@@ -213,6 +213,50 @@ sys.stdin.read()
     asyncio.run(run())
 
 
+def test_a_stop_while_the_init_event_is_persisted_keeps_its_session(
+    agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The database holds the persistence of the turn's first event (init, naming the session) until the stop has
+    # given up on the handling: the session it names is still saved, so the next process resumes it.
+    monkeypatch.setattr(manager_module, "STOP_HANDLING_SEC", 0.3, raising=False)
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("你好")
+            persisting, release = asyncio.Event(), asyncio.Event()
+            saved: list[str | None] = []
+
+            async def blocked(self: Any, payload: dict[str, Any]) -> None:
+                if not persisting.is_set():
+                    persisting.set()
+                    await release.wait()
+
+            async def save() -> None:
+                saved.append(manager._session_id)
+
+            monkeypatch.setattr(manager_module.ClaudeRunRecorder, "persist", blocked)
+            manager._save_session_state = save  # type: ignore[method-assign]
+            handling = asyncio.create_task(manager._handle(envelope))
+            try:
+                await asyncio.wait_for(persisting.wait(), 5)
+                await asyncio.wait_for(session.running.wait(), 5)
+                assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+                await asyncio.wait_for(asyncio.shield(handling), 5)
+                assert not release.is_set()  # the handling was given up on
+                (reply,) = _replies(queue)
+                assert reply["outcome"] == "stopped"
+                assert manager._session_id == "sess-1"
+                assert saved and saved[-1] == "sess-1"
+            finally:
+                release.set()
+                await asyncio.gather(handling, return_exceptions=True)
+                await bus.shutdown()
+
+    asyncio.run(run())
+
+
 def test_a_stop_during_the_user_message_persist_still_stores_it(agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmp:

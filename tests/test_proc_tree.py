@@ -1604,6 +1604,59 @@ def test_turn_tree_end_kills_the_strays_a_listing_past_the_deadline_found(
 # --- Every end signals first and stays bounded ---
 
 
+@pytest.mark.parametrize("new_only", [False, True], ids=["end", "end_new"])
+def test_turn_tree_end_kills_what_the_agent_owns_while_ps_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, new_only: bool,
+) -> None:
+    # Linux marks, through a simulated ``/proc``: once the stop begins every ``ps`` blocks, and a detached
+    # process carrying the agent's mark runs in a session of its own. The ownership listing and the identity check
+    # do not wait for ``ps``: the end kills it, and returns within its bound.
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.3)
+    monkeypatch.setattr(proc_tree, "REAP_SEC", 0.3)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    monkeypatch.setattr(proc_tree, "_PROC", str(proc))
+    released = threading.Event()
+
+    def blocked(*args: Any) -> Any:
+        released.wait(30)
+        return None
+
+    async def _run() -> tuple[float, list[int]]:
+        process = await _spawn_python(tmp_path, "import sys\nsys.stdin.read()\n")
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        if tree._owned is not None:
+            tree._owned.close()
+        mark = proc_tree._Marked(process.pid, "mark")
+        tree._owned = mark
+        daemon = None
+        try:
+            await tree.baseline()
+            daemon = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
+            (proc / str(daemon.pid)).mkdir()
+            (proc / str(daemon.pid) / "environ").write_bytes(b"A=1\0" + mark._entry + b"\0")
+            for name in ("_snapshot", "_start_times", "_start_time"):
+                monkeypatch.setattr(proc_tree, name, blocked)
+            began = time.monotonic()
+            await asyncio.wait_for(tree.end_new() if new_only else tree.end(), 15)
+            took = time.monotonic() - began
+            released.set()
+            daemon.poll()  # reaped, so a zombie is not taken for a running process
+            return took, _running([daemon.pid], settle=0)
+        finally:
+            released.set()
+            if daemon is not None and daemon.poll() is None:
+                daemon.kill()
+                daemon.wait()
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            await process.wait()
+
+    took, left = asyncio.run(_run())
+    assert left == []
+    assert took < proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC + proc_tree._LAST_LOOK_SEC + 2 * proc_tree._OWNED_SEC + 1
+
+
 def _signals(monkeypatch: pytest.MonkeyPatch) -> list[tuple[float, int, frozenset[int]]]:
     """Each signal an end sends to a tree: when (monotonic), which, and to which pids."""
     sent: list[tuple[float, int, frozenset[int]]] = []

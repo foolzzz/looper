@@ -66,6 +66,7 @@ _SCAN_SEC = 1.0  # the budget of one ownership listing of every process
 _ADOPT_SEC = 0.05  # the budget of the fork watch's walk of the children of the processes that forked
 _ADOPT_MAX = 256  # how many processes that walk records at most
 _LAST_LOOK_SEC = 1.0  # how long an end's last look past its deadline may take
+_OWNED_SEC = _LOCK_SEC + _SCAN_SEC  # an end's ownership listing's own budget, however long ``ps`` took before it
 RECORDS_DIR = Path(".local") / "agent-processes"  # under the runtime root: one ``<pid>.json`` per running agent
 
 # Set by ``sweep``: where this server records its agents, and the server (pid, start time) each record names.
@@ -117,13 +118,15 @@ class _Agent(Protocol):
 
 class _Orphan:
     """A previous server's process, signalled by pid and never reaped. A start-time check just before SIGTERM
-    and SIGKILL limits the pid-reuse window to one ``ps`` call."""
+    and SIGKILL limits the pid-reuse window to one ``ps`` call. ``native``: ``started`` is what ``_native_start``
+    reads, checked without ``ps``."""
 
     returncode = None
 
-    def __init__(self, pid: int, started: str | None = None) -> None:
+    def __init__(self, pid: int, started: str | None = None, *, native: bool = False) -> None:
         self.pid = pid
         self.started = started
+        self.native = native
 
     def send_signal(self, sig: int) -> None:
         os.kill(self.pid, sig)
@@ -352,7 +355,7 @@ async def _gone(process: _Agent, label: str) -> str | None:
     "exited", or "reused" (its pid now another process's); None while it does. Checked just before each signal."""
     if not isinstance(process, _Orphan) or process.started is None:
         return None
-    current = await asyncio.to_thread(_start_time, process.pid)
+    current = _native_start(process.pid) if process.native else await asyncio.to_thread(_start_time, process.pid)
     if current is None:
         logger.info("%s: pid %s exited", label, process.pid)
         return "exited"
@@ -399,6 +402,26 @@ def _start_times(pids: Iterable[int]) -> dict[int, str] | None:
         if pid in wanted:
             started[pid] = " ".join(fields[1].split())
     return started
+
+
+def _native_start(pid: int) -> str | None:
+    """``pid``'s identity as the kernel keeps it, read without ``ps`` (one system call, or ``/proc``): on macOS its
+    unique id, never reused; on Linux its start time in clock ticks since boot. None when it does not run, or this
+    platform has neither (``_NATIVE``)."""
+    if _LIBPROC is not None:
+        identity = _identity(pid)
+        return None if identity is None else f"id {identity[0]}"
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as stat:
+            fields = stat.read().rpartition(b")")[2].split()
+    except OSError:
+        return None
+    return f"ticks {fields[19].decode()}" if len(fields) > 19 else None
+
+
+def _native_starts(pids: Iterable[int]) -> dict[int, str]:
+    """``_native_start`` of each of ``pids`` that runs."""
+    return {pid: started for pid in pids if (started := _native_start(pid)) is not None}
 
 
 def _write_record(
@@ -861,6 +884,7 @@ class _Marked:
 
 
 _LINEAGE = _readable_versions()
+_NATIVE = _LIBPROC is not None or Path("/proc/self/stat").exists()  # whether ``_native_start`` can read here
 FOLLOWS_OWNERSHIP = _LINEAGE or _MARKS  # whether this platform has a facility ``_owned`` can use
 
 
@@ -1035,37 +1059,46 @@ class TurnTree:
         still running is one: none is left to the tree's end, and one the snapshot reached may have left the tree
         since. Also whether one the ownership listing named exited before it was read (its environment, or its start
         time): what it started meanwhile (a command it forked into a session of its own) is in no listing yet, so it
-        calls for another; as does a listing that did not come by ``until``."""
+        calls for another; as does a listing that did not come by ``until``.
+
+        The ownership listing, and the identities of what it finds (``_native_start``, where the platform has it),
+        have a budget of their own (``_OWNED_SEC``) and do not wait for ``ps``: a ``ps`` that blocks past ``until``
+        leaves the seen ones unlisted, never what the agent owns (each is then a stray, as nothing tells what the
+        tree reaches)."""
         table = await self._listing(_snapshot, until=until, default=None, what="a listing of strays")
-        if table is None:
-            return [], True
-        reached = {} if ended else _tree(self.process, table, self._groups)
+        reached = {} if ended or table is None else _tree(self.process, table, self._groups)
         skip = exclude | {self.process.pid}
         known = {pid: started for pid, started in self.seen.items()
-                 if started is not None and pid in table and pid not in reached and pid not in skip}
+                 if started is not None and pid in (table or ()) and pid not in reached and pid not in skip}
         current = await self._listing(_start_times, known, until=until, default=None, what="reading start times")
-        vanished = current is None and bool(known)
+        vanished = table is None or (current is None and bool(known))
         strays = [_Orphan(pid, started) for pid, started in known.items() if (current or {}).get(pid) == started]
-        owned, gone = await self._listing(self._live_owned, until=until, default=(set(), True),
+        owned_until = None if until is None else max(until, time.monotonic() + _OWNED_SEC)
+        owned, gone = await self._listing(self._live_owned, until=owned_until, default=(set(), True),
                                           what="the ownership listing")
         vanished = vanished or gone
         # Every one it owns, not only those the snapshot lists: one started since (a setsid command a shell starts
         # as it is told to exit) would otherwise be missed, and the end finish while it runs.
         unseen = [pid for pid in owned if pid not in reached and pid not in skip and pid not in known]
         if unseen:
-            starts = await self._listing(_start_times, unseen, until=until, default=None,
-                                         what="reading start times") or {}
-            strays += [_Orphan(pid, starts[pid]) for pid in unseen if pid in starts]
+            if _NATIVE:
+                starts = await self._listing(_native_starts, unseen, until=owned_until, default={},
+                                             what="reading identities")
+            else:
+                starts = await self._listing(_start_times, unseen, until=until, default=None,
+                                             what="reading start times") or {}
+            strays += [_Orphan(pid, starts[pid], native=_NATIVE) for pid in unseen if pid in starts]
             vanished = vanished or any(pid not in starts for pid in unseen)
         return strays, vanished
 
     @staticmethod
     def _kill_strays(strays: list[_Orphan], current: dict[int, str] | None) -> list[int]:
-        """SIGKILL each of ``strays`` still running as the process its start time names (``current``); the pids
-        signalled."""
+        """SIGKILL each of ``strays`` still running as the process its start time names (``current``, or read now
+        for a ``native`` one); the pids signalled."""
         killed = []
         for stray in strays:
-            if (current or {}).get(stray.pid) == stray.started:
+            now = _native_start(stray.pid) if stray.native else (current or {}).get(stray.pid)
+            if now == stray.started:
                 _send(os.kill, stray.pid, signal.SIGKILL)
                 killed.append(stray.pid)
         return killed
@@ -1085,7 +1118,8 @@ class TurnTree:
         the first signals, and the looking stops ``TERM_GRACE_SEC + REAP_SEC`` after them, or once only processes
         ended twice already are left (one SIGKILL does not end: EPERM, uninterruptible sleep); each seen or owned
         process a last listing (at most ``_LAST_LOOK_SEC``) then finds still running, whether or not the tree
-        reaches it, gets SIGKILL at once, and is logged and left."""
+        reaches it, gets SIGKILL at once, and is logged and left. The ownership listings take at most
+        ``_OWNED_SEC`` each past those bounds when ``ps`` blocks (``_strays``)."""
         began = time.monotonic()
         killed_by, deadline = began + TERM_GRACE_SEC, began + TERM_GRACE_SEC + REAP_SEC
         held = _hold(self.process, self._known_now(exclude), exclude)
@@ -1115,8 +1149,9 @@ class TurnTree:
                     if not ended:
                         strays, _ = await self._strays(exclude, ended=True, until=last)
                     # Past the last look, the start times the listing just read are the ones to go by.
-                    current = await self._listing(_start_times, [stray.pid for stray in strays], until=last,
-                                                  default={stray.pid: stray.started for stray in strays},
+                    listed = [stray for stray in strays if not stray.native]
+                    current = await self._listing(_start_times, [stray.pid for stray in listed], until=last,
+                                                  default={stray.pid: stray.started for stray in listed},
                                                   what="reading start times")
                     left = self._kill_strays(strays, current)
                     if left:

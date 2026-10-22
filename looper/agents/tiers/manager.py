@@ -1397,9 +1397,18 @@ class ManagerAgent:
         # holds back the read of the tool_use a bridge call waits for (``ManagerOps.MATCH_WAIT_SEC``).
         events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         handling: asyncio.Task[None] | None = None
+        session_unsaved = False
 
         def observe(payload: dict[str, Any]) -> None:
+            nonlocal session_unsaved
             recorder.account(payload)
+            # The session is taken at once, not as the event is handled: a stop that cuts the handling short (a
+            # slow persistence) still saves it, and the next process resumes it.
+            session_id = payload.get("session_id")
+            if isinstance(session_id, str) and session_id and session_id != self._session_id:
+                self._session_id, self._clean_start = session_id, False
+                self._pending_switch = self._pending_handoff = None  # the new session has its resume brief
+                session_unsaved = True
             message = payload.get("message") if payload.get("type") == "assistant" else None
             if self.ops is None or not isinstance(message, dict):
                 return
@@ -1450,14 +1459,12 @@ class ManagerAgent:
                 await self._send_status(context_envelope, text, **kwargs)
 
         async def handle(payload: dict[str, Any]) -> None:
-            nonlocal streamed_partials
+            nonlocal streamed_partials, session_unsaved
             await recorder.persist(payload)
 
-            session_id = payload.get("session_id")
-            if isinstance(session_id, str) and session_id and session_id != self._session_id:
-                self._session_id, self._clean_start = session_id, False
+            if session_unsaved:
+                session_unsaved = False
                 await self._save_session_state()
-                self._pending_switch = self._pending_handoff = None  # the new session has its resume brief
 
             event_type = payload.get("type")
             # Only the Manager's own turn is the reply; subagent output is internal.
