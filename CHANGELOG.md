@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.28] - 2026-10-21
+
+### Fixed
+
+- **A profile's unpriced-model list follows the launch catalog order.** The cost view of an Agent Profile (`cost_basis` unpriced list and cost warnings) now orders the provider's models by `(catalog_order, name, id)` instead of forcing the selected model first, so an earlier entry owns a shared normalized name as it does at launch. Behavior change: for a catalog with such name collisions the unpriced list and warnings can differ from before. Also fixes two flaky `tests/test_pi_steer.py` cases (the setup deadline no longer shortens in prompt-deadline scenarios). No prompt text, tool schema or tool result changed. ([#375](https://github.com/foolzzz/looper/pull/375))
+
 ## [2.13.27] - 2026-10-21
 
 ### Fixed
