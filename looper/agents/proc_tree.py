@@ -1108,8 +1108,8 @@ class TurnTree:
         self._merge(_tree(self.process, _snapshot(), self._groups))
         self._baseline = set(self.seen) | self._live_owned()
 
-    async def _reused(self) -> frozenset[int]:
-        known = {pid: started for pid, started in self.seen.items() if started is not None}
+    async def _reused(self, exclude: frozenset[int] = frozenset()) -> frozenset[int]:
+        known = {pid: started for pid, started in self.seen.items() if started is not None and pid not in exclude}
         current = await asyncio.to_thread(_start_times, known)
         if current is None:
             return frozenset()
@@ -1123,14 +1123,17 @@ class TurnTree:
             _ending.add(self.process.pid)
             await _record_tree(self.process.pid, dict(self._groups))
 
-    async def _strays(self, exclude: frozenset[int]) -> list[_Orphan]:
+    async def _strays(self, exclude: frozenset[int], *, ended: bool = False) -> list[_Orphan]:
         """The processes of the turn the tree no longer reaches (one that left its group, setsid, once its parent
         exited): each seen one still running with the start time the snapshot read, so a reused pid is never among
-        them, and each the agent owns (``_owned``) that runs now, whether or not the snapshot lists it."""
+        them, and each the agent owns (``_owned``) that runs now, whether or not the snapshot lists it. Once every
+        end has finished (``ended``), each still running is one: none is left to the tree's end, and one the
+        snapshot reached may have left the tree since."""
         table = await asyncio.to_thread(_snapshot)
-        reached = _tree(self.process, table, self._groups)
+        reached = {} if ended else _tree(self.process, table, self._groups)
         known = {pid: started for pid, started in self.seen.items()
-                 if started is not None and pid not in reached and pid not in exclude and pid != self.process.pid}
+                 if started is not None and pid in table and pid not in reached
+                 and pid not in exclude and pid != self.process.pid}
         current = await asyncio.to_thread(_start_times, known) or {}
         strays = [_Orphan(pid, started) for pid, started in known.items() if current.get(pid) == started]
         owned = await asyncio.to_thread(self._live_owned)
@@ -1145,9 +1148,9 @@ class TurnTree:
 
     async def _end_all(self, exclude: frozenset[int]) -> None:
         """End the tree, and beside it (not delaying its first signal) the processes it no longer reaches: those
-        running now and, until every end has finished, each that appears meanwhile (a command a tool's shell starts
-        in a session of its own as it is told to exit). One that appears after ``TERM_GRACE_SEC`` is killed at once;
-        none is looked for after twice that."""
+        running now and each that appears meanwhile (a command a tool's shell starts in a session of its own as it
+        is told to exit). After every end finishes, recheck all remaining processes before releasing ownership,
+        including those previously reached or signalled. One found after ``TERM_GRACE_SEC`` is killed at once."""
         if self.process.pid not in exclude:
             # Record ownership before a root that can exit is signalled. A resident or a held keeper stays alive:
             # signal its descendants first, without delaying them for an ownership scan of every process.
@@ -1157,14 +1160,16 @@ class TurnTree:
         started = time.monotonic()
         try:
             while True:
-                strays = await self._strays(exclude | found)
+                ended = all(end.done() for end in ends)
+                if ended:
+                    found.clear()  # a signal is not proof of exit: recheck even those already ended
+                strays = await self._strays(exclude | found, ended=ended)
                 found.update(stray.pid for stray in strays)
                 late = time.monotonic() - started >= TERM_GRACE_SEC
                 ends += [asyncio.ensure_future(_end(stray, label=f"{self.label} (left the tree)", known={},
                                                     exclude=exclude, grace=0 if late else None))
                          for stray in strays]
-                if (not strays and all(end.done() for end in ends)) \
-                        or time.monotonic() - started >= 2 * TERM_GRACE_SEC:
+                if not strays and ended:
                     break
                 await asyncio.sleep(_POLL_SEC)
         except BaseException:
@@ -1189,8 +1194,8 @@ class TurnTree:
         await self.refresh(force=True)
         kept = self._kept()
         exclude = await self._reused() | kept
+        await self._end_all(exclude)
         try:
-            await self._end_all(exclude)
             if kept:
                 assert self._keeper is not None
                 self._keeper.release()
@@ -1210,7 +1215,8 @@ class TurnTree:
     async def end_new(self) -> None:
         """End the members that are not in the baseline; the agent and the baseline members survive."""
         await self.refresh(force=True)
-        await self._end_all(frozenset(self._baseline | {self.process.pid} | self._kept() | await self._reused()))
+        exclude = frozenset(self._baseline | {self.process.pid} | self._kept())
+        await self._end_all(exclude | await self._reused(exclude))
 
 
 def track(process: Any, *, label: str = "agent") -> TurnTree:

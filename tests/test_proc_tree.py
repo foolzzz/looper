@@ -997,6 +997,74 @@ def test_turn_tree_end_ends_what_the_agent_owns_that_started_after_the_ends_last
     assert asyncio.run(_run()) == []
 
 
+_LEAVES_ONCE_TOLD = (
+    "import os, signal, time\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "open('child.pid', 'w').write(str(os.getpid()))\n"
+    "while not os.path.exists('go'):\n    time.sleep(0.01)\n"
+    "os.setsid()\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_DFL)\n"
+    "open('left', 'w').write('1')\n"
+    "time.sleep(60)\n"
+)
+
+
+def test_turn_tree_end_ends_what_left_the_tree_after_the_ends_last_listing_reached_it(tmp_path: Path) -> None:
+    # A child of the agent, still in the agent's group when the end lists every process, leaves for a session of its
+    # own only then; the agent has exited, so the tree's end finishes without it. Once every end has finished, the
+    # end looks again for whatever still runs, rather than trusting the listing that reached it.
+    code = ("import os, subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-c', " + repr(_LEAVES_ONCE_TOLD) + "])\n"
+            "while not os.path.exists('child.pid'):\n    time.sleep(0.01)\n"
+            "print('ready', flush=True)\nsys.stdin.read()\n")
+
+    async def _run() -> list[int]:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", code, cwd=tmp_path, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            start_new_session=True)
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        assert process.stdout
+        await process.stdout.readline()
+        agent_ended = threading.Event()
+
+        class _Ended(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                if f"ended the process tree of pid {process.pid}:" in record.getMessage():
+                    agent_ended.set()
+
+        live_owned, calls = tree._live_owned, []
+
+        def listing_after_the_snapshot() -> set[int]:
+            # The first call comes before any signal; the next follows the end's first listing of every process.
+            calls.append(None)
+            if len(calls) == 2:
+                (tmp_path / "go").write_text("1")
+                deadline = time.monotonic() + 10
+                while not ((tmp_path / "left").exists() and agent_ended.is_set()) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                # A slow ownership scan can outlast the signalling budget. It still has to be checked again
+                # after the main end returns, without the old snapshot's reached filter.
+                time.sleep(2 * proc_tree.TERM_GRACE_SEC)
+            return live_owned()
+
+        tree._live_owned = listing_after_the_snapshot  # type: ignore[method-assign]
+        handler, logger = _Ended(), logging.getLogger(proc_tree.__name__)
+        level = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        try:
+            await tree.end()
+            assert agent_ended.is_set() and (tmp_path / "left").exists()
+            return _running([int((tmp_path / "child.pid").read_text())])
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(level)
+            for pid in _running([int((tmp_path / "child.pid").read_text())], settle=0):
+                os.kill(pid, signal.SIGKILL)
+
+    assert asyncio.run(_run()) == []
+
+
 @pytest.mark.skipif(not proc_tree._DISCLAIMS, reason="no responsibility on this platform")
 def test_turn_tree_end_ends_what_the_agent_double_forks_as_it_exits_without_any_lineage_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

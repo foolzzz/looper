@@ -113,19 +113,22 @@ def test_a_stop_at_each_preparation_step(name: str, agent_db: Any, monkeypatch: 
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("late_child", [False, True])
 def test_stop_after_a_resident_result_ends_detached_processes_while_event_persistence_is_blocked(
-    tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch, late_child: bool,
 ) -> None:
     monkeypatch.setattr(manager_module, "STOP_HANDLING_SEC", 0.3, raising=False)
     monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.2)
     claude = fake_claude(tmp_path / "claude", """
-import json, subprocess, sys
+import json, os, subprocess, sys, time
 sys.stdin.readline()
+print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'sess-1'}), flush=True)
+print(json.dumps({'type': 'result', 'subtype': 'success', 'result': 'ok'}), flush=True)
+while not os.path.exists('spawn'):
+    time.sleep(0.01)
 child = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 open('child.pid', 'w').write(str(child.pid))
-print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'sess-1'}), flush=True)
-print(json.dumps({'type': 'result', 'subtype': 'success', 'result': 'ok'}), flush=True)
 sys.stdin.read()
 """)
 
@@ -148,15 +151,46 @@ sys.stdin.read()
 
         monkeypatch.setattr(session, "run_turn", run_turn)
         monkeypatch.setattr(manager, "_save_session_state", blocked)
+        if not late_child:
+            (tmp_path / "spawn").touch()
         envelope = _web("你好")
         handling = asyncio.create_task(manager._handle(envelope))
         child = None
+        original_end, original_strays = proc_tree._end, None
         try:
             await asyncio.wait_for(persisting.wait(), 8)
             await asyncio.wait_for(returned.wait(), 8)  # the real runtime dropped its cancellation callback
-            child = int((tmp_path / "child.pid").read_text())
-            assert _alive(child) and session.started
+            if late_child:
+                # The main end's snapshot precedes a tool's fork; the stray snapshot follows it, so it reaches
+                # the new child through the resident. Finish that scan after the old cleanup budget as well.
+                main_ended = asyncio.Event()
+                assert session._tree is not None
+                original_strays = session._tree._strays
+
+                async def end(process: Any, **kwargs: Any) -> None:
+                    await original_end(process, **kwargs)
+                    if process is session._process:
+                        (tmp_path / "spawn").touch()
+                        await _until(lambda: (tmp_path / "child.pid").exists(), timeout=2)
+                        main_ended.set()
+
+                async def strays(*args: Any, **kwargs: Any) -> Any:
+                    await asyncio.wait_for(main_ended.wait(), 2)
+                    found = await original_strays(*args, **kwargs)
+                    if not kwargs.get("ended"):
+                        await asyncio.sleep(2 * proc_tree.TERM_GRACE_SEC)
+                    return found
+
+                monkeypatch.setattr(proc_tree, "_end", end)
+                monkeypatch.setattr(session._tree, "_strays", strays)
+            else:
+                await _until(lambda: (tmp_path / "child.pid").exists(), timeout=2)
+                child = int((tmp_path / "child.pid").read_text())
+                assert _alive(child)
+            assert session.started
             assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+            await _until(lambda: (tmp_path / "child.pid").exists(), timeout=2)
+            child = int((tmp_path / "child.pid").read_text())
             await _until(lambda: not _alive(child), timeout=2)
             assert not release.is_set()  # cleanup does not depend on the database becoming available
             await asyncio.wait_for(asyncio.shield(handling), 5)
@@ -165,6 +199,9 @@ sys.stdin.read()
             assert session.started  # the resident and its baseline survive this turn's stop
         finally:
             release.set()
+            if original_strays is not None and session._tree is not None:
+                monkeypatch.setattr(session._tree, "_strays", original_strays)
+                monkeypatch.setattr(proc_tree, "_end", original_end)
             if not handling.done():
                 handling.cancel()
             await asyncio.gather(handling, return_exceptions=True)

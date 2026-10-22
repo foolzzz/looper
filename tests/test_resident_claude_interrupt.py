@@ -30,7 +30,7 @@ for raw in sys.stdin:
         continue
     turns += 1
     if turns == 1:
-        out({'type': 'system', 'subtype': 'init', 'session_id': 's1'})
+        out({'type': 'system', 'subtype': 'init', 'session_id': 's1', 'pid': os.getpid()})
         out({'type': 'stream_event', 'event': {'type': 'content_block_delta', 'delta': {'type': 'text_delta', 'text': 'hi'}}})
     else:
         out({'type': 'system', 'subtype': 'init', 'session_id': 's1'})
@@ -145,6 +145,7 @@ def test_an_obeyed_interrupt_ends_the_turn_and_keeps_the_process(tmp_path: Path)
         try:
             turn = asyncio.create_task(session.run_turn("work", on_event))
             await _until_streaming(seen)
+            (agent_pid,) = [event["pid"] for event in seen if event.get("subtype") == "init"]
             started = time.monotonic()
             assert await session.interrupt() is StopMethod.CONTROL
             assert time.monotonic() - started < 1
@@ -158,7 +159,7 @@ def test_an_obeyed_interrupt_ends_the_turn_and_keeps_the_process(tmp_path: Path)
             assert result.usage.cost_usd == pytest.approx(0.02)
             again = await session.run_turn("next", on_event)
             assert again.stopped is None
-            assert again.result_event is not None and again.result_event["result"] == f"pid={pid}"
+            assert again.result_event is not None and again.result_event["result"] == f"pid={agent_pid}"
             assert session.pid == pid
         finally:
             await session.stop(kill=True)
