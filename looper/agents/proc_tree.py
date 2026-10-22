@@ -213,17 +213,15 @@ async def _reap(process: Any, label: str) -> None:
 
 
 async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[int] = frozenset(),
-               spare: frozenset[int] = frozenset(), grace: float | None = None) -> None:
+               grace: float | None = None) -> None:
     """End the tree, recording it so the next start can finish an end cut short by the server's exit. Processes
-    in ``exclude`` are never signalled, nor those one of ``spare`` started (``_started_by``); ``grace`` replaces
-    ``TERM_GRACE_SEC``."""
+    in ``exclude`` are never signalled (what they start is); ``grace`` replaces ``TERM_GRACE_SEC``."""
     recorded = _recorded.get(process.pid)
     if recorded is not None:
         _ending.add(process.pid)
 
     def members(table: Table, known: Tree) -> Tree:
-        left = exclude | _started_by(table, spare)
-        return {pid: pgid for pid, pgid in _tree(process, table, known).items() if pid not in left}
+        return {pid: pgid for pid, pgid in _tree(process, table, known).items() if pid not in exclude}
 
     seen = members(_snapshot(), known)
     alive = dict(seen)
@@ -280,26 +278,6 @@ async def _gone(process: _Agent, label: str) -> str | None:
         logger.warning("%s: pid %s was reused; leaving it alone", label, process.pid)
         return "reused"
     return None
-
-
-def _started_by(table: Table, spare: Iterable[int]) -> set[int]:
-    """The processes of ``table`` that one of ``spare`` started, or one they started, and so on (by parent link):
-    what a process an earlier turn left running starts is not this turn's."""
-    spare = set(spare)
-    if not spare:
-        return set()
-    children: defaultdict[int, list[int]] = defaultdict(list)
-    for pid, (ppid, _) in table.items():
-        children[ppid].append(pid)
-    found: set[int] = set()
-    pending = [child for parent in spare for child in children[parent]]
-    while pending:
-        pid = pending.pop()
-        if pid in found or pid in spare:
-            continue
-        found.add(pid)
-        pending.extend(children[pid])
-    return found
 
 
 # --- Recording agents for the next server's sweep ---
@@ -845,16 +823,16 @@ class TurnTree:
             _ending.add(self.process.pid)
             await _record_tree(self.process.pid, dict(self._groups))
 
-    async def _strays(self, exclude: frozenset[int], spare: frozenset[int], *, ended: bool = False) -> list[_Orphan]:
+    async def _strays(self, exclude: frozenset[int], *, ended: bool = False) -> list[_Orphan]:
         """The processes of the turn the tree no longer reaches (one that left its group, setsid, once its parent
         exited): each seen one still running with the start time the snapshot read, so a reused pid is never among
         them, and each the agent owns (``_owned``) that runs now, whether or not the snapshot lists it. None in
-        ``exclude``, nor one that a process of ``spare`` started. Once every end has finished (``ended``), each
+        ``exclude``: what one of them started this turn is the turn's (a tool an MCP server runs). Once every end has finished (``ended``), each
         still running is one: none is left to the tree's end, and one the snapshot reached may have left the tree
         since."""
         table = await asyncio.to_thread(_snapshot)
         reached = {} if ended else _tree(self.process, table, self._groups)
-        skip = exclude | _started_by(table, spare) | {self.process.pid}
+        skip = exclude | {self.process.pid}
         known = {pid: started for pid, started in self.seen.items()
                  if started is not None and pid in table and pid not in reached and pid not in skip}
         current = await asyncio.to_thread(_start_times, known) or {}
@@ -868,16 +846,30 @@ class TurnTree:
             strays += [_Orphan(pid, starts[pid]) for pid in unseen if pid in starts]
         return strays
 
+    @staticmethod
+    def _kill_strays(strays: list[_Orphan]) -> list[int]:
+        """SIGKILL each of ``strays`` still running as the process its start time names; the pids signalled."""
+        if not strays:
+            return []
+        current = _start_times(stray.pid for stray in strays) or {}
+        killed = []
+        for stray in strays:
+            if current.get(stray.pid) == stray.started:
+                _send(os.kill, stray.pid, signal.SIGKILL)
+                killed.append(stray.pid)
+        return killed
+
     async def _end_all(self, exclude: frozenset[int]) -> None:
         """End the tree, and beside it (not delaying its first signal) the processes it no longer reaches: those
         running now and each that appears meanwhile (a command a tool's shell starts in a session of its own as it
         is told to exit). Once every end has finished, each still running gets one more end, as it may have left
-        the tree since a listing reached it. What one of ``exclude`` (the agent aside) starts is left alone too.
+        the tree since a listing reached it. What one of ``exclude`` starts is ended: a baseline process (a resident
+        MCP server) runs on, the tools it ran this turn do not.
 
         Bounded: every stray end's SIGKILL comes by ``TERM_GRACE_SEC`` after the first signals, and the looking
         stops ``TERM_GRACE_SEC + REAP_SEC`` after them, or once only processes ended twice already are left (one
-        SIGKILL does not end: EPERM, uninterruptible sleep); what still runs then is logged and left."""
-        spare = exclude - {self.process.pid}
+        SIGKILL does not end: EPERM, uninterruptible sleep); what the last listing finds then gets SIGKILL at once,
+        and is logged and left."""
         if self.process.pid not in exclude:
             # Record ownership before a root that can exit is signalled. A resident agent stays alive: signal its
             # descendants first, without delaying them for an ownership scan of every process.
@@ -885,18 +877,21 @@ class TurnTree:
         began = time.monotonic()
         killed_by, deadline = began + TERM_GRACE_SEC, began + TERM_GRACE_SEC + REAP_SEC
         ends = [asyncio.ensure_future(_end(self.process, label=self.label, known=dict(self._groups),
-                                           exclude=exclude, spare=spare))]
+                                           exclude=exclude))]
         tries: dict[int, int] = {}  # pid -> how many stray ends it was given
         try:
             while True:
                 ended = all(end.done() for end in ends)
-                strays = await self._strays(exclude, spare, ended=ended)
+                strays = await self._strays(exclude, ended=ended)
                 now = time.monotonic()
                 if now >= deadline:
-                    if strays:
-                        logger.warning("%s: %d process(es) still running %.1f s after the stop began, left running: "
-                                       "pid %s", self.label, len(strays), now - began,
-                                       ", ".join(str(stray.pid) for stray in strays))
+                    # A listing that took past the deadline still found these: each gets SIGKILL now (its start
+                    # time read once more), not left running unsignalled.
+                    left = await asyncio.to_thread(self._kill_strays, strays)
+                    if left:
+                        logger.warning("%s: %d process(es) still running %.1f s after the stop began, killed and "
+                                       "left: pid %s", self.label, len(left), now - began,
+                                       ", ".join(str(pid) for pid in left))
                     break
                 fresh = [stray for stray in strays if tries.get(stray.pid, 0) < (2 if ended else 1)]
                 if ended and not fresh:
@@ -907,7 +902,7 @@ class TurnTree:
                 for stray in fresh:
                     tries[stray.pid] = tries.get(stray.pid, 0) + 1
                 ends += [asyncio.ensure_future(_end(stray, label=f"{self.label} (left the tree)", known={},
-                                                    exclude=exclude, spare=spare, grace=max(0.0, killed_by - now)))
+                                                    exclude=exclude, grace=max(0.0, killed_by - now)))
                          for stray in fresh]
                 await asyncio.sleep(_POLL_SEC)
         except BaseException:
@@ -930,8 +925,8 @@ class TurnTree:
         await _reap(self.process, self.label)
 
     async def end_new(self) -> None:
-        """End the members that are not in the baseline; the agent, the baseline members and what they start
-        survive."""
+        """End the members that are not in the baseline, and what any process started since the baseline: the
+        agent and the baseline members themselves survive."""
         await self.refresh(force=True)
         exclude = frozenset(self._baseline | {self.process.pid})
         await self._end_all(exclude | await self._reused(exclude))

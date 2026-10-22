@@ -1248,15 +1248,11 @@ _LOOP_THEN_TURN = (
 )
 
 
-@pytest.mark.parametrize("spared", [True, False], ids=["spared", "every-child-a-stray"])
 def test_turn_tree_end_new_returns_within_its_bound_while_a_baseline_loop_keeps_starting_children(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spared: bool,
+    tmp_path: Path,
 ) -> None:
-    # What a baseline process starts is not the turn's; even counted as strays (``every-child-a-stray``), children
-    # that keep coming do not keep ``end_new`` going past its bound.
-    if not spared:
-        monkeypatch.setattr(proc_tree, "_started_by", lambda table, spare: set())
-
+    # What a baseline process starts since the baseline is the turn's: children that keep coming do not keep
+    # ``end_new`` going past its bound, and the loop itself runs on.
     async def _run() -> tuple[float, list[int], list[int]]:
         process = await proc_tree.spawn(sys.executable, "-c", _LOOP_THEN_TURN, cwd=tmp_path,
                                         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
@@ -1319,3 +1315,74 @@ def test_turn_tree_end_gives_up_on_a_stray_that_survives_sigkill(
     assert took < proc_tree.TERM_GRACE_SEC + 2 * proc_tree.REAP_SEC + 1
     assert len(left) == 1  # still running: given up on, not looped over
     assert any("left running" in record.getMessage() for record in caplog.records)
+
+
+# A resident MCP server the agent started in an earlier turn; this turn it runs a tool (a child of its own).
+_SERVER = (
+    "import os, subprocess, time\n"
+    "while not os.path.exists('call'):\n    time.sleep(0.01)\n"
+    "tool = subprocess.Popen(['/bin/sleep', '60'])\nopen('tool.pid', 'w').write(str(tool.pid))\ntime.sleep(60)\n"
+)
+_AGENT_WITH_SERVER = (
+    "import subprocess, sys\n"
+    "server = subprocess.Popen([sys.executable, '-c', " + repr(_SERVER) + "])\n"
+    "open('server.pid', 'w').write(str(server.pid))\nsys.stdin.read()\n"
+)
+
+
+def test_turn_tree_end_new_ends_the_tool_a_baseline_server_ran_this_turn_and_leaves_the_server(
+    tmp_path: Path,
+) -> None:
+    async def _run() -> tuple[list[int], list[int]]:
+        process = await _spawn_python(tmp_path, _AGENT_WITH_SERVER)
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        server = int(await _wait_file(tmp_path / "server.pid"))
+        tool = 0
+        try:
+            await tree.baseline()
+            assert server in tree.seen
+            (tmp_path / "call").write_text("go")
+            tool = int(await _wait_file(tmp_path / "tool.pid"))
+            await tree.end_new()
+            return _running([tool]), _running([process.pid, server], settle=0)
+        finally:
+            for pid in _running([tool, server] if tool else [server], settle=0):
+                os.kill(pid, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            await process.wait()
+
+    tool_left, survivors = asyncio.run(_run())
+    assert tool_left == []
+    assert len(survivors) == 2  # the agent and its server run on
+
+
+def test_turn_tree_end_kills_the_strays_a_listing_past_the_deadline_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The first listing of strays returns only after the deadline (a slow ``ps``): what it found still gets SIGKILL.
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.3)
+    monkeypatch.setattr(proc_tree, "REAP_SEC", 0.3)
+    strays = proc_tree.TurnTree._strays
+
+    async def slow(self: proc_tree.TurnTree, *args: Any, **kwargs: Any) -> list[Any]:
+        found = await strays(self, *args, **kwargs)
+        await asyncio.sleep(0.8)
+        return found
+
+    monkeypatch.setattr(proc_tree.TurnTree, "_strays", slow)
+    code = ("import subprocess, sys\n"
+            "subprocess.Popen([sys.executable, '-c', " + repr(_MIDDLE) + "]).wait()\nsys.stdin.read()\n")
+
+    async def _run() -> list[int]:
+        process = await _spawn_python(tmp_path, code)
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        child = await _child_that_leaves_its_group(tmp_path, tree)
+        try:
+            await tree.end()
+            return _running([child])
+        finally:
+            for pid in _running([child], settle=0):
+                os.kill(pid, signal.SIGKILL)
+
+    assert asyncio.run(_run()) == []
