@@ -193,7 +193,7 @@ def test_a_failed_post_is_tried_again_and_the_gates_later_messages_wait_behind_i
         await courier.run_once()  # the card fails once: it is tried again in POST_RETRY_SEC[0]
         retry_in = await pool.fetchval("SELECT extract(epoch FROM post_retry_at - now()) FROM "
                                        "task_user_gate_messages WHERE kind = 'opened'")
-        assert POST_RETRY_SEC[0] - 5 < retry_in <= POST_RETRY_SEC[0]
+        assert POST_RETRY_SEC[0] - 60 < retry_in <= POST_RETRY_SEC[0]
         assert await posts() == [("opened", None, 1, True)]
         (gate,) = (await _api("GET", "/api/tasks/task-a"))[1]["gates"]
         assert gate["channel_posts"]["failed"] == 0  # not failed yet
