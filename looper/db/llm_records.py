@@ -514,10 +514,12 @@ async def spend_since(since: datetime | None, *, until: datetime | None = None, 
     a cost.
     """
     pool = pool or get_pool()
+    # Without a Manager the query is the one before Managers had tasks, so a database not migrated yet reads too.
+    by_manager, args = (("", ()) if manager_id is None
+                        else (" AND (r.agent_id = $4 OR t.manager_id = $4)", (manager_id,)))
     row = await pool.fetchrow(
-        f"SELECT {_SPEND} FROM llm_records r LEFT JOIN tasks t ON t.id = r.task_id WHERE {_IN_RANGE} "
-        "AND ($4::text IS NULL OR r.agent_id = $4 OR t.manager_id = $4)",
-        since, until, project_id, manager_id,
+        f"SELECT {_SPEND} FROM llm_records r LEFT JOIN tasks t ON t.id = r.task_id WHERE {_IN_RANGE}{by_manager}",
+        since, until, project_id, *args,
     )
     return dict(row)
 
@@ -531,15 +533,16 @@ async def task_spend(since: datetime | None, until: datetime | None = None, *, p
     from .tasks import task_name
 
     pool = pool or get_pool()
+    by_manager, args = ("", ()) if manager_id is None else (" AND t.manager_id = $4", (manager_id,))
     rows = await pool.fetch(
         f"""
         SELECT r.task_id, t.title, t.goal_id, t.requirement, t.project_id, p.name AS project_name, {_SPEND}
         FROM llm_records r JOIN tasks t ON t.id = r.task_id LEFT JOIN projects p ON p.id = t.project_id
-        WHERE {_IN_RANGE} AND {_RUN_TASK_ROLE} IS NOT NULL AND ($4::text IS NULL OR t.manager_id = $4)
+        WHERE {_IN_RANGE} AND {_RUN_TASK_ROLE} IS NOT NULL{by_manager}
         GROUP BY r.task_id, t.title, t.goal_id, t.requirement, t.project_id, p.name
         ORDER BY sum(r.cost_usd) DESC NULLS LAST, r.task_id
         """,
-        since, until, project_id, manager_id,
+        since, until, project_id, *args,
     )
     return [{"task_id": row["task_id"], "name": task_name(title=row["title"], goal_id=row["goal_id"],
                                                           requirement=row["requirement"], task_id=row["task_id"]),

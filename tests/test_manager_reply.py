@@ -684,7 +684,7 @@ class TestManagerTurnSections:
         assert lines[1].startswith("  - tetris (default directory /srv/tetris): falling blocks xxx")
         assert len(lines[1].partition("): ")[2]) == 80  # the description, cut to 80 characters
         assert lines[2] == "  - notes (no default directory)"
-        agent_db.list_tasks.assert_awaited_with(limit=10, status="init")
+        agent_db.list_tasks.assert_awaited_with(limit=10, status="init", manager_id="manager")
         assert "  - task-aaaaaaaaaaaa (project tetris, goal old): an older one" in lines
         assert lines[-1] == "确认"
 

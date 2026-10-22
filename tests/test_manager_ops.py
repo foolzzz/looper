@@ -630,11 +630,12 @@ def test_profile_crud_resolves_models_and_keeps_runtime_options(recorded, monkey
         assert answer["result"]["profile"]["used_by"] == "the worker role"
         assert answer["result"]["warnings"] == ["missing key"]
         create.assert_awaited_once_with({"name": "recipe", "runtime_id": "rt-test", "model_id": "model-sonnet",
-                                        "effort": "high", "agent_teams": False, "custom_prompt": "Be concise."})
+                                        "effort": "high", "agent_teams": False, "custom_prompt": "Be concise."},
+                                       manager_id=None)
         changed = await ops.call("looper_agent_profiles", {"action": "update", "profile": "recipe", "effort": None})
         assert changed["result"]["profile"]["effort"] is None
         assert changed["result"]["profile"]["custom_prompt"] == "Be concise."
-        update.assert_awaited_once_with("agent-test", {"effort": None})
+        update.assert_awaited_once_with("agent-test", {"effort": None}, manager_id=None)
         listed = await ops.call("looper_agent_profiles", {"action": "list"})
         assert listed["result"]["models"] == models
         assert listed["result"]["profiles"][0]["model_id"] == "model-sonnet"
