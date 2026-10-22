@@ -305,7 +305,7 @@ def test_the_next_start_ends_the_tree_of_an_agent_whose_server_is_gone(
     tree, record = asyncio.run(_run())
     assert _running(list(tree.values())) == []
     assert not record.exists()
-    found = 5 if proc_tree._DISCLAIMS else 4  # (macOS: the agent's keeper too)
+    found = 6 if proc_tree._DISCLAIMS else 4  # (macOS: the agent's launcher and keeper too)
     assert _ended_line(caplog).endswith(f": {found} found, {found} exited on SIGTERM, 0 killed")
 
 
@@ -967,3 +967,118 @@ def test_turn_tree_end_ends_what_the_agent_double_forks_as_it_exits_without_any_
                     os.kill(pid, signal.SIGKILL)
 
     assert asyncio.run(_run()) == []
+
+
+# The same double fork, the binary's streams its own: a turn that reads the agent's output to its end is not held.
+_DOUBLE_FORK_EXEC_DETACHED = _DOUBLE_FORK_EXEC.replace(
+    "        os.setsid()\n",
+    "        os.setsid()\n"
+    "        null = os.open(os.devnull, os.O_RDWR)\n"
+    "        for fd in (0, 1, 2):\n"
+    "            os.dup2(null, fd)\n",
+)
+
+
+def _late_fork_watch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fork watch resumes only once the processes between the agent and what it started have exited."""
+    adopt = proc_tree._Lineage._adopt
+
+    def late(self: Any, parent: int) -> None:
+        time.sleep(0.5)
+        adopt(self, parent)
+
+    monkeypatch.setattr(proc_tree._Lineage, "_adopt", late)
+
+
+def _left_running(child: int) -> list[int]:
+    left = _running([child], settle=0)
+    for pid in left:
+        os.kill(pid, signal.SIGKILL)
+    return left
+
+
+# A resident Claude that answers its turn and, when its stdin closes, double-forks a system binary and exits.
+_RESIDENT_THAT_DETACHES = (
+    "import json, sys\n"
+    "sys.stdin.readline()\n"
+    "print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 's'}), flush=True)\n"
+    "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'ok'}), flush=True)\n"
+    "sys.stdin.read()\n"
+    + _DOUBLE_FORK_EXEC_DETACHED
+)
+
+
+@pytest.mark.skipif(not proc_tree._DISCLAIMS, reason="no responsibility on this platform")
+def test_a_killed_resident_claude_that_double_forks_as_its_stdin_closes_leaves_nothing_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``stop(kill=True)`` closes Claude's stdin first: Claude double-forks, the binary leaves the session and execs,
+    # and Claude exits, all before the end begins and before the fork watch resumes.
+    _late_fork_watch(monkeypatch)
+    claude = fake_claude(tmp_path / "claude", _RESIDENT_THAT_DETACHES)
+    end = proc_tree.TurnTree.end
+
+    async def end_once_the_agent_exited(self: proc_tree.TurnTree) -> None:
+        await _wait_file(tmp_path / "child.pid")
+        for _ in range(500):
+            if self.process.returncode is not None:
+                break
+            await asyncio.sleep(0.01)
+        await end(self)
+
+    monkeypatch.setattr(proc_tree.TurnTree, "end", end_once_the_agent_exited)
+
+    async def _run() -> int:
+        session = ResidentClaude(label="manager")
+        await session.start([claude], cwd=str(tmp_path), signature=None)
+
+        async def on_event(event: dict[str, Any]) -> None:
+            pass
+
+        turn = await session.run_turn("hello", on_event)
+        assert turn.result_event["result"] == "ok"
+        await session.stop(kill=True)
+        return int((tmp_path / "child.pid").read_text())
+
+    assert _left_running(asyncio.run(_run())) == []
+
+
+# A Codex turn that answers, then double-forks a system binary and exits: the turn returns with its result.
+_CODEX_TURN_THAT_DETACHES = (
+    "import json, sys\n"
+    "sys.stdin.read()\n"
+    "def emit(event):\n"
+    "    print(json.dumps(event), flush=True)\n"
+    "emit({'type': 'thread.started', 'thread_id': 'thread-1'})\n"
+    "emit({'type': 'turn.started'})\n"
+    "emit({'type': 'item.completed', 'item': {'id': 'item_0', 'type': 'agent_message', 'text': 'ok'}})\n"
+    "emit({'type': 'turn.completed', 'usage': {'input_tokens': 1, 'cached_input_tokens': 0,\n"
+    "                                          'cache_write_input_tokens': 0, 'output_tokens': 1,\n"
+    "                                          'reasoning_output_tokens': 0}})\n"
+    + _DOUBLE_FORK_EXEC_DETACHED
+)
+
+
+@pytest.mark.skipif(not proc_tree._DISCLAIMS, reason="no responsibility on this platform")
+def test_a_stop_after_a_codex_turn_returned_ends_what_it_double_forked_as_it_exited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _late_fork_watch(monkeypatch)
+    codex = fake_claude(tmp_path / "codex", _CODEX_TURN_THAT_DETACHES)
+
+    async def _run() -> int:
+        session = CODEX.resident_session("planner-task-1")
+        command = _resident_command(tmp_path / "runtime", codex, "prompt")
+        await session.start(command, cwd=str(tmp_path), signature="s", env=_launch().environment())
+
+        async def on_event(event: dict[str, Any]) -> None:
+            pass
+
+        turn = await session.run_turn("hello", on_event)
+        assert turn.result_event is not None
+        child = int(await _wait_file(tmp_path / "child.pid"))
+        await asyncio.sleep(1)  # the fork watch has resumed, too late: the child's ancestors have exited
+        await session.end_turn_processes()  # the stop came once the turn had returned
+        return child
+
+    assert _left_running(asyncio.run(_run())) == []

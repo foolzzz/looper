@@ -128,12 +128,13 @@ class Rig:
         """The processes a stopped turn leaves: the runtime's own one (and its MCP bridge), when it keeps one."""
         pid = self.session.pid
         if pid in proc_tree._disclaimed:
-            # The macOS keeper has exactly one child: the resident agent in its group. Tools are the agent's
-            # children and must still be counted by ``left``.
-            children = {child for child, (parent, group) in proc_tree._snapshot().items()
-                        if parent == pid and group == pid}
+            # The macOS launcher has exactly one child, the keeper, whose one child is the resident agent, all in the
+            # launcher's group. Tools are the agent's children and must still be counted by ``left``.
+            table = proc_tree._snapshot()
+            (keeper,) = [child for child, pair in table.items() if pair == (pid, pid)]
+            children = {child for child, pair in table.items() if pair == (keeper, pid)}
             assert len(children) == 1
-            return {pid, *children}
+            return {pid, keeper, *children}
         return {pid} if pid else set()
 
     def processes(self) -> list[int]:

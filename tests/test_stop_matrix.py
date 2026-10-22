@@ -228,8 +228,10 @@ def test_resident_claude_stop_in_every_window(
         process = session.pid
         agent = int((directory / "pids").read_text().split()[0])
         if process in proc_tree._disclaimed:
-            children = {pid: pair for pid, pair in proc_tree._snapshot().items() if pair[0] == process}
-            assert children == {agent: (process, process)}  # exactly the resident, in the keeper's group
+            table = proc_tree._snapshot()
+            (keeper,) = [pid for pid, pair in table.items() if pair == (process, process)]  # the launcher's one child
+            children = {pid: pair for pid, pair in table.items() if pair[0] == keeper}
+            assert children == {agent: (keeper, process)}  # exactly the resident, in the launcher's group
         else:
             assert agent == process
         seen, stop, cancel = Seen(hold_at="result" if window == "done" else None), Stop(), TurnCancel()
