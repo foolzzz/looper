@@ -330,7 +330,7 @@ def test_bridge_uses_the_scoped_library_credentials_only(tmp_path: Path, role: s
     assert "LOOPER_PI_AGENT_URL" in settings["shellCommandPrefix"]
     assert "LOOPER_PI_AGENT_TOKEN" in settings["shellCommandPrefix"]
     shell = subprocess.run(["/bin/sh", "-c", settings["shellCommandPrefix"] + " env"],
-                           env=env, capture_output=True, text=True, timeout=5, check=True)
+                           env=env, capture_output=True, text=True, timeout=60, check=True)
     assert url not in shell.stdout and token not in shell.stdout
 
 

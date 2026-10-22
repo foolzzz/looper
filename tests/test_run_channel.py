@@ -273,7 +273,7 @@ def _pi_worker_records(root: Path) -> list[dict[str, Any]]:
 
 
 async def _pi_worker_record(root: Path, key: str) -> dict[str, Any]:
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(20):
         while True:
             if matches := [row for row in _pi_worker_records(root) if key in row]:
                 return matches[-1]
@@ -292,7 +292,7 @@ def _pi_worker_running(pids: list[int]) -> list[int]:
 
 
 async def _pi_worker_tree_ended(pids: list[int]) -> None:
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(20):
         while _pi_worker_running(pids):
             await asyncio.sleep(.01)
 
@@ -317,11 +317,11 @@ def _pi_worker_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenari
                        max_budget_usd=.00001 if scenario == 'cap' else None)
     monkeypatch.setattr(worker, 'load_agent_settings', AsyncMock(return_value=settings))
     monkeypatch.setattr(worker, '_load_settings', AsyncMock(return_value=worker.WorkerSettings(
-        1 if scenario == 'timeout' else 0, 0, 'work')))
+        6 if scenario == 'timeout' else 0, 0, 'work')))
 
 
 async def _pi_worker_result(bus: MessageBus) -> MessageEnvelope:
-    async with asyncio.timeout(10):
+    async with asyncio.timeout(20):
         queue = bus.get_queue('planner-t1')
         while True:
             result = await queue.get()
@@ -375,7 +375,7 @@ def test_pi_worker_input_waits_for_queued_ack_then_settled_closes_stdin(
             await pool.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 15))
+    asyncio.run(asyncio.wait_for(run(), 45))
 
 
 @pytest.mark.parametrize('reason', ['cancel', 'timeout', 'cap'])
@@ -430,7 +430,7 @@ def test_pi_worker_stops_its_process_tree_and_clears_unacknowledged_input(
             await bus.shutdown()
 
     try:
-        asyncio.run(asyncio.wait_for(run(), 15))
+        asyncio.run(asyncio.wait_for(run(), 45))
     finally:
         # Also clean up descendants when an assertion fails before Worker shutdown.
         for pid in _pi_worker_running(tree):

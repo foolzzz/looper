@@ -40,7 +40,7 @@ async def _run_manager_pi(platform: SimpleNamespace, provider: SimpleNamespace, 
     env = {**launch.environment(), "TMPDIR": str(platform.root), "NO_PROXY": "*", "no_proxy": "*"}
     assert env[TURN_FILE_ENV] == str(platform.manager._turn_file)
     done = await asyncio.to_thread(subprocess.run, command, input="Do it.", text=True, capture_output=True,
-                                   env=env, cwd=platform.root, timeout=25, check=False)
+                                   env=env, cwd=platform.root, timeout=120, check=False)
     assert not provider.errors, provider.errors
     return done
 

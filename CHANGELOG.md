@@ -22,6 +22,24 @@ How the agent system works today is described in
 
 - **A task can be renamed.** The task page's heading has a pencil that edits the title in place (Enter or Save stores it, Esc cancels), `PUT /api/tasks/:id/title` sets it, and the Manager's `looper_task_update` takes a `title`. A task can be renamed in any status, an ended one included; lists, the task page and later end notices use the new name, and the change is noted in the task's history (`via` `task_page` or `manager:<channel>`).
 
+## [2.13.33] - 2026-10-22
+
+### Fixed
+
+- **Turn process tree: the change of #385 is reverted because it slowed killing a deaf Claude.** #385 added a start-time read to every process-tree refresh, which delayed the first signal of a kill on a loaded machine; `test_a_deaf_claude_is_killed_with_its_whole_tree` took 3.1 to 4.9 s against its 3 s bound. `looper/agents/proc_tree.py` and `tests/test_proc_tree.py` return to v2.13.30. Behavior change: the first; a pid reused after it left the turn tree is walked again when the tree is ended, and #338 redoes that fix without the extra read. Model-visible: none. ([#393](https://github.com/foolzzz/looper/pull/393))
+
+## [2.13.32] - 2026-10-22
+
+### Fixed
+
+- **Flaky tests and the isolated Pi smoke script: widened timeouts.** Subprocess waits, runner and RPC deadlines and browser action timeouts raced start-up under load in the planner worker, DSH, LLM models dashboard, model launch, model manager, operator token, Pi, room consult and run channel tests, and in `examples/pi/isolated-smoke.py`. Only the limits changed. Behavior change: none to product code. Model-visible: none. ([#390](https://github.com/foolzzz/looper/pull/390))
+
+## [2.13.31] - 2026-10-21
+
+### Fixed
+
+- **Turn process tree: the subtree of a reused pid is left alone.** A process id seen earlier in a turn that an unrelated process had since reused was spared itself, but its current children and group were still walked, merged into the turn tree and ended. `_tree` now skips reused pids together with what only they reach, and `refresh`, `_end`, `end` and `end_new` pass them on. Behavior change: the first. Model-visible: none. ([#385](https://github.com/foolzzz/looper/pull/385))
+
 ## [2.13.30] - 2026-10-21
 
 ### Fixed
