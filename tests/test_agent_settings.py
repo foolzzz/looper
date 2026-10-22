@@ -132,6 +132,11 @@ class TestPrecedence:
         only_project = {(Layer.PROJECT, None): LayerValues(**{field: VALUES[field][Layer.PROJECT]})}
         assert _resolved(resolve("manager", only_project, "proj-a"), field)[1] is Layer.BUILTIN
 
+    def test_the_manager_chain_is_four_places_in_order(self) -> None:
+        assert agent_settings._chain(AgentType.MANAGER, None) == [
+            (Layer.SYSTEM, None), (Layer.ROLE, AgentType.MANAGER), (Layer.MANAGER, AgentType.MANAGER),
+            (Layer.SESSION, AgentType.MANAGER)]
+
     def test_nothing_set_is_the_builtin_default(self) -> None:
         for role in AgentType:
             assert resolve(role, {}, "proj-a") == replace(BUILTIN_SETTINGS,

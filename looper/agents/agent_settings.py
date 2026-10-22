@@ -167,7 +167,8 @@ class Layer(str, Enum):
     of the task or for one step, under the task's own; ``TASK_ROLE`` is the profile of the role a task's Planner
     defined that a run runs as (``task_roles``), over the Planner's choices and under the task's own; ``SESSION`` is
     the Agent Profile the user chose for the Manager's current session (``agent_sessions.selected_profile_id``), the
-    Manager's last layer.
+    Manager's last layer; ``MANAGER`` is the profile of a Manager's definition (``managers.profile_id``), under
+    its session's choice.
     """
 
     BUILTIN = "builtin"
@@ -181,6 +182,7 @@ class Layer(str, Enum):
     TASK_ROLE = "task_role"
     TASK = "task"
     SESSION = "session"
+    MANAGER = "manager"
 
 
 class SettingsError(ValueError):
@@ -586,7 +588,7 @@ def _chain(role: AgentType | None, project_id: str | None) -> list[Place]:
     if role in PLANNER_CHOICE_ROLES:
         chain += [(Layer.PLANNER_TASK, role), (Layer.PLANNER_STEP, role), (Layer.TASK_ROLE, role)]
     if role is AgentType.MANAGER:
-        chain.append((Layer.SESSION, role))
+        chain += [(Layer.MANAGER, role), (Layer.SESSION, role)]
     else:
         chain.append((Layer.TASK, role))
     return chain
@@ -724,20 +726,23 @@ async def load_task_limit(role: AgentType, task_id: str | None) -> int:
 
 async def load_agent_settings(
     role: AgentType | str, project_id: str | None = None, task_id: str | None = None, step_id: str | None = None,
-    task_role: tuple[str, int] | None = None, manager_session: bool = True,
+    task_role: tuple[str, int] | None = None, manager_session: bool = True, manager_id: str = "manager",
 ) -> AgentSettings:
     """``role``'s settings in ``project_id`` (or outside any project) and, with ``task_id``, the profile that task
     and its Planner chose for it (with ``step_id``, the Planner's choice for that step too; with ``task_role``, a
     role's key and version, the profile of that role of the task), read now; the built-in defaults, with ``error``
-    set, when the layers cannot be read. The Manager's settings include the profile chosen for its session unless
-    ``manager_session`` is False."""
+    set, when the layers cannot be read. The Manager ``manager_id``'s settings include the profile of its definition and, unless
+    ``manager_session`` is False, the profile chosen for its session."""
     from ..db import agent_setting_layers
 
-    extra = {"manager_session": True} if AgentType(role) is AgentType.MANAGER and manager_session else {}
+    extra: dict[str, Any] = {}
+    if AgentType(role) is AgentType.MANAGER and (manager_session or manager_id != "manager"):
+        extra["manager_id"] = manager_id
+        if not manager_session:
+            extra["with_session"] = False
     try:
         rows = await agent_setting_layers.list_layers(project_id, task_id=task_id, step_id=step_id,
-                                                      task_role=task_role,
-                                                      **extra)
+                                                      task_role=task_role, **extra)
     except Exception as exc:
         logger.warning("cannot read the agent settings; using the built-in defaults", exc_info=True)
         # The built-in defaults of this role, including its built-in system prompt mode.

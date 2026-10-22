@@ -47,16 +47,17 @@ def _row(row: asyncpg.Record) -> dict[str, Any]:
 
 async def list_layers(
     project_id: str | None = None, *, task_id: str | None = None, step_id: str | None = None,
-    task_role: tuple[str, int] | None = None, manager_session: bool = False,
-    pool: asyncpg.Pool | None = None,
+    task_role: tuple[str, int] | None = None, manager_id: str | None = None,
+    with_session: bool = True, pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
     """Every row outside projects (system and role layers), and ``project_id``'s rows when given, each with its
     ``profile`` (``profile_registry.PROFILE_JSON``, or None); with ``task_id``, also a ``task`` row per role the task
     chose a profile or a concurrency limit for, and a ``planner_task`` row per role its Planner chose a profile for
     the rest of the task (one its project allows); with ``step_id`` too, a ``planner_step`` row per role its
     Planner chose one for that step; with ``task_role`` too (a role's key and version), a ``task_role`` row for the
-    role's kind when that version of the role has a profile its project allows; with ``manager_session``, a
-    ``session`` row for the Manager when the user chose a profile for its current session."""
+    role's kind when that version of the role has a profile its project allows; with ``manager_id``, a
+    ``session`` row for that Manager when the user chose a profile for its current session (unless ``with_session``
+    is False) and, for a Manager other than ``manager``, a ``manager`` row when its definition has a profile."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         f"SELECT l.scope, l.role, l.project_id, l.harness_prompt, l.profile_id, l.env, l.run_budget_usd, "
@@ -68,11 +69,17 @@ async def list_layers(
         project_id,
     )
     layers = [_row(r) for r in rows]
-    if manager_session:
+    if manager_id is not None and manager_id != "manager":
+        defined = await pool.fetch(
+            f"SELECT 'manager' AS scope, 'manager' AS role, md.profile_id, "
+            f"(SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = md.profile_id) AS profile "
+            "FROM managers md WHERE md.id = $1 AND md.profile_id IS NOT NULL", manager_id)
+        layers += [_row(r) for r in defined]
+    if manager_id is not None and with_session:
         chosen_session = await pool.fetch(
             f"SELECT 'session' AS scope, 'manager' AS role, s.selected_profile_id AS profile_id, "
             f"(SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = s.selected_profile_id) AS profile "
-            "FROM agent_sessions s WHERE s.agent_id = 'manager' AND s.selected_profile_id IS NOT NULL")
+            "FROM agent_sessions s WHERE s.agent_id = $1 AND s.selected_profile_id IS NOT NULL", manager_id)
         layers += [_row(r) for r in chosen_session]
     if task_id:
         overrides = await pool.fetch(

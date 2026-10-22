@@ -344,7 +344,7 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
     project_id, project_name}`` (system, then roles, then projects by name), ``task_count``, how many tasks
     chose it for one of their roles, ``schedule_count``, how many schedules did, and ``allowed_in``, the names of
     the projects whose Planners may choose it (a Planner's choice counts only while its project allows it, so it is
-    not counted), ``manager_session``, whether the Manager's current session selects it, ``managers``, the names of the Managers
+    not counted), ``manager_session``, whether any Manager's current session selects it, ``manager_sessions``, those Managers' ids, ``managers``, the names of the Managers
     it is the profile of, and ``manager_templates``, the templates (``"<template> of <Manager>"``) that
     choose it. A profile nothing selects is not in the result."""
     pool = pool or get_pool()
@@ -368,8 +368,8 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
         "WHERE $1::text IS NULL OR profile_id = $1 GROUP BY profile_id", profile_id,
     )
     manager = await pool.fetch(
-        "SELECT selected_profile_id FROM agent_sessions WHERE agent_id = 'manager' "
-        "AND selected_profile_id IS NOT NULL AND ($1::text IS NULL OR selected_profile_id = $1)", profile_id,
+        "SELECT selected_profile_id, agent_id FROM agent_sessions "
+        "WHERE (agent_id = 'manager' OR agent_id LIKE 'manager-%') AND selected_profile_id IS NOT NULL AND ($1::text IS NULL OR selected_profile_id = $1)", profile_id,
     )
     managers = await pool.fetch(
         "SELECT profile_id, name FROM managers WHERE deleted_at IS NULL AND profile_id IS NOT NULL "
@@ -386,7 +386,8 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
 
     def use(profile: str) -> dict[str, Any]:
         return uses.setdefault(profile, {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": [],
-                                         "manager_session": False, "managers": [], "manager_templates": []})
+                                         "manager_session": False, "manager_sessions": [], "managers": [],
+                                         "manager_templates": []})
 
     for row in layers:
         use(row["profile_id"])["layers"].append({k: row[k] for k in ("scope", "role", "project_id", "project_name")})
@@ -397,7 +398,9 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
     for row in allowed:
         use(row["profile_id"])["allowed_in"].append(row["name"])
     for row in manager:
-        use(row["selected_profile_id"])["manager_session"] = True
+        used = use(row["selected_profile_id"])
+        used["manager_session"] = True
+        used["manager_sessions"].append(row["agent_id"])
     for row in managers:
         use(row["profile_id"])["managers"].append(row["name"])
     for row in templates:

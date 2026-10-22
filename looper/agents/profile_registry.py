@@ -763,7 +763,7 @@ async def _selected_roles(profile_id: str, conn: Any = None) -> list[str]:
     roles: set[str] = set()
     for scope, role in await agent_setting_layers.selected_roles(profile_id, pool=conn):
         roles.update(_SCOPE_ROLES.get(scope, (role,)))
-    if await agent_sessions.selects_profile("manager", profile_id, pool=conn):
+    if await agent_sessions.manager_sessions_selecting(profile_id, pool=conn):
         roles.add("manager")
     roles |= await db_managers.template_profile_roles(profile_id, pool=conn)
     return [role for role in runtimes.ROLE_CAPABILITIES if role in roles]
@@ -994,7 +994,8 @@ def profile_warnings(profile: LegacyAgentProfile) -> list[str]:
 
 # Where nothing selects a profile.
 NOT_USED: Mapping[str, Any] = {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": [],
-                                "manager_session": False, "managers": [], "manager_templates": []}
+                                "manager_session": False, "manager_sessions": [], "managers": [],
+                                "manager_templates": []}
 
 
 def _cost_profile(row: Mapping[str, Any], models: Iterable[Mapping[str, Any]] = ()) -> LegacyAgentProfile:
@@ -1049,7 +1050,9 @@ def usage_text(used_by: Mapping[str, Any]) -> str:
         parts.append(f"{count} {'schedule' if count == 1 else 'schedules'}")
     parts += [f"the profiles the Planners of project {name!r} may choose" for name in used_by.get("allowed_in") or ()]
     if used_by.get("manager_session"):
-        parts.append("the Manager's current session")
+        ids = used_by.get("manager_sessions") or ["manager"]
+        parts.append("the Manager's current session" if ids == ["manager"]
+                     else f"the current session of Manager(s) {', '.join(ids)}")
     parts += [f"Manager {name}" for name in used_by.get("managers") or ()]
     parts += [f"template {label.replace(' of ', ' of Manager ', 1)}" for label in used_by.get("manager_templates") or ()]
     return ", ".join(parts)
