@@ -764,3 +764,19 @@ def test_publish_binding_writes_atomically_with_mode_0600(tmp_path: Path) -> Non
     bare = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", token="tok")
     assert "LOOPER_AGENT_TURN_FILE" not in bare.server_config()["env"]
     bare.publish_binding("b1")  # no file configured: nothing to write
+
+
+def test_a_token_of_no_fleet_manager_leaves_the_default_managers_turn_alone() -> None:
+    from types import SimpleNamespace
+
+    from looper.agents.http_server import AgentHTTPServer
+
+    refused: list[str] = []
+    default = SimpleNamespace(refuse=refused.append)
+    fleet = SimpleNamespace(ops_for=lambda authorization: None, ops=lambda manager_id: default)
+    server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
+                             task_router=SimpleNamespace(), managers=fleet)  # type: ignore[arg-type]
+    writer = _Writer()
+    asyncio.run(server._handle_agent_api("POST", "/api/agent/v1/ops/t_read", {"authorization": "Bearer gone"}, b"{}",
+                                         writer))  # type: ignore[arg-type]
+    assert int(writer.data.split()[1]) == 401 and refused == []

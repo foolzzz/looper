@@ -523,10 +523,10 @@ async def spend_since(since: datetime | None, *, until: datetime | None = None, 
 
 
 async def task_spend(since: datetime | None, until: datetime | None = None, *, project_id: str | None = None,
-                     pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+                     manager_id: str | None = None, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """What each task's runs started in [``since``, ``until``) cost (None for no bound), split by basis as
     ``spend_since`` splits it, most first: the runs that make up a task's cost (``task_costs``), of the tasks of
-    ``project_id`` only when it is given. Each row has the task's ``name`` and its ``project_id`` and
+    ``project_id`` only when it is given, of the tasks of ``manager_id`` only when that is. Each row has the task's ``name`` and its ``project_id`` and
     ``project_name`` now."""
     from .tasks import task_name
 
@@ -535,11 +535,11 @@ async def task_spend(since: datetime | None, until: datetime | None = None, *, p
         f"""
         SELECT r.task_id, t.title, t.goal_id, t.requirement, t.project_id, p.name AS project_name, {_SPEND}
         FROM llm_records r JOIN tasks t ON t.id = r.task_id LEFT JOIN projects p ON p.id = t.project_id
-        WHERE {_IN_RANGE} AND {_RUN_TASK_ROLE} IS NOT NULL
+        WHERE {_IN_RANGE} AND {_RUN_TASK_ROLE} IS NOT NULL AND ($4::text IS NULL OR t.manager_id = $4)
         GROUP BY r.task_id, t.title, t.goal_id, t.requirement, t.project_id, p.name
         ORDER BY sum(r.cost_usd) DESC NULLS LAST, r.task_id
         """,
-        since, until, project_id,
+        since, until, project_id, manager_id,
     )
     return [{"task_id": row["task_id"], "name": task_name(title=row["title"], goal_id=row["goal_id"],
                                                           requirement=row["requirement"], task_id=row["task_id"]),

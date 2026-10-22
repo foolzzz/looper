@@ -774,9 +774,9 @@ class AgentHTTPServer:
         authorization = headers.get("authorization")
         ops = self._managers.ops_for(authorization) if self._managers is not None else self._manager_ops
         if ops is None or not ops.authorized(authorization):
-            default_ops = self._managers.ops("manager") if self._managers is not None else self._manager_ops
-            if default_ops is not None:
-                default_ops.refuse(path)
+            # With a fleet the token is nobody's (unknown, or a stopped Manager's): no Manager's turn is touched.
+            if self._managers is None and self._manager_ops is not None:
+                self._manager_ops.refuse(path)
             ops = None
             writer.write(_json_response(HTTP_401, {"error": "this endpoint is the Manager's: a valid token is "
                                                             "required"}))

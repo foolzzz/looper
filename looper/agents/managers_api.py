@@ -217,13 +217,13 @@ async def _one_view(manager_id: str, extra: Callable[[str], Mapping[str, Any]] |
         raise _refuse(f"no Manager {manager_id!r}", HTTP_404)
     view = manager_view(row, await db_managers.list_templates(manager_id))
     if extra is not None:
-        view.update(extra(manager_id))
+        view["state"] = extra(manager_id)
     return view
 
 
 async def managers_view(extra: Callable[[str], Mapping[str, Any]] | None = None) -> dict[str, Any]:
-    """Every Manager not deleted with its templates; ``extra(manager_id)`` is merged into each Manager's view
-    (the fleet's ``state``); ``spend`` is counted from the runs, one query for all."""
+    """Every Manager not deleted with its templates; ``extra(manager_id)`` is each Manager's view's ``state``
+    (the fleet's); ``spend`` is counted from the runs, one query for all."""
     views = []
     from .overview import local_midnight  # overview imports the Manager tier, which imports this module's users
 
@@ -233,7 +233,7 @@ async def managers_view(extra: Callable[[str], Mapping[str, Any]] | None = None)
         view = manager_view(row, await db_managers.list_templates(row["id"]))
         view["spend"] = spend[row["id"]]
         if extra is not None:
-            view.update(extra(row["id"]))
+            view["state"] = extra(row["id"])
         views.append(view)
     return {"managers": views, "max_enabled": MAX_ENABLED_MANAGERS}
 

@@ -453,6 +453,31 @@ def test_projects_count_only_a_scoped_managers_tasks(monkeypatch: pytest.MonkeyP
     _run(test, monkeypatch)
 
 
+def test_the_costs_of_a_scoped_manager_name_only_its_own_tasks(monkeypatch: pytest.MonkeyPatch,
+                                                               tmp_path: Path) -> None:
+    async def test(pool: Any) -> None:
+        from looper.db import llm_records
+
+        chat, default = await _review(pool, tmp_path, tools="all", task_scope="own")
+        await _tasks(pool)
+        for agent_id, task_id in (("planner-task-own", "task-own"), ("planner-task-default", "task-default")):
+            record = await llm_records.start_record(agent_id=agent_id, task_id=task_id, pool=pool)
+            await llm_records.finish_record(record, status="completed", cost_usd=1.0, input_tokens=1, output_tokens=1,
+                                            cache_read_tokens=0, cache_creation_tokens=0, context_tokens=None,
+                                            compactions=[], pool=pool)
+        for arguments in ({"project": "calc"}, {}):
+            scoped = _ok((await chat.say("x", ("looper_costs", arguments)))[0])
+            full = _ok((await default.say("x", ("looper_costs", arguments)))[0])
+            assert scoped["total"]["runs"] == 1 and full["total"]["runs"] == 2, (scoped, full)
+            if "project" in arguments:
+                assert [t["task_id"] for t in scoped["tasks"]] == ["task-own"]
+                assert sorted(t["task_id"] for t in full["tasks"]) == ["task-default", "task-own"]
+            else:
+                assert [p["tasks"] for p in scoped["projects"]] == [1] and [p["tasks"] for p in full["projects"]] == [2]
+
+    _run(test, monkeypatch)
+
+
 # --- Workspaces ---
 
 

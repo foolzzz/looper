@@ -419,11 +419,14 @@ async def _costs(call: Call) -> dict[str, Any]:
                         "by_model splits those runs by model and adds up to it; manager_by_model is the Manager's turns "
                         "about the task, which neither cost_usd nor the task's spend cap counts"}
     since, until = _range(arguments)
-    project = await project_named(arguments["project"]) if arguments.get("project") is not None else None
+    manager_id = call.manager_id if call.scoped else None
+    project = (await project_named(arguments["project"], manager_id=manager_id)
+               if arguments.get("project") is not None else None)
     project_id = project["id"] if project else None
     answer: dict[str, Any] = {"since": since, "until": until, **({"project": project["name"]} if project else {}),
-                              "total": await db_llm_records.spend_since(since, until=until, project_id=project_id)}
-    tasks = await db_llm_records.task_spend(since, until, project_id=project_id)
+                              "total": await db_llm_records.spend_since(since, until=until, project_id=project_id,
+                                                                        manager_id=manager_id)}
+    tasks = await db_llm_records.task_spend(since, until, project_id=project_id, manager_id=manager_id)
     if project is not None:
         answer["tasks"] = [{key: row[key] for key in ("task_id", "name", "provider_priced_usd", "equivalent_usd",
                                                      "runs")} for row in tasks[:COST_TASKS_LISTED]]

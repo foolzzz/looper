@@ -432,3 +432,16 @@ def test_enabling_re_reads_the_manager_under_the_lock(monkeypatch: pytest.Monkey
         assert await managers.count_enabled() == 8
 
     _run(test, monkeypatch)
+
+
+def test_each_managers_view_carries_the_fleets_state_under_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        from looper.agents import managers_api
+
+        await _create("seer")
+        view = await managers_api.managers_view(extra=lambda manager_id: {"sync": "ok", "id": "not-the-managers"})
+        assert all(m["state"] == {"sync": "ok", "id": "not-the-managers"} and "sync" not in m
+                   for m in view["managers"])
+        assert {m["id"] for m in view["managers"]} >= {"manager", "manager-seer"}
+
+    _run(test, monkeypatch)
