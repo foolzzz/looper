@@ -64,7 +64,7 @@ class ManagerFleet:
     def _build(self, definition: ManagerDefinition, template_keys: Sequence[str] = ()) -> ManagerAgent:
         agent = ManagerAgent(config=self._config, runtime_root=self._runtime_root, broadcaster=self._broadcaster,
                              definition=definition)
-        ops = ManagerOps(dataclasses.replace(self._platform, manager=agent), url=self._url,
+        ops = ManagerOps(dataclasses.replace(self._platform, manager=agent, managers=self), url=self._url,
                          scope=scope_for(definition, template_keys),
                          turn_file=self._runtime_root / ".local" / f"{definition.id}-turn.json")
         agent.ops = ops

@@ -17,7 +17,7 @@ from typing import Any
 
 import asyncpg
 
-from ..db import connection as db_connection, managers as db_managers, projects as db_projects
+from ..db import connection as db_connection, llm_records as db_llm_records, managers as db_managers, projects as db_projects
 from ..db import role_templates as db_role_templates
 from . import projects, task_templates
 from .profile_registry import RegistryError, check_selection
@@ -223,10 +223,15 @@ async def _one_view(manager_id: str, extra: Callable[[str], Mapping[str, Any]] |
 
 async def managers_view(extra: Callable[[str], Mapping[str, Any]] | None = None) -> dict[str, Any]:
     """Every Manager not deleted with its templates; ``extra(manager_id)`` is merged into each Manager's view
-    (the fleet's ``state`` and ``spend``)."""
+    (the fleet's ``state``); ``spend`` is counted from the runs, one query for all."""
     views = []
-    for row in await db_managers.list_managers():
+    from .overview import local_midnight  # overview imports the Manager tier, which imports this module's users
+
+    rows = await db_managers.list_managers()
+    spend = await db_llm_records.manager_spend([row["id"] for row in rows], since=local_midnight())
+    for row in rows:
         view = manager_view(row, await db_managers.list_templates(row["id"]))
+        view["spend"] = spend[row["id"]]
         if extra is not None:
             view.update(extra(row["id"]))
         views.append(view)

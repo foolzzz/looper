@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from collections.abc import Sequence
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -223,7 +224,7 @@ async def list_events(
 # task's Planner records its turns as planner-<task_id>; Workers and Reviewers
 # record under their per-run instance id.
 _ROLE_FILTERS = {
-    "manager": "agent_id = 'manager'",
+    "manager": "(agent_id = 'manager' OR agent_id LIKE 'manager-%')",
     "planner": "agent_id LIKE 'planner-%'",
     "worker": "agent_id LIKE 'worker-%'",
     "reviewer": "agent_id LIKE 'reviewer-%'",
@@ -237,6 +238,36 @@ _TASK_ROLE = (
 )
 # A run of one of a task's agents (Planner, Worker, Reviewer), as task_costs counts them; the Manager is not one.
 TASK_RUN = f"{_TASK_ROLE} IS NOT NULL"
+
+
+async def manager_spend(
+    manager_ids: Sequence[str],
+    *,
+    since: datetime,
+    pool: asyncpg.Pool | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Per Manager, its spend since ``since`` (today's start), over the last 7 days and its runs since ``since``;
+    unpriced runs (NULL cost) count as 0 dollars and as runs. Every id is answered, with zeros when it never ran."""
+    pool = pool or get_pool()
+    result = {m: {"today_usd": 0.0, "last_7d_usd": 0.0, "runs_today": 0} for m in manager_ids}
+    if not result:
+        return result
+    rows = await pool.fetch(
+        """
+        SELECT agent_id,
+               COALESCE(sum(cost_usd) FILTER (WHERE created_at >= $2), 0)::float8 AS today_usd,
+               COALESCE(sum(cost_usd) FILTER (WHERE created_at >= $3), 0)::float8 AS last_7d_usd,
+               count(*) FILTER (WHERE created_at >= $2) AS runs_today
+        FROM llm_records
+        WHERE agent_id = ANY($1::text[]) AND created_at >= LEAST($2, $3)
+        GROUP BY agent_id
+        """,
+        list(result), since, datetime.now(timezone.utc) - timedelta(days=7),
+    )
+    for row in rows:
+        result[row["agent_id"]] = {"today_usd": row["today_usd"], "last_7d_usd": row["last_7d_usd"],
+                                   "runs_today": row["runs_today"]}
+    return result
 
 
 async def list_task_runs(

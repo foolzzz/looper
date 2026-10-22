@@ -67,6 +67,15 @@ def _runs_in(runs: list[dict[str, Any]], role: AgentType, project_id: str) -> di
             "waiting": sum(r["state"] == "waiting" for r in mine)}
 
 
+async def _fleet_managers(fleet: Any) -> list[dict[str, Any]]:
+    """Every Manager of the fleet and whether it is working, waiting or off."""
+    out = []
+    for agent in fleet.agents():
+        state = "busy" if agent.busy else "idle" if fleet.state(agent.agent_id)["running"] else "stopped"
+        out.append({"agent_id": agent.agent_id, "name": agent.name, "state": state})
+    return out
+
+
 async def build_overview(
     *,
     task_router: TaskRouter,
@@ -74,6 +83,7 @@ async def build_overview(
     manager: ManagerAgent | None,
     supervisor: AgentSupervisor,
     manager_id: str | None = None,
+    managers: Any = None,
 ) -> dict[str, Any]:
     """The overview, read now; raises when the database cannot be read. With ``manager_id``, the same keys for that
     Manager's tasks, its and its tasks' spend, and its own component only (no schedules)."""
@@ -128,6 +138,7 @@ async def build_overview(
         "tasks": group_counts(rows),
         "agents": {
             "manager": {"agent_id": manager.agent_id, "state": "busy" if manager.busy else "idle"} if manager else None,
+            **({"managers": await _fleet_managers(managers)} if managers is not None else {}),
             "planners": planners,
             "workers": [r for r in step_runs if r["role"] == AgentType.WORKER.value],
             "reviewers": [r for r in step_runs if r["role"] == AgentType.REVIEWER.value],

@@ -952,7 +952,8 @@ class AgentHTTPServer:
     async def _handle_overview(self, writer: asyncio.StreamWriter) -> None:
         try:
             result = await overview.build_overview(task_router=self._task_router, worker_pool=self._worker_pool,
-                                                   manager=self._manager, supervisor=self._supervisor)
+                                                   manager=self._manager, supervisor=self._supervisor,
+                                                   managers=self._managers)
         except Exception:
             logger.exception("DB unavailable for the overview")
             writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))

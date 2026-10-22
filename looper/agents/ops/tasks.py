@@ -124,7 +124,8 @@ async def _overview(call: Call) -> dict[str, Any]:
     platform = call.platform
     manager_id = call.manager_id if call.scoped else None
     view = await build_overview(task_router=platform.task_router, worker_pool=platform.worker_pool,
-                                manager=platform.manager, supervisor=platform.supervisor, manager_id=manager_id)
+                                manager=platform.manager, supervisor=platform.supervisor, manager_id=manager_id,
+                                managers=getattr(platform, "managers", None) if manager_id is None else None)
     agents = view["agents"]
     own = await db_layers.task_concurrency([p["task_id"] for p in agents["planners"]])
     return {

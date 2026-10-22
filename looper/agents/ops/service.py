@@ -104,6 +104,7 @@ class Platform:
     task_router: Any
     worker_pool: Any = None
     manager: Any = None
+    managers: Any = None  # the Manager fleet; the overview lists every Manager from it
     supervisor: Any = None
     scheduler: Any = None  # a schedule's Run now
     runtime_root: Path | None = None  # where a configuration export is written (``exports/``)
