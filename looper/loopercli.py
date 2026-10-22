@@ -21,6 +21,7 @@ import re
 import secrets
 import stat
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -38,11 +39,14 @@ API_PREFIX = "/api/v1"
 TABLE_COLUMNS = 8
 CELL_CHARS = 60
 LINE_CHARS = 200
+MAX_MESSAGE_CHARS = 32_000  # what chat.send accepts
+FOLLOW_SECONDS = 5  # between the polls of chat --follow
+WAIT_INTERVAL_SECONDS, WAIT_MIN_INTERVAL_SECONDS = 10, 2
 _MAX_CLIENT_FILE_BYTES = 64 * 1024
 # Non-blocking, so a FIFO in the file's place can't hang the read before fstat refuses it.
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
-EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_CONFIRM, EXIT_UNREACHABLE = 0, 1, 2, 3, 4
+EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_CONFIRM, EXIT_UNREACHABLE, EXIT_WAIT_TIMEOUT = 0, 1, 2, 3, 4, 6
 
 
 class CliError(Exception):
@@ -286,14 +290,22 @@ def _is_scalar(value: Any) -> bool:
     return not isinstance(value, (dict, list))
 
 
-def _table(rows: list[dict[str, Any]]) -> list[str]:
-    columns = [key for key, value in rows[0].items() if _is_scalar(value)][:TABLE_COLUMNS]
+def _cell(value: Any, named: bool) -> str:
+    text = "" if named and value is None else str(value)
+    return _clip(text.replace("\n", " "), CELL_CHARS)
+
+
+def _table(rows: list[dict[str, Any]], columns: Sequence[str] | None = None, indent: str = "  ") -> list[str]:
+    """``rows`` as aligned lines; without ``columns``, the scalar keys of the first row (at most ``TABLE_COLUMNS``)."""
+    named = columns is not None
+    if columns is None:
+        columns = [key for key, value in rows[0].items() if _is_scalar(value)][:TABLE_COLUMNS]
     if not columns:
         return []
-    cells = [[_clip(str(row.get(column, "")).replace("\n", " "), CELL_CHARS) for column in columns] for row in rows]
+    cells = [[_cell(row.get(column, ""), named) for column in columns] for row in rows]
     widths = [max(len(column), *(len(row[i]) for row in cells)) for i, column in enumerate(columns)]
     lines = ["  ".join(text.ljust(width) for text, width in zip(row, widths)).rstrip() for row in (columns, *cells)]
-    return ["  " + line for line in lines]
+    return [indent + line for line in lines]
 
 
 def _ok_blocks(answer: Mapping[str, Any]) -> list[str]:
@@ -422,10 +434,315 @@ def _confirm(args: argparse.Namespace, ctx: Context) -> int:
     return finish(status, answer, ctx.as_json)
 
 
+# --- chat ---
+
+
+@dataclass
+class Turn:
+    """What one message to the Manager came to."""
+
+    conversation_id: str | None
+    message_id: str | None = None
+    reply: str | None = None
+    outcome: str = "incomplete"
+    code: int = EXIT_OK
+
+
+def _chat_arguments(parser: Parser) -> None:
+    parser.add_argument("message", metavar="MESSAGE", nargs="?", help="what to say ('-' reads stdin)")
+    parser.add_argument("--file", metavar="PATH", help="say the content of a file ('-' reads stdin)")
+    parser.add_argument("--conversation", metavar="ID", help="continue this conversation (it is printed on stderr)")
+    parser.add_argument("--manager", metavar="ID", help="talk to this Manager")
+    parser.add_argument("--language", choices=("zh", "en"), help="the language of the Manager's reply")
+    parser.add_argument("--read", action="store_true", help="print the messages of --conversation instead of sending")
+    parser.add_argument("--after", metavar="MESSAGE_ID", help="with --read: only the messages after this one")
+    parser.add_argument("--list", action="store_true", help="list your conversations")
+    parser.add_argument("--follow", action="store_true",
+                        help="after sending or --read, keep printing new messages until Ctrl-C")
+
+
+def _chat_text(args: argparse.Namespace) -> str | None:
+    """The text to send; ``None`` when the user types it in a prompt."""
+    if args.file is not None:
+        text = _read_text(args.file, "--file")
+    elif args.message == "-":
+        text = _read_text("-", "message")
+    elif args.message is not None:
+        text = args.message
+    elif sys.stdin.isatty():
+        return None
+    else:
+        text = _read_text("-", "message")
+    if not text.strip():
+        raise UsageError("the message is empty")
+    if len(text) > MAX_MESSAGE_CHARS:
+        raise UsageError(f"the message has {len(text)} characters; at most {MAX_MESSAGE_CHARS}: "
+                         "summarise it and point to the files")
+    return text
+
+
+def _answer_error(answer: Mapping[str, Any], status: int) -> CliError:
+    error = answer.get("error")
+    error = error if isinstance(error, dict) else {}
+    return CliError(f"{error.get('code', 'unavailable')}: {error.get('message') or f'HTTP {status}'}")
+
+
+def _send(args: argparse.Namespace, ctx: Context, text: str, conversation_id: str | None) -> Turn:
+    """Send ``text`` and print the Manager's reply as it streams in."""
+    body: dict[str, Any] = {"text": text}
+    for key, value in (("conversation_id", conversation_id), ("manager_id", args.manager),
+                       ("language", args.language)):
+        if value:
+            body[key] = value
+    turn = Turn(conversation_id)
+    printed = ""
+    quiet = ctx.as_json
+    events = ctx.api().stream(f"{API_PREFIX}/chat/send", body)
+    try:
+        for event, data in events:
+            if event == "answer":  # the server answered an error instead of a stream
+                turn.outcome, turn.code = "error", finish(0, data, ctx.as_json)
+                return turn
+            if event == "accepted":
+                turn.conversation_id = data.get("conversation_id") or turn.conversation_id
+                turn.message_id = data.get("message_id")
+                print(f"conversation: {turn.conversation_id}", file=sys.stderr, flush=True)
+            elif event == "delta":
+                chunk = str(data.get("text", ""))
+                printed += chunk
+                if not quiet:
+                    sys.stdout.write(chunk)
+                    sys.stdout.flush()
+            elif event == "status":
+                if not quiet:
+                    print(f"[{data.get('label', '')}]", file=sys.stderr, flush=True)
+            elif event == "final":
+                turn.reply = str(data.get("text", ""))
+                turn.outcome = str(data.get("outcome") or "answered")
+                turn.code = EXIT_ERROR if turn.outcome == "failed" else EXIT_OK
+                if not quiet:
+                    # Looper may append its own blocks after the Manager's words (a confirmation request).
+                    rest = turn.reply[len(printed):] if turn.reply.startswith(printed) else "\n" + turn.reply
+                    print(rest)
+                return turn
+            elif event == "timeout":
+                turn.outcome = "timeout"
+                if not quiet:
+                    if printed:
+                        print()
+                    print(data.get("message", "the reply is still being written"), file=sys.stderr)
+                return turn
+    finally:
+        close = getattr(events, "close", None)
+        if close is not None:
+            close()
+    if not quiet and printed:
+        print()
+    print("error: the stream ended without a reply; read it later with: "
+          f"loopercli chat --conversation {turn.conversation_id} --read", file=sys.stderr)
+    turn.code = EXIT_ERROR
+    return turn
+
+
+def _print_turn(turn: Turn) -> None:
+    print(json.dumps({"conversation_id": turn.conversation_id, "message_id": turn.message_id, "reply": turn.reply,
+                      "outcome": turn.outcome}, ensure_ascii=False, indent=2))
+
+
+class _Messages:
+    """Prints messages as ``--read`` shows them, a blank line between."""
+
+    def __init__(self, as_json: bool) -> None:
+        self.as_json, self.shown = as_json, 0
+
+    def show(self, message: Mapping[str, Any]) -> None:
+        if self.as_json:
+            print(json.dumps(message, ensure_ascii=False))
+        else:
+            if self.shown:
+                print()
+            print(f"{message.get('role')} · {message.get('created_at')}")
+            print(message.get("content", ""))
+        self.shown += 1
+        sys.stdout.flush()
+
+
+def _pages(ctx: Context, conversation_id: str, after: str | None) -> Iterator[Mapping[str, Any]]:
+    """The pages of a conversation after a cursor, following the server's cursor while it has more."""
+    while True:
+        body = {"conversation_id": conversation_id, **({"after": after} if after else {})}
+        status, answer = ctx.api().call("POST", f"{API_PREFIX}/chat/messages", body)
+        page = answer.get("result")
+        if answer.get("status") != "ok" or not isinstance(page, dict):
+            raise _answer_error(answer, status)
+        yield page
+        cursor = page.get("next_cursor")
+        if not page.get("has_more") or not cursor or cursor == after:
+            return
+        after = cursor
+
+
+def _chat_read(args: argparse.Namespace, ctx: Context) -> int:
+    messages = _Messages(ctx.as_json)
+    collected: list[Any] = []
+    manager_id, cursor = None, args.after
+    for page in _pages(ctx, args.conversation, args.after):
+        manager_id = page.get("manager_id", manager_id)
+        cursor = page.get("next_cursor") or cursor
+        for message in page.get("messages") or []:
+            if ctx.as_json:
+                collected.append(message)
+            else:
+                messages.show(message)
+    if ctx.as_json:
+        print(json.dumps({"conversation_id": args.conversation, "manager_id": manager_id, "messages": collected,
+                          "next_cursor": cursor}, ensure_ascii=False, indent=2))
+    if args.follow:
+        return _follow(ctx, args.conversation, cursor, None, _Messages(ctx.as_json))
+    return EXIT_OK
+
+
+def _follow(ctx: Context, conversation_id: str, cursor: str | None, skip: str | None, messages: _Messages) -> int:
+    """Print the new messages of a conversation every few seconds until Ctrl-C.
+
+    ``skip`` is a reply already printed from a stream: the first assistant message with that content is not shown again.
+    """
+    try:
+        while True:
+            time.sleep(FOLLOW_SECONDS)
+            for page in _pages(ctx, conversation_id, cursor):
+                for message in page.get("messages") or []:
+                    if skip is not None and message.get("role") == "assistant" and message.get("content") == skip:
+                        skip = None
+                        continue
+                    messages.show(message)
+                cursor = page.get("next_cursor") or cursor
+    except KeyboardInterrupt:
+        return EXIT_OK
+
+
+def _chat_list(ctx: Context) -> int:
+    status, answer = ctx.api().call("POST", f"{API_PREFIX}/chat/conversations", {})
+    if ctx.as_json or answer.get("status") != "ok":
+        return finish(status, answer, ctx.as_json)
+    result = answer.get("result")
+    rows = result.get("conversations") if isinstance(result, dict) else None
+    if rows:
+        print("\n".join(_table(rows, ("conversation_id", "manager_id", "last_message_at", "last_content"), "")))
+    else:
+        print("no conversations")
+    return EXIT_OK
+
+
+def _chat_interactive(args: argparse.Namespace, ctx: Context) -> int:
+    conversation_id = args.conversation
+    while True:
+        print("> ", end="", file=sys.stderr, flush=True)
+        try:
+            line = input().strip()
+        except EOFError:
+            print(file=sys.stderr)
+            return EXIT_OK
+        except KeyboardInterrupt:
+            print(file=sys.stderr)
+            return EXIT_OK
+        if not line:
+            continue
+        if len(line) > MAX_MESSAGE_CHARS:
+            print(f"error: the message has {len(line)} characters; at most {MAX_MESSAGE_CHARS}: "
+                  "summarise it and point to the files", file=sys.stderr)
+            continue
+        try:
+            turn = _send(args, ctx, line, conversation_id)
+        except KeyboardInterrupt:
+            print(file=sys.stderr)
+            where = f" --conversation {conversation_id} --read" if conversation_id else ""
+            print(f"(stopped reading; the reply is still saved: loopercli chat{where})", file=sys.stderr)
+            continue
+        conversation_id = turn.conversation_id or conversation_id
+        if ctx.as_json:
+            _print_turn(turn)
+
+
+def _chat(args: argparse.Namespace, ctx: Context) -> int:
+    if args.list and args.read:
+        raise UsageError("--list and --read exclude each other")
+    if args.list:
+        return _chat_list(ctx)
+    if args.read:
+        if not args.conversation:
+            raise UsageError("--read needs --conversation ID")
+        return _chat_read(args, ctx)
+    if args.after:
+        raise UsageError("--after goes with --read")
+    text = _chat_text(args)
+    if text is None:
+        if args.follow:
+            raise UsageError("--follow needs a message or --read")
+        return _chat_interactive(args, ctx)
+    turn = _send(args, ctx, text, args.conversation)
+    if ctx.as_json and turn.outcome != "error":
+        _print_turn(turn)
+    if args.follow and turn.code == EXIT_OK and turn.conversation_id:
+        return _follow(ctx, turn.conversation_id, turn.message_id, turn.reply, _Messages(ctx.as_json))
+    return turn.code
+
+
+# --- wait ---
+
+
+def _wait_arguments(parser: Parser) -> None:
+    parser.add_argument("task_id", metavar="TASK")
+    parser.add_argument("--for", dest="until", choices=("any", "end", "gate"), default="any",
+                        help="what to wait for: a gate that needs you, the task's end, or whichever comes first")
+    parser.add_argument("--timeout", type=int, default=0, metavar="SECONDS",
+                        help="give up after this long (default: never)")
+    parser.add_argument("--interval", type=int, default=WAIT_INTERVAL_SECONDS, metavar="SECONDS",
+                        help="between two looks at the task (default %(default)s, at least "
+                             f"{WAIT_MIN_INTERVAL_SECONDS})")
+
+
+_WAIT_GROUPS = {"gate": ("needs_you",), "end": ("attention", "completed", "cancelled"),
+                "any": ("needs_you", "attention", "completed", "cancelled")}
+
+
+def _wait(args: argparse.Namespace, ctx: Context) -> int:
+    interval = max(args.interval, WAIT_MIN_INTERVAL_SECONDS)
+    started = time.monotonic()
+    while True:
+        status, answer = ctx.api().call("POST", f"{API_PREFIX}/ops/tasks/get", {"task_id": args.task_id})
+        result = answer.get("result")
+        if answer.get("status") != "ok" or not isinstance(result, dict):
+            return finish(status, answer, ctx.as_json)
+        if result.get("group") in _WAIT_GROUPS[args.until]:
+            if ctx.as_json:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                return EXIT_OK
+            print(f"task {args.task_id} {result.get('status')} ({result.get('group')})")
+            if result.get("group") == "needs_you":
+                for gate in result.get("gates") or []:
+                    if isinstance(gate, dict) and gate.get("waiting_for") == "user":
+                        print(f"gate {gate.get('gate')}: {gate.get('topic')}\n"
+                              f"  loopercli gates messages --task-id {args.task_id} --gate {gate.get('gate')}")
+            elif result.get("result"):
+                print(f"result: {result['result']}")
+            return EXIT_OK
+        if args.timeout and time.monotonic() - started >= args.timeout:
+            if ctx.as_json:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            print(f"still {result.get('status')} after {args.timeout} s", file=sys.stderr)
+            return EXIT_WAIT_TIMEOUT
+        remaining = args.timeout - (time.monotonic() - started) if args.timeout else interval
+        time.sleep(min(interval, max(remaining, 0)))
+
+
 HAND_COMMANDS: dict[str, HandCommand] = {command.name: command for command in (
     HandCommand("login", "Save an API client's token (read from stdin or a prompt) after checking it with Looper",
                 _login_arguments, _login),
     HandCommand("confirm", "Run the call that answered needs_confirmation", _confirm_arguments, _confirm),
+    HandCommand("chat", "Talk to the Manager, read a conversation, or list your conversations", _chat_arguments,
+                _chat),
+    HandCommand("wait", "Wait until a task needs you, ends, or the timeout passes (exit 6)", _wait_arguments, _wait),
 )}
 
 
@@ -543,21 +860,102 @@ def _run_generated(args: argparse.Namespace, ctx: Context) -> int:
     return finish(status, answer, ctx.as_json)
 
 
+def _run_task_alias(args: argparse.Namespace, ctx: Context) -> int:
+    """``start``, ``stop`` and ``status TASK``: the generated operation with the task's id."""
+    operation: Generated = args._generated
+    status, answer = ctx.api().call(operation.method, operation.path, {"task_id": args.task})
+    return finish(status, answer, ctx.as_json)
+
+
+def _run_status(args: argparse.Namespace, ctx: Context) -> int:
+    if args.task:
+        return _run_task_alias(args, ctx)
+    overview: Generated | None = args._overview
+    if overview is None:
+        raise UsageError("status needs a TASK: Looper's API description has no overview")
+    status, answer = ctx.api().call(overview.method, overview.path, {})
+    return finish(status, answer, ctx.as_json)
+
+
+PIPELINE_COLUMNS = ("step", "kind", "status", "depends_on", "role", "instruction")
+GATE_COLUMNS = ("gate", "state", "waiting_for", "topic")
+WAIT_COLUMNS = ("step", "state", "outcome", "topic", "check", "next_check_at")
+
+
+def _rows(value: Any) -> list[dict[str, Any]]:
+    return [row for row in value if isinstance(row, dict)] if isinstance(value, list) else []
+
+
+def _render_pipeline(result: Mapping[str, Any]) -> None:
+    blocks = ["\n".join(f"{key}: {value}" for key, value in result.items() if _is_scalar(value))]
+    steps = [{**step, "depends_on": ",".join(map(str, step.get("depends_on") or []))}
+             for step in _rows(result.get("steps"))]
+    for title, rows, columns in (("steps", steps, PIPELINE_COLUMNS),
+                                 ("gates", _rows(result.get("gates")), GATE_COLUMNS),
+                                 ("waits", _rows(result.get("waits")), WAIT_COLUMNS)):
+        if rows:
+            blocks.append("\n".join([f"{title}:", *_table(rows, columns)]))
+        elif title == "steps":
+            blocks.append("steps: none")
+    print("\n\n".join(block for block in blocks if block))
+
+
+def _run_pipeline(args: argparse.Namespace, ctx: Context) -> int:
+    operation: Generated = args._generated
+    status, answer = ctx.api().call(operation.method, operation.path, {"task_id": args.task})
+    result = answer.get("result")
+    if ctx.as_json or answer.get("status") != "ok" or not isinstance(result, dict):
+        return finish(status, answer, ctx.as_json)
+    _render_pipeline(result)
+    return EXIT_OK
+
+
+def _add_aliases(commands: Any, found: Mapping[tuple[str, str], Generated], summaries: Mapping[tuple[str, str], str],
+                 taken: set[str]) -> None:
+    """The short names of the commands used most; each needs its operation in the document."""
+
+    def alias(name: str, key: tuple[str, str], help_text: str) -> Parser | None:
+        if name in taken or key not in found:
+            return None
+        taken.add(name)
+        return commands.add_parser(name, help=_escape(help_text), description=summaries.get(key) or help_text)
+
+    for name, key, help_text in (("create", ("task-create", ""), "Create a task (the options of task-create)"),
+                                 ("list", ("tasks", "list"), "List tasks (the options of tasks list)")):
+        if (sub := alias(name, key, help_text)) is not None:
+            _add_operation(sub, found[key])
+            sub.set_defaults(_run=_run_generated)
+    for name, key, help_text, run in (
+            ("start", ("task-control", "start"), "Start a ready task", _run_task_alias),
+            ("stop", ("task-control", "stop"), "Stop a running task", _run_task_alias),
+            ("pipeline", ("task-pipeline", ""), "A task's steps, gates and waits", _run_pipeline)):
+        if (sub := alias(name, key, help_text)) is not None:
+            sub.add_argument("task", metavar="TASK", help="the task's id")
+            sub.set_defaults(_run=run, _generated=found[key])
+    if (sub := alias("status", ("tasks", "get"), "One task's state, or the overview without a TASK")) is not None:
+        sub.add_argument("task", metavar="TASK", nargs="?", help="the task's id (without it: the overview)")
+        sub.set_defaults(_run=_run_status, _generated=found[("tasks", "get")], _overview=found.get(("overview", "")))
+
+
 def build_parser(document: Mapping[str, Any] | None) -> Parser:
     """The parser of every command: the hand-written ones, and those the ``document`` (when there is one) generates."""
     parser = Parser(prog="loopercli", description="Operate the Looper on this machine from the command line.",
                     epilog="Global options, in any position: --client-file PATH, --session ID ($LOOPER_SESSION), "
                            "--json, --version. Exit codes: 0 ok, 1 error, 2 usage, 3 needs confirmation "
-                           "(run loopercli confirm ID), 4 Looper unreachable or the client file unusable.")
+                           "(run loopercli confirm ID), 4 Looper unreachable or the client file unusable, "
+                           "6 wait timed out.")
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
     for hand in HAND_COMMANDS.values():
         sub = commands.add_parser(hand.name, help=_escape(hand.help), description=hand.help)
         hand.add(sub)
         sub.set_defaults(_run=hand.run)
     parents: dict[str, Any] = {}
+    found: dict[tuple[str, str], Generated] = {}
+    summaries: dict[tuple[str, str], str] = {}
     for head, tail, summary, description, operation in generated_operations(document or {"paths": {}}):
         if head in HAND_COMMANDS:
             continue
+        found[head, tail], summaries[head, tail] = operation, summary
         if not tail:
             sub = commands.add_parser(head, help=_escape(summary), description=description)
             _add_operation(sub, operation)
@@ -569,6 +967,7 @@ def build_parser(document: Mapping[str, Any] | None) -> Parser:
         sub = parents[head].add_parser(tail, help=_escape(summary), description=description)
         _add_operation(sub, operation)
         sub.set_defaults(_run=_run_generated)
+    _add_aliases(commands, found, summaries, set(HAND_COMMANDS) | set(commands.choices))
     return parser
 
 

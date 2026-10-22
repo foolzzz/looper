@@ -3,6 +3,7 @@ and records the calls. No database; the CLI itself imports nothing of Looper but
 
 from __future__ import annotations
 
+import builtins
 import io
 import json
 import os
@@ -81,6 +82,7 @@ class FakeLooper(Server):
         self.answers: list[tuple[int, Any]] = []
         self.document_status = 200
         self.redirects: dict[str, tuple[int, str]] = {}  # path prefix -> (status, location)
+        self.streams: list[list[tuple[str, dict[str, Any]]]] = []  # the events /chat/send answers with, per call
         super().__init__(self._respond)
 
     def _respond(self, handler: BaseHTTPRequestHandler, request: Request) -> None:
@@ -96,6 +98,14 @@ class FakeLooper(Server):
             _send(handler, 401, {"status": "error", "error": {"code": "unauthorized", "message": "no"}})
         elif path == "/api/v1/whoami":
             _send(handler, 200, api_v1.whoami(api_v1.Principal("client", "c-1", "ci")))
+        elif path == "/api/v1/chat/send" and self.streams:
+            body = "".join(f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+                           for name, data in self.streams.pop(0)).encode()
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/event-stream")
+            handler.send_header("Content-Length", str(len(body)))
+            handler.end_headers()
+            handler.wfile.write(body)
         else:
             status, payload = self.answers.pop(0) if self.answers else (200, {"status": "ok", "result": {}})
             _send(handler, status, payload)
@@ -335,12 +345,12 @@ def test_a_command_is_generated_for_each_operation_without_a_hand_written_one() 
     assert not {head for head, *_ in names} & hand
 
 
-def test_confirm_is_listed_once_and_chat_is_not_generated(cli: Run) -> None:
+def test_confirm_and_chat_are_listed_once_and_chat_send_is_not_generated(cli: Run) -> None:
     code, out, _ = cli("--help")
     assert code == 0
     commands = [line.split()[0] for line in out.splitlines() if line.startswith("    ") and line.split()]
     assert commands.count("confirm") == 1 and "login" in commands and "whoami" in commands
-    assert "chat" not in commands and "openapi" not in commands
+    assert commands.count("chat") == 1 and "wait" in commands and "openapi" not in commands
     assert loopercli.main(["--client-file", str(cli.client), "chat-send"]) == 2
 
 
@@ -664,3 +674,419 @@ def test_stream_of_an_error_answer_is_that_answer(looper: FakeLooper) -> None:
     looper.answers.append((400, {"status": "error", "error": {"code": "invalid", "message": "text"}}))
     events = list(Api(looper.url, TOKEN).stream("/api/v1/chat/send", {}))
     assert events == [("answer", {"status": "error", "error": {"code": "invalid", "message": "text"}})]
+
+
+# --- chat ---
+
+
+def reply_stream(*texts: str, final: str | None = None, outcome: str = "answered",
+                 message_id: str = "m-1") -> list[tuple[str, dict[str, Any]]]:
+    events: list[tuple[str, dict[str, Any]]] = [
+        ("accepted", {"conversation_id": "cli-1", "message_id": message_id, "manager_id": "manager"})]
+    events += [("delta", {"text": text}) for text in texts]
+    return [*events, ("final", {"text": "".join(texts) if final is None else final, "outcome": outcome})]
+
+
+def messages_page(*messages: tuple[str, str, str], next_cursor: str | None, has_more: bool = False) -> tuple[int, Any]:
+    return 200, {"status": "ok", "result": {
+        "conversation_id": "cli-1", "manager_id": "manager", "has_more": has_more, "next_cursor": next_cursor,
+        "messages": [{"message_id": i, "role": role, "content": content, "created_at": "2026-01-01T00:00:00Z"}
+                     for i, role, content in messages]}}
+
+
+def chat_bodies(looper: FakeLooper) -> list[Any]:
+    return [r[3] for r in looper.calls() if r[1] == "/api/v1/chat/send"]
+
+
+def test_chat_prints_the_streamed_reply_then_what_looper_appended(cli: Run, looper: FakeLooper) -> None:
+    looper.streams.append([
+        ("accepted", {"conversation_id": "cli-1", "message_id": "m-1", "manager_id": "manager"}),
+        ("status", {"label": "thinking"}), ("heartbeat", {}), ("delta", {"text": "Hi"}), ("delta", {"text": " there"}),
+        ("final", {"text": "Hi there\n\n需要你确认：loopercli confirm c-1", "outcome": "answered"})])
+    code, out, err = cli("chat", "hello")
+    assert code == 0
+    assert out == "Hi there\n\n需要你确认：loopercli confirm c-1\n"
+    assert err.splitlines() == ["conversation: cli-1", "[thinking]"]
+    assert chat_bodies(looper) == [{"text": "hello"}]
+
+
+def test_a_final_that_does_not_continue_what_was_printed_is_printed_whole_after_a_newline(
+        cli: Run, looper: FakeLooper) -> None:
+    looper.streams.append(reply_stream("Draft", final="Rewritten"))
+    code, out, _ = cli("chat", "hello")
+    assert code == 0 and out == "Draft\nRewritten\n"
+
+
+def test_chat_sends_the_conversation_the_manager_the_language_and_a_files_content(
+        cli: Run, looper: FakeLooper, tmp_path: Path) -> None:
+    file = tmp_path / "msg.md"
+    file.write_text("from a file\n")
+    looper.streams.append(reply_stream("ok"))
+    code, _, err = cli("chat", "--conversation", "cli-1", "--manager", "manager-review", "--language", "en",
+                       "--file", str(file))
+    assert code == 0, err
+    assert chat_bodies(looper) == [{"text": "from a file\n", "conversation_id": "cli-1",
+                                    "manager_id": "manager-review", "language": "en"}]
+
+
+def test_chat_with_a_dash_or_without_a_message_reads_stdin(cli: Run, looper: FakeLooper) -> None:
+    looper.streams += [reply_stream("a"), reply_stream("b")]
+    assert cli("chat", "-", stdin="piped")[0] == 0
+    assert cli("chat", stdin="also piped")[0] == 0
+    assert chat_bodies(looper) == [{"text": "piped"}, {"text": "also piped"}]
+
+
+def test_chat_refuses_an_empty_message_and_one_over_the_limit_without_a_request(
+        cli: Run, looper: FakeLooper, tmp_path: Path) -> None:
+    file = tmp_path / "long.md"
+    file.write_text("x" * 32_001)
+    code, _, err = cli("chat", "--file", str(file))
+    assert code == 2
+    assert "the message has 32001 characters; at most 32000: summarise it and point to the files" in err
+    assert cli("chat", "  ", stdin="")[0] == 2
+    assert cli("chat", stdin="\n")[0] == 2
+    file.write_text("x" * 32_000)
+    looper.streams.append(reply_stream("ok"))
+    assert cli("chat", "--file", str(file))[0] == 0
+    assert len(chat_bodies(looper)) == 1
+
+
+def test_a_stream_that_times_out_says_so_and_exits_0(cli: Run, looper: FakeLooper) -> None:
+    looper.streams.append([("accepted", {"conversation_id": "cli-1", "message_id": "m-1"}),
+                           ("delta", {"text": "Part"}),
+                           ("timeout", {"message": "the reply is still being written; read it later"})])
+    code, out, err = cli("chat", "hello")
+    assert code == 0 and out == "Part\n"
+    assert "the reply is still being written; read it later" in err
+
+
+def test_a_failed_reply_exits_1(cli: Run, looper: FakeLooper) -> None:
+    looper.streams.append(reply_stream("Sorry", outcome="failed"))
+    code, out, _ = cli("chat", "hello")
+    assert code == 1 and out == "Sorry\n"
+
+
+def test_a_stream_that_ends_without_a_reply_exits_1(cli: Run, looper: FakeLooper) -> None:
+    looper.streams.append([("accepted", {"conversation_id": "cli-1", "message_id": "m-1"})])
+    code, _, err = cli("chat", "hello")
+    assert code == 1 and "loopercli chat --conversation cli-1 --read" in err
+
+
+def test_an_error_answer_instead_of_a_stream_exits_1(cli: Run, looper: FakeLooper) -> None:
+    looper.answers.append((404, {"status": "error", "error": {"code": "not_found", "message": "no conversation x"}}))
+    code, out, err = cli("chat", "--conversation", "x", "hello")
+    assert code == 1 and out == ""
+    assert err.strip() == "error: not_found: no conversation x"
+
+
+def test_chat_json_prints_one_object_and_nothing_while_streaming(cli: Run, looper: FakeLooper) -> None:
+    looper.streams.append(reply_stream("Hi", " there", final="Hi there\n\nconfirm?"))
+    code, out, err = cli("--json", "chat", "hello")
+    assert code == 0
+    assert json.loads(out) == {"conversation_id": "cli-1", "message_id": "m-1", "reply": "Hi there\n\nconfirm?",
+                               "outcome": "answered"}
+    assert err.strip() == "conversation: cli-1"
+    looper.streams.append([("accepted", {"conversation_id": "cli-2", "message_id": "m-9"}),
+                           ("timeout", {"message": "m"})])
+    assert json.loads(cli("--json", "chat", "again")[1]) == {
+        "conversation_id": "cli-2", "message_id": "m-9", "reply": None, "outcome": "timeout"}
+
+
+def test_chat_read_follows_the_servers_cursor_and_prints_each_message_once(cli: Run, looper: FakeLooper) -> None:
+    looper.answers += [messages_page(("m-2", "assistant", "first"), ("m-3", "user", "second"), next_cursor="m-3",
+                                     has_more=True),
+                       messages_page(("m-4", "assistant", "third"), next_cursor="m-4")]
+    code, out, err = cli("chat", "--conversation", "cli-1", "--read", "--after", "m-1")
+    assert code == 0, err
+    assert [call[3] for call in looper.calls()] == [{"conversation_id": "cli-1", "after": "m-1"},
+                                                    {"conversation_id": "cli-1", "after": "m-3"}]
+    assert looper.calls()[0][1] == "/api/v1/chat/messages"
+    assert out == ("assistant · 2026-01-01T00:00:00Z\nfirst\n\nuser · 2026-01-01T00:00:00Z\nsecond\n\n"
+                   "assistant · 2026-01-01T00:00:00Z\nthird\n")
+
+
+def test_chat_read_json_is_one_object_of_all_the_pages(cli: Run, looper: FakeLooper) -> None:
+    looper.answers += [messages_page(("m-2", "user", "a"), next_cursor="m-2", has_more=True),
+                       messages_page(("m-3", "assistant", "b"), next_cursor="m-3")]
+    code, out, _ = cli("--json", "chat", "--conversation", "cli-1", "--read")
+    result = json.loads(out)
+    assert code == 0 and looper.calls()[0][3] == {"conversation_id": "cli-1"}
+    assert [m["message_id"] for m in result["messages"]] == ["m-2", "m-3"]
+    assert (result["conversation_id"], result["manager_id"], result["next_cursor"]) == ("cli-1", "manager", "m-3")
+
+
+def test_an_unknown_cursor_exits_1_with_the_servers_message_and_no_second_request(
+        cli: Run, looper: FakeLooper) -> None:
+    looper.answers.append((400, {"status": "error", "error": {
+        "code": "invalid", "message": "unknown cursor m-x in conversation cli-1; read without --after"}}))
+    code, out, err = cli("chat", "--conversation", "cli-1", "--read", "--after", "m-x")
+    assert code == 1 and out == ""
+    assert "invalid: unknown cursor m-x" in err
+    assert len(looper.calls()) == 1
+
+
+def test_chat_read_needs_a_conversation_and_makes_no_request(cli: Run, looper: FakeLooper) -> None:
+    code, _, err = cli("chat", "--read")
+    assert code == 2 and "--conversation" in err
+    assert looper.calls() == []
+
+
+def test_chat_list_prints_a_table(cli: Run, looper: FakeLooper) -> None:
+    looper.answers.append((200, {"status": "ok", "result": {"conversations": [
+        {"conversation_id": "cli-1", "manager_id": "manager", "created_at": "c", "last_message_at": "2026-01-02",
+         "last_content": "y" * 100},
+        {"conversation_id": "cli-2", "manager_id": "manager-review", "created_at": "c", "last_message_at": None,
+         "last_content": None}]}}))
+    code, out, _ = cli("chat", "--list")
+    assert code == 0
+    lines = out.splitlines()
+    assert lines[0].split() == ["conversation_id", "manager_id", "last_message_at", "last_content"]
+    assert lines[1].split() == ["cli-1", "manager", "2026-01-02", "y" * 59 + "…"]
+    assert lines[2].split() == ["cli-2", "manager-review"]
+    assert looper.calls()[0][1:4:2] == ("/api/v1/chat/conversations", {})
+
+
+class Ticks:
+    """A sleep that does nothing and raises ``KeyboardInterrupt`` at the ``stop``-th call."""
+
+    def __init__(self, stop: int) -> None:
+        self.calls, self.stop = 0, stop
+
+    def __call__(self, seconds: float) -> None:
+        self.calls += 1
+        if self.calls >= self.stop:
+            raise KeyboardInterrupt
+
+
+def test_follow_after_a_reply_starts_at_the_sent_message_and_prints_new_messages_once(
+        cli: Run, looper: FakeLooper, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(loopercli.time, "sleep", ticks := Ticks(3))
+    looper.streams.append(reply_stream("Hi there", message_id="m-1"))
+    looper.answers += [
+        messages_page(("m-2", "assistant", "Hi there"), next_cursor="m-2"),  # the reply already printed
+        messages_page(("m-3", "user", "later"), next_cursor="m-3", has_more=True),
+        messages_page(("m-4", "assistant", "Hi there"), next_cursor="m-4")]
+    code, out, err = cli("chat", "--follow", "hello")
+    assert code == 0, err
+    bodies = [call[3] for call in looper.calls()[1:]]
+    assert bodies == [{"conversation_id": "cli-1", "after": "m-1"}, {"conversation_id": "cli-1", "after": "m-2"},
+                      {"conversation_id": "cli-1", "after": "m-3"}]
+    assert out == ("Hi there\n" "user · 2026-01-01T00:00:00Z\nlater\n\n"
+                   "assistant · 2026-01-01T00:00:00Z\nHi there\n")
+    assert ticks.calls == 3
+
+
+def test_follow_prints_a_reply_that_timed_out_and_one_json_line_per_message(
+        cli: Run, looper: FakeLooper, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(loopercli.time, "sleep", Ticks(2))
+    looper.streams.append([("accepted", {"conversation_id": "cli-1", "message_id": "m-1"}),
+                           ("timeout", {"message": "later"})])
+    looper.answers.append(messages_page(("m-2", "assistant", "late reply"), next_cursor="m-2"))
+    code, out, _ = cli("--json", "chat", "--follow", "hello")
+    assert code == 0
+    turn, _, line = out.strip().rpartition("\n")
+    assert json.loads(turn)["outcome"] == "timeout"
+    assert json.loads(line)["content"] == "late reply"
+
+
+def test_read_follow_starts_at_the_last_cursor_of_the_read(
+        cli: Run, looper: FakeLooper, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(loopercli.time, "sleep", Ticks(2))
+    looper.answers += [messages_page(("m-2", "user", "old"), next_cursor="m-2"),
+                       messages_page(("m-3", "assistant", "new"), next_cursor="m-3")]
+    code, out, _ = cli("chat", "--conversation", "cli-1", "--read", "--follow")
+    assert code == 0
+    assert [call[3] for call in looper.calls()] == [{"conversation_id": "cli-1"},
+                                                    {"conversation_id": "cli-1", "after": "m-2"}]
+    assert out.count("old") == 1 and out.count("new") == 1
+
+
+def test_follow_with_an_unknown_cursor_exits_1(cli: Run, looper: FakeLooper, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(loopercli.time, "sleep", Ticks(5))
+    looper.answers += [messages_page(next_cursor="m-2"),
+                       (400, {"status": "error", "error": {"code": "invalid", "message": "unknown cursor m-2"}})]
+    code, _, err = cli("chat", "--conversation", "cli-1", "--read", "--follow")
+    assert code == 1 and "unknown cursor m-2" in err
+
+
+def test_interactive_chat_keeps_the_conversation_between_messages(
+        cli: Run, looper: FakeLooper, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Terminal(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    lines = iter(["first", "", "second"])
+
+    def fake_input(prompt: str = "") -> str:
+        try:
+            return next(lines)
+        except StopIteration:
+            raise EOFError from None
+
+    monkeypatch.setattr(sys, "stdin", Terminal())
+    monkeypatch.setattr(builtins, "input", fake_input)
+    looper.streams += [reply_stream("one"), reply_stream("two")]
+    code, out, err = cli("chat")
+    assert code == 0 and out == "one\ntwo\n"
+    assert chat_bodies(looper) == [{"text": "first"}, {"text": "second", "conversation_id": "cli-1"}]
+    assert err.count("> ") == 4
+
+
+def test_interrupting_a_reply_in_the_prompt_says_the_reply_is_saved(
+        cli: Run, looper: FakeLooper, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Terminal(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    lines = iter(["first", "second"])
+
+    def fake_input(prompt: str = "") -> str:
+        try:
+            return next(lines)
+        except StopIteration:
+            raise EOFError from None
+
+    real = loopercli._send
+    calls: list[int] = []
+
+    def send(args: Any, ctx: Any, text: str, conversation_id: str | None) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            turn = real(args, ctx, text, conversation_id)
+            return turn
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(sys, "stdin", Terminal())
+    monkeypatch.setattr(builtins, "input", fake_input)
+    monkeypatch.setattr(loopercli, "_send", send)
+    looper.streams.append(reply_stream("one"))
+    code, _, err = cli("chat")
+    assert code == 0
+    assert "(stopped reading; the reply is still saved: loopercli chat --conversation cli-1 --read)" in err
+
+
+# --- wait ---
+
+
+def task_state(status: str, group: str, **more: Any) -> tuple[int, Any]:
+    return 200, {"status": "ok", "result": {"task_id": "t1", "status": status, "group": group, **more}}
+
+
+GATE = {"gate": "g1", "topic": "Pick a plan", "state": "open", "waiting_for": "user"}
+
+
+def test_wait_returns_when_a_gate_needs_the_user(cli: Run, looper: FakeLooper, monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(loopercli.time, "sleep", sleeps.append)
+    looper.answers += [task_state("running", "in_progress"), task_state("running", "in_progress"),
+                       task_state("planning", "needs_you",
+                                  gates=[GATE, {**GATE, "gate": "g2", "waiting_for": "planner"}])]
+    code, out, err = cli("wait", "t1")
+    assert code == 0, err
+    assert out.splitlines()[0] == "task t1 planning (needs_you)"
+    assert "gate g1: Pick a plan" in out and "loopercli gates messages --task-id t1 --gate g1" in out
+    assert "g2" not in out
+    assert [call[1:4:2] for call in looper.calls()] == [("/api/v1/ops/tasks/get", {"task_id": "t1"})] * 3
+    assert sleeps == [10, 10]
+
+
+def test_wait_for_end_keeps_waiting_through_a_gate_and_prints_the_result(
+        cli: Run, looper: FakeLooper, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(loopercli.time, "sleep", lambda seconds: None)
+    looper.answers += [task_state("running", "needs_you", gates=[GATE]), task_state("running", "needs_you"),
+                       task_state("completed", "completed", result="All done")]
+    code, out, _ = cli("wait", "t1", "--for", "end")
+    assert code == 0 and len(looper.calls()) == 3
+    assert out.splitlines() == ["task t1 completed (completed)", "result: All done"]
+
+
+def test_wait_for_a_gate_ignores_the_end_and_the_interval_has_a_minimum(
+        cli: Run, looper: FakeLooper, monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(loopercli.time, "sleep", sleeps.append)
+    looper.answers += [task_state("failed", "attention"), task_state("planning", "needs_you", gates=[GATE])]
+    code, out, _ = cli("wait", "t1", "--for", "gate", "--interval", "0")
+    assert code == 0 and "needs_you" in out and sleeps == [2]
+
+
+def test_wait_times_out_with_exit_6(cli: Run, looper: FakeLooper, monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = iter(range(0, 1000, 3))
+    monkeypatch.setattr(loopercli.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(loopercli.time, "sleep", lambda seconds: None)
+    looper.answers += [task_state("running", "in_progress")] * 5
+    code, out, err = cli("wait", "t1", "--timeout", "1")
+    assert code == 6 and out == ""
+    assert err.strip() == "still running after 1 s"
+    assert len(looper.calls()) == 1
+
+
+def test_wait_for_a_missing_task_exits_1_and_json_prints_the_result(
+        cli: Run, looper: FakeLooper, monkeypatch: pytest.MonkeyPatch) -> None:
+    looper.answers.append((404, {"status": "error", "error": {"code": "not_found", "message": "no task nope"}}))
+    code, _, err = cli("wait", "nope")
+    assert code == 1 and err.strip() == "error: not_found: no task nope"
+    looper.answers.append(task_state("completed", "completed"))
+    code, out, _ = cli("--json", "wait", "t1")
+    assert code == 0 and json.loads(out)["group"] == "completed"
+
+
+def test_wait_with_an_unreachable_looper_exits_4(cli: Run, client: Path) -> None:
+    write_client_file(client, f"http://127.0.0.1:{closed_port()}")
+    assert cli("wait", "t1")[0] == 4
+
+
+# --- the aliases ---
+
+
+def test_start_and_stop_post_the_task_id_to_task_control(cli: Run, looper: FakeLooper) -> None:
+    assert cli("start", "t1")[0] == 0
+    assert cli("stop", "t1")[0] == 0
+    assert [call[1:4:2] for call in looper.calls()] == [
+        ("/api/v1/ops/task_control/start", {"task_id": "t1"}), ("/api/v1/ops/task_control/stop", {"task_id": "t1"})]
+
+
+def test_status_is_one_task_or_the_overview(cli: Run, looper: FakeLooper) -> None:
+    assert cli("status", "t1")[0] == 0
+    assert cli("status")[0] == 0
+    assert [call[1:4:2] for call in looper.calls()] == [
+        ("/api/v1/ops/tasks/get", {"task_id": "t1"}), ("/api/v1/ops/overview", {})]
+
+
+def test_create_and_list_take_the_options_of_the_operations_they_stand_for(
+        cli: Run, looper: FakeLooper) -> None:
+    assert cli("create", "--title", "T", "--requirement", "R")[0] == 0
+    assert cli("list", "--limit", "5", "--group", "ready")[0] == 0
+    assert [call[1:4:2] for call in looper.calls()] == [
+        ("/api/v1/ops/task_create", {"title": "T", "requirement": "R"}),
+        ("/api/v1/ops/tasks/list", {"limit": 5, "group": "ready"})]
+    assert cli("list", "--group", "nowhere")[0] == 2
+
+
+def test_pipeline_renders_steps_gates_and_waits_as_tables(cli: Run, looper: FakeLooper) -> None:
+    looper.answers.append((200, {"status": "ok", "result": {
+        "task_id": "t1", "name": "Build", "status": "planning", "group": "needs_you", "phase": None,
+        "steps": [{"step": "s1", "kind": "work", "status": "done", "depends_on": [], "role": "worker",
+                   "instruction": "do it"},
+                  {"step": "s2", "kind": "review", "status": "ready", "depends_on": ["s1", "s0"],
+                   "instruction": "check it"}],
+        "gates": [GATE], "waits": [{"step": "w1", "state": "open", "outcome": None, "topic": "CI", "check": "ci"}]}}))
+    code, out, err = cli("pipeline", "t1")
+    assert code == 0, err
+    lines = out.splitlines()
+    assert "task_id: t1" in lines and "steps:" in lines and "gates:" in lines and "waits:" in lines
+    header = next(line for line in lines if "depends_on" in line)
+    assert header.split() == ["step", "kind", "status", "depends_on", "role", "instruction"]
+    assert next(line for line in lines if "s1,s0" in line).split() == ["s2", "review", "ready", "s1,s0", "check", "it"]
+    assert next(line for line in lines if line.split()[:1] == ["g1"]).split()[:4] == ["g1", "open", "user", "Pick"]
+    assert next(line for line in lines if line.split()[:1] == ["w1"]).split()[:3] == ["w1", "open", "CI"]
+    assert looper.calls()[0][1:4:2] == ("/api/v1/ops/task_pipeline", {"task_id": "t1"})
+
+
+def test_pipeline_json_and_errors_use_the_generic_answer(cli: Run, looper: FakeLooper) -> None:
+    answer = {"status": "ok", "result": {"task_id": "t1", "steps": []}}
+    looper.answers.append((200, answer))
+    code, out, _ = cli("--json", "pipeline", "t1")
+    assert code == 0 and json.loads(out) == answer
+    looper.answers.append((404, {"status": "error", "error": {"code": "not_found", "message": "no task t1"}}))
+    code, _, err = cli("pipeline", "t1")
+    assert code == 1 and "not_found" in err
