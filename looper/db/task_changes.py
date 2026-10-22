@@ -58,12 +58,16 @@ class TaskChanges:
         return not self.supplements and self.requirement is None
 
 
-async def add_supplement(task_id: str, text: str, *, via: str, pool: asyncpg.Pool | None = None) -> int:
-    """Add a supplement to ``task_id``, not yet delivered to its Planner; its journal id."""
+async def add_supplement(
+    task_id: str, text: str, *, via: str, delivered: bool = False, pool: asyncpg.Pool | None = None,
+) -> int:
+    """Add a supplement to ``task_id``, not yet delivered to its Planner unless ``delivered`` (a note for the record
+    that the Planner needs no turn for, such as a rename); its journal id."""
     pool = pool or get_pool()
     return await pool.fetchval(
-        "INSERT INTO task_journal (task_id, step_id, kind, summary, via) VALUES ($1, '', $2, $3, $4) RETURNING id",
-        task_id, SUPPLEMENT, text, via,
+        "INSERT INTO task_journal (task_id, step_id, kind, summary, via, delivered_at) "
+        "VALUES ($1, '', $2, $3, $4, CASE WHEN $5 THEN now() END) RETURNING id",
+        task_id, SUPPLEMENT, text, via, delivered,
     )
 
 

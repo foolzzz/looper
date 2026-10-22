@@ -513,6 +513,7 @@ database, a disposable `looper serve`, and fake or real mode.
 | `confirm_create_start` | the whole flow: a small task is asked for, the Manager restates it and asks; 「确认」 creates it with a title (`looper_task_create`); 「开始」 starts it; no reply shows raw JSON |
 | `create_start_stop` | a confirmed task is created ready in the named project with its configuration in the reply; "start" starts it, "stop" stops it |
 | `change_running_task` | for a running task: a supplement (or a requirement edit) reaches its Planner in a turn; an edited requirement is a new version; the Reviewer's Agent Profile changes |
+| `rename_task` | asked to rename a task not started, the Manager makes one `looper_task_update` with the task id and the new `title` and no other write; the task is then called by it |
 | `cancel_confirmation` | cancelling waits for the user's word: a refusal leaves the task running, a confirmation in the next message cancels it |
 | `concurrency` | a running task's own Worker limit changes at once (`looper_concurrency`); asked to change a project's Worker limit, which no longer exists (concurrency is per task), the Manager says so and nothing changes or waits for a confirmation, not the default in Settings → Roles either |
 | `status` | a status question is answered by reading through the tools (run it alone to try a runtime) |

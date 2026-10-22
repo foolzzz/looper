@@ -2625,6 +2625,7 @@ def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path:
     assert by_id["provider_key"]["turns"][0]["calls"] == [
         "looper_providers:error (forbidden)", "looper_providers:ok", "looper_models:ok"]
     assert by_id["config_tools"]["turns"][-2]["calls"] == ["looper_projects:needs_confirmation"]
+    assert by_id["rename_task"]["turns"][0]["calls"] == ["looper_task_update:ok"]
     assert [turn["calls"] for turn in by_id["schedules"]["turns"]] == [
         ["looper_schedules:ok"], ["looper_schedules:ok"], ["looper_schedules:needs_confirmation"],
         ["looper_schedules:ok"]]

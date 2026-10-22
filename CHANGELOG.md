@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.34] - 2026-10-22
+
+### Added
+
+- **A task can be renamed.** The task page's heading has a pencil that edits the title in place (Enter or Save stores it, Esc cancels), `PUT /api/tasks/:id/title` sets it, and the Manager's `looper_task_update` takes a `title`. A task can be renamed in any status, an ended one included; lists and the task page use the new name (a running task's end notices may keep the old one until the review's follow-up lands), and the change is noted in the task's history (`via` `task_page` or `manager:<channel>`). ([#389](https://github.com/foolzzz/looper/pull/389))
+
 ## [2.13.33] - 2026-10-22
 
 ### Fixed
