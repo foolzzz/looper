@@ -594,6 +594,10 @@ def test_open_gates_filters_by_chat_before_the_limit(monkeypatch: pytest.MonkeyP
         gates = await user_gates.open_gates(1, chat=("telegram", "4242"), dashboard=True)
         assert [gate["task_id"] for gate in gates] == ["task-d"]
         assert await user_gates.open_gates(1, chat=("telegram", "4242"), dashboard=False) == []
+        await pool.execute("UPDATE tasks SET status = 'stopped' WHERE id = 'task-a'")
+        assert "task-a" in [gate["task_id"] for gate in await user_gates.open_gates(10)]
+        await pool.execute("UPDATE tasks SET status = 'completed' WHERE id = 'task-a'")
+        assert "task-a" not in [gate["task_id"] for gate in await user_gates.open_gates(10)]
 
     _run(test, monkeypatch)
 
