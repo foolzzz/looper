@@ -208,7 +208,7 @@ Looper was called LoopX up to v2.5.0. The rename itself needs no manual step:
 - **Environment variables:** the old deployment variables are read for one
   more release (`LOOPER_DATABASE_URL`, `LOOPER_PUBLIC_URL`, `LOOPER_PG_DUMP`,
   `LOOPER_BACKUP_CMD`, `LOOPER_BACKUP_VERIFY_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names
-  except the notes root), from the environment and then from `.env`, each use
+  except the notes root and the verify command, which take only the `LOOPER_` prefix), from the environment and then from `.env`, each use
   warned about by name. `looper config init-ops` moves them into the ops file.
   `looper.env` still reads any other `LOOPX_*` name when its `LOOPER_*` name
   is unset, with a warning, for one release.
@@ -329,7 +329,7 @@ Each setting comes from the first of these: an explicit flag (`--host`,
 file, then for this release only the old variable from the environment
 (`LOOPER_DATABASE_URL`, `LOOPER_PUBLIC_URL`, `LOOPER_PG_DUMP`,
 `LOOPER_BACKUP_CMD`, `LOOPER_BACKUP_VERIFY_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names
-except the notes root), then the same name in the checkout's `.env`, then the
+except the notes root and the verify command, which take only the `LOOPER_` prefix), then the same name in the checkout's `.env`, then the
 built-in default. There is no default database URL. Each use of an old
 variable logs a deprecation warning that names the variable and never its
 value; the next release removes them. The runtime root is `--runtime-root`,
