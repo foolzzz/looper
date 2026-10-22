@@ -19,6 +19,9 @@ from .ops import ErrorCode, Tool
 
 API_VERSION = 1
 
+CHAT_STREAM_SECONDS = 1800  # how long a chat.send stream waits for the Manager's answer
+CONVERSATION_PREFIX = "cli-"  # the id of a conversation an API client opened
+
 OK = "200 OK"
 ACCEPTED = "202 Accepted"
 

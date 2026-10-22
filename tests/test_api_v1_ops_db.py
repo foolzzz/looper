@@ -56,7 +56,7 @@ def test_a_read_a_wrong_method_and_an_unknown_path(monkeypatch: pytest.MonkeyPat
         status, answer = await _v1("POST", "/api/v1/ops/nope", {}, ops=ops)
         assert status == 404 and answer["error"]["code"] == "not_found"
         status, answer = await _v1("POST", "/api/v1/chat/conversations", {}, ops=ops)
-        assert status == 404 and answer["error"]["message"] == "not available yet"
+        assert status == 403 and answer["error"]["code"] == "forbidden"  # the chat is for API clients
         status, answer = await _v1("POST", "/api/v1/ops/tasks/list", {})
         assert status == 503 and answer["error"]["code"] == "unavailable"
 
