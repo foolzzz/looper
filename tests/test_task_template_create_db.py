@@ -121,6 +121,19 @@ def test_a_task_from_a_template_on_a_fixed_project(monkeypatch: pytest.MonkeyPat
     _run(test, monkeypatch)
 
 
+def test_the_first_call_after_a_template_is_added_is_checked_by_the_new_schema(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(pool: Any) -> None:
+        await _setup(pool)
+        project = await _project(pool, "web-app")
+        chat = await _chat(pool, tmp_path)  # built before the template: its task tool takes no `template`
+        await _template(project_id=project["id"])  # bumps the revision; the fleet has not applied it yet
+        (done,) = await chat.say("确认", _create())
+        assert done["status"] == "ok", done
+
+    _run(test, monkeypatch)
+
+
 def test_refusals_write_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(pool: Any) -> None:
         await _setup(pool, task_policy="templates_only")

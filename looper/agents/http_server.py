@@ -1320,8 +1320,8 @@ class AgentHTTPServer:
             await writer.drain()
             return
         try:
-            # With ``manager``, a thread of another Manager is a 409 naming it, never its messages.
-            if query.get("manager") and (owner := await self._thread_owner_elsewhere(session_id, query["manager"])):
+            # A thread of another Manager is a 409 naming it, never its messages; no ``manager`` is the default one.
+            if owner := await self._thread_owner_elsewhere(session_id, query.get("manager") or "manager"):
                 writer.write(await self._foreign_thread(owner))
                 await writer.drain()
                 return
@@ -1367,6 +1367,10 @@ class AgentHTTPServer:
     ) -> None:
         cid = query.get("cid", "")
         if not cid and query.get("session"):
+            if owner := await self._thread_owner_elsewhere(query["session"], query.get("manager") or "manager"):
+                writer.write(await self._foreign_thread(owner))
+                await writer.drain()
+                return
             await self._handle_chat_session_events(query["session"], writer)
             return
         if not cid:
