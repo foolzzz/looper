@@ -2754,6 +2754,25 @@ def test_the_withdraw_dialog_checks_that_the_second_input_starts_with_the_note_a
     assert dialogs._knows_it_was_withdrawn(look(note, "已处理。", fake=True)) is None
 
 
+def test_the_withdraw_dialog_first_turn_may_count_the_projects_from_its_message() -> None:
+    """Every Manager message starts with the projects, so a real Manager can answer the count without a tool."""
+    from evals.prompt_regression import dialogs
+
+    class Api:
+        def get(self, path: str, **params: Any) -> dict[str, Any]:
+            assert path == "/api/projects"
+            return {"projects": [{"name": dialogs.PROJECT}]}
+
+    def look(reply: str) -> Any:
+        return dialogs.Look(Api(), None, reply, "disposable", 0, frozenset(), False)  # type: ignore[arg-type]
+
+    (dialog,) = dialogs.select(["withdraw_then_continue"])
+    check = dialog.says[0].check
+    assert check(look(f"现在有 1 个项目：**{dialogs.PROJECT}**（默认目录：`<eval-root>/work/calc`）。")) is None
+    assert check(look("现在有 1 个项目。")) is not None
+    assert check(look("")) is not None
+
+
 def test_the_withdraw_dialog_withdraws_its_second_say_only() -> None:
     from evals.prompt_regression import dialogs
 

@@ -399,6 +399,17 @@ WITHDREW_NOTE = "[Looper] The user withdrew"
 WITHDRAWN_ASK = "列出所有项目，然后逐个查看每个项目最近的三个任务，最后汇总。"
 
 
+def _projects_counted(look: Look) -> str | None:
+    """Every Manager message starts with the projects (TOOLS_CONTRACT's "Projects"), so the count needs no tool: the
+    reply names each one. The stand-in Manager's reply is status only; its scripted read answers instead."""
+    if look.fake:
+        return _answered_by_reading(look)
+    if not look.reply.strip():
+        return "no reply"
+    missing = [p["name"] for p in look.api.get("/api/projects")["projects"] if p["name"] not in look.reply]
+    return f"the reply does not name the project(s) {', '.join(missing)}" if missing else None
+
+
 def _was_stopped(look: Look) -> str | None:
     reply = look.reply.strip()
     if reply.endswith("（已停止）") or reply == "已停止，这次没有回复。":
@@ -1526,7 +1537,7 @@ DIALOGS: tuple[Dialog, ...] = (
         Say("刚才停在哪了？", _knows_it_was_stopped),
     ), seed=_enable_stop, tags=("stop",)),
     Dialog("withdraw_then_continue", (
-        Say("现在有几个项目？", _answered_by_reading, (("looper_projects", {"action": "list"}),)),
+        Say("现在有几个项目？", _projects_counted, (("looper_projects", {"action": "list"}),)),
         Say(WITHDRAWN_ASK, _was_stopped, withdraw=True),
         Say("我刚才让你做什么了？你做了吗？", _knows_it_was_withdrawn),
     ), seed=_enable_stop, tags=("stop",)),
