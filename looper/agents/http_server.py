@@ -2001,6 +2001,8 @@ class AgentHTTPServer:
             from ..db import managers as db_managers
             owner = (await db_managers.get_manager(raw.get("manager_id") or "manager", include_deleted=True)
                      if raw else None)
+            client_id = raw.get("client_id") if raw else None
+            client_name = (await db_api_clients.names([client_id])).get(client_id) if client_id else None
             agents = await projects.agents_view(raw) if raw else None
             roles = await roles_view(task_id, raw.get("steps", [])) if raw else None
             gates = await gate_service.gates_view(task_id) if raw else []
@@ -2045,6 +2047,8 @@ class AgentHTTPServer:
             "manager_id": raw.get("manager_id") or "manager",
             "manager_name": owner["name"] if owner else None,
             "template": raw.get("template"),
+            # The API client the task was created through (also a revoked one), or null.
+            "client": {"id": client_id, "name": client_name} if client_id and client_name else None,
             "goal_id": raw.get("goal_id", ""),
             "project_id": raw.get("project_id", ""),
             "project_name": raw.get("project_name", ""),

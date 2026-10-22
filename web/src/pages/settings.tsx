@@ -1,4 +1,5 @@
 import { AgentProfilesSection } from "@/components/agent-profiles";
+import { ApiClientsSection } from "@/components/api-clients";
 import { CatalogCard } from "@/components/catalog-card";
 import { ChatSettingsSection } from "@/components/chat-settings";
 import { ChannelsSection } from "@/components/channel-settings";
@@ -28,6 +29,9 @@ const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = 
   [AGENT_PROFILE.slug]: AGENT_PROFILE.help,
   managers:
     "Managers you talk to, each with its own duty, session and spend. Task templates set what a Manager's tasks run with. Managers and templates are not in Import / Export yet.",
+  clients:
+    "Tokens for agents and scripts on this machine that use Looper through loopercli. Each token can do everything " +
+    "the Manager's tools can; revoke it when it is no longer needed.",
   catalog:
     "Plugins, skills and MCP servers: import, upload, take from git or write them, then install them globally or " +
     "in a project, for the roles that load them.",
@@ -62,6 +66,7 @@ export function SettingsPage({ sub }: { sub: string }) {
       {page === AGENT_PROFILE.slug && <AgentProfilesSection />}
       {page === "roles" && <RolesSection sub={inner} />}
       {page === "managers" && <ManagersSection />}
+      {page === "clients" && <ApiClientsSection />}
       {page === "catalog" && <CatalogCard />}
       {page === "channels" && <ChannelsSection />}
       {page === "chat" && <ChatSettingsSection />}

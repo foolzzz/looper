@@ -67,4 +67,26 @@ describe("TaskDetailRoute manager attribution", () => {
     await show({ manager_id: "manager", manager_name: "Manager", template: null });
     expect(container.textContent).not.toContain("Created by");
   });
+
+  const action = (extra: Record<string, unknown>) => ({
+    manager_id: "manager", created_at: "2026-10-17T08:00:00Z", channel: "web", tool: "looper_task_control",
+    arguments: { task_id: "task-a", action: "stop" }, risk: "write", status: "ok", confirmation_id: null, ...extra,
+  });
+
+  it("names the client of an action that came through loopercli", async () => {
+    await show({ manager_actions: [action({ channel: "api", client_name: "laptop" })] });
+    expect(container.textContent).toContain("loopercli · laptop");
+    expect(container.textContent).not.toMatch(/\bapi ·/);
+  });
+
+  it("names the client when the Manager acted in a client's conversation", async () => {
+    await show({ manager_actions: [action({ channel: "web", client_name: "laptop" })] });
+    expect(container.textContent).toContain("loopercli · laptop");
+  });
+
+  it("shows the channel of an action without a client", async () => {
+    await show({ manager_actions: [action({ channel: "telegram", client_name: null })] });
+    expect(container.textContent).toContain("telegram ·");
+    expect(container.textContent).not.toContain("loopercli");
+  });
 });

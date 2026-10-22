@@ -1629,6 +1629,8 @@ export interface ManagerAction {
   /** "ok", or "needs_confirmation" while it waited for the user's word. */
   status: "ok" | "needs_confirmation";
   confirmation_id: string | null;
+  /** The API client (loopercli) it came through, by name; null or absent for none. */
+  client_name?: string | null;
 }
 
 /** Edit the requirement of a task that has not ended; its Planner, if it runs, gets the edit in a turn. */
@@ -1727,6 +1729,8 @@ export interface TaskDetail extends TaskInfo {
   } | null;
   /** The task's own title, "" when it has none (then `name` is its goal id or its requirement's first line). */
   title?: string;
+  /** The API client the task was created through; null for none. */
+  client?: { id: string; name: string } | null;
   work_dir: string;
   config: Record<string, unknown>;
   origin_channel_id: string;
@@ -4022,6 +4026,28 @@ async function managerJson<T>(url: string, method: string, body: unknown | undef
   });
   if (!res.ok) await failed(res, label);
   return res.json();
+}
+
+/** A token for an agent or script that uses Looper through loopercli (`/api/clients`); the token itself is never listed. */
+export interface ApiClient {
+  id: string;
+  name: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export async function fetchApiClients(): Promise<ApiClient[]> {
+  const data = await managerJson<{ clients?: ApiClient[] }>(`${API_BASE}/clients`, "GET", undefined, "API clients");
+  return data.clients ?? [];
+}
+
+/** Add a client; the answer holds its token, which the server shows once and does not keep. */
+export function createApiClient(name: string): Promise<{ client: ApiClient; token: string }> {
+  return managerJson(`${API_BASE}/clients`, "POST", { name }, "create API client");
+}
+
+export async function revokeApiClient(id: string): Promise<void> {
+  await managerJson(`${API_BASE}/clients/${encodeURIComponent(id)}`, "DELETE", undefined, "revoke API client");
 }
 
 export async function fetchManagers(): Promise<ManagerInfo[]> {
