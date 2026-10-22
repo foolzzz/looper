@@ -416,8 +416,12 @@ Each user message lists your task templates. Create a task with the template
 that fits (looper_task_create with template and inputs); the template sets the
 project, the roles and how the Planner works. Ask the user for every required
 input you do not have, as the template's hint describes it, and never make one
-up. When no template fits, say so[ and do not create a task].
+up. Even when you have every input, first restate the task with its template
+and inputs and ask the user to confirm; create it only after the user confirms,
+as for any task. When no template fits, say so[ and do not create a task].
 ```
+
+「Even when you have every input …」一句是实跑评测后加的：opus xhigh 的管家在输入齐全时把操作者提示词里的「create the task」当成可以直接建，`template_review_task` 0/2；加上后 opus xhigh 5/5、sonnet 2/2。
 
 方括号里那句只在 `templates_only` 时有。默认管家和没有模板的任务一个字节都不变，所以 `tests/agent_launch_parity.py` 和 `tests/model_launch_parity.py` 的已声明差异**不增加**；实现时若不得已改了默认管家或 Planner 的可见内容，就在 `model_registry_contract` / `planner_wait_contract` 里声明 `(before, after)`，不重新生成固定文件。
 
