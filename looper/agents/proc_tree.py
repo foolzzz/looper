@@ -39,7 +39,7 @@ import sys
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -60,6 +60,7 @@ _server: tuple[int, str] | None = None
 _recorded: dict[int, tuple[Path, str]] = {}
 _ending: set[int] = set()
 _forgetting: set[asyncio.Task[None]] = set()
+_finishing: set[asyncio.Future[None]] = set()
 
 # pid -> (ppid, pgid) of every live process; a zombie has exited already and is left out.
 Table = dict[int, tuple[int, int]]
@@ -194,6 +195,22 @@ async def _record_tree(pid: int, tree: Tree) -> None:
         return
     assert _server is not None
     _write_record(path.parent, pid, started, _server, tree=starts)
+
+
+async def finish(end: Awaitable[None]) -> None:
+    """Await ``end`` (a tree's end) in a task of its own that a cancel of the caller does not reach, so its signals
+    and its kill of strays come though the step that stops the agent is given up meanwhile (a turn's ``keep`` whose
+    budget runs out). A cancel waits for the end to finish, then propagates; a second one stops only the wait, and
+    the end runs on (each end is bounded)."""
+    task = asyncio.ensure_future(end)
+    _finishing.add(task)
+    task.add_done_callback(_finishing.discard)
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        if not task.done():
+            await asyncio.wait({task})
+        raise
 
 
 async def end(process: asyncio.subprocess.Process, *, label: str, known: Tree | None = None) -> None:

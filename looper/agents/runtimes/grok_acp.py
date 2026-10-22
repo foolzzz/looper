@@ -508,10 +508,8 @@ class AcpGrok:
         tasks, self._tasks = self._tasks, []
         stderr, self._stderr = self._stderr, None
         if process is not None:
-            if tree is not None:  # from the snapshot followed while the process ran
-                await tree.end()
-            else:
-                await proc_tree.end(process, label=self._label)
+            # From the snapshot followed while the process ran; not cut short by a cancel of the caller.
+            await proc_tree.finish(tree.end() if tree is not None else proc_tree.end(process, label=self._label))
         for task in (*tasks, *([stderr] if stderr is not None else [])):
             task.cancel()
         await asyncio.gather(*tasks, *([stderr] if stderr is not None else []), return_exceptions=True)

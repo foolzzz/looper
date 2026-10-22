@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import signal
 import time
 from pathlib import Path
 from typing import Any
@@ -687,5 +689,67 @@ def test_a_stop_between_the_result_and_the_return_still_ends_the_turns_tools(
             assert "control_request" not in inbox  # nothing left to interrupt: only the turn's tools are ended
         finally:
             await session.stop(kill=True)
+
+    asyncio.run(_run())
+
+
+# Starts a sleeper in a session of its own (its pid in ``sleeper.pid``), and runs on after its stdin closes.
+_IGNORES_EOF = """\
+import subprocess, sys, time
+sleeper = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)
+with open('sleeper.pid', 'w') as f:
+    f.write(str(sleeper.pid))
+for raw in sys.stdin:
+    pass
+time.sleep(60)
+"""
+
+
+def test_a_stop_whose_keep_budget_runs_out_in_a_slow_ps_still_ends_the_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The manager's ``keep("claude_stop", stop(), 10)`` with Claude using all of ``STOP_GRACE_SEC`` (5 s) and the
+    end's ``ps`` all of ``_PS_TIMEOUT_SEC`` (5 s), scaled down: the budget runs out inside the tree's end, whose
+    signals and kill of strays still come."""
+    from datetime import datetime, timezone
+
+    from looper.agents.tiers.turn_token import TurnToken
+
+    monkeypatch.setattr(claude_cli, "STOP_GRACE_SEC", 0.5)
+    monkeypatch.setattr(proc_tree, "_PS_TIMEOUT_SEC", 0.5)
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.2)
+    monkeypatch.setattr(proc_tree, "REAP_SEC", 0.5)
+    claude = fake_claude(tmp_path / "claude", _IGNORES_EOF)
+    snapshot = proc_tree._snapshot
+    closed: list[Any] = []
+
+    def slow_once_stdin_closes() -> proc_tree.Table:
+        if closed and closed[0].stdin.is_closing():
+            time.sleep(proc_tree._PS_TIMEOUT_SEC)
+        return snapshot()
+
+    monkeypatch.setattr(proc_tree, "_snapshot", slow_once_stdin_closes)
+
+    async def _run() -> None:
+        session = ResidentClaude(label="manager")
+        await session.start([claude], cwd=str(tmp_path), signature=None)
+        assert session._process is not None
+        process = session._process
+        sleeper = await _until_sleeper(tmp_path)
+        try:
+            closed.append(process)
+            token = TurnToken(message_id="m1", client_message_id=None, channel="web", chat="c",
+                              received_at=datetime.now(timezone.utc))
+            # Past the grace, inside the end's first ps.
+            budget = claude_cli.STOP_GRACE_SEC + proc_tree._PS_TIMEOUT_SEC / 2
+            with pytest.raises(TimeoutError):
+                await token.keep("claude_stop", session.stop(), budget)
+            assert process.pid not in snapshot() and sleeper not in snapshot()
+        finally:
+            for pid in (process.pid, sleeper):
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+            with contextlib.suppress(Exception):
+                await process.wait()
 
     asyncio.run(_run())

@@ -1034,11 +1034,9 @@ class ResidentClaude:
         finally:
             # Also when the wait is cancelled: the process is forgotten already.
             try:
-                # From the snapshot followed while Claude ran: what it started is re-parented once it exits.
-                if tree is not None:
-                    await tree.end()
-                else:
-                    await proc_tree.end(process, label=self._label)
+                # From the snapshot followed while Claude ran: what it started is re-parented once it exits. Not
+                # cut short by a cancel of the stop (its caller's budget ran out in the grace): the end still runs.
+                await proc_tree.finish(tree.end() if tree is not None else proc_tree.end(process, label=self._label))
                 if output is not None:
                     # Read to its end, or cut off: an event a stopped turn's owner still handles is over with it.
                     await output.finish()

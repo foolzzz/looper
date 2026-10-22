@@ -940,6 +940,9 @@ class ManagerAgent:
             # Not abandoned by a stop: the handoff's turn takes the token's cancel and ends itself.
             await token.keep("switch_session", self._switch_session(prepared.switch, token.cancel),
                              HANDOFF_TIMEOUT_SEC + 30)
+        # A stop's budget (10 s) covers ``STOP_GRACE_SEC`` and a ps or two, not the bounded end of the tree: when it
+        # runs out the stop is given up, but the end it is in runs to completion (``proc_tree.finish``), so every
+        # process of the stale session is still signalled.
         if launch.runtime is not self._claude_runtime:
             # Each runtime type keeps its resident sessions its own way (after the old one's handoff).
             await token.keep("claude_stop", self._claude.stop(), 10)
