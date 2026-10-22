@@ -972,28 +972,28 @@ The per-turn runtimes are killed rather than asked: the Manager runs them
 as one process per turn, not over Codex's app-server or OMP/Pi's rpc, whose
 `turn/interrupt` and `abort` only Workers use.
 
-Before it sends any signal, `proc_tree.end` reads the agent's tree from one
+`proc_tree.end` sends its first signals to the known agent and its group at
+once, then reads the agent's tree from a bounded
 `ps -A -o pid=,ppid=,pgid=,stat=` snapshot: the agent, every process whose
 parent is in the tree, and every member of a group the agent or one of them
 leads. It sends SIGTERM to those groups and to the tree's processes outside
 them, waits up to `TERM_GRACE_SEC` (3 s), then sends SIGKILL to what is
-left. It never signals the server's own process or group.
+left and waits up to `REAP_SEC` (2 s) to reap the agent. Locks, process
+listings and waits on a stop path are bounded; a cancelled caller still
+lets the tree's end finish within its bound. It never signals the server's
+own process or group.
 
-A user's stop also ends what the turn started that has left the tree (a
-command that moved to a session of its own, `setsid`, and whose parent
-exited): `proc_tree.TurnTree` follows the turn's processes while it runs.
-How surely depends on the platform. On Linux it is guaranteed: `spawn` gives
-the agent an environment mark (`LOOPER_PROC_OWNER`) that everything it starts
-inherits, a double-forked daemon included. On macOS it is best effort: the
-tree, its groups, kqueue fork notes and sampling while the turn runs find
-most such commands, but a daemon (setsid and a double fork, its ancestors
-gone before they were seen) can keep running, as one started from a terminal
-survives Ctrl-C there. No extra process is started for this on any spawn.
-The search is bounded: by `TERM_GRACE_SEC + REAP_SEC` after the first
-signals the end stops looking, and a process that SIGKILL does not end
-(EPERM, uninterruptible sleep) is logged and left. A process that ran
-before the turn (an MCP server, an earlier turn's background loop), and what
-it starts, are not the turn's. See the [Stop v2 RFC](rfcs/chat-stop-v2.zh-CN.md) 4.2 and 6.6.
+Ending a turn's processes is best effort on every platform, including
+Linux and macOS. A stop ends the agent, its process group and the processes
+the parent/child walk and groups show at the time of the stop.
+`proc_tree.TurnTree` also keeps snapshots while the turn runs and tries to
+end previously seen members by pid and start time. A descendant that has
+detached (`setsid`, a double fork or its ancestors gone) is not guaranteed
+to be found or ended on any platform. A successful `control` or `cancel`
+keeps the resident agent and baseline members and ends the turn's visible
+new members. The real-path detached-process cell d records the result and
+cleans up test processes; it is not a pass criterion. See the
+[Stop v2 RFC](rfcs/chat-stop-v2.zh-CN.md) 4.2, 6.6 and 10.
 
 A resident Claude Code that is asked to exit (its stdin closed, then
 `STOP_GRACE_SEC`) has its tree read before its stdin closes, so what it

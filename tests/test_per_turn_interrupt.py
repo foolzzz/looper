@@ -14,7 +14,7 @@ import pytest
 from fake_claude import fake_claude
 from looper.agents import proc_tree
 from looper.agents.claude_cli import USER_STOP
-from looper.agents.runtimes import StopMethod
+from looper.agents.runtimes import StopMethod, per_turn
 
 _PRELUDE = '''
 import json, os, subprocess, sys, time
@@ -220,15 +220,15 @@ def test_a_stopped_turn_returns_only_after_its_process_tree_cleanup(
 def test_a_stopped_turn_waits_out_the_whole_end_and_keeps_one_that_outlasts_it(
     tmp_path: Path, runtime: str, past_bound: bool, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # ``TurnTree.end`` may run past the grace and the reap while ``ps`` blocks: its last look and the ownership
-    # listings' own budget come after them. The turn waits that long; an end that runs longer still is kept, not
-    # dropped with the turn, and finishes.
+    # ``TurnTree.end`` may run past the grace and the reap while ``ps`` blocks. The turn waits up to its bound
+    # (``_end_bound``); an end that runs longer still is kept, not dropped with the turn, and finishes.
     monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.3)
     monkeypatch.setattr(proc_tree, "REAP_SEC", 0.3)
+    monkeypatch.setattr(proc_tree, "_PS_TIMEOUT_SEC", 0.3)
     session, command, env, home = (_omp if runtime == "omp" else _codex)(tmp_path)
     home.mkdir(parents=True, exist_ok=True)
     real_end = proc_tree.TurnTree.end
-    spec = proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC + proc_tree._LAST_LOOK_SEC + 2 * proc_tree._OWNED_SEC
+    spec = per_turn._end_bound()
     ended: list[bool] = []
 
     async def slow_end(tree: Any) -> Any:
@@ -269,6 +269,7 @@ def test_a_stopped_turn_waits_out_the_whole_end_and_keeps_one_that_outlasts_it(
 def test_a_stop_before_the_process_exists_is_kept(
     tmp_path: Path, runtime: str, phase: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(proc_tree, "_PS_TIMEOUT_SEC", 0.5)  # the stop waits out the whole end bound (``_end_bound``)
     session, command, env, home = (_omp if runtime == "omp" else _codex)(tmp_path)
     home.mkdir(parents=True, exist_ok=True)
     reached, release = asyncio.Event(), asyncio.Event()

@@ -733,6 +733,8 @@ class AcpGrok:
 
         try:
             await self._ensure()
+            if self._tree is not None:
+                await self._tree.baseline()  # resident process and MCP servers survive end_new
         except BaseException as exc:
             if cancel.requested and isinstance(exc, Exception):
                 # The user's stop ended the process while the session was readied: no prompt was sent, the session
@@ -781,10 +783,6 @@ class AcpGrok:
         from ..claude_cli import ResidentTurn, user_stop_result
         from . import StopMethod
 
-        if self._tree is not None:
-            # The process and its MCP servers: what the turn starts is what a stop ends. (Before anything below,
-            # which reads state an await could change.)
-            await self._tree.baseline()
         assert self._session is not None and self._launch is not None
         session, new = self._session, self._new_session
         while not self._inbox.empty():  # what the process wrote between turns

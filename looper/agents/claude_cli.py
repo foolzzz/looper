@@ -708,8 +708,16 @@ class _Output:
             await asyncio.wait({task}, timeout=_DRAIN_SEC)
             if not task.done():
                 task.cancel()
-                await asyncio.wait({task})
-        await self.close_own("Claude Code stopped")
+                await asyncio.wait({task}, timeout=_DRAIN_SEC)
+                if not task.done():
+                    logger.warning("%s: output reader did not finish after cancellation", self._claude.label)
+        closing = asyncio.create_task(self.close_own("Claude Code stopped"))
+        done, _ = await asyncio.wait({closing}, timeout=_DRAIN_SEC)
+        if not done:
+            closing.cancel()
+            logger.warning("%s: autonomous turn cleanup did not finish in time", self._claude.label)
+        else:
+            await closing
         self._between.clear()
 
 
@@ -851,8 +859,6 @@ class ResidentClaude:
         from .runtimes import StopMethod
         from .runtimes.cancel import TurnCancel
 
-        if self._tree is not None:
-            await self._tree.baseline()  # the process and its MCP servers: what the turn starts is what a stop ends
         process, output = self._process, self._output
         assert process is not None and process.stdin is not None and output is not None
         cancel = cancel or TurnCancel.never()
@@ -864,6 +870,8 @@ class ResidentClaude:
         self._user_turn, self._cancel, self._interrupting = turn, cancel, None
         unregister = cancel.on_request(self._on_stop)  # (called at once if the request came meanwhile)
         try:
+            if self._tree is not None:
+                await self._tree.baseline()  # resident process and MCP servers survive end_new
             output.turn = turn
             if output.ended:
                 output.drop_turn()  # nothing more will come
@@ -1025,8 +1033,8 @@ class ResidentClaude:
                 # nothing first: its end signals what it knows before any listing.)
                 with contextlib.suppress(Exception):
                     await tree.begin_end()
-            if process.stdin is not None and not process.stdin.is_closing():
-                process.stdin.close()
+            if process.stdin is not None and not process.stdin.is_closing() and not kill:
+                process.stdin.close()  # (a kill leaves it open: on EOF Claude exits and orphans its tree unsignalled)
             if process.returncode is None and not kill:
                 try:
                     await asyncio.wait_for(process.wait(), STOP_GRACE_SEC)
@@ -1038,6 +1046,8 @@ class ResidentClaude:
                 # From the snapshot followed while Claude ran: what it started is re-parented once it exits. Not
                 # cut short by a cancel of the stop (its caller's budget ran out in the grace): the end still runs.
                 await proc_tree.finish(tree.end() if tree is not None else proc_tree.end(process, label=self._label))
+                if process.stdin is not None and not process.stdin.is_closing():
+                    process.stdin.close()
                 if output is not None:
                     # Read to its end, or cut off: an event a stopped turn's owner still handles is over with it.
                     await output.finish()

@@ -86,9 +86,8 @@ _OMP_ONLY = (Cell("f", "stop while the text is written, before it is shown", "th
 
 
 def best_effort(cell: Cell, platform: str = sys.platform) -> bool:
-    """Whether a detached sleeper the stop left running is recorded rather than failed: on macOS, ending a daemon
-    whose ancestors are gone is best effort (design chat-stop-v2.zh-CN.md 6.6 and 10); on Linux it is ended."""
-    return cell.detached and platform == "darwin"
+    """Detached sleepers are recorded, rather than a pass criterion, on every platform (RFC 6.6 and 10)."""
+    return cell.detached
 
 
 def cells_for(runtime: str) -> tuple[Cell, ...]:
@@ -272,8 +271,9 @@ def render_report(runtime: str, results: list[CellResult], *, claude_version: st
     if log_counts is not None:
         lines.append("- server log: " + ", ".join(f"`{k}` {v}" for k, v in log_counts.items()))
     lines += ["", "| cell | rep | result | why | timeline (s after send) |", "| --- | --- | --- | --- | --- |"]
+    recorded = {c.key for c in (*_COMMON, *_DIAGNOSTIC) if c.detached}
     for r in results:
-        status = "pass" if not r.failures else "FAIL"
+        status = "recorded" if r.cell in recorded else "pass" if not r.failures else "FAIL"
         lines.append(f"| {r.cell} | {r.rep} | {status} | {'; '.join(r.failures) or '-'} | {r.timeline or '-'} |")
     return redact("\n".join(lines) + "\n", tmp=tmp)
 
@@ -477,7 +477,7 @@ def run_cell(api: Api, database_url: str, cell: Cell, rep: int, work: Path, cloc
     if best_effort(cell):
         detached = set(_read_pids(pid_file.with_name(pid_file.name + ".detached")))
         if left := [p for p in alive if p in detached]:
-            line += f"; macOS best effort: the detached sleeper {left} was left running (not a pass criterion)"
+            line += f"; best effort: the detached sleeper {left} was left running (not a pass criterion)"
             for pid in left:  # (it would sleep on through the next cells)
                 with contextlib.suppress(ProcessLookupError, PermissionError):
                     os.kill(pid, signal.SIGKILL)
@@ -625,7 +625,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.out:
         args.out.write_text(report, encoding="utf-8")
     print(report)
-    return 0 if all(not r.failures for r in results) else 1
+    recorded = {c.key for c in chosen_cells(args.runtime, args.cells) if c.detached}
+    return 0 if all(not r.failures for r in results if r.cell not in recorded) else 1
 
 
 def _read_all_pids(work: Path) -> list[int]:

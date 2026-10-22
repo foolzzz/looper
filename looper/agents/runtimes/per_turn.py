@@ -77,10 +77,8 @@ async def _exited(process: asyncio.subprocess.Process) -> None:
 
 
 def _end_bound() -> float:
-    """How long a turn waits for the cleanup of its process tree: as long as ``TurnTree.end`` may take (the grace,
-    the reap, the last look and the ownership listings' own budget when ``ps`` blocks) and a second."""
-    return (proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC + proc_tree._LAST_LOOK_SEC + 2 * proc_tree._OWNED_SEC
-            + 1)
+    """The normal grace and reap, plus a second. Slow ps may outlast this wait; shielded cleanup still runs."""
+    return proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC + 1
 
 
 def session_dir_name(label: str) -> str:
@@ -349,7 +347,7 @@ class PerTurnSession(ABC):
         tree, self._finished_tree = self._finished_tree, None
         if tree is None:
             return
-        # Shielded: the bound stops the wait, not the end, whose last look and SIGKILL of strays still run.
+        # Shielded: the bound stops the wait, not the end, whose SIGKILL of the visible tree still runs.
         self._finished_end = end = proc_tree.keep(tree.end())
         try:
             await asyncio.wait_for(asyncio.shield(end), _end_bound())

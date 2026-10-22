@@ -132,6 +132,57 @@ async def _until_streaming(seen: list[dict[str, Any]]) -> None:
     raise AssertionError("the turn never started")
 
 
+@pytest.mark.parametrize("label", ["planner", "manager"])
+@pytest.mark.parametrize("stage", ["baseline", "result"])
+@pytest.mark.parametrize("ending", ["timeout", "cancel"])
+def test_an_abandoned_exchange_kills_and_forgets_the_resident(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, label: str, stage: str, ending: str,
+) -> None:
+    claude = fake_claude(tmp_path / "claude", _DEAF)
+
+    async def run() -> None:
+        session = ResidentClaude(label=label)
+        await session.start([claude], cwd=str(tmp_path), signature=None)
+        process = session._process
+        assert process is not None
+        entered = asyncio.Event()
+        stopped: list[bool] = []
+        stop = session.stop
+
+        async def stopping(*, kill: bool = False) -> None:
+            stopped.append(kill)
+            await stop(kill=kill)
+
+        async def baseline(self: Any) -> None:
+            entered.set()
+            await asyncio.Event().wait()
+
+        async def event(event: dict[str, Any]) -> None:
+            if event.get("subtype") == "init":
+                entered.set()
+
+        monkeypatch.setattr(session, "stop", stopping)
+        if stage == "baseline":
+            monkeypatch.setattr(proc_tree.TurnTree, "baseline", baseline)
+        turn = asyncio.create_task(session.run_turn("work", event))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            if ending == "timeout":
+                with pytest.raises(TimeoutError):
+                    await asyncio.wait_for(turn, 0.1)
+            else:
+                turn.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await turn
+            assert stopped == [True]
+            assert session.started is False
+            assert process.returncode is not None
+        finally:
+            await stop(kill=True)
+
+    asyncio.run(run())
+
+
 def test_an_obeyed_interrupt_ends_the_turn_and_keeps_the_process(tmp_path: Path) -> None:
     claude = fake_claude(tmp_path / "claude", _OBEYS)
 
@@ -716,7 +767,6 @@ def test_a_stop_whose_keep_budget_runs_out_in_a_slow_ps_still_ends_the_tree(
     from looper.agents.tiers.turn_token import TurnToken
 
     monkeypatch.setattr(claude_cli, "STOP_GRACE_SEC", 0.5)
-    monkeypatch.setattr(proc_tree, "_PS_TIMEOUT_SEC", 0.5)
     monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.2)
     monkeypatch.setattr(proc_tree, "REAP_SEC", 0.5)
     claude = fake_claude(tmp_path / "claude", _IGNORES_EOF)
@@ -736,6 +786,12 @@ def test_a_stop_whose_keep_budget_runs_out_in_a_slow_ps_still_ends_the_tree(
         assert session._process is not None
         process = session._process
         sleeper = await _until_sleeper(tmp_path)
+        assert session._tree is not None
+        await session._tree.refresh(force=True)
+        starts = dict(session._tree.seen)
+        assert starts.get(sleeper) is not None  # the visible child's identity is known before the ps fault
+        monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {pid: starts[pid] for pid in pids})
+        monkeypatch.setattr(proc_tree, "_PS_TIMEOUT_SEC", 0.5)
         try:
             closed.append(process)
             token = TurnToken(message_id="m1", client_message_id=None, channel="web", chat="c",
@@ -753,3 +809,40 @@ def test_a_stop_whose_keep_budget_runs_out_in_a_slow_ps_still_ends_the_tree(
                 await process.wait()
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("stage", ["reader", "autonomous"])
+def test_output_cleanup_is_bounded_even_if_a_handler_suppresses_cancellation(
+    monkeypatch: pytest.MonkeyPatch, stage: str,
+) -> None:
+    monkeypatch.setattr(claude_cli, "_DRAIN_SEC", 0.05)
+
+    async def run() -> None:
+        output = claude_cli._Output(ResidentClaude(label="manager"), asyncio.StreamReader(), None)
+        entered, release = asyncio.Event(), asyncio.Event()
+        tasks: list[asyncio.Task[None]] = []
+
+        async def stuck(*args: Any) -> None:
+            task = asyncio.current_task()
+            assert task is not None
+            tasks.append(task)
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                await release.wait()
+
+        if stage == "reader":
+            output._task = asyncio.create_task(stuck())
+            await entered.wait()
+        else:
+            monkeypatch.setattr(output, "close_own", stuck)
+        try:
+            await asyncio.wait_for(output.finish(), 1)
+            assert entered.is_set()
+            assert any(not task.done() for task in tasks)
+        finally:
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*tasks), 1)
+
+    asyncio.run(run())

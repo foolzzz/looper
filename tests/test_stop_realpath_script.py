@@ -36,11 +36,11 @@ def test_the_setsid_sleeper_is_python_alone() -> None:
     assert '"/tmp/p.txt.detached"' in script  # the sleeper's pid, told apart from the shell's
 
 
-def test_cell_d_is_best_effort_on_macos_only() -> None:
-    """On macOS a detached sleeper left running is recorded, not failed (design 6.6, 10); on Linux it must be gone."""
+def test_cell_d_is_best_effort_on_every_platform() -> None:
+    """A detached sleeper left running is recorded on every platform (design 6.6, 10)."""
     for runtime in ("claude", "omp"):
         cells = {c.key: c for c in sr.cells_for(runtime)}
-        assert sr.best_effort(cells["d"], "darwin") and not sr.best_effort(cells["d"], "linux")
+        assert sr.best_effort(cells["d"], "darwin") and sr.best_effort(cells["d"], "linux")
         assert [key for key, c in cells.items() if sr.best_effort(c, "darwin")] == ["d"]
 
 
