@@ -461,6 +461,15 @@ def _message_origin(envelope: MessageEnvelope) -> dict[str, Any]:
             "sender": str(sender) if sender else None, "chat": chat, "group": group}
 
 
+def _recorded_origin(origin: dict[str, Any]) -> dict[str, Any]:
+    """An origin as a run records it: the channel id only for a bot added in Settings → Channels, so the web chat's
+    and a built-in bot's records keep the fields they always had."""
+    parsed = parse_channel_id(origin.get("channel_id"))
+    if parsed is not None and not parsed.builtin:
+        return origin
+    return {key: value for key, value in origin.items() if key != "channel_id"}
+
+
 def _stored_chat(origin: dict[str, Any]) -> bool:
     """Whether a chat's turns are stored (``_session_key``): the web chat's, Lark's direct messages and group chats
     (where only what @-mentions the bot comes in) and Telegram's direct messages; not a Telegram group's."""
@@ -1623,7 +1632,7 @@ class ManagerAgent:
             record_id = await db_llm_records.start_record(
                 agent_id=self.agent_id, session_id=previous, input_text=str(envelope.payload.get("text", "")),
                 metadata={**launch.record(), "session_reset": {
-                    **origin, "previous_session_id": previous, "selected_profile_id": chosen}},
+                    **_recorded_origin(origin), "previous_session_id": previous, "selected_profile_id": chosen}},
             )
             await db_llm_records.finish_record(record_id, status="completed", output_text=NEW_SESSION_REPLY,
                                                cost_usd=0.0, duration_ms=0)
@@ -1754,7 +1763,7 @@ class ManagerAgent:
             record_id = await db_llm_records.start_record(
                 agent_id=self.agent_id, session_id=self._session_id, input_text=input_text,
                 metadata={**launch.record(), "session_profile": {
-                    "from": previous, "to": profile_id, "effect": change.value, **origin, "via": via}},
+                    "from": previous, "to": profile_id, "effect": change.value, **_recorded_origin(origin), "via": via}},
             )
             await db_llm_records.finish_record(record_id, status="completed", output_text=text,
                                                cost_usd=0.0, duration_ms=0)
