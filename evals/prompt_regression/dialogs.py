@@ -67,6 +67,8 @@ import sys
 import tempfile
 import time
 import traceback
+import urllib.error
+import urllib.request
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -111,6 +113,7 @@ class Look:
     registry_before: dict[str, Any] | None = None
     runs_since: int = 0  # the Manager's newest run record before the dialog (the session-profile dialogs only)
     manager_id: str | None = None  # a scenario Manager's agent id: only its trail rows count
+    conversation: str | None = None  # a client dialog's conversation id (the API client's)
 
     def actions(self) -> list[dict[str, Any]]:
         return _trail(self.database_url, self.since, self.manager_id)
@@ -158,6 +161,7 @@ class Dialog:
     # What the dialog's server holds first, made through the API: (the API, the dialog's project id).
     seed: Callable[[Api, str], None] | None = None
     manager: str | None = None  # the key of the scenario Manager the dialog talks to (its seed creates it)
+    client: bool = False  # the dialog talks to the default Manager as an API client (``/api/v1/chat/send``)
     tags: tuple[str, ...] = field(default=())
 
 
@@ -344,6 +348,47 @@ def _cancelled_on_confirmation(look: Look) -> str | None:
         return found
     confirmed = [a for a in _writes(look, status="ok", tool="looper_task_control") if a["confirmation_id"]]
     return None if confirmed else "the task ended without a confirmed cancel"
+
+
+def _task_owners(database_url: str, task_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """The API client and the conversation each task in ``task_ids`` was created through (None for none)."""
+    import asyncpg
+
+    async def read() -> dict[str, dict[str, Any]]:
+        conn = await asyncpg.connect(database_url)
+        try:
+            rows = await conn.fetch("SELECT id, client_id, origin_thread FROM tasks WHERE id = ANY($1::text[])",
+                                    task_ids)
+        finally:
+            await conn.close()
+        return {row["id"]: dict(row) for row in rows}
+
+    return asyncio.run(read())
+
+
+def _by_the_client(look: Look) -> str | None:
+    """Every write the Manager made since the dialog started carries the API client it came through, and each
+    task created in the dialog has that client and the dialog's conversation as its origin."""
+    orphans = [a["tool"] for a in _writes(look) if not a.get("client_id")]
+    if orphans:
+        return f"Manager write(s) with no API client in the trail: {orphans}"
+    tasks = look.new_tasks()
+    owners = _task_owners(look.database_url, [t["task_id"] for t in tasks])
+    for task in tasks:
+        owner = owners.get(task["task_id"])
+        if owner is None:
+            return f"task {task['task_id']} is not in the database"
+        if not owner["client_id"]:
+            return f"task {task['task_id']} has no client_id"
+        if owner["origin_thread"] != look.conversation:
+            return (f"task {task['task_id']} came from thread {owner['origin_thread']!r}, "
+                    f"not the client's conversation {look.conversation!r}")
+    return None
+
+
+def _both(first: Callable[[Look], str | None], second: Callable[[Look], str | None]) -> Callable[[Look], str | None]:
+    """A check that is the first one's problem, else the second's."""
+    return lambda look: first(look) or second(look)
 
 
 def _task_limit_set(look: Look) -> str | None:
@@ -1548,6 +1593,22 @@ DIALOGS: tuple[Dialog, ...] = (
     Dialog("session_profile_ask", (
         Say(f"把这个会话的 Agent Profile 切到 {SWITCH}。", _switch_not_done_by_the_manager),
     ), seed=_make_switch_profile),
+    # The default Manager through loopercli's channel (``/api/v1/chat/send``): the dashboard twins are
+    # ``confirm_create_start`` and ``cancel_confirmation``.
+    Dialog("client_handoff", (
+        Say(f"我和用户讨论好了一个小需求，请你建任务：在 {PROJECT} 项目里创建 hello.py，运行时打印 hello；"
+            "验收标准是 python hello.py 输出 hello。目录用项目默认的。", _restated_and_asked),
+        Say("用户同意了，确认创建。", _both(_created_with_a_title, _by_the_client), (("looper_task_create", {
+            "requirement": "在工作目录里创建 hello.py，运行时打印 hello；验收：python hello.py 输出 hello。",
+            "title": "hello 脚本", "project": PROJECT}),)),
+        Say("用户说现在开始。", _started, (("looper_task_control", {"task_id": "<task id>", "action": "start"}),)),
+    ), client=True),
+    Dialog("client_relay_cancel", (
+        Say("用户要取消任务 <task>。", _asked_to_confirm,
+            (("looper_task_control", {"task_id": "<task>", "action": "cancel"}),)),
+        Say("用户确认取消。", _both(_cancelled_on_confirmation, _by_the_client),
+            (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
+    ), running_task=True, client=True),
 )
 
 
@@ -1570,8 +1631,8 @@ def _trail(database_url: str, since: int, manager_id: str | None = None) -> list
     async def read() -> list[dict[str, Any]]:
         conn = await asyncpg.connect(database_url)
         try:
-            rows = await conn.fetch("SELECT id, tool, risk, status, error_code, confirmation_id, task_id, arguments, "
-                                    "result FROM manager_actions WHERE id > $1 AND ($2::text IS NULL OR manager_id = $2) "
+            rows = await conn.fetch("SELECT id, tool, risk, status, error_code, confirmation_id, task_id, client_id, "
+                                    "arguments, result FROM manager_actions WHERE id > $1 AND ($2::text IS NULL OR manager_id = $2) "
                                     "ORDER BY id", since, manager_id)
         finally:
             await conn.close()
@@ -1668,6 +1729,12 @@ def _made_a_tool_call(api: Api, since: int, database_url: str | None, before: in
     return False
 
 
+def _newest_run(api: Api, agent: str) -> int:
+    """The id of ``agent``'s newest run record (0 for none): the turn's runs are the ones after it."""
+    records = api.get("/api/llm-records", agent_id=agent, limit=1)["records"]
+    return max((record["id"] for record in records), default=0)
+
+
 def _ask(api: Api, session: str, text: str, *, timeout: float,
          check_budget: Callable[[], None] | None = None, stop: bool = False, withdraw: bool = False,
          database_url: str | None = None, manager: str | None = None) -> str:
@@ -1678,8 +1745,7 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
     if check_budget is not None:
         check_budget()
     agent = f"manager-{manager}" if manager else "manager"
-    records = api.get("/api/llm-records", agent_id=agent, limit=1)["records"]
-    since = max((record["id"] for record in records), default=0)
+    since = _newest_run(api, agent)
     before = _last_action(database_url, agent) if database_url is not None else 0
     body = {"text": text, "session_id": session, "message_id": message_id}
     if manager:
@@ -1711,6 +1777,58 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
                 return str(message.get("content") or "")
         time.sleep(1.0)
     raise ReplyTimeout(f"no reply to {text!r} within {timeout:g} s")
+
+
+def _sse_events(body: str) -> list[tuple[str, dict[str, Any]]]:
+    """The (event, data) pairs of a server-sent events body; comments and events without JSON data are skipped."""
+    events = []
+    for block in body.replace("\r\n", "\n").split("\n\n"):
+        name, data = "message", []
+        for line in block.split("\n"):
+            if line.startswith("event:"):
+                name = line[len("event:"):].strip()
+            elif line.startswith("data:"):
+                data.append(line[len("data:"):].lstrip())
+        try:
+            payload = json.loads("\n".join(data))
+        except ValueError:
+            continue
+        if isinstance(payload, dict):
+            events.append((name, payload))
+    return events
+
+
+def _ask_client(client_api: Api, operator_api: Api, conversation: str | None, text: str, *, timeout: float,
+                database_url: str | None = None, check_budget: Callable[[], None] | None = None,
+                ) -> tuple[str, str]:
+    """Send ``text`` to the default Manager as the API client of ``client_api`` (``POST /api/v1/chat/send``, in
+    ``conversation`` or a new one) and read its reply from the event stream, which the server ends at the reply;
+    ``(the reply, the conversation id)``. ``ReplyTimeout`` without a ``final`` event. The client's token cannot
+    read run records, so they are read with ``operator_api``, as ``_ask`` does."""
+    if check_budget is not None:
+        check_budget()
+    since = _newest_run(operator_api, "manager")
+    body = {"text": text, **({"conversation_id": conversation} if conversation else {})}
+    request = urllib.request.Request(
+        client_api.base_url + "/api/v1/chat/send", data=json.dumps(body).encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/json", "Accept": "text/event-stream",
+                 "Authorization": f"Bearer {client_api.token}"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            stream = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        raise EvalError(f"POST /api/v1/chat/send answered {exc.code}: {detail}") from None
+    except TimeoutError:
+        raise ReplyTimeout(f"no reply to {text!r} within {timeout:g} s") from None
+    events = _sse_events(stream)
+    accepted = next((data for name, data in events if name == "accepted"), {})
+    final = next((data for name, data in events if name == "final"), None)
+    if final is None:
+        raise ReplyTimeout(f"no reply to {text!r} within {timeout:g} s")
+    conversation_id = str(accepted.get("conversation_id") or conversation or "")
+    _check_manager_run(operator_api, since, stop=False, withdraw=False, agent_id="manager")
+    return str(final.get("text") or ""), conversation_id
 
 
 def _start_slow_task(api: Api, project_id: str, *, timeout: float,
@@ -1855,7 +1973,10 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             raise SpendingCap("the dialog reached its spending cap")
 
     budget_args = {"check_budget": check_budget} if cap_left is not None else {}
+    client_id: str | None = None  # the API client a client dialog made; its token stays in this function
     try:
+        if dialog.client and any(say.stop or say.withdraw for say in dialog.says):
+            raise EvalError("stop and withdraw are not supported in client dialogs")
         if dialog.id == "task_cost":
             task = _make_cost_task(database_url, project_id)
         elif dialog.ready_task:
@@ -1880,6 +2001,12 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
         registry_before = api.get("/api/registry") if dialog.id in {
             "model_login_runtime", "model_missing_endpoint"} else None
         session = f"eval-{dialog.id}-{uuid.uuid4().hex[:6]}"
+        client_api: Api | None = None
+        conversation: str | None = None
+        if dialog.client:
+            created = api.post("/api/clients", {"name": f"eval-{uuid.uuid4().hex[:6]}"})
+            client_id = created["client"]["id"]
+            client_api = Api(api.base_url, token=created["token"], timeout=api.timeout)
         known = frozenset(t["task_id"] for t in api.get("/api/tasks")["tasks"])
         previous: Look | None = None
         for say in dialog.says:
@@ -1892,11 +2019,15 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             agent = f"manager-{dialog.manager}" if dialog.manager else "manager"
             before = _last_action(database_url, agent)
-            reply = _ask(api, session, text, timeout=timeout, stop=say.stop, withdraw=say.withdraw,
-                         database_url=database_url, manager=dialog.manager, **budget_args)
+            if client_api is not None:
+                reply, conversation = _ask_client(client_api, api, conversation, text, timeout=timeout,
+                                                  database_url=database_url, **budget_args)
+            else:
+                reply = _ask(api, session, text, timeout=timeout, stop=say.stop, withdraw=say.withdraw,
+                             database_url=database_url, manager=dialog.manager, **budget_args)
             previous = Look(api, task, reply, database_url, since, known, fake=mode == "fake",
                             runtime_root=runtime_root, registry_before=registry_before, runs_since=runs_since,
-                            manager_id=agent if dialog.manager else None)
+                            manager_id=agent if dialog.manager else None, conversation=conversation)
             problem = say.check(previous)
             trail = _trail(database_url, before, agent)
             calls = [f"{a['tool']}:{a['status']}" + (f" ({a['error_code']})" if a["error_code"] else "")
@@ -1917,6 +2048,11 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
         error = error_row(ErrorClass.HARNESS, f"{type(exc).__name__}: {exc}")
     finally:
         _stop_leftovers(api)
+        if client_id is not None:
+            try:
+                api.request("DELETE", f"/api/clients/{client_id}")
+            except Exception as exc:  # the token is never in this message: it names the client, not the token
+                print(f"could not revoke the eval's API client {client_id}: {exc}", file=sys.stderr)
     passed = all(t["problem"] is None for t in turns) and len(turns) == len(dialog.says)
     return {"id": dialog.id, **(error or {"outcome": (Outcome.PASS if passed else Outcome.FAIL).value,
                                           "success": passed}),
