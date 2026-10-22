@@ -1009,10 +1009,10 @@ _LEAVES_ONCE_TOLD = (
 )
 
 
-def test_turn_tree_end_ends_what_left_the_tree_after_the_ends_last_listing_reached_it(tmp_path: Path) -> None:
+def _ends_what_leaves_the_tree_during_a_slow_ownership_scan(tmp_path: Path, scan: float) -> list[int]:
     # A child of the agent, still in the agent's group when the end lists every process, leaves for a session of its
-    # own only then; the agent has exited, so the tree's end finishes without it. Once every end has finished, the
-    # end looks again for whatever still runs, rather than trusting the listing that reached it.
+    # own only then, while the ownership scan takes ``scan`` more seconds; the agent has exited, so the tree's end
+    # finishes without it. The child still running afterwards is returned.
     code = ("import os, subprocess, sys, time\n"
             "subprocess.Popen([sys.executable, '-c', " + repr(_LEAVES_ONCE_TOLD) + "])\n"
             "while not os.path.exists('child.pid'):\n    time.sleep(0.01)\n"
@@ -1042,9 +1042,7 @@ def test_turn_tree_end_ends_what_left_the_tree_after_the_ends_last_listing_reach
                 deadline = time.monotonic() + 10
                 while not ((tmp_path / "left").exists() and agent_ended.is_set()) and time.monotonic() < deadline:
                     time.sleep(0.01)
-                # A slow ownership scan can outlast the signalling budget. It still has to be checked again
-                # after the main end returns, without the old snapshot's reached filter.
-                time.sleep(2 * proc_tree.TERM_GRACE_SEC)
+                time.sleep(scan)
             return live_owned()
 
         tree._live_owned = listing_after_the_snapshot  # type: ignore[method-assign]
@@ -1062,7 +1060,24 @@ def test_turn_tree_end_ends_what_left_the_tree_after_the_ends_last_listing_reach
             for pid in _running([int((tmp_path / "child.pid").read_text())], settle=0):
                 os.kill(pid, signal.SIGKILL)
 
-    assert asyncio.run(_run()) == []
+    return asyncio.run(_run())
+
+
+def test_turn_tree_end_ends_what_left_the_tree_after_the_ends_last_listing_reached_it(tmp_path: Path) -> None:
+    # Once every end has finished, the end looks again for whatever still runs, rather than trusting the listing
+    # that reached it.
+    assert _ends_what_leaves_the_tree_during_a_slow_ownership_scan(tmp_path, 2 * proc_tree.TERM_GRACE_SEC) == []
+
+
+def test_turn_tree_end_ends_what_left_the_tree_during_a_scan_that_outlasts_the_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The scan returns only after the looking has to stop: the last look still checks every seen process without
+    # the old listing's reached filter, so the child that left meanwhile is killed, not left running.
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.3)
+    monkeypatch.setattr(proc_tree, "REAP_SEC", 0.3)
+    assert _ends_what_leaves_the_tree_during_a_slow_ownership_scan(
+        tmp_path, 2 * (proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC)) == []
 
 
 @pytest.mark.skipif(not proc_tree._MARKS, reason=_DETACHED_BEST_EFFORT)

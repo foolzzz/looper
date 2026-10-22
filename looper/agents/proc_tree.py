@@ -868,8 +868,8 @@ class TurnTree:
 
         Bounded: every stray end's SIGKILL comes by ``TERM_GRACE_SEC`` after the first signals, and the looking
         stops ``TERM_GRACE_SEC + REAP_SEC`` after them, or once only processes ended twice already are left (one
-        SIGKILL does not end: EPERM, uninterruptible sleep); what the last listing finds then gets SIGKILL at once,
-        and is logged and left."""
+        SIGKILL does not end: EPERM, uninterruptible sleep); each seen or owned process a last listing then finds
+        still running, whether or not the tree reaches it, gets SIGKILL at once, and is logged and left."""
         if self.process.pid not in exclude:
             # Record ownership before a root that can exit is signalled. A resident agent stays alive: signal its
             # descendants first, without delaying them for an ownership scan of every process.
@@ -885,8 +885,11 @@ class TurnTree:
                 strays = await self._strays(exclude, ended=ended)
                 now = time.monotonic()
                 if now >= deadline:
-                    # A listing that took past the deadline still found these: each gets SIGKILL now (its start
-                    # time read once more), not left running unsignalled.
+                    # The looking stops: each still running gets SIGKILL now (its start time read once more), not
+                    # left running unsignalled. A listing that filtered out what the tree reached is redone without
+                    # that filter, as one it reached may have left the tree while the listing ran.
+                    if not ended:
+                        strays = await self._strays(exclude, ended=True)
                     left = await asyncio.to_thread(self._kill_strays, strays)
                     if left:
                         logger.warning("%s: %d process(es) still running %.1f s after the stop began, killed and "
