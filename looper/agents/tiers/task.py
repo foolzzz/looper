@@ -523,7 +523,7 @@ class TaskRouter:
                                   task_id=task.task_id)
         text = notice_text(task.task_id, name, status, summary, channel=channel, dashboard_url=self._dashboard_url,
                            extra=branch_line)
-        return Notice(channel, task.notify, text)
+        return Notice(channel, task.notify, text, channel_id=task.origin_channel_id)
 
     async def _finish_workspace(self, task: Task) -> str | None:
         """A completed task's worktree goes, its branch stays: the notice's line about the branch, None without one."""

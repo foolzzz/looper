@@ -52,8 +52,8 @@ WHERE task_user_gates.state NOT IN {CLOSED!r}
 
 _ADD_MESSAGE = """
 INSERT INTO task_user_gate_messages (step_id, task_id, role, kind, text, author, via, agenda_item, option, channel,
-                                     chat, external_id, post_state)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CASE WHEN $3 = 'user' THEN 'none' END)
+                                     chat, external_id, channel_id, post_state)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CASE WHEN $3 = 'user' THEN 'none' END)
 RETURNING *
 """
 
@@ -118,7 +118,13 @@ def _gate(row: Mapping[str, Any]) -> dict[str, Any]:
 def _message_args(task_id: str, message: Mapping[str, Any]) -> tuple[Any, ...]:
     return (message["step_id"], task_id, message["role"], message["kind"], message.get("text") or "",
             message.get("author"), message.get("via") or "", message.get("agenda_item"), message.get("option"),
-            message.get("channel"), message.get("chat"), message.get("external_id"))
+            message.get("channel"), message.get("chat"), message.get("external_id"), _message_channel_id(message))
+
+
+def _message_channel_id(message: Mapping[str, Any]) -> str | None:
+    if message.get("channel_id"):
+        return message["channel_id"]
+    return f"channel-{message['channel']}" if message.get("channel") else None
 
 
 async def write(conn: asyncpg.Connection, task_id: str, gates: Sequence[Mapping[str, Any]],
@@ -306,7 +312,8 @@ async def unposted(limit: int = 50, *, pool: asyncpg.Pool | None = None) -> list
 
 
 async def record_post(message_id: int, task_id: str, state: str, *, error: str | None = None,
-                      channel: str | None = None, chat: str | None = None, external_ids: Sequence[str] = (),
+                      channel: str | None = None, channel_id: str | None = None, chat: str | None = None,
+                      external_ids: Sequence[str] = (),
                       pool: asyncpg.Pool | None = None) -> None:
     """Note what posting the message ``message_id`` did (``state``: ``sent``, ``failed`` with ``error``, or
     ``none``), with the channel messages it became in ``chat`` (a failed post may have sent some), in one
@@ -314,10 +321,13 @@ async def record_post(message_id: int, task_id: str, state: str, *, error: str |
     pool = pool or get_pool()
     async with pool.acquire() as conn, conn.transaction():
         if external_ids:
+            bot = channel_id or (f"channel-{channel}" if channel else None)
+            # channel only for a built-in bot's posts: schema.sql, task_user_gate_posts_bot_key.
+            builtin = channel if bot == f"channel-{channel}" else None
             await conn.executemany(
-                "INSERT INTO task_user_gate_posts (message_id, task_id, channel, chat, external_id) "
-                "VALUES ($1, $2, $3, $4, $5) ON CONFLICT (channel, chat, external_id) DO NOTHING",
-                [(message_id, task_id, channel, chat, external_id) for external_id in external_ids])
+                "INSERT INTO task_user_gate_posts (message_id, task_id, channel, channel_id, chat, external_id) "
+                "VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+                [(message_id, task_id, builtin, bot, chat, external_id) for external_id in external_ids])
         await conn.execute("UPDATE task_user_gate_messages SET post_state = $2, post_error = $3, "
                            "post_attempts = post_attempts + 1, post_retry_at = NULL WHERE id = $1",
                            message_id, state, error)
@@ -331,13 +341,13 @@ async def record_retry(message_id: int, error: str, retry_at: datetime, *,
                        "post_retry_at = $3 WHERE id = $1 AND post_state IS NULL", message_id, error, retry_at)
 
 
-async def first_post(step_id: str, channel: str, chat: str, *, pool: asyncpg.Pool | None = None) -> str | None:
+async def first_post(step_id: str, channel_id: str, chat: str, *, pool: asyncpg.Pool | None = None) -> str | None:
     """The first channel message Looper sent for the gate on ``step_id`` to ``chat`` (its card, unless that failed);
     None when none was."""
     pool = pool or get_pool()
     return await pool.fetchval(
         "SELECT p.external_id FROM task_user_gate_posts p JOIN task_user_gate_messages m ON m.id = p.message_id "
-        "WHERE m.step_id = $1 AND p.channel = $2 AND p.chat = $3 ORDER BY p.id LIMIT 1", step_id, channel, chat)
+        "WHERE m.step_id = $1 AND p.channel_id = $2 AND p.chat = $3 ORDER BY p.id LIMIT 1", step_id, channel_id, chat)
 
 
 async def answered(step_id: str, before: int, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
@@ -349,10 +359,10 @@ async def answered(step_id: str, before: int, *, pool: asyncpg.Pool | None = Non
     return dict(row) if row else None
 
 
-async def find_reference(channel: str, chat: str, external_ids: Sequence[str], *,
+async def find_reference(channel: str, chat: str, external_ids: Sequence[str], *, channel_id: str,
                          pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
-    """The gate a channel message is about, as it replies to ``external_ids`` in ``chat``: a message Looper posted
-    for the gate, or one of the user's in it. Lark's message ids are unique in the app, so a Lark one is found
+    """The gate a channel message is about, as it replies to ``external_ids`` in ``chat`` of the bot ``channel_id``
+    (of type ``channel``): a message Looper posted for the gate, or one of the user's in it. Lark's message ids are unique in the app, so a Lark one is found
     in any chat (Looper posts to a user's open_id, and the user's reply comes from their chat with the bot);
     Telegram's only within a chat. The gate's row with its step's label and its task's status; None for none."""
     pool = pool or get_pool()
@@ -365,13 +375,13 @@ async def find_reference(channel: str, chat: str, external_ids: Sequence[str], *
         FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id JOIN tasks t ON t.id = g.task_id
         WHERE g.step_id IN (
             SELECT m.step_id FROM task_user_gate_posts p JOIN task_user_gate_messages m ON m.id = p.message_id
-            WHERE p.channel = $1 AND p.external_id = ANY($3::text[]) AND ($1 IN ('lark', 'lark_bot') OR p.chat = $2)
+            WHERE p.channel_id = $4 AND p.external_id = ANY($3::text[]) AND ($1 IN ('lark', 'lark_bot') OR p.chat = $2)
             UNION
             SELECT m.step_id FROM task_user_gate_messages m
-            WHERE m.channel = $1 AND m.external_id = ANY($3::text[]) AND ($1 IN ('lark', 'lark_bot') OR m.chat = $2))
+            WHERE m.channel_id = $4 AND m.external_id = ANY($3::text[]) AND ($1 IN ('lark', 'lark_bot') OR m.chat = $2))
         ORDER BY g.opened_at DESC NULLS LAST
         LIMIT 1
-        """, channel, chat, ids)
+        """, channel, chat, ids, channel_id)
     return _gate(row) if row else None
 
 
@@ -381,7 +391,7 @@ async def open_gates(limit: int, *, chat: tuple[str, str] | None = None, dashboa
     answered: ``gate_service.post_message`` keeps the answer), the latest opened first, at most ``limit``, each with
     its step's label, its task's project, the chat its task came from (``origin_channel_id``, ``chat_id``,
     ``chat_kind``, ``chat_mention``, ``schedule_id``: ``gate_service.gate_chat``) and ``waiting_for_planner``.
-    When ``chat`` is given, filter before limiting; ``dashboard`` includes tasks from no channel; with
+    When ``chat`` is given (``(channel id, chat)``), filter before limiting; ``dashboard`` includes tasks from no channel; with
     ``manager_id``, only the gates of that Manager's tasks."""
     pool = pool or get_pool()
     where = ""
@@ -391,14 +401,15 @@ async def open_gates(limit: int, *, chat: tuple[str, str] | None = None, dashboa
         args.append(manager_id)
         where = f" AND t.manager_id = ${len(args)}"
     if chat is not None:
-        from ..agents.task_notice import _BY_CHANNEL_ID, TargetKind
+        from ..agents.message import CHANNEL_ID_PATTERN
+        from ..agents.task_notice import TargetKind
 
-        origins = [origin for origin, channel in _BY_CHANNEL_ID.items() if channel.value == chat[0]]
+        origins = [chat[0]]
         base = len(args)
         where += (f" AND t.schedule_id IS NULL AND ((t.origin_channel_id = ANY(${base + 1}::text[]) AND "
                   f"t.chat_id = ${base + 2} AND t.chat_id <> '' AND t.chat_kind = ANY(${base + 3}::text[])) OR "
-                  f"(${base + 4}::boolean AND NOT (COALESCE(t.origin_channel_id, '') = ANY(${base + 5}::text[]))))")
-        args += [origins, chat[1], [kind.value for kind in TargetKind], dashboard, list(_BY_CHANNEL_ID)]
+                  f"(${base + 4}::boolean AND NOT (COALESCE(t.origin_channel_id, '') ~ ${base + 5}::text)))")
+        args += [origins, chat[1], [kind.value for kind in TargetKind], dashboard, CHANNEL_ID_PATTERN]
     rows = await pool.fetch(
         _GATES.replace("FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id",
                        ", p.name AS project_name, t.title AS task_title, t.goal_id AS task_goal_id, "

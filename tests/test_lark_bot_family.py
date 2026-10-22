@@ -60,7 +60,7 @@ def test_bot_gate_references(context: dict[str, Any], reference: str | None) -> 
     if reference is None:
         assert found is None
     else:
-        assert found == ("lark_bot", "oc_group", reference, message.payload["channel_context"])
+        assert found == ("lark_bot", "channel-lark_bot", "oc_group", reference, message.payload["channel_context"])
 
 
 @pytest.mark.parametrize("group", [False, True])
@@ -99,7 +99,7 @@ def test_bot_open_gates_are_filtered_to_its_chat(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(manager, "gate_dashboard_target", dashboard_target)
     default_manager = SimpleNamespace(agent_id="manager", _log="Manager")
     assert asyncio.run(ManagerAgent._open_gates_section(default_manager, _message())) == []
-    assert calls == [{"chat": ("lark_bot", "ou_requester123"), "manager_id": "manager", "dashboard": False}]
+    assert calls == [{"chat": ("channel-lark_bot", "ou_requester123"), "manager_id": "manager", "dashboard": False}]
 
 
 def test_bot_allowlist_uses_lark_open_ids() -> None:

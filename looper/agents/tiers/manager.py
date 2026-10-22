@@ -90,6 +90,7 @@ from ..message import (
     channel_address,
     is_lark,
     manager_address,
+    parse_channel_id,
 )
 
 if TYPE_CHECKING:
@@ -462,7 +463,17 @@ def _message_origin(envelope: MessageEnvelope) -> dict[str, Any]:
             group = (chat or "").startswith("-")
         case _:
             group = False
-    return {"channel": channel, "sender": str(sender) if sender else None, "chat": chat, "group": group}
+    return {"channel": channel, "channel_id": getattr(envelope.source, "agent_id", None),
+            "sender": str(sender) if sender else None, "chat": chat, "group": group}
+
+
+def _recorded_origin(origin: dict[str, Any]) -> dict[str, Any]:
+    """An origin as a run records it: the channel id only for a bot added in Settings → Channels, so the web chat's
+    and a built-in bot's records keep the fields they always had."""
+    parsed = parse_channel_id(origin.get("channel_id"))
+    if parsed is not None and not parsed.builtin:
+        return origin
+    return {key: value for key, value in origin.items() if key != "channel_id"}
 
 
 def _stored_chat(origin: dict[str, Any]) -> bool:
@@ -483,7 +494,9 @@ def _session_key(envelope: MessageEnvelope) -> str | None:
     if context.get("session_id"):
         return str(context["session_id"])
     if origin["channel"] and origin["chat"]:
-        return f"{origin['channel']}:{origin['chat']}"
+        parsed = parse_channel_id(origin["channel_id"])
+        prefix = origin["channel_id"] if parsed is not None and not parsed.builtin else origin["channel"]
+        return f"{prefix}:{origin['chat']}"
     return None
 
 
@@ -1016,8 +1029,10 @@ class ManagerAgent:
                 return Prepared()
             origin = _message_origin(envelope)
             # The calls Claude makes while answering belong to this message and its chat.
-            turn = Turn(channel=origin["channel"], chat=origin["chat"], message_id=envelope.message_id,
-                        envelope=envelope, sender=origin["sender"], group=origin["group"])
+            turn = Turn(channel=origin["channel"], chat=origin["chat"], channel_id=origin["channel_id"],
+                        message_id=envelope.message_id,
+                        envelope=envelope, sender=origin["sender"], group=origin["group"],
+                        require_match=self._claude.shares_bridge)
             token.check()
             token.ops_turn = turn
             # Registered before the first await: a Stop during the persisting, the status and the tools probe is kept.
@@ -1288,7 +1303,7 @@ class ManagerAgent:
             # progress sent before it (``task_notice``).
             await self._bus.publish(MessageEnvelope.create(
                 source=self.agent_address,
-                target=channel_address(notice.channel.value),
+                target=channel_address(notice.channel.value, notice.channel_id),
                 message_type=MessageType.CHAT_NOTICE,
                 payload=notice.payload(),
                 correlation_id=envelope.correlation_id,
@@ -1716,7 +1731,7 @@ class ManagerAgent:
             record_id = await db_llm_records.start_record(
                 agent_id=self.agent_id, session_id=previous, input_text=str(envelope.payload.get("text", "")),
                 metadata={**launch.record(), "session_reset": {
-                    **origin, "previous_session_id": previous, "selected_profile_id": chosen}},
+                    **_recorded_origin(origin), "previous_session_id": previous, "selected_profile_id": chosen}},
             )
             await db_llm_records.finish_record(record_id, status="completed", output_text=NEW_SESSION_REPLY,
                                                cost_usd=0.0, duration_ms=0)
@@ -1847,7 +1862,7 @@ class ManagerAgent:
             record_id = await db_llm_records.start_record(
                 agent_id=self.agent_id, session_id=self._session_id, input_text=input_text,
                 metadata={**launch.record(), "session_profile": {
-                    "from": previous, "to": profile_id, "effect": change.value, **origin, "via": via}},
+                    "from": previous, "to": profile_id, "effect": change.value, **_recorded_origin(origin), "via": via}},
             )
             await db_llm_records.finish_record(record_id, status="completed", output_text=text,
                                                cost_usd=0.0, duration_ms=0)
@@ -2017,8 +2032,9 @@ class ManagerAgent:
 
         async def begin(after: Any) -> AutonomousRun:
             last = after if isinstance(after, MessageEnvelope) else None
-            origin = _message_origin(last) if last is not None else {"channel": None, "chat": None}
-            turn = Turn(channel=origin["channel"], chat=origin["chat"])  # it answers no message: it only reads
+            origin = _message_origin(last) if last is not None else {"channel": None, "channel_id": None, "chat": None}
+            turn = Turn(channel=origin["channel"], chat=origin["chat"], channel_id=origin["channel_id"])
+            # ^ it answers no message: it only reads
             if self.ops is not None:
                 self.ops.begin_turn(turn)
             recorder = ClaudeRunRecorder(
@@ -2173,7 +2189,7 @@ class ManagerAgent:
         the user's answer on (``looper_task_gate_reply``): in a Lark or Telegram chat only the gates whose messages
         go to that chat (``gate_service.gate_chat``), so no other chat's gate shows in it; in the dashboard chat all,
         each with its chat. None, no section."""
-        origin = _message_origin(envelope) if envelope is not None else {"channel": "web"}
+        origin = _message_origin(envelope) if envelope is not None else {"channel": "web", "channel_id": "channel-web"}
         here = is_lark(origin["channel"]) or origin["channel"] == "telegram"
         if here:
             chat = origin_chat(origin["channel"], origin["chat"] or "", group=origin["group"],
@@ -2182,9 +2198,9 @@ class ManagerAgent:
             if here:
                 dashboard = await gate_dashboard_target()
                 gates = await db_user_gates.open_gates(
-                    OPEN_GATES_LISTED, chat=(origin["channel"], chat), manager_id=self.agent_id,
-                    dashboard=dashboard is not None and (dashboard.channel.value, dashboard.target.id) ==
-                    (origin["channel"], chat))
+                    OPEN_GATES_LISTED, chat=(origin["channel_id"], chat), manager_id=self.agent_id,
+                    dashboard=dashboard is not None and (dashboard.channel_id, dashboard.target.id) ==
+                    (origin["channel_id"], chat))
             else:
                 gates = await db_user_gates.open_gates(OPEN_GATES_LISTED, manager_id=self.agent_id)
                 dashboard = await gate_dashboard_target() if gates else None
@@ -2194,8 +2210,8 @@ class ManagerAgent:
         listed: list[tuple[dict[str, Any], str]] = []
         for gate in gates:
             gate_chat = gate_chat_of(gate, dashboard)
-            if here and (gate_chat is None or (gate_chat.channel.value, gate_chat.target.id) !=
-                         (origin["channel"], chat)):
+            if here and (gate_chat is None or (gate_chat.channel_id, gate_chat.target.id) !=
+                         (origin["channel_id"], chat)):
                 continue
             listed.append((gate, "" if here else f"; chat: {gate_chat.label() if gate_chat else 'the task page only'}"))
         if not listed:

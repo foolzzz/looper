@@ -27,7 +27,8 @@ from dataclasses import dataclass
 from ..db import activity as db_activity, system_settings as db_settings, tasks as db_tasks
 from ..db import user_gates as db_user_gates
 from .bus import MessageBus
-from .message import AgentAddress, MessageEnvelope, MessageType, is_lark, planner_address
+from .message import (AgentAddress, MessageEnvelope, MessageType, builtin_channel_id, is_lark, parse_channel_id,
+                      planner_address)
 from .projects import RequestError
 from .task_notice import NotifyChannel, NotifyTarget, TargetKind, notify_channel
 from .user_gates import MESSAGE_MAX_CHARS, GateState, MessageKind, retry_at
@@ -52,6 +53,15 @@ class GateChat:
 
     channel: NotifyChannel
     target: NotifyTarget
+    channel_id: str = ""  # the bot's channel id; empty means the built-in row of ``channel``
+
+    def __post_init__(self) -> None:
+        if not self.channel_id:
+            object.__setattr__(self, "channel_id", builtin_channel_id(self.channel.value))
+            return
+        parsed = parse_channel_id(self.channel_id)
+        if parsed is None or parsed.channel_type != self.channel.value:
+            raise ValueError(f"channel id {self.channel_id!r} is not a {self.channel.value} bot")
 
     @property
     def lark_group(self) -> bool:
@@ -80,7 +90,7 @@ def gate_chat(task: Mapping[str, Any], dashboard: GateChat | None) -> GateChat |
     channel = notify_channel(task.get("origin_channel_id"))
     if channel is not None:
         target = NotifyTarget.from_columns(task)
-        return GateChat(channel, target) if target is not None else None
+        return GateChat(channel, target, channel_id=task["origin_channel_id"]) if target is not None else None
     return dashboard
 
 
@@ -316,7 +326,7 @@ async def post_message(
 ) -> dict[str, Any]:
     """Add the user's message (``end``: their end of the discussion) to the task's gate ``label``, and wake its
     Planner when it runs (``has_planner``). ``origin`` is the channel message it is, when it came from one
-    (``author`` in a group chat, ``channel``, ``chat``, ``external_id``: the Planner's reply goes under it). 404 for
+    (``author`` in a group chat, ``channel``, ``channel_id``, ``chat``, ``external_id``: the Planner's reply goes under it). 404 for
     no such task or gate, 409 for a gate that does not wait for the user or a task that completed, 400 for a
     message that is not right. ``delivered`` says what happens to it: ``queued`` (the Planner takes it next), or
     ``kept`` (the task is not running: its restart gives it)."""
@@ -329,7 +339,7 @@ async def post_message(
     if current is None:
         raise RequestError(HTTP_404, f"task {task_id} has no gate {label}")
     message = {**_message(data, current, end=end), "via": via,
-               **{key: origin.get(key) for key in ("author", "channel", "chat", "external_id") if origin}}
+               **{key: origin.get(key) for key in ("author", "channel", "channel_id", "chat", "external_id") if origin}}
     gate, added = await db_user_gates.add_user_message(task_id, label, message)
     if gate is None:
         raise RequestError(HTTP_404, f"task {task_id} has no gate {label}")

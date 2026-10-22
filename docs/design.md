@@ -35,7 +35,7 @@ TaskRouter（任务路由器）
 
 | 层级 | 组件 | 职责 | 隔离方式 |
 |------|------|------|----------|
-| 接入层 | Channel Adapter | 协议转换，用户消息 → MessageEnvelope | 每渠道一个 Adapter |
+| 接入层 | Channel Adapter | 协议转换，用户消息 → MessageEnvelope | 每个机器人一个 Adapter |
 | 决策层 | Manager | 意图理解、任务创建、状态汇报 | 默认管家 + 操作者定义的场景管家，各自一个常驻 Claude Code 进程（stream-json 输入，每条消息一个 user turn；进程重启后用 `--resume` 续接会话） |
 | 编排层 | TaskRouter + Planner | 任务路由；Planner 拆分步骤、按每个结果做决定、调度 Worker 和 Reviewer | 每个 Task 独立 Planner 实例，各自一个常驻 Claude Code 进程（和所有 agent 一样开放全部工具、跳过权限确认，由 role prompt 约束只做规划和决策；进程重启后用 `--resume` 续接会话） |
 | 执行层 | WorkerPool | 子进程执行具体开发/验证任务 | 每个 Worker 独立子进程 |
@@ -197,6 +197,8 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 
 渠道的密钥存在它自己的 Settings 字段里（存在数据库中），或放在服务的环境里（`looper service install --env NAME`）。某个渠道启动失败只记日志，不影响 Web 控制台。
 
+**每个管家可以有自己的机器人**：`channel_configs` 的每个 Telegram / 飞书行是一个机器人，一个运行器、一个管家（`manager_id`，添加时定下，不能改）；内置的三行（`channel-telegram`、`channel-lark`、`channel-lark_bot`）属于默认管家。Settings → Channels →「添加机器人」可为任何管家加 `channel-<type>-<n>`，凭据只在控制台录入（存 `channel_secrets`，日志里打码，添加的机器人不读环境变量，lark-cli 机器人要写 profile）；同一个机器人不能加两次（409）。线程 id 是 `<channel_id>:<chat_id>`（内置行仍是 `<type>:<chat_id>`），归它的管家；管家停用时它的机器人回复「已关闭」，有机器人的管家不能删除。任务结束、等待与并发通知、关卡消息按渠道 id 投递，即任务来自的那个机器人；定时任务的通知和控制台任务的关卡聊天只走内置行。机器人的改动重启后生效；配置导出只带内置的三行。
+
 ### Web
 
 - 控制台 Chat 页
@@ -229,7 +231,7 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
   - **Agent Profiles**（`profiles`）：Agent Profile 是 `agent_profiles` 表的一行（接口 `/api/agent-profiles`），即运行时 + provider + 模型 + effort（它的运行都用这个 effort）。列表写明每个 Profile 的组成、能跑的角色和被谁使用（系统层、角色层、项目层、项目里的角色层、任务覆盖、Manager 的当前会话）；表单依次选运行时、provider（分组：运行时自己的登录（OAuth），Claude Code 显示 `claude auth status` 的登录状态，Codex 的登录标为即将支持、不可选，OMP 没有；再是协议相符的 API key provider，和跳到 LLM Providers 的「+ New provider」）和模型（provider 有目录时从目录选，否则自由填写）；内置的 `claude-code/opus` 不能改删，被使用的 Profile 不能删除；
   - **Roles**（`roles`，旧的 `#settings`、`#settings/defaults` 都跳到这里）：标题下一句话按服务端的角色写明有几个角色、各是什么，各角色用共享默认值，除非自己设了，项目还可以再覆盖。下面是一个可折叠列表：先是「Shared defaults」（系统层；界面上凡是说明取值来源的地方都叫 shared defaults），再按 Manager、Planner、Worker、Reviewer 各一行，默认全部收起，可以同时展开多行。收起的一行是摘要，窄屏截断：Shared defaults 写适用于几个角色、Agent Profile、单次花费上限和环境变量个数；角色写名称（显示名不同时附上）、一句职责、生效的 Agent Profile 及来源（shared 或 own），Planner、Worker、Reviewer 再加每个项目的并发上限，停用的标「Disabled」，有未保存修改的标「unsaved」。展开后 Shared defaults 是系统层的表单；角色分两组：「Overrides for this role」是该角色的层（Agent Profile（effort 随它而来）、harness、环境变量、单次花费上限和并发，每项显示当前取值和来源，按钮「Save overrides」），「Role prompt and limits」是角色自己的字段（显示名、max turns、超时、启用、Role prompt，以及一行说明：所有 agent 都开放全部工具、带 `--dangerously-skip-permissions`；按钮「Save prompt and limits」）。收起一行不丢它未保存的修改。`#settings/roles/<role>` 展开该角色并滚动到它，`#settings/roles/shared` 展开 Shared defaults。凡是选 Agent Profile 的地方（Roles、项目页的分层设置、新建任务的按角色覆盖）都用同一个下拉框；界面上 Profile 的名字统一由一个函数生成：Profile 有 effort 且名字不以「 · <effort>」结尾时补上它（迁移建的 Profile 本就叫 `claude-code/opus · xhigh`），摘要不再单列 effort，最后一项「+ New Agent Profile」就地打开同一张表单，保存后选中新建的 Profile；
   - **Skills & MCP**（`catalog`）是目录：条目数、已安装几个、总大小，一行说明条目只在安装的地方加载、升级前导入的条目没有安装；「Import from this machine」或「Re-import」和上次导入的时间、变化与未导入的内容；按名称筛选；插件和 skill 分组列出，各有来源、大小和装在哪里，没有全局安装的可以「Install globally」，有的显示四个角色的勾选框和卸载，项目写的 skill 只能在项目页安装；改动对下一次运行生效；
-  - **Channels**（`channels`）和 **Import / Export**（`transfer`）：原来 Settings 长页上的渠道和「Move to another machine」，内容不变。
+  - **Channels**（`channels`）和 **Import / Export**（`transfer`）：原来 Settings 长页上的渠道和「Move to another machine」；Channels 页还可以为任何管家「添加机器人」，添加的机器人可以「删除」（内置的三行只能关闭）。
 - 顶部的 **Runs** 页（`#runs/<role>`，旧的 `#agents…` 跳到这里）只看每个角色的会话和运行记录，不再有配置，每个角色链接到 Settings → Roles 里它的那一行
 - **Schedules** 页（`#schedules`）按项目列出所有项目的定时任务，停用的也列出（变暗显示），顶部可按项目和启用状态筛选（两者叠加，记在地址里），每行有启用开关、Run now 和删除（行内先确认「Delete <名称>? Its tasks stay.」，与项目标签页相同）；名称打开这个定时任务的详情（`#schedules/<id>`）：设置、告警、今日花费和它触发的运行历史（默认隐藏没有新内容、上一轮未结束这两类常规跳过，可分页），也可以在这里删除，删除后回到列表；新建和编辑仍在项目的 Schedules 标签页，详情里有链接过去；项目 Schedules 标签页的每行还有 Planner 会话状态：`Planner session: none yet`，或 `Planner session: continuing since <时间>, last used by run <任务名>`（时间用定时任务时区，不显示会话 id，并行定时任务也显示留下的会话）。与启用、Run now 同排的 `Reset Planner session` 按钮用现有 `confirm()`：确认后清掉已存会话，下一轮从新会话开始；进行中的运行留着自己的会话到结束，不能写回。任务页紧挨定时标记，在 `continues_schedule_session` 为真时显示 `continues the schedule's Planner session`
 - **User Gates** 页（`#gates`）列出所有任务的关卡，默认只看 Open，可切到 Closed 或 All，还有「Waiting for you only」开关和项目筛选（都记在地址里）；每行链到任务的关卡面板，等你回复的关卡可以直接在行内回答（与 Dashboard 的回复卡片同一个接口）；侧栏 User Gates 项上的徽标是等你回复的关卡数，为 0 或未知时不显示

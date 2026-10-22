@@ -28,7 +28,7 @@ from typing import Any
 from ...db import connection as db_connection, profile_registry as db_profiles, projects as db_projects, schedules as db_schedules
 from ...db import tasks as db_tasks
 from .. import cron, schedules
-from ..message import is_lark
+from ..message import is_lark, parse_channel_id
 from ..project_execution import format_usd
 from ..tiers.journal import clip
 from . import Call, ErrorCode, OpError, Risk, Tool
@@ -192,8 +192,11 @@ async def _create(call: Call) -> dict[str, Any]:
     _required(arguments, "create", "project")
     project = await project_named(arguments["project"])
     data = _fields(arguments, "create")
-    if "notify_target" not in data and (is_lark(turn.channel) or turn.channel == "telegram") and turn.sender:
+    bot = parse_channel_id(turn.channel_id)
+    if ("notify_target" not in data and (is_lark(turn.channel) or turn.channel == "telegram") and turn.sender
+            and (bot is None or bot.builtin)):
         # Made from a Telegram or Lark chat: its messages go to whoever asked, when their channel's allowlist lets them.
+        # Schedules notify through the built-in rows only: through an added bot the target stays unset.
         asked = {"channel": turn.channel, "chat": turn.sender}
         if any((t["channel"], t["chat"]) == (asked["channel"], asked["chat"]) for t in await schedules.notify_targets()):
             data["notify_target"] = asked
