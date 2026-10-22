@@ -36,6 +36,7 @@ logged and gone without.
 from __future__ import annotations
 
 import asyncio
+import bisect
 import contextlib
 import json
 import logging
@@ -318,8 +319,8 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
             await _within(deadline, _record_tree(process.pid, seen), None, label=label, what="recording the tree")
         if alive:
             if (gone := await _gone(process, label)) is not None:
-                alive.pop(process.pid, None)  # exited: what it left is still signalled; reused: nothing is
-                if gone == "reused" or not alive:
+                alive.pop(process.pid, None)  # exited: what it left is still signalled; reused, unknown: nothing is
+                if gone != "exited" or not alive:
                     alive = {}
                     return
             _signal(process, alive, signal.SIGTERM)
@@ -341,7 +342,7 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
         raise
     finally:
         if alive and (gone := await _gone(process, label)) is not None:
-            alive = {} if gone == "reused" else {pid: pgid for pid, pgid in alive.items() if pid != process.pid}
+            alive = {} if gone != "exited" else {pid: pgid for pid, pgid in alive.items() if pid != process.pid}
         if alive:
             _signal(process, alive, signal.SIGKILL)
         release()
@@ -359,10 +360,18 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
 
 async def _gone(process: _Agent, label: str) -> str | None:
     """Whether ``process``, signalled by pid (``_Orphan``), no longer runs as the process its start time names:
-    "exited", or "reused" (its pid now another process's); None while it does. Checked just before each signal."""
+    "exited", "reused" (its pid now another process's), or "unknown" (``ps`` could not tell: not taken for an exit,
+    and nothing signalled); None while it does. Checked just before each signal."""
     if not isinstance(process, _Orphan) or process.started is None:
         return None
-    current = _native_start(process.pid) if process.native else await asyncio.to_thread(_start_time, process.pid)
+    if process.native:
+        current = _native_start(process.pid)
+    else:
+        try:
+            current = await asyncio.to_thread(_read_start, process.pid)
+        except (OSError, subprocess.SubprocessError):
+            logger.warning("%s: cannot read the start time of pid %s; leaving it alone", label, process.pid)
+            return "unknown"
     if current is None:
         logger.info("%s: pid %s exited", label, process.pid)
         return "exited"
@@ -376,12 +385,18 @@ async def _gone(process: _Agent, label: str) -> str | None:
 
 
 def _start_time(pid: int) -> str | None:
-    """When ``pid`` started, as ``ps -o lstart=`` prints it in UTC; None when no such process runs."""
+    """When ``pid`` started, as ``ps -o lstart=`` prints it in UTC; None when no such process runs, or ``ps``
+    cannot run."""
     try:
-        listed = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
-                                timeout=_PS_TIMEOUT_SEC, check=False, env={**child_env.inherited(), "LC_ALL": "C", "TZ": "UTC"})
+        return _read_start(pid)
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def _read_start(pid: int) -> str | None:
+    """``_start_time``, raising what keeps ``ps`` from running rather than taking it for an exit."""
+    listed = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                            timeout=_PS_TIMEOUT_SEC, check=False, env={**child_env.inherited(), "LC_ALL": "C", "TZ": "UTC"})
     return " ".join(listed.stdout.split()) or None
 
 
@@ -848,30 +863,38 @@ class _Marked:
         self._root = pid
         self._entry = f"{OWNER_ENV}={mark}".encode()
         self._exited: set[int] = set()  # the exited, unreaped ones the last listing found
+        self._resume = 0  # the pid a listing cut short stopped at: the next one starts past it
 
     def live(self) -> tuple[set[int], bool]:
         """The processes carrying the mark, and whether one the listing named exited before its environment was
         read: it may have been the agent's and forked first (a command in a session of its own), and the child,
         carrying the mark, be in no listing yet. One that exited but is not reaped yet (a zombie) reads as an
         empty environment: it counts as exited, unless the last listing found it so already (the listing since
-        then has had the child)."""
+        then has had the child).
+
+        A listing cut short at ``_SCAN_SEC`` calls for another, which goes on past the last pid it read (then wraps
+        around): every pid is read in turn, however slow ``/proc`` is, not only those a cut-short listing reaches
+        first each time."""
         owned: set[int] = set()
         exited: set[int] = set()
         vanished = False
         began = time.monotonic()
-        for entry in os.scandir(_PROC):
-            if time.monotonic() - began >= _SCAN_SEC:  # cut short (processes keep coming): another is called for
+        pids = sorted(int(entry.name) for entry in os.scandir(_PROC) if entry.name.isdigit())
+        after = bisect.bisect_right(pids, self._resume)
+        for read, pid in enumerate(pids[after:] + pids[:after]):
+            if read and time.monotonic() - began >= _SCAN_SEC:  # cut short (processes keep coming): another is called for
                 logger.warning("a listing of every process ran past %.1f s and was cut short", _SCAN_SEC)
                 return owned, True
-            if not entry.name.isdigit() or (pid := int(entry.name)) == self._root:
+            self._resume = pid
+            if pid == self._root:
                 continue
             try:
-                with open(f"{_PROC}/{entry.name}/environ", "rb") as environ:
+                with open(f"{_PROC}/{pid}/environ", "rb") as environ:
                     if self._entry in environ.read().split(b"\0"):
                         owned.add(pid)
                         continue
                 # Not the mark: read whole, or cut short (or empty) as the process exited while it was read.
-                with open(f"{_PROC}/{entry.name}/stat", "rb") as stat:
+                with open(f"{_PROC}/{pid}/stat", "rb") as stat:
                     state = stat.read().rpartition(b")")[2].split()[:1]
                 if state and state[0] in (b"Z", b"X"):
                     exited.add(pid)
@@ -1081,6 +1104,12 @@ class TurnTree:
         vanished = table is None or (current is None and bool(known))
         strays = [_Orphan(pid, started) for pid, started in known.items() if (current or {}).get(pid) == started]
         owned_until = None if until is None else max(until, time.monotonic() + _OWNED_SEC)
+        if _NATIVE and strays:
+            # Each one the start times confirmed is bound at once to its native identity, and checked by it from
+            # then on: an end's check before each signal then never waits for (nor fails with) ``ps``.
+            natives = await self._listing(_native_starts, [stray.pid for stray in strays], until=owned_until,
+                                          default={}, what="reading identities")
+            strays = [_Orphan(stray.pid, natives[stray.pid], native=True) for stray in strays if stray.pid in natives]
         owned, gone = await self._listing(self._live_owned, until=owned_until, default=(set(), True),
                                           what="the ownership listing")
         vanished = vanished or gone

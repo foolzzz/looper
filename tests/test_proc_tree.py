@@ -1708,6 +1708,138 @@ def test_turn_tree_end_kills_a_seen_detached_process_the_agent_owns_while_start_
     assert asyncio.run(_run()) == []
 
 
+def _failing_single_ps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``ps -o lstart= -p <pid>`` (one pid's start time) raises OSError; every other ``ps`` runs."""
+    run = subprocess.run
+
+    def failing(argv: Any, *args: Any, **kwargs: Any) -> Any:
+        if list(argv[:3]) == ["ps", "-o", "lstart="]:
+            raise OSError("ps cannot run")
+        return run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(proc_tree.subprocess, "run", failing)
+
+
+def test_an_unreadable_start_time_is_not_taken_for_an_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ``ps`` failing for one pid tells nothing of whether it runs: the end leaves it alone, never takes it for
+    # exited (which would have what it left signalled, unchecked).
+    sleeper = subprocess.Popen(["/bin/sleep", "60"])
+    try:
+        started = proc_tree._start_time(sleeper.pid)
+        assert started is not None
+        _failing_single_ps(monkeypatch)
+        assert asyncio.run(proc_tree._gone(proc_tree._Orphan(sleeper.pid, started), "orphan")) == "unknown"
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+
+@pytest.mark.parametrize("new_only", [False, True], ids=["end", "end_new"])
+def test_turn_tree_end_kills_a_seen_detached_process_the_agent_owns_while_one_pid_start_times_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, new_only: bool,
+) -> None:
+    # Linux marks, through a simulated ``/proc``: a detached process the tree saw (its start time read) carries the
+    # agent's mark, and once the stop begins ``ps`` for one pid's start time raises OSError. The start times of the
+    # strays still confirm it; its end's check before each signal goes by its native identity, and kills it.
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.3)
+    monkeypatch.setattr(proc_tree, "REAP_SEC", 0.3)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    monkeypatch.setattr(proc_tree, "_PROC", str(proc))
+
+    async def _run() -> list[int]:
+        process = await _spawn_python(tmp_path, "import sys\nsys.stdin.read()\n")
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        if tree._owned is not None:
+            tree._owned.close()
+        mark = proc_tree._Marked(process.pid, "mark")
+        tree._owned = mark
+        daemon = None
+        try:
+            await tree.baseline()
+            daemon = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
+            (proc / str(daemon.pid)).mkdir()
+            (proc / str(daemon.pid) / "environ").write_bytes(b"A=1\0" + mark._entry + b"\0")
+            tree.seen[daemon.pid] = proc_tree._start_times([daemon.pid])[daemon.pid]
+            tree._listed.add(daemon.pid)
+            _failing_single_ps(monkeypatch)
+            await asyncio.wait_for(tree.end_new() if new_only else tree.end(), 15)
+            daemon.poll()  # reaped, so a zombie is not taken for a running process
+            return _running([daemon.pid], settle=0)
+        finally:
+            if daemon is not None and daemon.poll() is None:
+                daemon.kill()
+                daemon.wait()
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            await process.wait()
+
+    assert asyncio.run(_run()) == []
+
+
+@pytest.mark.parametrize("new_only", [False, True], ids=["end", "end_new"])
+def test_turn_tree_end_kills_a_marked_process_past_what_a_slow_listing_reaches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, new_only: bool,
+) -> None:
+    # Linux marks, through a simulated ``/proc`` so slow that each ownership listing is cut short a few pids in:
+    # the detached process carrying the agent's mark comes last. Each listing goes on where the last one stopped,
+    # so one reaches it, and the end kills it.
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.5)
+    monkeypatch.setattr(proc_tree, "REAP_SEC", 0.5)
+    monkeypatch.setattr(proc_tree, "_SCAN_SEC", 0.2)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    monkeypatch.setattr(proc_tree, "_PROC", str(proc))
+    others = range(2, 10)
+    for pid in others:  # another program's processes, each read slowly
+        (proc / str(pid)).mkdir()
+        (proc / str(pid) / "environ").write_bytes(b"A=1\0")
+        (proc / str(pid) / "stat").write_bytes(f"{pid} (other) S 1 {pid} {pid} 0 -1".encode())
+
+    def slow_open(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if str(path).startswith(str(proc)) and str(path).endswith("/environ"):
+            time.sleep(0.08)
+        return open(path, *args, **kwargs)
+
+    monkeypatch.setattr(proc_tree, "open", slow_open, raising=False)
+    scandir = os.scandir
+
+    def in_pid_order(path: Any = ".") -> Any:  # as Linux lists ``/proc``: by pid
+        entries = list(scandir(path))
+        if str(path) == str(proc):
+            entries.sort(key=lambda entry: int(entry.name) if entry.name.isdigit() else -1)
+        return iter(entries)
+
+    monkeypatch.setattr(proc_tree.os, "scandir", in_pid_order)
+
+    async def _run() -> list[int]:
+        process = await _spawn_python(tmp_path, "import sys\nsys.stdin.read()\n")
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        if tree._owned is not None:
+            tree._owned.close()
+        mark = proc_tree._Marked(process.pid, "mark")
+        tree._owned = mark
+        daemon = None
+        try:
+            await tree.baseline()
+            daemon = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
+            assert daemon.pid > max(others)
+            (proc / str(daemon.pid)).mkdir()
+            (proc / str(daemon.pid) / "environ").write_bytes(b"A=1\0" + mark._entry + b"\0")
+            await asyncio.wait_for(tree.end_new() if new_only else tree.end(), 15)
+            daemon.poll()  # reaped, so a zombie is not taken for a running process
+            return _running([daemon.pid], settle=0)
+        finally:
+            if daemon is not None and daemon.poll() is None:
+                daemon.kill()
+                daemon.wait()
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            await process.wait()
+
+    assert asyncio.run(_run()) == []
+
+
 def _signals(monkeypatch: pytest.MonkeyPatch) -> list[tuple[float, int, frozenset[int]]]:
     """Each signal an end sends to a tree: when (monotonic), which, and to which pids."""
     sent: list[tuple[float, int, frozenset[int]]] = []
