@@ -23,20 +23,21 @@ from typing import Any
 from ..db.tasks import TaskGroup, task_group
 from . import (
     agent_settings, catalog, chat_settings, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
-    operator_auth, overview, profile_registry, project_skills, projects, prompt_preview, request_guard, role_api,
+    managers_api, operator_auth, overview, profile_registry, project_skills, projects, prompt_preview, request_guard, role_api,
     schedules, self_check, vault, wait_service,
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
-from .message import MANAGER_ADDRESS
 from .project_execution import ProjectExecution
 from .channels.web import WebChannelAdapter
 from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
 from .task_roles import record_role, run_roles
 from .tiers.journal import progress_notes
+from .ops import OpError
 from .ops.planner import PlannerOps
 from .ops.room import RoomOps
+from .managers import ManagerFleet
 from .ops.service import ManagerOps
 from .tiers.manager import ManagerAgent, is_new_session_command
 from .tiers.task import TaskRouter
@@ -152,6 +153,7 @@ class AgentHTTPServer:
         claude_bin: str = "claude",
         scheduler: Scheduler | None = None,
         manager_ops: ManagerOps | None = None,
+        managers: ManagerFleet | None = None,
         planner_ops: PlannerOps | None = None,
         room_ops: RoomOps | None = None,
     ) -> None:
@@ -185,6 +187,7 @@ class AgentHTTPServer:
         self._scheduler = scheduler
         # The Manager's platform tools, behind /api/agent/v1/ (its token only), and each task's Planner's (its own).
         self._manager_ops = manager_ops
+        self._managers = managers
         self._planner_ops = planner_ops
         # The agent room's tools of the steps' runs, each with a token of its own (``run.``).
         self._room_ops = room_ops
@@ -388,6 +391,9 @@ class AgentHTTPServer:
     _RE_PROJECT_ROLE_STATS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-stats$")
     _RE_PROJECT_ROLE_TEMPLATE = re.compile(
         r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-templates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})$")
+    _RE_MANAGER = re.compile(r"^/api/managers/(manager(?:-[a-z][a-z0-9-]{1,30})?)$")
+    _RE_MANAGER_TEMPLATE = re.compile(
+        r"^/api/managers/(manager(?:-[a-z][a-z0-9-]{1,30})?)/templates/([a-z][a-z0-9_-]{0,31})$")
     _RE_ROLE_SETTINGS = re.compile(r"^/api/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_RUNTIME_PROBE = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)/probe$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
@@ -424,7 +430,7 @@ class AgentHTTPServer:
         elif path == "/api/chat/send" and method == "POST":
             await self._handle_chat_send(body, writer)
         elif path == "/api/manager/session" and method == "GET":
-            await self._handle_manager_session(writer)
+            await self._handle_manager_session(query, writer)
         elif path == "/api/manager/session/profile" and method == "PUT":
             await self._handle_manager_session_profile(body, writer)
         elif path == "/api/chat/targets" and method == "GET":
@@ -656,6 +662,22 @@ class AgentHTTPServer:
                 m.group(1), m.group(2), projects.json_object(body)))
         elif (m := self._RE_PROJECT_ROLE_TEMPLATE.match(path)) and method == "DELETE":
             await self._answer(writer, HTTP_200, lambda: role_api.delete_template(m.group(1), m.group(2)))
+        elif path == "/api/managers" and method == "GET":
+            await self._answer(
+                writer, HTTP_200,
+                lambda: managers_api.managers_view(extra=self._managers.state if self._managers else None))
+        elif path == "/api/managers" and method == "POST":
+            await self._answer(writer, HTTP_201, lambda: managers_api.create_manager(projects.json_object(body)))
+        elif (m := self._RE_MANAGER.match(path)) and method == "PUT":
+            await self._answer(writer, HTTP_200, lambda: managers_api.update_manager(
+                m.group(1), projects.json_object(body)))
+        elif (m := self._RE_MANAGER.match(path)) and method == "DELETE":
+            await self._answer(writer, HTTP_200, lambda: managers_api.delete_manager(m.group(1)))
+        elif (m := self._RE_MANAGER_TEMPLATE.match(path)) and method == "PUT":
+            await self._answer(writer, HTTP_200, lambda: managers_api.put_template(
+                m.group(1), m.group(2), projects.json_object(body)))
+        elif (m := self._RE_MANAGER_TEMPLATE.match(path)) and method == "DELETE":
+            await self._answer(writer, HTTP_200, lambda: managers_api.delete_template(m.group(1), m.group(2)))
         elif (m := self._RE_PROJECT_ROLE_SETTINGS.match(path)) and method == "PUT":
             await self._handle_agent_settings(writer, lambda: self._write_layer(
                 body, lambda data: agent_settings.update_project(m.group(1), data, role=m.group(2))))
@@ -753,14 +775,20 @@ class AgentHTTPServer:
         if self._room_ops is not None and self._room_ops.claims(headers.get("authorization")):
             await self._handle_room_api(method, path, headers, body, writer)
             return
-        ops = self._manager_ops
-        if ops is None or not ops.authorized(headers.get("authorization")):
-            if ops is not None:
-                ops.refuse(path)
+        authorization = headers.get("authorization")
+        ops = self._managers.ops_for(authorization) if self._managers is not None else self._manager_ops
+        if ops is None or not ops.authorized(authorization):
+            # With a fleet the token is nobody's (unknown, or a stopped Manager's): no Manager's turn is touched.
+            if self._managers is None and self._manager_ops is not None:
+                self._manager_ops.refuse(path)
+            ops = None
             writer.write(_json_response(HTTP_401, {"error": "this endpoint is the Manager's: a valid token is "
                                                             "required"}))
         elif path == f"{AGENT_API}tools" and method == "GET":
-            writer.write(_json_response(HTTP_200, {"tools": ops.listing()}))
+            try:
+                writer.write(_json_response(HTTP_200, {"tools": await ops.current_listing()}))
+            except OpError as exc:
+                writer.write(_json_response(HTTP_503, {"error": str(exc)}))
         elif (m := _RE_AGENT_OP.match(path)) and method == "POST":
             try:
                 arguments = json.loads(body.decode("utf-8")) if body.strip() else {}
@@ -913,8 +941,14 @@ class AgentHTTPServer:
             "checks": await self._checks_now(),
             "can_sign_out": self._can_sign_out(headers),
         }
-        if self._manager_ops is not None:
+        if self._managers is not None:
             # Whether tool calls are refused by their turn binding, and the mismatches seen (chat-stop-v2 §10).
+            status["turn_binding"] = self._managers.binding_report()
+            status["managers"] = [
+                {"id": agent.agent_id, "name": agent.name, **self._managers.state(agent.agent_id),
+                 "turn_binding": self._managers.ops(agent.agent_id).binding_report()}
+                for agent in self._managers.agents() if self._managers.ops(agent.agent_id) is not None]
+        elif self._manager_ops is not None:
             status["turn_binding"] = self._manager_ops.binding_report()
         writer.write(_json_response(HTTP_200, status))
         await writer.drain()
@@ -922,7 +956,8 @@ class AgentHTTPServer:
     async def _handle_overview(self, writer: asyncio.StreamWriter) -> None:
         try:
             result = await overview.build_overview(task_router=self._task_router, worker_pool=self._worker_pool,
-                                                   manager=self._manager, supervisor=self._supervisor)
+                                                   manager=self._manager, supervisor=self._supervisor,
+                                                   managers=self._managers)
         except Exception:
             logger.exception("DB unavailable for the overview")
             writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
@@ -967,6 +1002,8 @@ class AgentHTTPServer:
             tasks = page[:limit]
             counts = await db_tasks.count_by_status(**filters)
             costs = await task_costs([t["id"] for t in tasks])
+            from ..db import managers as db_managers
+            manager_names = {m["id"]: m["name"] for m in await db_managers.list_managers(include_deleted=True)}
             result = []
             for t in tasks:
                 result.append({
@@ -977,6 +1014,11 @@ class AgentHTTPServer:
                     "project_id": t.get("project_id", ""),
                     "project_name": t.get("project_name", ""),
                     "work_dir": t.get("work_dir", ""),
+                    # The Manager the task belongs to.
+                    "manager_id": t.get("manager_id") or "manager",
+                    "manager_name": manager_names.get(t.get("manager_id") or "manager"),
+                    # The task template it came from, as it said then (null for none).
+                    "template": t.get("template"),
                     "status": t.get("status", "pending"),
                     "group": task_group(t.get("status")).value,
                     "phase": t.get("phase", "pending"),
@@ -1011,6 +1053,19 @@ class AgentHTTPServer:
         except ValueError as exc:
             raise projects.RequestError(HTTP_400, str(exc)) from None
 
+    def _stop_agent(self, message_id: str) -> Any:
+        """The Manager whose turn answers ``message_id`` (the default one when none does)."""
+        if self._managers is None:
+            return self._manager
+        found = self._managers.turn_for(message_id)
+        return found[0] if found is not None else self._managers.default
+
+    def _manager_for(self, manager_id: str | None) -> Any:
+        """The running Manager ``manager_id`` (the default one without it); None when it is not running."""
+        if self._managers is None:
+            return self._manager
+        return self._managers.get(manager_id or "manager")
+
     async def _handle_chat_stop(self, body: bytes, writer: asyncio.StreamWriter) -> None:
         if not chat_settings.stop_enabled():
             writer.write(_json_response(HTTP_409, {
@@ -1026,12 +1081,12 @@ class AgentHTTPServer:
             response = _json_response(HTTP_400, {"error": "invalid JSON body"})
         elif not isinstance(message_id, str) or not message_id.strip():
             response = _json_response(HTTP_400, {"error": "message_id is required"})
-        elif self._manager is None:
+        elif (agent := self._stop_agent(message_id)) is None:
             response = _json_response(HTTP_503, {"error": "the Manager is not running"})
         else:
-            result = await self._manager.stop_turn(message_id, via="web")
+            result = await agent.stop_turn(message_id, via="web")
             if result.value in ("stopping", "already_stopping"):
-                current = self._manager.turn_for(message_id)
+                current = agent.turn_for(message_id)
                 method = current.method if current is not None else None
                 found = current.stop.phase if current is not None and current.stop is not None else None
                 phase = found if found is not None else (current.phase if current is not None else None)
@@ -1049,10 +1104,14 @@ class AgentHTTPServer:
         session_id = query.get("session_id", "")
         if not session_id:
             response = _json_response(HTTP_400, {"error": "session_id is required"})
-        elif self._manager is None:
+        elif self._managers is None and self._manager is None:
             response = _json_response(HTTP_503, {"error": "the Manager is not running"})
         else:
-            current = self._manager.current_turn_for("web", session_id)
+            agent = self._manager
+            if self._managers is not None:
+                from ..db import managers as db_managers
+                agent = self._managers.get(await db_managers.thread_owner(session_id) or "manager")
+            current = None if agent is None else agent.current_turn_for("web", session_id)
             response = _json_response(HTTP_200, {"turn": None if current is None else {
                 "message_id": current.message_id, "client_message_id": current.client_message_id,
                 "channel": current.channel, "started_at": current.received_at.isoformat(), "state": current.phase.value,
@@ -1077,7 +1136,7 @@ class AgentHTTPServer:
             return
 
         try:
-            target = resolve_chat_target(data.get("target"), self._task_router)
+            target = await resolve_chat_target(data.get("target"), self._task_router, self._managers)
         except ChatTargetError as exc:
             writer.write(_json_response(exc.status, {"error": str(exc)}))
             await writer.drain()
@@ -1085,7 +1144,7 @@ class AgentHTTPServer:
 
         new_session_profile_id = data.get("new_session_profile_id")
         if new_session_profile_id is not None:
-            if target != MANAGER_ADDRESS or not is_new_session_command(text):
+            if target.agent_type != "manager" or not is_new_session_command(text):
                 writer.write(_json_response(
                     HTTP_400, {"error": "new_session_profile_id goes only with /new to the Manager"}))
                 await writer.drain()
@@ -1099,6 +1158,12 @@ class AgentHTTPServer:
 
         session_id = data.get("session_id", "")
         message_id = data.get("message_id", "")
+        if target.agent_type == "manager" and session_id and self._managers is not None:
+            owner = await self._thread_owner_for_send(session_id, target.agent_id)
+            if owner != target.agent_id:
+                writer.write(await self._foreign_thread(owner))
+                await writer.drain()
+                return
         # A message to a task's Planner is a supplement to the task, stored before the Planner gets it, so it is
         # not lost when the Planner is busy and the server restarts first.
         supplement_id = await projects.store_chat_supplement(target, text)
@@ -1127,17 +1192,61 @@ class AgentHTTPServer:
         writer.write(_json_response(HTTP_200, result))
         await writer.drain()
 
-    async def _handle_manager_session(self, writer: asyncio.StreamWriter) -> None:
-        if self._manager is None:
-            writer.write(_json_response(HTTP_503, {"error": "the Manager is not running"}))
+    async def _foreign_thread(self, owner: str) -> bytes:
+        """The 409 for a thread of Manager ``owner`` asked for under another Manager: whose it is, by name."""
+        from ..db import managers as db_managers
+        running = self._managers.get(owner) if self._managers is not None else None
+        row = None if running is not None else await db_managers.get_manager(owner, include_deleted=True)
+        name = running.name if running is not None else row["name"] if row and row.get("deleted_at") is None else None
+        error = (f"this conversation belongs to Manager {name}: open it there or start a new one" if name is not None
+                 else "this conversation belongs to a deleted Manager: start a new one")
+        return _json_response(HTTP_409, {"error": error, "manager_id": owner})
+
+    async def _thread_owner_elsewhere(self, session_id: str, manager_id: str) -> str | None:
+        """The Manager other than ``manager_id`` that thread ``session_id`` belongs to (an old thread, with messages
+        and no row, is the default Manager's); None for its own thread or a new one (no row, no messages)."""
+        from ..db import chat as db_chat
+        owner = await db_chat.thread_owner(session_id)
+        if owner is None and await db_chat.has_messages(session_id):
+            owner = "manager"
+        return owner if owner is not None and owner != manager_id else None
+
+    async def _thread_owner_for_send(self, session_id: str, wanted: str) -> str:
+        """The Manager that owns the thread, claiming it for ``wanted`` when it is new; an old thread (messages, no
+        row) is the default Manager's."""
+        from ..db import chat as db_chat
+        owner = await db_chat.thread_owner(session_id)
+        if owner is None:
+            owner = await db_chat.claim_thread(
+                session_id, "manager" if await db_chat.has_messages(session_id) else wanted)
+        return owner
+
+    def _no_running_manager(self, manager_id: str | None) -> bytes:
+        if self._managers is not None and self._managers.get(manager_id or "manager") is None:
+            return _json_response(HTTP_404, {"error": f"no running Manager '{manager_id or 'manager'}'"})
+        return _json_response(HTTP_503, {"error": "the Manager is not running"})
+
+    async def _handle_manager_session(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
+        manager_id = query.get("manager") or None
+        agent = self._manager_for(manager_id)
+        if agent is None:
+            writer.write(self._no_running_manager(manager_id))
         else:
-            writer.write(_json_response(HTTP_200, await self._manager.session_view()))
+            writer.write(_json_response(HTTP_200, await agent.session_view()))
         await writer.drain()
 
     async def _handle_manager_session_profile(self, body: bytes, writer: asyncio.StreamWriter) -> None:
         """Choose the Agent Profile of the Manager's session (``profile_id`` null: follow the Settings)."""
-        if self._manager is None:
-            writer.write(_json_response(HTTP_503, {"error": "the Manager is not running"}))
+        manager_id = None
+        try:
+            parsed = json.loads(body.decode("utf-8"))
+            if isinstance(parsed, dict) and isinstance(parsed.get("manager"), str):
+                manager_id = parsed["manager"]
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+        agent = self._manager_for(manager_id)
+        if agent is None:
+            writer.write(self._no_running_manager(manager_id))
             await writer.drain()
             return
         try:
@@ -1147,7 +1256,7 @@ class AgentHTTPServer:
             profile_id = data["profile_id"]
             if profile_id is not None and not isinstance(profile_id, str):
                 raise ValueError("profile_id must be a string or null")
-            result = await self._manager.select_session_profile(
+            result = await agent.select_session_profile(
                 profile_id, via="api",
                 origin={"channel": "web", "chat": None, "sender": "dashboard", "group": False})
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -1156,22 +1265,37 @@ class AgentHTTPServer:
             writer.write(_json_response(HTTP_400, {"error": str(exc)}))
         else:
             writer.write(_json_response(
-                HTTP_200, {**await self._manager.session_view(), "effect": result.effect.value, "text": result.text}))
+                HTTP_200, {**await agent.session_view(), "effect": result.effect.value, "text": result.text}))
         await writer.drain()
 
     async def _handle_chat_targets(self, writer: asyncio.StreamWriter) -> None:
         """The Manager, then each recent task's Planner and step agents (finished ones too)."""
-        targets = await list_chat_targets(self._task_router)
+        managers = None if self._managers is None else [
+            {"id": a.agent_id, "name": a.name} for a in self._managers.agents()]
+        targets = await list_chat_targets(self._task_router, managers=managers)
         writer.write(_json_response(HTTP_200, {"targets": _serialize(targets)}))
         await writer.drain()
 
     async def _handle_chat_sessions(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
         """The Manager's conversations on every channel, newest first, for the Chat page's conversation list (with
-        ``session_id``, only that one, however old, so a link to it opens it); a failed read is a 500, so the page
-        shows it rather than an empty list."""
+        ``session_id``, only that one, however old, so a link to it opens it, and a 409 naming its Manager when it is
+        another Manager's; none for a new thread); a failed read is a 500, so the page shows it rather than an empty
+        list."""
+        manager_id = query.get("manager") or "manager"
         try:
             from ..db.chat import list_sessions
-            sessions = await list_sessions(session_id=query.get("session_id") or None)
+            if manager_id != "manager":
+                from ..db import managers as db_managers
+                if await db_managers.get_manager(manager_id) is None:
+                    writer.write(_json_response(HTTP_404, {"error": f"no Manager '{manager_id}'"}))
+                    await writer.drain()
+                    return
+            if query.get("session_id") and (
+                    owner := await self._thread_owner_elsewhere(query["session_id"], manager_id)):
+                writer.write(await self._foreign_thread(owner))
+                await writer.drain()
+                return
+            sessions = await list_sessions(session_id=query.get("session_id") or None, manager_id=manager_id)
             writer.write(_json_response(HTTP_200, {"sessions": _serialize(sessions)}))
         except Exception as exc:
             logger.warning("failed to list chat sessions", exc_info=True)
@@ -1188,6 +1312,11 @@ class AgentHTTPServer:
             await writer.drain()
             return
         try:
+            # With ``manager``, a thread of another Manager is a 409 naming it, never its messages.
+            if query.get("manager") and (owner := await self._thread_owner_elsewhere(session_id, query["manager"])):
+                writer.write(await self._foreign_thread(owner))
+                await writer.drain()
+                return
             from ..db.chat import list_messages
             messages = await list_messages(session_id)
             writer.write(_json_response(HTTP_200, {"messages": _serialize(messages)}))
@@ -1564,6 +1693,9 @@ class AgentHTTPServer:
             overrides = await profile_overrides(task_id) if raw else {}
             versions = await requirement_versions(task_id) if raw else []
             actions = await manager_actions(task_id) if raw else []
+            from ..db import managers as db_managers
+            owner = (await db_managers.get_manager(raw.get("manager_id") or "manager", include_deleted=True)
+                     if raw else None)
             agents = await projects.agents_view(raw) if raw else None
             roles = await roles_view(task_id, raw.get("steps", [])) if raw else None
             gates = await gate_service.gates_view(task_id) if raw else []
@@ -1604,6 +1736,10 @@ class AgentHTTPServer:
                             for entry in raw.get("journal", []) if entry.get("kind") == "supplement"],
             # What the Manager did to the task through its tools, or asked the user to confirm, newest first.
             "manager_actions": actions,
+            # The Manager the task belongs to, and the task template it was created from (as it said then), or null.
+            "manager_id": raw.get("manager_id") or "manager",
+            "manager_name": owner["name"] if owner else None,
+            "template": raw.get("template"),
             "goal_id": raw.get("goal_id", ""),
             "project_id": raw.get("project_id", ""),
             "project_name": raw.get("project_name", ""),

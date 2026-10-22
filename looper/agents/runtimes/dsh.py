@@ -948,12 +948,13 @@ class DshMcpConfig:
     omissions: tuple[dict[str, str], ...] = ()
 
 
-def _platform_tools(role: str) -> dict[str, Any]:
+def _platform_tools(role: str, manager_tools: Sequence[str] | None = None) -> dict[str, Any]:
     from ..ops import planner, room, service, vault
     from ..room import MemberKind
 
     if role == "manager":
-        required = allowed = {tool.name for tool in service.MANAGER_TOOLS}
+        required = allowed = set(manager_tools) if manager_tools is not None else {
+            tool.name for tool in service.MANAGER_TOOLS}
         groups = []
     elif role == "planner":
         required = {tool.name for tool in planner.TOOLS}
@@ -1007,7 +1008,7 @@ def mcp_config(library: AgentLibrary, *, role: str | None = None, read_only: boo
     values: dict[str, str] = {}
     translated = []
     omissions = []
-    platform = _platform_tools(role) if role is not None else None
+    platform = _platform_tools(role, library.manager_tools) if role is not None else None
     for index, (name, server) in enumerate(sorted(servers.items(), key=lambda item: item[0] != "looper")):
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name) or not isinstance(server, dict):
             raise RuntimeUnsupported("DSH MCP server has an invalid name or configuration")

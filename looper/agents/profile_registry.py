@@ -758,13 +758,14 @@ async def check_selection(profile_id: str, roles: Iterable[str]) -> AgentProfile
 
 async def _selected_roles(profile_id: str, conn: Any = None) -> list[str]:
     """Every role ``profile_id`` is selected for, by a layer or a task."""
-    from ..db import agent_sessions, agent_setting_layers
+    from ..db import agent_sessions, agent_setting_layers, managers as db_managers
 
     roles: set[str] = set()
     for scope, role in await agent_setting_layers.selected_roles(profile_id, pool=conn):
         roles.update(_SCOPE_ROLES.get(scope, (role,)))
-    if await agent_sessions.selects_profile("manager", profile_id, pool=conn):
+    if await agent_sessions.manager_sessions_selecting(profile_id, pool=conn):
         roles.add("manager")
+    roles |= await db_managers.template_profile_roles(profile_id, pool=conn)
     return [role for role in runtimes.ROLE_CAPABILITIES if role in roles]
 
 
@@ -993,7 +994,8 @@ def profile_warnings(profile: LegacyAgentProfile) -> list[str]:
 
 # Where nothing selects a profile.
 NOT_USED: Mapping[str, Any] = {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": [],
-                                "manager_session": False}
+                                "manager_session": False, "manager_sessions": [], "managers": [],
+                                "manager_templates": []}
 
 
 def _cost_profile(row: Mapping[str, Any], models: Iterable[Mapping[str, Any]] = ()) -> LegacyAgentProfile:
@@ -1049,7 +1051,11 @@ def usage_text(used_by: Mapping[str, Any]) -> str:
         parts.append(f"{count} {'schedule' if count == 1 else 'schedules'}")
     parts += [f"the profiles the Planners of project {name!r} may choose" for name in used_by.get("allowed_in") or ()]
     if used_by.get("manager_session"):
-        parts.append("the Manager's current session")
+        ids = used_by.get("manager_sessions") or ["manager"]
+        parts.append("the Manager's current session" if ids == ["manager"]
+                     else f"the current session of Manager(s) {', '.join(ids)}")
+    parts += [f"Manager {name}" for name in used_by.get("managers") or ()]
+    parts += [f"template {label.replace(' of ', ' of Manager ', 1)}" for label in used_by.get("manager_templates") or ()]
     return ", ".join(parts)
 
 
@@ -1067,13 +1073,14 @@ def _limits() -> dict[str, Any]:
     }
 
 
-async def registry_view(*, server_claude: str = "claude") -> dict[str, Any]:
-    """Runtime/vendor types and saved runtimes, accounts, models and profiles, with usage counts."""
+async def registry_view(*, server_claude: str = "claude", manager_id: str | None = None) -> dict[str, Any]:
+    """Runtime/vendor types and saved runtimes, accounts, models and profiles, with usage counts; with
+    ``manager_id``, the usage only of that Manager's own tasks, session, profile and templates."""
     from ..db import profile_registry as db
 
     from .runtimes.pricing import BUILTIN_PRICES, PRICE_SOURCES, PRICES_AS_OF
 
-    uses = await db.profile_usage()
+    uses = await db.profile_usage(manager_id=manager_id)
     providers = await db.list_providers()
     logins = await _logins(providers)
     models = await db.list_models()
@@ -1512,9 +1519,9 @@ async def _parts(runtime_id: Any, model_id: Any, conn: Any) -> tuple[RuntimeSpec
     return runtime_spec(runtime), _resolved_model(row)
 
 
-async def create_profile(data: Any) -> dict[str, Any]:
+async def create_profile(data: Any, *, manager_id: str | None = None) -> dict[str, Any]:
     """Register a profile (agent teams on for Claude Code); refuse settings
-    its runtime cannot run."""
+    its runtime cannot run. ``manager_id``: the answer's usage as ``registry_view``'s."""
     import asyncpg
 
     from ..db import profile_registry as db
@@ -1536,15 +1543,16 @@ async def create_profile(data: Any) -> dict[str, Any]:
             profile_id = await db.insert_profile(fields, pool=conn)
     except asyncpg.UniqueViolationError:
         raise RegistryConflict(f"an Agent Profile named {fields['name']!r} already exists") from None
-    return await _profile_answer(profile_id)
+    return await _profile_answer(profile_id, manager_id=manager_id)
 
 
-async def _profile_answer(profile_id: str) -> dict[str, Any]:
-    """The profile, and what registering it as it is should warn about (``profile_warnings``)."""
+async def _profile_answer(profile_id: str, *, manager_id: str | None = None) -> dict[str, Any]:
+    """The profile, and what registering it as it is should warn about (``profile_warnings``); with
+    ``manager_id``, its usage only of that Manager's own (``registry_view``)."""
     from ..db import profile_registry as db
 
     row = await _existing_profile(profile_id)
-    uses = await db.profile_usage(profile_id)
+    uses = await db.profile_usage(profile_id, manager_id=manager_id)
     models = await db.list_models(provider_id=row["provider"]["id"])
     return {"profile": profile_view(row, uses.get(profile_id, NOT_USED), models),
             "warnings": profile_warnings(_cost_profile(row, models))}
@@ -1558,8 +1566,8 @@ async def profile_views(rows: Mapping[str, Mapping[str, Any]]) -> dict[str, dict
     return {key: profile_view(row, models=models) for key, row in rows.items()}
 
 
-async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
-    """Change an Agent Profile; the result is checked like a new one."""
+async def update_profile(profile_id: str, data: Any, *, manager_id: str | None = None) -> dict[str, Any]:
+    """Change an Agent Profile; the result is checked like a new one. ``manager_id``: as ``create_profile``'s."""
     import asyncpg
 
     from ..db import profile_registry as db
@@ -1601,7 +1609,7 @@ async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
             await db.update_profile(profile_id, fields, pool=conn)
     except asyncpg.UniqueViolationError:
         raise RegistryConflict(f"an Agent Profile named {fields['name']!r} already exists") from None
-    return await _profile_answer(profile_id)
+    return await _profile_answer(profile_id, manager_id=manager_id)
 
 
 async def deletable_profile(profile_id: str) -> dict[str, Any]:

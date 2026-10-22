@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle } from "lucide-react";
 import { SELECT } from "@/components/registry-ui";
 import {
@@ -71,19 +71,32 @@ export function ManagerSessionProfileView({
   );
 }
 
-export function ManagerSessionProfile({ refreshKey = 0 }: { refreshKey?: number }) {
+export function ManagerSessionProfile({ refreshKey = 0, managerId = "manager" }: { refreshKey?: number; managerId?: string }) {
   const [view, setView] = useState<SessionView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // The Manager the view was asked for; a late answer for another one is dropped.
+  const managerRef = useRef(managerId);
+  managerRef.current = managerId;
+
   const load = useCallback(async () => {
+    const requested = managerId;
     try {
-      setView(await fetchManagerSession());
+      const next = await fetchManagerSession(requested);
+      if (managerRef.current !== requested) return;
+      setView(next);
       setError(null);
     } catch (e) {
+      if (managerRef.current !== requested) return;
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, []);
+  }, [managerId]);
+
+  useEffect(() => {
+    setView(null);
+    setError(null);
+  }, [managerId]);
 
   useEffect(() => {
     load();
@@ -102,7 +115,7 @@ export function ManagerSessionProfile({ refreshKey = 0 }: { refreshKey?: number 
     if (text !== null && !confirm(text)) return;
     setBusy(true);
     try {
-      await setManagerSessionProfile(profileId);
+      await setManagerSessionProfile(profileId, managerId);
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

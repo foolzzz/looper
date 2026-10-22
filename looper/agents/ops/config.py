@@ -52,14 +52,14 @@ async def answered(request: Awaitable[T]) -> T:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
 
 
-async def project_named(raw: Any) -> dict[str, Any]:
+async def project_named(raw: Any, *, manager_id: str | None = None) -> dict[str, Any]:
     """The project of that name (ignoring case), with its counts; refuses an unknown one."""
     try:
         name = project_name(raw)
     except ValueError as exc:
         raise OpError(ErrorCode.INVALID, f"project: {exc}") from None
     row = await db_projects.find_project_by_name(name)
-    project = await db_projects.get_project(row["id"]) if row is not None else None
+    project = await db_projects.get_project(row["id"], manager_id=manager_id) if row is not None else None
     if project is None:
         raise OpError(ErrorCode.NOT_FOUND, f"no project named {name!r}; the Projects line before the message lists "
                                            "them")
@@ -106,20 +106,38 @@ def _project_listed(view: Mapping[str, Any]) -> dict[str, Any]:
 async def _projects(call: Call) -> dict[str, Any]:
     arguments, action = call.arguments, call.arguments["action"]
     if action == "list":
-        return {"projects": [_project_listed(p) for p in (await projects.list_projects())["projects"]]}
+        listed = await projects.list_projects(manager_id=call.manager_id if call.scoped else None)
+        return {"projects": [_project_listed(p) for p in listed["projects"]]}
     if action == "create":
         _required(arguments, action, "name")
         fields = {"name": arguments["name"], **_given(arguments, ("work_dir", "background"))}
         return {"project": await answered(projects.create_project(fields))}
     _required(arguments, action, "project")
-    project = await project_named(arguments["project"])
+    project = await project_named(arguments["project"], manager_id=call.manager_id if call.scoped else None)
     if action == "get":
         return {"project": projects.project_view(project)}
     if action == "update":
         fields = _given(arguments, ("name", "work_dir", "background"))
-        return {"project": await answered(projects.update_project(project["id"], fields))}
-    await answered(projects.delete_project(project["id"]))
+        return {"project": await answered(projects.update_project(
+            project["id"], fields, manager_id=call.manager_id if call.scoped else None))}
+    await _unused(call, projects.delete_project(project["id"]), project)
     return {"deleted": project["name"]}
+
+
+async def _unused(call: Call, request: Awaitable[T], project: Mapping[str, Any]) -> T:
+    """``request``, a deletion checked against every task, schedule and template; a scoped Manager is refused
+    without learning of anyone else's (``project`` carries its own task count): only its own tasks are counted."""
+    try:
+        return await answered(request)
+    except OpError as exc:
+        if exc.code is not ErrorCode.CONFLICT or not call.scoped:
+            raise
+        own = project["task_count"]
+        raise OpError(ErrorCode.CONFLICT,
+                      f"project {project['name']!r} still has {own} {'task' if own == 1 else 'tasks'} of this "
+                      "Manager; move or delete them first" if own else
+                      f"project {project['name']!r} is still used outside this Manager: it cannot be deleted from "
+                      "here") from None
 
 
 async def _deleting_project(call: Call) -> str | None:
@@ -127,7 +145,8 @@ async def _deleting_project(call: Call) -> str | None:
     if call.arguments["action"] != "delete":
         return None
     _required(call.arguments, "delete", "project")
-    project = await answered(projects.deletable_project((await project_named(call.arguments["project"]))["id"]))
+    named = await project_named(call.arguments["project"], manager_id=call.manager_id if call.scoped else None)
+    project = await _unused(call, projects.deletable_project(named["id"]), named)
     return (f"要删除项目「{project['name']}」（默认目录：{project['work_dir'] or '没有'}）吗？它没有任务和定时任务。它的 "
             "Agent 设置、规划者可选的 Agent Profile 列表、技能和 MCP 的安装、项目知识和它自己写的技能会一起删除，不能恢复；"
             "目录里的文件不受影响。")
@@ -156,8 +175,22 @@ def _provider_listed(view: Mapping[str, Any]) -> dict[str, Any]:
     return listed
 
 
-async def _registry() -> dict[str, Any]:
-    return await profile_registry.registry_view()
+async def _registry(call: Call | None = None) -> dict[str, Any]:
+    return await profile_registry.registry_view(manager_id=call.manager_id if call and call.scoped else None)
+
+
+async def _unshared(call: Call, request: Awaitable[T], profile: Mapping[str, Any]) -> T:
+    """``request``, a deletion checked against every reference; a scoped Manager is refused without learning of
+    anyone else's: only its own usage is spelled out."""
+    try:
+        return await answered(request)
+    except OpError as exc:
+        if exc.code is not ErrorCode.CONFLICT or not call.scoped:
+            raise
+        own = profile_registry.usage_text(profile["used_by"])
+        raise OpError(ErrorCode.CONFLICT,
+                      f"Agent Profile {profile['name']!r} is still selected" + (f" by {own} and" if own else "")
+                      + " elsewhere, outside this Manager: select another profile there first") from None
 
 
 def _profile(registry: Mapping[str, Any], wanted: Any) -> dict[str, Any]:
@@ -181,7 +214,7 @@ def _profile_answer(answer: Mapping[str, Any]) -> dict[str, Any]:
 
 async def _profiles(call: Call) -> dict[str, Any]:
     arguments, action = call.arguments, call.arguments["action"]
-    registry = await _registry()
+    registry = await _registry(call)
     if action == "list":
         return {"profiles": [_profile_listed(p) for p in registry["profiles"]],
                 "runtimes": [{"runtime_id": r["runtime_id"], "name": r["name"], "type": r["type"], "roles": r["roles"]}
@@ -197,10 +230,12 @@ async def _profiles(call: Call) -> dict[str, Any]:
     if action in ("create", "update"):
         fields = {**_given(arguments, ("name", "effort", "agent_teams", "custom_prompt"), clears=("effort",)),
                   **await _profile_parts(registry, arguments)}
+        manager_id = call.manager_id if call.scoped else None
         if action == "create":
-            return _profile_answer(await answered(profile_registry.create_profile(fields)))
-        return _profile_answer(await answered(profile_registry.update_profile(profile["profile_id"], fields)))
-    await answered(profile_registry.delete_profile(profile["profile_id"]))
+            return _profile_answer(await answered(profile_registry.create_profile(fields, manager_id=manager_id)))
+        return _profile_answer(await answered(profile_registry.update_profile(profile["profile_id"], fields,
+                                                                              manager_id=manager_id)))
+    await _unshared(call, profile_registry.delete_profile(profile["profile_id"]), profile)
     return {"deleted": profile["name"]}
 
 
@@ -209,8 +244,8 @@ async def _deleting_profile(call: Call) -> str | None:
     if call.arguments["action"] != "delete":
         return None
     _required(call.arguments, "delete", "profile")
-    profile = _profile(await _registry(), call.arguments["profile"])
-    row = await answered(profile_registry.deletable_profile(profile["profile_id"]))
+    profile = _profile(await _registry(call), call.arguments["profile"])
+    row = await _unshared(call, profile_registry.deletable_profile(profile["profile_id"]), profile)
     effort = f" · effort {row['effort']}" if row.get("effort") else ""
     return (f"要删除 Agent Profile「{row['name']}」（{row['runtime_name']} · {row['provider']['name']} · "
             f"{row['model']['name']} · {row['model']['protocol']}"
@@ -418,11 +453,14 @@ async def _costs(call: Call) -> dict[str, Any]:
                         "by_model splits those runs by model and adds up to it; manager_by_model is the Manager's turns "
                         "about the task, which neither cost_usd nor the task's spend cap counts"}
     since, until = _range(arguments)
-    project = await project_named(arguments["project"]) if arguments.get("project") is not None else None
+    manager_id = call.manager_id if call.scoped else None
+    project = (await project_named(arguments["project"], manager_id=manager_id)
+               if arguments.get("project") is not None else None)
     project_id = project["id"] if project else None
     answer: dict[str, Any] = {"since": since, "until": until, **({"project": project["name"]} if project else {}),
-                              "total": await db_llm_records.spend_since(since, until=until, project_id=project_id)}
-    tasks = await db_llm_records.task_spend(since, until, project_id=project_id)
+                              "total": await db_llm_records.spend_since(since, until=until, project_id=project_id,
+                                                                        manager_id=manager_id)}
+    tasks = await db_llm_records.task_spend(since, until, project_id=project_id, manager_id=manager_id)
     if project is not None:
         answer["tasks"] = [{key: row[key] for key in ("task_id", "name", "provider_priced_usd", "equivalent_usd",
                                                      "runs")} for row in tasks[:COST_TASKS_LISTED]]

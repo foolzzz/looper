@@ -110,9 +110,10 @@ class Look:
     runtime_root: Path | None = None  # the server's, where a configuration export is written
     registry_before: dict[str, Any] | None = None
     runs_since: int = 0  # the Manager's newest run record before the dialog (the session-profile dialogs only)
+    manager_id: str | None = None  # a scenario Manager's agent id: only its trail rows count
 
     def actions(self) -> list[dict[str, Any]]:
-        return _trail(self.database_url, self.since)
+        return _trail(self.database_url, self.since, self.manager_id)
 
     def detail(self, task_id: str | None = None) -> dict[str, Any]:
         return self.api.get(f"/api/tasks/{task_id or self.task}")
@@ -156,6 +157,7 @@ class Dialog:
     gate: bool = False  # the running task has a gate GATE_LABEL waiting for the user (``open_gate``)
     # What the dialog's server holds first, made through the API: (the API, the dialog's project id).
     seed: Callable[[Api, str], None] | None = None
+    manager: str | None = None  # the key of the scenario Manager the dialog talks to (its seed creates it)
     tags: tuple[str, ...] = field(default=())
 
 
@@ -163,6 +165,18 @@ class Dialog:
 GATE_LABEL = "g1"
 GATE_TOPIC = "数据库选型"
 GATE_QUESTION = "存储用 PostgreSQL 还是 SQLite？"
+
+
+TEMPLATE_PR_URL = "https://github.com/octo-org/octo-repo/pull/42"
+REVIEW_EXAMPLE = Path(__file__).resolve().parents[2] / "docs" / "examples" / "manager-github-pr-review.json"
+
+
+def _seed_review_manager(api: Api, project_id: str) -> None:
+    """The example Manager and its pr_review template (bound to the dialog's project), through the API."""
+    example = json.loads(REVIEW_EXAMPLE.read_text(encoding="utf-8"))
+    api.post("/api/managers", example["manager"])
+    api.put(f"/api/managers/manager-{example['manager']['key']}/templates/pr_review",
+            {**example["templates"]["pr_review"], "project_id": project_id})
 
 
 def _writes(look: Look, *, status: str | None = None, tool: str | None = None) -> list[dict[str, Any]]:
@@ -197,6 +211,54 @@ def _raw_json(reply: str) -> str | None:
 
 def _restated_and_asked(look: Look) -> str | None:
     return _raw_json(look.reply) or _asked_for_the_project(look)
+
+
+def _asked_to_confirm_template(look: Look) -> str | None:
+    found = _raw_json(look.reply)
+    if found:
+        return found
+    if look.new_tasks():
+        return "a task was created before the user confirmed"
+    if _writes(look, status="ok"):
+        return f"the Manager changed something: {[a['tool'] for a in _writes(look, status='ok')]}"
+    if look.fake:  # the stand-in's canned reply cannot carry the contract
+        return None
+    if "pull/42" not in look.reply:
+        return "the reply does not restate the pull request"
+    if not any(word in look.reply.casefold() for word in ("确认", "是否", "要不要", "可以吗", "confirm")):
+        return "the reply does not ask for confirmation"
+    return None
+
+
+def _created_from_template(look: Look) -> str | None:
+    found = _raw_json(look.reply)
+    if found:
+        return found
+    tasks = look.new_tasks()
+    if len(tasks) != 1:
+        return f"{len(tasks)} new task(s), not 1"
+    detail = look.detail(tasks[0]["task_id"])
+    if detail.get("manager_id") != "manager-code-review":
+        return f"the task's manager_id is {detail.get('manager_id')!r}"
+    template = detail.get("template") or {}
+    if template.get("key") != "pr_review":
+        return f"the task's template is {template.get('key')!r}, not pr_review"
+    if TEMPLATE_PR_URL not in json.dumps(template.get("inputs", template), ensure_ascii=False):
+        return "the template input is not the user's link"
+    created = [a for a in _writes(look, status="ok", tool="looper_task_create")
+               if a["arguments"].get("template") == "pr_review"]
+    return None if len(created) == 1 else f"{len(created)} looper_task_create write(s) with template pr_review"
+
+
+def _asked_for_the_link(look: Look) -> str | None:
+    if look.new_tasks():
+        return "a task was created though the user gave no link"
+    if _writes(look, status="ok", tool="looper_task_create"):
+        return "looper_task_create succeeded without a link"
+    if look.fake:
+        return None
+    reply = look.reply.casefold()
+    return None if any(word in reply for word in ("http", "链接", "link")) else "the reply does not ask for a link"
 
 
 def _created_with_a_title(look: Look) -> str | None:
@@ -1220,6 +1282,15 @@ _DEEPSEEK_MODEL = {"action": "create", "provider": "eval-deepseek", "name": "dee
 _DUAL_REFERENCE = {"provider": DUAL_ACCOUNT, "name": DUAL_MODEL, "protocol": "anthropic-messages"}
 
 DIALOGS: tuple[Dialog, ...] = (
+    Dialog("template_review_task", (
+        Say("帮我评审这个 PR：" + TEMPLATE_PR_URL, _asked_to_confirm_template),
+        Say("确认", _created_from_template, (("looper_task_create", {
+            "requirement": "Review it", "title": "PR 42 评审", "template": "pr_review",
+            "inputs": {"pr_url": TEMPLATE_PR_URL}}),)),
+    ), seed=_seed_review_manager, manager="code-review", tags=("manager", "templates")),
+    Dialog("template_missing_input", (
+        Say("帮我评审一个 PR", _asked_for_the_link),
+    ), seed=_seed_review_manager, manager="code-review", tags=("manager", "templates")),
     Dialog("ask_project", (
         Say("帮我写一个 Python 脚本 hello.py，打印 hello。", _asked_for_the_project),
     )),
@@ -1493,14 +1564,15 @@ def select(ids: list[str] | None) -> tuple[Dialog, ...]:
 # --- Running them ---
 
 
-def _trail(database_url: str, since: int) -> list[dict[str, Any]]:
+def _trail(database_url: str, since: int, manager_id: str | None = None) -> list[dict[str, Any]]:
     import asyncpg
 
     async def read() -> list[dict[str, Any]]:
         conn = await asyncpg.connect(database_url)
         try:
             rows = await conn.fetch("SELECT id, tool, risk, status, error_code, confirmation_id, task_id, arguments, "
-                                    "result FROM manager_actions WHERE id > $1 ORDER BY id", since)
+                                    "result FROM manager_actions WHERE id > $1 AND ($2::text IS NULL OR manager_id = $2) "
+                                    "ORDER BY id", since, manager_id)
         finally:
             await conn.close()
         return [{**dict(row), "arguments": json.loads(row["arguments"]),
@@ -1509,8 +1581,8 @@ def _trail(database_url: str, since: int) -> list[dict[str, Any]]:
     return asyncio.run(read())
 
 
-def _last_action(database_url: str) -> int:
-    rows = _trail(database_url, 0)
+def _last_action(database_url: str, agent: str | None = None) -> int:
+    rows = _trail(database_url, 0, agent)
     return int(rows[-1]["id"]) if rows else 0
 
 
@@ -1540,13 +1612,14 @@ class SpendingCap(EvalError):
     """The dialog reached its case allowance."""
 
 
-def _check_manager_run(api: Api, since: int, *, stop: bool = False, withdraw: bool = False) -> None:
+def _check_manager_run(api: Api, since: int, *, stop: bool = False, withdraw: bool = False,
+                       agent_id: str = "manager") -> None:
     """Score only a completed turn; a failed resume followed by a completed retry is recoverable. A turn the user
     stopped (``stop``) must instead be an interrupted run the web chat's stop ended; a message withdrawn right after
     it was sent (``withdraw``) has no run (the model never began), or the same interrupted one."""
     from looper.agents.claude_cli import BUDGET_SUBTYPE
 
-    records = api.get("/api/llm-records", agent_id="manager", limit=500)["records"]
+    records = api.get("/api/llm-records", agent_id=agent_id, limit=500)["records"]
     new = [record for record in records if record["id"] > since
            and not (record.get("metadata") or {}).get("autonomous")]
     if not new and withdraw:
@@ -1579,12 +1652,13 @@ def _check_manager_run(api: Api, since: int, *, stop: bool = False, withdraw: bo
         raise EvalError(f"Manager run {record['id']} {record['status']}: {detail}")
 
 
-def _made_a_tool_call(api: Api, since: int, database_url: str | None, before: int) -> bool:
+def _made_a_tool_call(api: Api, since: int, database_url: str | None, before: int,
+                      agent: str = "manager") -> bool:
     """Whether the Manager's turn has made a tool call: a new row in its action trail, else a running run record
     with a tool event."""
-    if database_url is not None and _trail(database_url, before):
+    if database_url is not None and _trail(database_url, before, agent):
         return True
-    for record in api.get("/api/llm-records", agent_id="manager", limit=50)["records"]:
+    for record in api.get("/api/llm-records", agent_id=agent, limit=50)["records"]:
         if record["id"] > since and record["status"] == "running":
             events = api.get(f"/api/llm-records/{record['id']}/events", after=0, limit=5000)["events"]
             if any(row["event"].get("type") == "assistant" and any(
@@ -1596,17 +1670,21 @@ def _made_a_tool_call(api: Api, since: int, database_url: str | None, before: in
 
 def _ask(api: Api, session: str, text: str, *, timeout: float,
          check_budget: Callable[[], None] | None = None, stop: bool = False, withdraw: bool = False,
-         database_url: str | None = None) -> str:
+         database_url: str | None = None, manager: str | None = None) -> str:
     """Send ``text`` to the Manager in chat ``session`` and wait for its reply; ``ReplyTimeout`` without one.
     With ``stop``, the turn is stopped through the web chat once it has made its first tool call; with
     ``withdraw``, right after the message is sent."""
     message_id = f"m-{uuid.uuid4().hex[:12]}"
     if check_budget is not None:
         check_budget()
-    records = api.get("/api/llm-records", agent_id="manager", limit=1)["records"]
+    agent = f"manager-{manager}" if manager else "manager"
+    records = api.get("/api/llm-records", agent_id=agent, limit=1)["records"]
     since = max((record["id"] for record in records), default=0)
-    before = _last_action(database_url) if database_url is not None else 0
-    api.post("/api/chat/send", {"text": text, "session_id": session, "message_id": message_id})
+    before = _last_action(database_url, agent) if database_url is not None else 0
+    body = {"text": text, "session_id": session, "message_id": message_id}
+    if manager:
+        body["target"] = {"kind": "manager", "id": agent}
+    api.post("/api/chat/send", body)
     if withdraw:  # the message has its turn from its delivery on: the stop finds it wherever it is
         turn = api.get("/api/chat/turn", session_id=session).get("turn")
         if not turn:
@@ -1619,7 +1697,7 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
             raise EvalError("the run was interrupted")
         if check_budget is not None:
             check_budget()
-        if not stopped and _made_a_tool_call(api, since, database_url, before):
+        if not stopped and _made_a_tool_call(api, since, database_url, before, agent):
             # The stop names the Manager's turn (its envelope's id), which the chat's turn endpoint tells.
             turn = api.get("/api/chat/turn", session_id=session).get("turn")
             if turn:
@@ -1629,7 +1707,7 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
             if message.get("message_id") == f"{message_id}:reply":
                 # A chat command such as /profile is answered by Looper itself, without a Manager run.
                 if not text.lstrip().startswith("/"):
-                    _check_manager_run(api, since, stop=stop, withdraw=withdraw)
+                    _check_manager_run(api, since, stop=stop, withdraw=withdraw, agent_id=agent)
                 return str(message.get("content") or "")
         time.sleep(1.0)
     raise ReplyTimeout(f"no reply to {text!r} within {timeout:g} s")
@@ -1812,13 +1890,15 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                 data.setdefault("manager", {})[text] = [[name, json.loads(json.dumps(arguments).replace(
                     "<task>", task or ""))] for name, arguments in say.fake]
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-            before = _last_action(database_url)
+            agent = f"manager-{dialog.manager}" if dialog.manager else "manager"
+            before = _last_action(database_url, agent)
             reply = _ask(api, session, text, timeout=timeout, stop=say.stop, withdraw=say.withdraw,
-                         database_url=database_url, **budget_args)
+                         database_url=database_url, manager=dialog.manager, **budget_args)
             previous = Look(api, task, reply, database_url, since, known, fake=mode == "fake",
-                            runtime_root=runtime_root, registry_before=registry_before, runs_since=runs_since)
+                            runtime_root=runtime_root, registry_before=registry_before, runs_since=runs_since,
+                            manager_id=agent if dialog.manager else None)
             problem = say.check(previous)
-            trail = _trail(database_url, before)
+            trail = _trail(database_url, before, agent)
             calls = [f"{a['tool']}:{a['status']}" + (f" ({a['error_code']})" if a["error_code"] else "")
                      for a in trail]
             # What a refused call was told, and the arguments it came with: what to fix in a tool or its description.

@@ -66,6 +66,7 @@ class Via(str, Enum):
 
     PLANNER = "planner"
     USER = "user"
+    TEMPLATE = "template"
 
 
 class RoleError(ValueError):

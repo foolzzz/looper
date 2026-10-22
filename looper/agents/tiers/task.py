@@ -42,6 +42,7 @@ from ..message import (
     MessageEnvelope,
     MessageType,
     RestartMode,
+    manager_address,
     planner_address,
 )
 from ..task_notice import Notice, NotifyTarget, ends_task, notice_text, notify_channel
@@ -88,6 +89,9 @@ class Task:
     workspace_dir: str = ""
     workspace_mode: str | None = None
     workspace_base: str = ""
+    # The Manager it belongs to, and the web chat thread it was asked in ('' when it was not asked in one).
+    manager_id: str = "manager"
+    origin_thread: str = ""
 
     @classmethod
     def from_row(cls, task_id: str, row: dict[str, Any]) -> Task:
@@ -105,6 +109,8 @@ class Task:
             workspace_dir=row.get("workspace_dir") or "",
             workspace_mode=row.get("workspace_mode"),
             workspace_base=row.get("workspace_base") or "",
+            manager_id=row.get("manager_id") or "manager",
+            origin_thread=row.get("origin_thread") or "",
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -147,6 +153,9 @@ class TaskRouter:
         self._broadcaster = broadcaster
         # Each Planner's own platform tools (``ops.planner.PlannerOps``; set by ``looper serve``); None: it has none.
         self.planner_ops: Any = None
+        # Whether a Manager runs now (``ManagerFleet.is_running``; set by ``looper serve``); None: every one does.
+        self.manager_running: Callable[[str], bool] | None = None
+        self._fallback_warned: set[str] = set()
 
     @property
     def agent_id(self) -> str:
@@ -423,15 +432,34 @@ class TaskRouter:
             correlation_id=envelope.correlation_id, metadata=envelope.metadata,
         ))
 
+    def _manager_for(self, task: Task | None) -> AgentAddress:
+        """Where the task's reports go: its Manager while it runs, else the default Manager."""
+        if task is None:
+            return MANAGER_ADDRESS
+        if self.manager_running is None or self.manager_running(task.manager_id):
+            return manager_address(task.manager_id)
+        if task.manager_id != MANAGER_ADDRESS.agent_id and task.task_id not in self._fallback_warned:
+            self._fallback_warned.add(task.task_id)
+            logger.warning("task %s: Manager %s is not running; its report goes to the default Manager",
+                           task.task_id, task.manager_id)
+        return MANAGER_ADDRESS
+
+    @staticmethod
+    def _report_metadata(envelope: MessageEnvelope, task: Task | None) -> dict[str, Any]:
+        if task is None:
+            return envelope.metadata
+        return {**envelope.metadata, "origin_thread": task.origin_thread, "task_title": task.title}
+
     async def _handle_task_accepted(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
+        task = self._tasks.get(envelope.payload.get("task_id", ""))
         await self._bus.publish(MessageEnvelope.create(
             source=TASK_ROUTER_ADDRESS,
-            target=MANAGER_ADDRESS,
+            target=self._manager_for(task),
             message_type=MessageType.TASK_ACCEPTED,
             payload=envelope.payload,
             correlation_id=envelope.correlation_id,
-            metadata=envelope.metadata,
+            metadata=self._report_metadata(envelope, task),
         ))
 
     async def _handle_planner_status(self, envelope: MessageEnvelope) -> None:
@@ -474,11 +502,11 @@ class TaskRouter:
             payload = {**payload, "notice": notice.payload()}
         await self._bus.publish(MessageEnvelope.create(
             source=TASK_ROUTER_ADDRESS,
-            target=MANAGER_ADDRESS,
+            target=self._manager_for(task),
             message_type=MessageType.GOAL_STATUS,
             payload=payload,
             correlation_id=envelope.correlation_id,
-            metadata=envelope.metadata,
+            metadata=self._report_metadata(envelope, task),
         ))
 
         if ends_task(status):

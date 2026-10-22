@@ -49,17 +49,19 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from ... import child_env
 from .. import chat_settings
-from ...db import manager_actions as db_actions
+from ...db import manager_actions as db_actions, managers as db_managers, tasks as db_tasks
+from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
 from . import Call, ErrorCode, OpError, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from .config import TOOLS as CONFIG_TOOLS
 from .schedules import TOOLS as SCHEDULE_TOOLS
 from .settings import TOOLS as SETTINGS_TOOLS
-from .tasks import TOOLS as TASK_TOOLS
+from .tasks import TOOLS as TASK_TOOLS, task_create_tool
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +104,7 @@ class Platform:
     task_router: Any
     worker_pool: Any = None
     manager: Any = None
+    managers: Any = None  # the Manager fleet; the overview lists every Manager from it
     supervisor: Any = None
     scheduler: Any = None  # a schedule's Run now
     runtime_root: Path | None = None  # where a configuration export is written (``exports/``)
@@ -125,14 +128,70 @@ MANAGER_TOOLS: tuple[Tool, ...] = (*TASK_TOOLS, *CONCURRENCY_TOOLS, *CONFIG_TOOL
                                    CONFIRM)
 
 
+# What a Manager with ``tools = tasks`` has: the task tools, projects (read only) and the confirmation, in
+# MANAGER_TOOLS order.
+TASKS_SCOPE_TOOLS: tuple[Tool, ...] = (*TASK_TOOLS, *(t for t in CONFIG_TOOLS if t.name == "looper_projects"), CONFIRM)
+READ_ONLY_TASKS = frozenset({"looper_projects"})
+_MANAGER_TOOL_NAMES = {tool.name: tool for tool in MANAGER_TOOLS}
+
+
+@dataclass(frozen=True)
+class OpsScope:
+    """What a Manager's calls may do, from its definition (RFC §7): the tools it has, those among them it may only
+    read, whether it sees its own tasks only, and its task policy. ``revision`` is the definition's
+    ``managers.revision`` it was computed from (-1: never compared with the database). The two settings are
+    independent: ``tools`` picks the tools, ``task_scope`` alone sets ``scoped``."""
+
+    manager_id: str
+    revision: int
+    tools: Mapping[str, Tool]
+    read_only: frozenset[str]
+    scoped: bool
+    task_policy: TaskPolicy
+    template_keys: tuple[str, ...] = ()
+
+
+def _tool_map(tools: Sequence[Tool]) -> Mapping[str, Tool]:
+    return MappingProxyType({tool.name: tool for tool in tools})
+
+
+def scope_for(definition: ManagerDefinition, template_keys: Sequence[str] = ()) -> OpsScope:
+    """The scope a Manager definition gives; with templates, ``looper_task_create`` takes ``template`` and
+    ``inputs``."""
+    all_tools = definition.tools is ManagerTools.ALL
+    tools = tuple(task_create_tool(template_keys) if tool.name == "looper_task_create" else tool
+                  for tool in (MANAGER_TOOLS if all_tools else TASKS_SCOPE_TOOLS))
+    return OpsScope(
+        manager_id=definition.id, revision=definition.revision,
+        tools=_tool_map(tools),
+        read_only=frozenset() if all_tools else READ_ONLY_TASKS,
+        scoped=definition.task_scope is TaskScope.OWN, task_policy=definition.task_policy,
+        template_keys=tuple(template_keys),
+    )
+
+
+def _default_scope() -> OpsScope:
+    """The default Manager's: every tool, every task, never compared with the database."""
+    definition = ManagerDefinition(
+        id=DEFAULT_MANAGER_ID, name="Manager", description="", system_prompt=None, profile_id=None,
+        tools=ManagerTools.ALL, task_scope=TaskScope.ALL, task_policy=TaskPolicy.FREE, enabled=True, builtin=True,
+        revision=-1)
+    return scope_for(definition)
+
+
+DEFAULT_SCOPE = _default_scope()
+
+
 class ManagerOps:
     def __init__(self, platform: Platform, *, url: str, token: str | None = None,
-                 tools: Sequence[Tool] = MANAGER_TOOLS,
+                 scope: OpsScope | None = None, tools: Sequence[Tool] | None = None,
                  clock: Callable[[], float] = time.monotonic, turn_file: Path | None = None) -> None:
         self._platform = platform
         self._url = url.rstrip("/")
         self._token = token or secrets.token_urlsafe(32)
-        self._tools = {tool.name: tool for tool in tools}
+        # One attribute holds everything a call is judged by; ``set_scope`` replaces it whole.
+        self._scope = scope if scope is not None else (
+            replace(DEFAULT_SCOPE, tools=_tool_map(tools)) if tools is not None else DEFAULT_SCOPE)
         self._clock = clock
         self._turn: Turn | None = None
         self._turn_file = turn_file
@@ -160,8 +219,69 @@ class ManagerOps:
         scheme, _, value = (header or "").partition(" ")
         return scheme.lower() == "bearer" and hmac.compare_digest(value.strip().encode(), self._token.encode())
 
+    @property
+    def scope(self) -> OpsScope:
+        return self._scope
+
+    def set_scope(self, scope: OpsScope) -> None:
+        """Judge calls by ``scope`` from now on (one assignment), and drop the confirmations of a tool it lacks."""
+        self._scope = scope
+        for key, pending in list(self._pending.items()):
+            if pending.tool.name not in scope.tools:
+                del self._pending[key]
+
+    async def current_scope(self) -> OpsScope:
+        """The scope in force now, judged by the database (RFC §7): the Manager's ``revision`` read, and the scope
+        rebuilt when the definition changed since. Never falls back to a scope that may be older than what was
+        committed."""
+        scope = self._scope
+        if scope.revision < 0 or scope.manager_id == DEFAULT_MANAGER_ID:
+            return scope
+        try:
+            found = await db_managers.revision_of(scope.manager_id)
+            if found is not None and found[1] and found[0] == scope.revision:
+                return scope
+            row = keys = None
+            if found is not None and found[1]:
+                row = await db_managers.get_manager(scope.manager_id)
+                keys = [t["key"] for t in await db_managers.list_templates(scope.manager_id)] if row else None
+            definition = ManagerDefinition.from_row(row) if row is not None else None
+        except Exception:
+            logger.warning("could not read the settings of Manager %s", scope.manager_id, exc_info=True)
+            raise OpError(ErrorCode.UNAVAILABLE, "this Manager's settings changed and are not in force yet; nothing "
+                                                 "was done; try again in a moment") from None
+        if definition is None or not definition.enabled:
+            raise OpError(ErrorCode.FORBIDDEN, "this Manager was turned off")
+        current = scope_for(definition, keys or ())
+        if self._scope is scope:  # not replaced meanwhile by the fleet
+            self.set_scope(current)
+        return current
+
     def listing(self) -> list[dict[str, Any]]:
-        return [tool.listing() for tool in self._tools.values()]
+        return [tool.listing() for tool in self._scope.tools.values()]
+
+    async def current_listing(self) -> list[dict[str, Any]]:
+        """The tools the Manager has now (``current_scope``), as ``tools/list`` names them."""
+        return [tool.listing() for tool in (await self.current_scope()).tools.values()]
+
+    async def _authorize(self, scope: OpsScope, name: str, arguments: Mapping[str, Any]) -> Tool:
+        """The one check of what ``scope`` allows: the tool is among its tools, a read-only tool is only read, and a
+        scoped Manager acts only on a task of its own. Returns the tool to run."""
+        tool = scope.tools.get(name)
+        if tool is None:
+            if name in _MANAGER_TOOL_NAMES:
+                raise OpError(ErrorCode.FORBIDDEN, f"this Manager no longer has {name}")
+            raise OpError(ErrorCode.INVALID, f"no tool {name!r}; the tools are: {', '.join(scope.tools)}")
+        if name in scope.read_only and tool.risk_of(arguments) is not Risk.READ:
+            raise OpError(ErrorCode.FORBIDDEN, "this Manager can only read projects; ask the user to use the "
+                                               "general Manager or the dashboard for that")
+        task_id = tool.task_id(arguments)
+        if scope.scoped and isinstance(task_id, str) and task_id:
+            task = await db_tasks.get_task(task_id)
+            if task is not None and task.get("manager_id") != scope.manager_id:
+                raise OpError(ErrorCode.FORBIDDEN, f"task {task_id} belongs to another Manager; this Manager acts "
+                                                   "only on the tasks it created")
+        return tool
 
     def refuse(self, path: str) -> None:
         """The endpoint refused a request for its token: logged, and the turn running (if any) is marked."""
@@ -215,14 +335,14 @@ class ManagerOps:
         runtime's write call runs only when it matches a tool_use of that turn's stream. Off (the default), the
         binding only observes: the call runs in the turn running when it comes, as it did before turns were bound,
         and each disagreement is logged and counted (``binding_report``), never refused."""
-        tool = self._tools.get(name)
+        tool = self._scope.tools.get(name) or _MANAGER_TOOL_NAMES.get(name)
         if tool is None:
             from .planner import TOOLS as PLANNER_TOOLS
 
             if name in {t.name for t in PLANNER_TOOLS}:
                 return _error(ErrorCode.FORBIDDEN, f"{name} is a tool of a task's Planner, for its own task; the "
-                                                   f"Manager's tools are: {', '.join(self._tools)}")
-            return _error(ErrorCode.INVALID, f"no tool {name!r}; the tools are: {', '.join(self._tools)}")
+                                                   f"Manager's tools are: {', '.join(self._scope.tools)}")
+            return _error(ErrorCode.INVALID, f"no tool {name!r}; the tools are: {', '.join(self._scope.tools)}")
         enforced = chat_settings.stop_enabled()
         bound = self._bindings.get(binding) if binding else None
         self._observe_turn(name, binding, bound, enforced=enforced)
@@ -230,8 +350,11 @@ class ManagerOps:
         risk = tool.risk
         arguments: dict[str, Any] = raw if isinstance(raw, dict) else {}
         try:
+            scope = await self.current_scope()  # once: this call is judged by it throughout
             arguments = check_arguments(tool.schema, raw)
             risk = tool.risk_of(arguments)
+            if tool.name != CONFIRM_TOOL:
+                tool = await self._authorize(scope, name, arguments)
             _check_answering(turn)
             matched_turn = turn if enforced else bound
             if (matched_turn is not None and matched_turn.require_match and binding
@@ -247,7 +370,7 @@ class ManagerOps:
             if risk is not Risk.READ and turn.autonomous:
                 raise OpError(ErrorCode.NEEDS_USER_TURN, "Looper changes things only in a turn that answers a user's "
                                                          "message; tell the user what you would do instead")
-            call = Call(arguments, turn, self._platform)
+            call = Call(arguments, turn, self._platform, scope=scope)
             impact = await tool.escalate(call) if tool.escalate is not None else None
             _check_answering(turn)  # stopped while escalate read: nothing runs and the user is asked nothing
             if impact is not None:
@@ -289,7 +412,13 @@ class ManagerOps:
         del self._pending[turn.chat_key]
         tool = pending.tool
         try:
-            result = _plain(await tool.run(Call(pending.arguments, turn, self._platform)))
+            scope = await self.current_scope()
+            try:
+                tool = await self._authorize(scope, pending.tool.name, pending.arguments)
+            except OpError:
+                raise OpError(ErrorCode.FORBIDDEN, "the operation was not run: this Manager may no longer do "
+                                                   "it") from None
+            result = _plain(await tool.run(Call(pending.arguments, turn, self._platform, scope=scope)))
         except Exception as exc:
             if isinstance(exc, OpError):
                 error = exc
@@ -326,7 +455,7 @@ class ManagerOps:
             await db_actions.record(
                 channel=turn.channel, chat=turn.chat, message_id=turn.message_id, tool=tool.name,
                 arguments=arguments, risk=risk.value, status=status, error_code=error_code, result=result,
-                confirmation_id=confirmation_id, task_id=task_id,
+                confirmation_id=confirmation_id, task_id=task_id, manager_id=self._scope.manager_id,
             )
         except Exception:
             logger.warning("could not record the Manager's call of %s", tool.name, exc_info=True)
@@ -497,7 +626,10 @@ class ManagerOps:
     async def library_with_server(self, library: Any, runtime_root: Path) -> Any:
         """``library`` (``AgentLibrary``) with Looper's own MCP server added: always there for the Manager, and
         over a catalog server of the same name."""
-        return await library_with_server(library, runtime_root, self.server_config(), who="the Manager")
+        library = await library_with_server(library, runtime_root, self.server_config(), who="the Manager")
+        if self._scope.manager_id != DEFAULT_MANAGER_ID:
+            library = replace(library, manager_tools=tuple(self._scope.tools))
+        return library
 
 
 def server_config(url: str, token: str) -> dict[str, Any]:

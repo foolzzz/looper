@@ -49,6 +49,9 @@ export interface TaskInfo {
   /** The schedule that created the task; null for any other task (and once that schedule is deleted). */
   schedule_id: string | null;
   schedule_name: string | null;
+  /** The Manager the task belongs to ("manager" is the default one) and its name (null if gone). */
+  manager_id?: string;
+  manager_name?: string | null;
   continues_schedule_session: boolean;
 }
 
@@ -365,7 +368,7 @@ export async function fetchTasks(
 }
 
 /** Who a chat message goes to: the global Manager or a running task's Planner. */
-export type ChatTarget = { kind: "manager" } | { kind: "planner"; task_id: string };
+export type ChatTarget = { kind: "manager"; id?: string } | { kind: "planner"; task_id: string };
 
 /**
  * An agent on the Chat page: the global Manager, each task's Planner and the
@@ -379,7 +382,7 @@ export interface ChatTargetInfo {
   task_id?: string;
   /** Planner: the task's requirement. */
   requirement?: string;
-  /** Planner: what the task is called (see TaskInfo.name). */
+  /** Planner: what the task is called (see TaskInfo.name). Manager: the Manager's name. */
   name?: string;
   /** Planner: the task's status; Worker/Reviewer: its latest run's status. */
   status?: string;
@@ -512,18 +515,20 @@ async function managerSessionResponse<T>(res: Response, what: string): Promise<T
   return res.json();
 }
 
-export async function fetchManagerSession(): Promise<ManagerSessionView> {
-  return managerSessionResponse(await fetch(`${API_BASE}/manager/session`), "manager session");
+export async function fetchManagerSession(managerId = "manager", signal?: AbortSignal): Promise<ManagerSessionView> {
+  const query = managerId === "manager" ? "" : `?manager=${encodeURIComponent(managerId)}`;
+  return managerSessionResponse(await fetch(`${API_BASE}/manager/session${query}`, { signal }), "manager session");
 }
 
 /** Choose the Manager session's Agent Profile; null follows Settings. */
 export async function setManagerSessionProfile(
   profileId: string | null,
+  managerId = "manager",
 ): Promise<ManagerSessionView & { effect: ManagerSessionEffect; text: string }> {
   const res = await fetch(`${API_BASE}/manager/session/profile`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ profile_id: profileId }),
+    body: JSON.stringify(managerId === "manager" ? { profile_id: profileId } : { profile_id: profileId, manager: managerId }),
   });
   return managerSessionResponse(res, "manager session profile");
 }
@@ -544,9 +549,34 @@ export interface DbChatMessage {
   delivery_error?: string | null;
 }
 
-/** A session's newest messages (up to 200), oldest first. */
-export async function fetchChatMessages(sessionId: string): Promise<DbChatMessage[]> {
-  const res = await fetch(`${API_BASE}/chat/messages?session_id=${encodeURIComponent(sessionId)}`);
+/** A conversation asked for under one Manager that belongs to another (`managerId`; the server's 409): never shown or
+ * continued there. */
+export class ForeignConversationError extends Error {
+  readonly managerId: string;
+  constructor(message: string, managerId: string) {
+    super(message);
+    this.name = "ForeignConversationError";
+    this.managerId = managerId;
+  }
+}
+
+async function foreignConversation(res: Response): Promise<ForeignConversationError | null> {
+  if (res.status !== 409) return null;
+  const data = await res.json().catch(() => ({}));
+  return new ForeignConversationError(data.error || "this conversation belongs to another Manager", data.manager_id ?? "");
+}
+
+/** A session's newest messages (up to 200), oldest first. With `managerId`, a session of another Manager is a
+ * `ForeignConversationError`. */
+export async function fetchChatMessages(
+  sessionId: string,
+  signal?: AbortSignal,
+  managerId?: string,
+): Promise<DbChatMessage[]> {
+  const owner = managerId ? `&manager=${encodeURIComponent(managerId)}` : "";
+  const res = await fetch(`${API_BASE}/chat/messages?session_id=${encodeURIComponent(sessionId)}${owner}`, { signal });
+  const foreign = await foreignConversation(res);
+  if (foreign) throw foreign;
   if (!res.ok) return [];
   const data = await res.json();
   return data.messages || [];
@@ -566,17 +596,25 @@ export interface ChatSession {
   last_content: string;
 }
 
-export async function fetchChatSessions(): Promise<ChatSession[]> {
-  const res = await fetch(`${API_BASE}/chat/sessions`);
+export async function fetchChatSessions(managerId = "manager", signal?: AbortSignal): Promise<ChatSession[]> {
+  const query = managerId === "manager" ? "" : `?manager=${encodeURIComponent(managerId)}`;
+  const res = await fetch(`${API_BASE}/chat/sessions${query}`, { signal });
   if (!res.ok) await failed(res, "list conversations");
   const data = await res.json();
   return data.sessions ?? [];
 }
 
-/** One conversation by its id, however long ago it was active (null when it has no messages): the list holds only the
- * newest. */
-export async function fetchChatSession(sessionId: string): Promise<ChatSession | null> {
-  const res = await fetch(`${API_BASE}/chat/sessions?session_id=${encodeURIComponent(sessionId)}`);
+/** One conversation by its id, however long ago it was active (null when it has no messages: a new one): the list holds
+ * only the newest. Another Manager's is a `ForeignConversationError`. */
+export async function fetchChatSession(
+  sessionId: string,
+  managerId = "manager",
+  signal?: AbortSignal,
+): Promise<ChatSession | null> {
+  const owner = managerId === "manager" ? "" : `&manager=${encodeURIComponent(managerId)}`;
+  const res = await fetch(`${API_BASE}/chat/sessions?session_id=${encodeURIComponent(sessionId)}${owner}`, { signal });
+  const foreign = await foreignConversation(res);
+  if (foreign) throw foreign;
   if (!res.ok) await failed(res, "load the conversation");
   const data = await res.json();
   return data.sessions?.[0] ?? null;
@@ -1565,6 +1603,8 @@ export interface Supplement {
 
 /** Something the Manager did to a task through its tools (its audit trail), or asked the user to confirm. */
 export interface ManagerAction {
+  /** The Manager that acted ("manager" is the default one). */
+  manager_id?: string;
   created_at: string;
   /** The chat's channel: "web", "lark", "lark_bot", "telegram". */
   channel: string;
@@ -1663,6 +1703,14 @@ export async function setTaskAgents(
 }
 
 export interface TaskDetail extends TaskInfo {
+  /** The task template the task was created from, as it said then; null for none. */
+  template?: {
+    key: string;
+    name: string;
+    updated_at: string;
+    inputs: { key: string; label: string; value: string }[];
+    planner_instructions: string;
+  } | null;
   /** The task's own title, "" when it has none (then `name` is its goal id or its requirement's first line). */
   title?: string;
   work_dir: string;
@@ -3887,4 +3935,102 @@ export async function fetchGates(
   const res = await fetch(`${API_BASE}/gates${qs ? `?${qs}` : ""}`);
   if (!res.ok) await failed(res, "gates");
   return res.json();
+}
+
+// --- Managers: each with its own duty, tools, task visibility and task templates ---
+
+export type ManagerTools = "all" | "tasks";
+export type TaskScope = "all" | "own";
+export type TaskPolicy = "free" | "templates_only";
+
+export interface TemplateInput {
+  key: string;
+  label: string;
+  kind: "text" | "url";
+  required: boolean;
+  pattern: string;
+  hint: string;
+}
+
+export interface TaskTemplate {
+  key: string;
+  name: string;
+  description: string;
+  project_id: string | null;
+  work_dir: string;
+  workspace_mode: "worktree" | "in_place" | null;
+  requirement: string;
+  planner_instructions: string;
+  profiles: Partial<Record<"planner" | "worker" | "reviewer", string>>;
+  role_templates: string[];
+  inputs: TemplateInput[];
+  updated_at: string;
+}
+
+export type TaskTemplateFields = Omit<TaskTemplate, "key" | "updated_at">;
+
+export interface ManagerInfo {
+  id: string;
+  name: string;
+  description: string;
+  builtin: boolean;
+  enabled: boolean;
+  tools: ManagerTools;
+  task_scope: TaskScope;
+  task_policy: TaskPolicy;
+  system_prompt: string | null;
+  profile_id: string | null;
+  profile_name: string | null;
+  templates: TaskTemplate[];
+  state: { running: boolean; busy: boolean; healthy: boolean; sync: "ok" | "pending"; sync_error?: string };
+  spend: { today_usd: number; last_7d_usd: number; runs_today: number };
+}
+
+export interface ManagerFields {
+  key?: string;
+  name?: string;
+  description?: string;
+  system_prompt?: string | null;
+  profile_id?: string | null;
+  tools?: ManagerTools;
+  task_scope?: TaskScope;
+  task_policy?: TaskPolicy;
+  enabled?: boolean;
+}
+
+const managerPath = (id: string) => `${API_BASE}/managers/${encodeURIComponent(id)}`;
+
+async function managerJson<T>(url: string, method: string, body: unknown | undefined, label: string): Promise<T> {
+  const res = await fetch(url, {
+    method,
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) await failed(res, label);
+  return res.json();
+}
+
+export async function fetchManagers(): Promise<ManagerInfo[]> {
+  const data = await managerJson<{ managers?: ManagerInfo[] }>(`${API_BASE}/managers`, "GET", undefined, "managers");
+  return data.managers ?? [];
+}
+
+export function createManager(body: ManagerFields): Promise<ManagerInfo> {
+  return managerJson(`${API_BASE}/managers`, "POST", body, "create manager");
+}
+
+export function updateManager(id: string, body: ManagerFields): Promise<ManagerInfo> {
+  return managerJson(managerPath(id), "PUT", body, "update manager");
+}
+
+export async function deleteManager(id: string): Promise<void> {
+  await managerJson(managerPath(id), "DELETE", undefined, "delete manager");
+}
+
+export function putManagerTemplate(id: string, key: string, body: TaskTemplateFields): Promise<ManagerInfo> {
+  return managerJson(`${managerPath(id)}/templates/${encodeURIComponent(key)}`, "PUT", body, "save template");
+}
+
+export function deleteManagerTemplate(id: string, key: string): Promise<ManagerInfo> {
+  return managerJson(`${managerPath(id)}/templates/${encodeURIComponent(key)}`, "DELETE", undefined, "delete template");
 }

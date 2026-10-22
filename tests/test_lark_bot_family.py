@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import uuid
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -96,8 +97,9 @@ def test_bot_open_gates_are_filtered_to_its_chat(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(manager.db_user_gates, "open_gates", open_gates)
     monkeypatch.setattr(manager, "gate_dashboard_target", dashboard_target)
-    assert asyncio.run(ManagerAgent._open_gates_section(None, _message())) == []
-    assert calls == [{"chat": ("lark_bot", "ou_requester123"), "dashboard": False}]
+    default_manager = SimpleNamespace(agent_id="manager", _log="Manager")
+    assert asyncio.run(ManagerAgent._open_gates_section(default_manager, _message())) == []
+    assert calls == [{"chat": ("lark_bot", "ou_requester123"), "manager_id": "manager", "dashboard": False}]
 
 
 def test_bot_allowlist_uses_lark_open_ids() -> None:

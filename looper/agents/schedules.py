@@ -627,6 +627,13 @@ async def list_notifications(schedule_id: str, query: Mapping[str, str]) -> dict
          "created_at": row["created_at"]} for row in rows]}
 
 
+def empty_schedule_overview() -> dict[str, Any]:
+    """``schedule_overview``'s shape with nothing in it (a scoped Manager has no schedules)."""
+    return {"total": 0, "enabled": 0, "next": [], "failing": [],
+            "skipped_today": {status: 0 for status in ("skipped_gate", "skipped_overlap", "skipped_missed",
+                                                       "skipped_budget")}}
+
+
 async def schedule_overview(since: datetime) -> dict[str, Any]:
     """The dashboard's schedules: how many there are, the next 5 fires, the failing ones, and the runs skipped
     since ``since`` by reason."""

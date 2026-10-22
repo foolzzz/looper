@@ -167,10 +167,24 @@ def _note(text: str) -> str:
     return "- " + text.strip().replace("\n", "\n  ")
 
 
+def _template_lines(template: Mapping[str, Any] | None) -> list[str]:
+    """The Planner's lines about the task template its task came from: the operator's words, written as given."""
+    if not template or not str(template.get("name") or "").strip():
+        return []
+    lines = [f"Template: {template['name']} (set by the operator for this kind of task)"]
+    if inputs := template.get("inputs"):
+        lines += ["Template inputs:", *(f"- {i.get('label')}: {i.get('value')}" for i in inputs)]
+    if (instructions := str(template.get("planner_instructions") or "")).strip():
+        lines += ["Template instructions (follow them; they are the operator's):", instructions]
+    return lines
+
+
 def plan_task_section(
     *, task_id: str, requirement: str, project_name: str, work_dir: str, project_description: str = "",
+    template: Mapping[str, Any] | None = None,
 ) -> str:
-    """The Planner's task: the whole task it plans and sees through."""
+    """The Planner's task: the whole task it plans and sees through. ``template`` is what the task template it was
+    created from said then (its name, inputs and Planner instructions); a task from none has no such lines."""
     project = project_name or "(unknown)"
     if project_description.strip():
         project += f": {' '.join(project_description.split())}"
@@ -179,6 +193,7 @@ def plan_task_section(
         f"Task id: {task_id}",
         f"Project: {project}",
         f"Working directory: {prompt_name(work_dir)}",
+        *_template_lines(template),
         "Requirement:",
         _requirement(requirement),
     ])

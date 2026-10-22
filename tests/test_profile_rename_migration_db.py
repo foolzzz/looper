@@ -53,13 +53,15 @@ UNCHANGED = ["agent_runtimes", "llm_providers", "llm_provider_secrets", "project
 # Columns a later migration of main adds to those tables, empty (NULL or '') on the rows from before.
 NEW_COLUMNS = {"tasks": ("schedule_id", "budget_usd", "chat_id", "original_user_text", "title", "chat_kind",
                          "chat_mention", "workspace_dir", "workspace_mode", "workspace_base",
-                         "continues_schedule_session", "planner_session_label"),
+                         "continues_schedule_session", "planner_session_label", "template", "origin_thread"),
                "projects": ("step_workspaces", "workspace_links", "max_step_retries", "planner_roles", "wait_commands",
                             "role_text_max_chars", "user_gates", "gate_reminder_hours", "agent_room",
                             "room_post_per_minute", "room_broadcasts_per_run", "room_message_max_chars",
                              "room_messages_per_task", "room_ping_pong_rounds", "room_wait_max_seconds",
                              "room_consult_budget_usd", "room_consult_timeout_seconds", "room_consults_per_task",
                              "task_workspaces", "operator_notes", "vault")}
+# Columns a later migration adds with a value for the rows from before: every old task is the default Manager's.
+DEFAULTED_COLUMNS = {"tasks": {"manager_id": "manager"}}
 # What the effort's upgrade, a later migration of main, changes: each layer's effort moved onto the profiles its
 # roles ran with it, so these layers and task choices select another profile (by name here; it changes their
 # updated_at), and the profiles they take are added (EFFORT_PROFILES: model, effort).
@@ -187,6 +189,8 @@ def test_a_v2_6_0_database_keeps_every_row_under_the_new_names_and_every_role_ru
                         assert {key: row[key] for key in model} == model
             for table, columns in NEW_COLUMNS.items():
                 assert all(row.pop(column) in (None, "", False) for row in after_unchanged[table] for column in columns)
+            for table, values in DEFAULTED_COLUMNS.items():
+                assert all(row.pop(column) == value for row in after_unchanged[table] for column, value in values.items())
             assert after_unchanged == unchanged
             assert {row["id"] for row in await _rows(pool, "llm_providers", "1")} - {
                 row["id"] for row in old_providers} == ADDED_ROWS["llm_providers"]

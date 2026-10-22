@@ -224,6 +224,13 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     monkeypatch.setattr(db_tasks, "active_workspaces", AsyncMock(return_value=[]))
     monkeypatch.setattr(db_llm_records, "role_runs", AsyncMock(return_value=[]))
     monkeypatch.setattr(db_llm_records, "list_task_runs", AsyncMock(return_value=[]))
+    # Task reads name each task's Manager; a project delete checks no task template uses it. Only the default one.
+    from looper.db import managers as db_managers
+
+    default = {"id": "manager", "name": "Manager", "deleted_at": None}
+    monkeypatch.setattr(db_managers, "list_managers", AsyncMock(return_value=[default]))
+    monkeypatch.setattr(db_managers, "get_manager", AsyncMock(return_value=default))
+    monkeypatch.setattr(db_managers, "template_using_project", AsyncMock(return_value=None))
     return fake
 
 

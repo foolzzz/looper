@@ -101,3 +101,17 @@ async def add_version(
             return None
         await db_journal.insert(conn, task_id, entries)
     return int(version)
+
+
+async def add_first_version(conn: asyncpg.Connection, task_id: str, key: str, values: Mapping[str, Any],
+                            entry: Mapping[str, Any]) -> None:
+    """Add version 1 of task ``task_id``'s role ``key`` with its journal ``entry`` on ``conn``, in the caller's
+    transaction (a task created with the roles of its template). ``values`` are those of ``add_version``. Raises
+    ``asyncpg.UniqueViolationError`` when the task already has the role."""
+    await conn.execute(
+        "INSERT INTO task_roles (task_id, role_key, version, kind, profile_id, role_prompt, harness, reason, "
+        "via, template_key, items) VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10)",
+        task_id, key, values["kind"], values.get("profile_id"), values["role_prompt"], values.get("harness"),
+        values.get("reason") or "", values.get("via") or "planner", values.get("template_key"),
+        list(values.get("items") or ()))
+    await db_journal.insert(conn, task_id, [entry])

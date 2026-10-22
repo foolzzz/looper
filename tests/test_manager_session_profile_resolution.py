@@ -49,7 +49,8 @@ def test_only_the_managers_chain_gains_the_session_layer(role: AgentType) -> Non
     chain = _chain(role, "proj")
     assert ((Layer.SESSION, AgentType.MANAGER) in chain) is (role is AgentType.MANAGER)
     if role is AgentType.MANAGER:
-        assert chain == [(Layer.SYSTEM, None), (Layer.ROLE, AgentType.MANAGER), (Layer.SESSION, AgentType.MANAGER)]
+        assert chain == [(Layer.SYSTEM, None), (Layer.ROLE, AgentType.MANAGER),
+                         (Layer.MANAGER, AgentType.MANAGER), (Layer.SESSION, AgentType.MANAGER)]
     else:
         assert chain[-1] == (Layer.TASK, role)
 
@@ -70,9 +71,9 @@ def test_load_agent_settings_asks_for_the_session_row_only_for_the_manager(
     monkeypatch.setattr(agent_setting_layers, "list_layers", fake)
     asyncio.run(agent_settings.load_agent_settings(role))
     assert len(calls) == 1
-    assert ("manager_session" in calls[0]) is expected
+    assert ("manager_id" in calls[0]) is expected
     if expected:
-        assert calls[0]["manager_session"] is True
+        assert calls[0]["manager_id"] == "manager"
 
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -81,9 +82,9 @@ def test_list_layers_returns_the_session_row_only_when_asked(monkeypatch: pytest
     from looper.db import agent_sessions, agent_setting_layers
 
     async def _test(_pool: Any) -> None:
-        assert not [r for r in await agent_setting_layers.list_layers(manager_session=True) if r["scope"] == "session"]
+        assert not [r for r in await agent_setting_layers.list_layers(manager_id="manager") if r["scope"] == "session"]
         await agent_sessions.select_profile("manager", BUILTIN_PROFILE.id)
-        rows = await agent_setting_layers.list_layers(manager_session=True)
+        rows = await agent_setting_layers.list_layers(manager_id="manager")
         session = [r for r in rows if r["scope"] == "session"]
         assert len(session) == 1
         assert (session[0]["role"], session[0]["profile_id"]) == ("manager", BUILTIN_PROFILE.id)

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from collections.abc import Sequence
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -223,7 +224,7 @@ async def list_events(
 # task's Planner records its turns as planner-<task_id>; Workers and Reviewers
 # record under their per-run instance id.
 _ROLE_FILTERS = {
-    "manager": "agent_id = 'manager'",
+    "manager": "(agent_id = 'manager' OR agent_id LIKE 'manager-%')",
     "planner": "agent_id LIKE 'planner-%'",
     "worker": "agent_id LIKE 'worker-%'",
     "reviewer": "agent_id LIKE 'reviewer-%'",
@@ -237,6 +238,36 @@ _TASK_ROLE = (
 )
 # A run of one of a task's agents (Planner, Worker, Reviewer), as task_costs counts them; the Manager is not one.
 TASK_RUN = f"{_TASK_ROLE} IS NOT NULL"
+
+
+async def manager_spend(
+    manager_ids: Sequence[str],
+    *,
+    since: datetime,
+    pool: asyncpg.Pool | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Per Manager, its spend since ``since`` (today's start), over the last 7 days and its runs since ``since``;
+    unpriced runs (NULL cost) count as 0 dollars and as runs. Every id is answered, with zeros when it never ran."""
+    pool = pool or get_pool()
+    result = {m: {"today_usd": 0.0, "last_7d_usd": 0.0, "runs_today": 0} for m in manager_ids}
+    if not result:
+        return result
+    rows = await pool.fetch(
+        """
+        SELECT agent_id,
+               COALESCE(sum(cost_usd) FILTER (WHERE created_at >= $2), 0)::float8 AS today_usd,
+               COALESCE(sum(cost_usd) FILTER (WHERE created_at >= $3), 0)::float8 AS last_7d_usd,
+               count(*) FILTER (WHERE created_at >= $2) AS runs_today
+        FROM llm_records
+        WHERE agent_id = ANY($1::text[]) AND created_at >= LEAST($2, $3)
+        GROUP BY agent_id
+        """,
+        list(result), since, datetime.now(timezone.utc) - timedelta(days=7),
+    )
+    for row in rows:
+        result[row["agent_id"]] = {"today_usd": row["today_usd"], "last_7d_usd": row["last_7d_usd"],
+                                   "runs_today": row["runs_today"]}
+    return result
 
 
 async def list_task_runs(
@@ -469,10 +500,11 @@ _SPEND = f"""count(*) AS runs,
 
 
 async def spend_since(since: datetime | None, *, until: datetime | None = None, project_id: str | None = None,
-                      pool: asyncpg.Pool | None = None) -> dict[str, Any]:
+                      manager_id: str | None = None, pool: asyncpg.Pool | None = None) -> dict[str, Any]:
     """What every agent's runs started at or after ``since`` (and before ``until``; None for no bound) cost, the
     Manager's included, split by basis; with ``project_id``, only the runs of that project's tasks that make up
-    their cost (their Planners', Workers' and Reviewers', as ``task_costs`` counts them).
+    their cost (their Planners', Workers' and Reviewers', as ``task_costs`` counts them); with ``manager_id``, only
+    the runs of that Manager and of its tasks.
 
     ``provider_priced_usd`` is money: runs with an API key, at their
     provider's prices (Claude Code's figure for Anthropic's API, Looper's for
@@ -482,31 +514,35 @@ async def spend_since(since: datetime | None, *, until: datetime | None = None, 
     a cost.
     """
     pool = pool or get_pool()
+    # Without a Manager the query is the one before Managers had tasks, so a database not migrated yet reads too.
+    by_manager, args = (("", ()) if manager_id is None
+                        else (" AND (r.agent_id = $4 OR t.manager_id = $4)", (manager_id,)))
     row = await pool.fetchrow(
-        f"SELECT {_SPEND} FROM llm_records r LEFT JOIN tasks t ON t.id = r.task_id WHERE {_IN_RANGE}",
-        since, until, project_id,
+        f"SELECT {_SPEND} FROM llm_records r LEFT JOIN tasks t ON t.id = r.task_id WHERE {_IN_RANGE}{by_manager}",
+        since, until, project_id, *args,
     )
     return dict(row)
 
 
 async def task_spend(since: datetime | None, until: datetime | None = None, *, project_id: str | None = None,
-                     pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+                     manager_id: str | None = None, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """What each task's runs started in [``since``, ``until``) cost (None for no bound), split by basis as
     ``spend_since`` splits it, most first: the runs that make up a task's cost (``task_costs``), of the tasks of
-    ``project_id`` only when it is given. Each row has the task's ``name`` and its ``project_id`` and
+    ``project_id`` only when it is given, of the tasks of ``manager_id`` only when that is. Each row has the task's ``name`` and its ``project_id`` and
     ``project_name`` now."""
     from .tasks import task_name
 
     pool = pool or get_pool()
+    by_manager, args = ("", ()) if manager_id is None else (" AND t.manager_id = $4", (manager_id,))
     rows = await pool.fetch(
         f"""
         SELECT r.task_id, t.title, t.goal_id, t.requirement, t.project_id, p.name AS project_name, {_SPEND}
         FROM llm_records r JOIN tasks t ON t.id = r.task_id LEFT JOIN projects p ON p.id = t.project_id
-        WHERE {_IN_RANGE} AND {_RUN_TASK_ROLE} IS NOT NULL
+        WHERE {_IN_RANGE} AND {_RUN_TASK_ROLE} IS NOT NULL{by_manager}
         GROUP BY r.task_id, t.title, t.goal_id, t.requirement, t.project_id, p.name
         ORDER BY sum(r.cost_usd) DESC NULLS LAST, r.task_id
         """,
-        since, until, project_id,
+        since, until, project_id, *args,
     )
     return [{"task_id": row["task_id"], "name": task_name(title=row["title"], goal_id=row["goal_id"],
                                                           requirement=row["requirement"], task_id=row["task_id"]),

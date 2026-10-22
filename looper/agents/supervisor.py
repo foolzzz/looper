@@ -141,6 +141,32 @@ class AgentSupervisor:
     def unregister(self, agent_id: str) -> None:
         self._agents.pop(agent_id, None)
 
+    async def start_agent(self, agent: ManagedAgent) -> bool:
+        """Register ``agent`` and, when the supervisor runs, start it; whether it started. A failed start is
+        restarted like any agent's."""
+        self.register(agent)
+        if not self._running:
+            return False
+        if await self._start_agent(agent.agent_id):
+            return True
+        self._schedule_restart(agent.agent_id)
+        return False
+
+    async def stop_agent(self, agent_id: str) -> None:
+        """Take the agent out of the supervisor (no health check or restart sees it any more) and stop it."""
+        entry = self._agents.pop(agent_id, None)
+        if entry is None:
+            return
+        if entry.restarting is not None:
+            entry.restarting.cancel()
+            await asyncio.gather(entry.restarting, return_exceptions=True)
+            entry.restarting = None
+        try:
+            await entry.agent.stop()
+            logger.info("agent %s stopped", agent_id)
+        except Exception:
+            logger.exception("error stopping agent %s", agent_id)
+
     async def start_all(self) -> None:
         """Start the agent hierarchy in order."""
         self._running = True
@@ -252,6 +278,8 @@ class AgentSupervisor:
                 except Exception:
                     logger.exception("error stopping agent %s for restart", agent_id)
                 await self._sleep(delay)
+                if self._agents.get(agent_id) is not entry:
+                    return  # taken out (stop_agent) meanwhile
                 entry.restart_count += 1
                 entry.next_restart_at = None
                 if entry.restart_count == CRASH_LOOP_RESTARTS:
