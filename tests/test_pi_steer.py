@@ -295,8 +295,10 @@ def test_rpc_failures_preserve_accumulated_model_usage(tmp_path: Path, monkeypat
 @pytest.mark.parametrize('scenario', ['setup_timeout', 'setup_noise_timeout', 'prompt_timeout', 'fast_timeout'])
 def test_ack_deadlines_include_silent_and_busy_stdout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                                      scenario: str) -> None:
-    monkeypatch.setattr(pi_steer, '_SETUP_TIMEOUT_SEC', 0.15)
-    monkeypatch.setattr(pi_steer, '_PROMPT_TIMEOUT_SEC', 0.15)
+    # Only the deadline under test is short: process startup must not race the other one under load.
+    setup_only = scenario.startswith('setup')
+    monkeypatch.setattr(pi_steer, '_SETUP_TIMEOUT_SEC', 0.15 if setup_only else 10.0)
+    monkeypatch.setattr(pi_steer, '_PROMPT_TIMEOUT_SEC', 10.0 if setup_only else 0.15)
     events = asyncio.run(_run(tmp_path, scenario))
     result, = [event for event in events if event['type'] == 'result']
     assert result['is_error'] is True
