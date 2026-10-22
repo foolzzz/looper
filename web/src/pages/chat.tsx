@@ -45,9 +45,9 @@ import {
   type LlmRecord,
   type UserGate,
   type ManagerSessionView,
+  sessionProfileLabel,
 } from "@/lib/api";
 import { historyFrom, joinStaged, pullBack, turnAnswers } from "@/lib/composer";
-import { profileLabel } from "@/lib/use-registry";
 import { isGateWaiting } from "@/lib/gates";
 import { randomId } from "@/lib/ids";
 import { RunCard, activityBelongsTo, historyHref, runRoleLabel } from "@/pages/agent-history";
@@ -1209,7 +1209,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
         <NewSessionPanel
           settingsName={
             newPanel && newPanel.effective.source !== "session" && newPanel.effective.profile
-              ? profileLabel(newPanel.effective.profile)
+              ? sessionProfileLabel(newPanel.effective.profile)
               : null
           }
           choices={newPanel?.choices ?? []}
