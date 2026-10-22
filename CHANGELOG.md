@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.26] - 2026-10-21
+
+### Fixed
+
+- **Flaky planner-wait retry test.** `test_a_failed_wait_turn_retries_twice_then_again_on_a_later_event` set its first retry wait to 0.4s, so under load the automatic retry could fall due during the test's 0.05s pause. The test now uses a 1.5s first wait (second 0.3s), a 1.0s gate idle check, and longer settle pauses. Test only; no runtime, prompt, tool schema or tool result changed. ([#368](https://github.com/foolzzz/looper/pull/368))
+
 ## [2.13.25] - 2026-10-21
 
 ### Fixed
