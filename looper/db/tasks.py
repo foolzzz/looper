@@ -195,6 +195,7 @@ async def create_task(
     manager_id: str = "manager",
     template: Mapping[str, Any] | None = None,
     origin_thread: str | None = None,
+    client_id: str | None = None,
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> dict[str, Any]:
     """Insert a task; ``schedule_id`` names the schedule that fired it, ``budget_usd`` its own spend cap.
@@ -207,7 +208,8 @@ async def create_task(
     did not come from either. ``original_user_text`` is the user's message the
     Manager's task JSON answered (kept as history); ``title`` the few words the Manager names the task with.
     ``manager_id`` is the Manager the task belongs to, ``template`` what the task template it came from said then.
-    ``origin_thread`` is the web chat thread it was asked in (None for a task from anywhere else).
+    ``origin_thread`` is the web chat thread it was asked in (None for a task from anywhere else), ``client_id``
+    the API client it came through (None for none).
     """
     pool = pool or get_pool()
     now = datetime.now(timezone.utc)
@@ -217,16 +219,17 @@ async def create_task(
         INSERT INTO tasks (id, requirement, goal_id, work_dir, project_id,
                            config, status, correlation_id, origin_channel_id, chat_id, original_user_text, title,
                            created_at, updated_at, schedule_id, budget_usd, chat_kind, chat_mention,
-                           workspace_dir, workspace_mode, workspace_base, manager_id, template, origin_thread)
+                           workspace_dir, workspace_mode, workspace_base, manager_id, template, origin_thread,
+                           client_id)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, $15, $16, $17, $18, $19, $20,
-                $21, $22::jsonb, $23)
+                $21, $22::jsonb, $23, $24)
         ON CONFLICT (id) DO NOTHING
         """,
         task_id, requirement, goal_id, work_dir, project_id,
         config_json, status, correlation_id, origin_channel_id, chat_id, original_user_text, task_title(title), now,
         schedule_id, budget_usd, chat_kind, chat_mention, workspace_dir, workspace_mode, workspace_base,
         manager_id, json.dumps(dict(template)) if template is not None else None,
-        origin_thread or None,
+        origin_thread or None, client_id,
     )
     return {"task_id": task_id, "created_at": now.isoformat()}
 

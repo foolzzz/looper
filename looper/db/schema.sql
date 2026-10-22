@@ -2154,3 +2154,19 @@ INSERT INTO agent_profiles (id, name, runtime_id, model_id, builtin, agent_teams
 SELECT 'agent-claude-code-opus', 'claude-code/opus', 'rt-claude-code', id, true, true
 FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'opus' AND protocol = 'anthropic-messages'
 ON CONFLICT DO NOTHING;
+
+-- Local agents and scripts that call /api/v1 with a token of their own (Settings → API clients). Only the token's
+-- SHA-256 is stored; a revoked client keeps its row so records still name it.
+CREATE TABLE IF NOT EXISTS api_clients (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    token_sha256  TEXT NOT NULL UNIQUE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_used_at  TIMESTAMPTZ,
+    revoked_at    TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_clients_active_name ON api_clients (lower(name)) WHERE revoked_at IS NULL;
+-- The API client a chat thread, a task or a Manager's call came through (NULL: none). No foreign key, like manager_id.
+ALTER TABLE chat_threads ADD COLUMN IF NOT EXISTS client_id TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS client_id TEXT;
+ALTER TABLE manager_actions ADD COLUMN IF NOT EXISTS client_id TEXT;
