@@ -758,13 +758,14 @@ async def check_selection(profile_id: str, roles: Iterable[str]) -> AgentProfile
 
 async def _selected_roles(profile_id: str, conn: Any = None) -> list[str]:
     """Every role ``profile_id`` is selected for, by a layer or a task."""
-    from ..db import agent_sessions, agent_setting_layers
+    from ..db import agent_sessions, agent_setting_layers, managers as db_managers
 
     roles: set[str] = set()
     for scope, role in await agent_setting_layers.selected_roles(profile_id, pool=conn):
         roles.update(_SCOPE_ROLES.get(scope, (role,)))
     if await agent_sessions.selects_profile("manager", profile_id, pool=conn):
         roles.add("manager")
+    roles |= await db_managers.template_profile_roles(profile_id, pool=conn)
     return [role for role in runtimes.ROLE_CAPABILITIES if role in roles]
 
 
@@ -993,7 +994,7 @@ def profile_warnings(profile: LegacyAgentProfile) -> list[str]:
 
 # Where nothing selects a profile.
 NOT_USED: Mapping[str, Any] = {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": [],
-                                "manager_session": False}
+                                "manager_session": False, "managers": [], "manager_templates": []}
 
 
 def _cost_profile(row: Mapping[str, Any], models: Iterable[Mapping[str, Any]] = ()) -> LegacyAgentProfile:
@@ -1049,6 +1050,8 @@ def usage_text(used_by: Mapping[str, Any]) -> str:
     parts += [f"the profiles the Planners of project {name!r} may choose" for name in used_by.get("allowed_in") or ()]
     if used_by.get("manager_session"):
         parts.append("the Manager's current session")
+    parts += [f"Manager {name}" for name in used_by.get("managers") or ()]
+    parts += [f"template {label.replace(' of ', ' of Manager ', 1)}" for label in used_by.get("manager_templates") or ()]
     return ", ".join(parts)
 
 

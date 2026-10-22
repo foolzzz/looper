@@ -213,11 +213,22 @@ async def deletable_project(project_id: str) -> dict[str, Any]:
     return project
 
 
+def _used_by_template(project_id: str, used: tuple[str, str]) -> RequestError:
+    return RequestError(HTTP_409, f"project {project_id!r} is used by template {used[0]!r} of Manager {used[1]!r}: "
+                                  "change the template first")
+
+
 async def delete_project(project_id: str) -> dict[str, Any]:
+    from ..db import managers as db_managers
+
     project = await deletable_project(project_id)
+    if used := await db_managers.template_using_project(project_id):
+        raise _used_by_template(project_id, used)
     try:
         await db_projects.delete_project(project_id)
-    except asyncpg.ForeignKeyViolationError:  # a task or a schedule was added meanwhile
+    except asyncpg.ForeignKeyViolationError:  # a task, a schedule or a template was added meanwhile
+        if used := await db_managers.template_using_project(project_id):
+            raise _used_by_template(project_id, used) from None
         raise _still_used(project) from None
     return {"deleted": project_id}
 

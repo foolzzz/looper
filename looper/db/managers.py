@@ -208,3 +208,32 @@ async def delete_template(manager_id: str, key: str) -> Literal["deleted", "miss
             return "missing"
         await _bump(conn, manager_id)
         return "deleted"
+
+
+async def template_profile_roles(profile_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> set[str]:
+    """The roles ``profile_id`` is selected for by a Manager not deleted: ``manager`` when it is a definition's
+    profile, ``planner`` / ``worker`` / ``reviewer`` for the template columns that name it."""
+    pool = pool or get_pool()
+    roles: set[str] = set()
+    if await pool.fetchval("SELECT EXISTS (SELECT 1 FROM managers WHERE deleted_at IS NULL AND profile_id = $1)",
+                           profile_id):
+        roles.add("manager")
+    row = await pool.fetchrow(
+        "SELECT coalesce(bool_or(t.planner_profile_id = $1), false) AS planner, "
+        "coalesce(bool_or(t.worker_profile_id = $1), false) AS worker, "
+        "coalesce(bool_or(t.reviewer_profile_id = $1), false) AS reviewer "
+        "FROM manager_task_templates t JOIN managers m ON m.id = t.manager_id "
+        "WHERE m.deleted_at IS NULL AND $1 IN (t.planner_profile_id, t.worker_profile_id, t.reviewer_profile_id)",
+        profile_id)
+    roles.update(role for role in ("planner", "worker", "reviewer") if row and row[role])
+    return roles
+
+
+async def template_using_project(project_id: str, *,
+                                 pool: asyncpg.Pool | asyncpg.Connection | None = None) -> tuple[str, str] | None:
+    """``(template name, Manager name)`` of a template that names the project; None when none does."""
+    pool = pool or get_pool()
+    row = await pool.fetchrow(
+        "SELECT t.name AS template, m.name AS manager FROM manager_task_templates t "
+        "JOIN managers m ON m.id = t.manager_id WHERE t.project_id = $1 ORDER BY m.id, t.key LIMIT 1", project_id)
+    return (row["template"], row["manager"]) if row else None
