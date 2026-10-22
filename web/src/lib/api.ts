@@ -365,7 +365,7 @@ export async function fetchTasks(
 }
 
 /** Who a chat message goes to: the global Manager or a running task's Planner. */
-export type ChatTarget = { kind: "manager" } | { kind: "planner"; task_id: string };
+export type ChatTarget = { kind: "manager"; id?: string } | { kind: "planner"; task_id: string };
 
 /**
  * An agent on the Chat page: the global Manager, each task's Planner and the
@@ -379,7 +379,7 @@ export interface ChatTargetInfo {
   task_id?: string;
   /** Planner: the task's requirement. */
   requirement?: string;
-  /** Planner: what the task is called (see TaskInfo.name). */
+  /** Planner: what the task is called (see TaskInfo.name). Manager: the Manager's name. */
   name?: string;
   /** Planner: the task's status; Worker/Reviewer: its latest run's status. */
   status?: string;
@@ -510,18 +510,20 @@ async function managerSessionResponse<T>(res: Response, what: string): Promise<T
   return res.json();
 }
 
-export async function fetchManagerSession(): Promise<ManagerSessionView> {
-  return managerSessionResponse(await fetch(`${API_BASE}/manager/session`), "manager session");
+export async function fetchManagerSession(managerId = "manager", signal?: AbortSignal): Promise<ManagerSessionView> {
+  const query = managerId === "manager" ? "" : `?manager=${encodeURIComponent(managerId)}`;
+  return managerSessionResponse(await fetch(`${API_BASE}/manager/session${query}`, { signal }), "manager session");
 }
 
 /** Choose the Manager session's Agent Profile; null follows Settings. */
 export async function setManagerSessionProfile(
   profileId: string | null,
+  managerId = "manager",
 ): Promise<ManagerSessionView & { effect: ManagerSessionEffect; text: string }> {
   const res = await fetch(`${API_BASE}/manager/session/profile`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ profile_id: profileId }),
+    body: JSON.stringify(managerId === "manager" ? { profile_id: profileId } : { profile_id: profileId, manager: managerId }),
   });
   return managerSessionResponse(res, "manager session profile");
 }
@@ -543,8 +545,8 @@ export interface DbChatMessage {
 }
 
 /** A session's newest messages (up to 200), oldest first. */
-export async function fetchChatMessages(sessionId: string): Promise<DbChatMessage[]> {
-  const res = await fetch(`${API_BASE}/chat/messages?session_id=${encodeURIComponent(sessionId)}`);
+export async function fetchChatMessages(sessionId: string, signal?: AbortSignal): Promise<DbChatMessage[]> {
+  const res = await fetch(`${API_BASE}/chat/messages?session_id=${encodeURIComponent(sessionId)}`, { signal });
   if (!res.ok) return [];
   const data = await res.json();
   return data.messages || [];
@@ -564,8 +566,9 @@ export interface ChatSession {
   last_content: string;
 }
 
-export async function fetchChatSessions(): Promise<ChatSession[]> {
-  const res = await fetch(`${API_BASE}/chat/sessions`);
+export async function fetchChatSessions(managerId = "manager", signal?: AbortSignal): Promise<ChatSession[]> {
+  const query = managerId === "manager" ? "" : `?manager=${encodeURIComponent(managerId)}`;
+  const res = await fetch(`${API_BASE}/chat/sessions${query}`, { signal });
   if (!res.ok) await failed(res, "list conversations");
   const data = await res.json();
   return data.sessions ?? [];
@@ -573,8 +576,13 @@ export async function fetchChatSessions(): Promise<ChatSession[]> {
 
 /** One conversation by its id, however long ago it was active (null when it has no messages): the list holds only the
  * newest. */
-export async function fetchChatSession(sessionId: string): Promise<ChatSession | null> {
-  const res = await fetch(`${API_BASE}/chat/sessions?session_id=${encodeURIComponent(sessionId)}`);
+export async function fetchChatSession(
+  sessionId: string,
+  managerId = "manager",
+  signal?: AbortSignal,
+): Promise<ChatSession | null> {
+  const owner = managerId === "manager" ? "" : `&manager=${encodeURIComponent(managerId)}`;
+  const res = await fetch(`${API_BASE}/chat/sessions?session_id=${encodeURIComponent(sessionId)}${owner}`, { signal });
   if (!res.ok) await failed(res, "load the conversation");
   const data = await res.json();
   return data.sessions?.[0] ?? null;

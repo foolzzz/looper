@@ -238,8 +238,9 @@ function StepAgentView({ agent }: { agent: ChatTargetInfo }) {
 }
 
 function sendTargetOf(target: ChatTargetInfo): ChatTarget {
-  return target.kind === "planner" && target.task_id
-    ? { kind: "planner", task_id: target.task_id }
+  if (target.kind === "planner" && target.task_id) return { kind: "planner", task_id: target.task_id };
+  return target.kind === "manager" && target.id !== MANAGER_TARGET.id
+    ? { kind: "manager", id: target.id }
     : { kind: "manager" };
 }
 
@@ -247,7 +248,7 @@ function sendTargetOf(target: ChatTargetInfo): ChatTarget {
 // thread; a Worker or Reviewer has no chat, only its runs.
 function sessionFor(target: ChatTargetInfo): string {
   if (target.kind === "planner") return `planner-${target.task_id}`;
-  if (target.kind === "manager") return getOrCreateSessionId();
+  if (target.kind === "manager") return getOrCreateSessionId(target.id);
   return "";
 }
 
@@ -255,14 +256,19 @@ function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
-function getOrCreateSessionId(): string {
-  const existing = localStorage.getItem(STORAGE_SESSION_KEY) ?? localStorage.getItem(LEGACY_SESSION_KEY);
+// The default Manager keeps the original key; every other Manager has a pointer of its own.
+const sessionKey = (managerId: string) =>
+  managerId === "manager" ? STORAGE_SESSION_KEY : `${STORAGE_SESSION_KEY}:${managerId}`;
+
+function getOrCreateSessionId(managerId = "manager"): string {
+  const key = sessionKey(managerId);
+  const existing = localStorage.getItem(key) ?? (managerId === "manager" ? localStorage.getItem(LEGACY_SESSION_KEY) : null);
   if (existing) {
-    localStorage.setItem(STORAGE_SESSION_KEY, existing);
+    localStorage.setItem(key, existing);
     return existing;
   }
   const id = `session-${randomId().slice(0, 8)}`;
-  localStorage.setItem(STORAGE_SESSION_KEY, id);
+  localStorage.setItem(key, id);
   return id;
 }
 
@@ -346,7 +352,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const canSendRef = useRef(true);
   const pollRef = useRef<{ sid: string; ids: string[]; stopped: boolean; timer?: ReturnType<typeof setTimeout> } | null>(null);
   // The Manager's conversations on every channel, and the Lark or Telegram one open read-only (null: the web thread).
-  const [conversations, setConversations] = useState<ChatSession[] | null>(null);
+  const [conversations, setConversations] = useState<{ managerId: string; rows: ChatSession[] } | null>(null);
   const [conversationsError, setConversationsError] = useState("");
   const [profileRefresh, setProfileRefresh] = useState(0);
   const [newPanel, setNewPanel] = useState<ManagerSessionView | null>(null);
@@ -357,13 +363,24 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   // Below the md breakpoint the list takes the messages' place while it is open.
   const [listOpen, setListOpen] = useState(false);
 
-  const refreshConversations = useCallback(() => {
-    fetchChatSessions()
+  // The Manager and session shown now; a late answer is applied only when it was asked for these.
+  const currentRef = useRef({ managerId: target.id, sessionId });
+  currentRef.current = { managerId: target.id, sessionId };
+  const isCurrentManager = (managerId: string) => managerId === currentRef.current.managerId;
+  const currentManagerId = target.kind === "manager" ? target.id : "";
+
+  const refreshConversations = useCallback((managerId: string, signal?: AbortSignal) => {
+    fetchChatSessions(managerId, signal)
       .then((rows) => {
-        setConversations(rows);
+        if (signal?.aborted || managerId !== currentRef.current.managerId) return;
+        setConversations({ managerId, rows });
         setConversationsError("");
       })
-      .catch((err) => setConversationsError(err instanceof Error ? err.message : String(err)));
+      .catch((err) => {
+        if (signal?.aborted || (err instanceof Error && err.name === "AbortError")) return;
+        if (managerId !== currentRef.current.managerId) return;
+        setConversationsError(err instanceof Error ? err.message : String(err));
+      });
   }, []);
 
   const refreshTargets = useCallback(() => {
@@ -381,6 +398,10 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     return () => clearInterval(timer);
   }, [refreshTargets]);
 
+  const managers = useMemo(() => {
+    const rows = targets.filter((t) => t.kind === "manager");
+    return rows.length > 0 ? rows : [MANAGER_TARGET];
+  }, [targets]);
   const groups = useMemo(() => groupByTask(targets), [targets]);
   // The selected agent as last listed: its status and whether it takes messages.
   const current = targets.find((t) => t.id === target.id) ?? target;
@@ -392,12 +413,12 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const managerConfig = roleConfigs.find((c) => c.role === "manager");
   const targetTitle = (t: ChatTargetInfo) => {
     if (t.kind === "planner") return `Planner · ${truncate(t.name || t.requirement || t.task_id || "", 40)}`;
-    if (t.kind === "manager") return managerConfig?.display_name || "Manager";
+    if (t.kind === "manager") return t.name ?? (managerConfig?.display_name || "Manager");
     return `${stepAgentTitle(t)} · ${truncate(taskGroup?.planner.name || taskGroup?.planner.requirement || t.task_id || "", 32)}`;
   };
   const targetSubtitle = (t: ChatTargetInfo) =>
     t.kind === "manager"
-      ? "global"
+      ? t.id === MANAGER_TARGET.id ? "global" : t.id
       : `${t.kind === "planner" ? t.task_id : t.id} · ${t.status || "unknown"}`;
 
   // A Planner's own record is its activity; show it above the chat with it.
@@ -441,26 +462,37 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   // The conversation list, while the Manager is shown: re-read on the targets cadence and after each answer.
   useEffect(() => {
     if (target.kind !== "manager" || sending) return;
-    refreshConversations();
-    const timer = setInterval(refreshConversations, TARGETS_POLL_MS);
-    return () => clearInterval(timer);
-  }, [target.kind, sending, refreshConversations]);
+    const controller = new AbortController();
+    const refresh = () => refreshConversations(currentManagerId, controller.signal);
+    refresh();
+    const timer = setInterval(refresh, TARGETS_POLL_MS);
+    return () => {
+      controller.abort();
+      clearInterval(timer);
+    };
+  }, [target.kind, currentManagerId, sending, refreshConversations]);
+  const shownConversations = conversations?.managerId === currentManagerId ? conversations.rows : null;
 
   // A Lark or Telegram conversation is read-only here: its newest messages, re-read on the same cadence.
   // The conversation the address names is read by its id as well, as the list holds only the newest: a link to an
   // older one opens, and one open stays open when the list moves on.
-  const [opened, setOpened] = useState<{ id: string; session: ChatSession | null; error: string } | null>(null);
+  const [opened, setOpened] = useState<{ managerId: string; id: string; session: ChatSession | null; error: string } | null>(null);
   useEffect(() => {
     if (target.kind !== "manager" || !wantConversation) return;
     let alive = true;
+    const controller = new AbortController();
+    const managerId = currentManagerId;
+    const fresh = () => alive && isCurrentManager(managerId);
     const load = () =>
-      fetchChatSession(wantConversation).then(
-        (session) => alive && setOpened({ id: wantConversation, session, error: "" }),
+      fetchChatSession(wantConversation, managerId, controller.signal).then(
+        (session) => fresh() && setOpened({ managerId, id: wantConversation, session, error: "" }),
         (err) =>
-          alive &&
+          fresh() &&
+          !(err instanceof Error && err.name === "AbortError") &&
           setOpened((prev) => ({
+            managerId,
             id: wantConversation,
-            session: prev?.id === wantConversation ? prev.session : null,
+            session: prev?.managerId === managerId && prev.id === wantConversation ? prev.session : null,
             error: err instanceof Error ? err.message : String(err),
           })),
       );
@@ -468,13 +500,14 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     const timer = setInterval(load, TARGETS_POLL_MS);
     return () => {
       alive = false;
+      controller.abort();
       clearInterval(timer);
     };
-  }, [target.kind, wantConversation]);
-  const openedHere = opened?.id === wantConversation ? opened : null;
+  }, [target.kind, currentManagerId, wantConversation]);
+  const openedHere = opened?.id === wantConversation && opened.managerId === currentManagerId ? opened : null;
   const knownConversation =
     target.kind === "manager" && wantConversation
-      ? conversations?.find((c) => c.session_id === wantConversation) ?? openedHere?.session ?? null
+      ? shownConversations?.find((c) => c.session_id === wantConversation) ?? openedHere?.session ?? null
       : null;
   const viewing = knownConversation && knownConversation.channel !== "web" ? knownConversation : null;
   // Named by the address but not read yet: loading, or the read failed (and it is tried again).
@@ -486,23 +519,32 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   useEffect(() => {
     if (!viewingId) return;
     let alive = true;
+    const controller = new AbortController();
+    const managerId = currentRef.current.managerId;
+    const fresh = () => alive && isCurrentManager(managerId);
     const load = () =>
-      fetchChatMessages(viewingId)
-        .then((rows) => alive && setViewingMessages({ id: viewingId, rows }))
-        .catch(() => alive && setViewingMessages((prev) => (prev?.id === viewingId ? prev : { id: viewingId, rows: [] })));
+      fetchChatMessages(viewingId, controller.signal)
+        .then((rows) => fresh() && setViewingMessages({ id: viewingId, rows }))
+        .catch((err) => {
+          if (err instanceof Error && err.name === "AbortError") return;
+          if (fresh()) setViewingMessages((prev) => (prev?.id === viewingId ? prev : { id: viewingId, rows: [] }));
+        });
     load();
     const timer = setInterval(load, TARGETS_POLL_MS);
     return () => {
       alive = false;
+      controller.abort();
       clearInterval(timer);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewingId]);
 
   // The web thread to continue; the address names it too, so it is kept by a link, a refresh, Back and Forward.
-  const switchWebSession = (id: string) => {
+  const switchWebSession = (id: string, managerId: string = currentRef.current.managerId) => {
     cleanupRef.current?.();
     cleanupRef.current = null;
-    localStorage.setItem(STORAGE_SESSION_KEY, id);
+    localStorage.setItem(sessionKey(managerId), id);
+    currentRef.current = { managerId, sessionId: id };
     setSessionId(id);
     setMessages([]);
     setSending(false);
@@ -510,7 +552,9 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   };
   // The conversation in the address that is already applied (or chosen here), so the address is applied once.
   const appliedConversation = useRef("");
-  const openConversation = (session: ChatSession) => {
+  const openConversation = (session: ChatSession, fromManagerId?: string) => {
+    // A click queued on a row of the Manager shown before a switch does nothing.
+    if (fromManagerId !== undefined && fromManagerId !== currentRef.current.managerId) return;
     setListOpen(false);
     if (session.channel === "web") appliedConversation.current = session.session_id;
     onQuery?.(chatQuery(target.id, session.session_id));
@@ -542,8 +586,16 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     setSending(false);
     setPhase("");
     setMessages([]);
+    if (next.id !== target.id) {
+      setConversations(null);
+      setOpened(null);
+      setViewingMessages(null);
+      appliedConversation.current = "";
+    }
+    const nextSession = sessionFor(next);
+    currentRef.current = { managerId: next.id, sessionId: nextSession };
     setTarget(next);
-    setSessionId(sessionFor(next));
+    setSessionId(nextSession);
   };
   useEffect(() => {
     if (query === undefined || wantTarget === target.id) return;
@@ -570,19 +622,32 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
       dbLoadedRef.current = true;
       return;
     }
-    fetchChatMessages(sessionId).then((dbMsgs) => {
+    let alive = true;
+    const controller = new AbortController();
+    const requested = { managerId: currentRef.current.managerId, sessionId };
+    const fresh = () =>
+      alive &&
+      requested.managerId === currentRef.current.managerId &&
+      requested.sessionId === currentRef.current.sessionId;
+    fetchChatMessages(sessionId, controller.signal).then((dbMsgs) => {
+      if (!fresh()) return;
       if (dbMsgs.length > 0) {
         setMessages(fromDb(dbMsgs));
       } else {
-        const local = loadMessages(sessionId);
+        const local = loadMessages(requested.sessionId);
         if (local.length > 0) setMessages(local);
       }
       dbLoadedRef.current = true;
-    }).catch(() => {
-      const local = loadMessages(sessionId);
+    }).catch((err) => {
+      if (!fresh() || (err instanceof Error && err.name === "AbortError")) return;
+      const local = loadMessages(requested.sessionId);
       if (local.length > 0) setMessages(local);
       dbLoadedRef.current = true;
     });
+    return () => {
+      alive = false;
+      controller.abort();
+    };
   }, [sessionId]);
 
   // What the Manager's Claude says on its own (after background work it started
@@ -742,14 +807,26 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     newSessionButtonRef.current?.focus();
   };
 
+  const newPanelAbort = useRef<AbortController | null>(null);
   const toggleNewPanel = () => {
     if (newPanelOpen) return closeNewPanel();
     setNewPanelOpen(true);
     setNewPanel(null);
-    fetchManagerSession().then(setNewPanel).catch(() => setNewPanel({
+    const requested = { managerId: target.id, sessionId };
+    newPanelAbort.current?.abort();
+    const controller = new AbortController();
+    newPanelAbort.current = controller;
+    const fresh = () =>
+      !controller.signal.aborted &&
+      requested.managerId === currentRef.current.managerId &&
+      requested.sessionId === currentRef.current.sessionId;
+    fetchManagerSession(target.id, controller.signal).then((view) => fresh() && setNewPanel(view)).catch((err) => {
+      if (!fresh() || (err instanceof Error && err.name === "AbortError")) return;
+      setNewPanel({
       session: { active: false, runtime: null, profile_id: null }, selected: null,
       effective: { profile: null, source: "session" }, problem: null, choices: [],
-    }));
+      });
+    });
   };
 
   const handleSend = async (text: string, newSessionProfileId?: string) => {
@@ -905,11 +982,11 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const managerView = target.kind === "manager";
   const conversationList = (
     <ConversationList
-      sessions={conversations}
+      sessions={shownConversations}
       error={conversationsError}
       selected={viewing?.session_id ?? sessionId}
-      onSelect={openConversation}
-      onRefresh={refreshConversations}
+      onSelect={(session) => openConversation(session, currentManagerId)}
+      onRefresh={() => refreshConversations(currentManagerId)}
     />
   );
 
@@ -952,12 +1029,15 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
             </button>
             {agentDropdown && (
               <div className="absolute left-0 top-full z-50 mt-1 max-h-[70vh] w-96 overflow-y-auto rounded-lg border border-border bg-popover py-1 shadow-lg">
-                <AgentRow
-                  title={targetTitle(MANAGER_TARGET)}
-                  subtitle={targetSubtitle(MANAGER_TARGET)}
-                  selected={target.id === MANAGER_TARGET.id}
-                  onSelect={() => selectTarget(MANAGER_TARGET)}
-                />
+                {managers.map((m) => (
+                  <AgentRow
+                    key={m.id}
+                    title={targetTitle(m)}
+                    subtitle={targetSubtitle(m)}
+                    selected={target.id === m.id}
+                    onSelect={() => selectTarget(m)}
+                  />
+                ))}
                 <p className="mt-1 border-t border-border px-3 pb-1 pt-2 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
                   Tasks
                 </p>
@@ -1029,7 +1109,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
             {!viewing && sessionId && (
               <span className="hidden font-mono text-[11px] text-muted-foreground sm:inline">{sessionId}</span>
             )}
-            {target.kind === "manager" && !viewing && <ManagerSessionProfile refreshKey={profileRefresh} />}
+            {target.kind === "manager" && !viewing && <ManagerSessionProfile refreshKey={profileRefresh} managerId={target.id} />}
             {target.kind === "manager" && !viewing && (
               <button
                 type="button"
@@ -1173,7 +1253,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
         {viewing && (
           <div data-viewing={viewing.session_id} className="contents">
           <ChannelMessages
-            session={conversations?.find((c) => c.session_id === viewing.session_id) ?? viewing}
+            session={shownConversations?.find((c) => c.session_id === viewing.session_id) ?? viewing}
             messages={viewingMessages?.id === viewing.session_id ? viewingMessages.rows : null}
           />
           </div>
