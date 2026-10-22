@@ -1007,9 +1007,10 @@ def _cost_profile(row: Mapping[str, Any], models: Iterable[Mapping[str, Any]] = 
     provider = LegacyProviderSpec(
         account["id"], account["name"], AuthKind(account["auth"]),
         frozenset({ApiProtocol(model["protocol"])}), account.get("oauth_runtime_type"),
-        endpoint["base_url"], (CatalogModel.from_entry(model), *(
-            CatalogModel.from_entry(other) for other in models if other["id"] != model["id"]
-            and other["provider_id"] == model["provider_id"] and other["protocol"] == model["protocol"])),
+        endpoint["base_url"], tuple(CatalogModel.from_entry(entry) for entry in sorted(
+            [model, *(other for other in models if other["id"] != model["id"]
+                      and other["provider_id"] == model["provider_id"] and other["protocol"] == model["protocol"])],
+            key=lambda entry: (entry["catalog_order"], entry["name"], entry["id"]))),
         _env(account.get("env")))
     return LegacyAgentProfile(profile.id, profile.name, profile.runtime, provider, model["name"],
                               profile.effort, profile.agent_teams, profile.custom_prompt)

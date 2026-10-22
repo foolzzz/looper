@@ -85,7 +85,7 @@ function CardBody({ section }: { section: CardSection }) {
       return (
         <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-xs pointer-coarse:items-center">
           {section.facts.map((fact) => (
-            <div key={fact.label} className="contents">
+            <div key={fact.key ?? fact.label} className="contents">
               <dt className="text-muted-foreground">{fact.label}</dt>
               <dd className="min-w-0 break-words">
                 {fact.href ? (

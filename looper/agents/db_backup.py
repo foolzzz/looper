@@ -159,6 +159,8 @@ def docker_exec_container(command: tuple[str, ...]) -> str | None:
                     if index == len(word) - 1:
                         next(words, None)
                     break
+                if letter == "=":
+                    break  # `-t=false`: the rest is the boolean's value
                 if letter not in "idt":
                     return None
             continue

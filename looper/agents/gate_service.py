@@ -221,10 +221,10 @@ def _list_query(query: Mapping[str, str]) -> tuple[str, str | None, str | None, 
         if state != "open":
             raise RequestError(HTTP_400, "waiting_on applies to state=open only")
     raw = query.get("limit") or str(GATES_PAGE)
-    if not raw.isdigit() or not 1 <= int(raw) <= GATES_PAGE_MAX:
+    if not (raw.isascii() and raw.isdigit()) or not 1 <= int(raw) <= GATES_PAGE_MAX:
         raise RequestError(HTTP_400, f"limit must be a whole number from 1 to {GATES_PAGE_MAX}")
     offset = query.get("offset") or "0"
-    if not offset.isdigit():
+    if not (offset.isascii() and offset.isdigit()):
         raise RequestError(HTTP_400, "offset must be a whole number from 0")
     return state, waiting_on, query.get("project_id") or None, int(raw), int(offset)
 

@@ -38,10 +38,10 @@ class ProfileCommand:
 
 def parse_profile_command(text: str) -> ProfileCommand | None:
     """The command ``text`` is, or None when it is a message for the model."""
-    head, _, rest = text.strip().partition(" ")
-    if not head or head.lower() != PROFILE_COMMAND:
+    words = text.split(None, 1)
+    if not words or words[0].lower() != PROFILE_COMMAND:
         return None
-    rest = rest.strip()
+    rest = words[1].strip() if len(words) > 1 else ""
     if not rest:
         return ProfileCommand(ProfileCommandKind.LIST)
     if rest == "0":

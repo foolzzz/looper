@@ -15,14 +15,14 @@ import { cn } from "@/lib/utils";
 
 /** How often the list refreshes. */
 const REFRESH_MS = 10_000;
-/** Rows read first and added by each "Show more"; the refresh never reads more than MAX_ROWS. */
+/** Rows read first and added by each "Show more"; a refresh re-reads the loaded rows in requests of MAX_ROWS. */
 const PAGE = 50;
 const MAX_ROWS = 200;
 
 const linkClass =
   "rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 // Every row is its own grid, so no track may size to its content: the header and the rows must line up.
-const COLUMNS = "lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1.8fr)_9rem_6rem_9rem_8rem_14rem]";
+const COLUMNS = "xl:grid-cols-[minmax(0,1.2fr)_minmax(0,1.8fr)_9rem_6rem_9rem_8rem_14rem]";
 
 interface Filters {
   state: GateListState;
@@ -69,13 +69,13 @@ function GateRow({ row, answering, onAnswer, onChanged }: {
   const { task, gate } = row;
   const active = isActiveTask(task);
   const look = gateLook(gate, active);
-  const canAnswer = isGateWaiting(gate) && gateWaitsOn(gate, active) === "user";
+  const canAnswer = task.group !== "completed" && isGateWaiting(gate) && gateWaitsOn(gate, active) === "user";
   const closed = gate.closed_at && !isGateWaiting(gate);
   return (
     <li className="rounded-lg border border-border bg-card px-4 py-3 text-sm">
-      <div className={cn("grid min-w-0 gap-x-4 gap-y-2 lg:items-center", COLUMNS)}>
+      <div className={cn("grid min-w-0 gap-x-4 gap-y-2 xl:items-center", COLUMNS)}>
         <a href={taskHref(task.task_id)}
-          className={cn("min-w-0 font-medium [overflow-wrap:anywhere]", linkClass)}>{task.name}</a>
+          title={task.name} className={cn("line-clamp-2 min-w-0 font-medium [overflow-wrap:anywhere]", linkClass)}>{task.name}</a>
         <span className="min-w-0 [overflow-wrap:anywhere]">{gate.topic}</span>
         <span><Badge variant={look.variant}>{look.label}</Badge></span>
         <span className="text-xs text-muted-foreground">
@@ -126,11 +126,23 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
       const seq = ++latest.current;
       loading.current = true;
       const more = mode === "more";
-      const limit = more ? PAGE : Math.min(MAX_ROWS, Math.max(PAGE, shown.current));
-      return fetchGates({
+      const request = (limit: number, offset: number) => fetchGates({
         state, ...(waiting ? { waitingOn: "user" as const } : {}), ...(project ? { projectId: project } : {}),
-        limit, offset: more ? shown.current : 0,
-      })
+        limit, offset,
+      });
+      // A refresh re-reads every loaded row, page by page, so the rows past the first page and their drafts stay.
+      const load = async (): Promise<GateList> => {
+        if (more) return request(PAGE, shown.current);
+        const want = Math.max(PAGE, shown.current);
+        let list = await request(Math.min(MAX_ROWS, want), 0);
+        while (list.gates.length < want && list.gates.length < list.total) {
+          const next = await request(Math.min(MAX_ROWS, want - list.gates.length), list.gates.length);
+          if (next.gates.length === 0) break;
+          list = { ...next, gates: [...list.gates, ...next.gates] };
+        }
+        return list;
+      };
+      return load()
         .then((list) => {
           if (seq !== latest.current) return;
           loading.current = false;
@@ -227,7 +239,7 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
       {rows.length > 0 && (
         <div className="space-y-2">
           <div aria-hidden="true"
-            className={cn("hidden gap-x-4 px-4 text-xs font-medium text-muted-foreground lg:grid", COLUMNS)}>
+            className={cn("hidden gap-x-4 px-4 text-xs font-medium text-muted-foreground xl:grid", COLUMNS)}>
             <span>Task</span><span>Topic</span><span>State</span><span>Opened</span>
             <span>Last message</span><span>Questions</span><span>Actions</span>
           </div>

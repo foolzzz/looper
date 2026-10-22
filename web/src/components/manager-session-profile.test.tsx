@@ -25,6 +25,7 @@ const view = (over: Partial<ManagerSessionView> = {}): ManagerSessionView => ({
     source: "session",
   },
   problem: null,
+  follow_settings: { name: "Settings Agent", effect: "new_session" },
   choices: [choice(), choice({ number: 2, profile_id: "p2", name: "Beta", problem: "runtime missing" })],
   ...over,
 });
@@ -38,6 +39,10 @@ describe("manager session profile", () => {
   it("confirms only for new_session", () => {
     expect(confirmText(choice({ effect: "new_session" }))).toContain("starts a new session on Alpha");
     for (const effect of ["current", "resumes", "starts"] as const) expect(confirmText(choice({ effect }))).toBeNull();
+  });
+
+  it("confirms following Settings when it starts a new session", () => {
+    expect(confirmText(view().follow_settings!)).toContain("new session on Settings Agent");
   });
 
   it("renders the profile, options and problems", () => {
