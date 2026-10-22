@@ -401,7 +401,7 @@ async def open_gates(limit: int, *, chat: tuple[str, str] | None = None, dashboa
         _GATES.replace("FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id",
                        ", p.name AS project_name, t.title AS task_title, t.goal_id AS task_goal_id, "
                        "t.requirement AS task_requirement, t.origin_channel_id, t.chat_id, t.chat_kind, t.chat_mention, "
-                       "t.schedule_id FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id "
+                       "t.schedule_id, t.manager_id AS task_manager_id FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id "
                        "JOIN tasks t ON t.id = g.task_id LEFT JOIN projects p ON p.id = t.project_id")
         + " WHERE g.state = ANY($1::text[]) AND t.status = ANY($2::text[])" + where
         + " ORDER BY g.opened_at DESC NULLS LAST LIMIT $3", *args)

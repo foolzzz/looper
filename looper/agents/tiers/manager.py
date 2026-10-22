@@ -1810,7 +1810,8 @@ class ManagerAgent:
         ``CONVERSATION_MAX_CHARS``. Nothing when none is stored or they cannot be read."""
         try:
             chats = await db_chat.recent_conversations(sessions=CONVERSATION_CHATS,
-                                                       messages=CONVERSATION_MESSAGES + 1)
+                                                       messages=CONVERSATION_MESSAGES + 1,
+                                                       manager_id=self.agent_id)
         except Exception:
             logger.warning("%s: cannot read the recent chat messages for a new session", self._log, exc_info=True)
             return []
@@ -1964,7 +1965,8 @@ class ManagerAgent:
     async def _ready_tasks_section(self) -> list[str]:
         """The tasks created but not started, newest first, so Claude can start one by its id; none, no section."""
         try:
-            tasks = await db_tasks.list_tasks(limit=READY_TASKS_LISTED, status=db_tasks.READY)
+            tasks = await db_tasks.list_tasks(limit=READY_TASKS_LISTED, status=db_tasks.READY,
+                                          manager_id=self.agent_id)
         except Exception:
             logger.warning("%s could not list the ready tasks", self._log, exc_info=True)
             return ["Ready tasks: (could not be read)", ""]
@@ -1991,11 +1993,11 @@ class ManagerAgent:
             if here:
                 dashboard = await gate_dashboard_target()
                 gates = await db_user_gates.open_gates(
-                    OPEN_GATES_LISTED, chat=(origin["channel"], chat),
+                    OPEN_GATES_LISTED, chat=(origin["channel"], chat), manager_id=self.agent_id,
                     dashboard=dashboard is not None and (dashboard.channel.value, dashboard.target.id) ==
                     (origin["channel"], chat))
             else:
-                gates = await db_user_gates.open_gates(OPEN_GATES_LISTED)
+                gates = await db_user_gates.open_gates(OPEN_GATES_LISTED, manager_id=self.agent_id)
                 dashboard = await gate_dashboard_target() if gates else None
         except Exception:
             logger.warning("%s could not list the open gates", self._log, exc_info=True)
@@ -2039,6 +2041,12 @@ class ManagerAgent:
             )
         except Exception:
             logger.warning("%s: could not persist a %s chat turn", self._log, channel, exc_info=True)
+            return
+        if self.agent_id != "manager":
+            try:
+                await db_chat.claim_thread(key, self.agent_id)
+            except Exception:
+                logger.warning("%s: could not claim the chat thread %s", self._log, key, exc_info=True)
 
     async def _send_reply(self, original: MessageEnvelope, text: str, *, error: str | None = None,
                           persist: bool = True, outcome: ReplyOutcome | None = None,
@@ -2059,7 +2067,8 @@ class ManagerAgent:
             return None
         try:
             return await gate_commands.handle(envelope, text, has_planner=self.ops.platform.task_router.has_planner,
-                                              bus=self._bus, source=self.agent_address)
+                                              bus=self._bus, source=self.agent_address,
+                                              manager_id=self.agent_id)
         except Exception as exc:
             logger.exception("%s: the gate command %r failed", self._log, text[:40])
             return f"关卡命令出错：{exc}"

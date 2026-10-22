@@ -115,9 +115,11 @@ async def recent_conversations(
     *,
     sessions: int,
     messages: int,
+    manager_id: str = "manager",
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
-    """The Manager's most recently active chat sessions, newest first, each with its last ``messages``
+    """Manager ``manager_id``'s (default: the default Manager's; a thread without a ``chat_threads`` row is the
+    default's) most recently active chat sessions, newest first, each with its last ``messages``
     messages, oldest first: ``[{"session_id", "messages": [{"role", "content", "created_at", "delivery_failure"}]}]``
     (``delivery_failure`` set for an answer its channel could not send)."""
     pool = pool or get_pool()
@@ -125,9 +127,10 @@ async def recent_conversations(
         """
         SELECT r.session_id, m.role, m.content, m.created_at, m.delivery_failure
         FROM (
-            SELECT session_id, max(id) AS last_id FROM chat_messages
-            WHERE NOT starts_with(session_id, $3)
-            GROUP BY session_id ORDER BY max(id) DESC LIMIT $1
+            SELECT c.session_id, max(c.id) AS last_id FROM chat_messages c
+            LEFT JOIN chat_threads t ON t.session_id = c.session_id
+            WHERE NOT starts_with(c.session_id, $3) AND coalesce(t.manager_id, 'manager') = $4
+            GROUP BY c.session_id ORDER BY max(c.id) DESC LIMIT $1
         ) r
         CROSS JOIN LATERAL (
             SELECT c.id, c.role, c.content, c.created_at, c.delivery_failure FROM chat_messages c
@@ -135,7 +138,7 @@ async def recent_conversations(
         ) m
         ORDER BY r.last_id DESC, m.id ASC
         """,
-        sessions, messages, PLANNER_THREAD_PREFIX,
+        sessions, messages, PLANNER_THREAD_PREFIX, manager_id,
     )
     conversations: dict[str, list[dict[str, Any]]] = {}
     for row in rows:

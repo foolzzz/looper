@@ -50,7 +50,8 @@ class _World:
         self.model: list[str] = []
         self.stored: list[str] = []
 
-        async def open_gates(limit: int, *, chat: Any = None, dashboard: bool = False, pool: Any = None) -> Any:
+        async def open_gates(limit: int, *, chat: Any = None, dashboard: bool = False,
+                              manager_id: Any = None, pool: Any = None) -> Any:
             self.listed_with.append(chat)
             if chat is None:
                 return list(self.gates)
@@ -76,6 +77,10 @@ class _World:
             self.stored.append(content)
 
         monkeypatch.setattr(gate_commands.db_user_gates, "open_gates", open_gates)
+        async def get_task(task_id: str) -> dict[str, Any]:
+            return {"id": task_id, "manager_id": "manager"}
+
+        monkeypatch.setattr(gate_commands.db_tasks, "get_task", get_task)
         monkeypatch.setattr(gate_commands, "dashboard_target", no_dashboard)
         monkeypatch.setattr(gate_commands, "post_message", post_message)
         monkeypatch.setattr(gate_routing, "post_message", post_message)

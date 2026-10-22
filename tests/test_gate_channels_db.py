@@ -641,7 +641,8 @@ def test_the_manager_sees_the_open_gates_of_the_chat_it_answers(monkeypatch: pyt
                               project_name="notes")
 
         async def section(envelope: MessageEnvelope | None) -> list[str]:
-            return await ManagerAgent._open_gates_section(None, envelope)  # type: ignore[arg-type]
+            return await ManagerAgent._open_gates_section(  # type: ignore[arg-type]
+                __import__("types").SimpleNamespace(agent_id="manager", _log="manager"), envelope)
 
         web = await section(_tool_turn("hi", channel="web").envelope)
         assert web[0] == "Open gates (waiting for the user's answer; newest first):"
