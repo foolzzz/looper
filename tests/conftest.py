@@ -50,8 +50,20 @@ _AGENT_DB_WRITES = (
     ("llm_records", "update_event"),
 )
 
+# The default Manager's row, what every read of a Manager answers in a unit test (its definition has no prompt, no
+# profile, every tool and every task).
+_DEFAULT_MANAGER = {
+    "id": "manager", "name": "Manager", "description": "", "system_prompt": None, "profile_id": None,
+    "profile_name": None, "tools": "all", "task_scope": "all", "task_policy": "free", "enabled": True,
+    "revision": 0, "deleted_at": None,
+}
+
 # Reads the agents make, answered as a database that holds no projects and no settings yet.
 _AGENT_DB_READS = (
+    ("managers", "get_manager", _DEFAULT_MANAGER),
+    ("managers", "list_managers", [_DEFAULT_MANAGER]),
+    ("managers", "revision_of", (0, True)),
+    ("managers", "list_templates", []),
     ("projects", "list_projects", []),
     ("projects", "find_project_by_name", None),
     ("projects", "get_project", None),

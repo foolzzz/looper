@@ -134,3 +134,18 @@ async def recent_conversations(
             {"role": row["role"], "content": row["content"], "created_at": row["created_at"],
              "delivery_failure": row["delivery_failure"]})
     return [{"session_id": session_id, "messages": items} for session_id, items in conversations.items()]
+
+
+async def thread_owner(session_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> str | None:
+    """The Manager a chat thread belongs to; None for a thread without a row (the default Manager's)."""
+    pool = pool or get_pool()
+    return await pool.fetchval("SELECT manager_id FROM chat_threads WHERE session_id = $1", session_id)
+
+
+async def claim_thread(session_id: str, manager_id: str, *,
+                       pool: asyncpg.Pool | asyncpg.Connection | None = None) -> str:
+    """Make ``manager_id`` the owner of the thread unless it has one; the stored owner (the first one wins)."""
+    pool = pool or get_pool()
+    await pool.execute("INSERT INTO chat_threads (session_id, manager_id) VALUES ($1, $2) "
+                       "ON CONFLICT (session_id) DO NOTHING", session_id, manager_id)
+    return await pool.fetchval("SELECT manager_id FROM chat_threads WHERE session_id = $1", session_id)

@@ -164,6 +164,8 @@ def _task(row: Mapping[str, Any]) -> dict[str, Any]:
     task = dict(row)
     if "config" in task:
         task["config"] = _read_config(task["config"])
+    if isinstance(task.get("template"), str):
+        task["template"] = json.loads(task["template"])
     task["name"] = task_name(title=task.get("title"), goal_id=task.get("goal_id"),
                              requirement=task.get("requirement"), task_id=str(task.get("id") or ""))
     return task
@@ -190,6 +192,8 @@ async def create_task(
     workspace_dir: str = "",
     workspace_mode: str | None = None,
     workspace_base: str = "",
+    manager_id: str = "manager",
+    template: Mapping[str, Any] | None = None,
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> dict[str, Any]:
     """Insert a task; ``schedule_id`` names the schedule that fired it, ``budget_usd`` its own spend cap.
@@ -201,6 +205,7 @@ async def create_task(
     Telegram chat, a Lark sender's open_id, or a Lark group and the sender to @-mention there; None for a task that
     did not come from either. ``original_user_text`` is the user's message the
     Manager's task JSON answered (kept as history); ``title`` the few words the Manager names the task with.
+    ``manager_id`` is the Manager the task belongs to, ``template`` what the task template it came from said then.
     """
     pool = pool or get_pool()
     now = datetime.now(timezone.utc)
@@ -210,13 +215,15 @@ async def create_task(
         INSERT INTO tasks (id, requirement, goal_id, work_dir, project_id,
                            config, status, correlation_id, origin_channel_id, chat_id, original_user_text, title,
                            created_at, updated_at, schedule_id, budget_usd, chat_kind, chat_mention,
-                           workspace_dir, workspace_mode, workspace_base)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, $15, $16, $17, $18, $19, $20)
+                           workspace_dir, workspace_mode, workspace_base, manager_id, template)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, $15, $16, $17, $18, $19, $20,
+                $21, $22::jsonb)
         ON CONFLICT (id) DO NOTHING
         """,
         task_id, requirement, goal_id, work_dir, project_id,
         config_json, status, correlation_id, origin_channel_id, chat_id, original_user_text, task_title(title), now,
         schedule_id, budget_usd, chat_kind, chat_mention, workspace_dir, workspace_mode, workspace_base,
+        manager_id, json.dumps(dict(template)) if template is not None else None,
     )
     return {"task_id": task_id, "created_at": now.isoformat()}
 
@@ -520,11 +527,12 @@ async def list_tasks(
     group: TaskGroup | None = None,
     schedule_id: str | None = None,
     before: str | None = None,
+    manager_id: str | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
     """The newest tasks (by creation, then id), each with its ``project_name`` and ``schedule_name``; only one
     project's when ``project_id`` is given, one schedule's when ``schedule_id`` is, only those in ``status``, or in
-    ``group``, when it is, and only those older than the task ``before`` when it is."""
+    ``group``, when it is, only those older than the task ``before`` when it is, and only ``manager_id``'s when given."""
     pool = pool or get_pool()
     statuses, inside = _group_filter(group)
     rows = await pool.fetch(
@@ -532,9 +540,10 @@ async def list_tasks(
         {_WITH_PROJECT}
         WHERE {_FILTERS}
           AND ($6::text IS NULL OR (t.created_at, t.id) < (SELECT b.created_at, b.id FROM tasks b WHERE b.id = $6))
+          AND ($9::text IS NULL OR t.manager_id = $9)
         ORDER BY t.created_at DESC, t.id DESC LIMIT $7 OFFSET $8
         """,
-        project_id, status, statuses, inside, schedule_id, before, limit, offset,
+        project_id, status, statuses, inside, schedule_id, before, limit, offset, manager_id,
     )
     return [_task(r) for r in rows]
 
