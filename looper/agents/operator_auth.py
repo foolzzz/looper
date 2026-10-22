@@ -292,6 +292,7 @@ def read_token(runtime_root: Path) -> str | None:
 class Access(enum.Enum):
     DASHBOARD = "dashboard"
     AGENT = "agent"
+    CLIENT = "client"
     OPERATOR = "operator"
     SIGN_IN = "sign_in"
 
@@ -302,7 +303,8 @@ class Area:
     access: Access
 
 
-AREAS: tuple[Area, ...] = (Area("/api/agent/v1/", Access.AGENT), Area("/api/", Access.OPERATOR))
+AREAS: tuple[Area, ...] = (
+    Area("/api/agent/v1/", Access.AGENT), Area("/api/v1/", Access.CLIENT), Area("/api/", Access.OPERATOR))
 
 
 def access(path: str) -> Access:
@@ -318,6 +320,11 @@ def cookie_name(port: int) -> str:
 def _bearer(headers: Mapping[str, str]) -> str | None:
     parts = headers.get("authorization", "").split(None, 1)
     return parts[1] if len(parts) == 2 and parts[0].lower() == "bearer" else None
+
+
+def bearer(headers: Mapping[str, str]) -> str | None:
+    """The ``Authorization: Bearer`` credential only, never a cookie."""
+    return _bearer(headers)
 
 
 def cookie(headers: Mapping[str, str], name: str) -> str | None:

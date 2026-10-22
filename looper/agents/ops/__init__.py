@@ -41,6 +41,7 @@ class ErrorCode(str, Enum):
     INVALID = "invalid"
     NEEDS_USER_TURN = "needs_user_turn"  # a change outside a turn that answers the user
     FORBIDDEN = "forbidden"
+    UNAUTHORIZED = "unauthorized"  # /api/v1 without a valid client token (the Manager never sees it)
     CONFLICT = "conflict"  # the target's state does not allow it (an ended task, a task not started)
     EXPIRED = "expired"  # a confirmation past its time or its turn
     STOPPED = "stopped"  # the user stopped the turn the call came in

@@ -20,9 +20,10 @@ from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from ..db import api_clients as db_api_clients
 from ..db.tasks import TaskGroup, task_group
 from . import (
-    agent_settings, catalog, chat_settings, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
+    agent_settings, api_v1, catalog, chat_settings, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
     managers_api, operator_auth, overview, profile_registry, project_skills, projects, prompt_preview, request_guard, role_api,
     schedules, self_check, vault, wait_service,
 )
@@ -34,7 +35,7 @@ from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
 from .task_roles import record_role, run_roles
 from .tiers.journal import progress_notes
-from .ops import OpError
+from .ops import ErrorCode, OpError
 from .ops.planner import PlannerOps
 from .ops.room import RoomOps
 from .managers import ManagerFleet
@@ -88,6 +89,8 @@ SIGN_IN_HEADERS = {
     "Cache-Control": "no-store", "Referrer-Policy": "same-origin",
     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
 }
+
+V1_HEADERS = {"Cache-Control": "no-store"}
 
 # The Manager's tools (``ops.service``).
 AGENT_API = "/api/agent/v1/"
@@ -265,6 +268,33 @@ class AgentHTTPServer:
                 writer.close()
                 return
 
+            principal = None
+            if area is operator_auth.Access.CLIENT:
+                try:
+                    principal = await self._client_principal(headers, peer_host)
+                except Exception:
+                    logger.warning("could not check an API client token for %s %s from %s", method, path, peer_host,
+                                   exc_info=True)
+                    status, answer = api_v1.error(
+                        ErrorCode.UNAVAILABLE, "Looper could not check the token now; try again")
+                    writer.write(_json_response(status, answer, headers=V1_HEADERS))
+                    await writer.drain()
+                    writer.close()
+                    return
+                if principal is None:
+                    logger.warning("refused %s %s from %s: no valid API client token%s", method, path, peer_host,
+                                   " (one was presented)" if operator_auth.bearer(headers) is not None
+                                   else " (none was presented)")
+                    status, answer = api_v1.error(
+                        ErrorCode.UNAUTHORIZED,
+                        "a valid API client token is required: create one in Settings → API clients, "
+                        "then run `loopercli login`")
+                    writer.write(_json_response(status, answer, headers={
+                        **V1_HEADERS, "WWW-Authenticate": 'Bearer realm="looper"'}))
+                    await writer.drain()
+                    writer.close()
+                    return
+
             query = dict(urllib.parse.parse_qsl(
                 parsed.query, keep_blank_values=area is operator_auth.Access.DASHBOARD))
             streamed = method == "POST" and path == CONFIG_IMPORTS_PATH
@@ -310,6 +340,8 @@ class AgentHTTPServer:
                 await self._handle_sign_in(method, path, headers, body, peer_host, writer)
             elif area is operator_auth.Access.AGENT:
                 await self._handle_agent_api(method, path, headers, body, writer)
+            elif area is operator_auth.Access.CLIENT:
+                await self._handle_v1(method, path, query, headers, body, writer, principal)
             elif area is operator_auth.Access.OPERATOR:
                 await self._route_api(method, path, query, body, writer, headers)
             else:
@@ -330,6 +362,35 @@ class AgentHTTPServer:
                 await writer.wait_closed()
             except Exception:
                 pass
+
+    async def _client_principal(self, headers: Mapping[str, str], peer_host: str | None) -> api_v1.Principal | None:
+        """Who calls ``/api/v1``: the operator, an API client (a local, direct caller with an ``lpc_`` bearer token),
+        or nobody. ``find`` raises when the database is down."""
+        if self._is_operator(headers):
+            return api_v1.OPERATOR
+        token = operator_auth.bearer(headers)
+        if (token is None or not token.startswith(db_api_clients.TOKEN_PREFIX)
+                or peer_host is None or not operator_auth.is_loopback(peer_host)
+                or not operator_auth.is_loopback(operator_auth.hostname(headers.get("host", "")))
+                or "forwarded" in headers or "x-forwarded-for" in headers):
+            return None
+        client = await db_api_clients.find(token)
+        if client is None:
+            return None
+        try:
+            await db_api_clients.touch(client["id"])
+        except Exception:
+            logger.debug("could not note the use of API client %s", client["id"], exc_info=True)
+        return api_v1.Principal("client", client["id"], client["name"])
+
+    async def _handle_v1(self, method: str, path: str, query: dict[str, str], headers: Mapping[str, str],
+                         body: bytes, writer: asyncio.StreamWriter, principal: api_v1.Principal) -> None:
+        if method == "GET" and path == "/api/v1/whoami":
+            status, answer = api_v1.OK, api_v1.whoami(principal)
+        else:
+            status, answer = api_v1.error(ErrorCode.NOT_FOUND, f"no {method} {path}")
+        writer.write(_json_response(status, answer, headers=V1_HEADERS))
+        await writer.drain()
 
     @staticmethod
     async def _read_headers(reader: asyncio.StreamReader) -> dict[str, str]:
@@ -409,6 +470,7 @@ class AgentHTTPServer:
     _RE_SCHEDULE_RUN = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/run$")
     _RE_SCHEDULE_RUNS = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/runs$")
     _RE_SCHEDULE_NOTIFICATIONS = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/notifications$")
+    _RE_CLIENT = re.compile(r"^/api/clients/(client-[0-9a-f]{12})$")
     _RE_CONFIG_IMPORT = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})$")
     _RE_CONFIG_IMPORT_APPLY = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})/apply$")
 
@@ -508,6 +570,12 @@ class AgentHTTPServer:
             await self._handle_task_detail(m.group(1), writer)
         elif path == "/api/workspaces/check" and method == "GET":
             await self._answer(writer, HTTP_200, lambda: projects.check_workspace(query))
+        elif path == "/api/clients" and method == "GET":
+            await self._answer(writer, HTTP_200, self._list_clients)
+        elif path == "/api/clients" and method == "POST":
+            await self._create_client(body, writer)
+        elif (m := self._RE_CLIENT.match(path)) and method == "DELETE":
+            await self._answer(writer, HTTP_200, lambda: self._revoke_client(m.group(1)))
         elif path == "/api/projects" and method == "GET":
             await self._handle_list_projects(writer)
         elif path == "/api/projects" and method == "POST":
@@ -856,6 +924,32 @@ class AgentHTTPServer:
             status, result = exc.status, {"error": str(exc)}
         writer.write(_json_response(status, _serialize(result)))
         await writer.drain()
+
+    @staticmethod
+    async def _list_clients() -> dict[str, Any]:
+        return {"clients": await db_api_clients.list_active()}
+
+    async def _create_client(self, body: bytes, writer: asyncio.StreamWriter) -> None:
+        """Add an API client; its token is in this answer and nowhere else."""
+        headers = {"Cache-Control": "no-store"}
+        try:
+            name = projects.json_object(body).get("name")
+            view, token = await db_api_clients.create(name)
+            status, answer = HTTP_201, {"client": view, "token": token}
+        except projects.RequestError as exc:
+            status, answer = exc.status, {"error": str(exc)}
+        except db_api_clients.ClientNameError as exc:
+            status, answer = HTTP_400, {"error": str(exc)}
+        except db_api_clients.ClientNameTaken as exc:
+            status, answer = HTTP_409, {"error": str(exc)}
+        writer.write(_json_response(status, _serialize(answer), headers=headers))
+        await writer.drain()
+
+    @staticmethod
+    async def _revoke_client(client_id: str) -> dict[str, Any]:
+        if not await db_api_clients.revoke(client_id):
+            raise projects.RequestError(HTTP_404, f"no active API client {client_id}")
+        return {"revoked": client_id}
 
     async def _gate_message(self, task_id: str, label: str, body: bytes, *, end: bool) -> dict[str, Any]:
         """The user's message in a gate of the task, or their end of its discussion (``gate_service``)."""
