@@ -18,7 +18,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   (`llm_records.agent_id`), turn binding file and `ManagerOps`.
   `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
   8 at once. A scenario Manager has its own system prompt, Agent Profile and
-  [task templates](#task-templates); channels reach the default Manager only
+  [task templates](#task-templates), and can have its own Telegram or Lark bots
   ([Channels](#channels)). What follows holds for each Manager unless it says
   otherwise
 - Acts on Looper only through its platform tools
@@ -2727,7 +2727,7 @@ through one JSON file, `format: looper-config/v3`. The registry sections are
 `profiles` (runtime name and a composite `model` reference). Built-ins exist
 everywhere and are not exported. Local ids are never portable references.
 `settings` carries the system/role layers, role prompts, timeouts and enabled
-flags; `channels`, global `installs` and `catalog` carry their existing content.
+flags; `channels`, global `installs` and `catalog` carry their existing content; `channels` holds only the three built-in rows, matched by id, so added bots are not exported and a file naming one is refused.
 `--include-projects` adds projects, layers, knowledge, skills, installs and
 schedules. Export streams a read-only repeatable-read snapshot, either through
 the CLI or `GET /api/config/export`; catalog files remain UTF-8 text.
@@ -3940,7 +3940,8 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `library_files` | Each catalog item's files: relative path, UTF-8 content, sha256, executable bit |
 | `library_installs` | Where an item loads: `scope` (`global` or `project`), `project_id`, `roles` (a non-empty subset of `manager`, `planner`, `worker`, `reviewer`; never `manager` in a project), `enabled`; one per item and place, going with its item and its project |
 | `project_documents` | A project's knowledge: title, one-line summary, `source_kind` (`text`, `upload` or `path`), `filename` and `content` (text and upload) or `path` (relative to the project's default directory), `size_bytes`, `sha256`; a CHECK keeps each kind's columns consistent and the rows go with their project |
-| `channel_configs` | Telegram/Lark settings (enabled flag, Telegram's token env var name, Lark's lark-cli `profile`, the sender allowlist, and for Lark the app it was made for) |
+| `channel_configs` | Telegram/Lark settings, one row per bot (`manager_id`, fixed when the bot is added; the built-in rows belong to the default Manager; a trigger refuses to delete a Manager that has bots; `channel_bot_seq` numbers the added `channel-<type>-<n>` rows; enabled flag, Telegram's token env var name, Lark's lark-cli `profile`, the sender allowlist, and for Lark the app it was made for) |
+| `task_user_gate_posts`, `task_user_gate_messages` | Each also has `channel_id`, the bot a gate message was posted through or received from; the type-keyed unique constraint of `task_user_gate_posts` stays so a downgrade still works |
 | `channel_rejected_senders` | The latest senders a channel's allowlist refused (the Lark channel records them): `sender_id`, `count`, `last_at` and `chat_id` (the group chat of the latest one; NULL for a direct message), never what they wrote; the 20 newest per channel |
 
 Plans and sessions used to be files (`.local/planner/planner-<task_id>/*.json`,
@@ -4326,12 +4327,14 @@ does not imply HTTP compatibility.
 | `/api/tasks/:id/waits/:step/resume` | POST | Ignore the body; move a `waiting` step to `ready`, outcome `resumed`, record activity and wake its Planner when running. Returns `{task_id, wait}`; 404 for an unknown task or wait, 409 for a completed/cancelled task, a non-waiting row or a concurrent move |
 | `/api/tasks/:id/waits/:step/cancel` | POST | Ignore the body; move a `waiting` step to `cancel_requested`, record activity and wake its Planner to decide what follows. Same response and refusal rules as resume; `timed_out` and `cancel_requested` explain that the Planner decides next |
 | `/api/wait-settings` | GET/PUT | `{max_wait_seconds, min_check_seconds}`, each `{value, default, min, max, source}` (`setting` or `built-in`). PUT one or both whole numbers of seconds, or `null` to restore the built-in; 400 for an invalid range or a minimum check interval above the maximum wait, with no changes stored |
-| `/api/channel-configs` | GET | List channels, each with `start_problem`: why it does not start as configured (an empty or invalid sender allowlist), else null |
-| `/api/channels/lark/status` | GET | The Lark (lark-cli) channel as lark-cli sees its saved settings: `bot` (`name`, `app_id`, `open_id`, `profile`; null when lark-cli cannot act as it), `problem` (why it would not start: lark-cli, or the allowlist made for another app), `allowlist_app_id`, `names` (open_id to name, for the allowlist and the refused senders) and `rejected` (`open_id`, `name`, `count`, `last_at`, `chat_id` (the group chat, null for a direct message), newest first, not on the allowlist; never what they wrote) |
+| `/api/channel-configs` | GET | List channels, each with `start_problem`: why it does not start as configured (an empty or invalid sender allowlist), else null, and `manager_id`, `manager_name` and `builtin` (true for the three built-in rows) |
+| `/api/channel-configs` | POST | Add a bot for a Manager: `channel_type`, `manager_id`, `bot_token`, `config`, `enabled` (default false) and `display_name`; the row is `channel-<type>-<n>` (`channel_bot_seq`), returned as GET shows it. 409 when the same bot is already added, 400 for a bad body (a Telegram or bot-token bot needs its token, a lark-cli bot its `profile`, a bot-token bot its `app_id`), 404 for an unknown Manager |
+| `/api/channel-configs/:id` | DELETE | Remove an added bot and its secret (`{deleted, restart}`); the built-in rows cannot be removed (400, turn them off instead), 404 for an unknown channel |
+| `/api/channels/lark/status` | GET | (`?channel_id=` picks an added Lark bot; the same for `lark/people`, `lark_bot/status` and `lark_bot/people`) The Lark (lark-cli) channel as lark-cli sees its saved settings: `bot` (`name`, `app_id`, `open_id`, `profile`; null when lark-cli cannot act as it), `problem` (why it would not start: lark-cli, or the allowlist made for another app), `allowlist_app_id`, `names` (open_id to name, for the allowlist and the refused senders) and `rejected` (`open_id`, `name`, `count`, `last_at`, `chat_id` (the group chat, null for a direct message), newest first, not on the allowlist; never what they wrote) |
 | `/api/channels/lark/people` | GET | `?q=` a name or an email (1–50 characters): `people`, each `open_id` (for the channel's app), `name`, `email`, `department`; 400 for a bad query, 502 when lark-cli cannot search |
 | `/api/channels/lark_bot/status` | GET | The Lark (bot token) channel as the platform sees its saved settings: the same fields as `/api/channels/lark/status` (`bot.profile` is empty); `problem` also says no `app_id` or no app secret is set |
 | `/api/channels/lark_bot/people` | GET | `?q=` a name or an email (1–50 characters): `people` as above and `complete` (false when the bounded directory scan, at most 40 requests, ended before reading every department); an email is looked up exactly; 400 for a bad query, 502 when the platform refuses |
-| `/api/channel-configs/:id` | GET/PUT | Channel config. PUT validates the sender allowlist (`allowed_user_ids` for Telegram, `allowed_open_ids` for Lark) and stores it as a list; 400 naming the first bad id, and nothing is stored then; 404 for an unknown channel |
+| `/api/channel-configs/:id` | GET/PUT | Channel config. PUT validates the sender allowlist (`allowed_user_ids` for Telegram, `allowed_open_ids` for Lark) and stores it as a list; 400 naming the first bad id, and nothing is stored then; 404 for an unknown channel. A `manager_id` in PUT must equal the stored one (400 otherwise): a bot's Manager cannot change |
 
 ## Configuration
 
@@ -4373,8 +4376,22 @@ takes no flags for them. At startup it reads `channel_configs`, which
 Settings → Channels edits, and starts each enabled channel. Changes apply after a
 restart.
 
-Telegram and Lark reach the default Manager only; a bot per Manager is stage 2
-of the [scenario Managers RFC](rfcs/scenario-managers.zh-CN.md).
+**A bot per Manager** (stage 2 of the
+[scenario Managers RFC](rfcs/scenario-managers.zh-CN.md)). Each Telegram or
+Lark row of `channel_configs` is one bot with one runner and one Manager
+(`channel_configs.manager_id`, fixed when the bot is added). The three built-in
+rows (`channel-telegram`, `channel-lark`, `channel-lark_bot`) are the default
+Manager's. Settings → Channels → Add a bot (`POST /api/channel-configs`) creates a
+`channel-<type>-<n>` row for any Manager. Its credentials are entered in the dashboard only, kept in
+`channel_secrets` and masked in logs; an added bot never reads the environment,
+and a lark-cli bot names its profile. The same bot cannot be added twice
+(Telegram by the bot id in its token, lark-cli by profile, bot token by app id;
+409). A bot's thread id is `<channel_id>:<chat_id>` (the built-in rows keep
+`<type>:<chat_id>`) and belongs to its Manager. A disabled Manager's bot answers
+that it is turned off, and a Manager with bots cannot be deleted. Delivery (task
+end notices, wait and concurrency notices, gate posts) goes by channel id, the
+bot the task came through; schedules' notices and the dashboard tasks' gate chat
+use the built-in rows only. Bot changes take effect after a restart.
 
 - **Sender allowlist** (`looper/agents/channels/allowlist.py`, RFC decision 8):
   the Manager runs any command it is asked to, so Telegram and Lark pass on
