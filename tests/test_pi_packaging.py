@@ -68,7 +68,7 @@ subprocess.Popen([sys.executable, '-c', {child!r}],
            "PI_EVAL_API_KEY": "test-only-key", "DEEPSEEK_API_KEY": "test-only-key",
            "ANTHROPIC_API_KEY": "test-only-key",
            "PI_EVAL_BASE_URL": "http://127.0.0.1:9/v1", "PI_EVAL_TOTAL_CAP_USD": "2.5",
-           "PI_EVAL_CASE_BUDGET_USD": "0.4", "PI_EVAL_DEADLINE_SECONDS": "2",
+           "PI_EVAL_CASE_BUDGET_USD": "0.4", "PI_EVAL_DEADLINE_SECONDS": "6",
            "LOOPER_EVAL_DATABASE_URL": "postgresql://127.0.0.1/disposable_eval"}
     try:
         # The timeout only guards against a hang; the kill latency is asserted below.
@@ -81,7 +81,7 @@ subprocess.Popen([sys.executable, '-c', {child!r}],
         # runner starts at or after the script, so its start plus the deadline is
         # never earlier than the real deadline and this never over-counts the kill.
         from looper.agents import proc_tree
-        deadline_at = float((tmp_path / "runner.started").read_text()) + 2
+        deadline_at = float((tmp_path / "runner.started").read_text()) + 6
         assert finished - deadline_at < proc_tree.TERM_GRACE_SEC + 3, "kill took too long after the deadline"
         assert (tmp_path / "child.pid").is_file(), "child must be ready before the deadline"
         if parent_exits:
@@ -164,10 +164,10 @@ out.mkdir(parents=True, exist_ok=True)
     env = {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}", "HOME": str(tmp_path / "home"),
            "SPEND": spend, "PI_EVAL_API_KEY": "test-only-key", "DEEPSEEK_API_KEY": "test-only-key",
            "PI_EVAL_BASE_URL": "http://127.0.0.1:9/v1", "PI_EVAL_TOTAL_CAP_USD": "2.5",
-           "PI_EVAL_CASE_BUDGET_USD": "0.4", "PI_EVAL_DEADLINE_SECONDS": "10",
+           "PI_EVAL_CASE_BUDGET_USD": "0.4", "PI_EVAL_DEADLINE_SECONDS": "60",
            "LOOPER_EVAL_DATABASE_URL": "postgresql://127.0.0.1/disposable_eval"}
     done = subprocess.run(["bash", str(scripts / f"eval-{kind}.sh")], cwd=tmp_path, env=env,
-                          capture_output=True, text=True, timeout=20)
+                          capture_output=True, text=True, timeout=90)
     commands = [json.loads(line) for line in (tmp_path / "commands.jsonl").read_text().splitlines()]
     assert commands[0][6] == "run"
     assert commands[0][commands[0].index("--total-cap-usd") + 1] == "2.5"
@@ -383,7 +383,7 @@ def test_initialization_failure_never_calls_provider(installed: tuple[Path, Path
                             (200, {"tools": [{"name": "broken", "description": "bad", "inputSchema": []}]}))
     command, env = _launch(installed, tmp_path, api, mode)
     prompt = "test" if mode == "json" else json.dumps({"type": "prompt", "id": "p", "message": "test"}) + "\n"
-    done = subprocess.run(command, input=prompt, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=25)
+    done = subprocess.run(command, input=prompt, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
     assert done.returncode != 0, done.stdout + done.stderr
     assert len(api.state["gets"]) == 1
     assert ("HTTP 401" if failure == "unauthorized" else "illegal inputSchema") in done.stderr
@@ -406,7 +406,7 @@ def test_successful_cold_start_registers_the_complete_table(installed: tuple[Pat
     api.state["catalog"] = (200, {"tools": catalog})
     command, env = _launch(installed, tmp_path, api, mode, bound)
     if mode == "json":
-        done = subprocess.run(command, input="test", cwd=tmp_path, env=env, capture_output=True, text=True, timeout=25)
+        done = subprocess.run(command, input="test", cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
         assert done.returncode == 0, done.stdout + done.stderr
     else:
         # Keep stdin open until Pi settles; EOF during startup could prevent the

@@ -498,13 +498,13 @@ class TestWorkerSubprocess:
 
     def test_run_over_the_time_limit_is_killed(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
         # Claude keeps writing thinking deltas: output does not extend the limit.
-        _worker_row(monkeypatch, {"timeout_seconds": 1, "max_turns": 0})
+        _worker_row(monkeypatch, {"timeout_seconds": 3, "max_turns": 0})
 
         async def _run() -> tuple[list[asyncio.subprocess.Process], MessageBus]:
             with tempfile.TemporaryDirectory() as tmp:
                 claude = _fake_claude(Path(tmp), (
                     _WARM_UP_EXIT
-                    + "for _ in range(25):\n"
+                    + "for _ in range(75):\n"
                     f"    print(json.dumps({_THINKING_DELTA!r}), flush=True)\n"
                     "    time.sleep(0.2)\n"
                     + _SUCCESS
@@ -521,12 +521,12 @@ class TestWorkerSubprocess:
         # The limit is the step's failure reason the Planner reads.
         reply = bus.get_queue("planner-t1").get_nowait()
         assert reply.payload["status"] == "failed"
-        assert reply.payload["error"] == "Claude ran longer than the 1 s limit (timeout_seconds)"
+        assert reply.payload["error"] == "Claude ran longer than the 3 s limit (timeout_seconds)"
         agent_db.touch_record.assert_awaited()  # output arrived and fed the heartbeat
         agent_db.append_events.assert_not_awaited()  # partial deltas are not stored
         finish = agent_db.finish_record.await_args.kwargs
         assert finish["status"] == "failed"
-        assert finish["error"] == "Claude ran longer than the 1 s limit (timeout_seconds)"
+        assert finish["error"] == "Claude ran longer than the 3 s limit (timeout_seconds)"
 
     def test_zero_timeout_has_no_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         get_config = _worker_row(monkeypatch, {"timeout_seconds": 0, "max_turns": 0})

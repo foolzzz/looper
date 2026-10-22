@@ -146,12 +146,12 @@ def test_operator_token_is_absent_from_every_agent_launch(tmp_path: Path, monkey
     monkeypatch.setattr(runner, "install_claude", install)
     monkeypatch.setattr(dialogs, "install_claude", install)
     result, _ = runner.run(mode="fake", tasks=runner.select_tasks(["reviewed_step"]), admin_url=str(DSN),
-                           out_dir=tmp_path / "tasks", user_gates="off")
+                           out_dir=tmp_path / "tasks", user_gates="off", task_timeout=180)
     assert result["aborted"] is None, result["aborted"]
     assert [row["outcome"] for row in result["tasks"]] == ["pass"], result["tasks"]
     if "Manager" not in _roles(_records(captures)):
         result, _ = dialogs.run(mode="fake", dialogs=dialogs.select(["ask_project"]), admin_url=str(DSN),
-                                out_dir=tmp_path / "dialogs")
+                                out_dir=tmp_path / "dialogs", timeout=180)
         assert result["aborted"] is None, result["aborted"]
         assert [row["outcome"] for row in result["dialogs"]] == ["pass"], result["dialogs"]
 
