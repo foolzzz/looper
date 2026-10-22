@@ -91,6 +91,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from ..db.channel_configs import BUILTIN_CHANNEL_IDS
+from .message import builtin_channel_id
+
 FORMAT = "looper-config/v3"
 # v1, and v1 under its name from before the rename to Looper (LoopX): read as v2 (``_from_v1``), never written.
 V2_FORMAT = "looper-config/v2"
@@ -119,7 +122,6 @@ _LIMIT_ROLES = ("worker", "reviewer")
 _PROVIDER_FIELDS = ("protocols", "auth", "oauth_runtime_type", "base_url", "models", "env", "max_concurrency")
 _ITEM_FIELDS = ("origin", "source", "version", "description", "modified")
 _DOCUMENT_FIELDS = ("summary", "source_kind", "filename", "path", "sha256", "size_bytes")
-_CHANNEL_ID = re.compile(r"[a-zA-Z0-9_-]{1,64}")
 _ITEM_NAME_MAX = 255
 _PATH_MAX = 1024
 _PROMPT_MAX_CHARS = 100_000
@@ -399,6 +401,7 @@ class ExportSummary:
     secrets: int = 0  # the secret values written, or left out as placeholders
     repoint: int = 0
     bytes: int = 0
+    bots_left_out: int = 0  # the added bots of Managers, which the file does not carry
 
 
 def _secret_count(entry: Mapping[str, Any]) -> int:
@@ -431,7 +434,10 @@ async def export_chunks(
     layers = await db.read_layers(conn)
     items = await db.read_items(conn)
     installs = await db.read_installs(conn)
-    channels = [channel_entry(row, include_secrets) for row in await db.read_channels(conn)]
+    channel_rows = await db.read_channels(conn)
+    channels = [channel_entry(row, include_secrets) for row in channel_rows
+                if row["channel_id"] in BUILTIN_CHANNEL_IDS]
+    summary.bots_left_out = len(channel_rows) - len(channels)
     providers = [provider_entry(r, include_secrets) for r in await db.read_providers(conn) if not r["builtin"]]
     head = {
         "format": FORMAT,
@@ -578,6 +584,14 @@ def read_file(path: Path, *, label: str | None = None) -> dict[str, Any]:
             raise ConfigFileError(f"settings.{section} must be a JSON list")
     if not isinstance(data.get("settings", {}).get("scheduler", {}), dict):
         raise ConfigFileError("settings.scheduler must be a JSON object")
+    for entry in data.get("channels", []):
+        if not isinstance(entry, dict):
+            continue
+        channel_id = entry.get("channel_id")
+        if (channel_id is not None and channel_id not in BUILTIN_CHANNEL_IDS) or (
+                "manager_id" in entry and entry["manager_id"] != "manager"):
+            raise ConfigFileError(f"channels: {channel_id} is a bot of a Manager; this file cannot be imported "
+                                  "(bots are added in Settings → Channels, not imported)")
     return _from_v1(data) if data["format"] in V1_FORMATS else data
 
 
@@ -869,8 +883,8 @@ class _Target:
         for row in await db.read_layers(conn):
             target.layers[(row["scope"], row["role"], row["project_id"])] = row
         target.roles = {row["role"]: row for row in await db.read_roles(conn)}
-        for row in await db.read_channels(conn):
-            target.channels.setdefault(row["channel_type"], row)
+        target.channels = {row["channel_id"]: row for row in await db.read_channels(conn)
+                           if row["channel_id"] in BUILTIN_CHANNEL_IDS}
         target.items = {(row["kind"], row["name"], row["owner_project_id"]): row for row in await db.read_items(conn)}
         target.installs = {(row["item_id"], row["project_id"]): row for row in await db.read_installs(conn)}
         target.projects = {row["name"].lower(): row for row in await db.read_projects(conn)}
@@ -925,7 +939,7 @@ class _Importer:
         self.seen_projects: set[str] = set()
         # Each channel's configuration as the import leaves it (the file's over this machine's): its sender allowlist
         # says which chats a schedule may tell.
-        self.channel_configs = {kind: dict(row["config"] or {}) for kind, row in target.channels.items()}
+        self.channel_configs = {row["channel_type"]: dict(row["config"] or {}) for row in target.channels.values()}
         # The schedules this import adds or rewrites, disabled; those that had a directory of their own.
         self.disabled_schedules: list[str] = []
         self.min_interval: int | None = None  # the file's, once read
@@ -1610,10 +1624,10 @@ class _Importer:
             entry = _mapping(entry, "a channel")
             if kind not in _CHANNEL_PUBLIC_KEYS:
                 raise _Skip(f"channel type {kind!r} is not one of {', '.join(_CHANNEL_PUBLIC_KEYS)}")
-            row = self.target.channels.get(kind)
-            channel_id = row["channel_id"] if row else entry.get("channel_id") or f"channel-{kind}"
-            if not isinstance(channel_id, str) or not _CHANNEL_ID.fullmatch(channel_id):
-                raise _Skip(f"channel_id {channel_id!r} is not usable")
+            channel_id = entry.get("channel_id") or builtin_channel_id(kind)
+            if channel_id != builtin_channel_id(kind):
+                raise _Skip(f"channel_id {channel_id!r} is not the built-in channel of type {kind}")
+            row = self.target.channels.get(channel_id)
             config, missing = _fill_placeholders(_mapping(entry.get("config", {}), "config"),
                                                  dict(row["config"] or {}) if row else {})
             try:
@@ -2137,7 +2151,9 @@ def format_export(summary: ExportSummary, path: Path, *, include_secrets: bool) 
     counts = ", ".join(f"{section} {count}" for section, count in summary.counts.items())
     secrets = (f"{summary.secrets} secret values included" if include_secrets
                else f"{summary.secrets} secret values left out as placeholders")
-    lines = [f"Wrote {path} ({summary.bytes} bytes, {FORMAT}): {counts}; {secrets}."]
+    left_out = (f"; {summary.bots_left_out} bots of Managers are not exported "
+                "(add them again in Settings → Channels)" if summary.bots_left_out else "")
+    lines = [f"Wrote {path} ({summary.bytes} bytes, {FORMAT}): {counts}; {secrets}{left_out}."]
     if summary.repoint:
         lines.append(f"{summary.repoint} path document(s) are references to re-point on the new machine.")
     lines.append(f"On the new machine: looper config import {path.name} (preview), then add --apply.")
