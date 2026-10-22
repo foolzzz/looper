@@ -18,6 +18,42 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.30] - 2026-10-21
+
+### Fixed
+
+- **Backup verifier: short boolean options with a value; docs on `LOOPER_BACKUP_VERIFY_CMD`.** `docker_exec_container` now accepts `-t=false`, `-i=false` and `-it=true` in a `docker exec ... pg_dump` backup command, so the verifier is derived where it was not. The README, README.zh-CN and the agent-system doc now say that `LOOPER_BACKUP_VERIFY_CMD` and the notes root take only the `LOOPER_` prefix. Also widens the deadlines of five timing-sensitive tests (`tests/test_dsh_installed.py`, `tests/test_dsh_runtime.py`, `tests/test_gate_channels_db.py`). Behavior change: the first. Model-visible: none. ([#381](https://github.com/foolzzz/looper/pull/381))
+
+## [2.13.29] - 2026-10-21
+
+### Fixed
+
+- **Gate chat commands: `end` to a closed gate, stopped tasks' gates, paged `/gates`.** An `end` reply under a gate's card that is closed, or that meets a 409, now gets a code-written "no longer waiting" receipt and never reaches the Manager's model or chat history. `open_gates` now includes the gates of stopped and failed tasks (every task not completed or cancelled), so `/gates` lists them and `/gate N` can answer them. `/gates` is paged (20 per page, `/gates N` for page N; numbers continue across pages and stay bound to the last delivered list's snapshot). Also fixes flaky deadlines in `tests/test_pi_steer.py` and `tests/test_provider_pricing.py`. Behavior changes: the three above. Model-visible: the Manager no longer sees `end` replies to closed gates; no prompt text, tool schema or tool result changed. ([#382](https://github.com/foolzzz/looper/pull/382))
+
+## [2.13.28] - 2026-10-21
+
+### Fixed
+
+- **A profile's unpriced-model list follows the launch catalog order.** The cost view of an Agent Profile (`cost_basis` unpriced list and cost warnings) now orders the provider's models by `(catalog_order, name, id)` instead of forcing the selected model first, so an earlier entry owns a shared normalized name as it does at launch. Behavior change: for a catalog with such name collisions the unpriced list and warnings can differ from before. Also fixes two flaky `tests/test_pi_steer.py` cases (the setup deadline no longer shortens in prompt-deadline scenarios). No prompt text, tool schema or tool result changed. ([#375](https://github.com/foolzzz/looper/pull/375))
+
+## [2.13.27] - 2026-10-21
+
+### Fixed
+
+- **A long streamed Manager reply no longer stalls the server.** `MessageBus.publish` no longer journals `STATUS_UPDATE` messages (streamed deltas, phases) and does not mark them delivered. Each journaled message cost a synchronous `fsync` on the event loop (about 20 ms measured locally), and a reply streams hundreds of deltas, so the dashboard got no deltas and other requests, a stop included, waited for seconds. Behavior change: after a restart, status updates from before it are no longer replayed (a stale "thinking" line in Telegram or Lark); replies and every other message type are journaled and replayed as before. No prompt text, tool schema or tool result changed. ([#371](https://github.com/foolzzz/looper/pull/371))
+
+## [2.13.26] - 2026-10-21
+
+### Fixed
+
+- **Flaky planner-wait retry test.** `test_a_failed_wait_turn_retries_twice_then_again_on_a_later_event` set its first retry wait to 0.4s, so under load the automatic retry could fall due during the test's 0.05s pause. The test now uses a 1.5s first wait (second 0.3s), a 1.0s gate idle check, and longer settle pauses. Test only; no runtime, prompt, tool schema or tool result changed. ([#368](https://github.com/foolzzz/looper/pull/368))
+
+## [2.13.25] - 2026-10-21
+
+### Fixed
+
+- **Pipeline node-card follow-ups.** The task detail page now also re-reads the task's runs when the cost's run counts change, so a new Planner run that changes no status, instance id or step no longer leaves the hover card on the old model. Each Agent fact on a node card has its own key per role (`agent`, `worker-agent`, `reviewer-agent`, `planner-agent`), so two `Agent` rows no longer collide on the renderer's key. Dashboard only; no prompt, tool schema or tool result changed. ([#365](https://github.com/foolzzz/looper/pull/365))
+
 ## [2.13.24] - 2026-10-21
 
 ### Fixed

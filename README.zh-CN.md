@@ -168,7 +168,7 @@ Looper 在 v2.5.0 及以前叫 LoopX。改名本身不需要手动操作：
   移过去（一次重命名，不复制也不删除任何文件），并在原处留一个指向它的链接，保留一个版本。两个目录都在时用
   `~/.looper` 并记一条警告。
 - **环境变量：**旧的部署变量再读一个版本（`LOOPER_DATABASE_URL`、`LOOPER_PUBLIC_URL`、`LOOPER_PG_DUMP`、
-  `LOOPER_BACKUP_CMD`、`LOOPER_BACKUP_VERIFY_CMD`、`LOOPER_OPERATOR_NOTES_ROOT`，以及除笔记根目录外的 `LOOPX_*` 同名），先看环境变量，再看 `.env`，
+  `LOOPER_BACKUP_CMD`、`LOOPER_BACKUP_VERIFY_CMD`、`LOOPER_OPERATOR_NOTES_ROOT`，以及除笔记根目录和校验命令外的 `LOOPX_*` 同名；这两项只认 `LOOPER_` 前缀），先看环境变量，再看 `.env`，
   每次使用都按变量名警告。`looper config init-ops` 把它们写进运维文件。其余的 `LOOPX_*` 在对应 `LOOPER_*` 没设时，
   `looper.env` 仍会读，并警告，再保留一个版本。
 - **服务：**`com.looper.serve`。`looper service install` 会先停掉并删除旧的 `com.loopx.serve`。
@@ -267,7 +267,7 @@ API 只响应操作者：在这台机器的浏览器中打开控制台会自动�
 
 每一项按这个顺序取第一个：显式参数（`--host`、`--port`，以及把 `server.log_level` 设为 `debug` 的 `--verbose`）、
 文件、然后仅本版本仍读的旧变量（环境里的 `LOOPER_DATABASE_URL`、`LOOPER_PUBLIC_URL`、`LOOPER_PG_DUMP`、
-`LOOPER_BACKUP_CMD`、`LOOPER_BACKUP_VERIFY_CMD`、`LOOPER_OPERATOR_NOTES_ROOT`，以及除笔记根目录外的 `LOOPX_*` 同名）、再是 checkout 的 `.env` 里的同名、
+`LOOPER_BACKUP_CMD`、`LOOPER_BACKUP_VERIFY_CMD`、`LOOPER_OPERATOR_NOTES_ROOT`，以及除笔记根目录和校验命令外的 `LOOPX_*` 同名；这两项只认 `LOOPER_` 前缀）、再是 checkout 的 `.env` 里的同名、
 最后是内置默认值。数据库 URL 没有默认值。用到旧变量就记一条弃用警告，只写变量名、不写值；下一版删除它们。
 runtime root 是 `--runtime-root`，否则是 `LOOPER_RUNTIME_ROOT`（已弃用，会警告；`LOOPX_RUNTIME_ROOT` 同样），
 否则是 `~/.looper`。文件本身不写 runtime root。`.env` 不再放进 Looper 的环境：只从中读上述旧设置，

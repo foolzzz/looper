@@ -221,6 +221,16 @@ def test_profile_view_preserves_usage_cost_and_warnings_from_normalized_settings
     assert 'wrong-model' not in repr(view)
 
 
+def test_profile_view_prices_in_launch_catalog_order_not_selected_model_first():
+    row = _profile_row()
+    row["model"].update(name="foo[1m]", background_model="foo-20250102", catalog_order=1,
+                        **dict.fromkeys(service.PRICE_FIELDS, 1.0))
+    earlier = {**row["model"], "id": "model-other", "name": "foo-20250101", "catalog_order": 0,
+               "background_model": None, **dict.fromkeys(service.PRICE_FIELDS)}
+    # The earlier, unpriced entry owns the shared normalized name, as it does at launch.
+    assert service.profile_view(row, models=[earlier])["cost"]["unpriced"] == ["foo-20250102"]
+
+
 def test_vendor_suggestions_are_stable_and_do_not_allocate_public_ids():
     first = service.vendor_types_view()
     assert first == service.vendor_types_view()
