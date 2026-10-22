@@ -728,6 +728,11 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 18. **任务的工作区**（2026-10-17 维护者定方向，设计见[任务的工作区 RFC](../architecture/rfcs/task-workspaces-v0.zh-CN.md)，TW1 见 looper #190）：建任务时点名一个已有的目录（工作区），任务默认在它所在仓库的一个 git worktree 里、自己的分支 `looper/<task_id>/task` 上做，做完分支留给用户合并，Looper 不合并；新项目和点名了别的目录的任务默认用 worktree，已有项目原地跑不变；同一个仓库上几个任务、工作区里没提交的改动、目录不在 git 里都只提醒；项目打开「操作者的笔记」时，规划者、执行者、评审者拿到操作者的 Claude Code 为这个目录记下的自动记忆的只读副本。会话历史的只读搜索、按定时任务覆盖运行方式、可选的复制清单是 TW2，未开始。
 19. **定时任务共用 Planner 会话**（2026-10-19 维护者定，见[会话 RFC](../architecture/rfcs/schedule-planner-session-v0.zh-CN.md)，本分支实现，待集成验证）：`skip`、`queue` 各轮续接同一条规划者会话，`parallel` 不读不写；仅用户经控制台、HTTP 或 Manager 明确重置，失败和编辑不自动清空。实现包括 holder 保护的写穿、回退活动、状态与重置入口、导出隔离；真实 CLI 与模型可见内容评测仍见 §5.4。
 20. **管家会话的 Agent Profile**（2026-10-20 维护者定，见[RFC](../architecture/rfcs/manager-session-profile-v0.zh-CN.md)，本分支实现，card 1–12，待集成验证）：管家的当前会话可以用自己的 Agent Profile，在控制台聊天头部、Telegram `/profile`、飞书文本 `/profile` 里切换，`/profile 0` 回到跟随 Settings；选择存在 `agent_sessions.selected_profile_id`（`Layer.SESSION`），下一条用户消息生效，`/new` 清掉，也可以在控制台「New session」面板里为新会话预选。状态：已实现、各 card 带离线测试（本卡未重跑）的有解析与列表、Manager 应答与 Runs 记录、解析顺序、`used_by` 与删除保护、`GET /api/manager/session`、`PUT /api/manager/session/profile`、`/api/chat/send` 的 `new_session_profile_id`、Telegram 转发、控制台组件、`looper_settings` 的 `manager_session`，以及 dialogs 评测的场景与 OMP + DeepSeek 示例配置；未跑过：真实模式 dialogs（haiku、opus xhigh）和 OMP + DeepSeek 真实路径，均待实跑，失败项暂无，因为一个都没跑。见 §5.4。
+21. **场景管家**（2026-10-21 维护者定方向，设计见[场景管家 RFC](../architecture/rfcs/scenario-managers.zh-CN.md)，待批准）：几个管家同时在线，各有自己的会话、上下文、花费和职责（提示词 + 任务模板，模板由代码在建任务时套用），通用管家不变。分三个阶段、各一个 PR：
+    - **阶段 1**（设计中）：管家定义与模板、控制台聊天页选管家、Settings → Managers、任务归属和回报给建它的管家（RFC 第 5–8、10–13 节）。
+    - **阶段 2**（待做）：每个管家可以有自己的飞书 / Telegram 机器人：`channel_configs.manager_id`，一种渠道多行（`channel-<type>-<n>`），凭据只在控制台录入，一个机器人一个运行器，投递按渠道 id 而不是类型（任务结束通知、关卡消息、定时任务通知），新机器人的线程 id 为 `<channel_id>:<chat_id>`（RFC 第 9.1 节）。
+    - **阶段 3**（待做）：按聊天绑定：`manager_chat_bindings(channel_id, chat_id, manager_id)`，未绑定聊天归机器人所属的管家，机器人可设「只接已绑定的聊天」（未绑定的只记录、不回复，Settings 一键绑定），绑定立即生效，`/stop` 停这个聊天在所有管家里的轮；Settings 的 Managers、Channels 页配置绑定（RFC 第 9.2 节）。
+    - 阶段 1 之后的待办：闲置的场景管家自动停进程；管家和模板进配置导出、导入；定时任务属于一个场景管家并能用它的模板；按管家分插件和 skill 的安装；任务列表按管家筛选。
 
 ### 5.1 核心缺陷（优先修，穿插在阶段之间）
 
