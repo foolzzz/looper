@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.22] - 2026-10-21
+
+### Fixed
+
+- **Gates page follow-ups.** The Gates list refresh re-reads every loaded row in requests of at most 200, so rows past the first 200 are no longer truncated; the All view offers no Answer on a gate of a completed task; the seven-column layout moves from the `lg` to the `xl` breakpoint so it no longer overflows at 1024px, and long task names are clamped to two lines with the full name in a title. `GET` gates list requests with a non-ASCII digit such as `²` in `limit` or `offset` now return 400 instead of 500. No prompt, tool schema or tool result changed. ([#358](https://github.com/foolzzz/looper/pull/358))
+
 ## [2.13.21] - 2026-10-21
 
 ### Fixed
