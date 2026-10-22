@@ -968,7 +968,7 @@ def test_turn_tree_end_ends_what_the_agent_owns_that_started_after_the_ends_last
 
         live_owned, calls = tree._live_owned, []
 
-        def listing_after_the_snapshot() -> set[int]:
+        def listing_after_the_snapshot() -> tuple[set[int], bool]:
             # The first call comes before any signal; the next follows the end's first listing of every process.
             calls.append(None)
             if len(calls) == 2:
@@ -1037,7 +1037,7 @@ def _ends_what_leaves_the_tree_during_a_slow_ownership_scan(
 
         live_owned, calls = tree._live_owned, []
 
-        def listing_after_the_snapshot() -> set[int]:
+        def listing_after_the_snapshot() -> tuple[set[int], bool]:
             # The first call comes before any signal; the next follows the end's first listing of every process.
             calls.append(None)
             if len(calls) == 2:
@@ -1409,14 +1409,14 @@ def test_turn_tree_end_looks_again_when_an_owned_process_exits_before_it_is_read
             ended_scan.set()
         return await strays(self, exclude, ended=ended)
 
-    def owned(self: proc_tree.TurnTree) -> set[int]:
+    def owned(self: proc_tree.TurnTree) -> tuple[set[int], bool]:
         if not ended_scan.is_set():
-            return set()
+            return set(), False
         if not child:
             # What the listed process left behind: in no tree the end knows, owned only by its inherited mark.
             child.append(subprocess.Popen(["/bin/sleep", "60"], start_new_session=True))
-            return {gone.pid}
-        return {child[0].pid} if child[0].poll() is None else set()
+            return {gone.pid}, False
+        return ({child[0].pid} if child[0].poll() is None else set()), False
 
     monkeypatch.setattr(proc_tree.TurnTree, "_strays", noting_ended)
     monkeypatch.setattr(proc_tree.TurnTree, "_live_owned", owned)
@@ -1424,6 +1424,63 @@ def test_turn_tree_end_looks_again_when_an_owned_process_exits_before_it_is_read
     async def _run() -> list[int]:
         process = await _spawn_python(tmp_path, "import sys\nsys.stdin.read()\n")
         tree = proc_tree.TurnTree.track(process, label="turn")
+        try:
+            await tree.end()
+            assert child
+            child[0].poll()  # reaped, so a zombie is not taken for a running process
+            return _running([child[0].pid], settle=0)
+        finally:
+            for leftover in child:
+                leftover.kill()
+                leftover.wait()
+
+    assert asyncio.run(_run()) == []
+
+
+def test_turn_tree_end_looks_again_when_a_marked_process_exits_before_its_environment_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Linux marks, through a simulated ``/proc``: once every end has finished, the listing names a process that,
+    # before its environment is read, forks a child into a session of its own (inheriting the mark) and exits; the
+    # end does not finish on that listing, as the next one finds the child.
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    monkeypatch.setattr(proc_tree, "_PROC", str(proc))
+    gone = subprocess.Popen(["/usr/bin/true"])
+    gone.wait()  # the marked process: listed, but exited by the time its environment is read
+    child: list[subprocess.Popen[bytes]] = []
+    ended_scan = threading.Event()
+    strays = proc_tree.TurnTree._strays
+    live = proc_tree._Marked.live
+
+    async def noting_ended(self: proc_tree.TurnTree, exclude: frozenset[int], *, ended: bool = False) -> Any:
+        if ended:
+            ended_scan.set()
+        return await strays(self, exclude, ended=ended)
+
+    def listing(self: proc_tree._Marked) -> tuple[set[int], bool]:
+        if ended_scan.is_set():
+            if not child:
+                # Listed (its ``/proc`` entry is there), gone before its environment is read; the child it left
+                # is in no tree the end knows and not in this listing.
+                (proc / str(gone.pid)).mkdir()
+                child.append(subprocess.Popen(["/bin/sleep", "60"], start_new_session=True))
+            else:
+                if (proc / str(gone.pid)).exists():
+                    (proc / str(gone.pid)).rmdir()
+                (proc / str(child[0].pid)).mkdir(exist_ok=True)
+                (proc / str(child[0].pid) / "environ").write_bytes(b"A=1\0" + self._entry + b"\0")
+        return live(self)
+
+    monkeypatch.setattr(proc_tree.TurnTree, "_strays", noting_ended)
+    monkeypatch.setattr(proc_tree._Marked, "live", listing)
+
+    async def _run() -> list[int]:
+        process = await _spawn_python(tmp_path, "import sys\nsys.stdin.read()\n")
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        if tree._owned is not None:
+            tree._owned.close()
+        tree._owned = proc_tree._Marked(process.pid, "mark")
         try:
             await tree.end()
             assert child

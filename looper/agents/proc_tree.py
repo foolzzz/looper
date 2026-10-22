@@ -478,7 +478,8 @@ async def sweep(runtime_root: Path) -> None:
 # Elsewhere, or for a process ``spawn`` did not start (Linux), the tree alone decides.
 
 OWNER_ENV = "LOOPER_PROC_OWNER"
-_MARKS = sys.platform.startswith("linux") and Path("/proc/self/environ").exists()
+_PROC = "/proc"
+_MARKS = sys.platform.startswith("linux") and Path(f"{_PROC}/self/environ").exists()
 _owners: dict[int, str] = {}  # agent pid -> its mark, set by ``spawn`` (Linux)
 
 
@@ -556,7 +557,7 @@ def _readable_versions() -> bool:
 
 
 class _Owned(Protocol):
-    def live(self) -> set[int]: ...
+    def live(self) -> tuple[set[int], bool]: ...
 
     def close(self) -> None: ...
 
@@ -683,9 +684,10 @@ class _Lineage:
                 self._closed.set()
                 self._kq.close()
 
-    def live(self) -> set[int]:
-        """The running processes the agent started, itself excluded."""
-        return self._scan() - {self._root}
+    def live(self) -> tuple[set[int], bool]:
+        """The running processes the agent started, itself excluded (and, as for ``_Marked``, False: the listing
+        records what an exited one started by its version)."""
+        return self._scan() - {self._root}, False
 
     def close(self) -> None:
         self._closed.set()
@@ -698,18 +700,24 @@ class _Marked:
         self._root = pid
         self._entry = f"{OWNER_ENV}={mark}".encode()
 
-    def live(self) -> set[int]:
+    def live(self) -> tuple[set[int], bool]:
+        """The processes carrying the mark, and whether one the listing named exited before its environment was
+        read: it may have been the agent's and forked first (a command in a session of its own), and the child,
+        carrying the mark, be in no listing yet."""
         owned: set[int] = set()
-        for entry in os.scandir("/proc"):
+        vanished = False
+        for entry in os.scandir(_PROC):
             if not entry.name.isdigit() or int(entry.name) == self._root:
                 continue
             try:
-                with open(f"/proc/{entry.name}/environ", "rb") as environ:
+                with open(f"{_PROC}/{entry.name}/environ", "rb") as environ:
                     if self._entry in environ.read().split(b"\0"):
                         owned.add(int(entry.name))
+            except (FileNotFoundError, ProcessLookupError):
+                vanished = True
             except OSError:
-                continue
-        return owned
+                continue  # another user's (EACCES): never the agent's
+        return owned, vanished
 
     def close(self) -> None:
         pass
@@ -762,14 +770,15 @@ class TurnTree:
         tree._merge(_tree(process, _snapshot(), {}))
         return tree
 
-    def _live_owned(self) -> set[int]:
+    def _live_owned(self) -> tuple[set[int], bool]:
+        """What the agent owns that runs now, and whether the listing calls for another (``_Owned.live``)."""
         if self._owned is None:
-            return set()
+            return set(), False
         try:
             return self._owned.live()
         except Exception:
             logger.warning("%s: cannot list the agent's processes", self.label, exc_info=True)
-            return set()
+            return set(), False
 
     def _merge(self, tree: Tree) -> list[int]:
         fresh = [pid for pid in tree if pid not in self.seen]
@@ -821,7 +830,7 @@ class TurnTree:
         them, and what they start, running. (The listings run off the event loop.)"""
         table = await asyncio.to_thread(_snapshot)
         self._merge(_tree(self.process, table, self._groups))
-        self._baseline = set(self.seen) | await asyncio.to_thread(self._live_owned)
+        self._baseline = set(self.seen) | (await asyncio.to_thread(self._live_owned))[0]
 
     async def _reused(self, exclude: frozenset[int] = frozenset()) -> frozenset[int]:
         """The seen pids now another process's: of those the last refresh listed (one that exited is no one's)."""
@@ -846,8 +855,9 @@ class TurnTree:
         them, and each the agent owns (``_owned``) that runs now, whether or not the snapshot lists it. None in
         ``exclude``: what one of them started this turn is the turn's (a tool an MCP server runs). Once every end has finished (``ended``), each
         still running is one: none is left to the tree's end, and one the snapshot reached may have left the tree
-        since. Also whether one the ownership listing found exited before its start time was read: what it started
-        meanwhile (a command it forked into a session of its own) is in no listing yet, so it calls for another."""
+        since. Also whether one the ownership listing named exited before it was read (its environment, or its start
+        time): what it started meanwhile (a command it forked into a session of its own) is in no listing yet, so it
+        calls for another."""
         table = await asyncio.to_thread(_snapshot)
         reached = {} if ended else _tree(self.process, table, self._groups)
         skip = exclude | {self.process.pid}
@@ -855,15 +865,14 @@ class TurnTree:
                  if started is not None and pid in table and pid not in reached and pid not in skip}
         current = await asyncio.to_thread(_start_times, known) or {}
         strays = [_Orphan(pid, started) for pid, started in known.items() if current.get(pid) == started]
-        owned = await asyncio.to_thread(self._live_owned)
+        owned, vanished = await asyncio.to_thread(self._live_owned)
         # Every one it owns, not only those the snapshot lists: one started since (a setsid command a shell starts
         # as it is told to exit) would otherwise be missed, and the end finish while it runs.
         unseen = [pid for pid in owned if pid not in reached and pid not in skip and pid not in known]
-        vanished = False
         if unseen:
             starts = await asyncio.to_thread(_start_times, unseen) or {}
             strays += [_Orphan(pid, starts[pid]) for pid in unseen if pid in starts]
-            vanished = any(pid not in starts for pid in unseen)
+            vanished = vanished or any(pid not in starts for pid in unseen)
         return strays, vanished
 
     @staticmethod
