@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.29] - 2026-10-21
+
+### Fixed
+
+- **Gate chat commands: `end` to a closed gate, stopped tasks' gates, paged `/gates`.** An `end` reply under a gate's card that is closed, or that meets a 409, now gets a code-written "no longer waiting" receipt and never reaches the Manager's model or chat history. `open_gates` now includes the gates of stopped and failed tasks (every task not completed or cancelled), so `/gates` lists them and `/gate N` can answer them. `/gates` is paged (20 per page, `/gates N` for page N; numbers continue across pages and stay bound to the last delivered list's snapshot). Also fixes flaky deadlines in `tests/test_pi_steer.py` and `tests/test_provider_pricing.py`. Behavior changes: the three above. Model-visible: the Manager no longer sees `end` replies to closed gates; no prompt text, tool schema or tool result changed. ([#382](https://github.com/foolzzz/looper/pull/382))
+
 ## [2.13.28] - 2026-10-21
 
 ### Fixed
