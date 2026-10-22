@@ -23,7 +23,7 @@ export type TaskRuns = Record<TaskRole, LlmRecord[]>;
 
 /** The runtime, model and effort of the latest of `records` (of one step, when `stepId` is given), or undefined
  * when none ran. */
-export function agentFact(records: LlmRecord[] | undefined, stepId?: string): CardFact | undefined {
+export function agentFact(records: LlmRecord[] | undefined, stepId?: string, key = "agent"): CardFact | undefined {
   const latest = (records ?? [])
     .filter((r) => stepId === undefined || r.metadata?.step_id === stepId)
     .reduce<LlmRecord | undefined>(
@@ -31,7 +31,7 @@ export function agentFact(records: LlmRecord[] | undefined, stepId?: string): Ca
   if (!latest) return undefined;
   const choice = latest.metadata?.model_choice;
   const parts = [runProfile(latest)?.runtime.name, latest.model || choice?.model, choice?.effort].filter(Boolean);
-  return parts.length ? { label: "Agent", value: parts.join(" · ") } : undefined;
+  return parts.length ? { key, label: "Agent", value: parts.join(" · ") } : undefined;
 }
 
 /** A node's status as the Pipeline draws it: a word and the node's colors. */
@@ -44,6 +44,8 @@ export interface CardLook {
 }
 
 export interface CardFact {
+  /** Tells facts with the same label apart; the label when absent. */
+  key?: string;
   label: string;
   value: string;
   /** An agent's history. */
@@ -224,9 +226,9 @@ export function stepCard(
         : []),
       ...facts("Runs", [
         step.worker_id && { label: "Worker", value: step.worker_id, href: historyHref(step.worker_id, taskId) },
-        step.worker_id && agentFact(runs?.worker, step.id),
+        step.worker_id && agentFact(runs?.worker, step.id, "worker-agent"),
         step.reviewer_id && { label: "Reviewer", value: step.reviewer_id, href: historyHref(step.reviewer_id, taskId) },
-        step.reviewer_id && agentFact(runs?.reviewer, step.id),
+        step.reviewer_id && agentFact(runs?.reviewer, step.id, "reviewer-agent"),
         step.retries > 0 && { label: "Retries", value: String(step.retries) },
         step.review && { label: "Review", value: "Needs a passing review" },
         step.status === "completed" && step.review_stage && {
@@ -332,7 +334,7 @@ export function plannerCard(task: TaskDetail, look: CardLook, runs?: TaskRuns): 
     sections: [
       ...facts("Runs", [
         task.planner_id && { label: "Planner", value: task.planner_id, href: historyHref(task.planner_id, task.task_id) },
-        task.planner_id && agentFact(runs?.planner),
+        task.planner_id && agentFact(runs?.planner, undefined, "planner-agent"),
         steps.length > 0 && {
           label: "Plan",
           value: `${planned} step${planned === 1 ? "" : "s"}${dropped ? `, ${dropped} dropped` : ""}`,
