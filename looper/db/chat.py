@@ -73,11 +73,13 @@ LAST_MESSAGE_MAX_CHARS = 200
 async def list_sessions(
     *,
     limit: int = 50,
+    session_id: str | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
     """The Manager's conversations on every channel, the most recently active first: each session's channel,
     message count, first and last message times, and its last message's role and start (``last_role``,
-    ``last_content``, up to ``LAST_MESSAGE_MAX_CHARS``). Planner threads are left out."""
+    ``last_content``, up to ``LAST_MESSAGE_MAX_CHARS``). Planner threads are left out. With ``session_id``, only
+    that session, however long ago it was active (none when it has no messages)."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         """
@@ -87,7 +89,7 @@ async def list_sessions(
             SELECT session_id, min(channel) AS channel, count(*) AS message_count,
                    min(created_at) AS first_message_at, max(created_at) AS last_message_at, max(id) AS last_id
             FROM chat_messages
-            WHERE NOT starts_with(session_id, $2)
+            WHERE NOT starts_with(session_id, $2) AND ($4::text IS NULL OR session_id = $4)
             GROUP BY session_id
             ORDER BY max(created_at) DESC, max(id) DESC
             LIMIT $1
@@ -95,7 +97,7 @@ async def list_sessions(
         JOIN chat_messages last ON last.id = s.last_id
         ORDER BY s.last_message_at DESC, s.last_id DESC
         """,
-        limit, PLANNER_THREAD_PREFIX, LAST_MESSAGE_MAX_CHARS,
+        limit, PLANNER_THREAD_PREFIX, LAST_MESSAGE_MAX_CHARS, session_id,
     )
     return [dict(r) for r in rows]
 

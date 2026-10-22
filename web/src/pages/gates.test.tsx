@@ -57,9 +57,9 @@ describe("GatesPage", () => {
       row("t1", gate("g1")), row("t2", gate("g2", { state: "passed", waiting_on: null, closed_at: "2026-10-20T10:10:00Z" }), "completed"),
     ]));
     await show();
-    const grids = [...container.querySelectorAll("[class*='lg:grid-cols-']")];
+    const grids = [...container.querySelectorAll("[class*='xl:grid-cols-']")];
     expect(grids).toHaveLength(3);
-    const columns = grids.map((g) => g.className.match(/lg:grid-cols-\[[^\]]+\]/)![0]);
+    const columns = grids.map((g) => g.className.match(/xl:grid-cols-\[[^\]]+\]/)![0]);
     expect(new Set(columns).size).toBe(1);
     expect(columns[0]).not.toMatch(/auto|max-content|min-content/);
   });
@@ -112,6 +112,26 @@ describe("GatesPage", () => {
     const calls = vi.mocked(fetchGates).mock.calls.length;
     await click(button("Retry"));
     expect(vi.mocked(fetchGates).mock.calls.length).toBe(calls + 1);
+  });
+
+  it("offers no Answer on an unclosed gate of a completed task", async () => {
+    vi.mocked(fetchGates).mockResolvedValue(list([row("t1", gate("g1"), "completed")]));
+    await show("state=all");
+    expect([...container.querySelectorAll("button")].some((b) => b.textContent === "Answer")).toBe(false);
+  });
+
+  it("refreshes every loaded row, not only the first 200", async () => {
+    const all = Array.from({ length: 250 }, (_, i) => row(`t${i}`, gate(`g${i}`)));
+    vi.mocked(fetchGates).mockImplementation(async (params) => {
+      const { limit = 50, offset = 0 } = params ?? {};
+      return list(all.slice(offset, offset + limit), { total: 250, offset, limit });
+    });
+    await show();
+    while (container.querySelectorAll("li").length < 250) {
+      await click(button("Show more"));
+    }
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(container.querySelectorAll("li")).toHaveLength(250);
   });
 
   it("offers Answer only on rows waiting for the user, and sends the reply", async () => {

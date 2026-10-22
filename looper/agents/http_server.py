@@ -429,7 +429,7 @@ class AgentHTTPServer:
         elif path == "/api/chat/targets" and method == "GET":
             await self._handle_chat_targets(writer)
         elif path == "/api/chat/sessions" and method == "GET":
-            await self._handle_chat_sessions(writer)
+            await self._handle_chat_sessions(query, writer)
         elif path == "/api/chat/messages" and method == "GET":
             await self._handle_chat_messages(query, writer)
         elif path == "/api/chat/messages" and method == "POST":
@@ -1161,12 +1161,13 @@ class AgentHTTPServer:
         writer.write(_json_response(HTTP_200, {"targets": _serialize(targets)}))
         await writer.drain()
 
-    async def _handle_chat_sessions(self, writer: asyncio.StreamWriter) -> None:
-        """The Manager's conversations on every channel, newest first, for the Chat page's conversation list; a
-        failed read is a 500, so the page shows it rather than an empty list."""
+    async def _handle_chat_sessions(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
+        """The Manager's conversations on every channel, newest first, for the Chat page's conversation list (with
+        ``session_id``, only that one, however old, so a link to it opens it); a failed read is a 500, so the page
+        shows it rather than an empty list."""
         try:
             from ..db.chat import list_sessions
-            sessions = await list_sessions()
+            sessions = await list_sessions(session_id=query.get("session_id") or None)
             writer.write(_json_response(HTTP_200, {"sessions": _serialize(sessions)}))
         except Exception as exc:
             logger.warning("failed to list chat sessions", exc_info=True)

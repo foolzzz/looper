@@ -15,6 +15,7 @@ function asRecord(run: TaskRunRow): LlmRecord {
     created_at: run.created_at,
     metadata: {
       ...(run.step_id ? { step_id: run.step_id } : {}),
+      ...(run.task_role ? { prompt_layers: { task_role: run.task_role } } : {}),
       ...(run.model || run.effort ? { model_choice: { model: run.model ?? "", source: "default", effort: run.effort } } : {}),
       ...(profile
         ? {

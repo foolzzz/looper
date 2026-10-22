@@ -41,6 +41,7 @@ import {
   fromLooper,
   isUnanswered,
   mergeRoom,
+  parseRoomFilter,
   reasonText,
   roomAnchor,
   roomRoles,
@@ -100,15 +101,15 @@ function useRoom(taskId: string, active: boolean) {
     // Per run of the effect: a read of an earlier run (before the task ended) never holds back this one's.
     let stopped = false;
     let busy = false;
-    const load = async () => {
+    const load = async (signal?: AbortSignal) => {
       if (busy) return;
       busy = true;
       try {
         const after = last.current;
-        let next = await fetchTaskRoom(taskId, { after });
+        let next = await fetchTaskRoom(taskId, { after, signal });
         // More newer messages than one read gives: read the newest whole, so none in between is left out.
         const whole = !after || next.more;
-        if (after && next.more) next = await fetchTaskRoom(taskId);
+        if (after && next.more) next = await fetchTaskRoom(taskId, { signal });
         if (stopped) return;
         const newest = next.messages.length ? next.messages[next.messages.length - 1].id : 0;
         last.current = whole ? newest : Math.max(after, newest);
@@ -125,8 +126,8 @@ function useRoom(taskId: string, active: boolean) {
       load();
       return () => { stopped = true; };
     }
-    const stop = startPolling(async () => {
-      await load();
+    const stop = startPolling(async (signal) => {
+      await load(signal);
     }, ROOM_REFRESH_MS);
     return () => {
       stopped = true;
@@ -272,23 +273,45 @@ export function RoomMessageItem({ message, known, onShow }: {
 }
 
 /** The task's agent room, read only: who is in it, then its messages oldest first, filtered by kind or role. */
-export function TaskRoomTab({ task }: { task: TaskDetail }) {
+export function TaskRoomTab({ task, filter: filterParam, role: roleParam, onFilter }: {
+  task: TaskDetail;
+  /** The filters the address names; with `onFilter`, the tab shows them and changes them through the address. */
+  filter?: string | null;
+  role?: string | null;
+  onFilter?: (filter: RoomFilter, role: string) => void;
+}) {
   const active = isActiveTask(task);
   const { view, error, retry } = useRoom(task.task_id, active);
-  const [filter, setFilter] = useState<RoomFilter>("all");
-  const [role, setRole] = useState("");
-  // "re #N": to that message, after clearing a filter that hides it.
-  const show = useCallback((id: number) => {
-    if (!document.getElementById(roomAnchor(id))) {
-      flushSync(() => {
-        setFilter("all");
-        setRole("");
-      });
-    }
-    const place = document.getElementById(roomAnchor(id));
-    place?.scrollIntoView({ block: "center" });
-    place?.focus({ preventScroll: true });
+  const [localFilter, setLocalFilter] = useState<RoomFilter>("all");
+  const [localRole, setLocalRole] = useState("");
+  const filter: RoomFilter = onFilter ? parseRoomFilter(filterParam) : localFilter;
+  const role = onFilter ? roleParam || "" : localRole;
+  const setFilters = useCallback(
+    (nextFilter: RoomFilter, nextRole: string) => {
+      if (onFilter) return onFilter(nextFilter, nextRole);
+      setLocalFilter(nextFilter);
+      setLocalRole(nextRole);
+    },
+    [onFilter],
+  );
+  // "re #N": to that message, after clearing a filter that hides it (through the address, that lands after this
+  // render, so the message is then shown once the filters have changed).
+  const pendingShow = useRef<number | null>(null);
+  const place = useCallback((id: number) => {
+    const el = document.getElementById(roomAnchor(id));
+    el?.scrollIntoView({ block: "center" });
+    el?.focus({ preventScroll: true });
+    return el !== null;
   }, []);
+  const show = useCallback((id: number) => {
+    if (document.getElementById(roomAnchor(id))) return void place(id);
+    pendingShow.current = id;
+    flushSync(() => setFilters("all", ""));
+    if (place(id)) pendingShow.current = null;
+  }, [setFilters, place]);
+  useEffect(() => {
+    if (pendingShow.current !== null && place(pendingShow.current)) pendingShow.current = null;
+  }, [filter, role, view, place]);
 
   if (!view) {
     return (
@@ -370,7 +393,7 @@ export function TaskRoomTab({ task }: { task: TaskDetail }) {
                 variant="outline"
                 size="sm"
                 aria-pressed={filter === id}
-                onClick={() => setFilter(id)}
+                onClick={() => setFilters(id, role)}
                 className={cn(filter === id && "border-primary/40 bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary")}
               >
                 {label}
@@ -381,7 +404,7 @@ export function TaskRoomTab({ task }: { task: TaskDetail }) {
           <select
             aria-label="From or to a role"
             value={role}
-            onChange={(e) => setRole(e.target.value)}
+            onChange={(e) => setFilters(filter, e.target.value)}
             className="h-8 min-w-0 max-w-full rounded-md border border-input bg-transparent px-2 text-xs text-foreground"
           >
             <option value="">From or to any role</option>
@@ -407,7 +430,7 @@ export function TaskRoomTab({ task }: { task: TaskDetail }) {
         ) : shown.length === 0 ? (
           <div className="flex flex-wrap items-center justify-center gap-3 rounded-lg border border-border bg-card px-4 py-6 text-sm text-muted-foreground">
             No messages match this filter.
-            <Button type="button" variant="outline" size="sm" onClick={() => { setFilter("all"); setRole(""); }}>
+            <Button type="button" variant="outline" size="sm" onClick={() => setFilters("all", "")}>
               Show all
             </Button>
           </div>
