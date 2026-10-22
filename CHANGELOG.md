@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.33] - 2026-10-22
+
+### Fixed
+
+- **Turn process tree: the change of #385 is reverted because it slowed killing a deaf Claude.** #385 added a start-time read to every process-tree refresh, which delayed the first signal of a kill on a loaded machine; `test_a_deaf_claude_is_killed_with_its_whole_tree` took 3.1 to 4.9 s against its 3 s bound. `looper/agents/proc_tree.py` and `tests/test_proc_tree.py` return to v2.13.30. Behavior change: the first; a pid reused after it left the turn tree is walked again when the tree is ended, and #338 redoes that fix without the extra read. Model-visible: none. ([#393](https://github.com/foolzzz/looper/pull/393))
+
 ## [2.13.32] - 2026-10-22
 
 ### Fixed
