@@ -34,6 +34,7 @@ from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
 from .task_roles import record_role, run_roles
 from .tiers.journal import progress_notes
+from .ops import OpError
 from .ops.planner import PlannerOps
 from .ops.room import RoomOps
 from .managers import ManagerFleet
@@ -780,7 +781,10 @@ class AgentHTTPServer:
             writer.write(_json_response(HTTP_401, {"error": "this endpoint is the Manager's: a valid token is "
                                                             "required"}))
         elif path == f"{AGENT_API}tools" and method == "GET":
-            writer.write(_json_response(HTTP_200, {"tools": ops.listing()}))
+            try:
+                writer.write(_json_response(HTTP_200, {"tools": await ops.current_listing()}))
+            except OpError as exc:
+                writer.write(_json_response(HTTP_503, {"error": str(exc)}))
         elif (m := _RE_AGENT_OP.match(path)) and method == "POST":
             try:
                 arguments = json.loads(body.decode("utf-8")) if body.strip() else {}

@@ -44,23 +44,26 @@ _WITH_COUNTS = """
     SELECT p.*,
            count(t.id) AS task_count,
            count(t.id) FILTER (WHERE t.status = ANY($1::text[])) AS active_count,
-           (SELECT count(*) FROM schedules s WHERE s.project_id = p.id) AS schedule_count
-    FROM projects p LEFT JOIN tasks t ON t.project_id = p.id
+           (SELECT count(*) FROM schedules s WHERE s.project_id = p.id AND $2::text IS NULL) AS schedule_count
+    FROM projects p LEFT JOIN tasks t ON t.project_id = p.id AND ($2::text IS NULL OR t.manager_id = $2)
 """
 
 
-async def list_projects(*, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+async def list_projects(*, manager_id: str | None = None, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """Every project with its ``task_count``, ``active_count`` and ``schedule_count``, ordered by name ignoring
-    case."""
+    case; with ``manager_id``, the counts are of that Manager's tasks and its schedules are 0."""
     pool = pool or get_pool()
-    rows = await pool.fetch(_WITH_COUNTS + "GROUP BY p.id ORDER BY lower(p.name)", list(ACTIVE_STATUSES))
+    rows = await pool.fetch(_WITH_COUNTS + "GROUP BY p.id ORDER BY lower(p.name)", list(ACTIVE_STATUSES), manager_id)
     return [dict(r) for r in rows]
 
 
-async def get_project(project_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
-    """One project with its ``task_count``, ``active_count`` and ``schedule_count``."""
+async def get_project(project_id: str, *, manager_id: str | None = None,
+                      pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+    """One project with its ``task_count``, ``active_count`` and ``schedule_count`` (``list_projects``'s
+    ``manager_id``)."""
     pool = pool or get_pool()
-    row = await pool.fetchrow(_WITH_COUNTS + "WHERE p.id = $2 GROUP BY p.id", list(ACTIVE_STATUSES), project_id)
+    row = await pool.fetchrow(_WITH_COUNTS + "WHERE p.id = $3 GROUP BY p.id", list(ACTIVE_STATUSES), manager_id,
+                              project_id)
     return dict(row) if row else None
 
 

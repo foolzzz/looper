@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ from ..db import managers as db_managers
 from .bus import MessageBus
 from .managers_api import DEFAULT_MANAGER_ID, MAX_ENABLED_MANAGERS, ManagerDefinition
 from .message import MANAGER_ADDRESS, MessageEnvelope, MessageType, manager_address
-from .ops.service import ManagerOps, Platform
+from .ops.service import ManagerOps, Platform, scope_for
 from .supervisor import AgentSupervisor
 from .tiers.manager import TURNED_OFF_REPLY, ManagerAgent, ManagerConfig, default_definition, reply_envelope
 from .tiers.turn_token import TurnToken
@@ -60,10 +61,11 @@ class ManagerFleet:
 
     # --- Building ---
 
-    def _build(self, definition: ManagerDefinition) -> ManagerAgent:
+    def _build(self, definition: ManagerDefinition, template_keys: Sequence[str] = ()) -> ManagerAgent:
         agent = ManagerAgent(config=self._config, runtime_root=self._runtime_root, broadcaster=self._broadcaster,
                              definition=definition)
         ops = ManagerOps(dataclasses.replace(self._platform, manager=agent), url=self._url,
+                         scope=scope_for(definition, template_keys),
                          turn_file=self._runtime_root / ".local" / f"{definition.id}-turn.json")
         agent.ops = ops
         agent.on_turned_off = self._turned_off
@@ -98,7 +100,15 @@ class ManagerFleet:
                 logger.error("Manager %s not started: at most %d Managers run at once", row["id"],
                              MAX_ENABLED_MANAGERS)
                 continue
-            self._supervisor.register(self._build(ManagerDefinition.from_row(row)))
+            self._supervisor.register(self._build(ManagerDefinition.from_row(row), await self._template_keys(row["id"])))
+
+    @staticmethod
+    async def _template_keys(manager_id: str) -> list[str]:
+        try:
+            return await ManagerFleet._read_template_keys(manager_id)
+        except Exception:
+            logger.exception("could not read the task templates of Manager %s", manager_id)
+            return []
 
     async def stop(self) -> None:
         """The service shuts down: no retry goes on."""
@@ -213,8 +223,18 @@ class ManagerFleet:
                 logger.error("Manager %s not started: at most %d Managers run at once", manager_id,
                              MAX_ENABLED_MANAGERS)
                 return
-            agent = self._build(ManagerDefinition.from_row(row))
+            agent = self._build(ManagerDefinition.from_row(row), await self._read_template_keys(manager_id))
             await self._supervisor.start_agent(agent)
+        else:
+            # Running and still enabled: the definition (tools, task scope, task policy, templates) may have changed.
+            ops = self._ops.get(manager_id)
+            if ops is not None and ops.scope.revision != row.get("revision"):
+                ops.set_scope(scope_for(ManagerDefinition.from_row(row), await self._read_template_keys(manager_id)))
+
+    @staticmethod
+    async def _read_template_keys(manager_id: str) -> list[str]:
+        """The keys of the Manager's templates; a failure propagates, so the apply is retried."""
+        return [template["key"] for template in await db_managers.list_templates(manager_id)]
 
     # --- Retiring ---
 

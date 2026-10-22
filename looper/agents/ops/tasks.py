@@ -19,11 +19,11 @@ import asyncpg
 
 from ...db import agent_setting_layers as db_layers, connection as db_connection, projects as db_projects
 from ...db import steps as db_steps, task_changes as db_changes, task_roles as db_roles, tasks as db_tasks
-from ...db import user_gates as db_user_gates
+from ...db import managers as db_managers, user_gates as db_user_gates
 from ..agent_settings import TASK_LIMIT_ROLES, TASK_ROLES, AgentSettings, AgentType, Layer, index_layers, resolve
 from ..agent_settings import resolve_task_concurrency
 from ..gate_service import origin_chat, post_message as post_gate_message
-from ..message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode, is_lark, planner_address
+from ..message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode, is_lark, planner_address
 from ..project_execution import LessonsMode, ProjectExecution, ReviewPolicy, TaskBudgetAction, TaskWorkspaces
 from ..project_execution import format_usd
 from ..projects import HTTP_404, HTTP_409, PROFILES_NOTE, TASK_PROFILE_ROLES, RequestError, agents_view
@@ -102,7 +102,7 @@ def _ended(task: Mapping[str, Any]) -> bool:
 
 async def _publish(call: Call, message_type: MessageType, task_id: str, **payload: Any) -> None:
     await call.platform.bus.publish(MessageEnvelope.create(
-        source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=message_type,
+        source=call.manager_address, target=TASK_ROUTER_ADDRESS, message_type=message_type,
         payload={"task_id": task_id, **payload},
     ))
 
@@ -114,8 +114,9 @@ async def _overview(call: Call) -> dict[str, Any]:
     from ..overview import build_overview
 
     platform = call.platform
+    manager_id = call.manager_id if call.scoped else None
     view = await build_overview(task_router=platform.task_router, worker_pool=platform.worker_pool,
-                                manager=platform.manager, supervisor=platform.supervisor)
+                                manager=platform.manager, supervisor=platform.supervisor, manager_id=manager_id)
     agents = view["agents"]
     own = await db_layers.task_concurrency([p["task_id"] for p in agents["planners"]])
     return {
@@ -131,7 +132,7 @@ async def _overview(call: Call) -> dict[str, Any]:
                       for r in agents["workers"] + agents["reviewers"]],
         "projects": view["projects"],
         # The user gates waiting for the user's answer in the running tasks ("Open gates" lists them).
-        "waiting_gates": len(await db_user_gates.open_gates(TASKS_SEARCHED)),
+        "waiting_gates": len(await db_user_gates.open_gates(TASKS_SEARCHED, manager_id=manager_id)),
         "spend_today": view["spend_today"],
         "unhealthy": view["health"]["unhealthy"],
     }
@@ -161,7 +162,8 @@ async def _tasks(call: Call) -> dict[str, Any]:
     group = db_tasks.TaskGroup(arguments["group"]) if arguments.get("group") else None
     limit = int(arguments.get("limit") or TASKS_LISTED)
     query = " ".join(str(arguments.get("query") or "").split()).casefold()
-    tasks = await db_tasks.list_tasks(limit=TASKS_SEARCHED if query else limit, project_id=project_id, group=group)
+    tasks = await db_tasks.list_tasks(limit=TASKS_SEARCHED if query else limit, project_id=project_id, group=group,
+                                      manager_id=call.manager_id if call.scoped else None)
     if query:
         tasks = [t for t in tasks if query in " ".join(
             str(t.get(key) or "") for key in ("id", "name", "requirement", "project_name", "goal_id")).casefold()]
@@ -307,7 +309,8 @@ async def _create(call: Call) -> dict[str, Any]:
     try:
         workspace = await task_workspace(arguments, work_dir=work_dir, named=named,
                                          project_dir=project["work_dir"] if project is not None else work_dir,
-                                         project_mode=project_mode)
+                                         project_mode=project_mode,
+                                         visible_to=call.manager_id if call.scoped else None)
     except RequestError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
     row = {
@@ -319,22 +322,23 @@ async def _create(call: Call) -> dict[str, Any]:
         "original_user_text": (str(envelope.payload.get("text") or "") or None) if envelope is not None else None,
         "title": title,
         "workspace_dir": work_dir, "workspace_mode": workspace["mode"], "workspace_base": workspace["base"],
+        "manager_id": call.manager_id,
     }
-    if project is not None and not profiles:
-        await db_tasks.create_task(**row, project_id=project["id"])
-    else:
-        try:
-            async with db_connection.transaction() as conn:
-                if project is None:
-                    project = await db_projects.create_project(
-                        name=name, work_dir=work_dir, pool=conn,
-                        execution={"task_workspaces": TaskWorkspaces.WORKTREE.value})
-                await db_tasks.create_task(**row, project_id=project["id"], pool=conn)
-                if profiles:
-                    await db_layers.set_profile_overrides(conn, task_id, profiles)
-        except asyncpg.UniqueViolationError:
-            raise OpError(ErrorCode.CONFLICT, f"a project named {name!r} was created meanwhile: call again to use "
-                                              "it") from None
+    try:
+        # One path: the Manager's row is locked first, so a delete or a turn-off that came first refuses the task.
+        async with db_connection.transaction() as conn:
+            if not await db_managers.lock_for_task(call.manager_id, conn=conn):
+                raise OpError(ErrorCode.CONFLICT, "this Manager was turned off or deleted; the task was not created")
+            if project is None:
+                project = await db_projects.create_project(
+                    name=name, work_dir=work_dir, pool=conn,
+                    execution={"task_workspaces": TaskWorkspaces.WORKTREE.value})
+            await db_tasks.create_task(**row, project_id=project["id"], pool=conn)
+            if profiles:
+                await db_layers.set_profile_overrides(conn, task_id, profiles)
+    except asyncpg.UniqueViolationError:
+        raise OpError(ErrorCode.CONFLICT, f"a project named {name!r} was created meanwhile: call again to use "
+                                          "it") from None
     shown = title or arguments.get("goal_id") or task_id
     turn.blocks.append(await configuration_block(task_id, shown, project, work_dir, created,
                                                  workspace=workspace["check"]))
@@ -362,8 +366,12 @@ def _workspace_lines(task_id: str, check: Mapping[str, Any]) -> list[str]:
             lines.append(f"- 提醒：目录里有 {len(warning.get('files') or [])} 个未提交的改动不会进入任务的 worktree"
                          f"（{files}），任务需要的话先提交")
         elif kind == WarningKind.SHARED.value:
-            names = "、".join(f"{t['name']}（{t['status']}）" for t in (warning.get("tasks") or [])[:5])
-            effect = ("原地运行的任务会互相覆盖文件" if overwrites(check.get("mode") or "in_place", warning.get("tasks") or ())
+            shared = warning.get("tasks") or []
+            own = [t for t in shared if not t.get("foreign")]
+            names = "、".join(f"{t['name']}（{t['status']}）" for t in own[:5])
+            if foreign := len(shared) - len(own):
+                names += ("、" if names else "") + f"另有 {foreign} 个其他管家的任务"
+            effect = ("原地运行的任务会互相覆盖文件" if overwrites(check.get("mode") or "in_place", shared)
                       else "worktree 里的任务各在自己的分支上，不会互相干扰，合并时可能冲突")
             lines.append(f"- 提醒：这个仓库上还有进行中的任务：{names}；{effect}")
         elif kind == WarningKind.LARGE_CHECKOUT.value:
@@ -484,7 +492,7 @@ async def _control(call: Call) -> dict[str, Any]:
                                               f"was created and never started{hint}")
         from ..projects import start_ready_task
         try:
-            await start_ready_task(task_id, call.platform.bus, MANAGER_ADDRESS)
+            await start_ready_task(task_id, call.platform.bus, call.manager_address)
         except RequestError as exc:
             raise _request_error(exc) from None
         return {"task_id": task_id, "started": True}
@@ -525,7 +533,7 @@ async def _instruct(call: Call) -> dict[str, Any]:
         task_id, kept_text(call.arguments["text"], SUPPLEMENTS_MAX_CHARS), via=_via(call.turn))
     if call.platform.task_router.has_planner(task_id):
         await call.platform.bus.publish(MessageEnvelope.create(
-            source=MANAGER_ADDRESS, target=planner_address(task_id), message_type=MessageType.TASK_CHANGE,
+            source=call.manager_address, target=planner_address(task_id), message_type=MessageType.TASK_CHANGE,
             payload={"task_id": task_id}))
     return {"task_id": task_id, "supplement_id": supplement,
             "note": "the task's Planner gets it in its next turn and decides whether to change the plan; every later "
@@ -573,7 +581,7 @@ async def _update(call: Call) -> dict[str, Any]:
         try:
             edited = await edit_requirement(task_id, {"requirement": requirement},
                                             task_router=call.platform.task_router, bus=call.platform.bus,
-                                            source=MANAGER_ADDRESS, via=_via(call.turn))
+                                            source=call.manager_address, via=_via(call.turn))
         except RequestError as exc:
             raise _request_error(exc) from None
         result["requirement_version"] = edited["version"]
@@ -624,7 +632,7 @@ async def _gate_reply(call: Call) -> dict[str, Any]:
     has_planner = call.platform.task_router.has_planner(task_id)
     try:
         posted = await post_gate_message(task_id, label, {"text": text},
-                                         has_planner=has_planner, bus=call.platform.bus, source=MANAGER_ADDRESS,
+                                         has_planner=has_planner, bus=call.platform.bus, source=call.manager_address,
                                          via=_via(turn), end=bool(arguments.get("end")), origin=origin)
     except RequestError as exc:
         raise _request_error(exc) from None

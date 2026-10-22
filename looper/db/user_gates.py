@@ -376,21 +376,26 @@ async def find_reference(channel: str, chat: str, external_ids: Sequence[str], *
 
 
 async def open_gates(limit: int, *, chat: tuple[str, str] | None = None, dashboard: bool = False,
-                     pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+                     manager_id: str | None = None, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """The gates that wait for the user in the tasks that run, the latest opened first, at most ``limit``, each with
     its step's label, its task's project, the chat its task came from (``origin_channel_id``, ``chat_id``,
     ``chat_kind``, ``chat_mention``, ``schedule_id``: ``gate_service.gate_chat``) and ``waiting_for_planner``.
-    When ``chat`` is given, filter before limiting; ``dashboard`` includes tasks from no channel."""
+    When ``chat`` is given, filter before limiting; ``dashboard`` includes tasks from no channel; with
+    ``manager_id``, only the gates of that Manager's tasks."""
     pool = pool or get_pool()
     where = ""
     args: list[Any] = [list(WAITING), list(ACTIVE_STATUSES), limit]
+    if manager_id is not None:
+        args.append(manager_id)
+        where = f" AND t.manager_id = ${len(args)}"
     if chat is not None:
         from ..agents.task_notice import _BY_CHANNEL_ID, TargetKind
 
         origins = [origin for origin, channel in _BY_CHANNEL_ID.items() if channel.value == chat[0]]
-        where = (" AND t.schedule_id IS NULL AND ((t.origin_channel_id = ANY($4::text[]) AND t.chat_id = $5 "
-                 "AND t.chat_id <> '' AND t.chat_kind = ANY($6::text[])) OR ($7::boolean AND "
-                 "NOT (COALESCE(t.origin_channel_id, '') = ANY($8::text[]))))")
+        base = len(args)
+        where += (f" AND t.schedule_id IS NULL AND ((t.origin_channel_id = ANY(${base + 1}::text[]) AND "
+                  f"t.chat_id = ${base + 2} AND t.chat_id <> '' AND t.chat_kind = ANY(${base + 3}::text[])) OR "
+                  f"(${base + 4}::boolean AND NOT (COALESCE(t.origin_channel_id, '') = ANY(${base + 5}::text[]))))")
         args += [origins, chat[1], [kind.value for kind in TargetKind], dashboard, list(_BY_CHANNEL_ID)]
     rows = await pool.fetch(
         _GATES.replace("FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id",

@@ -27,7 +27,7 @@ from .. import __version__
 from ..db import llm_records as db_llm_records, tasks as db_tasks
 from ..db.tasks import TaskGroup
 from .agent_settings import AgentType
-from .schedules import schedule_overview
+from .schedules import empty_schedule_overview, schedule_overview
 from .supervisor import AgentSupervisor
 from .task_roles import run_role
 from .tiers.manager import ManagerAgent
@@ -73,11 +73,13 @@ async def build_overview(
     worker_pool: WorkerPool | None,
     manager: ManagerAgent | None,
     supervisor: AgentSupervisor,
+    manager_id: str | None = None,
 ) -> dict[str, Any]:
-    """The overview, read now; raises when the database cannot be read."""
-    rows = await db_tasks.status_counts()
+    """The overview, read now; raises when the database cannot be read. With ``manager_id``, the same keys for that
+    Manager's tasks, its and its tasks' spend, and its own component only (no schedules)."""
+    rows = await db_tasks.status_counts(manager_id=manager_id)
     since = local_midnight()
-    spend = await db_llm_records.spend_since(since)
+    spend = await db_llm_records.spend_since(since, manager_id=manager_id)
 
     names = {row["project_id"]: row["project_name"] for row in rows if row["project_id"] is not None}
     by_project: dict[str, dict[TaskGroup, int]] = {}
@@ -94,6 +96,11 @@ async def build_overview(
         for p in task_router.running_planners()
     ]
     runs = sorted(worker_pool.runs() if worker_pool else [], key=lambda r: (r["state"] != "running", r["since"]))
+    if manager_id is not None:
+        owners = await db_tasks.manager_of({p["task_id"] for p in planners} | {r["task_id"] for r in runs})
+        own = {task_id for task_id, owner in owners.items() if owner == manager_id}
+        planners = [p for p in planners if p["task_id"] in own]
+        runs = [r for r in runs if r["task_id"] in own]
     step_runs = [
         {"agent_id": r["agent_id"], "role": r["role"], "task_id": r["task_id"], "project_id": r["project_id"],
          "project_name": names.get(r["project_id"]), "step": r["step"], "instruction": r["instruction"],
@@ -128,11 +135,12 @@ async def build_overview(
         "projects": projects,
         "idle_projects": len(set(names) - active),
         "spend_today": {"since": since.isoformat(), **spend},
-        "schedules": await schedule_overview(since),
+        "schedules": await schedule_overview(since) if manager_id is None else empty_schedule_overview(),
         # Every component not simply running: down and being restarted, or crash-looping (up or down now).
         "health": {"unhealthy": [
             {"name": name, **{key: entry[key] for key in ("state", "up", "restart_count", "last_crash_at",
                                                          "next_restart_at")}}
-            for name, entry in supervisor.agent_status().items() if not entry["healthy"]
+            for name, entry in supervisor.agent_status().items()
+            if not entry["healthy"] and (manager_id is None or name == manager_id)
         ]},
     }

@@ -168,8 +168,8 @@ async def _existing_project(project_id: str) -> dict[str, Any]:
     return project
 
 
-async def list_projects() -> dict[str, Any]:
-    return {"projects": [project_view(row) for row in await db_projects.list_projects()]}
+async def list_projects(*, manager_id: str | None = None) -> dict[str, Any]:
+    return {"projects": [project_view(row) for row in await db_projects.list_projects(manager_id=manager_id)]}
 
 
 async def create_project(data: dict[str, Any]) -> dict[str, Any]:
@@ -317,9 +317,10 @@ async def create_task(data: dict[str, Any]) -> dict[str, Any]:
 
 
 async def task_workspace(data: dict[str, Any], *, work_dir: str, named: bool, project_dir: str,
-                         project_mode: TaskWorkspaces) -> dict[str, Any]:
+                         project_mode: TaskWorkspaces, visible_to: str | None = None) -> dict[str, Any]:
     """A new task's ``workspace_mode`` (as ``data`` asks, else by ``task_workspaces.resolve_mode``) and ``base``,
-    checked: the mode, the base and the workspace check, or a 400."""
+    checked: the mode, the base and the workspace check, or a 400. ``visible_to``: the Manager the check's
+    warnings name tasks to; another Manager's tasks stay anonymous."""
     from . import task_workspaces
 
     requested, base = data.get("workspace_mode"), data.get("base")
@@ -336,7 +337,8 @@ async def task_workspace(data: dict[str, Any], *, work_dir: str, named: bool, pr
     if base and mode is not TaskWorkspaces.WORKTREE:
         raise RequestError(HTTP_400, "base is where a task's worktree starts: give it with workspace_mode worktree")
     try:
-        check = await task_workspaces.check(work_dir, mode=mode, base=base, asked=bool(requested))
+        check = await task_workspaces.check(work_dir, mode=mode, base=base, asked=bool(requested),
+                                            visible_to=visible_to)
     except task_workspaces.TaskWorkspaceError as exc:
         raise RequestError(HTTP_400, str(exc)) from None
     return {"mode": mode.value, "base": base, "check": check}

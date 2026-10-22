@@ -469,10 +469,11 @@ _SPEND = f"""count(*) AS runs,
 
 
 async def spend_since(since: datetime | None, *, until: datetime | None = None, project_id: str | None = None,
-                      pool: asyncpg.Pool | None = None) -> dict[str, Any]:
+                      manager_id: str | None = None, pool: asyncpg.Pool | None = None) -> dict[str, Any]:
     """What every agent's runs started at or after ``since`` (and before ``until``; None for no bound) cost, the
     Manager's included, split by basis; with ``project_id``, only the runs of that project's tasks that make up
-    their cost (their Planners', Workers' and Reviewers', as ``task_costs`` counts them).
+    their cost (their Planners', Workers' and Reviewers', as ``task_costs`` counts them); with ``manager_id``, only
+    the runs of that Manager and of its tasks.
 
     ``provider_priced_usd`` is money: runs with an API key, at their
     provider's prices (Claude Code's figure for Anthropic's API, Looper's for
@@ -483,8 +484,9 @@ async def spend_since(since: datetime | None, *, until: datetime | None = None, 
     """
     pool = pool or get_pool()
     row = await pool.fetchrow(
-        f"SELECT {_SPEND} FROM llm_records r LEFT JOIN tasks t ON t.id = r.task_id WHERE {_IN_RANGE}",
-        since, until, project_id,
+        f"SELECT {_SPEND} FROM llm_records r LEFT JOIN tasks t ON t.id = r.task_id WHERE {_IN_RANGE} "
+        "AND ($4::text IS NULL OR r.agent_id = $4 OR t.manager_id = $4)",
+        since, until, project_id, manager_id,
     )
     return dict(row)
 

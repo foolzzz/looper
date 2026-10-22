@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from datetime import datetime, timezone
 from enum import Enum
 from types import MappingProxyType
@@ -240,12 +240,21 @@ async def active_workspaces(*, besides: str | None = None,
     for a task from before workspaces), but ``besides``."""
     pool = pool or get_pool()
     rows = await pool.fetch(
-        "SELECT id, title, goal_id, requirement, status, workspace_mode, "
+        "SELECT id, title, goal_id, requirement, status, workspace_mode, manager_id, "
         "COALESCE(NULLIF(workspace_dir, ''), work_dir) AS workspace FROM tasks "
         "WHERE status = ANY($1::text[]) AND id <> COALESCE($2, '') ORDER BY created_at",
         list(ACTIVE_STATUSES), besides,
     )
     return [_task(row) for row in rows]
+
+
+async def manager_of(task_ids: Collection[str], *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> dict[str, str]:
+    """The Manager each of the tasks belongs to (a task that does not exist is left out)."""
+    if not task_ids:
+        return {}
+    pool = pool or get_pool()
+    rows = await pool.fetch("SELECT id, manager_id FROM tasks WHERE id = ANY($1::text[])", list(task_ids))
+    return {row["id"]: row["manager_id"] for row in rows}
 
 
 async def update_task_status(
@@ -570,16 +579,18 @@ async def task_exists(task_id: str, *, pool: asyncpg.Pool | None = None) -> bool
     return bool(await pool.fetchval("SELECT EXISTS (SELECT 1 FROM tasks WHERE id = $1)", task_id))
 
 
-async def status_counts(*, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
-    """How many tasks are in each status, every task counted: one row per project and status
-    (``project_id``, ``project_name``, ``status``, ``count``). A project without tasks has one row with
-    ``status`` None and ``count`` 0; tasks of no project have ``project_id`` None."""
+async def status_counts(*, manager_id: str | None = None, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """How many tasks are in each status, every task counted (with ``manager_id``, that Manager's only): one row
+    per project and status (``project_id``, ``project_name``, ``status``, ``count``). A project without tasks has
+    one row with ``status`` None and ``count`` 0; tasks of no project have ``project_id`` None."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         """
         SELECT p.id AS project_id, p.name AS project_name, t.status, count(t.id) AS count
-        FROM projects p FULL JOIN tasks t ON t.project_id = p.id
+        FROM projects p FULL JOIN (SELECT * FROM tasks WHERE $1::text IS NULL OR manager_id = $1) t
+             ON t.project_id = p.id
         GROUP BY p.id, p.name, t.status
         """,
+        manager_id,
     )
     return [dict(r) for r in rows]

@@ -52,14 +52,14 @@ async def answered(request: Awaitable[T]) -> T:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
 
 
-async def project_named(raw: Any) -> dict[str, Any]:
+async def project_named(raw: Any, *, manager_id: str | None = None) -> dict[str, Any]:
     """The project of that name (ignoring case), with its counts; refuses an unknown one."""
     try:
         name = project_name(raw)
     except ValueError as exc:
         raise OpError(ErrorCode.INVALID, f"project: {exc}") from None
     row = await db_projects.find_project_by_name(name)
-    project = await db_projects.get_project(row["id"]) if row is not None else None
+    project = await db_projects.get_project(row["id"], manager_id=manager_id) if row is not None else None
     if project is None:
         raise OpError(ErrorCode.NOT_FOUND, f"no project named {name!r}; the Projects line before the message lists "
                                            "them")
@@ -106,13 +106,14 @@ def _project_listed(view: Mapping[str, Any]) -> dict[str, Any]:
 async def _projects(call: Call) -> dict[str, Any]:
     arguments, action = call.arguments, call.arguments["action"]
     if action == "list":
-        return {"projects": [_project_listed(p) for p in (await projects.list_projects())["projects"]]}
+        listed = await projects.list_projects(manager_id=call.manager_id if call.scoped else None)
+        return {"projects": [_project_listed(p) for p in listed["projects"]]}
     if action == "create":
         _required(arguments, action, "name")
         fields = {"name": arguments["name"], **_given(arguments, ("work_dir", "background"))}
         return {"project": await answered(projects.create_project(fields))}
     _required(arguments, action, "project")
-    project = await project_named(arguments["project"])
+    project = await project_named(arguments["project"], manager_id=call.manager_id if call.scoped else None)
     if action == "get":
         return {"project": projects.project_view(project)}
     if action == "update":

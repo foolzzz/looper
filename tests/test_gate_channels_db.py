@@ -78,6 +78,15 @@ async def _task_with_gate(pool: Any, task_id: str = "task-a", *, origin: str = "
                                      "text": "Gate opened: storage"}], pool=pool)
 
 
+def _with_tool(ops: Any, name: str, **changes: Any) -> None:
+    """``ops`` with its tool ``name`` replaced by a copy with ``changes``."""
+    from dataclasses import replace
+    from types import MappingProxyType
+
+    tools = {**ops.scope.tools, name: replace(ops.scope.tools[name], **changes)}
+    ops.set_scope(replace(ops.scope, tools=MappingProxyType(tools)))
+
+
 async def _say(task_id: str, step_id: str, kind: str, text: str, role: str = "looper", **gate: Any) -> None:
     """A message of the Planner's or Looper's in the gate, with the gate as it is then."""
     from looper.db import plans
@@ -555,11 +564,11 @@ def test_a_gate_reply_runs_in_the_live_turn_and_never_in_one_stopped_or_over(mon
             ops.end_turn(turn)
             return "it relays the message"
 
-        ops._tools["looper_task_gate_reply"] = replace(ops._tools["looper_task_gate_reply"], escalate=ending)
+        _with_tool(ops, "looper_task_gate_reply", escalate=ending)
         late = await ops.call("looper_task_gate_reply", {"task_id": "task-a", "gate": "g1", "excerpt": "PostgreSQL 16"})
         assert late["status"] == "error" and late["error"]["code"] == "expired", late
         assert not ops.asks_in(turn.message_id)
-        ops._tools["looper_task_gate_reply"] = replace(ops._tools["looper_task_gate_reply"], escalate=None)
+        _with_tool(ops, "looper_task_gate_reply", escalate=None)
         # Begun again after the user stopped it, it stays stopped.
         ops.begin_turn(turn)
         ops.stop_turn(turn)
