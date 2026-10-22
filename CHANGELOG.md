@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.31] - 2026-10-21
+
+### Fixed
+
+- **Turn process tree: the subtree of a reused pid is left alone.** A process id seen earlier in a turn that an unrelated process had since reused was spared itself, but its current children and group were still walked, merged into the turn tree and ended. `_tree` now skips reused pids together with what only they reach, and `refresh`, `_end`, `end` and `end_new` pass them on. Behavior change: the first. Model-visible: none. ([#385](https://github.com/foolzzz/looper/pull/385))
+
 ## [2.13.30] - 2026-10-21
 
 ### Fixed
