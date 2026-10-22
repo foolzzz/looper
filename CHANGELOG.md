@@ -22,6 +22,18 @@ How the agent system works today is described in
 
 - **A bot per Manager.** Each Telegram or Lark row of `channel_configs` is now one bot with its own runner and one Manager (`channel_configs.manager_id`, fixed when the bot is added); the three built-in rows stay the default Manager's. Settings → Channels → Add a bot (`POST /api/channel-configs`, `DELETE /api/channel-configs/<id>`) creates a `channel-<type>-<n>` bot for any Manager, with its token or app secret entered in the dashboard and kept in `channel_secrets` (an added bot never reads the environment, and the same bot cannot be added twice). Its threads are `<channel_id>:<chat_id>`, and task end notices, wait and concurrency notices and gate posts go through the bot the task came through. Added bots are not exported, and a configuration file naming one is refused. Behavior change: none for an install with only the built-in channel rows; the Lark bot token channel's app secret is now masked in logs. Model-visible: none (the `Channel:` line names only the type).
 
+## [2.13.36] - 2026-10-22
+
+### Fixed
+
+- **Chat: the Agent line names the session's profile without `undefined`.** The chat header and the new-session panel showed `name — undefined · undefined / undefined / undefined`, because `GET /api/manager/session` returns the effective profile as a summary (`profile_id`, `name`, `runtime`, `provider`, `model`, `effort`) and the dashboard read it as a registry profile. A `ManagerSessionProfileSummary` type and `sessionProfileLabel` match the server. Behavior change: the label reads `name — runtime · provider / model`. Model-visible: none. ([#398](https://github.com/foolzzz/looper/pull/398))
+
+## [2.13.35] - 2026-10-22
+
+### Added
+
+- **Scenario Managers, stage 1.** Several Managers can be online at once. Each has its own duty prompt, Agent Profile, tool scope (`tools`: `all` or `tasks`), task scope (`task_scope`: `all` or `own`), task policy (`free` or `templates_only`), session, spend and task templates, up to 8 enabled Managers including the default one. They are defined in Settings → Managers or over `/api/managers` (`GET`, `POST`, `PUT` and `DELETE` on `/api/managers/:id`, `PUT` and `DELETE` on `/api/managers/:id/templates/:key`). The dashboard chat picks the Manager (the picker shows once a second Manager exists), a task records the Manager that created it (and the template it came from) and reports its progress and end to that Manager's thread, and runs and spend are counted per Manager. A Manager creates a task from a template with `looper_task_create` (`template`, `inputs`) after restating it and getting the user's confirmation. An install with only the default Manager keeps its prompt, tools, per-turn context, session and channels as before. Telegram and Lark still reach only the default Manager. Behavior changes and model-visible changes are listed in [docs/releases/v2.13.35.md](docs/releases/v2.13.35.md). ([#388](https://github.com/foolzzz/looper/pull/388))
+
 ## [2.13.34] - 2026-10-22
 
 ### Added
