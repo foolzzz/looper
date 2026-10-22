@@ -118,7 +118,8 @@ async def _projects(call: Call) -> dict[str, Any]:
         return {"project": projects.project_view(project)}
     if action == "update":
         fields = _given(arguments, ("name", "work_dir", "background"))
-        return {"project": await answered(projects.update_project(project["id"], fields))}
+        return {"project": await answered(projects.update_project(
+            project["id"], fields, manager_id=call.manager_id if call.scoped else None))}
     await answered(projects.delete_project(project["id"]))
     return {"deleted": project["name"]}
 

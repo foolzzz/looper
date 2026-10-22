@@ -441,7 +441,7 @@ def test_the_overview_of_a_scoped_manager_counts_its_own_tasks(monkeypatch: pyte
 
 def test_projects_count_only_a_scoped_managers_tasks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(pool: Any) -> None:
-        chat, default = await _review(pool, tmp_path, task_scope="own")
+        chat, default = await _review(pool, tmp_path, tools="all", task_scope="own")
         await _tasks(pool)
         (listed,) = _ok((await chat.say("x", ("looper_projects", {"action": "list"})))[0])["projects"]
         assert (listed["tasks"], listed["active_tasks"], listed["schedules"]) == (1, 1, 0)
@@ -449,6 +449,9 @@ def test_projects_count_only_a_scoped_managers_tasks(monkeypatch: pytest.MonkeyP
         assert (got["task_count"], got["active_count"], got["schedule_count"]) == (1, 1, 0)
         (listed,) = _ok((await default.say("x", ("looper_projects", {"action": "list"})))[0])["projects"]
         assert listed["tasks"] == 2
+        updated = _ok((await chat.say("x", ("looper_projects", {"action": "update", "project": "calc",
+                                                               "background": "b"})))[0])["project"]
+        assert (updated["task_count"], updated["active_count"], updated["schedule_count"]) == (1, 1, 0)
 
     _run(test, monkeypatch)
 

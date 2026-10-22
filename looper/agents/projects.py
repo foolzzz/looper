@@ -161,8 +161,8 @@ def _name_taken(name: str) -> RequestError:
     return RequestError(HTTP_409, f"a project named {name!r} already exists")
 
 
-async def _existing_project(project_id: str) -> dict[str, Any]:
-    project = await db_projects.get_project(project_id)
+async def _existing_project(project_id: str, *, manager_id: str | None = None) -> dict[str, Any]:
+    project = await db_projects.get_project(project_id, manager_id=manager_id)
     if project is None:
         raise RequestError(HTTP_404, f"project {project_id!r} not found")
     return project
@@ -181,7 +181,7 @@ async def create_project(data: dict[str, Any]) -> dict[str, Any]:
     return project_view(row)
 
 
-async def update_project(project_id: str, data: dict[str, Any]) -> dict[str, Any]:
+async def update_project(project_id: str, data: dict[str, Any], *, manager_id: str | None = None) -> dict[str, Any]:
     fields = _project_fields(data, update=True)
     if not fields:
         raise RequestError(
@@ -194,7 +194,7 @@ async def update_project(project_id: str, data: dict[str, Any]) -> dict[str, Any
         raise _name_taken(fields["name"]) from None
     if not updated:
         raise RequestError(HTTP_404, f"project {project_id!r} not found")
-    return project_view(await _existing_project(project_id))
+    return project_view(await _existing_project(project_id, manager_id=manager_id))
 
 
 def _still_used(project: dict[str, Any]) -> RequestError:
