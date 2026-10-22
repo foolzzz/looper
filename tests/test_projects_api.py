@@ -36,6 +36,7 @@ class _Store:
         self.tasks: dict[str, dict[str, Any]] = {}
         self.list_calls: list[dict[str, Any]] = []
         self.versions: dict[str, list[dict[str, Any]]] = {}
+        self.supplements: list[dict[str, Any]] = []
         self.transactions = 0
 
     def add_project(self, project_id: str, name: str, work_dir: str = "", background: str = "") -> None:
@@ -151,6 +152,20 @@ class _Store:
         task["requirement"] = text
         return len(versions)
 
+    async def set_task_title(self, task_id: str, title: Any, **_: Any) -> bool:
+        """``tasks.set_task_title``: the normalised title; an unknown task is False."""
+        stored = db_tasks.task_title(title)
+        if stored is None:
+            raise ValueError("a task's title cannot be empty")
+        if task_id not in self.tasks:
+            return False
+        self.tasks[task_id]["title"] = stored
+        return True
+
+    async def add_supplement(self, task_id: str, text: str, *, via: str, delivered: bool = False, **_: Any) -> int:
+        self.supplements.append({"task_id": task_id, "text": text, "via": via, "delivered": delivered})
+        return len(self.supplements)
+
     async def profile_overrides(self, task_id: str, **_: Any) -> dict[str, Any]:
         """No task here chose an Agent Profile of its own."""
         return {}
@@ -187,6 +202,8 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
 
     monkeypatch.setattr(task_changes, "requirement_versions", fake.requirement_versions)
     monkeypatch.setattr(task_changes, "edit_requirement", fake.edit_requirement)
+    monkeypatch.setattr(task_changes, "add_supplement", fake.add_supplement)
+    monkeypatch.setattr(db_tasks, "set_task_title", fake.set_task_title)
     from looper.db import manager_actions
 
     monkeypatch.setattr(manager_actions, "for_task", fake.manager_actions)
@@ -565,6 +582,44 @@ class TestStartReadyTask:
     def test_an_unknown_task_is_404(self, store: _Store) -> None:
         status, _, published = self._call("task-nope")
         assert (status, published) == (404, [])
+
+
+class TestRenameTask:
+    """``PUT /api/tasks/<id>/title`` sets a task's title in any status and notes it in the task's history."""
+
+    @pytest.mark.parametrize("task_status", ["init", "running", "completed", "cancelled"])
+    def test_any_status_can_be_renamed(self, store: _Store, task_status: str) -> None:
+        store.add_project("proj-a", "tetris")
+        store.add_task("task-1", "proj-a", task_status)
+        status, body = _call("PUT", "/api/tasks/task-1/title", {"title": "  Tetris \n game  "})
+        assert (status, body) == (200, {"task_id": "task-1", "title": "Tetris game"})
+        assert store.tasks["task-1"]["title"] == "Tetris game"
+        assert [(s["task_id"], s["via"], s["delivered"]) for s in store.supplements] == [("task-1", "task_page", True)]
+        assert "Tetris game" in store.supplements[0]["text"]
+
+    def test_a_long_title_is_cut_and_the_same_title_is_not_noted_again(self, store: _Store) -> None:
+        store.add_project("proj-a", "tetris")
+        store.add_task("task-1", "proj-a", "running")
+        status, body = _call("PUT", "/api/tasks/task-1/title", {"title": "x" * 100})
+        assert (status, body["title"]) == (200, "x" * db_tasks.TITLE_MAX_CHARS)
+        assert _call("PUT", "/api/tasks/task-1/title", {"title": "x" * 100})[0] == 200
+        assert len(store.supplements) == 1
+
+    @pytest.mark.parametrize(("body", "problem"), [
+        ({}, "title must be a string"),
+        ({"title": 5}, "title must be a string"),
+        ({"title": None}, "title must be a string"),
+        ({"title": " \n "}, "title must not be empty"),
+    ])
+    def test_a_missing_or_empty_title_is_refused(self, store: _Store, body: Any, problem: str) -> None:
+        store.add_project("proj-a", "tetris")
+        store.add_task("task-1", "proj-a", "running")
+        status, answer = _call("PUT", "/api/tasks/task-1/title", body)
+        assert (status, answer) == (400, {"error": problem})
+        assert "title" not in store.tasks["task-1"] and store.supplements == []
+
+    def test_an_unknown_task_is_not_found(self, store: _Store) -> None:
+        assert _call("PUT", "/api/tasks/task-9/title", {"title": "x"})[0] == 404
 
 
 class TestEditRequirement:

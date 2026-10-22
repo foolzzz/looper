@@ -449,6 +449,17 @@ async def mark_orphaned_tasks_stopped(
     return count
 
 
+async def set_task_title(task_id: str, title: Any, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> bool:
+    """Make ``title`` (as ``task_title`` stores it) the title of the task, in any status; False when there is no such
+    task. ``ValueError`` when nothing is left of ``title`` once normalised."""
+    stored = task_title(title)
+    if stored is None:
+        raise ValueError("a task's title cannot be empty")
+    pool = pool or get_pool()
+    result = await pool.execute("UPDATE tasks SET title = $2, updated_at = now() WHERE id = $1", task_id, stored)
+    return result == "UPDATE 1"
+
+
 async def update_task_config(
     task_id: str,
     *,

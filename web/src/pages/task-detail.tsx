@@ -25,8 +25,11 @@ import {
   Hourglass,
   MessageCircleQuestionMark,
   MessagesSquare,
+  Pencil,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { ClampedText } from "@/components/clamped-text";
 import { Markdown } from "@/components/markdown";
 import { ScheduledBadge } from "@/components/scheduled-badge";
@@ -81,6 +84,7 @@ import {
   READY_STATUS,
   updateTaskConfig,
   editTaskRequirement,
+  renameTask,
   setTaskProject,
   fetchKnowledgeDrafts,
   type KnowledgeDraft,
@@ -378,6 +382,76 @@ function viaLabel(via: string): string {
   if (via === "gate") return "gate conclusion";
   if (via.startsWith("manager:")) return `Manager (${via.slice("manager:".length)})`;
   return via || "—";
+}
+
+const TITLE_MAX_CHARS = 60;
+
+/** The task page's heading: the task's name, with a pencil to rename it (any status); Enter or Save stores the new
+ * title, Esc cancels, and the server's refusal is shown beside the input. */
+function TaskHeading({ task, taskId, onRenamed }: { task: TaskDetail | null; taskId: string; onRenamed: () => void }) {
+  const name = task?.name || task?.requirement || taskId;
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const cancel = () => { setEditing(false); setError(""); };
+  const save = async () => {
+    if (saving || !text.trim()) return;
+    setSaving(true);
+    setError("");
+    try {
+      await renameTask(taskId, text);
+      setEditing(false);
+      onRenamed();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (editing) {
+    return (
+      <div>
+        <div className="flex items-center gap-2">
+          <Input
+            autoFocus
+            value={text}
+            maxLength={TITLE_MAX_CHARS}
+            aria-label="Task title"
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { e.preventDefault(); void save(); }
+              else if (e.key === "Escape") cancel();
+            }}
+            className="h-8 text-base font-semibold"
+          />
+          <Button type="button" size="sm" onClick={() => void save()} disabled={saving || !text.trim()}>
+            {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+            Save
+          </Button>
+        </div>
+        {error && <p role="alert" className="mt-1 text-xs text-destructive">{error}</p>}
+      </div>
+    );
+  }
+  return (
+    <div className="flex items-center gap-1.5">
+      <h1 className="text-lg font-semibold leading-tight truncate">{name}</h1>
+      {task && (
+        <button
+          type="button"
+          aria-label="Rename task"
+          title="Rename task"
+          onClick={() => { setText(task.title || task.name); setError(""); setEditing(true); }}
+          className="shrink-0 rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
+      )}
+    </div>
+  );
 }
 
 /** A started task's requirement: the current text, its earlier versions, and an edit its Planner gets in a turn. */
@@ -2016,9 +2090,11 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
             <ArrowLeft className="h-4 w-4" aria-hidden="true" />
           </button>
           <div className="min-w-0 flex-1">
-            <h1 className="text-lg font-semibold leading-tight truncate">
-              {task?.name || task?.requirement || taskId}
-            </h1>
+            <TaskHeading
+              task={task}
+              taskId={taskId}
+              onRenamed={() => { fetchTaskDetail(taskId).then(setTask, () => {}); }}
+            />
             <div className="flex items-center gap-2 mt-0.5 flex-wrap">
               <span className="text-xs text-muted-foreground">{taskId}</span>
               {task && taskStatusBadge(task.status)}
