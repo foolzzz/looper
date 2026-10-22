@@ -25,6 +25,8 @@ DISPLAY_NAME_MAX = 60
 TOKEN_MAX = 4096
 _POST_KEYS = {"channel_type", "manager_id", "display_name", "enabled", "config", "bot_token"}
 _LOCK = "SELECT pg_advisory_xact_lock(hashtext('looper.channel_bots'))"
+_NAME_THE_PROFILE = ("name the lark-cli profile of this bot: the active profile belongs to the built-in Lark "
+                     "channel")
 
 
 def _bad(message: str) -> projects.RequestError:
@@ -117,8 +119,7 @@ async def add_bot(data: dict[str, Any]) -> dict[str, Any]:
             raise _bad("a new bot's token is entered here, not read from the environment")
     elif channel_type == "lark":
         if not config.get("profile"):
-            raise _bad("name the lark-cli profile of this bot: the active profile belongs to the built-in Lark "
-                       "channel")
+            raise _bad(_NAME_THE_PROFILE)
         if token is not None:
             raise _bad("a lark-cli bot has no token: its credentials are in its lark-cli profile")
     else:
@@ -175,6 +176,8 @@ async def update_bot(channel_id: str, data: dict[str, Any]) -> dict[str, Any]:
             config = await _bound(kind, before, data["config"])
             if kind == "telegram" and channel_id not in BUILTIN_CHANNEL_IDS and config.get("bot_token_env"):
                 raise _bad("a bot's token is entered here, not read from the environment")
+            if kind == "lark" and channel_id not in BUILTIN_CHANNEL_IDS and not config.get("profile"):
+                raise _bad(_NAME_THE_PROFILE)
             data = {**data, "config": config}
 
         from ...db.connection import get_pool

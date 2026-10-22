@@ -164,6 +164,28 @@ def test_lark_cli_bots_name_their_profile(monkeypatch: pytest.MonkeyPatch, lark_
     _run(test, monkeypatch)
 
 
+def test_an_added_lark_cli_bot_keeps_naming_its_profile(monkeypatch: pytest.MonkeyPatch,
+                                                         lark_cli_stand_in: Path) -> None:
+    async def test(pool: Any) -> None:
+        manager = await _manager(pool)
+        status, answer = await _call("POST", "/api/channel-configs",
+                                     {"channel_type": "lark", "manager_id": manager, "config": {"profile": "other"}})
+        assert status == 201, answer
+        lark_id = answer["channel_id"]
+        # With the built-in row on another profile, an empty one clashes with no row, and is still refused.
+        status, answer = await _call("PUT", "/api/channel-configs/channel-lark", {"config": {"profile": "out"}})
+        assert status == 200, answer
+        status, answer = await _call("PUT", f"/api/channel-configs/{lark_id}", {"config": {"profile": ""}})
+        assert status == 400 and "lark-cli profile" in answer["error"], answer
+        status, answer = await _call("GET", f"/api/channel-configs/{lark_id}")
+        assert answer["config"]["profile"] == "other"
+        # The built-in row may still use lark-cli's active profile.
+        status, answer = await _call("PUT", "/api/channel-configs/channel-lark", {"config": {"profile": ""}})
+        assert status == 200, answer
+
+    _run(test, monkeypatch)
+
+
 def test_lark_bot_apps_are_added_once(monkeypatch: pytest.MonkeyPatch, platform: Any) -> None:  # noqa: F811
     async def test(pool: Any) -> None:
         manager = await _manager(pool)
