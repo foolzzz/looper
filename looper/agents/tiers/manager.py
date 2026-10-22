@@ -300,6 +300,8 @@ CONVERSATION_MAX_CHARS = 4_000
 HANDOFF_TIMEOUT_SEC = 300
 # How long a stopped turn still waits for its events to be handled (a slow database write) before it ends without.
 STOP_HANDLING_SEC = 3.0
+# How long a stopped turn's own record and session writes may take (a row lock held elsewhere) before it ends without.
+STOP_FINISH_SEC = 10.0
 
 # The one command Looper answers itself in a chat with the Manager: a message that is exactly this (trimmed, any
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
@@ -1210,7 +1212,19 @@ class ManagerAgent:
     async def _end_stopped(self, token: TurnToken, prepared: Prepared, turn: ResidentTurn | None,
                            partial: str) -> NoReturn:
         """The turn ends stopped (its token already settled): the record finishes as interrupted, with what it
-        spent, and the reply is the partial text."""
+        spent, the session is saved, and the reply is the partial text. The writes get ``STOP_FINISH_SEC``: a
+        database that holds them holds neither the reply nor the Manager's lock."""
+        if turn is not None:
+            self._session_totals = self._claude.totals
+        try:
+            await token.keep("stop_finish", self._record_stopped(token, prepared, turn, partial), STOP_FINISH_SEC)
+        except asyncio.TimeoutError:
+            logger.warning("manager: the stopped turn's record and session were not written within %.1f s (%s)",
+                           STOP_FINISH_SEC, token.message_id)
+        raise TurnStopped(partial)
+
+    async def _record_stopped(self, token: TurnToken, prepared: Prepared, turn: ResidentTurn | None,
+                              partial: str) -> None:
         recorder, ops_turn = prepared.run.recorder, prepared.turn
         request = token.stop
         await recorder.finish(
@@ -1225,10 +1239,7 @@ class ManagerAgent:
             "usage_complete": turn is None or (turn.usage_complete and turn.usage.cost_usd is not None),
         }})
         await self._link_turn_task(recorder, ops_turn)
-        if turn is not None:
-            self._session_totals = self._claude.totals
         await self._save_session_state()
-        raise TurnStopped(partial)
 
     def _settle(self) -> None:
         """The running turn's end is decided (an answer or a failure): ``stop_turn`` refuses it from now on."""

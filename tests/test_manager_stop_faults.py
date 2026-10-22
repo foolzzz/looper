@@ -294,3 +294,50 @@ def test_a_stop_while_the_events_are_handled_waits_for_the_handling_within_a_bou
                 await bus.shutdown()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(("held", "held_writes"), [
+    ((manager_module.db_agent_sessions, "save_session"), 2),  # the handling's, then the stopped turn's
+    ((manager_module.db_llm_records, "add_metadata"), 1),  # the stopped turn's annotation
+], ids=["session", "record"])
+def test_a_stop_while_the_database_holds_every_write_still_replies_and_frees_the_lock(
+    held: tuple[Any, str], held_writes: int, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A row lock held elsewhere and never released holds every write to its table, the handling's and the stopped
+    # turn's own: the turn still ends stopped within a bound, replies, and leaves the Manager's lock free.
+    monkeypatch.setattr(manager_module, "STOP_HANDLING_SEC", 0.3, raising=False)
+    monkeypatch.setattr(manager_module, "STOP_FINISH_SEC", 0.3, raising=False)
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("你好")
+            unlocked = asyncio.Event()
+            writes: list[Any] = []
+
+            async def locked(*args: Any, **kwargs: Any) -> None:
+                writes.append(args)
+                await unlocked.wait()
+
+            monkeypatch.setattr(*held, locked)
+            handling = asyncio.create_task(manager._handle(envelope))
+            try:
+                await asyncio.wait_for(session.running.wait(), 5)
+                assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+                await asyncio.wait_for(asyncio.shield(handling), 5)
+                assert not unlocked.is_set() and len(writes) == held_writes  # the stopped turn's own was given up on
+                (reply,) = _replies(queue)
+                assert reply["outcome"] == "stopped" and "error" not in reply
+                assert not manager.busy and manager._lock_owner is None
+                assert manager.turn_for(envelope.message_id) is None
+                (finish,) = agent_db.finish_record.await_args_list
+                assert finish.kwargs["status"] == "interrupted"
+            finally:
+                unlocked.set()
+                if not handling.done():
+                    handling.cancel()
+                await asyncio.gather(handling, return_exceptions=True)
+                await bus.shutdown()
+
+    asyncio.run(run())
