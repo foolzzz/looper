@@ -35,7 +35,7 @@ from ..message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, Restart
 from ..project_execution import LessonsMode, ProjectExecution, ReviewPolicy, TaskBudgetAction, TaskWorkspaces
 from ..project_execution import format_usd
 from ..projects import HTTP_404, HTTP_409, PROFILES_NOTE, TASK_PROFILE_ROLES, RequestError, agents_view
-from ..projects import edit_requirement, profile_choices, project_name, set_task_agents, task_workspace
+from ..projects import edit_requirement, profile_choices, project_name, rename_task, set_task_agents, task_workspace
 from ..step_workspaces import _size_text as size_text
 from ..task_workspaces import WarningKind, overwrites, task_branch
 from ..system_prompt import TASK_REQUIREMENT_LIMIT
@@ -716,10 +716,10 @@ async def _instruct(call: Call) -> dict[str, Any]:
 async def _update(call: Call) -> dict[str, Any]:
     arguments = call.arguments
     task_id = arguments["task_id"]
-    requirement, work_dir = arguments.get("requirement"), arguments.get("work_dir")
+    requirement, work_dir, title = arguments.get("requirement"), arguments.get("work_dir"), arguments.get("title")
     own_agents = {field: arguments[field] for field in ("profiles", "system_prompt_modes") if arguments.get(field)}
-    if requirement is None and work_dir is None and not own_agents:
-        raise OpError(ErrorCode.INVALID, "give at least one of requirement, work_dir, profiles and "
+    if requirement is None and work_dir is None and title is None and not own_agents:
+        raise OpError(ErrorCode.INVALID, "give at least one of requirement, work_dir, title, profiles and "
                                          "system_prompt_modes")
     task = await _task(task_id)
     if _ended(task) and (requirement is not None or work_dir is not None):
@@ -747,6 +747,13 @@ async def _update(call: Call) -> dict[str, Any]:
             raise OpError(ErrorCode.CONFLICT, f"task {task_id} started meanwhile: its directory stays")
         changed.append("work_dir")
     result: dict[str, Any] = {"task_id": task_id}
+    if title is not None:
+        try:
+            renamed = await rename_task(task_id, {"title": title}, via=_via(call.turn))
+        except RequestError as exc:
+            raise _request_error(exc) from None
+        result["title"] = renamed["title"]
+        changed.append("title")
     if requirement is not None:
         try:
             edited = await edit_requirement(task_id, {"requirement": requirement},
@@ -931,7 +938,7 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         name="looper_task_update",
-        description="Change a task: its requirement while it has not ended (kept as a new version; a running "
+        description="Change a task: its title in any task (a label, only the name it is shown by), its requirement while it has not ended (kept as a new version; a running "
                     "task's Planner gets the edit in a turn), its directory (a task not started only), or the Agent "
                     "Profile of some of its roles in any task but a completed one (a Worker or Reviewer from its "
                     "next step on; a stopped, failed or cancelled task's restart runs with it).",
@@ -942,6 +949,8 @@ TOOLS: tuple[Tool, ...] = (
                 "requirement": {"type": "string", "minLength": 1, "maxLength": TASK_REQUIREMENT_LIMIT,
                                 "description": "The whole new requirement."},
                 "work_dir": {"type": "string", "minLength": 1, "description": "The new absolute directory."},
+                "title": {"type": "string", "minLength": 1, "maxLength": db_tasks.TITLE_MAX_CHARS,
+                          "description": "The new title: a few words naming the task, in the user's language."},
                 "profiles": _PROFILES_SCHEMA,
                 "system_prompt_modes": _PROMPT_MODES_SCHEMA,
             },

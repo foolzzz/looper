@@ -365,6 +365,7 @@ class AgentHTTPServer:
     _RE_TASK_CONTINUE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/continue$")
     _RE_TASK_START = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/start$")
     _RE_TASK_REQUIREMENT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/requirement$")
+    _RE_TASK_TITLE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/title$")
     _RE_TASK_AGENTS = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/agents$")
     _RE_TASK_ROOM = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/room$")
     _RE_TASK_ROLE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/roles/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})$")
@@ -477,6 +478,9 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_200, lambda: projects.edit_requirement(
                 m.group(1), projects.json_object(body), task_router=self._task_router, bus=self._supervisor.bus,
                 source=self._web_adapter._address, via=projects.VIA_TASK_PAGE))
+        elif (m := self._RE_TASK_TITLE.match(path)) and method == "PUT":
+            await self._answer(writer, HTTP_200, lambda: projects.rename_task(
+                m.group(1), projects.json_object(body), via=projects.VIA_TASK_PAGE))
         elif (m := self._RE_TASK_AGENTS.match(path)) and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: self._set_task_agents(m.group(1), body))
         elif (m := self._RE_TASK_ROLE.match(path)) and method == "PUT":
@@ -1720,6 +1724,7 @@ class AgentHTTPServer:
             "task_id": raw.get("id", ""),
             "requirement": raw.get("requirement", ""),
             "name": raw.get("name", ""),
+            "title": raw.get("title") or "",
             # Every version of an edited requirement, oldest first (none for one never edited): version, text, via,
             # created_at, delivered_at (when the Planner had the edit in a turn).
             "requirement_versions": versions,

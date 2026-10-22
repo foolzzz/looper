@@ -308,6 +308,20 @@ def _reviewer_is_opus(look: Look) -> str | None:
     return None if chosen.get("name") == "claude-code/opus" else f"the task's Reviewer profile is {chosen or 'unset'}"
 
 
+RENAMED_TITLE = "睡眠测试"
+
+
+def _task_renamed(look: Look) -> str | None:
+    """One looper_task_update with the task and the new title, and no other write; the task shows the new name."""
+    writes = _writes(look)
+    calls = [a for a in writes if a["tool"] == "looper_task_update" and a["status"] == "ok"
+             and a["arguments"].get("task_id") == look.task and a["arguments"].get("title") == RENAMED_TITLE]
+    if len(calls) != 1 or len(writes) != 1:
+        return f"expected one looper_task_update renaming the task, got {[(a['tool'], a['status']) for a in writes]}"
+    name = look.detail().get("name")
+    return None if name == RENAMED_TITLE else f"the task is called {name!r}, not {RENAMED_TITLE!r}"
+
+
 def _asked_to_confirm(look: Look) -> str | None:
     if not _writes(look, status="needs_confirmation", tool="looper_task_control"):
         return "no cancel waits for the user's confirmation"
@@ -1304,6 +1318,10 @@ DIALOGS: tuple[Dialog, ...] = (
         Say("把任务 <task> 的 Reviewer 换成 claude-code/opus。", _reviewer_is_opus,
             (("looper_task_update", {"task_id": "<task>", "profiles": {"reviewer": "claude-code/opus"}}),)),
     ), running_task=True),
+    Dialog("rename_task", (
+        Say(f"把任务 <task> 改名叫「{RENAMED_TITLE}」。", _task_renamed,
+            (("looper_task_update", {"task_id": "<task>", "title": RENAMED_TITLE}),)),
+    ), ready_task=True),
     Dialog("cancel_confirmation", (
         Say("取消任务 <task>。", _asked_to_confirm,
             (("looper_task_control", {"task_id": "<task>", "action": "cancel"}),)),

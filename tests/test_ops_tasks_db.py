@@ -410,6 +410,39 @@ def test_updating_a_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     _run(test, monkeypatch)
 
 
+def test_a_task_in_any_status_is_renamed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from looper.db import journal, task_changes, tasks
+
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        for task_id, status in (("task-r", "init"), ("task-v", "verifying"), ("task-c", "completed")):
+            await _task(pool, task_id, status, project)
+        chat = _Chat(tmp_path, planners={"task-v"})
+        ready, running, ended, with_more, nothing, empty, long = await chat.say(
+            "改名",
+            ("looper_task_update", {"task_id": "task-r", "title": "计算器"}),
+            ("looper_task_update", {"task_id": "task-v", "title": "  Calc \n v2 "}),
+            ("looper_task_update", {"task_id": "task-c", "title": "Done calc"}),
+            ("looper_task_update", {"task_id": "task-r", "title": "计算器 2", "work_dir": "/elsewhere"}),
+            ("looper_task_update", {"task_id": "task-r"}),
+            ("looper_task_update", {"task_id": "task-r", "title": ""}),
+            ("looper_task_update", {"task_id": "task-r", "title": "x" * (tasks.TITLE_MAX_CHARS + 1)}))
+        assert (ready["status"], ready["result"]["changed"], ready["result"]["title"]) == ("ok", ["title"], "计算器")
+        assert running["result"]["changed"] == ["title"] and ended["result"]["changed"] == ["title"]
+        assert [(await tasks.get_task(t, pool=pool))["name"] for t in ("task-v", "task-c")] == ["Calc v2", "Done calc"]
+        assert with_more["result"]["changed"] == ["work_dir", "title"]
+        row = await tasks.get_task("task-r", pool=pool)
+        assert (row["title"], row["name"], row["work_dir"]) == ("计算器 2", "计算器 2", "/elsewhere")
+        assert _error(nothing) == "invalid" and "requirement, work_dir, title, profiles" in nothing["error"]["message"]
+        assert _error(empty) == "invalid" and _error(long) == "invalid"
+        # A title is a label: the Planner has nothing to get, and the change is in the task's history.
+        assert (await task_changes.pending("task-v", pool=pool)).empty and chat.sent("planner-task-v") == []
+        notes = [e for e in await journal.list_entries("task-v", pool=pool) if e["kind"] == "supplement"]
+        assert [(e["via"], e["delivered_at"] is not None) for e in notes] == [("manager:lark", True)]
+
+    _run(test, monkeypatch)
+
+
 def test_tasks_are_listed_searched_and_read(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from looper.db import task_changes
 

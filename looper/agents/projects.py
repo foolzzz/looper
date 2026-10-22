@@ -459,6 +459,30 @@ async def edit_requirement(
     return {"task_id": task_id, "version": version, "requirement": requirement}
 
 
+async def rename_task(task_id: str, data: dict[str, Any], *, via: str) -> dict[str, Any]:
+    """Make ``data["title"]`` the task's title, in any status (a title is a label, not part of the run): 404 for an
+    unknown task, 400 for a missing, non-string or empty title. A change is noted in the task's journal (a
+    supplement the Planner needs no turn for); naming it what it is called changes nothing."""
+    from ..db import task_changes
+
+    title = data.get("title")
+    if not isinstance(title, str):
+        raise RequestError(HTTP_400, "title must be a string")
+    stored = db_tasks.task_title(title)
+    if stored is None:
+        raise RequestError(HTTP_400, "title must not be empty")
+    task = await db_tasks.get_task(task_id)
+    if task is None:
+        raise RequestError(HTTP_404, "task not found")
+    if stored != task.get("title"):
+        if not await db_tasks.set_task_title(task_id, stored):
+            raise RequestError(HTTP_404, "task not found")
+        old = db_tasks.task_name(title=task.get("title"), goal_id=task.get("goal_id"),
+                                 requirement=task.get("requirement"), task_id=task_id)
+        await task_changes.add_supplement(task_id, f"Renamed from {old!r} to {stored!r}.", via=via, delivered=True)
+    return {"task_id": task_id, "title": stored}
+
+
 # What a task's own choices per role are (``set_task_agents``), and when a new profile applies.
 TASK_AGENT_FIELDS = ("profiles", "concurrency", "system_prompt_modes")
 PROFILES_NOTE = ("a Worker or Reviewer uses its new profile from its next step on; the Planner moves to its new "

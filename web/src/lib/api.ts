@@ -1627,6 +1627,17 @@ export async function editTaskRequirement(taskId: string, requirement: string): 
   if (!res.ok) await failed(res, "edit requirement");
 }
 
+/** Rename a task, in any status; the stored title is returned (one line, at most 60 characters). */
+export async function renameTask(taskId: string, title: string): Promise<{ task_id: string; title: string }> {
+  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/title`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) await failed(res, "rename task");
+  return res.json();
+}
+
 /** The roles with a limit in each task: how many of them run at once there. */
 export type TaskLimitRole = "worker" | "reviewer";
 
@@ -1700,6 +1711,8 @@ export interface TaskDetail extends TaskInfo {
     inputs: { key: string; label: string; value: string }[];
     planner_instructions: string;
   } | null;
+  /** The task's own title, "" when it has none (then `name` is its goal id or its requirement's first line). */
+  title?: string;
   work_dir: string;
   config: Record<string, unknown>;
   origin_channel_id: string;
