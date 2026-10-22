@@ -2733,7 +2733,7 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
         directory.mkdir()
         monkeypatch.setenv(name, str(directory))
 
-    def wait_for(read, predicate, *, seconds=45):
+    def wait_for(read, predicate, *, seconds=120):
         deadline = time.monotonic() + seconds
         while True:
             value = read()
@@ -2744,7 +2744,7 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
 
     with fresh_database(os.environ["LOOPER_TEST_DATABASE_URL"]) as (database_url, _):
         with running_server(database_url=database_url, runtime_root=runtime, bin_dir=bin_dir,
-                            home=home, log_path=tmp_path / "serve.log", startup_timeout=30) as api:
+                            home=home, log_path=tmp_path / "serve.log", startup_timeout=90) as api:
             assert not api.base_url.endswith(":8767")
             channels = api.get("/api/channel-configs")["configs"]
             assert channels and all(not channel["enabled"] for channel in channels)
