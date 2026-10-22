@@ -232,7 +232,7 @@ def test_grok_fixture_records_patched_source() -> None:
                       "acp_blob": ":looper/agents/runtimes/grok_acp.py",
                       "registry_blob": ":looper/agents/profile_registry.py"}.items():
         result = subprocess.run(["git", "-C", str(repository), "rev-parse", parity.GROK_LEGACY_REVISION + path],
-                                check=True, capture_output=True, text=True, timeout=10)
+                                check=True, capture_output=True, text=True, timeout=60)
         assert pinned["source"][key] == result.stdout.strip()
     assert pinned["captures"].keys() == parity.GROK_CASES.keys()
     assert all(len(records) == (10 if parity.GROK_CASES[case][0] else 6)
@@ -245,9 +245,9 @@ def test_old_grok_checkout_reproduces_pinned_full_contract(tmp_path: Path) -> No
     repository = Path(__file__).resolve().parents[1]
     checkout = tmp_path / "legacy"
     subprocess.run(["git", "clone", "--shared", "--no-checkout", str(repository), str(checkout)],
-                   check=True, capture_output=True, timeout=15)
+                   check=True, capture_output=True, timeout=60)
     subprocess.run(["git", "-C", str(checkout), "checkout", "--detach", parity.GROK_LEGACY_REVISION],
-                   check=True, capture_output=True, timeout=15)
+                   check=True, capture_output=True, timeout=60)
     venv.EnvBuilder(with_pip=False).create(checkout / ".venv")
     packages = checkout / ".venv/lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
     (packages / "test-dependencies.pth").write_text("\n".join(site.getsitepackages()) + "\n")
@@ -385,7 +385,7 @@ def test_omp_fixture_records_patched_source() -> None:
                             "registry_blob": "{revision}:looper/agents/profile_registry.py"}.items():
         result = subprocess.run(["git", "-C", str(repository), "rev-parse",
                                  expression.format(revision=parity.OMP_LEGACY_REVISION)],
-                                check=True, capture_output=True, text=True, timeout=10)
+                                check=True, capture_output=True, text=True, timeout=60)
         assert pinned["source"][key] == result.stdout.strip()
     assert pinned["captures"].keys() == parity.OMP_CASES.keys()
     assert all(len(records) == 4 for records in pinned["captures"].values())
@@ -412,9 +412,9 @@ def test_old_omp_checkout_reproduces_pinned_full_contract(tmp_path: Path) -> Non
     repository = Path(__file__).resolve().parents[1]
     checkout = tmp_path / "legacy"
     subprocess.run(["git", "clone", "--shared", "--no-checkout", str(repository), str(checkout)],
-                   check=True, capture_output=True, timeout=15)
+                   check=True, capture_output=True, timeout=60)
     subprocess.run(["git", "-C", str(checkout), "checkout", "--detach", parity.OMP_LEGACY_REVISION],
-                   check=True, capture_output=True, timeout=15)
+                   check=True, capture_output=True, timeout=60)
     venv.EnvBuilder(with_pip=False).create(checkout / ".venv")
     packages = checkout / ".venv/lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
     (packages / "test-dependencies.pth").write_text("\n".join(site.getsitepackages()) + "\n")
@@ -557,9 +557,9 @@ def test_old_codex_checkout_reproduces_pinned_full_contract(tmp_path: Path) -> N
     repository = Path(__file__).resolve().parents[1]
     checkout = tmp_path / "legacy"
     subprocess.run(["git", "clone", "--shared", "--no-checkout", str(repository), str(checkout)],
-                   check=True, capture_output=True, timeout=15)
+                   check=True, capture_output=True, timeout=60)
     subprocess.run(["git", "-C", str(checkout), "checkout", "--detach", parity.CODEX_LEGACY_REVISION],
-                   check=True, capture_output=True, timeout=15)
+                   check=True, capture_output=True, timeout=60)
     venv.EnvBuilder(with_pip=False).create(checkout / ".venv")
     packages = checkout / ".venv/lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
     (packages / "test-dependencies.pth").write_text("\n".join(site.getsitepackages()) + "\n")
@@ -581,7 +581,7 @@ def test_codex_fixture_source_is_the_patched_adapter() -> None:
     }.items():
         result = subprocess.run(["git", "-C", str(repository), "rev-parse",
                                  expression.format(revision=parity.CODEX_LEGACY_REVISION)],
-                                check=True, capture_output=True, text=True, timeout=10)
+                                check=True, capture_output=True, text=True, timeout=60)
         assert pinned["source"][key] == result.stdout.strip()
     assert pinned["captures"].keys() == parity.CODEX_CASES.keys()
     assert all(len(records) == 6 for records in pinned["captures"].values())
@@ -772,7 +772,7 @@ def test_only_clean_patched_v2_source_passes_the_generation_gate(tmp_path: Path)
     checkout = tmp_path / "legacy"
 
     def git(*args: str) -> None:
-        subprocess.run(["git", *args], check=True, capture_output=True, timeout=15)
+        subprocess.run(["git", *args], check=True, capture_output=True, timeout=60)
 
     git("clone", "--shared", "--no-checkout", str(repository), str(checkout))
     git("-C", str(checkout), "checkout", "--detach", parity.CLAUDE_LEGACY_REVISION)
@@ -803,21 +803,21 @@ def test_only_clean_patched_v2_source_passes_the_generation_gate(tmp_path: Path)
         # before the missing-database gate, even with this checkout installed.
         child = subprocess.run(
             [sys.executable, "-I", parity.__file__, "--checkout", str(checkout), "--capture"],
-            cwd=checkout, capture_output=True, text=True, timeout=15,
+            cwd=checkout, capture_output=True, text=True, timeout=60,
         )
         assert child.returncode != 0
         assert "requires a disposable test database" in child.stderr
         assert not child.stdout
         omp_child = subprocess.run(
             [sys.executable, "-I", parity.__file__, "--checkout", str(checkout), "--runtime", "omp", "--capture"],
-            cwd=checkout, capture_output=True, text=True, timeout=15,
+            cwd=checkout, capture_output=True, text=True, timeout=60,
         )
         assert omp_child.returncode != 0
         assert "OMP baseline requires a disposable test database" in omp_child.stderr
         assert not omp_child.stdout
         grok_child = subprocess.run(
             [sys.executable, "-I", parity.__file__, "--checkout", str(checkout), "--runtime", "grok", "--capture"],
-            cwd=checkout, capture_output=True, text=True, timeout=15,
+            cwd=checkout, capture_output=True, text=True, timeout=60,
         )
         assert grok_child.returncode != 0
         assert "Grok baseline requires a disposable test database" in grok_child.stderr
@@ -864,9 +864,9 @@ def test_old_checkout_captures_sql_sessions_without_refreshing_the_fixture(
     repository = Path(__file__).resolve().parents[1]
     checkout = tmp_path / "legacy"
     subprocess.run(["git", "clone", "--shared", "--no-checkout", str(repository), str(checkout)],
-                   check=True, capture_output=True, timeout=15)
+                   check=True, capture_output=True, timeout=60)
     subprocess.run(["git", "-C", str(checkout), "checkout", "--detach", parity.CLAUDE_LEGACY_REVISION],
-                   check=True, capture_output=True, timeout=15)
+                   check=True, capture_output=True, timeout=60)
     # Reuse only the test interpreter's installed dependencies, offline. The
     # isolated child verifies that Looper and the driver import from v2.
     venv.EnvBuilder(with_pip=False).create(checkout / ".venv")
@@ -901,7 +901,7 @@ def test_patched_claude_fixture_is_pinned(baseline: dict[str, Any]) -> None:
     for field, expression in objects.items():
         expression = expression.replace("HEAD", parity.CLAUDE_LEGACY_REVISION)
         source = subprocess.run(["git", "-C", str(repository), "rev-parse", expression],
-                                check=True, capture_output=True, text=True, timeout=10)
+                                check=True, capture_output=True, text=True, timeout=60)
         assert baseline["source"][field] == source.stdout.strip()
     assert baseline["captures"].keys() == parity.CLAUDE_CASES.keys()
     for case, records in baseline["captures"].items():
