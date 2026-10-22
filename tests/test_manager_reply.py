@@ -718,6 +718,19 @@ class TestManagerChannelLine:
             ["Channel: a Lark group chat, from ou_2", "and?"],
         ]
 
+    def test_a_message_through_loopercli_names_its_client(self) -> None:
+        turns = _channel_turns([
+            (WEB, {"session_id": "cli-1", "client": {"id": "client-1", "name": "laptop"}}, "please build it"),
+            (WEB, {"session_id": "cli-2", "client": {"id": "", "name": "x"}}, "hi"),
+            (WEB, {"session_id": "cli-3", "client": "laptop"}, "hello"),
+        ])
+        assert [turn.split("\n\n")[-2:] for turn in turns] == [
+            ['Channel: loopercli, client "laptop" (the user works in their own coding agent, which writes these '
+             "messages for them)", "please build it"],
+            ["Channel: the Looper dashboard chat", "hi"],
+            ["Channel: the Looper dashboard chat", "hello"],
+        ]
+
 
 def _system(**values: Any) -> dict[str, Any]:
     return {"scope": "system", **values}
