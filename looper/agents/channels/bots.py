@@ -9,6 +9,9 @@ from typing import Any
 from ... import env
 
 BOT_TYPES = ("telegram", "lark", "lark_bot")
+# The types whose rows can be the same bot as each other's: a lark-cli profile and a bot token channel can name one
+# Lark app.
+SAME_BOT_TYPES = {"telegram": ("telegram",), "lark": ("lark", "lark_bot"), "lark_bot": ("lark", "lark_bot")}
 
 _TELEGRAM_BOT_ID = re.compile(r"^(\d+):")
 
@@ -31,23 +34,50 @@ def bot_key(channel_type: str, config: Mapping[str, Any], secret: str | None, *,
     return None
 
 
+def bot_keys(channel_type: str, config: Mapping[str, Any], secret: str | None, *, env_token: str = "",
+             app_id: str | None = None) -> set[str]:
+    """Every key that makes two rows the same bot: ``bot_key``'s, and for the Lark types the app the row acts as
+    (``app_id``, from ``lark_app_id``), so a lark-cli profile and a bot token row of one app, or two names of one
+    profile (the active profile and its own name), are the same bot."""
+    keys = {key for key in (bot_key(channel_type, config, secret, env_token=env_token),) if key is not None}
+    if channel_type in ("lark", "lark_bot") and app_id:
+        keys.add(f"lark_app:{app_id}")
+    return keys
+
+
+async def lark_app_id(channel_type: str, config: Mapping[str, Any]) -> str | None:
+    """The Lark app a row acts as: a bot token row's app_id; a lark-cli row's profile's app, as lark-cli tells it now
+    (None when it cannot say: such a row does not start)."""
+    if channel_type == "lark_bot":
+        return config.get("app_id") or None
+    if channel_type != "lark":
+        return None
+    from . import lark_cli
+
+    try:
+        return (await lark_cli.identity(config.get("profile") or None, fresh=True)).app_id or None
+    except lark_cli.LarkCliError:
+        return None
+
+
 def builtin_env_token(config: Mapping[str, Any]) -> str:
     """The Telegram token the built-in row falls back to: env[config.bot_token_env or LOOPER_TELEGRAM_BOT_TOKEN]."""
     return env.get(config.get("bot_token_env") or "LOOPER_TELEGRAM_BOT_TOKEN", "")
 
 
 def clashes(rows: Sequence[Mapping[str, Any]]) -> dict[str, str]:
-    """For rows of one type in order ({channel_id, channel_type, config, secret}), each later row whose key an
-    earlier row has: {later channel_id: earlier channel_id}."""
+    """For rows in order ({channel_id, channel_type, config, secret, and optionally env_token and app_id}), each
+    later row with a key (``bot_keys``) an earlier row has: {later channel_id: earlier channel_id}. A later row adds
+    no keys of its own: it does not run."""
     first: dict[str, str] = {}
     out: dict[str, str] = {}
     for row in rows:
-        key = bot_key(row["channel_type"], row.get("config") or {}, row.get("secret"),
-                      env_token=row.get("env_token") or "")
-        if key is None:
+        keys = bot_keys(row["channel_type"], row.get("config") or {}, row.get("secret"),
+                        env_token=row.get("env_token") or "", app_id=row.get("app_id"))
+        earlier = next((first[key] for key in sorted(keys) if key in first), None)
+        if earlier is not None:
+            out[row["channel_id"]] = earlier
             continue
-        if key in first:
-            out[row["channel_id"]] = first[key]
-        else:
+        for key in keys:
             first[key] = row["channel_id"]
     return out

@@ -17,7 +17,7 @@ from ...db.channel_configs import BUILTIN_CHANNEL_IDS
 from .. import log_redaction, projects
 from ..profile_registry import SECRET_MASK
 from .allowlist import AllowlistError, channel_view, normalized_config
-from .bots import BOT_TYPES, bot_key, builtin_env_token
+from .bots import BOT_TYPES, SAME_BOT_TYPES, bot_keys, builtin_env_token, lark_app_id
 
 HTTP_500 = "500 Internal Server Error"
 TYPE_WORDS = {"telegram": "Telegram", "lark": "Lark (lark-cli)", "lark_bot": "Lark (bot token)"}
@@ -55,24 +55,28 @@ async def _bound(channel_type: str, current: Mapping[str, Any], config: Any) -> 
 
 async def _clash(conn: asyncpg.Connection, channel_type: str, config: Mapping[str, Any], secret: str | None, *,
                  env_token: str = "", exclude: str | None = None) -> None:
-    """Under the bots lock: ``RequestError`` 409 when a bot of the type other than ``exclude`` is the same bot as
-    the one described. Never names a token."""
+    """Under the bots lock: ``RequestError`` 409 when a bot other than ``exclude`` is the same bot as the one
+    described (``bots.bot_keys``: for Lark, the app each row acts as, across both Lark types). Never names a
+    token."""
     await conn.execute(_LOCK)
-    key = bot_key(channel_type, config, secret, env_token=env_token)
-    if key is None:
+    keys = bot_keys(channel_type, config, secret, env_token=env_token,
+                    app_id=await lark_app_id(channel_type, config))
+    if not keys:
         return
-    for row in await db_channel_configs.bot_keys(channel_type, conn=conn):
-        if row["channel_id"] == exclude:
-            continue
-        stored = row["secret"]
-        env = builtin_env_token(row["config"] or {}) if (
-            channel_type == "telegram" and row["channel_id"] in BUILTIN_CHANNEL_IDS and not stored) else ""
-        if bot_key(channel_type, row["config"] or {}, stored, env_token=env) == key:
-            name = await conn.fetchval(
-                "SELECT display_name FROM channel_configs WHERE channel_id = $1", row["channel_id"])
-            raise projects.RequestError(
-                projects.HTTP_409,
-                f"this bot is already added as {name or row['channel_id']} ({row['channel_id']})")
+    for other_type in SAME_BOT_TYPES[channel_type]:
+        for row in await db_channel_configs.bot_keys(other_type, conn=conn):
+            if row["channel_id"] == exclude:
+                continue
+            stored, other = row["secret"], row["config"] or {}
+            env = builtin_env_token(other) if (
+                other_type == "telegram" and row["channel_id"] in BUILTIN_CHANNEL_IDS and not stored) else ""
+            if keys & bot_keys(other_type, other, stored, env_token=env,
+                               app_id=await lark_app_id(other_type, other)):
+                name = await conn.fetchval(
+                    "SELECT display_name FROM channel_configs WHERE channel_id = $1", row["channel_id"])
+                raise projects.RequestError(
+                    projects.HTTP_409,
+                    f"this bot is already added as {name or row['channel_id']} ({row['channel_id']})")
 
 
 async def add_bot(data: dict[str, Any]) -> dict[str, Any]:
@@ -168,15 +172,21 @@ async def update_bot(channel_id: str, data: dict[str, Any]) -> dict[str, Any]:
             if kind == "telegram" and channel_id not in BUILTIN_CHANNEL_IDS and config.get("bot_token_env"):
                 raise _bad("a bot's token is entered here, not read from the environment")
             data = {**data, "config": config}
-        identity_changed = any(config.get(key) != before.get(key) for key in ("profile", "app_id"))
+        # What says which bot a row is: its token (removing the built-in Telegram row's falls back to the
+        # environment's, which bot_token_env names), its lark-cli profile, its app_id.
+        identity_changed = token != SECRET_MASK or any(
+            config.get(key) != before.get(key) for key in ("profile", "app_id", "bot_token_env"))
 
         from ...db.connection import get_pool
         async with get_pool().acquire() as conn, conn.transaction():
-            if changing_token or identity_changed:
+            if identity_changed:
                 await conn.execute(_LOCK)
-                secret = token if changing_token else await db_channel_configs.get_bot_token(channel_id, pool=conn)
                 if removing:
                     secret = None
+                elif changing_token:
+                    secret = token
+                else:
+                    secret = await db_channel_configs.get_bot_token(channel_id, pool=conn)
                 env = builtin_env_token(config) if (
                     kind == "telegram" and channel_id in BUILTIN_CHANNEL_IDS and not secret) else ""
                 await _clash(conn, kind, config, secret, env_token=env, exclude=channel_id)

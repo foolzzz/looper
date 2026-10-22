@@ -171,6 +171,53 @@ def test_lark_bot_apps_are_added_once(monkeypatch: pytest.MonkeyPatch, platform:
     _run(test, monkeypatch)
 
 
+def test_a_lark_app_is_one_bot_whatever_names_it(monkeypatch: pytest.MonkeyPatch, lark_cli_stand_in: Path) -> None:
+    # The built-in lark-cli row names no profile: lark-cli's active one, cli_main, of app cli_main.
+    async def test(pool: Any) -> None:
+        manager = await _manager(pool)
+        lark = {"channel_type": "lark", "manager_id": manager}
+        lark_bot = {"channel_type": "lark_bot", "manager_id": manager, "bot_token": SECRET}
+        status, answer = await _call("POST", "/api/channel-configs", {**lark, "config": {"profile": "cli_main"}})
+        assert status == 409 and "channel-lark)" in answer["error"], answer
+        status, answer = await _call("POST", "/api/channel-configs", {**lark_bot, "config": {"app_id": "cli_main"}})
+        assert status == 409 and "channel-lark)" in answer["error"], answer
+        status, added = await _call("POST", "/api/channel-configs", {**lark_bot, "config": {"app_id": "cli_other"}})
+        assert status == 201, added
+        status, answer = await _call("POST", "/api/channel-configs", {**lark, "config": {"profile": "other"}})
+        assert status == 409 and added["channel_id"] in answer["error"], answer
+        status, answer = await _call("PUT", "/api/channel-configs/channel-lark", {"config": {"profile": "other"}})
+        assert status == 409 and added["channel_id"] in answer["error"], answer
+        assert await pool.fetchval("SELECT count(*) FROM channel_configs WHERE channel_type LIKE 'lark%'") == 3
+
+    _run(test, monkeypatch)
+
+
+def test_the_built_in_telegram_row_falling_back_to_the_environment_is_checked(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOOPER_TELEGRAM_BOT_TOKEN", SAME_BOT_NEW_SECRET)
+    monkeypatch.setenv("ALT_TELEGRAM_TOKEN", SAME_BOT_NEW_SECRET)
+
+    async def test(pool: Any) -> None:
+        path = "/api/channel-configs/channel-telegram"
+        assert (await _call("PUT", path, {"bot_token": OTHER_TOKEN}))[0] == 200
+        assert (await _telegram(await _manager(pool), TOKEN))[0] == 201  # channel-telegram-2, bot 1111111
+
+        # Without its stored token the built-in row would read the environment's: the added bot's.
+        status, body = await _call("PUT", path, {"bot_token": None})
+        assert status == 409 and "channel-telegram-2" in body["error"], body
+        assert SAME_BOT_NEW_SECRET not in json.dumps(body) and TOKEN not in json.dumps(body)
+        assert await pool.fetchval("SELECT bot_token FROM channel_secrets WHERE channel_id = 'channel-telegram'"
+                                   ) == OTHER_TOKEN
+
+        monkeypatch.setenv("LOOPER_TELEGRAM_BOT_TOKEN", "3333333:AAthird-env-token")
+        assert (await _call("PUT", path, {"bot_token": None}))[0] == 200
+        status, body = await _call("PUT", path, {"config": {**ALLOW, "bot_token_env": "ALT_TELEGRAM_TOKEN"}})
+        assert status == 409 and "channel-telegram-2" in body["error"], body
+        assert "bot_token_env" not in ((await _call("GET", path))[1]["config"] or {})
+
+    _run(test, monkeypatch)
+
+
 def test_put_keeps_the_manager_and_checks_a_new_token(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         manager, other = await _manager(pool), await _manager(pool, "other")

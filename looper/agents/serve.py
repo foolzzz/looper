@@ -39,7 +39,7 @@ from .broadcast import Broadcaster
 from .bus import MessageBus
 from .channels.allowlist import SenderAllowlist, allowlist_from_config, start_problem
 from .channels.base import ChannelAdapter
-from .channels.bots import BOT_TYPES, builtin_env_token, clashes
+from .channels.bots import BOT_TYPES, builtin_env_token, clashes, lark_app_id
 from .channels.lark import LarkChannelAdapter
 from .channels.registry import ChannelRegistry
 from .channels.telegram import TelegramChannelAdapter
@@ -452,13 +452,11 @@ async def _enabled_bot_rows() -> list[dict[str, Any]]:
         if row["enabled"] and row["channel_type"] in BOT_TYPES:
             rows.append({**row, "config": row.get("config") or {},
                          "secret": await get_bot_token(row["channel_id"]) or ""})
-    skipped: set[str] = set()
-    for bot_type in BOT_TYPES:
-        typed = [{**r, "env_token": builtin_env_token(r["config"]) if r["channel_id"] == "channel-telegram" else ""}
-                 for r in rows if r["channel_type"] == bot_type]
-        for later, earlier in clashes(typed).items():
-            logger.error("%s not started: it is the same bot as %s", later, earlier)
-            skipped.add(later)
+    keyed = [{**r, "env_token": builtin_env_token(r["config"]) if r["channel_id"] == "channel-telegram" else "",
+              "app_id": await lark_app_id(r["channel_type"], r["config"])} for r in rows]
+    skipped = clashes(keyed)
+    for later, earlier in skipped.items():
+        logger.error("%s not started: it is the same bot as %s", later, earlier)
     return [r for r in rows if r["channel_id"] not in skipped]
 
 
