@@ -382,7 +382,6 @@ class _DatabaseFacts:
 async def _database_facts(dsn: str) -> _DatabaseFacts:
     import asyncpg
 
-    from ..db.channel_configs import get_config
     from ..db.connection import schema_change_pending
     from ..db.profile_registry import login_profile_count
     from .runtimes import grok_login
@@ -395,9 +394,10 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
         return _DatabaseFacts()
     try:
         try:
-            row = await get_config("channel-lark", pool=conn)  # a connection answers like a pool here
+            lark_enabled = bool(await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM channel_configs WHERE channel_type = 'lark' AND enabled)"))
         except asyncpg.UndefinedTableError:  # a database `looper serve` has not set up yet
-            row = None
+            lark_enabled = False
         try:
             profiles: int | None = await login_profile_count("codex", pool=conn)
             problem = await recorded_problem(pool=conn)
@@ -412,7 +412,7 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
         except asyncpg.UndefinedColumnError:  # set up by a `looper serve` from before step workspaces
             worktrees = None
         return _DatabaseFacts(
-            lark_enabled=bool(row and row.get("enabled")),
+            lark_enabled=lark_enabled,
             server_version_num=int(await conn.fetchval("SELECT current_setting('server_version_num')")),
             schema_change_pending=await schema_change_pending(conn),
             codex_login_profiles=profiles,
