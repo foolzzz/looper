@@ -20,7 +20,10 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { LABEL, SELECT } from "@/components/registry-ui";
 import {
+  createChannelBot,
+  deleteChannelBot,
   fetchChannelConfigs,
+  fetchManagers,
   fetchGateSettings,
   fetchLarkStatus,
   searchLarkPeople,
@@ -31,6 +34,7 @@ import {
   type GateTarget,
   type LarkPerson,
   type LarkStatus,
+  type ManagerInfo,
 } from "@/lib/api";
 import { larkPeopleSearchNote } from "@/lib/chat-channels";
 import { useSettingsTarget } from "@/lib/settings-target";
@@ -107,11 +111,90 @@ function stringFields(config: Record<string, unknown>, skip: string[]) {
   return fields;
 }
 
-function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: () => void }) {
+type Allowlist = (typeof SENDER_ALLOWLISTS)[string];
+
+/** A chat channel's sender allowlist: one id per row, each checked against the channel's id pattern. */
+function AllowlistEditor({
+  allowlist,
+  ids,
+  setIds,
+  problems,
+  names,
+}: {
+  allowlist: Allowlist;
+  ids: string[];
+  setIds: (ids: string[]) => void;
+  problems: string[];
+  names?: Record<string, string>;
+}) {
+  return (
+        <div className="space-y-2">
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="text-xs font-medium text-muted-foreground">Allowed senders ({allowlist.label})</span>
+            <span className="text-[11px] tabular-nums text-muted-foreground">{ids.length} / {MAX_SENDERS}</span>
+          </div>
+          {ids.map((value, index) => (
+            <div key={index} className="space-y-1">
+              <div className="flex items-center gap-2">
+                <Input
+                  aria-label={`Allowed sender ${index + 1}${names?.[value.trim()] ? `, ${names[value.trim()]}` : ""}`}
+                  value={value}
+                  onChange={(e) => setIds(ids.map((current, i) => (i === index ? e.target.value : current)))}
+                  placeholder={allowlist.placeholder}
+                  aria-invalid={!!problems[index]}
+                  className="flex-1 font-mono"
+                />
+                {names?.[value.trim()] && (
+                  <span className="max-w-[40%] shrink-0 truncate text-xs text-foreground">{names[value.trim()]}</span>
+                )}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setIds(ids.filter((_, i) => i !== index))}
+                  aria-label={`Remove ${value.trim() || `sender ${index + 1}`}`}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+              {problems[index] && <p className="text-xs text-destructive">{problems[index]}</p>}
+            </div>
+          ))}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setIds([...ids, ""])}
+            disabled={ids.length >= MAX_SENDERS}
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Add sender
+          </Button>
+          <p className="text-xs text-muted-foreground">
+            {allowlist.hint} Only these senders reach the Manager, which runs any command on this machine without
+            asking; messages from anyone else are dropped and logged, with no reply. With an empty list the channel
+            does not start.
+          </p>
+        </div>
+  );
+}
+
+/** Why each id of an allowlist is not acceptable ("" when it is). */
+function allowlistProblems(ids: string[], allowlist?: Allowlist): string[] {
+  return ids.map((value, index) => {
+    const text = value.trim();
+    if (!text) return "Enter an ID or remove this row.";
+    if (allowlist && !allowlist.pattern.test(text)) return `Not a valid ${allowlist.label.replace(/s$/, "")}.`;
+    if (ids.findIndex((other) => other.trim() === text) !== index) return "Listed twice.";
+    return "";
+  });
+}
+
+function ChannelCard({ channel, onSaved, freshlySaved = false }: { channel: ChannelConfig; onSaved: () => void; freshlySaved?: boolean }) {
   const id = useId();
   const allowlist = SENDER_ALLOWLISTS[channel.channel_type];
   const saved = channel.config || {};
-  const skip = ["description", ...SERVER_KEYS, ...(allowlist ? [allowlist.field] : [])];
+  const skip = ["description", ...SERVER_KEYS, ...(channel.builtin === false ? ["bot_token_env"] : []), ...(allowlist ? [allowlist.field] : [])];
   const [enabled, setEnabled] = useState(channel.enabled);
   const [fields, setFields] = useState<Record<string, string>>(stringFields(saved, skip));
   const [ids, setIds] = useState<string[]>(allowlist ? storedIds(saved[allowlist.field]) : []);
@@ -120,7 +203,14 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
   const [botToken, setBotToken] = useState(channel.has_bot_token ? SECRET_MASK : "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [justSaved, setJustSaved] = useState(false);
+  const [justSaved, setJustSaved] = useState(freshlySaved);
+  const added = channel.builtin === false;
+  useEffect(() => {
+    if (!freshlySaved) return;
+    const timer = setTimeout(() => setJustSaved(false), 2000);
+    return () => clearTimeout(timer);
+  }, [freshlySaved]);
+  const remove = useAction();
   const Icon = channelIcon(channel.channel_type);
   const isLark = channel.channel_type === "lark" || channel.channel_type === "lark_bot";
   // The Lark channel's saved settings: the bot, names, refused senders. Read again after a save.
@@ -129,13 +219,13 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
   useEffect(() => {
     if (!isLark) return;
     let alive = true;
-    fetchLarkStatus(channel.channel_type)
+    fetchLarkStatus(channel.channel_type, channel.channel_id)
       .then((status) => alive && (setLark(status), setLarkError("")))
       .catch((e: Error) => alive && setLarkError(e.message));
     return () => {
       alive = false;
     };
-  }, [isLark, channel.channel_type, channel.updated_at]);
+  }, [isLark, channel.channel_type, channel.channel_id, channel.updated_at]);
   // An import's "secrets to fill in" links here (#settings/channels/<id>).
   const ref = useSettingsTarget<HTMLDivElement>("channel", channel.channel_id);
 
@@ -146,13 +236,7 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
     JSON.stringify(fields) !== JSON.stringify(stringFields(saved, skip)) ||
     JSON.stringify(ids) !== JSON.stringify(savedIds) ||
     (!!tokenChannel && botToken !== savedToken);
-  const idProblems = ids.map((value, index) => {
-    const text = value.trim();
-    if (!text) return "Enter an ID or remove this row.";
-    if (allowlist && !allowlist.pattern.test(text)) return `Not a valid ${allowlist.label.replace(/s$/, "")}.`;
-    if (ids.findIndex((other) => other.trim() === text) !== index) return "Listed twice.";
-    return "";
-  });
+  const idProblems = allowlistProblems(ids, allowlist);
   const invalid = idProblems.some(Boolean);
   // Why the channel does not start: the saved state from the server, or the same rule for unsaved edits.
   const startProblem = !allowlist
@@ -202,6 +286,7 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
           </div>
           <div>
             <h3 className="text-sm font-semibold">{channel.display_name}</h3>
+            {added && <p className="text-xs text-muted-foreground">Talks to {channel.manager_name ?? channel.manager_id}</p>}
             <p className="text-xs text-muted-foreground">{description}</p>
             {isLark && <LarkBotLine status={lark} error={larkError} channelType={channel.channel_type} />}
           </div>
@@ -211,6 +296,21 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
             {enabled ? "Enabled" : "Disabled"}
           </Badge>
           <Switch checked={enabled} onChange={setEnabled} label={`Enable ${channel.display_name}`} />
+          {added && (
+            <Button
+              type="button"
+              variant="ghost"
+              className="min-h-11 text-destructive hover:text-destructive"
+              disabled={remove.busy}
+              onClick={async () => {
+                if (!confirm(`Remove ${channel.display_name}? Its conversations stay stored; it keeps running until the server restarts.`)) return;
+                if (await remove.run(() => deleteChannelBot(channel.channel_id))) onSaved();
+              }}
+            >
+              <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+              Remove
+            </Button>
+          )}
         </div>
       </div>
 
@@ -264,59 +364,19 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
         ))}
 
         {allowlist && (
-          <div className="space-y-2">
-            <div className="flex items-baseline justify-between gap-2">
-              <span className="text-xs font-medium text-muted-foreground">Allowed senders ({allowlist.label})</span>
-              <span className="text-[11px] tabular-nums text-muted-foreground">{ids.length} / {MAX_SENDERS}</span>
-            </div>
-            {ids.map((value, index) => (
-              <div key={index} className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <Input
-                    aria-label={`Allowed sender ${index + 1}${lark?.names[value.trim()] ? `, ${lark.names[value.trim()]}` : ""}`}
-                    value={value}
-                    onChange={(e) => setIds(ids.map((current, i) => (i === index ? e.target.value : current)))}
-                    placeholder={allowlist.placeholder}
-                    aria-invalid={!!idProblems[index]}
-                    className="flex-1 font-mono"
-                  />
-                  {isLark && lark?.names[value.trim()] && (
-                    <span className="max-w-[40%] shrink-0 truncate text-xs text-foreground">{lark.names[value.trim()]}</span>
-                  )}
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setIds(ids.filter((_, i) => i !== index))}
-                    aria-label={`Remove ${value.trim() || `sender ${index + 1}`}`}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </Button>
-                </div>
-                {idProblems[index] && <p className="text-xs text-destructive">{idProblems[index]}</p>}
-              </div>
-            ))}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setIds([...ids, ""])}
-              disabled={ids.length >= MAX_SENDERS}
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Add sender
-            </Button>
-            <p className="text-xs text-muted-foreground">
-              {allowlist.hint} Only these senders reach the Manager, which runs any command on this machine without
-              asking; messages from anyone else are dropped and logged, with no reply. With an empty list the channel
-              does not start.
-            </p>
-          </div>
+          <AllowlistEditor
+            allowlist={allowlist}
+            ids={ids}
+            setIds={setIds}
+            problems={idProblems}
+            names={isLark ? lark?.names : undefined}
+          />
         )}
 
         {isLark && (
           <LarkPeople
             channelType={channel.channel_type}
+            channelId={channel.channel_id}
             status={lark}
             ids={ids.map((value) => value.trim())}
             onAdd={(openId) => setIds((current) => (current.some((v) => v.trim() === openId) ? current : [...current, openId]))}
@@ -331,7 +391,7 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
             {" · "}Saved changes take effect after the server restarts.
           </p>
           <div className="flex items-center gap-2">
-            {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+            {(error || remove.error) && <p role="alert" className="text-xs text-destructive">{error || remove.error}</p>}
             {justSaved && (
               <span className="flex items-center gap-1 text-xs text-success">
                 <CheckCircle2 className="h-3.5 w-3.5" />
@@ -376,12 +436,14 @@ function LarkBotLine({ status, error, channelType }: { status: LarkStatus | null
  * allowlist above; Save stores it. */
 function LarkPeople({
   channelType,
+  channelId,
   status,
   ids,
   onAdd,
   full,
 }: {
   channelType: string;
+  channelId: string;
   status: LarkStatus | null;
   ids: string[];
   onAdd: (openId: string) => void;
@@ -400,7 +462,7 @@ function LarkPeople({
     if (!query.trim()) return;
     setSearching(true);
     setError("");
-    searchLarkPeople(query.trim(), channelType)
+    searchLarkPeople(query.trim(), channelType, channelId)
       .then((result) => {
         setPeople(result.people);
         setComplete(result.complete);
@@ -630,11 +692,188 @@ function DashboardGatesCard({ reloadKey }: { reloadKey: string }) {
   );
 }
 
+const CHANNEL_GROUPS = [
+  { type: "telegram", noun: "Telegram" },
+  { type: "lark", noun: "Lark (lark-cli)" },
+  { type: "lark_bot", noun: "Lark (bot token)" },
+];
+
+const TEXT_INPUT = "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:ring-2 focus:ring-ring";
+
+/** The form that adds a bot of one type for a Manager. The secret is cleared after a failed request, never shown again. */
+function AddBotForm({
+  type,
+  noun,
+  onCancel,
+  onCreated,
+}: {
+  type: string;
+  noun: string;
+  onCancel: () => void;
+  onCreated: (channelId: string) => void;
+}) {
+  const id = useId();
+  const allowlist = SENDER_ALLOWLISTS[type];
+  const tokenChannel = TOKEN_CHANNELS[type];
+  const [managers, setManagers] = useState<ManagerInfo[]>([]);
+  const [managersError, setManagersError] = useState("");
+  const [managerId, setManagerId] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [secret, setSecret] = useState("");
+  const [fields, setFields] = useState<Record<string, string>>(
+    type === "lark" ? { profile: "" } : type === "lark_bot" ? { app_id: "", domain: "feishu" } : {},
+  );
+  const [ids, setIds] = useState<string[]>([]);
+  const [enabled, setEnabled] = useState(false);
+  const { busy, error, run } = useAction();
+
+  useEffect(() => {
+    let alive = true;
+    fetchManagers().then(
+      (list) => {
+        if (!alive) return;
+        // The default Manager first, the rest in the API's order.
+        const sorted = [...list.filter((m) => m.id === "manager"), ...list.filter((m) => m.id !== "manager")];
+        setManagers(sorted);
+        setManagerId(sorted[0]?.id ?? "");
+      },
+      (err) => alive && setManagersError(errorText(err)),
+    );
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const manager = managers.find((m) => m.id === managerId);
+  const problems = allowlistProblems(ids, allowlist);
+  const missing =
+    (tokenChannel && !secret) ||
+    (type === "lark" && !fields.profile?.trim()) ||
+    (type === "lark_bot" && !fields.app_id?.trim());
+  const canSave = !busy && !!manager && !missing && !problems.some(Boolean);
+
+  const save = async () => {
+    const config: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(fields)) config[key] = value.trim();
+    if (allowlist) config[allowlist.field] = ids.map((value) => value.trim());
+    const body: Parameters<typeof createChannelBot>[0] = { channel_type: type, manager_id: managerId, enabled, config };
+    if (displayName.trim()) body.display_name = displayName.trim();
+    if (tokenChannel) body.bot_token = secret;
+    let created: ChannelConfig | undefined;
+    const ok = await run(async () => {
+      created = await createChannelBot(body);
+    });
+    if (ok && created) onCreated(created.channel_id);
+    else setSecret("");
+  };
+
+  return (
+    <div className="rounded-lg border border-border bg-card overflow-hidden">
+      <div className="px-5 py-4 border-b border-border">
+        <h3 className="text-sm font-semibold">Add a {noun} bot</h3>
+      </div>
+      <div className="px-5 py-4 space-y-4">
+        {managersError && (
+          <p role="alert" className="flex items-start gap-2 text-xs text-destructive">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            {managersError}
+          </p>
+        )}
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-1">
+            <label htmlFor={`${id}-manager`} className={LABEL}>Manager</label>
+            <select
+              id={`${id}-manager`}
+              value={managerId}
+              onChange={(e) => setManagerId(e.target.value)}
+              className={cn(SELECT, "h-11")}
+            >
+              {managers.map((m) => (
+                <option key={m.id} value={m.id}>{`${m.name}${m.enabled ? "" : " (off)"}`}</option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-1">
+            <label htmlFor={`${id}-name`} className={LABEL}>Display name (optional)</label>
+            <Input
+              id={`${id}-name`}
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder={`${noun} · ${manager?.name ?? "Manager"}`}
+              className="h-11"
+            />
+          </div>
+        </div>
+
+        {tokenChannel && (
+          <div>
+            <label htmlFor={`${id}-secret`} className="block text-xs font-medium text-muted-foreground mb-1.5">
+              {tokenChannel.label}
+            </label>
+            <input
+              id={`${id}-secret`}
+              type="password"
+              autoComplete="off"
+              required
+              value={secret}
+              onChange={(e) => setSecret(e.target.value)}
+              placeholder={type === "lark_bot" ? "App secret" : "123456:ABC-DEF…"}
+              className={cn(TEXT_INPUT, "min-h-11")}
+            />
+            <p className="mt-1 text-[10px] text-muted-foreground">{tokenChannel.hint}</p>
+          </div>
+        )}
+
+        {Object.keys(fields).map((key) => (
+          <div key={key}>
+            <label htmlFor={`${id}-${key}`} className="block text-xs font-medium text-muted-foreground mb-1.5">
+              {key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
+            </label>
+            <input
+              id={`${id}-${key}`}
+              type="text"
+              required={key !== "domain"}
+              value={fields[key]}
+              onChange={(e) => setFields({ ...fields, [key]: e.target.value })}
+              placeholder={FIELD_HELP[key]?.placeholder ?? ""}
+              className={cn(TEXT_INPUT, "min-h-11")}
+            />
+            {FIELD_HELP[key] && <p className="mt-1 text-[10px] text-muted-foreground">{FIELD_HELP[key].hint}</p>}
+          </div>
+        ))}
+
+        {allowlist && <AllowlistEditor allowlist={allowlist} ids={ids} setIds={setIds} problems={problems} />}
+
+        <div className="flex items-center gap-3">
+          <Switch checked={enabled} onChange={setEnabled} label={`Enable the new ${noun} bot`} />
+          <span className="text-xs text-muted-foreground">Enabled (starts after the server restarts)</span>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
+          {error && (
+            <p role="alert" className="flex items-center gap-1 text-xs text-destructive">
+              <XCircle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              {error}
+            </p>
+          )}
+          <Button type="button" variant="outline" className="min-h-11" onClick={onCancel}>Cancel</Button>
+          <Button type="button" className="min-h-11" onClick={save} disabled={!canSave}>
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+            Save
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** Settings → Channels: Telegram and both Lark types (lark-cli and bot token), each with its sender allowlist. */
 export function ChannelsSection() {
   const [channels, setChannels] = useState<ChannelConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [adding, setAdding] = useState<string | null>(null);
+  const [fresh, setFresh] = useState("");
 
   const load = () => {
     fetchChannelConfigs()
@@ -669,7 +908,35 @@ export function ChannelsSection() {
           </div>
         </div>
       ) : (
-        channels.map((ch) => <ChannelCard key={ch.channel_id} channel={ch} onSaved={load} />)
+        CHANNEL_GROUPS.map(({ type, noun }) => {
+          const group = channels
+            .filter((ch) => ch.channel_type === type)
+            .sort((x, y) => Number(y.builtin !== false) - Number(x.builtin !== false) || x.channel_id.localeCompare(y.channel_id));
+          return (
+            <div key={type} className="space-y-4">
+              {group.map((ch) => (
+                <ChannelCard key={ch.channel_id} channel={ch} onSaved={load} freshlySaved={ch.channel_id === fresh} />
+              ))}
+              {adding === type ? (
+                <AddBotForm
+                  type={type}
+                  noun={noun}
+                  onCancel={() => setAdding(null)}
+                  onCreated={(channelId) => {
+                    setAdding(null);
+                    setFresh(channelId);
+                    load();
+                  }}
+                />
+              ) : (
+                <Button type="button" variant="outline" size="sm" className="min-h-11" onClick={() => setAdding(type)}>
+                  <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                  Add a {noun} bot
+                </Button>
+              )}
+            </div>
+          );
+        })
       )}
 
       {!loading && <DashboardGatesCard reloadKey={channels.map((ch) => ch.updated_at).join()} />}

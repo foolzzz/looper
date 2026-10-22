@@ -390,6 +390,9 @@ apart from the settings and never returned by the API or exported.
 | Telegram | **Bot token**: the token from BotFather, stored apart and shown only as saved. `bot_token_env`: the env var read when no token is saved (default `LOOPER_TELEGRAM_BOT_TOKEN`). `allowed_user_ids`: the numeric Telegram user IDs that may talk to the bot. | Nothing else, or the token in that env var. |
 | Lark (lark-cli) | `profile`: the lark-cli profile, which chooses the app and the bot (empty: lark-cli's active one). `allowed_open_ids`: the senders' Lark `open_id` (`ou_...`) for that app; Settings → Channels finds them by name or email and lists refused senders to allow. Direct messages, and in group chats only messages that @-mention the bot. | `lark-cli` on PATH and signed in; it receives and sends the messages, and the channel checks the bot at startup. |
 
+- Each Manager can have its own Telegram or Lark bots: Settings → Channels →
+  Add a bot; enter its token or app secret there (an added bot never reads the
+  environment). A bot's Manager is fixed when it is added; restart to apply.
 - Every agent runs Claude Code without permission prompts, so the Manager
   can run any command on this machine. Each channel therefore passes on only
   the senders it lists: anyone else's message is dropped and logged (sender

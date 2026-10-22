@@ -19,10 +19,12 @@ from typing import Any
 
 from ..bus import MessageBus
 from ..message import (
-    MANAGER_ADDRESS,
     MessageEnvelope,
     MessageType,
+    builtin_channel_id,
     channel_address,
+    manager_address,
+    parse_channel_id,
 )
 from ..task_notice import Notice, NotifyTarget, TargetKind
 from .allowlist import SenderAllowlist
@@ -64,8 +66,17 @@ class LarkChannelAdapter(ChannelAdapter):
         transport: LarkTransport | None = None,
         channel_type: str = "lark",
         backoff: bool = False,
+        channel_id: str | None = None,
+        manager_id: str = "manager",
+        manager_running: Callable[[str], bool] | None = None,
     ) -> None:
         self._channel_type = channel_type
+        self._channel_id = channel_id or builtin_channel_id(channel_type)
+        parsed = parse_channel_id(self._channel_id)
+        if parsed is None or parsed.channel_type != channel_type:
+            raise ValueError(f"not a {channel_type} channel id: {self._channel_id!r}")
+        self._manager_id = manager_id
+        self._manager_running = manager_running
         self._backoff = backoff
         self._transport = transport if transport is not None else CliTransport(profile)
         self._allowlist = allowlist  # open_ids
@@ -94,7 +105,7 @@ class LarkChannelAdapter(ChannelAdapter):
 
     @property
     def channel_id(self) -> str:
-        return f"channel-{self.channel_type}"
+        return self._channel_id
 
     async def start(self, bus: MessageBus) -> None:
         if not self._allowlist.ids:
@@ -203,6 +214,30 @@ class LarkChannelAdapter(ChannelAdapter):
             logger.warning("%s: a task's end notice to %s failed: %s", self.channel_id, target.id, exc)
             return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
         return DeliveryReceipt(channel=self.channel_type, success=True)
+
+    async def _turned_off(self, chat_id: str, group_message: str | None) -> bool:
+        """Whether this bot's Manager is turned off; then the sender is told so (under their message in a group)
+        and the message goes nowhere."""
+        if self._manager_id == "manager" or self._manager_running is None:
+            return False
+        try:
+            running = self._manager_running(self._manager_id)
+        except Exception:
+            logger.warning("%s: cannot tell whether %s is running", self.channel_id, self._manager_id, exc_info=True)
+            return False
+        if running:
+            return False
+        from ..tiers.manager import TURNED_OFF_REPLY
+
+        try:
+            if group_message:
+                await self._transport.reply(group_message, text=TURNED_OFF_REPLY)
+            else:
+                await self._transport.send(chat_id=chat_id, text=TURNED_OFF_REPLY)
+        except Exception as exc:
+            logger.warning("%s: could not tell chat %s that %s is turned off: %s", self.channel_id, chat_id,
+                           self._manager_id, exc)
+        return True
 
     async def _send_message(self, chat_id: str, text: str) -> DeliveryReceipt:
         try:
@@ -357,6 +392,8 @@ class LarkChannelAdapter(ChannelAdapter):
             return
 
         message_id = event.get("message_id") or ""
+        if await self._turned_off(chat_id, message_id if group else None):
+            return
         self._reactions.add(chat_id, message_id)  # the bot saw it; in the background, the Manager gets it now
         correlation_id = str(_uuid.uuid4())
         self._correlation_chat[correlation_id] = chat_id
@@ -373,7 +410,7 @@ class LarkChannelAdapter(ChannelAdapter):
 
         envelope = MessageEnvelope.create(
             source=self._address,
-            target=MANAGER_ADDRESS,
+            target=manager_address(self._manager_id),
             message_type=MessageType.USER_MESSAGE,
             payload={
                 "text": text,

@@ -29,6 +29,7 @@ from . import (
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
 from .project_execution import ProjectExecution
+from .channels import bot_api
 from .channels.web import WebChannelAdapter
 from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
@@ -722,13 +723,14 @@ class AgentHTTPServer:
         elif (m := self._RE_INSTALL.match(path)) and method == "DELETE":
             await self._handle_catalog(writer, HTTP_200, lambda: catalog.uninstall(m.group(1)))
         elif path == "/api/channels/lark/status" and method == "GET":
-            await self._answer(writer, HTTP_200, self._lark_status)
+            await self._answer(writer, HTTP_200, lambda: self._lark_status(query.get("channel_id")))
         elif path == "/api/channels/lark/people" and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: self._lark_people(query.get("q", "")))
+            await self._answer(writer, HTTP_200, lambda: self._lark_people(query.get("q", ""), query.get("channel_id")))
         elif path == "/api/channels/lark_bot/status" and method == "GET":
-            await self._answer(writer, HTTP_200, self._lark_bot_status)
+            await self._answer(writer, HTTP_200, lambda: self._lark_bot_status(query.get("channel_id")))
         elif path == "/api/channels/lark_bot/people" and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: self._lark_bot_people(query.get("q", "")))
+            await self._answer(writer, HTTP_200,
+                               lambda: self._lark_bot_people(query.get("q", ""), query.get("channel_id")))
         elif path == "/api/scheduler-settings" and method == "GET":
             await self._answer(writer, HTTP_200, schedules.scheduler_settings)
         elif path == "/api/scheduler-settings" and method == "PUT":
@@ -754,8 +756,12 @@ class AgentHTTPServer:
             await self._handle_list_channel_configs(writer)
         elif (m := self._RE_CHANNEL_CONFIG.match(path)) and method == "GET":
             await self._handle_get_channel_config(m.group(1), writer)
+        elif path == "/api/channel-configs" and method == "POST":
+            await self._answer(writer, HTTP_201, lambda: bot_api.add_bot(projects.json_object(body)))
         elif (m := self._RE_CHANNEL_CONFIG.match(path)) and method == "PUT":
-            await self._handle_update_channel_config(m.group(1), body, writer)
+            await self._answer(writer, HTTP_200, lambda: bot_api.update_bot(m.group(1), projects.json_object(body)))
+        elif (m := self._RE_CHANNEL_CONFIG.match(path)) and method == "DELETE":
+            await self._answer(writer, HTTP_200, lambda: bot_api.remove_bot(m.group(1)))
         else:
             writer.write(_json_response(HTTP_404, {"error": "not found"}))
             await writer.drain()
@@ -2288,34 +2294,48 @@ class AgentHTTPServer:
 
     # --- Channel config handlers ---
 
-    async def _lark_status(self) -> dict[str, Any]:
+    @staticmethod
+    def _not_found(exc: LookupError) -> projects.RequestError:
+        return projects.RequestError(HTTP_404, str(exc))
+
+    async def _lark_status(self, channel_id: str | None) -> dict[str, Any]:
         from .channels import lark_settings
 
-        return await lark_settings.status()
+        try:
+            return await lark_settings.status(channel_id or lark_settings.CHANNEL_ID)
+        except LookupError as exc:
+            raise self._not_found(exc) from None
 
-    async def _lark_people(self, q: str) -> dict[str, Any]:
+    async def _lark_people(self, q: str, channel_id: str | None) -> dict[str, Any]:
         from .channels import lark_cli, lark_settings
 
         try:
-            return await lark_settings.people(q)
+            return await lark_settings.people(q, channel_id or lark_settings.CHANNEL_ID)
         except ValueError as exc:
             raise projects.RequestError(HTTP_400, str(exc)) from None
+        except LookupError as exc:
+            raise self._not_found(exc) from None
         except lark_cli.LarkCliError as exc:
             raise projects.RequestError(HTTP_502, f"lark-cli could not search: {exc}") from None
 
-    async def _lark_bot_status(self) -> dict[str, Any]:
+    async def _lark_bot_status(self, channel_id: str | None) -> dict[str, Any]:
         from .channels import lark_bot_settings
 
-        return await lark_bot_settings.status()
+        try:
+            return await lark_bot_settings.status(channel_id or lark_bot_settings.CHANNEL_ID)
+        except LookupError as exc:
+            raise self._not_found(exc) from None
 
-    async def _lark_bot_people(self, q: str) -> dict[str, Any]:
+    async def _lark_bot_people(self, q: str, channel_id: str | None) -> dict[str, Any]:
         from .channels import lark_bot_settings
         from .channels.lark_api import LarkApiError
 
         try:
-            return await lark_bot_settings.people(q)
+            return await lark_bot_settings.people(q, channel_id or lark_bot_settings.CHANNEL_ID)
         except ValueError as exc:
             raise projects.RequestError(HTTP_400, str(exc)) from None
+        except LookupError as exc:
+            raise self._not_found(exc) from None
         except LarkApiError as exc:
             raise projects.RequestError(HTTP_502, f"the Lark platform could not search: {exc}") from None
 
@@ -2343,80 +2363,6 @@ class AgentHTTPServer:
         else:
             from .channels.allowlist import channel_view
             writer.write(_json_response(HTTP_200, channel_view(config)))
-        await writer.drain()
-
-    async def _handle_update_channel_config(
-        self, channel_id: str, body: bytes, writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
-            await writer.drain()
-            return
-
-        if not isinstance(data, dict):
-            writer.write(_json_response(HTTP_400, {"error": "body must be a JSON object"}))
-            await writer.drain()
-            return
-
-        from .channels.allowlist import AllowlistError, channel_view, normalized_config
-        from .profile_registry import SECRET_MASK
-
-        # The bot token is a secret kept out of config: SECRET_MASK (or absent) keeps the
-        # stored token, "" / null removes it, anything else stores it. It is never returned.
-        token = data.pop("bot_token", SECRET_MASK)
-        if token != SECRET_MASK and token is not None and (
-            not isinstance(token, str) or len(token) > 4096
-        ):
-            writer.write(_json_response(HTTP_400, {"error": "bot_token must be a string (<=4096 chars) or null"}))
-            await writer.drain()
-            return
-
-        try:
-            from ..db.channel_configs import get_config, set_bot_token, set_config
-            from ..db.connection import get_pool
-            current = await get_config(channel_id)
-            if current is None:
-                writer.write(_json_response(HTTP_404, {"error": f"channel '{channel_id}' not found"}))
-                await writer.drain()
-                return
-            if "config" in data:
-                # The sender allowlist is validated before anything is written: a rejected
-                # request (AllowlistError -> 400) must not change the stored token or config.
-                kind = str(current.get("channel_type") or "")
-                config = normalized_config(kind, data["config"])
-                if kind == "lark":
-                    from .channels import lark_settings
-                    try:
-                        config = await lark_settings.bound_config(current.get("config") or {}, config)
-                    except ValueError as exc:
-                        raise AllowlistError(str(exc)) from None
-                elif kind == "lark_bot":
-                    from .channels import lark_bot_settings
-                    try:
-                        config = await lark_bot_settings.bound_config(current.get("config") or {}, config)
-                    except ValueError as exc:
-                        raise AllowlistError(str(exc)) from None
-                data = {**data, "config": config}
-            # Apply the token and the config in one transaction so a failure leaves neither changed.
-            async with get_pool().acquire() as conn, conn.transaction():
-                if token != SECRET_MASK:
-                    await set_bot_token(channel_id, None if token in (None, "") else token, pool=conn)
-                updated = await set_config(channel_id, data, pool=conn)
-        except AllowlistError as exc:
-            writer.write(_json_response(HTTP_400, {"error": str(exc)}))
-            await writer.drain()
-            return
-        except Exception as exc:
-            writer.write(_json_response(HTTP_500, {"error": str(exc)}))
-            await writer.drain()
-            return
-
-        if updated is None:
-            writer.write(_json_response(HTTP_404, {"error": f"channel '{channel_id}' not found"}))
-        else:
-            writer.write(_json_response(HTTP_200, channel_view(updated)))
         await writer.drain()
 
     def _password_record(self) -> operator_auth.PasswordRecord | None:

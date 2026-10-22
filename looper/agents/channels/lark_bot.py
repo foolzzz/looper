@@ -57,7 +57,9 @@ class BotTransport:
 
 def make_adapter(config: Mapping[str, Any], app_secret: str, *, runtime_root: Path,
                  allowlist: SenderAllowlist, on_rejected: RejectedListener | None,
-                 bot_open_id: str, base_url: str | None = None) -> LarkChannelAdapter:
+                 bot_open_id: str, base_url: str | None = None,
+                 channel_id: str | None = None, manager_id: str = "manager",
+                 manager_running: Callable[[str], bool] | None = None) -> LarkChannelAdapter:
     """Build a bot-token channel with its app, sender policy and event identity."""
     from .lark_api import BASE_URLS
 
@@ -65,4 +67,5 @@ def make_adapter(config: Mapping[str, Any], app_secret: str, *, runtime_root: Pa
     transport = BotTransport(config["app_id"], app_secret, base_url=base_url or BASE_URLS[config["domain"]],
                              admit=lambda event: event["sender_id"] in allowlist.ids)
     return LarkChannelAdapter(channel_type="lark_bot", transport=transport, runtime_root=runtime_root,
-                              allowlist=allowlist, on_rejected=on_rejected, bot_open_id=bot_open_id, backoff=True)
+                              allowlist=allowlist, on_rejected=on_rejected, bot_open_id=bot_open_id, backoff=True,
+                              channel_id=channel_id, manager_id=manager_id, manager_running=manager_running)

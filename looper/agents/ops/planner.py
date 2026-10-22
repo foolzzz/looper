@@ -576,8 +576,8 @@ async def _notify(call: PlannerCall, task: Mapping[str, Any], lines: list[str], 
                       link_line(task_link(call.dashboard_url, call.task_id), channel)])
     try:
         await call.platform.bus.publish(MessageEnvelope.create(
-            source=planner_address(call.task_id), target=channel_address(channel.value),
-            message_type=MessageType.CHAT_NOTICE, payload=Notice(channel, target, text).payload(),
+            source=planner_address(call.task_id), target=channel_address(channel.value, task["origin_channel_id"]),
+            message_type=MessageType.CHAT_NOTICE, payload=Notice(channel, target, text, channel_id=task["origin_channel_id"]).payload(),
             metadata={"origin_channel_id": task.get("origin_channel_id")},
         ))
     except Exception:

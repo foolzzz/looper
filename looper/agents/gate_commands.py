@@ -50,9 +50,9 @@ class Entry:
     manager_id: str
 
 
-# (manager, channel, chat, sender) -> (when it was sent, its entries)
+# (manager, channel id, chat, sender) -> (when it was sent, its entries)
 _snapshots: dict[tuple[str, str, str, str], tuple[float, list[Entry]]] = {}
-# A list is not yet the snapshot while it is being sent: (manager, channel, chat, sender) -> (the list's token, its entries).
+# A list is not yet the snapshot while it is being sent: (manager, channel id, chat, sender) -> (the list's token, its entries).
 # ``settle`` makes it the snapshot once the channel has delivered it; until then, and when it is not delivered, no
 # number refers to anything.
 _pending: dict[tuple[str, str, str, str], tuple[str, list[Entry]]] = {}
@@ -87,8 +87,10 @@ def _waited(moment: Any) -> str:
     return f"{int(seconds // 3600)} 小时" if seconds < 172_800 else f"{int(seconds // 86_400)} 天"
 
 
-def _where(envelope: MessageEnvelope) -> tuple[str, str, str, bool, str]:
-    """The channel, the chat, the sender and whether it is a group of a message; the chat as a gate's chat names it."""
+def _where(envelope: MessageEnvelope) -> tuple[str, str, str, str, bool, str]:
+    """The channel (its type), the channel id (the bot), the chat, the sender and whether it is a group of a
+    message; the chat as a gate's chat names it."""
+    channel_id = envelope.source.agent_id
     channel = envelope.source.channel or envelope.source.agent_id
     context = envelope.payload.get("channel_context")
     context = context if isinstance(context, dict) else {}
@@ -97,20 +99,20 @@ def _where(envelope: MessageEnvelope) -> tuple[str, str, str, bool, str]:
     group = (is_lark(channel) or channel == "telegram") and _group(channel, context)
     own = origin_chat(channel, chat, group=group, sender=sender) if is_lark(channel) or channel == "telegram" \
         else chat
-    return channel, chat, sender, group, own
+    return channel, channel_id, chat, sender, group, own
 
 
-async def _waiting(channel: str, own: str, group: bool, limit: int, manager_id: str | None) -> list[dict[str, Any]]:
+async def _waiting(channel_id: str, own: str, group: bool, limit: int, manager_id: str | None) -> list[dict[str, Any]]:
     if not group:
         return await db_user_gates.open_gates(limit, manager_id=manager_id)
     dashboard = await dashboard_target()
     gates = await db_user_gates.open_gates(
-        limit, chat=(channel, own), manager_id=manager_id,
-        dashboard=dashboard is not None and (dashboard.channel.value, dashboard.target.id) == (channel, own))
+        limit, chat=(channel_id, own), manager_id=manager_id,
+        dashboard=dashboard is not None and (dashboard.channel_id, dashboard.target.id) == (channel_id, own))
     here = []
     for gate in gates:
         chat = gate_chat(gate, dashboard)
-        if chat is not None and (chat.channel.value, chat.target.id) == (channel, own):
+        if chat is not None and (chat.channel_id, chat.target.id) == (channel_id, own):
             here.append(gate)
     return here
 
@@ -132,11 +134,11 @@ def _entry_text(number: int, gate: dict[str, Any]) -> str:
 
 
 async def _list(envelope: MessageEnvelope, manager_id: str | None, page: int = 1) -> str:
-    channel, chat, sender, group, own = _where(envelope)
+    channel, channel_id, chat, sender, group, own = _where(envelope)
     first = (max(page, 1) - 1) * LISTED
-    waiting = await _waiting(channel, own, group, first + LISTED + 1, manager_id)
+    waiting = await _waiting(channel_id, own, group, first + LISTED + 1, manager_id)
     gates, more = waiting[first:first + LISTED], len(waiting) > first + LISTED
-    key = (manager_id or "*", channel, chat, sender)
+    key = (manager_id or "*", channel_id, chat, sender)
     _snapshots.pop(key, None)
     _pending.pop(key, None)
     if not gates:
@@ -155,8 +157,8 @@ async def _fresh_list(envelope: MessageEnvelope, why: str, manager_id: str | Non
 
 async def _gate(envelope: MessageEnvelope, number: str, answer: str, *, has_planner: Any, bus: MessageBus,
                 source: AgentAddress, manager_id: str | None) -> str:
-    channel, chat, sender, group, own = _where(envelope)
-    key = (manager_id or "*", channel, chat, sender)
+    channel, channel_id, chat, sender, group, own = _where(envelope)
+    key = (manager_id or "*", channel_id, chat, sender)
     saved = _snapshots.get(key)
     if saved is not None and time.monotonic() - saved[0] > SNAPSHOT_TTL_SEC:
         saved = _snapshots.pop(key, None) and None
@@ -176,7 +178,7 @@ async def _gate(envelope: MessageEnvelope, number: str, answer: str, *, has_plan
     context = context if isinstance(context, dict) else {}
     chat_origin = is_lark(channel) or channel == "telegram"
     origin = {"author": _author(channel, context) if chat_origin else None, "channel": channel,
-              "chat": own if chat_origin else None, "external_id": str(context.get("message_id") or "") or None}
+              "channel_id": channel_id, "chat": own if chat_origin else None, "external_id": str(context.get("message_id") or "") or None}
     try:
         posted = await post_message(entry.task_id, entry.label, {"text": "" if end else answer},
                                     has_planner=has_planner(entry.task_id), bus=bus, source=source,

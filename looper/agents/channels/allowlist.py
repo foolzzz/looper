@@ -26,6 +26,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from ...db.channel_configs import BUILTIN_CHANNEL_IDS
+
 logger = logging.getLogger(__name__)
 
 # A list longer than this is almost certainly not a list of people.
@@ -135,7 +137,8 @@ def normalized_config(channel_type: str, config: Any) -> dict[str, Any]:
 def channel_view(row: Mapping[str, Any]) -> dict[str, Any]:
     """A ``channel_configs`` row for the API, with ``start_problem`` (None when nothing in it stops the channel)."""
     config = row.get("config")
-    return {**row, "start_problem": start_problem(str(row.get("channel_type") or ""),
+    return {**row, "manager_id": row.get("manager_id"), "manager_name": row.get("manager_name"),
+            "builtin": row.get("channel_id") in BUILTIN_CHANNEL_IDS, "start_problem": start_problem(str(row.get("channel_type") or ""),
                                                   config if isinstance(config, Mapping) else {})}
 
 

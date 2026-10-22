@@ -24,7 +24,7 @@ from typing import Any
 
 from ..db import tasks as db_tasks
 from .links import task_link
-from .message import channel_address, is_lark
+from .message import builtin_channel_id, is_lark, parse_channel_id
 
 NAME_CHARS = 40
 LEAD_CHARS = 300
@@ -43,9 +43,6 @@ class NotifyChannel(str, Enum):
     @property
     def is_lark(self) -> bool:
         return is_lark(self.value)
-
-
-_BY_CHANNEL_ID = {channel_address(channel.value).agent_id: channel for channel in NotifyChannel}
 
 
 class TargetKind(str, Enum):
@@ -90,10 +87,19 @@ class Notice:
     channel: NotifyChannel
     target: NotifyTarget
     text: str
+    channel_id: str = ""  # the bot's channel id; empty means the built-in row of ``channel``
+
+    def __post_init__(self) -> None:
+        if not self.channel_id:
+            object.__setattr__(self, "channel_id", builtin_channel_id(self.channel.value))
+            return
+        parsed = parse_channel_id(self.channel_id)
+        if parsed is None or parsed.channel_type != self.channel.value:
+            raise ValueError(f"channel id {self.channel_id!r} is not a {self.channel.value} bot")
 
     def payload(self) -> dict[str, str | None]:
-        return {"channel": self.channel.value, "chat": self.target.id, "kind": self.target.kind.value,
-                "mention": self.target.mention, "text": self.text}
+        return {"channel": self.channel.value, "channel_id": self.channel_id, "chat": self.target.id,
+                "kind": self.target.kind.value, "mention": self.target.mention, "text": self.text}
 
     @classmethod
     def from_payload(cls, raw: Any) -> Notice | None:
@@ -107,12 +113,19 @@ class Notice:
         target, text = NotifyTarget._read(raw.get("kind"), raw.get("chat"), raw.get("mention")), raw.get("text")
         if target is None or not (isinstance(text, str) and text):
             return None
-        return cls(channel, target, text)
+        channel_id = raw.get("channel_id")
+        if channel_id is None:
+            channel_id = builtin_channel_id(channel.value)
+        parsed = parse_channel_id(channel_id) if isinstance(channel_id, str) else None
+        if parsed is None or parsed.channel_type != channel.value:
+            return None
+        return cls(channel, target, text, channel_id=channel_id)
 
 
 def notify_channel(origin_channel_id: str | None) -> NotifyChannel | None:
     """The channel a task's ``origin_channel_id`` names, when it is one that is told of the task's end."""
-    return _BY_CHANNEL_ID.get(origin_channel_id or "")
+    parsed = parse_channel_id(origin_channel_id)
+    return NotifyChannel(parsed.channel_type) if parsed is not None else None
 
 
 def notify_target(origin_channel_id: str | None, *, sender: str | None, chat: str | None,

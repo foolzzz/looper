@@ -363,3 +363,30 @@ def test_a_name_two_projects_have_is_resolved_by_its_project_or_its_id(
         assert [row["name"] for row in enabled] == ["calc"]
 
     _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize(("channel_id", "target"), [
+    ("channel-lark", {"channel": "lark", "chat": "ou_0123456789abcdef"}),
+    ("channel-lark-3", None),
+], ids=["built-in", "added-bot"])
+def test_a_schedule_made_through_an_added_bot_gets_no_default_notify_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, channel_id: str, target: Any,
+) -> None:
+    async def test(pool: Any) -> None:
+        import json
+
+        from looper.agents.serve import seed_channel_configs
+        from tests.test_manager_schedule_changes_db import _create, _view
+
+        await _project(pool, "calc", str(tmp_path))
+        await seed_channel_configs(pool)
+        sender = "ou_0123456789abcdef"
+        await pool.execute("UPDATE channel_configs SET config = config || $1::jsonb WHERE channel_id = 'channel-lark'",
+                           json.dumps({"allowed_open_ids": [sender]}))
+        chat = _Chat(tmp_path, sender=sender, channel_id=channel_id)
+        (created,) = await chat.say("建定时任务", _create())
+
+        assert created["status"] == "ok", created
+        assert (await _view("deps"))["notify_target"] == target
+
+    _run(test, monkeypatch)

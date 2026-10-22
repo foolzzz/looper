@@ -39,6 +39,7 @@ from .broadcast import Broadcaster
 from .bus import MessageBus
 from .channels.allowlist import SenderAllowlist, allowlist_from_config, start_problem
 from .channels.base import ChannelAdapter
+from .channels.bots import BOT_TYPES, builtin_env_token, clashes, lark_app_id
 from .channels.lark import LarkChannelAdapter
 from .channels.registry import ChannelRegistry
 from .channels.telegram import TelegramChannelAdapter
@@ -358,71 +359,143 @@ def _sender_allowlist(channel_id: str, channel_type: str, config: dict[str, Any]
 
 
 def _telegram_adapter_from_config(
-    config: dict[str, Any], bot_token: str = ""
+    config: dict[str, Any], bot_token: str = "", *, channel_id: str = "channel-telegram",
+    manager_id: str = "manager", manager_running: Callable[[str], bool] | None = None,
 ) -> TelegramChannelAdapter | None:
     """Build the Telegram adapter from its Settings-page config; None when its allowlist keeps it from starting.
 
-    The token comes from ``channel_secrets`` (``bot_token``); for a row that predates DB-stored tokens it falls
-    back to the environment variable the old ``bot_token_env`` config key names (default LOOPER_TELEGRAM_BOT_TOKEN).
+    The token comes from ``channel_secrets`` (``bot_token``); for the built-in row that predates DB-stored tokens it
+    falls back to the environment variable the old ``bot_token_env`` config key names (default
+    LOOPER_TELEGRAM_BOT_TOKEN). An added bot gets only its stored token.
     """
-    allowlist = _sender_allowlist("channel-telegram", "telegram", config)
+    allowlist = _sender_allowlist(channel_id, "telegram", config)
     if allowlist is None:
         return None
-    token = bot_token or env.get(config.get("bot_token_env") or "LOOPER_TELEGRAM_BOT_TOKEN", "")
-    return TelegramChannelAdapter(bot_token=token, allowlist=allowlist)
+    token = bot_token
+    if not token and channel_id == "channel-telegram":
+        token = builtin_env_token(config)
+    return TelegramChannelAdapter(bot_token=token, allowlist=allowlist, channel_id=channel_id,
+                                  manager_id=manager_id, manager_running=manager_running)
 
 
 def _lark_adapter_from_config(config: dict[str, Any], runtime_root: Path, *,
-                              bot_open_id: str = "") -> LarkChannelAdapter | None:
+                              bot_open_id: str = "", channel_id: str = "channel-lark",
+                              manager_id: str = "manager",
+                              manager_running: Callable[[str], bool] | None = None) -> LarkChannelAdapter | None:
     """Build the Lark adapter from its Settings-page config; None when its allowlist keeps it from starting.
     ``bot_open_id`` is the bot's own open_id, which tells a group message that @-mentions it."""
-    allowlist = _sender_allowlist("channel-lark", "lark", config)
+    allowlist = _sender_allowlist(channel_id, "lark", config)
     if allowlist is None:
         return None
     from ..db.channel_configs import record_rejected
 
     async def rejected(sender_id: str, chat_id: str | None) -> None:
-        await record_rejected("channel-lark", sender_id, chat_id=chat_id)
+        await record_rejected(channel_id, sender_id, chat_id=chat_id)
 
     return LarkChannelAdapter(profile=config.get("profile") or "", runtime_root=runtime_root, allowlist=allowlist,
-                              on_rejected=rejected, bot_open_id=bot_open_id)
+                              on_rejected=rejected, bot_open_id=bot_open_id, channel_id=channel_id,
+                              manager_id=manager_id, manager_running=manager_running)
 
 
-async def _lark_adapter(config: dict[str, Any], runtime_root: Path) -> LarkChannelAdapter | None:
+async def _lark_adapter(config: dict[str, Any], runtime_root: Path, *, channel_id: str = "channel-lark",
+                        manager_id: str = "manager",
+                        manager_running: Callable[[str], bool] | None = None,
+                        same_bot_as: Callable[[str], str | None] | None = None) -> LarkChannelAdapter | None:
     """The Lark adapter, once lark-cli acts as the bot under the channel's profile and the allowlist was made for
-    that app; None (logged) otherwise."""
+    that app, and ``same_bot_as`` (given the app it acts as) names no running channel of that app; None (logged)
+    otherwise."""
     from .channels import lark_cli
 
-    if _sender_allowlist("channel-lark", "lark", config) is None:
+    if _sender_allowlist(channel_id, "lark", config) is None:
         return None
     problem, bot = await lark_cli.check(config, fresh=True)
     if problem or bot is None:
-        logger.error("channel-lark not started: %s", problem)
+        logger.error("%s not started: %s", channel_id, problem)
         return None
-    logger.info("channel-lark: bot %s (app %s, lark-cli profile %s)", bot.bot_name, bot.app_id, bot.profile)
-    return _lark_adapter_from_config(config, runtime_root, bot_open_id=bot.bot_open_id)
+    if same_bot_as is not None and (earlier := same_bot_as(bot.app_id)) is not None:
+        logger.error("%s not started: it is the same bot as %s", channel_id, earlier)
+        return None
+    logger.info("%s: bot %s (app %s, lark-cli profile %s)", channel_id, bot.bot_name, bot.app_id, bot.profile)
+    return _lark_adapter_from_config(config, runtime_root, bot_open_id=bot.bot_open_id, channel_id=channel_id,
+                                     manager_id=manager_id, manager_running=manager_running)
 
 
-async def _lark_bot_adapter(config: dict[str, Any], secret: str, runtime_root: Path) -> LarkChannelAdapter | None:
+async def _lark_bot_adapter(config: dict[str, Any], secret: str, runtime_root: Path, *,
+                            channel_id: str = "channel-lark_bot", manager_id: str = "manager",
+                            manager_running: Callable[[str], bool] | None = None) -> LarkChannelAdapter | None:
     """Start the bot-token channel only with a valid allowlist and matching app credentials."""
     from ..db.channel_configs import record_rejected
     from .channels import lark_bot_settings
     from .channels.lark_bot import make_adapter
+    from .log_redaction import add_secret
 
-    allowlist = _sender_allowlist("channel-lark_bot", "lark_bot", config)
+    allowlist = _sender_allowlist(channel_id, "lark_bot", config)
     if allowlist is None:
         return None
+    add_secret(secret)
     problem, bot = await lark_bot_settings.check(config, secret, fresh=True)
     if problem or bot is None:
-        logger.error("channel-lark_bot not started: %s", problem)
+        logger.error("%s not started: %s", channel_id, problem)
         return None
-    logger.info("channel-lark_bot: bot %s (app %s)", bot.app_name, config.get("app_id"))
+    logger.info("%s: bot %s (app %s)", channel_id, bot.app_name, config.get("app_id"))
 
     async def rejected(sender_id: str, chat_id: str | None) -> None:
-        await record_rejected("channel-lark_bot", sender_id, chat_id=chat_id)
+        await record_rejected(channel_id, sender_id, chat_id=chat_id)
 
     return make_adapter(config, secret, runtime_root=runtime_root, allowlist=allowlist,
-                        on_rejected=rejected, bot_open_id=bot.open_id)
+                        on_rejected=rejected, bot_open_id=bot.open_id, channel_id=channel_id,
+                        manager_id=manager_id, manager_running=manager_running)
+
+
+async def _enabled_bot_rows() -> list[dict[str, Any]]:
+    """The enabled bot rows with their stored secret and ``clashes`` keys (``env_token``, ``app_id``), built-in rows
+    first. Rows of one bot are all kept: ``_register_bots`` starts the first that can start, so a row that cannot
+    (no valid sender allowlist, lark-cli not signed in) leaves the bot to a later row."""
+    from ..db.channel_configs import get_bot_token, list_configs
+
+    rows: list[dict[str, Any]] = []
+    for row in await list_configs():
+        if row["enabled"] and row["channel_type"] in BOT_TYPES:
+            rows.append({**row, "config": row.get("config") or {},
+                         "secret": await get_bot_token(row["channel_id"]) or ""})
+    return [{**r, "env_token": builtin_env_token(r["config"]) if r["channel_id"] == "channel-telegram" else "",
+             "app_id": await lark_app_id(r["channel_type"], r["config"])} for r in rows]
+
+
+async def _register_bots(registry: ChannelRegistry, rows: list[dict[str, Any]], runtime_root: Path,
+                         manager_running: Callable[[str], bool], channel_types: tuple[str, ...]) -> None:
+    """Build and register the adapter of each row of ``channel_types``; one that fails to start leaves the rest.
+
+    A lark-cli row's app is known for sure only once its adapter asks lark-cli (``_enabled_bot_rows`` may not have
+    learnt it), so each row is checked again against the bots this pass started, with the app its adapter found."""
+    started: list[dict[str, Any]] = []
+
+    def same_bot_as(row: dict[str, Any], app_id: str | None) -> str | None:
+        return clashes([*started, {**row, "app_id": app_id}]).get(row["channel_id"])
+
+    for row in rows:
+        if row["channel_type"] not in channel_types:
+            continue
+        kwargs: dict[str, Any] = {"channel_id": row["channel_id"], "manager_id": row.get("manager_id") or "manager",
+                                  "manager_running": manager_running}
+        adapter: ChannelAdapter | None
+        found: list[str] = []
+        if row["channel_type"] == "lark":
+            def lark_same_bot_as(app_id: str, row: dict[str, Any] = row) -> str | None:
+                found.append(app_id)
+                return same_bot_as(row, app_id)
+
+            adapter = await _lark_adapter(row["config"], runtime_root, same_bot_as=lark_same_bot_as, **kwargs)
+        elif (earlier := same_bot_as(row, row.get("app_id"))) is not None:
+            logger.error("%s not started: it is the same bot as %s", row["channel_id"], earlier)
+            continue
+        elif row["channel_type"] == "telegram":
+            adapter = _telegram_adapter_from_config(row["config"], row["secret"], **kwargs)
+        else:
+            adapter = await _lark_bot_adapter(row["config"], row["secret"], runtime_root, **kwargs)
+        if adapter is not None:
+            started.append({**row, "app_id": found[0] if found else row.get("app_id")})
+            await _register_optional_channel(registry, adapter)
 
 
 async def seed_channel_configs(pool: Any = None) -> None:
@@ -804,21 +877,15 @@ async def _run_agent_system(
     web_adapter = WebChannelAdapter(host=host, port=port)
     await registry.register(web_adapter)
 
-    from ..db.channel_configs import get_config as get_channel_config
+    # Every enabled bot runs as its own adapter (RFC §9.1), read once at startup.
+    fleet_box: list[Any] = []
 
-    # Telegram and Lark are always available; the Settings page decides
-    # whether they run (channel_configs.enabled), read once at startup. An
-    # enabled channel without a valid sender allowlist does not start.
-    tg_cfg = await get_channel_config("channel-telegram")
-    if tg_cfg and tg_cfg.get("enabled"):
-        from ..db.channel_configs import get_bot_token
-        tg_token = await get_bot_token("channel-telegram") or ""
-        telegram_adapter = _telegram_adapter_from_config(tg_cfg.get("config") or {}, tg_token)
-        if telegram_adapter is not None:
-            await _register_optional_channel(registry, telegram_adapter)
+    def manager_running(manager_id: str) -> bool:
+        return fleet_box[0].is_running(manager_id) if fleet_box else True
 
-    lark_cfg = await get_channel_config("channel-lark")
-    lark_enabled = bool(lark_cfg and lark_cfg.get("enabled"))
+    bot_rows = await _enabled_bot_rows()
+    lark_enabled = any(r["channel_type"] == "lark" for r in bot_rows)
+    await _register_bots(registry, bot_rows, runtime_root, manager_running, ("telegram",))
 
     # Without Claude or its login the agents cannot run, but the dashboard can
     # still show and change everything: a warning here and on /api/status.
@@ -832,19 +899,7 @@ async def _run_agent_system(
     ]
     self_check.log_problems(checks)
 
-    if lark_enabled:
-        lark_adapter = await _lark_adapter(lark_cfg.get("config") or {}, runtime_root)
-        if lark_adapter is not None:
-            await _register_optional_channel(registry, lark_adapter)
-
-    lark_bot_cfg = await get_channel_config("channel-lark_bot")
-    if lark_bot_cfg and lark_bot_cfg.get("enabled"):
-        from ..db.channel_configs import get_bot_token
-
-        secret = await get_bot_token("channel-lark_bot") or ""
-        lark_bot_adapter = await _lark_bot_adapter(lark_bot_cfg.get("config") or {}, secret, runtime_root)
-        if lark_bot_adapter is not None:
-            await _register_optional_channel(registry, lark_bot_adapter)
+    await _register_bots(registry, bot_rows, runtime_root, manager_running, ("lark", "lark_bot"))
 
     # --- Agent Tiers ---
 
@@ -879,6 +934,7 @@ async def _run_agent_system(
                         supervisor=supervisor, scheduler=scheduler, runtime_root=runtime_root)
     fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=runtime_root,
                          url=_local_url(host, port), config=manager_config, broadcaster=broadcaster)
+    fleet_box.append(fleet)
     task_router.manager_running = fleet.is_running
     await fleet.load()
     manager = fleet.default

@@ -18,6 +18,10 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+### Added
+
+- **A bot per Manager.** Each Telegram or Lark row of `channel_configs` is now one bot with its own runner and one Manager (`channel_configs.manager_id`, fixed when the bot is added); the three built-in rows stay the default Manager's. Settings → Channels → Add a bot (`POST /api/channel-configs`, `DELETE /api/channel-configs/<id>`) creates a `channel-<type>-<n>` bot for any Manager, with its token or app secret entered in the dashboard and kept in `channel_secrets` (an added bot never reads the environment, and the same bot cannot be added twice). Its threads are `<channel_id>:<chat_id>`, and task end notices, wait and concurrency notices and gate posts go through the bot the task came through. Added bots are not exported, and a configuration file naming one is refused. Behavior change: none for an install with only the built-in channel rows; the Lark bot token channel's app secret is now masked in logs. Model-visible: none (the `Channel:` line names only the type).
+
 ## [2.13.36] - 2026-10-22
 
 ### Fixed

@@ -63,5 +63,5 @@ def test_lark_sends_as_the_bot_to_the_users_open_id(tmp_path: Path, monkeypatch:
 
 def test_a_channel_that_is_not_running_says_so() -> None:
     registry = ChannelRegistry(bus=SimpleNamespace())
-    sent, error = asyncio.run(registry.notify("telegram", "1000001", "x"))
+    sent, error = asyncio.run(registry.notify("channel-telegram", "1000001", "x"))
     assert not sent and error == "the telegram channel is not running: enable it in Settings → Channels"
