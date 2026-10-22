@@ -1,6 +1,6 @@
 # RFC：一个 OpenAPI 接口，`loopercli` 与 `looper-skill`
 
-- **状态：** 草案，待维护者批准。第 1 节的六条是维护者 2026-10-22 定下的；其余按本文建议写成。标「需要验证」的几处在实现或实跑时核实。阶段 1 的实现卡片在本仓库之外。
+- **状态：** 阶段 1 已实现（looper #NNN）；阶段 2、3 待做。草案阶段的说明：第 1 节的六条是维护者 2026-10-22 定下的；其余按本文建议写成。标「需要验证」的几处在实现或实跑时核实。阶段 1 的实现卡片在本仓库之外。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.0 节第 22 项。
 - **相关：** [管家平台工具](manager-platform-tools-v0.zh-CN.md)（操作目录、风险分档、确认、留痕）、[操作者 API 认证](operator-api-auth-v0.zh-CN.md)（操作者令牌、本机限制）、[场景管家](scenario-managers.zh-CN.md)（线程归属、`origin_thread`）、[用户关卡](user-gate-v0.zh-CN.md)。
 - **代码基线：** v2.13.36（`ee67cebcd`）。
