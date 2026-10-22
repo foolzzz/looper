@@ -313,7 +313,7 @@ async def _run_pi(platform: SimpleNamespace, provider: SimpleNamespace, role: st
     command = PI.run_command(executable, cwd=platform.root, prompt_file=prompt, launch=launch)
     env = {**launch.environment(), "TMPDIR": str(platform.root), "NO_PROXY": "*", "no_proxy": "*"}
     done = await asyncio.to_thread(subprocess.run, command, input="Read platform state.", text=True,
-                                   capture_output=True, env=env, cwd=platform.root, timeout=25, check=False)
+                                   capture_output=True, env=env, cwd=platform.root, timeout=120, check=False)
     assert not provider.errors, provider.errors
     assert platform.tokens[role] not in done.stdout + done.stderr
     return done

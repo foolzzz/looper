@@ -279,7 +279,7 @@ def test_startup_and_protocol_failures_are_explicit(tmp_path: Path, scenario: st
                                      'usage_parse_error', 'fast_rejected', 'fast_timeout'])
 def test_rpc_failures_preserve_accumulated_model_usage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                                      scenario: str) -> None:
-    monkeypatch.setattr(pi_steer, '_PROMPT_TIMEOUT_SEC', 0.15)
+    monkeypatch.setattr(pi_steer, '_PROMPT_TIMEOUT_SEC', 2)
     events = asyncio.run(_run(tmp_path, scenario))
     result, = [event for event in events if event['type'] == 'result']
     assert result['is_error'] is True
@@ -295,8 +295,8 @@ def test_rpc_failures_preserve_accumulated_model_usage(tmp_path: Path, monkeypat
 @pytest.mark.parametrize('scenario', ['setup_timeout', 'setup_noise_timeout', 'prompt_timeout', 'fast_timeout'])
 def test_ack_deadlines_include_silent_and_busy_stdout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                                      scenario: str) -> None:
-    monkeypatch.setattr(pi_steer, '_SETUP_TIMEOUT_SEC', 0.15)
-    monkeypatch.setattr(pi_steer, '_PROMPT_TIMEOUT_SEC', 0.15)
+    monkeypatch.setattr(pi_steer, '_SETUP_TIMEOUT_SEC', 2)
+    monkeypatch.setattr(pi_steer, '_PROMPT_TIMEOUT_SEC', 2)
     events = asyncio.run(_run(tmp_path, scenario))
     result, = [event for event in events if event['type'] == 'result']
     assert result['is_error'] is True

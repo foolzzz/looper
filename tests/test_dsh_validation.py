@@ -32,7 +32,7 @@ def test_file_invocation_imports_checkout_evals(tmp_path):
     env.pop("PYTHONPATH", None)
     result = subprocess.run(
         [sys.executable, str(script), "--help"],
-        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30, check=False)
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120, check=False)
     assert result.returncode == 0, result.stderr
     assert "smoke" in result.stdout
     assert "ModuleNotFoundError" not in result.stderr

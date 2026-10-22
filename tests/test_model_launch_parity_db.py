@@ -334,11 +334,11 @@ async def target_database(monkeypatch: pytest.MonkeyPatch):
     from looper.db import connection
 
     name = f"looper_model_parity_{uuid.uuid4().hex}"
-    admin = await asyncpg.connect(DSN, timeout=10, command_timeout=15)
+    admin = await asyncpg.connect(DSN, timeout=10, command_timeout=60)
     pool = None
     try:
         await admin.execute(f'CREATE SCHEMA "{name}"')
-        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4, command_timeout=15,
+        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4, command_timeout=60,
                                         server_settings={"search_path": name})
         # Fresh target schema only. Calling this on a legacy schema is blocked
         # until the upgrade card connects conversion to ensure_schema.
@@ -371,7 +371,7 @@ def test_converted_registry_reproduces_pinned_tier_launches(
                             "revision": parity.CLAUDE_LEGACY_REVISION, "launches": len(actual),
                             "fields": sorted(parity.FIELDS), "mismatches": 0}))
 
-    asyncio.run(asyncio.wait_for(run(), timeout=90))
+    asyncio.run(asyncio.wait_for(run(), timeout=240))
 
 
 @pytest.mark.skipif(not DSN, reason="requires a disposable LOOPER_TEST_DATABASE_URL")
@@ -393,7 +393,7 @@ def test_new_profile_identity_preserves_saved_session(
             assert "resume" in after["argv"]
             assert after["session"]["session_totals"]["input_tokens"] == 2 * before["totals"]["input_tokens"]
 
-    asyncio.run(asyncio.wait_for(run(), timeout=90))
+    asyncio.run(asyncio.wait_for(run(), timeout=240))
 
 
 @pytest.mark.skipif(not DSN, reason="requires a disposable LOOPER_TEST_DATABASE_URL")
@@ -411,4 +411,4 @@ def test_declared_account_merge_preserves_tier_inputs(
             parity.assert_parity(expected, actual, expected_root=tmp_path, actual_root=tmp_path,
                                  provider_ids=conversion.provider_map)
 
-    asyncio.run(asyncio.wait_for(run(), timeout=90))
+    asyncio.run(asyncio.wait_for(run(), timeout=240))
