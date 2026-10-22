@@ -25,24 +25,32 @@ def _ids(config: Mapping[str, Any]) -> list[str]:
         return []
 
 
-async def status() -> dict[str, Any]:
+async def _row(channel_id: str) -> dict[str, Any]:
+    """The Lark (lark-cli) row ``channel_id``; ``LookupError`` for another type or none."""
+    row = await db_channel_configs.get_config(channel_id)
+    if row is None or row.get("channel_type") != "lark":
+        raise LookupError(f"no Lark (lark-cli) channel '{channel_id}'")
+    return row
+
+
+async def status(channel_id: str = CHANNEL_ID) -> dict[str, Any]:
     """The saved Lark channel as lark-cli sees it: ``bot`` (``name``, ``app_id``, ``open_id``, ``profile``; null
     when lark-cli cannot act as it), ``problem`` (why the channel would not start, from lark-cli or the allowlist's
     app; null otherwise), ``allowlist_app_id``, ``names`` (open_id -> name, for the allowlist and the refused
     senders) and ``rejected`` (the latest refused senders not on the allowlist: ``open_id``, ``name``,
     ``count``, ``last_at``, and ``chat_id``, the group chat they last wrote in, null for a direct message; never
     what they wrote)."""
-    row = await db_channel_configs.get_config(CHANNEL_ID)
-    config = dict((row or {}).get("config") or {})
+    row = await _row(channel_id)
+    config = dict(row.get("config") or {})
     problem, bot = await lark_cli.check(config)
     allowed = _ids(config)
-    rejected = [r for r in await db_channel_configs.rejected_senders(CHANNEL_ID) if r["sender_id"] not in allowed]
+    rejected = [r for r in await db_channel_configs.rejected_senders(channel_id) if r["sender_id"] not in allowed]
     names: dict[str, str] = {}
     if bot is not None:
         try:
             names = await lark_cli.names([*allowed, *(r["sender_id"] for r in rejected)], bot.profile or None)
         except lark_cli.LarkCliError as exc:
-            logger.info("channel-lark: could not look up the senders' names: %s", exc)
+            logger.info("%s: could not look up the senders' names: %s", channel_id, exc)
     return {
         "bot": None if bot is None else {"name": bot.bot_name, "app_id": bot.app_id, "open_id": bot.bot_open_id,
                                          "profile": bot.profile},
@@ -54,14 +62,14 @@ async def status() -> dict[str, Any]:
     }
 
 
-async def people(query: str) -> dict[str, Any]:
+async def people(query: str, channel_id: str = CHANNEL_ID) -> dict[str, Any]:
     """The people ``query`` (a name or an email) finds, to add to the allowlist: their open_ids for the saved
     profile's app. Raises ``ValueError`` for a bad query and ``LarkCliError`` when lark-cli cannot search."""
     text = query.strip()
     if not text or len(text) > QUERY_MAX_CHARS:
         raise ValueError(f"search for a name or an email of 1 to {QUERY_MAX_CHARS} characters")
-    row = await db_channel_configs.get_config(CHANNEL_ID)
-    profile = ((row or {}).get("config") or {}).get("profile") or None
+    row = await _row(channel_id)
+    profile = (row.get("config") or {}).get("profile") or None
     return {"people": await lark_cli.search_people(text, profile)}
 
 
