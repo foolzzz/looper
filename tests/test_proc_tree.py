@@ -13,6 +13,7 @@ import contextlib
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -1492,6 +1493,81 @@ def test_turn_tree_end_looks_again_when_a_marked_process_exits_before_its_enviro
                 leftover.wait()
 
     assert asyncio.run(_run()) == []
+
+
+def test_turn_tree_end_looks_again_when_a_marked_process_is_a_zombie_as_its_environment_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # As above, but the marked process has exited and is not reaped yet as its environment is read: a zombie's
+    # environment reads empty, and the end does not finish on that listing, as the next one finds the child.
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    monkeypatch.setattr(proc_tree, "_PROC", str(proc))
+    gone = subprocess.Popen(["/usr/bin/true"])
+    gone.wait()
+    child: list[subprocess.Popen[bytes]] = []
+    ended_scan = threading.Event()
+    strays = proc_tree.TurnTree._strays
+    live = proc_tree._Marked.live
+
+    async def noting_ended(self: proc_tree.TurnTree, exclude: frozenset[int], *, ended: bool = False) -> Any:
+        if ended:
+            ended_scan.set()
+        return await strays(self, exclude, ended=ended)
+
+    def listing(self: proc_tree._Marked) -> tuple[set[int], bool]:
+        zombie = proc / str(gone.pid)
+        if ended_scan.is_set():
+            if not child:
+                # Listed and still there, but a zombie: its environment reads empty; the child it left is in
+                # no tree the end knows and not in this listing.
+                zombie.mkdir()
+                (zombie / "environ").write_bytes(b"")
+                (zombie / "stat").write_bytes(f"{gone.pid} (true) Z 1 {gone.pid} {gone.pid} 0 -1".encode())
+                child.append(subprocess.Popen(["/bin/sleep", "60"], start_new_session=True))
+            else:
+                if zombie.exists():
+                    shutil.rmtree(zombie)
+                (proc / str(child[0].pid)).mkdir(exist_ok=True)
+                (proc / str(child[0].pid) / "environ").write_bytes(b"A=1\0" + self._entry + b"\0")
+        return live(self)
+
+    monkeypatch.setattr(proc_tree.TurnTree, "_strays", noting_ended)
+    monkeypatch.setattr(proc_tree._Marked, "live", listing)
+
+    async def _run() -> list[int]:
+        process = await _spawn_python(tmp_path, "import sys\nsys.stdin.read()\n")
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        if tree._owned is not None:
+            tree._owned.close()
+        tree._owned = proc_tree._Marked(process.pid, "mark")
+        try:
+            await tree.end()
+            assert child
+            child[0].poll()  # reaped, so a zombie is not taken for a running process
+            return _running([child[0].pid], settle=0)
+        finally:
+            for leftover in child:
+                leftover.kill()
+                leftover.wait()
+
+    assert asyncio.run(_run()) == []
+
+
+def test_marked_listing_counts_a_zombie_as_exited_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A zombie no one reaps (another program's) calls for one more listing, not for one at every listing: the
+    # listing after the one that found it has had what it forked.
+    proc = tmp_path / "proc"
+    (proc / "42").mkdir(parents=True)
+    (proc / "42" / "environ").write_bytes(b"")
+    (proc / "42" / "stat").write_bytes(b"42 (a (b) c) Z 1 42 42 0 -1")
+    (proc / "43").mkdir()
+    (proc / "43" / "environ").write_bytes(b"")
+    (proc / "43" / "stat").write_bytes(b"43 (kthreadd) S 0 0 0 0 -1")
+    monkeypatch.setattr(proc_tree, "_PROC", str(proc))
+    marked = proc_tree._Marked(1, "mark")
+    assert marked.live() == (set(), True)
+    assert marked.live() == (set(), False)
 
 
 def test_turn_tree_end_kills_the_strays_a_listing_past_the_deadline_found(

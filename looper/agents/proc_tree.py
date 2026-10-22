@@ -699,24 +699,36 @@ class _Marked:
     def __init__(self, pid: int, mark: str) -> None:
         self._root = pid
         self._entry = f"{OWNER_ENV}={mark}".encode()
+        self._exited: set[int] = set()  # the exited, unreaped ones the last listing found
 
     def live(self) -> tuple[set[int], bool]:
         """The processes carrying the mark, and whether one the listing named exited before its environment was
         read: it may have been the agent's and forked first (a command in a session of its own), and the child,
-        carrying the mark, be in no listing yet."""
+        carrying the mark, be in no listing yet. One that exited but is not reaped yet (a zombie) reads as an
+        empty environment: it counts as exited, unless the last listing found it so already (the listing since
+        then has had the child)."""
         owned: set[int] = set()
+        exited: set[int] = set()
         vanished = False
         for entry in os.scandir(_PROC):
-            if not entry.name.isdigit() or int(entry.name) == self._root:
+            if not entry.name.isdigit() or (pid := int(entry.name)) == self._root:
                 continue
             try:
                 with open(f"{_PROC}/{entry.name}/environ", "rb") as environ:
                     if self._entry in environ.read().split(b"\0"):
-                        owned.add(int(entry.name))
+                        owned.add(pid)
+                        continue
+                # Not the mark: read whole, or cut short (or empty) as the process exited while it was read.
+                with open(f"{_PROC}/{entry.name}/stat", "rb") as stat:
+                    state = stat.read().rpartition(b")")[2].split()[:1]
+                if state and state[0] in (b"Z", b"X"):
+                    exited.add(pid)
+                    vanished = vanished or pid not in self._exited
             except (FileNotFoundError, ProcessLookupError):
                 vanished = True
             except OSError:
                 continue  # another user's (EACCES): never the agent's
+        self._exited = exited
         return owned, vanished
 
     def close(self) -> None:
