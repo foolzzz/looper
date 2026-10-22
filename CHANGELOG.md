@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.36] - 2026-10-22
+
+### Fixed
+
+- **Chat: the Agent line names the session's profile without `undefined`.** The chat header and the new-session panel showed `name — undefined · undefined / undefined / undefined`, because `GET /api/manager/session` returns the effective profile as a summary (`profile_id`, `name`, `runtime`, `provider`, `model`, `effort`) and the dashboard read it as a registry profile. A `ManagerSessionProfileSummary` type and `sessionProfileLabel` match the server. Behavior change: the label reads `name — runtime · provider / model`. Model-visible: none. ([#398](https://github.com/foolzzz/looper/pull/398))
+
 ## [2.13.35] - 2026-10-22
 
 ### Added
