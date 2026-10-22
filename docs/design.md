@@ -36,7 +36,7 @@ TaskRouter（任务路由器）
 | 层级 | 组件 | 职责 | 隔离方式 |
 |------|------|------|----------|
 | 接入层 | Channel Adapter | 协议转换，用户消息 → MessageEnvelope | 每渠道一个 Adapter |
-| 决策层 | Manager | 意图理解、任务创建、状态汇报 | 单例，常驻 Claude Code 进程（stream-json 输入，每条消息一个 user turn；进程重启后用 `--resume` 续接会话） |
+| 决策层 | Manager | 意图理解、任务创建、状态汇报 | 默认管家 + 操作者定义的场景管家，各自一个常驻 Claude Code 进程（stream-json 输入，每条消息一个 user turn；进程重启后用 `--resume` 续接会话） |
 | 编排层 | TaskRouter + Planner | 任务路由；Planner 拆分步骤、按每个结果做决定、调度 Worker 和 Reviewer | 每个 Task 独立 Planner 实例，各自一个常驻 Claude Code 进程（和所有 agent 一样开放全部工具、跳过权限确认，由 role prompt 约束只做规划和决策；进程重启后用 `--resume` 续接会话） |
 | 执行层 | WorkerPool | 子进程执行具体开发/验证任务 | 每个 Worker 独立子进程 |
 
@@ -200,7 +200,7 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 ### Web
 
 - 控制台 Chat 页
-- 左上角列出所有 agent（`GET /api/chat/targets`）：全局唯一的 Manager，以及最近 30 个任务。每个任务下有它固定的一个 Planner，和每个步骤各自独立的 Worker（做了验收的步骤还有 Reviewer）。已经结束的任务和 agent 也列出来，可以查看消息
+- 左上角列出所有 agent（`GET /api/chat/targets`）：默认 Manager 和每个启用的场景管家（在这个 agent 列表里选一个管家，就和它对话，各有各的会话和线程），以及最近 30 个任务。每个任务下有它固定的一个 Planner，和每个步骤各自独立的 Worker（做了验收的步骤还有 Reviewer）。已经结束的任务和 agent 也列出来，可以查看消息
 - 能发消息的只有 Manager 和运行中任务的 Planner。发给 Planner 的消息由它的 Claude 回复（一个 `[CHAT]` turn），Claude 可以把消息转给正在执行某一步的 Worker，作为它的下一个 user turn，也可以给计划追加步骤；Worker 已经结束的，这条消息留到这一步的决策 turn 给 Claude 看。事件按到达顺序处理，正在跑别的 turn 时发来的消息会排在它后面；任务还没有计划或已经结束时，消息不经过 Claude，直接回复。选中 Planner 时，旁边折叠显示它最近 10 次 Claude 运行。Worker 和 Reviewer 只读，页面显示它的完整运行记录
 - `POST /api/chat/send` 发送消息，`target` 指定对话对象
 - 输入框在管家回复期间照样能用：
@@ -235,6 +235,8 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 - **User Gates** 页（`#gates`）列出所有任务的关卡，默认只看 Open，可切到 Closed 或 All，还有「Waiting for you only」开关和项目筛选（都记在地址里）；每行链到任务的关卡面板，等你回复的关卡可以直接在行内回答（与 Dashboard 的回复卡片同一个接口）；侧栏 User Gates 项上的徽标是等你回复的关卡数，为 0 或未知时不显示
 - 左侧栏导航下面列出所有项目（任务数，有进行中任务时显示进行中的数量），点击打开项目页 `#projects/<id>`，`+` 新建项目。项目页有五个标签：Overview 列出最近 5 个任务（链接到按项目筛选的 Tasks 页）、背景、知识和 skill 的数量与摘要、各角色的 Agent Profile、已设置的执行配置；Knowledge 管理文档（展开看正文，编辑标题、摘要和内容或路径，新增文本、上传或拖入文件、引用项目文件，删除前确认）；Skills 列出装在本项目的插件和 skill（本项目的安装可改角色、开关和卸载；继承的全局安装只读，标明在 Settings 里改），从目录安装并选角色，管理本项目写的 skill（展开看 `SKILL.md` 正文，编辑名称、描述和正文，手动新增或上传、拖入 `SKILL.md`，由 frontmatter 填名称和描述、其下的正文填正文，删除前确认）；知识和 skill 的改动立即生效，被拒绝时显示服务端给出的原因；Agent Profiles（`#projects/<id>/profiles`）是这个项目在 Settings → Roles 共享默认值之上的覆盖（Manager 不分项目，链接到 Settings → Roles），和 Roles 页一样是可折叠列表：先是「All roles in this project」（项目层），再是 Planner、Worker、Reviewer（项目里的角色层），默认全部收起；收起时一行写生效的 Agent Profile 及来源（shared defaults、role default、this project、this role in this project）、effort、角色的并发上限，本行设了值时标「overridden here」，有未保存修改时标「unsaved」；展开后先是 Agent Profile 下拉框（带「Remove override」回到继承），再是「More overrides」（harness、effort、单次花费上限、角色的并发上限和环境变量），一个保存按钮；`#projects/<id>/profiles/<role>`、`/project` 展开并滚动到该行，Agent Profile 的「used by」链接到这里；Settings 编辑项目字段（名称、默认目录、描述、背景实时显示 `n / 10000`）和执行配置，一起保存，没有任务时可以删除项目。Tasks 页可以按项目筛选，选中项目时显示项目名和默认目录，并链接到项目页。新建项目的对话框也可以填背景。新建任务时先选项目或当场新建一个，项目有默认目录时工作目录可以不填。任务详情里可以把任务移到其他项目，任何状态都可以
 - 项目接口：`GET/POST /api/projects` 列出（带任务数和进行中任务数）和新建项目，`PUT/DELETE /api/projects/<id>` 修改和删除，`GET/POST /api/projects/<id>/knowledge` 列出和新增项目知识、`PUT/DELETE /api/projects/<id>/knowledge/<doc_id>` 修改和删除（不返回正文），`GET /api/projects/<id>/installs` 列出本项目的安装和继承的全局安装，`POST /api/projects/<id>/skills` 新增项目 skill、`GET/PUT/DELETE /api/projects/<id>/skills/<skill_id>` 读取正文、修改和删除（重名返回 409），`background` 超过 10000 个字符、harness 超过 20000 个字符返回 400；Agent 默认值是 `GET/PUT /api/settings/agents` 和 `POST /api/settings/agents/reset-harness`；目录是 `GET /api/catalog`、`GET /api/catalog/<id>` 和 `POST /api/catalog/import`，安装是 `POST /api/installs` 和 `PUT/DELETE /api/installs/<id>`；`POST /api/tasks/create` 在已有项目或新项目里建任务；`PUT /api/tasks/<id>/project` 把任务移到另一个项目；`GET /api/tasks?project_id=<id>` 按项目列出任务
+
+- Settings → Managers：创建、编辑、停用场景管家（职责提示词、Agent Profile、工具范围、任务可见范围、建任务方式），并为每个管家维护任务模板；默认管家只能改名称和描述
 
 ### Telegram
 
