@@ -225,7 +225,12 @@ def test_resident_write_without_a_matching_tool_use_is_refused_after_the_wait(
     assert writes == []
 
 
-def test_resident_read_runs_without_a_match_and_per_turn_never_waits(agent_db: Any) -> None:
+def test_resident_read_runs_without_a_match_and_per_turn_never_waits(
+        agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.ops import service
+
+    monkeypatch.setattr(service, "MATCH_WAIT_SEC", 0.2)  # the resident write below is refused after the wait
+
     async def script(session: Any, binding: str, on_event: Any) -> None:
         session.answers.append(await session.ops.call("t_read", {}, binding=binding))
         session.answers.append(await session.ops.call("t_write", {"n": 1}, binding=binding))

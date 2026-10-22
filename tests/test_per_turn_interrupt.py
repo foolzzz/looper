@@ -16,6 +16,12 @@ from looper.agents import proc_tree
 from looper.agents.claude_cli import USER_STOP
 from looper.agents.runtimes import StopMethod
 
+
+@pytest.fixture(autouse=True)
+def _short_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.1)  # a stopped turn's tree is ended quickly
+
+
 _PRELUDE = '''
 import json, os, subprocess, sys, time
 HOME = os.environ[%r]
