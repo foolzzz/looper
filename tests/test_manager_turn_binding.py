@@ -38,6 +38,9 @@ class _PerTurnSession:
     pid = None
     shares_bridge = False
 
+    async def end_turn_processes(self) -> None:
+        pass
+
     def __init__(self, ops: ManagerOps, turn_file: Path) -> None:
         self.ops, self.turn_file = ops, turn_file
         self.started = False

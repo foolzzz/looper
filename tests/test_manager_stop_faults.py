@@ -132,3 +132,27 @@ def test_a_stop_during_the_user_message_persist_still_stores_it(agent_db: Any, m
             await bus.shutdown()
 
     asyncio.run(run())
+
+
+def test_a_stop_while_the_events_are_handled_ends_the_turns_processes(agent_db: Any) -> None:
+    # run_turn has returned an answer (and dropped its cancel) when the stop comes: nothing else ends what the turn
+    # started, so the Manager must, before it replies stopped.
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session(hold=False)
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("你好")
+
+            async def stop_while_persisting() -> None:
+                if session.ended_turns == 0 and manager.turn_for(envelope.message_id) is not None \
+                        and not manager.turn_for(envelope.message_id).cancel.requested:  # type: ignore[union-attr]
+                    assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+
+            manager._save_session_state = stop_while_persisting  # type: ignore[method-assign]
+            await asyncio.wait_for(manager._handle(envelope), 5)
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "stopped"
+            assert session.ended_turns == 1
+            await bus.shutdown()
+
+    asyncio.run(run())

@@ -835,3 +835,28 @@ def test_turn_tree_end_ends_an_unseen_child_two_quick_shells_down(tmp_path: Path
                 os.kill(pid, signal.SIGKILL)
 
     assert asyncio.run(_run()) == []
+
+
+@pytest.mark.skipif(not proc_tree._MARKS, reason="no environment mark on this platform")
+def test_turn_tree_end_ends_a_child_that_left_at_once_without_any_lineage_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The fork watch can lose a short-lived shell before its children are listed; the environment mark the agent
+    # passes down does not depend on any ancestor still running.
+    monkeypatch.setattr(proc_tree, "_LINEAGE", False)
+    code = ("import subprocess, sys\nsys.stdin.readline()\n"
+            "subprocess.Popen([sys.executable, '-c', " + repr(_QUICK_MIDDLE) + "]).wait()\nsys.stdin.read()\n")
+
+    async def _run() -> list[int]:
+        process = await proc_tree.spawn(sys.executable, "-c", code, cwd=tmp_path, stdin=asyncio.subprocess.PIPE)
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        process.stdin.write(b"\n")  # type: ignore[union-attr]
+        child = await _unseen_child_that_left_at_once(tmp_path, tree)
+        try:
+            await tree.end()
+            return _running([child])
+        finally:
+            for pid in _running([child], settle=0):
+                os.kill(pid, signal.SIGKILL)
+
+    assert asyncio.run(_run()) == []

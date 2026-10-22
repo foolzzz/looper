@@ -433,13 +433,45 @@ async def sweep(runtime_root: Path) -> None:
 #   process that created it (``p_orig_ppidversion``) through re-parenting and ``setsid``. A kqueue watch on each
 #   descendant (``NOTE_FORK``) records every new process's version as its parent creates it, so a command that
 #   exits at once still links the processes it started to the agent.
-# - Linux: an environment variable the agent gets at spawn (``OWNER_ENV``), inherited by everything it starts;
-#   ``/proc/<pid>/environ`` holds the environment a process was started with.
+#   That watch is a race: a short-lived shell can exit before its children are listed, and the version that
+#   links its children is lost. So it is only a complement to the mark below.
+# - An environment variable the agent gets at spawn (``OWNER_ENV``), inherited by everything it starts, whether or
+#   not its ancestors still run. Linux: ``/proc/<pid>/environ``; macOS: ``KERN_PROCARGS2`` (it shows no
+#   environment for system binaries, which the lineage still covers when they are not detached).
 #
 # Elsewhere, or for a process ``spawn`` did not start (Linux), the tree alone decides.
 
 OWNER_ENV = "LOOPER_PROC_OWNER"
-_MARKS = sys.platform.startswith("linux") and Path("/proc/self/environ").exists()
+_PROCARGS2 = (1, 49)  # macOS sysctl KERN_PROC, KERN_PROCARGS2: a process's arguments and the environment it started with
+
+
+def _procargs(pid: int) -> bytes | None:
+    """macOS: ``pid``'s arguments and starting environment, NUL-separated; None when unreadable. (A process
+    macOS protects, such as a system binary, shows no environment.)"""
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    mib = (ctypes.c_int * 3)(*_PROCARGS2, pid)
+    size = ctypes.c_size_t(0)
+    if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0 or size.value == 0:
+        return None
+    buffer = ctypes.create_string_buffer(size.value)
+    if libc.sysctl(mib, 3, buffer, ctypes.byref(size), None, 0) != 0:
+        return None
+    return buffer.raw[:size.value]
+
+
+def _readable_procargs() -> bool:
+    if sys.platform != "darwin":
+        return False
+    try:
+        raw = _procargs(os.getpid())
+    except Exception:
+        return False
+    return raw is not None and any(entry.startswith(b"PATH=") for entry in raw.split(b"\0"))
+
+
+_MARKS = (sys.platform.startswith("linux") and Path("/proc/self/environ").exists()) or _readable_procargs()
 _owners: dict[int, str] = {}  # agent pid -> its mark, set by ``spawn`` (Linux)
 
 
@@ -631,13 +663,28 @@ class _Lineage:
 
 
 class _Marked:
-    """Linux: the processes whose environment carries the agent's mark."""
+    """The processes whose environment carries the agent's mark (Linux: ``/proc``; macOS: ``KERN_PROCARGS2``)."""
 
     def __init__(self, pid: int, mark: str) -> None:
         self._root = pid
         self._entry = f"{OWNER_ENV}={mark}".encode()
 
+    def _live_darwin(self) -> set[int]:
+        owned: set[int] = set()
+        for pid in _all_pids():
+            if pid == self._root:
+                continue
+            try:
+                raw = _procargs(pid)
+            except Exception:
+                continue
+            if raw is not None and self._entry in raw.split(b"\0"):
+                owned.add(pid)
+        return owned
+
     def live(self) -> set[int]:
+        if sys.platform == "darwin":
+            return self._live_darwin()
         owned: set[int] = set()
         for entry in os.scandir("/proc"):
             if not entry.name.isdigit() or int(entry.name) == self._root:
@@ -654,21 +701,40 @@ class _Marked:
         pass
 
 
+class _Either:
+    """Ownership by several facilities at once: a process owned by any of them is owned."""
+
+    def __init__(self, parts: list[_Owned]) -> None:
+        self._parts = parts
+
+    def live(self) -> set[int]:
+        found: set[int] = set()
+        for part in self._parts:
+            found |= part.live()
+        return found
+
+    def close(self) -> None:
+        for part in self._parts:
+            part.close()
+
+
 _LINEAGE = _readable_versions()
 FOLLOWS_OWNERSHIP = _LINEAGE or _MARKS  # whether this platform has a facility ``_owned`` can use
 
 
 def _owned(process: Any, label: str) -> _Owned | None:
     """How ``process``'s descendants are followed here, or None where only its tree is."""
+    owned: list[_Owned] = []
+    if _MARKS and (mark := _owners.pop(process.pid, None)) is not None:
+        owned.append(_Marked(process.pid, mark))
     if _LINEAGE:
         try:
-            return _Lineage(process.pid, label)
+            owned.append(_Lineage(process.pid, label))
         except Exception:
             logger.warning("%s: cannot follow the agent's processes", label, exc_info=True)
-            return None
-    if _MARKS and (mark := _owners.pop(process.pid, None)) is not None:
-        return _Marked(process.pid, mark)
-    return None
+    if len(owned) > 1:
+        return _Either(owned)
+    return owned[0] if owned else None
 
 
 # --- One turn's tree, followed while the turn runs ---

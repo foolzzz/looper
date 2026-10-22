@@ -762,7 +762,7 @@ class AcpGrok:
             raise
         return await self._prompt(text, on_event, stop, cancel)
 
-    async def _end_new(self) -> None:
+    async def end_turn_processes(self) -> None:
         """After a ``CANCEL``: end what the turn started (tools of Grok's that outlived the cancel)."""
         tree = self._tree
         if tree is None:
@@ -876,7 +876,7 @@ class AcpGrok:
             if capped is not None:  # the turn ends with the cap's result, not the cancelled turn's
                 self._totals = self._totals.plus(capped.usage)
                 if cancel.requested:
-                    await self._end_new()
+                    await self.end_turn_processes()
                 return ResidentTurn(capped.result_event, session_started=True, usage=capped.usage, prompt_sent=sent,
                                     stopped=StopMethod.CANCEL if cancel.requested else None)
             if cancel.requested and not user_stopped:
@@ -887,7 +887,7 @@ class AcpGrok:
             if cancel.requested and not user_stopped:
                 user_stopped, result = True, _cancelled(result)  # asked while its result was handled
             if user_stopped:
-                await self._end_new()  # (a CANCEL ending: the process and the session stay)
+                await self.end_turn_processes()  # (a CANCEL ending: the process and the session stay)
             return ResidentTurn(result, session_started=True, usage=self._turn_usage(result), prompt_sent=sent,
                                 stopped=StopMethod.CANCEL if user_stopped else None)
         finally:

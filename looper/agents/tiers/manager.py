@@ -1363,6 +1363,10 @@ class ManagerAgent:
         # late (the token has ended).
         stopped = token.cancel.requested
         if stopped:
+            if turn.stopped is None:
+                # The runtime returned an answer and dropped the turn's cancel: nobody has ended what the turn
+                # started (a detached or background process), so it is ended here.
+                await self._claude.end_turn_processes()
             if asked_while_running and turn.stopped is None and not (turn.result_event or {}).get(USER_STOP):
                 logger.error("stop lost: the runtime answered a turn that was asked to stop (%s)", token.message_id)
             token.settle(ReplyOutcome.STOPPED)

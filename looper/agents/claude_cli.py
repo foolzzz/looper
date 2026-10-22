@@ -959,7 +959,7 @@ class ResidentClaude:
                 and turn.done.result() is not None):
             # Its result came before the stop: nothing is left to interrupt but what the turn started.
             turn.answered = True
-            await self._end_turn_processes()
+            await self.end_turn_processes()
             return StopMethod.CONTROL
         try:
             async with asyncio.timeout(INTERRUPT_GRACE_SEC):  # the write, the drain and the wait share one grace
@@ -967,7 +967,7 @@ class ResidentClaude:
                 await process.stdin.drain()
                 await asyncio.wait({turn.done})
             if not turn.done.cancelled() and turn.done.exception() is None and turn.done.result() is not None:
-                await self._end_turn_processes()
+                await self.end_turn_processes()
                 return StopMethod.CONTROL
         except (BrokenPipeError, ConnectionResetError):
             logger.warning("%s: Claude closed stdin before the interrupt was sent", self._label)
@@ -978,7 +978,7 @@ class ResidentClaude:
             await self.stop(kill=True)
         return StopMethod.KILL
 
-    async def _end_turn_processes(self) -> None:
+    async def end_turn_processes(self) -> None:
         """End every process the stopped turn started (background tools too); the process and its MCP servers stay."""
         if self._tree is None:
             return

@@ -47,6 +47,7 @@ class _Session:
         self.totals = Usage()
         self.turns: list[str] = []
         self.cancels: list[Any] = []
+        self.ended_turns = 0  # how often the manager had the last turn's processes ended
         self.running = asyncio.Event()
         self._stopped = asyncio.Event()
 
@@ -81,6 +82,9 @@ class _Session:
 
     async def stop(self, *, kill: bool = False) -> None:
         self.started = False
+
+    async def end_turn_processes(self) -> None:
+        self.ended_turns += 1
 
 
 def _manager(root: Path, session: _Session) -> tuple[ManagerAgent, MessageBus, asyncio.Queue[MessageEnvelope]]:
