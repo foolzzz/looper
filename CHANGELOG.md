@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.27] - 2026-10-21
+
+### Fixed
+
+- **A long streamed Manager reply no longer stalls the server.** `MessageBus.publish` no longer journals `STATUS_UPDATE` messages (streamed deltas, phases) and does not mark them delivered. Each journaled message cost a synchronous `fsync` on the event loop (about 20 ms measured locally), and a reply streams hundreds of deltas, so the dashboard got no deltas and other requests, a stop included, waited for seconds. Behavior change: after a restart, status updates from before it are no longer replayed (a stale "thinking" line in Telegram or Lark); replies and every other message type are journaled and replayed as before. No prompt text, tool schema or tool result changed. ([#371](https://github.com/foolzzz/looper/pull/371))
+
 ## [2.13.26] - 2026-10-21
 
 ### Fixed
