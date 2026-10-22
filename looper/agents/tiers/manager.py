@@ -31,6 +31,7 @@ The Manager is the only agent that communicates with users. It:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import uuid
@@ -137,10 +138,24 @@ others with looper_tasks.""",
 }
 
 
-def scope_contract(definition: ManagerDefinition) -> str:
-    """What a scenario Manager's tools and task scope are, in the words it reads (card 10 appends parts)."""
+TEMPLATES_CONTRACT = """\
+## Task templates
+Each user message lists your task templates. Create a task with the template
+that fits (looper_task_create with template and inputs); the template sets the
+project, the roles and how the Planner works. Ask the user for every required
+input you do not have, as the template's hint describes it, and never make one
+up. When no template fits, say so{only}."""
+TEMPLATES_ONLY_SENTENCE = " and do not create a task"
+
+
+def scope_contract(definition: ManagerDefinition, *, has_templates: bool = False) -> str:
+    """What a scenario Manager's tools and task scope are, and, with templates, how to use them, in the words it
+    reads."""
     parts = [("heading", SCOPE_HEADING), ("tools", SCOPE_TOOLS[definition.tools]),
              ("tasks", SCOPE_TASKS[definition.task_scope])]
+    if has_templates:
+        only = TEMPLATES_ONLY_SENTENCE if definition.task_policy is TaskPolicy.TEMPLATES_ONLY else ""
+        parts.append(("templates", "\n" + TEMPLATES_CONTRACT.format(only=only)))
     return "\n".join(text for _, text in parts)
 
 
@@ -287,7 +302,7 @@ HANDOFF_TIMEOUT_SEC = 300
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
     "persist_user_message", "route_to_gate", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
-    "load_session_state", "agent_settings", "library", "library_server", "build_user_message",
+    "load_session_state", "agent_settings", "templates", "library", "library_server", "build_user_message",
     "switch_session", "claude_stop", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
     "recorder_annotate",
 )
@@ -577,6 +592,7 @@ class ManagerAgent:
         # Set when the definition was turned off or deleted; the fleet (card 6) sets ``on_turned_off``.
         self._turned_off = False
         self._turned_off_told = False
+        self._has_templates = False  # from the last read of the Manager's task templates
         self.on_turned_off: Callable[[str], None] | None = None
         self._config = config
         self._runtime_root = runtime_root
@@ -1017,6 +1033,7 @@ class ManagerAgent:
         agent_settings = await token.step("agent_settings", self._load_agent_settings())
         if agent_settings.profile_error:  # answered as an error; never another profile
             raise ProfileUnavailable(agent_settings.profile_error, agent_settings.profile_source)
+        await token.step("templates", self._read_templates())
         system_prompt = self._composed_prompt(agent_settings)
         library = await token.step("library", load_installed(self._runtime_root, AgentType.MANAGER.value))
         library = await token.step("library_server", self._library_with_server(library))
@@ -1034,6 +1051,10 @@ class ManagerAgent:
             tuple(self._claude_command(prompt_file, launch, resume=False)), system_prompt.sha256, launch.env_sha256,
             launch.library.sha256, launch.binding_sha256,
         )
+        if self._has_templates or self.agent_id != DEFAULT_MANAGER_ID:
+            # The MCP tool list is read when the process starts: a changed one restarts it.
+            listing = json.dumps(self.ops.listing(), sort_keys=True) if self.ops is not None else ""
+            signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
         switch = session_switch.profile_switch(self._session_id, self._session_runtime, self._session_profile,
                                                launch, session_provider=self._session_provider)
         turn_text = await token.step("build_user_message", self._build_user_message(
@@ -1286,7 +1307,7 @@ class ManagerAgent:
         contract_name, contract = "TOOLS_CONTRACT", TOOLS_CONTRACT
         if self.agent_id != DEFAULT_MANAGER_ID:
             contract_name = "TOOLS_CONTRACT+SCOPE_CONTRACT"
-            contract = TOOLS_CONTRACT + "\n" + scope_contract(self._definition)
+            contract = TOOLS_CONTRACT + "\n" + scope_contract(self._definition, has_templates=self._has_templates)
         return build_system_prompt(
             harness=agent_settings.harness,
             custom_prompt=agent_settings.profile.custom_prompt,
@@ -1926,6 +1947,7 @@ class ManagerAgent:
     async def _build_user_message(self, user_message: str, note: str = "", *, channel: str = "",
                                   envelope: MessageEnvelope | None = None) -> str:
         parts = await self._projects_section()
+        parts += await self._templates_section()
         parts += await self._ready_tasks_section()
         parts += await self._open_gates_section(envelope)
 
@@ -1959,6 +1981,37 @@ class ManagerAgent:
             lines.append(line)
         if not projects:
             lines.append("  (none yet)")
+        lines.append("")
+        return lines
+
+    async def _read_templates(self) -> list[dict[str, Any]]:
+        """The Manager's task templates; ``_has_templates`` follows the last read that worked."""
+        templates = await db_managers.list_templates(self.agent_id)
+        self._has_templates = bool(templates)
+        return templates
+
+    async def _templates_section(self) -> list[str]:
+        """The Manager's task templates and their inputs, so Claude can pick one; none, no section."""
+        try:
+            templates = await self._read_templates()
+            names: dict[str, str] = {}
+            if any(t["project_id"] for t in templates):
+                names = {p["id"]: p["name"] for p in await db_projects.list_projects()}
+        except Exception:
+            logger.warning("%s could not read the task templates", self._log, exc_info=True)
+            return ["Task templates: (could not be read)", ""]
+        if not templates:
+            return []
+        lines = ["Task templates (create tasks with one of these; template is its key):"]
+        for template in templates:
+            project = f" (project {names.get(template['project_id'], template['project_id'])})" \
+                if template["project_id"] else ""
+            description = f": {clip(template['description'], 120)}" if template["description"] else ""
+            lines.append(f"  - {template['key']}: {template['name']}{project}{description}")
+            for item in template["inputs"]:
+                needs = "required" if item.get("required", True) else "optional"
+                hint = f"; {item['hint']}" if item.get("hint") else ""
+                lines.append(f'      inputs: {item["key"]} "{item["label"]}" ({needs}{hint})')
         lines.append("")
         return lines
 

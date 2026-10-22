@@ -61,7 +61,7 @@ from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from .config import TOOLS as CONFIG_TOOLS
 from .schedules import TOOLS as SCHEDULE_TOOLS
 from .settings import TOOLS as SETTINGS_TOOLS
-from .tasks import TOOLS as TASK_TOOLS
+from .tasks import TOOLS as TASK_TOOLS, task_create_tool
 
 logger = logging.getLogger(__name__)
 
@@ -155,11 +155,14 @@ def _tool_map(tools: Sequence[Tool]) -> Mapping[str, Tool]:
 
 
 def scope_for(definition: ManagerDefinition, template_keys: Sequence[str] = ()) -> OpsScope:
-    """The scope a Manager definition gives (its templates' keys are card 10's)."""
+    """The scope a Manager definition gives; with templates, ``looper_task_create`` takes ``template`` and
+    ``inputs``."""
     all_tools = definition.tools is ManagerTools.ALL
+    tools = tuple(task_create_tool(template_keys) if tool.name == "looper_task_create" else tool
+                  for tool in (MANAGER_TOOLS if all_tools else TASKS_SCOPE_TOOLS))
     return OpsScope(
         manager_id=definition.id, revision=definition.revision,
-        tools=_tool_map(MANAGER_TOOLS if all_tools else TASKS_SCOPE_TOOLS),
+        tools=_tool_map(tools),
         read_only=frozenset() if all_tools else READ_ONLY_TASKS,
         scoped=definition.task_scope is TaskScope.OWN, task_policy=definition.task_policy,
         template_keys=tuple(template_keys),

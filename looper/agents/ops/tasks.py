@@ -9,10 +9,13 @@ cancelling a task, are ``high``: the user confirms them first.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+import operator
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import asyncpg
@@ -20,8 +23,13 @@ import asyncpg
 from ...db import agent_setting_layers as db_layers, connection as db_connection, projects as db_projects
 from ...db import steps as db_steps, task_changes as db_changes, task_roles as db_roles, tasks as db_tasks
 from ...db import managers as db_managers, user_gates as db_user_gates
+from ...db import profile_registry as db_profiles, role_templates as db_role_templates
 from ..agent_settings import TASK_LIMIT_ROLES, TASK_ROLES, AgentSettings, AgentType, Layer, index_layers, resolve
 from ..agent_settings import resolve_task_concurrency
+from .. import task_templates, task_workspaces
+from ..managers_api import TaskPolicy
+from ..profile_registry import RegistryError, check_selection
+from ..task_templates import TaskTemplate, TemplateError
 from ..gate_service import origin_chat, post_message as post_gate_message
 from ..message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode, is_lark, planner_address
 from ..project_execution import LessonsMode, ProjectExecution, ReviewPolicy, TaskBudgetAction, TaskWorkspaces
@@ -32,7 +40,7 @@ from ..step_workspaces import _size_text as size_text
 from ..task_workspaces import WarningKind, overwrites, task_branch
 from ..system_prompt import TASK_REQUIREMENT_LIMIT
 from ..task_notice import notify_target
-from ..tiers.journal import SUPPLEMENTS_MAX_CHARS, clip, kept_text
+from ..tiers.journal import SUMMARY_MAX_CHARS, SUPPLEMENTS_MAX_CHARS, JournalKind, clip, kept_text
 from ..tiers.task import resolve_work_dir
 from . import Call, ErrorCode, OpError, Risk, Tool, Turn
 
@@ -253,32 +261,120 @@ def _gate_listed(gate: Mapping[str, Any]) -> dict[str, Any]:
 # --- looper_task_create ---
 
 
-async def _placement(arguments: Mapping[str, Any]) -> tuple[str, dict[str, Any] | None, str]:
-    """The new task's project name, the project (None: it does not exist) and the directory it runs in."""
+@dataclass(frozen=True)
+class Placement:
+    """Where a new task goes, the template's choice where it set one and the call's otherwise: the project's name,
+    the project (None: it does not exist), the directory, whether the directory was named (by the template or the
+    call) and the workspace mode (None: the project's)."""
+
+    name: str
+    project: dict[str, Any] | None
+    work_dir: str
+    named: bool
+    workspace_mode: str | None
+
+
+def _fixed(template_name: str, field: str, template_value: Any, given: Any, same: Callable[[Any, Any], bool]) -> Any:
+    """What a field the template sets is: the template's, also when the call gives the same value; a different
+    one is refused. A call's value never overrides a template's."""
+    if given is None or given == "":
+        return template_value
+    if same(given, template_value):
+        return template_value
+    raise OpError(ErrorCode.INVALID, f"the template {template_name} sets {field} to {template_value}: leave "
+                                     f"{field} out")
+
+
+def _same_name(given: Any, name: str) -> bool:
+    return isinstance(given, str) and given.strip().casefold() == name.casefold()
+
+
+def _resolved(raw: str) -> str:
     try:
-        name = project_name(arguments.get("project"))
-    except ValueError as exc:
-        raise OpError(ErrorCode.INVALID, f"{exc}: ask the user which project the task belongs to") from None
-    project = await db_projects.find_project_by_name(name)
-    explicit = str(arguments.get("work_dir") or "").strip()
-    if not explicit:
-        if project is not None and project["work_dir"]:
-            return name, project, project["work_dir"]
-        whose = "a new project" if project is None else f"project {project['name']!r}, which has no default"
-        raise OpError(ErrorCode.INVALID, f"the task needs a directory ({whose}): ask the user for it, as an absolute "
-                                         "path, and pass it as work_dir; never pick one yourself")
-    try:
-        return name, project, resolve_work_dir(explicit)
+        return resolve_work_dir(raw)
     except ValueError as exc:
         raise OpError(ErrorCode.INVALID, f"work_dir: {exc}") from None
 
 
+async def effective_placement(template: TaskTemplate | None, arguments: Mapping[str, Any]) -> Placement:
+    """The new task's project, directory and workspace mode: for each, the template's when it sets one, else the
+    call's, else the project's. The confirmation and the creation both read this one result. Without a template
+    it is what the call alone says."""
+    fixed = template.project_id if template is not None else None
+    if fixed:
+        project = await db_projects.get_project(fixed)
+        if project is None:
+            raise OpError(ErrorCode.CONFLICT, "the template's project no longer exists; tell the user to fix the "
+                                              "template on the dashboard")
+        given = arguments.get("project")
+        _fixed(template.name, "project", project["name"], given.strip() if isinstance(given, str) else given,
+               _same_name)
+        name = project["name"]
+    else:
+        try:
+            name = project_name(arguments.get("project"))
+        except ValueError as exc:
+            raise OpError(ErrorCode.INVALID, f"{exc}: ask the user which project the task belongs to") from None
+        project = await db_projects.find_project_by_name(name)
+    explicit = str(arguments.get("work_dir") or "").strip()
+    if template is not None and template.work_dir:
+        given_dir = _resolved(explicit) if explicit else None
+        _fixed(template.name, "work_dir", template.work_dir, given_dir, task_workspaces.same_directory)
+        work_dir, named = _resolved(template.work_dir), True
+    elif explicit:
+        work_dir, named = _resolved(explicit), True
+    elif project is not None and project["work_dir"]:
+        work_dir, named = project["work_dir"], False
+    else:
+        whose = "a new project" if project is None else f"project {project['name']!r}, which has no default"
+        raise OpError(ErrorCode.INVALID, f"the task needs a directory ({whose}): ask the user for it, as an absolute "
+                                         "path, and pass it as work_dir; never pick one yourself")
+    mode = arguments.get("workspace_mode")
+    if template is not None and template.workspace_mode:
+        mode = _fixed(template.name, "workspace_mode", template.workspace_mode, mode, operator.eq)
+    return Placement(name, project, work_dir, named, mode)
+
+
+async def _template_of(call: Call) -> tuple[TaskTemplate | None, dict[str, str]]:
+    """The template the call names and its checked inputs; ``(None, {})`` for a call without one (refused first
+    when the Manager's policy is ``templates_only``). Read once per call."""
+    cached = getattr(call, "_template", None)
+    if cached is not None:
+        return cached
+    arguments = call.arguments
+    key = arguments.get("template")
+    if key is None:
+        if arguments.get("inputs") is not None:
+            raise OpError(ErrorCode.INVALID, "inputs go with a template")
+        if call.scope.task_policy is TaskPolicy.TEMPLATES_ONLY:
+            raise OpError(ErrorCode.INVALID, "this Manager creates tasks only from its templates "
+                                             f"({', '.join(call.scope.template_keys)}): pick the one that fits, or "
+                                             "tell the user none fits")
+        found: tuple[TaskTemplate | None, dict[str, str]] = (None, {})
+    else:
+        row = await db_managers.get_template(call.manager_id, key)
+        if row is None:
+            keys = [t["key"] for t in await db_managers.list_templates(call.manager_id)]
+            raise OpError(ErrorCode.INVALID, f"no template {key}; this Manager's templates are: "
+                                             f"{', '.join(keys) or 'none'}")
+        template = TaskTemplate.from_row(row)
+        try:
+            values = await task_templates.check_values(template, arguments.get("inputs"))
+        except TemplateError as exc:
+            raise OpError(ErrorCode.INVALID, str(exc)) from None
+        found = (template, values)
+    object.__setattr__(call, "_template", found)
+    return found
+
+
 async def _new_project(call: Call) -> str | None:
     """None when the task's project exists; else the question whether to create it (the call is ``high``)."""
-    name, project, work_dir = await _placement(call.arguments)
+    template, _ = await _template_of(call)
+    placement = await effective_placement(template, call.arguments)
     await _profile_choices(call.arguments.get("profiles"), clearing=False)
-    if project is not None:
+    if placement.project is not None:
         return None
+    name, work_dir = placement.name, placement.work_dir
     lines = [f"项目「{name}」还不存在。要新建这个项目（默认目录 {work_dir}），并在里面创建任务"
              f"「{db_tasks.task_title(call.arguments.get('title')) or ''}」吗？"]
     try:
@@ -293,28 +389,82 @@ async def _new_project(call: Call) -> str | None:
     return "\n".join(lines)
 
 
+async def _merged_profiles(template: TaskTemplate | None, arguments: Mapping[str, Any]) -> dict[str, str | None]:
+    """The task's Agent Profile per role: the template's, plus the call's for the other roles; each able to run
+    its role (the call's were checked by ``_profile_choices``, the template's are checked again here)."""
+    profiles = await _profile_choices(arguments.get("profiles"), clearing=False)
+    if template is None:
+        return profiles
+    merged: dict[str, str | None] = dict(profiles)
+    for role, profile_id in template.profiles.items():
+        merged[role] = _fixed(template.name, f"the {role}'s Agent Profile", profile_id, profiles.get(role),
+                              operator.eq)
+        try:
+            await check_selection(profile_id, [role])
+        except RegistryError as exc:
+            profile = await db_profiles.get_profile(profile_id)
+            raise OpError(ErrorCode.CONFLICT, f"the template {template.name}'s {role} Agent Profile "
+                                              f"{profile['name'] if profile else profile_id} can no longer run the "
+                                              f"{role}: tell the user to fix the template on the dashboard "
+                                              f"({exc})") from None
+    return merged
+
+
+async def _template_roles(template: TaskTemplate, project: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The project's role templates the template names, as the task's first role versions."""
+    keys = list(template.role_templates)
+    if not keys:
+        return []
+    for key in keys:
+        if keys.count(key) > 1:
+            raise OpError(ErrorCode.CONFLICT, f"the template {template.name} lists the role template {key} twice: "
+                                              "tell the user to fix the template on the dashboard")
+    if not ProjectExecution.from_row(project).roles_on:
+        raise OpError(ErrorCode.CONFLICT, "the template's project has Planner-defined roles off: tell the user to "
+                                          "turn them on for the project or change the template")
+    roles = []
+    for key in keys:
+        row = await db_role_templates.get_template(project["id"], key)
+        if row is None:
+            raise OpError(ErrorCode.CONFLICT, f"project {project['name']} has no role template {key} any more: tell "
+                                              "the user to fix the template")
+        roles.append({"role_key": key, "kind": row["kind"], "profile_id": row["profile_id"],
+                      "role_prompt": row["role_prompt"], "harness": row["harness"],
+                      "items": list(row["items"] or ()), "template_key": key})
+    return roles
+
+
 async def _create(call: Call) -> dict[str, Any]:
     arguments, turn = call.arguments, call.turn
-    name, project, work_dir = await _placement(arguments)
-    profiles = await _profile_choices(arguments.get("profiles"), clearing=False)
+    template, values = await _template_of(call)
+    placement = await effective_placement(template, arguments)
+    name, project, work_dir = placement.name, placement.project, placement.work_dir
+    profiles = await _merged_profiles(template, arguments)
+    roles = await _template_roles(template, project) if template is not None and project is not None else []
+    requirement = arguments["requirement"].strip()
+    if template is not None:
+        try:
+            requirement = task_templates.render_requirement(template, values, arguments["requirement"])
+        except TemplateError as exc:
+            raise OpError(ErrorCode.INVALID, str(exc)) from None
     envelope = turn.envelope
     origin = envelope.metadata.get("origin_channel_id") if envelope is not None else None
     task_id = f"task-{uuid.uuid4().hex[:12]}"
     title = db_tasks.task_title(arguments.get("title"))
     created = project is None
     target = notify_target(origin, sender=turn.sender, chat=turn.chat, group=turn.group)
-    named = bool(str(arguments.get("work_dir") or "").strip())
     project_mode = (ProjectExecution.from_row(project).task_mode if project is not None
                     else TaskWorkspaces.WORKTREE)  # what a new project gets
     try:
-        workspace = await task_workspace(arguments, work_dir=work_dir, named=named,
+        workspace = await task_workspace({**arguments, "workspace_mode": placement.workspace_mode},
+                                         work_dir=work_dir, named=placement.named,
                                          project_dir=project["work_dir"] if project is not None else work_dir,
                                          project_mode=project_mode,
                                          visible_to=call.manager_id if call.scoped else None)
     except RequestError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
     row = {
-        "task_id": task_id, "requirement": arguments["requirement"].strip(), "goal_id": arguments.get("goal_id") or "",
+        "task_id": task_id, "requirement": requirement, "goal_id": arguments.get("goal_id") or "",
         "work_dir": work_dir, "status": db_tasks.READY,
         "correlation_id": envelope.correlation_id if envelope is not None else "", "origin_channel_id": origin or "",
         # Who the TaskRouter tells when the task ends: in Telegram the chat, in Lark the sender or the group.
@@ -324,6 +474,8 @@ async def _create(call: Call) -> dict[str, Any]:
         "workspace_dir": work_dir, "workspace_mode": workspace["mode"], "workspace_base": workspace["base"],
         "manager_id": call.manager_id,
     }
+    if template is not None:
+        row["template"] = template.snapshot(values, roles=roles)
     try:
         # One path: the Manager's row is locked first, so a delete or a turn-off that came first refuses the task.
         async with db_connection.transaction() as conn:
@@ -336,12 +488,20 @@ async def _create(call: Call) -> dict[str, Any]:
             await db_tasks.create_task(**row, project_id=project["id"], pool=conn)
             if profiles:
                 await db_layers.set_profile_overrides(conn, task_id, profiles)
+            for role in roles:
+                summary = f"Role {role['role_key']} v1 from the task template {template.name}"
+                await db_roles.add_first_version(conn, task_id, role["role_key"], {
+                    **role, "reason": f"from template {template.name}", "via": "template"},
+                    {"step_id": "", "kind": JournalKind.ROLE_DEFINED.value,
+                     "summary": clip(summary, SUMMARY_MAX_CHARS), "learnings": []})
     except asyncpg.UniqueViolationError:
         raise OpError(ErrorCode.CONFLICT, f"a project named {name!r} was created meanwhile: call again to use "
                                           "it") from None
     shown = title or arguments.get("goal_id") or task_id
+    used = None if template is None else (template.name, [(i.label, clip(values[i.key], 80))
+                                                         for i in template.inputs if i.key in values])
     turn.blocks.append(await configuration_block(task_id, shown, project, work_dir, created,
-                                                 workspace=workspace["check"]))
+                                                 workspace=workspace["check"], template=used))
     return {"task_id": task_id, "name": shown, "status": "ready", "project": project["name"],
             "project_created": created, "work_dir": work_dir, "workspace_mode": workspace["check"]["mode"],
             "shown_to_user": "Looper adds the task's configuration and the question whether to start it now after "
@@ -392,7 +552,7 @@ def _role_line(role: AgentType, settings: AgentSettings) -> str:
 
 async def configuration_block(
     task_id: str, name: str | None, project: Mapping[str, Any], work_dir: str, created: bool, *,
-    workspace: Mapping[str, Any] | None = None,
+    workspace: Mapping[str, Any] | None = None, template: tuple[str, Sequence[tuple[str, str]]] | None = None,
 ) -> str:
     """The new ready task's configuration, from the settings in effect for it (resolved as the project's agent
     settings view resolves them, with the task's own choices), with how it runs in its directory and what to know
@@ -402,8 +562,12 @@ async def configuration_block(
         "任务已创建，还没有开始（Ready — not started）：",
         f"- 任务：{name}（{task_id}）" if name else f"- 任务：{task_id}",
         f"- 项目：{project['name']}（{'新建' if created else '已有'}）",
-        f"- 目录：{work_dir}",
     ]
+    if template is not None:
+        template_name, template_inputs = template
+        inputs = "；".join(f"{label}：{value}" for label, value in template_inputs)
+        lines.append(f"- 模板：{template_name}（{inputs}）" if inputs else f"- 模板：{template_name}")
+    lines.append(f"- 目录：{work_dir}")
     if workspace is not None:
         lines += _workspace_lines(task_id, workspace)
     limits: list[int] = []
@@ -779,3 +943,29 @@ TOOLS: tuple[Tool, ...] = (
         risk=Risk.WRITE, run=_update, task_id=_task_argument,
     ),
 )
+
+
+_CREATE_TOOL = next(tool for tool in TOOLS if tool.name == "looper_task_create")
+
+
+def task_create_tool(template_keys: Sequence[str]) -> Tool:
+    """``looper_task_create`` as a Manager sees it: with templates it also takes ``template`` and ``inputs``, and
+    ``project`` is judged by code; without, the tool itself."""
+    if not template_keys:
+        return _CREATE_TOOL
+    schema = {
+        **_CREATE_TOOL.schema,
+        "required": ["requirement", "title"],
+        "properties": {
+            **_CREATE_TOOL.schema["properties"],
+            "template": {"type": "string", "enum": list(template_keys),
+                         "description": "The key of the task template that fits (see Task templates in the "
+                                        "message); its project, roles and Planner instructions apply."},
+            "inputs": {"type": "object", "description": "The template's inputs, by key, in the user's words (a link "
+                                                        "as the user gave it)."},
+        },
+    }
+    return dataclasses.replace(
+        _CREATE_TOOL, schema=schema,
+        description=_CREATE_TOOL.description + " With a template, give its inputs; the template sets the project "
+                                               "unless it has none.")
