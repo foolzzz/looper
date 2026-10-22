@@ -494,10 +494,24 @@ export interface ManagerProfileChoice {
   problem: string | null;
 }
 
+/** The session view's effective profile: names only (runtime, provider and model as the server words them). */
+export interface ManagerSessionProfileSummary {
+  profile_id: string;
+  name: string;
+  runtime: string;
+  provider: string;
+  model: string;
+  effort: string | null;
+}
+
+export function sessionProfileLabel(profile: ManagerSessionProfileSummary): string {
+  return `${profile.name} — ${profile.runtime} · ${profile.provider} / ${profile.model}`;
+}
+
 export interface ManagerSessionView {
   session: { active: boolean; runtime: string | null; profile_id: string | null };
   selected: { profile_id: string; name: string } | null;
-  effective: { profile: AgentProfile | null; source: SettingSource };
+  effective: { profile: ManagerSessionProfileSummary | null; source: SettingSource };
   problem: string | null;
   /** What following Settings does to the saved session; null when Settings' profile cannot launch. */
   follow_settings: { name: string; effect: ManagerSessionEffect } | null;

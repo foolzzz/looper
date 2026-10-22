@@ -3,11 +3,11 @@ import { AlertTriangle } from "lucide-react";
 import { SELECT } from "@/components/registry-ui";
 import {
   fetchManagerSession,
+  sessionProfileLabel,
   setManagerSessionProfile,
   type ManagerProfileChoice,
   type ManagerSessionView as SessionView,
 } from "@/lib/api";
-import { profileLabel } from "@/lib/use-registry";
 
 export function sourceText(view: Pick<SessionView, "effective">): string {
   return view.effective.source === "session" ? "this session" : "Settings";
@@ -30,7 +30,7 @@ export function ManagerSessionProfileView({
   onSelect: (profileId: string | null) => void;
 }) {
   const profile = view.effective.profile;
-  const name = profile ? profileLabel(profile) : "none";
+  const name = profile ? sessionProfileLabel(profile) : "none";
   return (
     <div className="flex flex-col gap-1 text-xs">
       <div className="flex items-center gap-1.5 text-muted-foreground">
