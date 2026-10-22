@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.24] - 2026-10-21
+
+### Fixed
+
+- **Prompt-regression `start_no_wait` check.** It now reads the newest Manager run's tool calls and fails a run that calls a native shell tool such as `Bash` (a `sleep`) after starting a task; before, only the MCP action trail was read. Eval harness only; no runtime or model-visible change. ([#361](https://github.com/foolzzz/looper/pull/361))
+
 ## [2.13.23] - 2026-10-21
 
 ### Fixed
