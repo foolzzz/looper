@@ -2087,6 +2087,37 @@ CREATE TABLE IF NOT EXISTS channel_rejected_senders (
 ALTER TABLE channel_rejected_senders DROP COLUMN IF EXISTS snippet;
 ALTER TABLE channel_rejected_senders ADD COLUMN IF NOT EXISTS chat_id TEXT;
 
+-- The Manager a channel's bot belongs to: its messages go to that Manager (RFC scenario-managers §9.1). The three
+-- built-in rows (channel-telegram, channel-lark, channel-lark_bot) are the default Manager's; a bot added in Settings
+-- → Channels is channel-<type>-<n> and names its Manager when it is added. Never changed afterwards: a thread id is
+-- <channel_id>:<chat_id> and a thread's owner never changes (chat_threads).
+ALTER TABLE channel_configs ADD COLUMN IF NOT EXISTS manager_id TEXT NOT NULL DEFAULT 'manager'
+    REFERENCES managers(id) ON DELETE RESTRICT;
+-- <n> of an added bot: only ever grows, never reused (a bot removed and added again gets a new id).
+CREATE SEQUENCE IF NOT EXISTS channel_bot_seq START 2;
+CREATE OR REPLACE FUNCTION channel_configs_manager_fixed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'a bot''s Manager cannot change: add a new bot for the other Manager and remove this one'
+        USING ERRCODE = 'check_violation';
+END $$;
+DROP TRIGGER IF EXISTS channel_configs_manager_fixed ON channel_configs;
+CREATE TRIGGER channel_configs_manager_fixed BEFORE UPDATE OF manager_id ON channel_configs
+    FOR EACH ROW WHEN (OLD.manager_id IS DISTINCT FROM NEW.manager_id) EXECUTE FUNCTION channel_configs_manager_fixed();
+CREATE INDEX IF NOT EXISTS idx_channel_configs_manager ON channel_configs (manager_id);
+
+-- The bot a gate's channel message went through or came from (channel_configs.channel_id): two bots of one type
+-- share chat ids (a Telegram private chat's id is the user's) and count message ids apart, so a reply is matched by
+-- bot, not by type. Rows an older binary wrote have none and get it here, at every start.
+ALTER TABLE task_user_gate_posts ADD COLUMN IF NOT EXISTS channel_id TEXT;
+ALTER TABLE task_user_gate_messages ADD COLUMN IF NOT EXISTS channel_id TEXT;
+UPDATE task_user_gate_posts SET channel_id = 'channel-' || channel WHERE channel_id IS NULL;
+UPDATE task_user_gate_messages SET channel_id = 'channel-' || channel WHERE channel_id IS NULL AND channel IS NOT NULL;
+-- UNIQUE (channel, chat, external_id) stays: an older binary's ON CONFLICT names it.
+CREATE UNIQUE INDEX IF NOT EXISTS task_user_gate_posts_bot_key ON task_user_gate_posts (channel_id, chat, external_id);
+CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_bot ON task_user_gate_posts (channel_id, external_id);
+CREATE INDEX IF NOT EXISTS idx_task_user_gate_messages_bot ON task_user_gate_messages (channel_id, external_id)
+    WHERE external_id IS NOT NULL;
+
 -- registry-phase: convert
 
 -- Python conversion and launch/pricing comparison have completed. Refuse to

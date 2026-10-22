@@ -52,8 +52,8 @@ WHERE task_user_gates.state NOT IN {CLOSED!r}
 
 _ADD_MESSAGE = """
 INSERT INTO task_user_gate_messages (step_id, task_id, role, kind, text, author, via, agenda_item, option, channel,
-                                     chat, external_id, post_state)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CASE WHEN $3 = 'user' THEN 'none' END)
+                                     chat, external_id, channel_id, post_state)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CASE WHEN $3 = 'user' THEN 'none' END)
 RETURNING *
 """
 
@@ -118,7 +118,13 @@ def _gate(row: Mapping[str, Any]) -> dict[str, Any]:
 def _message_args(task_id: str, message: Mapping[str, Any]) -> tuple[Any, ...]:
     return (message["step_id"], task_id, message["role"], message["kind"], message.get("text") or "",
             message.get("author"), message.get("via") or "", message.get("agenda_item"), message.get("option"),
-            message.get("channel"), message.get("chat"), message.get("external_id"))
+            message.get("channel"), message.get("chat"), message.get("external_id"), _message_channel_id(message))
+
+
+def _message_channel_id(message: Mapping[str, Any]) -> str | None:
+    if message.get("channel_id"):
+        return message["channel_id"]
+    return f"channel-{message['channel']}" if message.get("channel") else None
 
 
 async def write(conn: asyncpg.Connection, task_id: str, gates: Sequence[Mapping[str, Any]],
@@ -306,7 +312,8 @@ async def unposted(limit: int = 50, *, pool: asyncpg.Pool | None = None) -> list
 
 
 async def record_post(message_id: int, task_id: str, state: str, *, error: str | None = None,
-                      channel: str | None = None, chat: str | None = None, external_ids: Sequence[str] = (),
+                      channel: str | None = None, channel_id: str | None = None, chat: str | None = None,
+                      external_ids: Sequence[str] = (),
                       pool: asyncpg.Pool | None = None) -> None:
     """Note what posting the message ``message_id`` did (``state``: ``sent``, ``failed`` with ``error``, or
     ``none``), with the channel messages it became in ``chat`` (a failed post may have sent some), in one
@@ -314,10 +321,11 @@ async def record_post(message_id: int, task_id: str, state: str, *, error: str |
     pool = pool or get_pool()
     async with pool.acquire() as conn, conn.transaction():
         if external_ids:
+            bot = channel_id or (f"channel-{channel}" if channel else None)
             await conn.executemany(
-                "INSERT INTO task_user_gate_posts (message_id, task_id, channel, chat, external_id) "
-                "VALUES ($1, $2, $3, $4, $5) ON CONFLICT (channel, chat, external_id) DO NOTHING",
-                [(message_id, task_id, channel, chat, external_id) for external_id in external_ids])
+                "INSERT INTO task_user_gate_posts (message_id, task_id, channel, channel_id, chat, external_id) "
+                "VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+                [(message_id, task_id, channel, bot, chat, external_id) for external_id in external_ids])
         await conn.execute("UPDATE task_user_gate_messages SET post_state = $2, post_error = $3, "
                            "post_attempts = post_attempts + 1, post_retry_at = NULL WHERE id = $1",
                            message_id, state, error)
