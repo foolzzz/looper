@@ -6,6 +6,7 @@ Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database; it uses
 
 from __future__ import annotations
 
+import shlex
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,13 @@ def _setup(env: _Env, *, day_zone: str = "America/Los_Angeles", dashboard_url: s
     env.scheduler = Scheduler(bus=env.bus, clock=env.clock, sender=sender, day_zone=day_zone,
                               dashboard_url=dashboard_url)
     return sender
+
+
+def _held_gate(release: Path, then: str) -> str:
+    """A gate command that runs ``then`` once ``release`` exists (a test creates it when it has seen the gate
+    running; the wait is bounded, so a failed test does not leave the gate behind for long)."""
+    path = shlex.quote(str(release))
+    return f"for _ in $(seq 500); do [ -e {path} ] && break; sleep 0.02; done; [ -e {path} ] || exit 1; {then}"
 
 
 async def _allow_telegram(env: _Env) -> None:
@@ -135,11 +143,12 @@ def test_run_now_goes_through_the_gate_and_a_firing_meanwhile_is_an_overlap(monk
                                                                             tmp_path: Path) -> None:
     async def test(env: _Env) -> None:
         _setup(env)
-        sid = (await env.schedule(gate_command="sleep 1; echo new-item"))["schedule_id"]
+        sid = (await env.schedule(gate_command=_held_gate(tmp_path / "release", "echo new-item")))["schedule_id"]
         first = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
         assert (first["trigger"], first["status"]) == ("manual", "gating")
         second = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
         assert second["status"] == "skipped_overlap" and "still checking its gate" in second["error"]
+        (tmp_path / "release").touch()
         await env.scheduler.idle()
         run = next(r for r in await env.runs(sid) if r["run_id"] == first["run_id"])
         assert (run["status"], run["gate_output"]) == ("running", "new-item")
@@ -291,10 +300,11 @@ def test_a_gate_that_finds_nothing_ends_the_failure_streak_and_a_skip_that_ran_n
         assert await state() == (3, True, ["failures_alert"])
 
         # A firing while the gate runs is skipped as busy: the streak goes on.
-        await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "sleep 1; exit 3"})
+        await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": _held_gate(tmp_path / "release", "exit 3")})
         assert (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]["status"] == "gating"
         assert (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]["status"] == "skipped_overlap"
         assert await state() == (3, True, ["failures_alert"])
+        (tmp_path / "release").touch()
         await env.scheduler.idle()
         assert await state() == (4, True, ["failures_alert"])
         for status in db_schedules.NOTHING_RAN:  # nor does a skip for the budget or a missed firing
@@ -539,8 +549,8 @@ def test_a_slow_gate_never_runs_twice_at_once(monkeypatch: pytest.MonkeyPatch, t
     async def test(env: _Env) -> None:
         _setup(env)
         env.clock.now = NOON
-        sid = (await env.enabled(cron="* * * * *",
-                                 gate_command="echo start >> gate.log; sleep 1; echo end >> gate.log"))["schedule_id"]
+        gate = f"echo start >> gate.log; {_held_gate(tmp_path / 'release', 'echo end >> gate.log')}"
+        sid = (await env.enabled(cron="* * * * *", gate_command=gate))["schedule_id"]
         for _ in range(3):  # three minutes come while the first gate runs
             at = (env.clock.now + MINUTE).replace(second=0, microsecond=0)
             await env.pool.execute("UPDATE schedules SET next_fire_at = $2 WHERE id = $1", sid, at)
@@ -549,6 +559,7 @@ def test_a_slow_gate_never_runs_twice_at_once(monkeypatch: pytest.MonkeyPatch, t
         runs = await env.runs(sid)
         assert _shape(runs) == [("skipped_overlap", 2), ("gating", 1)]
         assert runs[0]["error"] == "the previous run is still checking its gate"
+        (tmp_path / "release").touch()
         await env.scheduler.idle()
         assert (tmp_path / "gate.log").read_text() == "start\nend\n"
         assert _shape(await env.runs(sid)) == [("skipped_overlap", 2), ("skipped_gate", 1)]
@@ -785,9 +796,11 @@ def test_a_parallel_schedules_gates_never_run_beside_each_other_and_know_their_r
     async def test(env: _Env) -> None:
         _setup(env)
         env.clock.now = NOON
-        gate = ('echo start >> gate.log; sleep 1; echo end >> gate.log; '
-                'echo "$LOOPER_SCHEDULE_ID $LOOPER_SCHEDULE_RUN_ID $LOOPER_SCHEDULE_SCHEDULED_FOR '
-                '[$LOOPER_SCHEDULE_RUN_TIMEOUT_SECONDS]"')
+        gate = ("echo start >> gate.log; "
+                + _held_gate(tmp_path / "release",
+                             'echo end >> gate.log; '
+                             'echo "$LOOPER_SCHEDULE_ID $LOOPER_SCHEDULE_RUN_ID $LOOPER_SCHEDULE_SCHEDULED_FOR '
+                             '[$LOOPER_SCHEDULE_RUN_TIMEOUT_SECONDS]"'))
         sid = (await env.enabled(cron="* * * * *", gate_command=gate, overlap="parallel",
                                  run_timeout_seconds=1800))["schedule_id"]
         for _ in range(2):  # a second minute comes while the first gate runs
@@ -797,6 +810,7 @@ def test_a_parallel_schedules_gates_never_run_beside_each_other_and_know_their_r
             await env.scheduler.tick()
         skipped, gating = await env.runs(sid)
         assert (skipped["status"], skipped["error"]) == ("skipped_overlap", "the previous run is still checking its gate")
+        (tmp_path / "release").touch()
         await env.scheduler.idle()
         [run] = [r for r in await env.runs(sid) if r["run_id"] == gating["run_id"]]
         assert run["status"] == "running"
