@@ -197,10 +197,11 @@ def test_unknown_v1_path_is_not_found(tmp_path: Path, clients: SimpleNamespace) 
         async with _serving(tmp_path) as server:
             status, _, body = await _send(server, "GET /api/v1/nope", _bearer(CLIENT_TOKEN))
             assert status == 404 and body["error"] == {"code": "not_found", "message": "no GET /api/v1/nope"}
+            # A path that exists answers another method with 405.
             status, _, body = await _send(server, "OPTIONS /api/v1/whoami", _bearer(CLIENT_TOKEN))
-            assert status == 404 and body["error"]["code"] == "not_found"
+            assert status == 405 and body["error"] == {"code": "invalid", "message": "use GET"}
             status, _, body = await _send(server, "POST /api/v1/whoami", _bearer(CLIENT_TOKEN), "{}")
-            assert status == 404
+            assert status == 405
 
     asyncio.run(run())
 

@@ -15,6 +15,7 @@ import logging
 import mimetypes
 import os
 import re
+import time
 import urllib.parse
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
@@ -36,6 +37,7 @@ from .supervisor import AgentSupervisor
 from .task_roles import record_role, run_roles
 from .tiers.journal import progress_notes
 from .ops import ErrorCode, OpError
+from .ops.clients import DEFAULT_SESSION, ClientOps
 from .ops.planner import PlannerOps
 from .ops.room import RoomOps
 from .managers import ManagerFleet
@@ -159,6 +161,7 @@ class AgentHTTPServer:
         managers: ManagerFleet | None = None,
         planner_ops: PlannerOps | None = None,
         room_ops: RoomOps | None = None,
+        client_ops: ClientOps | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -190,6 +193,8 @@ class AgentHTTPServer:
         self._scheduler = scheduler
         # The Manager's platform tools, behind /api/agent/v1/ (its token only), and each task's Planner's (its own).
         self._manager_ops = manager_ops
+        # What an API client's operations run through (``/api/v1``).
+        self._client_ops = client_ops
         self._managers = managers
         self._planner_ops = planner_ops
         # The agent room's tools of the steps' runs, each with a token of its own (``run.``).
@@ -385,12 +390,51 @@ class AgentHTTPServer:
 
     async def _handle_v1(self, method: str, path: str, query: dict[str, str], headers: Mapping[str, str],
                          body: bytes, writer: asyncio.StreamWriter, principal: api_v1.Principal) -> None:
-        if method == "GET" and path == "/api/v1/whoami":
-            status, answer = api_v1.OK, api_v1.whoami(principal)
-        else:
-            status, answer = api_v1.error(ErrorCode.NOT_FOUND, f"no {method} {path}")
+        started = time.monotonic()
+        operation = api_v1.find(method, path)
+        status, answer = await self._answer_v1(method, path, operation, headers, body, principal)
+        if operation is not None and operation.operation_id != "openapi":
+            outcome = (answer["status"] if answer.get("status") in ("ok", "needs_confirmation")
+                       else f"error:{answer['error']['code']}")
+            logger.info("api client=%s op=%s status=%s ms=%d", principal.key, operation.operation_id, outcome,
+                        (time.monotonic() - started) * 1000)
         writer.write(_json_response(status, answer, headers=V1_HEADERS))
         await writer.drain()
+
+    async def _answer_v1(self, method: str, path: str, operation: api_v1.Operation | None,
+                         headers: Mapping[str, str], body: bytes,
+                         principal: api_v1.Principal) -> tuple[str, dict[str, Any]]:
+        if operation is None:
+            other = api_v1.allowed_method(path)
+            if other is not None:
+                return api_v1.error(ErrorCode.INVALID, f"use {other}", status=HTTP_405)
+            return api_v1.error(ErrorCode.NOT_FOUND, f"no {method} {path}")
+        if operation.operation_id == "openapi":
+            return api_v1.OK, api_v1.document()
+        if operation.operation_id == "whoami":
+            return api_v1.OK, api_v1.whoami(principal)
+        if self._client_ops is None:
+            return api_v1.error(ErrorCode.UNAVAILABLE, "the API is not ready")
+        session = headers.get("x-looper-session") or DEFAULT_SESSION
+        try:
+            data = json.loads(body) if body.strip() else {}
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            return api_v1.error(ErrorCode.INVALID, "the body must be a JSON object")
+        if operation.tool is not None:
+            if "action" in data and operation.action:
+                return api_v1.error(ErrorCode.INVALID, "action is part of the path")
+            arguments = {**data, "action": operation.action} if operation.action else data
+            answer = await self._client_ops.call(principal, session, operation.tool, arguments)
+        elif operation.operation_id == "confirm":
+            confirmation_id = data.get("confirmation_id")
+            if not isinstance(confirmation_id, str) or not confirmation_id:
+                return api_v1.error(ErrorCode.INVALID, "confirmation_id is required")
+            answer = await self._client_ops.confirm(principal, session, confirmation_id)
+        else:
+            return api_v1.error(ErrorCode.NOT_FOUND, "not available yet")
+        return api_v1.answer_status(answer), answer
 
     @staticmethod
     async def _read_headers(reader: asyncio.StreamReader) -> dict[str, str]:
