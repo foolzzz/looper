@@ -22,26 +22,9 @@ def test_arguments_default_and_choices() -> None:
 
 
 def test_cells_by_runtime() -> None:
-    assert [c.key for c in sr.cells_for("claude")] == ["a", "b", "c", "d", "e"]
-    assert [c.key for c in sr.cells_for("omp")] == ["a", "b", "c", "d", "f"]
-    assert [c.key for c in sr.chosen_cells("omp", "d,dx")] == ["d", "dx"]  # a diagnostic cell by hand only
-
-
-def test_the_setsid_sleeper_is_python_alone() -> None:
-    """Cell d does not depend on the runtime's shell running a backgrounded subshell (OMP's brush-core did not)."""
-    script = sr._SETSID_PY.format(file="/tmp/p.txt")
-    compile(script, "sleeper", "exec")
-    assert "os.fork()" in script and "os.setsid()" in script and '"/tmp/p.txt"' in script
-    assert "&" not in sr._SETSID.format(file="/tmp/p.txt", script="/tmp/s.py")
-    assert '"/tmp/p.txt.detached"' in script  # the sleeper's pid, told apart from the shell's
-
-
-def test_cell_d_is_best_effort_on_every_platform() -> None:
-    """A detached sleeper left running is recorded on every platform (design 6.6, 10)."""
-    for runtime in ("claude", "omp"):
-        cells = {c.key: c for c in sr.cells_for(runtime)}
-        assert sr.best_effort(cells["d"], "darwin") and sr.best_effort(cells["d"], "linux")
-        assert [key for key, c in cells.items() if sr.best_effort(c, "darwin")] == ["d"]
+    assert [c.key for c in sr.cells_for("claude")] == ["a", "b", "c", "e"]  # a detached process is not in scope
+    assert [(c.key, c.refused) for c in sr.cells_for("omp")] == [("r", True)]  # no interrupt: the stop is refused
+    assert [c.key for c in sr.chosen_cells("claude", "b,e")] == ["b", "e"]
 
 
 def _events(*items: tuple[float, str, dict]) -> list[tuple[float, str, dict]]:

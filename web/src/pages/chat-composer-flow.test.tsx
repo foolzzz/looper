@@ -194,6 +194,33 @@ describe("chat composer flow", () => {
     });
   });
 
+  it("disables Stop for a runtime that cannot interrupt: Escape and /stop send nothing", async () => {
+    api.fetchChatTurn.mockResolvedValue({ message_id: "m1", client_message_id: null, channel: "web", started_at: "",
+      stopping: false, can_interrupt: false });
+    await mount();
+    await say("first");
+    const stop = container.querySelector('button[aria-label^="Stop the reply:"]') as HTMLButtonElement | null;
+    expect(stop?.disabled).toBe(true);
+    expect(stop?.parentElement?.getAttribute("title")).toBe("This runtime cannot interrupt a reply.");
+    key("Escape");
+    await say("/stop");
+    expect(api.stopChatReply).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("This runtime cannot interrupt a reply.");
+  });
+
+  it("disables Stop once the server refuses it for the runtime", async () => {
+    api.stopChatReply.mockResolvedValue({ state: "cannot_interrupt", method: null });
+    await mount();
+    await say("first");
+    key("Escape");
+    await flush();
+    expect(api.stopChatReply).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('button[aria-label^="Stop the reply:"]')).not.toBeNull();
+    key("Escape");
+    await flush();
+    expect(api.stopChatReply).toHaveBeenCalledTimes(1);
+  });
+
   it("explains an other_message stop", async () => {
     api.stopChatReply.mockResolvedValue({ state: "other_message", method: null });
     await mount();
@@ -205,7 +232,7 @@ describe("chat composer flow", () => {
 
   it("restores the queue after a reload while the turn runs, then moves it to the draft", async () => {
     sessionStorage.setItem(`looper-chat-staged-${SID}`, JSON.stringify(["a"]));
-    api.fetchChatTurn.mockResolvedValue({ message_id: "m1", channel: "web", started_at: "", stopping: false });
+    api.fetchChatTurn.mockResolvedValue({ message_id: "m1", channel: "web", started_at: "", stopping: false, can_interrupt: true });
     await mount();
     expect(container.textContent).toContain("a");
     expect(container.querySelector('button[aria-label="Remove queued message"]')).not.toBeNull();
@@ -250,7 +277,7 @@ describe("chat composer flow", () => {
   });
 
   const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
-  const envelopeTurn = { message_id: "env-1", client_message_id: "", channel: "web", started_at: "", stopping: false };
+  const envelopeTurn = { message_id: "env-1", client_message_id: "", channel: "web", started_at: "", stopping: false, can_interrupt: true };
 
   it("keeps following a turn named by the envelope id after the page's own stream ends without a final", async () => {
     await mount();
@@ -315,7 +342,7 @@ describe("chat composer flow", () => {
 
   it("keeps replying while the history is re-read after a followed turn, so a new message is staged", async () => {
     vi.useFakeTimers();
-    api.fetchChatTurn.mockResolvedValue({ message_id: "m1", channel: "web", started_at: "", stopping: false });
+    api.fetchChatTurn.mockResolvedValue({ message_id: "m1", channel: "web", started_at: "", stopping: false, can_interrupt: true });
     await mount();
     expect(stopButton()).not.toBeNull();
     let release!: (rows: unknown[]) => void;
@@ -333,13 +360,13 @@ describe("chat composer flow", () => {
 
   it("drops a history read that a newer message has overtaken", async () => {
     vi.useFakeTimers();
-    api.fetchChatTurn.mockResolvedValue({ message_id: "m1", channel: "web", started_at: "", stopping: false });
+    api.fetchChatTurn.mockResolvedValue({ message_id: "m1", channel: "web", started_at: "", stopping: false, can_interrupt: true });
     await mount();
     let release!: (rows: unknown[]) => void;
     api.fetchChatMessages.mockReturnValue(new Promise((r) => { release = r; }));
     api.fetchChatTurn.mockResolvedValue(null);
     await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
-    api.fetchChatTurn.mockResolvedValue({ message_id: "m2", channel: "web", started_at: "", stopping: false });
+    api.fetchChatTurn.mockResolvedValue({ message_id: "m2", channel: "web", started_at: "", stopping: false, can_interrupt: true });
     await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
     await act(async () => { release([{ message_id: "m0", role: "user", content: "old", created_at: "2026-01-01T00:00:00Z" }]); });
     await flush();

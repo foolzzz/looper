@@ -37,9 +37,9 @@ class _PerTurnSession:
     label = "manager"
     pid = None
     shares_bridge = False
-
-    async def end_turn_processes(self) -> None:
-        pass
+    # Stoppable, though Looper's per-turn runtimes are not (they have no interrupt): what is tested is the binding of
+    # a call that comes late, which a turn bridged per turn has whatever ended it.
+    can_interrupt = True
 
     def __init__(self, ops: ManagerOps, turn_file: Path) -> None:
         self.ops, self.turn_file = ops, turn_file

@@ -6,9 +6,10 @@ Run by hand (it needs Claude Code or OMP with a DeepSeek key, and a disposable P
         [--ports 8791-8799] [--deepseek-model deepseek-flash] [--key-from-zsh]
 
 Every cell sends a message through ``POST /api/chat/send``, follows its events, stops at the cell's moment through
-``POST /api/chat/stop`` and checks what is left. The server has a database, runtime root and port of its own; it
-never touches ``~/.looper`` and is killed with its process tree in ``finally``. The report is Markdown, home and
-temp paths redacted.
+``POST /api/chat/stop`` and checks what is left. OMP runs per turn and has no interrupt: its cell checks that the
+stop is refused and the reply completes. A process that detached from the agent's tree is not in scope. The server
+has a database, runtime root and port of its own; it never touches ``~/.looper`` and is killed with its process tree
+in ``finally``. The report is Markdown, home and temp paths redacted.
 """
 
 from __future__ import annotations
@@ -48,25 +49,13 @@ class Cell:
     prompt: str
     running: int = 0  # at the moment, wait for this many pids: the stop comes while the command runs
     after_s: float = 0.0  # stop this long after the moment
-    detached: bool = False  # its command leaves a sleeper detached (setsid, its parent gone): see ``best_effort``
+    refused: bool = False  # the runtime has no interrupt: the stop is refused and the reply completes
 
 
 _PIDS = ("Run the shell commands below one after another with your Bash tool, and before anything else inside "
          "each command run `echo $$ >> {file}`. ")
 _SLEEP = _PIDS + "Command 1: `sleep 120`. After it finishes say done."
-# A sleeper in a session of its own (``os.setsid``: macOS has no setsid command) whose parent exits at once, as #339
-# reproduced; it writes its own pid too, so a survivor is seen, and again to ``<file>.detached``, so it is told apart
-# from the shell. Python forks it itself: OMP runs commands in its brush-core shell, where the sleeper of a
-# backgrounded subshell (``(… &)``, kept as cell dx) never ran.
-_SETSID_PY = ("import os, time\nif os.fork() == 0:\n    os.setsid()\n"
-              "    for name in (\"{file}\", \"{file}.detached\"):\n"
-              "        f = open(name, \"a\")\n        f.write(\"%d\\n\" % os.getpid())\n        f.close()\n"
-              "    time.sleep(120)\n")
-_SETSID = _PIDS + ("Command 1: `python3 {script}; sleep 60` (the script forks a sleeper and exits at once). "
-                   "After it finishes say done.")
-_SETSID_SUBSHELL = _PIDS + ("Command 1: `(python3 -c 'import os, time; os.setsid(); f = open(\"{file}\", \"a\"); "
-                            "f.write(\"%d\\n\" % os.getpid()); f.close(); time.sleep(120)' &); sleep 60`. "
-                            "After it finishes say done.")
+_SHORT_SLEEP = _PIDS + "Command 1: `sleep 10`. After it finishes say done."
 _TEXT = "Count from 1 to 300, one number per line, without any tool."
 _TOOL_THEN_TEXT = _PIDS + "Command 1: `sleep 1`. Then write a long poem of 60 lines."
 
@@ -74,32 +63,23 @@ _COMMON = (
     Cell("a", "stop right after send", "send", _SLEEP),
     Cell("b", "stop at the first tool activity", "activity", _SLEEP, running=1),
     Cell("c", "stop at the first text delta", "delta", _TEXT),
-    Cell("d", "stop at the first tool activity, a setsid child", "activity", _SETSID, running=2, detached=True),
 )
 _CLAUDE_ONLY = (Cell("e", "stop after the tool, in the text", "delta", _TOOL_THEN_TEXT),)
-# By hand only (--cells dx): cell d as first written, a subshell in the background.
-_DIAGNOSTIC = (Cell("dx", "cell d with a backgrounded subshell", "activity", _SETSID_SUBSHELL, running=2,
-                    detached=True),)
-# OMP gives a message's text only at its end (``OmpStream`` drops ``message_update``): its first delta is the whole
-# message, so cell c's stop finds a turn that is usually over. This one stops while the model is still writing.
-_OMP_ONLY = (Cell("f", "stop while the text is written, before it is shown", "thinking", _TEXT, after_s=1.5),)
-
-
-def best_effort(cell: Cell, platform: str = sys.platform) -> bool:
-    """Detached sleepers are recorded, rather than a pass criterion, on every platform (RFC 6.6 and 10)."""
-    return cell.detached
+# OMP runs one process per turn, with no interrupt: Looper refuses its stop rather than kill it.
+_REFUSED = (Cell("r", "a stop at the first tool activity is refused", "activity", _SHORT_SLEEP, running=1,
+                 refused=True),)
 
 
 def cells_for(runtime: str) -> tuple[Cell, ...]:
-    return _COMMON + (_CLAUDE_ONLY if runtime == "claude" else _OMP_ONLY)
+    return _COMMON + _CLAUDE_ONLY if runtime == "claude" else _REFUSED
 
 
 def chosen_cells(runtime: str, keys: str | None) -> tuple[Cell, ...]:
-    """The runtime's cells, or those of ``keys`` (comma-separated; the diagnostic ones too)."""
+    """The runtime's cells, or those of ``keys`` (comma-separated)."""
     if not keys:
         return cells_for(runtime)
     wanted = keys.split(",")
-    return tuple(c for c in cells_for(runtime) + _DIAGNOSTIC if c.key in wanted)
+    return tuple(c for c in cells_for(runtime) if c.key in wanted)
 
 
 # Not stopped: one write call of Looper's own tools in an ordinary turn, so the turn binding's match (6.3) is seen
@@ -271,9 +251,8 @@ def render_report(runtime: str, results: list[CellResult], *, claude_version: st
     if log_counts is not None:
         lines.append("- server log: " + ", ".join(f"`{k}` {v}" for k, v in log_counts.items()))
     lines += ["", "| cell | rep | result | why | timeline (s after send) |", "| --- | --- | --- | --- | --- |"]
-    recorded = {c.key for c in (*_COMMON, *_DIAGNOSTIC) if c.detached}
     for r in results:
-        status = "recorded" if r.cell in recorded else "pass" if not r.failures else "FAIL"
+        status = "pass" if not r.failures else "FAIL"
         lines.append(f"| {r.cell} | {r.rep} | {status} | {'; '.join(r.failures) or '-'} | {r.timeline or '-'} |")
     return redact("\n".join(lines) + "\n", tmp=tmp)
 
@@ -423,9 +402,7 @@ def run_cell(api: Api, database_url: str, cell: Cell, rep: int, work: Path, cloc
     """``clock_offset``: the database's clock minus this one's (the actions after the stop are read by time)."""
     session = f"stop-{uuid.uuid4().hex[:10]}"
     pid_file = work / f"pids-{cell.key}-{rep}.txt"
-    script = work / f"sleeper-{cell.key}-{rep}.py"
-    script.write_text(_SETSID_PY.format(file=pid_file), encoding="utf-8")
-    prompt = cell.prompt.format(file=pid_file, script=script)
+    prompt = cell.prompt.format(file=pid_file)
     records = api.get("/api/llm-records", agent_id="manager", limit=1)["records"]
     since = max((r["id"] for r in records), default=0)
     message_id = f"m-{uuid.uuid4().hex[:10]}"
@@ -459,11 +436,16 @@ def run_cell(api: Api, database_url: str, cell: Cell, rep: int, work: Path, cloc
         try:
             api.post("/api/chat/stop", {"message_id": message_id})
         except EvalError as exc:
+            if cell.refused:
+                return refused_cell(cell, rep, stream, exc, timeline)
             _wait(lambda: any(k == "answer.final" for _, k, _ in stream.snapshot()), FINAL_WITHIN_S)
             if "not_running" in str(exc) and whole_before_stop(stream.snapshot(), stopped_at):
                 return CellResult(cell.key, rep, [], timeline() + "; the reply was whole before the stop: "
                                   "409 not_running (the turn had ended)")
             return CellResult(cell.key, rep, [f"the stop was refused: {exc}"], timeline())
+        if cell.refused:
+            _wait(lambda: any(k == "answer.final" for _, k, _ in stream.snapshot()), FINAL_WITHIN_S)
+            return CellResult(cell.key, rep, ["the stop was taken, though the runtime has no interrupt"], timeline())
         final = _wait(lambda: next((p for _, k, p in stream.snapshot() if k == "answer.final"), None), FINAL_WITHIN_S)
         after = None
         if final is not None:
@@ -474,15 +456,15 @@ def run_cell(api: Api, database_url: str, cell: Cell, rep: int, work: Path, cloc
     time.sleep(GONE_AFTER_S)
     pids = _read_pids(pid_file)
     alive = [p for p in pids if _alive(p)]
-    if best_effort(cell):
-        detached = set(_read_pids(pid_file.with_name(pid_file.name + ".detached")))
-        if left := [p for p in alive if p in detached]:
-            line += f"; best effort: the detached sleeper {left} was left running (not a pass criterion)"
-            for pid in left:  # (it would sleep on through the next cells)
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.kill(pid, signal.SIGKILL)
-        alive = [p for p in alive if p not in detached]
     record = _latest_record(api, since)
+    stop = ((record or {}).get("metadata") or {}).get("user_stop") or (record or {}).get("user_stop")
+    if alive and isinstance(stop, dict) and stop.get("method") == "control":
+        # Claude ended the turn on its interrupt: what it left running is its own, recorded and not a failure.
+        line += f"; Claude left {sorted(alive)} running after its interrupt (its own)"
+        for pid in alive:  # (it would sleep on through the next cells)
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+        alive = []
     actions = _db_rows(database_url, "SELECT status, error_code FROM manager_actions "
                        "WHERE created_at >= to_timestamp($1) AND chat = $2 ORDER BY id", started_at + clock_offset,
                        session)
@@ -498,17 +480,25 @@ def run_cell(api: Api, database_url: str, cell: Cell, rep: int, work: Path, cloc
         final=final, final_after_s=after, pids=pids, alive=alive, record=record,
         actions=actions, confirmations=confirmations, next_text=str((reply or {}).get("content") or ""),
         session_before=before, session_after=after_id, expect_pids=cell.moment != "delta" or cell.key == "e")
-    if cell.key in ("c", "f"):
+    if cell.key == "c":
         obs.expect_pids = False
     if cell.moment == "send":  # stopped before the model saw it (7): no command, and no run record unless it started
         obs.expect_pids = False
         obs.expect_record = record is not None
-    stop = ((record or {}).get("metadata") or {}).get("user_stop") or (record or {}).get("user_stop")
     if isinstance(stop, dict):
         line += f"; user_stop phase {stop.get('phase')}, method {stop.get('method')}"
     elif record is None:
         line += "; no run record"
     return CellResult(cell.key, rep, verdict(obs), line)
+
+
+def refused_cell(cell: Cell, rep: int, stream: _Stream, exc: EvalError, timeline: Callable[[], str]) -> CellResult:
+    """A runtime without an interrupt: the stop is refused (409 ``cannot_interrupt``) and the reply completes."""
+    why = [] if "cannot_interrupt" in str(exc) else [f"the stop was refused, but not as cannot_interrupt: {exc}"]
+    final = _wait(lambda: next((p for _, k, p in stream.snapshot() if k == "answer.final"), None), 180)
+    if final is None or final.get("outcome") != "answered":
+        why.append(f"the reply did not complete: {(final or {}).get('outcome')!r}")
+    return CellResult(cell.key, rep, why, timeline() + "; stop refused: cannot_interrupt")
 
 
 def run_probe(api: Api, database_url: str, rep: int) -> CellResult:
@@ -625,8 +615,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.out:
         args.out.write_text(report, encoding="utf-8")
     print(report)
-    recorded = {c.key for c in chosen_cells(args.runtime, args.cells) if c.detached}
-    return 0 if all(not r.failures for r in results if r.cell not in recorded) else 1
+    return 0 if all(not r.failures for r in results) else 1
 
 
 def _read_all_pids(work: Path) -> list[int]:

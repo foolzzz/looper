@@ -234,6 +234,8 @@ class ResidentSession(Protocol):
     def totals(self) -> Usage: ...
     @property
     def shares_bridge(self) -> bool: ...  # False unless the runtime's turns share one bridge process with the owner
+    @property
+    def can_interrupt(self) -> bool: ...  # Whether the runtime ends a turn on request (a user's stop is offered)
     def stale(self, signature: Any) -> bool: ...
     async def start(self, command: list[str], *, cwd: str, signature: Any, env: dict[str, str] | None = None,
                     totals: Usage | None = None, autonomous: Callable[[Any], Awaitable[Any]] | None = None,
@@ -242,9 +244,6 @@ class ResidentSession(Protocol):
                        tag: Any = None, stop: Callable[[], CapStop | None] | None = None,
                        cancel: TurnCancel | None = None) -> ResidentTurn: ...
     async def stop(self, *, kill: bool = False) -> None: ...
-    # End every process the last turn started that still runs (the session and its own processes stay): for a turn
-    # that returned an answer and was then stopped, after ``run_turn`` dropped its cancel
-    async def end_turn_processes(self) -> None: ...
     # A wrapper over the running turn's ``cancel`` (request it, await the turn's end); None: no turn running
     async def interrupt(self) -> StopMethod | None: ...
 
@@ -308,6 +307,10 @@ class RuntimeAdapter(ABC):
     can_replace_system_prompt: ClassVar[bool] = False
     # How its resident sessions run. A runtime with ACP falls back to a process per turn when it cannot serve one.
     resident_transport: ClassVar[ResidentTransport] = ResidentTransport.PER_TURN
+    # Whether its resident session ends a turn on request (Claude Code's control interrupt, Grok's ACP cancel), so
+    # the user can stop the Manager's reply. A session run per turn has no such channel: a stop is refused, never
+    # turned into a kill (``ResidentSession.can_interrupt`` says it of a running session).
+    can_interrupt: ClassVar[bool] = False
 
     # --- Registration ---
 

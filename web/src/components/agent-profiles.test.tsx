@@ -38,7 +38,7 @@ const REGISTRY: Registry = {
   runtime_types: ["claude-code", "codex", "stand-in"].map<Registry["runtime_types"][number]>((type) => ({
     type, label: type === "stand-in" ? "Stand-in" : "Claude Code", default_executable: type,
     runtime_id: `rt-${type}`, protocols: type === "codex" ? ["openai-responses"] : type === "stand-in" ? ["anthropic-messages", "openai-chat"] : ["anthropic-messages"], capabilities: [], roles: ["worker"],
-    auth_kinds: ["api_key", "oauth"], can_replace_system_prompt: type !== "stand-in",
+    auth_kinds: ["api_key", "oauth"], can_replace_system_prompt: type !== "stand-in", can_interrupt: type === "claude-code",
     supported_models: null,
     replace_system_prompt_refusal: type === "stand-in" ? REFUSAL : null,
   })),
@@ -569,7 +569,7 @@ const PI_TYPE: RuntimeType = {
   type: "pi", label: "pi", default_executable: "pi", runtime_id: "rt-pi",
   supported_models: null,
   protocols: ["openai-chat", "openai-responses"], capabilities: ["run", "resident_session", "resume"],
-  roles: [...PI_ROLES], auth_kinds: ["api_key"], can_replace_system_prompt: true, replace_system_prompt_refusal: null,
+  roles: [...PI_ROLES], auth_kinds: ["api_key"], can_replace_system_prompt: true, replace_system_prompt_refusal: null, can_interrupt: false,
 };
 
 const PI_PROFILE: AgentProfile = {

@@ -77,7 +77,7 @@ async def _exited(process: asyncio.subprocess.Process) -> None:
 
 
 def _end_bound() -> float:
-    """The normal grace and reap, plus a second. Slow ps may outlast this wait; shielded cleanup still runs."""
+    """How long a turn waits for the cleanup of its process tree: the grace, the reap and a second."""
     return proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC + 1
 
 
@@ -118,8 +118,6 @@ class PerTurnSession(ABC):
         self._done: asyncio.Future[None] | None = None  # set when the running turn has ended
         self._tree: proc_tree.TurnTree | None = None  # the running turn's process tree, once spawned
         self._end_task: asyncio.Future[None] | None = None  # the cleanup of that tree, once started
-        self._finished_tree: proc_tree.TurnTree | None = None  # the last turn's tree, until the next turn starts
-        self._finished_end: asyncio.Future[None] | None = None  # the end of that tree, once a stop started it
         self._totals = Usage()
         self._price: Price | None = None  # prices the totals at the provider's prices
 
@@ -138,6 +136,10 @@ class PerTurnSession(ABC):
     @property
     def shares_bridge(self) -> bool:
         return False
+
+    @property
+    def can_interrupt(self) -> bool:
+        return False  # one process per turn, with no interrupt channel: the Manager refuses a stop
 
     @property
     def pid(self) -> int | None:
@@ -207,15 +209,13 @@ class PerTurnSession(ABC):
         """
         assert self.started
         cancel = cancel or TurnCancel.never()
-        self._active, self._cancel, self._finished_tree = True, cancel, None
+        self._active, self._cancel = True, cancel
         self._done = asyncio.get_running_loop().create_future()
         unregister = cancel.on_request(self._on_stop)
         try:
             return await self._run_turn(text, on_event, tag=tag, stop=stop, cancel=cancel)
         finally:
             unregister()
-            if self._end_task is None:  # (an ended tree has nothing left to end)
-                self._finished_tree = self._tree
             self._active, self._cancel, self._tree, self._end_task = False, None, None, None
             if not self._done.done():
                 self._done.set_result(None)
@@ -224,7 +224,7 @@ class PerTurnSession(ABC):
         """The turn's cancel was requested: end its tree once the process exists (otherwise ``_run_turn`` sees the
         request when it has spawned)."""
         if self._tree is not None and self._end_task is None:
-            self._end_task = proc_tree.keep(self._tree.end())
+            self._end_task = asyncio.ensure_future(self._tree.end())
 
     def _stopped_turn(self, *, session_started: bool, usage: Usage, complete: bool, sent: bool) -> ResidentTurn:
         from ..claude_cli import ResidentTurn, user_stop_result
@@ -236,7 +236,7 @@ class PerTurnSession(ABC):
     async def _end_tree(self, process: asyncio.subprocess.Process, tree: proc_tree.TurnTree) -> None:
         """End the turn's tree, through the stop's own end when it is under way; bounded."""
         if self._end_task is None:
-            self._end_task = proc_tree.keep(tree.end())
+            self._end_task = asyncio.ensure_future(tree.end())
         try:
             await asyncio.wait_for(asyncio.shield(self._end_task), _end_bound())
         except asyncio.TimeoutError:
@@ -341,20 +341,6 @@ class PerTurnSession(ABC):
             self._turn_ended(new_session=resuming is None and session_started)
         return ResidentTurn(result, None if result is not None else process.returncode,
                             session_started=session_started, usage=self.turn_usage(result), prompt_sent=sent)
-
-    async def end_turn_processes(self) -> None:
-        """End every process the last turn started, a background command that outlived its process included."""
-        tree, self._finished_tree = self._finished_tree, None
-        if tree is None:
-            return
-        # Shielded: the bound stops the wait, not the end, whose SIGKILL of the visible tree still runs.
-        self._finished_end = end = proc_tree.keep(tree.end())
-        try:
-            await asyncio.wait_for(asyncio.shield(end), _end_bound())
-        except asyncio.TimeoutError:
-            logger.warning("%s: the stopped turn's processes were not ended within %.1f s", self._label, _end_bound())
-        except Exception:
-            logger.warning("%s: could not end the stopped turn's processes", self._label, exc_info=True)
 
     async def interrupt(self) -> StopMethod | None:
         """Request the running turn's cancel and wait (bounded) for the turn to end its process tree; the turn

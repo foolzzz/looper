@@ -74,6 +74,7 @@ const stagedKey = (sessionId: string) => `looper-chat-staged-${sessionId}`;
 const TURN_POLL_MS = 3000;
 const STOP_DISABLED_NOTICE = "Stopping a reply is off (Settings → Chat).";
 const OTHER_MESSAGE_NOTICE = "The Manager is answering another message first; this one has not started.";
+const CANNOT_INTERRUPT_NOTICE = "This runtime cannot interrupt a reply.";
 
 function readStaged(sessionId: string): string[] {
   try {
@@ -345,6 +346,8 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
       alive = false;
     };
   }, []);
+  // Whether the Manager's runtime can interrupt a reply (the turn's `can_interrupt`); a runtime run per turn cannot.
+  const [interruptible, setInterruptible] = useState(true);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const sessionIdRef = useRef(sessionId);
@@ -770,6 +773,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
         turn = undefined;
       }
       if (poll.stopped) return;
+      if (turn) setInterruptible(turn.can_interrupt);
       if (turn === undefined || turnAnswers(turn, ids)) {
         poll.timer = setTimeout(tick, TURN_POLL_MS);
         return;
@@ -801,6 +805,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     }
     if (sid !== sessionIdRef.current || managerId !== currentRef.current.managerId || sendingRef.current) return;
     if (turn) {
+      setInterruptible(turn.can_interrupt);
       followTurn(sid, turn.client_message_id ? [turn.message_id, turn.client_message_id] : [turn.message_id]);
     } else {
       stopPoll();
@@ -830,15 +835,30 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const serverTurnHere = serverTurn && serverTurn.sid === sessionId ? serverTurn : null;
   const replying = sending || serverTurnHere !== null;
   const runningId = sending ? ownId : (serverTurnHere ? serverTurnHere.ids[serverTurnHere.ids.length - 1] : null);
-  const canStop = stopEnabled && target.kind === "manager" && runningId !== null;
+  const stoppable = stopEnabled && target.kind === "manager" && runningId !== null;
+  const canStop = stoppable && interruptible;
+  // The page's own reply: read whether its runtime can interrupt it (the server's turns are read as they are followed).
+  useEffect(() => {
+    if (!sending || !ownId || !stopEnabled || target.kind !== "manager") return;
+    let alive = true;
+    fetchChatTurn(sessionId).then((turn) => alive && turn && setInterruptible(turn.can_interrupt), () => {});
+    return () => {
+      alive = false;
+    };
+  }, [sending, ownId, stopEnabled, target.kind, sessionId]);
 
   const handleStop = async () => {
     if (!runningId) return;
     if (!stopEnabled) return setNotice(STOP_DISABLED_NOTICE); // a typed /stop: nothing is sent
+    if (!interruptible) return setNotice(CANNOT_INTERRUPT_NOTICE);
     try {
       const { state } = await stopChatReply(runningId);
       if (state === "disabled") setNotice(STOP_DISABLED_NOTICE);
       else if (state === "other_message") setNotice(OTHER_MESSAGE_NOTICE);
+      else if (state === "cannot_interrupt") {
+        setInterruptible(false);
+        setNotice(CANNOT_INTERRUPT_NOTICE);
+      }
     } catch (err) {
       setNotice(err instanceof Error ? err.message : String(err));
     }
@@ -1432,6 +1452,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
           history={historyFrom(messages)}
           replying={replying}
           canStop={canStop}
+          stopRefusal={stoppable && !interruptible ? CANNOT_INTERRUPT_NOTICE : undefined}
           onSend={(text) => {
             setInput("");
             void handleSend(text);

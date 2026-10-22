@@ -9,13 +9,13 @@ Each runtime runs a stand-in process (real pipes, real process trees). A turn is
 - ``streaming``: while it streams text;
 - ``blocked``: while writing the message to it is blocked (it reads nothing: the pipe fills);
 - ``tool``: while a tool call it started runs (a child process, in a session of its own: ``setsid``);
-- ``detached`` (Claude): the tool's shell started a ``setsid`` sleeper and exited before any refresh saw either;
 - ``done``: after it wrote the turn's result, before the turn is cleaned up (the process lingers);
 - ``tail``: the process has exited and its stderr is read (per-turn runtimes, and the Grok fallback).
 
 Every cell checks the same things: the stop is not lost (the turn ends stopped, never as a success); it ends within a
-bound with the agent, its group and visible tree ended (detached daemons are best effort on every platform); nothing of it reaches the next turn; the next turn runs and
-resumes the same session. The Manager's own phases (received, preparing, starting, running, ended) over the same
+bound; a runtime that ended the turn on its interrupt (``CONTROL``, ``CANCEL``) had no process signalled, the tool the
+turn started included, and one that did not (or a per-turn process) was ended with its group and tree; nothing of it
+reaches the next turn; the next turn runs and resumes the same session. The Manager's own phases (received, preparing, starting, running, ended) over the same
 stand-ins are in ``tests/test_manager_stop_matrix.py``; the table of cells is in ``chat-stop-v2.zh-CN.md`` 8.2.
 """
 
@@ -202,7 +202,7 @@ def test_per_turn_stop_after_the_process_exited_before_the_turn_returned(
 # --- Claude Code: one resident stream-json process (``claude_cli.ResidentClaude``) ---
 
 
-CLAUDE_WINDOWS = ["silent", "streaming", "blocked", "tool", "detached", "done"]
+CLAUDE_WINDOWS = ["silent", "streaming", "blocked", "tool", "done"]
 
 
 @pytest.mark.parametrize("obey", [False, True], ids=["deaf", "obeys"])
@@ -228,8 +228,6 @@ def test_resident_claude_stop_in_every_window(
         first = await session.run_turn("hello", Seen())
         assert _answered(first), first.result_event
         process = session.pid
-        agent = int((directory / "pids").read_text().split()[0])
-        assert agent == process
         seen, stop, cancel = Seen(hold_at="result" if window == "done" else None), Stop(), TurnCancel()
         text = BIG if window == "blocked" else f"mode:{window}{' obey' if obey else ''}"
         running = asyncio.create_task(session.run_turn(text, seen, stop=stop, cancel=cancel))
@@ -265,15 +263,7 @@ def test_resident_claude_stop_in_every_window(
             await asyncio.gather(running, return_exceptions=True)
         seen.closed = True
         kept = session.started and session.pid == process
-        # Detached daemons are outside the guarantee on every platform. Clean up
-        # the fixture; the assertions below still check the agent and all visible-tree cells.
         alive = [pid for pid in pids if _alive(pid)]
-        if window == "detached":
-            for pid in alive:
-                if pid != agent:
-                    with contextlib.suppress(ProcessLookupError):
-                        os.kill(pid, signal.SIGKILL)
-            alive = [pid for pid in alive if pid == agent]
         (directory / "stall").unlink(missing_ok=True)
         if not session.started or session.stale("s"):
             await session.stop()
@@ -281,12 +271,12 @@ def test_resident_claude_stop_in_every_window(
         nxt = Seen()
         after = await asyncio.wait_for(session.run_turn("mode:answer", nxt), BOUND)
         await session.stop(kill=True)
-        return method, turn, seen, kept, alive, after, nxt, agent
+        return method, turn, seen, kept, pids, alive, after, nxt, process
 
-    method, turn, seen, kept, alive, after, nxt, agent = asyncio.run(asyncio.wait_for(run(), 60))
+    method, turn, seen, kept, pids, alive, after, nxt, process = asyncio.run(asyncio.wait_for(run(), 60))
     if window == "done" or (obey and window != "blocked"):
         assert method is StopMethod.CONTROL and kept  # the process and its session stay for the next turn
-        assert alive == [agent]  # a tool the turn started is gone
+        assert process in alive and alive == pids  # nothing was signalled: a tool the turn started is Claude's
     else:
         assert method is StopMethod.KILL and alive == []
     assert _stopped(turn) and turn.stopped is method, turn.result_event
@@ -376,7 +366,7 @@ def test_grok_acp_stop_in_every_window(tmp_path: Path, window: str, monkeypatch:
         session._env = env
         stall.unlink(missing_ok=True)
         gone = pid is None or not _alive(pid) or session.pid == pid
-        gone = gone and not any(_alive(p) for p in tool_pids)  # (a tool's process in a session of its own too)
+        tools = [p for p in tool_pids if _alive(p)]  # (a tool's process in a session of its own)
         transport = session.transport
         if session.stale("s"):  # the owner starts over, resuming the saved session
             await session.stop()
@@ -386,10 +376,15 @@ def test_grok_acp_stop_in_every_window(tmp_path: Path, window: str, monkeypatch:
         after = await asyncio.wait_for(session.run_turn("next", nxt), BOUND)
         resumed = session._session
         await session.stop()
-        return method, turn, seen, gone, transport, after, nxt, sid, resumed
+        for tool in tools:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(tool, signal.SIGKILL)
+        return method, turn, seen, gone, tools, transport, after, nxt, sid, resumed
 
-    method, turn, seen, gone, transport, after, nxt, sid, resumed = asyncio.run(asyncio.wait_for(run(), 60))
+    method, turn, seen, gone, tools, transport, after, nxt, sid, resumed = asyncio.run(asyncio.wait_for(run(), 60))
     assert method is (StopMethod.KILL if window in ("before_spawn", "spawning", "blocked") else StopMethod.CANCEL)
+    if window == "tool":
+        assert tools  # Grok ended the turn on its cancel: nothing was signalled, its tool is its own
     assert _stopped(turn) and turn.stopped is method, turn.result_event
     assert turn.result_event.get("is_error"), turn.result_event  # never a success
     assert not seen.late and gone
@@ -509,18 +504,3 @@ def test_grok_fallback_stop_in_every_window(tmp_path: Path, window: str, monkeyp
     if window == "tail":
         assert not any(e.get("type") == "result" and not e.get("is_error") for e in seen.events)
 
-
-
-def test_grok_fallback_end_turn_processes_ends_the_per_turn_sessions_tree(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A stop while the events are handled, after run_turn has returned an answer: the Manager has the turn's processes
-    # ended. A session that fell back keeps the turn's tree on its per-turn session (it has none of its own).
-    session = grok_acp.AcpGrok(label="manager")
-    session._fallback = True
-    ended: list[bool] = []
-
-    async def end_turn_processes() -> None:
-        ended.append(True)
-
-    monkeypatch.setattr(session._legacy, "end_turn_processes", end_turn_processes)
-    asyncio.run(session.end_turn_processes())
-    assert ended == [True]

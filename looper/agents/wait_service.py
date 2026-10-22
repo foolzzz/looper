@@ -357,9 +357,9 @@ async def run_github_pr(check: GithubPrCheck, baseline: Mapping[str, Any] | None
 
 
 async def _end_command(process: asyncio.subprocess.Process, known: proc_tree.Tree | None = None) -> None:
-    """End the command and every process it started, the way a run of Claude is ended (its group signalled
-    before anything is listed)."""
-    await proc_tree.end(process, label="wait command", known=known)
+    """End the command and every process it started, the way a run of Claude is ended."""
+    current = await proc_tree.begin_end(process)
+    await proc_tree.end(process, label="wait command", known={**(known or {}), **current})
 
 
 async def run_command(check: CommandCheck, work_dir: str | os.PathLike[str], *, project_allows: bool) -> Outcome:

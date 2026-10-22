@@ -113,7 +113,7 @@ def test_a_stop_at_each_preparation_step(name: str, agent_db: Any, monkeypatch: 
     asyncio.run(run())
 
 
-def test_stop_after_a_resident_result_ends_its_visible_tree_while_event_persistence_is_blocked(
+def test_a_stop_after_a_resident_result_while_persistence_is_blocked_ends_the_turn_and_signals_nothing(
     tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(manager_module, "STOP_HANDLING_SEC", 0.3, raising=False)
@@ -150,6 +150,14 @@ sys.stdin.read()
 
         monkeypatch.setattr(session, "run_turn", run_turn)
         monkeypatch.setattr(manager, "_save_session_state", blocked)
+        signalled: list[int] = []
+        real_signal = proc_tree._signal
+
+        def signal_(process: Any, tree: Any, sig: int) -> None:
+            signalled.append(sig)
+            real_signal(process, tree, sig)
+
+        monkeypatch.setattr(proc_tree, "_signal", signal_)
         (tmp_path / "spawn").touch()
         envelope = _web("你好")
         handling = asyncio.create_task(manager._handle(envelope))
@@ -162,14 +170,12 @@ sys.stdin.read()
             assert _alive(child)
             assert session.started
             assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
-            await _until(lambda: (tmp_path / "child.pid").exists(), timeout=2)
-            child = int((tmp_path / "child.pid").read_text())
-            await _until(lambda: not _alive(child), timeout=2)
-            assert not release.is_set()  # cleanup does not depend on the database becoming available
             await asyncio.wait_for(asyncio.shield(handling), 5)
+            assert not release.is_set()  # the stop does not wait for the database
             (reply,) = _replies(queue)
             assert reply["outcome"] == "stopped" and "error" not in reply
-            assert session.started  # the resident and its baseline survive this turn's stop
+            assert session.started and _alive(child)  # the turn is over; Claude and what it started are its own
+            assert signalled == []
         finally:
             release.set()
             if not handling.done():
@@ -254,35 +260,11 @@ def test_a_stop_during_the_user_message_persist_still_stores_it(agent_db: Any, m
     asyncio.run(run())
 
 
-def test_a_stop_while_the_events_are_handled_ends_the_turns_processes(agent_db: Any) -> None:
-    # run_turn has returned an answer (and dropped its cancel) when the stop comes: nothing else ends what the turn
-    # started, so the Manager must, before it replies stopped.
-    async def run() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            session = _Session(hold=False)
-            manager, bus, queue = _manager(Path(tmp), session)
-            envelope = _web("你好")
-
-            async def stop_while_persisting() -> None:
-                if session.ended_turns == 0 and manager.turn_for(envelope.message_id) is not None \
-                        and not manager.turn_for(envelope.message_id).cancel.requested:  # type: ignore[union-attr]
-                    assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
-
-            manager._save_session_state = stop_while_persisting  # type: ignore[method-assign]
-            await asyncio.wait_for(manager._handle(envelope), 5)
-            (reply,) = _replies(queue)
-            assert reply["outcome"] == "stopped"
-            assert session.ended_turns == 1
-            await bus.shutdown()
-
-    asyncio.run(run())
-
-
-def test_a_stop_while_the_events_are_handled_ends_the_processes_at_once_and_waits_for_the_handling_within_a_bound(
+def test_a_stop_while_the_events_are_handled_waits_for_the_handling_within_a_bound(
     agent_db: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The database holds the handling of the turn's events (persisting the session): the stop ends the turn's
-    # processes at once, without waiting for it, and the turn ends stopped once the handling has had its time.
+    # The database holds the handling of the turn's events (persisting the session) after the runtime answered: the
+    # stop is taken (no 409), and the turn ends stopped once the handling has had its time.
     monkeypatch.setattr(manager_module, "STOP_HANDLING_SEC", 0.3, raising=False)
 
     async def run() -> None:
@@ -302,12 +284,10 @@ def test_a_stop_while_the_events_are_handled_ends_the_processes_at_once_and_wait
             try:
                 await asyncio.wait_for(persisting.wait(), 5)
                 assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
-                await _until(lambda: session.ended_turns == 1, timeout=2)
-                assert not release.is_set()
                 await asyncio.wait_for(asyncio.shield(handling), 5)
+                assert not release.is_set()
                 (reply,) = _replies(queue)
                 assert reply["outcome"] == "stopped"
-                assert session.ended_turns == 1
             finally:
                 release.set()
                 await asyncio.gather(handling, return_exceptions=True)

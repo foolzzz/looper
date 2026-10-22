@@ -435,6 +435,8 @@ export interface ChatTurn {
   channel: string;
   started_at: string;
   stopping: boolean;
+  /** Whether the Manager's runtime can interrupt the reply (Claude Code, Grok); a runtime run per turn cannot. */
+  can_interrupt: boolean;
 }
 
 /** Stop the Manager's reply to a message. A 409 (no turn running, or another message's turn) resolves with its
@@ -2746,6 +2748,8 @@ export interface RuntimeType {
   effort_levels?: string[] | null;
   can_replace_system_prompt: boolean;
   replace_system_prompt_refusal: string | null;
+  /** Whether its Manager or Planner session can interrupt a reply (a user's stop is offered). */
+  can_interrupt: boolean;
 }
 
 /** A runtime on this machine: built in (one per type found on the server's PATH), or one registered by hand

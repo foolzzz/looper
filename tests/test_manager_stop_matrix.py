@@ -12,8 +12,10 @@ pipes, real process trees) under the runtimes' own sessions. The turn is stopped
 
 Each cell checks what the page and the next turn see: ``GET /api/chat/turn`` while the turn is held, the record's
 ``user_stop.phase``, the reply's outcome, the note the next turn is told (the user stopped it, or withdrew it), that
-the next turn is answered in the same session, and that no process of the stopped turn is left (a resident
-runtime's own process and its baseline stay). The runtimes' own windows are in ``tests/test_stop_matrix.py``.
+the next turn is answered in the same session, and which processes the stop ended: none when the runtime ended the
+turn on its interrupt (a tool it left running is its own), the agent with its tree when it ignored it. The runtimes
+run per turn (OMP, Codex) have no interrupt: their stop is refused in every phase and the reply runs on. The runtimes'
+own windows are in ``tests/test_stop_matrix.py``.
 """
 
 from __future__ import annotations
@@ -46,6 +48,8 @@ from tests.test_manager_new_session import _web
 from tests.test_manager_reply import WEB
 
 RUNTIMES = ["claude-obeys", "claude-deaf", "omp", "codex", "grok-acp"]
+STOPPABLE = ["claude-obeys", "claude-deaf", "grok-acp"]  # the runtimes with an interrupt (``can_interrupt``)
+PER_TURN = ["omp", "codex"]
 # How each runtime's stand-in is told what to do: Grok's by the message's text, the others' by a ``mode`` file.
 GROK_TEXT = {"streaming": "HANG", "tool": "SLEEPER", "answer": "work"}
 PAD = "整理一下今天的待办事项并告诉我结果，不用着急，也不必写得太长。" * 4  # (the note quotes the first 80 characters)
@@ -247,7 +251,7 @@ def _run(body: Callable[[], Awaitable[None]]) -> None:
 # --- received ---
 
 
-@pytest.mark.parametrize("runtime", RUNTIMES)
+@pytest.mark.parametrize("runtime", STOPPABLE)
 def test_a_message_stopped_while_it_waits_is_never_started(
     runtime: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
 ) -> None:
@@ -284,7 +288,7 @@ def test_a_message_stopped_while_it_waits_is_never_started(
 # --- preparing ---
 
 
-@pytest.mark.parametrize("runtime", RUNTIMES)
+@pytest.mark.parametrize("runtime", STOPPABLE)
 def test_a_message_stopped_while_it_is_prepared_never_reaches_the_model(
     runtime: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
 ) -> None:
@@ -318,7 +322,7 @@ def test_a_message_stopped_while_it_is_prepared_never_reaches_the_model(
 # --- starting ---
 
 
-@pytest.mark.parametrize("runtime", RUNTIMES)
+@pytest.mark.parametrize("runtime", STOPPABLE)
 def test_a_message_stopped_while_its_runtime_starts_is_not_sent(
     runtime: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
 ) -> None:
@@ -390,7 +394,7 @@ def test_a_message_stopped_during_the_handoff_keeps_the_old_session(
 # --- running ---
 
 
-@pytest.mark.parametrize("runtime", RUNTIMES)
+@pytest.mark.parametrize("runtime", STOPPABLE)
 def test_a_reply_stopped_while_it_streams(
     runtime: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
 ) -> None:
@@ -476,8 +480,8 @@ class Endpoint:
         return await asyncio.to_thread(request)
 
 
-@pytest.mark.parametrize("runtime", RUNTIMES)
-def test_a_reply_stopped_in_a_tool_leaves_no_process_and_refuses_the_late_write(
+@pytest.mark.parametrize("runtime", STOPPABLE)
+def test_a_reply_stopped_in_a_tool_ends_only_an_agent_that_ignored_it_and_refuses_the_late_write(
     runtime: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
 ) -> None:
     async def run() -> None:
@@ -507,13 +511,60 @@ def test_a_reply_stopped_in_a_tool_leaves_no_process_and_refuses_the_late_write(
                 assert [(row["status"], row["error_code"]) for row in endpoint.actions] == [("error", "stopped")]
                 (stop,) = rig.user_stops()
                 assert stop["phase"] == "running" and stop["method"] == METHOD[runtime], stop
-                assert rig.left() == []  # (the tool's process in a session of its own too)
+                if METHOD[runtime] == "kill":  # it ignored the interrupt: the agent and its tree are ended
+                    assert rig.left() == []  # (the tool's process in a session of its own too)
+                else:  # it ended the turn itself: nothing was signalled, the tool it left running is its own
+                    assert rig.left(), rig.processes()
                 assert endpoint.binding() is None
                 again = await endpoint.post(binding, 2)  # later still: the turn is over
                 assert again["error"]["code"] == "stopped" and endpoint.ran == []
                 await _next_turn(rig, session_id, STOPPED_NOTE, notes=1)
             finally:
                 await rig.finish()
+
+    _run(run)
+
+
+# --- a runtime without an interrupt ---
+
+
+@pytest.mark.parametrize("runtime", PER_TURN)
+def test_a_per_turn_runtime_refuses_the_stop_and_its_reply_runs_on(
+    runtime: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+) -> None:
+    signalled: list[int] = []
+    real_signal = proc_tree._signal
+
+    def signal_(process: Any, tree: Any, sig: int) -> None:
+        signalled.append(sig)
+        real_signal(process, tree, sig)
+
+    monkeypatch.setattr(proc_tree, "_signal", signal_)
+
+    async def run() -> None:
+        rig = _case(runtime, tmp_path, monkeypatch, agent_db)
+        await rig.start()
+        try:
+            await rig.answer("WARM")
+            rig.mode("slow")
+            envelope = await rig.send("SLOW")
+            await _until(rig.reached)
+            waiting = await rig.send("WAITING")
+            shown = await rig.api_turn()
+            assert shown is not None and shown["state"] == "running" and shown["can_interrupt"] is False
+            running = rig.processes()[-1:]  # the slow turn's process (the warm turn's has exited)
+            for message in (envelope, waiting):
+                assert await rig.manager.stop_turn(message.message_id, via="web") is StopResult.CANNOT_INTERRUPT
+                token = rig.token(message)
+                assert token.stop is None and not token.cancel.requested
+            await asyncio.sleep(0.3)
+            assert signalled == [] and running and all(map(_alive, running)), (signalled, running)  # nothing signalled
+            (rig.directory / "go").touch()
+            replies = await rig.replied(rig.sent)
+            assert [r["outcome"] for r in replies[-2:]] == ["answered", "answered"], replies
+            assert rig.user_stops() == [] and rig.manager._stopped_notes == []
+        finally:
+            await rig.finish()
 
     _run(run)
 

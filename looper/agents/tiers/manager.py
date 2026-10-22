@@ -390,6 +390,8 @@ def is_new_session_command(text: str) -> bool:
 STOP_COMMAND = "/stop"
 STOP_DONE_REPLY = "已停止当前回复。"
 STOP_IDLE_REPLY = "现在没有正在进行的回复。"
+# A runtime run per turn (Codex exec, OMP -p, Pi, DSH) has no interrupt: the stop is refused, the reply goes on.
+STOP_UNSUPPORTED_REPLY = "当前运行时不能中断回复，回复会照常完成。"
 
 
 def is_stop_command(text: str) -> bool:
@@ -514,6 +516,7 @@ class StopResult(str, Enum):
     ALREADY_STOPPING = "already_stopping"
     NOT_RUNNING = "not_running"
     OTHER_MESSAGE = "other_message"
+    CANNOT_INTERRUPT = "cannot_interrupt"  # the Manager's runtime has no interrupt (``can_interrupt``)
 
 
 class TurnFailed(RuntimeError):
@@ -657,6 +660,12 @@ class ManagerAgent:
         return bool(self._claude.started)
 
     @property
+    def can_interrupt(self) -> bool:
+        """Whether a stop can end this Manager's reply: its session's runtime ends a turn on request (Claude Code,
+        Grok over ACP). A runtime run per turn has no interrupt, and its stop is refused rather than a kill."""
+        return self._claude.can_interrupt
+
+    @property
     def agent_id(self) -> str:
         return self._definition.id
 
@@ -766,6 +775,9 @@ class ManagerAgent:
             channel, chat = origin["channel"], origin["chat"]
             if not chat_settings.stop_enabled():
                 await self._send_reply(envelope, chat_settings.STOP_DISABLED_REPLY, persist=False)
+                return
+            if not self.can_interrupt:
+                await self._send_reply(envelope, STOP_UNSUPPORTED_REPLY, persist=False)
                 return
             tokens = self._turns.live_for(channel, chat) if channel and chat else []
             stopped = 0
@@ -1079,9 +1091,6 @@ class ManagerAgent:
             # Not abandoned by a stop: the handoff's turn takes the token's cancel and ends itself.
             await token.keep("switch_session", self._switch_session(prepared.switch, token.cancel),
                              HANDOFF_TIMEOUT_SEC + 30)
-        # A stop's budget (10 s) covers ``STOP_GRACE_SEC`` and a ps or two, not the bounded end of the tree: when it
-        # runs out the stop is given up, but the end it is in runs to completion (``proc_tree.finish``), so every
-        # process of the stale session is still signalled.
         if launch.runtime is not self._claude_runtime:
             # Each runtime type keeps its resident sessions its own way (after the old one's handoff).
             await token.keep("claude_stop", self._claude.stop(), 10)
@@ -1169,12 +1178,15 @@ class ManagerAgent:
 
     async def stop_turn(self, message_id: str, *, via: str) -> StopResult:
         """Ask the user turn of ``message_id`` (the envelope's id or the web page's own), in any phase, to stop.
-        Does not wait for the turn's lock: the turn ends by itself, replying with what it had written."""
+        Does not wait for the turn's lock: the turn ends by itself, replying with what it had written. Refused when
+        the Manager's runtime cannot interrupt a turn (``can_interrupt``): its processes are never killed for it."""
         token = self._turns.find(message_id)
         if token is None:
             return StopResult.NOT_RUNNING
         if token.phase is TurnPhase.STOPPING:
             return StopResult.ALREADY_STOPPING
+        if not self.can_interrupt:
+            return StopResult.CANNOT_INTERRUPT
         # Before anything is awaited: the stop is for this turn, never for one that starts meanwhile.
         if not token.request_stop(via):
             return StopResult.NOT_RUNNING
@@ -1548,30 +1560,15 @@ class ManagerAgent:
         # Whether the stop was asked before the runtime returned (nothing awaited since): then a runtime that
         # answered all the same lost it.
         asked_while_running = token.cancel.requested
-        # A runtime that returned an answer has dropped the turn's cancel: nobody else ends what the turn started (a
-        # detached or background process), so a stop from now on has it ended at once, not after the handling.
-        ending: asyncio.Task[None] | None = None
-
-        def end_turn_processes() -> None:
-            nonlocal ending
-            if ending is None and turn.stopped is None:
-                ending = asyncio.ensure_future(self._claude.end_turn_processes())
-
-        unregister = token.cancel.on_request(end_turn_processes)
-        try:
-            # The turn's events still being handled are still reaching the chat: the turn is not over for the user
-            # until they have, and a stop meanwhile is not too late.
-            await handled()
-        finally:
-            unregister()
+        # The turn's events still being handled are still reaching the chat: the turn is not over for the user until
+        # they have, and a stop meanwhile is not too late.
+        await handled()
         resume_lost = bool(resuming) and not turn.session_started and not retried
         # Decided here, in one place and with nothing awaited since the events were handled: a stop asked until now
         # ends the turn stopped, even when the runtime came back with an answer; from the settle on, a stop is too
         # late (the token has ended).
         stopped = token.cancel.requested
         if stopped:
-            if ending is not None:
-                await ending
             if asked_while_running and turn.stopped is None and not (turn.result_event or {}).get(USER_STOP):
                 logger.error("stop lost: the runtime answered a turn that was asked to stop (%s)", token.message_id)
             token.settle(ReplyOutcome.STOPPED)

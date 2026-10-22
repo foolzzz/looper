@@ -14,7 +14,7 @@ import pytest
 from fake_claude import fake_claude
 from looper.agents import proc_tree
 from looper.agents.claude_cli import USER_STOP
-from looper.agents.runtimes import StopMethod, per_turn
+from looper.agents.runtimes import StopMethod
 
 _PRELUDE = '''
 import json, os, subprocess, sys, time
@@ -216,60 +216,10 @@ def test_a_stopped_turn_returns_only_after_its_process_tree_cleanup(
 
 
 @pytest.mark.parametrize("runtime", ["omp", "codex"])
-@pytest.mark.parametrize("past_bound", [False, True], ids=["within", "past"])
-def test_a_stopped_turn_waits_out_the_whole_end_and_keeps_one_that_outlasts_it(
-    tmp_path: Path, runtime: str, past_bound: bool, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # ``TurnTree.end`` may run past the grace and the reap while ``ps`` blocks. The turn waits up to its bound
-    # (``_end_bound``); an end that runs longer still is kept, not dropped with the turn, and finishes.
-    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.3)
-    monkeypatch.setattr(proc_tree, "REAP_SEC", 0.3)
-    monkeypatch.setattr(proc_tree, "_PS_TIMEOUT_SEC", 0.3)
-    session, command, env, home = (_omp if runtime == "omp" else _codex)(tmp_path)
-    home.mkdir(parents=True, exist_ok=True)
-    real_end = proc_tree.TurnTree.end
-    spec = per_turn._end_bound()
-    ended: list[bool] = []
-
-    async def slow_end(tree: Any) -> Any:
-        tree.process.kill()
-        try:
-            return await real_end(tree)
-        finally:
-            await asyncio.sleep(spec + 2 if past_bound else spec - 0.5)
-            ended.append(True)
-
-    async def run() -> Any:
-        await session.start(command, cwd=str(tmp_path), signature="s", env=env)
-        running = asyncio.create_task(session.run_turn("hello", _noop))
-        try:
-            await asyncio.wait_for(_until(lambda: (home / "pids").exists()), 8)
-            await asyncio.sleep(0.3)
-            monkeypatch.setattr(proc_tree.TurnTree, "end", slow_end)
-            session._cancel.request()
-            turn = await asyncio.wait_for(running, 30)
-            if past_bound:
-                assert ended == []
-                assert [task for task in proc_tree._finishing if not task.done()]
-                await asyncio.wait_for(asyncio.gather(*proc_tree._finishing), 10)
-            assert ended == [True]
-            return turn
-        finally:
-            running.cancel()
-            await asyncio.gather(running, return_exceptions=True)
-            monkeypatch.setattr(proc_tree.TurnTree, "end", real_end)
-            await session.stop()
-
-    turn = asyncio.run(asyncio.wait_for(run(), 40))
-    assert turn.stopped is StopMethod.KILL
-
-
-@pytest.mark.parametrize("runtime", ["omp", "codex"])
 @pytest.mark.parametrize("phase", ["argv", "spawn"])
 def test_a_stop_before_the_process_exists_is_kept(
     tmp_path: Path, runtime: str, phase: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(proc_tree, "_PS_TIMEOUT_SEC", 0.5)  # the stop waits out the whole end bound (``_end_bound``)
     session, command, env, home = (_omp if runtime == "omp" else _codex)(tmp_path)
     home.mkdir(parents=True, exist_ok=True)
     reached, release = asyncio.Event(), asyncio.Event()
@@ -477,3 +427,16 @@ os.close(1); time.sleep(0.5)
 
     turn = asyncio.run(asyncio.wait_for(run(), 15))
     assert turn.stopped is None and turn.prompt_sent
+
+
+@pytest.mark.parametrize("runtime", ["omp", "codex"])
+def test_a_per_turn_session_cannot_interrupt_so_the_manager_refuses_its_stop(tmp_path: Path, runtime: str) -> None:
+    # One process per turn and no interrupt channel: a user's stop is refused (``ManagerAgent.stop_turn``), never a
+    # kill of the turn's process. Only the runtimes with an interrupt offer it.
+    from looper.agents.profile_registry import type_view
+    from looper.agents.runtimes import ADAPTERS
+
+    session, *_ = (_omp if runtime == "omp" else _codex)(tmp_path)
+    assert session.can_interrupt is False
+    offered = {kind for kind, runtime_adapter in ADAPTERS.items() if type_view(runtime_adapter)["can_interrupt"]}
+    assert offered == {"claude-code", "grok"}

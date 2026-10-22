@@ -801,6 +801,7 @@ def type_view(adapter: runtimes.RuntimeAdapter) -> dict[str, Any]:
             "supported_models": sorted(adapter.supported_models) if adapter.supported_models is not None else None,
             "effort_levels": list(adapter.effort_levels) if adapter.effort_levels is not None else None,
             "can_replace_system_prompt": adapter.can_replace_system_prompt,
+            "can_interrupt": adapter.can_interrupt,
             "replace_system_prompt_refusal": runtimes.replace_refusal(adapter),
             "auth_kinds": sorted(a.value for a in adapter.auth_kinds)}
 

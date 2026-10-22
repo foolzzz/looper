@@ -39,6 +39,7 @@ class _Session:
     label = "manager"
     pid = None
     shares_bridge = True
+    can_interrupt = True
 
     def __init__(self, *, hold: bool = True, on_start: Any = None, on_turn: Any = None) -> None:
         self.hold, self.on_start, self.on_turn = hold, on_start, on_turn
@@ -47,7 +48,6 @@ class _Session:
         self.totals = Usage()
         self.turns: list[str] = []
         self.cancels: list[Any] = []
-        self.ended_turns = 0  # how often the manager had the last turn's processes ended
         self.running = asyncio.Event()
         self._stopped = asyncio.Event()
 
@@ -82,9 +82,6 @@ class _Session:
 
     async def stop(self, *, kill: bool = False) -> None:
         self.started = False
-
-    async def end_turn_processes(self) -> None:
-        self.ended_turns += 1
 
 
 def _manager(root: Path, session: _Session) -> tuple[ManagerAgent, MessageBus, asyncio.Queue[MessageEnvelope]]:
@@ -1136,3 +1133,41 @@ def test_a_stop_is_served_while_a_burst_of_deltas_is_shown(agent_db: Any) -> Non
             await bus.shutdown()
 
     asyncio.run(run())
+
+
+def test_a_runtime_without_an_interrupt_refuses_the_stop_and_its_turn_runs_on(
+        agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A per-turn runtime (Codex exec, OMP -p, Pi, DSH) has no interrupt: the stop is refused, nothing reaches the
+    # runtime (its cancel is never requested, no process is signalled) and the reply is answered as usual.
+    from looper.agents import proc_tree
+
+    signalled: list[int] = []
+    monkeypatch.setattr(proc_tree, "_signal", lambda process, tree, sig: signalled.append(sig))
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            midway, release = asyncio.Event(), asyncio.Event()
+
+            async def on_turn() -> None:
+                midway.set()
+                await release.wait()
+
+            session = _Session(hold=False, on_turn=on_turn)
+            session.can_interrupt = False  # type: ignore[misc]
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("写一篇很长的文章")
+            handling = asyncio.create_task(manager._handle(envelope))
+            await asyncio.wait_for(midway.wait(), 5)
+            assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.CANNOT_INTERRUPT
+            (cancel,) = session.cancels
+            assert not cancel.requested
+            token = manager.turn_for(envelope.message_id)
+            assert token is not None and token.stop is None
+            release.set()
+            await asyncio.wait_for(handling, 5)
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "answered" and reply["text"] == "好的"
+            await bus.shutdown()
+
+    asyncio.run(run())
+    assert signalled == []

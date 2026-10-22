@@ -146,3 +146,25 @@ def test_stop_takes_the_whole_chat_with_its_queued_messages(agent_db: Any) -> No
             await bus.shutdown()
 
     asyncio.run(run())
+
+
+def test_stop_says_a_runtime_without_an_interrupt_cannot_stop_the_reply(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session, manager, bus, chat, inbox = _setup(tmp)
+            session.can_interrupt = False
+            handling = asyncio.create_task(manager._handle(_tg("写一篇很长的文章")))
+            await _until(session.running.is_set)
+            _drain(chat)
+            await bus.publish(_tg("/stop"))
+            await _until(lambda: not chat.empty())
+            assert _texts(chat) == ["当前运行时不能中断回复，回复会照常完成。"]
+            assert inbox.empty()  # not queued for the model
+            assert manager._running_token is not None and manager._running_token.stop is None
+            assert not session._stopped.is_set()  # nothing was interrupted
+            session.can_interrupt = True  # to end the stand-in's turn
+            await manager.stop_turn(manager._running_token.message_id, via="telegram")
+            await handling
+            await bus.shutdown()
+
+    asyncio.run(run())

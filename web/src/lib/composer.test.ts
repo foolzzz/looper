@@ -176,7 +176,8 @@ describe("helpers", () => {
 });
 
 describe("turnAnswers", () => {
-  const turn = { message_id: "env", client_message_id: "cli", channel: "web", started_at: "", stopping: false };
+  const turn = { message_id: "env", client_message_id: "cli", channel: "web", started_at: "", stopping: false,
+    can_interrupt: true };
   it("matches either id of the turn", () => {
     expect(turnAnswers(turn, ["env"])).toBe(true);
     expect(turnAnswers(turn, ["x", "cli"])).toBe(true);

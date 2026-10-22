@@ -1,19 +1,17 @@
-"""Best-effort ending of an agent, its process group and its visible process tree.
+"""Ending an agent process together with every process it started.
 
 Looper starts each agent process (Claude Code, Codex, OMP) in a session of
 its own (``start_new_session=True``), so the children it starts share its
 process group. Some start a group of their own: Codex runs each shell
 command in one. Once a process dies its children are re-parented, and
 nothing links them to the agent any more. So ``end`` reads the agent's tree
-from a bounded ``ps`` snapshot after holding its own group with SIGSTOP: the agent, every
+from one ``ps`` snapshot before it sends any signal: the agent, every
 process whose parent is in the tree, and every member of a group the agent
 or one of them leads. It sends SIGTERM to those groups (and to the tree's
 processes outside them), waits up to ``TERM_GRACE_SEC`` for them to exit,
 sends SIGKILL to what is left and reaps the agent. A stop that first lets
 the agent exit on its own records the tree before it asks (``begin_end``) and
-hands it to ``end``. Every wait during cleanup is bounded. On every platform,
-a descendant that detached (setsid, double fork or vanished ancestors) may
-no longer be reachable and is not guaranteed to end.
+hands it to ``end``.
 
 Every stop, kill, timeout and spend-cap path of the Workers, the Reviewers
 and the resident Manager and Planner sessions ends its process this way, as
@@ -38,9 +36,9 @@ import signal
 import subprocess
 import time
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol
 
 from .. import child_env
 
@@ -59,13 +57,11 @@ _server: tuple[int, str] | None = None
 _recorded: dict[int, tuple[Path, str]] = {}
 _ending: set[int] = set()
 _forgetting: set[asyncio.Task[None]] = set()
-_finishing: set[asyncio.Future[None]] = set()
 
 # pid -> (ppid, pgid) of every live process; a zombie has exited already and is left out.
 Table = dict[int, tuple[int, int]]
 # pid -> pgid of the processes of one agent's tree.
 Tree = dict[int, int]
-_T = TypeVar("_T")
 
 
 def _snapshot() -> Table:
@@ -173,28 +169,6 @@ def _send(send: Callable[[int, int], None], target: int, sig: int) -> None:
         pass  # it exited already
 
 
-def _hold(process: _Agent) -> Tree:
-    """Hold the unreaped agent's own group immediately, before listing or waiting for anything."""
-    if process.returncode is not None or isinstance(process, _Orphan):
-        return {}
-    try:
-        held = {process.pid: os.getpgid(process.pid)}
-    except (ProcessLookupError, PermissionError):
-        return {}
-    _signal(process, held, signal.SIGSTOP)
-    return held
-
-
-async def _within(until: float, work: Awaitable[_T], default: _T, *, label: str, what: str) -> _T:
-    """``work``'s result, waited for until ``until`` (monotonic); past it, ``default``, logged. A
-    listing given up on runs on in its thread, bounded by ``_PS_TIMEOUT_SEC``."""
-    try:
-        return await asyncio.wait_for(work, max(0.0, until - time.monotonic()))
-    except asyncio.TimeoutError:
-        logger.warning("%s: %s did not finish in time; going on without it", label, what)
-        return default
-
-
 def tree_of(process: asyncio.subprocess.Process) -> Tree:
     """``process``'s tree now, for ``end`` once the process may have exited and its children been re-parented."""
     return _tree(process, _snapshot(), {})
@@ -202,11 +176,10 @@ def tree_of(process: asyncio.subprocess.Process) -> Tree:
 
 async def begin_end(process: asyncio.subprocess.Process) -> Tree:
     """Take and record the tree before asking the agent to exit; keep its record until ``end`` finishes."""
-    deadline = time.monotonic() + _PS_TIMEOUT_SEC
-    tree = await _within(deadline, asyncio.to_thread(tree_of, process), {}, label="agent", what="the tree listing")
+    tree = tree_of(process)
     if process.pid in _recorded:
         _ending.add(process.pid)
-        await _within(deadline, _record_tree(process.pid, tree), None, label="agent", what="recording the tree")
+        await _record_tree(process.pid, tree)
     return tree
 
 
@@ -220,36 +193,12 @@ async def _record_tree(pid: int, tree: Tree) -> None:
     _write_record(path.parent, pid, started, _server, tree=starts)
 
 
-def keep(end: Awaitable[None]) -> asyncio.Future[None]:
-    """Run ``end`` (a tree's end) in a task held until it finishes, so a caller that stops waiting for it (or
-    forgets it) never leaves it to be collected before its last SIGKILL."""
-    task = asyncio.ensure_future(end)
-    _finishing.add(task)
-    task.add_done_callback(_finishing.discard)
-    return task
-
-
-async def finish(end: Awaitable[None]) -> None:
-    """Await ``end`` (a tree's end) in a task of its own that a cancel of the caller does not reach, so its signals
-    and its kill of strays come though the step that stops the agent is given up meanwhile (a turn's ``keep`` whose
-    budget runs out). A cancel waits for the end to finish, then propagates; a second one stops only the wait, and
-    the end runs on (each end is bounded)."""
-    task = keep(end)
-    try:
-        await asyncio.shield(task)
-    except asyncio.CancelledError:
-        if not task.done():
-            await asyncio.wait({task})
-        raise
-
-
 async def end(process: asyncio.subprocess.Process, *, label: str, known: Tree | None = None) -> None:
-    """Best-effort end of the agent, its group and the visible tree; cancellation cannot cut cleanup short."""
-    async def ending() -> None:
-        await _end(process, label=label, known=known or {})
-        await _reap(process, label)
-
-    await finish(ending())
+    """End ``process`` and its tree: SIGTERM, then SIGKILL for what is still running after ``TERM_GRACE_SEC``;
+    ``process`` is reaped. ``known`` is its tree as ``begin_end`` took it earlier. Processes that appear during the
+    grace period get SIGTERM too, and a cancelled wait kills the rest at once."""
+    await _end(process, label=label, known=known or {})
+    await _reap(process, label)
 
 
 async def _reap(process: Any, label: str) -> None:
@@ -260,66 +209,48 @@ async def _reap(process: Any, label: str) -> None:
         logger.warning("%s: pid %s was not reaped within %.1f s of SIGKILL", label, process.pid, REAP_SEC)
 
 
-async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[int] = frozenset(),
-               held: Tree | None = None) -> None:
+async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[int] = frozenset()) -> None:
     """End the tree, recording it so the next start can finish an end cut short by the server's exit. Processes
-    in ``exclude`` are never terminated (what they start is). ``held`` gets SIGCONT after SIGTERM
-    or if ending fails. Nothing before the SIGKILL is waited for past the grace: a listing or record that has not
-    come by then is gone without."""
-    deadline = time.monotonic() + _PS_TIMEOUT_SEC
-    held = _hold(process) if held is None else held
+    in ``exclude`` are never signalled."""
     recorded = _recorded.get(process.pid)
     if recorded is not None:
         _ending.add(process.pid)
-        path, started = recorded
-    released = False
-
-    def release() -> None:
-        nonlocal released
-        if held and not released:
-            released = True
-            _signal(process, held, signal.SIGCONT)
 
     def members(table: Table, known: Tree) -> Tree:
         return {pid: pgid for pid, pgid in _tree(process, table, known).items() if pid not in exclude}
 
-    seen: Tree = {}
-    alive: Tree = {}
+    seen = members(_snapshot(), known)
+    alive = dict(seen)
     try:
-        table = await _within(deadline, asyncio.to_thread(_snapshot), {}, label=label, what="the first listing")
-        seen = members(table, known)
-        if not table:  # Fall back to the caller's known tree and the unreaped agent's group.
-            seen = {pid: pgid for pid, pgid in {**known, **held, **seen}.items() if pid not in exclude}
-        alive = dict(seen)
         if recorded is not None:
-            await _within(deadline, _record_tree(process.pid, seen), None, label=label, what="recording the tree")
+            path, started = recorded
+            await _record_tree(process.pid, seen)
         if alive:
-            if (gone := await _gone(process, label, until=deadline)) is not None:
-                alive.pop(process.pid, None)  # exited: what it left is still signalled; reused, unknown: nothing is
-                if gone != "exited" or not alive:
+            if isinstance(process, _Orphan) and process.started is not None:
+                if await asyncio.to_thread(_start_time, process.pid) != process.started:
+                    logger.warning("%s: pid %s was reused; leaving it alone", label, process.pid)
                     alive = {}
                     return
             _signal(process, alive, signal.SIGTERM)
         deadline = time.monotonic() + TERM_GRACE_SEC
-        release()
         while alive and time.monotonic() < deadline:
             await asyncio.sleep(_POLL_SEC)
-            if (table := await _within(deadline, asyncio.to_thread(_snapshot), None, label=label,
-                                       what="a listing")) is None:
-                break
-            alive = members(table, seen)
+            alive = members(await asyncio.to_thread(_snapshot), seen)
             if fresh := {pid: pgid for pid, pgid in alive.items() if pid not in seen}:
                 seen.update(fresh)
                 if recorded is not None:
-                    await _within(deadline, _record_tree(process.pid, seen), None, label=label,
-                                  what="recording the tree")
+                    await _record_tree(process.pid, seen)
                 _signal(process, fresh, signal.SIGTERM)
+    except BaseException:
+        alive = members(_snapshot(), seen)
+        raise
     finally:
-        if alive and (gone := await _gone(process, label)) is not None:
-            alive = {} if gone != "exited" else {pid: pgid for pid, pgid in alive.items() if pid != process.pid}
         if alive:
-            _signal(process, alive, signal.SIGKILL)
-        release()
+            if (isinstance(process, _Orphan) and process.started is not None
+                    and await asyncio.to_thread(_start_time, process.pid) != process.started):
+                logger.warning("%s: pid %s was reused; leaving it alone", label, process.pid)
+            else:
+                _signal(process, alive, signal.SIGKILL)
         logger.info("%s: ended the process tree of pid %s: %d found, %d exited on SIGTERM, %d killed",
                     label, process.pid, len(seen), len(seen) - len(alive), len(alive))
         _ending.discard(process.pid)
@@ -332,45 +263,17 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
             _recorded.pop(process.pid, None)
 
 
-async def _gone(process: _Agent, label: str, *, until: float | None = None) -> str | None:
-    """Recheck a recorded orphan before signalling a pid that could have been reused."""
-    if not isinstance(process, _Orphan) or process.started is None:
-        return None
-    try:
-        current = await _within(until if until is not None else time.monotonic() + _PS_TIMEOUT_SEC,
-                                asyncio.to_thread(_read_start, process.pid), "", label=label,
-                                what="the orphan's start time")
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
-    if current == "":
-        return "unknown"
-    if current is None:
-        return "exited"
-    if current != process.started:
-        logger.warning("%s: pid %s exited or was reused; leaving it alone", label, process.pid)
-        return "reused"
-    return None
-
-
 # --- Recording agents for the next server's sweep ---
 
 
-def _read_start(pid: int) -> str | None:
-    """Read an identity; an absent pid is None, a failed ps raises rather than looking like an exit."""
-    listed = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
-                            timeout=_PS_TIMEOUT_SEC, check=False,
-                            env={**child_env.inherited(), "LC_ALL": "C", "TZ": "UTC"})
-    if listed.returncode not in (0, 1):
-        raise subprocess.CalledProcessError(listed.returncode, listed.args)
-    return " ".join(listed.stdout.split()) or None
-
-
 def _start_time(pid: int) -> str | None:
-    """When ``pid`` started, in UTC; None when it exited or ps could not read it."""
+    """When ``pid`` started, as ``ps -o lstart=`` prints it in UTC; None when no such process runs."""
     try:
-        return _read_start(pid)
+        listed = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                                timeout=_PS_TIMEOUT_SEC, check=False, env={**child_env.inherited(), "LC_ALL": "C", "TZ": "UTC"})
     except (OSError, subprocess.SubprocessError):
         return None
+    return " ".join(listed.stdout.split()) or None
 
 
 def _start_times(pids: Iterable[int]) -> dict[int, str] | None:
@@ -515,8 +418,7 @@ async def sweep(runtime_root: Path) -> None:
 
 class TurnTree:
     """The tree of one turn's agent process, snapshotted when the turn starts and refreshed while it runs, so a
-    stop can also try to end previously seen processes whose parent has exited since.
-    Detached processes missed by those snapshots are not guaranteed on any platform.
+    stop can end every process the turn ever started, even those whose parent has exited since.
 
     ``seen`` maps each pid of the tree to its start time (None until a refresh has read it); ``end`` leaves a
     pid whose start time has changed alone, since the pid was reused."""
@@ -526,7 +428,6 @@ class TurnTree:
         self.label = label
         self.seen: dict[int, str | None] = {}
         self._groups: Tree = {}
-        self._baseline: set[int] = set()
         self._refreshed = float("-inf")
         self._lock = asyncio.Lock()
         self._ticker: asyncio.Task[None] | None = None
@@ -577,29 +478,20 @@ class TurnTree:
             ticker.cancel()
             await asyncio.gather(ticker, return_exceptions=True)
 
-    async def baseline(self) -> None:
-        """Remember the current members; ``end_new`` leaves them running."""
-        await self.refresh(force=True)
-        self._baseline = set(self.seen)
-
     async def _reused(self) -> frozenset[int]:
         known = {pid: started for pid, started in self.seen.items() if started is not None}
         current = await asyncio.to_thread(_start_times, known)
-        # A pid whose recorded start time cannot be confirmed (changed, or the listing failed) is left alone; one
-        # not read yet is signalled only if the live tree still reaches it. The unreaped agent is always safe.
-        current = current or {}
-        return frozenset(pid for pid, started in known.items() if pid != self.process.pid
-                         and current.get(pid) != started)
+        if current is None:
+            return frozenset()
+        return frozenset(pid for pid, started in known.items() if pid in current and current[pid] != started)
 
     async def begin_end(self) -> None:
         """Refresh and record the tree before the agent is asked to exit on its own: its record (what the next
         start's ``sweep`` ends) stays until ``end`` finishes, though the agent exits first."""
-        deadline = time.monotonic() + _PS_TIMEOUT_SEC
-        await _within(deadline, self.refresh(force=True), None, label=self.label, what="the final refresh")
+        await self.refresh(force=True)
         if self.process.pid in _recorded:
             _ending.add(self.process.pid)
-            await _within(deadline, _record_tree(self.process.pid, dict(self._groups)), None,
-                          label=self.label, what="recording the tree")
+            await _record_tree(self.process.pid, dict(self._groups))
 
     async def _strays(self, exclude: frozenset[int]) -> list[_Orphan]:
         """The seen processes the tree no longer reaches (one that left its group, setsid, once its parent exited):
@@ -611,42 +503,21 @@ class TurnTree:
         return [_Orphan(pid, started) for pid, started in known.items() if current.get(pid) == started]
 
     async def _end_all(self, exclude: frozenset[int]) -> None:
-        """Signal the agent's group at once; list independently of any refresh holding the lock."""
-        held = _hold(self.process)
-        handed_over = False
-        try:
-            reused = await _within(time.monotonic() + _PS_TIMEOUT_SEC, self._reused(),
-                                   frozenset(pid for pid, started in self.seen.items() if started is not None) - {self.process.pid},
-                                   label=self.label, what="checking seen pids")
-            exclude = exclude | reused
+        """End the tree, and beside it (not delaying its first signal) the seen processes it no longer reaches."""
+        async def end_strays() -> None:
+            strays = await self._strays(exclude)
+            await asyncio.gather(*(_end(stray, label=f"{self.label} (left the tree)", known={}, exclude=exclude)
+                                   for stray in strays))
 
-            async def end_strays() -> None:
-                strays = await _within(time.monotonic() + 2 * _PS_TIMEOUT_SEC, self._strays(exclude), [],
-                                       label=self.label, what="checking seen processes outside the tree")
-                await asyncio.gather(*(_end(stray, label=f"{self.label} (left the tree)", known={}, exclude=exclude)
-                                       for stray in strays))
-
-            known = {pid: group for pid, group in self._groups.items() if self.seen.get(pid) is not None}
-            handed_over = True  # _end now owns SIGCONT; do not signal a reaped agent's group again later.
-            await asyncio.gather(_end(self.process, label=self.label, known=known, exclude=exclude, held=held),
-                                 end_strays())
-        finally:
-            if not handed_over:
-                _signal(self.process, held, signal.SIGCONT)
+        await asyncio.gather(_end(self.process, label=self.label, known=dict(self._groups), exclude=exclude),
+                             end_strays())
 
     async def end(self) -> None:
-        """Best-effort end of the visible tree and previously seen processes, then reap the agent."""
-        async def ending() -> None:
-            await self._end_all(frozenset())
-            await _within(time.monotonic() + _PS_TIMEOUT_SEC, self.stop_ticker(), None,
-                          label=self.label, what="stopping the ticker")
-            await _reap(self.process, self.label)
-
-        await finish(ending())
-
-    async def end_new(self) -> None:
-        """End the visible members outside the baseline; the agent and baseline members survive."""
-        await finish(self._end_all(frozenset(self._baseline | {self.process.pid})))
+        """End every process of the tree seen so far and of the tree now, then reap the agent."""
+        await self.stop_ticker()
+        await self.refresh(force=True)
+        await self._end_all(await self._reused())
+        await _reap(self.process, self.label)
 
 
 def track(process: Any, *, label: str = "agent") -> TurnTree:

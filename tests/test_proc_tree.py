@@ -1,4 +1,4 @@
-"""Ending an agent ends its visible tree, best effort (``looper.agents.proc_tree``).
+"""Ending an agent ends every process it started (``looper.agents.proc_tree``).
 
 A stand-in agent starts what a real one leaves behind: a shell command in a
 session and process group of its own, as Codex runs each one, with a
@@ -9,14 +9,12 @@ path that stops an agent must leave none of them running.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import os
 import signal
 import subprocess
 import sys
-import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -120,7 +118,7 @@ def test_end_reaches_every_process_the_agent_started(
     tree, returncode = asyncio.run(_run())
     assert _running(list(tree.values())) == []
     assert returncode == -signal.SIGTERM  # ended and reaped
-    assert ": 4 found," in _ended_line(caplog)  # a slow last ps may leave exit counts unconfirmed
+    assert _ended_line(caplog).endswith(": 4 found, 4 exited on SIGTERM, 0 killed")
 
 
 def test_what_ignores_sigterm_is_killed_after_the_grace_period(
@@ -172,7 +170,7 @@ def test_killing_a_worker_ends_its_tree(tmp_path: Path, agent_db: Any, trees: li
 def test_a_worker_over_its_time_limit_ends_its_tree(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agent_db: Any, trees: list[dict[str, int]],
 ) -> None:
-    _worker_row(monkeypatch, {"timeout_seconds": 3, "max_turns": 0})
+    _worker_row(monkeypatch, {"timeout_seconds": 1, "max_turns": 0})
     claude = _fake_claude(tmp_path, _LISTENING_AGENT)
     _start_warm(monkeypatch, claude)
 
@@ -186,7 +184,7 @@ def test_a_worker_over_its_time_limit_ends_its_tree(
         return tree, bus.get_queue("planner-t1").get_nowait().payload
 
     tree, reply = asyncio.run(_run())
-    assert reply["error"] == "Claude ran longer than the 3 s limit (timeout_seconds)"
+    assert reply["error"] == "Claude ran longer than the 1 s limit (timeout_seconds)"
     assert _running(list(tree.values())) == []
 
 
@@ -306,7 +304,7 @@ def test_the_next_start_ends_the_tree_of_an_agent_whose_server_is_gone(
     tree, record = asyncio.run(_run())
     assert _running(list(tree.values())) == []
     assert not record.exists()
-    assert ": 4 found," in _ended_line(caplog)  # a slow last ps may leave exit counts unconfirmed
+    assert _ended_line(caplog).endswith(": 4 found, 4 exited on SIGTERM, 0 killed")
 
 
 @pytest.mark.parametrize("server", ["gone", "running"])
@@ -407,7 +405,7 @@ def test_a_graceful_stop_records_the_tree_before_the_agent_exits(
 
         await session.run_turn("hello", on_event)
         tree = await _started(tmp_path, trees)
-        record = runtime_root / proc_tree.RECORDS_DIR / f"{session.pid}.json"
+        record = runtime_root / proc_tree.RECORDS_DIR / f"{tree['agent']}.json"
         monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 10)
         stopping = asyncio.create_task(session.stop())
         try:
@@ -594,38 +592,6 @@ def test_turn_tree_leaves_a_reused_pid_alone(tmp_path: Path) -> None:
     assert len(asyncio.run(_run())) == 1
 
 
-def test_turn_tree_end_new_leaves_the_agent_and_earlier_children(tmp_path: Path) -> None:
-    code = ("import subprocess, sys\n"
-            "old = subprocess.Popen(['/bin/sleep', '60'])\nprint('go', flush=True)\n"
-            "sys.stdin.readline()\n"
-            "new = subprocess.Popen(['/bin/sleep', '60'])\nopen('new.pid', 'w').write(str(new.pid))\n"
-            "print(old.pid, flush=True)\nsys.stdin.read()\n")
-
-    async def _run() -> tuple[list[int], list[int]]:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, "-c", code, cwd=tmp_path, stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, start_new_session=True)
-        assert process.stdin and process.stdout
-        await process.stdout.readline()
-        tree = proc_tree.TurnTree.track(process, label="turn")
-        await tree.baseline()
-        process.stdin.write(b"\n")
-        await process.stdin.drain()
-        old = int((await process.stdout.readline()).decode())
-        new = int(await _wait_file(tmp_path / "new.pid"))
-        try:
-            await tree.end_new()
-            return _running([new]), _running([process.pid, old], settle=0)
-        finally:
-            for pid in _running([process.pid, old, new], settle=0):
-                os.kill(pid, signal.SIGKILL)
-            await process.wait()
-
-    new_left, survivors = asyncio.run(_run())
-    assert new_left == []
-    assert len(survivors) == 2
-
-
 def test_turn_tree_ticker_picks_up_a_child_started_between_events(tmp_path: Path) -> None:
     code = ("import subprocess, sys\nsys.stdin.readline()\n"
             "c = subprocess.Popen(['/bin/sleep', '60'])\nopen('c.pid', 'w').write(str(c.pid))\nsys.stdin.read()\n")
@@ -720,301 +686,3 @@ def test_turn_tree_end_ends_a_seen_child_that_left_the_group(tmp_path: Path) -> 
                 os.kill(pid, signal.SIGKILL)
 
     assert asyncio.run(_run()) == []
-
-
-def test_turn_tree_end_new_ends_a_seen_child_that_left_the_group(tmp_path: Path) -> None:
-    code = ("import subprocess, sys\nsys.stdin.readline()\n"
-            "subprocess.Popen([sys.executable, '-c', " + repr(_MIDDLE) + "]).wait()\nsys.stdin.read()\n")
-
-    async def _run() -> tuple[list[int], list[int]]:
-        process = await _spawn_python(tmp_path, code)
-        tree = proc_tree.TurnTree.track(process, label="turn")
-        await tree.baseline()
-        process.stdin.write(b"\n")  # type: ignore[union-attr]
-        child = await _child_that_leaves_its_group(tmp_path, tree)
-        try:
-            await tree.end_new()
-            return _running([child]), _running([process.pid], settle=0)
-        finally:
-            for pid in _running([child, process.pid], settle=0):
-                os.kill(pid, signal.SIGKILL)
-            await process.wait()
-
-    child_left, agent = asyncio.run(_run())
-    assert child_left == []
-    assert len(agent) == 1  # the agent survives end_new
-
-
-def test_spawn_starts_the_agent_itself_and_nothing_beside_it() -> None:
-    # No launcher, no keeper, on any platform: the process is the agent, alone in its group, and ``kill()`` ends it.
-    async def _run() -> tuple[list[int], list[int], str, int]:
-        process = await proc_tree.spawn("/bin/sleep", "60")
-        try:
-            table = proc_tree._snapshot()
-            group = [pid for pid, (_, pgid) in table.items() if pgid == process.pid]
-            children = [pid for pid, (ppid, _) in table.items() if ppid == process.pid]
-            command = subprocess.run(["ps", "-o", "comm=", "-p", str(process.pid)], capture_output=True, text=True,
-                                     check=False).stdout.strip()
-            process.kill()
-            return group, children, command, await asyncio.wait_for(process.wait(), 5)
-        finally:
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
-
-    group, children, command, code = asyncio.run(_run())
-    assert children == []
-    assert len(group) == 1
-    assert command.endswith("sleep")
-    assert code == -signal.SIGKILL
-
-
-_SERVER = (
-    "import os, subprocess, time\n"
-    "while not os.path.exists('call'):\n    time.sleep(0.01)\n"
-    "tool = subprocess.Popen(['/bin/sleep', '60'])\nopen('tool.pid', 'w').write(str(tool.pid))\ntime.sleep(60)\n"
-)
-
-
-_AGENT_WITH_SERVER = (
-    "import subprocess, sys\n"
-    "server = subprocess.Popen([sys.executable, '-c', " + repr(_SERVER) + "])\n"
-    "open('server.pid', 'w').write(str(server.pid))\nsys.stdin.read()\n"
-)
-
-
-def test_turn_tree_end_new_ends_the_tool_a_baseline_server_ran_this_turn_and_leaves_the_server(
-    tmp_path: Path,
-) -> None:
-    async def _run() -> tuple[list[int], list[int]]:
-        process = await _spawn_python(tmp_path, _AGENT_WITH_SERVER)
-        tree = proc_tree.TurnTree.track(process, label="turn")
-        server = int(await _wait_file(tmp_path / "server.pid"))
-        tool = 0
-        try:
-            await tree.baseline()
-            assert server in tree.seen
-            (tmp_path / "call").write_text("go")
-            tool = int(await _wait_file(tmp_path / "tool.pid"))
-            await tree.end_new()
-            return _running([tool]), _running([process.pid, server], settle=0)
-        finally:
-            for pid in _running([tool, server] if tool else [server], settle=0):
-                os.kill(pid, signal.SIGKILL)
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            await process.wait()
-
-    tool_left, survivors = asyncio.run(_run())
-    assert tool_left == []
-    assert len(survivors) == 2
-
-
-def _signals(monkeypatch: pytest.MonkeyPatch) -> list[tuple[float, int, frozenset[int]]]:
-    """Each signal an end sends to a tree: when (monotonic), which, and to which pids."""
-    sent: list[tuple[float, int, frozenset[int]]] = []
-    signal_tree = proc_tree._signal
-
-    def noting(process: Any, tree: dict[int, int], sig: int) -> None:
-        sent.append((time.monotonic(), sig, frozenset(tree)))
-        signal_tree(process, tree, sig)
-
-    monkeypatch.setattr(proc_tree, "_signal", noting)
-    return sent
-
-
-def _first(sent: list[tuple[float, int, frozenset[int]]], sig: int, pid: int) -> float:
-    return next(at for at, sent_sig, pids in sent if sent_sig == sig and pid in pids)
-
-
-_CHILD_AFTER_BASELINE = (
-    "import subprocess, sys\nsys.stdin.readline()\n"
-    "child = subprocess.Popen(['/bin/sleep', '60'])\nprint(child.pid, flush=True)\nsys.stdin.read()\n"
-)
-
-
-@pytest.mark.parametrize("new_only", [False, True], ids=["end", "end_new"])
-def test_turn_tree_end_does_not_wait_for_a_slow_refresh_before_it_signals(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, new_only: bool,
-) -> None:
-    # Only the refresh's listing blocks. The stop must read its own visible tree, without waiting for the lock.
-    sent = _signals(monkeypatch)
-    released, entered = threading.Event(), threading.Event()
-    snapshot = proc_tree._snapshot
-
-    def slow_once() -> Any:
-        if not entered.is_set():
-            entered.set()
-            released.wait(10)
-        return snapshot()
-
-    async def _run() -> tuple[float, float, float, list[int], list[int]]:
-        process = await proc_tree.spawn(sys.executable, "-c", _CHILD_AFTER_BASELINE, cwd=tmp_path,
-                                        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
-        assert process.stdin and process.stdout
-        tree = proc_tree.track(process, label="turn")
-        child = 0
-        refreshing = None
-        try:
-            await tree.baseline()
-            process.stdin.write(b"\n")
-            await process.stdin.drain()
-            child = int(await process.stdout.readline())
-            await tree.refresh(force=True)
-            assert child in tree.seen
-            monkeypatch.setattr(proc_tree, "_snapshot", slow_once)
-            refreshing = asyncio.create_task(tree.refresh(force=True))
-            assert await asyncio.to_thread(entered.wait, 2)
-            began = time.monotonic()
-            await asyncio.wait_for(tree.end_new() if new_only else tree.end(), 5)
-            took = time.monotonic() - began
-            assert not refreshing.done()
-            return (_first(sent, signal.SIGSTOP, process.pid) - began,
-                    _first(sent, signal.SIGTERM, child) - began, took,
-                    _running([child]), _running([process.pid], settle=0))
-        finally:
-            released.set()
-            if refreshing is not None:
-                await asyncio.wait_for(refreshing, 2)
-            if child:
-                with contextlib.suppress(ProcessLookupError):
-                    os.kill(child, signal.SIGKILL)
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            await asyncio.wait_for(process.wait(), 2)
-
-    held, terminated, took, child_left, agent_left = asyncio.run(_run())
-    assert held < 0.5
-    assert terminated < 2
-    assert took < proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC + 2
-    assert child_left == []
-    assert len(agent_left) == (1 if new_only else 0)
-
-
-@pytest.mark.parametrize("new_only", [False, True], ids=["end", "end_new"])
-def test_turn_tree_end_is_bounded_when_its_process_listing_blocks(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, new_only: bool,
-) -> None:
-    # A blocked ps cannot delay the first signal or keep the stop waiting forever. The known visible child is
-    # enough for end_new; no detached daemon, ownership scan or fork loop is needed to exercise this boundary.
-    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.2)
-    monkeypatch.setattr(proc_tree, "REAP_SEC", 0.2)
-    sent = _signals(monkeypatch)
-    released, entered = threading.Event(), threading.Event()
-
-    def blocked() -> dict[int, tuple[int, int]]:
-        entered.set()
-        released.wait(10)
-        return {}
-
-    async def _run() -> tuple[float, float, list[int], list[int]]:
-        process = await proc_tree.spawn(sys.executable, "-c", _CHILD_AFTER_BASELINE, cwd=tmp_path,
-                                        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
-        assert process.stdin and process.stdout
-        tree = proc_tree.track(process, label="turn")
-        child = 0
-        try:
-            await tree.baseline()
-            process.stdin.write(b"\n")
-            await process.stdin.drain()
-            child = int(await process.stdout.readline())
-            await tree.refresh(force=True)
-            assert child in tree.seen
-            starts = dict(tree.seen)
-            monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {pid: starts[pid] for pid in pids})
-            monkeypatch.setattr(proc_tree, "_PS_TIMEOUT_SEC", 0.1)
-            monkeypatch.setattr(proc_tree, "_snapshot", blocked)
-            began = time.monotonic()
-            await asyncio.wait_for(tree.end_new() if new_only else tree.end(), 3)
-            took = time.monotonic() - began
-            assert entered.is_set()
-            return (_first(sent, signal.SIGSTOP, process.pid) - began, took,
-                    _running([child]), _running([process.pid], settle=0))
-        finally:
-            released.set()
-            if child:
-                with contextlib.suppress(ProcessLookupError):
-                    os.kill(child, signal.SIGKILL)
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            await asyncio.wait_for(process.wait(), 2)
-
-    held, took, child_left, agent_left = asyncio.run(_run())
-    assert held < 0.5
-    assert took < proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC + 4 * proc_tree._PS_TIMEOUT_SEC + 1
-    assert child_left == []
-    assert len(agent_left) == (1 if new_only else 0)
-
-
-@pytest.mark.parametrize("how", ["end", "end_new", "process_end"])
-def test_cancelling_a_stop_still_finishes_ending_its_visible_tree(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str,
-) -> None:
-    child_code = "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nprint('ready', flush=True)\ntime.sleep(60)\n"
-    code = ("import subprocess, sys\nsys.stdin.readline()\n"
-            "child = subprocess.Popen([sys.executable, '-c', " + repr(child_code) + "], stdout=subprocess.PIPE)\n"
-            "child.stdout.readline()\nprint(child.pid, flush=True)\nsys.stdin.read()\n")
-
-    async def _run() -> tuple[float, list[int], list[int]]:
-        process = await proc_tree.spawn(sys.executable, "-c", code, cwd=tmp_path,
-                                        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
-        assert process.stdin and process.stdout
-        tree = proc_tree.track(process, label="turn")
-        first_signal = asyncio.Event()
-        signal_tree = proc_tree._signal
-
-        def noting(agent: Any, members: dict[int, int], sig: int) -> None:
-            signal_tree(agent, members, sig)
-            if process.pid in members and sig == signal.SIGSTOP:
-                first_signal.set()
-
-        monkeypatch.setattr(proc_tree, "_signal", noting)
-        child = 0
-        stopping = None
-        try:
-            await tree.baseline()
-            process.stdin.write(b"\n")
-            await process.stdin.drain()
-            child = int(await process.stdout.readline())
-            await tree.refresh(force=True)
-            assert child in tree.seen
-            end = (tree.end_new() if how == "end_new" else tree.end() if how == "end"
-                   else proc_tree.end(process, label="turn"))
-            began = time.monotonic()
-            stopping = asyncio.create_task(end)
-            await asyncio.wait_for(first_signal.wait(), 2)
-            stopping.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(stopping, 5)
-            return time.monotonic() - began, _running([child]), _running([process.pid], settle=0)
-        finally:
-            if stopping is not None:
-                await asyncio.gather(stopping, return_exceptions=True)
-            if child:
-                with contextlib.suppress(ProcessLookupError):
-                    os.kill(child, signal.SIGKILL)
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            await asyncio.wait_for(process.wait(), 2)
-
-    took, child_left, agent_left = asyncio.run(_run())
-    assert took < proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC + 2
-    assert child_left == []
-    assert len(agent_left) == (1 if how == "end_new" else 0)
-
-
-def test_an_orphan_exiting_on_term_still_has_its_visible_children_killed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The orphan exits on TERM while its child ignores it. Its exit is distinct from an unreadable identity.
-    root, child = 2_000_000_001, 2_000_000_002
-    table = {root: (1, root), child: (root, child)}
-    reads = iter(["started", None])
-    sent: list[tuple[int, set[int]]] = []
-    monkeypatch.setattr(proc_tree, "_snapshot", lambda: table)
-    monkeypatch.setattr(proc_tree, "_read_start", lambda pid: next(reads))
-    monkeypatch.setattr(proc_tree, "_signal", lambda process, tree, sig: sent.append((sig, set(tree))))
-    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.01)
-    asyncio.run(proc_tree._end(proc_tree._Orphan(root, "started"), label="orphan", known={}))
-    assert (signal.SIGTERM, {root, child}) in sent
-    assert (signal.SIGKILL, {child}) in sent

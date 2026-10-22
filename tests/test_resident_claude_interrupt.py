@@ -32,7 +32,7 @@ for raw in sys.stdin:
         continue
     turns += 1
     if turns == 1:
-        out({'type': 'system', 'subtype': 'init', 'session_id': 's1', 'pid': os.getpid()})
+        out({'type': 'system', 'subtype': 'init', 'session_id': 's1'})
         out({'type': 'stream_event', 'event': {'type': 'content_block_delta', 'delta': {'type': 'text_delta', 'text': 'hi'}}})
     else:
         out({'type': 'system', 'subtype': 'init', 'session_id': 's1'})
@@ -132,57 +132,6 @@ async def _until_streaming(seen: list[dict[str, Any]]) -> None:
     raise AssertionError("the turn never started")
 
 
-@pytest.mark.parametrize("label", ["planner", "manager"])
-@pytest.mark.parametrize("stage", ["baseline", "result"])
-@pytest.mark.parametrize("ending", ["timeout", "cancel"])
-def test_an_abandoned_exchange_kills_and_forgets_the_resident(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, label: str, stage: str, ending: str,
-) -> None:
-    claude = fake_claude(tmp_path / "claude", _DEAF)
-
-    async def run() -> None:
-        session = ResidentClaude(label=label)
-        await session.start([claude], cwd=str(tmp_path), signature=None)
-        process = session._process
-        assert process is not None
-        entered = asyncio.Event()
-        stopped: list[bool] = []
-        stop = session.stop
-
-        async def stopping(*, kill: bool = False) -> None:
-            stopped.append(kill)
-            await stop(kill=kill)
-
-        async def baseline(self: Any) -> None:
-            entered.set()
-            await asyncio.Event().wait()
-
-        async def event(event: dict[str, Any]) -> None:
-            if event.get("subtype") == "init":
-                entered.set()
-
-        monkeypatch.setattr(session, "stop", stopping)
-        if stage == "baseline":
-            monkeypatch.setattr(proc_tree.TurnTree, "baseline", baseline)
-        turn = asyncio.create_task(session.run_turn("work", event))
-        try:
-            await asyncio.wait_for(entered.wait(), 5)
-            if ending == "timeout":
-                with pytest.raises(TimeoutError):
-                    await asyncio.wait_for(turn, 0.1)
-            else:
-                turn.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await turn
-            assert stopped == [True]
-            assert session.started is False
-            assert process.returncode is not None
-        finally:
-            await stop(kill=True)
-
-    asyncio.run(run())
-
-
 def test_an_obeyed_interrupt_ends_the_turn_and_keeps_the_process(tmp_path: Path) -> None:
     claude = fake_claude(tmp_path / "claude", _OBEYS)
 
@@ -198,7 +147,6 @@ def test_an_obeyed_interrupt_ends_the_turn_and_keeps_the_process(tmp_path: Path)
         try:
             turn = asyncio.create_task(session.run_turn("work", on_event))
             await _until_streaming(seen)
-            (agent_pid,) = [event["pid"] for event in seen if event.get("subtype") == "init"]
             started = time.monotonic()
             assert await session.interrupt() is StopMethod.CONTROL
             assert time.monotonic() - started < 1
@@ -212,7 +160,7 @@ def test_an_obeyed_interrupt_ends_the_turn_and_keeps_the_process(tmp_path: Path)
             assert result.usage.cost_usd == pytest.approx(0.02)
             again = await session.run_turn("next", on_event)
             assert again.stopped is None
-            assert again.result_event is not None and again.result_event["result"] == f"pid={agent_pid}"
+            assert again.result_event is not None and again.result_event["result"] == f"pid={pid}"
             assert session.pid == pid
         finally:
             await session.stop(kill=True)
@@ -546,6 +494,24 @@ def _gone(pid: int) -> bool:
     return pid not in proc_tree._snapshot()
 
 
+def _signals(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Every signal ``proc_tree`` sends from now on (still sent)."""
+    sent: list[int] = []
+    real = proc_tree._signal
+
+    def record(process: Any, tree: Any, sig: int) -> None:
+        sent.append(sig)
+        real(process, tree, sig)
+
+    monkeypatch.setattr(proc_tree, "_signal", record)
+    return sent
+
+
+def _kill(pid: int) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
+
+
 async def _next_turn_answers(session: ResidentClaude, on_event: Any) -> Any:
     return await asyncio.wait_for(session.run_turn("next", on_event), 5)
 
@@ -593,8 +559,11 @@ async def _until_sleeper(tmp_path: Path) -> int:
     return int((tmp_path / "sleeper.pid").read_text())
 
 
-def test_an_obeyed_cancel_ends_the_tools_and_keeps_the_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_obeyed_cancel_ends_the_turn_and_signals_no_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Claude ended the turn on the interrupt: that is all. What it left running (the turn's background tool) is its
+    # own; Looper signals nothing.
     session, claude = _tool_session(tmp_path, monkeypatch, OBEY="1")
+    sent = _signals(monkeypatch)
 
     async def _run() -> None:
         await session.start([claude], cwd=str(tmp_path), signature=None, env=_ENV)
@@ -609,23 +578,27 @@ def test_an_obeyed_cancel_ends_the_tools_and_keeps_the_process(tmp_path: Path, m
             running = asyncio.create_task(session.run_turn("work", on_event, cancel=cancel))
             sleeper = await _until_sleeper(tmp_path)
             await _until_streaming(seen)
-            assert not _gone(sleeper)
             cancel.request()
             turn = await asyncio.wait_for(running, 5)
             assert turn.stopped is StopMethod.CONTROL and turn.prompt_sent is True
             assert session.started and session.pid == pid
-            assert _gone(sleeper)
+            assert not _gone(sleeper) and sent == []
             _ENV["OBEY"] = "0"
             again = await _next_turn_answers(session, on_event)
             assert again.stopped is None and session.pid == pid
         finally:
             await session.stop(kill=True)
+            if (tmp_path / "sleeper.pid").exists():
+                _kill(int((tmp_path / "sleeper.pid").read_text()))
 
     asyncio.run(_run())
 
 
 def test_a_deaf_claude_is_killed_with_its_whole_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Claude ignored the interrupt for its grace: the fallback kills it with its group and the tree ``proc_tree``
+    # finds.
     session, claude = _tool_session(tmp_path, monkeypatch)
+    sent = _signals(monkeypatch)
 
     async def _run() -> None:
         await session.start([claude], cwd=str(tmp_path), signature=None, env=_ENV)
@@ -646,6 +619,7 @@ def test_a_deaf_claude_is_killed_with_its_whole_tree(tmp_path: Path, monkeypatch
             assert time.monotonic() - started < 3
             assert turn.stopped is StopMethod.KILL and not session.started
             assert pid is not None and _gone(pid) and _gone(sleeper)
+            assert signal.SIGTERM in sent
             await session.start([claude], cwd=str(tmp_path), signature=None, env=_ENV)  # resumes the session
             again = await _next_turn_answers(session, on_event)
             assert again.stopped is None
@@ -711,12 +685,13 @@ def test_a_result_queued_behind_the_control_request_is_not_an_answer(
     asyncio.run(_run())
 
 
-def test_a_stop_between_the_result_and_the_return_still_ends_the_turns_tools(
+def test_a_stop_between_the_result_and_the_return_ends_the_turn_and_signals_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The result is dispatched (the output forgets the turn) and run_turn has not yet returned: the stop is the
-    # turn's, its background tool is ended, and the process stays.
+    # turn's, which is over already; nothing is interrupted or signalled, its background tool runs on.
     session, claude = _tool_session(tmp_path, monkeypatch, OBEY="1", ANSWER="1")
+    sent = _signals(monkeypatch)
 
     async def _run() -> None:
         await session.start([claude], cwd=str(tmp_path), signature=None, env=_ENV)
@@ -733,116 +708,14 @@ def test_a_stop_between_the_result_and_the_return_still_ends_the_turns_tools(
             assert cancel.requested
             assert turn.stopped is StopMethod.CONTROL and turn.usage_complete  # a whole turn's result
             assert turn.result_event is not None and turn.result_event["result"] == "done"
-            assert _gone(sleeper)
+            assert not _gone(sleeper) and sent == []
             assert session.started and session.pid == pid
             assert session._user_turn is None and session._interrupting is None
             inbox = (tmp_path / "inbox").read_text()
-            assert "control_request" not in inbox  # nothing left to interrupt: only the turn's tools are ended
+            assert "control_request" not in inbox  # nothing left to interrupt
         finally:
             await session.stop(kill=True)
+            if (tmp_path / "sleeper.pid").exists():
+                _kill(int((tmp_path / "sleeper.pid").read_text()))
 
     asyncio.run(_run())
-
-
-# Starts a sleeper in a session of its own (its pid in ``sleeper.pid``), and runs on after its stdin closes.
-_IGNORES_EOF = """\
-import subprocess, sys, time
-sleeper = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)
-with open('sleeper.pid', 'w') as f:
-    f.write(str(sleeper.pid))
-for raw in sys.stdin:
-    pass
-time.sleep(60)
-"""
-
-
-def test_a_stop_whose_keep_budget_runs_out_in_a_slow_ps_still_ends_the_tree(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The manager's ``keep("claude_stop", stop(), 10)`` with Claude using all of ``STOP_GRACE_SEC`` (5 s) and the
-    end's ``ps`` all of ``_PS_TIMEOUT_SEC`` (5 s), scaled down: the budget runs out inside the tree's end, whose
-    signals and kill of strays still come."""
-    from datetime import datetime, timezone
-
-    from looper.agents.tiers.turn_token import TurnToken
-
-    monkeypatch.setattr(claude_cli, "STOP_GRACE_SEC", 0.5)
-    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.2)
-    monkeypatch.setattr(proc_tree, "REAP_SEC", 0.5)
-    claude = fake_claude(tmp_path / "claude", _IGNORES_EOF)
-    snapshot = proc_tree._snapshot
-    closed: list[Any] = []
-
-    def slow_once_stdin_closes() -> proc_tree.Table:
-        if closed and closed[0].stdin.is_closing():
-            time.sleep(proc_tree._PS_TIMEOUT_SEC)
-        return snapshot()
-
-    monkeypatch.setattr(proc_tree, "_snapshot", slow_once_stdin_closes)
-
-    async def _run() -> None:
-        session = ResidentClaude(label="manager")
-        await session.start([claude], cwd=str(tmp_path), signature=None)
-        assert session._process is not None
-        process = session._process
-        sleeper = await _until_sleeper(tmp_path)
-        assert session._tree is not None
-        await session._tree.refresh(force=True)
-        starts = dict(session._tree.seen)
-        assert starts.get(sleeper) is not None  # the visible child's identity is known before the ps fault
-        monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {pid: starts[pid] for pid in pids})
-        monkeypatch.setattr(proc_tree, "_PS_TIMEOUT_SEC", 0.5)
-        try:
-            closed.append(process)
-            token = TurnToken(message_id="m1", client_message_id=None, channel="web", chat="c",
-                              received_at=datetime.now(timezone.utc))
-            # Past the grace, inside the end's first ps.
-            budget = claude_cli.STOP_GRACE_SEC + proc_tree._PS_TIMEOUT_SEC / 2
-            with pytest.raises(TimeoutError):
-                await token.keep("claude_stop", session.stop(), budget)
-            assert process.pid not in snapshot() and sleeper not in snapshot()
-        finally:
-            for pid in (process.pid, sleeper):
-                with contextlib.suppress(ProcessLookupError):
-                    os.kill(pid, signal.SIGKILL)
-            with contextlib.suppress(Exception):
-                await process.wait()
-
-    asyncio.run(_run())
-
-
-@pytest.mark.parametrize("stage", ["reader", "autonomous"])
-def test_output_cleanup_is_bounded_even_if_a_handler_suppresses_cancellation(
-    monkeypatch: pytest.MonkeyPatch, stage: str,
-) -> None:
-    monkeypatch.setattr(claude_cli, "_DRAIN_SEC", 0.05)
-
-    async def run() -> None:
-        output = claude_cli._Output(ResidentClaude(label="manager"), asyncio.StreamReader(), None)
-        entered, release = asyncio.Event(), asyncio.Event()
-        tasks: list[asyncio.Task[None]] = []
-
-        async def stuck(*args: Any) -> None:
-            task = asyncio.current_task()
-            assert task is not None
-            tasks.append(task)
-            entered.set()
-            try:
-                await release.wait()
-            except asyncio.CancelledError:
-                await release.wait()
-
-        if stage == "reader":
-            output._task = asyncio.create_task(stuck())
-            await entered.wait()
-        else:
-            monkeypatch.setattr(output, "close_own", stuck)
-        try:
-            await asyncio.wait_for(output.finish(), 1)
-            assert entered.is_set()
-            assert any(not task.done() for task in tasks)
-        finally:
-            release.set()
-            await asyncio.wait_for(asyncio.gather(*tasks), 1)
-
-    asyncio.run(run())

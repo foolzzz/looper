@@ -708,16 +708,8 @@ class _Output:
             await asyncio.wait({task}, timeout=_DRAIN_SEC)
             if not task.done():
                 task.cancel()
-                await asyncio.wait({task}, timeout=_DRAIN_SEC)
-                if not task.done():
-                    logger.warning("%s: output reader did not finish after cancellation", self._claude.label)
-        closing = asyncio.create_task(self.close_own("Claude Code stopped"))
-        done, _ = await asyncio.wait({closing}, timeout=_DRAIN_SEC)
-        if not done:
-            closing.cancel()
-            logger.warning("%s: autonomous turn cleanup did not finish in time", self._claude.label)
-        else:
-            await closing
+                await asyncio.wait({task})
+        await self.close_own("Claude Code stopped")
         self._between.clear()
 
 
@@ -762,6 +754,10 @@ class ResidentClaude:
 
     @property
     def shares_bridge(self) -> bool:
+        return True
+
+    @property
+    def can_interrupt(self) -> bool:
         return True
 
     @property
@@ -840,8 +836,8 @@ class ResidentClaude:
         ``cancel`` is the one way to stop the turn by the user: once it is
         requested, Claude is asked to interrupt the turn with a control
         request and given ``INTERRUPT_GRACE_SEC`` to end it with its result
-        (``CONTROL``; the process stays and every process the turn started
-        is ended from the tree's snapshot); else the whole tree is killed
+        (``CONTROL``; the process stays, and what Claude leaves running with
+        the interrupt is its own); else Claude is killed with its tree
         (``KILL``; the turn returns ``user_stop_result``). A turn stopped
         before its message was written writes nothing and leaves the process
         alone. From the request on, the turn's events are not handed to
@@ -870,8 +866,6 @@ class ResidentClaude:
         self._user_turn, self._cancel, self._interrupting = turn, cancel, None
         unregister = cancel.on_request(self._on_stop)  # (called at once if the request came meanwhile)
         try:
-            if self._tree is not None:
-                await self._tree.baseline()  # resident process and MCP servers survive end_new
             output.turn = turn
             if output.ended:
                 output.drop_turn()  # nothing more will come
@@ -957,7 +951,7 @@ class ResidentClaude:
         self, turn: _UserTurn, process: asyncio.subprocess.Process, output: _Output,
     ) -> StopMethod:
         """Ask Claude to interrupt ``turn`` and wait up to ``INTERRUPT_GRACE_SEC`` for its result (``CONTROL``: the
-        turn's tools, background ones too, are ended and the process stays); else, or when the request cannot be
+        turn is over and no process is signalled); else, or when the request cannot be
         written, kill Claude with its whole tree (``KILL``). A turn Claude has not yet begun (no output so far) is
         stopped the same way, so a silent Claude cannot hang the turn."""
         from .runtimes import StopMethod
@@ -965,9 +959,8 @@ class ResidentClaude:
         assert process.stdin is not None
         if (turn.done.done() and not turn.done.cancelled() and turn.done.exception() is None
                 and turn.done.result() is not None):
-            # Its result came before the stop: nothing is left to interrupt but what the turn started.
+            # Its result came before the stop: the turn is over, nothing is left to interrupt.
             turn.answered = True
-            await self.end_turn_processes()
             return StopMethod.CONTROL
         try:
             async with asyncio.timeout(INTERRUPT_GRACE_SEC):  # the write, the drain and the wait share one grace
@@ -975,7 +968,6 @@ class ResidentClaude:
                 await process.stdin.drain()
                 await asyncio.wait({turn.done})
             if not turn.done.cancelled() and turn.done.exception() is None and turn.done.result() is not None:
-                await self.end_turn_processes()
                 return StopMethod.CONTROL
         except (BrokenPipeError, ConnectionResetError):
             logger.warning("%s: Claude closed stdin before the interrupt was sent", self._label)
@@ -985,15 +977,6 @@ class ResidentClaude:
             output.discard = True
             await self.stop(kill=True)
         return StopMethod.KILL
-
-    async def end_turn_processes(self) -> None:
-        """End every process the stopped turn started (background tools too); the process and its MCP servers stay."""
-        if self._tree is None:
-            return
-        try:
-            await self._tree.end_new()
-        except Exception:
-            logger.warning("%s: could not end the interrupted turn's processes", self._label, exc_info=True)
 
     async def interrupt(self) -> StopMethod | None:
         """Request the running user turn's cancel and wait for its stop: ``CONTROL`` or ``KILL`` (see ``run_turn``).
@@ -1027,14 +1010,13 @@ class ResidentClaude:
         if output is not None:
             output.drop_turn()
         try:
-            if tree is not None and process.returncode is None and not kill:
-                # What Claude started since the last tick, before its stdin closes and it exits on its own;
-                # recorded, so a server that dies meanwhile has the rest ended at its next start. (A kill lists
-                # nothing first: its end signals what it knows before any listing.)
+            if tree is not None and process.returncode is None:
+                # What Claude started since the last tick, before its stdin closes and it exits; recorded when it
+                # is let exit on its own, so a server that dies meanwhile has the rest ended at its next start.
                 with contextlib.suppress(Exception):
-                    await tree.begin_end()
-            if process.stdin is not None and not process.stdin.is_closing() and not kill:
-                process.stdin.close()  # (a kill leaves it open: on EOF Claude exits and orphans its tree unsignalled)
+                    await (tree.refresh(force=True) if kill else tree.begin_end())
+            if process.stdin is not None and not process.stdin.is_closing():
+                process.stdin.close()
             if process.returncode is None and not kill:
                 try:
                     await asyncio.wait_for(process.wait(), STOP_GRACE_SEC)
@@ -1043,11 +1025,11 @@ class ResidentClaude:
         finally:
             # Also when the wait is cancelled: the process is forgotten already.
             try:
-                # From the snapshot followed while Claude ran: what it started is re-parented once it exits. Not
-                # cut short by a cancel of the stop (its caller's budget ran out in the grace): the end still runs.
-                await proc_tree.finish(tree.end() if tree is not None else proc_tree.end(process, label=self._label))
-                if process.stdin is not None and not process.stdin.is_closing():
-                    process.stdin.close()
+                # From the snapshot followed while Claude ran: what it started is re-parented once it exits.
+                if tree is not None:
+                    await tree.end()
+                else:
+                    await proc_tree.end(process, label=self._label)
                 if output is not None:
                     # Read to its end, or cut off: an event a stopped turn's owner still handles is over with it.
                     await output.finish()
