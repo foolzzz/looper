@@ -592,6 +592,38 @@ def test_turn_tree_leaves_a_reused_pid_alone(tmp_path: Path) -> None:
     assert len(asyncio.run(_run())) == 1
 
 
+def test_turn_tree_leaves_the_subtree_of_a_reused_pid_alone(tmp_path: Path) -> None:
+    child_code = ("import subprocess, sys, time\n"
+                  "while not __import__('os').path.exists('release'): time.sleep(0.02)\n"
+                  "d = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)\n"
+                  "open('grandchild.pid', 'w').write(str(d.pid))\ntime.sleep(60)\n")
+    code = ("import subprocess, sys\n"
+            "subprocess.Popen([sys.executable, '-c', " + repr(child_code) + "], start_new_session=True)\n"
+            "sys.stdin.read()\n")
+
+    async def _run() -> list[int]:
+        process = await _spawn_python(tmp_path, code)
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        for _ in range(100):
+            await tree.refresh(force=True)
+            if len(tree.seen) > 1:
+                break
+            await asyncio.sleep(0.05)
+        (child,) = [pid for pid in tree.seen if pid != process.pid]
+        await tree.refresh(force=True)
+        tree.seen[child] = "Thu Jan 1 00:00:00 1970"  # the child's pid now belongs to an unrelated process
+        (tmp_path / "release").write_text("go")
+        grandchild = int(await _wait_file(tmp_path / "grandchild.pid"))
+        try:
+            await tree.end()
+            return _running([child, grandchild], settle=0)
+        finally:
+            for pid in _running([child, grandchild], settle=0):
+                os.kill(pid, signal.SIGKILL)
+
+    assert len(asyncio.run(_run())) == 2
+
+
 def test_turn_tree_end_new_leaves_the_agent_and_earlier_children(tmp_path: Path) -> None:
     code = ("import subprocess, sys\n"
             "old = subprocess.Popen(['/bin/sleep', '60'])\nprint('go', flush=True)\n"
