@@ -30,6 +30,10 @@ if TYPE_CHECKING:
     from .service import OpsScope
 
 
+# The channel of a call that came through ``/api/v1`` (``ops.clients``).
+API_CHANNEL = "api"
+
+
 class Risk(str, Enum):
     READ = "read"
     WRITE = "write"
@@ -93,6 +97,9 @@ class Turn:
     # A resident runtime's turns share one bridge: a write call runs only when it matches a tool_use of this turn.
     require_match: bool = False
     runtime: str | None = None  # the runtime that answers it (its type), once the Manager knows it
+    # The API client the turn is for (``/api/v1``, or the Manager answering a client's chat message); None for none.
+    client_id: str | None = None
+    client_name: str | None = None
 
     @property
     def autonomous(self) -> bool:
