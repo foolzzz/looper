@@ -262,6 +262,8 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const selectedTaskId = taskPath ? decodeURIComponent(taskPath) : null;
   const gateStep = new URLSearchParams(taskQuery).get("gate");
   const tabParam = new URLSearchParams(taskQuery).get("tab");
+  const roomFilter = new URLSearchParams(taskQuery).get("filter");
+  const roomRole = new URLSearchParams(taskQuery).get("role");
   // The list's filter, so leaving a task's detail returns to the list it was opened from.
   const listQuery = useRef("");
   useEffect(() => {
@@ -471,6 +473,14 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
         gateStep={gateStep}
         tab={tabParam}
         onTab={(tab) => onNavigate?.(`${taskPath}${tab === "overview" ? "" : `?tab=${tab}`}`)}
+        roomFilter={roomFilter}
+        roomRole={roomRole}
+        onRoomFilter={(filter, role) => {
+          const next = new URLSearchParams({ tab: "room" });
+          if (filter !== "all") next.set("filter", filter);
+          if (role) next.set("role", role);
+          onNavigate?.(`${taskPath}?${next}`);
+        }}
         onBack={() => setSelectedTaskId(null)}
       />
     );

@@ -137,6 +137,32 @@ def test_sessions_leave_out_planner_threads_and_show_each_last_message(
     _run(_test, monkeypatch)
 
 
+def test_one_session_is_found_by_id_however_far_back_it_is(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def _test(pool: Any) -> None:
+        from looper.db import chat as db_chat
+
+        await db_chat.save_message(session_id="lark:old", message_id="o1", role="user", content="first",
+                                   channel="lark", pool=pool)
+        for n in range(51):
+            await db_chat.save_message(session_id=f"session-{n}", message_id=f"w{n}", role="user", content="hi",
+                                       pool=pool)
+
+        _, listed = await _call("GET", "/api/chat/sessions", tmp_path)
+        assert "lark:old" not in [s["session_id"] for s in listed["sessions"]]  # past the newest 50
+
+        status, body = await _call("GET", "/api/chat/sessions", tmp_path, {"session_id": "lark:old"})
+        assert status == 200
+        (session,) = body["sessions"]
+        assert (session["session_id"], session["channel"], session["last_content"]) == ("lark:old", "lark", "first")
+
+        _, none = await _call("GET", "/api/chat/sessions", tmp_path, {"session_id": "nope"})
+        assert none["sessions"] == []
+
+    _run(_test, monkeypatch)
+
+
 def test_a_long_session_returns_its_newest_messages_oldest_first(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:

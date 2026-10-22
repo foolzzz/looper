@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.21] - 2026-10-21
+
+### Fixed
+
+- **Task run rows and dashboard polling.** `GET /api/tasks/<id>/runs` rows gain `task_role` (the role the run's Planner defined, else null), read from the run's `prompt_layers`; the dashboard restores it, so slim runs no longer lose it. The Context usage panel, the task Room and the Gate thread pass the polling abort signal to their requests, so a stopped poll cancels its request, and the Gate thread has one reader (polling when following, else one read per change) instead of a first read racing the poll. No prompt, tool schema or tool result changed. ([#345](https://github.com/foolzzz/looper/pull/345))
+
+## [2.13.20] - 2026-10-21
+
+### Fixed
+
+- **Chat and Room addresses.** The Chat page keeps the open Web conversation in `?conversation=<id>`, so a link, refresh, Back and Forward reopen it. `GET /api/chat/sessions` takes an optional `session_id` and returns only that conversation, however old, so deep links beyond the newest 50 open, an open read-only channel conversation stays read-only, and loading and error states are shown. The task Room tab keeps its kind and role filters in `?tab=room&filter=..&role=..`. No prompt, tool schema or tool result changed. ([#350](https://github.com/foolzzz/looper/pull/350))
+
 ## [2.13.19] - 2026-10-21
 
 ### Fixed
