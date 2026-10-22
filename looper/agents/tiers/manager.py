@@ -144,7 +144,9 @@ Each user message lists your task templates. Create a task with the template
 that fits (looper_task_create with template and inputs); the template sets the
 project, the roles and how the Planner works. Ask the user for every required
 input you do not have, as the template's hint describes it, and never make one
-up. When no template fits, say so{only}."""
+up. Even when you have every input, first restate the task with its template
+and inputs and ask the user to confirm; create it only after the user confirms,
+as for any task. When no template fits, say so{only}."""
 TEMPLATES_ONLY_SENTENCE = " and do not create a task"
 
 

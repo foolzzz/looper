@@ -215,3 +215,13 @@ async def test_run_is_recorded_under_its_id(agent_db: Any, monkeypatch: pytest.M
         await manager._bus.shutdown()
     ids = [call.kwargs.get("agent_id") for call in agent_db.start_record.await_args_list]
     assert ids and set(ids) == {"manager-review"}
+
+
+@pytest.mark.parametrize("policy", [TaskPolicy.FREE, TaskPolicy.TEMPLATES_ONLY])
+def test_templates_section_waits_for_confirmation(policy: TaskPolicy) -> None:
+    # An operator's prompt such as "create the task" must not read as leave to create it at once: with every
+    # input given, the Manager still restates the task and creates it only once the user confirms.
+    contract = " ".join(scope_contract(_definition(task_policy=policy), has_templates=True).split())
+    assert "restate the task with its template and inputs" in contract
+    assert "create it only after the user confirms" in contract
+    assert all(len(line) < 80 for line in scope_contract(_definition(task_policy=policy), has_templates=True).splitlines())
