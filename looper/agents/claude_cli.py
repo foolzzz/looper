@@ -1249,7 +1249,12 @@ class ClaudeRunRecorder:
         await self.end_left_open(exc)
 
     async def record(self, event: dict[str, Any]) -> None:
-        await self._heartbeat()
+        self.account(event)
+        await self.persist(event)
+
+    def account(self, event: dict[str, Any]) -> None:
+        """What ``event`` tells the run (its usage, so its cap, its model and session), at once; ``persist`` writes
+        it to the record, which may wait on the database."""
         if event.get("type") == "usage":  # internal: counted, not part of the transcript
             from .runtimes.pricing import event_usage
 
@@ -1269,7 +1274,11 @@ class ClaudeRunRecorder:
             self._context_tokens = context
         if (compacted := compaction(event)) is not None:
             self._compactions.append(compacted)
-        if self._record_id is None:
+
+    async def persist(self, event: dict[str, Any]) -> None:
+        """Write ``event``, once ``account`` has taken it, to the run's record."""
+        await self._heartbeat()
+        if self._record_id is None or event.get("type") in ("usage", "stream_event"):
             return
         from ..db import llm_records
 

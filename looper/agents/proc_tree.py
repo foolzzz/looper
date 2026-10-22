@@ -33,7 +33,10 @@ import json
 import logging
 import os
 import signal
+import secrets
 import subprocess
+import sys
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
@@ -312,9 +315,15 @@ def _write_record(
 
 async def spawn(*argv: str, env: Mapping[str, str] | None = None, **kwargs: Any) -> asyncio.subprocess.Process:
     """Start an agent process in a session of its own, so its children share its process group, and record it
-    until it is reaped (once ``sweep`` has run). Without ``env``, start with ``child_env.inherited()``."""
-    process = await asyncio.create_subprocess_exec(
-        *argv, env=child_env.inherited() if env is None else env, start_new_session=True, **kwargs)
+    until it is reaped (once ``sweep`` has run). Without ``env``, start with ``child_env.inherited()``. Where the
+    turn's ownership is an inherited mark (``_MARKS``), the process gets one of its own (``OWNER_ENV``)."""
+    environment = dict(child_env.inherited() if env is None else env)
+    owner = None
+    if _MARKS:
+        owner = environment[OWNER_ENV] = secrets.token_hex(12)
+    process = await asyncio.create_subprocess_exec(*argv, env=environment, start_new_session=True, **kwargs)
+    if owner is not None:
+        _owners[process.pid] = owner
     if _records is not None and _server is not None:
         if (started := _start_time(process.pid)) is None:
             logger.warning("cannot read the start time of agent pid %s; it is not recorded for the next sweep",
@@ -413,12 +422,263 @@ async def sweep(runtime_root: Path) -> None:
     await asyncio.gather(*(end_record(path, agents) for path, agents in ends.items()))
 
 
+# --- What an agent owns: every process it ever started, whatever group or session that joined since ---
+#
+# The tree (``_tree``) reaches a process through its parent or its group; a background command that leaves the
+# group at once (``setsid``) while its parent exits has neither once the parent is gone, and a refresh that comes
+# after that never sees it. So a turn's agent also owns its descendants through what the platform keeps for each
+# process from the moment it is created:
+#
+# - macOS: the kernel gives every process an id version that is never reused, and keeps the version of the
+#   process that created it (``p_orig_ppidversion``) through re-parenting and ``setsid``. A kqueue watch on each
+#   descendant (``NOTE_FORK``) records every new process's version as its parent creates it, so a command that
+#   exits at once still links the processes it started to the agent.
+# - Linux: an environment variable the agent gets at spawn (``OWNER_ENV``), inherited by everything it starts;
+#   ``/proc/<pid>/environ`` holds the environment a process was started with.
+#
+# Elsewhere, or for a process ``spawn`` did not start (Linux), the tree alone decides.
+
+OWNER_ENV = "LOOPER_PROC_OWNER"
+_MARKS = sys.platform.startswith("linux") and Path("/proc/self/environ").exists()
+_owners: dict[int, str] = {}  # agent pid -> its mark, set by ``spawn`` (Linux)
+
+
+def _libproc() -> Any:
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes
+
+        # Each call is a short system call: made holding the GIL, so a busy server thread does not stretch a
+        # listing of every process (one call each) past the life of a shell that starts something and exits.
+        lib = ctypes.PyDLL("/usr/lib/libproc.dylib")
+        lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+        lib.proc_listallpids.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        lib.proc_listchildpids.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+        return lib
+    except (OSError, AttributeError):
+        return None
+
+
+_LIBPROC = _libproc()
+_PIDUNIQIDENTIFIERINFO = 17  # proc_pidinfo flavor: struct proc_uniqidentifierinfo (56 bytes)
+_UNIQ_SIZE = 56
+
+
+def _versions(pid: int) -> tuple[int, int] | None:
+    """macOS: ``pid``'s (id version, its creator's id version); None when it does not run or cannot be read."""
+    import ctypes
+
+    buffer = ctypes.create_string_buffer(_UNIQ_SIZE)
+    if _LIBPROC.proc_pidinfo(pid, _PIDUNIQIDENTIFIERINFO, 0, buffer, _UNIQ_SIZE) != _UNIQ_SIZE:
+        return None
+    raw = buffer.raw
+    return int.from_bytes(raw[32:36], sys.byteorder), int.from_bytes(raw[36:40], sys.byteorder)
+
+
+def _listed(call: Callable[[Any, int], int]) -> list[int]:
+    import ctypes
+
+    size = 4096
+    while True:
+        pids = (ctypes.c_int * size)()
+        count = call(pids, ctypes.sizeof(pids))
+        if count < 0:
+            return []
+        if count < size:
+            return [pids[i] for i in range(count) if pids[i] > 0]
+        size *= 2
+
+
+def _all_pids() -> list[int]:
+    return _listed(_LIBPROC.proc_listallpids)
+
+
+def _children(pid: int) -> list[int]:
+    return _listed(lambda buffer, size: _LIBPROC.proc_listchildpids(pid, buffer, size))
+
+
+def _readable_versions() -> bool:
+    if _LIBPROC is None:
+        return False
+    try:
+        own = _versions(os.getpid())
+    except Exception:
+        return False
+    return own is not None and own[0] != 0 and own[1] != 0
+
+
+class _Owned(Protocol):
+    def live(self) -> set[int]: ...
+
+    def close(self) -> None: ...
+
+
+class _Lineage:
+    """macOS: the agent's descendants by fork lineage. A thread waits on a kqueue for any watched process to
+    fork; the forking process's children are then recorded and watched at once (and theirs, for a fork that came
+    before its parent was watched), and one listing of every process records each whose creator's version is
+    recorded. Versions are never reused, so a recorded process that exited still links what it started."""
+
+    _POLL_SEC = 0.25
+
+    def __init__(self, pid: int, label: str) -> None:
+        import select
+
+        self.label = label
+        self._root = pid
+        self._versions: set[int] = set()
+        self._known: dict[int, int] = {}  # pid -> version of each recorded process seen running
+        self._watched: set[int] = set()
+        self._lock = threading.Lock()
+        self._closed = threading.Event()
+        self._kq = select.kqueue()
+        versions = _versions(pid)
+        if versions is None:
+            self._kq.close()
+            self._closed.set()
+            return
+        self._versions.add(versions[0])
+        self._known[pid] = versions[0]
+        self._watch(pid)
+        self._scan()
+        if pid not in self._watched:  # it exited already: nothing more to follow
+            self.close()
+            return
+        self._thread = threading.Thread(target=self._follow, name=f"proc-lineage-{pid}", daemon=True)
+        self._thread.start()
+
+    def _watch(self, pid: int) -> None:
+        import select
+
+        if pid in self._watched or self._closed.is_set():
+            return
+        try:
+            self._kq.control([select.kevent(pid, select.KQ_FILTER_PROC, select.KQ_EV_ADD,
+                                            select.KQ_NOTE_FORK | select.KQ_NOTE_EXIT)], 0, 0)
+        except OSError:
+            return  # it exited already; what it started is still found by its version
+        self._watched.add(pid)
+
+    def _adopt(self, parent: int) -> None:
+        """Record and watch ``parent``'s children, then theirs (forked before they were watched)."""
+        with self._lock:
+            pending = [parent]
+            while pending:
+                for child in _children(pending.pop()):
+                    versions = _versions(child)
+                    if versions is None or self._known.get(child) == versions[0]:
+                        continue
+                    self._versions.add(versions[0])
+                    self._known[child] = versions[0]
+                    self._watch(child)
+                    pending.append(child)
+
+    def _scan(self) -> set[int]:
+        """Record every running process created by a recorded one, until none is left; return the running ones."""
+        with self._lock:
+            table: dict[int, tuple[int, int]] = {}
+            for pid in _all_pids():
+                if (versions := _versions(pid)) is not None:
+                    table[pid] = versions
+            owned: set[int] = set()
+            grew = True
+            while grew:
+                grew = False
+                for pid, (version, creator) in table.items():
+                    if pid not in owned and (version in self._versions or creator in self._versions):
+                        owned.add(pid)
+                        if version not in self._versions:
+                            self._versions.add(version)
+                            grew = True
+            for pid in owned:
+                self._known[pid] = table[pid][0]
+                self._watch(pid)
+            self._watched &= owned
+            self._known = {pid: version for pid, version in self._known.items() if pid in owned}
+            return owned
+
+    def _follow(self) -> None:
+        import select
+
+        try:
+            while not self._closed.is_set():
+                try:
+                    events = self._kq.control(None, 64, self._POLL_SEC)
+                except OSError:
+                    return
+                forked = [event.ident for event in events if event.fflags & select.KQ_NOTE_FORK]
+                for parent in forked:
+                    self._adopt(parent)
+                if forked:
+                    self._scan()
+                if any(event.ident == self._root and event.fflags & select.KQ_NOTE_EXIT for event in events):
+                    self._scan()  # once the agent has exited nothing new is followed; what it left stays owned
+                    return
+        except Exception:
+            logger.warning("%s: cannot follow the agent's processes", self.label, exc_info=True)
+        finally:
+            with self._lock:
+                self._closed.set()
+                self._kq.close()
+
+    def live(self) -> set[int]:
+        """The running processes the agent started, itself excluded."""
+        return self._scan() - {self._root}
+
+    def close(self) -> None:
+        self._closed.set()
+
+
+class _Marked:
+    """Linux: the processes whose environment carries the agent's mark."""
+
+    def __init__(self, pid: int, mark: str) -> None:
+        self._root = pid
+        self._entry = f"{OWNER_ENV}={mark}".encode()
+
+    def live(self) -> set[int]:
+        owned: set[int] = set()
+        for entry in os.scandir("/proc"):
+            if not entry.name.isdigit() or int(entry.name) == self._root:
+                continue
+            try:
+                with open(f"/proc/{entry.name}/environ", "rb") as environ:
+                    if self._entry in environ.read().split(b"\0"):
+                        owned.add(int(entry.name))
+            except OSError:
+                continue
+        return owned
+
+    def close(self) -> None:
+        pass
+
+
+_LINEAGE = _readable_versions()
+FOLLOWS_OWNERSHIP = _LINEAGE or _MARKS  # whether this platform has a facility ``_owned`` can use
+
+
+def _owned(process: Any, label: str) -> _Owned | None:
+    """How ``process``'s descendants are followed here, or None where only its tree is."""
+    if _LINEAGE:
+        try:
+            return _Lineage(process.pid, label)
+        except Exception:
+            logger.warning("%s: cannot follow the agent's processes", label, exc_info=True)
+            return None
+    if _MARKS and (mark := _owners.pop(process.pid, None)) is not None:
+        return _Marked(process.pid, mark)
+    return None
+
+
 # --- One turn's tree, followed while the turn runs ---
 
 
 class TurnTree:
     """The tree of one turn's agent process, snapshotted when the turn starts and refreshed while it runs, so a
-    stop can end every process the turn ever started, even those whose parent has exited since.
+    stop can end every process the turn ever started, even those whose parent has exited since. Where the
+    platform allows, the agent's descendants are also followed from their creation (``_owned``), so one that left
+    the tree before any refresh is ended too.
 
     ``seen`` maps each pid of the tree to its start time (None until a refresh has read it); ``end`` leaves a
     pid whose start time has changed alone, since the pid was reused."""
@@ -432,12 +692,23 @@ class TurnTree:
         self._refreshed = float("-inf")
         self._lock = asyncio.Lock()
         self._ticker: asyncio.Task[None] | None = None
+        self._owned: _Owned | None = None
 
     @classmethod
     def track(cls, process: Any, *, label: str) -> TurnTree:
         tree = cls(process, label)
+        tree._owned = _owned(process, label)
         tree._merge(_tree(process, _snapshot(), {}))
         return tree
+
+    def _live_owned(self) -> set[int]:
+        if self._owned is None:
+            return set()
+        try:
+            return self._owned.live()
+        except Exception:
+            logger.warning("%s: cannot list the agent's processes", self.label, exc_info=True)
+            return set()
 
     def _merge(self, tree: Tree) -> list[int]:
         fresh = [pid for pid in tree if pid not in self.seen]
@@ -480,9 +751,10 @@ class TurnTree:
             await asyncio.gather(ticker, return_exceptions=True)
 
     def baseline(self) -> None:
-        """Remember the current members; ``end_new`` leaves them running."""
+        """Remember the current members, and what the agent started earlier that still runs; ``end_new`` leaves
+        them running."""
         self._merge(_tree(self.process, _snapshot(), self._groups))
-        self._baseline = set(self.seen)
+        self._baseline = set(self.seen) | self._live_owned()
 
     async def _reused(self) -> frozenset[int]:
         known = {pid: started for pid, started in self.seen.items() if started is not None}
@@ -500,13 +772,22 @@ class TurnTree:
             await _record_tree(self.process.pid, dict(self._groups))
 
     async def _strays(self, exclude: frozenset[int]) -> list[_Orphan]:
-        """The seen processes the tree no longer reaches (one that left its group, setsid, once its parent exited):
-        each still running with the start time the snapshot read, so a reused pid is never among them."""
-        reached = _tree(self.process, await asyncio.to_thread(_snapshot), self._groups)
+        """The processes of the turn the tree no longer reaches (one that left its group, setsid, once its parent
+        exited): each seen one still running with the start time the snapshot read, so a reused pid is never among
+        them, and each the agent owns (``_owned``) that runs now."""
+        table = await asyncio.to_thread(_snapshot)
+        reached = _tree(self.process, table, self._groups)
         known = {pid: started for pid, started in self.seen.items()
                  if started is not None and pid not in reached and pid not in exclude and pid != self.process.pid}
         current = await asyncio.to_thread(_start_times, known) or {}
-        return [_Orphan(pid, started) for pid, started in known.items() if current.get(pid) == started]
+        strays = [_Orphan(pid, started) for pid, started in known.items() if current.get(pid) == started]
+        owned = await asyncio.to_thread(self._live_owned)
+        unseen = [pid for pid in owned if pid in table and pid not in reached and pid not in exclude
+                  and pid not in known and pid != self.process.pid]
+        if unseen:
+            starts = await asyncio.to_thread(_start_times, unseen) or {}
+            strays += [_Orphan(pid, starts[pid]) for pid in unseen if pid in starts]
+        return strays
 
     async def _end_all(self, exclude: frozenset[int]) -> None:
         """End the tree, and beside it (not delaying its first signal) the seen processes it no longer reaches."""
@@ -519,10 +800,15 @@ class TurnTree:
                              end_strays())
 
     async def end(self) -> None:
-        """End every process of the tree seen so far and of the tree now, then reap the agent."""
+        """End every process of the tree seen so far and of the tree now, and every one the agent owns, then reap
+        the agent."""
         await self.stop_ticker()
         await self.refresh(force=True)
-        await self._end_all(await self._reused())
+        try:
+            await self._end_all(await self._reused())
+        finally:
+            if self._owned is not None:
+                self._owned.close()
         await _reap(self.process, self.label)
 
     async def end_new(self) -> None:

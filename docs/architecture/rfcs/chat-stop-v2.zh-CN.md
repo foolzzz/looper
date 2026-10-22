@@ -136,6 +136,10 @@ class TurnCancel:
 
 - `seen: dict[pid, start_time]`：进程本身、父链在树里的、树成员领导的进程组的成员（`_tree` 的现有规则）。
 - `refresh()`：读循环每个事件调一次，另有一个 0.5 秒的计时任务；新出现的进程连同启动时间并入 `seen`。工具 `setsid` 出去、父进程退出后被重新挂靠，只要被刷新到过一次就还在 `seen` 里。
+- **归属（不靠采样）**：一个后台命令起出来马上 `setsid`、父进程随即退出，可能在任何一次刷新之前就既不在组里、也没有父链（#339 的第一条）。所以 `track()` 同时按平台提供的机制跟住智能体起的每个进程（`proc_tree._owned`）：
+  - macOS：内核给每个进程一个不复用的 id 版本（`p_idversion`），并在 `p_orig_ppidversion` 里记下创建它的进程的版本，重新挂靠和 `setsid` 都不改。一个线程在 kqueue 上等每个已知后代的 `NOTE_FORK`，在父进程创建子进程时就把子进程的版本记下；所以中间那个 shell 立刻退出了，它起的进程照样连得回这个智能体。读的是 `proc_pidinfo(PROC_PIDUNIQIDENTIFIERINFO)`；读不了（旧系统）就只靠进程树。
+  - Linux：`spawn` 给智能体一个随机的环境变量 `LOOPER_PROC_OWNER`，它起的进程都继承；`/proc/<pid>/environ` 是进程启动时的环境，`setsid`、父进程退出都不改。工具自己清空环境（`env -i`）的进程不在内。
+  - `end()`/`end_new()` 把这些进程中树够不到、当前在跑的，和 `seen` 里够不到的一样逐个回收（读一次启动时间再发信号）；`baseline()` 把当时已在跑的这类进程算进基线，上一轮留下的后台进程不会被这一轮的 `end_new()` 结束。
 - `baseline()`：常驻进程在一轮开始时的成员（Claude 的 MCP 桥接进程等），`since_baseline()` 给出这一轮新起的进程。
 - `end()`：结束 `seen ∪ 当前树`，每个 pid 先核对启动时间（防 pid 复用），SIGTERM → `TERM_GRACE_SEC` → SIGKILL，`REAP_SEC = 2` 内回收不了就记日志放弃等待，不挂住这一轮。按进程组从树里够不到的 `seen` 成员（被刷新到过、之后自己 `setsid` 出组、父进程又退出了）不靠 pgid 找：按快照里的 pid ＋ 启动时间逐个独立回收（连同它领导的组），启动时间对不上的不碰。`end_new()` 同样如此。
 - `begin_end()`：常驻进程被允许自己退出（`stop()` 不带 `kill`）之前，刷新并把树写进进程记录，记录留到 `end` 完成；服务器在这期间死掉，下次启动的 `sweep` 照记录结束剩下的。
@@ -214,10 +218,11 @@ _end_turn(token, t)    同步判定：cancel.requested → 停止；否则 settl
 
 所以对常驻运行时（`ResidentSession.shares_bridge`：`ResidentClaude` 为真，`AcpGrok` 不在退回模式时为真），**非只读的调用和 `looper_confirm`** 还要对上这一轮自己的流：
 
-- 管家的 `on_event` 看到这一轮的 `tool_use` 块，调 `ops.expect(binding, tool, input, call_id=block["id"])`。登记和展示分开：子 agent 的 `assistant` 事件（带 `parent_tool_use_id`）不进回复、不发状态，但它的 `tool_use` 照样登记——子 agent 经同一个桥发的写调用也是这一轮的。名字和参数先规范化成桥接请求里的样子（`_looper_call`）：去掉 `mcp__looper__`（Claude Code）或 `looper__`（Grok）前缀；Grok 经 `use_tool` 调 MCP 工具，`{"tool_name": "looper__<tool>", "tool_input": {...}}` 解包成内层的工具名和参数（`tool_input` 是 JSON 字符串时先解析）。Grok 的 MCP 请求不带调用 id，只能按名字和参数对上，所以这一步不能省。
+- 管家的 `on_event` 看到这一轮的 `tool_use` 块，调 `ops.expect(binding, tool, input, call_id=block["id"])`。登记是同步的，在事件交到 `on_event` 的那一刻做完（`_converse` 的 `observe`，连同记账和软上限要用的用量）；记录事件（数据库）、保存会话和发状态排在一个按序处理的任务里，`run_turn` 返回后等它做完。运行时是读完一个事件、`on_event` 返回之后才读下一行，所以记录慢不会拖住下一个 `tool_use` 的读取和登记（#339 的第二条：记录一个事件花了 2.1 秒，后面那个正常的写调用等过了 `MATCH_WAIT_SEC`，被拒为 `not_this_turn`）。停止请求之后这个任务不再往聊天里发状态（R1）。这个任务每处理完一个事件让出一次事件循环：运行时一次读到的一大串增量（Claude Code 会把整段回复的流事件一起写出）排在它前面时，用户看到第一个增量就发的停止立刻被处理，而不是等前面读到的增量全部发完（真实路径格 e：之前停止后 17–19 秒才有 `answer.final`）。状态（`STATUS_UPDATE`：增量、阶段）不写消息总线的日志：重启后重放只会出一条过时的状态，而日志每条都同步 `fsync`（本机约 20 毫秒），流式回复每个增量都要付一次。登记和展示分开：子 agent 的 `assistant` 事件（带 `parent_tool_use_id`）不进回复、不发状态，但它的 `tool_use` 照样登记——子 agent 经同一个桥发的写调用也是这一轮的。名字和参数先规范化成桥接请求里的样子（`_looper_call`）：去掉 `mcp__looper__`（Claude Code）或 `looper__`（Grok）前缀；Grok 经 `use_tool` 调 MCP 工具，`{"tool_name": "looper__<tool>", "tool_input": {...}}` 解包成内层的工具名和参数（`tool_input` 是 JSON 字符串时先解析）。Grok 的 MCP 请求不带调用 id，只能按名字和参数对上，所以这一步不能省。
 - `ops.call` 对这类调用：有 `X-Looper-Call` 时按 id 找；没有时按 `(tool, 规范化 JSON 参数)` 找这一轮还没用掉的期望，最多等 `MATCH_WAIT_SEC = 2`（流里的事件可能晚于 HTTP 到达）。找到就消耗掉并执行；找不到就拒绝，`ErrorCode.NOT_THIS_TURN`：「这个调用不是正在进行的这一轮发出的，没有执行」。
 - 只读调用不做匹配（归错轮只影响 `manager_actions` 的记账，不改东西）。
 - 每轮一个进程的运行时不需要匹配。
+- 要不要匹配（`Turn.require_match`）由实际跑这一轮的会话决定：在发布这一轮 binding 的时候（`_publish_binding`，已经换过运行时之后）按 `self._claude.shares_bridge` 设，不在准备阶段按换之前的会话设。这一轮的调用要读到它的 binding 才会带上它，所以之前不存在要匹配的调用（#339 的第三条：从每轮进程换到常驻运行时的第一轮没有匹配）。
 
 需要验证（真实路径第 3 步）：Claude Code 当前版本的 `tools/call` 是否带 `_meta["claudecode/toolUseId"]`；stream-json 是否在执行工具之前写出带完整 `input` 的 `assistant` 事件；Grok ACP 的 `tool_call` 更新里的名字和 `rawInput`。任何一项不成立，匹配退回到「按名字和参数、等 2 秒」，测试两种都覆盖。
 
@@ -242,7 +247,7 @@ _end_turn(token, t)    同步判定：cancel.requested → 停止；否则 settl
 
 - 观察模式下 `not_this_turn` 的匹配在调用旁边单独跑（同样等 `MATCH_WAIT_SEC`、同样消耗期望），调用不等它，不加延迟。
 - 日志：`looper.agents.ops.service` 的 WARNING，`turn binding mismatch (observe-only, the call runs): reason=… runtime=… tool=… message=… total=N`，记录的 `extra` 里有 `binding_mismatch = {reason, runtime, tool, enforced}`。`runtime` 是这一轮的运行时类型（`Turn.runtime`，管家拿到 `Launch` 时填上）。
-- 计数：`ManagerOps.binding_report()`，`GET /api/status` 的 `turn_binding`：`{"enforced": bool, "mismatches": N, "by": [{reason, runtime, tool, count}]}`，从服务器启动累计。开关打开后同样记录和计数（`enforced: true`），只是这时会拒绝。
+- 计数：`ManagerOps.binding_report()`，`GET /api/status` 的 `turn_binding`：`{"enforced": bool, "mismatches": N, "by": [{reason, runtime, tool, count}], "matches": [{by, when, count}]}`，从服务器启动累计。开关打开后同样记录和计数（`enforced: true`），只是这时会拒绝。`matches` 是做过匹配的调用：`by` 为 `id`（桥接带了运行时的调用 id）或 `arguments`，`when` 为 `at_arrival`（请求到达时 `tool_use` 已经读到）、`waited`（等到了）或 `missed`；6.3 节的需要验证项据此在真实路径上读出。
 - 不放宽、也不收紧：关着时轮结束、轮被停的调用只在 main 本来就拒绝的地方拒绝（没有轮在跑时的写 → `needs_user_turn`；`self._turn` 已被停 → `stopped`）。
 
 ## 7. 记录、下一轮、续接（D7）

@@ -741,3 +741,97 @@ def test_turn_tree_end_new_ends_a_seen_child_that_left_the_group(tmp_path: Path)
     child_left, agent = asyncio.run(_run())
     assert child_left == []
     assert len(agent) == 1  # the agent survives end_new
+
+
+# A background command that leaves the agent's group at once (setsid) while its parent exits, before any refresh
+# could see it: only the turn's ownership of what the agent starts (fork lineage on macOS, an inherited marker on
+# Linux) still links it to the turn.
+_LEAVES_AT_ONCE = (
+    "import os, time\nos.setsid()\n"
+    "open('child.pid', 'w').write(str(os.getpid()))\ntime.sleep(60)\n"
+)
+_QUICK_MIDDLE = "import subprocess, sys\nsubprocess.Popen([sys.executable, '-c', " + repr(_LEAVES_AT_ONCE) + "])\n"
+
+
+async def _unseen_child_that_left_at_once(tmp_path: Path, tree: proc_tree.TurnTree) -> int:
+    child = int(await _wait_file(tmp_path / "child.pid"))
+    await asyncio.sleep(0.3)  # the middle process has exited: the child is re-parented, in a session of its own
+    assert child not in tree.seen
+    return child
+
+
+@pytest.mark.skipif(not proc_tree.FOLLOWS_OWNERSHIP, reason="no ownership facility on this platform")
+def test_turn_tree_end_ends_an_unseen_child_that_left_the_group_at_once(tmp_path: Path) -> None:
+    code = ("import subprocess, sys\nsys.stdin.readline()\n"
+            "subprocess.Popen([sys.executable, '-c', " + repr(_QUICK_MIDDLE) + "]).wait()\nsys.stdin.read()\n")
+
+    async def _run() -> list[int]:
+        process = await proc_tree.spawn(sys.executable, "-c", code, cwd=tmp_path, stdin=asyncio.subprocess.PIPE)
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        process.stdin.write(b"\n")  # type: ignore[union-attr]
+        child = await _unseen_child_that_left_at_once(tmp_path, tree)
+        try:
+            await tree.end()
+            return _running([child])
+        finally:
+            for pid in _running([child], settle=0):
+                os.kill(pid, signal.SIGKILL)
+
+    assert asyncio.run(_run()) == []
+
+
+@pytest.mark.skipif(not proc_tree.FOLLOWS_OWNERSHIP, reason="no ownership facility on this platform")
+def test_turn_tree_end_new_ends_an_unseen_child_that_left_at_once_and_spares_an_earlier_one(tmp_path: Path) -> None:
+    # The earlier turn's background command left the same way and is still running at the baseline: it is not
+    # this turn's to end.
+    code = ("import os, subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-c', " + repr(_QUICK_MIDDLE) + "]).wait()\n"
+            "while not os.path.exists('child.pid'):\n    time.sleep(0.01)\n"
+            "os.rename('child.pid', 'earlier.pid')\nprint('go', flush=True)\nsys.stdin.readline()\n"
+            "subprocess.Popen([sys.executable, '-c', " + repr(_QUICK_MIDDLE) + "]).wait()\nsys.stdin.read()\n")
+
+    async def _run() -> tuple[list[int], list[int]]:
+        process = await proc_tree.spawn(sys.executable, "-c", code, cwd=tmp_path,
+                                        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        assert process.stdin and process.stdout
+        await process.stdout.readline()
+        earlier = int((tmp_path / "earlier.pid").read_text())
+        await asyncio.sleep(0.3)
+        tree.baseline()
+        process.stdin.write(b"\n")
+        await process.stdin.drain()
+        child = await _unseen_child_that_left_at_once(tmp_path, tree)
+        try:
+            await tree.end_new()
+            return _running([child]), _running([process.pid, earlier], settle=0)
+        finally:
+            for pid in _running([child, earlier, process.pid], settle=0):
+                os.kill(pid, signal.SIGKILL)
+            await process.wait()
+
+    child_left, survivors = asyncio.run(_run())
+    assert child_left == []
+    assert len(survivors) == 2
+
+
+@pytest.mark.skipif(not proc_tree.FOLLOWS_OWNERSHIP, reason="no ownership facility on this platform")
+def test_turn_tree_end_ends_an_unseen_child_two_quick_shells_down(tmp_path: Path) -> None:
+    # As a tool runs `(cmd &)`: the tool's shell starts a subshell, which starts the command and exits at once.
+    shells = "import subprocess, sys\nsubprocess.Popen([sys.executable, '-c', " + repr(_QUICK_MIDDLE) + "]).wait()\n"
+    code = ("import subprocess, sys\nsys.stdin.readline()\n"
+            "subprocess.Popen([sys.executable, '-c', " + repr(shells) + "]).wait()\nsys.stdin.read()\n")
+
+    async def _run() -> list[int]:
+        process = await proc_tree.spawn(sys.executable, "-c", code, cwd=tmp_path, stdin=asyncio.subprocess.PIPE)
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        process.stdin.write(b"\n")  # type: ignore[union-attr]
+        child = await _unseen_child_that_left_at_once(tmp_path, tree)
+        try:
+            await tree.end()
+            return _running([child])
+        finally:
+            for pid in _running([child], settle=0):
+                os.kill(pid, signal.SIGKILL)
+
+    assert asyncio.run(_run()) == []

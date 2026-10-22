@@ -9,6 +9,7 @@ Each runtime runs a stand-in process (real pipes, real process trees). A turn is
 - ``streaming``: while it streams text;
 - ``blocked``: while writing the message to it is blocked (it reads nothing: the pipe fills);
 - ``tool``: while a tool call it started runs (a child process, in a session of its own: ``setsid``);
+- ``detached`` (Claude): the tool's shell started a ``setsid`` sleeper and exited before any refresh saw either;
 - ``done``: after it wrote the turn's result, before the turn is cleaned up (the process lingers);
 - ``tail``: the process has exited and its stderr is read (per-turn runtimes, and the Grok fallback).
 
@@ -199,7 +200,7 @@ def test_per_turn_stop_after_the_process_exited_before_the_turn_returned(
 # --- Claude Code: one resident stream-json process (``claude_cli.ResidentClaude``) ---
 
 
-CLAUDE_WINDOWS = ["silent", "streaming", "blocked", "tool", "done"]
+CLAUDE_WINDOWS = ["silent", "streaming", "blocked", "tool", "detached", "done"]
 
 
 @pytest.mark.parametrize("obey", [False, True], ids=["deaf", "obeys"])

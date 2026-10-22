@@ -247,7 +247,8 @@ def _pids(directory: Path) -> list[int]:
 # What the stand-in does with each user message is told by the message, ``mode:<window>``, or by a ``mode`` file
 # (the Manager's message is its own text): ``obey`` after the window makes it
 # answer an interrupt of a running turn (a control response, then the turn's error result; the tool it started,
-# a ``setsid`` sleeper, is left to the stop to end); else it is deaf to the interrupt. A ``stall`` file
+# a ``setsid`` sleeper, is left to the stop to end); else it is deaf to the interrupt. ``detached``: the tool's
+# shell starts the sleeper and exits at once, so no refresh of the tree sees the sleeper. A ``stall`` file
 # makes it stop reading its input after the message it is answering.
 _CLAUDE = r"""
 import json, os, subprocess, sys, threading, time
@@ -263,6 +264,9 @@ def child():
     c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)  # setsid
     put('pids', '%d\n' % c.pid)
     return c
+DETACH = ("import os, subprocess, sys\n"
+          "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+          "open(os.path.join(os.environ['STOP_MATRIX_DIR'], 'pids'), 'a').write('%d\\n' % c.pid)\n")
 def result(text, ok=True):
     state['running'] = False
     out({'type': 'result', 'subtype': 'success' if ok else 'error_during_execution', 'is_error': not ok,
@@ -288,6 +292,12 @@ def run(text):
         out({'type': 'assistant', 'message': {'role': 'assistant', 'content': [
              {'type': 'tool_use', 'id': 't1', 'name': 'Bash', 'input': {'command': 'sleep 60'}}]}})
         state['tool'] = child()
+        put('reached', mode, 'w')
+        return
+    if mode == 'detached':  # the tool's shell starts a sleeper in a session of its own and exits at once
+        out({'type': 'assistant', 'message': {'role': 'assistant', 'content': [
+             {'type': 'tool_use', 'id': 't1', 'name': 'Bash', 'input': {'command': 'setsid sleep 60 &'}}]}})
+        subprocess.Popen([sys.executable, '-c', DETACH]).wait()
         put('reached', mode, 'w')
         return
     out({'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'answered'}]}})

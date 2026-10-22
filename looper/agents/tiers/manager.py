@@ -869,8 +869,7 @@ class ManagerAgent:
             origin = _message_origin(envelope)
             # The calls Claude makes while answering belong to this message and its chat.
             turn = Turn(channel=origin["channel"], chat=origin["chat"], message_id=envelope.message_id,
-                        envelope=envelope, sender=origin["sender"], group=origin["group"],
-                        require_match=self._claude.shares_bridge)
+                        envelope=envelope, sender=origin["sender"], group=origin["group"])
             token.check()
             token.ops_turn = turn
             # Registered before the first await: a Stop during the persisting, the status and the tools probe is kept.
@@ -996,7 +995,11 @@ class ManagerAgent:
             self._publish_binding(token)
 
     def _publish_binding(self, token: TurnToken | None) -> None:
-        """The binding file the MCP bridge reads at each call names ``token``'s turn, or no turn (None)."""
+        """The binding file the MCP bridge reads at each call names ``token``'s turn, or no turn (None). Published
+        once the turn's session is the one that runs it (after any swap of runtime), which also decides whether the
+        turn's calls must match its stream: its calls carry the binding only from here on."""
+        if token is not None and token.ops_turn is not None:
+            token.ops_turn.require_match = self._claude.shares_bridge
         if self.ops is not None:
             self.ops.publish_binding(token.binding if token is not None else None)
 
@@ -1205,9 +1208,59 @@ class ManagerAgent:
         text_parts: list[str] = []
         streamed_partials = False
 
+        # The runtime hands its events on one at a time, reading the next once ``on_event`` returns. What a tool
+        # call's match and the turn's cap need is taken from each event at once (``observe``); recording it,
+        # saving the session and the chat's status follow in order (``handle``), so a slow database write never
+        # holds back the read of the tool_use a bridge call waits for (``ManagerOps.MATCH_WAIT_SEC``).
+        events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        handling: asyncio.Task[None] | None = None
+
+        def observe(payload: dict[str, Any]) -> None:
+            recorder.account(payload)
+            message = payload.get("message") if payload.get("type") == "assistant" else None
+            if self.ops is None or not isinstance(message, dict):
+                return
+            for block in message.get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    # Every tool call of the turn may come to the bridge, a subagent's too: each is expected,
+                    # though only the Manager's own blocks are shown.
+                    bare, arguments = _looper_call(block.get("name"), block.get("input"))
+                    self.ops.expect(token.binding, bare, arguments, call_id=block.get("id"))
+
         async def on_event(payload: dict[str, Any]) -> None:
+            observe(payload)
+            events.put_nowait(payload)
+
+        async def handle_events() -> None:
+            while (payload := await events.get()) is not None:
+                try:
+                    await handle(payload)
+                except Exception:  # (the turn goes on: the event is in the runtime's hands already)
+                    logger.warning("manager: handling an event of %s failed", token.message_id, exc_info=True)
+                # Neither a queued event nor its handling need wait: without this the task would show a whole backlog
+                # (a burst the runtime read at once) before the loop serves anything else, the user's stop included.
+                await asyncio.sleep(0)
+
+        async def handled() -> None:
+            """Wait for the events handed on so far to be handled (what the chat still shows of the turn)."""
+            if handling is not None and not handling.done():
+                events.put_nowait(None)
+            if handling is not None:
+                await handling
+
+        async def abandon_handling() -> None:
+            if handling is not None and not handling.done():
+                handling.cancel()
+            if handling is not None:
+                await asyncio.gather(handling, return_exceptions=True)
+
+        async def show(text: str, **kwargs: Any) -> None:
+            if not token.cancel.requested:  # (R1: what a stopped turn wrote before the stop is handled after it)
+                await self._send_status(context_envelope, text, **kwargs)
+
+        async def handle(payload: dict[str, Any]) -> None:
             nonlocal streamed_partials
-            await recorder.record(payload)
+            await recorder.persist(payload)
 
             session_id = payload.get("session_id")
             if isinstance(session_id, str) and session_id and session_id != self._session_id:
@@ -1222,7 +1275,7 @@ class ManagerAgent:
             if event_type == "system":
                 subtype = payload.get("subtype", "")
                 if subtype == "init":
-                    await self._send_status(context_envelope, "thinking", phase=True, activity="thinking")
+                    await show("thinking", phase=True, activity="thinking")
 
             elif event_type == "stream_event":
                 event = payload.get("event")
@@ -1231,7 +1284,7 @@ class ManagerAgent:
                     chunk = str(delta.get("text") or "")
                     if chunk:
                         streamed_partials = True
-                        await self._send_status(context_envelope, chunk, delta=True)
+                        await show(chunk, delta=True)
 
             elif event_type == "assistant":
                 msg = payload.get("message")
@@ -1241,11 +1294,6 @@ class ManagerAgent:
                         if not isinstance(block, dict):
                             continue
                         block_type = block.get("type", "")
-                        if block_type == "tool_use" and self.ops is not None:
-                            # Every tool call of the turn may come to the bridge, a subagent's too: each is
-                            # expected, though only the Manager's own blocks are shown.
-                            bare, arguments = _looper_call(block.get("name"), block.get("input"))
-                            self.ops.expect(token.binding, bare, arguments, call_id=block.get("id"))
                         if not top_level:
                             continue
                         if block_type == "text":
@@ -1253,18 +1301,17 @@ class ManagerAgent:
                             if chunk:
                                 text_parts.append(chunk)
                                 if not streamed_partials:  # else already sent chunk by chunk
-                                    await self._send_status(context_envelope, chunk, delta=True)
+                                    await show(chunk, delta=True)
                         elif block_type == "tool_use":
                             tool_name = block.get("name", "tool")
-                            await self._send_status(
-                                context_envelope,
+                            await show(
                                 f"正在使用工具: {tool_name}",
                                 phase=True,
                                 activity="tool",
                                 tool=str(tool_name),
                             )
                         elif block_type == "thinking":
-                            await self._send_status(context_envelope, "thinking", phase=True, activity="thinking")
+                            await show("thinking", phase=True, activity="thinking")
 
         try:
             turn_text = f"{brief}\n\n{prepared.turn_text}" if brief else prepared.turn_text
@@ -1274,19 +1321,23 @@ class ManagerAgent:
             if self._claude.shares_bridge:
                 self._publish_binding(token)  # on disk before the runtime gets the prompt
             token.cancel.sent()  # the prompt goes to the runtime now: starting -> running
+            handling = asyncio.create_task(handle_events())
             # A turn cut off by Claude's exit ends without a result; that Claude
             # is reaped and the next message starts a new process that resumes the session.
             turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope,
                                                stop=lambda: recorder.cap_stop, cancel=token.cancel)
             self._publish_binding(None)  # its result was read, or the cancel's cleanup ran: the bridge is quiet
         except TurnStopped:
+            await abandon_handling()
             raise
         except TurnCancelled:
             # A runtime that lets the turn's cancel escape was stopped by the user: not a failure.
             token.settle(ReplyOutcome.STOPPED)
+            await handled()
             await self._end_stopped(token, prepared, None, "".join(text_parts))
         except BaseException as exc:
             self._settle()  # the turn failed: a stop that comes while it is cleaned up is too late
+            await abandon_handling()
             # Never leave Claude running once the Manager gives up on it.
             await self._claude.stop(kill=True)
             await recorder.finish(
@@ -1296,13 +1347,19 @@ class ManagerAgent:
             await self._link_turn_task(recorder, ops_turn)
             raise
 
+        # Whether the stop was asked before the runtime returned (nothing awaited since): then a runtime that
+        # answered all the same lost it.
+        asked_while_running = token.cancel.requested
+        # The turn's events still being handled are still reaching the chat: the turn is not over for the user
+        # until they have, and a stop meanwhile is not too late.
+        await handled()
         resume_lost = bool(resuming) and not turn.session_started and not retried
-        # Decided here, in one place and with nothing awaited since the runtime returned: a stop asked until now
+        # Decided here, in one place and with nothing awaited since the events were handled: a stop asked until now
         # ends the turn stopped, even when the runtime came back with an answer; from the settle on, a stop is too
         # late (the token has ended).
         stopped = token.cancel.requested
         if stopped:
-            if turn.stopped is None and not (turn.result_event or {}).get(USER_STOP):
+            if asked_while_running and turn.stopped is None and not (turn.result_event or {}).get(USER_STOP):
                 logger.error("stop lost: the runtime answered a turn that was asked to stop (%s)", token.message_id)
             token.settle(ReplyOutcome.STOPPED)
             await self._end_stopped(token, prepared, turn, "".join(text_parts))

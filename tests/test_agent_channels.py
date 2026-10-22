@@ -224,6 +224,13 @@ class TestWebChannelAdapter:
             assert event["payload"]["text"] == "hello user"
             assert event["payload"]["outcome"] == payload.get("outcome", "answered")
 
+    def test_agent_phase_carries_the_activity(self) -> None:
+        env = MessageEnvelope.create(
+            source=MANAGER_ADDRESS, target=channel_address("web"), message_type=MessageType.STATUS_UPDATE,
+            payload={"text": "正在使用工具: Bash", "phase": True, "activity": "tool", "tool": "Bash"})
+        assert WebChannelAdapter._envelope_to_sse_event(env)["payload"] == {
+            "label": "正在使用工具: Bash", "activity": "tool", "tool": "Bash"}
+
     def test_answer_final_carries_the_reply_outcome(self) -> None:
         env = MessageEnvelope.create(
             source=MANAGER_ADDRESS, target=channel_address("web"), message_type=MessageType.AGENT_REPLY,

@@ -287,7 +287,10 @@ class WebChannelAdapter(ChannelAdapter):
                     }
                 return {
                     "kind": "agent.phase",
-                    "payload": {"label": envelope.payload.get("text", "")},
+                    # What the agent is doing (``activity``: thinking or tool, with the tool's name), when it says.
+                    "payload": {"label": envelope.payload.get("text", ""),
+                                **{key: envelope.payload[key] for key in ("activity", "tool")
+                                   if envelope.payload.get(key)}},
                 }
             case MessageType.CLARIFICATION_REQUEST:
                 return {

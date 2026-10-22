@@ -23,7 +23,40 @@ def test_arguments_default_and_choices() -> None:
 
 def test_cells_by_runtime() -> None:
     assert [c.key for c in sr.cells_for("claude")] == ["a", "b", "c", "d", "e"]
-    assert [c.key for c in sr.cells_for("omp")] == ["a", "b", "c", "d"]
+    assert [c.key for c in sr.cells_for("omp")] == ["a", "b", "c", "d", "f"]
+    assert [c.key for c in sr.chosen_cells("omp", "d,dx")] == ["d", "dx"]  # a diagnostic cell by hand only
+
+
+def test_the_setsid_sleeper_is_python_alone() -> None:
+    """Cell d does not depend on the runtime's shell running a backgrounded subshell (OMP's brush-core did not)."""
+    script = sr._SETSID_PY.format(file="/tmp/p.txt")
+    compile(script, "sleeper", "exec")
+    assert "os.fork()" in script and "os.setsid()" in script and '"/tmp/p.txt"' in script
+    assert "&" not in sr._SETSID.format(file="/tmp/p.txt", script="/tmp/s.py")
+
+
+def _events(*items: tuple[float, str, dict]) -> list[tuple[float, str, dict]]:
+    return list(items)
+
+
+def test_a_reply_whole_before_the_stop_makes_409_right() -> None:
+    whole = _events((1.0, "answer.delta", {"text": "1\n2\n"}), (1.3, "answer.final", {"text": "1\n2", "outcome": "answered"}))
+    assert sr.whole_before_stop(whole, stopped_at=1.1)
+    # the stop came before the text was all shown, or the turn did not end answered: the 409 is a failure
+    assert not sr.whole_before_stop(whole, stopped_at=0.9)
+    part = _events((1.0, "answer.delta", {"text": "1\n"}), (1.2, "answer.delta", {"text": "2"}),
+                   (1.3, "answer.final", {"text": "1\n2", "outcome": "answered"}))
+    assert not sr.whole_before_stop(part, stopped_at=1.1)
+    assert not sr.whole_before_stop(_events((1.0, "answer.delta", {"text": "x"})), stopped_at=1.1)
+
+
+def test_tool_calls_say_what_the_model_ran() -> None:
+    events = [{"type": "assistant", "message": {"content": [
+                  {"type": "tool_use", "name": "bash", "input": {"command": "a | b"}}]}},
+              {"type": "user", "message": {"content": [{"type": "tool_result", "content": "line1\nline2"}]}}]
+    text = sr.tool_calls(events)
+    assert 'bash {"command": "a \\| b"}' in text and "-> line1 line2" in text
+    assert sr.tool_calls([]) == "no tool call"
 
 
 def test_the_port_is_never_8767(monkeypatch: pytest.MonkeyPatch) -> None:
