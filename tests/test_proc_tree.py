@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents import proc_tree
+from looper.agents import claude_cli, proc_tree
 from looper.agents.bus import MessageBus
 from looper.agents.claude_cli import ResidentClaude
 from looper.agents.tiers.worker import WorkerConfig, WorkerPool
@@ -77,6 +77,7 @@ def trees() -> Iterator[list[dict[str, int]]]:
 @pytest.fixture(autouse=True)
 def _short_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.5)
+    monkeypatch.setattr(claude_cli, "STOP_GRACE_SEC", 0.5)
 
 
 async def _started(root: Path, trees: list[dict[str, int]]) -> dict[str, int]:
@@ -224,6 +225,15 @@ def test_stopping_a_resident_claude_ends_its_tree(tmp_path: Path, trees: list[di
 _PER_TURN_AGENT = _SPAWN_TREE + "sys.stdin.read()\ntime.sleep(60)\n"
 
 
+@pytest.fixture
+def _patient_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A turn waits only ``TERM_GRACE_SEC + REAP_SEC + 1`` s for its tree's end; on a loaded machine the ``ps`` calls
+    before the first SIGTERM can use that up, and the loop closing then cancels the end unsent. The test is about
+    the tree being ended, not how fast, so it gives the end room (it returns as soon as the tree is gone)."""
+    monkeypatch.setattr(proc_tree, "REAP_SEC", 30.0)
+
+
+@pytest.mark.usefixtures("_patient_end")
 @pytest.mark.parametrize("how", ["cancel", "stop"])
 def test_stopping_a_per_turn_session_ends_the_running_turns_tree(
     tmp_path: Path, trees: list[dict[str, int]], how: str,
@@ -509,17 +519,24 @@ def test_a_record_lists_the_tree_only_while_an_end_is_ending_it(
     asyncio.run(_run())
 
 
-def test_a_reaped_agents_record_is_removed(tmp_path: Path, runtime_root: Path) -> None:
+@pytest.mark.parametrize("recordable", [True, False], ids=["recorded", "identity_unavailable"])
+def test_a_reaped_agents_record_is_removed(
+    tmp_path: Path, runtime_root: Path, monkeypatch: pytest.MonkeyPatch, recordable: bool,
+) -> None:
     async def _run() -> tuple[bool, bool]:
         await proc_tree.sweep(runtime_root)
+        if not recordable:
+            # A process can exit before its start time is read. Its handle must still be returned and reaped.
+            monkeypatch.setattr(proc_tree, "_start_time", lambda pid: None)
         process = await proc_tree.spawn("/bin/sleep", "0.2")
         record = runtime_root / proc_tree.RECORDS_DIR / f"{process.pid}.json"
         recorded = record.exists()
         await process.wait()
+        assert process.returncode == 0
         await asyncio.sleep(0.05)  # the record is removed once the process is reaped
         return recorded, record.exists()
 
-    assert asyncio.run(_run()) == (True, False)
+    assert asyncio.run(_run()) == (recordable, False)
 
 
 # --- TurnTree: a turn's tree snapshotted at spawn, refreshed, ended from the snapshot ---
