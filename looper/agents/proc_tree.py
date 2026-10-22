@@ -36,7 +36,7 @@ import signal
 import subprocess
 import time
 from collections import defaultdict
-from collections.abc import Callable, Collection, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -110,10 +110,9 @@ class _Orphan:
         os.kill(self.pid, sig)
 
 
-def _tree(process: _Agent, table: Table, known: Tree, skip: Collection[int] = ()) -> Tree:
+def _tree(process: _Agent, table: Table, known: Tree) -> Tree:
     """The processes of ``process``'s tree that ``table`` lists: the agent, every process whose parent is in the
-    tree, every member of a group the agent or one of them leads, and each of ``known`` still in its group.
-    Processes in ``skip`` (reused pids) are left out together with what only they reach."""
+    tree, every member of a group the agent or one of them leads, and each of ``known`` still in its group."""
     root = process.pid
     children: defaultdict[int, list[int]] = defaultdict(list)
     members: defaultdict[int, list[int]] = defaultdict(list)
@@ -123,8 +122,7 @@ def _tree(process: _Agent, table: Table, known: Tree, skip: Collection[int] = ()
     own_pid, own_group = os.getpid(), os.getpgrp()
     tree: Tree = {}
     groups: set[int] = set()
-    pending = [root, *(pid for pid, pgid in known.items()
-                       if pid in table and table[pid][1] == pgid and pid not in skip)]
+    pending = [root, *(pid for pid, pgid in known.items() if pid in table and table[pid][1] == pgid)]
 
     def add_group(pgid: int) -> None:
         if pgid != own_group and pgid not in groups:
@@ -134,7 +132,7 @@ def _tree(process: _Agent, table: Table, known: Tree, skip: Collection[int] = ()
     add_group(root)  # the agent leads its group, whose members stay its own once it has exited
     while pending:
         pid = pending.pop()
-        if pid in tree or pid not in table or pid == own_pid or pid in skip:
+        if pid in tree or pid not in table or pid == own_pid:
             continue
         tree[pid] = pgid = table[pid][1]
         pending.extend(children[pid])
@@ -211,16 +209,15 @@ async def _reap(process: Any, label: str) -> None:
         logger.warning("%s: pid %s was not reaped within %.1f s of SIGKILL", label, process.pid, REAP_SEC)
 
 
-async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[int] = frozenset(),
-               reused: frozenset[int] = frozenset()) -> None:
+async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[int] = frozenset()) -> None:
     """End the tree, recording it so the next start can finish an end cut short by the server's exit. Processes
-    in ``exclude`` are never signalled; ``reused`` pids are not walked either, so what only they reach is spared."""
+    in ``exclude`` are never signalled."""
     recorded = _recorded.get(process.pid)
     if recorded is not None:
         _ending.add(process.pid)
 
     def members(table: Table, known: Tree) -> Tree:
-        return {pid: pgid for pid, pgid in _tree(process, table, known, reused).items() if pid not in exclude}
+        return {pid: pgid for pid, pgid in _tree(process, table, known).items() if pid not in exclude}
 
     seen = members(_snapshot(), known)
     alive = dict(seen)
@@ -455,10 +452,7 @@ class TurnTree:
             if not force and time.monotonic() - self._refreshed < _REFRESH_MIN_SEC:
                 return
             table = await asyncio.to_thread(_snapshot)
-            reused = await self._reused()  # before the walk: a reused pid's current subtree is not the turn's
-            for pid in reused:
-                self._groups.pop(pid, None)
-            self._merge(_tree(self.process, table, self._groups, reused))
+            self._merge(_tree(self.process, table, self._groups))
             unread = [pid for pid, started in self.seen.items() if started is None]
             if unread:
                 starts = await asyncio.to_thread(_start_times, unread) or {}
@@ -514,30 +508,27 @@ class TurnTree:
         current = await asyncio.to_thread(_start_times, known) or {}
         return [_Orphan(pid, started) for pid, started in known.items() if current.get(pid) == started]
 
-    async def _end_all(self, exclude: frozenset[int], reused: frozenset[int]) -> None:
+    async def _end_all(self, exclude: frozenset[int]) -> None:
         """End the tree, and beside it (not delaying its first signal) the seen processes it no longer reaches."""
         async def end_strays() -> None:
             strays = await self._strays(exclude)
-            await asyncio.gather(*(_end(stray, label=f"{self.label} (left the tree)", known={}, exclude=exclude,
-                                        reused=reused) for stray in strays))
+            await asyncio.gather(*(_end(stray, label=f"{self.label} (left the tree)", known={}, exclude=exclude)
+                                   for stray in strays))
 
-        await asyncio.gather(_end(self.process, label=self.label, known=dict(self._groups), exclude=exclude,
-                              reused=reused),
+        await asyncio.gather(_end(self.process, label=self.label, known=dict(self._groups), exclude=exclude),
                              end_strays())
 
     async def end(self) -> None:
         """End every process of the tree seen so far and of the tree now, then reap the agent."""
         await self.stop_ticker()
         await self.refresh(force=True)
-        reused = await self._reused()
-        await self._end_all(reused, reused)
+        await self._end_all(await self._reused())
         await _reap(self.process, self.label)
 
     async def end_new(self) -> None:
         """End the members that are not in the baseline; the agent and the baseline members survive."""
         await self.refresh(force=True)
-        reused = await self._reused()
-        await self._end_all(frozenset(self._baseline | {self.process.pid} | reused), reused)
+        await self._end_all(frozenset(self._baseline | {self.process.pid} | await self._reused()))
 
 
 def track(process: Any, *, label: str = "agent") -> TurnTree:
