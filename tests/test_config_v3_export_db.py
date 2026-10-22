@@ -231,7 +231,7 @@ async def _seed_content(pool):
         INSERT INTO role_configs (role, system_prompt, default_prompt, timeout_seconds, enabled)
           VALUES ('worker', 'Custom role prompt', 'Default prompt', 123, true);
         INSERT INTO channel_configs (channel_id, channel_type, display_name, enabled, config) VALUES
-          ('channel-export', 'telegram', 'Export channel', true,
+          ('channel-telegram', 'telegram', 'Export channel', true,
            '{"allowed_user_ids":["12345"],"webhook_secret":"sk-synthetic-config-v3-test-only"}');
     """)
     await pool.execute("INSERT INTO system_settings (key, value) VALUES ($1, '60')",

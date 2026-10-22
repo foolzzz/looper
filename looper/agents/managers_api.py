@@ -330,6 +330,8 @@ async def delete_manager(manager_id: str) -> dict[str, Any]:
     result = await db_managers.delete_manager(manager_id)
     if result == "has_tasks":
         raise _has_tasks(row)
+    if result == "has_bots":
+        raise _refuse(f"Manager {row['name']} has bots: remove them in Settings → Channels first", HTTP_409)
     if result == "missing":
         raise _refuse(f"no Manager {manager_id!r}", HTTP_404)
     await _on_change(manager_id)

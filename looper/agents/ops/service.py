@@ -70,6 +70,7 @@ SERVER_NAME = "looper"
 URL_ENV = "LOOPER_AGENT_URL"
 TOKEN_ENV = "LOOPER_AGENT_TOKEN"
 TURN_FILE_ENV = "LOOPER_AGENT_TURN_FILE"
+TRACE_ENV = "LOOPER_MCP_TRACE"  # the bridge's trace of each call's ``_meta`` keys (``mcp_server._trace_meta``)
 BINDINGS_KEPT = 64
 CONFIRMATION_SECONDS = 600
 # How long a write call waits for the tool_use of its turn's stream that it matches (the event may trail the call).
@@ -197,7 +198,7 @@ class ManagerOps:
         self._turn_file = turn_file
         self._epoch = 0
         self._bindings: OrderedDict[str, Turn] = OrderedDict()  # the last BINDINGS_KEPT turns, ended ones too
-        self._pending: dict[tuple[str | None, str | None], _Pending] = {}
+        self._pending: dict[tuple[str | None, str | None, str | None], _Pending] = {}
         self._working_at: float | None = None  # when the MCP entry last listed the tools
         # Per binding, the tool calls its turn's stream showed and no call has claimed yet: (call id, tool, args).
         self._expected: dict[str, list[tuple[str | None, str, str]]] = {}
@@ -205,6 +206,9 @@ class ManagerOps:
         # The calls whose binding disagreed with how Looper placed them, per (reason, runtime, tool): what
         # observe-only shows before the binding is enforced (``binding_report``).
         self._mismatches: Counter[tuple[str, str, str]] = Counter()
+        # How the calls that had to match their turn's stream did: (by "id"|"arguments", "at_arrival"|"waited"|
+        # "missed"): whether the bridge sent the runtime's call id, and whether its tool_use was read first.
+        self._matches: Counter[tuple[str, str]] = Counter()
         self._observing: set[asyncio.Task[None]] = set()
 
     @property
@@ -490,21 +494,31 @@ class ManagerOps:
 
     async def _matched(self, binding: str, tool: str, arguments: Mapping[str, Any], call_id: str | None) -> bool:
         """Whether a tool_use of the turn matches this call (consumed), waiting up to ``MATCH_WAIT_SEC`` for it."""
+        by = "id" if call_id else "arguments"
+        if self._take(binding, tool, arguments, call_id):
+            self._matches[(by, "at_arrival")] += 1
+            return True
         deadline = self._clock() + MATCH_WAIT_SEC
         while True:
-            if self._take(binding, tool, arguments, call_id):
-                return True
             remaining = deadline - self._clock()
             if remaining <= 0:
-                return False
+                matched = False
+                break
             event = self._expected_event.setdefault(binding, asyncio.Event())
             event.clear()
             if self._take(binding, tool, arguments, call_id):
-                return True
+                matched = True
+                break
             try:
                 await asyncio.wait_for(event.wait(), remaining)
             except asyncio.TimeoutError:
-                return self._take(binding, tool, arguments, call_id)
+                matched = self._take(binding, tool, arguments, call_id)
+                break
+            if self._take(binding, tool, arguments, call_id):
+                matched = True
+                break
+        self._matches[(by, "waited" if matched else "missed")] += 1
+        return matched
 
     # --- Observe-only binding (stop off) ---
 
@@ -545,7 +559,9 @@ class ManagerOps:
         """Whether the binding is enforced, and the mismatches counted since the server started."""
         return {"enforced": chat_settings.stop_enabled(), "mismatches": sum(self._mismatches.values()),
                 "by": [{"reason": reason, "runtime": runtime, "tool": tool, "count": count}
-                       for (reason, runtime, tool), count in sorted(self._mismatches.items())]}
+                       for (reason, runtime, tool), count in sorted(self._mismatches.items())],
+                "matches": [{"by": by, "when": when, "count": count}
+                            for (by, when), count in sorted(self._matches.items())]}
 
     def publish_binding(self, binding: str | None) -> None:
         """Write the binding file the MCP bridge reads at each call (synchronously and atomically: it must be on
@@ -622,6 +638,8 @@ class ManagerOps:
         config = server_config(self._url, self._token)
         if self._turn_file is not None:
             config["env"][TURN_FILE_ENV] = str(self._turn_file)
+        if trace := os.environ.get(TRACE_ENV, "").strip():  # a server started to trace its bridge (an eval)
+            config["env"][TRACE_ENV] = trace
         return config
 
     async def library_with_server(self, library: Any, runtime_root: Path) -> Any:

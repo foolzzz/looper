@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 import asyncpg
 
 from .connection import get_pool
 
 _UPDATABLE_FIELDS = ("display_name", "enabled", "config")
+
+BUILTIN_CHANNEL_IDS = ("channel-telegram", "channel-lark", "channel-lark_bot")
 
 
 def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
@@ -24,8 +26,9 @@ def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
 
 
 _SELECT_WITH_SECRET = (
-    "SELECT c.*, s.channel_id IS NOT NULL AS has_bot_token "
-    "FROM channel_configs c LEFT JOIN channel_secrets s ON s.channel_id = c.channel_id"
+    "SELECT c.*, m.name AS manager_name, s.channel_id IS NOT NULL AS has_bot_token "
+    "FROM channel_configs c LEFT JOIN channel_secrets s ON s.channel_id = c.channel_id "
+    "LEFT JOIN managers m ON m.id = c.manager_id"
 )
 
 
@@ -102,9 +105,74 @@ async def set_config(
     return await get_config(channel_id, pool=pool)
 
 
+async def create_bot(
+    channel_type: str,
+    manager_id: str,
+    *,
+    display_name: str,
+    enabled: bool,
+    config: dict[str, Any],
+    secret: str | None,
+    conn: asyncpg.Connection,
+) -> dict[str, Any]:
+    """Add a bot of ``channel_type`` for Manager ``manager_id`` on ``conn`` (the caller owns the transaction and the
+    advisory lock). ``LookupError`` for an unknown or deleted Manager; ``FOR KEY SHARE`` keeps it from being
+    deleted meanwhile."""
+    ok = await conn.fetchval(
+        "SELECT deleted_at IS NULL FROM managers WHERE id = $1 FOR KEY SHARE", manager_id
+    )
+    if not ok:
+        raise LookupError(f"Manager {manager_id} not found")
+    n = await conn.fetchval("SELECT nextval('channel_bot_seq')")
+    channel_id = f"channel-{channel_type}-{n}"
+    await conn.execute(
+        "INSERT INTO channel_configs (channel_id, channel_type, display_name, enabled, config, manager_id) "
+        "VALUES ($1, $2, $3, $4, $5, $6)",
+        channel_id, channel_type, display_name, enabled, json.dumps(config), manager_id,
+    )
+    if secret:
+        await set_bot_token(channel_id, secret, pool=conn)
+    return await get_config(channel_id, pool=conn)  # type: ignore[return-value]
+
+
+async def delete_bot(
+    channel_id: str, *, pool: asyncpg.Pool | None = None
+) -> Literal["deleted", "missing", "builtin"]:
+    """Remove an added bot with its token and refused senders; its chat threads and messages stay."""
+    if channel_id in BUILTIN_CHANNEL_IDS:
+        return "builtin"
+    pool = pool or get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        gone = await conn.fetchval(
+            "DELETE FROM channel_configs WHERE channel_id = $1 RETURNING channel_id", channel_id
+        )
+        if gone is None:
+            return "missing"
+        await conn.execute(
+            "DELETE FROM channel_rejected_senders WHERE channel_id = $1", channel_id
+        )
+    return "deleted"
+
+
+async def bot_keys(channel_type: str, *, conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    """Every bot of ``channel_type`` with its config and stored secret, for the duplicate check (server code only)."""
+    rows = await conn.fetch(
+        "SELECT c.channel_id, c.config, s.bot_token AS secret FROM channel_configs c "
+        "LEFT JOIN channel_secrets s ON s.channel_id = c.channel_id WHERE c.channel_type = $1 "
+        "ORDER BY c.channel_id", channel_type,
+    )
+    out = []
+    for r in rows:
+        d = dict(r)
+        if d["config"] is not None:
+            d["config"] = json.loads(d["config"])
+        out.append(d)
+    return out
+
+
 async def list_configs(*, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     pool = pool or get_pool()
-    rows = await pool.fetch(f"{_SELECT_WITH_SECRET} ORDER BY c.channel_id")
+    rows = await pool.fetch(f"{_SELECT_WITH_SECRET} ORDER BY (c.channel_id ~ '-[0-9]+$'), c.channel_id")
     return [_row_to_dict(r) for r in rows]
 
 

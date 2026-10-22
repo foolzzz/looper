@@ -138,6 +138,10 @@ class PerTurnSession(ABC):
         return False
 
     @property
+    def can_interrupt(self) -> bool:
+        return False  # one process per turn, with no interrupt channel: the Manager refuses a stop
+
+    @property
     def pid(self) -> int | None:
         return self._process.pid if self._process is not None else None
 

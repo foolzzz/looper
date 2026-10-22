@@ -28,7 +28,7 @@ const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = 
     "roles it can run. Runtimes are built in; a different binary comes from the server's PATH.",
   [AGENT_PROFILE.slug]: AGENT_PROFILE.help,
   managers:
-    "Managers you talk to, each with its own duty, session and spend. Task templates set what a Manager's tasks run with. Managers and templates are not in Import / Export yet.",
+    "Managers you talk to, each with its own duty, session and spend. Task templates set what a Manager's tasks run with.",
   clients:
     "Tokens for agents and scripts on this machine that use Looper through loopercli. Each token can do everything " +
     "the Manager's tools can; revoke it when it is no longer needed.",
@@ -37,7 +37,7 @@ const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = 
     "in a project, for the roles that load them.",
   channels:
     "Connect external messaging platforms. Each channel's card says where its credential comes from; saved " +
-    "changes take effect after the server restarts. Each channel passes on only the senders it lists.",
+    "changes take effect after the server restarts. Each channel passes on only the senders it lists. Each Manager can have its own bots; a bot's Manager is set when it is added.",
   chat: "How the chat with the Manager behaves, on the dashboard and on the channels.",
   scheduler:
     "System-wide limits of schedules: how close two fires may be, and the run timeout of schedules that follow the default.",
@@ -46,7 +46,7 @@ const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = 
     "note and write only in its writable folders; each write is a git commit in the vault.",
   transfer:
     "One file with the role settings, the providers and Agent Profiles, the catalog with its files and MCP servers, " +
-    "global installs, channels and the scheduler's settings.",
+    "global installs, channels and the scheduler's settings. Managers, their templates and their bots are not included.",
 };
 
 /** One Settings page (#settings/<page>[/<sub>]); the sidebar's Settings group lists them. */

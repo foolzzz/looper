@@ -807,7 +807,7 @@ async def _gate_reply(call: Call) -> dict[str, Any]:
     origin = None
     if is_lark(turn.channel) or turn.channel == "telegram":
         origin = {"author": (context.get("sender_name") or turn.sender) if turn.group else None,
-                  "channel": turn.channel,
+                  "channel": turn.channel, "channel_id": turn.channel_id,
                   "chat": origin_chat(turn.channel, turn.chat or "", group=turn.group, sender=turn.sender or ""),
                   "external_id": str(context.get("message_id") or "") or None}
     has_planner = call.platform.task_router.has_planner(task_id)

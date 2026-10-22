@@ -20,8 +20,8 @@ the session with ``--resume``:
   the tool commands it was running are ended, and the session stays usable. A turn given up (cancellation, a soft
   cap, ``--max-turns``) is cancelled this way; a process that does not answer in ``CANCEL_GRACE_SEC`` is ended
   through ``proc_tree``. The user's stop of a turn is the turn's ``cancel`` (``run_turn(cancel=)``; ``interrupt`` only
-  requests it): ``StopMethod.CANCEL`` when Grok ends the turn in time (the processes the turn started are then ended
-  from the tree's snapshot), ``KILL`` when its process had to be ended.
+  requests it): ``StopMethod.CANCEL`` when Grok ends the turn in time (no process is signalled: what Grok leaves
+  running is its own), ``KILL`` when its process had to be ended.
 - **Falling back**: when Grok cannot serve the session over ACP (no ``agent stdio``, no ``initialize`` answer, no
   ``loadSession`` for a saved session, a flag with no ACP form) the session runs per turn (``ResidentGrok``), which
   keeps its sessions in the same home. A process that dies mid-turn is a turn without a result, as for the per-turn
@@ -401,6 +401,10 @@ class AcpGrok:
         return not self._fallback
 
     @property
+    def can_interrupt(self) -> bool:
+        return not self._fallback  # per turn, Grok has no cancel Looper can send
+
+    @property
     def started(self) -> bool:
         return self._legacy.started if self._fallback else bool(self._command)
 
@@ -665,7 +669,7 @@ class AcpGrok:
         ``cancel`` is the one way to stop the turn by the user. Requested while the session is readied, it ends the
         process (``KILL``; no prompt is sent, the session is kept and the next turn loads it) and does not fall the
         session back to per turn; requested during the prompt, it is ``session/cancel`` (``CANCEL``: the process
-        and the session stay, every process the turn started is ended from the tree's snapshot), or, when Grok does
+        and the session stay, no process is signalled), or, when Grok does
         not answer it within ``CANCEL_GRACE_SEC`` or takes no prompt, the process is ended (``KILL``). From the
         request on the turn's events are not handed to ``on_event`` (its result still ends it). A session served per
         turn (fallen back to before or during the turn) is stopped by the same ``cancel``."""
@@ -762,16 +766,6 @@ class AcpGrok:
             raise
         return await self._prompt(text, on_event, stop, cancel)
 
-    async def _end_new(self) -> None:
-        """After a ``CANCEL``: end what the turn started (tools of Grok's that outlived the cancel)."""
-        tree = self._tree
-        if tree is None:
-            return
-        try:
-            await tree.end_new()
-        except Exception:
-            logger.warning("%s: could not end the cancelled turn's processes", self._label, exc_info=True)
-
     async def _prompt(
         self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]],
         stop: Callable[[], CapStop | None] | None, cancel: TurnCancel,
@@ -794,8 +788,6 @@ class AcpGrok:
             await on_event(turn.init(cwd=self._cwd))
             self._totals = self._totals.plus(early.usage)
             return ResidentTurn(early.result_event, session_started=True, usage=early.usage)
-        if self._tree is not None:
-            self._tree.baseline()  # the process and its MCP servers: what the turn starts is what a stop ends
         started = time.monotonic()
         self._requests += 1
         self._prompt_id = self._requests
@@ -875,8 +867,6 @@ class AcpGrok:
                 await asyncio.to_thread(grok.prune_sessions, self._home(), session)
             if capped is not None:  # the turn ends with the cap's result, not the cancelled turn's
                 self._totals = self._totals.plus(capped.usage)
-                if cancel.requested:
-                    await self._end_new()
                 return ResidentTurn(capped.result_event, session_started=True, usage=capped.usage, prompt_sent=sent,
                                     stopped=StopMethod.CANCEL if cancel.requested else None)
             if cancel.requested and not user_stopped:
@@ -886,8 +876,6 @@ class AcpGrok:
             await on_event(result)
             if cancel.requested and not user_stopped:
                 user_stopped, result = True, _cancelled(result)  # asked while its result was handled
-            if user_stopped:
-                await self._end_new()  # (a CANCEL ending: the process and the session stay)
             return ResidentTurn(result, session_started=True, usage=self._turn_usage(result), prompt_sent=sent,
                                 stopped=StopMethod.CANCEL if user_stopped else None)
         finally:

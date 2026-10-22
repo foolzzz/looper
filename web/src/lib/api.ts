@@ -435,6 +435,8 @@ export interface ChatTurn {
   channel: string;
   started_at: string;
   stopping: boolean;
+  /** Whether the Manager's runtime can interrupt the reply (Claude Code, Grok); a runtime run per turn cannot. */
+  can_interrupt: boolean;
 }
 
 /** Stop the Manager's reply to a message. A 409 (no turn running, or another message's turn) resolves with its
@@ -2750,6 +2752,8 @@ export interface RuntimeType {
   effort_levels?: string[] | null;
   can_replace_system_prompt: boolean;
   replace_system_prompt_refusal: string | null;
+  /** Whether its Manager or Planner session can interrupt a reply (a user's stop is offered). */
+  can_interrupt: boolean;
 }
 
 /** A runtime on this machine: built in (one per type found on the server's PATH), or one registered by hand
@@ -3714,6 +3718,11 @@ export interface ChannelConfig {
   start_problem?: string | null;
   /** Whether a bot token is stored (the token itself never leaves the server). */
   has_bot_token?: boolean;
+  /** The Manager this channel talks to. */
+  manager_id: string;
+  manager_name: string | null;
+  /** One of the three built-in rows (the general Manager's), as opposed to an added bot. */
+  builtin: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -3741,14 +3750,21 @@ export interface LarkPerson {
   department: string;
 }
 
-export async function fetchLarkStatus(channelType = "lark"): Promise<LarkStatus> {
-  const res = await fetch(`${API_BASE}/channels/${channelType}/status`);
+/** The query for an added bot's row; the built-in rows stay unqualified. */
+function channelIdQuery(channelType: string, channelId?: string): string {
+  return channelId && channelId !== `channel-${channelType}` ? `channel_id=${encodeURIComponent(channelId)}` : "";
+}
+
+export async function fetchLarkStatus(channelType = "lark", channelId?: string): Promise<LarkStatus> {
+  const query = channelIdQuery(channelType, channelId);
+  const res = await fetch(`${API_BASE}/channels/${channelType}/status${query ? `?${query}` : ""}`);
   if (!res.ok) await failed(res, "lark status");
   return res.json();
 }
 
-export async function searchLarkPeople(query: string, channelType = "lark"): Promise<{ people: LarkPerson[]; complete: boolean }> {
-  const res = await fetch(`${API_BASE}/channels/${channelType}/people?q=${encodeURIComponent(query)}`);
+export async function searchLarkPeople(query: string, channelType = "lark", channelId?: string): Promise<{ people: LarkPerson[]; complete: boolean }> {
+  const extra = channelIdQuery(channelType, channelId);
+  const res = await fetch(`${API_BASE}/channels/${channelType}/people?q=${encodeURIComponent(query)}${extra ? `&${extra}` : ""}`);
   if (!res.ok) await failed(res, "lark people");
   const data = await res.json();
   return { people: data.people ?? [], complete: data.complete ?? true };
@@ -3779,6 +3795,28 @@ export async function updateChannelConfig(
   });
   if (!res.ok) await failed(res, "update channel-config");
   return res.json();
+}
+
+export async function createChannelBot(body: {
+  channel_type: string;
+  manager_id: string;
+  display_name?: string;
+  enabled?: boolean;
+  config?: Record<string, unknown>;
+  bot_token?: string;
+}): Promise<ChannelConfig> {
+  const res = await fetch(`${API_BASE}/channel-configs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await failed(res, "add bot");
+  return res.json();
+}
+
+export async function deleteChannelBot(channelId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/channel-configs/${encodeURIComponent(channelId)}`, { method: "DELETE" });
+  if (!res.ok) await failed(res, "remove bot");
 }
 
 /** A chat of a channel: where a dashboard task's gate messages also go. */

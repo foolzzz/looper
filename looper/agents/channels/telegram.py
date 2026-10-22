@@ -23,17 +23,18 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
-from typing import Any
+from typing import Any, Callable
 
 from ... import env
 from ..bus import MessageBus
 from ..log_redaction import add_secret, redact
 from ..message import (
-    MANAGER_ADDRESS,
     AgentAddress,
     MessageEnvelope,
     MessageType,
     channel_address,
+    manager_address,
+    parse_channel_id,
 )
 from ..task_notice import NotifyTarget
 from .allowlist import SenderAllowlist
@@ -73,19 +74,30 @@ class TelegramChannelAdapter(ChannelAdapter):
         *,
         allowlist: SenderAllowlist,
         bot_token: str | None = None,
+        channel_id: str | None = None,
+        manager_id: str = "manager",
+        manager_running: Callable[[str], bool] | None = None,
     ) -> None:
-        self._bot_token = bot_token or env.get("LOOPER_TELEGRAM_BOT_TOKEN", "")
+        if channel_id is not None:
+            parsed = parse_channel_id(channel_id)
+            if parsed is None or parsed.channel_type != "telegram":
+                raise ValueError(f"not a Telegram channel id: {channel_id!r}")
+        self._channel_id = channel_id or "channel-telegram"
+        self._manager_id = manager_id
+        self._manager_running = manager_running
+        # Only the built-in row falls back to the environment; an added bot has its own token.
+        self._bot_token = bot_token or (env.get("LOOPER_TELEGRAM_BOT_TOKEN", "") if channel_id is None else "")
         self._allowlist = allowlist  # Telegram user ids, as strings
         self._bus: MessageBus | None = None
-        self._address = channel_address("telegram", "channel-telegram")
+        self._address = channel_address("telegram", self._channel_id)
         self._app: Any = None
         self._outbound_task: asyncio.Task[Any] | None = None
         self._running = False
         # correlation_id → telegram chat_id for reply routing (bounded, oldest evicted first)
         self._correlation_chat: OrderedDict[str, int] = OrderedDict()
         # One status message per message answered, edited in place (``status_line``).
-        self._status = StatusLines(channel="channel-telegram", send=self._send_status, edit=self._edit_status)
-        self._reactions = Reactions(channel="channel-telegram", react=self._react)
+        self._status = StatusLines(channel=self._channel_id, send=self._send_status, edit=self._edit_status)
+        self._reactions = Reactions(channel=self._channel_id, react=self._react)
 
     @property
     def channel_type(self) -> str:
@@ -93,12 +105,12 @@ class TelegramChannelAdapter(ChannelAdapter):
 
     @property
     def channel_id(self) -> str:
-        return "channel-telegram"
+        return self._channel_id
 
     async def start(self, bus: MessageBus) -> None:
         if not self._allowlist.ids:
             # The Manager runs any command it is asked to: nobody may reach it unlisted.
-            logger.error("channel-telegram not started: its sender allowlist is empty")
+            logger.error("%s not started: its sender allowlist is empty", self._channel_id)
             return
 
         if not _check_telegram_available():
@@ -109,7 +121,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             return
 
         if not self._bot_token:
-            logger.error("LOOPER_TELEGRAM_BOT_TOKEN not set, telegram adapter disabled")
+            logger.error("%s not started: no bot token (LOOPER_TELEGRAM_BOT_TOKEN for the built-in row)", self._channel_id)
             return
 
         from telegram.ext import (
@@ -264,6 +276,25 @@ class TelegramChannelAdapter(ChannelAdapter):
     async def _react(self, chat_id: str, message_id: str) -> None:
         await self._app.bot.set_message_reaction(chat_id=int(chat_id), message_id=int(message_id), reaction="👀")
 
+    async def _turned_off(self, chat_id: int) -> bool:
+        """Whether this bot's Manager is turned off; then the chat is told so and the message goes nowhere."""
+        if self._manager_id == "manager" or self._manager_running is None:
+            return False
+        try:
+            running = self._manager_running(self._manager_id)
+        except Exception:
+            logger.warning("%s: cannot tell whether %s is running", self._channel_id, self._manager_id, exc_info=True)
+            return False
+        if running:
+            return False
+        from ..tiers.manager import TURNED_OFF_REPLY
+
+        receipt = await self._send_answer(chat_id, TURNED_OFF_REPLY)
+        if not receipt.success:
+            logger.warning("%s: could not tell chat %s that %s is turned off", self._channel_id, chat_id,
+                           self._manager_id)
+        return True
+
     async def _send_answer(self, chat_id: int, text: str) -> DeliveryReceipt:
         """Send ``text`` as Markdown, or as plain text when Telegram cannot parse it."""
         import telegram
@@ -342,6 +373,8 @@ class TelegramChannelAdapter(ChannelAdapter):
         assert self._bus is not None
         import uuid as _uuid
 
+        if await self._turned_off(update.effective_chat.id):
+            return
         self._acknowledge(update)
         correlation_id = str(_uuid.uuid4())
         chat_id = update.effective_chat.id
@@ -349,7 +382,7 @@ class TelegramChannelAdapter(ChannelAdapter):
 
         envelope = MessageEnvelope.create(
             source=self._address,
-            target=MANAGER_ADDRESS,
+            target=manager_address(self._manager_id),
             message_type=MessageType.USER_MESSAGE,
             payload={
                 "text": "当前任务进度怎么样？",
@@ -412,6 +445,8 @@ class TelegramChannelAdapter(ChannelAdapter):
         assert self._bus is not None
         import uuid as _uuid
 
+        if await self._turned_off(update.effective_chat.id):
+            return
         self._acknowledge(update)
         chat_id = update.effective_chat.id
         correlation_id = str(_uuid.uuid4())
@@ -431,7 +466,7 @@ class TelegramChannelAdapter(ChannelAdapter):
 
         envelope = MessageEnvelope.create(
             source=self._address,
-            target=MANAGER_ADDRESS,
+            target=manager_address(self._manager_id),
             message_type=MessageType.USER_MESSAGE,
             payload={
                 "text": text,

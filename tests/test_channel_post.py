@@ -227,8 +227,8 @@ def test_the_registry_posts_through_the_running_channel_or_says_it_is_not_runnin
         registry = ChannelRegistry(bus=SimpleNamespace())
         channel = _Channel()
         await registry.register(channel)
-        posted = await registry.post("lark", LARK_GROUP, CARD, reply_to="om_card", idempotency_key="gate-7")
-        missing = await registry.post("telegram", TELEGRAM_GROUP, CARD)
+        posted = await registry.post("channel-lark", LARK_GROUP, CARD, reply_to="om_card", idempotency_key="gate-7")
+        missing = await registry.post("channel-telegram", TELEGRAM_GROUP, CARD)
         return posted, missing, channel.posts
 
     posted, missing, posts = asyncio.run(main())

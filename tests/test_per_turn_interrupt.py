@@ -427,3 +427,16 @@ os.close(1); time.sleep(0.5)
 
     turn = asyncio.run(asyncio.wait_for(run(), 15))
     assert turn.stopped is None and turn.prompt_sent
+
+
+@pytest.mark.parametrize("runtime", ["omp", "codex"])
+def test_a_per_turn_session_cannot_interrupt_so_the_manager_refuses_its_stop(tmp_path: Path, runtime: str) -> None:
+    # One process per turn and no interrupt channel: a user's stop is refused (``ManagerAgent.stop_turn``), never a
+    # kill of the turn's process. Only the runtimes with an interrupt offer it.
+    from looper.agents.profile_registry import type_view
+    from looper.agents.runtimes import ADAPTERS
+
+    session, *_ = (_omp if runtime == "omp" else _codex)(tmp_path)
+    assert session.can_interrupt is False
+    offered = {kind for kind, runtime_adapter in ADAPTERS.items() if type_view(runtime_adapter)["can_interrupt"]}
+    assert offered == {"claude-code", "grok"}

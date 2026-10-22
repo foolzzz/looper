@@ -39,6 +39,7 @@ class _Session:
     label = "manager"
     pid = None
     shares_bridge = True
+    can_interrupt = True
 
     def __init__(self, *, hold: bool = True, on_start: Any = None, on_turn: Any = None) -> None:
         self.hold, self.on_start, self.on_turn = hold, on_start, on_turn
@@ -1050,3 +1051,123 @@ def test_closing_the_manager_while_the_runtime_starts_leaves_no_process(agent_db
             await bus.shutdown()
 
     asyncio.run(run())
+
+
+def test_a_stop_while_an_answered_turns_events_still_reach_the_chat_stops_it_and_is_not_lost(
+        agent_db: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    # The runtime came back with an answer; the turn's events (handed on as they were read) are still being
+    # recorded and shown. For the user the reply still streams: a stop now stops it. The runtime was not asked to
+    # stop before it returned, so no stop was lost.
+    from looper.agents.claude_cli import ClaudeRunRecorder
+
+    recording, release = asyncio.Event(), asyncio.Event()
+    real_persist = ClaudeRunRecorder.persist
+
+    async def slow_persist(self: Any, event: dict[str, Any]) -> None:
+        if event.get("type") == "assistant":
+            recording.set()
+            await release.wait()
+        await real_persist(self, event)
+
+    monkeypatch.setattr(ClaudeRunRecorder, "persist", slow_persist)
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session(hold=False)
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("你好")
+            handling = asyncio.create_task(manager._handle(envelope))
+            await asyncio.wait_for(recording.wait(), 5)
+            await _until(lambda: session.turns)
+            await asyncio.sleep(0.05)  # the runtime has returned its answer
+            assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+            release.set()
+            await handling
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "stopped"
+            assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.NOT_RUNNING
+            await bus.shutdown()
+
+    asyncio.run(run())
+    assert "stop lost" not in caplog.text
+
+
+class _Burst(_Session):
+    """A runtime whose reader had many deltas buffered: it hands them all on at once, then runs on."""
+
+    async def run_turn(self, text: str, on_event: Any, *, tag: Any = None, stop: Any = None,
+                       cancel: Any = None) -> ResidentTurn:
+        self.turns.append(text)
+        if cancel is not None:
+            cancel.on_request(self._stopped.set)
+        for n in range(200):
+            delta = {"type": "text_delta", "text": f"{n}\n"}
+            await on_event({"type": "stream_event", "event": {"type": "content_block_delta", "delta": delta}})
+        await self._stopped.wait()
+        return ResidentTurn(user_stop_result(), stopped=StopMethod.KILL, usage=Usage(cost_usd=0.01),
+                            prompt_sent=True)
+
+
+def test_a_stop_is_served_while_a_burst_of_deltas_is_shown(agent_db: Any) -> None:
+    # Showing the turn's events is a task of its own that must not hold the event loop through a backlog: the stop
+    # the user sends at the first delta they see is served at once, not after every delta read so far was shown.
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Burst()
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("数到两百")
+            shown = asyncio.Event()
+            bus.subscribe_topic(MessageType.STATUS_UPDATE.value,
+                                lambda e: shown.set() if e.payload.get("delta") else None)
+
+            async def stop_at_the_first_delta() -> StopResult:
+                await shown.wait()
+                return await manager.stop_turn(envelope.message_id, via="web")
+
+            stopping = asyncio.create_task(stop_at_the_first_delta())
+            await asyncio.wait_for(manager._handle(envelope), 10)
+            assert await stopping is StopResult.STOPPING
+            statuses = [e.payload for e in _drain(queue) if e.message_type == MessageType.STATUS_UPDATE]
+            deltas = [s for s in statuses if s.get("delta")]
+            assert 0 < len(deltas) < 10, len(deltas)
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_runtime_without_an_interrupt_refuses_the_stop_and_its_turn_runs_on(
+        agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A per-turn runtime (Codex exec, OMP -p, Pi, DSH) has no interrupt: the stop is refused, nothing reaches the
+    # runtime (its cancel is never requested, no process is signalled) and the reply is answered as usual.
+    from looper.agents import proc_tree
+
+    signalled: list[int] = []
+    monkeypatch.setattr(proc_tree, "_signal", lambda process, tree, sig: signalled.append(sig))
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            midway, release = asyncio.Event(), asyncio.Event()
+
+            async def on_turn() -> None:
+                midway.set()
+                await release.wait()
+
+            session = _Session(hold=False, on_turn=on_turn)
+            session.can_interrupt = False  # type: ignore[misc]
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("写一篇很长的文章")
+            handling = asyncio.create_task(manager._handle(envelope))
+            await asyncio.wait_for(midway.wait(), 5)
+            assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.CANNOT_INTERRUPT
+            (cancel,) = session.cancels
+            assert not cancel.requested
+            token = manager.turn_for(envelope.message_id)
+            assert token is not None and token.stop is None
+            release.set()
+            await asyncio.wait_for(handling, 5)
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "answered" and reply["text"] == "好的"
+            await bus.shutdown()
+
+    asyncio.run(run())
+    assert signalled == []

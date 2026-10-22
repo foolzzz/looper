@@ -36,6 +36,7 @@ import asyncpg
 from ..db import connection as db_connection, projects as db_projects, schedules as db_schedules
 from . import cron
 from .links import schedule_link, task_link
+from .message import builtin_channel_id
 from .project_execution import format_usd
 
 logger = logging.getLogger(__name__)
@@ -217,7 +218,7 @@ class Notifier:
                 status, error = "failed", "this server cannot send messages"
             else:
                 try:
-                    sent, error = await self._sender(channel, chat, text)
+                    sent, error = await self._sender(builtin_channel_id(channel), chat, text)
                 except Exception as exc:  # a channel's failure is the message's, never the scheduler's
                     sent, error = False, f"{type(exc).__name__}: {exc}"
                 status = "sent" if sent else "failed"

@@ -120,7 +120,7 @@ def test_a_lark_tasks_gate_posts_its_card_and_the_rest_under_it(monkeypatch: pyt
         courier = GateCourier(poster, dashboard_url="http://looper.test")
         assert await courier.run_once() == 1
         (card,) = poster.posts
-        assert (card["channel"], card["target"], card["reply_to"]) == ("lark", NotifyTarget(TargetKind.USER,
+        assert (card["channel"], card["target"], card["reply_to"]) == ("channel-lark", NotifyTarget(TargetKind.USER,
                                                                                               LARK_USER), None)
         assert card["text"].splitlines()[:3] == ["⏸ 需要你决定 · settings file", "storage",
                                                  "1. Which database?（选项：PostgreSQL / SQLite）"]
@@ -598,11 +598,11 @@ def test_open_gates_filters_by_chat_before_the_limit(monkeypatch: pytest.MonkeyP
                            "WHERE step_id <> 'step-g1'")
 
         assert len(await user_gates.open_gates(4)) == 4
-        gates = await user_gates.open_gates(1, chat=("lark", LARK_GROUP))
+        gates = await user_gates.open_gates(1, chat=("channel-lark", LARK_GROUP))
         assert [gate["task_id"] for gate in gates] == ["task-a"]
-        gates = await user_gates.open_gates(1, chat=("telegram", "4242"), dashboard=True)
+        gates = await user_gates.open_gates(1, chat=("channel-telegram", "4242"), dashboard=True)
         assert [gate["task_id"] for gate in gates] == ["task-d"]
-        assert await user_gates.open_gates(1, chat=("telegram", "4242"), dashboard=False) == []
+        assert await user_gates.open_gates(1, chat=("channel-telegram", "4242"), dashboard=False) == []
         await pool.execute("UPDATE tasks SET status = 'stopped' WHERE id = 'task-a'")
         assert "task-a" in [gate["task_id"] for gate in await user_gates.open_gates(10)]
         await pool.execute("UPDATE tasks SET status = 'completed' WHERE id = 'task-a'")

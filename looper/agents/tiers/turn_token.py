@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from ..runtimes.cancel import TurnCancel, TurnCancelled
+from ..runtimes.cancel import TurnCancel, TurnCancelled, abandon
 
 if TYPE_CHECKING:
     from ..message import MessageEnvelope
@@ -150,42 +150,10 @@ class TurnToken:
             async with asyncio.timeout(timeout):
                 result = await asyncio.shield(task)
         except BaseException:
-            await _abandon(task, undo)
+            await abandon(task, undo)
             raise
         self.check()
         return result
-
-
-ABANDON_SEC = 10.0  # how long a step given up is waited for, once cancelled, and then its undo
-
-
-async def _abandon(task: asyncio.Future[Any], undo: Callable[[], Awaitable[None]] | None) -> None:
-    """Cancel ``task``, wait for it and run ``undo``, each bounded by ``ABANDON_SEC``; a cancel of the caller that
-    comes meanwhile (``cancel_and_wait`` cancels again) is held until both are done, then raised."""
-    cancelled = False
-
-    async def bounded(aw: Awaitable[Any]) -> None:
-        nonlocal cancelled
-        inner = asyncio.ensure_future(aw)
-        deadline = asyncio.get_running_loop().time() + ABANDON_SEC
-        while not inner.done():
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                inner.cancel()
-                break
-            try:
-                await asyncio.wait({inner}, timeout=remaining)
-            except asyncio.CancelledError:
-                cancelled = True
-        if inner.done() and not inner.cancelled() and inner.exception() is not None:
-            logger.warning("an abandoned turn step failed: %r", inner.exception())
-
-    task.cancel()
-    await bounded(task)
-    if undo is not None:
-        await bounded(undo())
-    if cancelled:
-        raise asyncio.CancelledError()
 
 
 class TurnRegistry:

@@ -303,6 +303,7 @@ agent 还需要别的变量时，从它的设置里取（Settings，或项目层
 | Telegram | **Bot token**：BotFather 给的 token，单独保存，只显示是否已保存。`bot_token_env`：没有保存 token 时读取的环境变量（默认 `LOOPER_TELEGRAM_BOT_TOKEN`）。`allowed_user_ids`：允许和 bot 对话的 Telegram 数字用户 ID。 | 无，或者该环境变量里的 token。 |
 | 飞书（lark-cli） | `profile`：lark-cli 的 profile，决定用哪个应用和机器人（为空用 lark-cli 当前的）。`allowed_open_ids`：发送者在该应用下的飞书 `open_id`（`ou_...`）；Settings → Channels 可按姓名或邮箱查找，并列出被拒的发送者以便允许。处理私聊，群聊里只处理 @ 机器人的消息。 | `PATH` 上有 `lark-cli` 并已登录；消息由它收发，启动时核对机器人身份。 |
 
+- 每个管家都可以有自己的 Telegram 或飞书机器人：Settings → Channels →「添加机器人」，token 或 app secret 在那里录入（添加的机器人从不读环境变量）。机器人所属的管家在添加时定下，改动后重启生效。
 - 每个 agent 运行 Claude Code 时都不弹权限确认，所以 Manager 能在这台机器上执行任何命令。因此每个渠道只转发名单上的发送者：其他人的消息会被丢弃并记一行日志（只记发送者 ID），不回复。名单为空或格式不对的渠道不会启动，Settings 页会写明原因。`LOOPX_TELEGRAM_ALLOWED_USERS` 已不再生效。
 - 飞书凭据由 `lark-cli` 保管；渠道的 `profile`（或 lark-cli 当前的 profile）决定以哪个应用的身份收发（`lark-cli whoami`）。open_id 因应用而异，所以白名单记下它是为哪个应用建的，换到别的应用后不启动，直到重建名单。
 - Manager 处理名单上发送者的消息时，机器人先给这条消息加一个表情（Telegram 私聊里是 👀，飞书里是「Get」），再用一条原地编辑的状态消息显示进展；回答和任务进度各自单独发消息。

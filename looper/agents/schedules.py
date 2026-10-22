@@ -36,6 +36,7 @@ from ..db import projects as db_projects, schedules as db_schedules
 from . import cron
 from .agent_settings import CONCURRENCY_MAX, TASK_LIMIT_ROLES, budget_usd
 from .channels.allowlist import SENDER_ID_FORMATS, sender_ids
+from .message import builtin_channel_id
 from .projects import HTTP_400, HTTP_404, HTTP_409, TASK_PROFILE_ROLES, RequestError, _concurrency_limits
 from .projects import _profile_overrides
 from . import scheduler_settings as scheduler_settings_module
@@ -227,7 +228,7 @@ async def notify_targets() -> list[dict[str, Any]]:
     targets = []
     for row in await db_channel_configs.list_configs():
         channel = row["channel_type"]
-        if channel not in SENDER_ID_FORMATS:
+        if channel not in SENDER_ID_FORMATS or row["channel_id"] != builtin_channel_id(channel):
             continue
         try:
             chats = sender_ids(channel, (row.get("config") or {}).get(SENDER_ID_FORMATS[channel].field))

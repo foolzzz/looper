@@ -14,7 +14,8 @@ describe("ChatComposer", () => {
   let seen: { draft: string; staged: string[] };
   let setOuterDraft: (d: string) => void;
 
-  function mount(init: { draft?: string; staged?: string[]; history?: string[]; replying?: boolean; canStop?: boolean }) {
+  function mount(init: { draft?: string; staged?: string[]; history?: string[]; replying?: boolean; canStop?: boolean;
+    stopRefusal?: string }) {
     function Harness() {
       const [draft, setDraft] = useState(init.draft ?? "");
       const [staged, setStaged] = useState(init.staged ?? []);
@@ -29,6 +30,7 @@ describe("ChatComposer", () => {
           history={init.history ?? []}
           replying={init.replying ?? false}
           canStop={init.canStop ?? false}
+          stopRefusal={init.stopRefusal}
           onSend={onSend as (t: string) => void}
           onStop={onStop as () => void}
         />
@@ -105,6 +107,19 @@ describe("ChatComposer", () => {
     mount({ draft: "later", replying: true, canStop: true });
     act(() => button("Queue message").click());
     expect(seen).toEqual({ draft: "", staged: ["later"] });
+  });
+
+  it("a runtime that cannot interrupt shows Stop disabled with why, and Escape does nothing", () => {
+    const why = "This runtime cannot interrupt a reply.";
+    mount({ draft: "later", replying: true, canStop: false, stopRefusal: why });
+    const stop = button(`Stop the reply: ${why}`);
+    expect(stop.disabled).toBe(true);
+    expect(stop.parentElement?.getAttribute("title")).toBe(why);
+    act(() => stop.click());
+    key("Escape");
+    expect(onStop).not.toHaveBeenCalled();
+    expect(seen).toEqual({ draft: "later", staged: [] });
+    expect(input().placeholder).toBe("Replying… Enter queues");
   });
 
   it("a touch user can stop the reply with text in the box: Stop sits beside Queue", () => {

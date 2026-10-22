@@ -7,6 +7,7 @@ inbox records with one canonical format.
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -279,6 +280,43 @@ def channel_address(channel: str, channel_id: str | None = None) -> AgentAddress
         agent_id=channel_id or f"channel-{channel}",
         channel=channel,
     )
+
+
+BOT_CHANNEL_TYPES = ("telegram", "lark", "lark_bot")
+_CHANNEL_ID = re.compile(r"^channel-(telegram|lark_bot|lark)(?:-([1-9][0-9]{0,8}))?$")
+# The same shape for PostgreSQL (``~``): a Telegram or Lark bot's channel id, built-in or added.
+CHANNEL_ID_PATTERN = r"^channel-(telegram|lark_bot|lark)(-[1-9][0-9]*)?$"
+
+
+@dataclass(frozen=True)
+class ChannelId:
+    """A Telegram or Lark bot's channel id: its type and, for a bot added in Settings → Channels, its number
+    (``channel-<type>-<n>``); None for the built-in row (``channel-<type>``)."""
+
+    channel_type: str
+    number: int | None
+
+    @property
+    def builtin(self) -> bool:
+        return self.number is None
+
+    def __str__(self) -> str:
+        return f"channel-{self.channel_type}" if self.number is None else f"channel-{self.channel_type}-{self.number}"
+
+
+def parse_channel_id(channel_id: str | None) -> ChannelId | None:
+    """The bot a channel id names; None for anything else (``channel-web`` too)."""
+    match = _CHANNEL_ID.match(channel_id or "")
+    if match is None:
+        return None
+    return ChannelId(match.group(1), int(match.group(2)) if match.group(2) else None)
+
+
+def builtin_channel_id(channel_type: str) -> str:
+    """The channel id of a type's built-in row."""
+    if channel_type not in BOT_CHANNEL_TYPES:
+        raise ValueError(f"not a bot channel type: {channel_type!r}")
+    return f"channel-{channel_type}"
 
 
 def worker_address(worker_id: str) -> AgentAddress:

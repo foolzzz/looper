@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import signal
 import time
 from pathlib import Path
 from typing import Any
@@ -492,6 +494,24 @@ def _gone(pid: int) -> bool:
     return pid not in proc_tree._snapshot()
 
 
+def _signals(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Every signal ``proc_tree`` sends from now on (still sent)."""
+    sent: list[int] = []
+    real = proc_tree._signal
+
+    def record(process: Any, tree: Any, sig: int) -> None:
+        sent.append(sig)
+        real(process, tree, sig)
+
+    monkeypatch.setattr(proc_tree, "_signal", record)
+    return sent
+
+
+def _kill(pid: int) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
+
+
 async def _next_turn_answers(session: ResidentClaude, on_event: Any) -> Any:
     return await asyncio.wait_for(session.run_turn("next", on_event), 5)
 
@@ -539,8 +559,11 @@ async def _until_sleeper(tmp_path: Path) -> int:
     return int((tmp_path / "sleeper.pid").read_text())
 
 
-def test_an_obeyed_cancel_ends_the_tools_and_keeps_the_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_obeyed_cancel_ends_the_turn_and_signals_no_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Claude ended the turn on the interrupt: that is all. What it left running (the turn's background tool) is its
+    # own; Looper signals nothing.
     session, claude = _tool_session(tmp_path, monkeypatch, OBEY="1")
+    sent = _signals(monkeypatch)
 
     async def _run() -> None:
         await session.start([claude], cwd=str(tmp_path), signature=None, env=_ENV)
@@ -555,23 +578,27 @@ def test_an_obeyed_cancel_ends_the_tools_and_keeps_the_process(tmp_path: Path, m
             running = asyncio.create_task(session.run_turn("work", on_event, cancel=cancel))
             sleeper = await _until_sleeper(tmp_path)
             await _until_streaming(seen)
-            assert not _gone(sleeper)
             cancel.request()
             turn = await asyncio.wait_for(running, 5)
             assert turn.stopped is StopMethod.CONTROL and turn.prompt_sent is True
             assert session.started and session.pid == pid
-            assert _gone(sleeper)
+            assert not _gone(sleeper) and sent == []
             _ENV["OBEY"] = "0"
             again = await _next_turn_answers(session, on_event)
             assert again.stopped is None and session.pid == pid
         finally:
             await session.stop(kill=True)
+            if (tmp_path / "sleeper.pid").exists():
+                _kill(int((tmp_path / "sleeper.pid").read_text()))
 
     asyncio.run(_run())
 
 
 def test_a_deaf_claude_is_killed_with_its_whole_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Claude ignored the interrupt for its grace: the fallback kills it with its group and the tree ``proc_tree``
+    # finds.
     session, claude = _tool_session(tmp_path, monkeypatch)
+    sent = _signals(monkeypatch)
 
     async def _run() -> None:
         await session.start([claude], cwd=str(tmp_path), signature=None, env=_ENV)
@@ -592,6 +619,7 @@ def test_a_deaf_claude_is_killed_with_its_whole_tree(tmp_path: Path, monkeypatch
             assert time.monotonic() - started < 3
             assert turn.stopped is StopMethod.KILL and not session.started
             assert pid is not None and _gone(pid) and _gone(sleeper)
+            assert signal.SIGTERM in sent
             await session.start([claude], cwd=str(tmp_path), signature=None, env=_ENV)  # resumes the session
             again = await _next_turn_answers(session, on_event)
             assert again.stopped is None
@@ -657,12 +685,13 @@ def test_a_result_queued_behind_the_control_request_is_not_an_answer(
     asyncio.run(_run())
 
 
-def test_a_stop_between_the_result_and_the_return_still_ends_the_turns_tools(
+def test_a_stop_between_the_result_and_the_return_ends_the_turn_and_signals_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The result is dispatched (the output forgets the turn) and run_turn has not yet returned: the stop is the
-    # turn's, its background tool is ended, and the process stays.
+    # turn's, which is over already; nothing is interrupted or signalled, its background tool runs on.
     session, claude = _tool_session(tmp_path, monkeypatch, OBEY="1", ANSWER="1")
+    sent = _signals(monkeypatch)
 
     async def _run() -> None:
         await session.start([claude], cwd=str(tmp_path), signature=None, env=_ENV)
@@ -679,12 +708,14 @@ def test_a_stop_between_the_result_and_the_return_still_ends_the_turns_tools(
             assert cancel.requested
             assert turn.stopped is StopMethod.CONTROL and turn.usage_complete  # a whole turn's result
             assert turn.result_event is not None and turn.result_event["result"] == "done"
-            assert _gone(sleeper)
+            assert not _gone(sleeper) and sent == []
             assert session.started and session.pid == pid
             assert session._user_turn is None and session._interrupting is None
             inbox = (tmp_path / "inbox").read_text()
-            assert "control_request" not in inbox  # nothing left to interrupt: only the turn's tools are ended
+            assert "control_request" not in inbox  # nothing left to interrupt
         finally:
             await session.stop(kill=True)
+            if (tmp_path / "sleeper.pid").exists():
+                _kill(int((tmp_path / "sleeper.pid").read_text()))
 
     asyncio.run(_run())

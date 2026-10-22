@@ -1,6 +1,6 @@
 """Channel registry: manages adapter lifecycle.
 
-Outbound messages are addressed to a channel (``channel-<name>``) and each
+Outbound messages are addressed to a channel id (``channel-<type>`` or ``channel-<type>-<n>``) and each
 adapter delivers what arrives on its own bus queue; the registry does not route
 them a second time.
 """
@@ -11,6 +11,7 @@ import logging
 from typing import Any
 
 from ..bus import MessageBus
+from ..message import parse_channel_id
 from ..task_notice import NotifyTarget
 from .base import ChannelAdapter, PostReceipt
 
@@ -42,22 +43,28 @@ class ChannelRegistry:
     def get(self, channel_id: str) -> ChannelAdapter | None:
         return self._channels.get(channel_id)
 
-    async def notify(self, channel_type: str, chat: str, text: str) -> tuple[bool, str | None]:
-        """Send a schedule's message through the running ``channel_type`` channel: whether it was sent, and why
+    @staticmethod
+    def _not_running(channel_id: str) -> str:
+        parsed = parse_channel_id(channel_id)
+        if parsed is not None and parsed.builtin:
+            return f"the {parsed.channel_type} channel is not running: enable it in Settings → Channels"
+        return f"the bot {channel_id} is not running: enable it in Settings → Channels"
+
+    async def notify(self, channel_id: str, chat: str, text: str) -> tuple[bool, str | None]:
+        """Send a schedule's message through the running channel ``channel_id``: whether it was sent, and why
         not."""
-        adapter = self._channels.get(f"channel-{channel_type}")
+        adapter = self._channels.get(channel_id)
         if adapter is None:
-            return False, f"the {channel_type} channel is not running: enable it in Settings → Channels"
+            return False, self._not_running(channel_id)
         receipt = await adapter.notify(chat, text)
         return receipt.success, receipt.error
 
-    async def post(self, channel_type: str, target: NotifyTarget, text: str, *,
+    async def post(self, channel_id: str, target: NotifyTarget, text: str, *,
                    reply_to: str | None = None, idempotency_key: str | None = None) -> PostReceipt:
-        """Post ``text`` to ``target`` through the running ``channel_type`` channel (``ChannelAdapter.post``)."""
-        adapter = self._channels.get(f"channel-{channel_type}")
+        """Post ``text`` to ``target`` through the running channel ``channel_id`` (``ChannelAdapter.post``)."""
+        adapter = self._channels.get(channel_id)
         if adapter is None:
-            return PostReceipt(False, error=f"the {channel_type} channel is not running: enable it in Settings → "
-                                            "Channels")
+            return PostReceipt(False, error=self._not_running(channel_id))
         return await adapter.post(target, text, reply_to=reply_to, idempotency_key=idempotency_key)
 
     def list_channels(self) -> list[dict[str, Any]]:

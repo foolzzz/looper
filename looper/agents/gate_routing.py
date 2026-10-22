@@ -65,8 +65,8 @@ class Route:
 NOT_A_REPLY = Route(RouteKind.NONE)
 
 
-def references(envelope: MessageEnvelope) -> tuple[str, str, str, dict[str, Any]] | None:
-    """The channel, the chat and the channel message a Lark or Telegram message replies to, with its context: the
+def references(envelope: MessageEnvelope) -> tuple[str, str, str, str, dict[str, Any]] | None:
+    """The channel (its type), the channel id (the bot), the chat and the channel message a Lark or Telegram message replies to, with its context: the
     one it answers directly, and in Lark the first of its thread only when it names none; None for a message from
     elsewhere, or one that replies to nothing."""
     channel = envelope.source.channel or ""
@@ -78,7 +78,7 @@ def references(envelope: MessageEnvelope) -> tuple[str, str, str, dict[str, Any]
     chat = str(context.get("chat_id") or "")
     if ref is None or not chat:
         return None
-    return channel, chat, ref, context
+    return channel, envelope.source.agent_id, chat, ref, context
 
 
 def _group(channel: str, context: dict[str, Any]) -> bool:
@@ -109,9 +109,9 @@ async def route(envelope: MessageEnvelope, *, has_planner: Any, bus: MessageBus,
     found_refs = references(envelope)
     if found_refs is None:
         return NOT_A_REPLY
-    channel, chat, ref, context = found_refs
+    channel, channel_id, chat, ref, context = found_refs
     try:
-        gate = await db_user_gates.find_reference(channel, chat, [ref])
+        gate = await db_user_gates.find_reference(channel, chat, [ref], channel_id=channel_id)
     except Exception:
         logger.warning("could not look up the gate a %s message replies to", channel, exc_info=True)
         return NOT_A_REPLY
@@ -121,7 +121,7 @@ async def route(envelope: MessageEnvelope, *, has_planner: Any, bus: MessageBus,
     text = str(envelope.payload.get("text") or "").strip()
     end = text.lower() in END_WORDS
     if GateState(gate["state"]).waiting:
-        origin = {"author": _author(channel, context), "channel": channel,
+        origin = {"author": _author(channel, context), "channel": channel, "channel_id": channel_id,
                   "chat": origin_chat(channel, chat, group=_group(channel, context),
                                       sender=str(context.get("sender_id") or "")),
                   "external_id": str(context.get("message_id") or "") or None}

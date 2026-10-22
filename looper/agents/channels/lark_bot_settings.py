@@ -90,23 +90,31 @@ async def check(config: Mapping[str, Any], app_secret: str | None, *, fresh: boo
     return None, bot
 
 
-async def status() -> dict[str, Any]:
+async def _row(channel_id: str) -> dict[str, Any]:
+    """The bot-token Lark row ``channel_id``; ``LookupError`` for another type or none."""
+    row = await db_channel_configs.get_config(channel_id)
+    if row is None or row.get("channel_type") != "lark_bot":
+        raise LookupError(f"no Lark (bot token) channel '{channel_id}'")
+    return row
+
+
+async def status(channel_id: str = CHANNEL_ID) -> dict[str, Any]:
     """The saved bot, its startup problem, allowlist names and latest refused senders."""
     from .lark_api import BASE_URLS, LarkApi, LarkApiError
 
-    row = await db_channel_configs.get_config(CHANNEL_ID)
-    config = dict((row or {}).get("config") or {})
-    secret = await db_channel_configs.get_bot_token(CHANNEL_ID)
+    row = await _row(channel_id)
+    config = dict(row.get("config") or {})
+    secret = await db_channel_configs.get_bot_token(channel_id)
     problem, bot = await check(config, secret)
     allowed = _ids(config)
-    rejected = [r for r in await db_channel_configs.rejected_senders(CHANNEL_ID) if r["sender_id"] not in allowed]
+    rejected = [r for r in await db_channel_configs.rejected_senders(channel_id) if r["sender_id"] not in allowed]
     names: dict[str, str] = {}
     if bot is not None:
         api = LarkApi(config["app_id"], secret, base_url=BASE_URLS[config.get("domain", "feishu")])
         try:
             names = await api.names([*allowed, *(r["sender_id"] for r in rejected)])
         except LarkApiError as exc:
-            logger.info("channel-lark_bot: could not look up the senders' names: %s", exc)
+            logger.info("%s: could not look up the senders' names: %s", channel_id, exc)
         finally:
             await api.aclose()
     return {
@@ -120,7 +128,7 @@ async def status() -> dict[str, Any]:
     }
 
 
-async def people(query: str) -> dict[str, Any]:
+async def people(query: str, channel_id: str = CHANNEL_ID) -> dict[str, Any]:
     """People matching a name or email, with whether the platform returned the complete result."""
     text = query.strip()
     if not text or len(text) > QUERY_MAX_CHARS:
@@ -128,9 +136,9 @@ async def people(query: str) -> dict[str, Any]:
 
     from .lark_api import BASE_URLS, LarkApi, LarkApiError
 
-    row = await db_channel_configs.get_config(CHANNEL_ID)
-    config = dict((row or {}).get("config") or {})
-    secret = await db_channel_configs.get_bot_token(CHANNEL_ID)
+    row = await _row(channel_id)
+    config = dict(row.get("config") or {})
+    secret = await db_channel_configs.get_bot_token(channel_id)
     if not config.get("app_id"):
         raise LarkApiError("no app_id is set")
     if not secret:
