@@ -1257,7 +1257,7 @@ class ManagerAgent:
             # progress sent before it (``task_notice``).
             await self._bus.publish(MessageEnvelope.create(
                 source=self.agent_address,
-                target=channel_address(notice.channel.value),
+                target=channel_address(notice.channel.value, notice.channel_id),
                 message_type=MessageType.CHAT_NOTICE,
                 payload=notice.payload(),
                 correlation_id=envelope.correlation_id,

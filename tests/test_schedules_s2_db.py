@@ -224,7 +224,7 @@ def test_a_runs_message_follows_notify(monkeypatch: pytest.MonkeyPatch, tmp_path
         assert [text.splitlines()[0].rsplit("：", 1)[1] for _, _, text in sender.sent] == expected
         if notify == "always":
             channel, chat, text = sender.sent[0]
-            assert (channel, chat) == ("telegram", TELEGRAM_CHAT)
+            assert (channel, chat) == ("channel-telegram", TELEGRAM_CHAT)
             assert text.startswith("定时任务「Alert triage」（项目 alerts）") and "2 new alerts, both known" in text
             assert text.endswith(f"花费 $0.05 · https://looper.example.com/#tasks/{done['task_id']}")
         assert [n["status"] for n in await _outbox(env, sid)] == ["sent"] * len(expected)

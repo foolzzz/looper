@@ -120,7 +120,7 @@ def test_a_lark_tasks_gate_posts_its_card_and_the_rest_under_it(monkeypatch: pyt
         courier = GateCourier(poster, dashboard_url="http://looper.test")
         assert await courier.run_once() == 1
         (card,) = poster.posts
-        assert (card["channel"], card["target"], card["reply_to"]) == ("lark", NotifyTarget(TargetKind.USER,
+        assert (card["channel"], card["target"], card["reply_to"]) == ("channel-lark", NotifyTarget(TargetKind.USER,
                                                                                               LARK_USER), None)
         assert card["text"].splitlines()[:3] == ["⏸ 需要你决定 · settings file", "storage",
                                                  "1. Which database?（选项：PostgreSQL / SQLite）"]

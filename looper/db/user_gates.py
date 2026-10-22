@@ -399,14 +399,15 @@ async def open_gates(limit: int, *, chat: tuple[str, str] | None = None, dashboa
         args.append(manager_id)
         where = f" AND t.manager_id = ${len(args)}"
     if chat is not None:
-        from ..agents.task_notice import _BY_CHANNEL_ID, TargetKind
+        from ..agents.message import BOT_CHANNEL_TYPES, builtin_channel_id
+        from ..agents.task_notice import TargetKind
 
-        origins = [origin for origin, channel in _BY_CHANNEL_ID.items() if channel.value == chat[0]]
+        origins = [builtin_channel_id(chat[0])]
         base = len(args)
         where += (f" AND t.schedule_id IS NULL AND ((t.origin_channel_id = ANY(${base + 1}::text[]) AND "
                   f"t.chat_id = ${base + 2} AND t.chat_id <> '' AND t.chat_kind = ANY(${base + 3}::text[])) OR "
                   f"(${base + 4}::boolean AND NOT (COALESCE(t.origin_channel_id, '') = ANY(${base + 5}::text[]))))")
-        args += [origins, chat[1], [kind.value for kind in TargetKind], dashboard, list(_BY_CHANNEL_ID)]
+        args += [origins, chat[1], [kind.value for kind in TargetKind], dashboard, [builtin_channel_id(t) for t in BOT_CHANNEL_TYPES]]
     rows = await pool.fetch(
         _GATES.replace("FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id",
                        ", p.name AS project_name, t.title AS task_title, t.goal_id AS task_goal_id, "
