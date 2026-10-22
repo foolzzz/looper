@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.32] - 2026-10-22
+
+### Fixed
+
+- **Flaky tests and the isolated Pi smoke script: widened timeouts.** Subprocess waits, runner and RPC deadlines and browser action timeouts raced start-up under load in the planner worker, DSH, LLM models dashboard, model launch, model manager, operator token, Pi, room consult and run channel tests, and in `examples/pi/isolated-smoke.py`. Only the limits changed. Behavior change: none to product code. Model-visible: none. ([#390](https://github.com/foolzzz/looper/pull/390))
+
 ## [2.13.31] - 2026-10-21
 
 ### Fixed
