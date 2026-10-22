@@ -258,7 +258,11 @@ class AgentLifecyclePayload(TypedDict, total=False):
 
 # --- Address helpers ---
 
-MANAGER_ADDRESS = AgentAddress(agent_type="manager", agent_id="manager")
+def manager_address(manager_id: str) -> AgentAddress:
+    return AgentAddress(agent_type="manager", agent_id=manager_id)
+
+
+MANAGER_ADDRESS = manager_address("manager")
 TASK_ROUTER_ADDRESS = AgentAddress(agent_type="task_router", agent_id="task-router")
 
 # Kept for backwards compatibility in tests; prefer planner_address(task_id).

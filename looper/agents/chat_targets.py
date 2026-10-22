@@ -11,8 +11,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ..db import llm_records, steps as db_steps, tasks as db_tasks
-from .message import MANAGER_ADDRESS, AgentAddress, planner_address
+from ..db import llm_records, managers as db_managers, steps as db_steps, tasks as db_tasks
+from .message import MANAGER_ADDRESS, AgentAddress, manager_address, planner_address
 from .task_roles import run_role
 from .tiers.task import TaskRouter
 
@@ -31,12 +31,24 @@ class ChatTargetError(Exception):
         self.status = status
 
 
-def resolve_chat_target(raw: Any, task_router: TaskRouter) -> AgentAddress:
+async def resolve_chat_target(raw: Any, task_router: TaskRouter, fleet: Any = None) -> AgentAddress:
     """Map a ``/api/chat/send`` target to a bus address; the Manager is the default."""
     target = raw or {"kind": "manager"}
     kind = target.get("kind", "manager") if isinstance(target, dict) else None
     if kind == "manager":
-        return MANAGER_ADDRESS
+        if target.get("id") is None:
+            return MANAGER_ADDRESS
+        manager_id = target["id"]
+        if not isinstance(manager_id, str):
+            raise ChatTargetError(HTTP_400, "target.id must be a string")
+        if fleet is not None and fleet.get(manager_id) is not None:
+            return manager_address(manager_id)
+        row = await db_managers.get_manager(manager_id)
+        if row is None or row.get("deleted_at") is not None:
+            raise ChatTargetError(HTTP_400, f"no Manager '{manager_id}'")
+        if fleet is not None:
+            raise ChatTargetError(HTTP_409, f"Manager '{manager_id}' is disabled")
+        return manager_address(manager_id)
     if kind == "planner":
         task_id = str(target.get("task_id") or "")
         if not task_router.has_planner(task_id):
@@ -51,15 +63,19 @@ def build_chat_targets(
     live_planners: list[dict[str, Any]],
     steps: list[dict[str, Any]],
     runs: list[dict[str, Any]],
+    managers: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """The Manager, then per task (newest first) its Planner and its step agents.
+    """The Manager (with ``managers``, each running Manager in fleet order), then per task (newest first) its Planner and its step agents.
 
     ``tasks`` are task rows, ``live_planners`` is ``TaskRouter.running_planners()``,
     ``steps`` are task_steps rows and ``runs`` are Worker/Reviewer llm_records
     rows (with the run's ``step_id`` and ``task_role``), oldest first. A step
     agent that ran as a role its task's Planner defined names it (``task_role``).
     """
-    targets: list[dict[str, Any]] = [{"kind": "manager", "id": MANAGER_ADDRESS.agent_id, "can_send": True}]
+    if managers is None:
+        targets: list[dict[str, Any]] = [{"kind": "manager", "id": MANAGER_ADDRESS.agent_id, "can_send": True}]
+    else:
+        targets = [{"kind": "manager", "id": m["id"], "name": m["name"], "can_send": True} for m in managers]
 
     live = {p["task_id"]: p for p in live_planners}
     known = {t["id"] for t in tasks}
@@ -109,7 +125,9 @@ def build_chat_targets(
     return targets
 
 
-async def list_chat_targets(task_router: TaskRouter) -> list[dict[str, Any]]:
+async def list_chat_targets(
+    task_router: TaskRouter, managers: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Read the recent tasks and their step agents; without the database, list the live ones."""
     live_planners = task_router.running_planners()
     tasks: list[dict[str, Any]] = []
@@ -122,4 +140,4 @@ async def list_chat_targets(task_router: TaskRouter) -> list[dict[str, Any]]:
         runs = await llm_records.list_task_runs(task_ids)
     except Exception:
         logger.warning("chat targets: task history unavailable, listing live agents only", exc_info=True)
-    return build_chat_targets(tasks=tasks, live_planners=live_planners, steps=steps, runs=runs)
+    return build_chat_targets(tasks=tasks, live_planners=live_planners, steps=steps, runs=runs, managers=managers)

@@ -19,9 +19,8 @@ const view = (over: Partial<ManagerSessionView> = {}): ManagerSessionView => ({
   selected: null,
   effective: {
     profile: {
-      name: "Effective Agent", effort: null, runtime_name: "Claude Code",
-      provider: { name: "Anthropic" }, model: { name: "Opus", protocol: "anthropic" },
-    } as never,
+      profile_id: "p1", name: "Effective Agent", effort: null, runtime: "claude-code", provider: "anthropic", model: "opus",
+    },
     source: "session",
   },
   problem: null,
@@ -49,7 +48,8 @@ describe("manager session profile", () => {
     const html = renderToStaticMarkup(
       <ManagerSessionProfileView view={view({ problem: "settings broken" })} busy={false} error={null} onSelect={() => {}} />,
     );
-    expect(html).toContain("Effective Agent");
+    expect(html).toContain("Effective Agent — claude-code · anthropic / opus");
+    expect(html).not.toContain("undefined");
     expect(html).toContain("this session");
     expect(html).toContain("Follow Settings");
     expect(html).toContain("1. Alpha");

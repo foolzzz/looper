@@ -339,12 +339,16 @@ async def update_profile(profile_id: str, fields: Mapping[str, Any], *,
 
 
 async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
-                        ) -> dict[str, dict[str, Any]]:
+                        manager_id: str | None = None) -> dict[str, dict[str, Any]]:
     """Where each Agent Profile (or ``profile_id``) is selected, by profile id: ``layers``, each ``{scope, role,
     project_id, project_name}`` (system, then roles, then projects by name), ``task_count``, how many tasks
     chose it for one of their roles, ``schedule_count``, how many schedules did, and ``allowed_in``, the names of
     the projects whose Planners may choose it (a Planner's choice counts only while its project allows it, so it is
-    not counted), and ``manager_session``, whether the Manager's current session selects it. A profile nothing selects is not in the result."""
+    not counted), ``manager_session``, whether any Manager's current session selects it, ``manager_sessions``, those Managers' ids, ``managers``, the names of the Managers
+    it is the profile of, and ``manager_templates``, the templates (``"<template> of <Manager>"``) that
+    choose it. A profile nothing selects is not in the result. With ``manager_id``, what only Managers and their
+    tasks own is that Manager's alone: its tasks, session, own profile and templates; schedules belong to no
+    Manager and are not counted."""
     pool = pool or get_pool()
     layers = await pool.fetch(
         "SELECT l.profile_id, l.scope, l.role, l.project_id, p.name AS project_name FROM agent_setting_layers l "
@@ -354,8 +358,9 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
         "array_position(ARRAY['manager', 'planner', 'worker', 'reviewer'], l.role)", profile_id,
     )
     tasks = await pool.fetch(
-        "SELECT profile_id, count(DISTINCT task_id) AS n FROM task_profile_overrides "
-        "WHERE $1::text IS NULL OR profile_id = $1 GROUP BY profile_id", profile_id,
+        "SELECT o.profile_id, count(DISTINCT o.task_id) AS n FROM task_profile_overrides o "
+        "JOIN tasks k ON k.id = o.task_id WHERE ($1::text IS NULL OR o.profile_id = $1) "
+        "AND ($2::text IS NULL OR k.manager_id = $2) GROUP BY o.profile_id", profile_id, manager_id,
     )
     allowed = await pool.fetch(
         "SELECT l.profile_id, p.name FROM project_allowed_profiles l JOIN projects p ON p.id = l.project_id "
@@ -363,17 +368,34 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
     )
     schedules = await pool.fetch(
         "SELECT profile_id, count(DISTINCT schedule_id) AS n FROM schedule_profile_overrides "
-        "WHERE $1::text IS NULL OR profile_id = $1 GROUP BY profile_id", profile_id,
+        "WHERE ($1::text IS NULL OR profile_id = $1) AND $2::text IS NULL GROUP BY profile_id",
+        profile_id, manager_id,
     )
     manager = await pool.fetch(
-        "SELECT selected_profile_id FROM agent_sessions WHERE agent_id = 'manager' "
-        "AND selected_profile_id IS NOT NULL AND ($1::text IS NULL OR selected_profile_id = $1)", profile_id,
+        "SELECT selected_profile_id, agent_id FROM agent_sessions "
+        "WHERE (agent_id = 'manager' OR agent_id LIKE 'manager-%') AND selected_profile_id IS NOT NULL "
+        "AND ($1::text IS NULL OR selected_profile_id = $1) AND ($2::text IS NULL OR agent_id = $2)",
+        profile_id, manager_id,
+    )
+    managers = await pool.fetch(
+        "SELECT profile_id, name FROM managers WHERE deleted_at IS NULL AND profile_id IS NOT NULL "
+        "AND ($1::text IS NULL OR profile_id = $1) AND ($2::text IS NULL OR id = $2) ORDER BY lower(name), id",
+        profile_id, manager_id,
+    )
+    templates = await pool.fetch(
+        "SELECT p.profile_id, t.name AS template, m.name AS manager FROM manager_task_templates t "
+        "JOIN managers m ON m.id = t.manager_id "
+        "CROSS JOIN LATERAL (VALUES (t.planner_profile_id), (t.worker_profile_id), (t.reviewer_profile_id)) "
+        "AS p(profile_id) WHERE m.deleted_at IS NULL AND p.profile_id IS NOT NULL "
+        "AND ($1::text IS NULL OR p.profile_id = $1) AND ($2::text IS NULL OR m.id = $2) "
+        "ORDER BY lower(m.name), t.key", profile_id, manager_id,
     )
     uses: dict[str, dict[str, Any]] = {}
 
     def use(profile: str) -> dict[str, Any]:
         return uses.setdefault(profile, {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": [],
-                                         "manager_session": False})
+                                         "manager_session": False, "manager_sessions": [], "managers": [],
+                                         "manager_templates": []})
 
     for row in layers:
         use(row["profile_id"])["layers"].append({k: row[k] for k in ("scope", "role", "project_id", "project_name")})
@@ -384,7 +406,15 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
     for row in allowed:
         use(row["profile_id"])["allowed_in"].append(row["name"])
     for row in manager:
-        use(row["selected_profile_id"])["manager_session"] = True
+        used = use(row["selected_profile_id"])
+        used["manager_session"] = True
+        used["manager_sessions"].append(row["agent_id"])
+    for row in managers:
+        use(row["profile_id"])["managers"].append(row["name"])
+    for row in templates:
+        label = f"{row['template']} of {row['manager']}"
+        if label not in use(row["profile_id"])["manager_templates"]:
+            use(row["profile_id"])["manager_templates"].append(label)
     return uses
 
 

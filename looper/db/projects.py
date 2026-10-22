@@ -44,23 +44,26 @@ _WITH_COUNTS = """
     SELECT p.*,
            count(t.id) AS task_count,
            count(t.id) FILTER (WHERE t.status = ANY($1::text[])) AS active_count,
-           (SELECT count(*) FROM schedules s WHERE s.project_id = p.id) AS schedule_count
-    FROM projects p LEFT JOIN tasks t ON t.project_id = p.id
+           (SELECT count(*) FROM schedules s WHERE s.project_id = p.id AND $2::text IS NULL) AS schedule_count
+    FROM projects p LEFT JOIN tasks t ON t.project_id = p.id AND ($2::text IS NULL OR t.manager_id = $2)
 """
 
 
-async def list_projects(*, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+async def list_projects(*, manager_id: str | None = None, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """Every project with its ``task_count``, ``active_count`` and ``schedule_count``, ordered by name ignoring
-    case."""
+    case; with ``manager_id``, the counts are of that Manager's tasks and its schedules are 0."""
     pool = pool or get_pool()
-    rows = await pool.fetch(_WITH_COUNTS + "GROUP BY p.id ORDER BY lower(p.name)", list(ACTIVE_STATUSES))
+    rows = await pool.fetch(_WITH_COUNTS + "GROUP BY p.id ORDER BY lower(p.name)", list(ACTIVE_STATUSES), manager_id)
     return [dict(r) for r in rows]
 
 
-async def get_project(project_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
-    """One project with its ``task_count``, ``active_count`` and ``schedule_count``."""
+async def get_project(project_id: str, *, manager_id: str | None = None,
+                      pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+    """One project with its ``task_count``, ``active_count`` and ``schedule_count`` (``list_projects``'s
+    ``manager_id``)."""
     pool = pool or get_pool()
-    row = await pool.fetchrow(_WITH_COUNTS + "WHERE p.id = $2 GROUP BY p.id", list(ACTIVE_STATUSES), project_id)
+    row = await pool.fetchrow(_WITH_COUNTS + "WHERE p.id = $3 GROUP BY p.id", list(ACTIVE_STATUSES), manager_id,
+                              project_id)
     return dict(row) if row else None
 
 
@@ -75,7 +78,7 @@ async def get_task_project(task_id: str, *, pool: asyncpg.Pool | None = None) ->
     pool = pool or get_pool()
     row = await pool.fetchrow(
         "SELECT p.*, t.budget_usd AS task_own_budget_usd, t.schedule_id AS task_schedule_id, "
-        "t.planner_session_label AS task_planner_session_label "
+        "t.planner_session_label AS task_planner_session_label, t.template AS task_template "
         "FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = $1", task_id,
     )
     if row is None:
@@ -83,6 +86,8 @@ async def get_task_project(task_id: str, *, pool: asyncpg.Pool | None = None) ->
     project = dict(row)
     if (own := project.pop("task_own_budget_usd")) is not None:
         project["task_budget_usd"] = own
+    if isinstance(project.get("task_template"), str):
+        project["task_template"] = json.loads(project["task_template"])
     return project
 
 

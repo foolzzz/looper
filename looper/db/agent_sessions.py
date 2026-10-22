@@ -50,6 +50,17 @@ async def selects_profile(
         "SELECT 1 FROM agent_sessions WHERE agent_id = $1 AND selected_profile_id = $2", agent_id, profile_id))
 
 
+async def manager_sessions_selecting(
+    profile_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> list[str]:
+    """The ids of the Managers (``manager``, ``manager-…``) whose current session has ``profile_id`` selected."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "SELECT agent_id FROM agent_sessions WHERE (agent_id = 'manager' OR agent_id LIKE 'manager-%') "
+        "AND selected_profile_id = $1 ORDER BY agent_id", profile_id)
+    return [r["agent_id"] for r in rows]
+
+
 async def select_profile(
     agent_id: str, profile_id: str | None, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> None:

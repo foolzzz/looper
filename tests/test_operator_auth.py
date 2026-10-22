@@ -37,6 +37,9 @@ class ManagerOps:
     def listing(self) -> list:
         return []
 
+    async def current_listing(self) -> list:
+        return []
+
     def binding_report(self) -> dict:
         return {"enforced": False, "mismatches": 0, "by": []}
 

@@ -396,3 +396,43 @@ def test_a_v2_7_0_steps_one_review_role_becomes_a_list_of_one_and_its_columns_go
         await ensure_schema(pool)  # and again, a no-op
 
     _run(test, monkeypatch)
+
+
+def test_planning_anew_restores_the_roles_of_the_tasks_template(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.db import tasks
+
+    role = {"role_key": "security-review", "kind": "review", "profile_id": None, "role_prompt": "Check auth.",
+            "harness": None, "items": [], "template_key": "security-review"}
+
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        await _profiles(pool)
+        for task_id in ("task-a", "task-b", "task-c", "task-d"):
+            await _task(pool, task_id, "failed", project)
+        await pool.execute("UPDATE tasks SET template = $1::jsonb WHERE id IN ('task-a', 'task-b')",
+                           json.dumps({"name": "PR review", "roles": [role]}))
+        await pool.execute("UPDATE tasks SET template = $1::jsonb WHERE id = 'task-c'",
+                           json.dumps({"name": "PR review", "roles": [{**role, "profile_id": "agent-gone"}]}))
+        for task_id in ("task-a", "task-b"):
+            for key, version, via in (("security-review", 1, "template"), ("extra", 1, "planner"),
+                                      ("security-review", 2, "user")):
+                await pool.execute(
+                    "INSERT INTO task_roles (task_id, role_key, version, kind, role_prompt, via) "
+                    "VALUES ($1, $2, $3, 'review', $4, $5)", task_id, key, version, f"{via} text", via)
+        await pool.execute("INSERT INTO task_roles (task_id, role_key, version, kind, role_prompt) "
+                           "VALUES ('task-d', 'x', 1, 'work', 'x')")
+
+        await tasks.reset_task_for_restart("task-b", keep_steps=True, pool=pool)
+        assert len(await _versions(pool, "task-b")) == 3
+        await tasks.reset_task_for_restart("task-a", keep_steps=False, pool=pool)
+        rows = await pool.fetch("SELECT role_key, version, via, role_prompt FROM task_roles WHERE task_id = 'task-a'")
+        assert [tuple(r.values()) for r in rows] == [("security-review", 1, "template", "Check auth.")]
+        (summary,) = await _journal(pool, "task-a", "role_defined")
+        assert "restored" in summary[1]
+
+        await tasks.reset_task_for_restart("task-c", keep_steps=False, pool=pool)
+        assert await _versions(pool, "task-c") == [("security-review", 1, None, None)]
+        await tasks.reset_task_for_restart("task-d", keep_steps=False, pool=pool)
+        assert await _versions(pool, "task-d") == []
+
+    _run(test, monkeypatch)

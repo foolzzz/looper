@@ -11,7 +11,16 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 
 ### Manager (`looper/agents/tiers/manager.py`)
 
-- Entry point for all user messages
+- Entry point for all user messages. There is a default Manager (`manager`)
+  and the operator's scenario Managers (`manager-<key>`, table `managers`,
+  [RFC](rfcs/scenario-managers.zh-CN.md)), each a `ManagerAgent` with its own
+  session (the `agent_sessions` row whose id is its id), runs
+  (`llm_records.agent_id`), turn binding file and `ManagerOps`.
+  `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
+  8 at once. A scenario Manager has its own system prompt, Agent Profile and
+  [task templates](#task-templates); channels reach the default Manager only
+  ([Channels](#channels)). What follows holds for each Manager unless it says
+  otherwise
 - Acts on Looper only through its platform tools
   ([The Manager's platform tools](#the-managers-platform-tools)): the MCP
   server `looper` is in every launch of its Claude, and each turn tells
@@ -44,7 +53,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   characters). `db.tasks.task_name` is what lists, headings, the Chat page and
   the end notice show: the title, else the goal id, else the requirement's
   first line, else the task id (a task from before titles)
-- The dashboard chat, Lark and Telegram share the Manager's one session, so
+- The dashboard chat, Lark and Telegram share the default Manager's one session (a scenario Manager's session serves its own dashboard chat threads), so
   every message ends with a code-written line saying where it came from, just
   before the message: `Channel: the Looper dashboard chat`, `Channel: a Lark
   direct message`, `Channel: a Lark group chat, from <sender>` (the name the
@@ -3043,6 +3052,25 @@ contract 4.9 KB (4,865 bytes of `TOOLS_CONTRACT`).
   secret, password or credential masked), the tier, how it ended, the result of a change
   and the `confirmation_id`. `GET /api/tasks/:id` lists a task's
   (`manager_actions`), and the task page shows them under "By the Manager".
+  `manager_actions.manager_id` says which Manager made the call (no foreign
+  key: the trail outlives a deleted Manager).
+- **What a Manager may use and see.** Two independent settings of a row in
+  `managers`. `tools` (`all` / `tasks`) says which tools it has: `all` is the
+  whole catalog, `tasks` the task tools, `looper_confirm` and the read-only
+  `looper_projects` list / get. `task_scope` (`all` / `own`) says which tasks
+  it sees and may act on: `all` every task, `own` only the tasks it created.
+  Any combination is valid. The default Manager is fixed to `all` / `all`; a
+  scenario Manager defaults to `tasks` / `own`. `ManagerOps` enforces both in
+  code (a call outside them is `forbidden`) from one immutable scope value
+  that changing either setting replaces at once. Each Manager's per-turn
+  `Ready tasks` and `Open gates` sections and the `/gates` list name only the
+  tasks that Manager created, whatever its `task_scope`. Every change to what
+  a Manager may do (`tools`, `task_scope`, `task_policy`, `enabled`, a
+  template saved or removed) bumps `managers.revision`; `ManagerOps` compares
+  it at each call and, when it differs, rebuilds its scope from the database
+  on the spot. If that fails the call is `unavailable`; the old scope is
+  never used. A confirmation waiting for the user is checked against the
+  scope at the time it is confirmed.
 
 | Tool | Does | Tier |
 |---|---|---|
@@ -3069,6 +3097,62 @@ Continuing a task that failed at its spend cap needs a higher cap, which is
 not one of these tools yet; nor are a project's execution settings, a role's
 prompt, name, turns and switch, changing or removing a provider, or adding
 items to the catalog.
+
+### Task reports
+
+A task reports to the Manager that created it (`tasks.manager_id`; the
+dashboard's and a schedule's tasks belong to the default Manager). Its
+progress and end go to that Manager, which tells the chat the task came from.
+A task asked for in the web chat records the chat thread (`tasks.origin_thread`);
+its acceptance and its end are written into that thread and reach an open
+dashboard through the thread's session subscription. When a Manager is
+disabled, its queued and in-flight reports are handed to the default Manager
+instead of being dropped.
+
+### Task templates
+
+A scenario Manager can carry task templates (`manager_task_templates`, one
+row per `manager_id` and `key`; `looper/agents/task_templates.py`). A template
+is what the operator fixes for one kind of task: `name`, `description`, a
+fixed `project_id`, `work_dir` and `workspace_mode`, a `requirement` with
+`{{input_key}}` placeholders, `planner_instructions`, an Agent Profile per
+role (`planner`, `worker`, `reviewer`), `role_templates` (keys of the
+project's role templates) and `inputs` (at most 10: `key`, `label`, `kind`
+`text` or `url`, `required`, `pattern`, `hint`). The API checks all of it
+when it saves; a `pattern` is compiled and matched in a short-lived
+subprocess with a 2-second limit, never on the event loop.
+
+A Manager with templates has a `Task templates` section in each turn, and its
+`looper_task_create` takes two more arguments, `template` (one of its keys)
+and `inputs`. With `task_policy` `templates_only` a call without `template`
+is `invalid`. With a template, and before anything is written, the code:
+
+1. reads the template (it must belong to this Manager) and checks `inputs`:
+   unknown keys, a missing required one, a `url` that is not http(s), a
+   `pattern` that does not match, each value trimmed to 2000 characters;
+2. merges the template's fixed fields with the call's: the template's value
+   wins, the call may repeat it but not change it (`invalid`), and
+   confirmation and creation use the same merged project, directory and
+   mode;
+3. checks again that each merged Agent Profile can run its role and that the
+   project's Planner-defined roles are on when `role_templates` is set
+   (`conflict` otherwise);
+4. fills the placeholders of the template's `requirement` in one pass,
+   followed by the Manager's own `requirement` (together within the
+   requirement limit);
+5. in one transaction, locks the Manager's row (it must still be enabled),
+   creates the task with `manager_id` and the `template` snapshot, writes the
+   Profile overrides and copies the role templates into `task_roles`
+   (version 1, `via` `template`).
+
+The snapshot (`tasks.template`) keeps the template's key, name, inputs,
+`planner_instructions` and every role copied, as the template said then; later
+edits of the template do not change the task, and planning anew
+(`start_over`) restores the copied roles from it. The Planner's `## Task`
+section gains, before `Requirement:`, the lines `Template: <name>`,
+`Template inputs:` and `Template instructions:`; a task without a snapshot
+gets none of them. The instructions go to the Planner only. The repository
+ships an example, `docs/examples/manager-github-pr-review.json`.
 
 ### A task's Planner's tools
 
@@ -3831,7 +3915,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | Table | Purpose |
 |---|---|
 | `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none), and the execution settings (`project_execution`) |
-| `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id`, `chat_kind` and `chat_mention` (who is told when it ends: a Telegram chat id, a Lark sender's open_id, or a Lark group's id and the requester it @-mentions; `chat_kind` is `user` or `chat`; NULL for a task asked for elsewhere), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history), `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement), and `workspace_dir`, `workspace_mode` and `workspace_base` ([Task workspaces](#task-workspaces)) |
+| `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id`, `chat_kind` and `chat_mention` (who is told when it ends: a Telegram chat id, a Lark sender's open_id, or a Lark group's id and the requester it @-mentions; `chat_kind` is `user` or `chat`; NULL for a task asked for elsewhere), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history), `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement), and `workspace_dir`, `workspace_mode` and `workspace_base` ([Task workspaces](#task-workspaces)); `manager_id` (the Manager that created it, which hears of its progress and end), `template` (JSON snapshot of the task template it came from, NULL without one) and `origin_thread` (the web chat thread it was asked for in) |
 | `task_worktrees` | A worktree task's git worktree ([Task workspaces](#task-workspaces)), one per task (going with it): `repo_dir` and `subdir` (the workspace in its repository), `path`, `branch`, `base_commit`, `links`, `state` (`active`, `removed`), `result_commit` (the branch's tip when it was removed), `created_at`, `removed_at` |
 | `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `kind` (`work` or `gate`), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages`, `started_at` (when its run was first dispatched, kept through retries, reviews and server restarts; cleared when a restart of the task sends it back to not started; null for steps from before the column) |
 | `task_user_gates` | A gate step's gate ([User gates](#user-gates)): `topic`, `agenda`, `findings`, `state`, `summary` (only once passed), `resolution`, `ended_by_user`, `plan_change`, `delivered_through`, `turns`, `reminders` and its times; the Planner writes all but `first_reply_at` and the reminders' columns, and a closed gate stays as it closed |
@@ -3841,7 +3925,10 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
 | `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `supplement`, `session_switch`, `handoff`, `progress`, `profile_choice`, `concurrency_change`, `role_defined`, `gate_opened`, `gate_updated`, `gate_cancelled` and `gate_closed` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`, and for a supplement its `via` and `delivered_at`; `GET /api/tasks/<id>` returns it as `journal` (and the progress notes, parsed and newest first, as `progress`); the task page lists the entries as Findings, each with its kind, and the progress notes in its Progress section |
 | `task_requirement_versions` | Every version of an edited task requirement: `task_id`, `version` (1 is the text the task was created with, written at its first edit), `text`, `via` (`created`, `task_page`, or the Manager's), `created_at` and `delivered_at` (when the Planner had it in a turn; `tasks.requirement` is the newest) |
-| `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
+| `managers` | The default Manager (`manager`) and the operator's scenario Managers (`manager-<key>`): `name`, `description`, `system_prompt` (null for the default), `profile_id`, `tools`, `task_scope`, `task_policy` (`free` / `templates_only`), `enabled`, `revision` (bumped by every change to what it may do), `deleted_at` (a soft delete: the row and its id stay) |
+| `manager_task_templates` | A Manager's task templates ([Task templates](#task-templates)), keyed by `manager_id` and `key`: `name`, `description`, `project_id`, `work_dir`, `workspace_mode`, `requirement`, `planner_instructions`, the three role Profile ids, `role_templates` and `inputs` (JSON) |
+| `chat_threads` | The Manager a web chat thread (`session_id`) belongs to, for good; a thread without a row (Lark's, Telegram's, from before) is the default Manager's |
+| `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web chat's session, or `<channel>:<chat_id>` for Telegram and Lark; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram` or `lark`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
 | `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`) |
@@ -4211,6 +4298,10 @@ does not imply HTTP compatibility.
 | `/api/chat/turn` | GET | `?session_id=<web chat id>`: `{turn: null}` or `{turn: {message_id, channel, started_at, stopping}}` when the Manager's running user turn answers that chat; 400 without `session_id`, 503 without a Manager. The page reads it after a reload or when its stream broke |
 | `/api/manager/session` | GET | The Manager's session and its Agent Profile, never the session id: `session` (`active`, `runtime`, `profile_id`: what the saved session ran), `selected` (`{profile_id, name}` or null: the session's own choice), `effective` (`{profile, source}`: what the next turn runs and the layer it comes from, `session` or a settings layer), `problem` (why that profile cannot launch, else null) and `choices` (the numbered profiles `/profile` lists, each with its `problem` when it cannot serve the Manager). 503 while the Manager is not running |
 | `/api/manager/session/profile` | PUT | Choose the session's Agent Profile as `/profile` does: `{profile_id}`, null following Settings (a missing `profile_id` is 400, as is a non-string one, an unknown profile or one that cannot serve the Manager; nothing is stored then). Answers the session view with `effect` (`current`, `resumes`, `new_session` or `starts`) and the reply `text`; recorded as a Runs record (`metadata.session_profile`, `via` `api`). 503 while the Manager is not running |
+| `/api/managers` | GET / POST | GET: `{managers, max_enabled}`, each Manager with `id`, `name`, `description`, `builtin`, `enabled`, `tools`, `task_scope`, `task_policy`, `system_prompt` (null for the default Manager), `profile_id`, `profile_name`, `templates`, `state` (`running`, `busy`, `healthy`, `sync`: `ok` or `pending` with `sync_error`) and `spend` (`today_usd`, `last_7d_usd`). POST `{key, name, description?, system_prompt, profile_id?, tools?, task_scope?, task_policy?, enabled?}` creates one (201; `tools` defaults to `tasks`, `task_scope` to `own`); 400 for a bad field, 409 when 8 are already enabled or the key was used by a deleted Manager |
+| `/api/managers/:id` | PUT / DELETE | PUT: a partial update (`key` cannot change; the default Manager changes only `name` and `description`, anything else is 400); changing `tools`, `task_scope`, `task_policy` or `enabled` bumps `revision` and applies to the running Manager; `enabled: true` is counted against the limit of 8 (409). DELETE: 409 for the default Manager or one that has tasks (disable it instead), otherwise a soft delete (the row stays so its threads keep their owner) that stops it; a deleted id is 404 |
+| `/api/managers/:id/templates/:key` | PUT / DELETE | Create or replace, or remove, one task template ([Task templates](#task-templates)); 400 names the field that fails; 404 for a deleted Manager |
+| `manager` parameters of the chat and session routes | | Without one every route is the default Manager's, as before. `GET /api/manager/session?manager=<id>` and `PUT /api/manager/session/profile` (body `manager`) act on that Manager's session; `GET /api/chat/sessions?manager=<id>` lists its threads (404 for an unknown or deleted Manager); `POST /api/chat/send` takes `target` `{"kind": "manager", "id": "<id>"}` (409 when the thread belongs to another Manager) and `new_session_profile_id` for any Manager's `/new`; `GET /api/chat/turn` finds the Manager from the thread's owner and `POST /api/chat/stop` looks for the `message_id` in every Manager; `GET /api/chat/targets` lists the Managers first, each with its `name`; `GET /api/tasks` and `/api/tasks/:id` add `manager_id`, `manager_name` and `template`; `GET /api/status` adds `managers` (`id`, `healthy`, `busy`, `turn_binding`) |
 | `/api/chat/targets` | GET | The Manager, then per recent task its Planner and step Workers/Reviewers, with `can_send` (and `task_role` for one that ran as a role) |
 | `/api/chat/sessions` | GET | The Manager's conversations on every channel (Planner threads left out), the 50 most recently active first: `session_id` (`<channel>:<chat id>` for Lark and Telegram), `channel`, `message_count`, `first_message_at`, `last_message_at`, `last_role` and the first 200 characters of the last message (`last_content`); 500 when they cannot be read |
 | `/api/chat/messages` | GET/POST | Chat history. GET returns the session's newest 200 messages, oldest first, each with its `channel`. The server saves both sides of a web chat: the message when it is sent, and its answer when it comes (`<message_id>:reply`), whether or not a page still reads its stream; the answer is also pushed to the chat's open pages (`chat.message`), so a page opened again before it came shows it |
@@ -4297,6 +4388,9 @@ The Web channel is always on. Telegram and Lark are built in; `looper serve`
 takes no flags for them. At startup it reads `channel_configs`, which
 Settings → Channels edits, and starts each enabled channel. Changes apply after a
 restart.
+
+Telegram and Lark reach the default Manager only; a bot per Manager is stage 2
+of the [scenario Managers RFC](rfcs/scenario-managers.zh-CN.md).
 
 - **Sender allowlist** (`looper/agents/channels/allowlist.py`, RFC decision 8):
   the Manager runs any command it is asked to, so Telegram and Lark pass on

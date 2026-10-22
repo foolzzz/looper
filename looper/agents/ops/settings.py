@@ -329,11 +329,11 @@ def _own(place: _Place, view: Mapping[str, Any]) -> dict[str, Any]:
 
 
 
-async def _manager_session(profiles: Mapping[str, str]) -> dict[str, Any] | None:
+async def _manager_session(profiles: Mapping[str, str], manager_id: str) -> dict[str, Any] | None:
     """The Manager session's own Agent Profile choice (``/profile``), as ``{"selected": {...} | null}``; None when
     it cannot be read (a warning, never a failure)."""
     try:
-        session = await db_agent_sessions.get_session("manager")
+        session = await db_agent_sessions.get_session(manager_id)
     except Exception:
         logger.warning("could not read the Manager session's profile choice", exc_info=True)
         return None
@@ -363,7 +363,7 @@ async def _set(call: Call) -> dict[str, Any]:
     answer = {"layer": place.name, "changes": changes,
               "effective": {role.value: _effective(view["roles"][role.value]["effective"]) for role in place.roles}}
     if place.layer is Layer.ROLE and place.role is AgentType.MANAGER and place.project_id is None:
-        if (session := await _manager_session(profiles)) is not None:
+        if (session := await _manager_session(profiles, call.manager_id)) is not None:
             answer["manager_session"] = session
             if session["selected"] is not None and "profile_id" in data:
                 answer["note"] = ("the Manager's current session keeps its own profile (chosen with /profile); "
@@ -407,7 +407,7 @@ async def _view(call: Call) -> dict[str, Any]:
                           for role, entry in view["roles"].items()},
                 "knowledge_vault": {key: vault_view[key] for key in
                                     ("configured", "path", "writable", "rules_file", "problem")}}
-        if call.arguments.get("role") == AgentType.MANAGER.value and (session := await _manager_session(profiles)):
+        if call.arguments.get("role") == AgentType.MANAGER.value and (session := await _manager_session(profiles, call.manager_id)):
             answer["manager_session"] = session
         return answer
     project = await project_named(call.arguments["project"])

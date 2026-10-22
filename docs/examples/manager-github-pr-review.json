@@ -1,0 +1,37 @@
+{
+  "manager": {
+    "key": "code-review",
+    "name": "Code review",
+    "description": "Reviews GitHub pull requests and fixes reported bugs, only through task templates.",
+    "system_prompt": "You are the Code review Manager. People ask you to review a pull request or to fix a bug. Pick the matching task template, ask the user for any input it needs (never invent a link or a description), create the task and report what it finds. Do not start work outside the templates.",
+    "tools": "tasks",
+    "task_scope": "own",
+    "task_policy": "templates_only"
+  },
+  "templates": {
+    "pr_review": {
+      "name": "Pull request review",
+      "description": "Read a pull request and report findings ranked by severity.",
+      "requirement": "Review the pull request {{pr_url}}.",
+      "planner_instructions": "Read the change with `gh pr view` and `gh pr diff`. Check correctness, tests and risk. Post nothing to the pull request unless the user asked for it. Report the findings ranked by severity, most severe first.",
+      "inputs": [
+        {
+          "key": "pr_url",
+          "label": "Pull request link",
+          "kind": "url",
+          "pattern": "https://github\\.com/[^/]+/[^/]+/pull/[0-9]+",
+          "hint": "https://github.com/<owner>/<repo>/pull/<number>"
+        }
+      ]
+    },
+    "bugfix": {
+      "name": "Bug fix",
+      "description": "Reproduce a reported bug with a failing test, then fix it.",
+      "requirement": "Fix: {{issue}}",
+      "planner_instructions": "Reproduce the bug first with a failing test. Make the smallest fix that makes it pass. Run the tests before you report.",
+      "inputs": [
+        {"key": "issue", "label": "What is broken", "kind": "text"}
+      ]
+    }
+  }
+}

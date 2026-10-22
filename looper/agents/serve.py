@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import os
 import signal
@@ -851,10 +852,6 @@ async def _run_agent_system(
         claude_bin=claude_bin,
         work_dir=work_dir,
     )
-    manager = ManagerAgent(
-        config=manager_config, runtime_root=runtime_root, broadcaster=broadcaster,
-    )
-    supervisor.register(manager)
 
     # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
     # task ends, to record a scheduled run's outcome.
@@ -875,12 +872,19 @@ async def _run_agent_system(
     # The Manager's platform tools: its MCP server reaches this server with a token made now. Each task's Planner
     # has its own, with a token for its task made when it starts.
     from .ops.planner import PlannerOps
-    from .ops.service import ManagerOps, Platform
-    platform = Platform(bus=bus, task_router=task_router, worker_pool=worker_pool, manager=manager,
+    from .ops.service import Platform
+    from . import managers_api
+    from .managers import ManagerFleet
+    platform = Platform(bus=bus, task_router=task_router, worker_pool=worker_pool, manager=None,
                         supervisor=supervisor, scheduler=scheduler, runtime_root=runtime_root)
-    manager_ops = ManagerOps(platform, url=_local_url(host, port),
-                          turn_file=runtime_root / ".local" / "manager-turn.json")
-    manager.ops = manager_ops
+    fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=runtime_root,
+                         url=_local_url(host, port), config=manager_config, broadcaster=broadcaster)
+    task_router.manager_running = fleet.is_running
+    await fleet.load()
+    manager = fleet.default
+    manager_ops = fleet.ops("manager")
+    managers_api.set_change_listener(fleet.apply)
+    platform = dataclasses.replace(platform, manager=manager, managers=fleet)
     planner_ops = PlannerOps(platform, url=_local_url(host, port), dashboard_url=dashboard_url)
     task_router.planner_ops = planner_ops
     # Each task's agent room: its Planner's tools (with its token) and its runs' (each with a token of its own).
@@ -900,6 +904,7 @@ async def _run_agent_system(
     # --- Start ---
 
     await supervisor.start_all()
+    await fleet.sweep()
     await carry_on_tasks(task_router, left_running)
 
     # --- HTTP Server ---
@@ -920,6 +925,7 @@ async def _run_agent_system(
         claude_bin=claude_bin,
         scheduler=scheduler,
         manager_ops=manager_ops,
+        managers=fleet,
         planner_ops=planner_ops,
         room_ops=room_ops,
     )
@@ -956,6 +962,7 @@ async def _run_agent_system(
         await gate_courier.stop()
         await scheduler.stop()
         await http_server.stop()
+        await fleet.stop()
         await supervisor.stop_all()
         await registry.stop_all()
         await bus.shutdown()

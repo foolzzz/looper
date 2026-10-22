@@ -202,9 +202,9 @@ def _new_chat(monkeypatch: pytest.MonkeyPatch, agent_db: Any, tmp_path: Path, me
 
     monkeypatch.setattr(db_connection, "transaction", _transaction)
 
-    async def _list_layers(*_: Any, manager_session: bool = False, **__: Any) -> list[dict[str, Any]]:
-        chosen = store.selected_profile_id.get("manager")
-        if manager_session and chosen:
+    async def _list_layers(*_: Any, manager_id: str | None = None, **__: Any) -> list[dict[str, Any]]:
+        chosen = store.selected_profile_id.get(manager_id or "")
+        if manager_id and chosen:
             return [{"scope": "session", "role": "manager", "profile_id": chosen, "profile": rows[chosen]}]
         return []
 

@@ -405,6 +405,8 @@ class AgentLibrary:
     error: str | None = None  # why the run goes without its installed items
     role: str | None = None
     project_id: str | None = None
+    # The tools of a scoped Manager's own MCP server (None: the default Manager's, every one); DSH checks them.
+    manager_tools: tuple[str, ...] | None = None
 
     @property
     def sha256(self) -> str | None:

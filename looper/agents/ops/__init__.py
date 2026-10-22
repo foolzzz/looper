@@ -22,9 +22,12 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ..message import MessageEnvelope
+from ..message import AgentAddress, MessageEnvelope, manager_address
+
+if TYPE_CHECKING:
+    from .service import OpsScope
 
 
 class Risk(str, Enum):
@@ -106,6 +109,28 @@ class Call:
     arguments: Mapping[str, Any]
     turn: Turn
     platform: Any  # service.Platform: the bus and the agents a tool acts through
+    # The scope the call was judged by (``ManagerOps`` sets it); a Call built without one (a Planner's tool, a test)
+    # is the default Manager's: unscoped.
+    scope: OpsScope = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.scope is None:
+            from .service import DEFAULT_SCOPE
+
+            object.__setattr__(self, "scope", DEFAULT_SCOPE)
+
+    @property
+    def manager_id(self) -> str:
+        return self.scope.manager_id
+
+    @property
+    def manager_address(self) -> AgentAddress:
+        return manager_address(self.manager_id)
+
+    @property
+    def scoped(self) -> bool:
+        """The Manager sees and acts on its own tasks only."""
+        return self.scope.scoped
 
 
 @dataclass(frozen=True)
