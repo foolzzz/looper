@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.25] - 2026-10-21
+
+### Fixed
+
+- **Pipeline node-card follow-ups.** The task detail page now also re-reads the task's runs when the cost's run counts change, so a new Planner run that changes no status, instance id or step no longer leaves the hover card on the old model. Each Agent fact on a node card has its own key per role (`agent`, `worker-agent`, `reviewer-agent`, `planner-agent`), so two `Agent` rows no longer collide on the renderer's key. Dashboard only; no prompt, tool schema or tool result changed. ([#365](https://github.com/foolzzz/looper/pull/365))
+
 ## [2.13.24] - 2026-10-21
 
 ### Fixed
