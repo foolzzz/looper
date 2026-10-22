@@ -61,8 +61,11 @@ async def lark_app_id(channel_type: str, config: Mapping[str, Any]) -> str | Non
 
 
 def builtin_env_token(config: Mapping[str, Any]) -> str:
-    """The Telegram token the built-in row falls back to: env[config.bot_token_env or LOOPER_TELEGRAM_BOT_TOKEN]."""
-    return env.get(config.get("bot_token_env") or "LOOPER_TELEGRAM_BOT_TOKEN", "")
+    """The Telegram token the built-in row without a stored token runs, in main's order: env[config.bot_token_env
+    or LOOPER_TELEGRAM_BOT_TOKEN], else (unset or empty) env[LOOPER_TELEGRAM_BOT_TOKEN]. Serve's start and every
+    same-bot check (the API, the config import, serve's ``clashes``) use this, so the token checked is the one run."""
+    return (env.get(config.get("bot_token_env") or "LOOPER_TELEGRAM_BOT_TOKEN", "")
+            or env.get("LOOPER_TELEGRAM_BOT_TOKEN", ""))
 
 
 def clashes(rows: Sequence[Mapping[str, Any]]) -> dict[str, str]:

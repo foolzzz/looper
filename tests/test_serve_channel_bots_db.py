@@ -40,6 +40,18 @@ def test_bot_key_cases(monkeypatch: pytest.MonkeyPatch) -> None:
     assert bot_key("lark_bot", {"app_id": ""}, "s") is None
 
 
+def test_builtin_env_token_falls_back_as_main_does(monkeypatch: pytest.MonkeyPatch) -> None:
+    # env[bot_token_env], then LOOPER_TELEGRAM_BOT_TOKEN (the adapter's own last fallback on main).
+    monkeypatch.setenv("LOOPER_TELEGRAM_BOT_TOKEN", "555:std")
+    monkeypatch.delenv("UNSET_TELEGRAM_TOKEN", raising=False)
+    monkeypatch.setenv("ALT_TELEGRAM_TOKEN", "666:alt")
+    assert builtin_env_token({}) == "555:std"
+    assert builtin_env_token({"bot_token_env": "ALT_TELEGRAM_TOKEN"}) == "666:alt"
+    assert builtin_env_token({"bot_token_env": "UNSET_TELEGRAM_TOKEN"}) == "555:std"
+    monkeypatch.setenv("ALT_TELEGRAM_TOKEN", "")
+    assert builtin_env_token({"bot_token_env": "ALT_TELEGRAM_TOKEN"}) == "555:std"
+
+
 def test_clashes_names_later_rows() -> None:
     rows = [{"channel_id": f"channel-telegram{suffix}", "channel_type": "telegram", "config": {}, "secret": secret}
             for suffix, secret in (("", "123:a"), ("-2", "123:b"), ("-3", "124:c"), ("-4", None))]
@@ -130,6 +142,27 @@ def test_added_bot_without_a_token_ignores_the_env_token(monkeypatch: pytest.Mon
         assert [a.channel_id for a in adapters] == ["channel-telegram", added]
         assert adapters[0]._bot_token == "555:envsecretvalue"
         assert adapters[1]._bot_token == ""
+
+    _run(test, monkeypatch)
+
+
+@requires_db
+def test_builtin_row_whose_bot_token_env_is_unset_starts_with_the_standard_token(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    # The reviewer's upgrade: an old built-in row's bot_token_env names an unset variable; main ran the bot in
+    # LOOPER_TELEGRAM_BOT_TOKEN, and an added bot of that bot id is the same bot.
+    monkeypatch.setenv("LOOPER_TELEGRAM_BOT_TOKEN", TOKEN_1)
+    monkeypatch.delenv("UNSET_TELEGRAM_TOKEN", raising=False)
+
+    async def test(pool: Any) -> None:
+        await _builtin(pool, "channel-telegram", {"allowed_user_ids": ["7"], "bot_token_env": "UNSET_TELEGRAM_TOKEN"})
+        added = await _bot(pool, "telegram", {"allowed_user_ids": ["8"]}, "111:AAanothersecretvalue")
+        with caplog.at_level(logging.INFO):
+            adapters = await _pass(("telegram",), tmp_path)
+        assert [a.channel_id for a in adapters] == ["channel-telegram"]
+        assert adapters[0]._bot_token == TOKEN_1
+        errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+        assert errors == [f"{added} not started: it is the same bot as channel-telegram"]
 
     _run(test, monkeypatch)
 

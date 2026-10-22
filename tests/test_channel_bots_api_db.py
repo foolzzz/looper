@@ -93,6 +93,22 @@ def test_the_built_in_row_reading_the_environment_counts(monkeypatch: pytest.Mon
     _run(test, monkeypatch)
 
 
+def test_the_built_in_row_whose_bot_token_env_is_unset_counts_the_standard_variable(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # As on main, the built-in row whose bot_token_env names an unset variable runs LOOPER_TELEGRAM_BOT_TOKEN's bot.
+    monkeypatch.setenv("LOOPER_TELEGRAM_BOT_TOKEN", SAME_BOT_NEW_SECRET)
+    monkeypatch.delenv("UNSET_TELEGRAM_TOKEN", raising=False)
+
+    async def test(pool: Any) -> None:
+        status, _ = await _call("PUT", "/api/channel-configs/channel-telegram",
+                                {"config": {**ALLOW, "bot_token_env": "UNSET_TELEGRAM_TOKEN"}})
+        assert status == 200
+        status, body = await _telegram(await _manager(pool), TOKEN)
+        assert status == 409 and "channel-telegram" in body["error"]
+
+    _run(test, monkeypatch)
+
+
 def test_refused_adds_write_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         manager = await _manager(pool)

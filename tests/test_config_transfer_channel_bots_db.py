@@ -135,13 +135,19 @@ def test_a_schedule_cannot_tell_a_chat_only_the_added_bot_allows(
 
 
 @pytest.mark.parametrize("apply", [False, True])
+@pytest.mark.parametrize("unset_env", [False, True])
 def test_the_built_in_channel_is_not_imported_as_an_added_bot(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, apply: bool,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, apply: bool, unset_env: bool,
 ) -> None:
     # The built-in Telegram row stores no token: a bot_token_env naming the added bot's token would make it that bot,
-    # and the server would then skip the added row and answer its chats as the default Manager.
-    monkeypatch.setenv("LOOPER_TELEGRAM_BOT_TOKEN", "999999:the-default-bot")
-    monkeypatch.setenv("ALT_TELEGRAM_TOKEN", "123456:another-secret-of-the-added-bot")
+    # and the server would then skip the added row and answer its chats as the default Manager. So would a
+    # bot_token_env naming an unset variable while LOOPER_TELEGRAM_BOT_TOKEN, its last fallback, holds the added bot.
+    if unset_env:
+        monkeypatch.setenv("LOOPER_TELEGRAM_BOT_TOKEN", "123456:another-secret-of-the-added-bot")
+        monkeypatch.delenv("ALT_TELEGRAM_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("LOOPER_TELEGRAM_BOT_TOKEN", "999999:the-default-bot")
+        monkeypatch.setenv("ALT_TELEGRAM_TOKEN", "123456:another-secret-of-the-added-bot")
 
     async def _test() -> None:
         async with _installation() as (pool, url):
