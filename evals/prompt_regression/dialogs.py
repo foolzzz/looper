@@ -111,9 +111,14 @@ class Look:
     registry_before: dict[str, Any] | None = None
     runs_since: int = 0  # the Manager's newest run record before the dialog (the session-profile dialogs only)
     manager_id: str | None = None  # a scenario Manager's agent id: only its trail rows count
+    turn_since: int = 0  # the trail's last id before the turn's message (``since`` when it is the dialog's first)
 
     def actions(self) -> list[dict[str, Any]]:
         return _trail(self.database_url, self.since, self.manager_id)
+
+    def turn_actions(self) -> list[dict[str, Any]]:
+        """The Manager's calls in the turn this reply answers, not those of the turns before it."""
+        return _trail(self.database_url, max(self.since, self.turn_since), self.manager_id)
 
     def detail(self, task_id: str | None = None) -> dict[str, Any]:
         return self.api.get(f"/api/tasks/{task_id or self.task}")
@@ -184,8 +189,9 @@ def _writes(look: Look, *, status: str | None = None, tool: str | None = None) -
             and (tool is None or a["tool"] == tool)]
 
 
-def _reads(look: Look) -> list[dict[str, Any]]:
-    return [a for a in look.actions() if a["risk"] == "read" and a["status"] == "ok"]
+def _reads(look: Look, *, this_turn: bool = False) -> list[dict[str, Any]]:
+    calls = look.turn_actions() if this_turn else look.actions()
+    return [a for a in calls if a["risk"] == "read" and a["status"] == "ok"]
 
 
 # --- The checks ---
@@ -449,9 +455,9 @@ def _knows_it_was_stopped(look: Look) -> str | None:
         return "the turn's input does not start with the note that the user stopped the previous reply"
     if look.fake:
         return None
-    # A summary the dialog's reads back (this turn may redo them) is real; without one, it is a claim unless the
-    # reply says the work was not done.
-    if "汇总" in look.reply and not _reads(look) and not re.search(
+    # A summary this turn's reads back (it may redo the stopped turn's) is real; the stopped turn's own read, which
+    # is what the stop waited for, backs none. Without one, it is a claim unless the reply says the work was not done.
+    if "汇总" in look.reply and not _reads(look, this_turn=True) and not re.search(
             r"没(有)?(来得及|完成|做完|汇总)|还没|未(完成|汇总)|停", look.reply):
         return "the reply claims the summary was finished"
     return None
@@ -1908,12 +1914,12 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                     "<task>", task or ""))] for name, arguments in say.fake]
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             agent = f"manager-{dialog.manager}" if dialog.manager else "manager"
-            before = _last_action(database_url, agent)
+            before = _last_action(database_url)
             reply = _ask(api, session, text, timeout=timeout, stop=say.stop, withdraw=say.withdraw,
                          database_url=database_url, manager=dialog.manager, **budget_args)
             previous = Look(api, task, reply, database_url, since, known, fake=mode == "fake",
                             runtime_root=runtime_root, registry_before=registry_before, runs_since=runs_since,
-                            manager_id=agent if dialog.manager else None)
+                            manager_id=agent if dialog.manager else None, turn_since=before)
             problem = say.check(previous)
             trail = _trail(database_url, before, agent)
             calls = [f"{a['tool']}:{a['status']}" + (f" ({a['error_code']})" if a["error_code"] else "")
