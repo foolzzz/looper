@@ -399,9 +399,11 @@ def _lark_adapter_from_config(config: dict[str, Any], runtime_root: Path, *,
 
 async def _lark_adapter(config: dict[str, Any], runtime_root: Path, *, channel_id: str = "channel-lark",
                         manager_id: str = "manager",
-                        manager_running: Callable[[str], bool] | None = None) -> LarkChannelAdapter | None:
+                        manager_running: Callable[[str], bool] | None = None,
+                        same_bot_as: Callable[[str], str | None] | None = None) -> LarkChannelAdapter | None:
     """The Lark adapter, once lark-cli acts as the bot under the channel's profile and the allowlist was made for
-    that app; None (logged) otherwise."""
+    that app, and ``same_bot_as`` (given the app it acts as) names no running channel of that app; None (logged)
+    otherwise."""
     from .channels import lark_cli
 
     if _sender_allowlist(channel_id, "lark", config) is None:
@@ -409,6 +411,9 @@ async def _lark_adapter(config: dict[str, Any], runtime_root: Path, *, channel_i
     problem, bot = await lark_cli.check(config, fresh=True)
     if problem or bot is None:
         logger.error("%s not started: %s", channel_id, problem)
+        return None
+    if same_bot_as is not None and (earlier := same_bot_as(bot.app_id)) is not None:
+        logger.error("%s not started: it is the same bot as %s", channel_id, earlier)
         return None
     logger.info("%s: bot %s (app %s, lark-cli profile %s)", channel_id, bot.bot_name, bot.app_id, bot.profile)
     return _lark_adapter_from_config(config, runtime_root, bot_open_id=bot.bot_open_id, channel_id=channel_id,
@@ -443,8 +448,9 @@ async def _lark_bot_adapter(config: dict[str, Any], secret: str, runtime_root: P
 
 
 async def _enabled_bot_rows() -> list[dict[str, Any]]:
-    """The enabled bot rows with their stored secret, built-in rows first. A bot without a valid sender allowlist
-    does not start (its adapter says so), nor does a later row for a bot an earlier row already runs."""
+    """The enabled bot rows with their stored secret and ``clashes`` keys (``env_token``, ``app_id``), built-in rows
+    first. A bot without a valid sender allowlist does not start (its adapter says so), nor does a later row for a
+    bot an earlier row already runs."""
     from ..db.channel_configs import get_bot_token, list_configs
 
     rows: list[dict[str, Any]] = []
@@ -457,25 +463,42 @@ async def _enabled_bot_rows() -> list[dict[str, Any]]:
     skipped = clashes(keyed)
     for later, earlier in skipped.items():
         logger.error("%s not started: it is the same bot as %s", later, earlier)
-    return [r for r in rows if r["channel_id"] not in skipped]
+    return [r for r in keyed if r["channel_id"] not in skipped]
 
 
 async def _register_bots(registry: ChannelRegistry, rows: list[dict[str, Any]], runtime_root: Path,
                          manager_running: Callable[[str], bool], channel_types: tuple[str, ...]) -> None:
-    """Build and register the adapter of each row of ``channel_types``; one that fails to start leaves the rest."""
+    """Build and register the adapter of each row of ``channel_types``; one that fails to start leaves the rest.
+
+    A lark-cli row's app is known for sure only once its adapter asks lark-cli (``_enabled_bot_rows`` may not have
+    learnt it), so each row is checked again against the bots this pass started, with the app its adapter found."""
+    started: list[dict[str, Any]] = []
+
+    def same_bot_as(row: dict[str, Any], app_id: str | None) -> str | None:
+        return clashes([*started, {**row, "app_id": app_id}]).get(row["channel_id"])
+
     for row in rows:
         if row["channel_type"] not in channel_types:
             continue
         kwargs: dict[str, Any] = {"channel_id": row["channel_id"], "manager_id": row.get("manager_id") or "manager",
                                   "manager_running": manager_running}
         adapter: ChannelAdapter | None
-        if row["channel_type"] == "telegram":
+        found: list[str] = []
+        if row["channel_type"] == "lark":
+            def lark_same_bot_as(app_id: str, row: dict[str, Any] = row) -> str | None:
+                found.append(app_id)
+                return same_bot_as(row, app_id)
+
+            adapter = await _lark_adapter(row["config"], runtime_root, same_bot_as=lark_same_bot_as, **kwargs)
+        elif (earlier := same_bot_as(row, row.get("app_id"))) is not None:
+            logger.error("%s not started: it is the same bot as %s", row["channel_id"], earlier)
+            continue
+        elif row["channel_type"] == "telegram":
             adapter = _telegram_adapter_from_config(row["config"], row["secret"], **kwargs)
-        elif row["channel_type"] == "lark":
-            adapter = await _lark_adapter(row["config"], runtime_root, **kwargs)
         else:
             adapter = await _lark_bot_adapter(row["config"], row["secret"], runtime_root, **kwargs)
         if adapter is not None:
+            started.append({**row, "app_id": found[0] if found else row.get("app_id")})
             await _register_optional_channel(registry, adapter)
 
 

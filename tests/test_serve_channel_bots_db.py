@@ -190,6 +190,44 @@ def test_one_lark_app_under_any_name_starts_once(monkeypatch: pytest.MonkeyPatch
 
 
 @requires_db
+def test_lark_app_learnt_late_still_starts_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, platform: Any,
+                                               caplog: pytest.LogCaptureFixture) -> None:
+    # lark-cli cannot say which app a profile is when the rows are read, and can when each adapter starts: the
+    # rows of one app under other names still start once.
+    from looper.agents.channels import lark_cli
+
+    async def identity(profile: Any = None, *, fresh: bool = False) -> Any:
+        raise lark_cli.LarkCliError("not signed in yet")
+
+    async def check(config: Any, *, fresh: bool = False) -> Any:
+        return None, SimpleNamespace(profile=config.get("profile"), app_id="cli_x", bot_name="B",
+                                     bot_open_id="ou_bot00000001")
+
+    monkeypatch.setattr(lark_cli, "identity", identity)
+    monkeypatch.setattr(lark_cli, "check", check)
+
+    async def test(pool: Any) -> None:
+        await pool.execute("INSERT INTO managers (id, name, system_prompt, enabled) "
+                           "VALUES ('manager-review', 'Review', 'x', true)")
+        await _builtin(pool, "channel-lark", {"allowed_open_ids": [OPEN_ID]})
+        by_profile = await _bot(pool, "lark", {"profile": "p2", "allowed_open_ids": [OPEN_ID]}, None,
+                                manager_id="manager-review")
+        by_token = await _bot(pool, "lark_bot", {"app_id": "cli_x", "allowed_open_ids": [OPEN_ID]}, LARK_SECRET,
+                              manager_id="manager-review")
+        with caplog.at_level(logging.ERROR):
+            adapters = await _pass(("lark", "lark_bot"), tmp_path)
+        for adapter in adapters:
+            if adapter.channel_id == by_token:
+                await adapter._transport.aclose()
+        assert [a.channel_id for a in adapters] == ["channel-lark"]
+        errors = sorted(r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR)
+        assert errors == sorted(f"{later} not started: it is the same bot as channel-lark"
+                                for later in (by_profile, by_token))
+
+    _run(test, monkeypatch)
+
+
+@requires_db
 def test_added_lark_cli_bot_records_refused_senders_under_its_id(monkeypatch: pytest.MonkeyPatch,
                                                                  tmp_path: Path) -> None:
     from looper.agents.channels import lark_cli
