@@ -65,7 +65,7 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
-from .. import chat_settings, gate_commands
+from .. import chat_commands, chat_settings, gate_commands
 from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
 from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat as gate_chat_of, origin_chat
 from ..library import load_installed
@@ -845,6 +845,10 @@ class ManagerAgent:
                 await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
                 self._acting(token)
                 return Prepared(action=lambda: self._start_new_session(envelope))
+            if chat_commands.is_help(text):  # the shared command list, never the model
+                await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
+                self._acting(token)
+                return Prepared(action=lambda: self._send_reply(envelope, chat_commands.help_text()))
             # /gates and /gate N ...: answered by code, never by the model; the discussion keeps an answer.
             if self._bus is not None and self.ops is not None and gate_commands.is_command(text):
                 self._acting(token)

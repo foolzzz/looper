@@ -33,8 +33,9 @@ def test_runs_are_compact_rows_matching_the_records(monkeypatch: pytest.MonkeyPa
                "model_choice": {"model": "sonnet", "source": "project", "effort": "high"}}
         planner = await _record(pool, "planner-task-a", "task-a", {"profile": PROFILE, "system_prompt": "s"})
         worker = await _record(pool, "worker-1", "task-a", big, model="claude-sonnet-x")
+        defined = {"id": "tester", "kind": "review", "version": 2}
         reviewer = await _record(pool, "reviewer-2", "task-a", {**big, "step_id": "step-2", "profile": {
-            **PROFILE, "source": "task_role"}}, status="failed")
+            **PROFILE, "source": "task_role"}, "prompt_layers": {"task_role": defined}}, status="failed")
         old = await _record(pool, "worker-3", "task-a", {"agent": {**PROFILE, "name": "Old"}})
         bare = await _record(pool, "worker-4", "task-a", None)
         await _record(pool, "manager", "task-a", {"profile": PROFILE})
@@ -48,7 +49,9 @@ def test_runs_are_compact_rows_matching_the_records(monkeypatch: pytest.MonkeyPa
         assert len(str(runs)) < 3000
         for run in runs:
             assert set(run) == {"id", "role", "agent_id", "step_id", "status", "created_at", "runtime", "model",
-                                "effort", "profile"}
+                                "effort", "profile", "task_role"}
+
+        assert [r["task_role"] for r in runs] == [None, None, defined, None, None]
 
         by_id = {r["id"]: r for r in await llm_records.list_records(task_id="task-a", pool=pool)}
         for run in runs:

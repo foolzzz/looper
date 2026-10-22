@@ -99,8 +99,8 @@ export function ContextUsagePanel({ agentId }: { agentId: string }) {
 
   useEffect(() => {
     let stopped = false;
-    const load = async () =>
-      fetchAgentUsage(agentId, TURNS)
+    const load = async (signal: AbortSignal) =>
+      fetchAgentUsage(agentId, TURNS, signal)
         .then((u) => {
           if (!stopped) {
             setUsage(u);
@@ -108,8 +108,8 @@ export function ContextUsagePanel({ agentId }: { agentId: string }) {
           }
         })
         .catch((e) => !stopped && setError(e instanceof Error ? e.message : String(e)));
-    const stop = startPolling(async () => {
-      await load();
+    const stop = startPolling(async (signal) => {
+      await load(signal);
     }, POLL_MS);
     return () => {
       stopped = true;

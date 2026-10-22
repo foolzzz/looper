@@ -603,6 +603,13 @@ class TestTelegramAllowlist:
         assert "stop" in dict(bot_commands())
         assert [n for n, _ in bot_commands()] == [n for n, _ in _BOT_COMMANDS]
 
+    def test_the_menu_and_help_share_one_list(self) -> None:
+        from looper.agents import chat_commands
+        from looper.agents.channels.telegram import bot_commands
+
+        assert bot_commands() == chat_commands.available()
+        assert all(f"/{n} — {d}" in chat_commands.help_text() for n, d in bot_commands())
+
     def test_status_names_only_its_chat(self, tmp_path: Path) -> None:
         (message,) = self._run(tmp_path, "_cmd_status", _tg_update(7, "/status", replies_to=17), "7")
         assert message.payload["channel_context"] == {"chat_id": 99}

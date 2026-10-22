@@ -433,7 +433,10 @@ def test_grok_fallback_stop_in_every_window(tmp_path: Path, window: str, monkeyp
         session = grok_acp.AcpGrok(label="manager")
         env = {**_launch().environment(), "FAKE_ACP_DEAD": "1"}
         await session.start(_command(root, grok), cwd=str(tmp_path), signature="s", env=env)
-        seen = Seen()
+        # In the tail window the turn's first event is held until the stop lands: the process has exited and its stderr
+        # is read, yet the turn has not consumed its output, so the result in the pipe is what the stop must drop. Without
+        # the hold, whether the result was consumed before the stop depended on the runner's speed.
+        seen = Seen("system" if window == "tail" else None)
         if window == "before_spawn":
             turn = await asyncio.wait_for(session.run_turn("work", seen, cancel=cancel), BOUND)
             started = list(spawned)
@@ -453,6 +456,7 @@ def test_grok_fallback_stop_in_every_window(tmp_path: Path, window: str, monkeyp
                     await asyncio.wait_for(slow.reached.wait(), BOUND)
                 elif window == "tail":
                     await asyncio.wait_for(holding.wait(), BOUND)  # the process has exited
+                    await asyncio.wait_for(seen.holding.wait(), BOUND)  # and the turn has read nothing past its first event
                 else:
                     if window == "tool":
                         await _until(sleeper_file.exists)
@@ -463,9 +467,11 @@ def test_grok_fallback_stop_in_every_window(tmp_path: Path, window: str, monkeyp
                 if slow is not None:
                     slow.release.set()
                 release.set()
+                seen.release.set()
                 turn = await asyncio.wait_for(running, BOUND)
             finally:
                 release.set()
+                seen.release.set()
                 if slow is not None:
                     slow.restore()
                 running.cancel()
