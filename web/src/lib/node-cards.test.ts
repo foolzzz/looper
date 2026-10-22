@@ -76,9 +76,15 @@ describe("stepCard agent lines", () => {
   const factsOf = (s: TaskStep, r: Partial<TaskRuns>) => {
     const card = stepCard(s, { taskId: "t1", active: true, look: look("x"), lookOf: () => look("x"),
                                stepsById: new Map([[s.id, s]]), runs: runs(r) });
-    return (section(card.sections, "Runs") as { facts: { label: string; value: string }[] }).facts;
+    return (section(card.sections, "Runs") as { facts: { key?: string; label: string; value: string }[] }).facts;
   };
   const s1 = step("s1", { worker_id: "worker-a", reviewer_id: "reviewer-a" });
+
+  it("gives the Worker's and the Reviewer's Agent lines different keys", () => {
+    const keys = factsOf(s1, { worker: [run(1, { step: "s1" })], reviewer: [run(2, { step: "s1" })] })
+      .map((f) => f.key ?? f.label);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
 
   it("puts the Agent line under the Worker and under the Reviewer", () => {
     const facts = factsOf(s1, {

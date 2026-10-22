@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 # Planners and Workers exist per task and never survive a restart; the server
 # stops their tasks at startup, so their journaled messages are not replayed.
 _PER_TASK_AGENT_TYPES = frozenset({"planner", "worker"})
+# A status (a streamed delta, a phase) is progress of a turn a restart ends: it is not journaled, so it is never
+# replayed as a stale line, and a streamed reply costs no fsync on the event loop per delta.
+_TRANSIENT = frozenset({MessageType.STATUS_UPDATE.value})
+
+
+def _journaled(envelope: MessageEnvelope) -> bool:
+    kind = envelope.message_type
+    return (kind.value if isinstance(kind, MessageType) else kind) not in _TRANSIENT
 
 
 class MessageJournal:
@@ -143,9 +151,11 @@ class MessageBus:
         self._started = True
 
     async def publish(self, envelope: MessageEnvelope) -> None:
-        """Publish a message. Journaled before delivery for crash recovery."""
-        self._journal.append(envelope)
-        await self._deliver(envelope, journaled=True)
+        """Publish a message. Journaled before delivery for crash recovery (a status is not: ``_TRANSIENT``)."""
+        journaled = _journaled(envelope)
+        if journaled:
+            self._journal.append(envelope)
+        await self._deliver(envelope, journaled=journaled)
 
     async def _deliver(self, envelope: MessageEnvelope, *, journaled: bool = False) -> None:
         msg_type = envelope.message_type.value if isinstance(envelope.message_type, MessageType) else envelope.message_type
@@ -189,7 +199,8 @@ class MessageBus:
         while True:
             envelope = await q.get()
             yield envelope
-            self._journal.mark_delivered(envelope.message_id)
+            if _journaled(envelope):
+                self._journal.mark_delivered(envelope.message_id)
 
     async def request(
         self,

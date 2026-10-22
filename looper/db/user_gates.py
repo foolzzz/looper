@@ -377,14 +377,16 @@ async def find_reference(channel: str, chat: str, external_ids: Sequence[str], *
 
 async def open_gates(limit: int, *, chat: tuple[str, str] | None = None, dashboard: bool = False,
                      manager_id: str | None = None, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
-    """The gates that wait for the user in the tasks that run, the latest opened first, at most ``limit``, each with
+    """The gates that wait for the user in the tasks not completed or cancelled (a stopped task's gate can still be
+    answered: ``gate_service.post_message`` keeps the answer), the latest opened first, at most ``limit``, each with
     its step's label, its task's project, the chat its task came from (``origin_channel_id``, ``chat_id``,
     ``chat_kind``, ``chat_mention``, ``schedule_id``: ``gate_service.gate_chat``) and ``waiting_for_planner``.
     When ``chat`` is given, filter before limiting; ``dashboard`` includes tasks from no channel; with
     ``manager_id``, only the gates of that Manager's tasks."""
     pool = pool or get_pool()
     where = ""
-    args: list[Any] = [list(WAITING), list(ACTIVE_STATUSES), limit]
+    args: list[Any] = [list(WAITING), [status for status, group in STATUS_GROUPS.items() if group in _ENDED_GROUPS],
+                       limit]
     if manager_id is not None:
         args.append(manager_id)
         where = f" AND t.manager_id = ${len(args)}"
@@ -403,7 +405,7 @@ async def open_gates(limit: int, *, chat: tuple[str, str] | None = None, dashboa
                        "t.requirement AS task_requirement, t.origin_channel_id, t.chat_id, t.chat_kind, t.chat_mention, "
                        "t.schedule_id, t.manager_id AS task_manager_id FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id "
                        "JOIN tasks t ON t.id = g.task_id LEFT JOIN projects p ON p.id = t.project_id")
-        + " WHERE g.state = ANY($1::text[]) AND t.status = ANY($2::text[])" + where
+        + " WHERE g.state = ANY($1::text[]) AND NOT (t.status = ANY($2::text[]))" + where
         + " ORDER BY g.opened_at DESC NULLS LAST LIMIT $3", *args)
     return [_gate(row) for row in rows]
 

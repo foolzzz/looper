@@ -502,6 +502,8 @@ export interface ManagerSessionView {
   selected: { profile_id: string; name: string } | null;
   effective: { profile: AgentProfile | null; source: SettingSource };
   problem: string | null;
+  /** What following Settings does to the saved session; null when Settings' profile cannot launch. */
+  follow_settings: { name: string; effect: ManagerSessionEffect } | null;
   choices: ManagerProfileChoice[];
 }
 

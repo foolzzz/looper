@@ -365,7 +365,7 @@ async def _set(call: Call) -> dict[str, Any]:
     if place.layer is Layer.ROLE and place.role is AgentType.MANAGER and place.project_id is None:
         if (session := await _manager_session(profiles, call.manager_id)) is not None:
             answer["manager_session"] = session
-            if session["selected"] is not None:
+            if session["selected"] is not None and "profile_id" in data:
                 answer["note"] = ("the Manager's current session keeps its own profile (chosen with /profile); "
                                   "this setting applies from its next session")
     return answer

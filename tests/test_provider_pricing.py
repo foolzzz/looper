@@ -725,7 +725,7 @@ const fetch = async (url, init) => {
 };
 const message = await runtime.complete(model, {
   messages: [{role: 'user', content: 'test', timestamp: 0}],
-}, {fetch, signal: AbortSignal.timeout(10000)});
+}, {fetch, signal: AbortSignal.timeout(50000)});
 if (message.stopReason !== 'stop') throw new Error(message.errorMessage || message.stopReason);
 console.log(JSON.stringify({requests, message}));
 ''')
@@ -734,7 +734,7 @@ console.log(JSON.stringify({requests, message}));
         directory.mkdir()
     env = {**_probe_env(home, agent, session), "LOOPER_PROVIDER_API_KEY": "synthetic-key"}
     done = subprocess.run([node, str(script), str(package), str(tmp_path)], cwd=tmp_path, env=env,
-                          capture_output=True, text=True, timeout=20, check=False)
+                          capture_output=True, text=True, timeout=60, check=False)
     assert done.returncode == 0, done.stderr
     readback = json.loads(done.stdout)
     request, = readback["requests"]

@@ -13,7 +13,7 @@ export function sourceText(view: Pick<SessionView, "effective">): string {
   return view.effective.source === "session" ? "this session" : "Settings";
 }
 
-export function confirmText(choice: ManagerProfileChoice): string | null {
+export function confirmText(choice: Pick<ManagerProfileChoice, "effect" | "name">): string | null {
   if (choice.effect !== "new_session") return null;
   return `The next message first has the current session write a handoff, then starts a new session on ${choice.name}. The conversation itself does not carry over; the handoff and recent messages do.`;
 }
@@ -102,8 +102,15 @@ export function ManagerSessionProfile({ refreshKey = 0, managerId = "manager" }:
     load();
   }, [load, refreshKey]);
 
+  // A switch from another channel (Lark, Telegram, the API) shows when the window is looked at again.
+  useEffect(() => {
+    const onFocus = () => void load();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [load]);
+
   const select = async (profileId: string | null) => {
-    const choice = view?.choices.find((c) => c.profile_id === profileId);
+    const choice = profileId === null ? view?.follow_settings : view?.choices.find((c) => c.profile_id === profileId);
     const text = choice ? confirmText(choice) : null;
     if (text !== null && !confirm(text)) return;
     setBusy(true);

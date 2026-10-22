@@ -18,6 +18,48 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.29] - 2026-10-21
+
+### Fixed
+
+- **Gate chat commands: `end` to a closed gate, stopped tasks' gates, paged `/gates`.** An `end` reply under a gate's card that is closed, or that meets a 409, now gets a code-written "no longer waiting" receipt and never reaches the Manager's model or chat history. `open_gates` now includes the gates of stopped and failed tasks (every task not completed or cancelled), so `/gates` lists them and `/gate N` can answer them. `/gates` is paged (20 per page, `/gates N` for page N; numbers continue across pages and stay bound to the last delivered list's snapshot). Also fixes flaky deadlines in `tests/test_pi_steer.py` and `tests/test_provider_pricing.py`. Behavior changes: the three above. Model-visible: the Manager no longer sees `end` replies to closed gates; no prompt text, tool schema or tool result changed. ([#382](https://github.com/foolzzz/looper/pull/382))
+
+## [2.13.28] - 2026-10-21
+
+### Fixed
+
+- **A profile's unpriced-model list follows the launch catalog order.** The cost view of an Agent Profile (`cost_basis` unpriced list and cost warnings) now orders the provider's models by `(catalog_order, name, id)` instead of forcing the selected model first, so an earlier entry owns a shared normalized name as it does at launch. Behavior change: for a catalog with such name collisions the unpriced list and warnings can differ from before. Also fixes two flaky `tests/test_pi_steer.py` cases (the setup deadline no longer shortens in prompt-deadline scenarios). No prompt text, tool schema or tool result changed. ([#375](https://github.com/foolzzz/looper/pull/375))
+
+## [2.13.27] - 2026-10-21
+
+### Fixed
+
+- **A long streamed Manager reply no longer stalls the server.** `MessageBus.publish` no longer journals `STATUS_UPDATE` messages (streamed deltas, phases) and does not mark them delivered. Each journaled message cost a synchronous `fsync` on the event loop (about 20 ms measured locally), and a reply streams hundreds of deltas, so the dashboard got no deltas and other requests, a stop included, waited for seconds. Behavior change: after a restart, status updates from before it are no longer replayed (a stale "thinking" line in Telegram or Lark); replies and every other message type are journaled and replayed as before. No prompt text, tool schema or tool result changed. ([#371](https://github.com/foolzzz/looper/pull/371))
+
+## [2.13.26] - 2026-10-21
+
+### Fixed
+
+- **Flaky planner-wait retry test.** `test_a_failed_wait_turn_retries_twice_then_again_on_a_later_event` set its first retry wait to 0.4s, so under load the automatic retry could fall due during the test's 0.05s pause. The test now uses a 1.5s first wait (second 0.3s), a 1.0s gate idle check, and longer settle pauses. Test only; no runtime, prompt, tool schema or tool result changed. ([#368](https://github.com/foolzzz/looper/pull/368))
+
+## [2.13.25] - 2026-10-21
+
+### Fixed
+
+- **Pipeline node-card follow-ups.** The task detail page now also re-reads the task's runs when the cost's run counts change, so a new Planner run that changes no status, instance id or step no longer leaves the hover card on the old model. Each Agent fact on a node card has its own key per role (`agent`, `worker-agent`, `reviewer-agent`, `planner-agent`), so two `Agent` rows no longer collide on the renderer's key. Dashboard only; no prompt, tool schema or tool result changed. ([#365](https://github.com/foolzzz/looper/pull/365))
+
+## [2.13.24] - 2026-10-21
+
+### Fixed
+
+- **Prompt-regression `start_no_wait` check.** It now reads the newest Manager run's tool calls and fails a run that calls a native shell tool such as `Bash` (a `sleep`) after starting a task; before, only the MCP action trail was read. Eval harness only; no runtime or model-visible change. ([#361](https://github.com/foolzzz/looper/pull/361))
+
+## [2.13.23] - 2026-10-21
+
+### Fixed
+
+- **Manager session profile follow-ups.** A Manager turn stops with the settings read error instead of running on cached or built-in settings; `/profile` followed by a tab or newline is recognized; the Chat header refreshes its Profile after `/profile` and on window focus; the session view gains `follow_settings`, so Follow Settings shows the handoff confirmation when it starts a new session; and the Settings tool's "applies from its next session" note is returned only when `profile_id` is set. Model-visible: that tool result no longer carries the note for timeout, budget or harness changes. ([#355](https://github.com/foolzzz/looper/pull/355))
+
 ## [2.13.22] - 2026-10-21
 
 ### Fixed

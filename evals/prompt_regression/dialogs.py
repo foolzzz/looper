@@ -1093,6 +1093,27 @@ def _not_relayed(look: Look) -> str | None:
     return None
 
 
+def _native_calls_after_start(look: Look) -> list[str]:
+    """The native tools (Bash, ...) the newest Manager run called after its start call; the action trail holds
+    only the MCP tools, so a ``sleep`` would not show there."""
+    records = look.api.get("/api/llm-records", agent_id="manager", limit=500)["records"]
+    runs = [r for r in records if not (r.get("metadata") or {}).get("autonomous")]
+    if not runs:
+        return []
+    called: list[tuple[str, dict[str, Any]]] = []
+    for row in _all_events(look.api, max(runs, key=lambda r: r["id"])["id"]):
+        event = row["event"]
+        if event.get("type") != "assistant" or event.get("parent_tool_use_id") is not None:
+            continue
+        called += [(str(b.get("name") or ""), b.get("input") or {}) for b in (event.get("message") or {}).get("content") or []
+                   if isinstance(b, dict) and b.get("type") == "tool_use"]
+    starts = [i for i, (name, args) in enumerate(called)
+              if name.endswith("looper_task_control") and args.get("action") == "start"]
+    if not starts:
+        return []
+    return [name for name, _ in called[starts[-1] + 1:] if "looper_" not in name]
+
+
 def _started_without_waiting(look: Look) -> str | None:
     """Started once; no waiting after it: no shell (a sleep) and at most one status read."""
     calls = look.actions()
@@ -1101,7 +1122,7 @@ def _started_without_waiting(look: Look) -> str | None:
     if len(starts) != 1:
         return f"looper_task_control start ran {len(starts)} times, not once"
     after = calls[calls.index(starts[0]) + 1:]
-    shell = [a["tool"] for a in after if not a["tool"].startswith("looper_")]
+    shell = [a["tool"] for a in after if not a["tool"].startswith("looper_")] + _native_calls_after_start(look)
     if shell:
         return f"the Manager ran {shell} after starting the task"
     if len(after) > 1:

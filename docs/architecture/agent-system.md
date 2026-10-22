@@ -3986,7 +3986,7 @@ The product was LoopX up to v2.5.0. `looper.ops_config` reads the old
 deployment variables for one release, both prefixes (`LOOPER_DATABASE_URL`,
 `LOOPER_PUBLIC_URL`, `LOOPER_PG_DUMP`, `LOOPER_BACKUP_CMD`,
 `LOOPER_BACKUP_VERIFY_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names except the notes
-root), from the environment and then from the checkout's `.env`, each use
+root and the verify command, which take only the `LOOPER_` prefix), from the environment and then from the checkout's `.env`, each use
 warned about by name; the next release removes them. `looper.env` still reads
 any other `LOOPER_*` variable's `LOOPX_*` name when the new one is unset, with
 a warning once per name, for one release. The `loopx` command is an alias that
@@ -4019,7 +4019,7 @@ Each setting comes from the first of: an explicit flag, the file, then for
 this release only the old variable from the environment (`LOOPER_DATABASE_URL`,
 `LOOPER_PUBLIC_URL`, `LOOPER_PG_DUMP`, `LOOPER_BACKUP_CMD`,
 `LOOPER_BACKUP_VERIFY_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names except the notes
-root), then the same name in the checkout's `.env`, then the built-in
+root and the verify command, which take only the `LOOPER_` prefix), then the same name in the checkout's `.env`, then the built-in
 default. Each use logs a deprecation warning that names the variable and never
 its value; the next release removes them. There is no default database URL:
 without one, `looper serve`, `doctor` and `config import` or `export` do not

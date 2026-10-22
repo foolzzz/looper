@@ -54,8 +54,8 @@ class _World:
                               manager_id: Any = None, pool: Any = None) -> Any:
             self.listed_with.append(chat)
             if chat is None:
-                return list(self.gates)
-            return [g for g in self.gates if g["chat_id"] == chat[1]]
+                return list(self.gates)[:limit]
+            return [g for g in self.gates if g["chat_id"] == chat[1]][:limit]
 
         async def no_dashboard() -> None:
             return None
@@ -153,6 +153,18 @@ class TestList:
 
     def test_nothing_waiting(self, world: _World) -> None:
         assert world.send("/gates") == [(gate_commands.NONE_WAITING, False)]
+
+    def test_a_long_list_is_paged_and_the_numbers_go_on(self, world: _World) -> None:
+        world.gates = [_gate(f"t{n}", "g1", f"任务{n}") for n in range(1, 23)]
+        [(first, _)] = world.send("/gates")
+        assert "20. 【任务20】" in first and "21." not in first and "/gates 2" in first
+        [(second, _)] = world.send("/gates 2")
+        assert "21. 【任务21】" in second and "22. 【任务22】" in second and "\n1. 【" not in second
+        assert "/gates 3" not in second
+        world.send("/gate 22 好")
+        assert world.posts[0]["task_id"] == "t22"
+        [(text, _)] = world.send("/gates 9")
+        assert "没有第 9 页" in text
 
     def test_telegram_form_with_the_bot_name(self, world: _World) -> None:
         world.gates = [_gate("t1", "g1", "A")]
@@ -326,3 +338,16 @@ class TestReplyUnderACard:
         world.send("late", reply_to="om_1")
         assert world.model == ["late"]
         assert gate_routing._closed("t1", "g1", "x").kind is RouteKind.CLOSED
+
+    def test_end_under_a_closed_card_is_answered_by_code(self, world: _World, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def find(channel: str, chat: str, ids: Any) -> dict[str, Any]:
+            return {"task_id": "t1", "step_key": "g1", "state": "passed"}
+
+        monkeypatch.setattr(gate_routing.db_user_gates, "find_reference", find)
+        [(text, stored)] = world.send("end", reply_to="om_1")
+        assert text == gate_routing.ENDED_REPLY and not stored and world.model == [] and world.posts == []
+
+    def test_end_that_meets_a_409_is_answered_by_code(self, world: _World, monkeypatch: pytest.MonkeyPatch) -> None:
+        world.refuse = RequestError("409 Conflict", "gate g1 is closed")
+        [(text, _)] = self._reply(world, "/end", monkeypatch)
+        assert text == gate_routing.ENDED_REPLY and world.model == []

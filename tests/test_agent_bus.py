@@ -154,6 +154,30 @@ class TestMessageBus:
 
         asyncio.run(_run())
 
+    def test_a_status_update_is_not_journaled(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A status (a streamed delta, a phase) is progress of a turn that a restart ends: replaying it would show a
+        # stale line. Journaling one cost a synchronous fsync on the event loop for each streamed delta.
+        async def _run() -> None:
+            bus1 = MessageBus(tmp_path)
+            await bus1.start()
+            synced: list[str] = []
+            real_append = bus1.journal.append
+            monkeypatch.setattr(bus1.journal, "append", lambda e: (synced.append(e.message_type), real_append(e)))
+            status = _make_envelope(source=MANAGER_ADDRESS, target=channel_address("web"),
+                                    message_type=MessageType.STATUS_UPDATE, payload={"text": "x", "delta": True})
+            reply = _make_envelope(source=MANAGER_ADDRESS, target=channel_address("web"),
+                                   message_type=MessageType.AGENT_REPLY, payload={"text": "done"})
+            await bus1.publish(status)
+            await bus1.publish(reply)
+            assert synced == [MessageType.AGENT_REPLY]
+            await bus1.shutdown()
+
+            bus2 = MessageBus(tmp_path)
+            await bus2.start()
+            assert await bus2.drain_queue(channel_address("web").agent_id) == [reply]  # the reply is replayed, the status is not
+
+        asyncio.run(_run())
+
     def test_messages_not_cross_delivered(self, tmp_path: Path) -> None:
         async def _run() -> None:
             bus = MessageBus(tmp_path)
