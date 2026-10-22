@@ -49,6 +49,9 @@ export interface TaskInfo {
   /** The schedule that created the task; null for any other task (and once that schedule is deleted). */
   schedule_id: string | null;
   schedule_name: string | null;
+  /** The Manager the task belongs to ("manager" is the default one) and its name (null if gone). */
+  manager_id?: string;
+  manager_name?: string | null;
   continues_schedule_session: boolean;
 }
 
@@ -1571,6 +1574,8 @@ export interface Supplement {
 
 /** Something the Manager did to a task through its tools (its audit trail), or asked the user to confirm. */
 export interface ManagerAction {
+  /** The Manager that acted ("manager" is the default one). */
+  manager_id?: string;
   created_at: string;
   /** The chat's channel: "web", "lark", "lark_bot", "telegram". */
   channel: string;
@@ -1658,6 +1663,14 @@ export async function setTaskAgents(
 }
 
 export interface TaskDetail extends TaskInfo {
+  /** The task template the task was created from, as it said then; null for none. */
+  template?: {
+    key: string;
+    name: string;
+    updated_at: string;
+    inputs: { key: string; label: string; value: string }[];
+    planner_instructions: string;
+  } | null;
   work_dir: string;
   config: Record<string, unknown>;
   origin_channel_id: string;

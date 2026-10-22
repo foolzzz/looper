@@ -998,6 +998,8 @@ class AgentHTTPServer:
             tasks = page[:limit]
             counts = await db_tasks.count_by_status(**filters)
             costs = await task_costs([t["id"] for t in tasks])
+            from ..db import managers as db_managers
+            manager_names = {m["id"]: m["name"] for m in await db_managers.list_managers(include_deleted=True)}
             result = []
             for t in tasks:
                 result.append({
@@ -1008,6 +1010,9 @@ class AgentHTTPServer:
                     "project_id": t.get("project_id", ""),
                     "project_name": t.get("project_name", ""),
                     "work_dir": t.get("work_dir", ""),
+                    # The Manager the task belongs to.
+                    "manager_id": t.get("manager_id") or "manager",
+                    "manager_name": manager_names.get(t.get("manager_id") or "manager"),
                     "status": t.get("status", "pending"),
                     "group": task_group(t.get("status")).value,
                     "phase": t.get("phase", "pending"),
@@ -1662,6 +1667,9 @@ class AgentHTTPServer:
             overrides = await profile_overrides(task_id) if raw else {}
             versions = await requirement_versions(task_id) if raw else []
             actions = await manager_actions(task_id) if raw else []
+            from ..db import managers as db_managers
+            owner = (await db_managers.get_manager(raw.get("manager_id") or "manager", include_deleted=True)
+                     if raw else None)
             agents = await projects.agents_view(raw) if raw else None
             roles = await roles_view(task_id, raw.get("steps", [])) if raw else None
             gates = await gate_service.gates_view(task_id) if raw else []
@@ -1701,6 +1709,10 @@ class AgentHTTPServer:
                             for entry in raw.get("journal", []) if entry.get("kind") == "supplement"],
             # What the Manager did to the task through its tools, or asked the user to confirm, newest first.
             "manager_actions": actions,
+            # The Manager the task belongs to, and the task template it was created from (as it said then), or null.
+            "manager_id": raw.get("manager_id") or "manager",
+            "manager_name": owner["name"] if owner else None,
+            "template": raw.get("template"),
             "goal_id": raw.get("goal_id", ""),
             "project_id": raw.get("project_id", ""),
             "project_name": raw.get("project_name", ""),
