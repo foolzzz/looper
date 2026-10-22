@@ -167,8 +167,25 @@ describe("useTaskRuns", () => {
     expect(seen?.runs?.planner.map((r) => r.id)).toEqual([1]);
     expect(seen?.runs?.worker.map((r) => r.id)).toEqual([2]);
     expect(seen?.runs?.reviewer).toEqual([]);
-    expect(agentFact(seen!.runs!.planner)).toEqual({ label: "Agent", value: "Claude Code · opus · high" });
-    expect(agentFact(seen!.runs!.worker, "step-1")).toEqual({ label: "Agent", value: "Codex · gpt" });
+    expect(agentFact(seen!.runs!.planner)).toMatchObject({ label: "Agent", value: "Claude Code · opus · high" });
+    expect(agentFact(seen!.runs!.worker, "step-1")).toMatchObject({ label: "Agent", value: "Codex · gpt" });
+  });
+});
+
+describe("useTaskRuns refresh", () => {
+  it("reads again when the Planner runs again without any other change", async () => {
+    vi.mocked(fetchTaskRuns).mockClear();
+    vi.mocked(fetchTaskRuns).mockResolvedValue([]);
+    const cost = (runs: number) => ({ runs, running: 0, by_role: { planner: { runs }, worker: { runs: 0 }, reviewer: { runs: 0 } } });
+    function Probe({ runs }: { runs: number }) {
+      useTaskRuns({ task_id: "task-b", status: "running", planner_id: "p", steps: [], cost: cost(runs) } as never);
+      return null;
+    }
+    await act(async () => root.render(<Probe runs={1} />));
+    await settle();
+    await act(async () => root.render(<Probe runs={2} />));
+    await settle();
+    expect(fetchTaskRuns).toHaveBeenCalledTimes(2);
   });
 });
 
