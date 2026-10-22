@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.30] - 2026-10-21
+
+### Fixed
+
+- **Backup verifier: short boolean options with a value; docs on `LOOPER_BACKUP_VERIFY_CMD`.** `docker_exec_container` now accepts `-t=false`, `-i=false` and `-it=true` in a `docker exec ... pg_dump` backup command, so the verifier is derived where it was not. The README, README.zh-CN and the agent-system doc now say that `LOOPER_BACKUP_VERIFY_CMD` and the notes root take only the `LOOPER_` prefix. Also widens the deadlines of five timing-sensitive tests (`tests/test_dsh_installed.py`, `tests/test_dsh_runtime.py`, `tests/test_gate_channels_db.py`). Behavior change: the first. Model-visible: none. ([#381](https://github.com/foolzzz/looper/pull/381))
+
 ## [2.13.29] - 2026-10-21
 
 ### Fixed
