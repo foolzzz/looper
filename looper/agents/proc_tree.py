@@ -840,13 +840,14 @@ class TurnTree:
             _ending.add(self.process.pid)
             await _record_tree(self.process.pid, dict(self._groups))
 
-    async def _strays(self, exclude: frozenset[int], *, ended: bool = False) -> list[_Orphan]:
+    async def _strays(self, exclude: frozenset[int], *, ended: bool = False) -> tuple[list[_Orphan], bool]:
         """The processes of the turn the tree no longer reaches (one that left its group, setsid, once its parent
         exited): each seen one still running with the start time the snapshot read, so a reused pid is never among
         them, and each the agent owns (``_owned``) that runs now, whether or not the snapshot lists it. None in
         ``exclude``: what one of them started this turn is the turn's (a tool an MCP server runs). Once every end has finished (``ended``), each
         still running is one: none is left to the tree's end, and one the snapshot reached may have left the tree
-        since."""
+        since. Also whether one the ownership listing found exited before its start time was read: what it started
+        meanwhile (a command it forked into a session of its own) is in no listing yet, so it calls for another."""
         table = await asyncio.to_thread(_snapshot)
         reached = {} if ended else _tree(self.process, table, self._groups)
         skip = exclude | {self.process.pid}
@@ -858,10 +859,12 @@ class TurnTree:
         # Every one it owns, not only those the snapshot lists: one started since (a setsid command a shell starts
         # as it is told to exit) would otherwise be missed, and the end finish while it runs.
         unseen = [pid for pid in owned if pid not in reached and pid not in skip and pid not in known]
+        vanished = False
         if unseen:
             starts = await asyncio.to_thread(_start_times, unseen) or {}
             strays += [_Orphan(pid, starts[pid]) for pid in unseen if pid in starts]
-        return strays
+            vanished = any(pid not in starts for pid in unseen)
+        return strays, vanished
 
     @staticmethod
     def _kill_strays(strays: list[_Orphan]) -> list[int]:
@@ -880,7 +883,8 @@ class TurnTree:
         """End the tree, and beside it (not delaying its first signal) the processes it no longer reaches: those
         running now and each that appears meanwhile (a command a tool's shell starts in a session of its own as it
         is told to exit). Once every end has finished, each still running gets one more end, as it may have left
-        the tree since a listing reached it. What one of ``exclude`` starts is ended: a baseline process (a resident
+        the tree since a listing reached it, and the looking goes on while an owned process exits between being
+        listed and being read. What one of ``exclude`` starts is ended: a baseline process (a resident
         MCP server) runs on, the tools it ran this turn do not.
 
         Bounded: every stray end's SIGKILL comes by ``TERM_GRACE_SEC`` after the first signals, and the looking
@@ -899,14 +903,14 @@ class TurnTree:
         try:
             while True:
                 ended = all(end.done() for end in ends)
-                strays = await self._strays(exclude, ended=ended)
+                strays, vanished = await self._strays(exclude, ended=ended)
                 now = time.monotonic()
                 if now >= deadline:
                     # The looking stops: each still running gets SIGKILL now (its start time read once more), not
                     # left running unsignalled. A listing that filtered out what the tree reached is redone without
                     # that filter, as one it reached may have left the tree while the listing ran.
                     if not ended:
-                        strays = await self._strays(exclude, ended=True)
+                        strays, _ = await self._strays(exclude, ended=True)
                     left = await asyncio.to_thread(self._kill_strays, strays)
                     if left:
                         logger.warning("%s: %d process(es) still running %.1f s after the stop began, killed and "
@@ -914,7 +918,9 @@ class TurnTree:
                                        ", ".join(str(pid) for pid in left))
                     break
                 fresh = [stray for stray in strays if tries.get(stray.pid, 0) < (2 if ended else 1)]
-                if ended and not fresh:
+                # One the ownership listing found that exited before it was read may have left a child no listing
+                # has had yet: the looking goes on until a listing has none such (or the deadline).
+                if ended and not fresh and not vanished:
                     if strays:
                         logger.warning("%s: %d process(es) survived SIGKILL, left running: pid %s", self.label,
                                        len(strays), ", ".join(str(stray.pid) for stray in strays))

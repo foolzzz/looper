@@ -1392,6 +1392,51 @@ def test_turn_tree_end_new_ends_the_tool_a_baseline_server_ran_this_turn_and_lea
     assert len(survivors) == 2  # the agent and its server run on
 
 
+def test_turn_tree_end_looks_again_when_an_owned_process_exits_before_it_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Once every end has finished, the ownership listing finds a process that, before its start time is read,
+    # forks a child into a session of its own (inheriting the ownership mark) and exits; the end does not finish
+    # on that listing, as the next one finds the child.
+    gone = subprocess.Popen(["/usr/bin/true"])
+    gone.wait()  # the owned process: listed, but exited by the time its start time is read
+    child: list[subprocess.Popen[bytes]] = []
+    ended_scan = threading.Event()
+    strays = proc_tree.TurnTree._strays
+
+    async def noting_ended(self: proc_tree.TurnTree, exclude: frozenset[int], *, ended: bool = False) -> Any:
+        if ended:
+            ended_scan.set()
+        return await strays(self, exclude, ended=ended)
+
+    def owned(self: proc_tree.TurnTree) -> set[int]:
+        if not ended_scan.is_set():
+            return set()
+        if not child:
+            # What the listed process left behind: in no tree the end knows, owned only by its inherited mark.
+            child.append(subprocess.Popen(["/bin/sleep", "60"], start_new_session=True))
+            return {gone.pid}
+        return {child[0].pid} if child[0].poll() is None else set()
+
+    monkeypatch.setattr(proc_tree.TurnTree, "_strays", noting_ended)
+    monkeypatch.setattr(proc_tree.TurnTree, "_live_owned", owned)
+
+    async def _run() -> list[int]:
+        process = await _spawn_python(tmp_path, "import sys\nsys.stdin.read()\n")
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        try:
+            await tree.end()
+            assert child
+            child[0].poll()  # reaped, so a zombie is not taken for a running process
+            return _running([child[0].pid], settle=0)
+        finally:
+            for leftover in child:
+                leftover.kill()
+                leftover.wait()
+
+    assert asyncio.run(_run()) == []
+
+
 def test_turn_tree_end_kills_the_strays_a_listing_past_the_deadline_found(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1400,7 +1445,7 @@ def test_turn_tree_end_kills_the_strays_a_listing_past_the_deadline_found(
     monkeypatch.setattr(proc_tree, "REAP_SEC", 0.3)
     strays = proc_tree.TurnTree._strays
 
-    async def slow(self: proc_tree.TurnTree, *args: Any, **kwargs: Any) -> list[Any]:
+    async def slow(self: proc_tree.TurnTree, *args: Any, **kwargs: Any) -> Any:
         found = await strays(self, *args, **kwargs)
         await asyncio.sleep(0.8)
         return found
