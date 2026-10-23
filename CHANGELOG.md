@@ -22,6 +22,12 @@ How the agent system works today is described in
 
 - **Supported upgrades start at v2.12.** Installations on older versions must upgrade to v2.12 first, then upgrade to the current version.
 
+## [2.13.40] - 2026-10-22
+
+### Fixed
+
+- **Prompt-regression dialogs: the withdraw and stop checks no longer fail correct real-mode replies.** `withdraw_then_continue` accepts a first-turn reply that names every project, since each Manager message starts with the projects; `stop_then_continue` counts a "汇总" reply as a false claim only when this turn read no single project's tasks and the reply does not say the work was not done. Behavior change: none in the product. Model-visible: none. ([#410](https://github.com/foolzzz/looper/pull/410))
+
 ## [2.13.39] - 2026-10-22
 
 ### Changed
