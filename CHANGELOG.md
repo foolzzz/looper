@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.52] - 2026-10-23
+
+### Fixed
+
+- **loopercli config import follow-ups.** A staged configuration import can be cancelled with `loopercli config import --cancel IMPORT_ID` (new v1 operation `config.import_cancel`, limited to the caller that staged it). The limit of four pending imports now counts per caller instead of per server. The import preview prints the full plan, and a failed export write removes the partial file. ([#440](https://github.com/foolzzz/looper/pull/440))
+
 ## [2.13.51] - 2026-10-23
 
 ### Fixed
