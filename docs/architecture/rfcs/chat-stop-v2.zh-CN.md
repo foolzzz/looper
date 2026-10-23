@@ -275,27 +275,34 @@ _end_turn(token, t)    同步判定：cancel.requested → 停止；否则 settl
 | `tests/test_manager_stop.py`（改） | 投递即登记；`received`、`preparing`、`starting`、`running` 停止各自的回复、记录、下一轮说明；排队消息可停；`/new` 动手前后；交接被停不丢会话；`stop lost` 不变式 |
 | `tests/test_manager_stop_faults.py`（新） | 故障注入：对 `PREPARATION_STEPS` 参数化，在该步骤挂住，停止，放开；断言模型的 `run_turn` 从未被调用（步骤在 `running` 之前）、`STOP_REPLY_BOUND` 内回 `outcome: stopped`、没有成功记录、没有遗留确认；外加 AST 测试（第 5 节） |
 | `tests/test_proc_tree.py`（加） | `TurnTree`：快照、刷新抓到 `setsid` 出去的孙进程、父进程先退出后照样结束、pid 复用不误杀、`REAP_SEC` 上限 |
-| `tests/test_per_turn_interrupt.py`、`tests/test_resident_claude_interrupt.py`、`tests/test_grok_acp.py`（改） | `cancel=` 在各入口的语义；R1（停止后没有事件进 `on_event`）；退回旧路径时停止不丢；中断成功后不发任何信号；不理中断时智能体连同进程组被杀；每轮一个进程和退回的 Grok `can_interrupt` 为假 |
+| `tests/test_stop_matrix.py`、`tests/test_resident_claude_interrupt.py`、`tests/test_grok_acp.py`（改） | `cancel=` 在各入口的语义；R1（停止后没有事件进 `on_event`）；退回旧路径时停止不丢；中断成功后不发任何信号；不理中断时智能体连同进程组被杀；每轮一个进程和退回的 Grok `can_interrupt` 为假 |
 | `tests/test_mcp_server.py`、`tests/test_manager_ops.py`、`tests/test_manager_turn_binding.py`（新） | 绑定文件读写与头；按 binding 归属；迟到请求（含确认）被拒；常驻运行时的匹配：按 id、按参数、等待上限、自己的轮的调用不匹配被拒 |
 
 ### 8.2 停止矩阵（常驻测试）
 
-`tests/test_stop_matrix.py` 保留 v0 的运行时级矩阵（真实子进程、真实管道），扩成两层：
+`tests/test_stop_matrix.py` 保留 v0 的运行时级矩阵（真实子进程、真实管道），扩成两层。**每条共享代码路径选一个运行时**：几个运行时走同一段代码，这段代码的每个窗口只在一个运行时上跑满；各运行时只多跑它自己不同的那部分。
 
-**运行时层**（每格断言：以停止结束、绝不当回答；`STOP_REPLY_BOUND` 内结束；`control`/`cancel` 不发任何信号，常驻进程和这一轮的工具进程都留着；`kill` 结束智能体、进程组和它的树；停止之后没有事件进 `on_event`；下一轮照常回答并续接同一会话。每轮进程的格测的是 `cancel=` 这个运行时原语，管家不会对跑着的每轮进程请求它）：
+**运行时层**（每格断言：以停止结束、绝不当回答；`STOP_REPLY_BOUND` 内结束；`control`/`cancel` 不发任何信号，常驻进程和这一轮的工具进程都留着；`kill` 结束智能体、进程组和它的树，被停的一轮在树清理完之后才返回；停止之后不再转发回复内容（Grok 保留取消终态事件；替身停止后仍在写：每轮进程的流式窗口持续写，Claude 在中断被应答后还写一小段）；下一轮照常回答并续接同一会话；被停一轮的用量按运行时上报的算（Claude 被打断的结果不带，每轮进程按已读到的事件）。每轮进程的格测的是 `cancel=` 这个运行时原语，管家不会对跑着的每轮进程请求它）：
 
-| 窗口 | Claude 常驻（deaf / obeys） | 每轮进程 ×（codex, omp, pi, dsh） | Grok ACP | Grok 退回 |
-|---|---|---|---|---|
-| 起进程之前（cancel 已请求再调 `run_turn`） | ✓ | ✓ | ✓ | ✓ |
-| 起进程中（spawn 挂住） | — | ✓ | ✓ | ✓ |
-| 起了没事件 | ✓ | ✓ | ✓ | ✓ |
-| 流式输出中 | ✓ | ✓ | ✓ | ✓ |
-| 写被堵住 | ✓ | ✓ | ✓ | — |
-| 工具进行中（工具 `setsid` 出去一个孙进程） | ✓ | ✓ | ✓ | ✓ |
-| 有了结果、返回之前 | ✓ | ✓ | ✓ | ✓ |
-| 进程退出后读尾巴时 | ✓ | ✓ | — | ✓ |
+| 窗口 | Claude 常驻（deaf / obeys） | 每轮进程：Codex | 每轮进程：OMP、pi、DSH | Grok ACP | Grok 退回 |
+|---|---|---|---|---|---|
+| 发送本轮提示之前（含已请求的 cancel） | ✓ | ✓ | — | ✓ | ✓ |
+| 起进程中（spawn 挂住） | — | ✓ | — | ✓ | — |
+| 起了没事件 | ✓ | ✓ | — | ✓ | — |
+| 流式输出中 | ✓ | ✓ | ✓ | ✓ | — |
+| 写被堵住 | ✓ | ✓ | — | ✓ | — |
+| 工具进行中（工具 `setsid` 出去一个孙进程） | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 有了结果、返回之前 | ✓ | ✓ | — | ✓ | — |
+| 进程退出后读尾巴时 | — | ✓ | — | — | — |
 
-**管家层**（新，`tests/test_manager_stop_matrix.py`）：阶段 × 运行时替身，管家用真实的 `ManagerAgent`、`agent_db`、总线，运行时用上面同一批替身进程：`received`（排在另一轮后面）、`preparing`（故障注入挂在第一个步骤）、`starting`（交接中、启动中）、`running`（流式、工具中）、`ended` 之后（`not_running`、什么都不改）。每格还检查：`/api/chat/turn` 的 `state`、记录的 `user_stop.phase`、下一轮的说明是「被停」还是「撤回」、迟到的工具请求被拒、工具中被停时只有不理中断的运行时的进程被结束。每轮一个进程的运行时（omp、codex）只有一格：跑着的和排队的停止都答 `cannot_interrupt`，不发信号，两条回复照常完成。
+为什么这样选：
+
+- **每轮进程**：Codex、OMP、pi、DSH 都走 `PerTurnSession._run_turn`（`per_turn.py`：起进程、写、读、读尾巴、结束进程树），Codex 把这条共享路径的七个窗口加尾巴跑满。其余三个只跑读它们自己事件流的两个窗口：流式文字、工具调用。
+- **Grok 退回每轮进程**：它的每一轮就是 `PerTurnSession`，上面已经跑满；Grok 自己的部分是「退回的过程中收到停止」（`before_spawn`）和它起的工具（`tool`）。
+- **Grok ACP、Claude 常驻**：各有自己的会话类，格子全跑。
+- **前提**：这样删格子的前提是这几个运行时走的是同一段代码。以后哪个运行时不再走 `PerTurnSession`（或 Grok 退回不再复用它），就要把它的格子加回来；`test_stop_matrix.py` 里的 `PER_TURN_CELLS` 注释写着同一条。
+
+**管家层**（新，`tests/test_manager_stop_matrix.py`）：阶段 × 运行时替身，管家用真实的 `ManagerAgent`、`agent_db`、总线，运行时用上面同一批替身进程：`received`（排在另一轮后面）、`preparing`（故障注入挂在第一个步骤）、`starting`（交接中、启动中）、`running`（流式、工具中）、`ended` 之后（`not_running`、什么都不改）。每格还检查：`/api/chat/turn` 的 `state`、记录的 `user_stop.phase`、下一轮的说明是「被停」还是「撤回」、迟到的工具请求被拒、工具中被停时只有不理中断的运行时的进程被结束。不碰运行时的阶段（`received`、`preparing`、`ended`）只跑一个运行时（Claude obeys）；`starting` 和 `running` 跑三个有中断的运行时（Claude obeys、Claude deaf、Grok ACP）。每轮一个进程的运行时（Codex、OMP、pi、DSH）只有一格（Codex）：跑着的和排队的停止都答 `cannot_interrupt`，不发信号，两条回复照常完成。
 
 ### 8.3 dialogs 评测
 

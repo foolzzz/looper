@@ -126,8 +126,12 @@ def test_price_null_and_explicit_free(price_field, value):
     assert getattr(model(**{price_field: value}), price_field) == value
 
 
-@pytest.mark.parametrize("price_field", PRICES)
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf"), -0.01, 10_000.01, True, "0", 10**1000])
+# One value per way ``_price`` refuses (not a number, below 0, above the maximum, nan, which no range holds), each
+# kind of value on a different price field so that every field is shown to be checked.
+@pytest.mark.parametrize("price_field,value", [
+    (PRICES[0], float("nan")), (PRICES[1], -0.01), (PRICES[2], 10_000.01), (PRICES[3], True),
+    (PRICES[0], "0"), (PRICES[1], -float("inf")), (PRICES[2], 10**1000),
+])
 def test_invalid_prices(price_field, value):
     with pytest.raises(RegistryError):
         model(**{price_field: value})

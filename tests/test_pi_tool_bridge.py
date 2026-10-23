@@ -27,6 +27,8 @@ from uuid import uuid4
 
 import pytest
 
+pytestmark = pytest.mark.installed
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXTENSION = REPO_ROOT / "looper" / "agents" / "runtimes" / "pi_extension" / "looper.ts"
 HARNESS = REPO_ROOT / "tests" / "fixtures" / "pi_bridge" / "harness.mjs"

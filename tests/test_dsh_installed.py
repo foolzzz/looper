@@ -29,8 +29,8 @@ from looper.agents.runtimes import dsh
 from tests.dsh_installed_stand_in import FetchMessages, MessagesServer, NETWORK_GUARD, mcp_command, read_records, tool
 
 
-pytestmark = pytest.mark.skipif(os.environ.get("LOOPER_TEST_INSTALLED_DSH") != "1",
-                                reason="Installed dsh verification requires LOOPER_TEST_INSTALLED_DSH=1")
+pytestmark = [pytest.mark.installed, pytest.mark.skipif(os.environ.get("LOOPER_TEST_INSTALLED_DSH") != "1",
+                                reason="Installed dsh verification requires LOOPER_TEST_INSTALLED_DSH=1")]
 VERSION = "0.2.1-rc.2"
 KEY = "synthetic-offline-key"
 LITERAL = 'Looper literal {{unknown}} / {{ secrets }} 中文 ${value}'
