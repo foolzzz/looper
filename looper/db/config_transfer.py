@@ -124,7 +124,7 @@ async def read_installs(conn: asyncpg.Connection) -> list[dict[str, Any]]:
 
 async def read_channels(conn: asyncpg.Connection) -> list[dict[str, Any]]:
     rows = await conn.fetch(
-        "SELECT channel_id, channel_type, display_name, enabled, config, manager_id FROM channel_configs ORDER BY channel_id"
+        "SELECT channel_id, channel_type, display_name, enabled, config FROM channel_configs ORDER BY channel_id"
     )
     return [{**dict(row), "config": _json(row["config"])} for row in rows]
 
