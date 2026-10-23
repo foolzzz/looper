@@ -93,10 +93,11 @@ def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
 
 
 def _get_status(port: int, token: str | None) -> dict | None:
-    """``GET /api/status`` on 127.0.0.1, bypassing any proxy; None when nothing answers with JSON."""
+    """``POST /api/v1/system/status`` on 127.0.0.1, bypassing any proxy; None when nothing answers with JSON."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    request = urllib.request.Request(f"http://127.0.0.1:{port}/api/status",
-                                    headers={"Authorization": f"Bearer {token}"} if token else {})
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/api/v1/system/status",
+                                    data=b"{}", headers={"Content-Type": "application/json",
+                                                           **({"Authorization": f"Bearer {token}"} if token else {})})
     try:
         with opener.open(request, timeout=3) as response:
             payload = json.loads(response.read())
@@ -104,7 +105,8 @@ def _get_status(port: int, token: str | None) -> dict | None:
         return {"status": "unauthorized"} if exc.code == 401 else None
     except (OSError, ValueError, http.client.HTTPException):
         return None
-    return payload if isinstance(payload, dict) else None
+    return (payload["result"] if isinstance(payload, dict) and payload.get("status") == "ok"
+            and isinstance(payload.get("result"), dict) else None)
 
 
 def _port_in_use(port: int) -> bool:
@@ -512,7 +514,7 @@ class Serving:
 
 def _start_and_wait(mgr: _Manager, port: int, log_path: Path | None, timeout: float,
                     runtime_root: Path | None) -> Serving:
-    """Start the stopped service on a free ``port`` and wait until it answers ``GET /api/status``."""
+    """Start the stopped service on a free ``port`` and wait until it answers ``POST /api/v1/system/status``."""
     host = mgr.host
     if host.port_in_use(port):
         raise ServiceError(f"port {port} is in use by another process, so the service is installed but not "
@@ -672,16 +674,16 @@ def status(host: Host, *, label: str = DEFAULT_LABEL) -> tuple[int, str]:
     if state.port is None:
         lines.append("api        unknown port")
     elif answer is None:
-        lines.append(f"api        http://127.0.0.1:{state.port}/api/status: no answer")
+        lines.append(f"api        http://127.0.0.1:{state.port}/api/v1/system/status: no answer")
     elif answer.get("status") == "unauthorized":
         path = operator_auth.token_path(state.runtime_root) if state.runtime_root is not None else "unknown"
-        lines.append(f"api        http://127.0.0.1:{state.port}/api/status: unauthorized "
+        lines.append(f"api        http://127.0.0.1:{state.port}/api/v1/system/status: unauthorized "
                      f"(the operator token in {path} was refused)")
     else:
         tasks = answer.get("tasks") or {}
         failing = [check.get("label", "?") for check in answer.get("checks") or []
                    if isinstance(check, dict) and check.get("status") in ("fail", "warn")]
-        lines.append(f"api        http://127.0.0.1:{state.port}/api/status: {answer.get('status', '?')}, "
+        lines.append(f"api        http://127.0.0.1:{state.port}/api/v1/system/status: {answer.get('status', '?')}, "
                      f"{tasks.get('total', '?')} task(s), {tasks.get('running', '?')} running"
                      + (f"; check problems: {', '.join(failing)}" if failing else ""))
     return (0 if state.running and answer is not None else 1), "\n".join(lines)

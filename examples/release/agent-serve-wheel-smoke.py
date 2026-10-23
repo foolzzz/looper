@@ -11,6 +11,7 @@ Run `scripts/stage-dashboard.sh` first; the staged dashboard is not in Git.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
@@ -52,8 +53,13 @@ def serve_check(venv: Path, work: Path, dsn: str) -> None:
         for _ in range(120):
             try:
                 # /api/ needs the operator token, which serve writes into the runtime root on its first start.
-                auth = {"Authorization": f"Bearer {token_file.read_text().strip()}"}
-                urllib.request.urlopen(urllib.request.Request(f"{base}/api/status", headers=auth), timeout=2)
+                auth = {"Authorization": f"Bearer {token_file.read_text().strip()}",
+                        "Content-Type": "application/json"}
+                request = urllib.request.Request(f"{base}/api/v1/system/status", headers=auth,
+                                                 method="POST", data=b"{}")
+                with urllib.request.urlopen(request, timeout=2) as response:
+                    status = json.load(response)
+                assert status["status"] == "ok" and status["result"]["status"] == "running", status
                 break
             except OSError:
                 time.sleep(0.5)

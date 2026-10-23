@@ -11,7 +11,7 @@
 
 1. **只在本机。** 客户端经回环地址访问 Looper，不对网络开放。
 2. **全部权限。** 一个客户端令牌能做管家工具能做的一切。
-3. **写操作两步确认，和管家一样。** 需要确认的写操作先回答「待确认」，第二个明确的确认调用才执行；按客户端和它的会话区分，绝不跨客户端。
+3. **客户端的 `high` 操作两步确认。** 客户端令牌调用先回答「待确认」，同一客户端、同一会话明确确认后才执行；普通写操作直接执行。控制台以操作者身份调用 v1 时，`high` 在一次调用中执行，保留原有前置确认弹窗，不增加共享弹窗或自动确认调用。
 4. **一个接口。** 和 Looper 的一切交互都经 Looper 的 OpenAPI：不另加一套平行的「客户端 API」，而是把现有 HTTP API 变成有 OpenAPI 描述的公开 API（带版本，每个操作有类型化的请求和回答，错误是类型化的状态对象），以生成的文档提供（`GET /api/v1/openapi.json`），控制台、命令行和 skill 都用它。HTTP API 和管家的 ops 工具重复做的事，指定一份实现；今天只有 ops 层有的操作，以 ops 工具的 schema 成为 API 操作。agent 经命令行访问 Looper（不用 Bash/curl；阶段 1 不做 MCP）。命令行是新程序 `loopercli`：同一个 Python 包的第二个 console script，是纯粹的 OpenAPI 客户端，不导入服务端的任何代码；子命令在运行时从 OpenAPI 文档生成，新操作不需要写命令行代码；常用的任务操作有几个手写的别名；服务地址和令牌在一个 0600 文件里、每次调用时读；默认输出易读的表格，`--json` 给脚本；两步确认表现为打印出的待确认 id 和 `confirm` 子命令。日常交互都经 API 和 `loopercli`。`looper` 保留运行服务（`serve`、`service`、`version`）、agent 内部用的 `mcp-server`，以及服务起不来时用的离线救援命令：`doctor` 和操作者密码的重设（`auth set-password` / `clear-password`），它们和 `serve`、`service` 一样是本机命令，不经 API（第 15 节）；`config export` / `import` 改成 API 操作，由 `loopercli` 调用，搬完后从 `looper` 删除（发布说明写明去了哪里）。用户这边的集成就是 `loopercli` 加 `looper-skill`。
 5. **`loopercli` 和管家对话。** 阶段 1 的主路径：agent（或人）把讨论好的需求经现有的聊天 API 发给一个管家（默认管家，或按 id 选场景管家），回复流式返回；管家复述、提问、等确认、建任务，和在控制台里一样（消息写明用户已同意提交并开始时，管家可以不再复述、直接建；Looper 自己的确认，如新项目，仍然要）；任务的接受和结束回到这个对话（和今天场景管家的 web 线程一样）。关卡和进度在阶段 1 不推进这个对话：客户端用 `loopercli wait <task>`（关卡打开、任务结束或超时时返回）和 `status`、`pipeline` 跟进（第 11 节）。直接操作（建任务等）保留给脚本和精确修改；skill 优先用对话交新活。
 6. **任务附件。** 提交任务通常只是需求文本。大文档是可选的任务附件：作为文件上传、随任务保存，Planner 和 Worker 当文件读，不受需求 32,000 字的限制。
@@ -59,7 +59,7 @@
 | D2 | 操作目录就是 ops 的 `Tool`：客户端的目录 = 管家的工具，去掉两个只属于管家的（`looper_task_gate_reply`、`looper_confirm`），加两个只给客户端的（`looper_task_pipeline`、`looper_gates`）。另有几个手写声明的操作：聊天三个、`confirm`、`whoami` |
 | D3 | 客户端身份 = **API client**：操作者在 Settings → API clients 里创建（起名字）、吊销；令牌只显示一次，库里只存 SHA-256；客户端不能管理客户端。凭据管理（`auth.*`：设置、清除操作者密码，创建、吊销客户端令牌）只接受操作者身份，客户端令牌一律拒绝，也换不到操作者会话 |
 | D4 | 客户端令牌只在 TCP 对端和 `Host` 都是回环、且没有 `Forwarded` / `X-Forwarded-For` 时有效；`/api/v1/` 也接受操作者的凭据。客户端令牌在 `/api/` 其余路由上无效 |
-| D5 | 客户端的每次调用是一个独立的「请求轮」：写操作直接执行，`high` 两步确认，确认按（客户端，会话）登记，会话由请求头 `X-Looper-Session` 给出（默认 `default`）|
+| D5 | 客户端的每次调用是一个独立的「请求轮」：写操作直接执行，`high` 两步确认，确认按（客户端，会话）登记，会话由请求头 `X-Looper-Session` 给出（默认 `default`）；操作者的 `high` 在一次调用中执行，控制台保留原有确认弹窗 |
 | D6 | 回答：`ok` 是 200 `{status, result, notes?}`；`needs_confirmation` 是 202 `{status, confirmation_id, expires_in_seconds, impact}`；错误是 4xx/5xx `{status: "error", error: {code, message}}`，`code` 取自 `ErrorCode`，加一个 `unauthorized` |
 | D7 | 归属：`chat_threads.client_id`、`tasks.client_id`、`manager_actions.client_id`；直接操作的变更 `via` 记为 `client:<名字>`，客户端对话里管家做的变更记为 `manager:loopercli` |
 | D8 | `loopercli chat` 走现有聊天实现：消息经 `WebChannelAdapter` 进管家，`channel_context.client` 由服务端按令牌填写；管家的渠道行写明是 loopercli 和客户端名字；对话默认新开线程，线程归这个客户端，别的客户端和控制台的线程都不能用 |
@@ -89,14 +89,17 @@
 
 `looper/agents/api_v1.py` 在第一次被请求时从目录生成一次文档并缓存（目录是代码里的常量，进程内不变）：`openapi: 3.1.0`，`info.version` 为 Looper 版本，`info.x-looper-api: 1`，`servers: [{url: "/api/v1"}]`，`components.securitySchemes.bearer`，`components.schemas` 里有 `ErrorCode`、`OpError`、`OpOk`、`OpNeedsConfirmation`。每个操作的 200 回答是 `OpOk` 加这个操作的 `result` schema。
 
-**类型化的结果：** 阶段 1 给 agent 用的操作写出 `result` 的 schema（顶层每个键的类型，`additionalProperties: true`）：`tasks.list`、`tasks.get`、`task_pipeline`、`task_create`、`task_control.*`、`task_update`、`task_instruct`、`gates.*`、`agent_profiles.list`、`overview`、`confirm`、`whoami`、聊天三个。其余操作的 `result` 暂为 `{"type": "object"}` 并标 `x-looper-result-typed: false`，测试列出这些操作，阶段 2 把列表清空。
+**类型化的结果：** 状态投影有独立 schema，不新增 Manager Tool。未完成领域的工具结果继续显式标记未类型化，各领域通过 `RESULTS` 补齐。阶段 1 给 agent 用的操作写出 `result` 的 schema（顶层每个键的类型，`additionalProperties: true`）：`tasks.list`、`tasks.get`、`task_pipeline`、`task_create`、`task_control.*`、`task_update`、`task_instruct`、`gates.*`、`agent_profiles.list`、`overview`、`confirm`、`whoami`、聊天三个。其余操作的 `result` 暂为 `{"type": "object"}` 并标 `x-looper-result-typed: false`，测试列出这些操作，阶段 2 把列表清空。
 
-**文档覆盖什么：** 阶段 1 只有上面的 v1 操作；`/api/` 下的控制台路由不在文档里，`info.description` 写明。阶段 2 起它们逐个成为 v1 操作（第 21 节）。
+**文档覆盖什么：** 文档包含既有 v1 操作和已迁移的控制台领域，剩余旧路由仍不在文档中。状态现为 `POST /api/v1/system/status {}`，返回完整状态投影（Agent、任务计数、web 健康、自检、退出能力及可选的绑定/管家状态），客户端的 `can_sign_out` 恒为 false；操作者从真实请求头计算。旧 `GET /api/status` 已删除。
+
+领域注册表为有序模块名元组，按需加载；每个模块声明 `OPERATIONS`、补齐现有工具的 `RESULTS` 和 `run`，按需声明 `stream` / `impact`。生成时拒绝重复 id/方法路径，领域 stream 自带事件说明/schema，当前仅接受只读操作（注册时拒绝写流，防止绕过确认/审计）；`high` 必须提供 impact。请求头直接传回调。普通写复用 ClientOps 校验、审计和客户端确认，领域 DTO 使用 transport 校验一次（保留必填 null、对象数组与联合类型，拒绝未声明字段）；Manager Tool 校验/列表不变。凭据写先拒绝客户端，参数/结果不审计，失败脱敏。错误可带类型化 `details`（`manager_id`、`state`、可空的 `phase`/`method`），不透传原始异常或请求值。
 
 ### 5.4 HTTP 路由和 ops 工具的重叠
 
 | 做的事 | 控制台路由 | ops 工具 | 当前实现 | 共享实现与状态（阶段 2） |
 |---|---|---|---|---|
+| 控制台状态 | `POST /api/v1/system/status` | 无 | 已抽取 `_status_result` | 领域模块提供完整投影，服务状态命令与控制台共用 v1 |
 | 列任务 | `GET /api/tasks` | `looper_tasks` list | 共用 `projects.list_tasks_page`（游标、状态、定时任务、分组和工具的关键字搜索） | 已实现；ops 的 list 使用精简形状，保留原有搜索范围与 `more` 语义，控制台保留游标、计数和花费 |
 | 任务详情 | `GET /api/tasks/:id` | `looper_tasks` get（`_task_view`） | 共用 `projects.task_detail` | 已实现；ops 的 get 使用精简视图，保留原有键、裁剪和结果文案 |
 | 建任务 | `POST /api/tasks/create`（`projects.create_task`） | `looper_task_create`（`_create`） | 共用 `projects.create_task_core`（放置、工作区检查、事务、配置块），两入口保留参数适配层 | 已实现；核心收两边参数并集，控制台保留 `config`、`profile_overrides` 和新项目全部字段，工具 schema 不变；数据库回归测试从两入口创建后回读并比较任务行与 Profile 覆盖 |
@@ -123,7 +126,7 @@
 
 ## 7. 客户端能用的操作，以及依赖管家轮的地方
 
-客户端的调用由 `ops/clients.py` 的 `ClientOps` 执行，用默认管家的范围（`DEFAULT_SCOPE`：全部工具、全部任务；场景管家的模板只在和那个管家对话时可用）。每次调用造一个 `Turn(channel="api", chat=<会话>, message_id="api-<随机>", client_id, client_name)`：
+操作者调用沿用相同服务和留痕，`high` 单次执行；控制台的既有确认交互不变。客户端的调用由 `ops/clients.py` 的 `ClientOps` 执行，用默认管家的范围（`DEFAULT_SCOPE`：全部工具、全部任务；场景管家的模板只在和那个管家对话时可用）。每次调用造一个 `Turn(channel="api", chat=<会话>, message_id="api-<随机>", client_id, client_name)`：
 
 | 管家轮里的东西 | 客户端怎么办 |
 |---|---|
@@ -144,7 +147,9 @@
 
 ## 8. 两步确认
 
-- `high`（或被 `escalate` 升为 `high`）的调用不执行：登记 `_Pending(id, tool, arguments, impact, at)` 到 `(principal_key, session)`；同一键上新的待确认替换旧的；最多 50 个键，超出丢最旧的；写一行 `manager_actions`（`status = needs_confirmation`）；回答 202。
+操作者调用 v1 的 `high` 在一次请求中执行并留痕，控制台仍使用已有确认弹窗。以下两步流程只适用于客户端令牌，不由服务器自动确认。
+
+- 客户端的 `high`（或被 `escalate` 升为 `high`）的调用不执行：登记 `_Pending(id, tool, arguments, impact, at)` 到 `(principal_key, session)`；同一键上新的待确认替换旧的；最多 50 个键，超出丢最旧的；写一行 `manager_actions`（`status = needs_confirmation`）；回答 202。
 - `POST /api/v1/confirm {confirmation_id}`：同一客户端、同一 `X-Looper-Session`、id 相同、600 秒内 → 按当初的参数执行一次，删除登记，写一行 `status = ok` 或 `error` 带 `confirmation_id`。否则：没有或 id 不同 → 404 `not_found`；超时 → 410 `expired`（同时删除）。另一个客户端或另一个会话拿到 id 也确认不了（键不同）。
 - 只在内存里：重启就没了，客户端再调一次原操作。
 - 和管家对话里的确认不是一回事：那是管家的流程，用户（或替他说话的 agent）在同一对话里回一句「确认」，管家调 `looper_confirm`。`/api/v1/confirm` 只确认直接操作。
@@ -269,9 +274,26 @@ v1 配置预览收 `{document: <配置对象>}`，和控制台一样最多 256 M
 - **阶段 2 其余部分（待做）：** 其余 HTTP 路由成为 v1 操作（任务删除、项目知识与 skill、角色、管家与模板、渠道、目录上传和 git、设置页、运行记录、活动流……），全部操作的结果类型化；客户端令牌管理的 v1 操作；第 5.4 节其余重复实现合并（建任务是一个共享核心加两个参数适配层）；控制台改用 v1，不再用的旧路由删除。按领域拆成各自可用的 PR。
 - **阶段 3：** 任务附件（第 14 节）。
 
+| 领域 | 阶段 2 状态 |
+|---|---|
+| 状态与 transport | 已验证：HTTP/文档 112 项、web 26 项；隔离 serve 与 1280/390 浏览器通过，完整套件留给 CI |
+| 任务 | 待迁移；共享任务核心 [#429](https://github.com/foolzzz/looper/pull/429) 单独跟踪 |
+| 聊天 | 待迁移 |
+| 项目与知识 | 待迁移 |
+| 能力目录 | 待迁移 |
+| Agent 与 Profile | 待迁移 |
+| 管家与模板 | 待迁移 |
+| 渠道 | 待迁移 |
+| 文件与 Git | 待迁移 |
+| 设置 | 待迁移 |
+| 运行记录与活动流 | 待迁移 |
+| 客户端凭据 | 待迁移 |
+
+阶段 2a 保持已交付；共享任务核心独立跟踪，阶段 3 仍待做。整体完成由最终审计确认。
+
 ## 22. 默认行为的变化
 
-- `/api/v1/` 的普通操作也接受操作者身份；没有客户端令牌时仍可用操作者凭据调用。配置命令迁移是阶段 2a 单独列出的行为变化。
+- `/api/v1/` 的普通操作也接受操作者身份；操作者的 `high` 单次执行，客户端令牌仍须两步确认。控制台确认弹窗与可见行为不变。状态及服务就绪探测改走 v1，旧状态 GET 删除；Telegram/Lark 继续使用未改动的 Manager ops/services。配置命令迁移是阶段 2a 单独列出的行为变化。
 - 管家：只有客户端的消息多一种渠道行。
 - 默认管家：客户端对话里建的任务把接受和结束写回那个线程（控制台对话里建的不变）。
 - 关卡通知和进度不变：照旧走全局通知目标，不进客户端的对话。

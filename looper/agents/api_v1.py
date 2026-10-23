@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import copy
 import functools
+import importlib
+import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
 import looper
 
-from .ops import ErrorCode, Tool
+from .ops import ErrorCode, ErrorDetails, OpError, Tool
 
 API_VERSION = 1
 
@@ -54,8 +57,10 @@ class Principal:
 OPERATOR = Principal("operator")
 
 
-def error(code: ErrorCode, message: str, *, status: str | None = None) -> tuple[str, dict[str, Any]]:
-    return status or STATUS.get(code, _DEFAULT_STATUS), {"status": "error", "error": {"code": code.value, "message": message}}
+def error(code: ErrorCode, message: str, *, details: ErrorDetails | None = None,
+          status: str | None = None) -> tuple[str, dict[str, Any]]:
+    return status or STATUS.get(code, _DEFAULT_STATUS), {"status": "error", "error": {"code": code.value, "message": message,
+        **({"details": details} if details is not None else {})}}
 
 
 def answer_status(answer: Mapping[str, Any]) -> str:
@@ -99,6 +104,9 @@ class Operation:
     stream: bool = False  # answers text/event-stream
     confirms: bool = False  # a call may answer needs_confirmation (a write, or a tool that escalates)
     operator_only: bool = False  # credential management never accepts an API client
+    credential_write: bool = False  # bypass argument/result audit and redact failures
+    stream_description: str | None = None
+    stream_events: Mapping[str, Any] | None = None
 
 
 def _summary(description: str) -> str:
@@ -212,6 +220,12 @@ RESULTS: dict[str, dict[str, Any]] = {
 
 def tool_operations(tools: Sequence[Tool]) -> list[Operation]:
     """One operation per action of a tool that has an ``action``, otherwise one per tool."""
+    results = dict(RESULTS)
+    for domain in domains():
+        for name, schema in domain.RESULTS.items():
+            if name in results:
+                raise ValueError(f"duplicate result schema: {name}")
+            results[name] = schema
     operations: list[Operation] = []
     for tool in tools:
         base = tool.name.removeprefix("looper_")
@@ -222,7 +236,7 @@ def tool_operations(tools: Sequence[Tool]) -> list[Operation]:
             operations.append(Operation(
                 operation_id=base, method="POST", path=f"{PREFIX}/ops/{base}", summary=_summary(description),
                 description=description, request=copy.deepcopy(dict(tool.schema)),
-                result=RESULTS.get(base, UNTYPED), tool=tool.name, risk=tool.risk.value,
+                result=results.get(base, UNTYPED), tool=tool.name, risk=tool.risk.value,
                 confirms=tool.risk.value != "read" or tool.escalate is not None))
             continue
         for action in actions:
@@ -238,7 +252,7 @@ def tool_operations(tools: Sequence[Tool]) -> list[Operation]:
             operations.append(Operation(
                 operation_id=operation_id, method="POST", path=f"{PREFIX}/ops/{base}/{action}",
                 summary=_summary(description), description=description, request=request,
-                result=RESULTS.get(operation_id, UNTYPED), tool=tool.name, action=action, risk=risk,
+                result=results.get(operation_id, UNTYPED), tool=tool.name, action=action, risk=risk,
                 confirms=risk != "read" or tool.escalate is not None))
     return operations
 
@@ -294,7 +308,7 @@ ONLINE_OPERATIONS: tuple[Operation, ...] = (
           "Cancel this caller's staged configuration import and remove its file.",
           _object({"import_id": {"type": "string", "minLength": 1}}, closed=True), hand=False),
     Operation("config.import_apply", "POST", f"{PREFIX}/config/import_apply", "Apply a staged configuration import.",
-              "Apply a staged configuration import. Requires confirmation in this client and session.",
+              "Apply a staged configuration import. Client tokens require confirmation in the same session; operators execute once.",
               _object({"import_id": {"type": "string", "minLength": 1}}, closed=True),
               RESULTS["config.import_apply"], risk="high", confirms=True),
 )
@@ -305,7 +319,92 @@ def operations(tools: Sequence[Tool] | None = None) -> list[Operation]:
         from .ops.clients import CLIENT_TOOLS
 
         tools = CLIENT_TOOLS
-    return [*tool_operations(tools), *HAND_OPERATIONS, WHOAMI, *ONLINE_OPERATIONS]
+    registered = [*tool_operations(tools), *HAND_OPERATIONS, WHOAMI, *ONLINE_OPERATIONS]
+    registered.extend(op for domain in domains() for op in domain.OPERATIONS)
+    ids, paths = set(), set()
+    for op in registered:
+        if op.operation_id in ids or (op.method, op.path) in paths:
+            raise ValueError(f"duplicate operation id or route: {op.operation_id}")
+        ids.add(op.operation_id)
+        paths.add((op.method, op.path))
+        domain = domain_for(op)
+        if domain is not None and op.stream and op.risk not in (None, "read"):
+            raise ValueError(f"domain streams must be read-only: {op.operation_id}")
+        if domain is not None and op.risk == "high" and not callable(getattr(domain, "impact", None)):
+            raise ValueError(f"high operation needs impact: {op.operation_id}")
+        if op.credential_write and not op.operator_only:
+            raise ValueError(f"credential operation must be operator only: {op.operation_id}")
+    return registered
+
+
+@functools.cache
+def domains() -> tuple[Any, ...]:
+    """Load after Operation and schema helpers exist; registry order is explicit."""
+    from .v1_domains import MODULES
+
+    return tuple(importlib.import_module(f"{__package__}.v1_domains.{name}") for name in MODULES)
+
+
+def domain_for(operation: Operation) -> Any | None:
+    return next((domain for domain in domains() if operation in domain.OPERATIONS), None)
+
+
+def validate_arguments(schema: Mapping[str, Any], arguments: Any) -> dict[str, Any]:
+    """Transport schema subset for declared domain DTOs; Manager Tool validation stays unchanged."""
+    def check(spec: Mapping[str, Any], value: Any) -> None:
+        kinds = spec.get("type", [])
+        kinds = [kinds] if isinstance(kinds, str) else kinds
+        matches = {"null": value is None, "string": isinstance(value, str), "boolean": isinstance(value, bool),
+                   "integer": type(value) is int, "number": type(value) in (int, float) and math.isfinite(value),
+                   "object": isinstance(value, dict), "array": isinstance(value, list)}
+        if kinds and not any(matches.get(kind, False) for kind in kinds):
+            raise ValueError
+        if "enum" in spec and not any(type(value) is type(item) and value == item for item in spec["enum"]):
+            raise ValueError
+        if "const" in spec and (type(value) is not type(spec["const"]) or value != spec["const"]):
+            raise ValueError
+        for union in ("oneOf", "anyOf"):
+            if union in spec:
+                count = 0
+                for variant in spec[union]:
+                    try:
+                        check(variant, value)
+                        count += 1
+                    except ValueError:
+                        pass
+                if (union == "oneOf" and count != 1) or count == 0:
+                    raise ValueError
+        if isinstance(value, dict):
+            props = spec.get("properties", {})
+            if any(name not in value for name in spec.get("required", [])):
+                raise ValueError
+            for name, item in value.items():
+                child = props.get(name, spec.get("additionalProperties", True))
+                if child is False:
+                    raise ValueError
+                if isinstance(child, Mapping):
+                    check(child, item)
+        if isinstance(value, list):
+            if not spec.get("minItems", 0) <= len(value) <= spec.get("maxItems", math.inf):
+                raise ValueError
+            for item in value:
+                check(spec.get("items", {}), item)
+        if isinstance(value, str):
+            if not spec.get("minLength", 0) <= len(value) <= spec.get("maxLength", math.inf):
+                raise ValueError
+            if "pattern" in spec and re.search(spec["pattern"], value) is None:
+                raise ValueError
+        if type(value) in (int, float):
+            if not math.isfinite(value) or not spec.get("minimum", -math.inf) <= value <= spec.get("maximum", math.inf):
+                raise ValueError
+
+    try:
+        if not isinstance(arguments, dict):
+            raise ValueError
+        check({**schema, "additionalProperties": False}, arguments)
+    except (ValueError, TypeError):
+        raise OpError(ErrorCode.INVALID, "the request does not match the declared schema") from None
+    return dict(arguments)
 
 
 _STREAM_EVENTS = ("Events, in order: accepted {conversation_id, message_id, manager_id}; delta {text} and status "
@@ -318,7 +417,9 @@ def _responses(operation: Operation) -> dict[str, Any]:
     if operation.operation_id == "openapi":
         ok = {"description": "The OpenAPI document.", "content": {"application/json": {"schema": _OBJ}}}
     elif operation.stream:
-        ok = {"description": _STREAM_EVENTS, "content": {"text/event-stream": {"schema": {"type": "string"}}}}
+        ok = {"description": operation.stream_description or (
+            _STREAM_EVENTS if operation.operation_id == "chat.send" else operation.description),
+              "content": {"text/event-stream": {"schema": operation.stream_events or {"type": "string"}}}}
     else:
         ok = {"description": "ok", "content": {"application/json": {"schema": {"allOf": [
             {"$ref": "#/components/schemas/OpOk"}, {"type": "object", "properties": {"result": dict(operation.result)}}]}}}}
@@ -375,7 +476,7 @@ def _document(ops: Sequence[Operation]) -> dict[str, Any]:
         "openapi": "3.1.0",
         "info": {"title": "Looper API", "version": looper.__version__, "x-looper-api": API_VERSION,
                  "description": "The operations of /api/v1 only: the ops tools an API client may use, the chat, "
-                                "confirm and whoami. The dashboard's /api routes are not described yet."},
+                                "confirm, whoami and migrated dashboard domains. Remaining legacy /api routes are not described."},
         "servers": [{"url": PREFIX}],
         "security": [{"bearer": []}],
         "paths": paths,
@@ -384,7 +485,9 @@ def _document(ops: Sequence[Operation]) -> dict[str, Any]:
             "schemas": {
                 "ErrorCode": {"type": "string", "enum": [code.value for code in ErrorCode]},
                 "OpError": _object({"status": {"const": "error"}, "error": _object({
-                    "code": {"$ref": "#/components/schemas/ErrorCode"}, "message": _STR})}),
+                    "code": {"$ref": "#/components/schemas/ErrorCode"}, "message": _STR,
+                    "details": _object({"manager_id": _STR, "state": _STR, "phase": _NULL_STR,
+                                        "method": _NULL_STR}, [], closed=True)}, ["code", "message"])}),
                 "OpOk": _object({"status": {"const": "ok"}, "result": _OBJ, "notes": _array(_STR)},
                                 ["status", "result"]),
                 "OpNeedsConfirmation": _object({

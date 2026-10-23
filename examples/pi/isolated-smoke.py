@@ -498,7 +498,8 @@ asyncio.run(check())
                 raise RuntimeError("installed serve exited before readiness; see private serve.log")
             try:
                 token = (root / "operator-token").read_text().strip()
-                request(base, "/api/status", token)
+                status = request(base, "/api/v1/system/status", token, "POST", {})
+                assert status["status"] == "ok" and status["result"]["status"] == "running", status
                 break
             except OSError:
                 if time.monotonic() > deadline:

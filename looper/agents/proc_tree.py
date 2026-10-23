@@ -199,8 +199,11 @@ async def end(process: asyncio.subprocess.Process, *, label: str, known: Tree | 
     """End ``process`` and its tree: SIGTERM, then SIGKILL for what is still running after ``TERM_GRACE_SEC``;
     ``process`` is reaped. ``known`` is its tree as ``begin_end`` took it earlier. Processes that appear during the
     grace period get SIGTERM too, and a cancelled wait kills the rest at once."""
-    await _end(process, label=label, known=known or {})
-    await _reap(process, label)
+    try:
+        await _end(process, label=label, known=known or {})
+    finally:
+        # A cancelled end sends SIGKILL too; reap it before the cancellation escapes.
+        await _reap(process, label)
 
 
 async def _reap(process: Any, label: str) -> None:
@@ -521,8 +524,10 @@ class TurnTree:
         # Exclude reused leaders before a refresh can remember their unrelated children.
         exclude = await self._reused()
         await self.refresh(force=True, skip=exclude)
-        await self._end_all(exclude)
-        await _reap(self.process, self.label)
+        try:
+            await self._end_all(exclude)
+        finally:
+            await _reap(self.process, self.label)
 
 
 def track(process: Any, *, label: str = "agent") -> TurnTree:

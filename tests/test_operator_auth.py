@@ -908,7 +908,8 @@ def test_status_says_only_a_password_session_can_sign_out(tmp_path: Path, transp
     async def run() -> None:
         async with _login_server(tmp_path, transport) as server:
             server._supervisor = SimpleNamespace(agent_status=lambda: {})
-            server._web_adapter = SimpleNamespace(healthcheck=lambda: {})
+            server._web_adapter = SimpleNamespace(healthcheck=lambda: {
+                "channel": "web", "healthy": True, "active_sse_streams": 0})
             _, headers, _ = await _password_login(server)
             session = headers["set-cookie"].split(";", 1)[0]
             token = f"{operator_auth.cookie_name(server._port)}={TOKEN}"
@@ -917,8 +918,8 @@ def test_status_says_only_a_password_session_can_sign_out(tmp_path: Path, transp
                      "bearer token": ({"Authorization": f"Bearer {TOKEN}"}, False),
                      "both cookies": ({"Cookie": f"{session}; {token}"}, False)}
             for name, (credential, expected) in cases.items():
-                status, _, body = await _send(server, "GET /api/status", credential)
-                assert status == 200 and json.loads(body)["can_sign_out"] is expected, name
+                status, _, body = await _send(server, "POST /api/v1/system/status", credential, "{}")
+                assert status == 200 and json.loads(body)["result"]["can_sign_out"] is expected, name
     asyncio.run(run())
 
 

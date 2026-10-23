@@ -139,7 +139,7 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
                              help="Seconds to wait for the service to answer (default 120).")
     status = service_commands.add_parser(
         "status", allow_abbrev=False,
-        help="Show whether the service is installed and running, its PID, last exit and log, and GET /api/status.",
+        help="Show whether the service is installed and running, its PID, last exit and log, and POST /api/v1/system/status.",
         description="Exits 0 when the service runs and answers on its port, else 1.")
     uninstall = service_commands.add_parser(
         "uninstall", allow_abbrev=False, help="Stop the service and remove its unit.")

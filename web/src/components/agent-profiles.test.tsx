@@ -71,9 +71,11 @@ describe("Agent Profiles", () => {
     registry = structuredClone(REGISTRY);
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url === "/api/v1/system/status") {
+        return Response.json({ status: "ok", result: { checks: [] } });
+      }
       if (init?.body) requests.push({ url, body: JSON.parse(String(init.body)) });
-      const answer = url.endsWith("/registry") ? registry : url.endsWith("/status") ? { checks: [] }
-        : { profile: PROFILE, warnings: [] };
+      const answer = url.endsWith("/registry") ? registry : { profile: PROFILE, warnings: [] };
       return new Response(JSON.stringify(answer), { status: 200 });
     }));
     container = document.createElement("div");
@@ -220,6 +222,8 @@ describe("Agent Profiles", () => {
     expect(select("Model *").value).toBe("");
     await choose("Model *", "provider-deepseek-v4-pro[1m]");
     await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toBe("/api/agent-profiles/p");
     expect(requests[0].body).toMatchObject({ runtime_id: "rt-dsh", model_id: "provider-deepseek-v4-pro[1m]", agent_teams: false });
     expect(container.textContent).toContain("the DSH runtime cannot replace its default system prompt");
   });

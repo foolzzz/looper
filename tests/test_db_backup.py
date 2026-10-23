@@ -114,8 +114,9 @@ def _serve(tmp_path: Path, database_url: str, *flags: str, **extra_env: str) -> 
             while process.poll() is None:
                 try:
                     token = operator_auth.read_token(tmp_path / "runtime")
-                    request = urllib.request.Request(f"http://127.0.0.1:{port}/api/status",
-                                                     headers={"Authorization": f"Bearer {token}"} if token else {})
+                    request = urllib.request.Request(f"http://127.0.0.1:{port}/api/v1/system/status", data=b"{}",
+                                                     headers={"Content-Type": "application/json",
+                                                              **({"Authorization": f"Bearer {token}"} if token else {})})
                     urllib.request.urlopen(request, timeout=2).read()
                     break
                 except OSError:

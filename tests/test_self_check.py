@@ -65,7 +65,7 @@ def test_serve_without_claude_starts_and_reports_it(tmp_path: Path, monkeypatch:
     with fresh_database(str(DSN)) as (database_url, _), running_server(
         database_url=database_url, runtime_root=tmp_path, bin_dir=tmp_path / "bin", log_path=log,
     ) as api:
-        checks = {check["id"]: check for check in api.get("/api/status")["checks"]}
+        checks = {check["id"]: check for check in api.post("/api/v1/system/status", {})["result"]["checks"]}
 
     assert [checks[name]["status"] for name in ("database", "claude_cli", "claude_login", "lark_cli")] == [
         "ok", "fail", "skip", "skip"]

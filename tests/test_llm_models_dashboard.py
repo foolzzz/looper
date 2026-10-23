@@ -91,7 +91,7 @@ def _wait_ready(server):
         try:
             server.api.token = operator_auth.read_token(server.runtime_root)
             if server.api.token:
-                server.api.get("/api/status")
+                server.api.post("/api/v1/system/status", {})["result"]
                 return
         except (OSError, EvalError):
             pass

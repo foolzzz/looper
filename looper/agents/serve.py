@@ -921,7 +921,7 @@ async def _run_agent_system(
     await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("lark", "lark_bot"))
 
     # Poll before the advisory checks: Telegram drops pending updates when polling starts, so messages sent
-    # during a slow check must already be received. Problems only warn here and on /api/status.
+    # during a slow check must already be received. Problems only warn here and on /api/v1/system/status.
     checks = [
         database_check,
         *await asyncio.to_thread(self_check.check_claude, claude_bin),

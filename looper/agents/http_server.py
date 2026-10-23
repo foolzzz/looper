@@ -189,7 +189,7 @@ class AgentHTTPServer:
         self._password_key: tuple[int, ...] | None = None
         self._password: operator_auth.PasswordRecord | None = None
         self._password_error: operator_auth.OperatorTokenError | None = None
-        # The startup self-check (self_check.Check.to_dict), reported on /api/status.
+        # The startup self-check (self_check.Check.to_dict), reported on /api/v1/system/status.
         self._self_checks = self_checks or []
         self._ops_config = ops_config
         # The Claude Code the server runs: what a Claude Code runtime without an executable of its own probes.
@@ -399,7 +399,12 @@ class AgentHTTPServer:
         started = time.monotonic()
         operation = api_v1.find(method, path)
         refused: tuple[str, dict[str, Any]] | None = None
-        if operation is not None and operation.operation_id == "chat.send":
+        if operation is not None and operation.operator_only and principal.kind != "operator":
+            status, answer = api_v1.error(ErrorCode.FORBIDDEN, "operator identity is required")
+        elif operation is not None and operation.stream and api_v1.domain_for(operation) is not None:
+            refused = await self._v1_domain(operation, headers, body, principal, writer=writer)
+            status, answer = refused or (api_v1.OK, {"status": "ok"})
+        elif operation is not None and operation.operation_id == "chat.send":
             refused = await self._v1_chat_send(body, principal, writer)
             status, answer = refused or (api_v1.OK, {"status": "ok"})
         else:
@@ -409,7 +414,7 @@ class AgentHTTPServer:
                        else f"error:{answer['error']['code']}")
             logger.info("api client=%s op=%s status=%s ms=%d", principal.key, operation.operation_id, outcome,
                         (time.monotonic() - started) * 1000)
-        if operation is not None and operation.operation_id == "chat.send" and refused is None:
+        if operation is not None and operation.stream and refused is None and answer.get("status") == "ok":
             return  # the stream is written
         writer.write(_json_response(status, answer, headers=V1_HEADERS))
         await writer.drain()
@@ -431,6 +436,10 @@ class AgentHTTPServer:
             if other is not None:
                 return api_v1.error(ErrorCode.INVALID, f"use {other}", status=HTTP_405)
             return api_v1.error(ErrorCode.NOT_FOUND, f"no {method} {path}")
+        if operation.operator_only and principal.kind != "operator":
+            return api_v1.error(ErrorCode.FORBIDDEN, "operator identity is required")
+        if api_v1.domain_for(operation) is not None:
+            return await self._v1_domain(operation, headers, body, principal)
         if operation.operation_id == "openapi":
             return api_v1.OK, api_v1.document()
         if operation.operation_id == "whoami":
@@ -451,7 +460,7 @@ class AgentHTTPServer:
             if "action" in data and operation.action:
                 return api_v1.error(ErrorCode.INVALID, "action is part of the path")
             arguments = {**data, "action": operation.action} if operation.action else data
-            answer = await self._client_ops.call(principal, session, operation.tool, arguments)
+            answer = await self._call_v1(principal, session, operation.tool, arguments)
         elif operation.operation_id == "confirm":
             confirmation_id = data.get("confirmation_id")
             if not isinstance(confirmation_id, str) or not confirmation_id:
@@ -460,6 +469,65 @@ class AgentHTTPServer:
         else:
             return api_v1.error(ErrorCode.NOT_FOUND, "not available yet")
         return api_v1.answer_status(answer), answer
+
+    async def _call_v1(self, principal: api_v1.Principal, session: str, name: str, data: Any,
+                       **kwargs: Any) -> dict[str, Any]:
+        return await self._client_ops.call(principal, session, name, data,
+                                          require_confirmation=principal.kind == "client", **kwargs)
+
+    async def _v1_domain(self, operation: api_v1.Operation, headers: Mapping[str, str], body: bytes,
+                         principal: api_v1.Principal, *, writer: asyncio.StreamWriter | None = None
+                         ) -> tuple[str, dict[str, Any]] | None:
+        domain = api_v1.domain_for(operation)
+        if operation.operator_only and principal.kind != "operator":
+            return api_v1.error(ErrorCode.FORBIDDEN, "operator identity is required")
+
+        async def invoke(callback: Any, arguments: dict[str, Any], *extra: Any) -> Any:
+            try:
+                return await callback(self, operation, arguments, principal, headers, *extra)
+            except OpError:
+                if not operation.credential_write:
+                    raise
+                raise OpError(ErrorCode.INVALID, "invalid credential request") from None
+            except projects.RequestError as exc:
+                code = next((code for code, status in api_v1.STATUS.items() if status == exc.status), ErrorCode.INVALID)
+                raise OpError(code, "the operation was refused") from None
+            except ValueError:
+                raise OpError(ErrorCode.INVALID, "invalid request") from None
+            except Exception:
+                logger.warning("domain operation %s failed", operation.operation_id)
+                raise OpError(ErrorCode.UNAVAILABLE, "the operation failed; try again later") from None
+
+        try:
+            data = self._v1_body(body)
+            if data is None:
+                raise OpError(ErrorCode.INVALID, "the body must be a JSON object")
+            if writer is not None or operation.credential_write or operation.risk in (None, "read"):
+                arguments = api_v1.validate_arguments(operation.request or {}, data)
+                if writer is not None:
+                    return await invoke(domain.stream, arguments, writer)
+                return api_v1.OK, {"status": "ok", "result": await invoke(domain.run, arguments)}
+            if self._client_ops is None:
+                raise OpError(ErrorCode.UNAVAILABLE, "the API is not ready")
+
+            async def run(call: Call) -> dict[str, Any]:
+                return await invoke(domain.run, call.arguments)
+
+            async def impact(call: Call) -> str | None:
+                result = await invoke(domain.impact, call.arguments)
+                if operation.risk == "high" and not isinstance(result, str):
+                    raise OpError(ErrorCode.UNAVAILABLE, "the operation has no confirmation impact")
+                return result
+
+            tool = Tool(name=operation.operation_id, description=operation.description, schema=operation.request or {},
+                        risk=Risk(operation.risk), run=run,
+                        escalate=impact if callable(getattr(domain, "impact", None)) else None)
+            answer = await self._call_v1(principal, headers.get("x-looper-session") or DEFAULT_SESSION,
+                                         tool.name, data, tool=tool, validator=api_v1.validate_arguments)
+            return api_v1.answer_status(answer), answer
+        except OpError as exc:
+            return api_v1.error(exc.code, "invalid credential request" if operation.credential_write else str(exc),
+                                details=None if operation.credential_write else exc.details)
 
     async def _v1_online(self, operation: api_v1.Operation, headers: Mapping[str, str], body: bytes,
                          principal: api_v1.Principal) -> tuple[str, dict[str, Any]]:
@@ -546,7 +614,7 @@ class AgentHTTPServer:
             applying = name == "config.import_apply"
             tool = Tool(name=name, description=operation.description, schema=operation.request or {},
                         risk=Risk.HIGH if applying else Risk.READ, run=run, escalate=impact if applying else None)
-            answer = await self._client_ops.call(principal, headers.get("x-looper-session") or DEFAULT_SESSION,
+            answer = await self._call_v1(principal, headers.get("x-looper-session") or DEFAULT_SESSION,
                                                   name, data, tool=tool)
             return api_v1.answer_status(answer), answer
         except OpError as exc:
@@ -783,9 +851,7 @@ class AgentHTTPServer:
         writer: asyncio.StreamWriter,
         headers: Mapping[str, str] | None = None,
     ) -> None:
-        if path == "/api/status" and method == "GET":
-            await self._handle_status(writer, headers or {})
-        elif path == "/api/overview" and method == "GET":
+        if path == "/api/overview" and method == "GET":
             await self._handle_overview(writer)
         elif path == "/api/tasks" and method == "GET":
             await self._handle_list_tasks(query, writer)
@@ -1318,7 +1384,7 @@ class AgentHTTPServer:
                for check in self._self_checks if check.get("id") in self_check.LOGIN_CHECKS}
         return [now.get(check.get("id"), check) for check in self._self_checks]
 
-    async def _handle_status(self, writer: asyncio.StreamWriter, headers: Mapping[str, str]) -> None:
+    async def _status_result(self, headers: Mapping[str, str]) -> dict[str, Any]:
         agents = self._supervisor.agent_status()
         web_health = self._web_adapter.healthcheck()
         try:
@@ -1349,8 +1415,7 @@ class AgentHTTPServer:
                 for agent in self._managers.agents() if self._managers.ops(agent.agent_id) is not None]
         elif self._manager_ops is not None:
             status["turn_binding"] = self._manager_ops.binding_report()
-        writer.write(_json_response(HTTP_200, status))
-        await writer.drain()
+        return status
 
     async def _handle_overview(self, writer: asyncio.StreamWriter) -> None:
         try:

@@ -328,7 +328,7 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
                 api.token = operator_auth.read_token(runtime_root)
                 if api.token is None:
                     raise EvalError("the server has not made its operator credential yet")
-                api.get("/api/status")
+                api.post("/api/v1/system/status", {})["result"]
                 break
             except (OSError, EvalError):
                 if time.monotonic() > deadline:

@@ -1,16 +1,39 @@
 import { isSessionEnded, SessionEndedError } from "@/lib/session";
+import { callV1, V1Error } from "@/lib/v1";
 
 const API_BASE = "/api";
 
 export interface SystemStatus {
-  status: string;
-  agents: Record<string, { healthy: boolean; agent_id: string }>;
-  channels: Record<string, unknown>;
-  uptime: number;
+  status: "running";
+  agents: Record<string, AgentStatus>;
+  tasks: { total: number; running: number; completed: number };
+  channels: { web: WebHealth };
   /** The startup self-check, as `looper doctor` prints it. */
-  checks?: SelfCheck[];
+  checks: SelfCheck[];
   /** True for a password session, which can sign out; false for the local browser's auto-login. */
-  can_sign_out?: boolean;
+  can_sign_out: boolean;
+  turn_binding?: TurnBindingStatus;
+  managers?: { id: string; name: string; running: boolean; busy: boolean; healthy: boolean;
+    sync: "pending" | "ok"; sync_error?: string; turn_binding: TurnBindingStatus }[];
+}
+
+export interface AgentStatus {
+  healthy: boolean;
+  state: string;
+  up: boolean;
+  restart_count: number;
+  last_crash_at: string | null;
+  next_restart_at: string | null;
+  agent_type: string;
+}
+
+export interface WebHealth { channel: "web"; healthy: boolean; active_sse_streams: number }
+
+export interface TurnBindingStatus {
+  enforced: boolean;
+  mismatches: number;
+  by: { reason: string; runtime: string; tool: string; count: number; manager?: string }[];
+  matches?: { by: string; when: string; count: number }[];
 }
 
 /** One startup check; "skip" means not checked, with the reason in `detail`. */
@@ -183,9 +206,9 @@ export interface SSEEvent {
 }
 
 export async function fetchStatus(): Promise<SystemStatus> {
-  const res = await fetch(`${API_BASE}/status`);
-  if (!res.ok) throw new Error(`status ${res.status}`);
-  return res.json();
+  const result = await callV1<SystemStatus>("/api/v1/system/status", {});
+  if (result.status === "needs_confirmation") throw new V1Error(202, "unavailable", "Status unexpectedly needs confirmation.");
+  return result;
 }
 
 /** What a task's status means at a glance; the server maps each status to one (an unknown one to "other"). */
