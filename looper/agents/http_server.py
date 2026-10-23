@@ -1929,7 +1929,7 @@ class AgentHTTPServer:
             writer.write(_json_response(HTTP_400, {"error": "task_id is required"}))
             await writer.drain()
             return
-        # A stopped, failed or cancelled task goes on from its saved plan; only an explicit start_over plans anew.
+        # A ready task starts for the first time; a stopped, failed or cancelled one goes on from its saved plan.
         start_over = data.get("start_over", False)
         if not isinstance(start_over, bool):
             writer.write(_json_response(HTTP_400, {"error": "start_over must be true or false"}))
@@ -1937,8 +1937,17 @@ class AgentHTTPServer:
             return
 
         try:
-            await projects.control_task(task_id, "start_over" if start_over else "restart",
-                                        self._supervisor.bus, self._web_adapter._address)
+            from ..db import tasks as db_tasks
+
+            task = await db_tasks.get_task(task_id)
+            if task is not None and task["status"] == db_tasks.READY:
+                # Keep the legacy endpoint's ready-task support without treating Manager restarts as starts.
+                if not (task.get("work_dir") or "").strip():
+                    raise projects.RequestError(HTTP_400, "set the task's work directory before starting it")
+                await projects.start_ready_task(task_id, self._supervisor.bus, self._web_adapter._address)
+            else:
+                await projects.control_task(task_id, "start_over" if start_over else "restart",
+                                            self._supervisor.bus, self._web_adapter._address)
         except projects.RequestError as exc:
             writer.write(_json_response(exc.status, {"error": str(exc)}))
             await writer.drain()

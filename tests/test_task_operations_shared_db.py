@@ -55,7 +55,8 @@ async def _post(server: AgentHTTPServer, path: str, body: dict[str, Any]) -> tup
     ("cancel", "cancelled", {}, False, MessageType.TASK_CANCEL, {}),
     ("cancel", "executing", {}, True, MessageType.TASK_CANCEL, {}),
     ("start", "completed", {}, False, MessageType.TASK_RESTART, {}),
-    ("start", "init", {}, False, MessageType.TASK_RESTART, {}),
+    ("start", "init", {}, True, MessageType.TASK_START, {}),
+    ("start", "init", {"start_over": True}, True, MessageType.TASK_START, {}),
     ("start", "executing", {}, False, MessageType.TASK_RESTART, {}),
     ("start", "executing", {"start_over": True}, False, MessageType.TASK_RESTART, {}),
     ("start", "stopped", {}, True, MessageType.TASK_RESTART, {"mode": "continue"}),
@@ -74,6 +75,7 @@ def test_console_controls_check_state_before_sending(
         queue = bus.get_queue("task-router")
         if allowed:
             assert response == 200, body
+            assert body == {{"stop": "stopped", "cancel": "cancelled", "start": "started"}[path]: "task-a"}
             message = queue.get_nowait()
             assert (message.message_type, message.payload) == (message_type, {"task_id": "task-a", **message_extra})
         else:
@@ -81,6 +83,31 @@ def test_console_controls_check_state_before_sending(
             assert status in body["error"]
         assert queue.empty()
         assert (await tasks.get_task("task-a", pool=pool))["status"] == status
+
+    run_db(test, monkeypatch, timeout=20)
+
+
+@pytest.mark.parametrize(("exists", "work_dir", "extra", "expected"), [
+    (False, "work", {}, 404),
+    (True, "", {}, 400),
+    (True, "work", {"start_over": "yes"}, 400),
+])
+def test_legacy_start_rejects_invalid_requests_without_sending(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, exists: bool, work_dir: str,
+    extra: dict[str, Any], expected: int,
+) -> None:
+    async def test(pool: Any) -> None:
+        if exists:
+            project = await projects.create_project(name="calc", pool=pool)
+            await tasks.create_task(task_id="task-a", requirement="Build calc", status="init",
+                                    project_id=project["id"], work_dir=str(tmp_path) if work_dir else "", pool=pool)
+        server, bus, _ = _server(tmp_path)
+        status, body = await _post(server, "/api/tasks/start", {"task_id": "task-a", **extra})
+        assert status == expected, body
+        assert body["error"]
+        assert bus.get_queue("task-router").empty()
+        if exists:
+            assert (await tasks.get_task("task-a", pool=pool))["status"] == "init"
 
     run_db(test, monkeypatch, timeout=20)
 
