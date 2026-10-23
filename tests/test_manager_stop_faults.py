@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
+import dataclasses
 import inspect
 import os
 import signal
@@ -20,6 +21,7 @@ from fake_claude import fake_claude
 from looper.agents import proc_tree
 from looper.agents.claude_cli import ResidentClaude
 from looper.agents.runtimes import cancel as cancel_module
+from looper.agents.runtimes.cancel import TurnCancelled
 from looper.agents.tiers import manager as manager_module
 from looper.agents.tiers.manager import PREPARATION_STEPS, ManagerAgent, StopResult
 from looper.agents.tiers.turn_token import TurnPhase
@@ -442,5 +444,204 @@ def test_a_stop_while_a_preparation_read_finds_the_database_unreachable_still_re
                     handling.cancel()
                 await asyncio.gather(handling, return_exceptions=True)
                 await bus.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("runtime_cancelled", [False, True], ids=["result", "cancelled"])
+def test_closing_the_manager_while_events_drain_ends_the_handling(
+    runtime_cancelled: bool, tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.agents import chat_settings
+
+    monkeypatch.setattr(chat_settings, "_stop_enabled", False)
+    monkeypatch.setattr(cancel_module, "ABANDON_SEC", 0.1)
+
+    async def run() -> None:
+        session = _Session(hold=False)
+        manager, bus, queue = _manager(tmp_path, session)
+        persisting, release, returned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        event_task: asyncio.Task[Any] | None = None
+        original_run = session.run_turn
+
+        async def run_turn(*args: Any, **kwargs: Any) -> Any:
+            turn = await original_run(*args, **kwargs)
+            returned.set()
+            if runtime_cancelled:
+                kwargs["cancel"].request()
+                raise TurnCancelled()
+            return turn
+
+        async def persist(self: Any, payload: dict[str, Any]) -> None:
+            nonlocal event_task
+            event_task = asyncio.current_task()
+            persisting.set()
+            await release.wait()
+
+        monkeypatch.setattr(session, "run_turn", run_turn)
+        monkeypatch.setattr(manager_module.ClaudeRunRecorder, "persist", persist)
+        manager._task = asyncio.create_task(manager._handle(_web("hello")))
+        try:
+            await asyncio.wait_for(persisting.wait(), 5)
+            await asyncio.wait_for(returned.wait(), 5)
+            await asyncio.sleep(0)  # both runtime exits are now draining the shielded event task
+            await asyncio.wait_for(manager.stop(), 1)
+            assert event_task is not None and event_task.done()
+            writes, sent = agent_db.save_session.await_count, queue.qsize()
+            release.set()
+            await asyncio.sleep(0)
+            assert agent_db.save_session.await_count == writes and queue.qsize() == sent
+        finally:
+            release.set()
+            if manager._task is not None:
+                manager._task.cancel()
+                await asyncio.gather(manager._task, return_exceptions=True)
+            if event_task is not None:
+                await asyncio.gather(event_task, return_exceptions=True)
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stopped_reply_keeps_the_deltas_shown_before_persistence_blocked(
+    tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(manager_module, "STOP_HANDLING_SEC", 0.1)
+
+    async def run() -> None:
+        session = _Session()
+        manager, bus, queue = _manager(tmp_path, session)
+        persisting, release = asyncio.Event(), asyncio.Event()
+        original_persist = manager_module.ClaudeRunRecorder.persist
+
+        async def persist(self: Any, payload: dict[str, Any]) -> None:
+            if payload.get("type") == "assistant":
+                persisting.set()
+                await release.wait()
+            await original_persist(self, payload)
+
+        monkeypatch.setattr(manager_module.ClaudeRunRecorder, "persist", persist)
+        envelope = _web("hello")
+        handling = asyncio.create_task(manager._handle(envelope))
+        try:
+            await asyncio.wait_for(persisting.wait(), 5)
+            shown = "".join(e.payload["text"] for e in queue._queue if e.payload.get("delta"))
+            assert shown == "半截回复"
+            await manager.stop_turn(envelope.message_id, via="web")
+            await asyncio.wait_for(asyncio.shield(handling), 2)
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "stopped" and reply["text"].startswith(shown)
+            assert reply["text"].count(shown) == 1
+        finally:
+            release.set()
+            handling.cancel()
+            await asyncio.gather(handling, return_exceptions=True)
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("phase", ["running", "recording"])
+def test_disabling_a_manager_keeps_the_text_it_already_showed(
+    phase: str, tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.agents import chat_settings
+    from looper.agents.managers import ManagerFleet
+    from looper.agents.ops.service import Platform
+    from looper.agents.supervisor import AgentSupervisor
+
+    monkeypatch.setattr(chat_settings, "_stop_enabled", False)
+
+    async def run() -> None:
+        session = _Session(hold=phase == "running")
+        manager, bus, queue = _manager(tmp_path, session)
+        manager._definition = dataclasses.replace(manager._definition, id="manager-review",
+                                                  system_prompt=manager._system_prompt)
+        row = dataclasses.asdict(manager._definition)
+        agent_db.get_manager.return_value = row
+        supervisor = AgentSupervisor(bus, tmp_path)
+        supervisor.register(manager)
+        platform = Platform(bus=bus, task_router=None, supervisor=supervisor, runtime_root=tmp_path)
+        fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=tmp_path,
+                             url="http://127.0.0.1:1", config=manager._config, broadcaster=None)
+        fleet._agents[manager.agent_id] = manager
+        recording, release = asyncio.Event(), asyncio.Event()
+
+        async def finish(*args: Any, **kwargs: Any) -> None:
+            if phase == "recording":
+                recording.set()
+                await release.wait()
+
+        agent_db.finish_record.side_effect = finish
+        await manager.start(bus)
+        envelope = dataclasses.replace(_web("hello"), target=manager.agent_address)
+        try:
+            await bus.publish(envelope)
+            await until(lambda: any(e.payload.get("delta") for e in queue._queue), timeout=5)
+            if phase == "recording":
+                await asyncio.wait_for(recording.wait(), 5)
+                assert manager.turn_for(envelope.message_id) is None  # already settled, still writing its record
+            row["enabled"] = False
+            await asyncio.wait_for(fleet.apply(manager.agent_id), 2)
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "stopped" and reply["text"].startswith("半截回复")
+            assert fleet.get(manager.agent_id) is None
+        finally:
+            release.set()
+            await manager.stop()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("channel", ["telegram", "lark"])
+def test_a_queued_stopped_message_replies_when_its_save_never_finishes(
+    channel: str, tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+
+    monkeypatch.setattr(manager_module, "STOP_FINISH_SEC", 0.1)
+    monkeypatch.setattr(cancel_module, "ABANDON_SEC", 0.1)
+
+    async def run() -> None:
+        session = _Session(hold=False)
+        manager, bus, _ = _manager(tmp_path, session)
+        source = channel_address(channel)
+        queue = bus.get_queue(source.agent_id)
+        envelope = MessageEnvelope.create(
+            source=source, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+            payload={"text": "withdraw this", "channel_context": {"chat_id": "99", "user_id": "7"}},
+        )
+        database = _Unreachable()
+        original_save = manager_module.db_chat.save_message
+
+        async def save(**kwargs: Any) -> None:
+            if kwargs["message_id"] == envelope.message_id:
+                await database(**kwargs)
+            else:
+                await original_save(**kwargs)
+
+        monkeypatch.setattr(manager_module.db_chat, "save_message", save)
+        token = manager._register_turn(envelope)
+        assert await manager.stop_turn(token.message_id, via=channel) is StopResult.STOPPING
+        handling = asyncio.create_task(manager._handle(envelope))
+        try:
+            await asyncio.wait_for(database.reached.wait(), 5)
+            await asyncio.wait_for(asyncio.shield(handling), 1)
+            assert not manager.busy and session.turns == []
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "stopped"
+            assert "not written within" in caplog.text
+            next_message = dataclasses.replace(envelope, message_id="next", correlation_id="next",
+                                                payload={**envelope.payload, "text": "next"})
+            await asyncio.wait_for(manager._handle(next_message), 2)
+            assert len(session.turns) == 1
+            (answer,) = _replies(queue)
+            assert answer["outcome"] == "answered"
+        finally:
+            database.restore()
+            handling.cancel()
+            await asyncio.gather(handling, return_exceptions=True)
+            await bus.shutdown()
 
     asyncio.run(run())
