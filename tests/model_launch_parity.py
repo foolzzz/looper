@@ -744,13 +744,13 @@ def generate_claude_baseline(checkout: Path, output: Path) -> None:
 
 
 def with_planner_file_reads(argv: list[str]) -> list[str]:
-    """Apply the declared Planner read-tool fix for current comparisons; keep historical captures unchanged."""
+    """Apply the declared Planner read-tool and worktree restrictions; keep historical captures unchanged."""
     argv = list(argv)
     if "--permission-mode" in argv and "--disallowedTools" in argv and "--allowedTools" in argv:
         denied, allowed = argv.index("--disallowedTools") + 1, argv.index("--allowedTools") + 1
         if argv[denied] == "Edit,Write,NotebookEdit":
             assert argv[allowed].startswith("Skill,WebFetch,WebSearch"), argv
-            argv[denied] = "Bash," + argv[denied]
+            argv[denied] = "Bash," + argv[denied] + ",EnterWorktree"
             argv[allowed] = "Read,Glob,Grep," + argv[allowed]
     return argv
 
