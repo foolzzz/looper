@@ -708,7 +708,6 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-21 | 场景管家阶段 1 交付（looper #NNN，[RFC](../architecture/rfcs/scenario-managers.zh-CN.md)）：管家与任务模板、控制台聊天页选管家、Settings → Managers、任务归属和回报给建它的管家。渠道仍只到默认管家，阶段 2、3 待做。 |
 | 2026-10-22 | 场景管家阶段 2 交付（looper #NNN）：每个管家可以有自己的飞书 / Telegram 机器人，投递按渠道 id，配置导出只带内置的三行。 |
 | 2026-10-22 | 一个 OpenAPI 接口、`loopercli` 与 `looper-skill` 阶段 1 交付（looper #NNN，[RFC](../architecture/rfcs/looper-client-skill.zh-CN.md)）：`/api/v1/` 的 OpenAPI、Settings → API clients、客户端两步确认与聊天、管家的 loopercli 渠道行、`loopercli` 和 `looper-skill` 插件。阶段 2、3 待做。 |
-
 | 2026-10-22 | Linux CI 修复：工作区检查同时识别 Git 搜索到根目录和跨挂载点边界的非仓库报错，损坏 Git 目录等检查失败仍拒绝；Python Tests 使用与 PostgreSQL 16 服务端同主版本的备份恢复客户端。本地工作区/API 测试 55 项、vault closeout/令牌隔离/四角色服务 smoke 5 项通过；Linux 完整测试结果见对应 PR。 |
 
 ## 5. 不属于本 RFC 的待办
