@@ -147,9 +147,34 @@ def test_row_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     run_db(test, monkeypatch)
 
 
+@pytest.mark.parametrize("state", ["open", "closed", "all"])
+def test_cursor_keeps_loaded_rows_when_an_earlier_gate_closes(monkeypatch: pytest.MonkeyPatch, state: str) -> None:
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        await _task(pool, "task-a", "running", project)
+        await _gates(pool, "task-a", *(["passed" if state == "closed" else "open"] * 4))
+        # Equal timestamps exercise the step-id tiebreaker and the created_at fallback.
+        await pool.execute("UPDATE task_user_gates SET opened_at = NULL, created_at = $1 WHERE step_id = 'task-a-g1'", NOW)
+        first = await _list(state=state, limit="2")
+        assert _ids(first) == ["task-a-g4", "task-a-g3"]
+        await pool.execute("DELETE FROM task_user_gates WHERE step_id = 'task-a-g4'")
+        second = await _list(state=state, limit="2", cursor=first["next_cursor"])
+        assert _ids(second) == ["task-a-g2", "task-a-g1"]
+        # A refresh keeps its old boundary even if a newer gate opens, or its last gate closes.
+        await pool.execute("DELETE FROM task_user_gates WHERE step_id = 'task-a-g1'")
+        await pool.execute("UPDATE task_user_gates SET opened_at = $1 WHERE step_id = 'task-a-g3'", NOW + timedelta(hours=1))
+        refreshed = await _list(state=state, limit="200", through=second["next_cursor"])
+        assert _ids(refreshed) == ["task-a-g3", "task-a-g2"]
+        assert not refreshed["has_more"]
+
+    run_db(test, monkeypatch)
+
+
 @pytest.mark.parametrize("query", [
     {"state": "bogus"}, {"waiting_on": "user", "state": "closed"}, {"waiting_on": "nobody"},
     {"limit": "0"}, {"limit": "201"}, {"offset": "-1"}, {"offset": "x"}, {"limit": "²"}, {"offset": "²"},
+    {"cursor": "bogus"}, {"cursor": "[]"}, {"through": '["not-a-date", "step"]'},
+    {"cursor": '["2026-10-20T10:00:00Z", "step"]', "offset": "1"},
 ])
 def test_bad_queries_are_refused(monkeypatch: pytest.MonkeyPatch, query: dict[str, str]) -> None:
     async def test(pool: Any) -> None:

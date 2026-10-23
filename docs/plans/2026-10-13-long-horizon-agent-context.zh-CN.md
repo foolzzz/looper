@@ -709,6 +709,9 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-21 | 场景管家阶段 1 交付（looper #NNN，[RFC](../architecture/rfcs/scenario-managers.zh-CN.md)）：管家与任务模板、控制台聊天页选管家、Settings → Managers、任务归属和回报给建它的管家。渠道仍只到默认管家，阶段 2、3 待做。 |
 | 2026-10-22 | 场景管家阶段 2 交付（looper #NNN）：每个管家可以有自己的飞书 / Telegram 机器人，投递按渠道 id，配置导出只带内置的三行。 |
 | 2026-10-22 | 一个 OpenAPI 接口、`loopercli` 与 `looper-skill` 阶段 1 交付（looper #NNN，[RFC](../architecture/rfcs/looper-client-skill.zh-CN.md)）：`/api/v1/` 的 OpenAPI、Settings → API clients、客户端两步确认与聊天、管家的 loopercli 渠道行、`loopercli` 和 `looper-skill` 插件。阶段 2a 的 auth、doctor、config 命令迁移已交付；阶段 2 其余部分与阶段 3 待做。 |
+| 2026-10-22 | Linux CI 修复：工作区检查同时识别 Git 搜索到根目录和跨挂载点边界的非仓库报错，损坏 Git 目录等检查失败仍拒绝；Python Tests 的 Python job 固定 Ubuntu 24.04，使用与 PostgreSQL 16 服务端同主版本的备份恢复客户端。本地工作区/API 测试 55 项、vault closeout/令牌隔离/四角色服务 smoke 5 项通过；Linux 完整测试结果见对应 PR。 |
+
+| 2026-10-23 | 控制台回归修复（本分支）：聊天的裸地址原位补上线程，快速返回/前进恢复对应对话，不再把不存在的 Planner 或渠道线程当作新 Web 对话；User Gates 用游标刷新已加载范围，关闭前排或新增关卡不丢已有回复草稿。补齐 `/new` 大小写处理、会话 Profile 的 effort 显示、Room 重选保留筛选与按 ID 读取对话的接口说明；模型可见内容不变，渠道和 CLI 无地址入口改动。验证：定向前端 110 项、数据库 21 项、生产构建通过；一次性数据库与 runtime root 的真实服务上，无头 Chrome 验证 Back/Forward、250 行跨请求关闭与草稿保留、桌面/窄屏及空态/错误态。 |
 
 ## 5. 不属于本 RFC 的待办
 

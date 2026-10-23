@@ -18,6 +18,36 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.53] - 2026-10-23
+
+### Fixed
+
+- **Channels: serve startup and delivery.** Channel bots start receiving only once every enabled Manager is known and poll before the advisory startup checks, so messages sent during a slow check are received. A message queued during startup is no longer delivered twice after the journal replay, and old status entries are settled instead of replayed. Config export and import preview read channels before the Manager migration. No model-visible change. ([#434](https://github.com/foolzzz/looper/pull/434))
+
+## [2.13.52] - 2026-10-23
+
+### Fixed
+
+- **loopercli config import follow-ups.** A staged configuration import can be cancelled with `loopercli config import --cancel IMPORT_ID` (new v1 operation `config.import_cancel`, limited to the caller that staged it). The limit of four pending imports now counts per caller instead of per server. The import preview prints the full plan, and a failed export write removes the partial file. ([#440](https://github.com/foolzzz/looper/pull/440))
+
+## [2.13.51] - 2026-10-23
+
+### Fixed
+
+- **Stop runtimes: process tree and runtime binding.** Stop no longer remembers or signals the children of a process whose pid was reused: reused leaders are excluded before the tree is refreshed, and remembered groups whose leader is gone are dropped. A Grok turn that falls back from ACP to the legacy transport now announces the transport so the manager rebinds the turn before its tool bridge can call a tool. The stop real-path write probe passes only when the turn's final answer has the outcome `answered`. No model-visible change. ([#442](https://github.com/foolzzz/looper/pull/442))
+
+## [2.13.50] - 2026-10-23
+
+### Fixed
+
+- **Web chat address and User Gates page.** A bare chat address now names its thread in place, so Back and Forward restore the matching conversation, and a missing Planner or channel conversation is reported instead of adopted as a new web one. `/new` is case-insensitive, the session profile label shows its effort, and selecting Room again keeps its filters. `GET /api/gates` gains `cursor` and `through` parameters and returns `next_cursor` and `has_more`, so the User Gates page refreshes its loaded rows without losing them or their reply drafts when a gate closes or a new one opens. No model-visible change. ([#436](https://github.com/foolzzz/looper/pull/436))
+
+## [2.13.49] - 2026-10-23
+
+### Fixed
+
+- **Tasks start in workspaces on a mounted filesystem.** Repository discovery now crosses filesystem boundaries (`GIT_DISCOVERY_ACROSS_FILESYSTEM=1`), so a workspace on a mount is isolated in its parent repository or runs in place when there is none, instead of being refused with a "mount point" diagnostic. Invalid Git directories and other inspection failures still fail visibly. The Linux Python Tests job now runs on Ubuntu 24.04 with PostgreSQL 16 clients matching the service. No model-visible change. ([#427](https://github.com/foolzzz/looper/pull/427))
+
 ## [2.13.48] - 2026-10-23
 
 ### Breaking changes

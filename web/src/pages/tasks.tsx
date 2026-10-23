@@ -472,7 +472,10 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
         taskId={selectedTaskId}
         gateStep={gateStep}
         tab={tabParam}
-        onTab={(tab) => onNavigate?.(`${taskPath}${tab === "overview" ? "" : `?tab=${tab}`}`)}
+        onTab={(tab) => {
+          if (tab === "room" && tabParam === "room") return;
+          onNavigate?.(`${taskPath}${tab === "overview" ? "" : `?tab=${tab}`}`);
+        }}
         roomFilter={roomFilter}
         roomRole={roomRole}
         onRoomFilter={(filter, role) => {
