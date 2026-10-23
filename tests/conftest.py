@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -163,9 +164,10 @@ class _PlanStore:
         keys = {step["id"]: step["key"] for step in self.steps.get(task_id, {}).values()}
         return [{**entry, "step_key": keys.get(entry["step_id"], "")} for entry in self.journal.get(task_id, [])]
 
-    async def create_task(self, *, task_id: str, status: str = "pending", **row: Any) -> None:
+    async def create_task(self, *, task_id: str, status: str = "pending", **row: Any) -> dict[str, Any]:
         if status == "init":
             self.ready[task_id] = {"id": task_id, **{k: v for k, v in row.items() if k != "pool"}, "status": "pending"}
+        return {"task_id": task_id, "created_at": datetime.now(timezone.utc).isoformat()}
 
     async def start_ready_task(self, task_id: str, **_: object) -> dict[str, Any] | None:
         return self.ready.pop(task_id, None)

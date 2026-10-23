@@ -24,8 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from ..db import api_clients as db_api_clients
+from ..db.tasks import TaskGroup
 from ..ops_config import OpsConfig
-from ..db.tasks import TaskGroup, task_group
 from . import (
     agent_settings, api_v1, catalog, chat_settings, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
     managers_api, operator_auth, overview, profile_registry, project_skills, projects, prompt_preview, request_guard, role_api,
@@ -33,14 +33,12 @@ from . import (
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
-from .message import AgentAddress, manager_address
-from .project_execution import ProjectExecution
+from .message import AgentAddress
 from .channels import bot_api
 from .channels.web import WebChannelAdapter
 from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
-from .task_roles import record_role, run_roles
-from .tiers.journal import progress_notes
+from .task_roles import record_role
 from .ops import Call, ErrorCode, OpError, Risk, Tool, check_arguments
 from .ops.clients import DEFAULT_SESSION, ClientOps
 from .ops.planner import PlannerOps
@@ -1460,54 +1458,16 @@ class AgentHTTPServer:
         filters = {"project_id": query.get("project_id") or None, "group": group,
                    "schedule_id": query.get("schedule_id") or None}
         try:
-            from ..db.llm_records import task_costs
-            if before is not None and not await db_tasks.task_exists(before):
-                await refuse(f"before must be a task id; {before!r} is not one")
-                return
-            page = await db_tasks.list_tasks(limit=limit + 1, status=status, before=before, **filters)
-            tasks = page[:limit]
-            counts = await db_tasks.count_by_status(**filters)
-            costs = await task_costs([t["id"] for t in tasks])
-            from ..db import managers as db_managers
-            manager_names = {m["id"]: m["name"] for m in await db_managers.list_managers(include_deleted=True)}
-            result = []
-            for t in tasks:
-                result.append({
-                    "task_id": t.get("id", ""),
-                    "requirement": t.get("requirement", ""),
-                    "name": t.get("name", ""),
-                    "goal_id": t.get("goal_id", ""),
-                    "project_id": t.get("project_id", ""),
-                    "project_name": t.get("project_name", ""),
-                    "work_dir": t.get("work_dir", ""),
-                    # The Manager the task belongs to.
-                    "manager_id": t.get("manager_id") or "manager",
-                    "manager_name": manager_names.get(t.get("manager_id") or "manager"),
-                    # The task template it came from, as it said then (null for none).
-                    "template": t.get("template"),
-                    "status": t.get("status", "pending"),
-                    "group": task_group(t.get("status")).value,
-                    "phase": t.get("phase", "pending"),
-                    "planner_id": t.get("planner_id"),
-                    "correlation_id": t.get("correlation_id", ""),
-                    "created_at": t.get("created_at"),
-                    "completed_at": t.get("completed_at"),
-                    # The schedule that created it (null for any other task, or once the schedule is deleted).
-                    "schedule_id": t.get("schedule_id"),
-                    "schedule_name": t.get("schedule_name"),
-                    "continues_schedule_session": t.get("continues_schedule_session", False),
-                    # What the task's Planner, Workers and Reviewers spent so far.
-                    "cost": costs.get(t.get("id", "")),
-                })
+            result = await projects.list_tasks_page(limit=limit, status=status, before=before, **filters)
+        except projects.RequestError as exc:
+            await refuse(str(exc))
+            return
         except Exception:
             logger.exception("DB unavailable for list_tasks")
             writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
             await writer.drain()
             return
-        writer.write(_json_response(HTTP_200, {
-            "tasks": _serialize(result), "next_before": tasks[-1]["id"] if len(page) > limit else None,
-            "counts": counts,
-        }))
+        writer.write(_json_response(HTTP_200, _serialize(result)))
         await writer.drain()
 
     async def _chat_settings(self) -> dict[str, Any]:
@@ -1647,32 +1607,35 @@ class AgentHTTPServer:
         """Send ``text`` to ``target``: the one way a chat message goes in, for the dashboard and for an API client
         (``client``: its ``id`` and ``name``). Stores it as the Planner's supplement and as the thread's user message
         first; the adapter's answer has the ``correlation_id`` its reply streams under."""
-        # A message to a task's Planner is a supplement to the task, stored before the Planner gets it, so it is
-        # not lost when the Planner is busy and the server restarts first.
-        supplement_id = await projects.store_chat_supplement(target, text)
+        async def deliver(supplement_id: int | None) -> dict[str, Any]:
+            if session_id and message_id:
+                try:
+                    from ..db.chat import save_message
+                    await save_message(
+                        session_id=session_id, message_id=message_id,
+                        role="user", content=text,
+                    )
+                except Exception:
+                    logger.debug("failed to persist user chat message", exc_info=True)
 
-        if session_id and message_id:
-            try:
-                from ..db.chat import save_message
-                await save_message(
-                    session_id=session_id, message_id=message_id,
-                    role="user", content=text,
-                )
-            except Exception:
-                logger.debug("failed to persist user chat message", exc_info=True)
+            return await self._web_adapter.handle_user_message(
+                text=text,
+                session_id=session_id,
+                goal_id=goal_id,
+                language=language,
+                attachments=attachments,
+                target=target,
+                message_id=message_id or None,
+                supplement_id=supplement_id,
+                **({"new_session_profile_id": new_session_profile_id} if new_session_profile_id is not None else {}),
+                **({"client": client} if client is not None else {}),
+            )
 
-        return await self._web_adapter.handle_user_message(
-            text=text,
-            session_id=session_id,
-            goal_id=goal_id,
-            language=language,
-            attachments=attachments,
-            target=target,
-            message_id=message_id or None,
-            supplement_id=supplement_id,
-            **({"new_session_profile_id": new_session_profile_id} if new_session_profile_id is not None else {}),
-            **({"client": client} if client is not None else {}),
-        )
+        if target.agent_type == "planner":
+            return await projects.add_task_supplement(
+                target.agent_id.removeprefix("planner-"), text, via=projects.VIA_CHAT,
+                wake=deliver, best_effort=True)
+        return await deliver(None)
 
     async def _foreign_thread(self, owner: str) -> bytes:
         """The 409 for a thread of Manager ``owner`` asked for under another Manager: whose it is, by name."""
@@ -1984,17 +1947,12 @@ class AgentHTTPServer:
             await writer.drain()
             return
 
-        from .bus import MessageBus
-        from .message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
-
-        bus = self._supervisor.bus
-        envelope = MessageEnvelope.create(
-            source=self._web_adapter._address,
-            target=TASK_ROUTER_ADDRESS,
-            message_type=MessageType.TASK_CANCEL,
-            payload={"task_id": task_id},
-        )
-        await bus.publish(envelope)
+        try:
+            await projects.control_task(task_id, "cancel", self._supervisor.bus, self._web_adapter._address)
+        except projects.RequestError as exc:
+            writer.write(_json_response(exc.status, {"error": str(exc)}))
+            await writer.drain()
+            return
         writer.write(_json_response(HTTP_200, {"cancelled": task_id}))
         await writer.drain()
 
@@ -2014,17 +1972,12 @@ class AgentHTTPServer:
             await writer.drain()
             return
 
-        from .bus import MessageBus
-        from .message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
-
-        bus = self._supervisor.bus
-        envelope = MessageEnvelope.create(
-            source=self._web_adapter._address,
-            target=TASK_ROUTER_ADDRESS,
-            message_type=MessageType.TASK_STOP,
-            payload={"task_id": task_id},
-        )
-        await bus.publish(envelope)
+        try:
+            await projects.control_task(task_id, "stop", self._supervisor.bus, self._web_adapter._address)
+        except projects.RequestError as exc:
+            writer.write(_json_response(exc.status, {"error": str(exc)}))
+            await writer.drain()
+            return
         writer.write(_json_response(HTTP_200, {"stopped": task_id}))
         await writer.drain()
 
@@ -2043,36 +1996,29 @@ class AgentHTTPServer:
             writer.write(_json_response(HTTP_400, {"error": "task_id is required"}))
             await writer.drain()
             return
-        # A stopped, failed or cancelled task goes on from its saved plan; only an explicit start_over plans anew.
+        # A ready task starts for the first time; a stopped, failed or cancelled one goes on from its saved plan.
         start_over = data.get("start_over", False)
         if not isinstance(start_over, bool):
             writer.write(_json_response(HTTP_400, {"error": "start_over must be true or false"}))
             await writer.drain()
             return
 
-        from ..db.tasks import get_task
-        from .message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode
+        try:
+            from ..db import tasks as db_tasks
 
-        task = await get_task(task_id)
-        if task is None:
-            writer.write(_json_response(HTTP_404, {"error": "task not found"}))
+            task = await db_tasks.get_task(task_id)
+            if task is not None and task["status"] == db_tasks.READY:
+                # Keep the legacy endpoint's ready-task support without treating Manager restarts as starts.
+                if not (task.get("work_dir") or "").strip():
+                    raise projects.RequestError(HTTP_400, "set the task's work directory before starting it")
+                await projects.start_ready_task(task_id, self._supervisor.bus, self._web_adapter._address)
+            else:
+                await projects.control_task(task_id, "start_over" if start_over else "restart",
+                                            self._supervisor.bus, self._web_adapter._address)
+        except projects.RequestError as exc:
+            writer.write(_json_response(exc.status, {"error": str(exc)}))
             await writer.drain()
             return
-        if not (task.get("work_dir") or "").strip():
-            # There is no default directory; a task without one cannot run.
-            writer.write(_json_response(HTTP_400, {"error": "set the task's work directory before starting it"}))
-            await writer.drain()
-            return
-
-        bus = self._supervisor.bus
-        envelope = MessageEnvelope.create(
-            source=self._web_adapter._address,
-            target=TASK_ROUTER_ADDRESS,
-            message_type=MessageType.TASK_RESTART,
-            payload={"task_id": task_id,
-                     "mode": (RestartMode.START_OVER if start_over else RestartMode.CONTINUE).value},
-        )
-        await bus.publish(envelope)
         writer.write(_json_response(HTTP_200, {"started": task_id}))
         await writer.drain()
 
@@ -2167,157 +2113,24 @@ class AgentHTTPServer:
         self, task_id: str, writer: asyncio.StreamWriter,
     ) -> None:
         try:
-            from ..db.agent_setting_layers import profile_overrides
-            from ..db.llm_records import list_task_runs, task_costs
-            from ..db.tasks import get_task_with_steps
-            from ..db.manager_actions import for_task as manager_actions
-            from ..db.task_changes import requirement_versions
-            from .task_roles import roles_view
-            raw = await get_task_with_steps(task_id)
-            cost = (await task_costs([task_id]))[task_id] if raw else None
-            ran_as = run_roles(await list_task_runs([task_id]), raw.get("steps", [])) if raw else {}
-            overrides = await profile_overrides(task_id) if raw else {}
-            versions = await requirement_versions(task_id) if raw else []
-            actions = await manager_actions(task_id) if raw else []
-            from ..db import managers as db_managers
-            owner = (await db_managers.get_manager(raw.get("manager_id") or "manager", include_deleted=True)
-                     if raw else None)
-            client_id = raw.get("client_id") if raw else None
-            client_name = (await db_api_clients.names([client_id])).get(client_id) if client_id else None
-            agents = await projects.agents_view(raw) if raw else None
-            roles = await roles_view(task_id, raw.get("steps", [])) if raw else None
-            gates = await gate_service.gates_view(task_id) if raw else []
-            waits = await wait_service.waits_view(task_id) if raw else []
-            task_workspace = await self._task_workspace(raw) if raw else None
-            workspaces = await self._task_workspaces(task_id, raw.get("steps", []),
-                                                     in_worktree=bool(task_workspace and task_workspace["worktree"]),
-                                                     ) if raw else None
+            result = await projects.task_detail(task_id)
+        except projects.RequestError as exc:
+            writer.write(_json_response(exc.status, {"error": str(exc)}))
         except Exception:
             logger.exception("DB unavailable for task_detail %s", task_id)
             writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
-            await writer.drain()
-            return
-
-        if not raw:
-            writer.write(_json_response(HTTP_404, {"error": "task not found"}))
-            await writer.drain()
-            return
-        try:
-            from .room import task_view
-            room = await task_view(task_id, limit=1)
-        except Exception:
-            # The room's numbers are help on the page: without them, the task still shows.
-            logger.warning("cannot read the room of task %s", task_id, exc_info=True)
-            room = None
-
-        result = {
-            "task_id": raw.get("id", ""),
-            "requirement": raw.get("requirement", ""),
-            "name": raw.get("name", ""),
-            "title": raw.get("title") or "",
-            # Every version of an edited requirement, oldest first (none for one never edited): version, text, via,
-            # created_at, delivered_at (when the Planner had the edit in a turn).
-            "requirement_versions": versions,
-            # What the user added to the task while it ran, oldest first: text, via, created_at, delivered_at.
-            "supplements": [{"text": entry["summary"], "via": entry.get("via") or "", "created_at": entry["created_at"],
-                             "delivered_at": entry.get("delivered_at")}
-                            for entry in raw.get("journal", []) if entry.get("kind") == "supplement"],
-            # What the Manager did to the task through its tools, or asked the user to confirm, newest first.
-            "manager_actions": actions,
-            # The Manager the task belongs to, and the task template it was created from (as it said then), or null.
-            "manager_id": raw.get("manager_id") or "manager",
-            "manager_name": owner["name"] if owner else None,
-            "template": raw.get("template"),
-            # The API client the task was created through (also a revoked one), or null.
-            "client": {"id": client_id, "name": client_name} if client_id and client_name else None,
-            "goal_id": raw.get("goal_id", ""),
-            "project_id": raw.get("project_id", ""),
-            "project_name": raw.get("project_name", ""),
-            "status": raw.get("status", "pending"),
-            "group": task_group(raw.get("status")).value,
-            "phase": raw.get("phase", "pending"),
-            "planner_id": raw.get("planner_id"),
-            "correlation_id": raw.get("correlation_id", ""),
-            "work_dir": raw.get("work_dir", ""),
-            "config": raw.get("config", {}),
-            # The Agent Profile the task chose for some of its roles, over the layers (agent_settings.Layer.TASK).
-            "profile_overrides": await profile_registry.profile_views(overrides),
-            # Each task role's Agent Profile, and its Workers' and Reviewers' concurrency, with where each comes from;
-            # the task's own choices are source "task" (projects.agents_view).
-            "agents": agents,
-            # The roles the task's Planner defined for its steps (current version, earlier versions, the steps that
-            # name each, its numbers), and the built-in Worker's and Reviewer's numbers (task_roles.roles_view).
-            "roles": roles["roles"],
-            "builtin_role_stats": roles["builtin"],
-            # The user gates of its plan, in plan order: state, agenda, findings, how each closed, and whom each
-            # waiting one waits for (gate_service.gate_view); their discussions are at .../gates/<step>/messages.
-            "gates": gates,
-            # Wait steps in plan order, with their check, timing and latest result (wait_service.wait_view).
-            # Only waiting rows accept .../waits/<step>/resume or /cancel; the Planner settles moved rows.
-            "waits": waits,
-            # Its workspace: the directory it names, how it runs there, and the worktree it runs in (its branch,
-            # where it started, the commands that take the work over), null for none (task_workspaces).
-            "task_workspace": task_workspace,
-            # Its steps' worktrees, in a project with step workspaces (null when it had none): where its branch
-            # started, each worktree oldest first, and the commands that undo the task's commits (none for a task
-            # in a worktree of its own: they would change its branch, not the user's).
-            "step_workspaces": workspaces,
-            # Its agent room in numbers: whether its project has it on, its messages by kind and its unanswered
-            # questions, and each step's (sent, received, unanswered); the messages are at .../room.
-            "room": {**{key: room[key] for key in ("enabled", "counts", "by_step")},
-                     "consults": {k: v for k, v in room["consults"].items() if k != "list"}} if room else None,
-            # The role each Worker and Reviewer run that ran as one ran as, by agent id (task_roles.run_roles); only
-            # in a task with such runs.
-            **({"run_roles": ran_as} if ran_as else {}),
-            "origin_channel_id": raw.get("origin_channel_id", ""),
-            "result_summary": raw.get("result_summary"),
-            "error": raw.get("error"),
-            "fail_kind": raw.get("fail_kind"),  # "task_budget": it failed at its project's task spend cap
-            # The task's spend cap as the Planner enforces it (its own, else its project's); null for none.
-            "task_budget_usd": ProjectExecution.from_row(
-                {"id": raw.get("project_id"), "task_budget_usd": raw.get("task_budget_usd")}).task_budget_usd,
-            # The task's own cap (a scheduled run's), raised alone when it continues at its cap; null for none.
-            "own_budget_usd": raw.get("budget_usd"),
-            "schedule_id": raw.get("schedule_id"),
-            "schedule_name": raw.get("schedule_name"),
-            "continues_schedule_session": raw.get("continues_schedule_session", False),
-            "created_at": raw.get("created_at"),
-            "updated_at": raw.get("updated_at"),
-            "completed_at": raw.get("completed_at"),
-            "steps": raw.get("steps", []),
-            # The task journal, oldest first: an entry per accepted step with its summary and learnings.
-            "journal": raw.get("journal", []),
-            # The Planner's progress notes (journal kind progress), newest first: done, now, next, risks, estimate, at.
-            "progress": progress_notes(raw.get("journal", [])),
-            # What the task's Planner, Workers and Reviewers spent: the total, by role, and the run count.
-            "cost": cost,
-        }
-        writer.write(_json_response(HTTP_200, _serialize(result)))
+        else:
+            writer.write(_json_response(HTTP_200, _serialize(result)))
         await writer.drain()
 
     @staticmethod
     async def _task_workspace(task: dict[str, Any]) -> dict[str, Any]:
-        from ..db import task_worktrees as db_task_worktrees
-        from .task_workspaces import TaskWorktree
-
-        row = await db_task_worktrees.get(str(task["id"]))
-        return {"workspace_dir": task.get("workspace_dir") or task.get("work_dir") or "",
-                "mode": task.get("workspace_mode") or "in_place", "base": task.get("workspace_base") or "",
-                "worktree": TaskWorktree.from_row(row).view() if row is not None else None}
+        return await projects.task_workspace_view(task)
 
     @staticmethod
     async def _task_workspaces(task_id: str, steps: list[dict[str, Any]], *,
                                in_worktree: bool = False) -> dict[str, Any] | None:
-        from ..db import step_workspaces as db_step_workspaces
-        from . import step_workspaces
-
-        rows = await db_step_workspaces.list_for_task(task_id)
-        if not rows:
-            return None
-        start = await db_step_workspaces.task_start(task_id)
-        view = step_workspaces.task_view(task_id, rows, start_branch=start[0], start_commit=start[1],
-                                         step_keys={str(s["id"]): str(s.get("step_key") or "") for s in steps})
-        return {**view, "undo": []} if in_worktree else view
+        return await projects.step_workspaces_view(task_id, steps, in_worktree=in_worktree)
 
     async def _handle_task_activity(
         self, task_id: str, query: dict[str, str], writer: asyncio.StreamWriter,

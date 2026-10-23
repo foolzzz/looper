@@ -617,7 +617,7 @@ def test_resolved_claude_binding_matches_pinned_launches(case: str) -> None:
     import tempfile
     from unittest.mock import patch
 
-    from model_launch_parity import CLAUDE_CASES, above_root_normalized
+    from model_launch_parity import CLAUDE_CASES, above_root_normalized, with_planner_file_reads
     from looper.agents.agent_settings import AgentSettings, AgentType, Launch
     from looper.agents.profile_registry import (
         Endpoint, ModelSpec, ProviderSpec, ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
@@ -654,13 +654,22 @@ def test_resolved_claude_binding_matches_pinned_launches(case: str) -> None:
                 binding = runtime.bind_provider(profile.provider, launch.model, launch.effort)
                 assert {k: v for k, v in env.items() if parent.get(k) != v} == expected["env"]
                 assert sorted((parent.keys() - env.keys()) | set(binding.unset)) == expected["unset"]
-                argv = expected["argv"]
-                start = next(i for i, arg in enumerate(argv) if arg in ("--dangerously-skip-permissions", "--permission-mode"))
-                assert launch.args() == argv[start:]
-                assert launch.cost_source.value == expected["price"]["source"]
                 cwd = tmp_path / "work" if role is AgentType.MANAGER else tmp_path / "work/project"
+                # Keep the historical provider capture, applying only the deliberate Planner permission change:
+                # no Bash, and file reads scoped to this repository-less task directory.
+                argv = with_planner_file_reads(expected["argv"])
+                if role is AgentType.PLANNER:
+                    at = argv.index("--allowedTools") + 1
+                    assert argv[at].startswith("Read,Glob,Grep,")
+                    reads = ",".join(f"{tool}(/{cwd.as_posix()}/**)" for tool in ("Read", "Glob", "Grep"))
+                    argv[at] = reads + argv[at][len("Read,Glob,Grep"):]
+                start = next(i for i, arg in enumerate(argv) if arg in ("--dangerously-skip-permissions", "--permission-mode"))
+                with patch("pathlib.Path.cwd", return_value=cwd):
+                    assert launch.args() == argv[start:]
+                assert launch.cost_source.value == expected["price"]["source"]
                 command = runtime.resident_command("claude", cwd=cwd,
                            prompt_file=SystemPrompt(expected["prompt"]).write_file(tmp_path), launch=launch)
+                assert command[-len(argv[start:]):] == argv[start:]
                 settings = command[command.index("--settings") + 1]
                 assert above_root_normalized(settings, str(tmp_path)) == \
                     above_root_normalized(expected["config"]["settings"], str(tmp_path))

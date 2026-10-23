@@ -1,6 +1,6 @@
 # RFC：一个 OpenAPI 接口，`loopercli` 与 `looper-skill`
 
-- **状态：** 阶段 1 已实现（looper #411）；阶段 2a 已交付（第 15 节：auth、doctor、config）；阶段 2 其余部分与阶段 3 待做。草案阶段的说明：第 1 节的六条是维护者 2026-10-22 定下的；其余按本文建议写成。标「需要验证」的几处在实现或实跑时核实。阶段 1 的实现卡片在本仓库之外。
+- **状态：** 阶段 1 已实现（looper #411）；阶段 2a 已交付（第 15 节：auth、doctor、config）；阶段 2 的任务操作共享核心已实现（第 5.4 节）；其余迁移与阶段 3 待做。草案阶段的说明：第 1 节的六条是维护者 2026-10-22 定下的；其余按本文建议写成。标「需要验证」的几处在实现或实跑时核实。阶段 1 的实现卡片在本仓库之外。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.0 节第 22 项。
 - **相关：** [管家平台工具](manager-platform-tools-v0.zh-CN.md)（操作目录、风险分档、确认、留痕）、[操作者 API 认证](operator-api-auth-v0.zh-CN.md)（操作者令牌、本机限制）、[场景管家](scenario-managers.zh-CN.md)（线程归属、`origin_thread`）、[用户关卡](user-gate-v0.zh-CN.md)。
 - **代码基线：** v2.13.36（`ee67cebcd`）。
@@ -33,7 +33,7 @@
 | ops 工具 | 每次调用属于「管家正在跑的轮」（`Turn`：渠道、聊天、回答的消息、发送者、信封）。没有轮就算 Claude 自己的轮，只能读（`NEEDS_USER_TURN`）；`high` 的确认按聊天登记，只在回答用户下一条消息的那一轮里由 `looper_confirm` 执行（`ops/service.py`） | 客户端的调用没有「轮」，也没有「下一条消息」 |
 | 依赖消息原文的工具 | `looper_task_gate_reply` 只把这一轮回答的用户消息原文（或其中一段）交给关卡（`ops/tasks._relayed_text`），不收模型自己的话 | 客户端没有「用户消息」可转 |
 | 操作者 API | `/api/` 下其余路由只认操作者（令牌文件、cookie、密码会话），手写 JSON，没有 schema，没有版本 | 不能拿来生成命令行；令牌是整台机器的操作者凭据，不能按客户端吊销或留痕 |
-| 重复实现 | 建任务（`projects.create_task` 与 `ops/tasks._create`）、任务详情（`http_server._handle_task_detail` 与 `ops/tasks._task_view`）、停止/取消/重启（`http_server` 里内联发总线消息与 `ops/tasks._control`）、补充说明（`projects.store_chat_supplement` 与 `db_changes.add_supplement`）各有两份 | 两个入口可能对同一件事判得不一样 |
+| 任务操作共享核心 | 控制台路由和 ops 工具共用 `projects` 的任务列表、创建、详情、生命周期控制与补充说明；入口只适配参数和回答形状（第 5.4 节） | 控制台拒绝状态不允许的停止、取消、重启和从头开始时返回 409，并展示原因 |
 | 聊天 | `POST /api/chat/send` → `WebChannelAdapter.handle_user_message`，回复在 `/api/chat/events?cid=` 流式返回，并存进 `chat_messages`；管家在每条消息前加 `Channel: the Looper dashboard chat`（`tiers/manager.channel_line`） | 管家分不出「人经自己的 agent 在说」；线程不记客户端 |
 | 任务回报 | 只有场景管家的 web 任务记 `tasks.origin_thread`，接受和结束写进那个线程（`ops/tasks._create`，`tiers/manager._web_thread_reply`）；默认管家的 web 任务回报只进当时的流 | 客户端发起的任务的回报回不到它的对话 |
 | 关卡通知 | `gate_courier` 把打开的关卡发往全局通知目标，不读任务的线程归属；进度不进任何线程 | 阶段 1 不改：客户端用 `loopercli wait` 和 `status`、`pipeline` 跟进（第 11 节） |
@@ -97,16 +97,16 @@
 
 ### 5.4 HTTP 路由和 ops 工具的重叠
 
-| 做的事 | 控制台路由 | ops 工具 | 今天的实现 | 保留的一份（阶段 2 合并） |
+| 做的事 | 控制台路由 | ops 工具 | 当前实现 | 共享实现与状态（阶段 2） |
 |---|---|---|---|---|
 | 控制台状态 | `POST /api/v1/system/status` | 无 | 已抽取 `_status_result` | 领域模块提供完整投影，服务状态命令与控制台共用 v1 |
-| 列任务 | `GET /api/tasks` | `looper_tasks` list | 都调 `db_tasks.list_tasks`，过滤和回答形状不同 | 一个 `projects.list_tasks_page`（游标、状态、定时任务、分组、关键字）；ops 的 list 取它的精简形状 |
-| 任务详情 | `GET /api/tasks/:id`（`http_server` 内联） | `looper_tasks` get（`_task_view`） | 两份 | 一个 `projects.task_detail`；ops 的 get 是它的精简视图 |
-| 建任务 | `POST /api/tasks/create`（`projects.create_task`） | `looper_task_create`（`_create`） | 两份，都写 `db_tasks.create_task`；控制台路由还收 `config`、`profile_overrides` 和新项目的字段，工具的 schema 没有全部对应项 | 抽出一个共享的建任务核心（放置、工作区检查、事务、配置块，收两边参数的并集），控制台路由和 `_create` 各留一个参数适配层；控制台现有字段照收，并保留写入后回读验证，迁移不丢配置 |
+| 列任务 | `GET /api/tasks` | `looper_tasks` list | 共用 `projects.list_tasks_page`（游标、状态、定时任务、分组和工具的关键字搜索） | 已实现；ops 的 list 使用精简形状，保留原有搜索范围与 `more` 语义，控制台保留游标、计数和花费 |
+| 任务详情 | `GET /api/tasks/:id` | `looper_tasks` get（`_task_view`） | 共用 `projects.task_detail` | 已实现；ops 的 get 使用精简视图，保留原有键、裁剪和结果文案 |
+| 建任务 | `POST /api/tasks/create`（`projects.create_task`） | `looper_task_create`（`_create`） | 共用 `projects.create_task_core`（放置、工作区检查、事务、配置块），两入口保留参数适配层 | 已实现；核心收两边参数并集，控制台保留 `config`、`profile_overrides` 和新项目全部字段，工具 schema 不变；数据库回归测试从两入口创建后回读并比较任务行与 Profile 覆盖 |
 | 开始 | `POST /api/tasks/:id/start` | `task_control` start | 共用 `projects.start_ready_task` | 不变 |
-| 停止、取消、重启、从头开始 | `POST /api/tasks/stop`、`cancel`、`start` | `task_control` | `http_server` 内联发总线消息；ops 先检查状态再发 | ops 的检查加发送，搬到 `projects` 的一个函数，两边共用（控制台因此多了状态检查：409 代替静默） |
+| 停止、取消、重启、从头开始 | `POST /api/tasks/stop`、`cancel`、`start` | `task_control` | 共用 `projects.control_task`（状态检查加发送） | 已实现；状态不允许时控制台返回 409 和原因、不发送消息，任务列表和详情页展示错误；工具结果不变 |
 | 标题、需求、Agent Profile | `PUT /api/tasks/:id/title`、`requirement`、`agents` | `looper_task_update` | 共用 `rename_task`、`edit_requirement`、`set_task_agents` | 不变 |
-| 补充说明 | `POST /api/chat/send` 发给 Planner（`store_chat_supplement`） | `looper_task_instruct` | 两份 | `db_changes.add_supplement` 加唤醒 Planner，做成一个函数 |
+| 补充说明 | `POST /api/chat/send` 发给 Planner | `looper_task_instruct` | 共用 `projects.add_task_supplement`（存储加唤醒） | 已实现；每次写一行、唤醒一次，聊天保留 `USER_MESSAGE` 的补充 id 和回复关联，工具保留 `TASK_CHANGE` 与现有结果 |
 | 关卡留言、结束 | `POST /api/tasks/:id/gates/:step/messages`、`end` | `looper_task_gate_reply`、`looper_gates` reply/end | 共用 `gate_service.post_message` | 不变 |
 | 关卡列表、讨论 | `GET /api/gates`、`GET …/messages` | `looper_gates` list/messages | 共用 `gate_service.list_gates`、`thread` | 不变 |
 | 总览 | `GET /api/overview` | `looper_overview` | 共用 `overview.build_overview` | 不变 |

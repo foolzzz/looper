@@ -482,11 +482,151 @@ class TestPermissionArgs:
         # Claude Code's default permission mode, pinned against a project's own settings, with no one to answer its
         # prompts, so that what it would ask about is refused; no file-editing tools.
         assert "--dangerously-skip-permissions" not in args
+        reads = ",".join(f"{tool}(/{Path.cwd().as_posix()}/**)" for tool in ("Read", "Glob", "Grep"))
         assert args[:8] == ["--permission-mode", "manual", "--permission-prompts", "none",
-                            "--disallowedTools", "Edit,Write,NotebookEdit",
-                            "--allowedTools", "Skill,WebFetch,WebSearch,mcp__looper,mcp__docs"]
+                            "--disallowedTools", "Bash,Edit,Write,NotebookEdit",
+                            "--allowedTools", f"{reads},Skill,WebFetch,WebSearch,mcp__looper,mcp__docs"]
         assert launch.record()["read_only"] == "permissions"
-        assert _builtin_launch(role=AgentType.PLANNER).args()[6:8] == ["--allowedTools", "Skill,WebFetch,WebSearch"]
+        assert _builtin_launch(role=AgentType.PLANNER).args()[6:8] == [
+            "--allowedTools", f"{reads},Skill,WebFetch,WebSearch"]
+
+    @pytest.mark.parametrize("resident", [False, True])
+    def test_a_planner_can_read_document_paths_without_a_writing_tool(
+        self, tmp_path: Path, resident: bool,
+    ) -> None:
+        from looper.agents.knowledge import AgentKnowledge
+        from looper.agents.runtimes import CLAUDE_CODE
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "DESIGN.md").write_text("Repository design\n")
+        (workspace / "DESIGN.md").write_text("Workspace design\n")
+        mounts = (tmp_path / "knowledge", tmp_path / "references")
+        launch = _builtin_launch(role=AgentType.PLANNER,
+                                 knowledge=AgentKnowledge(add_dirs=tuple(str(path) for path in mounts)))
+        command = CLAUDE_CODE.resident_command if resident else CLAUDE_CODE.run_command
+        args = command("claude", cwd=workspace, prompt_file=workspace / "prompt.md", launch=launch)
+        allowed = args[args.index("--allowedTools") + 1].split(",")
+        roots = (tmp_path, *mounts)
+        assert set(allowed) == {*(f"{tool}(/{root.as_posix()}/**)" for root in roots
+                                 for tool in ("Read", "Glob", "Grep")), "Skill", "WebFetch", "WebSearch"}
+        assert {"Bash", "Edit", "Write", "NotebookEdit"} <= set(_denied(args))
+        assert not set(allowed) & set(_denied(args))
+        assert "--dangerously-skip-permissions" not in args
+
+    @pytest.mark.installed
+    @pytest.mark.parametrize("repo_name", ["repo", "repo[1]"])
+    def test_planner_file_tools_allow_repo_and_knowledge_but_deny_outside_paths(
+        self, tmp_path: Path, repo_name: str,
+    ) -> None:
+        # The installed CLI, with a scripted local provider, performs the permission checks and actual reads.
+        # No operator login, configuration or real model is used.
+        import os
+        import shutil
+        import subprocess
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        from looper.agents.knowledge import AgentKnowledge
+        from looper.agents.runtimes import CLAUDE_CODE
+
+        executable = shutil.which("claude")
+        if not executable:
+            pytest.skip("requires the installed Claude Code CLI")
+        repo, knowledge, outside = (tmp_path / name for name in (repo_name, "knowledge", "repo1"))
+        workspace = repo / "src"
+        workspace.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        knowledge.mkdir()
+        outside.mkdir()
+        for directory in (repo, knowledge, outside):
+            (directory / "DESIGN.md").write_text(f"marker-{directory.name}\n")
+        (repo / "escape").symlink_to(outside, target_is_directory=True)
+        calls, expected = [], {}
+        for tool in ("Read", "Glob", "Grep"):
+            for name, directory, allowed in (
+                ("repo", repo, True), ("knowledge", knowledge, True), ("outside", outside, False),
+                ("traversal", workspace / ".." / ".." / "repo1", False),
+                ("symlink", repo / "escape", False),
+            ):
+                tool_input = {"file_path": str(directory / "DESIGN.md")} if tool == "Read" else {
+                    "path": str(directory), "pattern": "*.md" if tool == "Glob" else "marker-"}
+                call_id = f"{tool}-{name}"
+                calls.append({"type": "tool_use", "id": call_id, "name": tool, "input": tool_input})
+                expected[call_id] = allowed
+        results: dict[str, Any] = {}
+
+        class Provider(BaseHTTPRequestHandler):
+            def log_message(self, *args: Any) -> None:
+                pass
+
+            def do_POST(self) -> None:
+                request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path.endswith("/count_tokens"):
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b'{"input_tokens":10}')
+                    return
+                for message in request.get("messages", []):
+                    for block in message.get("content", []) if isinstance(message.get("content"), list) else []:
+                        if block.get("type") == "tool_result" and block.get("tool_use_id") in expected:
+                            results[block["tool_use_id"]] = block
+                content = [{"type": "text", "text": "Done."}] if results else calls
+                stop = "end_turn" if results else "tool_use"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+
+                def event(kind: str, **fields: Any) -> None:
+                    data = json.dumps({"type": kind, **fields})
+                    self.wfile.write(f"event: {kind}\ndata: {data}\n\n".encode())
+
+                event("message_start", message={"id": "msg-test", "type": "message", "role": "assistant",
+                      "model": "claude-sonnet-4-6", "content": [], "stop_reason": None,
+                      "usage": {"input_tokens": 10, "output_tokens": 0}})
+                for index, block in enumerate(content):
+                    initial = {**block, "input": {}} if block["type"] == "tool_use" else {"type": "text", "text": ""}
+                    event("content_block_start", index=index, content_block=initial)
+                    delta = {"type": "input_json_delta", "partial_json": json.dumps(block["input"])} \
+                        if block["type"] == "tool_use" else {"type": "text_delta", "text": block["text"]}
+                    event("content_block_delta", index=index, delta=delta)
+                    event("content_block_stop", index=index)
+                event("message_delta", delta={"stop_reason": stop}, usage={"output_tokens": 10})
+                event("message_stop")
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+        thread = threading.Thread(target=server.serve_forever)
+        home = tmp_path / "home"
+        home.mkdir()
+        env = {"PATH": os.environ["PATH"], "HOME": str(home), "TMPDIR": str(tmp_path),
+               "CLAUDE_CONFIG_DIR": str(home / "config"), "ANTHROPIC_API_KEY": "synthetic-test-key",
+               "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.server_port}",
+               "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+        prompt = workspace / "prompt.md"
+        prompt.write_text("Check document access.")
+        launch = _builtin_launch(role=AgentType.PLANNER, knowledge=AgentKnowledge(add_dirs=(str(knowledge),)))
+        command = CLAUDE_CODE.run_command(executable, cwd=workspace, prompt_file=prompt, launch=launch, max_turns=2)
+        turn = {"type": "user", "message": {"role": "user", "content": "Check document access."}}
+        thread.start()
+        try:
+            run = subprocess.run(command, input=json.dumps(turn) + "\n", text=True, capture_output=True,
+                                 cwd=workspace, env=env, timeout=45)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+        assert run.returncode == 0, run.stderr + run.stdout
+        assert results.keys() == expected.keys(), run.stdout
+        events = [json.loads(line) for line in run.stdout.splitlines()]
+        denials = {denial["tool_use_id"] for event in events if event["type"] == "result"
+                   for denial in event.get("permission_denials", [])}
+        assert denials == {call_id for call_id, allowed in expected.items() if not allowed}
+        for call_id, allowed in expected.items():
+            assert results[call_id].get("is_error", False) is (not allowed), results[call_id]
+            if allowed:
+                assert "DESIGN.md" in json.dumps(results[call_id]) or "marker-" in json.dumps(results[call_id])
+        assert "marker-repo1" not in json.dumps(results)
 
     @pytest.mark.parametrize(("server", "rule"), [
         ("looper", "mcp__looper"), ("probe.v2", "mcp__probe_v2"), ("my server+x", "mcp__my_server_x"),
@@ -556,7 +696,7 @@ class TestOtherSessions:
     def test_a_read_only_run_keeps_its_own_denials(self) -> None:
         planner = _teams_launch(AgentType.PLANNER, teams=False)
         consult = _teams_launch(AgentType.WORKER, teams=False, consult=True)
-        assert _denied(planner.args()) == ["Edit", "Write", "NotebookEdit", "ListAgents", "SendMessage"]
+        assert _denied(planner.args()) == ["Bash", "Edit", "Write", "NotebookEdit", "ListAgents", "SendMessage"]
         assert _denied(consult.args()) == ["Bash", "Edit", "Write", "NotebookEdit", "ListAgents", "SendMessage"]
 
     @pytest.mark.parametrize("command", ["run", "resident", "consult"])
