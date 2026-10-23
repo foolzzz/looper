@@ -751,6 +751,8 @@ class AcpGrok:
             if isinstance(exc, AcpUnavailable):
                 await self._fall_back(str(exc))
                 self._readying = False
+                # Let the owner rebind this turn before its per-turn bridge can call any tools.
+                await on_event({"type": "system", "subtype": "transport", "transport": self.transport})
                 # The legacy turn sees a request that came meanwhile (``cancel.requested``) and starts no process.
                 return await self._legacy.run_turn(text, on_event, tag=tag, stop=stop, cancel=cancel)
             if isinstance(exc, SessionGone):

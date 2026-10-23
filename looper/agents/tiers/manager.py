@@ -1486,6 +1486,8 @@ class ManagerAgent:
                     self.ops.expect(token.binding, bare, arguments, call_id=block.get("id"))
 
         async def on_event(payload: dict[str, Any]) -> None:
+            if payload.get("type") == "system" and payload.get("subtype") == "transport":
+                self._publish_binding(token)
             observe(payload)
             events.put_nowait(payload)
 
