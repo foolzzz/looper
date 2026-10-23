@@ -136,6 +136,10 @@ class MessageBus:
         replay: list[MessageEnvelope] = []
         dropped = 0
         for envelope in self._journal.undelivered():
+            # Older versions journaled statuses, but their turns ended at restart.
+            if not _journaled(envelope):
+                self._journal.mark_delivered(envelope.message_id)
+                continue
             if envelope.target.agent_type in _PER_TASK_AGENT_TYPES:
                 self._journal.mark_delivered(envelope.message_id)
                 dropped += 1

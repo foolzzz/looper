@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -368,16 +369,121 @@ def test_lark_bot_secret_is_masked_in_logs(monkeypatch: pytest.MonkeyPatch, tmp_
     run_with_channel_configs(test, monkeypatch)
 
 
-def test_manager_running_answers_true_until_the_fleet_exists() -> None:
-    # The same expression serve builds around ``fleet_box``.
-    fleet_box: list[Any] = []
+@requires_db
+@pytest.mark.parametrize("channel_type", ["telegram", "lark"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_startup_bot_backlog_reaches_only_an_enabled_manager(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, channel_type: str, enabled: bool,
+) -> None:
+    from unittest.mock import AsyncMock
 
-    def manager_running(manager_id: str) -> bool:
-        return fleet_box[0].is_running(manager_id) if fleet_box else True
+    from looper import db, ops_config
+    from looper.agents import managers, managers_api, operator_notes, profile_registry, serve
+    from looper.agents.channels import lark_cli
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.channels.telegram import TelegramChannelAdapter
+    from looper.agents.runtimes import codex_login, grok_login
+    from looper.agents.tiers.manager import TURNED_OFF_REPLY
+    from tests.test_agent_channels import _lark_event, _tg_update
+    from tests.test_channel_post import _Bot
+    from tests.test_lark_transport import StubTransport
 
-    assert manager_running("manager-review") is True
-    fleet_box.append(SimpleNamespace(is_running=lambda manager_id: manager_id == "manager"))
-    assert manager_running("manager") is True and manager_running("manager-review") is False
+    class Started(Exception):
+        pass
+
+    async def test(pool: Any) -> None:
+        await pool.execute("INSERT INTO managers (id, name, system_prompt, enabled) "
+                           "VALUES ('manager-review', 'Review', 'x', $1)", enabled)
+        config = {"allowed_user_ids": ["7"]} if channel_type == "telegram" else {"allowed_open_ids": [OPEN_ID]}
+        await _bot(pool, channel_type, config, TOKEN_1 if channel_type == "telegram" else None,
+                   manager_id="manager-review")
+        adapters: list[Any] = []
+        registries: list[Any] = []
+        incoming: list[str] = []
+        bot, transport = _Bot(), StubTransport()
+
+        async def receive(adapter: Any) -> None:
+            text = f"backlog {len(incoming)}"
+            incoming.append(text)
+            if channel_type == "telegram":
+                await adapter._on_message(_tg_update(7, text), None)
+            else:
+                await adapter._handle_lark_event(_lark_event(OPEN_ID, text, message_id=f"om_{len(incoming)}"))
+
+        async def start(adapter: Any, bus: Any) -> None:
+            adapter._bus = bus
+            adapter._running = True
+            if channel_type == "telegram":
+                adapter._app = SimpleNamespace(bot=bot)
+                adapter._acknowledge = lambda update: None
+            else:
+                adapter._transport = transport
+            adapters.append(adapter)
+            await receive(adapter)
+
+        load = managers.ManagerFleet.load
+
+        async def load_with_backlog(fleet: Any) -> None:
+            # An already polling adapter can receive another message while the fleet is still being built.
+            for adapter in adapters:
+                await receive(adapter)
+            await load(fleet)
+
+        register = serve.ChannelRegistry.register
+
+        async def register_and_keep(registry: Any, adapter: Any) -> None:
+            if registry not in registries:
+                registries.append(registry)
+            await register(registry, adapter)
+
+        async def ready(supervisor: Any) -> None:
+            # Inspect delivery before the agents consume their queues; no model process is launched.
+            raise Started
+
+        identity = SimpleNamespace(profile="", app_id="cli_x", bot_name="B", bot_open_id="ou_bot00000001")
+        monkeypatch.setattr(lark_cli, "identity", AsyncMock(return_value=identity))
+        monkeypatch.setattr(lark_cli, "check", AsyncMock(return_value=(None, identity)))
+        monkeypatch.setattr(TelegramChannelAdapter if channel_type == "telegram" else LarkChannelAdapter, "start", start)
+        monkeypatch.setattr(managers.ManagerFleet, "load", load_with_backlog)
+        monkeypatch.setattr(serve.ChannelRegistry, "register", register_and_keep)
+        monkeypatch.setattr(serve.AgentSupervisor, "start_all", ready)
+        monkeypatch.setattr(managers_api, "_listener", None)
+        monkeypatch.setattr(operator_notes, "_root", str(tmp_path))
+        monkeypatch.setattr(db, "init_pool", AsyncMock(return_value=pool))
+        monkeypatch.setattr(profile_registry, "register_found_runtimes", AsyncMock(return_value=[]))
+        for module in (codex_login, grok_login):
+            monkeypatch.setattr(module, "inspect_at_start", AsyncMock(return_value=None))
+        check = serve.self_check.Check("test", "Test", serve.self_check.OK, "")
+        for name in ("check_database", "codex_login_check", "grok_login_check"):
+            monkeypatch.setattr(serve.self_check, name, AsyncMock(return_value=check))
+        monkeypatch.setattr(serve.self_check, "check_claude", lambda _: [])
+        for name in ("check_lark_cli", "check_git"):
+            monkeypatch.setattr(serve.self_check, name, lambda *args: check)
+        ops = ops_config.OpsConfig(runtime_root=tmp_path, path=tmp_path / "ops.toml", database_url=DSN, port=9876,
+                                   operator_notes_root=str(tmp_path))
+        try:
+            with pytest.raises(Started):
+                await asyncio.wait_for(serve._run_agent_system(ops=ops, runtime_root=tmp_path, work_dir=tmp_path,
+                                                               skip_backup=True), 10)
+            assert adapters and incoming
+            queued = await adapters[0]._bus.drain_queue("manager-review")
+            replies = [s["text"] for s in bot.sent] if channel_type == "telegram" else [
+                fields["text"] for method, fields in transport.calls if method == "send" and "text" in fields]
+            if enabled:
+                assert [message.payload["text"] for message in queued] == incoming
+                assert TURNED_OFF_REPLY not in replies
+            else:
+                assert queued == []
+                assert replies == [TURNED_OFF_REPLY] * len(incoming)
+                assert adapters[0]._bus.journal.undelivered() == []
+        finally:
+            for adapter in adapters:
+                if channel_type == "telegram":
+                    adapter._app = None
+            for registry in registries:
+                await registry.stop_all()
+
+    run_with_channel_configs(test, monkeypatch)
 
 
 @requires_db

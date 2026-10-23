@@ -878,14 +878,8 @@ async def _run_agent_system(
     await registry.register(web_adapter)
 
     # Every enabled bot runs as its own adapter (RFC §9.1), read once at startup.
-    fleet_box: list[Any] = []
-
-    def manager_running(manager_id: str) -> bool:
-        return fleet_box[0].is_running(manager_id) if fleet_box else True
-
     bot_rows = await _enabled_bot_rows()
     lark_enabled = any(r["channel_type"] == "lark" for r in bot_rows)
-    await _register_bots(registry, bot_rows, runtime_root, manager_running, ("telegram",))
 
     # Without Claude or its login the agents cannot run, but the dashboard can
     # still show and change everything: a warning here and on /api/status.
@@ -898,8 +892,6 @@ async def _run_agent_system(
         await asyncio.to_thread(self_check.check_git),
     ]
     self_check.log_problems(checks)
-
-    await _register_bots(registry, bot_rows, runtime_root, manager_running, ("lark", "lark_bot"))
 
     # --- Agent Tiers ---
 
@@ -934,9 +926,11 @@ async def _run_agent_system(
                         supervisor=supervisor, scheduler=scheduler, runtime_root=runtime_root)
     fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=runtime_root,
                          url=_local_url(host, port), config=manager_config, broadcaster=broadcaster)
-    fleet_box.append(fleet)
     task_router.manager_running = fleet.is_running
     await fleet.load()
+    # Start receiving only once every enabled Manager is known, so backlog is not lost or sent to a disabled one.
+    await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("telegram",))
+    await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("lark", "lark_bot"))
     manager = fleet.default
     manager_ops = fleet.ops("manager")
     managers_api.set_change_listener(fleet.apply)

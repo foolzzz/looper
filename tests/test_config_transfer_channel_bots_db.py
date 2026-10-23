@@ -40,6 +40,39 @@ async def _dump(pool: Any) -> dict[str, list[str]]:
             for t in ("channel_configs", "projects", "role_configs")}
 
 
+@pytest.mark.parametrize("command", ["export", "import"])
+def test_export_and_preview_read_channels_before_the_manager_migration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: str,
+) -> None:
+    async def _test() -> None:
+        async with _installation() as (pool, url):
+            from looper.agents.serve import seed_channel_configs
+
+            await seed_channel_configs(pool)
+            await pool.execute("ALTER TABLE channel_configs DROP COLUMN manager_id CASCADE")
+            await pool.execute("UPDATE channel_configs SET display_name = 'Saved Telegram' "
+                               "WHERE channel_id = 'channel-telegram'")
+            before, rows = await _dump(pool), await _rows(pool)
+            path = tmp_path / "config.json"
+            if command == "import":
+                path.write_text(json.dumps({"format": "looper-config/v3", "channels": [
+                    {"channel_type": "telegram", "channel_id": "channel-telegram", "display_name": "Preview name",
+                     "enabled": False, "config": {}}]}))
+            args = ["config", command, str(path)] + (["--json"] if command == "import" else [])
+            code, out, err = await _looper(monkeypatch, url, *args)
+            assert code == 0, err
+            if command == "export":
+                channels = json.loads(path.read_text())["channels"]
+                assert next(c for c in channels if c["channel_id"] == "channel-telegram")["display_name"] == "Saved Telegram"
+            else:
+                plan = _plan(out)
+                assert not plan["applied"]
+                assert plan["counts"]["channels"]["changed"] == 1
+            assert await _dump(pool) == before and await _rows(pool) == rows
+
+    asyncio.run(_test())
+
+
 @pytest.mark.parametrize("secrets", [False, True])
 def test_export_leaves_the_added_bot_out(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, secrets: bool) -> None:
     async def _test() -> None:

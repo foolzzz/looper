@@ -168,6 +168,7 @@ class TestMessageBus:
             reply = _make_envelope(source=MANAGER_ADDRESS, target=channel_address("web"),
                                    message_type=MessageType.AGENT_REPLY, payload={"text": "done"})
             await bus1.publish(status)
+            assert bus1.get_queue(channel_address("web").agent_id).get_nowait() == status
             await bus1.publish(reply)
             assert synced == [MessageType.AGENT_REPLY]
             await bus1.shutdown()
@@ -228,6 +229,25 @@ class TestTopicConsumers:
 
 
 class TestReplay:
+    def test_legacy_status_updates_are_dropped(self, tmp_path: Path) -> None:
+        journal_dir = tmp_path / ".local" / "agent-bus"
+        status = _make_envelope(
+            source=MANAGER_ADDRESS,
+            target=channel_address("web"),
+            message_type=MessageType.STATUS_UPDATE,
+            payload={"text": "stale", "delta": True},
+        )
+        MessageJournal(journal_dir).append(status)
+
+        async def _run() -> None:
+            for _ in range(2):
+                bus = MessageBus(tmp_path)
+                await bus.start()
+                assert bus.pending_count(status.target.agent_id) == 0
+                assert (journal_dir / "journal.jsonl").read_text() == ""
+
+        asyncio.run(_run())
+
     def test_messages_for_per_task_agents_are_dropped(self, tmp_path: Path) -> None:
         """Planners and Workers do not survive a restart; their tasks are stopped."""
         journal = MessageJournal(tmp_path / ".local" / "agent-bus")
