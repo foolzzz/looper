@@ -285,9 +285,9 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
             if path == "/api/projects":
                 self.work = Path(body["work_dir"])
                 return {"project_id": "project-eval"}
-            if path == "/api/tasks/create":
+            if path == "/api/v1/tasks/create":
                 self.work = Path(body["project"]["work_dir"])
-                return {"task_id": "task-eval", "project_id": "project-eval"}
+                return {"status": "ok", "result": {"task_id": "task-eval", "project_id": "project-eval"}}
             if path == "/api/tasks/start":
                 for role in ("planner", "worker", "reviewer"):
                     self.launch(role)
@@ -895,7 +895,7 @@ def test_vault_tasks_enable_the_project_and_read_back_their_commits(
         if path == "/api/tasks/start":
             for name, content in task.fake["attempts"]["s1"][0]["files"].items():
                 (work / name).write_text(content, encoding="utf-8")
-        return {"task_id": "task-1"}
+        return {"status": "ok", "result": {"task_id": "task-1"}} if path == "/api/v1/tasks/create" else {}
 
     def get(path: str, **_: Any) -> dict[str, Any]:
         if path == "/api/tasks/task-1":
@@ -1510,7 +1510,7 @@ def test_run_task_pushes_fixes_without_resuming_the_pr_wait(
 
     def post(path: str, body: Any) -> dict[str, Any]:
         posted.append((path, body))
-        return {"task_id": "t1", "project_id": "p1"} if path == "/api/tasks/create" else {}
+        return {"status": "ok", "result": {"task_id": "t1", "project_id": "p1"}} if path == "/api/v1/tasks/create" else {}
 
     def get(path: str, **_: Any) -> dict[str, Any]:
         if path == "/api/tasks/t1":
@@ -1530,7 +1530,7 @@ def test_run_task_pushes_fixes_without_resuming_the_pr_wait(
     if fault is not None:
         assert result["problems"]  # aggregate counts pass; only the task-specific flow check rejects this
     assert result["wait_resumes"] == {}
-    assert [path for path, _ in posted] == ["/api/tasks/create", "/api/tasks/start"]
+    assert [path for path, _ in posted] == ["/api/v1/tasks/create", "/api/tasks/start"]
     assert ("for value in values" in runner._git_in(tmp_path, "show", "HEAD:totals.py")) is (fault != "wrong_pr")
 
 
@@ -2107,7 +2107,7 @@ class _CostlyApi:
         self.posts.append((path, body))
         if path == "/api/tasks/cancel":
             self.cancelled = True
-        return {"task_id": "task-1"} if path == "/api/tasks/create" else {}
+        return {"status": "ok", "result": {"task_id": "task-1"}} if path == "/api/v1/tasks/create" else {}
 
     def get(self, path: str, **_query: Any) -> Any:
         if path == "/api/tasks/task-1":
@@ -2123,7 +2123,7 @@ class _CostlyApi:
 def test_a_task_is_cancelled_when_it_reaches_the_cap_left(tmp_path: Path) -> None:
     api = _CostlyApi()
     result = runner.run_task(api, _task("a"), tmp_path / "work", timeout=60, poll=0, cap_left=0.25)  # type: ignore[arg-type]
-    assert [path for path, _ in api.posts] == ["/api/tasks/create", "/api/tasks/start", "/api/tasks/cancel"]
+    assert [path for path, _ in api.posts] == ["/api/v1/tasks/create", "/api/tasks/start", "/api/tasks/cancel"]
     assert result["stopped_by_cap"] is True and result["success"] is False
     # Cancelled at the cap: an error, not the model's failure.
     assert (result["outcome"], result["error_class"], result["error"]) == (
@@ -2145,7 +2145,7 @@ def test_a_task_the_harness_cannot_follow_is_cancelled_with_its_cost(tmp_path: P
         runner.run_task(api, _task("a"), tmp_path / "work", timeout=60, poll=0)  # type: ignore[arg-type]
     assert str(raised.value) == "EvalError: GET /api/llm-records answered 500: boom"
     assert raised.value.cost_usd == pytest.approx(0.0)
-    assert [path for path, _ in api.posts] == ["/api/tasks/create", "/api/tasks/start", "/api/tasks/cancel"]
+    assert [path for path, _ in api.posts] == ["/api/v1/tasks/create", "/api/tasks/start", "/api/tasks/cancel"]
 
 
 def test_real_claude_gets_the_per_run_budget(tmp_path: Path) -> None:

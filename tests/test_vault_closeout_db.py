@@ -135,8 +135,8 @@ def test_task_vault_closeout_is_once_and_preserves_its_result(tmp_path: Path, mo
             project = api.post("/api/projects", {"name": "build", "work_dir": str(work), "vault": mode,
                                                  "distill_lessons": "off", "agent_room": "off",
                                                  "operator_notes": "off", "task_workspaces": "in_place"})
-            task_id = api.post("/api/tasks/create", {"requirement": "build the package",
-                                                       "project_id": project["project_id"]})["task_id"]
+            task_id = api.post("/api/v1/tasks/create", {"requirement": "build the package",
+                                                       "project_id": project["project_id"]})["result"]["task_id"]
             api.post("/api/tasks/start", {"task_id": task_id})
             done = _wait(api, task_id, lambda detail: detail["status"] in ("completed", "failed", "stopped"))
             activity = [row["summary"] for row in api.get(f"/api/tasks/{task_id}/activity", limit=500)["activity"]]

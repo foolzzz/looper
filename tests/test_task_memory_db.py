@@ -117,8 +117,8 @@ def test_accepted_steps_are_journaled_fed_back_and_distilled_into_knowledge(
             project = api.post("/api/projects", {"name": "calc", "work_dir": str(work),
                                                  "distill_lessons": distill_lessons})
             assert project["distill_lessons"] == distill_lessons
-            task_id = api.post("/api/tasks/create", {"requirement": "build the calc package",
-                                                      "project_id": project["project_id"]})["task_id"]
+            task_id = api.post("/api/v1/tasks/create", {"requirement": "build the calc package",
+                                                      "project_id": project["project_id"]})["result"]["task_id"]
             api.post("/api/tasks/start", {"task_id": task_id})
             done = _wait(api, task_id, lambda d: d["status"] in ("completed", "failed", "stopped"))
             base = f"/api/projects/{project['project_id']}/knowledge"

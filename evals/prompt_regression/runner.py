@@ -535,7 +535,7 @@ def run_task(
         project["vault"] = "on"
     before = snapshot(work_dir)
     started = time.monotonic()
-    created = api.post("/api/tasks/create", {"requirement": task.requirement, "project": project})
+    created = api.post("/api/v1/tasks/create", {"requirement": task.requirement, "project": project})["result"]
     task_id = created["task_id"]
     try:
         if task.planner_may_choose:

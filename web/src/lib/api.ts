@@ -777,7 +777,7 @@ export async function discardStepWorkspace(taskId: string, workspaceId: number):
   return (await res.json()).workspace;
 }
 
-export interface NewProjectFields {
+export interface NewProjectFields extends Partial<ProjectExecution> {
   name: string;
   description?: string;
   /** Absolute default work directory; omit or "" for none. */
@@ -806,13 +806,10 @@ export async function createTask(
     base?: string;
   } & TaskProjectChoice,
 ): Promise<{ task_id: string; status: string; created_at: string; project_id: string; workspace: WorkspaceCheck }> {
-  const res = await fetch(`${API_BASE}/tasks/create`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(params),
-  });
-  if (!res.ok) await failed(res, "create task");
-  const data = await res.json();
+  const data = await callV1<{ task_id: string; status: string; created_at: string; project_id: string; workspace: WorkspaceCheck }>(
+    "/api/v1/tasks/create", params,
+  );
+  if ("confirmation_id" in data) throw new V1Error(202, "unavailable", data.impact);
   notifyProjectsChanged();
   return data;
 }

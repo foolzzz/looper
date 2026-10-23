@@ -34,6 +34,12 @@ async def _call(method: str, path: str, body: Any = None, *, claude: str = "clau
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())), claude_bin=claude)
+    if path == "/api/v1/tasks/create":
+        from looper.agents.ops.clients import ClientOps
+        from tests.test_api_v1_ops_db import _v1
+
+        status, answer = await _v1(method, path, body, ops=ClientOps(SimpleNamespace()))
+        return status, answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
     writer = _Writer()
     parsed = urlsplit(path)
     await server._route_api(method, parsed.path, dict(parse_qsl(parsed.query)),
@@ -1130,7 +1136,7 @@ def test_where_a_profile_is_selected_is_read_back_and_keeps_it_from_being_delete
         await _ok("PUT", f"/api/projects/{calc}/agent-settings", {"profile_id": sonnet})
         await _ok("PUT", f"/api/projects/{calc}/agent-settings/roles/reviewer", {"profile_id": one_off})
         for _ in range(2):
-            await _ok("POST", "/api/tasks/create", {"requirement": "r", "project_id": calc,
+            await _ok("POST", "/api/v1/tasks/create", {"requirement": "r", "project_id": calc,
                                                     "profile_overrides": {"worker": sonnet, "reviewer": sonnet}})
 
         profiles = {a["name"]: a for a in (await _registry())["profiles"]}
@@ -1226,9 +1232,9 @@ def test_a_tasks_profile_override_reaches_only_that_tasks_role(
         one_off = await _stand_in_profile(stand_in)
         await _ok("PUT", "/api/agent-settings/system", {"profile_id": sonnet})
         project = (await _ok("POST", "/api/projects", {"name": "calc", "work_dir": str(tmp_path / "w")}))["project_id"]
-        chose = (await _ok("POST", "/api/tasks/create", {"requirement": "r", "project_id": project,
-                                                         "profile_overrides": {"worker": haiku, "planner": None}}))
-        plain = await _ok("POST", "/api/tasks/create", {"requirement": "r", "project_id": project})
+        chose = (await _ok("POST", "/api/v1/tasks/create", {"requirement": "r", "project_id": project,
+                                                         "profile_overrides": {"worker": haiku}}))
+        plain = await _ok("POST", "/api/v1/tasks/create", {"requirement": "r", "project_id": project})
 
         seen = {(task["task_id"] == chose["task_id"], role): await _launch(role, task["task_id"], tmp_path / "w",
                                                                            tmp_path)
@@ -1245,14 +1251,14 @@ def test_a_tasks_profile_override_reaches_only_that_tasks_role(
         assert (await _call("DELETE", f"/api/agent-profiles/{haiku}"))[0] == 409  # a task chose it
 
         # A task chooses only for its own roles, a profile that exists and can run the role.
-        for overrides, error in [({"manager": sonnet}, "not 'manager'"),
+        for overrides, error in [({"manager": sonnet}, "declared schema"),
                                  ({"worker": "agent-nowhere"}, "no Agent Profile"),
-                                 ({"planner": one_off}, "cannot run the planner"), ([sonnet], "must be an object")]:
-            status, payload = await _call("POST", "/api/tasks/create", {"requirement": "r", "project_id": project,
+                                 ({"planner": one_off}, "cannot run the planner"), ([sonnet], "declared schema")]:
+            status, payload = await _call("POST", "/api/v1/tasks/create", {"requirement": "r", "project_id": project,
                                                                         "profile_overrides": overrides})
             assert status == 400 and error in payload["error"], payload
-        assert (await _call("POST", "/api/tasks/create", {"requirement": "r", "project_id": project,
-                                                          "profile_overrides": {"worker": one_off}}))[0] == 201
+        assert (await _call("POST", "/api/v1/tasks/create", {"requirement": "r", "project_id": project,
+                                                          "profile_overrides": {"worker": one_off}}))[0] == 200
 
     run_db(_test, monkeypatch)
 
@@ -1266,7 +1272,7 @@ def test_a_profile_that_can_no_longer_run_fails_the_run_instead_of_another_profi
         one_off = await _stand_in_profile(stand_in)
         await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": one_off})
         project = (await _ok("POST", "/api/projects", {"name": "calc"}))["project_id"]
-        task = (await _ok("POST", "/api/tasks/create", {"requirement": "r", "project_id": project,
+        task = (await _ok("POST", "/api/v1/tasks/create", {"requirement": "r", "project_id": project,
                                                         "work_dir": str(tmp_path / "w")}))["task_id"]
         monkeypatch.delitem(runtimes.ADAPTERS, stand_in)  # a version without that runtime type
 

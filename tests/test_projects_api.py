@@ -207,6 +207,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     from looper.db import manager_actions
 
     monkeypatch.setattr(manager_actions, "for_task", fake.manager_actions)
+    monkeypatch.setattr(manager_actions, "record", AsyncMock())
     from looper.db import task_roles
 
     monkeypatch.setattr(task_roles, "versions", AsyncMock(return_value=[]))
@@ -254,6 +255,12 @@ def _server(router: TaskRouter | None = None) -> AgentHTTPServer:
 def _call(method: str, path: str, body: Any = None, *, query: dict[str, str] | None = None,
           server: AgentHTTPServer | None = None) -> tuple[int, Any]:
     """Route one API request; return the status code and the decoded JSON body."""
+    if path == "/api/v1/tasks/create":
+        from looper.agents.ops.clients import ClientOps
+        from tests.test_api_v1_ops_db import _v1
+
+        status, answer = asyncio.run(_v1(method, path, body, ops=ClientOps(SimpleNamespace())))
+        return status, answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
     raw = body if isinstance(body, bytes) else (b"" if body is None else json.dumps(body).encode())
     writer = _Writer()
     asyncio.run((server or _server())._route_api(method, path, query or {}, raw, writer))
@@ -381,11 +388,11 @@ class TestProjectBackground:
         assert status == 200 and body["background"] == ""
 
     def test_a_new_project_made_with_a_task_takes_it(self, store: _Store) -> None:
-        status, body = _call("POST", "/api/tasks/create", {
+        status, body = _call("POST", "/api/v1/tasks/create", {
             "requirement": "r", "work_dir": "/tmp/calc",
             "project": {"name": "calc", "background": " Use uv.\n"},
         })
-        assert status == 201
+        assert status == 200
         assert store.projects[body["project_id"]]["background"] == " Use uv."
 
 
@@ -399,7 +406,7 @@ class TestMovedProjectFields:
         store.add_project("proj-c", "c")
         assert _call("PUT", "/api/projects/proj-c", {"name": "renamed", field: "x"})[0] == 400
         assert store.projects["proj-c"]["name"] == "c"
-        status, _ = _call("POST", "/api/tasks/create", {"requirement": "r", "work_dir": "/tmp/calc",
+        status, _ = _call("POST", "/api/v1/tasks/create", {"requirement": "r", "work_dir": "/tmp/calc",
                                                         "project": {"name": "calc", field: "x"}})
         assert status == 400 and list(store.projects) == ["proj-c"]
 
@@ -407,8 +414,8 @@ class TestMovedProjectFields:
 class TestTaskCreate:
     def test_in_an_existing_project_uses_its_directory(self, store: _Store) -> None:
         store.add_project("proj-a", "tetris", "/srv/tetris")
-        status, body = _call("POST", "/api/tasks/create", {"requirement": " build it ", "project_id": "proj-a"})
-        assert status == 201
+        status, body = _call("POST", "/api/v1/tasks/create", {"requirement": " build it ", "project_id": "proj-a"})
+        assert status == 200
         assert body["project_id"] == "proj-a" and body["status"] == "init"
         task = store.tasks[body["task_id"]]
         assert (task["project_id"], task["work_dir"], task["requirement"], task["status"]) == (
@@ -417,16 +424,16 @@ class TestTaskCreate:
 
     def test_an_explicit_directory_wins_over_the_projects(self, store: _Store) -> None:
         store.add_project("proj-a", "tetris", "/srv/tetris")
-        status, body = _call("POST", "/api/tasks/create",
+        status, body = _call("POST", "/api/v1/tasks/create",
                              {"requirement": "r", "project_id": "proj-a", "work_dir": "/tmp/other/"})
-        assert status == 201 and store.tasks[body["task_id"]]["work_dir"] == "/tmp/other"
+        assert status == 200 and store.tasks[body["task_id"]]["work_dir"] == "/tmp/other"
 
     def test_with_a_new_project_creates_both_in_one_transaction(self, store: _Store) -> None:
-        status, body = _call("POST", "/api/tasks/create", {
+        status, body = _call("POST", "/api/v1/tasks/create", {
             "requirement": "r", "project": {"name": " notes ", "description": "d", "work_dir": "~/notes"},
             "config": {"k": 1}, "goal_id": "g",
         })
-        assert status == 201
+        assert status == 200
         (project,) = store.projects.values()
         notes_dir = os.path.join(os.path.expanduser("~"), "notes")
         assert (project["name"], project["description"], project["work_dir"]) == ("notes", "d", notes_dir)
@@ -436,9 +443,9 @@ class TestTaskCreate:
         assert store.transactions == 1
 
     def test_a_new_project_keeps_only_its_own_directory(self, store: _Store) -> None:
-        status, body = _call("POST", "/api/tasks/create",
+        status, body = _call("POST", "/api/v1/tasks/create",
                              {"requirement": "r", "project": {"name": "notes"}, "work_dir": "/tmp/notes"})
-        assert status == 201
+        assert status == 200
         assert store.projects[body["project_id"]]["work_dir"] == ""
         assert store.tasks[body["task_id"]]["work_dir"] == "/tmp/notes"
 
@@ -450,8 +457,8 @@ class TestTaskCreate:
     ])
     def test_needs_exactly_one_project_field(self, store: _Store, fields: dict[str, Any]) -> None:
         store.add_project("proj-a", "tetris", "/srv/tetris")
-        status, body = _call("POST", "/api/tasks/create", {"requirement": "r", "work_dir": "/tmp", **fields})
-        assert status == 400 and "project" in body["error"]
+        status, body = _call("POST", "/api/v1/tasks/create", {"requirement": "r", "work_dir": "/tmp", **fields})
+        assert status == 400 and body["error"] == "the request does not match the declared schema"
         assert store.tasks == {}
 
     @pytest.mark.parametrize("fields", [
@@ -465,28 +472,28 @@ class TestTaskCreate:
     ])
     def test_rejects_bad_project_directory_or_config_fields(self, store: _Store, fields: dict[str, Any]) -> None:
         store.add_project("proj-a", "tetris", "/srv/tetris")
-        assert _call("POST", "/api/tasks/create", {"requirement": "r", **fields})[0] == 400
+        assert _call("POST", "/api/v1/tasks/create", {"requirement": "r", **fields})[0] == 400
         assert store.tasks == {} and len(store.projects) == 1
 
     @pytest.mark.parametrize("project", [{"project_id": "proj-a"}, {"project": {"name": "notes"}}])
     def test_without_any_directory_is_refused(self, store: _Store, project: dict[str, Any]) -> None:
         store.add_project("proj-a", "tetris")  # no default directory
-        status, body = _call("POST", "/api/tasks/create", {"requirement": "r", "work_dir": " ", **project})
+        status, body = _call("POST", "/api/v1/tasks/create", {"requirement": "r", "work_dir": " ", **project})
         assert status == 400
         assert body["error"] == "a work directory is required: set one on the task or on its project"
         assert store.tasks == {} and list(store.projects) == ["proj-a"]
 
     def test_requires_a_requirement(self, store: _Store) -> None:
         store.add_project("proj-a", "tetris", "/srv/tetris")
-        assert _call("POST", "/api/tasks/create", {"requirement": " ", "project_id": "proj-a"})[0] == 400
+        assert _call("POST", "/api/v1/tasks/create", {"requirement": " ", "project_id": "proj-a"})[0] == 400
 
     def test_unknown_project_id_is_404(self, store: _Store) -> None:
-        status, _ = _call("POST", "/api/tasks/create", {"requirement": "r", "project_id": "proj-nope", "work_dir": "/tmp"})
+        status, _ = _call("POST", "/api/v1/tasks/create", {"requirement": "r", "project_id": "proj-nope", "work_dir": "/tmp"})
         assert status == 404 and store.tasks == {}
 
     def test_a_new_project_with_a_taken_name_is_409(self, store: _Store) -> None:
         store.add_project("proj-a", "Notes", "/srv/notes")
-        status, _ = _call("POST", "/api/tasks/create", {"requirement": "r", "project": {"name": "notes"}, "work_dir": "/tmp"})
+        status, _ = _call("POST", "/api/v1/tasks/create", {"requirement": "r", "project": {"name": "notes"}, "work_dir": "/tmp"})
         assert status == 409
         assert store.tasks == {} and list(store.projects) == ["proj-a"]
 
@@ -691,13 +698,13 @@ class TestEditRequirement:
         store.add_task("task-1", "proj-a", "init")
         status, body = _call("PUT", "/api/tasks/task-1/config", {"requirement": "x" * 32_001})
         assert status == 400 and body["error"] == "the requirement has 32001 characters; at most 32000 are allowed"
-        status, body = _call("POST", "/api/tasks/create", {"requirement": "x" * 32_001, "project_id": "proj-a",
+        status, body = _call("POST", "/api/v1/tasks/create", {"requirement": "x" * 32_001, "project_id": "proj-a",
                                                            "work_dir": "/tmp/t"})
-        assert status == 400 and "at most 32000" in body["error"]
+        assert status == 400 and body["error"] == "the request does not match the declared schema"
         assert "task-1" not in store.versions and len(store.tasks) == 1
         # The longest one is taken whole.
-        assert _call("POST", "/api/tasks/create", {"requirement": "x" * 32_000, "project_id": "proj-a",
-                                                   "work_dir": "/tmp/t"})[0] == 201
+        assert _call("POST", "/api/v1/tasks/create", {"requirement": "x" * 32_000, "project_id": "proj-a",
+                                                   "work_dir": "/tmp/t"})[0] == 200
 
     def test_the_task_pages_edit_of_a_task_not_started_is_kept_as_a_version_too(self, store: _Store) -> None:
         store.add_project("proj-a", "tetris")

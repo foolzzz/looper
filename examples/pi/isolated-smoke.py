@@ -272,8 +272,8 @@ def session_smoke(base, token, root, work, output, provider, *, helper, installe
                        "message_id": "smoke-" + str(time.monotonic_ns()), "target": target})
 
     def task(marker):
-        task_id = request(base, "/api/tasks/create", token, "POST", {
-            "project_id": project_id, "requirement": marker})["task_id"]
+        task_id = request(base, "/api/v1/tasks/create", token, "POST", {
+            "project_id": project_id, "requirement": marker})["result"]["task_id"]
         request(base, "/api/tasks/start", token, "POST", {"task_id": task_id})
         return task_id
 

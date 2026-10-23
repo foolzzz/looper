@@ -2748,8 +2748,8 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
                 work = tmp_path / f"work-{number}"
                 work.mkdir()
                 project = api.post("/api/projects", {"name": f"disposable-{number}", "work_dir": str(work)})
-                task = api.post("/api/tasks/create", {"requirement": "Write delivery.txt and review its contents",
-                                                       "project_id": project["project_id"]})["task_id"]
+                task = api.post("/api/v1/tasks/create", {"requirement": "Write delivery.txt and review its contents",
+                                                       "project_id": project["project_id"]})["result"]["task_id"]
                 tasks.append((task, work))
                 api.post("/api/tasks/start", {"task_id": task})
             for task, work in tasks:
