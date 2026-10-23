@@ -342,8 +342,30 @@ def test_the_startup_sweep_finishes_what_ended_and_removes_what_no_task_has(repo
     assert git(repo, "show", "looper/task-gone/task:left.txt") == "left"  # its branch stays, with what it held
 
 
+@pytest.mark.parametrize("stderr", [
+    b"fatal: not a git repository (or any of the parent directories): .git\n",
+    b"fatal: not a git repository (or any parent up to mount point /)\n"
+    b"Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n",
+], ids=["root", "mount"])
+def test_not_git_workspace_runs_in_place_for_every_discovery_boundary(
+    tmp_path: Path, store: Store, monkeypatch: pytest.MonkeyPatch, stderr: bytes,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    async def outside_git(*_: Any, **__: Any) -> ws._Run:
+        return ws._Run(128, b"", stderr)
+
+    monkeypatch.setattr(ws, "_git", outside_git)
+    checked = run(tw.check(str(workspace), mode=WORKTREE))
+    assert (checked["mode"], checked["git"], [w["kind"] for w in checked["warnings"]]) == (
+        "in_place", None, [WarningKind.NOT_GIT.value])
+    assert prepare(store, task("task-1", workspace), tmp_path / "rt") == str(workspace)
+    assert not store.worktrees
+
+
 @pytest.mark.parametrize("command", ["location", "head", "branch"])
-@pytest.mark.parametrize("failure", ["timeout", "os_error", "git_error", "exit_one"])
+@pytest.mark.parametrize("failure", ["timeout", "os_error", "git_error", "exit_one", "invalid_git_dir"])
 def test_repository_inspection_failures_never_fall_back_to_in_place(
     repo: Path, store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, failure: str,
 ) -> None:
@@ -357,6 +379,8 @@ def test_repository_inspection_failures_never_fall_back_to_in_place(
                 raise ws.GitError("git inspection timed out")
             if failure == "os_error":
                 raise OSError("git inspection unavailable")
+            if failure == "invalid_git_dir":
+                return ws._Run(128, b"", b"fatal: not a git repository: /inspection/broken.git")
             return ws._Run(1 if failure == "exit_one" else 128, b"", b"fatal: inspection failed")
         return await original(cwd, *args, **kwargs)
 

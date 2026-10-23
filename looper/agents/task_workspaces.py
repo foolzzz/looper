@@ -170,7 +170,9 @@ async def _repository(workspace: str) -> _Repository | None:
     try:
         where = await ws._git(workspace, "rev-parse", "--show-toplevel", "--show-prefix", check=False)
         if where.returncode != 0:
-            if where.stderr.startswith((b"fatal: not a git repository (or any of the parent",
+            # Discovery can stop at the root or a mount point. An invalid
+            # explicit git directory ("not a git repository: ...") is still an error.
+            if where.stderr.startswith((b"fatal: not a git repository (or any ",
                                         b"fatal: this operation must be run in a work tree")):
                 return None
             raise ws.GitError(where.stderr.decode("utf-8", "replace").strip()[:500] or
