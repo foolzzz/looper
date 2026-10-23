@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.58] - 2026-10-23
+
+### Fixed
+
+- **A read-only Planner can read its steps' worktrees and symbolic-link paths.** On Claude Code the Planner is now allowed to read the isolated worktrees of the steps its task still uses, and a directory in either its resolved or its written spelling. It can no longer use `EnterWorktree`, and its recommended prompt says to inspect with Read, Glob and Grep and leave commands to Workers (model-visible: its prompt line and tool list change). Other runtimes are unchanged. ([#461](https://github.com/foolzzz/looper/pull/461))
+
 ## [2.13.57] - 2026-10-23
 
 ### Fixed
