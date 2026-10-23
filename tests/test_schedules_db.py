@@ -682,7 +682,7 @@ def test_a_profile_a_schedule_chose_is_not_deleted(monkeypatch: pytest.MonkeyPat
 
 def test_an_export_carries_the_schedules_and_importing_it_here_again_leaves_them_running(
         monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from tests.test_config_transfer_db import _looper
+    from tests.test_config_transfer_db import _transfer_file
 
     async def test(env: ScheduleEnv) -> None:
         await env.enabled(name="nightly")
@@ -691,11 +691,11 @@ def test_an_export_carries_the_schedules_and_importing_it_here_again_leaves_them
                                         ("search_path", await env.pool.fetchval("SELECT current_schema()"))])
         url = urllib.parse.urlunsplit(parts._replace(query=query))
         exported = tmp_path / "config.json"
-        code, _, err = await _looper(monkeypatch, url, "config", "export", str(exported), "--include-projects")
+        code, _, err = await _transfer_file(url, "export", str(exported), include_projects=True)
         assert code == 0, err
         (project,) = json.loads(exported.read_text())["projects"]
         assert [s["name"] for s in project["schedules"]] == ["nightly"]
-        code, _, err = await _looper(monkeypatch, url, "config", "import", str(exported), "--apply")
+        code, _, err = await _transfer_file(url, "import", str(exported), apply=True)
         assert code == 0, err
         # Its settings match: the import leaves it as it is, enabled.
         assert [tuple(r) for r in await env.pool.fetch("SELECT name, enabled FROM schedules")] == [("nightly", True)]

@@ -2127,7 +2127,7 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
 
 async def run_import(conn: Any, data: Mapping[str, Any], *, apply: bool) -> Plan:
     """Preview ``data`` in a read-only transaction, or apply it in one transaction, on ``conn``: what both
-    ``looper config import`` and the dashboard's import run."""
+    v1 and the dashboard's import run."""
     async with conn.transaction(isolation="read_committed" if apply else "repeatable_read", readonly=not apply):
         return await import_config(conn, data, apply=apply)
 
@@ -2180,5 +2180,6 @@ def format_export(summary: ExportSummary, path: Path, *, include_secrets: bool) 
     lines = [f"Wrote {path} ({summary.bytes} bytes, {FORMAT}): {counts}; {secrets}{left_out}."]
     if summary.repoint:
         lines.append(f"{summary.repoint} path document(s) are references to re-point on the new machine.")
-    lines.append(f"On the new machine: looper config import {path.name} (preview), then add --apply.")
+    lines.append(f"On the new machine: loopercli config import {path.name} (preview), then "
+                 "loopercli config import --apply <import_id> and loopercli confirm <confirmation_id>.")
     return "\n".join(lines)

@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from tests.db_support import DSN
-from tests.test_config_transfer_db import _installation, _looper, _plan, _rows
+from tests.test_config_transfer_db import _installation, _plan, _rows, _transfer_file
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -82,8 +82,7 @@ def test_export_leaves_the_added_bot_out(monkeypatch: pytest.MonkeyPatch, tmp_pa
             await seed_channel_configs(pool)
             await _add_bot(pool)
             path = tmp_path / "out.json"
-            args = ["config", "export", str(path)] + (["--include-secrets"] if secrets else [])
-            code, out, err = await _looper(monkeypatch, url, *args)
+            code, out, err = await _transfer_file(url, "export", str(path), include_secrets=secrets)
             assert code == 0, err
             text = path.read_text()
             channels = json.loads(text)["channels"]
@@ -102,13 +101,13 @@ def test_import_leaves_the_added_bot_untouched(monkeypatch: pytest.MonkeyPatch, 
             await seed_channel_configs(pool)
             await _add_bot(pool)
             path = tmp_path / "out.json"
-            assert (await _looper(monkeypatch, url, "config", "export", str(path)))[0] == 0
+            assert (await _transfer_file(url, "export", str(path)))[0] == 0
             data = json.loads(path.read_text())
             telegram = next(c for c in data["channels"] if c["channel_type"] == "telegram")
             telegram["display_name"] = "Imported name"
             path.write_text(json.dumps(data))
             before = await _bot_state(pool)
-            code, _, err = await _looper(monkeypatch, url, "config", "import", str(path), "--apply", "--json")
+            code, _, err = await _transfer_file(url, "import", str(path), apply=True, json_output=True)
             assert code == 0, err
             assert await _bot_state(pool) == before
             assert await pool.fetchval("SELECT display_name FROM channel_configs WHERE channel_id = "
@@ -136,7 +135,7 @@ def test_a_file_with_a_bot_is_refused_and_nothing_changes(
                 {"role": "worker", "prompt": "changed", "timeout_seconds": 60, "enabled": True}]},
                 "channels": [entry]}))
             before, rows = await _dump(pool), await _rows(pool)
-            code, out, err = await _looper(monkeypatch, url, "config", "import", str(path), "--apply")
+            code, out, err = await _transfer_file(url, "import", str(path), apply=True)
             assert code != 0
             assert "is a bot of a Manager" in out + err
             assert await _dump(pool) == before and await _rows(pool) == rows
@@ -158,7 +157,7 @@ def test_a_schedule_cannot_tell_a_chat_only_the_added_bot_allows(
                         "notify": "always", "notify_target": {"channel": "telegram", "chat": BOT_ALLOWED}}
             path.write_text(json.dumps({"format": "looper-config/v2", "projects": [
                 {"name": "calc", "schedules": [schedule]}]}))
-            code, out, err = await _looper(monkeypatch, url, "config", "import", str(path), "--apply", "--json")
+            code, out, err = await _transfer_file(url, "import", str(path), apply=True, json_output=True)
             assert code == 0, err
             assert await pool.fetchval("SELECT notify_channel FROM schedules WHERE name = 'good'") is None
             assert any(f"telegram chat '{BOT_ALLOWED}' is not in this machine's sender allowlist" in n
@@ -193,8 +192,7 @@ def test_the_built_in_channel_is_not_imported_as_an_added_bot(
             path.write_text(json.dumps({"format": "looper-config/v3", "channels": [
                 {"channel_type": "telegram", "channel_id": "channel-telegram", "display_name": "Telegram",
                  "enabled": True, "config": {"allowed_user_ids": ["1"], "bot_token_env": "ALT_TELEGRAM_TOKEN"}}]}))
-            args = ["config", "import", str(path), "--json"] + (["--apply"] if apply else [])
-            code, out, err = await _looper(monkeypatch, url, *args)
+            code, out, err = await _transfer_file(url, "import", str(path), apply=apply, json_output=True)
             assert code == 0, err
             change = next(c for c in _plan(out)["changes"] if c["section"] == "channels")
             assert change["action"] == "skipped" and f"({BOT})" in change["reason"], change
@@ -219,7 +217,7 @@ def test_both_built_in_lark_channels_of_one_app_are_imported(
             path.write_text(json.dumps({"format": "looper-config/v3", "channels": [
                 {"channel_type": "lark_bot", "channel_id": "channel-lark_bot", "display_name": "Lark bot",
                  "enabled": False, "config": {"app_id": "cli_main"}}]}))
-            code, out, err = await _looper(monkeypatch, url, "config", "import", str(path), "--apply", "--json")
+            code, out, err = await _transfer_file(url, "import", str(path), apply=True, json_output=True)
             assert code == 0, err
             change = next(c for c in _plan(out)["changes"] if c["section"] == "channels")
             assert change["action"] != "skipped", change

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from ..db import api_clients as db_api_clients
+from ..ops_config import OpsConfig
 from ..db.tasks import TaskGroup, task_group
 from . import (
     agent_settings, api_v1, catalog, chat_settings, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
@@ -40,7 +41,7 @@ from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
 from .task_roles import record_role, run_roles
 from .tiers.journal import progress_notes
-from .ops import ErrorCode, OpError, check_arguments
+from .ops import Call, ErrorCode, OpError, Risk, Tool, check_arguments
 from .ops.clients import DEFAULT_SESSION, ClientOps
 from .ops.planner import PlannerOps
 from .ops.room import RoomOps
@@ -166,6 +167,7 @@ class AgentHTTPServer:
         planner_ops: PlannerOps | None = None,
         room_ops: RoomOps | None = None,
         client_ops: ClientOps | None = None,
+        ops_config: OpsConfig | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -191,6 +193,7 @@ class AgentHTTPServer:
         self._password_error: operator_auth.OperatorTokenError | None = None
         # The startup self-check (self_check.Check.to_dict), reported on /api/status.
         self._self_checks = self_checks or []
+        self._ops_config = ops_config
         # The Claude Code the server runs: what a Claude Code runtime without an executable of its own probes.
         self._claude_bin = claude_bin
         # What "Run now" on a schedule fires through.
@@ -307,7 +310,8 @@ class AgentHTTPServer:
             query = dict(urllib.parse.parse_qsl(
                 parsed.query, keep_blank_values=area is operator_auth.Access.DASHBOARD))
             streamed = method == "POST" and path == CONFIG_IMPORTS_PATH
-            cap = config_imports.UPLOAD_MAX_BYTES if streamed else REQUEST_BODY_MAX_BYTES
+            cap = (config_imports.UPLOAD_MAX_BYTES if streamed or path == "/api/v1/config/import_preview"
+                   else REQUEST_BODY_MAX_BYTES)
             if area is operator_auth.Access.SIGN_IN:
                 cap = 4096
             body = b""
@@ -437,6 +441,8 @@ class AgentHTTPServer:
             return await self._v1_chat_messages(body, principal, operation)
         if operation.operation_id == "chat.conversations":
             return await self._v1_chat_conversations(body, principal, operation)
+        if operation in api_v1.ONLINE_OPERATIONS:
+            return await self._v1_online(operation, headers, body, principal)
         if self._client_ops is None:
             return api_v1.error(ErrorCode.UNAVAILABLE, "the API is not ready")
         session = headers.get("x-looper-session") or DEFAULT_SESSION
@@ -456,6 +462,102 @@ class AgentHTTPServer:
         else:
             return api_v1.error(ErrorCode.NOT_FOUND, "not available yet")
         return api_v1.answer_status(answer), answer
+
+    async def _v1_online(self, operation: api_v1.Operation, headers: Mapping[str, str], body: bytes,
+                         principal: api_v1.Principal) -> tuple[str, dict[str, Any]]:
+        name = operation.operation_id
+        # Refuse before validating arguments: credential requests never enter the ops argument audit trail.
+        if operation.operator_only and principal.kind != "operator":
+            return api_v1.error(ErrorCode.FORBIDDEN, "operator identity is required")
+        data = self._v1_body(body)
+        if data is None:
+            return api_v1.error(ErrorCode.INVALID, "the body must be a JSON object")
+        try:
+            # Validation errors can contain values; never echo a password supplied as an unexpected property.
+            try:
+                schema = operation.request or {}
+                if name == "auth.set_password":
+                    # The tool validator trims minLength; passwords must keep the offline command's raw length.
+                    schema = {**schema, "properties": {**schema["properties"], "password": {"type": "string"}}}
+                data = check_arguments(schema, data)
+            except OpError:
+                if operation.operator_only:
+                    raise OpError(ErrorCode.INVALID, "invalid credential request") from None
+                raise
+            if operation.operator_only:
+                if self._runtime_root is None:
+                    raise OpError(ErrorCode.UNAVAILABLE, "the server has no runtime root")
+                async with self._sign_in_lock:
+                    if name == "auth.set_password":
+                        user = data.get("user", "admin")
+                        if not isinstance(user, str) or not isinstance(data["password"], str):
+                            raise OpError(ErrorCode.INVALID, "invalid credential request")
+                        await asyncio.to_thread(operator_auth.set_password, self._runtime_root, user, data["password"])
+                        result = {"user": user, "password_set": True}
+                    else:
+                        result = {"removed": await asyncio.to_thread(operator_auth.clear_password, self._runtime_root)}
+                    self._sessions = operator_auth.Sessions()
+                    self._password_key = None
+                return api_v1.OK, {"status": "ok", "result": result}
+            if name == "system.check":
+                if self._ops_config is None:
+                    raise OpError(ErrorCode.UNAVAILABLE, "the server has no ops settings for self checks")
+                checks = await self_check.run_checks(self._ops_config, claude_bin=self._claude_bin)
+                return api_v1.OK, {"status": "ok", "result": {"checks": [c.to_dict() for c in checks]}}
+            if self._client_ops is None:
+                raise OpError(ErrorCode.UNAVAILABLE, "the API is not ready")
+
+            async def run(call: Call) -> dict[str, Any]:
+                try:
+                    if name == "config.export":
+                        from ..db.connection import get_pool
+                        async with get_pool().acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
+                            chunks = config_transfer.export_chunks(conn,
+                                include_projects=bool(call.arguments.get("include_projects")),
+                                include_secrets=bool(call.arguments.get("include_secrets")))
+                            document = json.loads("".join([chunk async for chunk in chunks]))
+                        return {"document": document}
+                    if self._config_imports is None:
+                        raise OpError(ErrorCode.UNAVAILABLE, "the server has no runtime root")
+                    if name == "config.import_preview":
+                        raw = json.dumps(call.arguments["document"], ensure_ascii=False).encode()
+                        reader = asyncio.StreamReader()
+                        reader.feed_data(raw)
+                        reader.feed_eof()
+                        return await self._config_imports.receive(reader, len(raw), owner=principal.key)
+                    return await self._apply_import(self._config_imports, call.arguments["import_id"],
+                                                    owner=principal.key)
+                except config_transfer.ConfigFileError as exc:
+                    raise OpError(ErrorCode.INVALID, str(exc)) from None
+                except config_imports.ImportNotFound as exc:
+                    raise OpError(ErrorCode.NOT_FOUND, str(exc)) from None
+                except (config_imports.ImportConflict, config_transfer.SchemaChangePending) as exc:
+                    raise OpError(ErrorCode.CONFLICT, str(exc)) from None
+
+            async def impact(call: Call) -> str:
+                if self._config_imports is None:
+                    raise OpError(ErrorCode.UNAVAILABLE, "the server has no runtime root")
+                try:
+                    self._config_imports._get(call.arguments["import_id"], owner=principal.key)
+                except config_imports.ImportNotFound as exc:
+                    raise OpError(ErrorCode.NOT_FOUND, str(exc)) from None
+                return f"Apply configuration import {call.arguments['import_id']} in one transaction."
+
+            applying = name == "config.import_apply"
+            tool = Tool(name=name, description=operation.description, schema=operation.request or {},
+                        risk=Risk.HIGH if applying else Risk.READ, run=run, escalate=impact if applying else None)
+            answer = await self._client_ops.call(principal, headers.get("x-looper-session") or DEFAULT_SESSION,
+                                                  name, data, tool=tool)
+            return api_v1.answer_status(answer), answer
+        except OpError as exc:
+            return api_v1.error(exc.code, str(exc))
+        except ValueError:
+            return api_v1.error(ErrorCode.INVALID, "invalid credential request" if operation.operator_only
+                                else "invalid request")
+        except Exception:
+            # No exception text or traceback: credential failures must not expose request values.
+            logger.warning("online operation %s failed", name)
+            return api_v1.error(ErrorCode.UNAVAILABLE, "the operation failed; try again later")
 
     # --- /api/v1 chat ---
 
@@ -2372,11 +2474,12 @@ class AgentHTTPServer:
             await self._recheck_concurrency()
         return result
 
-    async def _apply_import(self, imports: config_imports.ConfigImports, import_id: str, body: bytes = b"") -> Any:
+    async def _apply_import(self, imports: config_imports.ConfigImports, import_id: str, body: bytes = b"", *,
+                            owner: str | None = None) -> Any:
         """Apply an import; its layers may raise a concurrency limit."""
         if body:
             raise config_transfer.ConfigFileError("apply takes no request body; the server recomputes the import plan")
-        result = await imports.apply(import_id)
+        result = await imports.apply(import_id, owner=owner)
         await self._recheck_concurrency()
         return result
 

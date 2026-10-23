@@ -1,11 +1,11 @@
-"""Configuration imports through the dashboard: upload, preview, then apply or cancel (``looper config import``).
+"""Configuration imports through the dashboard and v1: upload, preview, then apply or cancel.
 
 A configuration file with the catalog's files is usually far over the 8 MiB
 the server reads into memory for a request (``REQUEST_BODY_MAX_BYTES``), so
 ``POST /api/config/imports`` alone takes up to ``UPLOAD_MAX_BYTES`` and
 streams the body to a file under ``<runtime root>/config-imports/`` (mode
 0600: the file may hold secrets) instead. The file is then checked and
-previewed exactly like ``looper config import``, and waits under an import id:
+previewed by the shared configuration importer, and waits under an import id:
 ``apply`` writes it in one transaction like ``--apply`` and deletes it,
 ``cancel`` deletes it, and an import neither applied nor cancelled expires
 after ``TTL_SECONDS``. Pending imports live in this process only: the server
@@ -32,8 +32,8 @@ from .library import LIBRARY_MAX_BYTES
 
 logger = logging.getLogger(__name__)
 
-# Twice the catalog's cap: a full catalog as JSON-escaped text with room for projects' knowledge. A larger file
-# still imports with the CLI, which reads it from disk.
+# Twice the catalog's cap: a full catalog as JSON-escaped text with room for projects' knowledge.
+# The dashboard and loopercli both use this upload limit.
 UPLOAD_MAX_BYTES = 2 * LIBRARY_MAX_BYTES
 TTL_SECONDS = 3600
 # Uploads in flight and imports waiting at once; each holds a file of up to UPLOAD_MAX_BYTES on disk.
@@ -60,6 +60,7 @@ class _Pending:
     about: dict[str, str]
     deadline: float  # time.monotonic()
     expires_at: datetime
+    owner: str | None = None
     timer: asyncio.TimerHandle | None = None
     applying: bool = False
 
@@ -95,7 +96,7 @@ class ConfigImports:
         self._pending.clear()
         shutil.rmtree(self._directory, ignore_errors=True)
 
-    async def receive(self, reader: asyncio.StreamReader, length: int) -> dict[str, Any]:
+    async def receive(self, reader: asyncio.StreamReader, length: int, *, owner: str | None = None) -> dict[str, Any]:
         """Stream a body of ``length`` bytes to a file, check it and preview it; the file waits under a new id.
 
         Raises ``ConfigFileError`` for a body that is not a usable file (its
@@ -104,6 +105,8 @@ class ConfigImports:
         """
         if length <= 0:
             raise ConfigFileError("the request holds no file")
+        if length > UPLOAD_MAX_BYTES:
+            raise ConfigFileError("the configuration file exceeds the upload limit")
         if len(self._pending) + self._receiving >= PENDING_MAX:
             raise ImportConflict(f"{PENDING_MAX} imports are pending; apply or cancel one, or wait for one to "
                                  f"expire ({TTL_SECONDS // 60} minutes after its upload)")
@@ -129,16 +132,16 @@ class ConfigImports:
         finally:
             self._receiving -= 1
         pending = _Pending(path, _about(data), time.monotonic() + TTL_SECONDS,
-                           datetime.now(UTC) + timedelta(seconds=TTL_SECONDS))
+                           datetime.now(UTC) + timedelta(seconds=TTL_SECONDS), owner=owner)
         self._pending[import_id] = pending
         self._arm(import_id, pending)
         return {"import_id": import_id, "bytes": length, "file": pending.about,
                 "expires_at": pending.expires_at.isoformat(timespec="seconds"), "plan": plan.view()}
 
-    async def apply(self, import_id: str) -> dict[str, Any]:
+    async def apply(self, import_id: str, *, owner: str | None = None) -> dict[str, Any]:
         """Write the pending import in one transaction and delete its file. On a failure nothing is written and
         it stays pending (until it expires) for another try."""
-        pending = self._get(import_id)
+        pending = self._get(import_id, owner=owner)
         if pending.applying:
             raise ImportConflict("this import is being applied")
         pending.applying = True
@@ -160,8 +163,10 @@ class ConfigImports:
         self._drop(import_id)
         return {"deleted": import_id}
 
-    def _get(self, import_id: str) -> _Pending:
+    def _get(self, import_id: str, *, owner: str | None = None) -> _Pending:
         pending = self._pending.get(import_id)
+        if pending is not None and pending.owner != owner:
+            raise ImportNotFound(f"no pending import {import_id} for this caller")
         if pending is None or (not pending.applying and time.monotonic() >= pending.deadline):
             if pending is not None:
                 self._drop(import_id)
