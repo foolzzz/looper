@@ -397,33 +397,60 @@ with them. Every `--jobs` command below also takes `--case-budget-usd` (see
 Running cases in parallel).
 
 Per pull request, on the tasks and dialogs the change touches plus any new
-ones, with `--reps 2` and haiku (`--tasks a,b` or a task set, `--dialogs a,b`):
+ones, with `--reps 2` and sonnet (`--model sonnet`, `--tasks a,b` or a task
+set, `--dialogs a,b`), compared with the sonnet baselines
+(`baselines/real-sonnet.json` and `baselines/dialogs-real-sonnet.json`). If a
+sonnet baseline is missing, report the gap and refresh it at the next release
+tier run.
+
+The PR commands are:
 
 - a change to model-visible content (a recommended prompt, a contract, the
   injection order, the injected context) runs those tasks:
-  `run --mode real --reps 2 --tasks <ids> --jobs 4 --case-budget-usd 1`;
+  `run --mode real --model sonnet --reps 2 --tasks <ids> --jobs 4
+  --max-budget-usd 1.0 --case-budget-usd 2.0 --total-cap-usd 20`;
 - a change to the Planner's prompt, its contracts, the plan contract or the
   context the Planner receives also runs them on opus, `run --mode real
-  --model opus --reps 2 --tasks <ids> --jobs 4`, compared with
+  --model opus --reps 1 --tasks <ids> --jobs 4 --max-budget-usd 3.0
+  --case-budget-usd 6.0 --total-cap-usd 40`, compared with
   `baselines/real-opus.json`;
 - a change to the Manager's prompt or its tools runs `dialogs --mode real
-  --reps 2 --dialogs <ids> --jobs 4`, and also, with `--manager-model opus
-  --manager-effort xhigh`, the same dialogs on the opus Manager.
+  --model sonnet --reps 2 --dialogs <ids> --jobs 4 --max-budget-usd 1.0
+  --case-budget-usd 1.0 --total-cap-usd 8`, and also runs the same dialogs on
+  the opus xhigh Manager: `dialogs --mode real --model sonnet --reps 1
+  --dialogs <ids> --jobs 4 --manager-model opus --manager-effort xhigh
+  --max-budget-usd 3.0 --case-budget-usd 3.0 --total-cap-usd 12`.
 
+Run a second opus repetition only if the first fails; keep both results.
 Do not rerun after a change the model cannot see.
 
 Once before a release, on the release candidate (`main` after every merge):
-haiku on all 39 tasks, `run --mode real --reps 3 --jobs 4 --max-budget-usd 1.0
---case-budget-usd 2.0 --total-cap-usd 20` (the earlier baseline cost about $12.32); opus,
-`run --mode real --model opus --reps 3 --tasks planner --jobs 4
---max-budget-usd 3.0 --case-budget-usd 6.0 --total-cap-usd 40` (24 tasks;
-the earlier baseline cost about $27.73); and all 22 dialogs on haiku and on the opus xhigh Manager,
-`dialogs --mode real --reps 3 --jobs 4 --max-budget-usd 1.0
---case-budget-usd 1.0 --total-cap-usd 8` (about $4.36) and
-`dialogs --mode real --reps 3 --jobs 4 --manager-model opus
---manager-effort xhigh --max-budget-usd 3.0 --case-budget-usd 3.0
---total-cap-usd 12` (about $7.91). `--jobs` above 1 under a total cap needs
-`--case-budget-usd`. The baselines are refreshed from these runs.
+
+- haiku on all 39 tasks: `run --mode real --reps 3 --jobs 4
+  --max-budget-usd 1.0 --case-budget-usd 2.0 --total-cap-usd 20`
+  (the earlier baseline cost about $12.32);
+- sonnet on all tasks: `run --mode real --model sonnet --reps 3 --jobs 4
+  --max-budget-usd 1.0 --case-budget-usd 2.0 --total-cap-usd 40`, refreshing
+  `baselines/real-sonnet.json`;
+- opus on the 24 Planner tasks: `run --mode real --model opus --reps 3
+  --tasks planner --jobs 4 --max-budget-usd 3.0 --case-budget-usd 6.0
+  --total-cap-usd 40` (the earlier baseline cost about $27.73);
+- haiku on all 22 dialogs: `dialogs --mode real --reps 3 --jobs 4
+  --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd 8` (about $4.36);
+- sonnet on all dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
+  --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd 16`, refreshing
+  `baselines/dialogs-real-sonnet.json`;
+- the opus xhigh Manager on all dialogs: `dialogs --mode real --reps 3 --jobs 4
+  --manager-model opus --manager-effort xhigh --max-budget-usd 3.0
+  --case-budget-usd 3.0 --total-cap-usd 12` (about $7.91).
+
+`--jobs` above 1 under a total cap needs `--case-budget-usd`. Refresh each
+model's baseline from the JSON named by that command's `Run written to`
+output, including both Sonnet files above. Only promote a complete three-rep
+run covering every selected case, with no aborted, skipped or error cases;
+retain scored model failures. If a cap stops a run, raise it and rerun before
+refreshing. The existing five-task, one-rep Sonnet task baseline and missing
+Sonnet dialog baseline remain a coverage gap until those real runs complete.
 
 #### OMP on DeepSeek
 
