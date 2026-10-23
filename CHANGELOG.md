@@ -18,6 +18,10 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+### Changed
+
+- **Supported upgrades start at v2.12.** Installations on older versions must upgrade to v2.12 first, then upgrade to the current version.
+
 ## [2.13.42] - 2026-10-22
 
 ### Fixed

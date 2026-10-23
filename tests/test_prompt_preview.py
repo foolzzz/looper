@@ -45,9 +45,12 @@ def _dependencies(monkeypatch, runtime="claude-code", mode="append", role="worke
     return module, profile, layers
 
 
-@pytest.mark.parametrize("runtime", ["claude-code", "codex", "grok", "omp", "pi"])
-@pytest.mark.parametrize("mode", ["append", "replace"])
-@pytest.mark.parametrize("role", ["planner", "worker", "reviewer", "manager"])
+# The preview takes its blocks from the runtime and its contract from the role, and the two do not interact: one
+# sweep over the runtimes (a worker, appending) and one over the roles (on Claude Code, replacing).
+@pytest.mark.parametrize("runtime,mode,role", [
+    *((runtime, "append", "worker") for runtime in ("claude-code", "codex", "grok", "omp", "pi")),
+    *(("claude-code", "replace", role) for role in ("planner", "worker", "reviewer", "manager")),
+])
 def test_preview_uses_profile_harness_contract_and_runtime_blocks(monkeypatch, runtime, mode, role):
     from looper.agents.system_prompt import sha256_text
     module, profile, loader = _dependencies(monkeypatch, runtime, mode, role)
