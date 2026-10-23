@@ -18,9 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.43] - 2026-10-22
+
 ### Changed
 
 - **Supported upgrades start at v2.12.** Installations on older versions must upgrade to v2.12 first, then upgrade to the current version.
+- **Tests: migration-era launch snapshots and harness self-tests dropped.** The pinned launch fixtures no longer carry prompt text, three main-branch snapshot fixtures and the tests that only exercised the parity harness are removed, and the slow tests that clone an old revision to prove a fixture's origin run in a separate `Launch fixture provenance` workflow (marker `provenance`, excluded from the main test job). Tests and CI only; no change to `looper/`, no behavior change, no model-visible change. ([#416](https://github.com/foolzzz/looper/pull/416))
 
 ## [2.13.42] - 2026-10-22
 
