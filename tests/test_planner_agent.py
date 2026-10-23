@@ -307,7 +307,7 @@ def _assert_unrestricted(argv: list[str]) -> None:
     assert not {"--tools", "--allowedTools", "--permission-mode"} & set(argv)
 
 
-def _assert_read_only(argv: list[str]) -> None:
+def _assert_read_only(argv: list[str], cwd: Path) -> None:
     """A Planner's read-only flags, once: Claude Code's default permission mode, pinned and with no one to answer its
     prompts, without the file-editing tools or the tools that reach other Claude Code sessions, with its skills and
     web reads (and its MCP servers) allowed; nothing that skips the permissions."""
@@ -315,9 +315,11 @@ def _assert_read_only(argv: list[str]) -> None:
     assert argv.count("--permission-mode") == 1 and _flag(argv, "--permission-mode") == "manual"
     assert argv.count("--permission-prompts") == 1 and _flag(argv, "--permission-prompts") == "none"
     assert [argv[i + 1] for i, arg in enumerate(argv) if arg == "--disallowedTools"] == [
-        "Edit,Write,NotebookEdit", "ListAgents,SendMessage"]
+        "Bash,Edit,Write,NotebookEdit", "ListAgents,SendMessage"]
     assert argv.count("--allowedTools") == 1
-    assert str(_flag(argv, "--allowedTools")).startswith("Skill,WebFetch,WebSearch")
+    roots = (cwd.resolve(), *(Path(path).resolve() for path in _add_dirs(argv)))
+    reads = ",".join(f"{tool}(/{root.as_posix()}/**)" for root in roots for tool in ("Read", "Glob", "Grep"))
+    assert str(_flag(argv, "--allowedTools")).startswith(f"{reads},Skill,WebFetch,WebSearch")
 
 
 def _sha(text: str) -> str:
@@ -1041,8 +1043,9 @@ class TestResidentClaude:
 
         (argv,) = claude.argvs()
         # Read-only: the role prompt keeps it to planning, and Claude Code refuses what would change files.
-        _assert_read_only(argv)
-        assert _flag(argv, "--allowedTools") == "Skill,WebFetch,WebSearch"  # no MCP server: no Planner tools here
+        _assert_read_only(argv, h.work_dir)
+        reads = ",".join(f"{tool}(/{h.work_dir.resolve().as_posix()}/**)" for tool in ("Read", "Glob", "Grep"))
+        assert _flag(argv, "--allowedTools") == f"{reads},Skill,WebFetch,WebSearch"  # no MCP server here
         assert _flag(argv, "--input-format") == "stream-json"
         assert _flag(argv, "--output-format") == "stream-json"
         assert (_flag(argv, "--model"), _flag(argv, "--max-turns")) == ("claude-test", "9")
@@ -1445,13 +1448,13 @@ class TestLibrary:
     ) -> None:
         demo, alpha = enabled_library(DEMO_PLUGIN, ALPHA_SKILL)
         claude = planner_claude(plan(step("s1")), decide("accept"))
-        drive(claude, always(WORK_OK))
+        h = drive(claude, always(WORK_OK))
 
         (argv,) = claude.argvs()
         plugin, skills = plugin_dirs(argv)
         assert plugin.endswith(f"/.local/library/{demo['sha256']}/demo") and skills.endswith("/personal")
         # Every tool, Skill included, so that the library's skills reach the Planner too.
-        _assert_read_only(argv)
+        _assert_read_only(argv, h.work_dir)
         assert all(s["metadata"]["library"]["items"] == [
             {"kind": "plugin", "name": "demo@market", "sha256": demo["sha256"], "plugin": "demo", "scope": "global"},
             {"kind": "skill", "name": "alpha", "sha256": alpha["sha256"], "plugin": "personal", "scope": "global"}]
@@ -1504,7 +1507,7 @@ class TestKnowledge:
         # The stored documents' set directory, and the project's since the task runs in its own directory.
         assert Path(set_dir).parent == h.work_dir.parent / ".local" / "projects" / "proj-1" / "knowledge"
         assert mounted_project == str(project_dir)
-        _assert_read_only(argv)
+        _assert_read_only(argv, h.work_dir)
         (prompt,) = claude.prompts()
         _in_order(prompt, "## Project: calc\nUse uv.\n\n", "## Project knowledge\n",
                   f"In {set_dir}:\n- Glossary: Terms the code uses (Glossary.md)\n",
@@ -1605,7 +1608,7 @@ class TestProjectSkills:
         assert plugin.startswith(f"{h.work_dir.parent}/.local/library/")
         assert found[plugin] == {"deploy-check": (
             "---\nname: deploy-check\ndescription: \"Use before a deploy.\"\n---\n\nReply DEPLOY-OK.\n")}
-        _assert_read_only(argv)
+        _assert_read_only(argv, h.work_dir)
         for start in _starts(agent_db):
             library = start["metadata"]["library"]
             assert (library["role"], library["project_id"]) == ("planner", "proj-1")

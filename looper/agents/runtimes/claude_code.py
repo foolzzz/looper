@@ -195,7 +195,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
                  *own),
             unset=(API_KEY,))
 
-    def launch_args(self, launch: Launch) -> list[str]:
+    def launch_args(self, launch: Launch, *, cwd: str | Path | None = None) -> list[str]:
         """The Claude Code flags every agent starts with: the permissions (read-only for a run that must not
         change files, ``Launch.read_only``; only reading tools for a consult) with the tools that reach the
         operator's other Claude Code sessions denied (``claude_cli.peer_args``), the model, the effort, the plugin
@@ -209,7 +209,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         provider = launch.profile.provider
         return [
             *(consult_args() if launch.consult else
-              read_only_args(launch.library) if launch.read_only else permission_args()),
+              read_only_args(launch.library, cwd=cwd if cwd is not None else Path.cwd(),
+                             add_dirs=launch.knowledge.add_dirs) if launch.read_only else permission_args()),
             *peer_args(launch.agent_teams),
             "--model", launch.model,
             *(["--effort", launch.effort] if launch.effort else []),
@@ -252,7 +253,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             # args.
             *claude_cli.isolation_args(cwd),
             *_prompt_input(launch, prompt_file=prompt_file)[0],
-            *self.launch_args(launch),
+            *self.launch_args(launch, cwd=cwd),
             *(["--max-turns", str(max_turns)] if max_turns > 0 else []),
         ]
 
@@ -280,7 +281,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             # come with the launch args.
             *claude_cli.isolation_args(cwd),
             *_prompt_input(launch, prompt_file=prompt_file)[0],
-            *self.launch_args(launch),
+            *self.launch_args(launch, cwd=cwd),
             *(["--max-turns", str(max_turns)] if max_turns > 0 else []),
         ]
 
