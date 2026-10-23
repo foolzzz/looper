@@ -1252,13 +1252,15 @@ class ManagerAgent:
         """The oldest live user turn of ``chat`` on ``channel``: the one being answered, else the first queued."""
         return self._turns.oldest_for(channel, chat)
 
-    async def _end_stopped(self, token: TurnToken, prepared: Prepared, turn: ResidentTurn | None) -> NoReturn:
+    async def _end_stopped(self, token: TurnToken, prepared: Prepared, turn: ResidentTurn | None,
+                           text_parts: list[str]) -> NoReturn:
         """The turn ends stopped (its token already settled): the record finishes as interrupted, with what it
         spent, the session is saved, and the reply is the partial text. The writes get ``STOP_FINISH_SEC``: a
         database that holds them holds neither the reply nor the Manager's lock."""
         if turn is not None:
             self._session_totals = self._claude.totals
-        partial = token.partial
+        # Drained assistant events may not have streamed after the stop; use deltas only if none were handled.
+        partial = "".join(text_parts) or token.partial
         try:
             await token.keep("stop_finish", self._record_stopped(token, prepared, turn, partial), STOP_FINISH_SEC)
         except asyncio.TimeoutError:
@@ -1598,7 +1600,7 @@ class ManagerAgent:
                 # A runtime that lets the turn's cancel escape was stopped by the user: not a failure.
                 token.settle(ReplyOutcome.STOPPED)
                 await handled()
-                await self._end_stopped(token, prepared, None)
+                await self._end_stopped(token, prepared, None, text_parts)
 
             # Whether the stop was asked before the runtime returned (nothing awaited since): then a runtime that
             # answered all the same lost it.
@@ -1630,7 +1632,7 @@ class ManagerAgent:
             if asked_while_running and turn.stopped is None and not (turn.result_event or {}).get(USER_STOP):
                 logger.error("stop lost: the runtime answered a turn that was asked to stop (%s)", token.message_id)
             token.settle(ReplyOutcome.STOPPED)
-            await self._end_stopped(token, prepared, turn)
+            await self._end_stopped(token, prepared, turn, text_parts)
 
         if resume_lost:
             # Claude never started the saved session: it no longer exists. Every

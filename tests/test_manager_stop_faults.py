@@ -19,7 +19,8 @@ import pytest
 
 from fake_claude import fake_claude
 from looper.agents import proc_tree
-from looper.agents.claude_cli import ResidentClaude
+from looper.agents.claude_cli import ResidentClaude, ResidentTurn, user_stop_result
+from looper.agents.runtimes import StopMethod
 from looper.agents.runtimes import cancel as cancel_module
 from looper.agents.runtimes.cancel import TurnCancelled
 from looper.agents.tiers import manager as manager_module
@@ -234,6 +235,72 @@ def test_a_stop_while_the_init_event_is_persisted_keeps_its_session(
                 release.set()
                 await asyncio.gather(handling, return_exceptions=True)
                 await bus.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(("streamed", "release_persist"), [(False, True), (True, True), (True, False)])
+@pytest.mark.parametrize("cancel_escapes", [False, True])
+def test_a_stopped_reply_keeps_assistant_text_or_falls_back_to_streamed_text(
+    streamed: bool, release_persist: bool, cancel_escapes: bool,
+    tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(manager_module, "STOP_HANDLING_SEC", 0.3)
+
+    async def run() -> None:
+        session = _Session()
+        manager, bus, queue = _manager(tmp_path, session)
+        persisting, release, stopped = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        prefix, suffix = "半截回复", "，完整答案"
+        original_persist = manager_module.ClaudeRunRecorder.persist
+
+        async def persist(self: Any, payload: dict[str, Any]) -> None:
+            # Without deltas the entire assistant event queues behind init; with deltas it is its own write
+            # that lags, after the streamed prefix has already reached the chat.
+            if payload["type"] == ("assistant" if streamed else "system"):
+                persisting.set()
+                await release.wait()
+            await original_persist(self, payload)
+
+        async def run_turn(text: str, on_event: Any, *, cancel: Any, **kwargs: Any) -> ResidentTurn:
+            cancel.on_request(stopped.set)
+            await on_event({"type": "system", "subtype": "init", "session_id": "sess-1"})
+            if streamed:
+                await on_event({"type": "stream_event", "event": {
+                    "delta": {"type": "text_delta", "text": prefix}}})
+            await on_event({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": prefix}, {"type": "text", "text": suffix}]}})
+            await stopped.wait()
+            if cancel_escapes:
+                raise TurnCancelled()
+            return ResidentTurn(user_stop_result(), stopped=StopMethod.KILL, prompt_sent=True)
+
+        monkeypatch.setattr(manager_module.ClaudeRunRecorder, "persist", persist)
+        monkeypatch.setattr(session, "run_turn", run_turn)
+        envelope = _web("你好")
+        handling = asyncio.create_task(manager._handle(envelope))
+        try:
+            await asyncio.wait_for(persisting.wait(), 5)
+            token = manager.turn_for(envelope.message_id)
+            assert token is not None and token.partial == (prefix if streamed else "")
+            assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+            if release_persist:
+                release.set()
+            await asyncio.wait_for(asyncio.shield(handling), 5)
+            expected = prefix + suffix if release_persist else prefix
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "stopped" and "error" not in reply
+            assert reply["text"] == f"{expected}\n\n（已停止）"
+            (finish,) = agent_db.finish_record.await_args_list
+            assert finish.kwargs["output_text"] == expected
+            assert finish.kwargs["status"] == "interrupted"
+        finally:
+            release.set()
+            if not handling.done():
+                handling.cancel()
+            await asyncio.gather(handling, return_exceptions=True)
+            await session.stop(kill=True)
+            await bus.shutdown()
 
     asyncio.run(run())
 
