@@ -14,7 +14,7 @@ vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => null }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const gates = (waiting: number): GateList => ({
-  gates: [], total: 0, limit: 1, offset: 0,
+  gates: [], total: 0, limit: 1, offset: 0, next_cursor: null, has_more: false,
   counts: { open: waiting, waiting_user: waiting, waiting_planner: 0, closed: 0, all: waiting },
 });
 

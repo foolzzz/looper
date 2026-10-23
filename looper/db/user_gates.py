@@ -433,14 +433,21 @@ def _listed(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 async def list_gates(*, state: str = "open", project_id: str | None = None, limit: int | None = None,
-                     offset: int = 0, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+                     offset: int = 0, cursor: tuple[datetime, str] | None = None,
+                     through: tuple[datetime, str] | None = None,
+                     pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """The gates of all tasks, newest opened first, each with its task (``task_status``, ``title``, ``goal_id``,
     ``requirement``'s first 200 characters, ``project_id``, ``project_name``) and ``last_message`` (``role``,
     ``author``, ``via``, ``created_at``; None without one): ``state`` ``open`` (waiting, in a task not completed or
     cancelled), ``closed`` (passed, cancelled or skipped) or ``all``, in ``project_id`` when given. ``limit`` and
-    ``offset`` page them (no ``limit``: all)."""
+    ``offset`` page them (no ``limit``: all). ``cursor`` excludes newer rows; ``through`` includes the old last row's
+    ordering boundary even if that gate has since closed."""
     pool = pool or get_pool()
     where, args = _listed_filter(state, project_id)
+    for boundary, operator in ((cursor, "<"), (through, ">=")):
+        if boundary is not None:
+            where += f" AND (COALESCE(g.opened_at, g.created_at), g.step_id) {operator} (${len(args) + 1}, ${len(args) + 2})"
+            args.extend(boundary)
     sql = _LISTED
     sql += f" WHERE {where}{_LISTED_ORDER}"
     if limit is not None:

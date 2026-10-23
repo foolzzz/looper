@@ -32,7 +32,8 @@ function answer(url: string): unknown {
     if (asked === "lark-old") return { sessions: [lark("lark-old")] }; // past the newest 50: only by its id
     return { sessions: asked ? [] : [web("web-1"), lark("lark-1")] };
   }
-  if (url.includes("/chat/messages")) return [];
+  if (url.includes("/chat/messages")) return { messages: new URL(url, "http://x").searchParams.get("session_id") === "web-1"
+    ? [{ message_id: "a1", role: "user", content: "The original conversation", created_at: "2026-01-01T00:00:00Z" }] : [] };
   if (url.includes("/activity")) return { activity: [] };
   if (url.includes("/conversation")) return { conversation: [] };
   if (url.endsWith("/projects")) return { projects: [{ project_id: "p1", name: "Proj", description: "", work_dir: "", task_count: 1, active_count: 0 }] };
@@ -169,6 +170,31 @@ describe("the dashboard keeps its place in the URL", () => {
   describe("the chat", () => {
     const heading = () => container.textContent ?? "";
 
+    it("names the stored thread in a bare chat address before starting another", async () => {
+      localStorage.setItem("looper-chat-session-id", "web-1");
+      window.location.hash = "#chat";
+      const entries = window.history.length;
+      await open("#chat");
+      const previous = hash();
+      expect(previous).toBe("#chat?conversation=web-1");
+      expect(window.history.length).toBe(entries);
+      expect(heading()).toContain("The original conversation");
+      const newChat = container.querySelector('button[title^="New conversation"]') as HTMLButtonElement;
+      await act(async () => newChat.click());
+      const next = hash();
+      expect(next).not.toBe(previous);
+      expect(heading()).not.toContain("The original conversation");
+      await act(async () => window.history.back());
+      await settle();
+      expect(localStorage.getItem("looper-chat-session-id")).toBe("web-1");
+      expect(hash()).toBe(previous);
+      expect(heading()).toContain("The original conversation");
+      await act(async () => window.history.forward());
+      await settle();
+      expect(localStorage.getItem("looper-chat-session-id")).toBe(new URLSearchParams(next.split("?")[1]).get("conversation"));
+      expect(heading()).not.toContain("The original conversation");
+    });
+
     it("opens an agent from the hash, and the Manager when the hash drops it", async () => {
       await open("#chat?target=planner-task-a");
       expect(heading()).toContain("Planner · Task task-a");
@@ -222,6 +248,14 @@ describe("the dashboard keeps its place in the URL", () => {
   describe("the room's filters", () => {
     const pressed = (label: string) => button(label)?.getAttribute("aria-pressed");
     const roleSelect = () => container.querySelector<HTMLSelectElement>('select[aria-label="From or to a role"]');
+
+    it("keeps the kind and role filters when selecting Room again", async () => {
+      await open("#tasks/task-a?tab=room&filter=unanswered&role=planner");
+      await click("Room");
+      expect(hash()).toBe("#tasks/task-a?tab=room&filter=unanswered&role=planner");
+      expect(pressed("Unanswered")).toBe("true");
+      expect(roleSelect()?.value).toBe("planner");
+    });
 
     it("opens the kind and role filters from the hash", async () => {
       await open("#tasks/task-a?tab=room&filter=unanswered&role=planner");

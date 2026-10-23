@@ -307,7 +307,7 @@ function chatQuery(targetId: string, conversationId = ""): string {
 /** `#chat?target=<agent id>&conversation=<session id>`: the agent open (the Manager when left out or unknown) and, with the
  * Manager, a Lark or Telegram conversation read-only. `query` is undefined while another page is shown: the chat stays
  * mounted, and keeps what it last read. */
-export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query: string) => void }) {
+export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query: string, replace?: boolean) => void }) {
   const seenQuery = useRef("");
   if (query !== undefined) seenQuery.current = query;
   const urlParams = new URLSearchParams(seenQuery.current);
@@ -513,7 +513,11 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     const fresh = () => alive && isCurrentManager(managerId);
     const load = () =>
       fetchChatSession(wantConversation, managerId, controller.signal).then(
-        (session) => fresh() && setOpened({ managerId, id: wantConversation, session, error: "" }),
+        (session) => fresh() && setOpened({
+          managerId, id: wantConversation, session,
+          error: !session && (wantConversation.startsWith("planner-") || wantConversation.includes(":"))
+            ? "Conversation not found." : "",
+        }),
         (err) =>
           fresh() &&
           !(err instanceof Error && err.name === "AbortError") &&
@@ -583,6 +587,11 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   };
   // The conversation in the address that is already applied (or chosen here), so the address is applied once.
   const appliedConversation = useRef("");
+  // Pin the shown thread to this history entry before New conversation pushes the next one.
+  useEffect(() => {
+    if (query === undefined || target.kind !== "manager" || !targetSettled || wantConversation || !threadOwned) return;
+    onQuery?.(chatQuery(target.id, sessionId), true);
+  }, [query, target.kind, target.id, targetSettled, wantConversation, threadOwned, sessionId, onQuery]);
   const openConversation = (session: ChatSession, fromManagerId?: string) => {
     // A click queued on a row of the Manager shown before a switch does nothing.
     if (fromManagerId !== undefined && fromManagerId !== currentRef.current.managerId) return;
@@ -592,7 +601,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     if (session.channel === "web" && session.session_id !== sessionId) switchWebSession(session.session_id);
   };
   // A web thread the address names (a link, Back, a refresh) once it is known not to be a channel conversation; an id
-  // with no messages yet is a new web thread.
+  // with no messages yet is a new web thread only outside Planner and channel namespaces.
   useEffect(() => {
     if (!wantConversation) appliedConversation.current = "";
     if (target.kind !== "manager" || !wantConversation || appliedConversation.current === wantConversation) return;
@@ -931,7 +940,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     setServerTurn(null);
     setNotice("");
     setSending(true);
-    const changesProfile = text === NEW_SESSION_COMMAND || /^\/profile(\s|$)/i.test(text);
+    const changesProfile = text.toLowerCase() === NEW_SESSION_COMMAND || /^\/profile(\s|$)/i.test(text);
     setPhase("");
     let finalSeen = false;
     let aborted = false;
@@ -1055,7 +1064,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
           : err.message;
       if (current_()) setSending(false);
       if (sid !== sessionIdRef.current) return;
-      if (text === NEW_SESSION_COMMAND) {
+      if (text.toLowerCase() === NEW_SESSION_COMMAND) {
         setMessages((prev) =>
           prev.map((m) => (m.id === assistantId ? { ...m, content: reason, streaming: false } : m)),
         );

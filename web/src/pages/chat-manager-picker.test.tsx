@@ -285,6 +285,14 @@ describe("chat Manager picker", () => {
     const asked = (path: string, sid: string) =>
       server.mock.calls.filter(([url]) => url.includes(path) && url.includes(`session_id=${sid}`)).map(([url]) => url);
 
+    it.each(["planner-t1", "telegram:9"])("does not adopt the missing conversation %s", async (id) => {
+      await mount(`conversation=${encodeURIComponent(id)}`);
+      expect(localStorage.getItem("looper-chat-session-id")).toBe(SID);
+      expect(container.querySelector('[role="alert"]')?.textContent).toMatch(/conversation not found/i);
+      expect(input()).toBeNull();
+      expect(api.sendChat).not.toHaveBeenCalled();
+    });
+
     it("opens an id the server answers with an empty list as a new thread of the selected Manager", async () => {
       await mount("target=manager-review&conversation=new-sid");
       expect(asked("/chat/sessions", "new-sid")).toEqual([expect.stringContaining("manager=manager-review")]);

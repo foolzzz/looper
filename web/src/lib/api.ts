@@ -499,7 +499,7 @@ export interface ManagerProfileChoice {
   problem: string | null;
 }
 
-/** The session view's effective profile: names only (runtime, provider and model as the server words them). */
+/** The session view's effective profile: runtime, provider, model and effort as the server words them. */
 export interface ManagerSessionProfileSummary {
   profile_id: string;
   name: string;
@@ -510,7 +510,7 @@ export interface ManagerSessionProfileSummary {
 }
 
 export function sessionProfileLabel(profile: ManagerSessionProfileSummary): string {
-  return `${profile.name} — ${profile.runtime} · ${profile.provider} / ${profile.model}`;
+  return `${profile.name} — ${profile.runtime} · ${profile.provider} / ${profile.model}${profile.effort ? ` · ${profile.effort}` : ""}`;
 }
 
 export interface ManagerSessionView {
@@ -3975,6 +3975,8 @@ export interface GateList {
   counts: { open: number; waiting_user: number; waiting_planner: number; closed: number; all: number };
   limit: number;
   offset: number;
+  next_cursor: string | null;
+  has_more: boolean;
 }
 
 export async function fetchGates(
@@ -3984,6 +3986,8 @@ export async function fetchGates(
     projectId?: string;
     limit?: number;
     offset?: number;
+    cursor?: string;
+    through?: string;
   } = {},
 ): Promise<GateList> {
   const params = new URLSearchParams();
@@ -3992,6 +3996,8 @@ export async function fetchGates(
   if (filters.projectId) params.set("project_id", filters.projectId);
   if (filters.limit) params.set("limit", String(filters.limit));
   if (filters.offset) params.set("offset", String(filters.offset));
+  if (filters.cursor) params.set("cursor", filters.cursor);
+  if (filters.through) params.set("through", filters.through);
   const qs = params.toString();
   const res = await fetch(`${API_BASE}/gates${qs ? `?${qs}` : ""}`);
   if (!res.ok) await failed(res, "gates");
