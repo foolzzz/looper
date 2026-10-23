@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.46] - 2026-10-23
+
+### Fixed
+
+- **The Manager's reply no longer asks to start a task it already started.** When the Manager creates a task and starts it in the same turn, the task's configuration block in the reply now reads "任务已创建：" without the "Ready — not started" wording and without the question whether to start it. A start that fails, a turn that does not start the task, and a start of a different task keep the block and the question as before. Behavior change: the text of the Manager's reply in that case. Model-visible: no change to the Manager's prompt or tool schemas (the `looper_task_create` result still carries its `shown_to_user` note). ([#428](https://github.com/foolzzz/looper/pull/428))
+
 ## [2.13.45] - 2026-10-22
 
 ### Added
