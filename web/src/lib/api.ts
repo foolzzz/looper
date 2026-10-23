@@ -691,7 +691,7 @@ export async function cancelTask(taskId: string): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ task_id: taskId }),
   });
-  if (!res.ok) throw new Error(`cancel ${res.status}`);
+  if (!res.ok) await failed(res, "cancel");
 }
 
 export async function deleteTask(taskId: string): Promise<void> {
@@ -710,7 +710,7 @@ export async function stopTask(taskId: string): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ task_id: taskId }),
   });
-  if (!res.ok) throw new Error(`stop ${res.status}`);
+  if (!res.ok) await failed(res, "stop");
 }
 
 /** Throw with the server's reason when it gives one. */

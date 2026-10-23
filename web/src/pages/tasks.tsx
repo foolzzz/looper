@@ -236,6 +236,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
   const loading = loadedFor !== listKey;
   const [error, setError] = useState("");
+  const [actionError, setActionError] = useState("");
   /** Continues the list (null at its end), and how many tasks each status holds under the URL's filters. */
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [counts, setCounts] = useState<Record<string, number>>({});
@@ -340,22 +341,24 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   };
 
   const handleStop = async (taskId: string) => {
+    setActionError("");
     try {
       await stopTask(taskId);
       load();
-    } catch {
-      // ignore
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
     }
   };
 
   const handleStart = async (task: TaskInfo, startOver = false) => {
+    setActionError("");
     try {
       // A ready task is started; a stopped, failed or cancelled one goes on from its saved plan, or is planned anew.
       await (task.status === READY_STATUS ? startReadyTask(task.task_id) : startTask(task.task_id, { startOver }));
       setConfirmStartOver(null);
       load();
-    } catch {
-      // ignore
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -610,6 +613,12 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
             </Button>
           </div>
         )
+      )}
+
+      {actionError && (
+        <div role="alert" className="rounded-lg border border-destructive/50 bg-destructive/10 px-5 py-4 text-sm text-destructive">
+          {actionError}
+        </div>
       )}
 
       {error && !tasks.length && (
