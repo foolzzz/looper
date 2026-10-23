@@ -319,11 +319,17 @@ def test_login_takes_no_token_argument(cli: Run, looper: FakeLooper, tmp_path: P
     assert looper.requests == []
 
 
-def test_a_usage_error_hides_a_token_with_hyphens(cli: Run, looper: FakeLooper, tmp_path: Path) -> None:
+@pytest.mark.parametrize("argv", [
+    ("login", "lpc_ab-cd_ef-gh"),
+    ("login", "--json=lpc_ab-cd_ef-gh"),
+    ("chat", "--file", "lpc_ab-cd_ef-gh"),
+])
+def test_a_usage_error_hides_a_token_with_hyphens(
+        cli: Run, looper: FakeLooper, tmp_path: Path, argv: tuple[str, ...]) -> None:
     # A real token is lpc_ and token_urlsafe, whose alphabet has '-' and '_'.
     token = "lpc_ab-cd_ef-gh"
-    code, _, err = cli("--client-file", str(tmp_path / "c.json"), "login", token, client=False)
-    assert code == 2 and "cd_ef" not in err and "-gh" not in err
+    code, _, err = cli("--client-file", str(tmp_path / "c.json"), *argv, client=False)
+    assert code == 2 and token not in err and "cd_ef" not in err and "-gh" not in err
     assert looper.requests == []
 
 
@@ -565,11 +571,14 @@ def test_confirm_posts_the_confirmation_id(cli: Run, looper: FakeLooper) -> None
     assert headers["x-looper-session"] == "s1"
 
 
-def test_an_error_answer_exits_1_with_its_code_and_message_on_stderr(cli: Run, looper: FakeLooper) -> None:
-    looper.answers.append((409, {"status": "error", "error": {"code": "conflict", "message": "task is running"}}))
+@pytest.mark.parametrize("message,shown", [("task is running", "task is running"),
+                                           ("invalid lpc_ab-cd_ef-gh", "invalid lpc_…")])
+def test_an_error_answer_exits_1_with_its_code_and_message_on_stderr(
+        cli: Run, looper: FakeLooper, message: str, shown: str) -> None:
+    looper.answers.append((409, {"status": "error", "error": {"code": "conflict", "message": message}}))
     code, out, err = cli("task-control", "start", "--task-id", "t1")
     assert code == 1 and out == ""
-    assert err.strip() == "error: conflict: task is running"
+    assert err.strip() == f"error: conflict: {shown}"
 
 
 def test_json_prints_the_answer_as_it_is(cli: Run, looper: FakeLooper) -> None:
@@ -948,8 +957,9 @@ def test_interactive_chat_keeps_the_conversation_between_messages(
     assert err.count("> ") == 4
 
 
+@pytest.mark.parametrize("interrupt_on", [1, 2])
 def test_interrupting_a_reply_in_the_prompt_says_the_reply_is_saved(
-        cli: Run, looper: FakeLooper, monkeypatch: pytest.MonkeyPatch) -> None:
+        cli: Run, looper: FakeLooper, monkeypatch: pytest.MonkeyPatch, interrupt_on: int) -> None:
     class Terminal(io.StringIO):
         def isatty(self) -> bool:
             return True
@@ -962,23 +972,25 @@ def test_interrupting_a_reply_in_the_prompt_says_the_reply_is_saved(
         except StopIteration:
             raise EOFError from None
 
-    real = loopercli._send
-    calls: list[int] = []
+    real = Api.stream
+    calls = 0
 
-    def send(args: Any, ctx: Any, text: str, conversation_id: str | None) -> Any:
-        calls.append(1)
-        if len(calls) == 1:
-            turn = real(args, ctx, text, conversation_id)
-            return turn
-        raise KeyboardInterrupt
+    def stream(self: Api, path: str, body: Any) -> Iterator[tuple[str, dict[str, Any]]]:
+        nonlocal calls
+        calls += 1
+        for event, data in real(self, path, body):
+            yield event, data
+            if calls == interrupt_on and event == "accepted":
+                raise KeyboardInterrupt
 
     monkeypatch.setattr(sys, "stdin", Terminal())
     monkeypatch.setattr(builtins, "input", fake_input)
-    monkeypatch.setattr(loopercli, "_send", send)
-    looper.streams.append(reply_stream("one"))
+    monkeypatch.setattr(Api, "stream", stream)
+    looper.streams += [reply_stream("one"), reply_stream("two")]
     code, _, err = cli("chat")
     assert code == 0
     assert "(stopped reading; the reply is still saved: loopercli chat --conversation cli-1 --read)" in err
+    assert chat_bodies(looper) == [{"text": "first"}, {"text": "second", "conversation_id": "cli-1"}]
 
 
 # --- wait ---

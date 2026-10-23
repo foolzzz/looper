@@ -203,7 +203,10 @@ def test_github_new_comments_count_reviews(tmp_path: Path) -> None:
     assert extra_same["resolution"] == ""
 
 
-@pytest.mark.parametrize(("state", "sentence"), [("MERGED", "Ready: owner/name#12 was merged.")])  # closed, alike
+@pytest.mark.parametrize(("state", "sentence"), [
+    ("MERGED", "Ready: owner/name#12 was merged."),
+    ("CLOSED", "Ready: owner/name#12 was closed."),
+])
 def test_github_merged_or_closed_is_ready(tmp_path: Path, state: str, sentence: str) -> None:
     # The head did not change; closing the request is still ready, and the sentence says which.
     (result, _output, error, extra), _ = _github(
