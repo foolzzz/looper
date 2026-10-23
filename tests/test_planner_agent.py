@@ -315,9 +315,9 @@ def _assert_read_only(argv: list[str]) -> None:
     assert argv.count("--permission-mode") == 1 and _flag(argv, "--permission-mode") == "manual"
     assert argv.count("--permission-prompts") == 1 and _flag(argv, "--permission-prompts") == "none"
     assert [argv[i + 1] for i, arg in enumerate(argv) if arg == "--disallowedTools"] == [
-        "Edit,Write,NotebookEdit", "ListAgents,SendMessage"]
+        "Bash,Edit,Write,NotebookEdit", "ListAgents,SendMessage"]
     assert argv.count("--allowedTools") == 1
-    assert str(_flag(argv, "--allowedTools")).startswith("Skill,WebFetch,WebSearch")
+    assert str(_flag(argv, "--allowedTools")).startswith("Read,Glob,Grep,Skill,WebFetch,WebSearch")
 
 
 def _sha(text: str) -> str:
@@ -1042,7 +1042,7 @@ class TestResidentClaude:
         (argv,) = claude.argvs()
         # Read-only: the role prompt keeps it to planning, and Claude Code refuses what would change files.
         _assert_read_only(argv)
-        assert _flag(argv, "--allowedTools") == "Skill,WebFetch,WebSearch"  # no MCP server: no Planner tools here
+        assert _flag(argv, "--allowedTools") == "Read,Glob,Grep,Skill,WebFetch,WebSearch"  # no MCP server here
         assert _flag(argv, "--input-format") == "stream-json"
         assert _flag(argv, "--output-format") == "stream-json"
         assert (_flag(argv, "--model"), _flag(argv, "--max-turns")) == ("claude-test", "9")

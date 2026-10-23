@@ -294,8 +294,8 @@ READ_ONLY_MODE = ("--permission-mode", "manual", "--permission-prompts", "none")
 WRITE_TOOLS = ("Edit", "Write", "NotebookEdit")
 # A consult has only these built-in reading tools, with no shell.
 CONSULT_TOOLS = ("Read", "Glob", "Grep")
-# The tools it may use although Claude Code's default permission mode would ask first; none of them changes a file.
-READ_ONLY_ALLOWED = ("Skill", "WebFetch", "WebSearch")
+# Explicit read rules also allow document paths outside cwd (for example, at the repository root).
+READ_ONLY_ALLOWED = (*CONSULT_TOOLS, "Skill", "WebFetch", "WebSearch")
 # How much of a refused call's input its record keeps.
 DENIAL_INPUT_CHARS = 200
 
@@ -311,19 +311,18 @@ def read_only_args(library: AgentLibrary) -> list[str]:
     """The flags of a run that must not change files (a Planner's, ``Launch.read_only``), in place of
     ``permission_args``: Claude Code's default permission mode, pinned and with no one to answer its prompts
     (``READ_ONLY_MODE``), so that in ``--print`` mode it refuses every tool call it would ask about; without the
-    file-editing tools (``WRITE_TOOLS``); and with what the run may use without asking: its skills, web reads and the
-    MCP servers installed for it, Looper's own among them (``mcp_rule``). A plugin's own MCP servers never load
+    shell and file-editing tools (``WRITE_TOOLS``); and with what the run may use without asking: file reads,
+    searches, its skills, web reads and the MCP servers installed for it, Looper's own among them (``mcp_rule``).
+    A plugin's own MCP servers never load
     (``--strict-mcp-config``), so none needs a rule.
 
-    Verified against Claude Code 2.1.285 in ``--print`` stream-json mode with the isolation flags: Bash runs
-    ``ls``, ``cat``, ``git status``, ``git log`` and ``git show`` and refuses a redirect, ``touch``, a ``python3``
-    that writes a file and ``git commit`` ("This command requires approval"), each refusal in the result's
-    ``permission_denials`` (``permission_denials``); the working directory is unchanged.
+    Read, Glob and Grep remain available to the model; Bash is removed so it cannot choose ``cat`` and abandon
+    a document after a permission denial, or inherit a project's permission to run a writing shell command.
     """
     from .library import ItemKind
 
     servers = [mcp_rule(item.name) for item in library.items if item.kind is ItemKind.MCP]
-    return [*READ_ONLY_MODE, "--disallowedTools", ",".join(WRITE_TOOLS),
+    return [*READ_ONLY_MODE, "--disallowedTools", ",".join(("Bash", *WRITE_TOOLS)),
             "--allowedTools", ",".join((*READ_ONLY_ALLOWED, *servers))]
 
 
@@ -341,7 +340,7 @@ def peer_args(agent_teams: bool) -> list[str]:
     (``isolation_args`` sets it for Looper's own agents). A second ``--disallowedTools`` adds to a read-only run's.
 
     Verified against Claude Code 2.1.285 in ``--print`` stream-json mode with the isolation flags: the init event
-    lists neither denied tool (a Planner's lists none of its five denied tools either), a model asked to call
+    lists neither denied tool (a Planner's lists none of its denied tools either), a model asked to call
     ListAgents finds no such tool, and a run with agent teams starts a named teammate, messages it and gets its reply.
     """
     return ["--disallowedTools", ",".join((LIST_PEERS, *(() if agent_teams else (SEND_MESSAGE,))))]

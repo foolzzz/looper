@@ -41,6 +41,12 @@ def pinned(runtime: str) -> dict[str, Any]:
         # session's own /profile choice), null until chosen. Only saved-session rows (not the bare {"session_id"}
         # of a resumed turn) gain it.
         for record in records:
+            if runtime == "claude":
+                # Apply the same declared fix as the legacy capture, without refreshing fixtures.
+                record["argv"] = parity.with_planner_file_reads(record["argv"])
+                for flag in ("--disallowedTools", "--allowedTools"):
+                    record["permissions"][flag] = record["argv"][record["argv"].index(flag) + 1] \
+                        if flag in record["argv"] else None
             if isinstance(record["session"], dict) and "session_totals" in record["session"]:
                 assert "selected_profile_id" not in record["session"], case
                 record["session"]["selected_profile_id"] = None
@@ -103,6 +109,20 @@ def test_the_prompt_text_is_not_compared_but_its_flag_and_directory_are(change: 
         key = "ANTHROPIC_API_KEY" if change == "key" else "model"
         field[key] = "0" * 64
         expected[0]["env" if change == "key" else "config"][key] = "1" * 64
+    with pytest.raises(AssertionError, match="launch 0 differs"):
+        parity.assert_parity(expected, actual, expected_root=tmp_path, actual_root=tmp_path)
+
+
+@pytest.mark.parametrize("flag,value", [
+    ("--allowedTools", "Skill,WebFetch,WebSearch"),
+    ("--disallowedTools", "Edit,Write,NotebookEdit"),
+])
+def test_current_planner_permissions_cannot_revert_to_the_legacy_rules(tmp_path: Path, flag: str, value: str) -> None:
+    records = pinned("claude")["proxy-key-background-append"]
+    expected = [next(row for row in records if "--permission-mode" in row["argv"])]
+    actual = copy.deepcopy(expected)
+    actual[0]["argv"][actual[0]["argv"].index(flag) + 1] = value
+    actual[0]["permissions"][flag] = value
     with pytest.raises(AssertionError, match="launch 0 differs"):
         parity.assert_parity(expected, actual, expected_root=tmp_path, actual_root=tmp_path)
 

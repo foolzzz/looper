@@ -128,7 +128,9 @@ def _isolation_settings(raw: str, root: str) -> str:
 
 
 def _normalized(seen: dict[str, Any], root: str, executable: str, environ: dict[str, str]) -> dict[str, Any]:
-    argv = list(seen["argv"])
+    from model_launch_parity import with_planner_file_reads
+
+    argv = with_planner_file_reads(seen["argv"])
     if "--settings" in argv:
         at = argv.index("--settings") + 1
         argv[at] = _isolation_settings(argv[at], root)

@@ -432,10 +432,32 @@ class TestPermissionArgs:
         # prompts, so that what it would ask about is refused; no file-editing tools.
         assert "--dangerously-skip-permissions" not in args
         assert args[:8] == ["--permission-mode", "manual", "--permission-prompts", "none",
-                            "--disallowedTools", "Edit,Write,NotebookEdit",
-                            "--allowedTools", "Skill,WebFetch,WebSearch,mcp__looper,mcp__docs"]
+                            "--disallowedTools", "Bash,Edit,Write,NotebookEdit",
+                            "--allowedTools", "Read,Glob,Grep,Skill,WebFetch,WebSearch,mcp__looper,mcp__docs"]
         assert launch.record()["read_only"] == "permissions"
-        assert _builtin_launch(role=AgentType.PLANNER).args()[6:8] == ["--allowedTools", "Skill,WebFetch,WebSearch"]
+        assert _builtin_launch(role=AgentType.PLANNER).args()[6:8] == [
+            "--allowedTools", "Read,Glob,Grep,Skill,WebFetch,WebSearch"]
+
+    @pytest.mark.parametrize("resident", [False, True])
+    def test_a_planner_can_read_document_paths_without_a_writing_tool(
+        self, tmp_path: Path, resident: bool,
+    ) -> None:
+        from looper.agents.runtimes import CLAUDE_CODE
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "DESIGN.md").write_text("Repository design\n")
+        (workspace / "DESIGN.md").write_text("Workspace design\n")
+        launch = _builtin_launch(role=AgentType.PLANNER)
+        command = CLAUDE_CODE.resident_command if resident else CLAUDE_CODE.run_command
+        args = command("claude", cwd=workspace, prompt_file=workspace / "prompt.md", launch=launch)
+        allowed = args[args.index("--allowedTools") + 1].split(",")
+        # Unqualified read rules also cover paths above cwd, inside the repository.
+        assert {"Read", "Glob", "Grep"} <= set(allowed)
+        assert {"Bash", "Edit", "Write", "NotebookEdit"} <= set(_denied(args))
+        assert not set(allowed) & set(_denied(args))
+        assert "--dangerously-skip-permissions" not in args
 
     @pytest.mark.parametrize(("server", "rule"), [
         ("looper", "mcp__looper"), ("probe.v2", "mcp__probe_v2"), ("my server+x", "mcp__my_server_x"),
@@ -505,7 +527,7 @@ class TestOtherSessions:
     def test_a_read_only_run_keeps_its_own_denials(self) -> None:
         planner = _teams_launch(AgentType.PLANNER, teams=False)
         consult = _teams_launch(AgentType.WORKER, teams=False, consult=True)
-        assert _denied(planner.args()) == ["Edit", "Write", "NotebookEdit", "ListAgents", "SendMessage"]
+        assert _denied(planner.args()) == ["Bash", "Edit", "Write", "NotebookEdit", "ListAgents", "SendMessage"]
         assert _denied(consult.args()) == ["Bash", "Edit", "Write", "NotebookEdit", "ListAgents", "SendMessage"]
 
     @pytest.mark.parametrize("command", ["run", "resident", "consult"])
