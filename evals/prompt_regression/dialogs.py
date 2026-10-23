@@ -77,6 +77,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from looper.agents.tiers.manager import _looper_call
+
 from .compare import outcome
 from .runner import (
     INTERRUPTED, Api, ErrorClass, EvalError, Outcome, _git, aborted_reason, check_case_budget, error_row,
@@ -536,7 +538,7 @@ def _knows_it_was_stopped(look: Look) -> str | None:
     # own read, which is what the stop waited for, backs none, and nor does a re-listing of the projects alone.
     # Without one, it is a claim unless the reply says the work was not done.
     if "汇总" in look.reply and not _project_task_reads(look) and not re.search(
-            r"没(有)?(来得及|完成|做完|汇总)|还没|未(完成|汇总)|停", look.reply):
+            r"没(有)?(来得及|完成|做完|汇总)|还没(有)?(真正)?(查询|查|读|汇总|完成|做|开始)|未(完成|汇总)|停", look.reply):
         return "the reply claims the summary was finished"
     return None
 
@@ -1220,13 +1222,19 @@ def _native_calls_after_start(look: Look) -> list[str]:
         event = row["event"]
         if event.get("type") != "assistant" or event.get("parent_tool_use_id") is not None:
             continue
-        called += [(str(b.get("name") or ""), b.get("input") or {}) for b in (event.get("message") or {}).get("content") or []
+        called += [_looper_call(b.get("name"), b.get("input")) for b in (event.get("message") or {}).get("content") or []
                    if isinstance(b, dict) and b.get("type") == "tool_use"]
     starts = [i for i, (name, args) in enumerate(called)
-              if name.endswith("looper_task_control") and args.get("action") == "start"]
+              if name == "looper_task_control" and args.get("action") == "start"]
     if not starts:
         return []
-    return [name for name, _ in called[starts[-1] + 1:] if "looper_" not in name]
+    actions = [a for a in look.turn_actions() if a["tool"] == "looper_task_control"
+               and a["arguments"].get("action") == "start"]
+    # Match the start attempts to their outcomes; a refused retry must not move the anchor.
+    first = next((i for i, action in zip(starts, actions) if action["status"] == "ok"), None)
+    if first is None:
+        return []
+    return [name for name, _ in called[first + 1:] if not name.startswith("looper_")]
 
 
 def _started_without_waiting(look: Look) -> str | None:
