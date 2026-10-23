@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.53] - 2026-10-23
+
+### Fixed
+
+- **Channels: serve startup and delivery.** Channel bots start receiving only once every enabled Manager is known and poll before the advisory startup checks, so messages sent during a slow check are received. A message queued during startup is no longer delivered twice after the journal replay, and old status entries are settled instead of replayed. Config export and import preview read channels before the Manager migration. No model-visible change. ([#434](https://github.com/foolzzz/looper/pull/434))
+
 ## [2.13.52] - 2026-10-23
 
 ### Fixed

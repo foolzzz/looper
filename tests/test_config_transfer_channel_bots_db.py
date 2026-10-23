@@ -9,7 +9,11 @@ from typing import Any
 
 import pytest
 
-from tests.db_support import DSN
+from looper.agents.bus import MessageBus
+from looper.agents.ops.clients import ClientOps
+from looper.agents.ops.service import Platform
+from tests.db_support import DSN, run_db
+from tests.test_api_v1_auth import TOKEN, _bearer, _send, _serving
 from tests.test_config_transfer_db import _installation, _plan, _rows, _transfer_file
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -38,6 +42,45 @@ async def _bot_state(pool: Any) -> tuple[Any, ...]:
 async def _dump(pool: Any) -> dict[str, list[str]]:
     return {t: sorted(repr(tuple(r)) for r in await pool.fetch(f"SELECT * FROM {t}"))
             for t in ("channel_configs", "projects", "role_configs")}
+
+
+@pytest.mark.parametrize("command", ["export", "import"])
+def test_export_and_preview_read_channels_before_the_manager_migration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: str,
+) -> None:
+    # The retired offline CLI is gone; exercise the shared implementation through v1 without running migrations.
+    async def _test(pool: Any) -> None:
+        from looper.agents.serve import seed_channel_configs
+
+        await seed_channel_configs(pool)
+        await pool.execute("ALTER TABLE channel_configs DROP COLUMN manager_id CASCADE")
+        await pool.execute("UPDATE channel_configs SET display_name = 'Saved Telegram' "
+                           "WHERE channel_id = 'channel-telegram'")
+        before, rows = await _dump(pool), await _rows(pool)
+        document = {"format": "looper-config/v3", "channels": [
+            {"channel_type": "telegram", "channel_id": "channel-telegram", "display_name": "Preview name",
+             "enabled": False, "config": {}}]}
+        async with _serving(tmp_path) as server:
+            server._client_ops = ClientOps(Platform(bus=MessageBus(runtime_root=tmp_path),
+                                                   task_router=server._task_router, runtime_root=tmp_path))
+            try:
+                operation = "export" if command == "export" else "import_preview"
+                status, _, answer = await _send(server, f"POST /api/v1/config/{operation}", _bearer(TOKEN),
+                                                json.dumps({} if command == "export" else {"document": document}))
+                assert status == 200, answer
+                assert answer["status"] == "ok", answer
+                if command == "export":
+                    channels = answer["result"]["document"]["channels"]
+                    assert next(c for c in channels if c["channel_id"] == "channel-telegram")["display_name"] == "Saved Telegram"
+                else:
+                    plan = answer["result"]["plan"]
+                    assert not plan["applied"]
+                    assert plan["counts"]["channels"]["changed"] == 1
+                assert await _dump(pool) == before and await _rows(pool) == rows
+            finally:
+                server._config_imports.clear()
+
+    run_db(_test, monkeypatch, timeout=30)
 
 
 @pytest.mark.parametrize("secrets", [False, True])
