@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.49] - 2026-10-23
+
+### Fixed
+
+- **Tasks start in workspaces on a mounted filesystem.** Repository discovery now crosses filesystem boundaries (`GIT_DISCOVERY_ACROSS_FILESYSTEM=1`), so a workspace on a mount is isolated in its parent repository or runs in place when there is none, instead of being refused with a "mount point" diagnostic. Invalid Git directories and other inspection failures still fail visibly. The Linux Python Tests job now runs on Ubuntu 24.04 with PostgreSQL 16 clients matching the service. No model-visible change. ([#427](https://github.com/foolzzz/looper/pull/427))
+
 ## [2.13.48] - 2026-10-23
 
 ### Breaking changes
