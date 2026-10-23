@@ -2,16 +2,20 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
+from contextlib import nullcontext
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from looper import loopercli
 from looper.agents import api_v1, operator_auth
+from looper.agents.http_server import _json_response
 from looper.agents.ops.clients import ClientOps
-from looper.db import api_clients, manager_actions, tasks
+from looper.db import api_clients, manager_actions, projects, tasks
 from tests.test_api_v1_auth import CLIENT, CLIENT_TOKEN, TOKEN, _bearer, _send, _send_raw, _serving
 from tests.test_api_v1_auth import clients as clients
 from tests.test_operator_auth import PASSWORD, USER, _password_login
@@ -98,6 +102,83 @@ def test_old_status_is_absent_after_authenticated_v1_positive_control(tmp_path, 
             prepare_status(server)
             assert (await _send(server, f"POST {STATUS}", _bearer(TOKEN), "{}"))[0] == 200
             assert (await _send(server, "GET /api/status", _bearer(TOKEN)))[0] == 404
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("script", ["release/agent-serve-wheel-smoke.py", "pi/isolated-smoke.py"])
+@pytest.mark.parametrize("response", [None, {"status": "running"},
+    {"status": "error", "error": {"code": "internal", "message": "unavailable"}},
+    {"status": "ok", "result": {"status": "stopped"}}], ids=["ready", "legacy", "error", "stopped"])
+def test_smoke_readiness_uses_v1_and_checks_the_response(tmp_path, status_data, monkeypatch, script, response):
+    path = Path(__file__).resolve().parents[1] / "examples" / script
+    spec = importlib.util.spec_from_file_location("status_smoke", path)
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+    runtime = tmp_path / "rt"
+    runtime.mkdir()
+    (runtime / "operator-token").write_text(TOKEN)
+    process = SimpleNamespace(poll=lambda: None, terminate=lambda: None, wait=lambda **_: None)
+
+    def no_retry(_seconds):
+        raise AssertionError("readiness request failed")
+
+    monkeypatch.setattr(smoke.time, "sleep", no_retry)
+
+    class Ready(Exception):
+        pass
+
+    async def run():
+        async with _serving(tmp_path, listen=True) as server:
+            assert server._port != 8767
+            prepare_status(server)
+            original = server._handle_v1
+            requests = []
+
+            async def status_request(method, path, query, headers, body, writer, principal):
+                requests.append((method, path, headers["content-type"], body))
+                if response is None:
+                    await original(method, path, query, headers, body, writer, principal)
+                else:
+                    writer.write(_json_response(api_v1.OK, response))
+                    await writer.drain()
+
+            monkeypatch.setattr(server, "_handle_v1", status_request)
+            if script.startswith("release/"):
+                async def no_projects(**_kwargs):
+                    return []
+                monkeypatch.setattr(projects, "list_projects", no_projects)
+                (tmp_path / "index.html").write_text('<div id="root"></div>')
+                monkeypatch.setattr(smoke, "free_port", lambda: server._port)
+                monkeypatch.setattr(smoke.subprocess, "Popen", lambda *_, **__: process)
+                call = lambda: smoke.serve_check(tmp_path / "venv", tmp_path, "unused")
+            else:
+                monkeypatch.setattr(smoke, "managed_process", lambda *_, **__: nullcontext(process))
+                monkeypatch.setattr(smoke.shutil, "which", lambda _: None)
+                original_request = smoke.request
+
+                def request(base, path, *args):
+                    if path == "/api/channel-configs":
+                        raise Ready  # Readiness succeeded; the Pi registry flow is outside this regression.
+                    return original_request(base, path, *args)
+
+                helper = SimpleNamespace(_run=lambda *_, **__: None)
+                installed = (tmp_path, tmp_path / "venv/bin/python", {})
+                # registry_smoke chooses its own port; route its local requests to this test server.
+                original_request_base = f"http://127.0.0.1:{server._port}"
+                monkeypatch.setattr(smoke, "request", lambda _base, *args: request(original_request_base, *args))
+                call = lambda: smoke.registry_smoke(helper, installed, runtime, 0, "unused", tmp_path, "unused")
+
+            if response is not None:
+                with pytest.raises(AssertionError) as error:
+                    await asyncio.to_thread(call)
+                assert str(error.value) != "readiness request failed"
+            elif script.startswith("release/"):
+                await asyncio.to_thread(call)
+            else:
+                with pytest.raises(Ready):
+                    await asyncio.to_thread(call)
+            assert requests == [("POST", STATUS, "application/json", b"{}")]
+
     asyncio.run(run())
 
 
