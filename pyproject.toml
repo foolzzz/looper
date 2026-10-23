@@ -48,6 +48,9 @@ include = ["looper*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "provenance: clones an old revision to prove where a pinned fixture came from (slow; select with -m provenance)",
+]
 
 [tool.coverage.run]
 source = ["looper"]
