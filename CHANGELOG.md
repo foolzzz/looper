@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.41] - 2026-10-22
+
+### Changed
+
+- **Test suite slimming, step pr4.** Validation parametrizations keep one value per branch, and the PostgreSQL tests share one helper module (`tests/db_support.py`) for the database URL and a per-test schema; the scheduler tests share `tests/schedule_support.py`, and schedule request validation has database-free tests (`tests/test_schedule_validation.py`). Behavior change: none. Model-visible: none. ([#415](https://github.com/foolzzz/looper/pull/415))
+
 ## [2.13.40] - 2026-10-22
 
 ### Fixed
