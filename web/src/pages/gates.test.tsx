@@ -23,7 +23,7 @@ const row = (id: string, g: UserGate, group: GateListRow["task"]["group"] = "nee
   gate: g, agenda_open: 1, last_message: { role: "user", author: null, via: "", created_at: "2026-10-20T10:07:00Z" },
 });
 const list = (gates: GateListRow[], extra: Partial<GateList> = {}): GateList => ({
-  gates, total: gates.length, limit: 50, offset: 0,
+  gates, total: gates.length, limit: 50, offset: 0, next_cursor: null, has_more: false,
   counts: { open: 3, waiting_user: 2, waiting_planner: 1, closed: 4, all: 7 }, ...extra,
 });
 
@@ -120,18 +120,39 @@ describe("GatesPage", () => {
     expect([...container.querySelectorAll("button")].some((b) => b.textContent === "Answer")).toBe(false);
   });
 
-  it("refreshes every loaded row, not only the first 200", async () => {
+  it.each(["close", "insert"] as const)("keeps a loaded gate and its draft during refresh after %s", async (change) => {
     const all = Array.from({ length: 250 }, (_, i) => row(`t${i}`, gate(`g${i}`)));
+    let closeFirst = false;
     vi.mocked(fetchGates).mockImplementation(async (params) => {
       const { limit = 50, offset = 0 } = params ?? {};
-      return list(all.slice(offset, offset + limit), { total: 250, offset, limit });
+      const start = params?.cursor ? all.findIndex((r) => r.gate.step === params.cursor) + 1 : offset;
+      const end = params?.through ? all.findIndex((r) => r.gate.step === params.through) + 1 : all.length;
+      const gates = all.slice(start, Math.min(end, start + limit));
+      const result = list(gates, {
+        total: all.length, offset, limit, next_cursor: gates.at(-1)?.gate.step ?? null,
+        has_more: start + gates.length < end,
+      });
+      if (closeFirst) { all.shift(); closeFirst = false; }
+      return result;
     });
     await show();
-    while (container.querySelectorAll("li").length < 250) {
+    for (let page = 1; page < 5; page++) {
       await click(button("Show more"));
     }
+    const taskId = change === "close" ? "t200" : "t249";
+    const target = container.querySelector(`a[href='#tasks/${taskId}']`)!.closest("li")!;
+    await click([...target.querySelectorAll("button")].find((b) => b.textContent === "Answer")!);
+    const input = target.querySelector("textarea")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "Keep this draft");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    if (change === "close") closeFirst = true;
+    else all.unshift(row("new", gate("new")));
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
-    expect(container.querySelectorAll("li")).toHaveLength(250);
+    expect(container.querySelectorAll("li")).toHaveLength(change === "close" ? 250 : 251);
+    expect(container.querySelector(`a[href='#tasks/${taskId}']`)).not.toBeNull();
+    expect(container.querySelector("textarea")?.value).toBe("Keep this draft");
   });
 
   it("offers Answer only on rows waiting for the user, and sends the reply", async () => {
@@ -163,11 +184,13 @@ describe("GatesPage", () => {
   });
 
   it("shows more and refreshes on a timer, never while one is pending", async () => {
-    vi.mocked(fetchGates).mockResolvedValue(list(
+    vi.mocked(fetchGates).mockResolvedValueOnce(list(
       Array.from({ length: 50 }, (_, i) => row("t1", gate(`g${i}`))), { total: 80 }));
+    vi.mocked(fetchGates).mockResolvedValueOnce(list(
+      Array.from({ length: 30 }, (_, i) => row("t1", gate(`g${i + 50}`))), { total: 80 }));
     await show();
     await click(button("Show more"));
-    expect(fetchGates).toHaveBeenLastCalledWith(expect.objectContaining({ offset: 50, limit: 50 }));
+    expect(container.querySelectorAll("li")).toHaveLength(80);
 
     vi.mocked(fetchGates).mockReturnValue(new Promise(() => {}));
     const calls = vi.mocked(fetchGates).mock.calls.length;
