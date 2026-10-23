@@ -303,6 +303,7 @@ def test_resident_claude_stop_in_every_window(
         first = await session.run_turn("hello", Seen())
         assert _answered(first), first.result_event
         process = session.pid
+        cost_before = session.totals.cost_usd
         seen, stop, cancel = Seen(hold_at="result" if window == "done" else None), Stop(), TurnCancel()
         text = BIG if window == "blocked" else f"mode:{window}{' obey' if obey else ''}"
         running = asyncio.create_task(session.run_turn(text, seen, stop=stop, cancel=cancel))
@@ -343,6 +344,7 @@ def test_resident_claude_stop_in_every_window(
         if method is StopMethod.CONTROL:
             assert sent_signals == []
         seen.closed = True
+        cost_after = session.totals.cost_usd
         kept = session.started and session.pid == process
         alive = [pid for pid in pids if _alive(pid)]
         (directory / "stall").unlink(missing_ok=True)
@@ -352,12 +354,15 @@ def test_resident_claude_stop_in_every_window(
         nxt = Seen()
         after = await asyncio.wait_for(session.run_turn("mode:answer", nxt), BOUND)
         await session.stop(kill=True)
-        return method, turn, seen, kept, pids, alive, after, nxt, process
+        return method, turn, seen, kept, pids, alive, after, nxt, process, cost_before, cost_after
 
-    method, turn, seen, kept, pids, alive, after, nxt, process = asyncio.run(asyncio.wait_for(run(), 60))
+    method, turn, seen, kept, pids, alive, after, nxt, process, cost_before, cost_after = asyncio.run(
+        asyncio.wait_for(run(), 60))
     if window == "done" or (obey and window != "blocked"):
         assert method is StopMethod.CONTROL and kept  # the process and its session stay for the next turn
         assert process in alive and alive == pids  # nothing was signalled: a tool the turn started is Claude's
+        assert turn.usage.cost_usd == pytest.approx(0.01)
+        assert cost_after == pytest.approx(cost_before + turn.usage.cost_usd)
         if window != "done":  # Claude's interrupted result does not carry what the aborted request spent (2.1.x)
             assert turn.usage_complete is False
     else:

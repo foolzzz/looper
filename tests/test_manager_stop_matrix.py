@@ -538,6 +538,48 @@ def test_a_reply_stopped_in_a_tool_ends_only_an_agent_that_ignored_it_and_refuse
 # --- a runtime without an interrupt ---
 
 
+def test_a_grok_fallback_on_the_first_turn_runs_its_write_without_a_streamed_tool_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+) -> None:
+    from test_grok_runtime import _FAKE_GROK, _launch
+
+    async def run() -> None:
+        rig = _case("grok-acp", tmp_path, monkeypatch, agent_db)
+        async with Endpoint(rig) as endpoint:
+            # ACP initialize fails; the per-turn process calls before it streams even its init event.
+            body = '''
+import json, os, sys, urllib.request
+if 'agent' in sys.argv[1:]:
+    message = json.loads(sys.stdin.readline())
+    print(json.dumps({'jsonrpc': '2.0', 'id': message['id'],
+                      'error': {'code': -32601, 'message': 'initialize unavailable'}}), flush=True)
+    sys.stdin.read()
+else:
+    binding = json.load(open(os.environ['TURN_FILE']))['turn']
+    request = urllib.request.Request(os.environ['WRITE_URL'], json.dumps({'n': 1}).encode(),
+        {'Authorization': 'Bearer ' + os.environ['OPS_TOKEN'], 'Content-Type': 'application/json',
+         'X-Looper-Turn': binding}, method='POST')
+    with urllib.request.urlopen(request, timeout=10) as response:
+        open(os.environ['WRITE_RESULT'], 'w').write(response.read().decode())
+    exec(compile(HEADLESS, 'headless', 'exec'))
+'''.replace("HEADLESS", repr(_FAKE_GROK))
+            result_file = tmp_path / "write-result.json"
+            env = (("TURN_FILE", str(endpoint.turn_file)), ("OPS_TOKEN", endpoint.ops._token),
+                   ("WRITE_URL", f"http://127.0.0.1:{endpoint.port}/api/agent/v1/ops/t_write"),
+                   ("WRITE_RESULT", str(result_file)))
+            rig.settings = _launch(executable=fake_claude(tmp_path / "fallback-grok", body), env=env).settings, ()
+            await rig.start()
+            try:
+                await rig.answer()
+                assert rig.session.transport == "per-turn"
+                assert json.loads(result_file.read_text())["status"] == "ok"
+                assert endpoint.ran == [{"n": 1}]
+            finally:
+                await rig.finish()
+
+    _run(run)
+
+
 def test_a_per_turn_runtime_refuses_the_stop_and_its_reply_runs_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
 ) -> None:

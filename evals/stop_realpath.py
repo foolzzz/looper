@@ -505,15 +505,18 @@ def run_probe(api: Api, database_url: str, rep: int) -> CellResult:
     """An ordinary turn with one write call of Looper's tools: it runs (matched), and the turn answers."""
     session = f"probe-{uuid.uuid4().hex[:10]}"
     message_id = f"m-{uuid.uuid4().hex[:10]}"
-    api.post("/api/chat/send", {"text": _PROBE.format(name=f"stop-probe-{rep}-{uuid.uuid4().hex[:6]}"),
-                                "session_id": session, "message_id": message_id})
-    reply = _wait(lambda: next((m for m in api.get("/api/chat/messages", session_id=session)["messages"]
-                                if m.get("message_id") == f"{message_id}:reply"), None), 240)
+    sent = api.post("/api/chat/send", {"text": _PROBE.format(name=f"stop-probe-{rep}-{uuid.uuid4().hex[:6]}"),
+                                     "session_id": session, "message_id": message_id})
+    stream = _Stream(api.base_url + sent["events_url"], api.token)
+    try:
+        final = _wait(lambda: next((p for _, k, p in stream.snapshot() if k == "answer.final"), None), 240)
+    finally:
+        stream.close()
     actions = _db_rows(database_url, "SELECT tool, risk, status, error_code FROM manager_actions "
                        "WHERE chat = $1 ORDER BY id", session)
     why: list[str] = []
-    if reply is None:
-        why.append("no reply")
+    if final is None or final.get("outcome") != "answered":
+        why.append(f"the reply did not complete: {(final or {}).get('outcome')!r}")
     writes = [a for a in actions if a["risk"] != "read"]
     if not writes:
         why.append("the model made no write call")

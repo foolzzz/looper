@@ -609,6 +609,58 @@ def test_turn_tree_leaves_a_reused_pid_alone(tmp_path: Path) -> None:
     assert len(asyncio.run(_run())) == 1
 
 
+@pytest.mark.parametrize("root_reused", [False, True], ids=["seen_leader", "root"])
+def test_turn_tree_leaves_a_reused_leaders_new_tree_alone(
+    monkeypatch: pytest.MonkeyPatch, root_reused: bool,
+) -> None:
+    class Agent:
+        pid = 101
+        returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+    table = {101: (1, 101), 102: (101, 102), 105: (102, 105)}
+    starts = {101: "agent", 102: "child", 105: "survivor"}
+    signalled: set[int] = set()
+    monkeypatch.setattr(proc_tree, "_snapshot", lambda: dict(table))
+    monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {pid: starts[pid] for pid in pids if pid in starts})
+    monkeypatch.setattr(proc_tree.os, "kill", lambda pid, sig: signalled.add(pid))
+    monkeypatch.setattr(proc_tree.os, "killpg", lambda pgid, sig: signalled.update(
+        pid for pid, (_, group) in table.items() if group == pgid))
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0)
+
+    async def _run() -> None:
+        tree = proc_tree.TurnTree.track(Agent(), label="turn")
+        await tree.refresh(force=True)
+        reused = 101 if root_reused else 102
+        # The old leader exited; an unrelated leader now owns its pid and has a new child and group member.
+        table.clear()
+        table.update({reused: (1, reused), 103: (reused, 103), 104: (1, reused), 105: (1, 105)})
+        starts.update({reused: "replacement", 103: "new child", 104: "new member"})
+        await tree.end()
+
+    asyncio.run(_run())
+    assert signalled == {105}  # the original turn's surviving descendant is still ended
+
+
+def test_turn_tree_forgets_groups_missing_from_a_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    process = proc_tree._Orphan(101)
+    table = {101: (1, 101), 102: (101, 102)}
+    monkeypatch.setattr(proc_tree, "_snapshot", lambda: dict(table))
+    monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {pid: "started" for pid in pids})
+
+    async def _run() -> None:
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        table.pop(102)
+        await tree.refresh(force=True)
+        table.update({102: (1, 102), 103: (102, 102)})
+        await tree.refresh(force=True)
+        assert 103 not in tree.seen
+
+    asyncio.run(_run())
+
+
 def test_turn_tree_ticker_picks_up_a_child_started_between_events(tmp_path: Path) -> None:
     code = ("import subprocess, sys\nsys.stdin.readline()\n"
             "c = subprocess.Popen(['/bin/sleep', '60'])\nopen('c.pid', 'w').write(str(c.pid))\nsys.stdin.read()\n")
