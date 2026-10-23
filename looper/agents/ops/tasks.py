@@ -510,8 +510,10 @@ async def _create(call: Call) -> dict[str, Any]:
     shown = title or arguments.get("goal_id") or task_id
     used = None if template is None else (template.name, [(i.label, clip(values[i.key], 80))
                                                          for i in template.inputs if i.key in values])
-    turn.blocks.append(await configuration_block(task_id, shown, project, work_dir, created,
-                                                 workspace=workspace["check"], template=used))
+    block = await configuration_block(task_id, shown, project, work_dir, created,
+                                      workspace=workspace["check"], template=used)
+    turn.blocks.append(block)
+    turn.created_task_blocks[task_id] = block
     return {"task_id": task_id, "name": shown, "status": "ready", "project": project["name"],
             "project_created": created, "work_dir": work_dir, "workspace_mode": workspace["check"]["mode"],
             "shown_to_user": "Looper adds the task's configuration and the question whether to start it now after "
@@ -669,6 +671,10 @@ async def _control(call: Call) -> dict[str, Any]:
             await start_ready_task(task_id, call.platform.bus, call.manager_address)
         except RequestError as exc:
             raise _request_error(exc) from None
+        # TaskRouter may not have consumed the start yet; the successful request is enough to stop asking.
+        if block := call.turn.created_task_blocks.pop(task_id, None):
+            configuration = block.partition("\n")[2].removesuffix(f"\n\n{START_QUESTION}")
+            call.turn.blocks[call.turn.blocks.index(block)] = f"任务已创建：\n{configuration}"
         return {"task_id": task_id, "started": True}
     if action == "stop":
         if status not in db_tasks.ACTIVE_STATUSES:
