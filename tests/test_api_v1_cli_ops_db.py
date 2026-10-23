@@ -115,6 +115,15 @@ def test_cli_commands_against_disposable_serve(tmp_path, monkeypatch, capsys):
             capsys.readouterr()
             assert loopercli.main([*base, "config", "import", str(exported)]) == 0
             staged = json.loads(capsys.readouterr().out)["result"]["import_id"]
+            for _ in range(3):
+                assert loopercli.main([*base, "config", "import", str(exported)]) == 0
+                unused = json.loads(capsys.readouterr().out)["result"]["import_id"]
+            assert loopercli.main([*base, "config", "import", str(exported)]) == 1
+            assert json.loads(capsys.readouterr().out)["error"]["code"] == "conflict"
+            assert loopercli.main([*base, "config", "import", "--cancel", unused]) == 0
+            assert json.loads(capsys.readouterr().out)["result"] == {"deleted": unused}
+            assert loopercli.main([*base, "config", "import", str(exported)]) == 0
+            capsys.readouterr()
             assert loopercli.main([*base, "config", "import", "--apply", staged]) == 3
             confirmation = json.loads(capsys.readouterr().out)["confirmation_id"]
             assert loopercli.main([*base, "confirm", confirmation]) == 0

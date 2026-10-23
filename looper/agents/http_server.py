@@ -525,6 +525,8 @@ class AgentHTTPServer:
                         reader.feed_data(raw)
                         reader.feed_eof()
                         return await self._config_imports.receive(reader, len(raw), owner=principal.key)
+                    if name == "config.import_cancel":
+                        return await self._config_imports.cancel(call.arguments["import_id"], owner=principal.key)
                     return await self._apply_import(self._config_imports, call.arguments["import_id"],
                                                     owner=principal.key)
                 except config_transfer.ConfigFileError as exc:
