@@ -98,6 +98,7 @@ class Operation:
     hand: bool = False  # loopercli has a hand-written command for it (x-looper-cli-hand)
     stream: bool = False  # answers text/event-stream
     confirms: bool = False  # a call may answer needs_confirmation (a write, or a tool that escalates)
+    operator_only: bool = False  # credential management never accepts an API client
 
 
 def _summary(description: str) -> str:
@@ -132,8 +133,32 @@ _LISTED = {"task_id": _STR, "name": _STR, "status": _STR, "group": _STR, "projec
            "created_at": _NULL_STR}
 _TASK_ID_ONLY = {"task_id": _STR}
 _GATE_ANSWER = {"task_id": _STR, "gate": _OBJ, "message": _OBJ, "delivered": _STR}
+_PLAN = _object({
+    "applied": _BOOL, "counts": _OBJ,
+    "changes": _array(_object({"section": _STR, "key": _STR, "action": _STR,
+                               "fields": _array(_STR), "reason": _STR, "code": _STR},
+                              ["section", "key", "action"])),
+    "need_secret": _array(_object({"section": _STR, "key": _STR, "names": _array(_STR),
+                                   "target": _object({"kind": _STR, "id": _STR})},
+                                  ["section", "key", "names"])),
+    "notes": _array(_STR)})
 
 RESULTS: dict[str, dict[str, Any]] = {
+    "auth.set_password": _object({"user": _STR, "password_set": _BOOL}),
+    "auth.clear_password": _object({"removed": _BOOL}),
+    "system.check": _object({"checks": _array(_object({
+        "id": _STR, "label": _STR, "status": {"type": "string", "enum": ["ok", "warn", "fail", "skip"]},
+        "detail": _STR, "fix": _STR}))}),
+    "config.export": _object({"document": _object({
+        "format": _STR, "looper_version": _STR, "exported_at": _STR, "secrets": _STR,
+        "runtimes": _array(), "providers": _array(), "models": _array(), "profiles": _array(),
+        "settings": _OBJ, "channels": _array(), "catalog": _array(), "installs": _array(),
+        "projects": _array()}, ["format"])}),
+    "config.import_preview": _object({"import_id": _STR, "bytes": _INT, "file": _OBJ,
+                                      "expires_at": _STR, "plan": _PLAN}),
+    "config.import_apply": _object({"import_id": _STR, "plan": _PLAN}),
+    "config_export": _object({"path": _STR, "format": _STR, "bytes": _INT, "counts": _OBJ,
+                               "secrets_left_out": _INT, "path_documents_to_repoint": _INT, "note": _STR}),
     "tasks.list": _object({"tasks": _array(_object(_LISTED)), "more": _BOOL}),
     "tasks.get": _object({
         **_LISTED, "phase": _NULL_STR, "work_dir": _NULL_STR, "requirement": _NULL_STR, "steps": _array(),
@@ -218,10 +243,10 @@ def tool_operations(tools: Sequence[Tool]) -> list[Operation]:
 
 
 def _hand(operation_id: str, method: str, path: str, description: str, request: Mapping[str, Any] | None, *,
-          stream: bool = False, hand: bool = True) -> Operation:
+          stream: bool = False, hand: bool = True, operator_only: bool = False) -> Operation:
     return Operation(operation_id=operation_id, method=method, path=f"{PREFIX}{path}",
                      summary=_summary(description), description=description, request=request,
-                     result=RESULTS.get(operation_id, UNTYPED), hand=hand, stream=stream)
+                     result=RESULTS.get(operation_id, UNTYPED), hand=hand, stream=stream, operator_only=operator_only)
 
 
 HAND_OPERATIONS: tuple[Operation, ...] = (
@@ -248,13 +273,35 @@ HAND_OPERATIONS: tuple[Operation, ...] = (
 )
 WHOAMI = _hand("whoami", "GET", "/whoami", "Who the token calls as, and the Looper version.", None, hand=False)
 
+ONLINE_OPERATIONS: tuple[Operation, ...] = (
+    _hand("auth.set_password", "POST", "/auth/set_password",
+          "Set the operator password and end existing password sessions. Operator identity only.",
+          _object({"user": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$"},
+                   "password": {"type": "string", "minLength": 8, "writeOnly": True}}, ["password"], closed=True),
+          hand=False, operator_only=True),
+    _hand("auth.clear_password", "POST", "/auth/clear_password",
+          "Clear the operator password and end existing password sessions. Operator identity only.",
+          _object({}, closed=True), hand=False, operator_only=True),
+    _hand("system.check", "POST", "/system/check", "Run the doctor's self checks, including pg_dump.",
+          _object({}, closed=True), hand=False),
+    _hand("config.export", "POST", "/config/export", "Export the configuration as a portable document.",
+          _object({"include_projects": _BOOL, "include_secrets": _BOOL}, [], closed=True), hand=False),
+    _hand("config.import_preview", "POST", "/config/import_preview",
+          "Stage a configuration document and preview its import without writing configuration.",
+          _object({"document": _OBJ}, closed=True), hand=False),
+    Operation("config.import_apply", "POST", f"{PREFIX}/config/import_apply", "Apply a staged configuration import.",
+              "Apply a staged configuration import. Requires confirmation in this client and session.",
+              _object({"import_id": {"type": "string", "minLength": 1}}, closed=True),
+              RESULTS["config.import_apply"], risk="high", confirms=True),
+)
+
 
 def operations(tools: Sequence[Tool] | None = None) -> list[Operation]:
     if tools is None:
         from .ops.clients import CLIENT_TOOLS
 
         tools = CLIENT_TOOLS
-    return [*tool_operations(tools), *HAND_OPERATIONS, WHOAMI]
+    return [*tool_operations(tools), *HAND_OPERATIONS, WHOAMI, *ONLINE_OPERATIONS]
 
 
 _STREAM_EVENTS = ("Events, in order: accepted {conversation_id, message_id, manager_id}; delta {text} and status "
@@ -290,6 +337,8 @@ def _path_item(operation: Operation) -> dict[str, Any]:
             item[key] = value
     if operation.hand:
         item["x-looper-cli-hand"] = True
+    if operation.operator_only:
+        item["x-looper-operator-only"] = True
     if operation.method == "POST":
         item["parameters"] = [{"name": "X-Looper-Session", "in": "header", "required": False,
                                "description": "Confirmations belong to this session of the client (default: "
