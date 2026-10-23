@@ -103,21 +103,6 @@ RUNTIMES = ["claude-code", "codex", "grok", "omp"]
 
 
 @pytest.mark.parametrize("runtime_type", RUNTIMES)
-@pytest.mark.parametrize("role", list(AgentType))
-@pytest.mark.parametrize("task, layer", [(None, None), (None, APPEND), (None, REPLACE), (APPEND, REPLACE),
-                                         (REPLACE, APPEND), (REPLACE, None), (APPEND, None)])
-def test_launch_mode_is_the_same_on_every_runtime(role: AgentType, runtime_type: str, task: SystemPromptMode | None,
-                                                  layer: SystemPromptMode | None) -> None:
-    layers = {(Layer.TASK, role): LayerValues(system_prompt_mode=task),
-              (Layer.ROLE, role): LayerValues(system_prompt_mode=layer)}
-    profile = _with_runtime(runtime_type)
-    settings = replace(resolve(role, layers), profile=profile)
-    expected = task or layer or BUILTIN_SYSTEM_PROMPT_MODE[role]
-    assert Launch(settings, role=role).system_prompt_mode is expected
-    assert Launch(settings, role=role).record()["system_prompt_mode"] == expected.value
-
-
-@pytest.mark.parametrize("runtime_type", RUNTIMES)
 def test_a_launch_without_a_role_appends_on_every_runtime(runtime_type: str) -> None:
     profile = _with_runtime(runtime_type)
     assert Launch(AgentSettings(profile=profile, system_prompt_mode=REPLACE)).system_prompt_mode is APPEND

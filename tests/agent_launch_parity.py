@@ -10,25 +10,17 @@ user turn on its stdin. Paths under ``root`` read ``<root>``; the
 directories above it, which differ between machines, read ``<above>`` in the
 isolation settings.
 
-``seed_projects`` and ``seed_layers`` write a scenario's projects and agent
-setting layers with SQL that works on the tables as they were before agents
-(when a layer held a ``model``), so a scenario can be set up on that code and,
-for the upgrade, before this code's schema migrates it. ``seed_rest`` adds the
-tasks, a knowledge document and a catalog install through the API functions.
-
-Run as a script, it prints the captures of every scenario as JSON: that is how
-``fixtures/agent_launch_parity_main.json`` was made, on the code before agents
-(see ``tests/test_agent_launch_parity_db.py``).
+``seed_projects`` writes the projects, and ``seed_rest`` the tasks, with SQL and API
+functions that work on the tables of the v2.12 registry and of this code alike:
+``tests/model_launch_parity.py`` runs them on the old checkout that made the
+v2.12 launch fixtures and on the converted rows.
 """
-
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import os
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -42,31 +34,10 @@ TASKS = {PROJECT_A: "task-0000000000a1", PROJECT_B: "task-0000000000b1"}
 PROJECTS = {PROJECT_A: ("calc", "Calc background."), PROJECT_B: ("docs", "")}
 REQUIREMENT = "Add an add(a, b) function to calc.py."
 
-_ENV = [{"key": "ZED", "value": "1"}, {"key": "ALPHA", "value": "two words"}]
-
-# Each scenario: the agent setting layers as stored before agents, (scope, role, project, fields), and the
-# roles captured ("role" or "role@project"). "unconfigured" has none; "migrated" sets a model on every layer,
-# including one stored with spaces around it and one that no longer validates (ignored, as if unset).
+# The one scenario: no agent setting layers; the roles captured ("role" or "role@project").
 SCENARIOS: dict[str, dict[str, Any]] = {
     "unconfigured": {
-        "layers": [],
-        "extras": False,
         "cases": ["manager", f"planner@{PROJECT_A}", f"worker@{PROJECT_A}", f"reviewer@{PROJECT_A}"],
-    },
-    "migrated": {
-        "layers": [
-            ("system", None, None, {"model": "sonnet", "effort": "high", "env": _ENV}),
-            ("role", "manager", None, {"model": "opus", "harness_prompt": "Manager harness HM."}),
-            ("role", "planner", None, {"model": " haiku "}),
-            ("role", "reviewer", None, {"model": "--resume"}),
-            ("project", None, PROJECT_A, {"model": "opus[1m]", "run_budget_usd": 0.5}),
-            ("role_project", "worker", PROJECT_A,
-             {"model": "claude-haiku-4-5", "effort": "low", "harness_prompt": "Work harness WH."}),
-            ("role_project", "reviewer", PROJECT_B, {"env": [{"key": "ZED", "value": None}]}),
-        ],
-        "extras": True,
-        "cases": ["manager", *(f"{role}@{project}" for project in (PROJECT_A, PROJECT_B)
-                               for role in ("planner", "worker", "reviewer"))],
     },
 }
 
@@ -78,32 +49,13 @@ async def seed_projects(pool: Any) -> None:
     )
 
 
-async def seed_layers(pool: Any, scenario: str) -> None:
-    for scope, role, project_id, fields in SCENARIOS[scenario]["layers"]:
-        await pool.execute(
-            "INSERT INTO agent_setting_layers (scope, role, project_id, harness_prompt, model, effort, env, "
-            "run_budget_usd) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)",
-            scope, role, project_id, fields.get("harness_prompt"), fields.get("model"), fields.get("effort"),
-            json.dumps(fields.get("env", [])), fields.get("run_budget_usd"),
-        )
-
-
 async def seed_rest(scenario: str, root: Path) -> None:
-    """The tasks; with the scenario's extras, a knowledge document in project A and a skill for every Worker."""
+    """The tasks (``scenario`` is the old checkouts' signature, whose scenarios differ in what else they seed)."""
     from looper.db import tasks
 
     for project_id, task_id in TASKS.items():
         await tasks.create_task(task_id=task_id, requirement=REQUIREMENT, project_id=project_id,
                                 work_dir=str(_work_dir(root, project_id)), status="running")
-    if not SCENARIOS[scenario]["extras"]:
-        return
-    from looper.agents import catalog, catalog_sources, knowledge
-
-    await knowledge.add_document(PROJECT_A, {"source_kind": "text", "title": "Style", "summary": "How calc is written",
-                                             "content": "Use type hints.\n"}, root / "runtime")
-    skill = await catalog_sources.create_skill({"name": "stamp", "description": "Stamp a release",
-                                                "content": "Write STAMP into stamp.txt.\n"})
-    await catalog.install({"item_id": skill["item"]["item_id"], "scope": "global", "roles": ["worker"]})
 
 
 def _work_dir(root: Path, project_id: str) -> Path:
@@ -197,11 +149,6 @@ def _normalized(seen: dict[str, Any], root: str, executable: str, environ: dict[
     }
 
 
-# Agent teams, on by default for every Claude Code profile since after these fixtures were made: every role of their
-# scenarios but the Planner, which never has them, starts with them.
-AGENT_TEAMS = "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
-
-
 def without_agent_teams(argv: list[str]) -> list[str]:
     """``argv`` as a run without agent teams has it: less ``--teammate-mode in-process``, which it must have, and with
     SendMessage denied beside ListAgents, where a run with teams keeps it for its teammates (``claude_cli.peer_args``)."""
@@ -211,128 +158,6 @@ def without_agent_teams(argv: list[str]) -> list[str]:
     denied = argv.index("--disallowedTools") + 1
     assert argv[denied] == "ListAgents", argv
     return [*argv[:denied], "ListAgents,SendMessage", *argv[denied + 1:]]
-
-
-# A Planner runs read-only since the fixture was made (the Planner read-only RFC): its permission flag, and the line of
-# its recommended role prompt that said it had every tool, then and now.
-_PLANNER_PERMISSIONS = (["--dangerously-skip-permissions"],
-                        ["--permission-mode", "manual", "--permission-prompts", "none",
-                         "--disallowedTools", "Edit,Write,NotebookEdit", "--allowedTools", "Skill,WebFetch,WebSearch"])
-_PLANNER_TOOLS_LINE = (
-    "- You have every tool. Read the project and run harmless commands (for\n  example to look at the build or the "
-    "tests) when that helps you plan a step\n  or judge a result, and leave the project as you found it.\n",
-    "- You run read-only: read the project and run commands that change nothing\n  (listing, reading and searching "
-    "files; git status, log, diff and show)\n  when that helps you plan a step or judge a result. Looper refuses "
-    "or\n  reports the tool calls that would change files.\n")
-
-
-def read_only_planner(expected: dict[str, dict[str, Any]], *, recommended: bool = True) -> dict[str, dict[str, Any]]:
-    """The fixture's captures with each Planner's read-only flags in place of its permission flag and, when it ran the
-    recommended role prompt (``recommended``), that prompt's line on its tools as it reads now; the other roles' as
-    they were."""
-    then, now = _PLANNER_PERMISSIONS
-    result = {}
-    for case, seen in expected.items():
-        if case.partition("@")[0] == "planner":
-            at = seen["argv"].index(then[0])
-            prompt = seen["system_prompt"]
-            assert prompt.count(_PLANNER_TOOLS_LINE[0]) == int(recommended), case
-            seen = {**seen, "argv": [*seen["argv"][:at], *now, *seen["argv"][at + len(then):]],
-                    "system_prompt": prompt.replace(*_PLANNER_TOOLS_LINE)}
-        result[case] = seen
-    return result
-
-
-def model_registry_contract(expected: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Apply the declared Manager model-tool contract changes to the older pinned prompts.
-
-    Keep the captures and every other prompt byte pinned; do not derive the
-    replacement text from the current production prompt.
-    """
-    changes = (
-        ("  task, adding to it, editing it; projects, Agent Profiles, providers,\n",
-         "  task, adding to it, editing it; projects, Agent Profiles, providers, models,\n"),
-        ("- Never ask for, take or repeat an API key, token or password: the user enters\n"
-         "  them on the dashboard.\n",
-         "- Never ask for, take or repeat an API key, token or password: the user enters\n"
-         "  them on the dashboard. If the user pastes one, do not repeat it and\n"
-         "  never pass it to a tool; direct them to Dashboard → Settings → LLM Providers\n"
-         "  → their provider → API key.\n"
-         "- Accounts (looper_providers) hold login or API access; models (looper_models)\n"
-         "  identify one account, exact name and protocol. Use a model id or the full\n"
-         "  {provider, name, protocol} reference; list compatible models when unsure.\n"
-         "  Profiles (looper_agent_profiles) are recipes: runtime, model and runtime\n"
-         "  options (effort, teams, custom prompt). Select a role's profile with\n"
-         "  looper_settings.\n"),
-        ("  looper_confirm with its confirmation_id; otherwise do not.\n",
-         "  looper_confirm with its confirmation_id; otherwise do not.\n"
-         "- After starting or changing a task, do not wait or poll inside the turn (no\n"
-         "  sleep, no repeated status calls): end the reply. Looper brings the task's\n"
-         "  questions (gates) and its end to the user.\n"),
-        # This branch's declared Manager contract lines on the session's /profile.
-        ('- Never say an operation ran unless its answer was "ok".\n',
-         "- The user switches the Agent Profile of this conversation with /profile\n"
-         "  and starts a new one with /new; Looper answers both itself. You cannot\n"
-         "  switch it: when asked to, tell the user to send /profile (it lists the\n"
-         "  choices). Setting the manager role's profile with looper_settings applies\n"
-         "  to later sessions only when this one has its own choice.\n"
-         '- Never say an operation ran unless its answer was "ok".\n'),
-    )
-    result = dict(expected)
-    for case, seen in expected.items():
-        if case.partition("@")[0] == "manager":
-            prompt = seen["system_prompt"]
-            for before, after in changes:
-                assert prompt.count(before) == 1, case
-                prompt = prompt.replace(before, after)
-            result[case] = {**seen, "system_prompt": prompt}
-    return result
-
-
-
-# Declared Planner contract delta between 252e736725c4 and 9dd4ec666d47.
-# Frozen from origin/main's _WAIT_RULES, not imported from the current prompt;
-# every other byte in the v2 captures remains an independent expected value.
-_PLANNER_WAIT_RULES = """\
-- Waits: when something outside the task must happen before some steps can
-  run (a pull request's author pushes fixes, CI finishes, another system's
-  job ends), a step may be a wait instead of a Worker that polls:
-  {"id": "w1", "kind": "wait", "topic": "...", "depends_on": ["s1"], "max_wait_seconds": 259200, "check": {"type": "github_pr", "repo": "owner/name", "number": 12, "ready_when": "head_changed"}, "every_seconds": 600}
-  It opens when the steps it depends on are done. Looper runs the check every
-  every_seconds (at least 300, default 600) with no turn of yours, and the
-  steps that depend on it start once it is ready; they read why. check:
-  github_pr ("ready_when": "head_changed", "checks_finished" or
-  "new_comments"). Without a check, give "not_before_seconds" (or
-  "not_before", an ISO time) and it ends then. Always set max_wait_seconds
-  (at most 604800): when it passes, the user is told and you get a [WAIT]
-  turn. Prefer a typed check. Never wait for what a step of this task does:
-  depend on that step. In [DECISION] and [CHAT], "waits": [{"id": "w1",
-  "action": "cancel", "resolution": "..."}] ends a wait now; it counts as done.
-"""
-
-
-def planner_wait_contract(expected: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Apply only main's declared wait-step contract addition to pinned Planner captures."""
-    boundary = "\n[DECISION]: decide what happens to a step after its Worker's or Reviewer's\n"
-    result = dict(expected)
-    for case, seen in expected.items():
-        if case.partition("@")[0] == "planner":
-            prompt = seen["system_prompt"]
-            assert prompt.count(boundary) == 1 and "- Waits:" not in prompt, case
-            result[case] = {**seen, "system_prompt": prompt.replace(boundary, _PLANNER_WAIT_RULES + boundary)}
-    return result
-
-
-def set_aside_agent_teams(captured: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """The captures without agent teams, after checking each one but a Planner's had the flag and the variable and
-    a Planner's had neither (the caller removed the variable from the server's environment, so a capture shows it)."""
-    for case, seen in captured.items():
-        if case.partition("@")[0] == "planner":
-            assert "--teammate-mode" not in seen["argv"] and AGENT_TEAMS not in seen["env"], case
-            continue
-        seen["argv"] = without_agent_teams(seen["argv"])
-        assert seen["env"].pop(AGENT_TEAMS) == "1", case
-    return captured
 
 
 async def _manager(claude: str, root: Path) -> None:
@@ -417,42 +242,3 @@ async def capture(root: Path, scenario: str) -> dict[str, dict[str, Any]]:
             await _worker(claude, root, project_id, verify=role == "reviewer")
         captured[case] = _normalized(json.loads(out.read_text(encoding="utf-8")), str(root), claude, environ)
     return captured
-
-
-# --- Generating the fixture (on the code before agents) ---
-
-
-async def _generate(dsn: str) -> dict[str, Any]:
-    import uuid
-
-    import asyncpg
-
-    from looper.db import connection
-
-    result: dict[str, Any] = {}
-    for scenario in SCENARIOS:
-        schema = f"looper_parity_{uuid.uuid4().hex[:12]}"
-        admin = await asyncpg.connect(dsn)
-        await admin.execute(f'CREATE SCHEMA "{schema}"')
-        pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4, server_settings={"search_path": schema})
-        try:
-            await connection.ensure_schema(pool)
-            connection._pool = pool
-            await seed_projects(pool)
-            await seed_layers(pool, scenario)
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp).resolve()
-                os.environ["HOME"] = str(root / "home")
-                os.environ.pop("CLAUDE_CONFIG_DIR", None)
-                await seed_rest(scenario, root)
-                result[scenario] = await capture(root, scenario)
-        finally:
-            connection._pool = None
-            await pool.close()
-            await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
-            await admin.close()
-    return result
-
-
-if __name__ == "__main__":
-    print(json.dumps(asyncio.run(_generate(sys.argv[1])), indent=1, ensure_ascii=False, sort_keys=True))

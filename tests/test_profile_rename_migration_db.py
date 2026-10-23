@@ -1,14 +1,12 @@
-"""The rename to the dashboard's names, on a v2.6.0 database: every row survives and every role runs as before.
+"""The rename to the dashboard's names, on a v2.6.0 database: every row survives under its new names.
 
 Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own, dropped afterwards.
 
 The database is ``fixtures/schema_v2_6_0.sql`` (the v2.6.0 release's
 schema) with ``profile_rename_parity.V2_6_0_ROWS``. This code's schema
-renames its tables and columns in place; ``fixtures/profile_rename_parity_main.json``
-is what the code before the rename (``main`` at 0c5d5ab8a) started each role
-with on the same database (``python tests/profile_rename_parity.py <dsn>`` run
-on that code), so it is not derived from the code under test.
+renames its tables and columns in place; the rows before and after are compared table by table. What each
+role is started with is not compared here: the launch of a role is proved by the tests of the tiers themselves.
 """
 
 from __future__ import annotations
@@ -16,22 +14,17 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import tempfile
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 import pytest
 
-import agent_launch_parity
 import profile_rename_parity as parity
 
 DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-
-MAIN = json.loads((Path(__file__).parent / "fixtures" / "profile_rename_parity_main.json").read_text("utf-8"))
 
 # Each renamed table before and after, with its key and the columns that were renamed (old -> new). A column the
 # rename, or a later migration of main, drops is in DROPPED; every other column keeps its name and value.
@@ -137,12 +130,10 @@ async def _structure(pool: Any) -> dict[str, list[tuple[Any, ...]]]:
     }
 
 
-def test_a_v2_6_0_database_keeps_every_row_under_the_new_names_and_every_role_runs_as_before(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_v2_6_0_database_keeps_every_row_under_the_new_names() -> None:
     from looper.db import connection
 
-    async def _main() -> tuple[dict[str, Any], str]:
+    async def _main() -> None:
         async with _schema() as pool:
             await parity.seed_v2_6_0(pool)
             before = {old: await _rows(pool, old, key) for old, _, key, _ in RENAMED}
@@ -209,28 +200,7 @@ def test_a_v2_6_0_database_keeps_every_row_under_the_new_names_and_every_role_ru
             assert await pool.fetch("SELECT id, model_id FROM agent_profiles ORDER BY id") == identities
             assert await _structure(pool) == shape
 
-            monkeypatch.setattr(connection, "_pool", pool)
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp).resolve()
-                monkeypatch.setenv("HOME", str(root / "home"))
-                monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-                monkeypatch.delenv(agent_launch_parity.AGENT_TEAMS, raising=False)
-                # The fixture predates agent teams, which its Claude Code profiles now have by default.
-                captured = agent_launch_parity.set_aside_agent_teams(await parity.capture(root))
-            return captured, await pool.fetchval("SELECT id FROM agent_profiles WHERE name = $1",
-                                                 "claude-code/glm/glm-5.3[1m] · high")
-
-    captured, glm_high = asyncio.run(_main())
-    # The Manager runs glm with the system's effort high as before, through the profile that has it: the brief of
-    # its new session names that profile's id.
-    captured["manager"]["stdin"] = captured["manager"]["stdin"].replace(f"(agent {glm_high})",
-                                                                        "(agent agent-glm000000001)")
-    assert sorted(captured) == sorted(MAIN)
-    # The pinned launch predates the Planner's read-only run and Manager's model registry contract.
-    expected = agent_launch_parity.model_registry_contract(
-        agent_launch_parity.read_only_planner(MAIN, recommended=False))
-    for case in parity.CASES:
-        assert captured[case] == expected[case], case
+    asyncio.run(_main())
 
 
 def test_a_migrated_v2_6_0_database_is_shaped_like_a_new_one() -> None:

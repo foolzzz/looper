@@ -1,4 +1,4 @@
-"""A v2.6.0 database with realistic rows, and what every role starts its runtime with on it.
+"""A v2.6.0 database with realistic rows.
 
 ``V2_6_0_ROWS`` fills the tables of ``fixtures/schema_v2_6_0.sql`` (the
 schema of the v2.6.0 release, ``git show v2.6.0:looper/db/schema.sql``) the
@@ -6,40 +6,20 @@ way that release stored them: role configs keyed by ``agent_id`` (with
 ``role`` repeating it), registered agents, settings layers and a task's
 overrides that name them by ``agent_id``, and saved sessions that name theirs
 by ``session_agent_id``. SQL only, so it runs before any newer schema renames
-those names.
-
-``capture(root)`` runs every role of ``CASES`` through the agent tiers with a
-stand-in ``claude`` (``agent_launch_parity.capture``) on the database the
-caller set up and migrated. Run as a script on the code before the rename
-(``main`` at 0c5d5ab8a), it prints the captures as JSON: that is how
-``fixtures/profile_rename_parity_main.json`` was made
-(``tests/test_profile_rename_migration_db.py``).
+those names (``tests/test_profile_rename_migration_db.py``).
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
-import os
-import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
-if str(Path(__file__).parent) not in sys.path:
-    sys.path.insert(0, str(Path(__file__).parent))
-
-import agent_launch_parity as parity  # noqa: E402
+import agent_launch_parity as parity
 
 SCHEMA_V2_6_0 = Path(__file__).parent / "fixtures" / "schema_v2_6_0.sql"
 PROJECT_A, PROJECT_B = parity.PROJECT_A, parity.PROJECT_B
 TASK_A, TASK_B = parity.TASKS[PROJECT_A], parity.TASKS[PROJECT_B]
 API_KEY = "sk-test-rename-parity-0123456789"
-
-# Every role, outside and in both projects; the Planner, Workers and Reviewers of project A run task A, which chose
-# a profile of its own for its Workers and Reviewers.
-CASES = ["manager", *(f"{role}@{project}" for project in (PROJECT_A, PROJECT_B)
-                      for role in ("planner", "worker", "reviewer"))]
 
 V2_6_0_ROWS = f"""
 INSERT INTO projects (id, name, background) VALUES
@@ -108,43 +88,3 @@ async def seed_v2_6_0(pool: Any) -> None:
     """The v2.6.0 schema and ``V2_6_0_ROWS``, in the pool's schema."""
     await pool.execute(SCHEMA_V2_6_0.read_text(encoding="utf-8"))
     await pool.execute(V2_6_0_ROWS)
-
-
-async def capture(root: Path) -> dict[str, dict[str, Any]]:
-    """What every case of ``CASES`` started Claude Code with; the caller set up and migrated the database, and set
-    ``HOME`` (under ``root``)."""
-    parity.SCENARIOS["profile_rename"] = {"layers": [], "extras": False, "cases": CASES}
-    for project_id in (PROJECT_A, PROJECT_B):
-        parity._work_dir(root, project_id).mkdir(parents=True, exist_ok=True)
-    return await parity.capture(root, "profile_rename")
-
-
-async def _generate(dsn: str) -> dict[str, Any]:
-    import uuid
-
-    import asyncpg
-
-    from looper.db import connection
-
-    schema = f"looper_parity_{uuid.uuid4().hex[:12]}"
-    admin = await asyncpg.connect(dsn)
-    await admin.execute(f'CREATE SCHEMA "{schema}"')
-    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4, server_settings={"search_path": schema})
-    try:
-        await seed_v2_6_0(pool)
-        await connection.ensure_schema(pool)
-        connection._pool = pool
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp).resolve()
-            os.environ["HOME"] = str(root / "home")
-            os.environ.pop("CLAUDE_CONFIG_DIR", None)
-            return await capture(root)
-    finally:
-        connection._pool = None
-        await pool.close()
-        await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
-        await admin.close()
-
-
-if __name__ == "__main__":
-    print(json.dumps(asyncio.run(_generate(sys.argv[1])), indent=1, ensure_ascii=False, sort_keys=True))

@@ -737,7 +737,7 @@ def test_a_login_consult_links_the_operators_login_and_copies_no_auth_file(
 def test_resolved_codex_binding_matches_pinned_launches(case: str) -> None:
     from unittest.mock import patch
 
-    from model_launch_parity import CODEX_CASES, codex_capture_root, codex_environment
+    from model_launch_parity import CODEX_CASES, codex_capture_root, codex_environment, without_prompt_text
     from looper.agents.runtimes import SystemPromptMode
 
     with codex_capture_root() as tmp_path:
@@ -761,8 +761,9 @@ def test_resolved_codex_binding_matches_pinned_launches(case: str) -> None:
                                                model.id, expected["config"]["effort"] or None, resolved_model=resolved)
                 launch = Launch(AgentSettings(profile=profile, max_budget_usd=expected["cap"],
                                 env=(("CAPTURE_SETTING", "settings"),), system_prompt_mode=SystemPromptMode(mode)), role=role)
-                # The capture holds the rendered runtime notes; give the adapter its original Looper text.
-                prompt = expected["prompt"].partition("\n\n---\n\n")[2].replace("<root>", str(tmp_path))
+                # The capture holds no prompt text (the wording is the prompt tests' business): give the adapter a
+                # stand-in, and compare the files with the prompt text masked as the capture masks it.
+                prompt = "A stand-in for the system prompt."
                 session_dir = None
                 if role in (AgentType.MANAGER, AgentType.PLANNER):
                     owner = "manager" if role is AgentType.MANAGER else "planner-task-0000000000a1"
@@ -772,11 +773,14 @@ def test_resolved_codex_binding_matches_pinned_launches(case: str) -> None:
                            session_dir=session_dir)
                 home = Path(command[1].removeprefix("CODEX_HOME="))
                 actual_config = (home / "config.toml").read_text()
-                assert actual_config.replace(str(tmp_path), "<root>") == expected["config"]["toml"]
-                assert (home / "AGENTS.md").read_text().replace(str(tmp_path), "<root>") == expected["config"]["agents_md"]
                 env = {**launch.environment(), "CODEX_HOME": str(home)}
                 changed = {k: v.replace(str(tmp_path), "<root>") for k, v in env.items() if parent.get(k) != v}
-                assert changed == expected["env"]
+                masked = without_prompt_text({"prompt": prompt, "argv": [], "env": changed, "config": {
+                    "toml": actual_config.replace(str(tmp_path), "<root>"),
+                    "agents_md": (home / "AGENTS.md").read_text().replace(str(tmp_path), "<root>")}})
+                assert masked["config"] == {"toml": expected["config"]["toml"],
+                                            "agents_md": expected["config"]["agents_md"]}
+                assert masked["env"] == expected["env"]
                 binding = CODEX.bind_provider(profile.provider, launch.model, launch.effort)
                 assert sorted((parent.keys() - env.keys()) | set(binding.unset)) == expected["unset"]
                 argv = expected["argv"]
