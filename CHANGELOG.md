@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.50] - 2026-10-23
+
+### Fixed
+
+- **Web chat address and User Gates page.** A bare chat address now names its thread in place, so Back and Forward restore the matching conversation, and a missing Planner or channel conversation is reported instead of adopted as a new web one. `/new` is case-insensitive, the session profile label shows its effort, and selecting Room again keeps its filters. `GET /api/gates` gains `cursor` and `through` parameters and returns `next_cursor` and `has_more`, so the User Gates page refreshes its loaded rows without losing them or their reply drafts when a gate closes or a new one opens. No model-visible change. ([#436](https://github.com/foolzzz/looper/pull/436))
+
 ## [2.13.49] - 2026-10-23
 
 ### Fixed
