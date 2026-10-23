@@ -17,7 +17,7 @@
     - 不给测试工具写测试：替身、fixture 生成器和对照 harness 不单独测。为一次性迁移做的对照快照不比 prompt 原文，在发布说明里写明保留到哪个版本，到期就删。
     - 数据库测试用共享 fixture，不在测试文件里复制建库 helper，也不从别的测试文件导入 helper。
     - 单个测试超过 5 秒的，要能被 xdist 拆开并行。依赖本机 CLI、浏览器或旧版本 checkout 的测试打上 `installed` 或 `provenance` 标记，放进 nightly。PR 的 Validation 里写明新增的测试行数和生产代码行数（不含 fixture）；比例超过 2:1 时说明原因。
-5. **真实评测只在改动模型可见内容时跑，PR 只跑改动涉及的部分，全量档位在发布前跑一次。** 模型可见内容指 prompt、契约、工具描述和注入的上下文。每个 PR 只跑改动涉及的任务和对话（加上新增的），`--reps 2`、haiku；Planner 的 prompt、契约或上下文变了，再在这些任务上加 opus；Manager 的 prompt 或工具变了，对话跑 haiku，并再用 opus xhigh 的 Manager 跑同样的对话。发布前在候选版本（合入全部 PR 后的 `main`）上跑一次全量档位并刷新基线。在代码定稿后跑，之后只改了模型看不到的代码就不重跑。具体命令和 `--jobs 4` 和 `--case-budget-usd`（并行且有总上限时必填）的用法见 [evals/README.md](../../evals/README.md) 的 "Which tier to run"。
+5. **真实评测只在改动模型可见内容时跑，PR 只跑改动涉及的部分，全量档位在发布前跑一次。** 模型可见内容指 prompt、契约、工具描述和注入的上下文。每个 PR 只跑改动涉及的任务和对话（加上新增的），`--reps 2`、sonnet，与 sonnet 基线比较（尚无基线时，在下一次发布前全量档位运行时刷新）；Planner 的 prompt、契约或上下文变了，再在这些任务上加 opus、`--reps 1`；Manager 的 prompt 或工具变了，再用 opus xhigh 的 Manager、`--reps 1` 跑同样的对话。opus 只在第一次失败时补跑第二次。发布前在候选版本（合入全部 PR 后的 `main`）上跑一次全量档位：haiku 和 sonnet 各跑全部任务与对话，opus 跑 Planner 任务和 opus xhigh Manager 对话，均为 `--reps 3`；从对应真实运行结果刷新各模型基线，包括 `real-sonnet.json` 和 `dialogs-real-sonnet.json`。Sonnet 任务基线仍只有 5 个任务、1 次重复，对话基线尚缺，完成这两项真实运行前继续报告覆盖缺口。在代码定稿后跑，之后只改了模型看不到的代码就不重跑。具体命令和 `--jobs 4` 和 `--case-budget-usd`（并行且有总上限时必填）的用法见 [evals/README.md](../../evals/README.md) 的 "Which tier to run"。
 6. **截图只在界面改动时做，一张即可。**
 7. **文档从简。** 每个阶段交付后在第 4 节记一行（不超过 3 句），并更新第 2 节的状态列；`agent-system.md` 只在架构变化时改。
 8. **合入后部署。** 合入后同步本机 `main`，前端有改动就重新构建 `web/dist`，然后执行 `looper service restart` 重启本机服务（8767，由 `looper service` 托管）。
@@ -27,6 +27,7 @@
     - 一个 PR 一个开发会话，代码定稿、CI 通过、评测排上队后就结束；新功能开新会话。会话变长时先写交接说明（状态、决定、剩余工作、文件和行号），再换新会话。
     - 等待不占会话：CI 和评测用后台命令，结束时通知一次，不轮询。评测之后的填表、和 `main` 的冲突解决交给 Codex 或 Grok，评测失败才再开一个短会话修。
     - 机械工作（按明确的任务卡实现、修评审意见、补测试、写文档和 PR 文案）交给 Codex 或 Grok；Claude 会话负责设计、评审、调试和判断。设计、评审和改动 Planner、管家 prompt 的工作用 Opus，照已批准设计实现的会话用 Sonnet。
+    - 真实链路验证（全新数据库上的 `looper serve`）在改动不依赖运行时时，所有角色都用 Codex Agent Profiles；只有改动涉及 Claude Code 运行时或 Claude Code agent 可见内容时才用 Claude Code（sonnet）。Claude 可见内容的 prompt 评测仍按第 5 条用 Claude Code 跑。
     - 同时进行的开发会话不超过 4 个，真实评测最多 3 个并行。
 
 ## 2. 阶段总览
@@ -707,7 +708,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-20 | 在飞书、Telegram 里回答、结束用户关卡（方案 A，用户关卡 RFC Q23）：`/gates` 由代码列出在等用户的关卡（私聊列全部，含群任务和网页任务；群里只列本群的），`/gate N <回答>`、`/gate N end` 经 `gate_service.post_message` 存进关卡，回复卡片时正文为 `end` 也结束；编号绑定在该聊天上一次列表的快照上，关卡已不在等不会落到别的关卡；渠道白名单里的人都可以答；回执是代码的中文文字，不进管家模型和聊天记录，模型可见内容不变。Telegram 注册 `/gates`、`/gate` 并加进命令菜单（原来 `~filters.COMMAND` 会丢掉），飞书文本原样到达（群里 @ 去掉后）。验证：`tests/test_telegram_gate_commands.py`（命令原文转给管家、未列入白名单的无反应、菜单和 handler 注册）、`tests/test_agent_channels.py` 里飞书群 @ 的用例、`tests/test_channel_gate_commands.py`。按钮（第二步）未做。 |
 | 2026-10-21 | 场景管家阶段 1 交付（looper #NNN，[RFC](../architecture/rfcs/scenario-managers.zh-CN.md)）：管家与任务模板、控制台聊天页选管家、Settings → Managers、任务归属和回报给建它的管家。渠道仍只到默认管家，阶段 2、3 待做。 |
 | 2026-10-22 | 场景管家阶段 2 交付（looper #NNN）：每个管家可以有自己的飞书 / Telegram 机器人，投递按渠道 id，配置导出只带内置的三行。 |
-| 2026-10-22 | 一个 OpenAPI 接口、`loopercli` 与 `looper-skill` 阶段 1 交付（looper #NNN，[RFC](../architecture/rfcs/looper-client-skill.zh-CN.md)）：`/api/v1/` 的 OpenAPI、Settings → API clients、客户端两步确认与聊天、管家的 loopercli 渠道行、`loopercli` 和 `looper-skill` 插件。阶段 2、3 待做。 |
+| 2026-10-22 | 一个 OpenAPI 接口、`loopercli` 与 `looper-skill` 阶段 1 交付（looper #NNN，[RFC](../architecture/rfcs/looper-client-skill.zh-CN.md)）：`/api/v1/` 的 OpenAPI、Settings → API clients、客户端两步确认与聊天、管家的 loopercli 渠道行、`loopercli` 和 `looper-skill` 插件。阶段 2a 的 auth、doctor、config 命令迁移已交付；阶段 2 其余部分与阶段 3 待做。 |
 | 2026-10-22 | Linux CI 修复：工作区检查同时识别 Git 搜索到根目录和跨挂载点边界的非仓库报错，损坏 Git 目录等检查失败仍拒绝；Python Tests 的 Python job 固定 Ubuntu 24.04，使用与 PostgreSQL 16 服务端同主版本的备份恢复客户端。本地工作区/API 测试 55 项、vault closeout/令牌隔离/四角色服务 smoke 5 项通过；Linux 完整测试结果见对应 PR。 |
 
 ## 5. 不属于本 RFC 的待办
@@ -742,9 +743,10 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
     - **阶段 2**（✅ 已交付，looper #NNN）：每个管家可以有自己的飞书 / Telegram 机器人：`channel_configs.manager_id`，一种渠道多行（`channel-<type>-<n>`），凭据只在控制台录入，一个机器人一个运行器，添加时不调用 `getMe`；投递按渠道 id 而不是类型（任务结束通知、等待与并发通知、关卡消息），定时任务的通知仍走内置的三行；新机器人的线程 id 为 `<channel_id>:<chat_id>`（RFC 第 9.1 节）。
     - **阶段 3**（待做）：按聊天绑定：`manager_chat_bindings(channel_id, chat_id, manager_id)`，未绑定聊天归机器人所属的管家，机器人可设「只接已绑定的聊天」（未绑定的只记录、不回复，Settings 一键绑定），绑定立即生效，`/stop` 停这个聊天在所有管家里的轮；Settings 的 Managers、Channels 页配置绑定（RFC 第 9.2 节）。
     - 阶段 1 之后的待办：不再支持降级到阶段 2 之前的版本后，删掉 `task_user_gate_posts` 按类型的唯一约束；闲置的场景管家自动停进程；管家和模板进配置导出、导入；定时任务属于一个场景管家并能用它的模板；按管家分插件和 skill 的安装；任务列表按管家筛选。
-22. **一个 OpenAPI 接口、`loopercli` 与 `looper-skill`**（2026-10-22 维护者定方向，设计见[RFC](../architecture/rfcs/looper-client-skill.zh-CN.md)，待批准）：别的 agent 会话经 skill 把讨论好的活交给 Looper 并跟进。只在本机、客户端令牌全部权限（Settings 里建、吊销，只存哈希）、写操作两步确认（按客户端和会话）；和 Looper 的一切交互走 `/api/v1/` 的 OpenAPI（从 ops 工具的 schema 生成），新程序 `loopercli` 是它的纯客户端（子命令运行时生成，几个手写别名），主路径是 `loopercli chat` 和管家对话。分三个阶段、各一个 PR：
+22. **一个 OpenAPI 接口、`loopercli` 与 `looper-skill`**（2026-10-22 维护者定方向，设计见[RFC](../architecture/rfcs/looper-client-skill.zh-CN.md)，阶段 1、2a 已交付）：别的 agent 会话经 skill 把讨论好的活交给 Looper 并跟进。只在本机、客户端令牌全部权限（Settings 里建、吊销，只存哈希）、写操作两步确认（按客户端和会话）；和 Looper 的一切交互走 `/api/v1/` 的 OpenAPI（从 ops 工具的 schema 生成），新程序 `loopercli` 是它的纯客户端（子命令运行时生成，几个手写别名），主路径是 `loopercli chat` 和管家对话。分三个阶段，阶段 2 按独立交付的子阶段拆 PR：
     - **阶段 1**（✅ 已交付，looper #NNN）：客户端令牌、v1 文档与操作（客户端目录、聊天、确认）、管家的 loopercli 渠道行与对话回报、`loopercli`、`looper-skill` 和 Claude Code 插件、两个管家对话评测（sonnet）；对话里回报任务的接受和结束，关卡和进度用 `loopercli wait` 跟进。
-    - **阶段 2**（待做）：其余 HTTP 路由成为 v1 操作并全部类型化；只认操作者的密码与令牌管理（`auth.*`，客户端令牌一律拒绝）；`config export/import` 搬到 API 和 `loopercli` 后从 `looper` 删除，`doctor` 和密码重设留在 `looper` 作服务起不来时的离线救援；HTTP 路由与 ops 工具的重复实现合并（建任务抽共享核心、两边各留参数适配，RFC 第 5.4 节）；控制台改用 v1。
+    - **阶段 2a**（✅ 已交付）：只认操作者的 `auth.set_password` / `auth.clear_password`、`system.check` 和配置导出、导入预览、应用进入同一 v1 文档，结果类型化；`loopercli` 的对应命令；客户端应用配置需两步确认；配置操作与旧路由、工具共用实现。`looper config export/import` 已删除，替代命令需要运行服务；`doctor` 和密码重设留在 `looper` 作离线救援。
+    - **阶段 2 其余部分**（待做）：其余 HTTP 路由成为 v1 操作并全部类型化；只认操作者的客户端令牌管理；HTTP 路由与 ops 工具其余重复实现合并（建任务抽共享核心、两边各留参数适配，RFC 第 5.4 节）；控制台改用 v1。
     - **阶段 3**（待做）：可选的任务附件（上传、随任务存储、Planner 和 Worker 当文件读）。
     - 阶段 1 之后的待办：控制台聊天列表标出客户端的线程；没有 shell 的客户端需要时在同一 API 上包 MCP。
 

@@ -18,6 +18,29 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.48] - 2026-10-23
+
+### Breaking changes
+
+- **Configuration export and import require the running service.** `looper config export` and `looper config import` have been removed. Use `loopercli config export <file>` and `loopercli config import <file>` instead; apply a preview with `loopercli config import --apply <import_id>`, then `loopercli confirm <confirmation_id>`.
+- **配置导出、导入需要运行中的服务。** 已删除 `looper config export` 和 `looper config import`，请改用 `loopercli config export <file>` 和 `loopercli config import <file>`；应用预览用 `loopercli config import --apply <import_id>`，再用 `loopercli confirm <confirmation_id>` 确认。
+
+### Added
+
+- **`loopercli auth`, `doctor` and `config` through the v1 API.** New v1 operations `auth.set_password` and `auth.clear_password` (operator identity only; an API client token gets 403 `forbidden`), `system.check`, `config.export`, `config.import_preview` and `config.import_apply` (needs a client confirmation). `loopercli auth set-password|clear-password`, `loopercli doctor` and `loopercli config export|import` call them. `looper auth` and `looper doctor` are unchanged. Pending configuration imports now belong to the caller that staged them. Model-visible: the `looper_config_export` result `note` now names the `loopercli` commands; the OpenAPI document lists six more operations. ([#430](https://github.com/foolzzz/looper/pull/430))
+
+## [2.13.47] - 2026-10-23
+
+### Fixed
+
+- **The nightly installed tests build the dashboard first.** `.github/workflows/installed-tests.yml` now runs `scripts/stage-dashboard.sh` before the installed tests, as the release workflow does, so the browser tests find the dashboard. The same diff also pins `actions/setup-node` to `v6` (was `v7`). Behavior change: none in the program, only the nightly CI workflow. Model-visible: none. ([#433](https://github.com/foolzzz/looper/pull/433))
+
+## [2.13.46] - 2026-10-23
+
+### Fixed
+
+- **The Manager's reply no longer asks to start a task it already started.** When the Manager creates a task and starts it in the same turn, the task's configuration block in the reply now reads "任务已创建：" without the "Ready — not started" wording and without the question whether to start it. A start that fails, a turn that does not start the task, and a start of a different task keep the block and the question as before. Behavior change: the text of the Manager's reply in that case. Model-visible: no change to the Manager's prompt or tool schemas (the `looper_task_create` result still carries its `shown_to_user` note). ([#428](https://github.com/foolzzz/looper/pull/428))
+
 ## [2.13.45] - 2026-10-22
 
 ### Added
