@@ -1543,11 +1543,7 @@ export interface NewProjectSkill {
   description: string;
   /** The SKILL.md body, without frontmatter. */
   content: string;
-}
-
-function skillsUrl(projectId: string, skillId?: string) {
-  const base = `${API_BASE}/projects/${encodeURIComponent(projectId)}/skills`;
-  return skillId ? `${base}/${encodeURIComponent(skillId)}` : base;
+  enabled?: boolean;
 }
 
 /**
@@ -1559,13 +1555,10 @@ export async function addProjectSkill(
   projectId: string,
   skill: NewProjectSkill,
 ): Promise<ProjectInstalls & { skill: ProjectSkill }> {
-  const res = await fetch(skillsUrl(projectId), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(skill),
-  });
-  if (!res.ok) await failed(res, "add skill");
-  return res.json();
+  const result = await callV1<ProjectInstalls & { skill: ProjectSkill }>(
+    "/api/v1/project_skills/add", { project_id: projectId, skill });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** One skill the project wrote and its SKILL.md body. */
@@ -1575,24 +1568,22 @@ export interface ProjectSkillBody {
 }
 
 export async function fetchProjectSkill(projectId: string, skillId: string): Promise<ProjectSkillBody> {
-  const res = await fetch(skillsUrl(projectId, skillId));
-  if (!res.ok) await failed(res, "skill");
-  return res.json();
+  const result = await callV1<ProjectSkillBody>(
+    "/api/v1/project_skills/get", { project_id: projectId, skill_id: skillId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Change a skill's name, description or body; a bad field is 400, a taken name 409. Switch it with its install. */
 export async function updateProjectSkill(
   projectId: string,
   skillId: string,
-  fields: Partial<NewProjectSkill>,
+  fields: Partial<Omit<NewProjectSkill, "enabled">>,
 ): Promise<ProjectInstalls & { skill: ProjectSkill }> {
-  const res = await fetch(skillsUrl(projectId, skillId), {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-  });
-  if (!res.ok) await failed(res, "update skill");
-  return res.json();
+  const result = await callV1<ProjectInstalls & { skill: ProjectSkill }>(
+    "/api/v1/project_skills/update", { project_id: projectId, skill_id: skillId, fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Delete a skill the project wrote: from the catalog and from every project it is installed in. */
@@ -1600,9 +1591,10 @@ export async function deleteProjectSkill(
   projectId: string,
   skillId: string,
 ): Promise<ProjectInstalls & { deleted: string }> {
-  const res = await fetch(skillsUrl(projectId, skillId), { method: "DELETE" });
-  if (!res.ok) await failed(res, "delete skill");
-  return res.json();
+  const result = await callV1<ProjectInstalls & { deleted: string }>(
+    "/api/v1/project_skills/delete", { project_id: projectId, skill_id: skillId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function updateTaskConfig(
@@ -3528,15 +3520,15 @@ export interface RunProjectSkills {
 }
 
 export async function fetchCatalog(): Promise<Catalog> {
-  const res = await fetch(`${API_BASE}/catalog`);
-  if (!res.ok) await failed(res, "catalog");
-  return res.json();
+  const result = await callV1<Catalog>("/api/v1/catalog_items/list", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function fetchCatalogItem(itemId: string): Promise<CatalogItemDetail> {
-  const res = await fetch(`${API_BASE}/catalog/${encodeURIComponent(itemId)}`);
-  if (!res.ok) await failed(res, "catalog item");
-  return res.json();
+  const result = await callV1<CatalogItemDetail>("/api/v1/catalog_items/get", { item_id: itemId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Import (or re-import) this machine's enabled Claude Code plugins and personal skills; new items are installed nowhere. */
@@ -3571,19 +3563,15 @@ export async function updateMcpServer(
   itemId: string,
   change: { name?: string; description?: string } & Partial<McpConfig>,
 ): Promise<{ item: CatalogItem }> {
-  const res = await fetch(`${API_BASE}/catalog/${encodeURIComponent(itemId)}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(change),
-  });
-  if (!res.ok) await failed(res, "update MCP server");
-  return res.json();
+  const result = await callV1<{ item: CatalogItem }>("/api/v1/catalog_items/update", { item_id: itemId, fields: change });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Remove an item from the catalog with its installs (not a project's own skill). */
 export async function deleteCatalogItem(itemId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/catalog/${encodeURIComponent(itemId)}`, { method: "DELETE" });
-  if (!res.ok) await failed(res, "delete");
+  const result = await callV1<{ deleted: string }>("/api/v1/catalog_items/delete", { item_id: itemId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
 }
 
 /** Install an item globally or in one project; roles default to every role the scope allows. 409 when it is there. */
@@ -3594,33 +3582,25 @@ export async function installItem(install: {
   roles?: InstallRole[];
   enabled?: boolean;
 }): Promise<InstallChange> {
-  const res = await fetch(`${API_BASE}/installs`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(install),
-  });
-  if (!res.ok) await failed(res, "install");
-  return res.json();
+  const result = await callV1<InstallChange>("/api/v1/installs/create", install);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function updateInstall(
   installId: string,
   fields: { roles?: InstallRole[]; enabled?: boolean },
 ): Promise<InstallChange> {
-  const res = await fetch(`${API_BASE}/installs/${encodeURIComponent(installId)}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-  });
-  if (!res.ok) await failed(res, "update install");
-  return res.json();
+  const result = await callV1<InstallChange>("/api/v1/installs/update", { install_id: installId, ...fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Uninstall; the item stays in the catalog. */
 export async function uninstall(installId: string): Promise<{ deleted: string; item: CatalogItem }> {
-  const res = await fetch(`${API_BASE}/installs/${encodeURIComponent(installId)}`, { method: "DELETE" });
-  if (!res.ok) await failed(res, "uninstall");
-  return res.json();
+  const result = await callV1<{ deleted: string; item: CatalogItem }>("/api/v1/installs/delete", { install_id: installId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Send JSON to a catalog endpoint; a refusal throws the server's reason. */
@@ -3708,15 +3688,17 @@ export function createCatalogSkill(skill: NewProjectSkill): Promise<{ item: Cata
 }
 
 /** Change a Settings, uploaded or git skill; an uploaded or git one is marked modified. */
-export function updateCatalogItem(itemId: string, fields: Partial<NewProjectSkill>): Promise<{ item: CatalogItem }> {
-  return catalogRequest("PUT", `/${encodeURIComponent(itemId)}`, "edit", fields);
+export async function updateCatalogItem(itemId: string, fields: Partial<NewProjectSkill>): Promise<{ item: CatalogItem }> {
+  const result = await callV1<{ item: CatalogItem }>("/api/v1/catalog_items/update", { item_id: itemId, fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** What applies to a project: its own installs and the inherited global ones. */
 export async function fetchProjectInstalls(projectId: string): Promise<ProjectInstalls> {
-  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/installs`);
-  if (!res.ok) await failed(res, "installs");
-  return res.json();
+  const result = await callV1<ProjectInstalls>("/api/v1/installs/project", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 // --- Channel configs ---

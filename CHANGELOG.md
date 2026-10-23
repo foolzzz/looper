@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.61] - 2026-10-23
+
+### Changed
+
+- **Project-owned skills move to the versioned API.** `project_skills.add/get/update/delete` under `/api/v1/` replace four legacy HTTP methods (`POST /api/projects/{id}/skills`, `GET`/`PUT`/`DELETE /api/projects/{id}/skills/{skill id}`), which are removed; the dashboard's project Skills tab uses the new routes. Results are typed, `enabled` is switched through `installs.update`, and deleting a skill is `high` risk: the confirmation lists every installation and project, and references are read again at the delete. Manager prompts and tools are unchanged. ([#470](https://github.com/foolzzz/looper/pull/470))
+
+## [2.13.60] - 2026-10-23
+
+### Changed
+
+- **Catalog items and installations move to the versioned API.** `catalog_items.list/get/update/delete` and `installs.create/update/delete/project` under `/api/v1/` replace eight legacy HTTP methods (`GET /api/catalog`, `GET`/`PUT`/`DELETE /api/catalog/{id}`, `POST /api/installs`, `PUT`/`DELETE /api/installs/{id}`, `GET /api/projects/{id}/installs`), which are removed; the dashboard uses the new routes. Item edits are operator-only and kept out of the audit trail because MCP patches can carry secrets; deleting an item is `high` risk. Full catalog views and the compact `looper_catalog` results are typed in the OpenAPI document. Manager prompts and tools are unchanged. ([#466](https://github.com/foolzzz/looper/pull/466))
+
 ## [2.13.59] - 2026-10-23
 
 ### Changed

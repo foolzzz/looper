@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from tests.db_support import DSN, run_db
+from tests.test_catalog_db import _call as _catalog_call
 from tests.test_ops_tasks_db import _error, _project, _task
 from tests.test_planner_tools_db import _allow, _haiku, _journal, _ops, _Planner
 from tests.test_task_agents_db import _call, _profiles
@@ -271,7 +272,7 @@ async def _skill(name: str) -> str:
 async def _install(item_id: str, roles: list[str] | None, project: dict[str, Any] | None = None) -> dict[str, Any]:
     body = {"item_id": item_id, "scope": "project" if project else "global",
             **({"project_id": project["id"]} if project else {}), **({"roles": roles} if roles is not None else {})}
-    status, answer = await _call("POST", "/api/installs", body)
+    status, answer = await _catalog_call("POST", "/api/v1/installs/create", body)
     assert status in (200, 201), answer
     return answer["install"]
 

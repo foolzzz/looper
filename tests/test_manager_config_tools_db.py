@@ -20,6 +20,7 @@ from looper.agents.ops import Turn
 from looper.agents import profile_registry as registry
 from looper.agents.runtimes import VendorType
 from tests.db_support import DSN, run_db
+from tests.test_catalog_db import _call as _catalog_call
 from tests.test_ops_tasks_db import _Chat, _error, _project, _task
 from tests.test_task_agents_db import _call, _concurrency_chat
 from tests.test_usage_api_db import _run_record
@@ -30,7 +31,8 @@ SECRET = "sk-test-0123456789"
 
 
 async def _ok(method: str, path: str, body: Any = None) -> Any:
-    status, answer = await _call(method, path, body)
+    call = _catalog_call if path.startswith("/api/v1/installs/") else _call
+    status, answer = await call(method, path, body)
     assert status in (200, 201), (status, answer)
     return answer
 
@@ -893,7 +895,7 @@ def test_a_catalog_item_is_installed_changed_and_uninstalled_as_the_dashboard_do
             "action": "install", "item": "search", "project": "calc", "roles": ["worker"]}))
         assert installed["status"] == "ok", installed
         install_id = installed["result"]["install"]["install_id"]
-        (entry,) = (await _ok("GET", f"/api/projects/{project['id']}/installs"))["installs"]
+        (entry,) = (await _ok("POST", "/api/v1/installs/project", {"project_id": project['id']}))["installs"]
         assert (entry["install_id"], entry["roles"], entry["inherited"]) == (install_id, ["worker"], False)
         (again,) = await chat.say("再装一次", ("looper_catalog", {"action": "install", "item": "search",
                                                                 "project": "calc"}))
@@ -909,7 +911,7 @@ def test_a_catalog_item_is_installed_changed_and_uninstalled_as_the_dashboard_do
             ("search", ["worker", "reviewer"])]
         (gone,) = await chat.say("卸掉", ("looper_catalog", {"action": "uninstall", "install_id": install_id}))
         assert gone["status"] == "ok"
-        assert (await _ok("GET", f"/api/projects/{project['id']}/installs"))["installs"] == []
+        assert (await _ok("POST", "/api/v1/installs/project", {"project_id": project['id']}))["installs"] == []
 
     run_db(test, monkeypatch)
 

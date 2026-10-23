@@ -29,6 +29,7 @@ run creates and drops a database beside it).
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -209,7 +210,9 @@ def restarted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     init_repository(work["worktree"])
 
     with fresh_database(str(DSN)) as (database_url, _):
-        server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home}
+        # Only the stand-ins and system tools: installed runtimes otherwise get probed at startup.
+        server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home,
+                  "env": {"PATH": f"{bin_dir}{os.pathsep}{os.defpath}"}}
         with running_server(**server, log_path=root / "serve.log") as api:
             ids: dict[str, str] = {}
             for variant in VARIANTS:
