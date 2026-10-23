@@ -247,14 +247,14 @@ class ManagerFleet:
         bus = self._bus
         taken = bus.take_queue(manager_id)
         queued = {envelope.message_id for envelope in taken}
-        for envelope in (agent.stopped_in_flight if agent else ()):
+        for envelope, partial in (agent.stopped_in_flight if agent else ()):
             if envelope.message_id in queued:
                 continue
             if envelope.message_type in _TASK_REPORTS:
                 await self._hand_over(envelope)
             else:
                 # The stopped turn's final reply first: the chat waits for it, and settling alone ends no stream.
-                await bus.publish(reply_envelope(envelope, stopped_reply("", []), manager_address(manager_id),
+                await bus.publish(reply_envelope(envelope, stopped_reply(partial, []), manager_address(manager_id),
                                                  outcome=ReplyOutcome.STOPPED))
                 bus.settle(envelope.message_id)  # a user message's token ended as stopped
         await self._deal_with(manager_id, taken)

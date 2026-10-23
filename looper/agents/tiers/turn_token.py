@@ -69,6 +69,8 @@ class TurnToken:
     channel: str
     chat: str
     received_at: datetime
+    channel_id: str | None = None
+    partial: str = ""  # top-level text already sent to the chat, independent of event persistence
     binding: str = field(default_factory=lambda: secrets.token_urlsafe(18))
     phase: TurnPhase = TurnPhase.RECEIVED
     stop: StopRequest | None = None
@@ -161,11 +163,12 @@ class TurnRegistry:
         self._tokens: dict[str, TurnToken] = {}
 
     def receive(self, envelope: MessageEnvelope, *, channel: str, chat: str,
-                client_message_id: str | None = None) -> TurnToken:
+                channel_id: str | None = None, client_message_id: str | None = None) -> TurnToken:
         token = TurnToken(
             message_id=envelope.message_id,
             client_message_id=client_message_id,
             channel=channel,
+            channel_id=channel_id,
             chat=chat,
             received_at=datetime.now(timezone.utc),
             envelope=envelope,
@@ -187,11 +190,10 @@ class TurnRegistry:
         return [t for t in self._tokens.values() if t.live]
 
     def live_for(self, channel: str, chat: str) -> list[TurnToken]:
-        return [t for t in self._tokens.values() if t.live and t.channel == channel and t.chat == chat]
+        return [t for t in self._tokens.values() if t.live and (t.channel_id or t.channel) == channel and t.chat == chat]
 
     def oldest_for(self, channel: str, chat: str) -> TurnToken | None:
-        live = self.live_for(channel, chat)
-        return live[0] if live else None
+        return next((t for t in self._tokens.values() if t.live and t.channel == channel and t.chat == chat), None)
 
     def drop(self, token: TurnToken) -> None:
         if self._tokens.get(token.message_id) is token:

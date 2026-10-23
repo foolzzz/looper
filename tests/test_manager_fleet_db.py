@@ -273,7 +273,7 @@ def test_disable_settles_the_message_in_flight(tmp_path: Path, monkeypatch: pyte
             await until(lambda: len(seen) == 1, "the answer to block", timeout=5)
             await _set_enabled(pool, review, False)
             await r.fleet.apply(review)
-            assert [e.message_id for e in agent.stopped_in_flight] == [message.message_id]
+            assert [e.message_id for e, _ in agent.stopped_in_flight] == [message.message_id]
             # The chat gets the stopped turn's final reply, not a silence until its stream times out.
             (reply,) = [e for e in published if e.message_type == MessageType.AGENT_REPLY]
             assert reply.reply_to == message.message_id and reply.payload["outcome"] == "stopped"

@@ -679,7 +679,7 @@ class ManagerAgent:
         # The envelope the message loop is handling, and the ones a stop found unfinished (the fleet settles or
         # hands them over when it retires this Manager).
         self._handling: MessageEnvelope | None = None
-        self.stopped_in_flight: tuple[MessageEnvelope, ...] = ()
+        self.stopped_in_flight: tuple[tuple[MessageEnvelope, str], ...] = ()
 
     @property
     def name(self) -> str:
@@ -797,6 +797,7 @@ class ManagerAgent:
         context = envelope.payload.get("channel_context")
         client_id = context.get("client_message_id") if isinstance(context, dict) else None
         token = self._turns.receive(envelope, channel=origin["channel"] or "", chat=origin["chat"] or "",
+                                    channel_id=origin["channel_id"],
                                     client_message_id=client_id if isinstance(client_id, str) and client_id else None)
         return token
 
@@ -810,7 +811,7 @@ class ManagerAgent:
             if not self.can_interrupt:
                 await self._send_reply(envelope, STOP_UNSUPPORTED_REPLY, persist=False)
                 return
-            tokens = self._turns.live_for(channel, chat) if channel and chat else []
+            tokens = self._turns.live_for(origin["channel_id"] or channel, chat) if channel and chat else []
             stopped = 0
             for token in tokens:
                 result = await self.stop_turn(token.message_id, via=channel)
@@ -827,9 +828,12 @@ class ManagerAgent:
     async def stop(self) -> None:
         self._running = False
         # Before the cancel: it runs the handlers' finally blocks, which end the tokens and clear ``_handling``.
-        pending = ([self._handling] if self._handling is not None else []) + [
-            t.envelope for t in self._turns.live() if t.envelope is not None]
-        self.stopped_in_flight = tuple({e.message_id: e for e in pending}.values())
+        tokens = self._turns.live()
+        if self._running_token is not None:
+            tokens.append(self._running_token)  # settled while its record finishes, but still answering the chat
+        pending = ([(self._handling, "")] if self._handling is not None else []) + [
+            (t.envelope, t.partial) for t in tokens if t.envelope is not None]
+        self.stopped_in_flight = tuple({e.message_id: (e, partial) for e, partial in pending}.values())
         if self._bus is not None:
             self._bus.unsubscribe_topic(MessageType.USER_MESSAGE.value, self._receive)
         if self._task:
@@ -904,7 +908,13 @@ class ManagerAgent:
         """The user stopped the message before the model had it: nothing ran, and the reply says so."""
         text = envelope.payload.get("text", "")
         if envelope.message_id not in self._persisted:
-            await self._persist_user(envelope, text)
+            try:
+                await token.keep("persist_user_message", self._persist_user(envelope, text), STOP_FINISH_SEC)
+            except TurnStopped:
+                pass  # the write finished; the token was already stopped
+            except asyncio.TimeoutError:
+                logger.warning("manager: the stopped user message was not written within %.1f s (%s)",
+                               STOP_FINISH_SEC, token.message_id)
         self._note_stop(envelope, token)
         await self._send_reply(envelope, stopped_reply(stopped.partial, []), outcome=ReplyOutcome.STOPPED)
         token.settle(ReplyOutcome.STOPPED)
@@ -1243,12 +1253,14 @@ class ManagerAgent:
         return self._turns.oldest_for(channel, chat)
 
     async def _end_stopped(self, token: TurnToken, prepared: Prepared, turn: ResidentTurn | None,
-                           partial: str) -> NoReturn:
+                           text_parts: list[str]) -> NoReturn:
         """The turn ends stopped (its token already settled): the record finishes as interrupted, with what it
         spent, the session is saved, and the reply is the partial text. The writes get ``STOP_FINISH_SEC``: a
         database that holds them holds neither the reply nor the Manager's lock."""
         if turn is not None:
             self._session_totals = self._claude.totals
+        # Drained assistant events may not have streamed after the stop; use deltas only if none were handled.
+        partial = "".join(text_parts) or token.partial
         try:
             await token.keep("stop_finish", self._record_stopped(token, prepared, turn, partial), STOP_FINISH_SEC)
         except asyncio.TimeoutError:
@@ -1513,6 +1525,8 @@ class ManagerAgent:
         async def show(text: str, **kwargs: Any) -> None:
             if not token.cancel.requested:  # (R1: what a stopped turn wrote before the stop is handled after it)
                 await self._send_status(context_envelope, text, **kwargs)
+                if kwargs.get("delta"):
+                    token.partial += text
 
         async def handle(payload: dict[str, Any]) -> None:
             nonlocal streamed_partials, session_unsaved
@@ -1578,20 +1592,28 @@ class ManagerAgent:
             handling = asyncio.create_task(handle_events())
             # A turn cut off by Claude's exit ends without a result; that Claude
             # is reaped and the next message starts a new process that resumes the session.
-            turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope,
-                                               stop=lambda: recorder.cap_stop, cancel=token.cancel)
-            self._publish_binding(None)  # its result was read, or the cancel's cleanup ran: the bridge is quiet
-        except TurnStopped:
-            await abandon_handling()
-            raise
-        except TurnCancelled:
-            # A runtime that lets the turn's cancel escape was stopped by the user: not a failure.
-            token.settle(ReplyOutcome.STOPPED)
+            try:
+                turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope,
+                                                   stop=lambda: recorder.cap_stop, cancel=token.cancel)
+                self._publish_binding(None)  # its result was read, or the cancel's cleanup ran: the bridge is quiet
+            except TurnCancelled:
+                # A runtime that lets the turn's cancel escape was stopped by the user: not a failure.
+                token.settle(ReplyOutcome.STOPPED)
+                await handled()
+                await self._end_stopped(token, prepared, None, text_parts)
+
+            # Whether the stop was asked before the runtime returned (nothing awaited since): then a runtime that
+            # answered all the same lost it.
+            asked_while_running = token.cancel.requested
+            # The turn's events still being handled are still reaching the chat: the turn is not over for the user
+            # until they have, and a stop meanwhile is not too late.
             await handled()
-            await self._end_stopped(token, prepared, None, "".join(text_parts))
         except BaseException as exc:
-            self._settle()  # the turn failed: a stop that comes while it is cleaned up is too late
+            if not isinstance(exc, TurnStopped):
+                self._settle()  # the turn failed: a stop that comes while it is cleaned up is too late
             await abandon_handling()
+            if isinstance(exc, TurnStopped):
+                raise
             # Never leave Claude running once the Manager gives up on it.
             await self._claude.stop(kill=True)
             await recorder.finish(
@@ -1601,12 +1623,6 @@ class ManagerAgent:
             await self._link_turn_task(recorder, ops_turn)
             raise
 
-        # Whether the stop was asked before the runtime returned (nothing awaited since): then a runtime that
-        # answered all the same lost it.
-        asked_while_running = token.cancel.requested
-        # The turn's events still being handled are still reaching the chat: the turn is not over for the user until
-        # they have, and a stop meanwhile is not too late.
-        await handled()
         resume_lost = bool(resuming) and not turn.session_started and not retried
         # Decided here, in one place and with nothing awaited since the events were handled: a stop asked until now
         # ends the turn stopped, even when the runtime came back with an answer; from the settle on, a stop is too
@@ -1616,7 +1632,7 @@ class ManagerAgent:
             if asked_while_running and turn.stopped is None and not (turn.result_event or {}).get(USER_STOP):
                 logger.error("stop lost: the runtime answered a turn that was asked to stop (%s)", token.message_id)
             token.settle(ReplyOutcome.STOPPED)
-            await self._end_stopped(token, prepared, turn, "".join(text_parts))
+            await self._end_stopped(token, prepared, turn, text_parts)
 
         if resume_lost:
             # Claude never started the saved session: it no longer exists. Every
