@@ -881,18 +881,6 @@ async def _run_agent_system(
     bot_rows = await _enabled_bot_rows()
     lark_enabled = any(r["channel_type"] == "lark" for r in bot_rows)
 
-    # Without Claude or its login the agents cannot run, but the dashboard can
-    # still show and change everything: a warning here and on /api/status.
-    checks = [
-        database_check,
-        *await asyncio.to_thread(self_check.check_claude, claude_bin),
-        await self_check.codex_login_check(),
-        await self_check.grok_login_check(),
-        self_check.check_lark_cli(lark_enabled),
-        await asyncio.to_thread(self_check.check_git),
-    ]
-    self_check.log_problems(checks)
-
     # --- Agent Tiers ---
 
     manager_config = ManagerConfig(
@@ -931,6 +919,19 @@ async def _run_agent_system(
     # Start receiving only once every enabled Manager is known, so backlog is not lost or sent to a disabled one.
     await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("telegram",))
     await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("lark", "lark_bot"))
+
+    # Poll before the advisory checks: Telegram drops pending updates when polling starts, so messages sent
+    # during a slow check must already be received. Problems only warn here and on /api/status.
+    checks = [
+        database_check,
+        *await asyncio.to_thread(self_check.check_claude, claude_bin),
+        await self_check.codex_login_check(),
+        await self_check.grok_login_check(),
+        self_check.check_lark_cli(lark_enabled),
+        await asyncio.to_thread(self_check.check_git),
+    ]
+    self_check.log_problems(checks)
+
     manager = fleet.default
     manager_ops = fleet.ops("manager")
     managers_api.set_change_listener(fleet.apply)

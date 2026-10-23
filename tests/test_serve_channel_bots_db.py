@@ -371,11 +371,12 @@ def test_lark_bot_secret_is_masked_in_logs(monkeypatch: pytest.MonkeyPatch, tmp_
 
 @requires_db
 @pytest.mark.parametrize("channel_type", ["telegram", "lark"])
-@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(("manager_id", "enabled"), [("manager", True), ("manager-review", False),
+                                                     ("manager-review", True)])
 def test_startup_bot_backlog_reaches_only_an_enabled_manager(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, channel_type: str, enabled: bool,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, channel_type: str, manager_id: str, enabled: bool,
 ) -> None:
-    from unittest.mock import AsyncMock
+    from unittest.mock import AsyncMock, MagicMock
 
     from looper import db, ops_config
     from looper.agents import managers, managers_api, operator_notes, profile_registry, serve
@@ -392,15 +393,34 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
         pass
 
     async def test(pool: Any) -> None:
-        await pool.execute("INSERT INTO managers (id, name, system_prompt, enabled) "
-                           "VALUES ('manager-review', 'Review', 'x', $1)", enabled)
+        if manager_id != "manager":
+            await pool.execute("INSERT INTO managers (id, name, system_prompt, enabled) "
+                               "VALUES ('manager-review', 'Review', 'x', $1)", enabled)
         config = {"allowed_user_ids": ["7"]} if channel_type == "telegram" else {"allowed_open_ids": [OPEN_ID]}
         await _bot(pool, channel_type, config, TOKEN_1 if channel_type == "telegram" else None,
-                   manager_id="manager-review")
+                   manager_id=manager_id)
         adapters: list[Any] = []
         registries: list[Any] = []
         incoming: list[str] = []
         bot, transport = _Bot(), StubTransport()
+        pending = ["sent while offline"]
+
+        async def start_polling(*, drop_pending_updates: bool) -> None:
+            assert drop_pending_updates is True
+            pending.clear()
+
+        if channel_type == "telegram":
+            # Exercise the real adapter startup, including the destructive polling bootstrap.
+            app = MagicMock()
+            app.bot = bot
+            bot.set_my_commands = AsyncMock()
+            for name in ("initialize", "start", "stop", "shutdown"):
+                setattr(app, name, AsyncMock())
+            app.updater.start_polling = start_polling
+            app.updater.stop = AsyncMock()
+            monkeypatch.setattr("telegram.ext.Application.builder", lambda: MagicMock(
+                token=lambda _: SimpleNamespace(build=lambda: app)))
+        telegram_start = TelegramChannelAdapter.start
 
         async def receive(adapter: Any) -> None:
             text = f"backlog {len(incoming)}"
@@ -411,15 +431,37 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
                 await adapter._handle_lark_event(_lark_event(OPEN_ID, text, message_id=f"om_{len(incoming)}"))
 
         async def start(adapter: Any, bus: Any) -> None:
-            adapter._bus = bus
-            adapter._running = True
             if channel_type == "telegram":
-                adapter._app = SimpleNamespace(bot=bot)
                 adapter._acknowledge = lambda update: None
+                await telegram_start(adapter, bus)
             else:
+                adapter._bus = bus
+                adapter._running = True
                 adapter._transport = transport
             adapters.append(adapter)
             await receive(adapter)
+
+        async def message_during_check() -> None:
+            if channel_type != "telegram":
+                return
+            if adapters:
+                await receive(adapters[0])
+            else:
+                # Telegram queues these until start_polling deletes the old updates.
+                text = f"backlog {len(incoming)}"
+                incoming.append(text)
+                pending.append(text)
+
+        check = serve.self_check.Check("test", "Test", serve.self_check.WARN, "unavailable")
+        loop = asyncio.get_running_loop()
+
+        def sync_check(*args: Any) -> Any:
+            asyncio.run_coroutine_threadsafe(message_during_check(), loop).result(timeout=2)
+            return check
+
+        async def async_check() -> Any:
+            await message_during_check()
+            return check
 
         load = managers.ManagerFleet.load
 
@@ -453,12 +495,13 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
         monkeypatch.setattr(profile_registry, "register_found_runtimes", AsyncMock(return_value=[]))
         for module in (codex_login, grok_login):
             monkeypatch.setattr(module, "inspect_at_start", AsyncMock(return_value=None))
-        check = serve.self_check.Check("test", "Test", serve.self_check.OK, "")
-        for name in ("check_database", "codex_login_check", "grok_login_check"):
-            monkeypatch.setattr(serve.self_check, name, AsyncMock(return_value=check))
-        monkeypatch.setattr(serve.self_check, "check_claude", lambda _: [])
-        for name in ("check_lark_cli", "check_git"):
-            monkeypatch.setattr(serve.self_check, name, lambda *args: check)
+        monkeypatch.setattr(serve.self_check, "check_database", AsyncMock(return_value=serve.self_check.Check(
+            "database", "Database", serve.self_check.OK, "")))
+        for name in ("codex_login_check", "grok_login_check"):
+            monkeypatch.setattr(serve.self_check, name, async_check)
+        monkeypatch.setattr(serve.self_check, "check_claude", lambda _: [sync_check()])
+        monkeypatch.setattr(serve.self_check, "check_git", sync_check)
+        monkeypatch.setattr(serve.self_check, "check_lark_cli", lambda _: check)
         ops = ops_config.OpsConfig(runtime_root=tmp_path, path=tmp_path / "ops.toml", database_url=DSN, port=9876,
                                    operator_notes_root=str(tmp_path))
         try:
@@ -466,7 +509,9 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
                 await asyncio.wait_for(serve._run_agent_system(ops=ops, runtime_root=tmp_path, work_dir=tmp_path,
                                                                skip_backup=True), 10)
             assert adapters and incoming
-            queued = await adapters[0]._bus.drain_queue("manager-review")
+            if channel_type == "telegram":
+                assert len(incoming) == 5 and pending == []
+            queued = await adapters[0]._bus.drain_queue(manager_id)
             replies = [s["text"] for s in bot.sent] if channel_type == "telegram" else [
                 fields["text"] for method, fields in transport.calls if method == "send" and "text" in fields]
             if enabled:
@@ -477,9 +522,6 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
                 assert replies == [TURNED_OFF_REPLY] * len(incoming)
                 assert adapters[0]._bus.journal.undelivered() == []
         finally:
-            for adapter in adapters:
-                if channel_type == "telegram":
-                    adapter._app = None
             for registry in registries:
                 await registry.stop_all()
 
