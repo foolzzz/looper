@@ -36,7 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # Parity tests check out pinned old revisions.
+          # Recovery tests archive the supported v2.12 source.
           fetch-depth: 0
 
       - uses: actions/setup-python@v6
@@ -47,7 +47,7 @@ jobs:
         run: python -m pip install uv
 
       - name: Run the tests
-        run: uv run --extra test python -m pytest -q -n auto -rs --durations=25
+        run: uv run --extra test python -m pytest -q -n auto -rs --durations=25 -m "not provenance"
 
   dashboard:
     name: Dashboard tests

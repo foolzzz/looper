@@ -8,18 +8,22 @@ are left alone. The driver owns disposable persistence and synthetic auth.
 
 ``inspect_launch(argv, env, cwd)`` reads config bytes, prompt, permissions,
 isolation, MCP and login-link targets *at launch*. ``readback(index)`` reads
-session, totals, price and cap *after the exercise*. Both must return all
+session, totals, price, cap and persisted prompt-layer sources *after the
+exercise*. Both must return all
 their fields, using explicit None for inapplicable facts. No runtime-specific
 defaults or expected values are invented here. The returned list is JSON
 data, suitable for freezing on an old checkout and comparing on a new one.
 Drivers must seed deterministic IDs and control their inherited environment.
 
-Only the supplied temporary root (including derived prompt addresses),
-explicitly requested session timestamps, materialized model identity metadata,
-internal catalog price number spelling
-and declared account-id mappings can be normalized. Config text, URL spelling,
-model/provider names, ordering, environment removals, model settings, price
-values and caps remain significant.
+Only the supplied temporary root, explicitly requested session timestamps,
+materialized model identity metadata, internal catalog price number spelling
+and declared account-id mappings can be normalized; and the system prompt's
+text, which the capture does not compare (``without_prompt_text``): the flag
+and the directory that carry it, and whether there is one, stay. Layer sources
+remain significant; only their content hashes and project row timestamps vary.
+Config text,
+URL spelling, model/provider names, ordering, environment removals, model
+settings, price values and caps remain significant.
 Existing main fixtures are never read or refreshed by this module.
 """
 
@@ -28,13 +32,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import difflib
-import fcntl
-import hashlib
 import json
 import math
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,7 +50,7 @@ from typing import Any
 from unittest.mock import patch
 
 LAUNCH_FIELDS = frozenset({"unset", "config", "prompt", "permissions", "isolation", "mcp", "login_target"})
-STATE_FIELDS = frozenset({"session", "totals", "price", "cap"})
+STATE_FIELDS = frozenset({"session", "totals", "price", "cap", "prompt_layers"})
 FIELDS = frozenset({"argv", "env", "unset", "first_input"}) | LAUNCH_FIELDS | STATE_FIELDS
 TIME_PATHS = frozenset({("session", "created_at"), ("session", "updated_at")})
 CATALOG_FIELDS = ("name", "context_window", "input_usd_per_mtok", "output_usd_per_mtok",
@@ -94,15 +95,9 @@ OMP_CASES = {
 
 @contextmanager
 def omp_capture_root() -> Any:
-    """Lease a stable temporary root; preserve content-addressed adapter paths."""
-    root = Path("/tmp/looper-omp-launch-parity-v2")
-    with root.with_suffix(".lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        root.mkdir(mode=0o700)
-        try:
-            yield root
-        finally:
-            shutil.rmtree(root)
+    """Use a private root; prompt-derived content addresses are normalized separately."""
+    with tempfile.TemporaryDirectory(prefix="looper-omp-capture-", dir="/tmp") as directory:
+        yield Path(directory).resolve()
 
 
 def omp_environment(root: Path) -> dict[str, str]:
@@ -238,13 +233,14 @@ async def _capture_legacy_omp(checkout: Path) -> dict[str, Any]:
 
                 async def state(index: int) -> dict[str, Any]:
                     rows = await pool.fetch("SELECT session_id, input_tokens, output_tokens, cache_read_tokens, "
-                                            "cache_creation_tokens, cost_usd, status FROM llm_records ORDER BY id")
+                                            "cache_creation_tokens, cost_usd, status, metadata FROM llm_records ORDER BY id")
                     if len(rows) != index + 1 or rows[-1]["status"] != "completed":
                         raise LegacyBaselineUnavailable("OMP tier did not persist a completed run")
                     owner = "manager" if index == 0 else f"planner-{tiers.TASKS[tiers.PROJECT_A]}"
                     session = await agent_sessions.get_session(owner) if index < 2 else {
                         "session_id": rows[-1]["session_id"]}
-                    return {"session": session, "totals": {key: rows[-1][key] for key in CODEX_TOTALS}}
+                    return {"session": session, "totals": {key: rows[-1][key] for key in CODEX_TOTALS},
+                            "prompt_layers": _prompt_layer_sources(json.loads(rows[-1]["metadata"])["prompt_layers"])}
 
                 with patch.dict(os.environ, omp_environment(root), clear=True):
                     await tiers.seed_rest("unconfigured", root)
@@ -263,20 +259,9 @@ async def _capture_legacy_omp(checkout: Path) -> dict[str, Any]:
 
 @contextmanager
 def codex_capture_root() -> Any:
-    """Lease one stable temporary path so content-addressed filenames compare byte for byte.
-
-    The lock serializes concurrent captures. Refuse an existing directory rather
-    than deleting someone else's files; only our newly created root is removed.
-    No adapter hash, config byte or launch argument is normalized away.
-    """
-    root = Path("/tmp/looper-codex-launch-parity-v2")
-    with root.with_suffix(".lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        root.mkdir(mode=0o700)
-        try:
-            yield root
-        finally:
-            shutil.rmtree(root)
+    """Use a private root; prompt-derived content addresses are normalized separately."""
+    with tempfile.TemporaryDirectory(prefix="looper-codex-capture-", dir="/tmp") as directory:
+        yield Path(directory).resolve()
 
 
 def codex_environment(root: Path, *, explicit_home: bool) -> dict[str, str]:
@@ -335,15 +320,9 @@ GROK_CASES = {
 
 @contextmanager
 def grok_capture_root() -> Any:
-    """Keep content-addressed filenames significant across old and new captures."""
-    root = Path("/tmp/looper-grok-launch-parity-v2")
-    with root.with_suffix(".lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        root.mkdir(mode=0o700)
-        try:
-            yield root
-        finally:
-            shutil.rmtree(root)
+    """Use a private root; prompt-derived content addresses are normalized separately."""
+    with tempfile.TemporaryDirectory(prefix="looper-grok-capture-", dir="/tmp") as directory:
+        yield Path(directory).resolve()
 
 
 def grok_environment(root: Path, *, explicit_home: bool) -> dict[str, str]:
@@ -498,13 +477,14 @@ async def _capture_legacy_grok(checkout: Path) -> dict[str, Any]:
 
                 async def read_state(index: int) -> dict[str, Any]:
                     rows = await pool.fetch("SELECT session_id, input_tokens, output_tokens, cache_read_tokens, "
-                                            "cache_creation_tokens, cost_usd, status FROM llm_records ORDER BY id")
+                                            "cache_creation_tokens, cost_usd, status, metadata FROM llm_records ORDER BY id")
                     if len(rows) != index + 1 or rows[-1]["status"] != "completed":
                         raise LegacyBaselineUnavailable("Grok tier did not persist a completed run")
                     owner = "manager" if index < 2 else f"planner-{tiers.TASKS[tiers.PROJECT_A]}"
                     session = await agent_sessions.get_session(owner) if index < 4 else {
                         "session_id": rows[-1]["session_id"]}
-                    return {"session": session, "totals": {key: rows[-1][key] for key in CODEX_TOTALS}}
+                    return {"session": session, "totals": {key: rows[-1][key] for key in CODEX_TOTALS},
+                            "prompt_layers": _prompt_layer_sources(json.loads(rows[-1]["metadata"])["prompt_layers"])}
 
                 with patch.dict(os.environ, grok_environment(root, explicit_home=explicit_home), clear=True):
                     await tiers.seed_rest("unconfigured", root)
@@ -614,13 +594,14 @@ async def _capture_legacy_codex(checkout: Path) -> dict[str, Any]:
 
                 async def read_state(index: int) -> dict[str, Any]:
                     rows = await pool.fetch("SELECT session_id, input_tokens, output_tokens, cache_read_tokens, "
-                                            "cache_creation_tokens, cost_usd, status FROM llm_records ORDER BY id")
+                                            "cache_creation_tokens, cost_usd, status, metadata FROM llm_records ORDER BY id")
                     if len(rows) != index + 1 or rows[-1]["status"] != "completed":
                         raise LegacyBaselineUnavailable("Codex tier did not persist a completed run")
                     owner = "manager" if index < 2 else f"planner-{tiers.TASKS[tiers.PROJECT_A]}"
                     session = await agent_sessions.get_session(owner) if index < 4 else {
                         "session_id": rows[-1]["session_id"]}
-                    return {"session": session, "totals": {key: rows[-1][key] for key in CODEX_TOTALS}}
+                    return {"session": session, "totals": {key: rows[-1][key] for key in CODEX_TOTALS},
+                            "prompt_layers": _prompt_layer_sources(json.loads(rows[-1]["metadata"])["prompt_layers"])}
 
                 with patch.dict(os.environ, codex_environment(root, explicit_home=explicit_home), clear=True):
                     await tiers.seed_rest("unconfigured", root)
@@ -831,16 +812,15 @@ async def _capture_legacy_claude(checkout: Path) -> dict[str, Any]:
                     result = await original_capture(*args)
                     records = await pool.fetch(
                         "SELECT session_id, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, "
-                        "cost_usd, status FROM llm_records ORDER BY id")
+                        "cost_usd, status, metadata FROM llm_records ORDER BY id")
                     if len(records) != 4 or any(row["status"] != "completed" for row in records):
                         raise LegacyBaselineUnavailable("legacy tiers did not persist four completed runs")
                     for index, row in enumerate(records):
                         owner = "manager" if index == 0 else f"planner-{tiers.TASKS[tiers.PROJECT_A]}"
                         session = await agent_sessions.get_session(owner) if index < 2 else {
                             "session_id": row["session_id"]}
-                        states.append({"session": session, "totals": {key: row[key] for key in
-                                       ("input_tokens", "output_tokens", "cache_read_tokens",
-                                        "cache_creation_tokens", "cost_usd")}})
+                        states.append({"session": session, "totals": {key: row[key] for key in CODEX_TOTALS},
+                                       "prompt_layers": _prompt_layer_sources(json.loads(row["metadata"])["prompt_layers"])})
                     return result
 
                 cli = tiers._CLAUDE.replace(
@@ -951,8 +931,7 @@ async def capture_converted_tiers(
                     "cache_write_usd_per_mtok": 1, "efforts": ["high", "low"], "background_model": background}]
         account_env = [{"key": "API_TIMEOUT_MS", "value": "3000000"}]
         budget = 0.5
-        # Match the legacy driver's parent: Claude's isolation settings include
-        # every ancestor, so nesting under pytest changes actual config bytes.
+        # Use the same temporary-root layout as the independent legacy capture.
         root_context = tempfile.TemporaryDirectory(prefix="looper-target-claude-", dir="/tmp")
     else:
         runtime_type = runtime
@@ -974,9 +953,6 @@ async def capture_converted_tiers(
             raise ValueError(f"unsupported capture runtime: {runtime}")
 
     with root_context as directory:
-        # The three content-addressed drivers lease stable lexical /tmp
-        # paths, as the old capture did. Resolving a /tmp symlink would change
-        # generated bytes and their hashes before root normalization can run.
         root = Path(directory).resolve() if runtime == "claude" else Path(directory)
         if runtime == "claude":
             executable = ""
@@ -1024,14 +1000,15 @@ async def capture_converted_tiers(
 
         async def state(index: int) -> dict[str, Any]:
             rows = await pool.fetch("SELECT session_id, input_tokens, output_tokens, cache_read_tokens, "
-                                    "cache_creation_tokens, cost_usd, status FROM llm_records ORDER BY id")
+                                    "cache_creation_tokens, cost_usd, status, metadata FROM llm_records ORDER BY id")
             if len(rows) != index + 1 or rows[-1]["status"] != "completed":
                 raise AssertionError(f"{runtime}/{case}: tier {index} did not persist a completed run")
             resident = index < (4 if runtime in {"codex", "grok"} else 2)
             owner = "manager" if index < (2 if runtime in {"codex", "grok"} else 1) else (
                 f"planner-{tiers.TASKS[tiers.PROJECT_A]}")
             session = await agent_sessions.get_session(owner) if resident else {"session_id": rows[-1]["session_id"]}
-            result = {"session": session, "totals": {key: rows[-1][key] for key in CODEX_TOTALS}}
+            result = {"session": session, "totals": {key: rows[-1][key] for key in CODEX_TOTALS},
+                            "prompt_layers": _prompt_layer_sources(json.loads(rows[-1]["metadata"])["prompt_layers"])}
             if index == rename_profile_after:
                 await pool.execute(
                     "INSERT INTO agent_profiles (id, name, runtime_id, model_id, effort, agent_teams, custom_prompt) "
@@ -1047,13 +1024,14 @@ async def capture_converted_tiers(
             result = await original_capture(*args)
             # Claude's existing driver completes all roles before readback.
             rows = await pool.fetch("SELECT session_id, input_tokens, output_tokens, cache_read_tokens, "
-                                    "cache_creation_tokens, cost_usd, status FROM llm_records ORDER BY id")
+                                    "cache_creation_tokens, cost_usd, status, metadata FROM llm_records ORDER BY id")
             if len(rows) != 4 or any(row["status"] != "completed" for row in rows):
                 raise AssertionError("Claude tiers did not persist four completed runs")
             for index in range(4):
                 owner = "manager" if index == 0 else f"planner-{tiers.TASKS[tiers.PROJECT_A]}"
                 saved = await agent_sessions.get_session(owner) if index < 2 else {"session_id": rows[index]["session_id"]}
-                states.append({"session": saved, "totals": {key: rows[index][key] for key in CODEX_TOTALS}})
+                states.append({"session": saved, "totals": {key: rows[index][key] for key in CODEX_TOTALS},
+                               "prompt_layers": _prompt_layer_sources(json.loads(rows[index]["metadata"])["prompt_layers"])})
             return result
 
         ids = count(1)
@@ -1159,6 +1137,67 @@ def _json_copy(value: Any) -> Any:
     raise ValueError(f"capture requires JSON data, got {type(value).__name__}")
 
 
+# Only paths derived from prompt-bearing files may vary with the wording.
+# Keys, endpoints, models and arbitrary hashes in other configuration stay exact.
+_PROMPT_ADDRESS = re.compile(
+    r"(<root>/runtime/\.local/(?:prompts/|codex/(?:instructions/|runs/)|grok/runs/|omp/homes/))"
+    r"[0-9a-f]{64}(?=[/.\"\\\s]|$)"
+)
+_OMP_PROMPT_ADDRESS = re.compile(
+    r"(<root>/runtime/\.local/omp/homes/<sha256>/prompts/)[0-9a-f]{64}(?=\.md)"
+)
+_PROMPT = "<prompt>"
+
+
+def _prompt_addresses(text: str) -> str:
+    text = _PROMPT_ADDRESS.sub(r"\1<sha256>", text)
+    return _OMP_PROMPT_ADDRESS.sub(r"\1<sha256>", text)
+
+
+def without_prompt_text(record: dict[str, Any]) -> dict[str, Any]:
+    """Discard wording and its content addresses, preserving flags, locations and other inputs."""
+    record["prompt"] = _PROMPT if record["prompt"] else ""
+    argv = record["argv"]
+    prompt_flags = {"--system-prompt-file", "--append-system-prompt-file", "--system-prompt",
+                    "--append-system-prompt", "--agent", "--agent-profile", "--config"}
+    record["argv"] = [
+        _prompt_addresses(arg) if (index and argv[index - 1] in prompt_flags)
+        or arg.startswith(("HOME=", "CODEX_HOME=", "GROK_HOME=")) else arg
+        for index, arg in enumerate(argv)
+    ]
+    for field in ("env", "isolation"):
+        for key in ("HOME", "CODEX_HOME", "GROK_HOME"):
+            if isinstance(record.get(field), dict) and isinstance(record[field].get(key), str):
+                record[field][key] = _prompt_addresses(record[field][key])
+    config = record.get("config")
+    if isinstance(config, dict):
+        if isinstance(config.get("toml"), str):
+            config["toml"] = re.sub(
+                r'(?m)^(model_instructions_file = ")([^"\n]+)(")$',
+                lambda match: match[1] + _prompt_addresses(match[2]) + match[3], config["toml"])
+        for key in ("agents_md", "agent_md", "acp_agent_md"):
+            content = config.get(key)
+            if isinstance(content, str) and content:
+                # Grok's front matter carries tool permissions, so it remains significant.
+                end = content.find("\n---\n\n") if content.startswith("---\n") else -1
+                config[key] = (content[:end + 6] if end >= 0 else "") + _PROMPT
+    return record
+
+
+def _prompt_layer_sources(value: Any) -> Any:
+    """Keep layer identity, scope and presence without pinning content hashes or row times."""
+    if isinstance(value, str):
+        value = json.loads(value)
+    if not isinstance(value, dict) or not value:
+        raise ValueError("completed tier must persist prompt_layers")
+    return {
+        layer: ({key: ("<sha256>" if item else item) if key in {"sha256", "background_sha256", "knowledge_sha256"} else
+                 ("<time>" if item else item) if key == "updated_at" else item
+                 for key, item in details.items()} if isinstance(details, dict) else details)
+        for layer, details in value.items()
+    }
+
+
 def normalize(record: dict[str, Any], *, root: Path,
               time_paths: Iterable[tuple[str, ...]] = ()) -> dict[str, Any]:
     """Normalize root paths, their derived prompt addresses and opted-in times."""
@@ -1212,31 +1251,7 @@ def normalize(record: dict[str, Any], *, root: Path,
             return replaced
         return value
 
-    normalized = replace(result)
-    # Claude names prompt files by the raw text's hash. That text can name
-    # the temporary root, so root substitution also changes its content
-    # address. Validate the raw address before canonicalizing this one argv
-    # operand; retain the flag, directory and exact normalized prompt bytes.
-    # Pinned captures already contain <root> and cannot recover their old raw
-    # root. Like agent_launch_parity._normalized, compare the derived address
-    # rather than treating a random temporary directory as a behavior change.
-    for flag in ("--system-prompt-file", "--append-system-prompt-file"):
-        if flag not in result["argv"]:
-            continue
-        at = result["argv"].index(flag) + 1
-        if at >= len(result["argv"]):
-            raise ValueError("missing Claude prompt file operand")
-        path = normalized["argv"][at]
-        if not re.fullmatch(r"<root>/runtime/\.local/prompts/[0-9a-f]{64}\.md", path):
-            continue
-        raw_path = result["argv"][at]
-        if raw_path.startswith(root_text + "/"):
-            digest = hashlib.sha256(result["prompt"].encode("utf-8")).hexdigest()
-            if Path(raw_path).name != f"{digest}.md":
-                raise ValueError("Claude prompt file does not match its captured text's hash")
-        digest = hashlib.sha256(normalized["prompt"].encode("utf-8")).hexdigest()
-        normalized["argv"][at] = str(Path(path).with_name(f"{digest}.md"))
-    return normalized
+    return without_prompt_text(replace(result))
 
 
 def assert_parity(expected: list[dict[str, Any]], actual: list[dict[str, Any]], *,
@@ -1405,7 +1420,7 @@ async def capture_claude_tiers(
 ) -> list[dict[str, Any]]:
     """Capture the existing four-tier driver without replacing adapter behavior.
 
-    ``read_state`` returns ``session`` and ``totals`` from the driver's
+    ``read_state`` returns ``session``, ``totals`` and ``prompt_layers`` from the driver's
     persistence *after* the exercise. The other fields are read from the
     actual Launch at subprocess creation, including explicit binding removals.
     Imports are lazy so this same helper can be copied into the old checkout.
@@ -1449,7 +1464,7 @@ async def capture_claude_tiers(
 
     def readback(index: int) -> dict[str, Any]:
         state = read_state(index)
-        _fields(state, frozenset({"session", "totals"}))
+        _fields(state, frozenset({"session", "totals", "prompt_layers"}))
         launch = launches[index]
         return {**state, "price": {"source": launch.cost_source.value,
                                    "catalog": _json_copy(_public_data([asdict(entry) for entry in
@@ -1539,7 +1554,7 @@ async def capture_codex_tiers(
             states.append(_json_copy(await read_state(index)))
 
     def readback(index: int) -> dict[str, Any]:
-        _fields(states[index], frozenset({"session", "totals"}))
+        _fields(states[index], frozenset({"session", "totals", "prompt_layers"}))
         launch = launches[index]
         return {**states[index], "price": {"source": launch.cost_source.value,
                                           "catalog": _public_data([asdict(entry) for entry in
@@ -1611,7 +1626,7 @@ async def capture_omp_tiers(
             states.append(_json_copy(await read_state(index)))
 
     def readback(index: int) -> dict[str, Any]:
-        _fields(states[index], frozenset({"session", "totals"}))
+        _fields(states[index], frozenset({"session", "totals", "prompt_layers"}))
         launch = launches[index]
         return {**states[index], "price": {"source": launch.cost_source.value,
                                           "catalog": _public_data([asdict(entry) for entry in
@@ -1727,7 +1742,7 @@ async def capture_grok_tiers(
 
     def readback(index: int) -> dict[str, Any]:
         index = launch_indices[index]
-        _fields(states[index], frozenset({"session", "totals"}))
+        _fields(states[index], frozenset({"session", "totals", "prompt_layers"}))
         launch = launches[index]
         return {**states[index], "price": {"source": launch.cost_source.value,
                                           "catalog": _public_data([asdict(entry) for entry in

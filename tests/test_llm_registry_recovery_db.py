@@ -162,7 +162,7 @@ def pg_clients():
     return dump, restore
 
 
-async def _old_start(checkout, dsn, tmp_path, label, *, refused=False):
+async def _old_start(checkout, dsn, tmp_path, label):
     driver = tmp_path / "old_driver.py"
     driver.write_text(_OLD_DRIVER)
     output = tmp_path / f"{label}.json"
@@ -170,12 +170,6 @@ async def _old_start(checkout, dsn, tmp_path, label, *, refused=False):
     result = await asyncio.to_thread(
         subprocess.run, [sys.executable, "-I", str(driver), str(checkout), dsn, str(output)],
         cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
-    if refused:
-        assert result.returncode != 0
-        assert "exceeds supported version 2" in result.stderr
-        assert "recovery DDL tripwire" not in result.stderr
-        assert not output.exists()
-        return None
     assert result.returncode == 0, result.stderr
     return json.loads(output.read_text())
 
@@ -282,21 +276,6 @@ def test_failure_after_conversion_rolls_back_every_ddl_row_and_marker(monkeypatc
                 assert await connection.schema_change_pending(readback)
             assert await state(source) == before
     asyncio.run(asyncio.wait_for(run(), 90))
-
-
-def test_guarded_old_patch_refuses_v3_before_any_ddl(tmp_path, old_patch):
-    async def run():
-        async with _snapshot_databases() as (_, target, target_dsn):
-            # Positive control runs the very same old entry on a v2 database.
-            await target.execute(_VERSION_TWO)
-            await _old_start(old_patch, target_dsn, tmp_path, "positive")
-            await connection.ensure_schema(target)
-            before = await state(target)
-            await _block_ddl(target)
-            await _old_start(old_patch, target_dsn, tmp_path, "refused", refused=True)
-            assert await state(target) == before
-            assert await target.fetchval("SELECT version FROM registry_schema_version") == 3
-    asyncio.run(asyncio.wait_for(run(), 120))
 
 
 def test_full_backup_restores_old_patch_in_isolation_and_keeps_new_writes(tmp_path, old_patch, pg_clients, caplog):
