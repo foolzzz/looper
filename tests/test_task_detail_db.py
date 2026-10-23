@@ -10,10 +10,10 @@ from typing import Any
 
 import pytest
 
+from tests.db_support import DSN, run_db
 from tests.test_ops_tasks_db import _project, _task
 from tests.test_planner_tools_db import _steps
 from tests.test_task_agents_db import _call
-from tests.test_usage_api_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -35,4 +35,4 @@ def test_the_task_detail_gives_each_steps_result_as_an_object_or_null(monkeypatc
         await pool.execute("INSERT INTO task_plans (task_id, plan_id, status) VALUES ('task-a', 'plan-a', 'executing')")
         assert [s["result"] for s in (await plans.load("task-a", pool=pool))["steps"]] == [result, None]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

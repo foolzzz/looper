@@ -13,8 +13,8 @@ from looper.agents.channels.web import WebChannelAdapter
 from looper.agents.message import MessageEnvelope, MessageType, TASK_ROUTER_ADDRESS, channel_address
 from looper.agents.ops import Turn
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+from tests.db_support import DSN, run_db
 from tests.test_ops_tasks_db import LARK, _Chat, _project
-from tests.test_usage_api_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -55,7 +55,7 @@ def test_create_records_the_web_thread_only_for_a_scenario_managers_web_task(mon
         default = await _create(_Chat(tmp_path), web=True)
         assert (await tasks.get_task(default["result"]["task_id"], pool=pool))["origin_thread"] is None
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def _report(kind: MessageType, payload: dict[str, Any], **meta: Any) -> MessageEnvelope:
@@ -118,7 +118,7 @@ def test_reports_after_the_answer_ended_reach_the_thread(monkeypatch: pytest.Mon
         assert (await late.__anext__())["kind"] == "heartbeat"
         await late.aclose()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_non_final_status_is_a_stream_status_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -143,7 +143,7 @@ def test_a_non_final_status_is_a_stream_status_only(monkeypatch: pytest.MonkeyPa
         assert (await adapter._sse_queues["c1"].get())["kind"] == "agent.phase"
         assert await db_chat.list_messages("s-web", pool=pool) == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_handed_over_final_report_reaches_the_thread(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -162,4 +162,4 @@ def test_a_handed_over_final_report_reaches_the_thread(monkeypatch: pytest.Monke
         texts = [m["content"] for m in await db_chat.list_messages("s-web", pool=pool)]
         assert texts == ["任务「计算器」失败：boom"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

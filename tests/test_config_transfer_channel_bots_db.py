@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from tests.test_catalog_db import DSN
+from tests.db_support import DSN
 from tests.test_config_transfer_db import _installation, _looper, _plan, _rows
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")

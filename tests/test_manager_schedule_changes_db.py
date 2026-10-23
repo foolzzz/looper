@@ -20,10 +20,10 @@ from typing import Any
 
 import pytest
 
+from tests.db_support import DSN, run_db
 from tests.test_manager_config_tools_db import _ok, _trail
 from tests.test_manager_schedule_tools_db import _confirm, _schedule, _starting_state
 from tests.test_ops_tasks_db import _Chat, _error, _project
-from tests.test_usage_api_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -87,7 +87,7 @@ def test_a_schedule_is_created_disabled_with_its_configuration_and_enabled_only_
         assert await _trail(pool) == [(TOOL, "write", "ok"), (TOOL, "write", "error"), (TOOL, "write", "error"),
                                       (TOOL, "high", "needs_confirmation"), (TOOL, "high", "ok")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("action", ["enable", "run"])
@@ -114,7 +114,7 @@ def test_a_schedule_created_this_turn_cannot_start_or_leave_a_pending_confirmati
         assert await _trail(pool) == [(TOOL, "write", "ok"), (TOOL, "write", "error"),
                                       ("looper_confirm", "high", "error")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_creating_takes_every_setting_the_dashboard_takes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -144,7 +144,7 @@ def test_creating_takes_every_setting_the_dashboard_takes(monkeypatch: pytest.Mo
                      "- 运行超时：1800 秒", "- Agent Profile：worker：claude-code/sonnet", "- 每次运行的任务并发：worker 2"):
             assert line in block.split("\n"), (line, block)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("allowed", [True, False], ids=["allowed", "not-allowed"])
@@ -168,7 +168,7 @@ def test_a_schedule_made_from_a_lark_chat_tells_whoever_asked_when_the_allowlist
         (block,) = chat.turns[0].blocks
         assert (f"- 通知：失败时 → 飞书 · {sender}" if allowed else "- 通知：失败时 → 只在控制台") in block
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("arguments", "code", "message"), [
@@ -196,7 +196,7 @@ def test_a_schedule_is_not_created_when_the_dashboard_would_refuse_it(
         assert chat.turns[0].blocks == []
         assert await pool.fetchval("SELECT count(*) FROM schedules") == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- update ---
@@ -230,7 +230,7 @@ def test_a_change_is_made_at_once_and_shown_before_and_after(monkeypatch: pytest
         assert lines[6].startswith("- 接下来 3 次：") and lines[7] == "它现在已启用。"
         assert await _trail(pool) == [(TOOL, "write", "ok")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("before", "after", "line"), [
@@ -263,7 +263,7 @@ def test_raising_or_removing_a_spend_cap_waits_for_the_users_word_in_the_next_me
         assert await _trail(pool) == [(TOOL, "high", "needs_confirmation"), (TOOL, "high", "needs_confirmation"),
                                       (TOOL, "high", "ok")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("before", "after"), [
@@ -282,7 +282,7 @@ def test_a_spend_cap_lowered_or_added_changes_at_once(
         (key, value), = after.items()
         assert (await _view("nightly"))[key] == value
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("project_cap", "fields", "asks"), [
@@ -303,7 +303,7 @@ def test_a_run_cap_the_schedule_does_not_set_is_the_projects_when_raising_it(
         assert answer["status"] == ("needs_confirmation" if asks else "ok"), answer
         assert (await _view("nightly"))["run_budget_usd"] == (None if asks else fields["run_budget_usd"])
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_change_the_dashboard_would_refuse_is_refused_before_anything_is_asked(
@@ -319,7 +319,7 @@ def test_a_change_the_dashboard_would_refuse_is_refused_before_anything_is_asked
         assert chat.turns[0].blocks == []
         assert (await _view("nightly"))["cron"] == "0 9 * * 1-5"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- run ---
@@ -351,7 +351,7 @@ def test_run_now_fires_the_schedule_once_as_the_dashboards_button_does(
         assert ((await _view("nightly"))["enabled"], (await _view("nightly"))["next_fire_at"]) == (False, None)
         assert await _trail(pool) == [(TOOL, "high", "needs_confirmation"), (TOOL, "high", "ok")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_run_now_without_a_scheduler_is_unavailable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -365,7 +365,7 @@ def test_run_now_without_a_scheduler_is_unavailable(monkeypatch: pytest.MonkeyPa
         assert await pool.fetchval("SELECT count(*) FROM schedule_runs") == 0
         assert await _trail(pool) == [(TOOL, "high", "needs_confirmation"), (TOOL, "high", "error")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("arguments", [
@@ -387,7 +387,7 @@ def test_a_turn_claude_runs_on_its_own_creates_changes_and_runs_nothing(
         assert (await _view("nightly"))["enabled"] is False
         assert await _trail(pool) == [(TOOL, "write", "error")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- looper_config_export ---
@@ -423,7 +423,7 @@ def test_the_configuration_is_exported_into_the_runtime_directory_without_secret
         assert await _trail(pool) == [("looper_config_export", "read", "ok")] * 2
         assert await pool.fetchval("SELECT count(*) FROM manager_actions WHERE result IS NOT NULL") == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_without_projects_the_export_leaves_them_and_their_schedules_out(
@@ -437,7 +437,7 @@ def test_without_projects_the_export_leaves_them_and_their_schedules_out(
         assert "projects" not in data and "schedules" not in answer["result"]["counts"]
         assert datetime.fromisoformat(data["exported_at"])
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("arguments", "runtime", "code"), [
@@ -456,4 +456,4 @@ def test_the_export_takes_neither_secrets_nor_a_path_and_needs_a_runtime_directo
         assert _error(answer) == code, answer
         assert not (tmp_path / "runtime" / "exports").exists() or not list((tmp_path / "runtime" / "exports").iterdir())
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

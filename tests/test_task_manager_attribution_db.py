@@ -6,9 +6,9 @@ from typing import Any
 
 import pytest
 
+from tests.db_support import DSN, run_db
 from tests.test_managers_schema_db import _manager
 from tests.test_task_agents_db import _call
-from tests.test_usage_api_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -44,4 +44,4 @@ def test_task_detail_and_list_name_the_manager_and_template(monkeypatch: pytest.
         assert rows["task-a"]["template"] == TEMPLATE
         assert rows["task-b"]["manager_id"] == "manager" and rows["task-b"]["template"] is None
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)

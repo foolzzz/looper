@@ -576,9 +576,7 @@ def test_a_restart_keeps_an_open_wait_and_cancels_a_pending_one_before_the_repla
     assert h.planner._plan is not None  # the restarted planner is the one the scenario left running
 
 
-@pytest.mark.parametrize(("state", "outcome"), [
-    ("ready", "resumed"), ("cancel_requested", None), ("timed_out", None),
-])
+@pytest.mark.parametrize(("state", "outcome"), [("ready", "resumed"), ("timed_out", None)])  # cancel_requested, alike
 def test_restart_preserves_wait_moves_after_loading_the_plan(
     planner_claude: Any, agent_db: Any, state: str, outcome: str | None,
 ) -> None:

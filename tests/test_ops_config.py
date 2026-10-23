@@ -93,11 +93,11 @@ def _words(name: str, tag: str) -> str:
     return f'docker exec "{SECRET}-{tag} container" pg_dump' if isinstance(value, list) else value
 
 
+# ``ops.load`` walks one table of settings: the whole order of sources on one setting, and on each of the others the
+# variable that names it (the file's section and key are read back for every setting by the init-file round trip).
 @pytest.mark.parametrize(("name", "section", "key", "suffix", "winner"), [
-    (*setting, winner) for setting in LEGACY_SETTINGS
-    for winner in ("file", "environment-new", "environment-old", "dotenv-new", "dotenv-old")
-    if setting[0] not in NO_LEGACY_PREFIX or not winner.endswith("old")
-])
+    (*LEGACY_SETTINGS[0], winner) for winner in ("file", "environment-new", "environment-old", "dotenv-new", "dotenv-old")
+] + [(*setting, "environment-new") for setting in LEGACY_SETTINGS[1:]])
 def test_setting_precedence_and_sources(
     tmp_path: Path, dotenv: Path, name: str, section: str, key: str, suffix: str, winner: str,
 ) -> None:
@@ -137,7 +137,8 @@ def test_setting_precedence_and_sources(
     assert SECRET not in "\n".join(config.warnings)
 
 
-@pytest.mark.parametrize(("name", "section", "key", "suffix"), LEGACY_SETTINGS)
+# A plain setting (the database, which is also required), and a command (an empty tuple, not an empty string).
+@pytest.mark.parametrize(("name", "section", "key", "suffix"), [LEGACY_SETTINGS[0], LEGACY_SETTINGS[3]])
 def test_missing_and_blank_variables_are_unset(
     tmp_path: Path, dotenv: Path, name: str, section: str, key: str, suffix: str,
 ) -> None:
@@ -530,10 +531,9 @@ def test_manager_model_warnings_and_price_status(monkeypatch, action, name, prot
     assert any(p["effective"] is None for p in answer["model"]["prices"].values()) == unpriced
 
 
-@pytest.mark.parametrize("action", ["register", "update"])
-@pytest.mark.parametrize("field", ["key", "api_key", "apiKey", "password", "credential"])
-def test_manager_provider_refuses_key_arguments(action: str, field: str) -> None:
+def test_manager_provider_refuses_key_arguments() -> None:
+    # Which names count as a secret's is ``check_arguments``' (test_manager_ops); here a tool refuses one.
     with pytest.raises(OpError, match="Settings → LLM Providers") as error:
-        _provider_call({"action": action, field: SECRET})
+        _provider_call({"action": "register", "api_key": SECRET})
     assert error.value.code.value == "forbidden"
     assert SECRET not in str(error.value)

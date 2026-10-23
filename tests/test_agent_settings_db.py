@@ -14,57 +14,19 @@ derived from the code under test.
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
-import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import agent_launch_parity
+from tests.db_support import DSN, run_db
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 PARITY = json.loads((Path(__file__).parent / "fixtures" / "agent_settings_parity_main.json").read_text("utf-8"))
-
-
-@asynccontextmanager
-async def _fresh_schema() -> AsyncIterator[Any]:
-    import asyncpg
-
-    schema = f"looper_test_{uuid.uuid4().hex[:12]}"
-    admin = await asyncpg.connect(DSN)
-    await admin.execute(f'CREATE SCHEMA "{schema}"')
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3, server_settings={"search_path": schema})
-    try:
-        yield pool
-    finally:
-        await pool.close()
-        await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
-        await admin.close()
-
-
-def _run(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch | None = None, *,
-         before: Callable[[Any], Awaitable[None]] | None = None) -> None:
-    """Run ``test(pool)`` on a new schema (``before(pool)`` runs ahead of it); with ``monkeypatch`` the pool
-    is also the server's pool."""
-    from looper.db import connection
-
-    async def _main() -> None:
-        async with _fresh_schema() as pool:
-            if before is not None:
-                await before(pool)
-            await connection.ensure_schema(pool)
-            if monkeypatch is not None:
-                monkeypatch.setattr(connection, "_pool", pool)
-            await test(pool)
-
-    asyncio.run(_main())
 
 
 # --- The upgrade: the old columns' values move into their layers, and every role launches as before ---
@@ -177,7 +139,7 @@ def test_the_upgrade_moves_every_value_into_its_layer_and_each_role_launches_as_
             assert {"args": args, "env": [list(p) for p in launch.env], "env_sha256": launch.env_sha256,
                     "system_prompt": prompt.text} == expected, case
 
-    _run(_test, monkeypatch, before=_old_state(scenario))
+    run_db(_test, monkeypatch, before=_old_state(scenario))
 
 
 def test_a_fresh_database_has_no_layers_and_every_role_runs_with_the_builtin_settings(
@@ -198,7 +160,7 @@ def test_a_fresh_database_has_no_layers_and_every_role_runs_with_the_builtin_set
                 BUILTIN_SETTINGS, profile=builtin_resolved_profile(),
                 system_prompt_mode=BUILTIN_SYSTEM_PROMPT_MODE[AgentType(role)])
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 # --- The store ---
@@ -257,7 +219,7 @@ def test_each_layer_round_trips_and_a_deleted_project_takes_its_layers(monkeypat
         await projects.delete_project(pid, pool=pool)
         assert await pool.fetchval("SELECT count(*) FROM agent_setting_layers WHERE project_id IS NOT NULL") == 0
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_seeding_moves_unedited_role_prompts_keeps_edited_ones_and_adds_the_reviewer() -> None:
@@ -302,4 +264,4 @@ def test_seeding_moves_unedited_role_prompts_keeps_edited_ones_and_adds_the_revi
         await seed_role_configs(pool)
         assert await pool.fetch("SELECT role, system_prompt, default_prompt FROM role_configs ORDER BY 1") == before
 
-    _run(_test)
+    run_db(_test)

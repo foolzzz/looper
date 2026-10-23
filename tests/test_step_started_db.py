@@ -12,10 +12,10 @@ from typing import Any
 
 import pytest
 
+from tests.db_support import DSN, run_db
 from tests.test_ops_tasks_db import _project, _task
 from tests.test_planner_tools_db import _steps
 from tests.test_task_agents_db import _call
-from tests.test_usage_api_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -46,7 +46,7 @@ def test_a_step_keeps_the_start_of_its_first_attempt(monkeypatch: pytest.MonkeyP
         await plans.save("task-a", steps=[_row("s1", "verified", None)], pool=pool)
         assert await _started(pool, "s1") == FIRST
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_step_sent_back_to_not_started_starts_again(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,7 +62,7 @@ def test_a_step_sent_back_to_not_started_starts_again(monkeypatch: pytest.Monkey
         await plans.save("task-a", steps=[_row("s1", "dispatched", again)], pool=pool)
         assert await _started(pool, "s1") == again
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_step_from_before_the_column_gets_no_guessed_start(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -75,7 +75,7 @@ def test_a_step_from_before_the_column_gets_no_guessed_start(monkeypatch: pytest
                          pool=pool)
         assert [await _started(pool, "step-s1"), await _started(pool, "step-s2")] == [None, None]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_task_detail_gives_each_steps_start(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -90,4 +90,4 @@ def test_the_task_detail_gives_each_steps_start(monkeypatch: pytest.MonkeyPatch)
         assert started["s2"] is None
         assert datetime.fromisoformat(started["s1"]) == FIRST
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

@@ -22,7 +22,7 @@ import pytest
 from looper import __version__
 from looper.agents import config_imports
 from looper.agents.http_server import CONFIG_IMPORTS_PATH, REQUEST_BODY_MAX_BYTES, AgentHTTPServer
-from tests.test_catalog_db import DSN
+from tests.db_support import DSN
 
 needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 TOKEN = "operator-test-token"

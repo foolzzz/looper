@@ -17,11 +17,11 @@ from typing import Any
 import pytest
 
 from looper.agents import scheduler_settings
+from tests.db_support import DSN, run_db
+from tests.schedule_support import ScheduleEnv, run_scheduled
 from tests.test_manager_config_tools_db import _ok as _manager_ok, _trail
 from tests.test_manager_schedule_tools_db import _confirm
 from tests.test_ops_tasks_db import _Chat, _error, _project
-from tests.test_schedules_db import DSN, _Env, _run
-from tests.test_usage_api_db import _run as _manager_run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -43,7 +43,7 @@ def _clean(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_the_stored_minimum_interval_beats_the_deprecated_variable_which_beats_the_built_in(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         view = await env.ok("GET", "/api/scheduler-settings")
         assert view["min_interval_seconds"]["value"] == 300 and view["min_interval_seconds"]["source"] == "built-in"
         assert view["run_timeout_seconds"]["value"] is None and view["run_timeout_seconds"]["source"] == "built-in"
@@ -64,25 +64,25 @@ def test_the_stored_minimum_interval_beats_the_deprecated_variable_which_beats_t
         reset = await env.ok("PUT", "/api/scheduler-settings", {"min_interval_seconds": None})
         assert (reset["min_interval_seconds"]["value"], reset["min_interval_seconds"]["source"]) == (123, "env")
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_the_legacy_variable_name_is_named_in_the_warning(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         monkeypatch.setenv("LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS", "77")
         with caplog.at_level(logging.WARNING):
             assert await scheduler_settings.load() == 77
         assert any("LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS is deprecated" in r.getMessage()
                    and "77" not in r.getMessage() for r in caplog.records)
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_variable_that_is_not_a_whole_number_refuses_the_start(monkeypatch: pytest.MonkeyPatch,
                                                                  tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         monkeypatch.setenv(ENV, "soon")
         with pytest.raises(ValueError, match=f"{ENV} must be a whole number of seconds from 1"):
             await scheduler_settings.load()
@@ -90,7 +90,7 @@ def test_a_variable_that_is_not_a_whole_number_refuses_the_start(monkeypatch: py
         await env.ok("PUT", "/api/scheduler-settings", {"min_interval_seconds": 90})
         assert await scheduler_settings.load() == 90
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 @pytest.mark.parametrize(("body", "error"), [
@@ -107,19 +107,19 @@ def test_a_variable_that_is_not_a_whole_number_refuses_the_start(monkeypatch: py
 def test_a_bad_scheduler_setting_is_refused_and_changes_nothing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: dict[str, Any], error: str,
 ) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         status, payload = await env.call("PUT", "/api/scheduler-settings", body)
         assert status == 400 and error in payload["error"], payload
         view = await env.ok("GET", "/api/scheduler-settings")
         assert (view["min_interval_seconds"]["source"], view["run_timeout_seconds"]["source"]) == ("built-in",) * 2
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_the_minimum_interval_setting_decides_which_rules_a_schedule_may_have(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         body = {"name": "often", "cron": "*/2 * * * *", "timezone": "UTC", "requirement": "Look."}
         status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", body)
         assert status == 400 and "fires 2 minutes apart" in payload["error"]
@@ -128,7 +128,7 @@ def test_the_minimum_interval_setting_decides_which_rules_a_schedule_may_have(
         limits = (await env.ok("GET", f"/api/projects/{env.project_id}/schedules"))["limits"]
         assert (limits["min_interval_seconds"], limits["min_interval_gated_seconds"]) == (120, 60)
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 # --- A schedule's run timeout ---
@@ -136,7 +136,7 @@ def test_the_minimum_interval_setting_decides_which_rules_a_schedule_may_have(
 
 def test_a_schedule_follows_the_default_has_its_own_timeout_or_none(monkeypatch: pytest.MonkeyPatch,
                                                                     tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         followed = await env.schedule()
         assert (followed["run_timeout_seconds"], followed["run_timeout_effective_seconds"]) == ("default", None)
         await env.ok("PUT", "/api/scheduler-settings", {"run_timeout_seconds": 900})
@@ -162,22 +162,22 @@ def test_a_schedule_follows_the_default_has_its_own_timeout_or_none(monkeypatch:
         limits = (await env.ok("GET", f"/api/projects/{env.project_id}/schedules"))["limits"]
         assert limits["run_timeout_default_seconds"] == 900
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 @pytest.mark.parametrize("value", [0, -5, 1.5, "soon", True, 2_592_001, [60]])
 def test_a_bad_schedule_timeout_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, value: Any) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         body = {"name": "x", "cron": "*/5 * * * *", "timezone": "UTC", "requirement": "Look.",
                 "run_timeout_seconds": value}
         status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", body)
         assert status == 400 and 'null for no limit, or "default"' in payload["error"], payload
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_run_keeps_the_timeout_it_started_with(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         await env.ok("PUT", "/api/scheduler-settings", {"run_timeout_seconds": 120})
         sid = (await env.enabled())["schedule_id"]  # follows the default
         await env.due(sid)
@@ -207,12 +207,12 @@ def test_a_run_keeps_the_timeout_it_started_with(monkeypatch: pytest.MonkeyPatch
         assert await env.pool.fetchval("SELECT run_timeout_seconds FROM schedule_runs WHERE id = $1",
                                        newest["run_id"]) is None
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_schedule_following_an_unset_default_runs_without_a_limit(monkeypatch: pytest.MonkeyPatch,
                                                                    tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         sid = (await env.enabled())["schedule_id"]
         await env.due(sid)
         await env.scheduler.tick()
@@ -225,7 +225,7 @@ def test_a_schedule_following_an_unset_default_runs_without_a_limit(monkeypatch:
         started = next(r for r in await env.runs(sid) if r["run_id"] == run["run_id"])
         assert started["status"] == "running" and env.bus.of("task_stop") == []
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_gate_is_told_the_timeout_its_run_started_with(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -237,7 +237,7 @@ def test_a_gate_is_told_the_timeout_its_run_started_with(monkeypatch: pytest.Mon
 
 
 def test_schedules_from_before_keep_their_meaning(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         from looper.db import connection
 
         # The database as the previous version left it: no mode, a number or none on each schedule, runs in progress.
@@ -263,7 +263,7 @@ def test_schedules_from_before_keep_their_meaning(monkeypatch: pytest.MonkeyPatc
         # A schedule created afterwards follows the default.
         assert (await env.schedule())["run_timeout_seconds"] == "default"
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 # --- The configuration file ---
@@ -272,7 +272,7 @@ def test_schedules_from_before_keep_their_meaning(monkeypatch: pytest.MonkeyPatc
 def test_an_export_carries_the_scheduler_settings_and_each_schedules_timeout_choice(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         from looper.agents import config_transfer
 
         await env.ok("PUT", "/api/scheduler-settings", {"min_interval_seconds": 60, "run_timeout_seconds": 600})
@@ -310,7 +310,7 @@ def test_an_export_carries_the_scheduler_settings_and_each_schedules_timeout_cho
         assert set(skipped) == {"min_interval_seconds", "run_timeout_seconds", "other"}
         assert all(c.action.value == "skipped" for c in plan.changes if c.section == "settings.scheduler")
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 # --- The Manager ---
@@ -345,7 +345,7 @@ def test_the_manager_changes_the_scheduler_settings_after_the_user_confirms(
                                       ("looper_settings", "high", "needs_confirmation"),
                                       ("looper_settings", "high", "ok")]
 
-    _manager_run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- Review findings ---
@@ -356,7 +356,7 @@ def test_the_default_run_timeout_is_read_on_the_connection_it_is_given(monkeypat
     """Inside the scheduler's transaction a second pool connection could wait forever for one."""
     from looper.db import system_settings
 
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         asked: list[Any] = []
 
         class Conn:
@@ -372,13 +372,13 @@ def test_the_default_run_timeout_is_read_on_the_connection_it_is_given(monkeypat
         assert await scheduler_settings.effective_run_timeout("seconds", 5, Conn()) == 5
         assert asked == [[scheduler_settings.RUN_TIMEOUT_KEY]]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_an_import_checks_its_schedules_against_the_minimum_interval_it_brings(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         from looper.agents import config_transfer
 
         await env.schedule(name="every-minute")
@@ -399,13 +399,13 @@ def test_an_import_checks_its_schedules_against_the_minimum_interval_it_brings(
         assert (await entry(data))[0] in ("changed", "added", "unchanged")
         assert scheduler_settings.min_interval_seconds(gated=False) == 300  # a preview changes nothing
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_clearing_the_minimum_interval_is_refused_before_anything_changes_when_the_variable_is_bad(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         await env.ok("PUT", "/api/scheduler-settings", {"min_interval_seconds": 90})
         monkeypatch.setenv(ENV, "soon")
         status, payload = await env.call("PUT", "/api/scheduler-settings", {"min_interval_seconds": None})
@@ -418,7 +418,7 @@ def test_clearing_the_minimum_interval_is_refused_before_anything_changes_when_t
         view = await env.ok("GET", "/api/scheduler-settings")
         assert (view["min_interval_seconds"]["value"], view["min_interval_seconds"]["source"]) == (90, "setting")
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_launch_reads_the_default_timeout_without_a_second_pool_connection(
@@ -454,7 +454,7 @@ def test_a_launch_reads_the_default_timeout_without_a_second_pool_connection(
         def __getattr__(self, name: str) -> Any:
             return getattr(self.pool, name)
 
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         await env.ok("PUT", "/api/scheduler-settings", {"run_timeout_seconds": 120})
         sid = (await env.enabled())["schedule_id"]  # follows the default
         guarded = GuardedPool(env.pool)
@@ -467,4 +467,4 @@ def test_a_launch_reads_the_default_timeout_without_a_second_pool_connection(
                                        run["run_id"]) == 120
         assert guarded.violations == []
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)

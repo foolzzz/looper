@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from tests.test_channel_configs_db import _run
+from tests.db_support import run_with_channel_configs
 
 pytestmark = pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"),
                                 reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -79,4 +79,4 @@ def test_renamed_channel_checks_are_widened_once(monkeypatch: pytest.MonkeyPatch
             with pytest.raises(asyncpg.CheckViolationError):
                 await pool.execute(f"UPDATE schedules SET {assignment} WHERE id = 'schedule-a'")
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)

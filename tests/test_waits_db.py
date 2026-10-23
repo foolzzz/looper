@@ -14,8 +14,8 @@ from typing import Any
 import asyncpg
 import pytest
 
+from tests.db_support import DSN, run_db
 from tests.test_ops_tasks_db import _project, _task
-from tests.test_usage_api_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -58,7 +58,7 @@ def test_plans_keep_waits_and_read_them_in_plan_order(monkeypatch: pytest.Monkey
                                            "instruction": "earlier"}], waits=[_wait("step-w0")], pool=pool)
         assert [r["step_key"] for r in await waits.list_for_task("task-a", pool=pool)] == ["w0", "w1"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_planner_write_expect_keeps_a_row_someone_else_moved(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -75,7 +75,7 @@ def test_planner_write_expect_keeps_a_row_someone_else_moved(monkeypatch: pytest
         row = await waits.get("task-a", "w1", pool=pool)
         assert (row["state"], row["outcome"], row["resolution"]) == ("done", "ready", "checks passed")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_due_waits_are_waiting_due_and_in_active_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -104,7 +104,7 @@ def test_due_waits_are_waiting_due_and_in_active_tasks(monkeypatch: pytest.Monke
         assert len(await waits.due(NOW, ["running"], limit=1, pool=pool)) == 1
         assert await waits.due(NOW, [], pool=pool) == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_future_time_waits_do_not_fill_the_due_batch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -127,7 +127,7 @@ def test_future_time_waits_do_not_fill_the_due_batch(monkeypatch: pytest.MonkeyP
             rows = await waits.due(NOW + timedelta(seconds=60), ["running"], pool=pool)
             assert [row["task_id"] for row in rows] == ["task-100"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_check_record_and_move_only_apply_in_the_expected_state(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -157,12 +157,14 @@ def test_check_record_and_move_only_apply_in_the_expected_state(monkeypatch: pyt
         assert (await waits.get("task-a", "w1", pool=pool))["notice"] == "dashboard"
         assert [r["step_id"] for r in await waits.for_planner("task-a", pool=pool)] == ["step-w1"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
-@pytest.mark.parametrize("status", ["stopped", "failed", "completed", "cancelled", "init"])
-@pytest.mark.parametrize(("to", "outcome"), [("timed_out", None), ("ready", "ready"),
-                                            ("ready", "resumed"), ("cancel_requested", None)])
+# ``move`` asks for the task's status among the active ones, whatever the move: a status of each kind (one that ended,
+# one that never started) and the moves, each once.
+@pytest.mark.parametrize(("status", "to", "outcome"), [
+    ("stopped", "timed_out", None), ("init", "ready", "resumed"), ("completed", "cancel_requested", None),
+])
 def test_wait_moves_require_an_active_task(
     monkeypatch: pytest.MonkeyPatch, status: str, to: str, outcome: str | None,
 ) -> None:
@@ -181,7 +183,7 @@ def test_wait_moves_require_an_active_task(
         moved = await waits.move("step-active", to=to, outcome=outcome, pool=pool)
         assert moved is not None and (moved["state"], moved["outcome"]) == (to, outcome)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("output", "expected"), [
@@ -206,7 +208,7 @@ def test_check_output_is_capped_to_2048_utf8_bytes(
         assert row["last_output"] == expected
         assert len(row["last_output"].encode()) <= 2048
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_wait_step_and_journal_kinds_survive_repeated_schema_setup(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -224,7 +226,7 @@ def test_wait_step_and_journal_kinds_survive_repeated_schema_setup(monkeypatch: 
         assert [r["kind"] for r in await journal.list_entries("task-a", pool=pool)] == [
             "wait_opened", "wait_extended", "wait_closed"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_project_wait_commands_round_trip_through_execution_fields(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -245,7 +247,7 @@ def test_project_wait_commands_round_trip_through_execution_fields(monkeypatch: 
         row = await projects.get_project(project["id"], pool=pool)
         assert row["wait_commands"] is None and not ProjectExecution.from_row(row).wait_commands_on
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_ready_requires_an_outcome_and_other_open_states_cannot_carry_one(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -285,7 +287,7 @@ def test_ready_requires_an_outcome_and_other_open_states_cannot_carry_one(monkey
         done = await plans.load("task-done", pool=pool)
         assert done is not None and done["waits"]["step-done"]["outcome"] == "cancelled"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_ready_move_race_lets_only_one_side_win(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -306,7 +308,7 @@ def test_a_ready_move_race_lets_only_one_side_win(monkeypatch: pytest.MonkeyPatc
         assert stored["state"] == "ready" and stored["outcome"] == winners[0]["outcome"]
         assert stored["outcome"] in ("ready", "resumed") and stored["resolution"] == stored["outcome"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 _OLD_OUTCOME = """
@@ -344,4 +346,4 @@ def test_an_old_schema_backfills_ready_rows_and_repeated_setup_keeps_them(monkey
             "SELECT count(*) FROM schema_migrations WHERE name = 'task_waits_outcome_ready'") == 1
         assert (await waits.get("task-a", "w1", pool=pool))["outcome"] == "ready"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

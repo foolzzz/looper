@@ -16,9 +16,10 @@ import pytest
 
 from looper.agents.bus import MessageBus
 from looper.agents.message import MessageEnvelope, MessageType, channel_address, planner_address, worker_address
+from tests.db_support import DSN, run_db
 from tests.test_ops_tasks_db import _error, _project, _task
 from tests.test_task_agents_db import _LISTENING, _call, _Pool, _profiles, _Rechecks
-from tests.test_usage_api_db import DSN, _run, _Writer
+from tests.test_usage_api_db import _Writer
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -145,7 +146,7 @@ def test_a_planners_token_works_for_its_own_task_and_its_own_tools_only(
         assert _error(answer) == "forbidden" and "task task-b has ended" in answer["error"]["message"]
         assert (await _endpoint(server, held, "GET", "tools"))[0] == 401
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- looper_task_profiles and looper_task_profile_set ---
@@ -177,7 +178,7 @@ def test_with_the_projects_list_empty_the_planner_chooses_any_profile_that_can_r
         assert await pool.fetchval("SELECT count(*) FROM task_planner_profiles") == 1
         assert await _runs_on("task-a", project, role="reviewer") == ("claude-code/sonnet", "planner_task")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_projects_list_is_set_whole_by_id_or_name_and_read_back(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -220,7 +221,7 @@ def test_the_projects_list_is_set_whole_by_id_or_name_and_read_back(monkeypatch:
         assert (await _call("GET", "/api/projects/proj-nope/allowed-profiles"))[0] == 404
         assert (await _allow(project))["profiles"] == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_planners_choice_runs_from_the_next_run_on_and_a_steps_choice_wins_over_it(
@@ -275,7 +276,7 @@ def test_the_planners_choice_runs_from_the_next_run_on_and_a_steps_choice_wins_o
         assert listed["roles"]["worker"]["your_choice"] == "claude-code/sonnet"
         assert listed["steps"] == [{"step": "s3", "role": "worker", "profile": "claude-code/haiku"}]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_users_choice_for_the_task_wins_over_the_planners(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -302,7 +303,7 @@ def test_the_users_choice_for_the_task_wins_over_the_planners(monkeypatch: pytes
         assert listed == {"runs": {"name": "one-off/opus", "source": "task"}, "user_choice": "one-off/opus",
                           "your_choice": None}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("arguments", "code", "message"), [
@@ -333,7 +334,7 @@ def test_a_choice_the_planner_may_not_make_is_refused_and_nothing_is_stored(
         assert await pool.fetchval("SELECT count(*) FROM task_planner_profiles") == 0
         assert await _journal(pool, "task-a", "profile_choice") == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_each_choice_is_journaled_and_the_task_shows_it(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -368,7 +369,7 @@ def test_each_choice_is_journaled_and_the_task_shows_it(monkeypatch: pytest.Monk
         assert activity[0] == ("Planner chose the Agent Profile: Workers of the rest of the task: claude-code/sonnet. "
                                "Reason: the steps are hard")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_planners_choice_counts_only_while_the_tasks_project_allows_it(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -409,7 +410,7 @@ def test_the_planners_choice_counts_only_while_the_tasks_project_allows_it(monke
         await tasks.reset_task_for_restart("task-a")
         assert await pool.fetchval("SELECT count(*) FROM task_planner_profiles") == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_profile_an_open_tasks_planner_chose_cannot_be_deleted_until_the_task_ends(
@@ -433,7 +434,7 @@ def test_a_profile_an_open_tasks_planner_chose_cannot_be_deleted_until_the_task_
         assert (await _call("DELETE", "/api/agent-profiles/agent-sonnet"))[0] == 200
         assert await pool.fetchval("SELECT count(*) FROM task_planner_profiles") == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_profile_an_open_tasks_role_chose_cannot_be_deleted_and_a_racing_choice_is_not_dropped(
@@ -468,7 +469,7 @@ def test_a_profile_an_open_tasks_role_chose_cannot_be_deleted_and_a_racing_choic
         assert status == 409 and "task-a" in refused["error"], refused
         assert await pool.fetchval("SELECT count(*) FROM task_planner_profiles") == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- looper_task_concurrency ---
@@ -528,7 +529,7 @@ def test_the_planner_changes_its_tasks_limits_at_once_and_the_chat_is_told(
         assert _notices(bus, "lark") == [] and _notices(bus, "web") == []
         await bus.shutdown()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_limit_the_planner_raises_starts_the_waiting_runs_at_once(
@@ -548,7 +549,7 @@ def test_a_limit_the_planner_raises_starts_the_waiting_runs_at_once(
             for worker_id in running:
                 await runs.finish(worker_id)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("tool", "arguments", "message"), [
@@ -576,4 +577,4 @@ def test_a_limit_the_planner_may_not_set_is_refused_and_nothing_changes(
         assert await pool.fetchval("SELECT count(*) FROM agent_setting_layers WHERE max_concurrency IS NOT NULL") == 0
         assert await _journal(pool, "task-a", "concurrency_change") == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

@@ -6,27 +6,14 @@ The database tests run only when LOOPER_TEST_DATABASE_URL points at a disposable
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
 from typing import Any
 
 import asyncpg
 import pytest
 
-from tests.test_catalog_db import DSN, _fresh_schema
+from tests.db_support import DSN, run_db
 
 needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-
-
-def _run(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.db import connection
-
-    async def _main() -> None:
-        async with _fresh_schema() as pool:
-            await connection.ensure_schema(pool)
-            monkeypatch.setattr(connection, "_pool", pool)
-            await test(pool)
-
-    asyncio.run(_main())
 
 
 async def _profile_id(pool: Any) -> str:
@@ -47,7 +34,7 @@ def test_schema_applies_twice_with_column_and_constraint(monkeypatch: pytest.Mon
             "SELECT count(*) FROM pg_constraint WHERE conname = 'agent_sessions_selected_profile_manager' "
             "AND conrelid = to_regclass(current_schema() || '.agent_sessions')") == 1
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 @needs_db
@@ -61,7 +48,7 @@ def test_select_profile_then_get_session(monkeypatch: pytest.MonkeyPatch) -> Non
         assert saved["selected_profile_id"] == pid and saved["session_id"] is None
         assert saved["session_totals"] == {}
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 @needs_db
@@ -79,7 +66,7 @@ def test_save_session_and_select_profile_leave_each_other(monkeypatch: pytest.Mo
         assert (saved["selected_profile_id"], saved["session_id"]) == (None, "s-1")
         assert saved["session_totals"] == {"cost": 1}
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 @needs_db
@@ -90,7 +77,7 @@ def test_only_the_manager_can_select_a_profile(monkeypatch: pytest.MonkeyPatch) 
         with pytest.raises(asyncpg.CheckViolationError):
             await agent_sessions.select_profile("planner-task-x", await _profile_id(pool))
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 @needs_db
@@ -103,7 +90,7 @@ def test_selected_profile_cannot_be_deleted(monkeypatch: pytest.MonkeyPatch) -> 
         with pytest.raises(asyncpg.ForeignKeyViolationError):
             await pool.execute("DELETE FROM agent_profiles WHERE id = $1", pid)
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 @needs_db
@@ -126,7 +113,7 @@ def test_both_writes_share_one_transaction(monkeypatch: pytest.MonkeyPatch) -> N
         saved = await agent_sessions.get_session("manager")
         assert (saved["session_id"], saved["selected_profile_id"]) == ("s-1", pid)
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_agent_db_store_keeps_selected_profile_across_save_session(agent_db: Any) -> None:

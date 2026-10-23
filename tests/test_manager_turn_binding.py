@@ -21,7 +21,8 @@ from looper.agents.ops.service import ManagerOps, Platform
 from looper.agents.run_usage import Usage
 from looper.agents.runtimes import StopMethod
 from looper.agents.tiers.manager import StopResult
-from tests.test_manager_new_session import _until, _web
+from tests.db_support import until
+from tests.test_manager_new_session import _web
 from tests.test_manager_stop import _manager
 
 
@@ -102,7 +103,7 @@ def test_a_call_that_comes_after_the_stop_is_refused_and_the_next_turns_runs(age
 
             first = _web("写一篇很长的文章")
             handling = asyncio.create_task(manager._handle(first))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             assert json.loads(turn_file.read_text())["turn"] is not None
             assert await manager.stop_turn(first.message_id, via="web") is StopResult.STOPPING
             await handling

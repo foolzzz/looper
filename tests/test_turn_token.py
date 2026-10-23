@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import itertools
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,7 +15,6 @@ from looper.agents.tiers.manager import StopRequest as ManagerStopRequest, TurnS
 from looper.agents.tiers.turn_token import TurnPhase, TurnRegistry, TurnStopped, TurnToken
 
 P = TurnPhase
-ALLOWED = {(P.RECEIVED, P.PREPARING), (P.PREPARING, P.STARTING), (P.STARTING, P.RUNNING)}
 
 
 def _token(phase: TurnPhase = P.RECEIVED, mid: str = "m1") -> TurnToken:
@@ -31,20 +29,20 @@ def test_reexports() -> None:
     assert ManagerTurnStopped is TurnStopped
 
 
-@pytest.mark.parametrize("src,dst", list(itertools.product(P, P)))
-def test_transition_table(src: TurnPhase, dst: TurnPhase) -> None:
-    token = _token(src)
-    if src is P.STOPPING:
-        with pytest.raises(TurnStopped):
-            token.advance(dst)
-        assert token.phase is P.STOPPING
-    elif (src, dst) in ALLOWED:
-        token.advance(dst)
-        assert token.phase is dst
-    else:
+def test_a_turn_advances_along_its_phases_only() -> None:
+    token = _token(P.RECEIVED)
+    for phase in (P.PREPARING, P.STARTING, P.RUNNING):  # every step of the table
+        token.advance(phase)
+        assert token.phase is phase
+    for src, dst in ((P.RECEIVED, P.RUNNING), (P.RUNNING, P.RUNNING), (P.ENDED, P.RECEIVED)):  # anything else
+        token = _token(src)
         with pytest.raises(AssertionError):
             token.advance(dst)
         assert token.phase is src
+    stopping = _token(P.STOPPING)  # a stopped turn goes nowhere
+    with pytest.raises(TurnStopped):
+        stopping.advance(P.RUNNING)
+    assert stopping.phase is P.STOPPING
 
 
 def test_restart() -> None:

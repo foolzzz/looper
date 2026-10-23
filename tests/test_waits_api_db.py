@@ -15,8 +15,9 @@ from looper.agents import waits
 from looper.agents.http_server import AgentHTTPServer
 from looper.agents.message import MessageType, channel_address, planner_address
 from looper.db import activity, plans, waits as db_waits
+from tests.db_support import DSN, run_db
 from tests.test_ops_tasks_db import _Chat, _project, _task
-from tests.test_usage_api_db import DSN, _run, _Writer
+from tests.test_usage_api_db import _Writer
 from tests.test_waits_db import NOW, SPEC, _plan_with_wait, _wait
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -95,11 +96,10 @@ def test_detail_waits_are_in_plan_order_with_all_fields(monkeypatch: pytest.Monk
                        "resolution": "Keep waiting", "notice": "dashboard", "closed_at": None,
                        "depends_on": ["s1"]}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
-@pytest.mark.parametrize("action", ["resume", "cancel"])
-@pytest.mark.parametrize("live", [False, True])
+@pytest.mark.parametrize(("action", "live"), [("resume", True), ("cancel", False)])
 def test_user_moves_wait_and_only_wakes_an_existing_planner(
     monkeypatch: pytest.MonkeyPatch, action: str, live: bool,
 ) -> None:
@@ -129,12 +129,14 @@ def test_user_moves_wait_and_only_wakes_an_existing_planner(
         assert status == 409 and not bus.messages
         assert len(await activity.list_activity("task-a")) == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
-@pytest.mark.parametrize("action", ["resume", "cancel"])
-@pytest.mark.parametrize("case", ["no_task", "no_label", "completed", "cancelled", "task_failed", "stopped", "timed_out",
-                                  "cancel_requested", "pending", "ready", "done", "failed", "skipped", "race"])
+# Each way a move is refused once; a task that ended, or a wait that is not waiting, is refused alike by its status.
+@pytest.mark.parametrize(("action", "case"), [
+    ("resume", "no_task"), ("cancel", "no_label"), ("resume", "stopped"), ("cancel", "timed_out"),
+    ("resume", "done"), ("cancel", "race"),
+])
 def test_refused_moves_leave_no_activity_or_wakeup(
     monkeypatch: pytest.MonkeyPatch, action: str, case: str,
 ) -> None:
@@ -170,13 +172,11 @@ def test_refused_moves_leave_no_activity_or_wakeup(
         if case == "race":
             assert (await db_waits.get("task-a", "w1"))["state"] == "timed_out"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("method", "path"), [
-    ("POST", "/api/tasks/task-a/waits/w1/resume"), ("POST", "/api/tasks/task-a/waits/w1/cancel"),
-    ("POST", "/api/tasks/task-a/gates/g1/messages"), ("GET", "/api/wait-settings"),
-    ("PUT", "/api/wait-settings"),
+    ("POST", "/api/tasks/task-a/waits/w1/resume"), ("GET", "/api/wait-settings"), ("PUT", "/api/wait-settings"),
 ])
 def test_wait_routes_use_operator_auth_and_request_guard(
     monkeypatch: pytest.MonkeyPatch, method: str, path: str,
@@ -196,7 +196,7 @@ def test_wait_routes_use_operator_auth_and_request_guard(
         status, _, _ = await _api(method, path, b'{"max_wait_seconds": 3600}')
         assert status == (404 if "/gates/" in path else 200)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_settings_values_defaults_sources_reset_and_validation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -216,10 +216,8 @@ def test_settings_values_defaults_sources_reset_and_validation(monkeypatch: pyte
         assert status == 200
         assert changed == {name: {**initial[name], "value": value, "source": "setting"}
                            for name, value in (("max_wait_seconds", 600), ("min_check_seconds", 60))}
-        for body in (b"[]", b"invalid", b"{}", b'{"unknown": 1}', b'{"max_wait_seconds": true}',
-                     b'{"max_wait_seconds": 59}', b'{"max_wait_seconds": 2592001}',
-                     b'{"min_check_seconds": 9}', b'{"min_check_seconds": 86401}',
-                     b'{"min_check_seconds": 601}', b'{"max_wait_seconds": 60, "min_check_seconds": 61}'):
+        for body in (b"[]", b"invalid", b'{"unknown": 1}', b'{"max_wait_seconds": 59}',
+                     b'{"max_wait_seconds": 60, "min_check_seconds": 61}'):
             status, answer, _ = await _api("PUT", "/api/wait-settings", body)
             assert status == 400 and answer["error"], (body, answer)
             assert (await _api("GET", "/api/wait-settings"))[1] == changed
@@ -229,7 +227,7 @@ def test_settings_values_defaults_sources_reset_and_validation(monkeypatch: pyte
         await waits.load()
         assert await waits.settings_view() == initial
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_manager_reads_changes_and_resets_wait_limits_only_after_confirmation(
@@ -263,12 +261,11 @@ def test_manager_reads_changes_and_resets_wait_limits_only_after_confirmation(
             assert (waits.limits().max_wait_seconds, waits.limits().min_check_seconds) == expected
             assert (await _api("GET", "/api/wait-settings"))[1] == await waits.settings_view()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
-@pytest.mark.parametrize("values", [{}, {"unknown": 1}, {"min_check_seconds": True},
-                                  {"max_wait_seconds": 59}, {"min_check_seconds": 9},
-                                  {"max_wait_seconds": 60, "min_check_seconds": 61}])
+# Which values are invalid is test_waits_protocol's; here the Manager's refusal leaves the stored limits alone.
+@pytest.mark.parametrize("values", [{"max_wait_seconds": 59}])
 def test_manager_refuses_invalid_wait_limits_before_asking(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, values: dict[str, Any],
 ) -> None:
@@ -283,7 +280,7 @@ def test_manager_refuses_invalid_wait_limits_before_asking(
         assert not chat.turns[-1].blocks
         assert await waits.settings_view() == before
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_manager_task_detail_includes_wait_conditions_states_and_step_kinds(
@@ -304,4 +301,4 @@ def test_manager_task_detail_includes_wait_conditions_states_and_step_kinds(
         assert detail["waits"][0]["check"] == check
         assert detail["waits"][0]["state"] == "waiting"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

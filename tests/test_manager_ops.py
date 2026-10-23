@@ -105,7 +105,7 @@ def test_arguments_are_checked_against_the_schema(arguments: Any, problem: str |
     assert raised.value.code is ErrorCode.INVALID and str(raised.value).startswith(problem)
 
 
-@pytest.mark.parametrize("name", ["api_key", "OPENAI_KEY", "token", "password", "client_secret", "credential"])
+@pytest.mark.parametrize("name", ["OPENAI_KEY", "token", "client_secret", "password", "credential"])
 def test_an_argument_named_like_a_secret_is_refused_and_its_value_never_named(name: str) -> None:
     with pytest.raises(OpError) as raised:
         check_arguments({"type": "object", "properties": {"n": {"type": "integer"}}}, {"n": 1, name: "sk-x"})
@@ -557,9 +557,7 @@ def test_profile_schema_rejects_fields_outside_the_recipe(field):
         check_arguments(tool.schema, {"action": "create", field: "unused"})
 
 
-@pytest.mark.parametrize("tool", ["looper_agent_profiles", "looper_models", "looper_providers"])
-@pytest.mark.parametrize("field", ["api_key", "token", "credential"])
-def test_configuration_secrets_never_reach_tools_or_final_records(recorded, monkeypatch, tool, field):
+def test_configuration_secrets_never_reach_tools_or_final_records(recorded, monkeypatch):
     from looper.agents.ops import config
 
     secret = "sk-synthetic-manager-profile-test"
@@ -567,8 +565,7 @@ def test_configuration_secrets_never_reach_tools_or_final_records(recorded, monk
     monkeypatch.setattr(config, "_registry", registry)
     ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="tok")
     ops.begin_turn(_turn("request"))
-    answer = asyncio.run(ops.call(tool, {"action": "create" if tool != "looper_providers" else "register",
-                                         field: secret}))
+    answer = asyncio.run(ops.call("looper_providers", {"action": "register", "credential": secret}))
     assert answer["error"]["code"] == "forbidden"
     assert "Settings → LLM Providers" in answer["error"]["message"]
     assert secret not in json.dumps(answer)

@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import tempfile
-import uuid
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,32 +16,7 @@ from typing import Any
 
 import pytest
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
-
-
-def _run(test: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run ``test(pool)`` on a new schema that is also the server's pool."""
-    if not DSN:
-        pytest.skip("LOOPER_TEST_DATABASE_URL is not set")
-    import asyncpg
-
-    from looper.db import connection
-
-    async def _main() -> None:
-        schema = f"looper_test_{uuid.uuid4().hex[:12]}"
-        admin = await asyncpg.connect(DSN)
-        await admin.execute(f'CREATE SCHEMA "{schema}"')
-        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3, server_settings={"search_path": schema})
-        try:
-            await connection.ensure_schema(pool)
-            monkeypatch.setattr(connection, "_pool", pool)
-            await test(pool)
-        finally:
-            await pool.close()
-            await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
-            await admin.close()
-
-    asyncio.run(_main())
+from tests.db_support import run_db
 
 
 class _Writer:
@@ -122,7 +95,7 @@ def test_the_task_detail_and_list_carry_the_tasks_cost(monkeypatch: pytest.Monke
         assert by_id["task-a"]["cost"] == cost
         assert by_id["task-b"]["cost"]["cost_usd"] == 0.0 and by_id["task-b"]["cost"]["runs"] == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def _model_launch():
@@ -274,7 +247,7 @@ def test_old_and_new_records_keep_identical_task_costs_and_model_groups(monkeypa
         assert cost["manager_by_model"][1]["unpriced_runs"] == 1
         assert [await llm_records.get_record(r["id"], pool=pool) for r in old_records] == old_records
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_registry_price_edits_and_deletion_do_not_reprice_a_run_or_its_history(
@@ -317,7 +290,7 @@ def test_registry_price_edits_and_deletion_do_not_reprice_a_run_or_its_history(
         assert ended["metadata"] == opened["metadata"]
         assert await llm_records.get_record(historical_id, pool=pool) == historical
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_an_agents_usage_reads_back_its_context_cost_and_compactions(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -342,4 +315,4 @@ def test_an_agents_usage_reads_back_its_context_cost_and_compactions(monkeypatch
         status, bad = await _get("/api/agents/manager/usage", {"turns": "many"})
         assert status == 400 and "turns" in bad["error"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

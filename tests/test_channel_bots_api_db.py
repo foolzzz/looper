@@ -14,8 +14,8 @@ from typing import Any
 
 import pytest
 
-from tests.test_channel_configs_db import _run
-from tests.test_lark_bot_settings_db import DSN, platform  # noqa: F401 (the fixture)
+from tests.db_support import DSN, run_with_channel_configs
+from tests.test_lark_bot_settings_db import platform  # noqa: F401 (the fixture)
 from tests.test_lark_channel_db import _call as _call_query
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -64,7 +64,7 @@ def test_add_a_telegram_bot_lists_it_after_the_built_in_rows(monkeypatch: pytest
         assert builtin["channel-telegram"]["builtin"] is True and builtin["channel-telegram"]["manager_id"] == "manager"
         assert TOKEN not in json.dumps(listed)
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_the_same_telegram_bot_is_not_added_twice(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -78,7 +78,7 @@ def test_the_same_telegram_bot_is_not_added_twice(monkeypatch: pytest.MonkeyPatc
         assert await pool.fetchval("SELECT count(*) FROM channel_configs WHERE channel_type = 'telegram'") == 2
         assert (await _telegram(second, OTHER_TOKEN))[0] == 201
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_the_built_in_row_reading_the_environment_counts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -90,7 +90,7 @@ def test_the_built_in_row_reading_the_environment_counts(monkeypatch: pytest.Mon
         assert status == 409 and "channel-telegram" in body["error"]
         assert TOKEN not in json.dumps(body) and SAME_BOT_NEW_SECRET not in json.dumps(body)
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_the_built_in_row_whose_bot_token_env_is_unset_counts_the_standard_variable(
@@ -106,7 +106,7 @@ def test_the_built_in_row_whose_bot_token_env_is_unset_counts_the_standard_varia
         status, body = await _telegram(await _manager(pool), TOKEN)
         assert status == 409 and "channel-telegram" in body["error"]
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_refused_adds_write_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -130,7 +130,7 @@ def test_refused_adds_write_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
         status, row = await _telegram(manager)
         assert status == 201 and row["manager_id"] == manager
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_lark_cli_bots_name_their_profile(monkeypatch: pytest.MonkeyPatch, lark_cli_stand_in: Path) -> None:
@@ -161,7 +161,7 @@ def test_lark_cli_bots_name_their_profile(monkeypatch: pytest.MonkeyPatch, lark_
         status, answer = await _call("PUT", "/api/channel-configs/channel-lark", {"config": {"profile": "other"}})
         assert status == 409 and lark_id in answer["error"]
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_an_added_lark_cli_bot_keeps_naming_its_profile(monkeypatch: pytest.MonkeyPatch,
@@ -183,7 +183,7 @@ def test_an_added_lark_cli_bot_keeps_naming_its_profile(monkeypatch: pytest.Monk
         status, answer = await _call("PUT", "/api/channel-configs/channel-lark", {"config": {"profile": ""}})
         assert status == 200, answer
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_lark_bot_apps_are_added_once(monkeypatch: pytest.MonkeyPatch, platform: Any) -> None:  # noqa: F811
@@ -206,7 +206,7 @@ def test_lark_bot_apps_are_added_once(monkeypatch: pytest.MonkeyPatch, platform:
         status, _ = await _call("GET", "/api/channels/lark_bot/status", query={"channel_id": "channel-lark"})
         assert status == 404
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_a_lark_app_is_one_bot_whatever_names_it(monkeypatch: pytest.MonkeyPatch, lark_cli_stand_in: Path) -> None:
@@ -227,7 +227,7 @@ def test_a_lark_app_is_one_bot_whatever_names_it(monkeypatch: pytest.MonkeyPatch
         assert status == 409 and added["channel_id"] in answer["error"], answer
         assert await pool.fetchval("SELECT count(*) FROM channel_configs WHERE channel_type LIKE 'lark%'") == 3
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_the_built_in_lark_bot_row_may_act_as_the_built_in_lark_cli_rows_app(
@@ -247,7 +247,7 @@ def test_the_built_in_lark_bot_row_may_act_as_the_built_in_lark_cli_rows_app(
             "channel_type": "lark_bot", "manager_id": manager, "config": {"app_id": "cli_main"}, "bot_token": SECRET})
         assert status == 409 and "(channel-lark" in answer["error"], answer
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_the_built_in_telegram_row_falling_back_to_the_environment_is_checked(
@@ -273,7 +273,7 @@ def test_the_built_in_telegram_row_falling_back_to_the_environment_is_checked(
         assert status == 409 and "channel-telegram-2" in body["error"], body
         assert "bot_token_env" not in ((await _call("GET", path))[1]["config"] or {})
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_a_token_removal_is_checked_against_a_bot_token_env_changed_meanwhile(
@@ -306,7 +306,7 @@ def test_a_token_removal_is_checked_against_a_bot_token_env_changed_meanwhile(
         assert await pool.fetchval("SELECT bot_token FROM channel_secrets WHERE channel_id = 'channel-telegram'"
                                    ) == OTHER_TOKEN
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_put_keeps_the_manager_and_checks_a_new_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -336,7 +336,7 @@ def test_put_keeps_the_manager_and_checks_a_new_token(monkeypatch: pytest.Monkey
         status, body = await _call("PUT", "/api/channel-configs/channel-telegram", {"manager_id": manager})
         assert status == 400
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_delete_removes_an_added_bot_and_its_secret(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -358,7 +358,7 @@ def test_delete_removes_an_added_bot_and_its_secret(monkeypatch: pytest.MonkeyPa
         assert (await _call("DELETE", "/api/channel-configs/channel-telegram-2"))[0] == 404
         assert (await _call("DELETE", f"/api/managers/{manager}"))[0] == 200
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_two_adds_of_one_token_at_once_make_one_bot(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -368,7 +368,7 @@ def test_two_adds_of_one_token_at_once_make_one_bot(monkeypatch: pytest.MonkeyPa
         assert sorted(status for status, _ in results) == [201, 409]
         assert await pool.fetchval("SELECT count(*) FROM channel_configs WHERE channel_type = 'telegram'") == 2
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_no_log_line_carries_a_token(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
@@ -387,7 +387,7 @@ def test_no_log_line_carries_a_token(monkeypatch: pytest.MonkeyPatch, caplog: py
             "bot_token": SECRET})
         await _call("DELETE", "/api/channel-configs/channel-telegram-2")
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
     formatter = log_redaction.RedactingFormatter("%(message)s")
     for record in caplog.records:
         text = formatter.format(record)

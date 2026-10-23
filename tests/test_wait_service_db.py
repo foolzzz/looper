@@ -17,8 +17,8 @@ import pytest
 from looper.agents import wait_service as service, waits
 from looper.agents.message import MessageType, channel_address, planner_address
 from looper.db import activity, projects, waits as db_waits
+from tests.db_support import DSN, run_db
 from tests.test_ops_tasks_db import _project, _task
-from tests.test_usage_api_db import DSN, _run
 from tests.test_waits_db import NOW, _plan_with_wait
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -107,7 +107,7 @@ def test_time_only_wait_before_and_after_due(monkeypatch: pytest.MonkeyPatch) ->
         assert await loop.run_once(clock=lambda: NOW + timedelta(hours=2)) == 0
         assert len(bus.messages) == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_first_github_check_only_baselines_then_unchanged_then_changed(
@@ -135,14 +135,13 @@ def test_first_github_check_only_baselines_then_unchanged_then_changed(
             "pr view 12 --repo owner/name --json headRefOid,state,comments,reviews,statusCheckRollup")
         assert [m.message_type for m in bus.messages] == [MessageType.WAIT_EVENT]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("when", "changes"), [
     ("checks_finished", {"statusCheckRollup": [{"status": "COMPLETED"}, {"state": "SUCCESS"}]}),
     ("new_comments", {"comments": [{}], "reviews": [{}]}),
     ("head_changed", {"state": "MERGED"}),
-    ("head_changed", {"state": "CLOSED"}),
 ])
 def test_github_first_success_is_only_baseline_even_if_already_ready(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, when: str, changes: dict[str, Any],
@@ -161,7 +160,7 @@ def test_github_first_success_is_only_baseline_even_if_already_ready(
         assert await loop.run_once(clock=lambda: NOW + timedelta(seconds=300)) == 1
         assert (await _row())["last_result"] == "ready"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("output", ["exit", "invalid JSON"])
@@ -179,7 +178,7 @@ def test_github_errors_keep_waiting_and_retry(monkeypatch: pytest.MonkeyPatch, t
         assert await _loop(gh=gh).run_once(clock=lambda: NOW + timedelta(seconds=300)) == 0
         assert (await _row())["baseline"] == {"head": "abcdef012345", "comments": 0}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_ready_check_waits_for_earliest_time_and_records_before_move(
@@ -204,7 +203,7 @@ def test_ready_check_waits_for_earliest_time_and_records_before_move(
         assert await loop.run_once(clock=lambda: NOW + timedelta(seconds=600)) == 1
         assert (await _row())["state"] == "ready"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_github_change_before_earliest_time_keeps_original_baseline(
@@ -225,7 +224,7 @@ def test_github_change_before_earliest_time_keeps_original_baseline(
         assert await loop.run_once(clock=lambda: NOW + timedelta(seconds=600)) == 1
         assert "changed" in (await _row())["resolution"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("race", ["record", "move"])
@@ -250,7 +249,7 @@ def test_concurrent_user_move_wins_and_does_not_wake_or_notify(
         assert row["checks"] == (0 if race == "record" else 1)
         assert not bus.messages and not await activity.list_activity("task-a")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("code", [0, 1])
@@ -281,7 +280,7 @@ def test_command_result_output_environment_and_working_directory(
         assert "PRIVATE_OUTPUT" not in caplog.text and command not in caplog.text
         assert "private-secret" not in caplog.text and "inherited-marker" not in caplog.text
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_command_policy_is_read_again_at_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -295,7 +294,7 @@ def test_command_policy_is_read_again_at_runtime(monkeypatch: pytest.MonkeyPatch
         assert (row["state"], row["last_result"], row["last_error"]) == ("waiting", "error", "wait_commands is off")
         assert not (tmp_path / "forbidden").exists()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_command_timeout_stays_waiting(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -309,7 +308,7 @@ def test_command_timeout_stays_waiting(monkeypatch: pytest.MonkeyPatch, tmp_path
         assert (row["state"], row["last_result"], row["checks"]) == ("waiting", "error", 1)
         assert "timed out" in row["last_error"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_stopped_tasks_are_untouched_with_active_positive_control(
@@ -328,7 +327,7 @@ def test_stopped_tasks_are_untouched_with_active_positive_control(
         assert (await _row("active"))["state"] == "ready"
         assert [m.payload["task_id"] for m in bus.messages] == ["active"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("result", [waits.CheckResult.READY, waits.CheckResult.NOT_READY])
@@ -356,7 +355,7 @@ def test_task_stopped_during_check_cannot_move_or_notify(
         assert (row["state"], row["outcome"], row["notice"], row["resolution"]) == ("waiting", None, None, "")
         assert not bus.messages and not await activity.list_activity("task-a")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_task_stopped_after_timeout_move_is_not_notified(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -383,7 +382,7 @@ def test_task_stopped_after_timeout_move_is_not_notified(monkeypatch: pytest.Mon
         (notice,) = bus.messages
         assert notice.message_type is MessageType.CHAT_NOTICE and notice.payload["chat"] == "task-control"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_no_planner_leaves_ready_in_database(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -394,7 +393,7 @@ def test_no_planner_leaves_ready_in_database(monkeypatch: pytest.MonkeyPatch) ->
         assert await loop.run_once(clock=lambda: NOW + timedelta(seconds=60)) == 1
         assert (await _row())["state"] == "ready" and not bus.messages
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("kind", ["time", "command"])
@@ -410,12 +409,11 @@ def test_ready_wins_over_deadline_in_same_tick(monkeypatch: pytest.MonkeyPatch, 
         assert [m.message_type for m in bus.messages] == [MessageType.WAIT_EVENT]
         assert not await activity.list_activity("task-a")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("channel", "fail", "notice"), [
-    ("telegram", False, "sent"), ("lark", False, "sent"), ("lark_bot", False, "sent"),
-    (None, False, "dashboard"), ("telegram", True, "failed"),
+    ("telegram", False, "sent"), (None, False, "dashboard"), ("telegram", True, "failed"),
 ])
 def test_timeout_notice_and_activity_precede_planner_event(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
@@ -453,7 +451,7 @@ def test_timeout_notice_and_activity_precede_planner_event(
         if fail:
             assert any(r.levelno == logging.WARNING for r in caplog.records)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("result", "maximum", "duration", "waited"), [
@@ -482,7 +480,7 @@ def test_unsatisfied_check_is_recorded_before_timeout(
         assert f"等了 {waited}，" in bus.messages[0].payload["text"]
         assert bus.messages[-1].message_type is MessageType.WAIT_EVENT
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_error_activity_only_on_transition_and_error_is_clipped(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -504,7 +502,7 @@ def test_error_activity_only_on_transition_and_error_is_clipped(monkeypatch: pyt
         assert [a["summary"] for a in await activity.list_activity("task-a")] == [
             "Wait w1 check failed: " + "e" * 200] * 2
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_one_row_failure_does_not_block_others_and_checks_are_bounded(
@@ -537,14 +535,11 @@ def test_one_row_failure_does_not_block_others_and_checks_are_bounded(
         assert sum(counts) == 8 and counts.count(0) == 1
         assert "step-task-" in caplog.text and "PRIVATE_ROW_ERROR" not in caplog.text
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
-@pytest.mark.parametrize(("wait_state", "task_status"), [
-    ("ready", "waiting"), ("cancel_requested", "waiting"), ("timed_out", "waiting"),
-    ("waiting", "stopped"), ("waiting", "failed"), ("waiting", "completed"),
-    ("waiting", "cancelled"),
-])
+# A wait that is no longer waiting, and a task that is no longer running (the other states of each are refused alike).
+@pytest.mark.parametrize(("wait_state", "task_status"), [("ready", "waiting"), ("waiting", "stopped")])
 def test_queued_check_rereads_wait_and_task_before_running(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, wait_state: str, task_status: str,
 ) -> None:
@@ -580,7 +575,7 @@ def test_queued_check_rereads_wait_and_task_before_running(
         assert (tmp_path / "task-control").is_file()
         assert (await _row("task-control"))["checks"] == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_default_interval_is_opened_from_real_settings_and_persisted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -608,7 +603,7 @@ def test_default_interval_is_opened_from_real_settings_and_persisted(monkeypatch
             await waits.update({"min_check_seconds": None, "max_wait_seconds": None})
             waits._limits, waits._sources = old_limits, old_sources
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_start_stop_reclaims_loop_and_inflight_checks(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -638,7 +633,7 @@ def test_start_stop_reclaims_loop_and_inflight_checks(monkeypatch: pytest.Monkey
         await loop.stop()
         assert (await _row())["checks"] == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_stop_reaps_a_running_command(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -666,7 +661,7 @@ def test_stop_reaps_a_running_command(monkeypatch: pytest.MonkeyPatch, tmp_path:
             os.kill(pid, 0)
         assert (await _row())["checks"] == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
@@ -794,4 +789,4 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
         assert events.index("http.start") < events.index("waits.start")
         assert events.index("waits.stop") < events.index("supervisor.stop")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

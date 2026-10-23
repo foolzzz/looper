@@ -19,11 +19,10 @@ from looper import child_env
 from looper.agents.consult import CONSULT_CONTRACT
 from looper.agents.room import FallbackReason, RoomService
 from looper.agents.system_prompt import REVIEW_CONTRACT, WORK_CONTRACT
+from tests.db_support import DSN, run_db, until
 from tests.fake_claude import fake_claude
-from tests.test_room_db import FE, PLANNER, _Pool, _room_task
 from tests.test_room_consult import _repo
-from tests.test_usage_api_db import DSN, _run
-from tests.test_task_agents_db import _until
+from tests.test_room_db import FE, PLANNER, _Pool, _room_task
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -172,13 +171,13 @@ def test_a_consult_waits_for_recovery_then_answers_once(monkeypatch: pytest.Monk
             assert not seen.exists()
             await service.resume_all()
             assert (await _settled(pool))["state"] == "answered"
-            await _until(lambda: not service._running, "the consult's end")
+            await until(lambda: not service._running, "the consult's end")
             assert len(seen.read_text().splitlines()) == 1
             assert await pool.fetchval("SELECT count(*) FROM room_messages WHERE kind = 'answer'") == 1
         finally:
             await service.stop()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("mode", ["no_cost", "answer"])
@@ -218,7 +217,7 @@ def test_a_consult_checks_its_result_cost_when_the_recorded_cost_lookup_fails(
         finally:
             await service.stop()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_consult_with_no_full_provider_price_does_not_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -259,7 +258,7 @@ def test_a_consult_with_no_full_provider_price_does_not_run(monkeypatch: pytest.
         finally:
             await service.stop()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("mode", ["answer", "prose"])
@@ -295,7 +294,7 @@ def test_a_consult_finishes_without_messages_when_its_room_was_turned_off(
             monkeypatch.setattr(room, "_wake_planner", wakes.append)
             monkeypatch.setattr(room, "_wake_inboxes", wakes.append)
             release.set()
-            await _until(lambda: not service._running, "the consult's end")
+            await until(lambda: not service._running, "the consult's end")
             row = await pool.fetchrow("SELECT * FROM room_consults")
             assert (row["state"], row["fallback_reason"]) == ("failed", "room_off")
             assert row["detail"] == "its task's agent room was turned off" and row["finished_at"] is not None
@@ -305,7 +304,7 @@ def test_a_consult_finishes_without_messages_when_its_room_was_turned_off(
             release.set()
             await service.stop()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_question_for_a_seat_whose_run_ended_is_answered_by_a_fork_of_its_session(
@@ -348,8 +347,7 @@ def test_a_question_for_a_seat_whose_run_ended_is_answered_by_a_fork_of_its_sess
         # The consult was a run of a Worker's kind under the task's limit, and it is gone now.
         assert not room.worker_pool._active
 
-    _run(test, monkeypatch)
-
+    run_db(test, monkeypatch)
 
 
 def test_a_running_consult_is_recorded_for_the_next_start_and_a_shutdown_ends_it(
@@ -388,7 +386,7 @@ def test_a_running_consult_is_recorded_for_the_next_start_and_a_shutdown_ends_it
         consult = await pool.fetchrow("SELECT state FROM room_consults")
         assert consult["state"] == "running"  # the next start runs it again (resume_all)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 @pytest.mark.parametrize(("setup", "mode", "reason"), [
     ("no_record", "answer", "no_session"),
@@ -424,7 +422,7 @@ def test_a_question_no_consult_can_answer_goes_to_the_planner_with_why(
         assert notice["audience"] == ["fe_rd@s2"]
         assert await pool.fetchval("SELECT count(*) FROM room_messages WHERE kind = 'answer'") == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_question_the_consult_left_unanswered_goes_to_the_planner_and_the_answered_one_does_not(
@@ -454,7 +452,7 @@ def test_a_question_the_consult_left_unanswered_goes_to_the_planner_and_the_answ
         escalation = await pool.fetchrow("SELECT * FROM room_messages WHERE kind = 'escalation'")
         assert escalation["reply_to"] == second["id"] and "(unsure)" in escalation["body"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_reviewer_seat_is_consulted_only_by_the_planner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -482,7 +480,7 @@ def test_a_reviewer_seat_is_consulted_only_by_the_planner(monkeypatch: pytest.Mo
         assert (answer["sender_seat"], answer["sender_kind"], answer["audience"], answer["planner_pending"]) == (
             "reviewer@s1", "review", ["planner"], True)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_consult_whose_task_ended_while_it_waited_does_not_start(monkeypatch: pytest.MonkeyPatch,
@@ -505,7 +503,7 @@ def test_a_consult_whose_task_ended_while_it_waited_does_not_start(monkeypatch: 
         assert (consult["state"], consult["detail"]) == ("failed", "its task ended first")
         assert not seen.exists()  # nothing ran
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 async def _question(pool: Any, body: str, *, asker: str = "fe_rd@s2") -> dict[str, Any]:
@@ -535,7 +533,7 @@ def test_shutdown_does_not_start_the_seats_next_consult(monkeypatch: pytest.Monk
         service = _service(tmp_path, room, _Pool({"worker-2": "running"}))
         try:
             await room.post("task-r", FE, kind="question", body="first?", to=["backend_rd@s1"])
-            await _until(lambda: seen.exists() and len(seen.read_text().splitlines()) == 1, "the first consult")
+            await until(lambda: seen.exists() and len(seen.read_text().splitlines()) == 1, "the first consult")
             await room.post("task-r", FE, kind="question", body="second?", to=["backend_rd@s1"])
             second = await pool.fetchrow("SELECT * FROM room_consults ORDER BY id DESC LIMIT 1")
             assert second["state"] == "queued"
@@ -547,7 +545,7 @@ def test_shutdown_does_not_start_the_seats_next_consult(monkeypatch: pytest.Monk
         finally:
             await service.stop()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def _overlap_admissions(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -586,7 +584,7 @@ def test_parallel_questions_join_one_queued_consult(monkeypatch: pytest.MonkeyPa
         await service.ask("task-r", member, questions[0])
         assert await pool.fetchval("SELECT cardinality(questions) FROM room_consults") == 5
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_parallel_seats_share_the_task_consult_limit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -609,7 +607,7 @@ def test_parallel_seats_share_the_task_consult_limit(monkeypatch: pytest.MonkeyP
         assert await pool.fetchval("SELECT count(*) FROM room_consults") == 1
         assert len(held) == 1 and results.count(FallbackReason.LIMIT) == 15
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_recovery_requeues_the_running_consult_and_starts_only_the_oldest_per_seat(
@@ -629,7 +627,7 @@ def test_recovery_requeues_the_running_consult_and_starts_only_the_oldest_per_se
         assert [r["state"] for r in rows] == ["queued", "queued"]
         assert second["id"] > first["id"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_start_keeps_a_busy_seat_queued_and_fails_an_ended_task(monkeypatch: pytest.MonkeyPatch,
@@ -652,7 +650,7 @@ def test_start_keeps_a_busy_seat_queued_and_fails_an_ended_task(monkeypatch: pyt
         _, state = await db_room.start_consult(waiting["id"], consult_run="consult-wait", pool=pool)
         assert state is db_room.ConsultStart.GONE
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_finishing_a_consult_commits_answers_escalations_and_state_together(
@@ -697,7 +695,7 @@ def test_finishing_a_consult_commits_answers_escalations_and_state_together(
         assert await finish() is None
         assert await pool.fetchval("SELECT count(*) FROM room_messages WHERE kind != 'question'") == 3
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_killing_a_consult_fails_it_and_gives_its_question_to_the_planner(monkeypatch: pytest.MonkeyPatch,
@@ -715,7 +713,7 @@ def test_killing_a_consult_fails_it_and_gives_its_question_to_the_planner(monkey
             question = await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd@s1"])
             fork = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / "consult" / \
                 "11111111-1111-4111-8111-111111111111.jsonl"
-            await _until(lambda: seen.exists() and seen.read_text() and fork.exists(), "the hanging consult")
+            await until(lambda: seen.exists() and seen.read_text() and fork.exists(), "the hanging consult")
             run = await pool.fetchval("SELECT consult_run FROM room_consults")
             assert await service.worker_pool.kill(run)
             consult = await _settled(pool)
@@ -728,7 +726,7 @@ def test_killing_a_consult_fails_it_and_gives_its_question_to_the_planner(monkey
         finally:
             await service.stop()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_task_ended_while_a_consult_waits_for_capacity_is_rechecked_before_start(
@@ -764,7 +762,7 @@ def test_a_task_ended_while_a_consult_waits_for_capacity_is_rechecked_before_sta
         try:
             await holding.wait()
             await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd@s1"])
-            await _until(lambda: bool(service.worker_pool._slot_waiters), "the consult waiting for capacity")
+            await until(lambda: bool(service.worker_pool._slot_waiters), "the consult waiting for capacity")
             await pool.execute("UPDATE tasks SET status = 'completed'")
             release.set()
             await holder
@@ -776,7 +774,7 @@ def test_a_task_ended_while_a_consult_waits_for_capacity_is_rechecked_before_sta
             await holder
             await service.stop()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_session_still_being_recorded_cannot_be_consulted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -793,7 +791,7 @@ def test_a_session_still_being_recorded_cannot_be_consulted(monkeypatch: pytest.
         assert await service.ask("task-r", member, question) is FallbackReason.NO_SESSION
         assert not held and await pool.fetchval("SELECT count(*) FROM room_consults") == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_consult_does_not_resume_its_seats_newer_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -817,7 +815,7 @@ def test_a_consult_does_not_resume_its_seats_newer_run(monkeypatch: pytest.Monke
         assert "another run" in consult["detail"]
         assert not seen.exists()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_consult_stops_if_its_seat_restarts_during_the_session_copy(
@@ -870,7 +868,7 @@ def test_a_consult_stops_if_its_seat_restarts_during_the_session_copy(
         finally:
             await service.stop()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("phase", ["prompt", "command", "note", "execute"])
@@ -928,7 +926,7 @@ def test_a_failure_after_the_snapshot_cleans_the_checkout_and_session_fork(
         listed = subprocess.run(["git", "worktree", "list"], cwd=repo, capture_output=True, text=True, check=True)
         assert "consult-" not in listed.stdout
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_recovery_sweeps_leftover_checkouts_and_session_forks(monkeypatch: pytest.MonkeyPatch,
@@ -953,7 +951,7 @@ def test_recovery_sweeps_leftover_checkouts_and_session_forks(monkeypatch: pytes
         listed = subprocess.run(["git", "worktree", "list"], cwd=repo, capture_output=True, text=True, check=True)
         assert str(leftover) not in listed.stdout
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_shutdown_waits_for_a_snapshot_being_created_and_removes_its_checkout_and_fork(
@@ -992,7 +990,7 @@ def test_shutdown_waits_for_a_snapshot_being_created_and_removes_its_checkout_an
         monkeypatch.setattr(consult, "_snapshot", blocked_snapshot)
         try:
             await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd@s1"])
-            await _until(entered.is_set, "the snapshot thread")
+            await until(entered.is_set, "the snapshot thread")
             stopping = asyncio.create_task(service.stop())
             await asyncio.sleep(0)
             release.set()
@@ -1008,9 +1006,9 @@ def test_shutdown_waits_for_a_snapshot_being_created_and_removes_its_checkout_an
             release.set()
             await service.stop()
             if entered.is_set():
-                await _until(finished.is_set, "the released snapshot thread")
+                await until(finished.is_set, "the released snapshot thread")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_question_joining_a_queued_consult_as_it_ends_also_goes_to_the_planner(
@@ -1043,7 +1041,7 @@ def test_a_question_joining_a_queued_consult_as_it_ends_also_goes_to_the_planner
         assert [row["reply_to"] for row in notices] == [first["id"], second["id"]]
         assert await pool.fetchval("SELECT state FROM room_consults") == "failed"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("failure", ["timeout", "nonzero"])
@@ -1134,7 +1132,7 @@ def test_killing_a_consult_waiting_for_capacity_also_gives_its_question_to_the_p
         finally:
             await service.stop()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("mode", ["stderr", "no_result", "no_stdin", "wait_exit", "child", "fast_exit_child",
@@ -1233,7 +1231,7 @@ def test_a_consult_keeps_its_execution_bounds_and_cleans_its_children(
                 except ProcessLookupError:
                     pass
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_dsh_consult_snapshot_records_answer_and_new_run_without_changing_source(
@@ -1312,4 +1310,4 @@ def test_dsh_consult_snapshot_records_answer_and_new_run_without_changing_source
             _cleanup(None, fork)
         assert not fork.exists()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

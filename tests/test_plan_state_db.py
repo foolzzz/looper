@@ -18,7 +18,7 @@ import pytest
 
 from looper.agents.run_usage import Usage
 from looper.agents.tiers.planner import PlannerAgent, PlanStep, TaskPlan
-from tests.test_usage_api_db import DSN, _run
+from tests.db_support import DSN, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -84,7 +84,7 @@ def test_a_restarted_planner_reads_back_its_plan_and_session(tmp_path: Path, mon
             ("s1", "verified", 0), ("s2", "dispatched", 1)]
         assert not (tmp_path / ".local").exists()  # no plan file
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_resumable_tasks_and_restart_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -147,7 +147,7 @@ def test_resumable_tasks_and_restart_cleanup(monkeypatch: pytest.MonkeyPatch) ->
             assert await plans.load(task_id, pool=pool) is None
             assert await agent_sessions.get_session(f"planner-{task_id}", pool=pool) is None
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- The one-time import of the state files ---
@@ -230,7 +230,7 @@ def test_the_state_files_are_imported_once(tmp_path: Path, monkeypatch: pytest.M
         assert (await plans.load("task-new", pool=pool))["plan"]["status"] == "executing"  # type: ignore[index]
         assert len(list(planner_dir.glob("*/*.json"))) == 3
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_manager_session_dropped_with_new_stays_clean_after_a_restart(
@@ -261,4 +261,4 @@ def test_a_manager_session_dropped_with_new_stays_clean_after_a_restart(
                                                       "group": False, "previous_session_id": "sess-old",
                                                       "selected_profile_id": None}  # /new clears the choice
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

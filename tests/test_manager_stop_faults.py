@@ -23,9 +23,10 @@ from looper.agents.runtimes import cancel as cancel_module
 from looper.agents.tiers import manager as manager_module
 from looper.agents.tiers.manager import PREPARATION_STEPS, ManagerAgent, StopResult
 from looper.agents.tiers.turn_token import TurnPhase
+from tests.db_support import until
 from tests.stop_faults import hold_at
 from tests.stop_matrix_support import _alive
-from tests.test_manager_new_session import _until, _web
+from tests.test_manager_new_session import _web
 from tests.test_manager_stop import _manager, _replies, _Session, _stop_on  # noqa: F401
 
 
@@ -167,7 +168,7 @@ sys.stdin.read()
         try:
             await asyncio.wait_for(persisting.wait(), 8)
             await asyncio.wait_for(returned.wait(), 8)  # the real runtime dropped its cancellation callback
-            await _until(lambda: (tmp_path / "child.pid").exists(), timeout=2)
+            await until(lambda: (tmp_path / "child.pid").exists(), timeout=2)
             child = int((tmp_path / "child.pid").read_text())
             assert _alive(child)
             assert session.started

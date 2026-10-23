@@ -19,10 +19,10 @@ from looper import child_env
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
 from looper.agents.ops import ErrorCode, OpError
 from looper.agents.room import MemberKind, RoomService, Seat
+from tests.db_support import DSN, run_db, until
 from tests.fake_claude import fake_claude
 from tests.test_ops_tasks_db import _project, _task
-from tests.test_task_agents_db import _until
-from tests.test_usage_api_db import DSN, _run, _Writer
+from tests.test_usage_api_db import _Writer
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -100,7 +100,7 @@ def test_an_interface_post_reaches_everyone_and_reminds_the_online_seats(monkeyp
             ("backend_rd@s1", "worker-1", True, False)
         assert json.loads(row["refs"]) == [{"file": "api.md"}, {"commit": "abc1234", "resolved": None}]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_worker_cannot_message_a_reviewer_but_may_answer_its_question(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,7 +121,7 @@ def test_a_worker_cannot_message_a_reviewer_but_may_answer_its_question(monkeypa
         assert await _refused(room.post("task-r", REVIEWER, kind="interface", body="x",
                                         to=["planner"])) is ErrorCode.FORBIDDEN
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_question_for_a_seat_no_run_is_in_goes_to_the_planner_and_the_asker_is_told(
@@ -139,7 +139,7 @@ def test_a_question_for_a_seat_no_run_is_in_goes_to_the_planner_and_the_asker_is
         assert (escalation["reason"], escalation["audience"], escalation["planner_pending"],
                 escalation["reply_to"]) == ("consult_fallback", ["planner"], True, posted["id"])
         assert notice["audience"] == ["fe_rd@s2"]
-        await _until(lambda: bus.sent, "the Planner's wake")
+        await until(lambda: bus.sent, "the Planner's wake")
         assert bus.sent[0].message_type is MessageType.ROOM_MESSAGE and bus.sent[0].target == planner_address("task-r")
         # A message to the Planner wakes it too; one to a seat online does not.
         await room.post("task-r", FE, kind="question", body="ok to use JSON?", to=["planner"])
@@ -147,7 +147,7 @@ def test_a_question_for_a_seat_no_run_is_in_goes_to_the_planner_and_the_asker_is
         await room.post("task-r", FE, kind="question", body="names?", to=["backend_rd@s1"])
         assert (await pool.fetchval("SELECT count(*) FROM room_messages WHERE planner_pending")) == 2
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_names_are_checked_against_the_room(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -163,7 +163,7 @@ def test_names_are_checked_against_the_room(monkeypatch: pytest.MonkeyPatch) -> 
                                         commits=["not-a-commit"])) is ErrorCode.INVALID
         await room.post("task-r", BACKEND, kind="info", body="x", to=["fe_rd"])  # a role
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- Limits and escalations ---
@@ -190,7 +190,7 @@ def test_the_projects_limits_hold(monkeypatch: pytest.MonkeyPatch) -> None:
                                             to=["planner"])) is ErrorCode.RATE_LIMITED
         assert await pool.fetchval("SELECT count(*) FROM room_messages WHERE reason = 'room_full'") == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_two_seats_trading_too_long_and_an_interface_changed_after_use_go_to_the_planner(
@@ -211,7 +211,7 @@ def test_two_seats_trading_too_long_and_an_interface_changed_after_use_go_to_the
         changed = await pool.fetchrow("SELECT * FROM room_messages WHERE reason = 'interface_changed'")
         assert changed is not None and "fe_rd@s2" in changed["body"] and changed["planner_pending"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- Reading ---
@@ -236,7 +236,7 @@ def test_the_inbox_reads_in_order_flags_what_is_for_the_seat_and_peek_marks_noth
         first_turn = await room.first_turn("task-r", BACKEND)
         assert "you are backend_rd@s1" in first_turn and "Online now: fe_rd@s2." in first_turn
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_an_inbox_wait_ends_when_a_message_for_the_seat_comes_and_otherwise_at_its_bound(
@@ -265,7 +265,7 @@ def test_an_inbox_wait_ends_when_a_message_for_the_seat_comes_and_otherwise_at_i
         await room.post("task-r", BACKEND, kind="interface", body="qty is an int", to=["all"])
         assert [m["body"] for m in (await asyncio.wait_for(waiting, 5))["messages"]] == ["qty is an int"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_history_follows_a_thread_and_finds_unanswered_questions(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -285,7 +285,7 @@ def test_the_history_follows_a_thread_and_finds_unanswered_questions(monkeypatch
         assert [m["body"] for m in mine["messages"]] == ["qty"]  # the aside to the Planner is not fe_rd's to see
         assert len((await room.read("task-r", PLANNER, sender="backend_rd@s1"))["messages"]) == 2
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- Watches ---
@@ -311,7 +311,7 @@ def test_watches_fire_on_a_kind_and_on_presence_once(monkeypatch: pytest.MonkeyP
         assert await pool.fetchval("SELECT count(*) FROM room_watches WHERE ended_at IS NULL") == 0
         assert workers.reminded  # the notices remind it
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- Off, ended, restarted ---
@@ -332,7 +332,7 @@ def test_a_room_turned_off_or_a_task_ended_takes_no_messages(monkeypatch: pytest
         assert await _refused(room.post("task-r", BACKEND, kind="info", body="y", to=["all"])) is ErrorCode.FORBIDDEN
         assert len((await room.read("task-r", FE))["messages"]) == 1  # its history still reads
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_planning_a_task_anew_deletes_its_room_and_going_on_keeps_it(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -349,7 +349,7 @@ def test_planning_a_task_anew_deletes_its_room_and_going_on_keeps_it(monkeypatch
         assert await pool.fetchval("SELECT count(*) FROM room_messages") == 0
         assert await pool.fetchval("SELECT count(*) FROM room_reads") == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- The Planner ---
@@ -385,7 +385,7 @@ def test_the_planners_reply_answers_those_who_asked_it(monkeypatch: pytest.Monke
         assert view["by_step"]["s1"]["unanswered"] == view["by_step"]["s2"]["unanswered"] == 0
         assert await room.planner_reply("task-r", "", pending) is None
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_planners_room_tools_come_with_its_projects_room(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -410,7 +410,7 @@ def test_the_planners_room_tools_come_with_its_projects_room(monkeypatch: pytest
         assert "looper_room_post" not in {tool["name"] for tool in await ops.listing(header)}
         assert (await ops.call(header, "looper_room_read", {}))["error"]["code"] == "forbidden"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- A run's token ---
@@ -451,7 +451,7 @@ def test_a_runs_token_is_its_seat_and_stops_working_when_the_run_ends(
         assert not Path(library.mcp_config).exists()
         assert (await ops.call(f"Bearer {work}", "looper_room_read", {}))["error"]["code"] == "forbidden"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_task_page_reads_the_room(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -490,7 +490,7 @@ def test_the_task_page_reads_the_room(monkeypatch: pytest.MonkeyPatch) -> None:
         status, view = await get("/api/tasks/task-r/room", {})
         assert view["by_step"]["s1"] == {"sent": 2, "received": 1, "unanswered": 1}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- A Worker's run in a room ---
@@ -549,13 +549,13 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
                                        "harness": None, "profile_id": None},
                          "context": {"work_dir": str(tmp_path / "work")}}))
             try:
-                await _until(lambda: (workers._reminders.get("worker-2") or SimpleState()).tools_running > 0,
+                await until(lambda: (workers._reminders.get("worker-2") or SimpleState()).tools_running > 0,
                              "the run's tool call")
             except AssertionError:
                 rows = await pool.fetch("SELECT kind, summary FROM activity WHERE task_id = 'task-r' ORDER BY seq")
                 raise AssertionError([dict(r) for r in rows] + [r.payload for r in results]) from None
             await room.post("task-r", BACKEND, kind="question", body="which list view?", to=["fe_rd"])
-            await _until(lambda: results, "the run's result", seconds=30)
+            await until(lambda: results, "the run's result", timeout=30)
         finally:
             await workers.stop()
             await bus.shutdown()
@@ -570,7 +570,7 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
         cost = await pool.fetchval("SELECT cost_usd FROM llm_records WHERE agent_id = 'worker-2'")
         assert cost == pytest.approx(0.5)  # the last result's, the session's totals
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 class SimpleState:
@@ -610,7 +610,7 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
                 source=planner_address("task-r"), target=worker_address("worker-2"), message_type=MessageType.WORK_ITEM,
                 payload={"task_id": "step-s2", "parent_task_id": "task-r", "step_key": "s2", "instruction": "do it",
                          "context": {"work_dir": str(tmp_path / "work")}}))
-            await _until(lambda: results, "the run's result", seconds=30)
+            await until(lambda: results, "the run's result", timeout=30)
         finally:
             await workers.stop()
             await bus.shutdown()
@@ -618,7 +618,7 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
         assert "--mcp-config" not in record["argv"]
         assert "task room" not in record["prompt"] and "room" not in record["first_turn"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("explicit_transaction", [False, True])
@@ -653,7 +653,7 @@ def test_message_ids_follow_task_commit_order(monkeypatch: pytest.MonkeyPatch, e
             assert [r["id"] for r in rows] == [first["id"], second["id"]]
             assert [r["id"] for r in await db_room.messages("task-r", after=first["id"], pool=pool)] == [second["id"]]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("setting", "cap", "posts"), [
@@ -684,7 +684,7 @@ def test_parallel_posts_respect_limits(monkeypatch: pytest.MonkeyPatch, setting:
         if setting == "room_messages_per_task":
             assert await pool.fetchval("SELECT count(*) FROM room_messages WHERE reason = 'room_full'") == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_parallel_watches_respect_run_cap(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -708,7 +708,7 @@ def test_parallel_watches_respect_run_cap(monkeypatch: pytest.MonkeyPatch) -> No
         assert all(isinstance(r, dict) or isinstance(r, OpError) and r.code is ErrorCode.RATE_LIMITED for r in results)
         assert len(await original("task-r", run=FE.run)) == WATCHES_PER_RUN
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_post_budget_includes_references(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -720,4 +720,4 @@ def test_post_budget_includes_references(monkeypatch: pytest.MonkeyPatch) -> Non
                                         files=["f" * 10], to=[FE.key])) is ErrorCode.INVALID
         assert await pool.fetchval("SELECT count(*) FROM room_messages") == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

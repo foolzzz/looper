@@ -10,187 +10,42 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import tempfile
 import urllib.parse
-import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+from tests.db_support import DSN
+from tests.schedule_support import NOON, UTC, ScheduleEnv, run_scheduled
+
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-
-UTC = timezone.utc
-# Noon in Los Angeles, where the scheduler's day (``_run``, ``_setup``) starts at midnight: far from a day's end.
-NOON = datetime(2030, 1, 15, 20, 0, tzinfo=UTC)
-
-
-class _Bus:
-    def __init__(self) -> None:
-        self.sent: list[Any] = []
-
-    async def publish(self, envelope: Any) -> None:
-        self.sent.append(envelope)
-
-    def of(self, kind: str) -> list[str]:
-        return [e.payload["task_id"] for e in self.sent if e.message_type.value == kind]
-
-
-class _Clock:
-    def __init__(self) -> None:
-        self.now = datetime.now(UTC)
-
-    def __call__(self) -> datetime:
-        return self.now
-
-
-class _Writer:
-    def __init__(self) -> None:
-        self.data = b""
-
-    def write(self, data: bytes) -> None:
-        self.data += data
-
-    async def drain(self) -> None:
-        pass
-
-
-class _Env(SimpleNamespace):
-    pool: Any
-    bus: _Bus
-    clock: _Clock
-    scheduler: Any
-    project_id: str
-    work_dir: str
-
-    async def call(self, method: str, path: str, body: Any = None, query: dict[str, str] | None = None,
-                   ) -> tuple[int, Any]:
-        from looper.agents.http_server import AgentHTTPServer
-        from looper.agents.tiers.task import TaskRouter
-
-        server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
-                                 task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())),
-                                 scheduler=self.scheduler)
-        writer = _Writer()
-        raw = b"" if body is None else json.dumps(body).encode()
-        await server._route_api(method, path, query or {}, raw, writer)
-        head, _, payload = writer.data.partition(b"\r\n\r\n")
-        return int(head.split()[1]), json.loads(payload)
-
-    async def ok(self, method: str, path: str, body: Any = None) -> Any:
-        status, payload = await self.call(method, path, body)
-        assert status in (200, 201), (status, payload)
-        return payload
-
-    async def schedule(self, **fields: Any) -> dict[str, Any]:
-        body = {"name": f"s-{uuid.uuid4().hex[:6]}", "cron": "*/5 * * * *", "timezone": "America/Los_Angeles",
-                "requirement": "Look at the new alerts.", **fields}
-        return (await self.ok("POST", f"/api/projects/{self.project_id}/schedules", body))["schedule"]
-
-    async def enabled(self, **fields: Any) -> dict[str, Any]:
-        schedule = await self.schedule(**fields)
-        return (await self.ok("PUT", f"/api/schedules/{schedule['schedule_id']}", {"enabled": True}))["schedule"]
-
-    async def due(self, schedule_id: str, *, fires_ago: int = 0, step: timedelta = timedelta(minutes=5)) -> None:
-        """Make the schedule's next fire ``fires_ago`` fire times in the past, and the clock 10 s after the latest."""
-        latest = (self.clock.now + step).replace(second=0, microsecond=0)
-        latest -= timedelta(minutes=latest.minute % 5)
-        await self.pool.execute("UPDATE schedules SET next_fire_at = $2 WHERE id = $1", schedule_id,
-                                latest - fires_ago * step)
-        self.clock.now = latest + timedelta(seconds=10)
-
-    async def runs(self, schedule_id: str) -> list[dict[str, Any]]:
-        return (await self.ok("GET", f"/api/schedules/{schedule_id}/runs"))["runs"]
-
-    async def end_task(self, task_id: str, status: str, *, summary: str = "", cost: float = 0.0) -> None:
-        await self.pool.execute(
-            "UPDATE tasks SET status = $2, result_summary = CASE WHEN $2 = 'completed' THEN $3 END, "
-            "error = CASE WHEN $2 = 'failed' THEN $3 END WHERE id = $1", task_id, status, summary)
-        if cost:
-            await self.pool.execute(
-                "INSERT INTO llm_records (agent_id, task_id, input_text, output_text, status, cost_usd) "
-                "VALUES ($1, $2, '', '', 'completed', $3)", f"planner-{task_id}", task_id, cost)
-        await self.scheduler.task_ended(task_id, status)
-
-
-def _run(test: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    import asyncpg
-
-    from looper.agents import scheduler_settings
-    from looper.agents.scheduler import Scheduler
-    from looper.db import connection, projects
-
-    async def _main() -> None:
-        schema = f"looper_test_{uuid.uuid4().hex[:12]}"
-        admin = await asyncpg.connect(DSN)
-        await admin.execute(f'CREATE SCHEMA "{schema}"')
-        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4, server_settings={"search_path": schema})
-        try:
-            await connection.ensure_schema(pool)
-            monkeypatch.setattr(connection, "_pool", pool)
-            monkeypatch.setattr(scheduler_settings, "_min_interval", scheduler_settings.DEFAULT_MIN_INTERVAL_SECONDS)
-            project = await projects.create_project(name="alerts", work_dir=str(tmp_path), pool=pool)
-            bus, clock = _Bus(), _Clock()
-            env = _Env(pool=pool, bus=bus, clock=clock,
-                       scheduler=Scheduler(bus=bus, clock=clock, day_zone="America/Los_Angeles"),
-                       project_id=project["id"], work_dir=str(tmp_path))
-            await test(env)
-        finally:
-            await pool.close()
-            await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
-            await admin.close()
-
-    asyncio.run(_main())
 
 
 # --- The API ---
 
 
-@pytest.mark.parametrize(("body", "error"), [
-    ({"name": ""}, "a schedule name is required"),
-    ({"name": "x" * 81}, "at most 80 characters"),
-    ({"cron": "*/3 * * * *"}, "fires 3 minutes apart"),
-    ({"cron": "0 9 * *"}, "5 fields"),
-    ({"cron": "0 0 30 2 *"}, "never fires"),
-    ({"timezone": "Mars/Base"}, "unknown time zone"),
-    ({"requirement": "   "}, "requirement is required"),
-    ({"requirement": "x" * 27_001}, "at most 27000 characters"),
-    ({"overlap": "both"}, "overlap must be one of skip, queue, parallel"),
-    ({"catch_up": "all"}, "catch_up must be one of once, skip"),
-    ({"run_timeout_seconds": 0}, "run_timeout_seconds must be"),
-    ({"run_timeout_seconds": 1.5}, "run_timeout_seconds must be"),
-    ({"run_budget_usd": -1}, "run_budget_usd must be"),
-    ({"work_dir": "relative/dir"}, "absolute path"),
-    ({"profile_overrides": {"manager": "agent-claude-code-opus"}}, "not 'manager'"),
-    ({"profile_overrides": {"planner": "agent-nope"}}, "planner:"),
-    ({"task_limits": {"planner": 2}}, "task_limits: one Planner runs a task"),
-    ({"task_limits": {"manager": 2}}, "task_limits: unknown role 'manager'"),
-    ({"task_limits": {"worker": 0}}, "task_limits.worker: max_concurrency must be a whole number from 1 to 64"),
-    ({"task_limits": {"reviewer": 65}}, "task_limits.reviewer:"),
-    ({"task_limits": [8]}, "task_limits must be an object"),
-    ({"enabled": True}, "created disabled"),
-    ({"gate": "true"}, "unknown field 'gate'"),
-])
-def test_a_bad_schedule_is_refused_with_the_reason(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-                                                   body: dict[str, Any], error: str) -> None:
-    async def test(env: _Env) -> None:
-        full = {"name": "triage", "cron": "*/5 * * * *", "requirement": "Look at the alerts.", **body}
-        status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", full)
-        assert status == 400, payload
-        assert error in payload["error"]
-        assert await env.pool.fetchval("SELECT count(*) FROM schedules") == 0
+def test_a_refused_schedule_writes_nothing_and_a_profile_the_registry_lacks_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    # The checks of each field are in test_schedule_validation; a profile is checked against the registry.
+    async def test(env: ScheduleEnv) -> None:
+        for body, error in [({"cron": "*/3 * * * *"}, "fires 3 minutes apart"),
+                            ({"profile_overrides": {"planner": "agent-nope"}}, "planner:")]:
+            full = {"name": "triage", "cron": "*/5 * * * *", "requirement": "Look at the alerts.", **body}
+            status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", full)
+            assert status == 400, payload
+            assert error in payload["error"]
+            assert await env.pool.fetchval("SELECT count(*) FROM schedules") == 0
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_new_schedule_is_disabled_named_once_per_project_and_previewed(monkeypatch: pytest.MonkeyPatch,
                                                                        tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         schedule = await env.schedule(name="Triage", cron="0  9 * * 1-5", profile_overrides={
             "planner": "agent-claude-code-opus", "worker": "claude-code/opus"})  # by id or by name
         assert (schedule["enabled"], schedule["next_fire_at"], schedule["last_run"]) == (False, None, None)
@@ -221,12 +76,12 @@ def test_a_new_schedule_is_disabled_named_once_per_project_and_previewed(monkeyp
         status, payload = await env.call("PUT", f"/api/schedules/{schedule['schedule_id']}", {"enabled": "yes"})
         assert status == 400 and "true or false" in payload["error"]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_enabling_sets_the_next_fire_from_now_and_never_back_fills(monkeypatch: pytest.MonkeyPatch,
                                                                    tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         schedule = await env.enabled()
         sid = schedule["schedule_id"]
         first = datetime.fromisoformat(schedule["next_fire_at"])
@@ -245,14 +100,14 @@ def test_enabling_sets_the_next_fire_from_now_and_never_back_fills(monkeypatch: 
         hourly = (await env.ok("PUT", f"/api/schedules/{sid}", {"cron": "0 * * * *"}))["schedule"]
         assert datetime.fromisoformat(hourly["next_fire_at"]).minute == 0
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_every_projects_schedules_are_listed_together_the_disabled_ones_too(monkeypatch: pytest.MonkeyPatch,
                                                                            tmp_path: Path) -> None:
     from looper.db import projects
 
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         assert await env.ok("GET", "/api/schedules") == {"schedules": []}
         billing = await projects.create_project(name="Billing", work_dir=env.work_dir, pool=env.pool)
         await env.ok("POST", f"/api/projects/{billing['id']}/schedules", {
@@ -275,12 +130,12 @@ def test_every_projects_schedules_are_listed_together_the_disabled_ones_too(monk
         assert (await env.ok("GET", f"/api/projects/{env.project_id}/schedules"))["schedules"] == listed[:2]
         assert (await env.ok("GET", f"/api/schedules/{hourly['schedule_id']}"))["schedule"] == listed[0]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_schedules_runs_page_by_cursor_and_can_leave_out_the_routine_skips(monkeypatch: pytest.MonkeyPatch,
                                                                            tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         sid = (await env.enabled())["schedule_id"]
         run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]  # the oldest, with its task
         await env.pool.execute("UPDATE tasks SET title = 'Look at the new alerts' WHERE id = $1", run["task_id"])
@@ -325,11 +180,11 @@ def test_a_schedules_runs_page_by_cursor_and_can_leave_out_the_routine_skips(mon
                                          query={"before": "srun-test0001"})
         assert status == 400 and "before must be a run of schedule" in payload["error"]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_schedule_with_a_gate_may_fire_every_minute(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         base = {"name": "every minute", "cron": "* * * * *", "timezone": "UTC", "requirement": "Look."}
         status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", base)
         assert status == 400
@@ -354,7 +209,7 @@ def test_a_schedule_with_a_gate_may_fire_every_minute(monkeypatch: pytest.Monkey
         limits = (await env.ok("GET", f"/api/projects/{env.project_id}/schedules"))["limits"]
         assert (limits["min_interval_seconds"], limits["min_interval_gated_seconds"]) == (300, 60)
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 # --- Firing ---
@@ -363,7 +218,7 @@ def test_a_schedule_with_a_gate_may_fire_every_minute(monkeypatch: pytest.Monkey
 def test_a_schedules_task_limits_are_replaced_whole_and_given_to_each_task_it_fires(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         schedule = await env.schedule(task_limits={"worker": 8, "reviewer": 3})
         sid = schedule["schedule_id"]
         assert schedule["task_limits"] == {"worker": 8, "reviewer": 3}
@@ -388,14 +243,14 @@ def test_a_schedules_task_limits_are_replaced_whole_and_given_to_each_task_it_fi
         assert status == 200 and task["agents"]["roles"]["worker"]["concurrency"] == {
             "value": 8, "source": "task", "task": 8, "default": {"value": 16, "source": "builtin"}}
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_due_schedule_fires_a_started_task_with_its_settings_and_run_context(monkeypatch: pytest.MonkeyPatch,
                                                                                tmp_path: Path) -> None:
     from looper.db import projects as db_projects
 
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         schedule = await env.enabled(name="Alert triage", run_budget_usd=0.25,
                                      profile_overrides={"worker": "agent-claude-code-opus"})
         sid = schedule["schedule_id"]
@@ -432,12 +287,12 @@ def test_a_due_schedule_fires_a_started_task_with_its_settings_and_run_context(m
         await env.scheduler.tick()
         assert len(await env.runs(sid)) == 1
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_schedules_planner_profile_reaches_its_tasks_and_no_other_change_touches_it(
         monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         cheap = await env.enabled(name="Cheap planner", profile_overrides={"planner": "agent-claude-code-opus"})
         plain = await env.enabled(name="Project planner")
         assert plain["profile_overrides"] == {}
@@ -456,14 +311,14 @@ def test_a_schedules_planner_profile_reaches_its_tasks_and_no_other_change_touch
         assert [(r["role"], r["profile_id"]) for r in planners["Cheap planner"]] == [("planner", "agent-claude-code-opus")]
         assert planners["Project planner"] == []  # no row: the project's layers decide
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_two_schedulers_ticking_together_fire_each_firing_once(monkeypatch: pytest.MonkeyPatch,
                                                               tmp_path: Path) -> None:
     from looper.agents.scheduler import Scheduler
 
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         schedules = [(await env.enabled())["schedule_id"] for _ in range(3)]
         other = Scheduler(bus=env.bus, clock=env.clock)
         for round_ in range(1, 6):
@@ -478,14 +333,14 @@ def test_two_schedulers_ticking_together_fire_each_firing_once(monkeypatch: pyte
         # Each schedule's first run created a task; the later ones found it still in progress.
         assert len(env.bus.of("task_start")) == 3
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_message_being_recorded_about_a_schedule_does_not_hold_up_its_firing(monkeypatch: pytest.MonkeyPatch,
                                                                               tmp_path: Path) -> None:
     from looper.db import schedules as db_schedules
 
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         sid = (await env.enabled())["schedule_id"]
         await env.due(sid)
         # The Notifier records a message about an earlier run while the pass looks for due schedules: until it
@@ -497,11 +352,11 @@ def test_a_message_being_recorded_about_a_schedule_does_not_hold_up_its_firing(m
             await env.scheduler.tick()
         assert [run["status"] for run in await env.runs(sid)] == ["running"]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_schedule_that_cannot_fire_holds_up_no_other(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         broken, working = (await env.enabled())["schedule_id"], (await env.enabled())["schedule_id"]
         await env.due(broken)
         await env.pool.execute("UPDATE schedules SET next_fire_at = (SELECT next_fire_at FROM schedules "
@@ -534,13 +389,13 @@ def test_a_schedule_that_cannot_fire_holds_up_no_other(monkeypatch: pytest.Monke
         with pytest.raises(Unreachable):
             await asyncio.wait_for(env.scheduler.tick(), timeout=5)
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 @pytest.mark.parametrize("overlap", ["skip", "queue"])
 def test_a_firing_while_the_previous_task_runs_is_skipped_or_queued_once(monkeypatch: pytest.MonkeyPatch,
                                                                          tmp_path: Path, overlap: str) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         env.clock.now = NOON
         sid = (await env.enabled(overlap=overlap))["schedule_id"]
         await env.due(sid)
@@ -574,12 +429,12 @@ def test_a_firing_while_the_previous_task_runs_is_skipped_or_queued_once(monkeyp
         else:
             assert env.bus.of("task_start") == [first["task_id"]]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_missed_fires_run_once_as_a_catch_up_or_are_skipped(monkeypatch: pytest.MonkeyPatch,
                                                            tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         once = (await env.enabled(catch_up="once"))["schedule_id"]
         skip = (await env.enabled(catch_up="skip"))["schedule_id"]
         # The server was down for four fire times, the latest 10 s ago.
@@ -607,12 +462,12 @@ def test_missed_fires_run_once_as_a_catch_up_or_are_skipped(monkeypatch: pytest.
         assert datetime.fromisoformat(
             (await env.ok("GET", f"/api/schedules/{skip}"))["schedule"]["next_fire_at"]) > env.clock.now
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_run_now_fires_a_manual_run_and_keeps_the_next_fire(monkeypatch: pytest.MonkeyPatch,
                                                             tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         sid = (await env.enabled())["schedule_id"]
         before = await env.pool.fetchval("SELECT next_fire_at FROM schedules WHERE id = $1", sid)
         run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
@@ -630,7 +485,7 @@ def test_run_now_fires_a_manual_run_and_keeps_the_next_fire(monkeypatch: pytest.
         failed = (await env.ok("POST", f"/api/schedules/{manual['schedule_id']}/run"))["run"]
         assert failed["status"] == "failed" and "work directory is required" in failed["error"]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_running_runs_spend_excludes_the_manager_linked_to_its_task(
@@ -638,7 +493,7 @@ def test_a_running_runs_spend_excludes_the_manager_linked_to_its_task(
 ) -> None:
     from looper.db import llm_records, schedules
 
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         sid = (await env.enabled())["schedule_id"]
         run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
         task_id = run["task_id"]
@@ -652,7 +507,7 @@ def test_a_running_runs_spend_excludes_the_manager_linked_to_its_task(
         assert await schedules.spent_since_each(env.pool, [sid], since) == {sid: 0.5}
         assert (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]["spent_today_usd"] == 0.5
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 @pytest.mark.parametrize(("agent_prefix", "model"), [("worker", "haiku"), ("planner", "sonnet")])
@@ -661,7 +516,7 @@ def test_a_runs_spend_rounds_each_role_and_model_like_its_final_cost(
 ) -> None:
     from looper.db import llm_records, schedules
 
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         sid = (await env.enabled())["schedule_id"]
         run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
         task_id = run["task_id"]
@@ -681,12 +536,12 @@ def test_a_runs_spend_rounds_each_role_and_model_like_its_final_cost(
         assert running == finalized == {sid: cost}
         assert (await env.runs(sid))[0]["cost_usd"] == cost
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_task_end_writes_the_run_outcome_and_the_failure_count(monkeypatch: pytest.MonkeyPatch,
                                                                  tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         sid = (await env.enabled())["schedule_id"]
 
         async def fire_and_end(status: str, summary: str, cost: float) -> dict[str, Any]:
@@ -725,12 +580,12 @@ def test_a_task_end_writes_the_run_outcome_and_the_failure_count(monkeypatch: py
         requirement = await env.pool.fetchval("SELECT requirement FROM tasks WHERE id = $1", latest["task_id"])
         assert "最近 3 次运行" in requirement and requirement.index("2 new alerts") < requirement.index("已停止")
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_run_past_its_timeout_is_stopped_and_counts_as_a_failure(monkeypatch: pytest.MonkeyPatch,
                                                                    tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         sid = (await env.enabled(run_timeout_seconds=60))["schedule_id"]
         await env.due(sid)
         await env.scheduler.tick()
@@ -751,12 +606,12 @@ def test_a_run_past_its_timeout_is_stopped_and_counts_as_a_failure(monkeypatch: 
         await env.end_task(run["task_id"], "stopped")
         assert (await env.runs(sid))[0]["status"] == "timed_out"
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_runs_whose_task_ended_while_no_one_listened_are_settled(monkeypatch: pytest.MonkeyPatch,
                                                                  tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         sid = (await env.enabled())["schedule_id"]
         await env.due(sid)
         await env.scheduler.tick()
@@ -775,7 +630,7 @@ def test_runs_whose_task_ended_while_no_one_listened_are_settled(monkeypatch: py
         await env.scheduler.tick()
         assert env.bus.of("task_start") == [pending["task_id"]]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 # --- Guards ---
@@ -785,7 +640,7 @@ def test_a_project_with_schedules_is_not_deleted_and_a_deleted_schedule_keeps_it
         monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from looper.db import projects as db_projects
 
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         empty = await db_projects.create_project(name="empty", pool=env.pool)
         await env.pool.execute("UPDATE projects SET work_dir = $2 WHERE id = $1", empty["id"], env.work_dir)
         status, schedule = await env.call("POST", f"/api/projects/{empty['id']}/schedules", {
@@ -804,11 +659,11 @@ def test_a_project_with_schedules_is_not_deleted_and_a_deleted_schedule_keeps_it
         assert await env.pool.fetchval("SELECT count(*) FROM schedule_runs") == 0
         assert (await env.call("GET", f"/api/schedules/{sid}"))[0] == 404
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_profile_a_schedule_chose_is_not_deleted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         models = (await env.call("GET", "/api/models", query={"provider_id": "prov-claude-subscription"}))[1]["models"]
         created = await env.ok("POST", "/api/agent-profiles", {
             "name": "cheap", "runtime_id": "rt-claude-code",
@@ -822,14 +677,14 @@ def test_a_profile_a_schedule_chose_is_not_deleted(monkeypatch: pytest.MonkeyPat
         await env.ok("PUT", f"/api/schedules/{sid}", {"profile_overrides": {}})
         await env.ok("DELETE", f"/api/agent-profiles/{profile_id}")
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_an_export_carries_the_schedules_and_importing_it_here_again_leaves_them_running(
         monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from tests.test_config_transfer_db import _looper
 
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         await env.enabled(name="nightly")
         parts = urllib.parse.urlsplit(DSN)
         query = urllib.parse.urlencode([*urllib.parse.parse_qsl(parts.query),
@@ -845,4 +700,4 @@ def test_an_export_carries_the_schedules_and_importing_it_here_again_leaves_them
         # Its settings match: the import leaves it as it is, enabled.
         assert [tuple(r) for r in await env.pool.fetch("SELECT name, enabled FROM schedules")] == [("nightly", True)]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
