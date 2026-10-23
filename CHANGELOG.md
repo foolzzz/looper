@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.55] - 2026-10-23
+
+### Fixed
+
+- **loopercli and the eval and test guards.** `loopercli` hides a token (`lpc_…`) in every error it prints, not only in usage errors, and a Ctrl-C while a reply streams keeps the conversation id so the next message continues it. The prompt-regression stop dialog no longer flags a reply that offers to do the work, and its start-without-waiting check reads wrapped tool calls and anchors on the first start that succeeded. No model-visible change. ([#448](https://github.com/foolzzz/looper/pull/448))
+
 ## [2.13.54] - 2026-10-23
 
 ### Fixed
