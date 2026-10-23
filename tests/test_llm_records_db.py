@@ -7,13 +7,13 @@ schema is applied to it and the test's rows are removed afterwards.
 from __future__ import annotations
 
 import asyncio
-import os
 from decimal import Decimal
 from typing import Any
 
 import pytest
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+from tests.db_support import DSN, run_db
+
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
@@ -102,29 +102,6 @@ def test_run_is_recorded_end_to_end() -> None:
 # --- Usage, context and cost (each test in a new schema of its own, dropped afterwards) ---
 
 
-def _in_fresh_schema(test: Any) -> None:
-    """Run ``test(pool)`` against a new schema holding Looper's tables."""
-    import uuid
-
-    import asyncpg
-
-    from looper.db.connection import ensure_schema
-
-    async def _run() -> None:
-        schema = f"looper_test_{uuid.uuid4().hex[:12]}"
-        admin = await asyncpg.connect(DSN)
-        await admin.execute(f'CREATE SCHEMA "{schema}"')
-        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2, server_settings={"search_path": schema})
-        try:
-            await ensure_schema(pool)
-            await test(pool)
-        finally:
-            await pool.close()
-            await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
-            await admin.close()
-
-    asyncio.run(_run())
-
 
 async def _run_record(pool: Any, agent_id: str, *, task_id: str | None = None, cost: float | None = None,
                       status: str = "completed", session_id: str | None = None, context: int | None = None,
@@ -166,7 +143,7 @@ def test_a_runs_tokens_context_and_compactions_are_read_back() -> None:
         await llm_records.finish_record(big, status="completed", cache_read_tokens=3_000_000_000, pool=pool)
         assert (await llm_records.get_record(big, pool=pool))["cache_read_tokens"] == 3_000_000_000
 
-    _in_fresh_schema(test)
+    run_db(test, max_size=2)
 
 
 def test_a_tasks_cost_is_the_sum_of_its_planner_worker_and_reviewer_runs() -> None:
@@ -206,7 +183,7 @@ def test_a_tasks_cost_is_the_sum_of_its_planner_worker_and_reviewer_runs() -> No
             "reviewer": {"cost_usd": 0.0, "runs": 0}}, "by_model": [], "manager_by_model": []}
         assert await llm_records.task_costs([], pool=pool) == {}
 
-    _in_fresh_schema(test)
+    run_db(test, max_size=2)
 
 
 def test_a_tasks_cost_by_model_counts_its_runs_tokens_and_the_managers_turns_about_it() -> None:
@@ -272,7 +249,7 @@ def test_a_tasks_cost_by_model_counts_its_runs_tokens_and_the_managers_turns_abo
              "cost_usd": 1.0},
         ]
 
-    _in_fresh_schema(test)
+    run_db(test, max_size=2)
 
 
 def test_task_cost_dialog_seed_stays_fixed_when_the_manager_replies() -> None:
@@ -306,7 +283,7 @@ def test_task_cost_dialog_seed_stays_fixed_when_the_manager_replies() -> None:
             k: v for k, v in after.items() if k != "manager_by_model"}
         assert len(after["manager_by_model"]) == 2
 
-    _in_fresh_schema(test)
+    run_db(test, max_size=2)
 
 
 def test_a_tasks_cost_sums_money_exactly_within_one_role_and_model() -> None:
@@ -322,7 +299,7 @@ def test_a_tasks_cost_sums_money_exactly_within_one_role_and_model() -> None:
         assert sum(Decimal(str(r["cost_usd"] or 0)) for r in cost["by_model"]) == Decimal(str(cost["cost_usd"]))
         assert sum(Decimal(str(r["cost_usd"])) for r in cost["by_role"].values()) == Decimal(str(cost["cost_usd"]))
 
-    _in_fresh_schema(test)
+    run_db(test, max_size=2)
 
 
 def test_a_manager_record_can_link_to_a_task_but_keeps_an_existing_task() -> None:
@@ -342,7 +319,7 @@ def test_a_manager_record_can_link_to_a_task_but_keeps_an_existing_task() -> Non
         assert cost["manager_by_model"][0]["cost_usd"] == 0.1
         assert cost["manager_by_model"][0]["runs"] == 1
 
-    _in_fresh_schema(test)
+    run_db(test, max_size=2)
 
 
 def test_a_run_with_a_runtimes_own_login_costs_a_subscription_equivalent() -> None:
@@ -360,7 +337,7 @@ def test_a_run_with_a_runtimes_own_login_costs_a_subscription_equivalent() -> No
         # equivalents; the API key run is priced at its provider's prices.
         assert (cost["equivalent_runs"], cost["provider_price_runs"]) == (3, 1)
 
-    _in_fresh_schema(test)
+    run_db(test, max_size=2)
 
 
 def test_a_resident_agents_usage_by_session_day_and_turn() -> None:
@@ -396,4 +373,4 @@ def test_a_resident_agents_usage_by_session_day_and_turn() -> None:
         nobody = await llm_records.agent_usage("planner-none", pool=pool)
         assert nobody["total"]["runs"] == 0 and nobody["turns"] == [] and nobody["latest_context_tokens"] is None
 
-    _in_fresh_schema(test)
+    run_db(test, max_size=2)

@@ -7,14 +7,10 @@ is synthetic (``library_fixtures``).
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import os
 import tempfile
-import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -22,37 +18,9 @@ from typing import Any
 import pytest
 from library_fixtures import fake_claude_home, write
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+from tests.db_support import DSN, run_db
+
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-
-
-@asynccontextmanager
-async def _fresh_schema() -> AsyncIterator[Any]:
-    import asyncpg
-
-    schema = f"looper_test_{uuid.uuid4().hex[:12]}"
-    admin = await asyncpg.connect(DSN)
-    await admin.execute(f'CREATE SCHEMA "{schema}"')
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3, server_settings={"search_path": schema})
-    try:
-        yield pool
-    finally:
-        await pool.close()
-        await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
-        await admin.close()
-
-
-def _run(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run ``test(pool)`` on a new schema that is also the server's pool."""
-    from looper.db import connection
-
-    async def _main() -> None:
-        async with _fresh_schema() as pool:
-            await connection.ensure_schema(pool)
-            monkeypatch.setattr(connection, "_pool", pool)
-            await test(pool)
-
-    asyncio.run(_main())
 
 
 @pytest.fixture
@@ -130,7 +98,7 @@ def test_an_import_stores_the_snapshot(home: Path, monkeypatch: pytest.MonkeyPat
         status, again = await _call("GET", "/api/catalog")
         assert status == 200 and again["items"] == view["items"] and again["last_import"] == report
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_a_reimport_replaces_changed_items_keeps_their_installs_and_leaves_project_skills_alone(
@@ -177,7 +145,7 @@ def test_a_reimport_replaces_changed_items_keeps_their_installs_and_leaves_proje
         assert (own["name"], own["description"]) == ("alpha", "The project's own alpha.")
         assert own["id"] in installed and await pool.fetchval("SELECT count(*) FROM library_items") == 4
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_an_import_over_the_cap_changes_nothing(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -192,7 +160,7 @@ def test_an_import_over_the_cap_changes_nothing(home: Path, monkeypatch: pytest.
         assert status == 400 and "over the cap" in body["error"]
         assert await pool.fetch("SELECT id, sha256 FROM library_items ORDER BY id") == before
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_agents_load_the_installed_items_from_the_database(
@@ -214,4 +182,4 @@ def test_agents_load_the_installed_items_from_the_database(
         assert skills.name == SKILLS_PLUGIN and [p.name for p in (skills / "skills").iterdir()] == ["alpha"]
         assert (skills / "skills" / "alpha" / "SKILL.md").read_text().endswith("Reply ALPHA-OK.\n")
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)

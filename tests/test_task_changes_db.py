@@ -12,8 +12,8 @@ from typing import Any
 
 import pytest
 
+from tests.db_support import DSN, run_db
 from tests.test_task_capture_db import _task
-from tests.test_usage_api_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -53,7 +53,7 @@ def test_supplements_and_requirement_edits_are_pending_until_delivered(monkeypat
         assert await task_changes.edit_requirement("task-nope", "x", via="task_page", delivered=True,
                                                    pool=pool) is None
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_title_is_set_in_any_status_and_a_delivered_note_is_not_pending(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -81,7 +81,7 @@ def test_a_title_is_set_in_any_status_and_a_delivered_note_is_not_pending(monkey
         await task_changes.add_supplement("task-a", "Renamed.", via="task_page", delivered=True, pool=pool)
         assert (await task_changes.pending("task-a", pool=pool)).empty
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_user_instructions_from_before_become_delivered_supplements(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -105,7 +105,7 @@ def test_user_instructions_from_before_become_delivered_supplements(monkeypatch:
             "supplement", "old", "chat", row["created_at"])
         assert (await task_changes.pending("task-a", pool=pool)).empty
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("status", ["planning", "verifying", "stopping", "pending"])
@@ -126,4 +126,4 @@ def test_the_requirement_of_a_task_in_any_running_status_can_be_edited(monkeypat
             source=channel_address("web"), via="task_page", task_router=SimpleNamespace(has_planner=lambda _: False))
         assert edited["version"] == 2
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

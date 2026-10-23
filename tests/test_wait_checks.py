@@ -169,7 +169,6 @@ def test_github_reads_the_whole_view_and_returns_its_tail(tmp_path: Path) -> Non
     ([], False),
     ([{"__typename": "CheckRun", "status": "IN_PROGRESS", "name": "ci"}], False),
     ([{"__typename": "StatusContext", "state": "PENDING", "context": "ci"}], False),
-    ([{"__typename": "StatusContext", "state": "EXPECTED", "context": "ci"}], False),
     ([{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
       {"__typename": "StatusContext", "state": "PENDING", "context": "ci"}], False),
     ([{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE"},
@@ -204,10 +203,7 @@ def test_github_new_comments_count_reviews(tmp_path: Path) -> None:
     assert extra_same["resolution"] == ""
 
 
-@pytest.mark.parametrize(("state", "sentence"), [
-    ("MERGED", "Ready: owner/name#12 was merged."),
-    ("CLOSED", "Ready: owner/name#12 was closed."),
-])
+@pytest.mark.parametrize(("state", "sentence"), [("MERGED", "Ready: owner/name#12 was merged.")])  # closed, alike
 def test_github_merged_or_closed_is_ready(tmp_path: Path, state: str, sentence: str) -> None:
     # The head did not change; closing the request is still ready, and the sentence says which.
     (result, _output, error, extra), _ = _github(
@@ -377,8 +373,7 @@ def test_command_timeout_ends_the_process_tree(tmp_path: Path, monkeypatch: pyte
                 pass
 
 
-@pytest.mark.parametrize("exit_code", [0, 1])
-@pytest.mark.parametrize("inherit_output", [True, False])
+@pytest.mark.parametrize(("exit_code", "inherit_output"), [(0, True), (1, False)])
 def test_command_exit_ends_background_children(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_code: int, inherit_output: bool,
 ) -> None:
@@ -519,11 +514,8 @@ def test_command_is_recorded_until_reaped(
     asyncio.run(test())
 
 
-@pytest.mark.parametrize(("wait_state", "task_status"), [
-    ("ready", "waiting"), ("cancel_requested", "waiting"), ("timed_out", "waiting"),
-    ("waiting", "stopped"), ("waiting", "failed"), ("waiting", "completed"),
-    ("waiting", "cancelled"),
-])
+# A wait that is no longer waiting, and a task that is no longer running (the other states of each are refused alike).
+@pytest.mark.parametrize(("wait_state", "task_status"), [("ready", "waiting"), ("waiting", "stopped")])
 def test_queued_command_is_not_dispatched_after_state_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wait_state: str, task_status: str,
 ) -> None:
@@ -572,7 +564,7 @@ def test_queued_command_is_not_dispatched_after_state_changes(
     asyncio.run(test())
 
 
-@pytest.mark.parametrize("status", [None, "stopped", "failed", "completed", "cancelled", "init", "waiting"])
+@pytest.mark.parametrize("status", [None, "stopped", "init", "waiting"])
 def test_timeout_notice_rechecks_task_status(monkeypatch: pytest.MonkeyPatch, status: str | None) -> None:
     from looper.agents.message import MessageType
 

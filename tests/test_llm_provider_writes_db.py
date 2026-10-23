@@ -10,7 +10,7 @@ import pytest
 
 from looper.agents import profile_registry as service
 from looper.db import connection, profile_registry as db
-from tests.test_catalog_db import DSN, _fresh_schema
+from tests.db_support import DSN, run_db
 
 needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 SECRET = "sk-synthetic-provider-write-only"
@@ -18,13 +18,10 @@ URL = "https://api.example.invalid/messages"
 
 
 def _run(test, monkeypatch):
-    async def run():
-        async with _fresh_schema() as pool:
-            await connection.ensure_schema(pool)
-            monkeypatch.setattr(connection, "_pool", pool)
-            monkeypatch.setattr(service, "_login_modules", lambda: {})
-            await test(pool)
-    asyncio.run(asyncio.wait_for(run(), timeout=45))
+    async def setup(pool):
+        monkeypatch.setattr(service, "_login_modules", lambda: {})
+
+    run_db(test, monkeypatch, setup=setup, timeout=45)
 
 
 def _body(**changes):

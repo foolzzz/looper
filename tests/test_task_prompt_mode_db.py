@@ -7,8 +7,8 @@ from typing import Any
 
 import pytest
 
-from tests.test_catalog_db import DSN
-from tests.test_profile_registry_db import _call, _launch, _model_id, _ok, _run, _runtime
+from tests.db_support import DSN, run_db
+from tests.test_profile_registry_db import _call, _launch, _model_id, _ok, _runtime
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -56,7 +56,7 @@ def test_task_modes_are_read_written_reset_and_validated(monkeypatch: pytest.Mon
         await pool.execute("DELETE FROM tasks WHERE id = $1", task)
         assert await pool.fetchval("SELECT count(*) FROM task_system_prompt_modes WHERE task_id = $1", task) == 0
 
-    _run(run, monkeypatch)
+    run_db(run, monkeypatch)
 
 
 def test_task_mode_shows_the_runtime_type_so_the_ui_hides_it_off_claude_code(
@@ -73,7 +73,7 @@ def test_task_mode_shows_the_runtime_type_so_the_ui_hides_it_off_claude_code(
         roles = body["agents"]["roles"]
         assert roles["worker"]["runtime_type"] == "codex" and roles["planner"]["runtime_type"] == "claude-code"
 
-    _run(run, monkeypatch)
+    run_db(run, monkeypatch)
 
 
 @pytest.mark.parametrize("role", ["planner", "worker", "reviewer"])
@@ -92,7 +92,7 @@ def test_a_real_claude_code_launch_follows_the_task_then_the_role_then_the_built
         other = "--append-system-prompt-file" if used == "replace" else "--system-prompt-file"
         assert flag in seen["argv"] and other not in seen["argv"]
 
-    _run(run, monkeypatch)
+    run_db(run, monkeypatch)
 
 
 @pytest.mark.parametrize("falsy", [False, 0, "", [], None])
@@ -106,4 +106,4 @@ def test_a_falsy_system_prompt_modes_is_refused_not_skipped(
         assert status == 400 and "system_prompt_modes must be an object" in body["error"]
         assert await pool.fetchval("SELECT count(*) FROM task_concurrency_limits WHERE task_id = $1", task) == 0
 
-    _run(run, monkeypatch)
+    run_db(run, monkeypatch)

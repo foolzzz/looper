@@ -7,11 +7,8 @@ Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each te
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 import tempfile
-import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -20,7 +17,8 @@ import pytest
 
 from lark_cli_stand_in import OPEN_ID, OTHER
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+from tests.db_support import DSN, run_db
+
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
@@ -45,28 +43,6 @@ async def _call(method: str, path: str, body: Any = None, query: dict[str, str] 
     await server._route_api(method, path, query or {}, b"" if body is None else json.dumps(body).encode(), writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
     return int(head.split()[1]), json.loads(payload)
-
-
-def _run(test: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    import asyncpg
-
-    from looper.db import connection
-
-    async def _main() -> None:
-        schema = f"looper_test_{uuid.uuid4().hex[:12]}"
-        admin = await asyncpg.connect(DSN)
-        await admin.execute(f'CREATE SCHEMA "{schema}"')
-        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3, server_settings={"search_path": schema})
-        try:
-            await connection.ensure_schema(pool)
-            monkeypatch.setattr(connection, "_pool", pool)
-            await test(pool)
-        finally:
-            await pool.close()
-            await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
-            await admin.close()
-
-    asyncio.run(_main())
 
 
 def test_a_lark_row_from_before_loses_its_app_keys_and_old_name(monkeypatch: pytest.MonkeyPatch,
@@ -96,7 +72,7 @@ def test_a_lark_row_from_before_loses_its_app_keys_and_old_name(monkeypatch: pyt
         assert json.loads(await pool.fetchval("SELECT config FROM channel_configs WHERE channel_id = 'channel-lark'")
                           )["profile"] == "work"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_saving_binds_the_allowlist_and_the_status_names_people(monkeypatch: pytest.MonkeyPatch,
@@ -140,7 +116,7 @@ def test_saving_binds_the_allowlist_and_the_status_names_people(monkeypatch: pyt
             "config": {"profile": "bad profile", "allowed_open_ids": [OPEN_ID]}})
         assert status == 400 and "not a lark-cli profile name" in payload["error"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_only_the_newest_refused_senders_are_kept(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -152,7 +128,7 @@ def test_only_the_newest_refused_senders_are_kept(monkeypatch: pytest.MonkeyPatc
         kept = await rejected_senders("channel-lark")
         assert len(kept) == REJECTED_KEPT and kept[0]["sender_id"] == f"ou_sender{REJECTED_KEPT + 4:06d}"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_table_from_before_loses_what_refused_senders_wrote(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -169,4 +145,4 @@ def test_a_table_from_before_loses_what_refused_senders_wrote(monkeypatch: pytes
                                    "AND column_name = 'snippet'") == 0
         assert [r["sender_id"] for r in await rejected_senders("channel-lark")] == [OTHER]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

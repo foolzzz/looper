@@ -5,25 +5,21 @@ from __future__ import annotations
 import asyncio
 import json
 import stat
+from functools import partial
 from unittest.mock import AsyncMock
 
 import pytest
 
 from looper.agents import config_transfer as transfer
 from looper.agents.profile_registry import MODEL_FIELDS
-from looper.db import config_transfer as db, connection
-from tests.test_catalog_db import DSN, _fresh_schema
+from looper.db import config_transfer as db
+from tests.db_support import DSN, run_db
 
 needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 SECRET = "sk-synthetic-config-v3-test-only"
 
 
-def _run(test):
-    async def run():
-        async with _fresh_schema() as pool:
-            await connection.ensure_schema(pool)
-            await test(pool)
-    asyncio.run(asyncio.wait_for(run(), timeout=45))
+_run = partial(run_db, timeout=45)
 
 
 async def _seed(pool):

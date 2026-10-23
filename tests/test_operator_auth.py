@@ -203,6 +203,20 @@ def test_page_navigation_signs_in(tmp_path: Path, transport: str, path: str) -> 
     asyncio.run(run())
 
 
+def test_a_socket_carries_the_same_exchange(tmp_path: Path) -> None:
+    async def run() -> None:
+        async with _login_server(tmp_path, "socket") as server:
+            status, _, answer = await _send(server, "GET /api/nothing-here")
+            assert status == 401 and "error" in json.loads(answer)
+            status, _, _ = await _send(server, "GET /api/nothing-here", {"Authorization": f"Bearer {TOKEN}"})
+            assert status == 404
+            status, headers, body = await _send(server, "GET /", NAVIGATE)
+            assert status == 200 and "dashboard" in body
+            _assert_cookie(headers, server._port)
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("path", "headers"),
     [
@@ -259,9 +273,11 @@ class MemoryWriter:
         pass
 
 
-@pytest.fixture(params=["memory", "socket"])
-def transport(request: pytest.FixtureRequest) -> str:
-    return request.param
+@pytest.fixture
+def transport() -> str:
+    """How a request reaches the server. Both ways run the same ``_handle_connection``, so the tests below take it
+    from memory; ``test_a_socket_carries_the_same_exchange`` is the one on a real socket."""
+    return "memory"
 
 
 @asynccontextmanager

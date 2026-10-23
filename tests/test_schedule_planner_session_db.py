@@ -15,9 +15,10 @@ from looper.agents.run_usage import Usage
 from looper.agents.session_switch import session_lost
 from looper.agents.tiers.planner import PlannerAgent
 from looper.db import agent_sessions, connection, projects, schedules, tasks
+from tests.db_support import DSN
+from tests.schedule_support import run_scheduled
 from tests.test_planner_agent import plan, step
 from tests.test_schedule_planner_session import FRESH, SCHEDULE_RUN_REQUIREMENT_HEADING, with_run_requirement
-from tests.test_schedules_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -100,7 +101,7 @@ def test_second_and_later_runs_resume_the_stored_id_with_own_cost_baseline(
                                                 status="completed", task_id=task_id, finished_at=now)
             await schedules.update_run(env.pool, run_id, summary="previous result")
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 @pytest.mark.parametrize("overlap", ["skip", "queue"])
@@ -131,7 +132,7 @@ def test_reset_revokes_write_through_but_preserves_the_inflight_tasks_session(
         await agent._save_session(agent._plan)
         assert json.loads((await _row(env, sid))["planner_session_totals"])["cost_usd"] == 0.25
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_parallel_runs_neither_copy_nor_write_the_stored_conversation(
@@ -166,7 +167,7 @@ def test_parallel_runs_neither_copy_nor_write_the_stored_conversation(
         await _store("task-before", "must-not-write")
         assert await _row(env, sid) == before
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 @pytest.mark.parametrize("fallback", ["profile", "missing", "claim"])
@@ -221,7 +222,7 @@ def test_each_fallback_records_its_reason_and_only_unusable_sessions_are_replace
         else:
             assert "--resume" not in claude.argvs()[0]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_restarted_holder_stores_the_replacement_session_and_the_next_run_continues_it(
@@ -275,7 +276,7 @@ def test_restarted_holder_stores_the_replacement_session_and_the_next_run_contin
             "SELECT continues_schedule_session FROM tasks WHERE id = 'task-after'") is True
         assert (await _row(env, sid))["planner_session_id"] == "sess-p"
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_active_holder_is_not_stolen_and_handoff_replacement_survives_edits_and_deletion(
@@ -307,7 +308,7 @@ def test_active_holder_is_not_stolen_and_handoff_replacement_survives_edits_and_
         assert (await _row(env, sid))["planner_session_id"] == "replacement-session"
         assert (await schedules.claim_planner_session("task-replan"))["session_id"] == "replacement-session"
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_migration_is_idempotent_and_keeps_saved_sessions(
@@ -326,7 +327,7 @@ def test_migration_is_idempotent_and_keeps_saved_sessions(
         assert await _row(env, sid) == before
         assert await env.pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name = 'schedule_planner_session'") == 1
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_claimed_label_survives_reset_and_only_a_live_task_occupies_the_session(
@@ -384,7 +385,7 @@ def test_claimed_label_survives_reset_and_only_a_live_task_occupies_the_session(
         assert await tasks.delete_task("task-b")
         assert set(await tasks.live_planner_session_labels()) == set()
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_task_can_persist_its_own_planner_session_label(
@@ -400,4 +401,4 @@ def test_a_task_can_persist_its_own_planner_session_label(
             "SELECT planner_session_label FROM tasks WHERE id = 'task-a'") == "planner-task-a"
         assert (await projects.get_task_project("task-a"))["task_planner_session_label"] == "planner-task-a"
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)

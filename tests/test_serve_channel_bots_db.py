@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -11,10 +10,9 @@ from typing import Any
 import pytest
 
 from looper.agents.channels.bots import bot_key, builtin_env_token, clashes
-from tests.test_channel_configs_db import _run
+from tests.db_support import DSN, run_with_channel_configs
 from tests.test_lark_bot_settings_db import platform  # noqa: F401 (a fixture)
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 requires_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 OPEN_ID = "ou_allowed000001"
@@ -124,7 +122,7 @@ def test_added_telegram_bot_runs_beside_the_builtin_one(monkeypatch: pytest.Monk
         assert adapters[0]._manager_id == "manager" and adapters[0]._bot_token == TOKEN_1
         assert adapters[1]._manager_id == "manager-review" and adapters[1]._bot_token == TOKEN_2
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 @requires_db
@@ -141,7 +139,7 @@ def test_only_builtin_rows_register_todays_ids(monkeypatch: pytest.MonkeyPatch, 
         adapters = [*await _pass(("telegram",), tmp_path), *await _pass(("lark", "lark_bot"), tmp_path)]
         assert [a.channel_id for a in adapters] == ["channel-telegram", "channel-lark"]
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 @requires_db
@@ -156,7 +154,7 @@ def test_added_bot_without_a_token_ignores_the_env_token(monkeypatch: pytest.Mon
         assert adapters[0]._bot_token == "555:envsecretvalue"
         assert adapters[1]._bot_token == ""
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 @requires_db
@@ -177,7 +175,7 @@ def test_builtin_row_whose_bot_token_env_is_unset_starts_with_the_standard_token
         errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
         assert errors == [f"{added} not started: it is the same bot as channel-telegram"]
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 @requires_db
@@ -193,7 +191,7 @@ def test_same_telegram_bot_twice_starts_once(monkeypatch: pytest.MonkeyPatch, tm
         assert errors == [f"{added} not started: it is the same bot as channel-telegram"]
         assert "AAfirstsecretvalue" not in caplog.text and "AAanothersecretvalue" not in caplog.text
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 @requires_db
@@ -211,7 +209,7 @@ def test_same_lark_profile_twice_starts_once(monkeypatch: pytest.MonkeyPatch, tm
         await _bot(pool, "lark", {"profile": "p1", "allowed_open_ids": [OPEN_ID]}, None)
         assert [a.channel_id for a in await _pass(("lark",), tmp_path)] == ["channel-lark"]
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 @requires_db
@@ -234,7 +232,7 @@ def test_one_lark_app_under_any_name_starts_once(monkeypatch: pytest.MonkeyPatch
         assert errors == sorted(f"{later} not started: it is the same bot as channel-lark"
                                 for later in (by_name, by_token))
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 @requires_db
@@ -254,7 +252,7 @@ def test_both_built_in_lark_rows_of_one_app_start(monkeypatch: pytest.MonkeyPatc
         assert [a.channel_id for a in adapters] == ["channel-lark", "channel-lark_bot"]
         assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 @requires_db
@@ -281,7 +279,7 @@ def test_builtin_lark_row_that_cannot_start_leaves_its_app_to_a_later_row(
         errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
         assert errors == ["channel-lark not started: lark-cli is not signed in as the bot"]
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 @requires_db
@@ -319,7 +317,7 @@ def test_lark_app_learnt_late_still_starts_once(monkeypatch: pytest.MonkeyPatch,
         assert errors == sorted(f"{later} not started: it is the same bot as channel-lark"
                                 for later in (by_profile, by_token))
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 @requires_db
@@ -348,7 +346,7 @@ def test_added_lark_cli_bot_records_refused_senders_under_its_id(monkeypatch: py
         await adapter._on_rejected(OTHER, "oc_team")
         assert recorded == [(added, OTHER, "oc_team")]
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 @requires_db
@@ -367,7 +365,7 @@ def test_lark_bot_secret_is_masked_in_logs(monkeypatch: pytest.MonkeyPatch, tmp_
         line = log_redaction.RedactingFormatter("%(message)s").format(record)
         assert LARK_SECRET not in line and "leak" in line
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_manager_running_answers_true_until_the_fleet_exists() -> None:
@@ -396,4 +394,4 @@ def test_database_facts_see_an_added_lark_row(monkeypatch: pytest.MonkeyPatch) -
         return (await self_check._database_facts(f"{DSN}{'&' if '?' in DSN else '?'}search_path={schema}")
                 ).lark_enabled
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)

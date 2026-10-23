@@ -13,10 +13,10 @@ from typing import Any
 
 import pytest
 
+from tests.db_support import DSN, run_db
 from tests.test_ops_tasks_db import _error, _project, _task
 from tests.test_planner_tools_db import _allow, _haiku, _journal, _ops, _Planner, _steps
 from tests.test_task_agents_db import _call, _profiles
-from tests.test_usage_api_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -70,7 +70,7 @@ def test_the_role_tools_are_listed_and_work_only_where_the_project_lets_its_plan
         # A token the endpoint does not know lists no role tool either.
         assert "looper_task_roles" not in {t["name"] for t in await ops.listing("Bearer planner.nope")}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_each_change_is_a_new_version_with_a_journal_entry_and_a_refused_one_changes_nothing(
@@ -122,7 +122,7 @@ def test_each_change_is_a_new_version_with_a_journal_entry_and_a_refused_one_cha
         assert read["result"]["role_text_max_chars"] == 500 and "claude-code/opus" in [
             p["name"] for p in read["result"]["allowed_profiles"]]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_role_takes_any_profile_that_can_run_it_while_the_projects_list_is_empty(
@@ -142,7 +142,7 @@ def test_a_role_takes_any_profile_that_can_run_it_while_the_projects_list_is_emp
         read = (await planner("looper_task_roles", {}))["result"]
         assert read["roles"][0]["profile"] is None and read["roles"][0]["profile_not_allowed"] == "claude-code/sonnet"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_roles_profile_comes_from_the_projects_list_and_yields_to_the_users_choice(
@@ -174,7 +174,7 @@ def test_a_roles_profile_comes_from_the_projects_list_and_yields_to_the_users_ch
         assert _error(answer) == "forbidden" and "their choice stands" in answer["error"]["message"]
         assert (await planner("looper_task_role_set", {**TESTER, "id": "doc"}))["status"] == "ok"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_run_of_a_role_gets_its_profile_under_the_users_choice_and_over_the_planners(
@@ -228,7 +228,7 @@ def test_a_run_of_a_role_gets_its_profile_under_the_users_choice_and_over_the_pl
         assert status == 200
         assert await runs_on("task-a", project, "worker", ("tester", 1)) == ("claude-code/opus", "task")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_planning_a_task_anew_drops_its_roles_and_going_on_from_its_plan_keeps_them(
@@ -250,7 +250,7 @@ def test_planning_a_task_anew_drops_its_roles_and_going_on_from_its_plan_keeps_t
         assert await _versions(pool, "task-a") == [("tester", 1, None, None)]
         assert await _versions(pool, "task-b") == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_task_page_lists_each_roles_versions_steps_and_numbers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -316,7 +316,7 @@ def test_the_task_page_lists_each_roles_versions_steps_and_numbers(monkeypatch: 
         await _task(pool, "task-b", "running", project)
         assert "roles" not in await _task_view("task-b")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_steps_roles_and_its_review_roles_are_saved_and_read_back(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -342,7 +342,7 @@ def test_a_steps_roles_and_its_review_roles_are_saved_and_read_back(monkeypatch:
         with pytest.raises(Exception, match="task_steps_review_roles_reviewed"):
             await plans.save("task-a", steps=[{**step, "review": False}], pool=pool)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_v2_7_0_steps_one_review_role_becomes_a_list_of_one_and_its_columns_go(monkeypatch: pytest.MonkeyPatch,
@@ -395,7 +395,7 @@ def test_a_v2_7_0_steps_one_review_role_becomes_a_list_of_one_and_its_columns_go
         assert "task_steps_review_role_reviewed" not in constraints
         await ensure_schema(pool)  # and again, a no-op
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_planning_anew_restores_the_roles_of_the_tasks_template(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -435,4 +435,4 @@ def test_planning_anew_restores_the_roles_of_the_tasks_template(monkeypatch: pyt
         await tasks.reset_task_for_restart("task-d", keep_steps=False, pool=pool)
         assert await _versions(pool, "task-d") == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

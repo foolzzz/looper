@@ -15,8 +15,9 @@ from typing import Any
 
 import pytest
 
+from tests.db_support import DSN, run_db
 from tests.test_managers_schema_db import _manager
-from tests.test_usage_api_db import DSN, _run, _Writer
+from tests.test_usage_api_db import _Writer
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -120,7 +121,7 @@ def test_targets_list_the_running_managers_with_names(monkeypatch: pytest.Monkey
             {"kind": "manager", "id": "manager", "name": "Manager", "can_send": True},
             {"kind": "manager", "id": "manager-review", "name": "Code review", "can_send": True}]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_thread_belongs_to_the_manager_that_first_took_it(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,7 +145,7 @@ def test_a_thread_belongs_to_the_manager_that_first_took_it(monkeypatch: pytest.
         status, _ = await _call(fleet, web, "POST", "/api/chat/send", _send("s-old", None))
         assert status == 200 and web.targets[-1].agent_id == "manager"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_an_unknown_or_disabled_manager_takes_no_message(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -157,7 +158,7 @@ def test_an_unknown_or_disabled_manager_takes_no_message(monkeypatch: pytest.Mon
         assert status == 409 and answer["error"] == "Manager 'manager-off' is disabled"
         assert web.targets == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_stop_finds_the_manager_whose_turn_it_is(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -171,7 +172,7 @@ def test_stop_finds_the_manager_whose_turn_it_is(monkeypatch: pytest.MonkeyPatch
         status, answer = await _call(fleet, web, "POST", "/api/chat/stop", {"message_id": "m-none"})
         assert status == 409 and answer["state"] == "not_running" and default.stopped == ["m-none"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_running_turn_is_asked_of_the_threads_owner(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -185,7 +186,7 @@ def test_the_running_turn_is_asked_of_the_threads_owner(monkeypatch: pytest.Monk
         await _call(fleet, web, "GET", "/api/chat/turn", query={"session_id": "s-other"})
         assert default.turn_asked == [("web", "s-other")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_managers_session_is_the_one_asked_for(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -204,7 +205,7 @@ def test_a_managers_session_is_the_one_asked_for(monkeypatch: pytest.MonkeyPatch
                                      {"manager": "manager-review", "profile_id": None})
         assert status == 200 and answer["manager"] == "manager-review"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_each_manager_lists_its_own_conversations(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -231,7 +232,7 @@ def test_each_manager_lists_its_own_conversations(monkeypatch: pytest.MonkeyPatc
         status, answer = await _call(fleet, web, "GET", "/api/chat/sessions", query={"manager": "manager-nope"})
         assert status == 404 and answer == {"error": "no Manager 'manager-nope'"}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_another_managers_thread_is_named_never_listed_or_read_as_a_new_one(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -265,7 +266,7 @@ def test_another_managers_thread_is_named_never_listed_or_read_as_a_new_one(monk
         status, answer = await get("/api/chat/messages", {"manager": "manager", "session_id": "s-def"})
         assert status == 200 and len(answer["messages"]) == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_deleted_managers_threads_are_in_no_list(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -286,4 +287,4 @@ def test_a_deleted_managers_threads_are_in_no_list(monkeypatch: pytest.MonkeyPat
         assert status == 409 and "deleted Manager" in answer["error"]
         assert web.targets == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

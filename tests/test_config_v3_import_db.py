@@ -9,7 +9,7 @@ import pytest
 
 from looper.agents import config_transfer as transfer
 from looper.agents import registry_migration as migration
-from tests.test_catalog_db import DSN
+from tests.db_support import DSN
 from tests.test_config_transfer_db import _installation
 
 pytestmark = pytest.mark.anyio

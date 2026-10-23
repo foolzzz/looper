@@ -17,8 +17,9 @@ from typing import Any
 import pytest
 
 from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
+from tests.db_support import DSN, run_db
 from tests.test_ops_tasks_db import _project, _task
-from tests.test_usage_api_db import DSN, _Writer, _run
+from tests.test_usage_api_db import _Writer
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -56,7 +57,7 @@ def test_waiting_is_in_progress_found_active_and_kept(monkeypatch: pytest.Monkey
             assert writer.data.startswith(b"HTTP/1.1 400") and b"stop the task before deleting" in writer.data
         assert await pool.fetchval("SELECT count(*) FROM tasks") == 2
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_an_internal_restart_carries_on_a_waiting_task_as_it_does_a_running_one(
@@ -85,4 +86,4 @@ def test_an_internal_restart_carries_on_a_waiting_task_as_it_does_a_running_one(
         assert {row["id"]: row["status"] for row in await pool.fetch("SELECT id, status FROM tasks")} == {
             "task-run": "pending", "task-wait": "pending"}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

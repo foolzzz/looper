@@ -8,8 +8,8 @@ from typing import Any
 import pytest
 
 from looper.agents.agent_settings import HARNESS_MAX_CHARS
-from tests.test_catalog_db import DSN
-from tests.test_profile_registry_db import _call, _model_id, _ok, _run
+from tests.db_support import DSN, run_db
+from tests.test_profile_registry_db import _call, _model_id, _ok
 from tests.test_system_prompt_mode_db import _profile
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -29,7 +29,7 @@ def test_custom_prompt_registry_keeps_omitted_updates_and_strips_text(monkeypatc
         cleared = await _ok("PUT", f"/api/agent-profiles/{profile_id}", {"custom_prompt": " \n "})
         assert cleared["profile"]["custom_prompt"] == ""
 
-    _run(run, monkeypatch)
+    run_db(run, monkeypatch)
 
 
 @pytest.mark.parametrize("value", [None, False, 1, [], {}, "x" * (HARNESS_MAX_CHARS + 1)])
@@ -46,7 +46,7 @@ def test_custom_prompt_bad_values_return_400(monkeypatch: pytest.MonkeyPatch, va
             if isinstance(value, str):
                 assert str(HARNESS_MAX_CHARS) in payload["error"]
 
-    _run(run, monkeypatch)
+    run_db(run, monkeypatch)
 
 
 def test_custom_prompt_config_round_trip_legacy_and_derived(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -76,7 +76,7 @@ def test_custom_prompt_config_round_trip_legacy_and_derived(monkeypatch: pytest.
                 await import_config(conn, {"profiles": [legacy]}, apply=True)
             assert await conn.fetchval("SELECT custom_prompt FROM agent_profiles WHERE name = 'custom'") == ""
 
-    _run(run, monkeypatch)
+    run_db(run, monkeypatch)
 
 
 def test_custom_prompt_schema_upgrade_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -90,7 +90,7 @@ def test_custom_prompt_schema_upgrade_is_idempotent(monkeypatch: pytest.MonkeyPa
         await connection.ensure_schema(pool)
         assert await pool.fetchval("SELECT custom_prompt FROM agent_profiles LIMIT 1") == "CUSTOM"
 
-    _run(run, monkeypatch)
+    run_db(run, monkeypatch)
 
 
 def test_manager_profile_tool_saves_lists_and_updates_custom_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -111,4 +111,4 @@ def test_manager_profile_tool_saves_lists_and_updates_custom_prompt(monkeypatch:
                                       "custom_prompt": "CHANGED"}, turn, None))
         assert updated["profile"]["custom_prompt"] == "CHANGED"
 
-    _run(run, monkeypatch)
+    run_db(run, monkeypatch)

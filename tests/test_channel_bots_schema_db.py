@@ -12,7 +12,7 @@ from typing import Any
 import asyncpg
 import pytest
 
-from tests.test_channel_configs_db import DSN, _run
+from tests.db_support import DSN, run_with_channel_configs
 from tests.test_gate_channels_db import _task_with_gate
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -51,7 +51,7 @@ def test_builtin_rows_belong_to_the_default_manager_and_a_second_start_changes_n
         assert [r["channel_id"] for r in await channel_configs.list_configs(pool=pool)] == BUILTIN
         assert await pool.fetchrow("SELECT last_value, is_called FROM channel_bot_seq") == seq
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_added_bots_get_growing_ids_that_are_never_reused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -74,7 +74,7 @@ def test_added_bots_get_growing_ids_that_are_never_reused(monkeypatch: pytest.Mo
         keys = await channel_configs.bot_keys("telegram", conn=pool)
         assert keys[-1]["secret"] == "s3cret" and keys[-1]["config"] == {"k": 1}
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_create_bot_needs_a_live_manager(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -88,7 +88,7 @@ def test_create_bot_needs_a_live_manager(monkeypatch: pytest.MonkeyPatch) -> Non
         bot = await _bot(pool, manager_id="manager-off")
         assert bot["manager_id"] == "manager-off" and bot["manager_name"] == "manager-off"
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_a_bots_manager_cannot_change(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,7 +108,7 @@ def test_a_bots_manager_cannot_change(monkeypatch: pytest.MonkeyPatch) -> None:
         with pytest.raises(asyncpg.ForeignKeyViolationError):
             await pool.execute("DELETE FROM managers WHERE id = 'manager'")
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_delete_bot_keeps_builtin_rows_and_chat_messages(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -127,7 +127,7 @@ def test_delete_bot_keeps_builtin_rows_and_chat_messages(monkeypatch: pytest.Mon
         assert await pool.fetchval("SELECT count(*) FROM channel_rejected_senders WHERE channel_id = $1", cid) == 0
         assert await pool.fetchval("SELECT count(*) FROM chat_messages WHERE session_id = $1", f"{cid}:42") == 1
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_a_manager_with_a_bot_is_not_deleted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -141,7 +141,7 @@ def test_a_manager_with_a_bot_is_not_deleted(monkeypatch: pytest.MonkeyPatch) ->
         await channel_configs.delete_bot(bot["channel_id"], pool=pool)
         assert await managers.delete_manager("manager-review") == "deleted"
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_a_bot_is_not_added_to_a_manager_being_deleted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -174,7 +174,7 @@ def test_a_bot_is_not_added_to_a_manager_being_deleted(monkeypatch: pytest.Monke
             await b
         assert await pool.fetchval("SELECT count(*) FROM channel_configs WHERE manager_id = 'manager-review'") == 0
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_gate_posts_are_keyed_by_bot_and_an_old_binary_still_writes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -204,7 +204,7 @@ def test_gate_posts_are_keyed_by_bot_and_an_old_binary_still_writes(monkeypatch:
         assert await pool.fetchval("SELECT channel_id FROM task_user_gate_posts WHERE external_id = '9'") \
             == "channel-lark"
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_a_gate_message_stores_its_bot(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -221,4 +221,4 @@ def test_a_gate_message_stores_its_bot(monkeypatch: pytest.MonkeyPatch) -> None:
             c = await conn.fetchrow(user_gates._ADD_MESSAGE, *user_gates._message_args("task-a", {**base}))
         assert (a["channel_id"], b["channel_id"], c["channel_id"]) == ("channel-lark", "channel-lark-5", None)
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)

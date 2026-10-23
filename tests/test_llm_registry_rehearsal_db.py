@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -23,11 +22,11 @@ from looper.agents.run_usage import Usage
 from looper.agents.runtimes import ADAPTERS, AuthKind
 from looper.agents.runtimes.pricing import pricer
 from looper.db import connection, llm_records, profile_registry, registry_migration
+from tests.db_support import DSN
 from tests.test_llm_registry_v2_seed_db import SEED
 from tests.test_registry_migration import REPORT_FIELDS
 from tests.test_registry_migration_report_db import state
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DSN, reason="requires a disposable LOOPER_TEST_DATABASE_URL")
 USAGE = Usage(input_tokens=1000, output_tokens=100, cache_read_tokens=200, cache_creation_tokens=50)
 

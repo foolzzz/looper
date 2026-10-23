@@ -19,9 +19,10 @@ import pytest
 from looper.agents.ops import Turn
 from looper.agents import profile_registry as registry
 from looper.agents.runtimes import VendorType
+from tests.db_support import DSN, run_db
 from tests.test_ops_tasks_db import _Chat, _error, _project, _task
 from tests.test_task_agents_db import _call, _concurrency_chat
-from tests.test_usage_api_db import DSN, _run, _run_record
+from tests.test_usage_api_db import _run_record
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -90,7 +91,7 @@ def test_projects_are_created_changed_and_read_back_as_the_dashboard_reads_them(
         assert await pool.fetchval("SELECT count(*) FROM manager_actions WHERE risk = 'read' AND result IS NOT NULL") \
             == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("arguments", "code", "message"), [
@@ -109,7 +110,7 @@ def test_a_project_change_is_refused_with_the_dashboards_message(
         assert _error(answer) == code and message in answer["error"]["message"], answer
         assert await pool.fetchval("SELECT count(*) FROM projects") == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_deleting_a_project_asks_first_and_runs_only_on_the_next_messages_confirmation(
@@ -132,7 +133,7 @@ def test_deleting_a_project_asks_first_and_runs_only_on_the_next_messages_confir
                                       ("looper_projects", "high", "needs_confirmation"),
                                       ("looper_projects", "high", "ok")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_project_with_tasks_is_not_offered_for_deletion(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -144,7 +145,7 @@ def test_a_project_with_tasks_is_not_offered_for_deletion(monkeypatch: pytest.Mo
         assert chat.turns[0].blocks == []  # nothing was asked
         assert await pool.fetchval("SELECT count(*) FROM projects") == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- looper_agent_profiles and looper_providers ---
@@ -191,7 +192,7 @@ def test_agent_profiles_are_created_changed_and_read_back(monkeypatch: pytest.Mo
             "action": "create", "name": "fast", "runtime": "rt-claude-code", "model": opus["model_id"]}))
         assert _error(taken) == "conflict" and "already exists" in taken["error"]["message"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("runtime,protocol,model_name,effort", [
@@ -249,7 +250,7 @@ def test_pi_and_dsh_manager_models_profiles_and_config_import_share_pairing_rule
                 imported["custom_prompt"]) == (runtime_id, model["model_id"], effort, False, "Keep this instruction.")
         assert (await _ok("GET", f"/api/models/{model['model_id']}"))["model"]["input_usd_per_mtok"] == 2.5
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_deleting_an_agent_profile_asks_first_and_one_in_use_is_refused(
@@ -273,7 +274,7 @@ def test_deleting_an_agent_profile_asks_first_and_one_in_use_is_refused(
         assert done["result"] == {"deleted": "claude-code/sonnet"}
         assert [p["name"] for p in (await _ok("GET", "/api/registry"))["profiles"]] == ["claude-code/opus"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_provider_is_registered_without_a_key_and_the_user_told_where_to_enter_it(monkeypatch, tmp_path):
@@ -299,7 +300,7 @@ def test_a_provider_is_registered_without_a_key_and_the_user_told_where_to_enter
             "action": "register", "name": "other", "vendor_type": "deepseek",
             "env": [{"key": "OTHER_API_TOKEN", "value": "x"}]}))
         assert _error(refused) == "invalid" and "looks like a credential" in refused["error"]["message"]
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("vendor", [v for v in VendorType if v.auth_kind.value == "api_key"])
@@ -330,7 +331,7 @@ def test_registering_a_vendor_and_its_suggested_models_reads_back_defaults(monke
             (m.name, m.protocol.value, m.context_window, m.background_model) for m in defaults.models}
         assert stored["env"] == [{"key": k, "value": v} for k, v in defaults.env]
         assert stored["api_key"] is None
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_provider_explicit_overrides_win(monkeypatch, tmp_path):
@@ -346,7 +347,7 @@ def test_provider_explicit_overrides_win(monkeypatch, tmp_path):
                                         "base_url": "https://example.com/v1", "use_runtime_default": False}]
         assert stored["env"] == [{"key": "API_TIMEOUT_MS", "value": "1234"}]
         assert model["name"] == "custom-model" and model["provider_id"] == provider["provider_id"]
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("arguments", "message"), [
@@ -361,7 +362,7 @@ def test_invalid_provider_registration_is_refused_without_registering(monkeypatc
         (answer,) = await _Chat(tmp_path).say("登记", ("looper_providers", {"action": "register", **arguments}))
         assert _error(answer) == "invalid" and message in answer["error"]["message"], answer
         assert await pool.fetchval("SELECT count(*) FROM llm_providers") == before
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_provider_list_includes_vendor_suggestions(monkeypatch, tmp_path):
@@ -373,7 +374,7 @@ def test_provider_list_includes_vendor_suggestions(monkeypatch, tmp_path):
         assert {m["name"] for m in deepseek["suggested_models"]} == {"deepseek-flash[1m]", "deepseek-v4-pro[1m]",
                                                                     "deepseek-flash", "deepseek-v4-pro"}
         assert any(e["base_url"] == "https://api.deepseek.com" for e in deepseek["endpoints"])
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("reference", ["id", "name"])
@@ -411,7 +412,7 @@ def test_provider_update_changes_dashboard_and_preserves_models_and_key(monkeypa
                                    provider["provider_id"]) == SECRET
         assert SECRET not in json.dumps(answer)
         assert await _trail(pool) == [("looper_providers", "write", "ok")] * 2
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("fields", [
@@ -437,7 +438,7 @@ def test_provider_update_uses_dashboard_validation_and_rolls_back(monkeypatch, t
         assert await _ok("GET", "/api/registry") == before
         assert await pool.fetchval("SELECT api_key FROM llm_provider_secrets WHERE provider_id = $1",
                                    provider["provider_id"]) == SECRET
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("action", ["register", "update"])
@@ -462,7 +463,7 @@ def test_rejected_provider_env_credentials_are_masked_in_audit(monkeypatch, tmp_
         assert saved_env[1]["value"] == "***"
         assert env[1]["value"] == SECRET  # Auditing must not mutate the original request.
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_model_update_changes_dashboard_and_preserves_provider_key(monkeypatch, tmp_path):
@@ -493,7 +494,7 @@ def test_model_update_changes_dashboard_and_preserves_provider_key(monkeypatch, 
         assert (await _ok("GET", f"/api/models/{model['model_id']}"))["model"] == stored
         cleared = await _tool(chat, "looper_models", action="update", model=model["model_id"], context_window=None)
         assert cleared["model"]["context_window"] is None and cleared["model"]["background_model"] == "deepseek-v4-pro"
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("changes", [{"context_window": 1}, {"background_model": None}, {"efforts": []},
@@ -513,7 +514,7 @@ def test_model_update_preserves_other_catalog_metadata(monkeypatch, tmp_path, ch
             assert stored[field] == changes.get(field, model[field])
         assert (await _ok("GET", f"/api/models/{other['model_id']}"))["model"] == other
         assert any("no full price" in w for w in answer["warnings"]) == (changes.get("output_usd_per_mtok", 2) is None)
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("action", ["create", "update"])
@@ -529,7 +530,7 @@ def test_model_writes_report_prices_and_keep_exact_unknown_names(monkeypatch, tm
         stored = (await _ok("GET", f"/api/models/{answer['model']['model_id']}"))["model"]
         assert stored["name"] == name and stored["provider_id"] == provider["provider_id"]
         assert stored["warnings"] == answer["warnings"]
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("fields", [{}, {"context_window": 0}, {"input_usd_per_mtok": -1},
@@ -550,7 +551,7 @@ def test_model_update_refuses_with_dashboard_validation_and_rolls_back(monkeypat
         if not (set(fields) & {"protocol", "name"}):
             assert answer["error"]["message"] == dashboard["error"]
         assert (await _ok("GET", f"/api/models/{model['model_id']}"))["model"] == model
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("background_priced", [True, False])
@@ -568,7 +569,7 @@ def test_profile_price_warnings_use_the_catalog_a_launch_prices_with(monkeypatch
         assert sum("no full price" in w for w in created["warnings"]) == len(unpriced)
         view = next(p for p in (await registry.registry_view())["profiles"] if p["name"] == "priced")
         assert view["cost"]["unpriced"] == unpriced
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("changes", [{"model": "sonnet"}, {"model": {"provider": "claude-subscription", "name": "sonnet"}},
@@ -591,7 +592,7 @@ def test_invalid_profile_changes_preserve_saved_reference(monkeypatch, tmp_path,
         if "effort" in fields:
             assert "effort" in answer["error"]["message"]
         assert await pool.fetchrow("SELECT * FROM agent_profiles WHERE id = 'agent-sonnet'") == before
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_profile_login_cannot_be_used_by_another_runtime(monkeypatch, tmp_path):
@@ -605,27 +606,25 @@ def test_profile_login_cannot_be_used_by_another_runtime(monkeypatch, tmp_path):
         valid = await _tool(_Chat(tmp_path), "looper_agent_profiles", action="create", name="valid", runtime="claude-code",
                             model=(await _model())["model_id"])
         assert valid["profile"]["model_id"] and valid["profile"]["provider"]["auth"] == "oauth"
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
-@pytest.mark.parametrize("action", ["register", "update"])
-@pytest.mark.parametrize("name", ["api_key", "apiKey", "key", "password", "credential"])
-def test_no_tool_takes_a_key_and_none_is_kept_or_answered(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, action: str,
-) -> None:
+def test_no_tool_takes_a_key_and_none_is_kept_or_answered(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Which names count as a secret's is ``check_arguments``' (test_manager_ops); here none reaches the tables.
+
     async def test(pool: Any) -> None:
         chat = _Chat(tmp_path)
         (answer,) = await chat.say(f"登记 deepseek，key 是 {SECRET}", ("looper_providers", {
-            "action": action, "name": "deepseek", "vendor_type": "deepseek", name: SECRET}))
+            "action": "register", "name": "deepseek", "vendor_type": "deepseek", "api_key": SECRET}))
         assert _error(answer) == "forbidden"
         assert "Settings → LLM Providers" in answer["error"]["message"] and SECRET not in json.dumps(answer)
         assert await pool.fetchval("SELECT count(*) FROM llm_providers WHERE name = 'deepseek'") == 0
         assert await pool.fetchval("SELECT count(*) FROM llm_provider_secrets") == 0
         (row,) = await pool.fetch("SELECT arguments, result FROM manager_actions")
         assert SECRET not in row["arguments"] + row["result"]
-        assert json.loads(row["arguments"])[name] == "***"
+        assert json.loads(row["arguments"])["api_key"] == "***"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- looper_settings ---
@@ -660,7 +659,7 @@ def test_a_role_in_a_projects_profile_is_set_at_once_and_reads_back(
                                                                               "source": "builtin"}
         assert await _trail(pool) == [("looper_settings", "write", "ok"), ("looper_settings", "read", "ok")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_shared_defaults_change_only_after_the_user_confirms(
@@ -686,7 +685,7 @@ def test_the_shared_defaults_change_only_after_the_user_confirms(
         assert await _trail(pool) == [("looper_settings", "high", "needs_confirmation"),
                                       ("looper_settings", "high", "ok")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_roles_default_limit_changes_only_after_the_user_confirms_and_a_projects_is_refused(
@@ -718,7 +717,7 @@ def test_a_roles_default_limit_changes_only_after_the_user_confirms_and_a_projec
             "action": "set", "role": "planner", "values": {"max_concurrency": 2}}))
         assert planner["status"] == "error" and "concurrency is per task" in planner["error"]["message"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("start", "change", "asks"), [
@@ -745,7 +744,7 @@ def test_raising_a_spend_cap_asks_first_and_lowering_it_does_not(
             assert answer["status"] == "ok", answer
             assert worker["run_budget_usd"] == change
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_cap_set_lower_down_counts_against_what_runs_with_it(
@@ -761,7 +760,7 @@ def test_a_cap_set_lower_down_counts_against_what_runs_with_it(
             "action": "set", "project": "calc", "values": {"run_budget_usd": 3.0}}))
         assert answer["status"] == "needs_confirmation"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_roles_timeout_is_set_as_settings_roles_saves_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -780,7 +779,7 @@ def test_a_roles_timeout_is_set_as_settings_roles_saves_it(monkeypatch: pytest.M
             "action": "set", "project": "calc", "role": "worker", "values": {"timeout_seconds": 3600}}))
         assert _error(refused) == "invalid" and "a role's own" in refused["error"]["message"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("arguments", "message"), [
@@ -804,7 +803,7 @@ def test_a_settings_change_is_refused_with_the_dashboards_message(
         assert chat.turns[0].blocks == []
         assert await pool.fetchval("SELECT count(*) FROM agent_setting_layers") == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_projects_allowed_profiles_change_as_its_settings_tab_sets_them(
@@ -846,7 +845,7 @@ def test_a_projects_allowed_profiles_change_as_its_settings_tab_sets_them(
         assert _error(empty) == "invalid"
         assert await allowed() == ["claude-code/opus"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_turn_the_manager_runs_on_its_own_reads_settings_but_changes_none(
@@ -872,7 +871,7 @@ def test_a_turn_the_manager_runs_on_its_own_reads_settings_but_changes_none(
         assert (await _ok("GET", "/api/roles/worker"))["timeout_seconds"] == 86400
         assert await pool.fetchval("SELECT count(*) FROM projects") == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- looper_catalog ---
@@ -912,7 +911,7 @@ def test_a_catalog_item_is_installed_changed_and_uninstalled_as_the_dashboard_do
         assert gone["status"] == "ok"
         assert (await _ok("GET", f"/api/projects/{project['id']}/installs"))["installs"] == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- looper_costs ---
@@ -943,7 +942,7 @@ def test_a_tasks_cost_is_the_task_pages(monkeypatch: pytest.MonkeyPatch, tmp_pat
                                                                                      "period": "today"}))
         assert _error(mixed) == "invalid"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_spend_by_project_and_time_range_counts_the_runs_started_in_it(
@@ -994,4 +993,4 @@ def test_spend_by_project_and_time_range_counts_the_runs_started_in_it(
         (bad,) = await chat.say("上周", ("looper_costs", {"since": "last week"}))
         assert _error(bad) == "invalid" and "YYYY-MM-DD" in bad["error"]["message"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

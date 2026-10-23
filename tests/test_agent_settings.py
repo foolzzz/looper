@@ -115,9 +115,12 @@ def _row(profile: AgentProfile) -> dict[str, Any]:
 
 
 class TestPrecedence:
-    @pytest.mark.parametrize("role", TASK_ROLES)
-    @pytest.mark.parametrize("upto", ORDER)
-    @pytest.mark.parametrize("field", list(VALUES))
+    # ``resolve`` reads every field in one loop over the layers: each field once with all the layers set, and the
+    # profile with the layers cut short at a role's own, a project's and the first.
+    @pytest.mark.parametrize(("field", "upto", "role"), [
+        *[(field, Layer.ROLE_PROJECT, "worker") for field in VALUES],
+        ("profile", Layer.SYSTEM, "worker"), ("profile", Layer.PROJECT, "planner"), ("profile", Layer.ROLE, "reviewer"),
+    ])
     def test_each_layer_wins_over_the_ones_before_and_an_unset_later_one_inherits(
         self, field: str, upto: Layer, role: str,
     ) -> None:

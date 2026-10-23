@@ -14,9 +14,9 @@ from looper.agents import gate_commands
 from looper.agents.managers_api import ManagerDefinition
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+from tests.db_support import DSN, run_db
 from tests.test_managers_schema_db import _manager
 from tests.test_ops_tasks_db import _project
-from tests.test_usage_api_db import DSN, _run
 from tests.test_user_gates_db import _gate, _gate_step
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -90,7 +90,7 @@ def test_ready_tasks_and_gates_are_the_managers_own(monkeypatch: pytest.MonkeyPa
         out = await _handle(_web(), "/gates", None)
         assert out and "title of t-default" in out and "title of t-own" in out
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_no_tasks_no_sections(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -99,7 +99,7 @@ def test_no_tasks_no_sections(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
         assert await agent._ready_tasks_section() == []
         assert await agent._open_gates_section(_web()) == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_default_sections_unchanged(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -117,7 +117,7 @@ def test_default_sections_unchanged(monkeypatch: pytest.MonkeyPatch, tmp_path: P
         assert lines[1].endswith("waiting for the user; chat: the task page only; open questions: "
                                  + lines[1].rsplit("open questions: ", 1)[1]) and lines[2] == ""
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_recent_conversations_and_threads(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -137,7 +137,7 @@ def test_recent_conversations_and_threads(monkeypatch: pytest.MonkeyPatch) -> No
         got = await chat.recent_conversations(sessions=10, messages=5, manager_id="manager", pool=pool)
         assert "s-del" not in {c["session_id"] for c in got}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_gate_snapshot_keys_and_recheck(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -174,4 +174,4 @@ def test_gate_snapshot_keys_and_recheck(monkeypatch: pytest.MonkeyPatch) -> None
         out = await _handle(envelope, "/gate 1 ok", REVIEW)
         assert out and "请先用 /gates" in out
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

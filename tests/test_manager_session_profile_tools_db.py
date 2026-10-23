@@ -14,9 +14,9 @@ import pytest
 from looper.agents.agent_settings import DEFAULT_HARNESS_PROMPT, Harness, Layer
 from looper.agents.system_prompt import build_system_prompt
 from looper.agents.tiers.manager import DEFAULT_SYSTEM_PROMPT, TOOLS_CONTRACT
+from tests.db_support import DSN, run_db
 from tests.test_manager_session_profile_db import _profile_id
 from tests.test_ops_tasks_db import _Chat
-from tests.test_usage_api_db import DSN, _run
 
 BULLET = """\
 - The user switches the Agent Profile of this conversation with /profile
@@ -65,7 +65,7 @@ def test_view_and_set_show_the_selected_profile(monkeypatch: pytest.MonkeyPatch,
         assert changed["manager_session"]["selected"]["profile_id"] == pid
         assert changed["note"] == NOTE
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @needs_db
@@ -78,7 +78,7 @@ def test_only_a_profile_change_gets_the_note(monkeypatch: pytest.MonkeyPatch, tm
         changed = await _settings(chat, action="set", role="manager", values={"run_budget_usd": 5})
         assert "note" not in changed
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @needs_db
@@ -90,7 +90,7 @@ def test_without_a_selection_there_is_no_note(monkeypatch: pytest.MonkeyPatch, t
         changed = await _settings(chat, action="set", role="manager", values={"profile": pid})
         assert changed["manager_session"] == {"selected": None} and "note" not in changed
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @needs_db
@@ -103,4 +103,4 @@ def test_other_roles_are_unchanged(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
         changed = await _settings(chat, action="set", role="worker", values={"profile": pid})
         assert "manager_session" not in changed and "note" not in changed
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

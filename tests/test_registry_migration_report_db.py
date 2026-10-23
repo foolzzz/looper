@@ -2,18 +2,15 @@
 
 import asyncio
 import json
-import os
-import uuid
 
-import asyncpg
 import pytest
 
 from looper.agents.registry_migration import plan
 from looper.db.registry_migration import dry_run, read_snapshot
+from tests.db_support import DSN, fresh_connection
 from tests.test_registry_migration import REPORT_FIELDS
 
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 LEGACY = """
@@ -50,11 +47,7 @@ async def state(conn):
 @pytest.mark.parametrize("bad_profile", [False, True])
 def test_readonly_preflight_preserves_schema_rows_and_hides_all_values(bad_profile):
     async def run():
-        conn = await asyncpg.connect(DSN, command_timeout=10)
-        schema = f"looper_test_{uuid.uuid4().hex}"
-        try:
-            await conn.execute(f'CREATE SCHEMA "{schema}"')
-            await conn.execute(f'SET search_path TO "{schema}"')
+        async with fresh_connection(command_timeout=10) as conn:
             await conn.execute(LEGACY)
             if bad_profile:
                 await conn.execute("UPDATE agent_profiles SET runtime_id = 'missing'")
@@ -91,8 +84,6 @@ def test_readonly_preflight_preserves_schema_rows_and_hides_all_values(bad_profi
                     else:
                         assert type(value) is int and value >= 0
             assert await state(conn) == before
-        finally:
-            await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-            await conn.close()
+
 
     asyncio.run(asyncio.wait_for(run(), timeout=30))
