@@ -540,11 +540,12 @@ def test_the_client_dialogs_exist_and_their_fake_scripts_use_the_registered_tool
     from looper.agents.ops.service import MANAGER_TOOLS
 
     schemas = {tool.name: tool.schema for tool in MANAGER_TOOLS}
-    cases = dialogs.select(["client_handoff", "client_relay_cancel"])
-    assert [c.id for c in cases] == ["client_handoff", "client_relay_cancel"]
+    ids = ["client_handoff", "client_handoff_agreed", "client_relay_cancel"]
+    cases = dialogs.select(ids)
+    assert [c.id for c in cases] == ids
     assert all(c.client for c in cases)
     assert not any(say.stop or say.withdraw for c in cases for say in c.says)
-    assert [c.running_task for c in cases] == [False, True]
+    assert [c.running_task for c in cases] == [False, False, True]
     for case in cases:
         for say in case.says:
             for tool, arguments in say.fake:
@@ -552,7 +553,8 @@ def test_the_client_dialogs_exist_and_their_fake_scripts_use_the_registered_tool
 
 
 def test_the_other_dialogs_are_not_client_dialogs():
-    assert [d.id for d in dialogs.DIALOGS if d.client] == ["client_handoff", "client_relay_cancel"]
+    assert [d.id for d in dialogs.DIALOGS if d.client] == [
+        "client_handoff", "client_handoff_agreed", "client_relay_cancel"]
 
 
 def test_the_stand_in_strips_the_client_channel_line():

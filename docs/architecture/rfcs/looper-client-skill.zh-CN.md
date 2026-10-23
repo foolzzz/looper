@@ -13,7 +13,7 @@
 2. **全部权限。** 一个客户端令牌能做管家工具能做的一切。
 3. **写操作两步确认，和管家一样。** 需要确认的写操作先回答「待确认」，第二个明确的确认调用才执行；按客户端和它的会话区分，绝不跨客户端。
 4. **一个接口。** 和 Looper 的一切交互都经 Looper 的 OpenAPI：不另加一套平行的「客户端 API」，而是把现有 HTTP API 变成有 OpenAPI 描述的公开 API（带版本，每个操作有类型化的请求和回答，错误是类型化的状态对象），以生成的文档提供（`GET /api/v1/openapi.json`），控制台、命令行和 skill 都用它。HTTP API 和管家的 ops 工具重复做的事，指定一份实现；今天只有 ops 层有的操作，以 ops 工具的 schema 成为 API 操作。agent 经命令行访问 Looper（不用 Bash/curl；阶段 1 不做 MCP）。命令行是新程序 `loopercli`：同一个 Python 包的第二个 console script，是纯粹的 OpenAPI 客户端，不导入服务端的任何代码；子命令在运行时从 OpenAPI 文档生成，新操作不需要写命令行代码；常用的任务操作有几个手写的别名；服务地址和令牌在一个 0600 文件里、每次调用时读；默认输出易读的表格，`--json` 给脚本；两步确认表现为打印出的待确认 id 和 `confirm` 子命令。日常交互都经 API 和 `loopercli`。`looper` 保留运行服务（`serve`、`service`、`version`）、agent 内部用的 `mcp-server`，以及服务起不来时用的离线救援命令：`doctor` 和操作者密码的重设（`auth set-password` / `clear-password`），它们和 `serve`、`service` 一样是本机命令，不经 API（第 15 节）；`config export` / `import` 改成 API 操作，由 `loopercli` 调用，搬完后从 `looper` 删除（发布说明写明去了哪里）。用户这边的集成就是 `loopercli` 加 `looper-skill`。
-5. **`loopercli` 和管家对话。** 阶段 1 的主路径：agent（或人）把讨论好的需求经现有的聊天 API 发给一个管家（默认管家，或按 id 选场景管家），回复流式返回；管家复述、提问、等确认、建任务，和在控制台里一样；任务的接受和结束回到这个对话（和今天场景管家的 web 线程一样）。关卡和进度在阶段 1 不推进这个对话：客户端用 `loopercli wait <task>`（关卡打开、任务结束或超时时返回）和 `status`、`pipeline` 跟进（第 11 节）。直接操作（建任务等）保留给脚本和精确修改；skill 优先用对话交新活。
+5. **`loopercli` 和管家对话。** 阶段 1 的主路径：agent（或人）把讨论好的需求经现有的聊天 API 发给一个管家（默认管家，或按 id 选场景管家），回复流式返回；管家复述、提问、等确认、建任务，和在控制台里一样（消息写明用户已同意提交并开始时，管家可以不再复述、直接建；Looper 自己的确认，如新项目，仍然要）；任务的接受和结束回到这个对话（和今天场景管家的 web 线程一样）。关卡和进度在阶段 1 不推进这个对话：客户端用 `loopercli wait <task>`（关卡打开、任务结束或超时时返回）和 `status`、`pipeline` 跟进（第 11 节）。直接操作（建任务等）保留给脚本和精确修改；skill 优先用对话交新活。
 6. **任务附件。** 提交任务通常只是需求文本。大文档是可选的任务附件：作为文件上传、随任务保存，Planner 和 Worker 当文件读，不受需求 32,000 字的限制。
 
 **不做：**
@@ -256,7 +256,7 @@
 - **单元：** 文档生成（每个客户端工具都在、动作拆分、请求 schema 去掉 `action`、回答和错误的 schema、未类型化的列表、没有碰凭据的操作）；`ClientOps`（各分档、`notes`、`shown_to_user` 去掉、确认按客户端和会话、过期、替换、跨客户端和跨会话拒绝、管家专用工具不在）；认证（客户端令牌只在 `/api/v1/` 有效、只在回环、吊销后 401、操作者也能用 v1、失败不读请求体、客户端令牌在 `/api/clients` 和 `/login` 上换不到任何东西）；渠道行；`loopercli`（用一份文档夹具生成命令、选项映射、`-file` 和标准输入、`--body`、令牌文件权限、退出码、SSE 解析、登录检查/普通调用/取文档/SSE 各自拒绝重定向且另一端收不到请求、不导入服务端代码）；skill 两份副本一致、提到的命令都存在。
 - **PostgreSQL：** `api_clients` 的创建、查找、吊销、名字唯一；经 HTTP 服务的直接操作端到端（建任务 → 新项目要确认 → 确认 → `tasks.client_id` 和 `manager_actions.client_id`）；聊天：新线程归客户端、别的客户端和控制台的线程被拒、`origin_thread` 写入、回报进线程、按游标分页（`next_cursor`、`has_more`、未知游标报错）；场景管家的成功路径（新开、续聊、确认、任务回报进线程）和跨管家拒绝。
 - **真实路径：** 从 worktree 起 `looper serve`（新库、临时 runtime root、非 8767 端口）；在 Settings 里建令牌（无头浏览器截图一张，截图里的令牌是不能认证的合成值或不可逆遮盖的，临时客户端在分享任何东西之前吊销，任何公开产物里都没有令牌）；`loopercli login`；`loopercli chat` 用真实管家（sonnet）走一遍交付；再起一个真实的 Claude Code 会话（`claude -p --plugin-dir plugins/looper --model sonnet`），给它一份设计文档：它用 skill 交给管家、从文档回答问题、在「用户说了提交并开始」时确认建任务和开始、用 `pipeline` 汇报；另一轮让它取消任务，检查它把确认转给用户而没有自己确认。
-- **提示词评测：** 管家对话加 `client_handoff`（经客户端交一份设计，管家复述并问项目和目录，代笔确认后建出任务，任务带 `client_id`、`origin_thread`）和 `client_relay_cancel`（客户端说「用户同意取消」，取消照旧两步、确认后执行）；用 sonnet 跑，`--reps 2`，不用 haiku。
+- **提示词评测：** 管家对话加 `client_handoff`（经客户端交一份设计，消息没写用户同意时，管家复述、不建；代笔确认后建出任务，任务带 `client_id`、`origin_thread`）、`client_handoff_agreed`（消息写明用户已同意提交并开始，管家直接建；已建未开始或已开始都算对）和 `client_relay_cancel`（客户端说「用户同意取消」，取消照旧两步、确认后执行）；用 sonnet 跑，`--reps 2`，不用 haiku。
 
 ## 21. 阶段
 

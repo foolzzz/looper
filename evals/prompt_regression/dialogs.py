@@ -231,7 +231,32 @@ def _raw_json(reply: str) -> str | None:
 
 
 def _restated_and_asked(look: Look) -> str | None:
-    return _raw_json(look.reply) or _asked_for_the_project(look)
+    """The client's message did not say the user agreed, so nothing is created or changed: the Manager restates
+    the task and asks the user's agreement (the project is named, the directory is the project's default)."""
+    found = _raw_json(look.reply)
+    if found:
+        return found
+    if look.new_tasks():
+        return "a task was created though the client's message did not say the user agreed to submit it"
+    if _writes(look, status="ok"):
+        return f"the Manager changed something: {[a['tool'] for a in _writes(look, status='ok')]}"
+    return None if look.reply.strip() else "no reply"
+
+
+def _created_on_the_users_word(look: Look) -> str | None:
+    """The client's message said the user agreed to submit and start: the Manager creating (and starting) the task
+    at once is right. Looper's own confirmations still stand, so a task left ready or started both pass."""
+    found = _raw_json(look.reply)
+    if found:
+        return found
+    tasks = look.new_tasks()
+    if len(tasks) != 1 or tasks[0].get("project_name") != PROJECT:
+        return f"{len(tasks)} new task(s), not 1 in {PROJECT}, though the user had agreed"
+    if tasks[0]["status"] not in ("init", *ACTIVE):
+        return f"the new task is {tasks[0]['status']}"
+    created = _writes(look, status="ok", tool="looper_task_create")
+    titled = [a for a in created if str(a["arguments"].get("title") or "").strip()]
+    return None if titled else "looper_task_create ran without a title"
 
 
 def _asked_to_confirm_template(look: Look) -> str | None:
@@ -1633,6 +1658,15 @@ DIALOGS: tuple[Dialog, ...] = (
             "requirement": "在工作目录里创建 hello.py，运行时打印 hello；验收：python hello.py 输出 hello。",
             "title": "hello 脚本", "project": PROJECT}),)),
         Say("用户说现在开始。", _started, (("looper_task_control", {"task_id": "<task id>", "action": "start"}),)),
+    ), client=True),
+    # The client's message states the user's agreement: the maintainer's rule lets an agent confirm what the user
+    # authorised in its session (create and start the task), so the Manager creates it right away.
+    Dialog("client_handoff_agreed", (
+        Say(f"用户已经同意提交并开始这个任务，请你直接建任务并开始：在 {PROJECT} 项目里创建 hello.py，运行时打印 hello；"
+            "验收标准是 python hello.py 输出 hello。目录用项目默认的。",
+            _both(_created_on_the_users_word, _by_the_client), (("looper_task_create", {
+                "requirement": "在工作目录里创建 hello.py，运行时打印 hello；验收：python hello.py 输出 hello。",
+                "title": "hello 脚本", "project": PROJECT}),)),
     ), client=True),
     Dialog("client_relay_cancel", (
         Say("用户要取消任务 <task>。", _asked_to_confirm,

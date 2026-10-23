@@ -20,6 +20,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import stat
 import sys
 import time
@@ -332,7 +333,7 @@ def _ok_blocks(answer: Mapping[str, Any]) -> list[str]:
     return blocks
 
 
-def render(answer: Mapping[str, Any]) -> None:
+def render(answer: Mapping[str, Any], session: str | None = None) -> None:
     """Print an answer for a person: ``ok`` and ``needs_confirmation`` on stdout, ``error`` on stderr."""
     status = answer.get("status")
     if status == "ok":
@@ -340,8 +341,10 @@ def render(answer: Mapping[str, Any]) -> None:
         if blocks:
             print("\n\n".join(blocks))
     elif status == "needs_confirmation":
+        # A confirmation belongs to its session: the printed command must name it, or copying it fails.
+        flag = f"--session {shlex.quote(session)} " if session else ""
         print(f"{answer.get('impact', '')}\n"
-              f"Confirm with: loopercli confirm {answer.get('confirmation_id')}\n"
+              f"Confirm with: loopercli {flag}confirm {answer.get('confirmation_id')}\n"
               f"(expires in {answer.get('expires_in_seconds')} s; same client and session)")
     else:
         error = answer.get("error")
@@ -350,13 +353,13 @@ def render(answer: Mapping[str, Any]) -> None:
               file=sys.stderr)
 
 
-def finish(status: int, answer: Mapping[str, Any], as_json: bool) -> int:
+def finish(status: int, answer: Mapping[str, Any], as_json: bool, session: str | None = None) -> int:
     """Print the answer and give the exit code it decides."""
     if as_json:
         print(json.dumps(answer, ensure_ascii=False, indent=2))
     else:
         render(answer if "status" in answer else {
-            "status": "error", "error": {"code": "unavailable", "message": f"HTTP {status}"}})
+            "status": "error", "error": {"code": "unavailable", "message": f"HTTP {status}"}}, session)
     kind = answer.get("status")
     if kind == "ok":
         return EXIT_OK
@@ -432,7 +435,7 @@ def _confirm_arguments(parser: Parser) -> None:
 
 def _confirm(args: argparse.Namespace, ctx: Context) -> int:
     status, answer = ctx.api().call("POST", f"{API_PREFIX}/confirm", {"confirmation_id": args.confirmation_id})
-    return finish(status, answer, ctx.as_json)
+    return finish(status, answer, ctx.as_json, ctx.session)
 
 
 # --- chat ---
@@ -502,7 +505,7 @@ def _send(args: argparse.Namespace, ctx: Context, text: str, conversation_id: st
     try:
         for event, data in events:
             if event == "answer":  # the server answered an error instead of a stream
-                turn.outcome, turn.code = "error", finish(0, data, ctx.as_json)
+                turn.outcome, turn.code = "error", finish(0, data, ctx.as_json, ctx.session)
                 return turn
             if event == "accepted":
                 turn.conversation_id = data.get("conversation_id") or turn.conversation_id
@@ -625,7 +628,7 @@ def _follow(ctx: Context, conversation_id: str, cursor: str | None, skip: str | 
 def _chat_list(ctx: Context) -> int:
     status, answer = ctx.api().call("POST", f"{API_PREFIX}/chat/conversations", {})
     if ctx.as_json or answer.get("status") != "ok":
-        return finish(status, answer, ctx.as_json)
+        return finish(status, answer, ctx.as_json, ctx.session)
     result = answer.get("result")
     rows = result.get("conversations") if isinstance(result, dict) else None
     if rows:
@@ -714,7 +717,7 @@ def _wait(args: argparse.Namespace, ctx: Context) -> int:
         status, answer = ctx.api().call("POST", f"{API_PREFIX}/ops/tasks/get", {"task_id": args.task_id})
         result = answer.get("result")
         if answer.get("status") != "ok" or not isinstance(result, dict):
-            return finish(status, answer, ctx.as_json)
+            return finish(status, answer, ctx.as_json, ctx.session)
         if result.get("group") in _WAIT_GROUPS[args.until]:
             if ctx.as_json:
                 print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -885,14 +888,14 @@ def _run_generated(args: argparse.Namespace, ctx: Context) -> int:
     operation: Generated = args._generated
     body = request_body(args, operation) if operation.method == "POST" else None
     status, answer = ctx.api().call(operation.method, operation.path, body)
-    return finish(status, answer, ctx.as_json)
+    return finish(status, answer, ctx.as_json, ctx.session)
 
 
 def _run_task_alias(args: argparse.Namespace, ctx: Context) -> int:
     """``start``, ``stop`` and ``status TASK``: the generated operation with the task's id."""
     operation: Generated = args._generated
     status, answer = ctx.api().call(operation.method, operation.path, {"task_id": args.task})
-    return finish(status, answer, ctx.as_json)
+    return finish(status, answer, ctx.as_json, ctx.session)
 
 
 def _run_status(args: argparse.Namespace, ctx: Context) -> int:
@@ -902,7 +905,7 @@ def _run_status(args: argparse.Namespace, ctx: Context) -> int:
     if overview is None:
         raise UsageError("status needs a TASK: Looper's API description has no overview")
     status, answer = ctx.api().call(overview.method, overview.path, {})
-    return finish(status, answer, ctx.as_json)
+    return finish(status, answer, ctx.as_json, ctx.session)
 
 
 PIPELINE_COLUMNS = ("step", "kind", "status", "depends_on", "role", "instruction")
@@ -933,7 +936,7 @@ def _run_pipeline(args: argparse.Namespace, ctx: Context) -> int:
     status, answer = ctx.api().call(operation.method, operation.path, {"task_id": args.task})
     result = answer.get("result")
     if ctx.as_json or answer.get("status") != "ok" or not isinstance(result, dict):
-        return finish(status, answer, ctx.as_json)
+        return finish(status, answer, ctx.as_json, ctx.session)
     _render_pipeline(result)
     return EXIT_OK
 

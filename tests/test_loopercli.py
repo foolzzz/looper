@@ -548,6 +548,14 @@ def test_needs_confirmation_exits_3_and_says_how_to_confirm(cli: Run, looper: Fa
                                 "(expires in 300 s; same client and session)"]
 
 
+def test_the_confirm_hint_names_the_session_the_call_ran_in(cli: Run, looper: FakeLooper) -> None:
+    looper.answers.append((202, {"status": "needs_confirmation", "confirmation_id": "c-1", "impact": "Cancels t1.",
+                                 "expires_in_seconds": 300}))
+    code, out, _ = cli("--session", "my session", "task-control", "cancel", "--task-id", "t1")
+    assert code == 3
+    assert out.splitlines()[1] == "Confirm with: loopercli --session 'my session' confirm c-1"
+
+
 def test_confirm_posts_the_confirmation_id(cli: Run, looper: FakeLooper) -> None:
     looper.answers.append((200, {"status": "ok", "result": {"cancelled": True}}))
     code, out, _ = cli("--session", "s1", "confirm", "c-1")
