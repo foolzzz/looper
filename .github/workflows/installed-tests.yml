@@ -38,9 +38,9 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: "24"
       - name: Install Python and browser dependencies
         run: |
           python -m pip install uv
@@ -56,6 +56,8 @@ jobs:
             echo '::warning::DSH 0.2.1-rc.2 could not be installed; DSH tests will report the gap as skips.'
             echo 'DSH 0.2.1-rc.2 could not be installed from npm.' >> "$GITHUB_STEP_SUMMARY"
           fi
+      - name: Build the dashboard
+        run: scripts/stage-dashboard.sh
       - name: Run installed tests against local stand-ins
         run: timeout 1800 uv run --no-sync python -m pytest -q -n auto -m installed -rs --durations=25 --junitxml=installed-results.xml
       - name: Report unverified paths
