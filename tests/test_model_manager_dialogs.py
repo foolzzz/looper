@@ -655,8 +655,8 @@ class ClientRunApi(Api):
 
     def request(self, method, path, body=None, **query):
         self.calls.append((method, path, body))
-        if path == "/api/clients" and method == "POST":
-            return {"client": {"id": "client-0123456789ab"}, "token": "lpc_secret"}
+        if path == "/api/v1/clients/create" and method == "POST":
+            return {"status": "ok", "result": {"client": {"id": "client-0123456789ab"}, "token": "lpc_secret"}}
         if path == "/api/tasks":
             return {"tasks": []}
         return {}
@@ -682,16 +682,16 @@ def test_a_client_dialog_makes_a_client_and_revokes_it_without_leaking_its_token
     assert row["outcome"] == "pass"
     assert sent == [("lpc_secret", True, None), ("lpc_secret", True, "cli-1")]
     assert seen == ["cli-1", "cli-1"]
-    assert api.calls[0][:2] == ("POST", "/api/clients") and api.calls[0][2]["name"].startswith("eval-")
-    assert api.calls[-1] == ("DELETE", "/api/clients/client-0123456789ab", None)
+    assert api.calls[0][:2] == ("POST", "/api/v1/clients/create") and api.calls[0][2]["name"].startswith("eval-")
+    assert api.calls[-1] == ("POST", "/api/v1/clients/revoke", {"client_id": "client-0123456789ab"})
     assert "lpc_secret" not in json.dumps(row) and "lpc_secret" not in capsys.readouterr().err
 
 
 def test_a_failed_revoke_is_logged_without_the_token_and_ignored(monkeypatch, capsys):
     class Failing(ClientRunApi):
         def request(self, method, path, body=None, **query):
-            if method == "DELETE":
-                raise dialogs.EvalError(f"DELETE {path} answered 404: gone")
+            if path == "/api/v1/clients/revoke":
+                raise dialogs.EvalError(f"POST {path} answered 404: gone")
             return super().request(method, path, body, **query)
 
     monkeypatch.setattr(dialogs, "_last_action", lambda *a: 0)

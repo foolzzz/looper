@@ -89,9 +89,11 @@
 
 `looper/agents/api_v1.py` 在第一次被请求时从目录生成一次文档并缓存（目录是代码里的常量，进程内不变）：`openapi: 3.1.0`，`info.version` 为 Looper 版本，`info.x-looper-api: 1`，`servers: [{url: "/api/v1"}]`，`components.securitySchemes.bearer`，`components.schemas` 里有 `ErrorCode`、`OpError`、`OpOk`、`OpNeedsConfirmation`。每个操作的 200 回答是 `OpOk` 加这个操作的 `result` schema。
 
-**类型化的结果：** 状态投影有独立 schema，不新增 Manager Tool。未完成领域的工具结果继续显式标记未类型化，各领域通过 `RESULTS` 补齐。阶段 1 给 agent 用的操作写出 `result` 的 schema（顶层每个键的类型，`additionalProperties: true`）：`tasks.list`、`tasks.get`、`task_pipeline`、`task_create`、`task_control.*`、`task_update`、`task_instruct`、`gates.*`、`agent_profiles.list`、`overview`、`confirm`、`whoami`、聊天三个。其余操作的 `result` 暂为 `{"type": "object"}` 并标 `x-looper-result-typed: false`，测试列出这些操作，阶段 2 把列表清空。
+**类型化的结果：** 状态与客户端凭据投影有独立 schema，不新增 Manager Tool。未完成领域的工具结果继续显式标记未类型化，各领域通过 `RESULTS` 补齐。阶段 1 给 agent 用的操作写出 `result` 的 schema（顶层每个键的类型，`additionalProperties: true`）：`tasks.list`、`tasks.get`、`task_pipeline`、`task_create`、`task_control.*`、`task_update`、`task_instruct`、`gates.*`、`agent_profiles.list`、`overview`、`confirm`、`whoami`、聊天三个。其余操作的 `result` 暂为 `{"type": "object"}` 并标 `x-looper-result-typed: false`，测试列出这些操作，阶段 2 把列表清空。
 
 目录条目与安装提供 `catalog_items.list/get/update/delete`、`installs.create/update/delete/project`，均为 `hand=false` 的普通 JSON 操作。完整目录、详情、安装与项目安装 DTO 保留文件、归属及继承信息；现有 `catalog.list/install/update/uninstall` 的请求和路径不变，compact 回答分别类型化，列表用 `oneOf` 区分全局与项目。获取来源的迁移另行交付。项目自有 skill 由 `project_skills.add/get/update/delete` 提供，复用完整 `ProjectInstalls`、`CatalogItem`、`Install` 投影及 `ProjectSkill`；请求标识为必填字符串，更新字段非空且不接受 `enabled`，开关走 `installs.update`。名称、描述、正文和项目数量限制沿用 `project_skills` 核心常量。
+
+客户端凭据由 `clients.list/create/revoke` 提供，均为 `operator_only=true`、`hand=false` 的闭合 JSON 请求。`ApiClient` 只含 `id/name/created_at/last_used_at`，末次使用时间可为 null；创建回答额外返回只显示一次的敏感 `token`，以描述标注 response-only，不使用表示仅请求字段的 OpenAPI `writeOnly`。凭据操作不进入 `manager_actions`，日志只记操作与结果状态。
 
 **文档覆盖什么：** 文档包含既有 v1 操作和已迁移的控制台领域，剩余旧路由仍不在文档中。状态现为 `POST /api/v1/system/status {}`，返回完整状态投影（Agent、任务计数、web 健康、自检、退出能力及可选的绑定/管家状态），客户端的 `can_sign_out` 恒为 false；操作者从真实请求头计算。旧 `GET /api/status` 已删除。
 
@@ -115,14 +117,15 @@
 | 项目、Profile、provider、模型、设置层、可选 Profile、定时任务、花费 | 各自的路由 | 各自的工具 | 共用 `projects`、`profile_registry`、`catalog`、`agent_settings`、`schedules`、`llm_records` | 不变（这些工具建时就要求调控制台的代码） |
 | 目录条目与安装 | `catalog_items.*`、`installs.*`（v1） | `looper_catalog` | 沿用 `catalog` 事务与安装普通写策略，删除目录条目为 high 并重验归属 | 控制台和客户端共用；MCP/skill 更新只认操作者，回答遮罩秘密 |
 | 项目自有 skill | `project_skills.add/get/update/delete`（v1） | 无新增 Tool | 共用 `project_skills` 归属校验与事务 | 控制台与客户端共用完整结果；删除列明所有安装项目，确认执行时重读实际引用并级联删除安装 |
+| 客户端凭据 | `clients.list/create/revoke`（v1） | 无新增 Tool | 共用 `db.api_clients.list_active/create/revoke` | 只认操作者，保留名称去首尾空白、活跃名称唯一及立即吊销语义；控制台与生成 CLI 改走 v1，三个旧方法删除 |
 | 配置导出、导入 | `GET /api/config/export`、`/api/config/imports` | `looper_config_export` | 阶段 2a：v1 与旧路由、工具共用 `config_transfer` 和 `ConfigImports` | 已交付：`loopercli config export` / `import` 调 v1；旧控制台路由保留 |
 
 ## 6. 客户端身份与令牌
 
 - **表 `api_clients`：** `id`（`client-<12 位十六进制>`）、`name`（1–40 个字符，`[A-Za-z0-9][A-Za-z0-9 ._-]*`，未吊销的里面忽略大小写唯一）、`token_sha256`（唯一）、`created_at`、`last_used_at`（最多每分钟更新一次）、`revoked_at`。吊销只填 `revoked_at`，行留着，归属记录一直能显示名字。
 - **令牌：** `lpc_` + `secrets.token_urlsafe(32)`，创建时只在回答里出现一次；库里只存 SHA-256 的十六进制（256 位随机值不需要慢哈希）。按哈希查找：`WHERE token_sha256 = $1 AND revoked_at IS NULL`。
-- **管理：** 只给操作者的路由（控制台用，阶段 1 不进 v1）：`GET /api/clients`（未吊销的，不含令牌）、`POST /api/clients {name}`（201 `{client, token}`，`Cache-Control: no-store`）、`DELETE /api/clients/:id`（吊销；404 给未知或已吊销的）。
-- **凭据管理只认操作者：** 设置或清除操作者密码（阶段 2a 的 v1 `auth.set_password` / `auth.clear_password`，第 15 节）、创建或吊销客户端令牌只接受操作者身份（操作者令牌、cookie 或密码会话）；客户端令牌调用 → 403 `forbidden`，不执行、不改任何凭据。客户端令牌永远换不到操作者会话：`/login` 只认操作者密码，而密码只能由操作者（或本机的离线命令）设置；客户端令牌在 `/login`、`/logout` 和 `/api/` 其余路由上都不是凭据。阶段 1 不开任何通往这些的路径：客户端目录里没有碰密码、操作者令牌或客户端令牌的操作，`/api/clients` 只认操作者，测试锁住这几点。阶段 2a 的 `loopercli auth set-password` / `clear-password` 用独立的操作者入口：`--url URL --operator-token-file PATH` 从操作者令牌文件（同样的 0600 检查）读取，省略文件或给 `-` 则从标准输入读取；令牌只用于这一次请求，不写进 `client.json`。
+- **管理：** 控制台与生成的 `loopercli clients list/create/revoke` 使用只给操作者的 `POST /api/v1/clients/list {}`、`/create {name}`、`/revoke {client_id}`；200 回答为 `OpOk/result`。列表不含令牌或哈希，创建只返回一次 `{client, token}`，回答 `Cache-Control: no-store`；无效名称 400、活跃名称重复 409、未知或已吊销 id 404。旧 GET/POST `/api/clients` 和 DELETE `/api/clients/:id` 已删除。
+- **凭据管理只认操作者：** `auth.set_password` / `auth.clear_password`（阶段 2a，第 15 节）与 `clients.list/create/revoke` 只接受操作者令牌、cookie 或密码会话；客户端令牌在解析请求体之前返回 403 `forbidden`，不执行、不审计参数或结果，也不生成确认项。客户端令牌永远换不到操作者会话：`/login` 只认操作者密码，而密码只能由操作者（或本机的离线命令）设置；客户端令牌在 `/login`、`/logout` 和 `/api/` 其余路由上都不是凭据。客户端的 Manager Tool 目录仍没有凭据工具。阶段 2a 的 `loopercli auth set-password` / `clear-password` 用独立操作者入口 `--url URL --operator-token-file PATH`，令牌只用于这一次请求，不写进 `client.json`。
 - **认证：** `operator_auth.AREAS` 加 `Area("/api/v1/", Access.CLIENT)`，排在 `/api/` 前。`Access.CLIENT` 的请求在读请求体之前判身份：操作者凭据有效 → 操作者；否则 `Authorization: Bearer lpc_…`，且对端和 `Host` 都是回环、没有转发头，且令牌有效 → 这个客户端；否则 401（`WWW-Authenticate: Bearer realm="looper"`，类型化错误，不说令牌在哪）。失败只记对端和「unknown client token」，从不记令牌。
 - **令牌不出现在：** 命令行参数、提示词、日志、`manager_actions`、聊天记录、任务记录里。`loopercli login` 从标准输入读令牌（终端上不回显），写进 0600 文件；之后每次调用从文件读。
 - **令牌文件：** 默认 `$XDG_CONFIG_HOME/looper/client.json`（没设就是 `~/.config/looper/client.json`），`LOOPER_CLIENT_FILE` 或 `--client-file` 覆盖。内容 `{"url": "http://127.0.0.1:8767", "token": "lpc_…"}`。读时不跟随符号链接，用 `fstat` 确认是当前用户的普通文件且权限正好 0600，否则拒绝并给出修复命令（与操作者令牌文件同样的规则）。`url` 的主机必须是回环地址。
@@ -264,7 +267,7 @@ v1 配置预览收 `{document: <配置对象>}`，和控制台一样最多 256 M
 
 ## 20. 测试计划（照开发计划第 1 节）
 
-- **单元：** 文档生成（每个客户端工具都在、动作拆分、请求 schema 去掉 `action`、回答和错误的 schema、未类型化的列表、没有碰凭据的操作）；`ClientOps`（各分档、`notes`、`shown_to_user` 去掉、确认按客户端和会话、过期、替换、跨客户端和跨会话拒绝、管家专用工具不在）；认证（客户端令牌只在 `/api/v1/` 有效、只在回环、吊销后 401、操作者也能用 v1、失败不读请求体、客户端令牌在 `/api/clients` 和 `/login` 上换不到任何东西）；渠道行；`loopercli`（用一份文档夹具生成命令、选项映射、`-file` 和标准输入、`--body`、令牌文件权限、退出码、SSE 解析、登录检查/普通调用/取文档/SSE 各自拒绝重定向且另一端收不到请求、不导入服务端代码）；skill 两份副本一致、提到的命令都存在。
+- **单元：** 文档生成（每个客户端工具都在、动作拆分、请求 schema 去掉 `action`、回答和错误的 schema、未类型化的列表、凭据操作只认操作者且没有凭据 Tool）；`ClientOps`（各分档、`notes`、`shown_to_user` 去掉、确认按客户端和会话、过期、替换、跨客户端和跨会话拒绝、管家专用工具不在）；认证（客户端令牌只在 `/api/v1/` 有效、只在回环、吊销后 401、操作者也能用 v1、失败不读请求体、客户端令牌被 `clients.*` 拒绝且在 `/login` 上换不到操作者身份）；渠道行；`loopercli`（用一份文档夹具生成命令、选项映射、`-file` 和标准输入、`--body`、令牌文件权限、退出码、SSE 解析、登录检查/普通调用/取文档/SSE 各自拒绝重定向且另一端收不到请求、不导入服务端代码）；skill 两份副本一致、提到的命令都存在。
 - **PostgreSQL：** `api_clients` 的创建、查找、吊销、名字唯一；经 HTTP 服务的直接操作端到端（建任务 → 新项目要确认 → 确认 → `tasks.client_id` 和 `manager_actions.client_id`）；聊天：新线程归客户端、别的客户端和控制台的线程被拒、`origin_thread` 写入、回报进线程、按游标分页（`next_cursor`、`has_more`、未知游标报错）；场景管家的成功路径（新开、续聊、确认、任务回报进线程）和跨管家拒绝。
 - **真实路径：** 从 worktree 起 `looper serve`（新库、临时 runtime root、非 8767 端口）；在 Settings 里建令牌（无头浏览器截图一张，截图里的令牌是不能认证的合成值或不可逆遮盖的，临时客户端在分享任何东西之前吊销，任何公开产物里都没有令牌）；`loopercli login`；`loopercli chat` 用真实管家（sonnet）走一遍交付；再起一个真实的 Claude Code 会话（`claude -p --plugin-dir plugins/looper --model sonnet`），给它一份设计文档：它用 skill 交给管家、从文档回答问题、在「用户说了提交并开始」时确认建任务和开始、用 `pipeline` 汇报；另一轮让它取消任务，检查它把确认转给用户而没有自己确认。
 - **提示词评测：** 管家对话加 `client_handoff`（经客户端交一份设计，消息没写用户同意时，管家复述、不建；代笔确认后建出任务，任务带 `client_id`、`origin_thread`）、`client_handoff_agreed`（消息写明用户已同意提交并开始，管家直接建；已建未开始或已开始都算对）和 `client_relay_cancel`（客户端说「用户同意取消」，取消照旧两步、确认后执行）；用 sonnet 跑，`--reps 2`，不用 haiku。
@@ -275,7 +278,7 @@ v1 配置预览收 `{document: <配置对象>}`，和控制台一样最多 256 M
 
 - **阶段 1：** 客户端令牌（表、Settings 页、认证）；v1：客户端目录生成的操作、两步确认、文档、聊天三个、`whoami`；管家的渠道行和客户端对话的回报；`loopercli`（生成的命令、别名、`chat`、`wait`、`confirm`、`login`、`skill`）；`looper-skill` 与 Claude Code 插件；两个管家对话评测；文档。可用的结果：在别的 agent 会话里装上 skill，就能把讨论好的活交给管家并跟进。
 - **阶段 2a（已交付）：** 第 15 节的命令迁移：只认操作者的 `auth.set_password` / `auth.clear_password`、`system.check` 和 `config.export` / `config.import_preview` / `config.import_apply` 进入同一 v1 文档，结果类型化；`loopercli` 提供对应命令；`looper` 删除配置导出、导入，保留 doctor 和密码重设作离线救援。配置操作与原路由、工具共用实现，客户端应用配置需两步确认。
-- **阶段 2 其余部分（待做）：** 其余 HTTP 路由成为 v1 操作（任务删除、项目知识与 skill、角色、管家与模板、渠道、目录上传和 git、设置页、运行记录、活动流……），全部操作的结果类型化；客户端令牌管理的 v1 操作；第 5.4 节其余重复实现合并（建任务是一个共享核心加两个参数适配层）；控制台改用 v1，不再用的旧路由删除。按领域拆成各自可用的 PR。
+- **阶段 2 其余部分（待做）：** 其余 HTTP 路由成为 v1 操作（任务删除、项目知识与 skill、角色、管家与模板、渠道、目录上传和 git、设置页、运行记录、活动流……），全部操作的结果类型化；第 5.4 节其余重复实现合并（建任务是一个共享核心加两个参数适配层）；控制台改用 v1，不再用的旧路由删除。按领域拆成各自可用的 PR。
 - **阶段 3：** 任务附件（第 14 节）。
 
 | 领域 | 阶段 2 状态 |
@@ -291,7 +294,7 @@ v1 配置预览收 `{document: <配置对象>}`，和控制台一样最多 256 M
 | 文件与 Git | 待迁移 |
 | 设置 | 待迁移 |
 | 运行记录与活动流 | 待迁移 |
-| 客户端凭据 | 待迁移 |
+| 客户端凭据 | 已验证：`clients.list/create/revoke` 只认操作者，完整 DTO、控制台及生成 CLI 已迁移，三个旧方法删除；保留一次显示、复制与吊销刷新。229 项定向 pytest、25 项 web 测试及构建通过；新数据库隔离 serve、1280/390px 浏览器创建/复制/隐藏/吊销及立即 401 通过，截图无可用令牌。模型可见内容未改，未跑真实模型评测；完整套件留给 CI |
 
 阶段 2a 保持已交付；共享任务核心独立跟踪，阶段 3 仍待做。整体完成由最终审计确认。
 
@@ -300,6 +303,7 @@ v1 配置预览收 `{document: <配置对象>}`，和控制台一样最多 256 M
 - `/api/v1/` 的普通操作也接受操作者身份；操作者的 `high` 单次执行，客户端令牌仍须两步确认。控制台确认弹窗与可见行为不变。状态及服务就绪探测改走 v1，旧状态 GET 删除；Telegram/Lark 继续使用未改动的 Manager ops/services。配置命令迁移是阶段 2a 单独列出的行为变化。
 - 目录条目与安装的八个旧 HTTP 方法已删除；控制台改走 v1 并保留原有弹窗。目录删除对客户端为 high 两步确认，卸载仍与原 `catalog` Tool 共用普通写策略；条目更新只认操作者，避免 MCP 环境变量或 header 秘密进入凭据审计。
 - 项目自有 skill 的旧 POST/GET/PUT/DELETE 方法已删除，控制台与生成的 `loopercli project-skills add|get|update|delete` 改走 v1。新增仍默认启用，显式 `false` 保留；只修改提供的字段。删除为 high，影响覆盖其他项目的安装：客户端须同会话确认，操作者单次执行，控制台保留既有确认弹窗。Telegram/Lark 的 Manager ops/services 与模型可见内容不变。
+- 客户端凭据的三个旧 HTTP 方法删除，控制台和生成 CLI 改走仅限操作者的 v1 操作；创建由旧 201 裸对象改为 200 `OpOk/result`。名称与吊销语义不变，列表仅返回约定四字段，不再返回恒为 null 的 `revoked_at`；一次显示与既有吊销确认不变。Telegram/Lark 的 Manager ops/services 与模型可见内容不变。
 - 管家：只有客户端的消息多一种渠道行。
 - 默认管家：客户端对话里建的任务把接受和结束写回那个线程（控制台对话里建的不变）。
 - 关卡通知和进度不变：照旧走全局通知目标，不进客户端的对话。
