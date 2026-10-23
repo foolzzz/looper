@@ -319,6 +319,14 @@ def test_login_takes_no_token_argument(cli: Run, looper: FakeLooper, tmp_path: P
     assert looper.requests == []
 
 
+def test_a_usage_error_hides_a_token_with_hyphens(cli: Run, looper: FakeLooper, tmp_path: Path) -> None:
+    # A real token is lpc_ and token_urlsafe, whose alphabet has '-' and '_'.
+    token = "lpc_ab-cd_ef-gh"
+    code, _, err = cli("--client-file", str(tmp_path / "c.json"), "login", token, client=False)
+    assert code == 2 and "cd_ef" not in err and "-gh" not in err
+    assert looper.requests == []
+
+
 def test_login_defaults_to_the_local_dashboard_address(
         cli: Run, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     seen: list[str] = []

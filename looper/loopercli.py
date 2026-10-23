@@ -383,7 +383,7 @@ class Context:
 class Parser(argparse.ArgumentParser):
     def error(self, message: str) -> Any:  # type: ignore[override]
         # An argument the user mistook for an option's value may be a token; do not echo it.
-        raise UsageError(re.sub(rf"{TOKEN_PREFIX}\w+", f"{TOKEN_PREFIX}…", message), self.format_usage())
+        raise UsageError(re.sub(rf"{TOKEN_PREFIX}[A-Za-z0-9_-]+", f"{TOKEN_PREFIX}…", message), self.format_usage())
 
 
 @dataclass(frozen=True)
