@@ -18,6 +18,11 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **Configuration export and import require the running service.** `looper config export` and `looper config import` have been removed. Use `loopercli config export <file>` and `loopercli config import <file>` instead; apply a preview with `loopercli config import --apply <import_id>`, then `loopercli confirm <confirmation_id>`.
+- **配置导出、导入需要运行中的服务。** 已删除 `looper config export` 和 `looper config import`，请改用 `loopercli config export <file>` 和 `loopercli config import <file>`；应用预览用 `loopercli config import --apply <import_id>`，再用 `loopercli confirm <confirmation_id>` 确认。
+
 ## [2.13.47] - 2026-10-23
 
 ### Fixed
