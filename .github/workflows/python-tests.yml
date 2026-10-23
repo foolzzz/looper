@@ -17,7 +17,8 @@ concurrency:
 jobs:
   agent-system:
     name: Agent system tests
-    runs-on: ubuntu-latest
+    # Keep the runner's PostgreSQL 16 client package available alongside the service.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
       postgres:
@@ -45,6 +46,15 @@ jobs:
 
       - name: Install uv
         run: python -m pip install uv
+
+      - name: Install PostgreSQL clients matching the service
+        # Newer pg_restore can emit settings unsupported by the PostgreSQL 16 server.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-client-16
+          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+          /usr/lib/postgresql/16/bin/pg_dump --version
+          /usr/lib/postgresql/16/bin/pg_restore --version
 
       - name: Run the tests
         run: uv run --extra test python -m pytest -q -n auto -rs --durations=25 -m "not installed and not provenance"
