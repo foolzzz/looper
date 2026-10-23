@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.44] - 2026-10-22
+
+### Changed
+
+- **Tests: one test per shared stop and runtime path; installed-CLI tests nightly (step pr3).** The stop matrix runs each shared code path on one runtime (per-turn processes: Codex runs all windows, OMP, pi and DSH only their own event-stream windows), tests that need an installed runtime CLI or a browser carry the new `installed` marker and run in a new nightly `Installed runtime tests` workflow, and the main test job excludes them. Tests, CI and one RFC page only; no change to `looper/`, no behavior change, no model-visible change. ([#422](https://github.com/foolzzz/looper/pull/422))
+
 ## [2.13.43] - 2026-10-22
 
 ### Changed
