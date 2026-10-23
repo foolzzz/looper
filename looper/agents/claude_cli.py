@@ -311,8 +311,8 @@ def read_only_args(library: AgentLibrary, *, cwd: str | os.PathLike[str], add_di
     ``permission_args``: Claude Code's default permission mode, pinned and with no one to answer its prompts
     (``READ_ONLY_MODE``), so that in ``--print`` mode it refuses every tool call it would ask about; without the
     shell and file-editing tools (``WRITE_TOOLS``); and with what the run may use without asking: file reads and
-    searches under its repository and ``add_dirs``, its skills, web reads and the MCP servers installed for it,
-    Looper's own among them (``mcp_rule``).
+    searches under its repository and ``add_dirs`` (knowledge and step worktrees), its skills, web reads and the
+    MCP servers installed for it, Looper's own among them (``mcp_rule``).
     A plugin's own MCP servers never load
     (``--strict-mcp-config``), so none needs a rule.
 
@@ -323,11 +323,13 @@ def read_only_args(library: AgentLibrary, *, cwd: str | os.PathLike[str], add_di
 
     servers = [mcp_rule(item.name) for item in library.items if item.kind is ItemKind.MCP]
     # A bare tool allow overrides Claude Code's outside-directory permission ask. Use absolute path rules
-    # (the leading // is Claude Code's absolute-path syntax), limited to the repository and mounted knowledge.
-    roots = dict.fromkeys((repository_root(Path(cwd).resolve()), *(Path(path).resolve() for path in add_dirs)))
+    # (the leading // is Claude Code's absolute-path syntax), limited to the repository and supplied directories.
+    # Keep both spellings so a document path through a symlink is allowed too, including above cwd in a repo.
+    roots = dict.fromkeys((repository_root(Path(cwd).resolve()), repository_root(Path(cwd).absolute()),
+                          *(root for path in add_dirs for root in (Path(path).resolve(), Path(path).absolute()))))
     paths = [re.sub(r"([\\*?\[\]{}()])", r"\\\1", root.as_posix().rstrip("/")) for root in roots]
     reads = [f"{tool}(/{path}/**)" for path in paths for tool in CONSULT_TOOLS]
-    return [*READ_ONLY_MODE, "--disallowedTools", ",".join(("Bash", *WRITE_TOOLS)),
+    return [*READ_ONLY_MODE, "--disallowedTools", ",".join(("Bash", *WRITE_TOOLS, "EnterWorktree")),
             "--allowedTools", ",".join((*reads, *READ_ONLY_ALLOWED, *servers))]
 
 

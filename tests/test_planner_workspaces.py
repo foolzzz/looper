@@ -133,7 +133,15 @@ class TestStepWorkspaces:
         notes = activity(agent_db)
         assert any(n.startswith("Checkpoint ") and "1 pending file(s)" in n for n in notes)
         assert sum("merged into main as" in n for n in notes) == 2
-        # The decision on a step in its own worktree says where it is: outside what the read-only Planner reads.
+        # The decision names the step's worktree, and its launch permits reading that worktree's files.
+        allowed = [argv[argv.index("--allowedTools") + 1].split(",") for argv in claude.argvs()]
+        # New worktrees become readable on the decision turn, and merged worktrees lose that grant.
+        directories = [(h.work_dir,), (h.work_dir, one["work_dir"], two["work_dir"]),
+                       (h.work_dir, two["work_dir"]), (h.work_dir,)]
+        for tool in ("Read", "Glob", "Grep"):
+            assert [{rule for rule in rules if rule.startswith(f"{tool}(")} for rules in allowed] == [
+                {f"{tool}(/{root.as_posix()}/**)" for path in paths
+                 for root in (Path(path).resolve(), Path(path).absolute())} for paths in directories]
         decisions = [t["text"] for t in claude.turns() if t["text"].startswith("[DECISION]")]
         base = one["workspace"]["base_commit"][:12]
         assert sum(f"- worktree: {one['work_dir']}, on branch looper/t1/s1-1 from {base}" in d for d in decisions) == 1

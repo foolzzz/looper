@@ -52,6 +52,14 @@ REVIEW_FAIL = {"passed": False, "findings": ["no tests"], "summary": "missing te
 Outcome = Callable[[MessageEnvelope], "dict[str, Any] | None"]
 
 
+def test_recommended_planner_prompt_uses_available_reading_tools() -> None:
+    from looper.agents.tiers.planner import DEFAULT_SYSTEM_PROMPT
+
+    assert "Read, Glob and Grep" in DEFAULT_SYSTEM_PROMPT
+    assert "commands that change nothing" not in DEFAULT_SYSTEM_PROMPT
+    assert "git status, log, diff and show" not in DEFAULT_SYSTEM_PROMPT
+
+
 @pytest.mark.parametrize(("runtime", "read_only"), [
     ("claude-code", ReadOnly.PERMISSIONS),
     ("codex", ReadOnly.SANDBOX),
@@ -315,9 +323,10 @@ def _assert_read_only(argv: list[str], cwd: Path) -> None:
     assert argv.count("--permission-mode") == 1 and _flag(argv, "--permission-mode") == "manual"
     assert argv.count("--permission-prompts") == 1 and _flag(argv, "--permission-prompts") == "none"
     assert [argv[i + 1] for i, arg in enumerate(argv) if arg == "--disallowedTools"] == [
-        "Bash,Edit,Write,NotebookEdit", "ListAgents,SendMessage"]
+        "Bash,Edit,Write,NotebookEdit,EnterWorktree", "ListAgents,SendMessage"]
     assert argv.count("--allowedTools") == 1
-    roots = (cwd.resolve(), *(Path(path).resolve() for path in _add_dirs(argv)))
+    roots = dict.fromkeys(root for path in (cwd, *map(Path, _add_dirs(argv)))
+                          for root in (path.resolve(), path.absolute()))
     reads = ",".join(f"{tool}(/{root.as_posix()}/**)" for root in roots for tool in ("Read", "Glob", "Grep"))
     assert str(_flag(argv, "--allowedTools")).startswith(f"{reads},Skill,WebFetch,WebSearch")
 
@@ -1044,7 +1053,9 @@ class TestResidentClaude:
         (argv,) = claude.argvs()
         # Read-only: the role prompt keeps it to planning, and Claude Code refuses what would change files.
         _assert_read_only(argv, h.work_dir)
-        reads = ",".join(f"{tool}(/{h.work_dir.resolve().as_posix()}/**)" for tool in ("Read", "Glob", "Grep"))
+        reads = ",".join(f"{tool}(/{root.as_posix()}/**)"
+                         for root in dict.fromkeys((h.work_dir.resolve(), h.work_dir.absolute()))
+                         for tool in ("Read", "Glob", "Grep"))
         assert _flag(argv, "--allowedTools") == f"{reads},Skill,WebFetch,WebSearch"  # no MCP server here
         assert _flag(argv, "--input-format") == "stream-json"
         assert _flag(argv, "--output-format") == "stream-json"
