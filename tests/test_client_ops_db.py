@@ -13,7 +13,7 @@ import pytest
 from looper.agents.api_v1 import OPERATOR, Principal
 from looper.agents.bus import MessageBus
 from looper.agents.message import MessageEnvelope, MessageType, channel_address
-from looper.agents.ops import Turn
+from looper.agents.ops import Risk, Tool, Turn
 from looper.agents.ops.clients import ClientOps
 from looper.agents.ops.service import Platform
 from tests.test_ops_tasks_db import _Chat, _project, _task
@@ -133,5 +133,32 @@ def test_the_manager_answering_a_clients_chat_gives_the_task_its_client_and_thre
         without = await _manager_create(_Chat(tmp_path), client_id=None)
         row = await tasks.get_task(without["result"]["task_id"], pool=pool)
         assert (row["client_id"], row["origin_thread"]) == (None, None)
+
+    run_db(test, monkeypatch)
+
+
+def test_a_call_that_fails_unexpectedly_stays_in_the_trail(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def broken(call: Any) -> dict[str, Any]:
+        raise RuntimeError("disk full")
+
+    async def ask(call: Any) -> str | None:
+        return "do it?" if call.arguments.get("confirm") else None
+
+    schema = {"type": "object", "properties": {"confirm": {"type": "boolean"}}}
+
+    async def test(pool: Any) -> None:
+        client = await _principal(pool)
+        ops = ClientOps(_ops(tmp_path)._platform, tools=(Tool("t_broken", "fails", schema, Risk.WRITE, broken,
+                                                               escalate=ask),))
+        failed = await ops.call(client, "s1", "t_broken", {})
+        assert failed["error"]["code"] == "unavailable"
+        asked = await ops.call(client, "s1", "t_broken", {"confirm": True})
+        confirmed = await ops.confirm(client, "s1", asked["confirmation_id"])
+        assert confirmed["error"]["code"] == "unavailable"
+        rows = await pool.fetch("SELECT status, error_code, confirmation_id, client_id FROM manager_actions ORDER BY id")
+        assert [(r["status"], r["error_code"], r["confirmation_id"], r["client_id"]) for r in rows] == [
+            ("error", "unavailable", None, client.client_id),
+            ("needs_confirmation", None, asked["confirmation_id"], client.client_id),
+            ("error", "unavailable", asked["confirmation_id"], client.client_id)]
 
     run_db(test, monkeypatch)

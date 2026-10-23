@@ -183,7 +183,7 @@ class ClientOps:
             return _error(exc.code, str(exc))
         except Exception as exc:
             logger.exception("an API client's call of %s failed", name)
-            await self._record(turn, tool, arguments, risk, "unavailable", error_code=ErrorCode.UNAVAILABLE.value,
+            await self._record(turn, tool, arguments, risk, "error", error_code=ErrorCode.UNAVAILABLE.value,
                                result={"message": f"{type(exc).__name__}: {exc}"})
             return _error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: {exc}); try "
                                                  "again later")
@@ -213,7 +213,7 @@ class ClientOps:
             return _error(exc.code, str(exc))
         except Exception as exc:
             logger.exception("an API client's confirmed call of %s failed", tool.name)
-            await self._record(turn, tool, arguments, Risk.HIGH, "unavailable", error_code=ErrorCode.UNAVAILABLE.value,
+            await self._record(turn, tool, arguments, Risk.HIGH, "error", error_code=ErrorCode.UNAVAILABLE.value,
                                result={"message": f"{type(exc).__name__}: {exc}"}, confirmation_id=pending.id)
             return _error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: {exc}); call "
                                                  "the operation again later")

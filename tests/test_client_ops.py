@@ -146,7 +146,7 @@ def test_errors_are_answered_and_recorded_but_a_reads_is_not(recorded: list[dict
     answer = ops.call("t_write", {"n": 99})
     assert _code(answer) == "unavailable" and "ConnectionError" in answer["error"]["message"]
     assert _code(ops.call("t_read", {"n": 13})) == "conflict"
-    assert [(r["status"], r["error_code"]) for r in recorded] == [("error", "conflict"), ("unavailable", "unavailable")]
+    assert [(r["status"], r["error_code"]) for r in recorded] == [("error", "conflict"), ("error", "unavailable")]
 
 
 def test_a_high_call_is_asked_not_run_and_the_same_client_and_session_confirms_it_once(
