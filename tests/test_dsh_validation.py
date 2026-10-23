@@ -666,7 +666,9 @@ def _serve_smoke_stand_in(mode):
             state["calls"].append([method, path])  # never persist the provider request body
             result = {}
             status = 200
-            if path == "/api/channel-configs":
+            if method == "POST" and path == "/api/v1/system/status":
+                result = {"status": "ok", "result": {"status": "running"}}
+            elif path == "/api/channel-configs":
                 result = {"configs": [{"enabled": mode == "channels"}]}
             elif path == "/api/registry":
                 result = {"runtimes": [{"name": "DSH", "type": "dsh", "builtin": True, "runtime_id": "rt-dsh"}],

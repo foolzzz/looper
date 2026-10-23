@@ -539,6 +539,48 @@ def test_a_reaped_agents_record_is_removed(
     assert asyncio.run(_run()) == (recordable, False)
 
 
+@pytest.mark.parametrize("tracked", [False, True], ids=["process", "turn_tree"])
+def test_a_cancelled_end_reaps_the_agent_and_removes_its_record(
+    runtime_root: Path, monkeypatch: pytest.MonkeyPatch, tracked: bool,
+) -> None:
+    async def _run() -> None:
+        await proc_tree.sweep(runtime_root)
+        process = await proc_tree.spawn(
+            "/bin/sh", "-c", 'trap "" TERM; echo ready; exec sleep 60',
+            stdout=asyncio.subprocess.PIPE)
+        assert process.stdout is not None
+        assert await asyncio.wait_for(process.stdout.readline(), 3) == b"ready\n"
+        record = runtime_root / proc_tree.RECORDS_DIR / f"{process.pid}.json"
+        assert record.exists()
+        tree = proc_tree.track(process) if tracked else None
+        signalled = asyncio.Event()
+        original_signal = proc_tree._signal
+
+        def signal_tree(agent: Any, members: Any, sig: int) -> None:
+            original_signal(agent, members, sig)
+            if sig == signal.SIGTERM:
+                signalled.set()
+
+        monkeypatch.setattr(proc_tree, "_signal", signal_tree)
+        ending = asyncio.create_task(tree.end() if tree else proc_tree.end(process, label="agent"))
+        try:
+            await asyncio.wait_for(signalled.wait(), 3)
+            ending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await ending
+            assert process.returncode == -signal.SIGKILL
+            assert not record.exists()
+        finally:
+            if not ending.done():
+                ending.cancel()
+            await asyncio.gather(ending, return_exceptions=True)
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+
+    asyncio.run(_run())
+
+
 # --- TurnTree: a turn's tree snapshotted at spawn, refreshed, ended from the snapshot ---
 
 _DETACHED_CHILD = (
