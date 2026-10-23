@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.59] - 2026-10-23
+
+### Changed
+
+- **Dashboard status moves to the versioned API.** `POST /api/v1/system/status` (body `{}`, answer in `result`) replaces `GET /api/status`, which is removed and now answers 404; the dashboard, `looper service status` and the service start-up probe use it. A v1 domain registry and a shared dashboard transport (`web/src/lib/v1.ts`) are added for the next migrations. With the operator credential a `high` `/api/v1/` operation now runs in one request; client tokens keep the two-step confirmation. Manager prompts and tools are unchanged; the OpenAPI document gains the status operation and error `details`. ([#457](https://github.com/foolzzz/looper/pull/457))
+
+### Fixed
+
+- **A cancelled process-tree stop reaps the child.** `proc_tree.end` and the turn tree's stop reap in a `finally`. ([#457](https://github.com/foolzzz/looper/pull/457))
+
 ## [2.13.58] - 2026-10-23
 
 ### Fixed
