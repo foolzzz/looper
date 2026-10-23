@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.45] - 2026-10-22
+
+### Added
+
+- **`loopercli`, `looper-skill` and an OpenAPI-described API (`/api/v1`) (stage 1 of the client-skill RFC).** An agent in another session, or a script, can hand work to a Manager and follow tasks: API clients with tokens made in Settings (accepted from loopback only, SHA-256 stored), operations generated from the ops catalog with per-client, per-session confirmation of high-risk writes, chat with a Manager over a server-sent event stream, the `loopercli` command (generated commands, `login`, `confirm`, `chat`, `wait`, `skill`), and `looper-skill` shipped in the wheel and as a Claude Code plugin. `schema.sql` adds `api_clients` and a nullable `client_id` on `chat_threads`, `tasks` and `manager_actions`. Behavior change: new `/api/v1` and `/api/clients` routes, a new command, a task created in a client's conversation reports into that conversation. Model-visible: a Manager message through a client carries the line `Channel: loopercli, client "<name>" ...`; the client has the Manager's tools less two plus `looper_task_pipeline` and `looper_gates`; `looper-skill` is new agent-facing text. ([#411](https://github.com/foolzzz/looper/pull/411))
+
 ## [2.13.44] - 2026-10-22
 
 ### Changed
