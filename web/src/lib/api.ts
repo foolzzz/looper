@@ -1550,11 +1550,7 @@ export interface NewProjectSkill {
   description: string;
   /** The SKILL.md body, without frontmatter. */
   content: string;
-}
-
-function skillsUrl(projectId: string, skillId?: string) {
-  const base = `${API_BASE}/projects/${encodeURIComponent(projectId)}/skills`;
-  return skillId ? `${base}/${encodeURIComponent(skillId)}` : base;
+  enabled?: boolean;
 }
 
 /**
@@ -1566,13 +1562,10 @@ export async function addProjectSkill(
   projectId: string,
   skill: NewProjectSkill,
 ): Promise<ProjectInstalls & { skill: ProjectSkill }> {
-  const res = await fetch(skillsUrl(projectId), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(skill),
-  });
-  if (!res.ok) await failed(res, "add skill");
-  return res.json();
+  const result = await callV1<ProjectInstalls & { skill: ProjectSkill }>(
+    "/api/v1/project_skills/add", { project_id: projectId, skill });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** One skill the project wrote and its SKILL.md body. */
@@ -1582,24 +1575,22 @@ export interface ProjectSkillBody {
 }
 
 export async function fetchProjectSkill(projectId: string, skillId: string): Promise<ProjectSkillBody> {
-  const res = await fetch(skillsUrl(projectId, skillId));
-  if (!res.ok) await failed(res, "skill");
-  return res.json();
+  const result = await callV1<ProjectSkillBody>(
+    "/api/v1/project_skills/get", { project_id: projectId, skill_id: skillId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Change a skill's name, description or body; a bad field is 400, a taken name 409. Switch it with its install. */
 export async function updateProjectSkill(
   projectId: string,
   skillId: string,
-  fields: Partial<NewProjectSkill>,
+  fields: Partial<Omit<NewProjectSkill, "enabled">>,
 ): Promise<ProjectInstalls & { skill: ProjectSkill }> {
-  const res = await fetch(skillsUrl(projectId, skillId), {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-  });
-  if (!res.ok) await failed(res, "update skill");
-  return res.json();
+  const result = await callV1<ProjectInstalls & { skill: ProjectSkill }>(
+    "/api/v1/project_skills/update", { project_id: projectId, skill_id: skillId, fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Delete a skill the project wrote: from the catalog and from every project it is installed in. */
@@ -1607,9 +1598,10 @@ export async function deleteProjectSkill(
   projectId: string,
   skillId: string,
 ): Promise<ProjectInstalls & { deleted: string }> {
-  const res = await fetch(skillsUrl(projectId, skillId), { method: "DELETE" });
-  if (!res.ok) await failed(res, "delete skill");
-  return res.json();
+  const result = await callV1<ProjectInstalls & { deleted: string }>(
+    "/api/v1/project_skills/delete", { project_id: projectId, skill_id: skillId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function updateTaskConfig(

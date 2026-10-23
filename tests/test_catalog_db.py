@@ -41,7 +41,7 @@ async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
     writer = _Writer()
     raw = b"" if body is None else json.dumps(body).encode()
-    if path.startswith(("/api/v1/catalog_items/", "/api/v1/installs/")):
+    if path.startswith(("/api/v1/catalog_items/", "/api/v1/installs/", "/api/v1/project_skills/")):
         from looper.agents.api_v1 import OPERATOR
         from looper.agents.ops.clients import ClientOps
         server._client_ops = ClientOps(SimpleNamespace())
@@ -50,7 +50,7 @@ async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
         await server._route_api(method, path, {}, raw, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
     answer = json.loads(payload)
-    if path.startswith(("/api/v1/catalog_items/", "/api/v1/installs/")):
+    if path.startswith(("/api/v1/catalog_items/", "/api/v1/installs/", "/api/v1/project_skills/")):
         answer = answer["result"] if answer.get("status") == "ok" else {"error": answer["error"]["message"]}
     return int(head.split()[1]), answer
 
@@ -161,7 +161,7 @@ def test_the_upgrade_keeps_imported_items_uninstalled_and_moves_project_skills_w
             "SELECT sha256 FROM library_items WHERE id = 'skill-0000000000b1'"))]
         assert (await load_installed(runtime, "manager")).items == ()
         # The API reads the body back as it was written (a missing last newline added).
-        status, body = await _call("GET", "/api/projects/proj-a/skills/skill-0000000000a1")
+        status, body = await _call("POST", "/api/v1/project_skills/get", {"project_id": 'proj-a', "skill_id": 'skill-0000000000a1'})
         assert status == 200 and body["content"] == "Run the checks, then reply DEPLOY-OK.\n"
         assert body["skill"]["qualified_name"] == "project:deploy-check"
 
@@ -270,8 +270,7 @@ def test_the_install_api_refuses_what_an_install_cannot_be(monkeypatch: pytest.M
     async def _test(pool: Any) -> None:
         ids = await _import(pool, "skill:alpha")
         (calc,) = await _projects("calc")
-        _, own = await _call("POST", f"/api/projects/{calc}/skills",
-                             {"name": "deploy-check", "description": "Deploy.", "content": "Reply OK."})
+        _, own = await _call("POST", "/api/v1/project_skills/add", {"project_id": calc, "skill": {"name": "deploy-check", "description": "Deploy.", "content": "Reply OK."}})
         own_id = own["skill"]["skill_id"]
         refused = [
             ({"item_id": ids["alpha"], "scope": "project", "project_id": calc, "roles": ["manager"]}, 400,
@@ -315,8 +314,7 @@ def test_the_catalog_and_a_projects_view_show_where_each_item_is_installed(monke
         await _call("POST", "/api/v1/installs/create", {"item_id": ids["mgr-only"], "scope": "global", "roles": ["manager"]})
         await _call("POST", "/api/v1/installs/create", {"item_id": ids["alpha"], "scope": "project", "project_id": calc,
                                               "roles": ["worker", "reviewer"]})
-        await _call("POST", f"/api/projects/{calc}/skills",
-                    {"name": "deploy-check", "description": "Deploy.", "content": "Reply OK."})
+        await _call("POST", "/api/v1/project_skills/add", {"project_id": calc, "skill": {"name": "deploy-check", "description": "Deploy.", "content": "Reply OK."}})
 
         status, catalog = await _call("POST", "/api/v1/catalog_items/list", {})
         # The roles an install may name, the ones a task's Planner defines last; an install names those only when

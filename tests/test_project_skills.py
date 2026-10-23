@@ -1,9 +1,9 @@
 """A project's own Claude Code skills: what the API refuses, and the SKILL.md a skill is written as.
 
 A project writes skills (a name, a one-line description and the body of their
-``SKILL.md``) into the catalog. Every refusal here happens before the
-database is touched, so none is needed; writing, installing and loading them
-against a real PostgreSQL is ``test_project_skills_db.py``.
+``SKILL.md``) into the catalog. These v1 input refusals need no skill storage;
+writing, installing and loading them against a real PostgreSQL is
+``test_project_skills_db.py``.
 """
 
 from __future__ import annotations
@@ -39,9 +39,20 @@ def _call(root: Path, method: str, path: str, body: Any = None) -> tuple[int, An
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), task_router=TaskRouter(runtime_root=root),
                              supervisor=SimpleNamespace(), runtime_root=root)
     writer = _Writer()
-    asyncio.run(server._route_api(method, path, {}, raw, writer))
+    from looper.agents.api_v1 import OPERATOR
+    from looper.agents.ops.clients import ClientOps
+    server._client_ops = ClientOps(SimpleNamespace())
+    if not isinstance(body, bytes):
+        arguments = {"project_id": "proj-1"}
+        if path.endswith("/update"):
+            arguments.update(skill_id="skill-000000000001", fields=body)
+        else:
+            arguments["skill"] = body
+        raw = json.dumps(arguments).encode()
+    asyncio.run(server._handle_v1(method, path, {}, {}, raw, writer, OPERATOR))
     head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload)
+    answer = json.loads(payload)
+    return int(head.split()[1]), {"error": answer["error"]["message"]}
 
 
 def _skill(name: Any = "deploy-check", description: Any = "Use before a deploy: checks the release steps.",
@@ -49,7 +60,7 @@ def _skill(name: Any = "deploy-check", description: Any = "Use before a deploy: 
     return {"name": name, "description": description, "content": content, **extra}
 
 
-BASE = "/api/projects/proj-1/skills"
+BASE = "/api/v1/project_skills/add"
 
 
 class TestRefused:
@@ -65,7 +76,7 @@ class TestRefused:
         ("project:deploy", "lowercase letters, digits and hyphens"),
         ("déploy", "lowercase letters, digits and hyphens"),
         ("x" * 65, "at most 64 characters"),
-        (7, "a skill needs a name"),
+        (7, "does not match the declared schema"),
     ])
     def test_a_name_that_is_not_a_slug(self, tmp_path: Path, name: Any, reason: str) -> None:
         status, body = _call(tmp_path, "POST", BASE, _skill(name=name))
@@ -74,7 +85,7 @@ class TestRefused:
     @pytest.mark.parametrize(("description", "reason"), [
         ("", "a skill needs a description"),
         ("   ", "a skill needs a description"),
-        (None, "a skill needs a description"),
+        (None, "does not match the declared schema"),
         ("two\nlines", "one line"),
         ("tab\there", "control characters"),
         ("x" * 1025, "at most 1024 characters"),
@@ -86,7 +97,7 @@ class TestRefused:
     @pytest.mark.parametrize(("content", "reason"), [
         ("", "a skill needs its content"),
         ("  \n ", "a skill needs its content"),
-        (["not", "text"], "a skill needs its content"),
+        (["not", "text"], "does not match the declared schema"),
         ("a \x00 NUL", "NUL"),
         ("---\nname: other\n---\nBody", "frontmatter"),
         ("x" * (64 * 1024 + 1), "at most 64 KiB"),
@@ -97,10 +108,10 @@ class TestRefused:
         assert status == 400 and reason in body["error"]
 
     @pytest.mark.parametrize(("body", "reason"), [
-        ({**_skill(), "allowed_tools": "Bash"}, "unknown field 'allowed_tools'"),
-        ({**_skill(), "enabled": "yes"}, "enabled must be true or false"),
-        ([], "JSON object"),
-        (b"{not json", "invalid JSON"),
+        ({**_skill(), "allowed_tools": "Bash"}, "does not match the declared schema"),
+        ({**_skill(), "enabled": "yes"}, "does not match the declared schema"),
+        ([], "does not match the declared schema"),
+        (b"{not json", "JSON object"),
     ])
     def test_a_bad_request(self, tmp_path: Path, body: Any, reason: str) -> None:
         status, answer = _call(tmp_path, "POST", BASE, body)
@@ -108,14 +119,14 @@ class TestRefused:
 
     @pytest.mark.parametrize(("body", "reason"), [
         ({}, "give at least one of"),
-        ({"enabled": False}, "where it is installed"),
+        ({"enabled": False}, "does not match the declared schema"),
         ({"name": "Bad Name"}, "lowercase letters, digits and hyphens"),
         ({"content": ""}, "a skill needs its content"),
         ({"description": "a\nb"}, "one line"),
-        ({"project_id": "proj-2"}, "unknown field 'project_id'"),
+        ({"project_id": "proj-2"}, "does not match the declared schema"),
     ])
     def test_a_bad_change(self, tmp_path: Path, body: Any, reason: str) -> None:
-        status, answer = _call(tmp_path, "PUT", f"{BASE}/skill-000000000001", body)
+        status, answer = _call(tmp_path, "POST", "/api/v1/project_skills/update", body)
         assert status == 400 and reason in answer["error"]
 
 
