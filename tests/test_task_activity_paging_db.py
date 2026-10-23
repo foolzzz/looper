@@ -7,8 +7,9 @@ from typing import Any
 import pytest
 
 from looper.db import activity
+from tests.db_support import run_db
 from tests.test_ops_tasks_db import _project, _task
-from tests.test_usage_api_db import _get, _run
+from tests.test_usage_api_db import _get
 
 
 async def _fill(pool: Any, task_id: str, count: int, *, kind: str = "tool") -> list[int]:
@@ -40,7 +41,7 @@ def test_without_a_cursor_the_latest_window_comes_oldest_first(monkeypatch: pyte
         status, body = await _get("/api/tasks/task-a/activity", {"before": str(seqs[0])})
         assert body["activity"] == [] and body["has_more"] is False and body["oldest_seq"] is None
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_an_empty_task_and_other_tasks_rows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -57,7 +58,7 @@ def test_an_empty_task_and_other_tasks_rows(monkeypatch: pytest.MonkeyPatch) -> 
         status, body = await _get("/api/tasks/task-a/conversation")
         assert status == 200 and body["conversation"] == [] and body["has_more"] is False
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_window_is_capped_and_defaults_to_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -76,7 +77,7 @@ def test_the_window_is_capped_and_defaults_to_the_cap(monkeypatch: pytest.Monkey
         status, body = await _get("/api/tasks/task-a/conversation", {"limit": "5000"})
         assert body["conversation"] == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_forward_reads_are_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -92,7 +93,7 @@ def test_forward_reads_are_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
         status, body = await _get("/api/tasks/task-a/activity", {"since": "0"})
         assert [r["seq"] for r in body["activity"]] == seqs
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_conversation_is_windowed_like_the_activity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -119,7 +120,7 @@ def test_the_conversation_is_windowed_like_the_activity(monkeypatch: pytest.Monk
         status, body = await _get("/api/tasks/task-a/conversation")
         assert [r["seq"] for r in body["conversation"]] == talk and body["has_more"] is False
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_bad_cursor_is_a_400(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -129,4 +130,4 @@ def test_a_bad_cursor_is_a_400(monkeypatch: pytest.MonkeyPatch) -> None:
             status, _ = await _get(f"/api/tasks/task-a/{path}", {"before": "x"})
             assert status == 400
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

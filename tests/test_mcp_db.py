@@ -12,7 +12,8 @@ from typing import Any
 
 import pytest
 
-from tests.test_catalog_db import DSN, _call, _projects, _run
+from tests.db_support import DSN, run_db
+from tests.test_catalog_db import _call, _projects
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -92,7 +93,7 @@ def test_a_server_reaches_only_the_roles_and_projects_it_is_installed_for(
         assert (await _call("DELETE", f"/api/installs/{install['install_id']}"))[0] == 200
         assert await _mounted(root, "planner", calc) == ([], None)
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_the_api_masks_the_values_and_sending_the_mask_back_keeps_them(
@@ -132,7 +133,7 @@ def test_the_api_masks_the_values_and_sending_the_mask_back_keeps_them(
         assert (await _call("GET", f"/api/catalog/{item_id}"))[0] == 404
         assert await _mounted(tmp_path, "worker") == ([], None)
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 @pytest.mark.parametrize(("body", "status", "reason"), [
@@ -157,7 +158,7 @@ def test_adding_a_server_refuses_what_it_cannot_be(
         got, answer = await _call("POST", "/api/catalog/mcp", body)
         assert got == status and reason in answer["error"], answer
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_importing_from_this_machine_reads_its_user_mcp_servers(
@@ -214,7 +215,7 @@ def test_importing_from_this_machine_reads_its_user_mcp_servers(
         assert sorted(i["name"] for i in (await _call("GET", "/api/catalog"))[1]["items"]) == [
             "marker", "mine", "plain"]
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_a_catalog_from_before_mcp_servers_accepts_them(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -232,4 +233,4 @@ def test_a_catalog_from_before_mcp_servers_accepts_them(monkeypatch: pytest.Monk
             await pool.execute("INSERT INTO library_items (id, kind, name, sha256, size_bytes, file_count) "
                                "VALUES ('x', 'agent', 'x', 'x', 0, 0)")
 
-    _run(_test, monkeypatch, before=before)
+    run_db(_test, monkeypatch, before=before)

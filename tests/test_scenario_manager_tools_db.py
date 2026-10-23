@@ -20,10 +20,10 @@ import pytest
 
 from looper.agents.managers_api import ManagerDefinition, ManagerTools
 from looper.agents.ops.service import MANAGER_TOOLS, ManagerOps, Platform, scope_for
+from tests.db_support import DSN, run_db
 from tests.test_gate_channels_db import _gate, _gate_step
 from tests.test_managers_schema_db import _manager
 from tests.test_ops_tasks_db import _Chat, _error, _project
-from tests.test_usage_api_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -103,7 +103,7 @@ def test_a_managers_listing_is_its_scope_and_follows_the_database(monkeypatch: p
         assert [tool["name"] for tool in chat.ops.listing()] == names
         assert [tool["name"] for tool in await chat.ops.current_listing()] == [tool.name for tool in MANAGER_TOOLS]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("tools,task_scope", [("all", "own"), ("tasks", "all"), ("tasks", "own"), ("all", "all")])
@@ -133,7 +133,7 @@ def test_tools_and_task_scope_are_independent(monkeypatch: pytest.MonkeyPatch, t
         (answer,) = await default.say("x", ("looper_task_instruct", {"task_id": "task-own", "text": "hi"}))
         _ok(answer)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_task_scope_change_is_in_force_before_the_fleet_applies_it(monkeypatch: pytest.MonkeyPatch,
@@ -161,7 +161,7 @@ def test_a_task_scope_change_is_in_force_before_the_fleet_applies_it(monkeypatch
         assert (await tasks.get_task("task-default", pool=pool))["status"] == "failed"
         assert default.sent() == [] and chat.sent() == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_revision_check_never_falls_back_to_the_old_scope(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -197,7 +197,7 @@ def test_the_revision_check_never_falls_back_to_the_old_scope(monkeypatch: pytes
         with pytest.raises(Exception, match="turned off"):
             await chat.ops.current_listing()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_projects_are_read_only_for_a_tasks_manager_and_the_refusal_is_audited(monkeypatch: pytest.MonkeyPatch,
@@ -212,7 +212,7 @@ def test_projects_are_read_only_for_a_tasks_manager_and_the_refusal_is_audited(m
                                   "WHERE tool = 'looper_projects' AND status = 'error'")
         assert tuple(row) == ("error", REVIEW, "forbidden")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_set_scope_swaps_everything_at_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -227,7 +227,7 @@ def test_a_set_scope_swaps_everything_at_once(monkeypatch: pytest.MonkeyPatch, t
         (answer,) = await chat.say("x", ("looper_projects", {"action": "create", "name": "new"}))
         _ok(answer)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- Confirmations ---
@@ -251,7 +251,7 @@ def test_a_confirmation_is_rechecked_against_the_scope_in_force(monkeypatch: pyt
         assert _error(answer) == ("not_found" if set_scope_drops else "forbidden")
         assert _ok((await default.say("x", view))[0]) == before
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_confirmation_for_a_task_that_changed_owner_does_not_run(monkeypatch: pytest.MonkeyPatch,
@@ -273,7 +273,7 @@ def test_a_confirmation_for_a_task_that_changed_owner_does_not_run(monkeypatch: 
         assert (row["error_code"], row["manager_id"]) == ("forbidden", REVIEW)
         assert await manager_actions.for_task("task-own", pool=pool)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- Creating tasks ---
@@ -294,7 +294,7 @@ def test_a_task_is_attributed_to_the_manager_that_creates_it(monkeypatch: pytest
                                   "AND task_id = $1", scoped["task_id"])
         assert row["manager_id"] == REVIEW
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("profiles", [False, True])
@@ -317,7 +317,7 @@ def test_a_turned_off_manager_creates_no_task(monkeypatch: pytest.MonkeyPatch, t
         assert _error(answer) == "conflict" and "turned off or deleted" in answer["error"]["message"]
         assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_task_waits_for_a_delete_that_holds_the_managers_row(monkeypatch: pytest.MonkeyPatch,
@@ -340,7 +340,7 @@ def test_a_task_waits_for_a_delete_that_holds_the_managers_row(monkeypatch: pyte
         assert _error(answer) == "conflict" and "turned off or deleted" in answer["error"]["message"]
         assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- Acting on tasks ---
@@ -372,7 +372,7 @@ def test_a_scoped_manager_acts_only_on_its_own_tasks(monkeypatch: pytest.MonkeyP
         (answer,) = await chat.say("x", ("looper_tasks", {"action": "list", "query": "default"}))
         assert _listed(answer) == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- Reads derived from a Manager's tasks ---
@@ -436,7 +436,7 @@ def test_the_overview_of_a_scoped_manager_counts_its_own_tasks(monkeypatch: pyte
         assert scoped["unhealthy"] == []
         assert [entry["name"] for entry in full["unhealthy"]] == ["worker-pool"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_projects_count_only_a_scoped_managers_tasks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -453,7 +453,7 @@ def test_projects_count_only_a_scoped_managers_tasks(monkeypatch: pytest.MonkeyP
                                                                "background": "b"})))[0])["project"]
         assert (updated["task_count"], updated["active_count"], updated["schedule_count"]) == (1, 1, 0)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_costs_of_a_scoped_manager_name_only_its_own_tasks(monkeypatch: pytest.MonkeyPatch,
@@ -478,7 +478,7 @@ def test_the_costs_of_a_scoped_manager_name_only_its_own_tasks(monkeypatch: pyte
             else:
                 assert [p["tasks"] for p in scoped["projects"]] == [1] and [p["tasks"] for p in full["projects"]] == [2]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- Workspaces ---
@@ -519,7 +519,7 @@ def test_a_workspace_warning_does_not_name_another_managers_task(monkeypatch: py
         _ok(plain[0])
         assert "secret title task-b" in default.turns[-1].blocks[0]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_agent_profile_usage_and_deletion_conflicts_stay_inside_a_scoped_managers_tasks(
@@ -548,7 +548,7 @@ def test_agent_profile_usage_and_deletion_conflicts_stay_inside_a_scoped_manager
         assert "task-default" not in text and "title of" not in text and "2 task" not in text
         assert await pool.fetchval("SELECT count(*) FROM agent_profiles WHERE id = $1", profile_id) == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_agent_profile_answers_count_only_a_scoped_managers_tasks(monkeypatch: pytest.MonkeyPatch,
@@ -571,7 +571,7 @@ def test_agent_profile_answers_count_only_a_scoped_managers_tasks(monkeypatch: p
             "action": "update", "profile": "shared-2", "name": "shared-3"})))[0])
         assert full["profile"]["used_by"] == "2 tasks"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_project_deletion_conflicts_stay_inside_a_scoped_managers_tasks(monkeypatch: pytest.MonkeyPatch,
@@ -605,7 +605,7 @@ def test_project_deletion_conflicts_stay_inside_a_scoped_managers_tasks(monkeypa
         assert await refused(chat) == message  # a template of another Manager, not named
         assert "template" in await refused(default)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_schedule_runs_show_a_scoped_manager_none_of_another_managers_tasks(monkeypatch: pytest.MonkeyPatch,
@@ -649,4 +649,4 @@ def test_schedule_runs_show_a_scoped_manager_none_of_another_managers_tasks(monk
         session = got["schedule"]["planner_session"]
         assert (session["last_task_id"], session["last_task_title"]) == ("task-own", "title of task-own")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

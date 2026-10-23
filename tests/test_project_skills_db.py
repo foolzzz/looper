@@ -8,48 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import stat
-import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+from tests.db_support import DSN, run_db
+
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-
-
-@asynccontextmanager
-async def _fresh_schema() -> AsyncIterator[Any]:
-    import asyncpg
-
-    schema = f"looper_test_{uuid.uuid4().hex[:12]}"
-    admin = await asyncpg.connect(DSN)
-    await admin.execute(f'CREATE SCHEMA "{schema}"')
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3, server_settings={"search_path": schema})
-    try:
-        yield pool
-    finally:
-        await pool.close()
-        await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
-        await admin.close()
-
-
-def _run(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run ``test(pool)`` on a new schema that is also the server's pool."""
-    from looper.db import connection
-
-    async def _main() -> None:
-        async with _fresh_schema() as pool:
-            await connection.ensure_schema(pool)
-            monkeypatch.setattr(connection, "_pool", pool)
-            await test(pool)
-
-    asyncio.run(_main())
 
 
 class _Writer:
@@ -108,7 +76,7 @@ def test_names_are_unique_per_owner_and_a_skill_goes_with_its_project(monkeypatc
         assert list(await _items(pool)) == [f"{other['id']}/deploy-check"]
         assert await pool.fetchval("SELECT count(*) FROM library_installs") == 1
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_the_api_writes_a_catalog_item_installed_in_the_project_then_changes_and_deletes_it(
@@ -160,7 +128,7 @@ def test_the_api_writes_a_catalog_item_installed_in_the_project_then_changes_and
         assert (await _call(tmp_path, "DELETE", f"{base}/{skill_id}"))[0] == 404
         assert await pool.fetchval("SELECT count(*) FROM library_installs WHERE item_id = $1", skill_id) == 0
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_a_skill_is_read_and_changed_through_its_own_project_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -182,7 +150,7 @@ def test_a_skill_is_read_and_changed_through_its_own_project_only(monkeypatch: p
         assert (await _call(tmp_path, "PUT", elsewhere, {"name": "mine"}))[0] == 404
         assert (await _call(tmp_path, "DELETE", elsewhere))[0] == 404
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_a_skill_installed_in_another_project_keeps_one_name_per_project(
@@ -221,7 +189,7 @@ def test_a_skill_installed_in_another_project_keeps_one_name_per_project(
             ("project:release-notes", "calc", ["worker"])]
         assert theirs["owned_count"] == 1
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_concurrent_adds_cannot_both_pass_the_count_cap_or_take_one_name(
@@ -245,7 +213,7 @@ def test_concurrent_adds_cannot_both_pass_the_count_cap_or_take_one_name(
         assert len(refused) == 1 and "at most 2 skills" in str(refused[0])
         assert await pool.fetchval("SELECT count(*) FROM library_items WHERE origin = 'project'") == 2
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_a_run_loads_only_the_skills_installed_and_enabled_in_its_project(
@@ -280,4 +248,4 @@ def test_a_run_loads_only_the_skills_installed_and_enabled_in_its_project(
         assert [i.name for i in theirs.items] == ["elsewhere"] and theirs.plugin_dirs != loaded.plugin_dirs
         assert (await load_installed(runtime, "manager")).items == ()
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)

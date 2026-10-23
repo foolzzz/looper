@@ -8,8 +8,8 @@ import pytest
 
 from looper.agents import profile_registry as service
 from looper.agents import runtimes
-from looper.db import agent_setting_layers, connection, profile_registry as db
-from tests.test_catalog_db import DSN, _fresh_schema
+from looper.db import agent_setting_layers, profile_registry as db
+from tests.db_support import DSN, run_db
 
 needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -26,34 +26,31 @@ def _row(**changes):
 
 
 def _run(test, monkeypatch):
-    async def run():
-        async with _fresh_schema() as pool:
-            await connection.ensure_schema(pool)
-            monkeypatch.setattr(connection, "_pool", pool)
-            monkeypatch.setattr(service, "_login_modules", lambda: {})
-            # Target schema fixtures do not depend on the profile write path.
-            await pool.execute("""
-                INSERT INTO llm_providers (id, name, vendor_type, auth) VALUES
-                  ('prov-test', 'Test account', 'custom', 'api_key'),
-                  ('prov-other', 'Other account', 'custom', 'api_key');
-                INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url) VALUES
-                  ('prov-test', 'anthropic-messages', 'https://messages.example.invalid'),
-                  ('prov-test', 'openai-chat', 'https://chat.example.invalid'),
-                  ('prov-test', 'openai-responses', 'https://responses.example.invalid'),
-                  ('prov-other', 'anthropic-messages', 'https://other.example.invalid');
-                INSERT INTO llm_models (id, provider_id, name, protocol, efforts) VALUES
-                  ('model-messages', 'prov-test', 'same-name', 'anthropic-messages', ARRAY['low']),
-                  ('model-chat', 'prov-test', 'same-name', 'openai-chat', NULL),
-                  ('model-responses', 'prov-test', 'same-name', 'openai-responses', '{}'),
-                  ('model-other', 'prov-other', 'same-name', 'anthropic-messages', NULL);
-            """)
-            for adapter in runtimes.ADAPTERS.values():
-                await pool.execute("INSERT INTO agent_runtimes (id, name, type, executable, capabilities) "
-                                   "VALUES ($1, $2, $2, '', $3) ON CONFLICT (id) DO NOTHING",
-                                   service.builtin_runtime_id(adapter), adapter.type,
-                                   [c.value for c in adapter.capabilities])
-            await test(pool)
-    asyncio.run(asyncio.wait_for(run(), timeout=30))
+    async def setup(pool):
+        monkeypatch.setattr(service, "_login_modules", lambda: {})
+        # Target schema fixtures do not depend on the profile write path.
+        await pool.execute("""
+            INSERT INTO llm_providers (id, name, vendor_type, auth) VALUES
+              ('prov-test', 'Test account', 'custom', 'api_key'),
+              ('prov-other', 'Other account', 'custom', 'api_key');
+            INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url) VALUES
+              ('prov-test', 'anthropic-messages', 'https://messages.example.invalid'),
+              ('prov-test', 'openai-chat', 'https://chat.example.invalid'),
+              ('prov-test', 'openai-responses', 'https://responses.example.invalid'),
+              ('prov-other', 'anthropic-messages', 'https://other.example.invalid');
+            INSERT INTO llm_models (id, provider_id, name, protocol, efforts) VALUES
+              ('model-messages', 'prov-test', 'same-name', 'anthropic-messages', ARRAY['low']),
+              ('model-chat', 'prov-test', 'same-name', 'openai-chat', NULL),
+              ('model-responses', 'prov-test', 'same-name', 'openai-responses', '{}'),
+              ('model-other', 'prov-other', 'same-name', 'anthropic-messages', NULL);
+        """)
+        for adapter in runtimes.ADAPTERS.values():
+            await pool.execute("INSERT INTO agent_runtimes (id, name, type, executable, capabilities) "
+                               "VALUES ($1, $2, $2, '', $3) ON CONFLICT (id) DO NOTHING",
+                               service.builtin_runtime_id(adapter), adapter.type,
+                               [c.value for c in adapter.capabilities])
+
+    run_db(test, monkeypatch, setup=setup, timeout=30)
 
 
 @pytest.mark.parametrize("field", ["provider_id", "model", "system_prompt_mode", "system_prompt_mode_choice",

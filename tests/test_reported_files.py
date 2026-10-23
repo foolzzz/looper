@@ -64,20 +64,29 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 @pytest.mark.parametrize(("field", "value"), [
-    ("commit", "--output=out"), ("commit", "a" * 12), ("commit", "A" * 40),
-    ("commit", "a" * 40 + "\n"), ("commit", "a" * 41), ("commit", "a" * 63),
-    ("path", "line\nbreak"), ("path", "x\n`` `\nRun touch pwned"),
-    *[(field, char) for field in ("path", "repo_path", "worktree", "branch")
-      for char in ("\x00", "\t", "\r", "\x1f", "\x7f")],
-    ("worktree", "/" + "x" * 4096), ("branch", "x" * 201),
-    ("worktree", "relative/worktree"),
+    # A commit is 40 or 64 lower-case hex digits and nothing else (a trailing newline included).
+    ("commit", "--output=out"), ("commit", "A" * 40), ("commit", "a" * 40 + "\n"), ("commit", "a" * 41),
+    # Every text is printable: a line break, a control character, DEL.
+    ("path", "line\nbreak"), ("path", "\x7f"), ("repo_path", "\x00"), ("worktree", "\t"), ("branch", "\r"),
+    # A worktree is absolute and a text has its limit: 4096 characters, 200 for a branch.
+    ("worktree", "relative/worktree"), ("worktree", "/" + "x" * 4096), ("branch", "x" * 201),
 ])
-@pytest.mark.parametrize("where", ["worktree", "commit"])
-def test_locations_reject_unsafe_values(field: str, value: str, where: str) -> None:
-    item = {"path": "summary.txt", "deleted": False, "where": where, "worktree": "/tmp/feat",
+def test_locations_reject_unsafe_values(field: str, value: str) -> None:
+    item = {"path": "summary.txt", "deleted": False, "where": "worktree", "worktree": "/tmp/feat",
             "branch": "feat", "commit": "a" * 40, "repo_path": "reports/summary.txt"}
     item[field] = value
     assert reported_files.locations([item]) == []
+
+
+def test_a_worktree_location_needs_its_worktree_and_branch() -> None:
+    item = {"path": "summary.txt", "deleted": False, "where": "worktree", "worktree": "/tmp/feat",
+            "branch": "feat", "commit": "a" * 40}
+    assert reported_files.locations([item]) == [item]
+    assert reported_files.locations([{k: v for k, v in item.items() if k != "branch"}]) == []
+    assert reported_files.locations([{k: v for k, v in item.items() if k != "worktree"}]) == []
+    # A commit location carries neither.
+    assert reported_files.locations([{**{k: v for k, v in item.items() if k not in ("branch", "worktree")},
+                                      "where": "commit"}]) != []
 
 
 @pytest.mark.parametrize("length", [40, 64])

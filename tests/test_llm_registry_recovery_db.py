@@ -28,12 +28,12 @@ from looper import ops_config
 from looper.agents import db_backup
 from looper.agents.serve import _back_up_before_schema_change
 from looper.db import connection, registry_migration
+from tests.db_support import DSN
 from tests.test_db_backup import _backups, _install, _install_docker, _docker_calls, _serve
 from tests.test_llm_registry_rehearsal_db import _dsn, _history, _snapshot_databases
-from tests.test_registry_migration_report_db import state
 from tests.test_profile_rename_migration_db import _structure as _raw_structure
+from tests.test_registry_migration_report_db import state
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DSN, reason="requires a disposable LOOPER_TEST_DATABASE_URL")
 
 _VERSION_TWO = """

@@ -14,13 +14,14 @@ from typing import Any
 
 import pytest
 
-from tests.test_schedules_db import DSN, _Env, _run
-from tests.test_schedules_s2_db import TELEGRAM_CHAT, _allow_telegram, _setup
+from tests.db_support import DSN
+from tests.schedule_support import TELEGRAM_CHAT, ScheduleEnv, allow_telegram, run_scheduled, with_sender
+
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
-async def _gone(env: _Env, sid: str) -> None:
+async def _gone(env: ScheduleEnv, sid: str) -> None:
     """Nothing of the schedule is left, and nothing brought it back."""
     assert (await env.call("GET", f"/api/schedules/{sid}"))[0] == 404
     for table in ("schedules", "schedule_runs", "schedule_notifications"):
@@ -34,9 +35,9 @@ def _errors(caplog: pytest.LogCaptureFixture) -> list[str]:
 def test_a_schedule_deleted_while_its_task_runs_lets_the_task_end_and_says_nothing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    async def test(env: _Env) -> None:
-        sender = _setup(env)
-        await _allow_telegram(env)
+    async def test(env: ScheduleEnv) -> None:
+        sender = with_sender(env)
+        await allow_telegram(env)
         sid = (await env.enabled(notify="always", notify_target={"channel": "telegram", "chat": TELEGRAM_CHAT},
                                  run_timeout_seconds=60))["schedule_id"]
         run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
@@ -61,14 +62,14 @@ def test_a_schedule_deleted_while_its_task_runs_lets_the_task_end_and_says_nothi
         assert _errors(caplog) == []
 
     caplog.set_level(logging.INFO)
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_schedule_deleted_while_its_gate_runs_creates_no_task(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    async def test(env: _Env) -> None:
-        sender = _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        sender = with_sender(env)
         gate = "touch started; while [ ! -e go ]; do sleep 0.05; done; echo alert-1"
         sid = (await env.enabled(gate_command=gate, gate_timeout_seconds=30, notify="always"))["schedule_id"]
         run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
@@ -91,13 +92,13 @@ def test_a_schedule_deleted_while_its_gate_runs_creates_no_task(
         assert _errors(caplog) == []
 
     caplog.set_level(logging.INFO)
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_schedule_deleted_with_a_queued_run_never_starts_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         sid = (await env.enabled(overlap="queue"))["schedule_id"]
         first = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
         queued = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
@@ -113,7 +114,7 @@ def test_a_schedule_deleted_with_a_queued_run_never_starts_it(
         assert _errors(caplog) == []
 
     caplog.set_level(logging.INFO)
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 async def _waits_for_a_lock(pool: Any, query: str) -> None:
@@ -134,8 +135,8 @@ def test_a_schedule_deleted_while_its_runs_end_is_recorded_is_deleted_and_the_en
     for it and succeeds, and the end is recorded without an error, never a deadlock that fails one of them."""
     from looper.db import schedules as db_schedules
 
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         sid = (await env.enabled())["schedule_id"]
         task_id = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]["task_id"]
         await env.pool.execute("UPDATE tasks SET status = 'completed' WHERE id = $1", task_id)
@@ -163,7 +164,7 @@ def test_a_schedule_deleted_while_its_runs_end_is_recorded_is_deleted_and_the_en
         assert _errors(caplog) == []
 
     caplog.set_level(logging.INFO)
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_message_about_a_run_of_a_schedule_deleted_meanwhile_is_dropped_without_an_error(
@@ -173,9 +174,9 @@ def test_a_message_about_a_run_of_a_schedule_deleted_meanwhile_is_dropped_withou
     recorded: the message is not recorded (it went with the schedule), and the notifier raises nothing."""
     from looper.db import schedules as db_schedules
 
-    async def test(env: _Env) -> None:
-        sender = _setup(env)
-        await _allow_telegram(env)
+    async def test(env: ScheduleEnv) -> None:
+        sender = with_sender(env)
+        await allow_telegram(env)
         sid = (await env.enabled(notify="always", notify_target={"channel": "telegram", "chat": TELEGRAM_CHAT})
                )["schedule_id"]
         run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
@@ -190,4 +191,4 @@ def test_a_message_about_a_run_of_a_schedule_deleted_meanwhile_is_dropped_withou
         await env.scheduler._notifier.run_ended(run["run_id"])
         await _gone(env, sid)
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)

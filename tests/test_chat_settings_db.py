@@ -11,13 +11,14 @@ from typing import Any
 import pytest
 
 from looper.agents import chat_settings
-from tests.test_schedules_db import DSN, _Env, _run
+from tests.db_support import DSN
+from tests.schedule_support import ScheduleEnv, run_scheduled
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
 def test_the_stop_setting_is_stored_and_loaded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         assert await chat_settings.load() is False
         assert await env.call("GET", "/api/chat-settings") == (200, {"stop_enabled": False})
         assert await env.call("PUT", "/api/chat-settings", {"stop_enabled": True}) == (200, {"stop_enabled": True})
@@ -26,4 +27,4 @@ def test_the_stop_setting_is_stored_and_loaded(monkeypatch: pytest.MonkeyPatch, 
         assert await env.call("PUT", "/api/chat-settings", {"stop_enabled": None}) == (200, {"stop_enabled": False})
         assert await chat_settings.load() is False
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)

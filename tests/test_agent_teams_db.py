@@ -16,9 +16,9 @@ import pytest
 
 import agent_launch_parity as parity
 from fake_claude import fake_claude
-from tests.test_catalog_db import DSN
+from tests.db_support import DSN, run_db
 from tests.test_profile_registry_db import (  # noqa: F401
-    _call, _launch, _model_id, _ok, _provider, _run, _runtime, stand_in,
+    _call, _launch, _model_id, _ok, _provider, _runtime, stand_in,
 )
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -68,7 +68,7 @@ def test_agent_teams_are_on_by_default_for_claude_code_and_only_claude_code_take
             status, payload = await _profile("cc/bad", agent_teams=value)
             assert status == 400 and "agent_teams must be true or false" in payload["error"]
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_the_upgrade_turns_agent_teams_on_once_for_every_claude_code_profile(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -101,7 +101,7 @@ def test_the_upgrade_turns_agent_teams_on_once_for_every_claude_code_profile(mon
         await ensure_schema(pool)
         assert await teams() == {"claude-code/opus": True, "cc/sonnet": False, "codex/gpt": False}
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 async def _seen(role: str, task_id: str, root: Path) -> dict[str, Any]:
@@ -148,4 +148,4 @@ def test_the_manager_workers_and_reviewers_start_with_agent_teams_only_when_thei
             seen = await _seen(role, task, tmp_path)
             assert (_teammate_mode(seen["argv"]), TEAMS in seen["env"]) == (None, False), role
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)

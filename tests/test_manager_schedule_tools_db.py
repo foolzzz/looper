@@ -17,11 +17,11 @@ from typing import Any
 
 import pytest
 
+from tests.db_support import DSN, run_db
 from tests.test_manager_config_tools_db import _ok, _trail
 from tests.test_manager_ops import _Clock
 from tests.test_ops_tasks_db import _Chat, _error, _project, _task
 from tests.test_task_agents_db import _call
-from tests.test_usage_api_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -117,7 +117,7 @@ def test_schedules_are_listed_and_read_as_the_schedules_page_reads_them(
         assert await _trail(pool) == [(TOOL, "read", "ok")] * 3
         assert await pool.fetchval("SELECT count(*) FROM manager_actions WHERE result IS NOT NULL") == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_schedule_is_enabled_and_disabled_as_its_switch_does_in_a_turn_answering_the_user(
@@ -152,7 +152,7 @@ def test_a_schedule_is_enabled_and_disabled_as_its_switch_does_in_a_turn_answeri
                                       (TOOL, "high", "ok"), *[(TOOL, "write", "ok")] * 2]
         assert await pool.fetchval("SELECT count(*) FROM manager_actions WHERE status = 'ok' AND result IS NULL") == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_enabling_is_refused_with_the_dashboards_message(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -174,7 +174,7 @@ def test_enabling_is_refused_with_the_dashboards_message(monkeypatch: pytest.Mon
             "SELECT confirmation_id, error_code FROM manager_actions ORDER BY id DESC LIMIT 1")) == (
                 asked["confirmation_id"], "invalid")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("action", ["enable", "run"])
@@ -209,7 +209,7 @@ def test_starting_a_schedule_asks_first_and_runs_only_on_the_next_messages_confi
             assert _error(reused) == "not_found"
             assert await _starting_state(pool, sid) == (action == "enable", int(action == "run"))
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("action", ["enable", "run"])
@@ -229,7 +229,7 @@ def test_starting_a_schedule_lapses_when_the_next_message_does_not_confirm(
             assert await _starting_state(pool, sid) == (False, 0)
             assert await _trail(pool) == [(TOOL, "high", "needs_confirmation"), ("looper_confirm", "high", "error")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("action", ["enable", "run"])
@@ -263,7 +263,7 @@ def test_starting_a_schedule_refuses_a_confirmation_outside_its_turn_or_time(
             assert await _starting_state(pool, sid) == (False, 0)
             assert await _trail(pool) == [(TOOL, "high", "needs_confirmation"), ("looper_confirm", "high", "error")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_deleting_a_schedule_asks_first_and_runs_only_on_the_next_messages_confirmation(
@@ -304,7 +304,7 @@ def test_deleting_a_schedule_asks_first_and_runs_only_on_the_next_messages_confi
         assert await _trail(pool) == [(TOOL, "high", "needs_confirmation"), ("looper_confirm", "high", "error"),
                                       (TOOL, "high", "needs_confirmation"), (TOOL, "high", "ok")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_schedule_without_a_run_in_progress_says_so_when_asked_for(
@@ -318,7 +318,7 @@ def test_a_schedule_without_a_run_in_progress_says_so_when_asked_for(
         (block,) = chat.turns[0].blocks
         assert "- 状态：已停用\n- 正在进行的运行：没有\n它建出的任务都保留" in block
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("arguments", "code", "message"), [
@@ -343,7 +343,7 @@ def test_a_schedule_named_ambiguously_or_not_at_all_is_refused_naming_the_candid
         assert chat.turns[0].blocks == []  # nothing was asked
         assert await pool.fetchval("SELECT count(*) FROM schedules WHERE enabled") == 2
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_name_two_projects_have_is_resolved_by_its_project_or_its_id(
@@ -362,7 +362,7 @@ def test_a_name_two_projects_have_is_resolved_by_its_project_or_its_id(
                                    "WHERE s.enabled")
         assert [row["name"] for row in enabled] == ["calc"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("channel_id", "target"), [
@@ -389,4 +389,4 @@ def test_a_schedule_made_through_an_added_bot_gets_no_default_notify_target(
         assert created["status"] == "ok", created
         assert (await _view("deps"))["notify_target"] == target
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

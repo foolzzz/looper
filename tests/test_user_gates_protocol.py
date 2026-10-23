@@ -3,7 +3,6 @@ against the plan it answers; and the contract, which says nothing of gates where
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from typing import Any
@@ -332,17 +331,10 @@ def test_a_chat_reply_may_cancel_a_gate_and_depend_on_it_in_a_replan() -> None:
     assert reply.gates[0].action is GateAction.CANCEL and [s.id for s in reply.steps] == ["s3"]
 
 
-# The contract without gates, including the wait rules every task gets (sha256).
-_BEFORE = {(False, 2): "b70ffeae8558158dbf5c765d6b8ffe9fe8ef425d7aede3a1e9ce6f5af5adb588",
-           (False, 0): "712156fe0550eb002ca39c24338baea1ac3d7823238a8d96d927394fe689c19a",
-           (True, 2): "a444fa4037d257bf9266f5622305f8e85b78733be3b1c0e2e0f2fcf9455c6cc9",
-           (True, 5): "18001adf2c88c900972793992c652815fcbb3dfb373ae1f74729d5f0d9b4205f"}
-
-
-@pytest.mark.parametrize(("roles", "retries"), sorted(_BEFORE))
-def test_the_contract_without_gates_keeps_its_shape_and_wait_rules(roles: bool, retries: int) -> None:
+# The contract's text is pinned once, by its hash, in test_task_roles; here only that without gates it has none of them.
+@pytest.mark.parametrize(("roles", "retries"), [(False, 2), (True, 5)])
+def test_the_contract_without_gates_says_nothing_of_them(roles: bool, retries: int) -> None:
     text = reply_contract(retries, roles=roles)
-    assert hashlib.sha256(text.encode()).hexdigest() == _BEFORE[(roles, retries)]
     assert "[GATE]" not in text and '"kind": "gate"' not in text
 
 

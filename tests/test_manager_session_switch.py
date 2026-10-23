@@ -25,6 +25,7 @@ from looper.agents.message import MessageEnvelope, MessageType
 from looper.agents.tiers import manager as manager_module
 from looper.db import connection as db_connection
 from looper.agents.tiers.manager import NEW_SESSION_REPLY, ManagerAgent, ManagerConfig
+from tests.db_support import until
 from tests.test_manager_new_session import _drain, _resets, _saved, _web
 from tests.test_manager_reply import _CODEX, _codex_profile, _converse, _fake_claude, _flag, _forgetting, _resident
 
@@ -310,7 +311,7 @@ class TestNewSessionWithProfile:
 def test_a_stop_during_the_handoff_keeps_the_old_session_and_the_next_message_hands_off_again(
         agent_db: Any, tmp_path: Path) -> None:
     from looper.agents.tiers.manager import StopResult, _Process
-    from tests.test_manager_stop import _manager, _replies, _Session, _until
+    from tests.test_manager_stop import _manager, _replies, _Session
 
     async def run() -> None:
         session = _Session()
@@ -323,7 +324,7 @@ def test_a_stop_during_the_handoff_keeps_the_old_session_and_the_next_message_ha
         session.stop = AsyncMock(side_effect=lambda **kw: stops.append("stop"))  # type: ignore[method-assign]
         first = _web("你好", 0)
         handling = asyncio.create_task(manager._handle(first))
-        await _until(session.running.is_set)
+        await until(session.running.is_set, timeout=10)
         assert session.turns[0].startswith("[HANDOFF]")
         assert await manager.stop_turn(first.message_id, via="web") is StopResult.STOPPING
         await asyncio.wait_for(handling, 5)

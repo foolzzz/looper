@@ -1,7 +1,6 @@
 """Normalized registry reads: direct services and disposable PostgreSQL, never HTTP."""
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import asdict
 import pytest
@@ -9,21 +8,18 @@ import pytest
 from looper.agents import profile_registry as service
 from looper.agents.runtimes import AuthKind, VendorType
 from looper.db import agent_setting_layers as layers, connection, profile_registry as db
-from tests.test_catalog_db import DSN, _fresh_schema
+from tests.db_support import DSN, run_db
 
 SECRET = "sk-synthetic-registry-read-test-only"
 needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
 def _run(test, monkeypatch):
-    async def run():
-        async with _fresh_schema() as pool:
-            await connection.ensure_schema(pool)
-            monkeypatch.setattr(connection, "_pool", pool)
-            # Login state is external to the registry DB; never inspect personal CLI homes.
-            monkeypatch.setattr(service, "_login_modules", lambda: {})
-            await test(pool)
-    asyncio.run(asyncio.wait_for(run(), timeout=45))
+    async def setup(pool):
+        # Login state is external to the registry DB; never inspect personal CLI homes.
+        monkeypatch.setattr(service, "_login_modules", lambda: {})
+
+    run_db(test, monkeypatch, setup=setup, timeout=45)
 
 
 async def _seed(pool):

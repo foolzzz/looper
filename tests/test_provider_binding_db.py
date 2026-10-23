@@ -18,14 +18,8 @@ from typing import Any
 import pytest
 
 from fake_claude import fake_claude
-from tests.test_profile_registry_db import _call, _launch, _ok, _run as _run_db
-from tests.test_catalog_db import DSN
-
-
-def _run(*args: Any, **kwargs: Any) -> None:
-    if not DSN:
-        pytest.skip("LOOPER_TEST_DATABASE_URL is not set")
-    _run_db(*args, **kwargs)
+from tests.db_support import run_db
+from tests.test_profile_registry_db import _call, _launch, _ok
 
 
 KEY = "sk-test-binding-0123456789"
@@ -90,7 +84,7 @@ def test_provider_saves_warn_about_context_suffixes_without_anthropic_messages(
         assert anthropic["warnings"] == []
         assert (await _profile(provider_id, models[0]["name"]))["warnings"] == []
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 async def _task(tmp_path: Path) -> str:
@@ -149,7 +143,7 @@ def test_pi_bridge_reads_the_materialized_scoped_library_after_loading_settings(
         assert token not in json.dumps(launch.record())
         assert url not in json.dumps(launch.record())
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 # --- The binding ---
@@ -187,7 +181,7 @@ def test_a_third_party_provider_gets_its_endpoint_key_and_every_model_alias_and_
         # The key is in no record.
         assert KEY not in json.dumps([dict(r) for r in await pool.fetch("SELECT * FROM llm_records")], default=str)
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_anthropics_own_api_takes_the_key_as_an_api_key_and_keeps_claude_codes_cap(
@@ -207,7 +201,7 @@ def test_anthropics_own_api_takes_the_key_as_an_api_key_and_keeps_claude_codes_c
             **dict.fromkeys(MAPPED)}
         assert seen["argv"][seen["argv"].index("--max-budget-usd") + 1] == "0.5"
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_the_glm_preset_starts_claude_code_as_the_vendors_guide_says(
@@ -233,7 +227,7 @@ def test_the_glm_preset_starts_claude_code_as_the_vendors_guide_says(
             "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.3[1m]", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "API_TIMEOUT_MS": "3000000"}
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 _DEEPSEEK_RESPONSES = "https://api-docs.deepseek.com/guides/responses_api/"
@@ -265,7 +259,7 @@ def test_every_preset_makes_providers_whose_profiles_are_priced(monkeypatch: pyt
                     assert answer["warnings"] == [], (preset["vendor_type"], model["name"])
                     assert answer["profile"]["cost"] == {"source": "provider_price", "equivalent": False, "unpriced": []}
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_the_deepseek_preset_serves_responses_and_chat_at_one_url_and_prices_each_protocol(
@@ -319,7 +313,7 @@ def test_the_deepseek_preset_serves_responses_and_chat_at_one_url_and_prices_eac
                 assert answer["profile"]["cost"] == {
                     "source": "provider_price", "equivalent": False, "unpriced": []}
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_a_profile_whose_models_have_no_price_is_registered_with_a_warning(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -344,7 +338,7 @@ def test_a_profile_whose_models_have_no_price_is_registered_with_a_warning(monke
         anthropic = await _profile(await _provider("anthropic", base_url=""), "mystery-1")
         assert (anthropic["profile"]["cost"]["source"], anthropic["warnings"]) == ("runtime", [])
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 @pytest.mark.parametrize(("env", "error"), [
@@ -361,7 +355,7 @@ def test_a_providers_own_env_cannot_set_what_the_binding_owns_or_hold_a_secret(
             "endpoints": [{"protocol": "anthropic-messages", "base_url": THIRD_PARTY}], "env": env})
         assert status == 400 and error in payload["error"], payload
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_an_api_key_provider_without_a_key_fails_the_run_with_the_reason(
@@ -374,7 +368,7 @@ def test_an_api_key_provider_without_a_key_fails_the_run_with_the_reason(
         assert "argv" not in result  # nothing started
         assert result["outcome"]["status"] == "failed" and "has no API key" in result["outcome"]["error"]
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 # --- Cost and the soft cap ---
@@ -453,7 +447,7 @@ def test_a_run_is_priced_from_each_models_tokens_cache_included(
         row = await pool.fetchrow("SELECT cost_usd, cost_source, input_tokens, output_tokens FROM llm_records")
         assert dict(row) == {"cost_usd": None, "cost_source": "provider_price", "input_tokens": 5, "output_tokens": 6}
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def _request(model: str, input_: int, output: int) -> list[dict[str, Any]]:
@@ -486,7 +480,7 @@ def test_a_worker_over_its_cap_at_the_providers_prices_is_stopped(
         assert dict(row) == {"status": "failed", "cost_usd": pytest.approx(0.61), "cost_source": "provider_price",
                              "input_tokens": 300_000}
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_a_planner_turn_over_its_cap_is_stopped_and_its_session_counts_the_spend(
@@ -510,7 +504,7 @@ def test_a_planner_turn_over_its_cap_is_stopped_and_its_session_counts_the_spend
         # The session goes on; the next process that resumes it counts from what this turn spent ($0.60).
         assert saved["session_id"] == "s-cap" and saved["session_totals"]["cost_usd"] == pytest.approx(0.6)
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 # --- The session rule: a resident session resumes only with the same runtime type and provider ---
@@ -575,7 +569,7 @@ def test_a_planner_resumes_its_session_only_with_the_same_runtime_type_and_provi
         saved = await agent_sessions.get_session(f"planner-{task}")
         assert (saved["runtime_type"], saved["provider_id"]) == ("claude-code", providers[after])
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 # These adapter tests need no database: the resolved loader snapshot is their input.
@@ -774,7 +768,7 @@ def test_dsh_manager_failed_result_is_failed_in_the_database_and_never_a_success
         assert result["is_error"] is True and result["subtype"] != "success"
         assert KEY not in json.dumps([record, events], default=str)
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 @pytest.mark.parametrize("role", ["manager", "planner"])
@@ -845,7 +839,7 @@ def test_dsh_resident_budget_failure_is_read_back_without_inventing_a_total_cost
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 @pytest.mark.parametrize(("missing", "reason"), [
@@ -871,7 +865,7 @@ def test_dsh_worker_configuration_failure_is_readable_without_a_fake_run(
         assert await pool.fetchval("SELECT count(*) FROM llm_records WHERE task_id = $1", task) == 0
         assert not (tmp_path / "seen.json").exists()
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 @pytest.mark.parametrize("mode", ["success", "no-final", "cancel", "soft-cap", "unknown-cap", "unknown"])
@@ -958,7 +952,7 @@ if {mode in ('cancel', 'soft-cap', 'unknown-cap')!r}:
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 @pytest.mark.parametrize("role", ["manager", "planner"])
@@ -1049,4 +1043,4 @@ def test_dsh_rejected_saved_session_is_replaced_before_any_turn_executes(
         assert "read state" in store[new_session]["turns"][0]
         assert KEY not in json.dumps([records, transcripts], default=str)
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)

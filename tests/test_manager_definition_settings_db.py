@@ -7,8 +7,8 @@ from typing import Any
 import pytest
 
 from looper.agents.agent_settings import AgentType, Layer, load_agent_settings
-from tests.test_catalog_db import DSN
-from tests.test_profile_registry_db import _profile, _run, stand_in as stand_in  # noqa: F401
+from tests.db_support import DSN, run_db
+from tests.test_profile_registry_db import _profile, stand_in as stand_in  # noqa: F401
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -38,7 +38,7 @@ def test_the_default_manager_resolves_as_before(monkeypatch: pytest.MonkeyPatch)
         await agent_setting_layers.put_layer("role", "manager", None, {"profile_id": None}, pool=pool)
         assert await _resolved() == (BUILTIN_PROFILE.id, Layer.BUILTIN)
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_a_manager_resolves_its_definition_then_its_own_session(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -63,7 +63,7 @@ def test_a_manager_resolves_its_definition_then_its_own_session(monkeypatch: pyt
         await agent_sessions.select_profile("manager", None)
         assert await _resolved() == (p2, Layer.ROLE)
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_profile_usage_lists_every_manager_session_and_blocks_deleting(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -82,4 +82,4 @@ def test_profile_usage_lists_every_manager_session_and_blocks_deleting(monkeypat
         assert REVIEW in str(err.value)
         assert await agent_sessions.manager_sessions_selecting(p3) == [REVIEW]
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)

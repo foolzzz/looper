@@ -14,11 +14,12 @@ from typing import Any
 
 import pytest
 
+from tests.db_support import DSN, run_db
 from tests.test_ops_tasks_db import _error, _project, _task
 from tests.test_planner_tools_db import _allow, _haiku, _journal, _ops, _Planner
 from tests.test_task_agents_db import _call, _profiles
 from tests.test_task_roles_db import TESTER, _roles_on, _versions
-from tests.test_usage_api_db import DSN, _run, _Writer
+from tests.test_usage_api_db import _Writer
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -84,7 +85,7 @@ def test_a_template_is_checked_as_a_task_role_is_and_listed_by_key(monkeypatch: 
         status, answer = await _call("DELETE", f"/api/projects/{project['id']}/role-templates/tester")
         assert status == 200 and list(_templates(answer)) == ["security"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_planner_copies_a_template_as_a_task_role_and_the_fields_it_gives_override_it(
@@ -147,7 +148,7 @@ def test_a_planner_copies_a_template_as_a_task_role_and_the_fields_it_gives_over
         roles = {r["id"]: r for r in (await planner("looper_task_roles", {}))["result"]["roles"]}
         assert roles["security"]["template"] == "security" and "edited_by_user" not in roles["security"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 class _Bus:
@@ -237,7 +238,7 @@ def test_the_users_edit_is_a_new_version_that_tells_the_planner_and_stands(monke
         tester = next(r for r in detail["roles"] if r["id"] == "tester")
         assert (tester["via"], [v["via"] for v in tester["versions"]]) == ("user", ["planner", "user", "user"])
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_version_is_written_only_on_top_of_the_one_its_writer_read(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -257,7 +258,7 @@ def test_a_version_is_written_only_on_top_of_the_one_its_writer_read(monkeypatch
         assert await _versions(pool, "task-a") == [("tester", 1, None, None), ("tester", 2, None, None)]
         assert len(await _journal(pool, "task-a", "role_defined")) == 3
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 async def _skill(name: str) -> str:
@@ -339,7 +340,7 @@ def test_a_role_names_the_items_installed_for_roles_and_its_runs_load_them(
         assert answer["status"] == "ok" and f"The template's items {lint} are not installed" in answer["result"]["note"]
         assert await pool.fetchval("SELECT items FROM task_roles WHERE role_key = 'notes-review'") == [notes]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 async def _get(path: str, **query: str) -> tuple[int, Any]:
@@ -400,7 +401,7 @@ def test_a_projects_role_summary_sums_each_role_across_its_tasks(monkeypatch: py
         assert (await _get(f"/api/projects/{project['id']}/role-stats", since="soon"))[0] == 400
         assert (await _call("GET", "/api/projects/proj-nope/role-stats"))[0] == 404
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_role_from_the_tasks_template_cannot_be_redefined_by_its_planner(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -416,4 +417,4 @@ def test_a_role_from_the_tasks_template_cannot_be_redefined_by_its_planner(monke
         read = {r["id"]: r for r in (await planner("looper_task_roles", {}))["result"]["roles"]}
         assert read["tester"]["from_task_template"] is True
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

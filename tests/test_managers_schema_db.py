@@ -11,7 +11,7 @@ from typing import Any
 import asyncpg
 import pytest
 
-from tests.test_usage_api_db import DSN, _run
+from tests.db_support import DSN, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -70,7 +70,7 @@ def test_default_row_seeded_once(monkeypatch: pytest.MonkeyPatch) -> None:
         assert (row["tools"], row["task_scope"], row["enabled"], row["system_prompt"]) == ("all", "all", True, None)
         assert row["revision"] == 0 and row["deleted_at"] is None
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_default_row_refuses_changes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -84,7 +84,7 @@ def test_default_row_refuses_changes(monkeypatch: pytest.MonkeyPatch) -> None:
         with pytest.raises(asyncpg.ForeignKeyViolationError):
             await pool.execute("DELETE FROM managers WHERE id = 'manager'")
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_insert_and_constraints(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -107,7 +107,7 @@ def test_insert_and_constraints(monkeypatch: pytest.MonkeyPatch) -> None:
         with pytest.raises(asyncpg.UniqueViolationError):
             await _manager(pool, "other", name=" review ")
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_task_attribution(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,7 +128,7 @@ def test_task_attribution(monkeypatch: pytest.MonkeyPatch) -> None:
         assert {t["id"] for t in await tasks.list_tasks()} == {"t1", "t2", "t3"}
         assert (await tasks.list_tasks(manager_id="manager-review"))[0]["template"] in ({"key": "pr"}, None)
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_session_profile_and_via(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -143,7 +143,7 @@ def test_session_profile_and_via(monkeypatch: pytest.MonkeyPatch) -> None:
         await pool.execute("INSERT INTO task_roles (task_id, role_key, version, kind, role_prompt, via) "
                            "VALUES ('t1', 'r', 1, 'work', 'p', 'template')")
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_threads_first_owner_wins(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -158,7 +158,7 @@ def test_threads_first_owner_wins(monkeypatch: pytest.MonkeyPatch) -> None:
         with pytest.raises(asyncpg.ForeignKeyViolationError):
             await pool.execute("DELETE FROM managers WHERE id = 'manager-review'")
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_soft_delete(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -188,7 +188,7 @@ def test_soft_delete(monkeypatch: pytest.MonkeyPatch) -> None:
         with pytest.raises(asyncpg.UniqueViolationError):
             await _manager(pool, "review", name="Other")
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_soft_delete_frees_profile(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -201,7 +201,7 @@ def test_soft_delete_frees_profile(monkeypatch: pytest.MonkeyPatch) -> None:
         assert (await managers.get_manager("manager-review", include_deleted=True))["profile_id"] is None
         await pool.execute("DELETE FROM agent_profiles WHERE id = $1", profile)
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_delete_with_tasks_changes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -219,7 +219,7 @@ def test_delete_with_tasks_changes_nothing(monkeypatch: pytest.MonkeyPatch) -> N
         assert await agent_sessions.get_session("manager-xx") is not None
         assert await managers.lock_for_task("manager-nope", conn=pool) is False
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 async def _pending(task: asyncio.Task[Any]) -> bool:
@@ -268,7 +268,7 @@ def test_delete_vs_task_creation(monkeypatch: pytest.MonkeyPatch) -> None:
         await tx.rollback()
         await pool.release(conn)
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_revision(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -295,7 +295,7 @@ def test_revision(monkeypatch: pytest.MonkeyPatch) -> None:
             with pytest.raises(asyncpg.CheckViolationError):
                 await conn.execute("UPDATE managers SET enabled = true WHERE id = 'manager-xx'")
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_template_write_vs_delete(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -333,7 +333,7 @@ def test_template_write_vs_delete(monkeypatch: pytest.MonkeyPatch) -> None:
         assert await asyncio.wait_for(deleting, 5) == "deleted"
         assert await pool.fetchval("SELECT count(*) FROM manager_task_templates WHERE manager_id = 'manager-yy'") == 0
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_upgraded_database(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -362,7 +362,7 @@ def test_upgraded_database(monkeypatch: pytest.MonkeyPatch) -> None:
         with pytest.raises(asyncpg.CheckViolationError):
             await agent_sessions.select_profile("planner-t", profile)
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_downgrade_guard(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -380,4 +380,4 @@ def test_downgrade_guard(monkeypatch: pytest.MonkeyPatch) -> None:
                            "VALUES ('t1', 'r', 1, 'work', 'p', 'template')")
         await pool.execute(_OLD_VIA_COLUMN)
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)

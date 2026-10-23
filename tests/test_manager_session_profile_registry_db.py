@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from tests.test_catalog_db import DSN
-from tests.test_profile_registry_db import _call, _profile, _run, _stand_in_profile, stand_in as stand_in  # noqa: F401
+from tests.db_support import DSN, run_db
+from tests.test_profile_registry_db import _call, _profile, _stand_in_profile, stand_in as stand_in  # noqa: F401
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -34,7 +34,7 @@ def test_manager_session_selection_is_a_use(monkeypatch: pytest.MonkeyPatch) -> 
         assert chosen not in await db.profile_usage()
         assert await profile_registry.delete_profile(chosen) == {"deleted": chosen}
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_update_keeps_the_manager_session_profile_able_to_run_the_manager(
@@ -55,4 +55,4 @@ def test_update_keeps_the_manager_session_profile_able_to_run_the_manager(
         await profile_registry.update_profile(chosen, {"runtime_id": row["runtime_id"],
                                                        "model_id": row["model_id"]})
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)

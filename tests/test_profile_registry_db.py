@@ -9,10 +9,8 @@ row ``looper serve`` would add for one it finds (``_runtime``).
 
 from __future__ import annotations
 
-import asyncio
 import json
 import tempfile
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -21,26 +19,13 @@ from urllib.parse import parse_qsl, urlsplit
 import pytest
 
 from fake_claude import fake_claude
-from tests.test_catalog_db import DSN, _fresh_schema, _Writer
+from tests.db_support import DSN, run_db
+from tests.test_catalog_db import _Writer
 from tests.test_dsh_runtime import MODELS as DSH_MODELS, dsh_policy as dsh_policy
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 SECRET = "sk-test-registry-0123456789"
-
-
-def _run(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch, *, before: str = "") -> None:
-    from looper.db import connection
-
-    async def _main() -> None:
-        async with _fresh_schema() as pool:
-            if before:
-                await pool.execute(before)
-            await connection.ensure_schema(pool)
-            monkeypatch.setattr(connection, "_pool", pool)
-            await test(pool)
-
-    asyncio.run(_main())
 
 
 async def _call(method: str, path: str, body: Any = None, *, claude: str = "claude") -> tuple[int, Any]:
@@ -156,7 +141,7 @@ def test_dsh_policy_profile_create_edit_and_provider_update_need_no_key(
         assert changed["api_key"] is None
         assert (await db.get_profile(profile_id))["model"]["name"] == model
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 @pytest.mark.parametrize("change", [
@@ -189,7 +174,7 @@ def test_dsh_policy_refuses_invalid_profile_create_and_edit(
         assert status == 400, payload
         assert await db.get_profile(profile_id) == before
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 @pytest.mark.parametrize("protocol,base_url", [
@@ -229,7 +214,7 @@ def test_dsh_policy_refuses_incompatible_endpoints_and_rolls_back_updates(
             status, payload = await _call(method, path, body)
             assert status == 400, payload
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_dsh_policy_checks_stored_effort_when_a_provider_changes(
@@ -250,7 +235,7 @@ def test_dsh_policy_checks_stored_effort_when_a_provider_changes(
         assert status == 400 and "dsh-profile" in payload["error"]
         assert (await db.get_provider(provider_id))["name"] == "gateway"
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 # --- The built-ins ---
@@ -287,7 +272,7 @@ def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch
             "prov-grok-login", "grok-login", True, "oauth", "grok", ["openai-responses"], 4, "grok-4.7")
         assert grok["login"]["state"] == "not_logged_in"  # the tests' GROK_HOME has no login
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 @pytest.mark.parametrize(("method", "path", "body"), [
@@ -303,7 +288,7 @@ def test_the_builtins_are_read_only(monkeypatch: pytest.MonkeyPatch, method: str
         status, payload = await _call(method, path, body)
         assert status == 400 and "built-in" in payload["error"]
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 # --- Runtimes: built in, detected and probed ---
@@ -322,7 +307,7 @@ def test_runtimes_cannot_be_registered_changed_or_removed(
         (runtime,) = (await _registry())["runtimes"]
         assert (runtime["runtime_id"], runtime["executable"]) == ("rt-claude-code", "")
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_re_detect_probes_a_runtime_and_adds_a_type_found_on_path_since(
@@ -363,7 +348,7 @@ def test_re_detect_probes_a_runtime_and_adds_a_type_found_on_path_since(
         assert "was not found" in missing["probe_error"]
         assert (await _call("POST", "/api/runtimes/rt-nowhere/probe"))[0] == 404
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 # Runtimes registered by hand before runtimes were built in: "claude-beta" runs a profile, "claude-old" none.
@@ -400,7 +385,7 @@ def test_the_upgrade_drops_custom_runtimes_no_profile_uses_once_and_keeps_the_ot
         await ensure_schema(pool)
         assert {r["name"] for r in (await _registry())["runtimes"]} == {"claude-code", "claude-beta", "x"}
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 # --- Providers: secrets stored apart and masked ---
@@ -430,7 +415,7 @@ def test_a_provider_api_key_is_stored_apart_and_never_shown(monkeypatch: pytest.
         cleared = (await _ok("PUT", f"/api/providers/{provider_id}", {"api_key": None}))["provider"]
         assert cleared["api_key"] is None and await pool.fetchval("SELECT count(*) FROM llm_provider_secrets") == 0
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 @pytest.mark.parametrize(("body", "error"), [
@@ -455,7 +440,7 @@ def test_a_provider_that_does_not_validate_is_refused(
         status, payload = await _call("POST", "/api/providers", {"name": "p", **body})
         assert status == 400 and error in payload["error"], payload
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 # --- Agent Profiles: checked when created or changed ---
@@ -521,7 +506,7 @@ def test_a_profile_pairs_a_runtime_and_a_provider_that_can_run_together(
         status, payload = await profile(standin, key, "claude-sonnet-4-5")
         assert status == 400 and "auth kind" in payload["error"]
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 @pytest.mark.parametrize("field", ["runtime_id", "model_id"])
@@ -549,7 +534,7 @@ def test_profile_identity_fields_require_registered_ids(
         else:
             assert all(profile["name"] != "identity" for profile in profiles)
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def _version_codex(path: Path) -> str:
@@ -608,7 +593,7 @@ def test_codex_pairs_with_its_own_login_or_an_api_key_provider_of_openai_respons
         assert payload["profile"]["cost"] == {"source": "provider_price", "equivalent": True, "unpriced": []}
         await _ok("PUT", "/api/agent-settings/system", {"profile_id": payload["profile"]["profile_id"]})
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_the_codex_login_pairs_only_with_codex_runtimes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -627,7 +612,7 @@ def test_the_codex_login_pairs_only_with_codex_runtimes(monkeypatch: pytest.Monk
         status, payload = await _call("DELETE", "/api/providers/prov-claude-subscription/login-problem")
         assert status == 400 and "is not the Codex or Grok login" in payload["error"]
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_codex_on_path_becomes_a_builtin_runtime_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -647,7 +632,7 @@ def test_codex_on_path_becomes_a_builtin_runtime_once(monkeypatch: pytest.Monkey
             "rt-codex", True, "", "codex-cli 0.162.0")
         assert await register_found_runtimes() == []  # once
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def _version_omp(path: Path) -> str:
@@ -710,7 +695,7 @@ def test_omp_pairs_with_an_api_key_provider_of_any_of_its_apis_and_runs_every_ro
             "name": "omp-login", "vendor_type": "omp-login"})
         assert status == 400 and "vendor_type must be" in payload["error"]
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_omp_on_path_becomes_a_builtin_runtime_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -728,7 +713,7 @@ def test_omp_on_path_becomes_a_builtin_runtime_once(monkeypatch: pytest.MonkeyPa
             "rt-omp", True, "", "omp/18.4.3")
         assert await register_found_runtimes() == []  # once
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def _version_dsh(path: Path, version: str = "0.2.1-rc.2") -> str:
@@ -788,7 +773,7 @@ def test_dsh_path_registration_is_once_and_redetect_updates_the_persisted_probe(
         assert restored["roles"] == runtime["roles"]
         assert await pool.fetchval("SELECT count(*) FROM agent_runtimes WHERE type = 'dsh'") == 1
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_dsh_profile_and_all_four_role_selections_round_trip_through_api_and_database(
@@ -837,7 +822,7 @@ def test_dsh_profile_and_all_four_role_selections_round_trip_through_api_and_dat
         readback = _by_name(registry["profiles"], "dsh-flash")
         assert {layer["role"] for layer in readback["used_by"]["layers"]} == set(profile["roles"])
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_dsh_provider_cannot_remove_the_endpoint_needed_by_its_profile(
@@ -868,7 +853,7 @@ def test_dsh_provider_cannot_remove_the_endpoint_needed_by_its_profile(
         assert await db.get_profile(profile_id) == before_profile
         assert await db.get_api_key(provider_id) == SECRET
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def _version_grok(path: Path) -> str:
@@ -926,7 +911,7 @@ def test_grok_on_path_becomes_a_builtin_runtime_that_pairs_only_with_its_own_log
         status, payload = await profile("prov-grok-login", "rt-codex")
         assert status == 400 and "only use its own runtime" in payload["error"]
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def _version_pi(path: Path) -> str:
@@ -1008,7 +993,7 @@ def test_pi_on_path_is_discovered_once_offers_every_role_and_refuses_other_auth_
         status, payload = await profile("prov-claude-subscription")
         assert status == 400 and "exact protocol" in payload["error"]
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_a_change_that_would_break_a_profile_is_refused_and_one_in_use_is_kept(
@@ -1042,7 +1027,7 @@ def test_a_change_that_would_break_a_profile_is_refused_and_one_in_use_is_kept(
         await _ok("DELETE", f"/api/providers/{provider_id}")
         assert runtime_id in {r["runtime_id"] for r in (await _registry())["runtimes"]}
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 # --- LLM profiles are gone ---
@@ -1081,7 +1066,7 @@ def test_the_upgrade_removes_llm_profiles_and_keeps_the_role_configs(monkeypatch
         status, payload = await _call("PUT", "/api/roles/worker", {"runtime": "codex-cli"})
         assert status == 400 and "runtime was removed" in payload["error"]
 
-    _run(_test, monkeypatch, before=_BEFORE_AGENTS)
+    run_db(_test, monkeypatch, before=_BEFORE_AGENTS)
 
 
 # --- Selecting a profile: the layers and a task's overrides, checked for the roles they reach ---
@@ -1130,7 +1115,7 @@ def test_a_layer_selects_a_profile_only_for_roles_its_runtime_can_run(
         # A selected profile stays until nothing selects it.
         assert (await _call("DELETE", f"/api/agent-profiles/{planner}"))[0] == 409
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_where_a_profile_is_selected_is_read_back_and_keeps_it_from_being_deleted(
@@ -1184,7 +1169,7 @@ def test_where_a_profile_is_selected_is_read_back_and_keeps_it_from_being_delete
         await _ok("PUT", f"/api/projects/{calc}/allowed-profiles", {"profile_ids": []})
         await _ok("DELETE", f"/api/agent-profiles/{haiku}")  # nothing selects it
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 async def _launch(role: str, task_id: str, work_dir: Path, root: Path) -> dict[str, Any]:
@@ -1269,7 +1254,7 @@ def test_a_tasks_profile_override_reaches_only_that_tasks_role(
         assert (await _call("POST", "/api/tasks/create", {"requirement": "r", "project_id": project,
                                                           "profile_overrides": {"worker": one_off}}))[0] == 201
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_a_profile_that_can_no_longer_run_fails_the_run_instead_of_another_profile(
@@ -1290,7 +1275,7 @@ def test_a_profile_that_can_no_longer_run_fails_the_run_instead_of_another_profi
         assert result["outcome"]["status"] == "failed"
         assert "runs on a 'stand-in' runtime, which this version cannot run" in result["outcome"]["error"]
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 # --- The upgrade: each layer's model becomes an Agent Profile ---
@@ -1349,7 +1334,7 @@ def test_the_upgrade_turns_each_layer_model_into_a_profile(monkeypatch: pytest.M
                 [tuple(r) for r in await pool.fetch("SELECT * FROM agent_profiles ORDER BY id")]) \
             == before
 
-    _run(_test, monkeypatch, before=_BEFORE_LAYER_PROFILES)
+    run_db(_test, monkeypatch, before=_BEFORE_LAYER_PROFILES)
 
 
 # --- A provider's model catalog and concurrency: stored and checked ---
@@ -1383,7 +1368,7 @@ def test_a_provider_keeps_its_model_catalog_and_concurrency_with_unknowns_as_nul
         builtins = [p for p in (await _registry())["providers"] if p["builtin"]]
         assert all(b["max_concurrency"] is None and b["model_count"] > 0 for b in builtins)
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 @pytest.mark.parametrize(("change", "error"), [
@@ -1404,4 +1389,4 @@ def test_model_settings_that_do_not_validate_are_refused(
         status, payload = await _call("PUT", f"/api/providers/{provider}", {"max_concurrency": 0})
         assert status == 400 and "max_concurrency must be" in payload["error"]
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)

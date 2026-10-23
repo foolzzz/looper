@@ -15,7 +15,8 @@ from pathlib import Path
 import pytest
 
 from evals.prompt_regression.runner import fresh_database, running_server
-from tests.test_restart_resume_db import DSN, _log, _wait
+from tests.db_support import DSN
+from tests.test_restart_resume_db import _log, _wait
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 

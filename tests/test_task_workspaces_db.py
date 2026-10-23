@@ -19,9 +19,9 @@ import pytest
 from looper.agents import task_workspaces as tw
 from looper.agents import operator_notes
 from looper.agents.operator_notes import directory_name
+from tests.db_support import DSN, run_db
 from tests.test_continue_at_cap_db import _call, _setup
 from tests.test_ops_tasks_db import _Chat
-from tests.test_usage_api_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -94,7 +94,7 @@ def test_a_task_names_its_workspace_and_is_told_what_it_will_run_in(
         status, made = await _call(server, "POST", "/api/projects", {"name": "fresh", "work_dir": str(workspace)})
         assert made["task_workspaces"] == "worktree" and project.get("task_workspaces") is None
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 async def _check(server: Any, query: dict[str, str]) -> tuple[int, Any]:
@@ -145,7 +145,7 @@ def test_a_worktree_tasks_row_its_page_and_its_deletion(tmp_path: Path, monkeypa
         assert git(workspace, "show", "looper/task-w/task:wip.txt") == "work in progress"  # the branch stays
         assert await tasks.get_task("task-w", pool=pool) is None and await task_worktrees.get("task-w") is None
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_manager_creates_a_task_in_a_worktree_and_says_what_to_know(
@@ -174,4 +174,4 @@ def test_the_manager_creates_a_task_in_a_worktree_and_says_what_to_know(
             "requirement": "x", "title": "x", "project": "calc", "work_dir": str(workspace), "base": "nope"}))
         assert answer["status"] == "error" and "'nope' is not a branch" in answer["error"]["message"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
