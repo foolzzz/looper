@@ -1789,7 +1789,7 @@ class ManagerAgent:
             name = next((c.name for c in listed if c.profile_id == selected_id), selected_id)
             selected = {"profile_id": selected_id, "name": name}
         profile = effective.view()["profile"]
-        settings = await load_agent_settings(AgentType.MANAGER, manager_session=False)
+        settings = await load_agent_settings(AgentType.MANAGER, manager_session=False, manager_id=self.agent_id)
         follow = None if settings.error or settings.profile_error else {
             "name": display_name({"name": settings.profile.name, "effort": settings.profile.effort}),
             "effect": profile_effect(saved or None, "", settings.profile).value}

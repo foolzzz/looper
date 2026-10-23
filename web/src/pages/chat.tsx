@@ -624,6 +624,10 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
       setOpened(null);
       setViewingMessages(null);
       appliedConversation.current = "";
+      // The panel shows the previous Manager's Profile, and confirming it would reset this one's session.
+      newPanelAbort.current?.abort();
+      setNewPanelOpen(false);
+      setNewPanel(null);
     }
     const nextSession = sessionFor(next);
     currentRef.current = { managerId: next.id, sessionId: nextSession };
@@ -728,7 +732,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
               },
             ],
       );
-    });
+    }, managerId);
   }, [sessionId, target.kind, target.id, threadOwned]);
 
   // Keep localStorage as cache

@@ -79,6 +79,30 @@ def test_match_patterns_does_not_block_loop():
     assert ticks >= 50 and index == 0
 
 
+def test_a_cancelled_match_kills_its_subprocess(monkeypatch):
+    started = []
+    create = asyncio.create_subprocess_exec
+
+    async def spy(*args, **kwargs):
+        proc = await create(*args, **kwargs)
+        started.append(proc)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spy)
+
+    async def main():
+        task = asyncio.create_task(match_patterns([("(a+)+$", "a" * 40 + "!")], timeout=30.0))
+        while not started:
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return started[0].returncode
+
+    assert run(main()) is not None
+
+
 def test_match_patterns_answers_and_empty():
     assert run(match_patterns([])) == []
     got = run(match_patterns([("a+", "aa"), ("a+", "b"), ("(", "x")]))
