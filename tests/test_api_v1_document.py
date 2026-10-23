@@ -15,7 +15,7 @@ HAND = {"chat.send", "chat.messages", "chat.conversations", "confirm", "openapi"
 TYPED_TOOL_OPERATIONS = {
     "tasks.list", "tasks.get", "task_pipeline", "task_create", "task_control.start", "task_control.stop",
     "task_control.restart", "task_control.start_over", "task_control.cancel", "task_update", "task_instruct",
-    "gates.list", "gates.messages", "gates.reply", "gates.end", "agent_profiles.list", "overview"}
+    "gates.list", "gates.messages", "gates.reply", "gates.end", "agent_profiles.list", "overview", "config_export"}
 
 
 def _actions(tool) -> list[str] | None:
@@ -118,10 +118,12 @@ def test_responses_say_which_calls_may_ask_for_confirmation() -> None:
     assert "x-looper-cli-hand" not in paths["/whoami"]["get"]
 
 
-def test_no_operation_touches_credentials() -> None:
+def test_only_explicit_operator_operations_touch_credentials() -> None:
     for op in api_v1.operations():
-        assert not op.operation_id.startswith(("auth", "clients"))
-        assert "/auth" not in op.path and "/clients" not in op.path
+        assert not op.operation_id.startswith("clients")
+        if op.operation_id.startswith("auth."):
+            assert op.operation_id in {"auth.set_password", "auth.clear_password"}
+            assert op.tool is None
     for tool in CLIENT_TOOLS:
         assert not any(word in tool.name for word in ("password", "token", "client"))
 

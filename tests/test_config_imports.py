@@ -165,7 +165,7 @@ async def _serving(monkeypatch: pytest.MonkeyPatch, pool: Any, runtime_root: Pat
 async def _export(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, big: bool) -> Path:
     """A configuration file of an installation using every section (``big``: over the request cap, too)."""
     from looper.db import library as db_library
-    from tests.test_config_transfer_db import _installation, _item, _looper, _populate
+    from tests.test_config_transfer_db import _installation, _item, _transfer_file, _populate
 
     exported = tmp_path / "config.json"
     async with _installation() as (source, source_url):
@@ -177,7 +177,7 @@ async def _export(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, big: bool)
                     await db_library.insert_item(conn, _item("skill", f"big-{n}", [
                         {"path": "SKILL.md", "content": f"---\nname: big-{n}\n---\n"},
                         {"path": "reference.md", "content": body}]), origin="upload")
-        code, _, err = await _looper(monkeypatch, source_url, "config", "export", str(exported), "--include-projects")
+        code, _, err = await _transfer_file(source_url, "export", str(exported), include_projects=True)
         assert code == 0, err
     return exported
 
@@ -218,15 +218,15 @@ def test_a_file_over_the_request_cap_is_previewed_without_writing(
 
 
 @needs_db
-def test_applying_writes_what_the_cli_apply_writes_and_removes_the_file(
+def test_applying_writes_what_the_transfer_core_writes_and_removes_the_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    from tests.test_config_transfer_db import _installation, _looper, _plan, _state
+    from tests.test_config_transfer_db import _installation, _transfer_file, _plan, _state
 
     async def _test() -> None:
         exported = await _export(monkeypatch, tmp_path, big=False)
         runtime_root = tmp_path / "runtime"
-        async with _installation() as (by_api, _), _installation() as (by_cli, cli_url):
+        async with _installation() as (by_api, _), _installation() as (by_core, core_url):
             async with _serving(monkeypatch, by_api, runtime_root) as port:
                 status, uploaded = await _request(port, "POST", CONFIG_IMPORTS_PATH, exported)
                 assert status == 201, uploaded
@@ -238,13 +238,13 @@ def test_applying_writes_what_the_cli_apply_writes_and_removes_the_file(
                 again = await _request(port, "POST", f"{CONFIG_IMPORTS_PATH}/{uploaded['import_id']}/apply")
                 assert again[0] == 404 and "upload the file again" in again[1]["error"]
 
-            code, out, err = await _looper(monkeypatch, cli_url, "config", "import", str(exported), "--apply", "--json")
+            code, out, err = await _transfer_file(core_url, "import", str(exported), apply=True, json_output=True)
             assert code == 0, err
             plan = applied["plan"]
             targets = {(n["section"], n["key"]): n.pop("target", None) for n in plan["need_secret"]}
             assert plan == _plan(out)
             assert plan["applied"] and plan["counts"] == uploaded["plan"]["counts"]
-            assert await _state(by_api) == await _state(by_cli)
+            assert await _state(by_api) == await _state(by_core)
 
             # Each secret to fill in names the stored row whose form takes it.
             async with by_api.acquire() as conn:
@@ -318,12 +318,12 @@ def test_an_import_not_applied_expires_or_is_cancelled_and_its_file_goes(
 
 
 @needs_db
-def test_v3_preview_merge_apply_and_readback_share_the_cli_contract(
+def test_v3_preview_merge_apply_and_readback_share_the_core_contract(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     from copy import deepcopy
 
-    from tests.test_config_transfer_db import _installation, _looper, _plan, _rows
+    from tests.test_config_transfer_db import _installation, _transfer_file, _plan, _rows
     from tests.test_config_v3_import_db import v3
 
     async def _test() -> None:
@@ -336,7 +336,7 @@ def test_v3_preview_merge_apply_and_readback_share_the_cli_contract(
             assert status == 201, uploaded
             plan = uploaded["plan"]
             assert plan["counts"]["models"] == {"added": 1, "changed": 0, "unchanged": 0, "skipped": 0}
-            code, out, err = await _looper(monkeypatch, url, "config", "import", str(path), "--json")
+            code, out, err = await _transfer_file(url, "import", str(path), json_output=True)
             assert code == 0, err
             assert _plan(out) == plan
             assert await _rows(target) == before
@@ -358,13 +358,13 @@ def test_v3_preview_merge_apply_and_readback_share_the_cli_contract(
             status, exported = await _request(port, "GET", "/api/config/export")
             assert status == 200 and exported["format"] == "looper-config/v3"
             assert exported["providers"][0]["api_key"] == {"secret": "omitted"}
-            cli_path = tmp_path / "cli.json"
-            code, _, err = await _looper(monkeypatch, url, "config", "export", str(cli_path))
+            core_path = tmp_path / "core.json"
+            code, _, err = await _transfer_file(url, "export", str(core_path))
             assert code == 0, err
-            cli = json.loads(cli_path.read_text())
-            cli.pop("exported_at")
+            core = json.loads(core_path.read_text())
+            core.pop("exported_at")
             exported.pop("exported_at")
-            assert cli == exported
+            assert core == exported
 
             # Merge one model in place, add another, and retain the existing profile
             # when an invalid reference tries to replace it.

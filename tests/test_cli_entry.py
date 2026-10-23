@@ -69,7 +69,7 @@ def _clean_env(root: Path) -> dict[str, str]:
 
 def _run_looper(*argv: str, cwd: Path, env: dict[str, str] | None = None, script: str = "looper",
                 ) -> tuple[dict, str, str]:
-    if argv[:1] == ("doctor",) or argv[:2] in (("config", "import"), ("config", "export")):
+    if argv[:1] == ("doctor",):
         argv = (*argv, "--runtime-root", str(cwd / "runtime"))
     proc = subprocess.run(
         [sys.executable, "-c", _DRIVER, str(REPO_ROOT / "pyproject.toml"), script, *argv],
@@ -232,41 +232,24 @@ def test_version_loads_only_the_cli(tmp_path: Path, argv: list[str], script: str
     assert result["modules"] == ["looper", "looper.cli"]
 
 
-@pytest.mark.parametrize(
-    "argv",
-    [["config", "import", "missing.json"], ["config", "export", "out.json"]],
-    ids=["config-import", "config-export"],
-)
-def test_config_loads_no_upstream_modules(tmp_path: Path, argv: list[str]) -> None:
-    """``looper config`` reports a missing file or an unreachable database as an error line and exits 1."""
-    env = {**_clean_env(tmp_path), "LOOPER_DATABASE_URL": f"postgresql://127.0.0.1:{_closed_port()}/loopx"}
+@pytest.mark.parametrize("command", ["export", "import"])
+def test_removed_config_commands_name_the_running_service_replacement(tmp_path: Path, command: str) -> None:
+    """Removed offline commands fail before reading state and explain their replacement."""
+    result, output, stderr = _run_looper("config", command, "portable.json", cwd=tmp_path)
 
-    result, _, stderr = _run_looper(*argv, cwd=tmp_path, env=env)
-
-    assert result["code"] == 1 and any(line.startswith("error: ") for line in stderr.splitlines()), stderr
-    assert not (tmp_path / "out.json").exists()
-    assert not _upstream(result["modules"])
+    assert result["code"] == 2, output + stderr
+    assert f"loopercli config {command}" in stderr
+    assert "running service" in stderr
+    assert not (tmp_path / "portable.json").exists()
+    assert result["modules"] == ["looper", "looper.cli"]
 
 
-def test_config_export_with_secrets_names_every_kind_of_secret_it_writes(tmp_path: Path) -> None:
-    """``--include-secrets`` writes provider API keys too, so its help and its warning name them.
+def test_config_help_keeps_only_init_ops(tmp_path: Path) -> None:
+    result, output, stderr = _run_looper("config", "--help", cwd=tmp_path)
 
-    The warning comes before the database is read, so an unreachable one still shows it.
-    """
-    env = {**_clean_env(tmp_path), "LOOPER_DATABASE_URL": f"postgresql://127.0.0.1:{_closed_port()}/loopx"}
-    kinds = ("LLM provider API keys", "MCP environment and header values", "channel secrets")
-
-    result, _, stderr = _run_looper("config", "export", "out.json", "--include-secrets", cwd=tmp_path, env=env)
-    lines = stderr.splitlines()
-    warning = next(line for line in lines if line.startswith("warning: out.json will hold secrets"))
-    assert result["code"] == 1 and lines[-1].startswith("error: "), stderr
-    assert all(k in warning for k in kinds), warning
-
-    result, output, stderr = _run_looper("config", "export", "--help", cwd=tmp_path)
     assert result["code"] == 0, stderr
-    help_text = " ".join(output.split())  # argparse wraps the help
-    option_help = help_text.partition("--include-secrets")[2]
-    assert all(k in option_help for k in kinds), help_text
+    assert "{init-ops}" in output
+    assert "{export" not in output
 
 
 def test_service_status_loads_no_upstream_modules(tmp_path: Path) -> None:

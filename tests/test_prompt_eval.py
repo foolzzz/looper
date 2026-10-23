@@ -10,6 +10,8 @@ import asyncio
 import dataclasses
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -1694,6 +1696,29 @@ def test_baseline_comparison_reads_model_names_from_existing_raw_runs(
         data, _ = runner.comparison_base(choice, out_dir=tmp_path, current=current, mode="real",
                                          model=runner.compared_model(run), dialogs=dialogs)
         assert data == run
+
+
+@pytest.mark.parametrize("command", ["run", "dialogs"])
+def test_release_tier_refreshes_the_sonnet_baseline_for_every_case(command: str) -> None:
+    readme = (Path(__file__).resolve().parents[1] / "evals" / "README.md").read_text(encoding="utf-8")
+    release = readme.split("Once before a release,", 1)[1].split("#### ", 1)[0]
+    entries = []
+    for entry in release.split("\n- "):
+        for text in re.findall(r"`((?:run|dialogs) --[^`]+)`", entry):
+            args = cli._parser().parse_args(shlex.split(text))
+            model = getattr(args, "manager_model", None) or args.model
+            if args.command == command and model == "sonnet":
+                entries.append((args, entry))
+    assert len(entries) == 1, f"release tier needs one full Sonnet {command} run"
+    args, entry = entries[0]
+    assert args.mode == "real"
+    assert args.model == "sonnet"
+    assert args.reps == 3
+    assert getattr(args, "tasks" if command == "run" else "dialogs") is None
+    assert args.case_budget_usd > 0
+    assert args.total_cap_usd >= args.jobs * args.case_budget_usd
+    baseline = runner.baseline_path(mode="real", model="sonnet", dialogs=command == "dialogs")
+    assert f"baselines/{baseline.name}" in entry
 
 
 def test_the_base_is_the_committed_baseline_unless_another_is_named(tmp_path: Path,
