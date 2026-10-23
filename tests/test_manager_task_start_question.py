@@ -26,6 +26,7 @@ def test_created_task_start_question_in_manager_reply(
 ) -> None:
     project = {"id": "project-calc", "name": "calc", "work_dir": str(tmp_path)}
     monkeypatch.setattr(projects, "find_project_by_name", AsyncMock(return_value=project))
+    monkeypatch.setattr(projects, "get_project", AsyncMock(return_value=project))
     monkeypatch.setattr(manager_actions, "record", AsyncMock(return_value=1))
     monkeypatch.setattr(tasks, "get_task", AsyncMock(side_effect=lambda task_id: {
         **agent_db.store.ready[task_id], "status": tasks.READY}))
