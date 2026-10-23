@@ -14,7 +14,8 @@ from typing import Any
 import pytest
 
 from tests.test_api_v1_auth import _bearer, _send, _serving
-from tests.test_usage_api_db import DSN, _run, _Writer
+from tests.db_support import DSN, run_db
+from tests.test_usage_api_db import _Writer
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -66,4 +67,4 @@ def test_create_list_and_revoke(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
             status, _, body = await _send(server, "GET /api/v1/whoami", _bearer(token))
             assert status == 401 and body["error"]["code"] == "unauthorized"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

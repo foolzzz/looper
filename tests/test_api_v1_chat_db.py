@@ -17,7 +17,8 @@ import pytest
 from looper.agents.api_v1 import OPERATOR, Principal
 from tests.test_managers_schema_db import _manager
 from tests.test_scenario_manager_chat_api_db import _Fleet, _Stub
-from tests.test_usage_api_db import DSN, _run, _Writer
+from tests.db_support import DSN, run_db
+from tests.test_usage_api_db import _Writer
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -116,7 +117,7 @@ def test_a_new_conversation_streams_the_reply(monkeypatch: pytest.MonkeyPatch) -
         assert [(m["message_id"], m["role"], m["content"]) for m in saved[0]] == [
             (accepted["message_id"], "user", "你好")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_stream_without_a_final_ends_with_a_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -129,7 +130,7 @@ def test_a_stream_without_a_final_ends_with_a_timeout(monkeypatch: pytest.Monkey
         assert events[-1][1]["message"] == (
             f"the reply is still being written; read it later with: loopercli chat --conversation {cid} --read")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_conversation_is_continued_only_by_its_client(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -154,7 +155,7 @@ def test_a_conversation_is_continued_only_by_its_client(monkeypatch: pytest.Monk
         assert status == 403 and answer["error"]["code"] == "forbidden"
         assert len(web.sent) == 2
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_arguments_are_checked(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -175,7 +176,7 @@ def test_the_arguments_are_checked(monkeypatch: pytest.MonkeyPatch) -> None:
         assert status == 400 and answer["error"]["message"] == "no Manager 'manager-nope'"
         assert web.sent == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_thread_is_read_by_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -221,7 +222,7 @@ def test_a_thread_is_read_by_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
         _, answer = await _v1(None, "/api/v1/chat/messages", {"conversation_id": "cli-empty"}, mine)
         assert answer["result"]["next_cursor"] is None and answer["result"]["messages"] == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_conversations_are_the_clients_own(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -240,7 +241,7 @@ def test_conversations_are_the_clients_own(monkeypatch: pytest.MonkeyPatch) -> N
             "conversation_id", "manager_id", "created_at", "last_message_at", "last_content"}
         assert (await _v1(None, "/api/v1/chat/conversations", {}, OPERATOR))[0] == 403
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_scenario_manager_keeps_its_conversation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -270,7 +271,7 @@ def test_a_scenario_manager_keeps_its_conversation(monkeypatch: pytest.MonkeyPat
         assert status == 404
         assert len(web.sent) == 2
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_manager_that_is_not_running_takes_no_message(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -286,7 +287,7 @@ def test_a_manager_that_is_not_running_takes_no_message(monkeypatch: pytest.Monk
         status, answer = await _send(web, mine, {"text": "x", "conversation_id": "cli-off"}, fleet)
         assert status == 409 and answer["error"]["code"] == "conflict" and web.sent == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_dropped_client_closes_the_stream(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -305,7 +306,7 @@ def test_a_dropped_client_closes_the_stream(monkeypatch: pytest.MonkeyPatch) -> 
         await server._handle_v1("POST", "/api/v1/chat/send", {}, {}, b'{"text": "hi"}', Gone(), client)
         assert web.closed == ["c1"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_dashboard_send_has_no_client(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -322,4 +323,4 @@ def test_the_dashboard_send_has_no_client(monkeypatch: pytest.MonkeyPatch) -> No
         assert writer.data.startswith(b"HTTP/1.1 200") and len(web.sent) == 1
         assert "client" not in web.sent[0] and web.sent[0]["session_id"] == "s1"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

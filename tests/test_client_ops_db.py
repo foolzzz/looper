@@ -17,7 +17,7 @@ from looper.agents.ops import Turn
 from looper.agents.ops.clients import ClientOps
 from looper.agents.ops.service import Platform
 from tests.test_ops_tasks_db import _Chat, _project, _task
-from tests.test_usage_api_db import DSN, _run
+from tests.db_support import DSN, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -74,7 +74,7 @@ def test_a_client_creates_a_task_in_a_new_project_after_confirming(monkeypatch: 
         missing = await ops.call(client, "s1", "looper_task_pipeline", {"task_id": "task-nope"})
         assert missing["error"]["code"] == "not_found"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_gates_list_empty_and_reply_to_a_gate_that_does_not_exist(monkeypatch: pytest.MonkeyPatch,
@@ -99,7 +99,7 @@ def test_gates_list_empty_and_reply_to_a_gate_that_does_not_exist(monkeypatch: p
         # A list is a read: only the refused writes are in the trail.
         assert await pool.fetchval("SELECT count(*) FROM manager_actions WHERE status = 'ok'") == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 async def _manager_create(chat: _Chat, *, client_id: str | None) -> dict[str, Any]:
@@ -134,4 +134,4 @@ def test_the_manager_answering_a_clients_chat_gives_the_task_its_client_and_thre
         row = await tasks.get_task(without["result"]["task_id"], pool=pool)
         assert (row["client_id"], row["origin_thread"]) == (None, None)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

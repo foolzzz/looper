@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from tests.test_usage_api_db import DSN, _run
+from tests.db_support import DSN, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -37,7 +37,7 @@ def test_a_token_is_stored_only_as_its_hash(monkeypatch: pytest.MonkeyPatch) -> 
         assert await api_clients.find("lpc_wrong", pool=pool) is None
         assert await api_clients.find("not-a-token", pool=pool) is None
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_names_are_checked_and_unique_among_the_active_clients(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -55,7 +55,7 @@ def test_names_are_checked_and_unique_among_the_active_clients(monkeypatch: pyte
         again, _ = await api_clients.create("OK", pool=pool)
         assert again["id"] != view["id"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_revoked_client_cannot_be_found_but_is_still_named(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -72,7 +72,7 @@ def test_a_revoked_client_cannot_be_found_but_is_still_named(monkeypatch: pytest
         assert await api_clients.names([], pool=pool) == {}
         assert await api_clients.revoke(view["id"], pool=pool) is False
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_touch_moves_last_used_at_once_a_minute(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -92,7 +92,7 @@ def test_touch_moves_last_used_at_once_a_minute(monkeypatch: pytest.MonkeyPatch)
         assert await pool.fetchval(
             "SELECT last_used_at > now() - interval '1 minute' FROM api_clients WHERE id = $1", view["id"])
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_thread_keeps_the_client_that_claimed_it_first(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -119,7 +119,7 @@ def test_a_thread_keeps_the_client_that_claimed_it_first(monkeypatch: pytest.Mon
         assert threads[0]["last_content"] == "x" * 200 and threads[0]["last_message_at"] is not None
         assert await chat.client_threads(two["id"], pool=pool) == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_client_threads_list_the_most_recently_active_first(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -134,7 +134,7 @@ def test_client_threads_list_the_most_recently_active_first(monkeypatch: pytest.
         assert [t["session_id"] for t in await chat.client_threads(one["id"], pool=pool)] == ["new", "old", "quiet"]
         assert [t["session_id"] for t in await chat.client_threads(one["id"], limit=2, pool=pool)] == ["new", "old"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_messages_are_paged_forward_by_a_message_id_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -167,7 +167,7 @@ def test_messages_are_paged_forward_by_a_message_id_cursor(monkeypatch: pytest.M
         assert await page(after="m2", limit=3) == (["m3", "m4", "m5"], False)
         assert await page(after="m3") == (["m4", "m5"], False)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_task_and_a_manager_call_name_the_client_they_came_through(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -194,4 +194,4 @@ def test_a_task_and_a_manager_call_name_the_client_they_came_through(monkeypatch
         [row] = await manager_actions.for_task("task-a", pool=pool)
         assert row["client_name"] == "agent"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

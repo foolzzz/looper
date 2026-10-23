@@ -17,7 +17,8 @@ from looper.agents.bus import MessageBus
 from looper.agents.ops.clients import ClientOps
 from looper.agents.ops.service import Platform
 from tests.test_ops_tasks_db import _project
-from tests.test_usage_api_db import DSN, _run, _Writer
+from tests.db_support import DSN, run_db
+from tests.test_usage_api_db import _Writer
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -60,7 +61,7 @@ def test_a_read_a_wrong_method_and_an_unknown_path(monkeypatch: pytest.MonkeyPat
         status, answer = await _v1("POST", "/api/v1/ops/tasks/list", {})
         assert status == 503 and answer["error"]["code"] == "unavailable"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_write_waits_for_the_same_session_to_confirm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -91,7 +92,7 @@ def test_a_write_waits_for_the_same_session_to_confirm(monkeypatch: pytest.Monke
         row = await tasks.get_task(done["result"]["task_id"], pool=pool)
         assert row["client_id"] == client.client_id
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_body_that_is_not_an_object_or_names_the_action(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -105,7 +106,7 @@ def test_a_body_that_is_not_an_object_or_names_the_action(monkeypatch: pytest.Mo
         status, answer = await _v1("POST", "/api/v1/ops/tasks/list", {"limit": "x"}, ops=ops)
         assert status == 400 and answer["error"]["code"] == "invalid"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_document_is_served(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -113,4 +114,4 @@ def test_the_document_is_served(monkeypatch: pytest.MonkeyPatch) -> None:
         status, answer = await _v1("GET", "/api/v1/openapi.json")
         assert status == 200 and "/ops/tasks/list" in answer["paths"] and answer["openapi"] == "3.1.0"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
