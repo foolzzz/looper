@@ -111,9 +111,14 @@ class Look:
     registry_before: dict[str, Any] | None = None
     runs_since: int = 0  # the Manager's newest run record before the dialog (the session-profile dialogs only)
     manager_id: str | None = None  # a scenario Manager's agent id: only its trail rows count
+    turn_since: int = 0  # the trail's last id before the turn's message (``since`` when it is the dialog's first)
 
     def actions(self) -> list[dict[str, Any]]:
         return _trail(self.database_url, self.since, self.manager_id)
+
+    def turn_actions(self) -> list[dict[str, Any]]:
+        """The Manager's calls in the turn this reply answers, not those of the turns before it."""
+        return _trail(self.database_url, max(self.since, self.turn_since), self.manager_id)
 
     def detail(self, task_id: str | None = None) -> dict[str, Any]:
         return self.api.get(f"/api/tasks/{task_id or self.task}")
@@ -182,6 +187,18 @@ def _seed_review_manager(api: Api, project_id: str) -> None:
 def _writes(look: Look, *, status: str | None = None, tool: str | None = None) -> list[dict[str, Any]]:
     return [a for a in look.actions() if a["risk"] != "read" and (status is None or a["status"] == status)
             and (tool is None or a["tool"] == tool)]
+
+
+def _reads(look: Look, *, this_turn: bool = False) -> list[dict[str, Any]]:
+    calls = look.turn_actions() if this_turn else look.actions()
+    return [a for a in calls if a["risk"] == "read" and a["status"] == "ok"]
+
+
+def _project_task_reads(look: Look) -> list[dict[str, Any]]:
+    """This turn's reads of one project's tasks (``looper_tasks list`` with a project): what a summary of each
+    project's recent tasks stands on. Listing the projects, or all tasks at once, reads no project's tasks."""
+    return [a for a in _reads(look, this_turn=True) if a["tool"] == "looper_tasks"
+            and (a.get("arguments") or {}).get("action") == "list" and (a.get("arguments") or {}).get("project")]
 
 
 # --- The checks ---
@@ -388,8 +405,7 @@ def _project_limit_explained(look: Look) -> str | None:
 
 
 def _answered_by_reading(look: Look) -> str | None:
-    reads = [a for a in look.actions() if a["risk"] == "read" and a["status"] == "ok"]
-    if not reads:
+    if not _reads(look):
         return "the Manager read nothing through its tools"
     return None if look.reply.strip() else "no reply"
 
@@ -397,6 +413,17 @@ def _answered_by_reading(look: Look) -> str | None:
 STOPPED_NOTE = "[Looper] The user stopped your previous reply"
 WITHDREW_NOTE = "[Looper] The user withdrew"
 WITHDRAWN_ASK = "列出所有项目，然后逐个查看每个项目最近的三个任务，最后汇总。"
+
+
+def _projects_counted(look: Look) -> str | None:
+    """Every Manager message starts with the projects (TOOLS_CONTRACT's "Projects"), so the count needs no tool: the
+    reply names each one. The stand-in Manager's reply is status only; its scripted read answers instead."""
+    if look.fake:
+        return _answered_by_reading(look)
+    if not look.reply.strip():
+        return "no reply"
+    missing = [p["name"] for p in look.api.get("/api/projects")["projects"] if p["name"] not in look.reply]
+    return f"the reply does not name the project(s) {', '.join(missing)}" if missing else None
 
 
 def _was_stopped(look: Look) -> str | None:
@@ -435,7 +462,11 @@ def _knows_it_was_stopped(look: Look) -> str | None:
         return "the turn's input does not start with the note that the user stopped the previous reply"
     if look.fake:
         return None
-    if "汇总" in look.reply and not re.search(r"没(有)?(来得及|完成|做完|汇总)|未(完成|汇总)|停", look.reply):
+    # A summary this turn's per-project task reads back (it may redo the stopped turn's) is real; the stopped turn's
+    # own read, which is what the stop waited for, backs none, and nor does a re-listing of the projects alone.
+    # Without one, it is a claim unless the reply says the work was not done.
+    if "汇总" in look.reply and not _project_task_reads(look) and not re.search(
+            r"没(有)?(来得及|完成|做完|汇总)|还没|未(完成|汇总)|停", look.reply):
         return "the reply claims the summary was finished"
     return None
 
@@ -1526,7 +1557,7 @@ DIALOGS: tuple[Dialog, ...] = (
         Say("刚才停在哪了？", _knows_it_was_stopped),
     ), seed=_enable_stop, tags=("stop",)),
     Dialog("withdraw_then_continue", (
-        Say("现在有几个项目？", _answered_by_reading, (("looper_projects", {"action": "list"}),)),
+        Say("现在有几个项目？", _projects_counted, (("looper_projects", {"action": "list"}),)),
         Say(WITHDRAWN_ASK, _was_stopped, withdraw=True),
         Say("我刚才让你做什么了？你做了吗？", _knows_it_was_withdrawn),
     ), seed=_enable_stop, tags=("stop",)),
@@ -1891,12 +1922,12 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                     "<task>", task or ""))] for name, arguments in say.fake]
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             agent = f"manager-{dialog.manager}" if dialog.manager else "manager"
-            before = _last_action(database_url, agent)
+            before = _last_action(database_url)
             reply = _ask(api, session, text, timeout=timeout, stop=say.stop, withdraw=say.withdraw,
                          database_url=database_url, manager=dialog.manager, **budget_args)
             previous = Look(api, task, reply, database_url, since, known, fake=mode == "fake",
                             runtime_root=runtime_root, registry_before=registry_before, runs_since=runs_since,
-                            manager_id=agent if dialog.manager else None)
+                            manager_id=agent if dialog.manager else None, turn_since=before)
             problem = say.check(previous)
             trail = _trail(database_url, before, agent)
             calls = [f"{a['tool']}:{a['status']}" + (f" ({a['error_code']})" if a["error_code"] else "")
