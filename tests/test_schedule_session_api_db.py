@@ -9,11 +9,11 @@ from typing import Any
 
 import pytest
 
+from tests.db_support import DSN, run_db
 from tests.test_catalog_db import _call
 from tests.test_manager_config_tools_db import _trail
 from tests.test_manager_schedule_tools_db import _confirm, _schedule
 from tests.test_ops_tasks_db import _Chat, _project, _task
-from tests.test_usage_api_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -65,7 +65,7 @@ def test_schedule_api_shows_session_metadata_without_its_id_and_reset_clears_it(
         assert body["schedule"]["planner_session"] == {key: False if key == "active" else None for key in expected}
         assert (await _call("POST", "/api/schedules/sched-missing/reset-planner-session"))[0] == 404
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_task_api_exposes_whether_its_planner_continued_the_schedule_session(
@@ -84,7 +84,7 @@ def test_task_api_exposes_whether_its_planner_continued_the_schedule_session(
         assert {task["task_id"]: task["continues_schedule_session"] for task in body["tasks"]} == {
             "task-fresh": False, "task-continued": True}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("stored", [False, True])
@@ -114,7 +114,7 @@ def test_manager_reset_asks_for_next_message_confirmation_before_clearing(
         assert await _trail(pool) == [("looper_schedules", "high", "needs_confirmation"),
                                       ("looper_schedules", "high", "ok")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_configuration_export_excludes_session_state_and_import_skips_unknown_session_fields(
@@ -146,4 +146,4 @@ def test_configuration_export_excludes_session_state_and_import_skips_unknown_se
                 assert await conn.fetchval("SELECT count(*) FROM schedules WHERE name = $1", name) == 0
         assert await pool.fetchval("SELECT planner_session_id FROM schedules WHERE id = $1", sid) == "private-session"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

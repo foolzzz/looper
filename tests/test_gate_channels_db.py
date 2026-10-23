@@ -17,9 +17,9 @@ import pytest
 from looper.agents.channels.base import PostReceipt
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.task_notice import NotifyTarget, TargetKind
+from tests.db_support import DSN, run_db
 from tests.test_ops_tasks_db import _project
 from tests.test_user_gates_db import _api, _gate, _gate_step
-from tests.test_usage_api_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -154,7 +154,7 @@ def test_a_lark_tasks_gate_posts_its_card_and_the_rest_under_it(monkeypatch: pyt
         assert gate["channel_posts"] == {"channel": "lark", "target": f"Lark {LARK_USER}", "sent": 3, "failed": 0,
                                          "last_error": None}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_lark_groups_messages_that_wait_for_an_answer_say_to_mention_the_bot(monkeypatch: pytest.MonkeyPatch,
@@ -176,7 +176,7 @@ def test_a_lark_groups_messages_that_wait_for_an_answer_say_to_mention_the_bot(m
                                   "计划：加了 s2\n[/#tasks/task-a](/#tasks/task-a)")
         assert GROUP_LINE not in closed["text"] and closed["reply_to"] == "om_101"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_failed_post_is_tried_again_and_the_gates_later_messages_wait_behind_it(
@@ -241,7 +241,7 @@ def test_a_failed_post_is_tried_again_and_the_gates_later_messages_wait_behind_i
         assert alone["key"] == f"{under['key']}-own"
         assert (await posts())[-1] == ("cancelled", "sent", 1, False)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_gates_message_behind_one_that_failed_waits_in_the_same_pass(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -258,7 +258,7 @@ def test_a_gates_message_behind_one_that_failed_waits_in_the_same_pass(monkeypat
                                                      "task_user_gate_messages ORDER BY id")]
         assert states == [("opened", None, 1), ("reminder", None, 0)]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_what_asks_for_an_answer_is_not_posted_once_the_gate_stopped_waiting(monkeypatch: pytest.MonkeyPatch,
@@ -281,7 +281,7 @@ def test_what_asks_for_an_answer_is_not_posted_once_the_gate_stopped_waiting(mon
         assert states == [("opened", "none"), ("reminder", "none"), ("updated", "none"), ("resumed", "none"),
                           ("reply", "sent"), ("closed", "sent")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_web_tasks_gates_go_to_the_chat_the_setting_names(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -342,7 +342,7 @@ def test_a_web_tasks_gates_go_to_the_chat_the_setting_names(monkeypatch: pytest.
         status, cleared, _ = await _api("PUT", "/api/gate-settings", {"dashboard_target": None})
         assert status == 200 and cleared["dashboard_target"] is None and cleared["dashboard_target_problem"] is None
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_reply_to_a_gates_message_goes_to_the_gate_before_the_manager(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -399,7 +399,7 @@ def test_a_reply_to_a_gates_message_goes_to_the_gate_before_the_manager(monkeypa
         assert closed.kind is RouteKind.CLOSED and "gate g1 of task task-a" in closed.note
         assert "looper_task_instruct" in closed.note
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_telegram_reply_is_matched_within_its_chat_only(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -438,7 +438,7 @@ def test_a_telegram_reply_is_matched_within_its_chat_only(monkeypatch: pytest.Mo
         assert [(p["target"].id, p["text"], p["reply_to"]) for p in poster.posts[1:]] == [
             (TELEGRAM_CHAT, "Which version?", "9"), (TELEGRAM_CHAT, "15 then.", "om_101")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_discussions_from_before_gates_reached_channels_are_not_posted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -455,7 +455,7 @@ def test_the_discussions_from_before_gates_reached_channels_are_not_posted(monke
         poster = _Poster()
         assert await GateCourier(poster).run_once() == 0 and poster.posts == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def _tool_turn(text: str, *, channel: str = "lark", group: bool = False) -> Any:
@@ -534,7 +534,7 @@ def test_the_manager_relays_the_users_own_message_to_a_waiting_gate(monkeypatch:
         assert answer["status"] == "error" and answer["error"]["code"] == "conflict"
         assert "gate g1 is passed" in answer["error"]["message"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_gate_reply_runs_in_the_live_turn_and_never_in_one_stopped_or_over(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -581,7 +581,7 @@ def test_a_gate_reply_runs_in_the_live_turn_and_never_in_one_stopped_or_over(mon
         assert [m["text"] for m in await user_gates.thread("step-g1", pool=pool) if m["role"] == "user"] == [
             "PostgreSQL 16, please"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_open_gates_filters_by_chat_before_the_limit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -608,7 +608,7 @@ def test_open_gates_filters_by_chat_before_the_limit(monkeypatch: pytest.MonkeyP
         await pool.execute("UPDATE tasks SET status = 'completed' WHERE id = 'task-a'")
         assert "task-a" not in [gate["task_id"] for gate in await user_gates.open_gates(10)]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_gate_closed_during_a_pass_posts_no_reminder(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -632,7 +632,7 @@ def test_a_gate_closed_during_a_pass_posts_no_reminder(monkeypatch: pytest.Monke
             "SELECT kind, post_state FROM task_user_gate_messages ORDER BY id")] == [
                 ("opened", "sent"), ("reminder", "none")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_manager_sees_the_open_gates_of_the_chat_it_answers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -669,4 +669,4 @@ def test_the_manager_sees_the_open_gates_of_the_chat_it_answers(monkeypatch: pyt
                            "\"assumptions\": [], \"open\": []}'")
         assert await section(None) == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

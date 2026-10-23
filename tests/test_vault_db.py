@@ -14,8 +14,8 @@ from typing import Any
 import pytest
 
 from looper import child_env
+from tests.db_support import DSN, run_db, until
 from tests.test_room_db import BACKEND, _room, _room_task
-from tests.test_usage_api_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -49,7 +49,7 @@ def test_planner_lists_only_the_vault_tools_its_project_allows(
         header = f"Bearer {ops.issue('task-r')}"
         assert {t["name"] for t in await ops.listing(header) if t["name"].startswith("looper_vault_")} == expected
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_planner_vault_write_needs_a_turn_and_records_writes_and_refusals(
@@ -78,7 +78,7 @@ def test_planner_vault_write_needs_a_turn_and_records_writes_and_refusals(
         assert sum(s.startswith("Vault: planner's looper_vault_write refused (forbidden)") for s in lines) == 1
         assert not (root / "mine/diary.md").exists()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("room_on", [False, True])
@@ -108,7 +108,7 @@ def test_run_token_carries_vault_tools_and_mcp_and_rechecks_the_project(
         ops.revoke_run(BACKEND.run)
         assert not ops.authorized(header) and not Path(library.mcp_config).exists()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_run_token_limits_total_vault_writes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -130,7 +130,7 @@ def test_run_token_limits_total_vault_writes(monkeypatch: pytest.MonkeyPatch, tm
         assert result["error"]["code"] == "rate_limited"
         assert await pool.fetchval("SELECT count(*) FROM activity WHERE summary LIKE 'Vault:%wrote%'") == 4
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("enabled", ["off", "on"])
@@ -145,7 +145,6 @@ def test_worker_gets_vault_tools_without_the_room(
     from looper.agents.room import RoomService
     from looper.agents.tiers.worker import WorkerConfig, WorkerPool
     from tests.fake_claude import fake_claude
-    from tests.test_task_agents_db import _until
 
     body = '''
 import json, os, sys
@@ -183,7 +182,7 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
             await bus.publish(MessageEnvelope.create(
                 source=planner_address("task-r"), target=worker_address("worker-2"), message_type=MessageType.WORK_ITEM,
                 payload=payload))
-            await _until(lambda: results, "the run's result", seconds=30)
+            await until(lambda: results, "the run's result", timeout=30)
         finally:
             await workers.stop()
             await bus.shutdown()
@@ -197,7 +196,7 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
             mcp_path = record["argv"][record["argv"].index("--mcp-config") + 1]
             assert not Path(mcp_path).exists()
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("configured", "enabled"), [(True, "off"), (False, "on"), (False, "off")])
@@ -211,7 +210,6 @@ def test_vault_off_worker_prompt_and_argv_match_the_unconfigured_baseline(
     from looper.agents.room import RoomService
     from looper.agents.tiers.worker import WorkerConfig, WorkerPool
     from tests.fake_claude import fake_claude
-    from tests.test_task_agents_db import _until
 
     body = '''
 import json, os, sys
@@ -240,7 +238,7 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
                 source=planner_address("task-r"), target=worker_address("worker-2"), message_type=MessageType.WORK_ITEM,
                 payload={"task_id": "step-s2", "parent_task_id": "task-r", "step_key": "s2", "instruction": "do it",
                          "context": {"work_dir": str(tmp_path / "work")}}))
-            await _until(lambda: results, "the run's result", seconds=30)
+            await until(lambda: results, "the run's result", timeout=30)
         finally:
             await workers.stop()
             await bus.shutdown()
@@ -261,7 +259,7 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
         assert "--mcp-config" not in record["argv"]
         assert "--mcp-config" not in baseline["argv"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_concurrent_planner_vault_calls_commit_once_and_record_one_write(
@@ -302,4 +300,4 @@ def test_concurrent_planner_vault_calls_commit_once_and_record_one_write(
         rows = await pool.fetch("SELECT summary FROM activity WHERE task_id = 'task-r'")
         assert sum(row["summary"].startswith("Vault: planner wrote") for row in rows) == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

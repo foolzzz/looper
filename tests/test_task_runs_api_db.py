@@ -7,8 +7,9 @@ from typing import Any
 import pytest
 
 from looper.db import llm_records
+from tests.db_support import run_db
 from tests.test_ops_tasks_db import _project, _task
-from tests.test_usage_api_db import _get, _run
+from tests.test_usage_api_db import _get
 from tests.test_waits_api_db import _api
 
 PROFILE = {"id": "profile-1", "name": "Fast", "model": "profile-model", "source": "project",
@@ -74,7 +75,7 @@ def test_runs_are_compact_rows_matching_the_records(monkeypatch: pytest.MonkeyPa
         status, body = await _get("/api/tasks/task-c/runs")
         assert (status, body) == (200, {"runs": []})
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_runs_are_operator_only(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -85,4 +86,4 @@ def test_runs_are_operator_only(monkeypatch: pytest.MonkeyPatch) -> None:
         status, body, _ = await _api("GET", "/api/tasks/task-a/runs")
         assert status == 200 and body == {"runs": []}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

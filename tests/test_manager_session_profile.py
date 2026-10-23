@@ -23,7 +23,8 @@ from looper.agents.message import MessageType
 from looper.agents.tiers.manager import (
     PROFILE_CURRENT_REPLY, PROFILE_EFFECT_REPLIES, ManagerAgent, ManagerConfig,
 )
-from tests.test_manager_new_session import _HOLD_FIRST, _drain, _saved, _until, _web
+from tests.db_support import until
+from tests.test_manager_new_session import _HOLD_FIRST, _drain, _saved, _web
 from tests.test_manager_reply import _CODEX, _codex_profile, _fake_claude, _resident
 from tests.test_manager_reply import WEB
 
@@ -86,7 +87,7 @@ def _chat(monkeypatch: pytest.MonkeyPatch, agent_db: Any, tmp_path: Path, messag
             if hold:
                 await manager.start(bus)  # its loop serializes the messages, as the server's does
                 await bus.publish(_web(messages[0], 0))
-                await _until((root / "busy").exists)
+                await until((root / "busy").exists, timeout=10)
                 for index, text in enumerate(messages[1:], 1):
                     await bus.publish(_web(text, index))
                 await asyncio.sleep(0.3)

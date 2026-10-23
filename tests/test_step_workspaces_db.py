@@ -18,7 +18,7 @@ import pytest
 from looper.agents import step_workspaces as ws
 from looper.agents.step_workspaces import MergeError, StepWorkspaceState
 from looper.agents.tiers.planner import PlannerAgent, PlanStep, TaskPlan
-from tests.test_usage_api_db import DSN, _run
+from tests.db_support import DSN, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -112,7 +112,7 @@ def test_a_workspace_row_is_written_as_it_changes_and_the_table_keeps_its_rules(
         assert await tasks.delete_task("task-a", pool=pool)
         assert await db.list_for_task("task-a") == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_planner_reads_back_the_start_of_its_branch_and_each_step_s_newest_workspace(
@@ -142,7 +142,7 @@ def test_a_planner_reads_back_the_start_of_its_branch_and_each_step_s_newest_wor
         assert (loaded.start_branch, loaded.start_commit) == ("refs/heads/main", start)
         assert loaded.steps[0].workspace == newer and loaded.steps[0].isolated
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_removing_and_sweeping_follow_what_each_task_keeps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -172,7 +172,7 @@ def test_removing_and_sweeping_follow_what_each_task_keeps(tmp_path: Path, monke
         assert states == {"task-done": ("discarded", True), "task-stopped": ("active", False),
                           "task-anew": ("discarded", True)}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_task_page_shows_a_task_s_workspaces_and_discards_one_a_stopped_task_keeps(
@@ -256,7 +256,7 @@ def test_the_task_page_shows_a_task_s_workspaces_and_discards_one_a_stopped_task
         assert blocked == ["waited"] and not Path(three.path).exists()
         assert await pool.fetchval("SELECT status FROM tasks WHERE id = 'task-a'") == "stopped"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_doctor_reads_the_projects_whose_steps_work_in_worktrees(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -272,4 +272,4 @@ def test_doctor_reads_the_projects_whose_steps_work_in_worktrees(tmp_path: Path,
         assert [(p["name"], p["work_dir"], p["workspace_links"]) for p in await projects.worktree_projects()] == [
             ("alpha", "/a", None), ("beta", "/b", [".venv"])]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

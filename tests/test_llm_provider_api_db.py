@@ -16,7 +16,7 @@ import pytest
 from looper.agents import http_server, profile_registry as service
 from looper.agents.runtimes import VendorType
 from looper.db import connection, profile_registry as db
-from tests.test_catalog_db import DSN, _fresh_schema
+from tests.db_support import DSN, fresh_schema
 
 needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 SECRET = "sk-synthetic-provider-http-only"
@@ -75,7 +75,7 @@ def _run(test, monkeypatch, tmp_path, *, database=True):
 
     async def run():
         if database:
-            async with _fresh_schema() as pool:
+            async with fresh_schema() as pool:
                 await connection.ensure_schema(pool)
                 monkeypatch.setattr(connection, "_pool", pool)
                 await serve(pool)

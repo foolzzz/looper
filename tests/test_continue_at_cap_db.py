@@ -21,7 +21,8 @@ import pytest
 from looper.agents.http_server import AgentHTTPServer
 from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, channel_address, planner_address
 from looper.agents.tiers.task import Task, TaskRouter
-from tests.test_usage_api_db import DSN, _run, _run_record, _Writer
+from tests.db_support import DSN, run_db
+from tests.test_usage_api_db import _run_record, _Writer
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -99,7 +100,7 @@ def test_a_task_that_failed_at_its_cap_continues_from_its_plan_with_a_higher_cap
         assert (row["status"], row["error"], row["fail_kind"]) == ("pending", None, None)
         assert [s["id"] for s in await steps.list_steps("task-a", pool=pool)] == ["step-1", "step-2"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_manager_turn_linked_to_the_task_counts_toward_neither_its_cost_nor_its_cap(
@@ -127,7 +128,7 @@ def test_a_manager_turn_linked_to_the_task_counts_toward_neither_its_cost_nor_it
         assert restart.message_type is MessageType.TASK_RESTART
         assert restart.payload == {"task_id": "task-a", "mode": "at_cap"}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("fail_kind, body, error", [
@@ -151,4 +152,4 @@ def test_continuing_is_refused_unless_the_task_failed_at_its_cap_and_the_cap_is_
         assert (await projects.get_project(project_id, pool=pool))["task_budget_usd"] == 0.4
         assert published == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

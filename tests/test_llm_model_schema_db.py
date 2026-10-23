@@ -3,32 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import asyncpg
 import pytest
 
 from looper.db import connection
+from tests.db_support import DSN, fresh_connection as _database
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
-
-@asynccontextmanager
-async def _database() -> AsyncIterator[asyncpg.Connection]:
-    conn = await asyncpg.connect(DSN, command_timeout=15)
-    schema = f"looper_test_{uuid.uuid4().hex}"
-    await conn.execute(f'CREATE SCHEMA "{schema}"')
-    await conn.execute(f'SET search_path TO "{schema}"')
-    try:
-        yield conn
-    finally:
-        await conn.execute(f'DROP SCHEMA "{schema}" CASCADE')
-        await conn.close()
 
 
 def _run(test: Callable[[asyncpg.Connection], Awaitable[None]], *, initialize: bool = True) -> None:
@@ -113,44 +98,31 @@ def test_builtin_model_natural_key_preserves_existing_id_and_metadata() -> None:
     _run(test)
 
 
-@pytest.mark.parametrize('assignment', ["vendor_type = 'unknown'", "vendor_type = 'codex-login'",
-                                        "auth = 'oauth', oauth_runtime_type = 'codex'", 'vendor_type = NULL'])
-def test_provider_vendor_auth_checks(assignment: str) -> None:
-    async def test(conn: asyncpg.Connection) -> None:
-        await _account(conn)
-        with pytest.raises((asyncpg.CheckViolationError, asyncpg.NotNullViolationError)):
-            await conn.execute(f"UPDATE llm_providers SET {assignment} WHERE id = 'prov-test'")
-
-    _run(test)
-
-
-@pytest.mark.parametrize('assignment', ["protocol = 'unknown'", "base_url = 'ftp://example.invalid'",
-                                        "base_url = 'https://example.invalid/has space'",
-                                        "base_url = 'https://user:secret@example.invalid'",
-                                        'use_runtime_default = TRUE'])
-def test_endpoint_checks(assignment: str) -> None:
-    async def test(conn: asyncpg.Connection) -> None:
-        await _account(conn)
-        with pytest.raises(asyncpg.CheckViolationError):
-            await conn.execute(f"UPDATE llm_provider_endpoints SET {assignment} WHERE provider_id = 'prov-test'")
-
-    _run(test)
-
-
-@pytest.mark.parametrize('field,value', [
-    ('id', 'bad-id'), ('name', ''), ('name', '-flag'), ('name', 'has space'),
-    ('name', 'a' * 201), ('protocol', 'unknown'), ('context_window', 0),
-    ('context_window', 100_000_001), ('catalog_order', -1), ('background_model', 'bad name'),
-    ('efforts', ['high', 'high']), ('efforts', ['High']), ('efforts', [None]),
-    ('efforts', ['e' * 33]), ('efforts', [f'level{i}' for i in range(11)]),
-] + [(field, value) for field in (
-    'input_usd_per_mtok', 'output_usd_per_mtok', 'cache_read_usd_per_mtok', 'cache_write_usd_per_mtok'
-) for value in (-1, 10_000.01, float('nan'), float('inf'), -float('inf'))])
-def test_model_checks(field: str, value: object) -> None:
+def test_registry_checks_reject_invalid_rows_on_one_migrated_schema() -> None:
     async def test(conn: asyncpg.Connection) -> None:
         await _model(conn)
-        with pytest.raises(asyncpg.CheckViolationError):
-            await conn.execute(f'UPDATE llm_models SET {field} = $1 WHERE id = $2', value, 'model-test')
+        # A failed statement rolls back by itself; every check starts from the same valid rows.
+        for assignment in ("vendor_type = 'unknown'", "vendor_type = 'codex-login'",
+                           "auth = 'oauth', oauth_runtime_type = 'codex'", 'vendor_type = NULL'):
+            with pytest.raises((asyncpg.CheckViolationError, asyncpg.NotNullViolationError)):
+                await conn.execute(f"UPDATE llm_providers SET {assignment} WHERE id = 'prov-test'")
+        for assignment in ("protocol = 'unknown'", "base_url = 'ftp://example.invalid'",
+                           "base_url = 'https://example.invalid/has space'",
+                           "base_url = 'https://user:secret@example.invalid'", 'use_runtime_default = TRUE'):
+            with pytest.raises(asyncpg.CheckViolationError):
+                await conn.execute(f"UPDATE llm_provider_endpoints SET {assignment} WHERE provider_id = 'prov-test'")
+        invalid_models = [
+            ('id', 'bad-id'), ('name', ''), ('name', '-flag'), ('name', 'has space'),
+            ('name', 'a' * 201), ('protocol', 'unknown'), ('context_window', 0),
+            ('context_window', 100_000_001), ('catalog_order', -1), ('background_model', 'bad name'),
+            ('efforts', ['high', 'high']), ('efforts', ['High']), ('efforts', [None]),
+            ('efforts', ['e' * 33]), ('efforts', [f'level{i}' for i in range(11)]),
+        ] + [(field, value) for field in (
+            'input_usd_per_mtok', 'output_usd_per_mtok', 'cache_read_usd_per_mtok', 'cache_write_usd_per_mtok'
+        ) for value in (-1, 10_000.01, float('nan'), float('inf'), -float('inf'))]
+        for field, value in invalid_models:
+            with pytest.raises(asyncpg.CheckViolationError):
+                await conn.execute(f'UPDATE llm_models SET {field} = $1 WHERE id = $2', value, 'model-test')
 
     _run(test)
 

@@ -18,6 +18,7 @@ from looper.agents.channels.lark_bot import make_adapter
 from looper.agents.channels.telegram import TelegramChannelAdapter
 from looper.agents.message import (MessageEnvelope, MessageType, channel_address, manager_address)
 from looper.agents.tiers.manager import TURNED_OFF_REPLY, _session_key
+from tests.db_support import DSN, run_with_channel_configs
 from tests.test_agent_channels import _allowlist, _lark_event, _tg_update
 from tests.test_channel_post import _Bot
 from tests.test_lark_transport import BOT_ID, OPEN_ID, StubTransport
@@ -223,8 +224,6 @@ def test_the_thread_id_names_the_bot_only_for_an_added_one() -> None:
 
 # --- PostgreSQL ---
 
-from tests.test_channel_configs_db import DSN, _run  # noqa: E402
-
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 def test_a_scenario_managers_bot_thread_belongs_to_it(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -244,4 +243,4 @@ def test_a_scenario_managers_bot_thread_belongs_to_it(monkeypatch: pytest.Monkey
         assert [s["session_id"] for s in await db_chat.list_sessions(manager_id=REVIEW)] == ["channel-lark-3:oc_dm"]
         assert await db_chat.list_sessions() == []
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)

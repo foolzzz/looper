@@ -8,16 +8,14 @@ start from a database that predates projects.
 from __future__ import annotations
 
 import asyncio
-import os
 import re
-import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+from tests.db_support import DSN, fresh_schema
+
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 # The tasks table as it was before projects.
@@ -42,28 +40,11 @@ CREATE TABLE tasks (
 """
 
 
-@asynccontextmanager
-async def _fresh_schema() -> AsyncIterator[Any]:
-    """A pool whose tables live in a new, empty schema, dropped afterwards."""
-    import asyncpg
-
-    schema = f"looper_test_{uuid.uuid4().hex[:12]}"
-    admin = await asyncpg.connect(DSN)
-    await admin.execute(f'CREATE SCHEMA "{schema}"')
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2, server_settings={"search_path": schema})
-    try:
-        yield pool
-    finally:
-        await pool.close()
-        await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
-        await admin.close()
-
-
 def _run(test: Callable[[Any], Awaitable[None]], *, old_tasks: bool = False) -> None:
     from looper.db.connection import ensure_schema
 
     async def _main() -> None:
-        async with _fresh_schema() as pool:
+        async with fresh_schema(max_size=2) as pool:
             if old_tasks:
                 await pool.execute(OLD_TASKS_TABLE)
             else:
@@ -241,7 +222,7 @@ def test_background_column_is_added_to_an_existing_projects_table() -> None:
     from looper.db.connection import ensure_schema
 
     async def _main() -> None:
-        async with _fresh_schema() as pool:
+        async with fresh_schema(max_size=2) as pool:
             # A database from before backgrounds, holding a project.
             await ensure_schema(pool)
             await pool.execute("ALTER TABLE projects DROP COLUMN background")

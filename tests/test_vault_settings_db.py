@@ -10,7 +10,7 @@ import pytest
 
 from looper.agents import vault
 from looper.db import system_settings
-from tests.test_usage_api_db import DSN, _run
+from tests.db_support import DSN, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -32,7 +32,7 @@ def test_vault_settings_store_read_back_and_clear(tmp_path: Path, monkeypatch: p
         assert cleared["configured"] is False and cleared["path"] is None
         assert vault.SETTING_KEY not in await system_settings.get_settings([vault.SETTING_KEY])
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_saved_vault_becomes_unconfigured_when_its_folder_vanishes(
@@ -49,4 +49,4 @@ def test_saved_vault_becomes_unconfigured_when_its_folder_vanishes(
         assert view["problem"] and "no longer holds" in view["problem"]
         assert await vault.active() is None
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

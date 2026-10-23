@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from tests.test_catalog_db import DSN, _fresh_schema
+from tests.db_support import DSN, fresh_schema
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -72,7 +72,7 @@ def test_the_upgrade_moves_each_effort_onto_profiles_and_every_run_keeps_its_pro
             "LEFT JOIN agent_profiles a ON a.id = l.profile_id")}
 
     async def _main() -> None:
-        async with _fresh_schema() as pool:
+        async with fresh_schema() as pool:
             await connection.ensure_schema(pool)
             await pool.execute(_BEFORE)
             profiles = {pid: AgentProfile.from_row(await get_profile(pid, pool=pool))

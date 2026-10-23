@@ -19,14 +19,7 @@ from looper.agents.message import (
     planner_address,
 )
 from looper.agents.tiers.task import Task, TaskRouter
-
-
-async def _until(condition: Any, timeout: float = 5.0) -> None:
-    """Wait until ``condition()`` holds, checking every 10 ms."""
-    deadline = asyncio.get_running_loop().time() + timeout
-    while not condition():
-        assert asyncio.get_running_loop().time() < deadline, "timed out waiting for the router"
-        await asyncio.sleep(0.01)
+from tests.db_support import until
 
 
 @pytest.mark.usefixtures("agent_db")
@@ -53,7 +46,7 @@ class TestTaskRouter:
                 )
                 await bus.publish(envelope)
                 await bus.publish(_start("task-c1"))
-                await _until(lambda: len(router._planners) == 1)
+                await until(lambda: len(router._planners) == 1, timeout=5)
 
                 task_id = list(router._tasks.keys())[0]
 
@@ -64,7 +57,7 @@ class TestTaskRouter:
                     payload={"task_id": task_id},
                 )
                 await bus.publish(cancel_env)
-                await _until(lambda: task_id not in router._planners)
+                await until(lambda: task_id not in router._planners, timeout=5)
 
                 assert router._tasks[task_id].status == "cancelled"
                 assert task_id not in router._planners
@@ -184,7 +177,7 @@ class TestEveryTaskStarts:
                 await router.start(bus)
                 for requirement in names:
                     await _ask_and_start(bus, "proj-a", requirement)
-                await _until(lambda: len(router._planners) == len(names))
+                await until(lambda: len(router._planners) == len(names), timeout=5)
                 statuses = self._statuses(router)
                 await router.stop()
                 await bus.shutdown()
@@ -211,7 +204,7 @@ class TestEveryTaskStarts:
                 router = TaskRouter(runtime_root=Path(tmp))
                 await router.start(bus)
                 await _ask_and_start(bus, "proj-a", "a1")
-                await _until(lambda: len(router._planners) == 1)
+                await until(lambda: len(router._planners) == 1, timeout=5)
                 if arrival == "start":
                     await _ask_and_start(bus, "proj-a", "a2")
                 elif arrival == "restart":
@@ -220,7 +213,7 @@ class TestEveryTaskStarts:
                         payload={"task_id": "task-old"}))
                 else:
                     await router.resume_tasks(["task-old"])
-                await _until(lambda: len(router._planners) == 2)
+                await until(lambda: len(router._planners) == 2, timeout=5)
                 statuses = self._statuses(router)
                 await router.stop()
                 await bus.shutdown()
@@ -383,7 +376,6 @@ class TestTaskProject:
         task, envelope = asyncio.run(_run())
         assert task.project_id == "proj-7"
         assert envelope.payload["project_id"] == "proj-7"
-
 
 
 @pytest.mark.usefixtures("agent_db")

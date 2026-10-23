@@ -16,10 +16,10 @@ import pytest
 from looper.agents.managers_api import ManagerDefinition
 from looper.agents.ops.service import scope_for
 from looper.agents.ops.tasks import TOOLS, task_create_tool
+from tests.db_support import DSN, run_db
 from tests.test_managers_schema_db import _manager
 from tests.test_ops_tasks_db import _Chat, _error, _project
 from tests.test_task_agents_db import _profiles
-from tests.test_usage_api_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -99,7 +99,7 @@ def test_listing_of_a_manager_without_templates_is_the_original(monkeypatch: pyt
         assert listed["inputSchema"]["properties"]["template"]["enum"] == ["pr_review"]
         assert "project" not in listed["inputSchema"]["required"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_task_from_a_template_on_a_fixed_project(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -118,7 +118,7 @@ def test_a_task_from_a_template_on_a_fixed_project(monkeypatch: pytest.MonkeyPat
         assert task["requirement"].startswith(f"Review the pull request {LINK}.\n\nFocus on tests.")
         assert "模板：PR review（Pull request link：" in chat.turns[0].blocks[-1]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_first_call_after_a_template_is_added_is_checked_by_the_new_schema(
@@ -172,7 +172,7 @@ def test_refusals_write_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
                            "SELECT $1, $1, runtime_id, model_id FROM agent_profiles WHERE id = $2", other, reviewer)
         await _refused(pool, chat, "invalid", "Agent Profile", _create(profiles={"reviewer": other}))
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_same_values_are_accepted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -190,7 +190,7 @@ def test_the_same_values_are_accepted(monkeypatch: pytest.MonkeyPatch, tmp_path:
         task = await tasks.get_task(done["result"]["task_id"], pool=pool)
         assert (task["project_id"], task["work_dir"], task["workspace_mode"]) == (project["id"], "/w", "in_place")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 async def _role_template(pool: Any, project_id: str, key: str = "security-review") -> None:
@@ -222,7 +222,7 @@ def test_role_templates_are_copied_into_the_task(monkeypatch: pytest.MonkeyPatch
                                       "harness": role["harness"], "items": list(role["items"]),
                                       "template_key": "security-review"}]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_role_template_failures_write_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -240,7 +240,7 @@ def test_role_template_failures_write_nothing(monkeypatch: pytest.MonkeyPatch, t
         await pool.execute("DELETE FROM project_role_templates")
         await _refused(pool, chat, "conflict", "no role template security-review", _create())
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_template_without_a_project_asks_before_a_new_one(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -259,7 +259,7 @@ def test_a_template_without_a_project_asks_before_a_new_one(monkeypatch: pytest.
         assert project["work_dir"] == "/srv/tpl"
         assert (await tasks.get_task(done["result"]["task_id"], pool=pool))["work_dir"] == "/srv/tpl"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_placement_merges_the_template_and_the_call(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -279,7 +279,7 @@ def test_the_placement_merges_the_template_and_the_call(monkeypatch: pytest.Monk
         (done,) = await chat.say("确认", _create(template="tpl-dir", project="q"))
         assert (await tasks.get_task(done["result"]["task_id"], pool=pool))["work_dir"] == "/t"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_template_profile_that_cannot_run_its_role_any_more(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -292,7 +292,7 @@ def test_a_template_profile_that_cannot_run_its_role_any_more(monkeypatch: pytes
         chat = await _chat(pool, tmp_path)
         await _refused(pool, chat, "conflict", "PR review's reviewer Agent Profile", _create())
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_deleted_manager_creates_no_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -307,7 +307,7 @@ def test_a_deleted_manager_creates_no_task(monkeypatch: pytest.MonkeyPatch, tmp_
         assert answer["status"] == "error", answer
         assert await _task_ids(pool) == before
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_manager_is_told_of_its_templates_only_when_it_has_some(monkeypatch: pytest.MonkeyPatch,
@@ -332,4 +332,4 @@ def test_the_manager_is_told_of_its_templates_only_when_it_has_some(monkeypatch:
         text = TEMPLATES_CONTRACT.format(only=" and do not create a task")
         assert text.endswith("say so and do not create a task.")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

@@ -16,7 +16,6 @@ drops a database beside it).
 from __future__ import annotations
 
 import json
-import os
 import shlex
 import sys
 import time
@@ -26,8 +25,8 @@ from typing import Any
 import pytest
 
 from evals.prompt_regression.runner import Api, EvalError, fresh_database, running_server
+from tests.db_support import DSN
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 PLANNER_TURN_COST = 0.001

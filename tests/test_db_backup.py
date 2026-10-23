@@ -28,9 +28,9 @@ from evals.prompt_regression.runner import fresh_database, free_port
 from looper import ops_config
 from looper.agents import db_backup, operator_auth
 from looper.env import counterpart
+from tests.db_support import DSN
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 needs_database = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 _PG_DUMP = r'''#!@PYTHON@

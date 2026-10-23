@@ -6,9 +6,7 @@ test works in a new schema of its own, dropped afterwards.
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -18,31 +16,9 @@ from typing import Any
 
 import pytest
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+from tests.db_support import DSN, run_db
+
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-
-
-def _run(test: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run ``test(pool)`` on a new schema that is also the server's pool."""
-    import asyncpg
-
-    from looper.db import connection
-
-    async def _main() -> None:
-        schema = f"looper_test_{uuid.uuid4().hex[:12]}"
-        admin = await asyncpg.connect(DSN)
-        await admin.execute(f'CREATE SCHEMA "{schema}"')
-        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3, server_settings={"search_path": schema})
-        try:
-            await connection.ensure_schema(pool)
-            monkeypatch.setattr(connection, "_pool", pool)
-            await test(pool)
-        finally:
-            await pool.close()
-            await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
-            await admin.close()
-
-    asyncio.run(_main())
 
 
 class _Writer:
@@ -113,7 +89,7 @@ def test_every_task_is_counted_by_group_and_the_tasks_page_lists_a_group(monkeyp
             status, body = await _get(_server(), "/api/tasks", {"group": unknown})
             assert status == 400 and "in_progress" in body["error"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_agents_running_now_and_each_active_projects_load(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -203,7 +179,7 @@ def test_the_agents_running_now_and_each_active_projects_load(monkeypatch: pytes
         assert body["agents"] == {"manager": None, "planners": [], "workers": [], "reviewers": []}
         assert [p["name"] for p in body["projects"]] == ["alpha", "beta"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("model_metadata", [False, True])
@@ -246,7 +222,7 @@ def test_todays_spend_keeps_money_apart_from_the_subscription_equivalent(
         assert spend["equivalent_usd"] == pytest.approx(1.75)
         assert (spend["runs"], spend["running"], spend["unpriced_runs"]) == (7, 1, 1)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_runs_a_previous_server_left_running_end_at_startup_and_count_as_ended(
@@ -291,7 +267,7 @@ def test_runs_a_previous_server_left_running_end_at_startup_and_count_as_ended(
         assert (status, spend["runs"], spend["running"], spend["unpriced_runs"]) == (200, 4, 0, 2)
         assert spend["provider_priced_usd"] + spend["equivalent_usd"] == pytest.approx(0.35)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_planning_or_verifying_task_is_active_for_the_sidebar_and_the_delete_guard(
@@ -319,7 +295,7 @@ def test_a_planning_or_verifying_task_is_active_for_the_sidebar_and_the_delete_g
         assert writer.data.startswith(b"HTTP/1.1 400") and b"stop the task before deleting" in writer.data
         assert await pool.fetchval("SELECT count(*) FROM tasks WHERE id = 'planning'") == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_tasks_name_is_its_title_else_its_goal_else_its_requirement(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -342,7 +318,7 @@ def test_a_tasks_name_is_its_title_else_its_goal_else_its_requirement(monkeypatc
         assert (status, detail["name"], detail["requirement"]) == (200, "写 hello 脚本", "Write hello.py.")
         assert await pool.fetchval("SELECT title FROM tasks WHERE id = 'task-titled'") == "写 hello 脚本"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_tasks_list_pages_newest_first_under_its_filters(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -397,7 +373,7 @@ def test_the_tasks_list_pages_newest_first_under_its_filters(monkeypatch: pytest
             status, body = await _get(server, "/api/tasks", query)
             assert status == 400 and says in body["error"], body
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_another_task_running_in_a_directory_is_found_and_an_ended_one_or_itself_is_not(
@@ -417,4 +393,4 @@ def test_another_task_running_in_a_directory_is_found_and_an_ended_one_or_itself
         assert await db_tasks.others_active_in("/w/d", "task-self", pool=pool) is True  # a wait holds it
         assert await db_tasks.others_active_in("/w/b", "task-other", pool=pool) is False
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

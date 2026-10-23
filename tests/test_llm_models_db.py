@@ -12,29 +12,10 @@ import pytest
 
 from looper.agents import profile_registry as service
 from looper.db import connection, llm_records, profile_registry as db
-from tests.test_catalog_db import DSN, _fresh_schema
+from tests.db_support import DSN, run_with_models as _run
 from tests.test_llm_provider_api_db import _run as _run_http, _account, SECRET
 
 needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-
-
-def _run(test, monkeypatch):
-    async def run():
-        async with _fresh_schema() as pool:
-            await connection.ensure_schema(pool)
-            monkeypatch.setattr(connection, "_pool", pool)
-            monkeypatch.setattr(service, "_login_modules", lambda: {})
-            await pool.execute("""
-                INSERT INTO llm_providers (id, name, vendor_type, auth) VALUES
-                  ('prov-test', 'Test account', 'custom', 'api_key'),
-                  ('prov-other', 'Other account', 'custom', 'api_key');
-                INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url) VALUES
-                  ('prov-test', 'anthropic-messages', 'https://messages.example.invalid'),
-                  ('prov-test', 'openai-chat', 'https://chat.example.invalid'),
-                  ('prov-other', 'anthropic-messages', 'https://other.example.invalid');
-            """)
-            await test(pool)
-    asyncio.run(asyncio.wait_for(run(), timeout=30))
 
 
 def _body(**changes):

@@ -6,55 +6,20 @@ test works in a new schema of its own, dropped afterwards.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
-import os
 import tempfile
-import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+from tests.db_support import DSN, run_db
+
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 TASK_ROLES = ["planner", "worker", "reviewer"]
-
-
-@asynccontextmanager
-async def _fresh_schema() -> AsyncIterator[Any]:
-    import asyncpg
-
-    schema = f"looper_test_{uuid.uuid4().hex[:12]}"
-    admin = await asyncpg.connect(DSN)
-    await admin.execute(f'CREATE SCHEMA "{schema}"')
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3, server_settings={"search_path": schema})
-    try:
-        yield pool
-    finally:
-        await pool.close()
-        await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
-        await admin.close()
-
-
-def _run(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch, *, before: str = "") -> None:
-    """Run ``test(pool)`` on a new schema that is also the server's pool; ``before`` runs ahead of the schema."""
-    from looper.db import connection
-
-    async def _main() -> None:
-        async with _fresh_schema() as pool:
-            if before:
-                await pool.execute(before)
-            await connection.ensure_schema(pool)
-            monkeypatch.setattr(connection, "_pool", pool)
-            await test(pool)
-
-    asyncio.run(_main())
 
 
 class _Writer:
@@ -190,7 +155,7 @@ def test_the_upgrade_keeps_imported_items_uninstalled_and_moves_project_skills_w
         assert status == 200 and body["content"] == "Run the checks, then reply DEPLOY-OK.\n"
         assert body["skill"]["qualified_name"] == "project:deploy-check"
 
-    _run(_test, monkeypatch, before=_BEFORE_CATALOG + _old_skills_sql())
+    run_db(_test, monkeypatch, before=_BEFORE_CATALOG + _old_skills_sql())
 
 
 # --- Installs and what each run loads ---
@@ -259,7 +224,7 @@ def test_each_run_loads_what_is_installed_for_its_role_globally_or_in_its_projec
         assert await _loaded(root, "planner", calc) == ["demo", "personal:alpha", "personal:beta"]
         assert await _loaded(root, "worker", calc) == ["demo", "personal:alpha", "personal:beta"]
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_uninstalling_disabling_or_dropping_a_role_takes_the_item_out_of_the_next_run(
@@ -288,7 +253,7 @@ def test_uninstalling_disabling_or_dropping_a_role_takes_the_item_out_of_the_nex
         assert {i["name"]: len(i["installs"]) for i in catalog["items"]} == {"alpha": 0, "beta": 1}
         assert (await _call("POST", "/api/installs", {"item_id": ids["alpha"], "scope": "global"}))[0] == 201
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_the_install_api_refuses_what_an_install_cannot_be(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -329,7 +294,7 @@ def test_the_install_api_refuses_what_an_install_cannot_be(monkeypatch: pytest.M
         assert (await _call("GET", "/api/projects/proj-nope/installs"))[0] == 404
         assert await pool.fetchval("SELECT count(*) FROM library_installs") == 2
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_the_catalog_and_a_projects_view_show_where_each_item_is_installed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -370,4 +335,4 @@ def test_the_catalog_and_a_projects_view_show_where_each_item_is_installed(monke
         _, other = await _call("GET", f"/api/projects/{docs}/installs")
         assert [e["item"]["qualified_name"] for e in other["installs"]] == ["demo"]
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)

@@ -13,8 +13,8 @@ from typing import Any, Awaitable
 
 import pytest
 
+from tests.db_support import DSN, run_db
 from tests.test_task_agents_db import _call, _profiles
-from tests.test_usage_api_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -120,7 +120,7 @@ def test_the_default_manager_is_listed_and_creating_checks_every_field(monkeypat
         assert status == 409 and "at most 8 Managers can be enabled at once" in answer["error"]
         assert (await _create("e9", enabled=False))[0] == 201
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_default_manager_takes_only_a_name_and_a_description(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -140,7 +140,7 @@ def test_the_default_manager_takes_only_a_name_and_a_description(monkeypatch: py
         assert status == 400 and "no task templates" in answer["error"], answer
         assert await pool.fetchval("SELECT count(*) FROM manager_task_templates WHERE manager_id = 'manager'") == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_updates_bump_the_revision_and_tell_the_listener(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -178,7 +178,7 @@ def test_updates_bump_the_revision_and_tell_the_listener(monkeypatch: pytest.Mon
         finally:
             managers_api.set_change_listener(None)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_delete_is_soft_and_refused_while_the_manager_has_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -206,7 +206,7 @@ def test_delete_is_soft_and_refused_while_the_manager_has_tasks(monkeypatch: pyt
         assert status == 409 and "key idle was used by a deleted Manager: pick another" in answer["error"]
         assert (await _call("POST", "/api/managers", {**_body("fresh"), "name": "Idle"}))[0] == 201
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_task_created_while_the_delete_runs_keeps_the_manager(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -229,7 +229,7 @@ def test_a_task_created_while_the_delete_runs_keeps_the_manager(monkeypatch: pyt
         assert status == 409 and "disable it instead" in answer["error"]
         assert (await _list())["manager-xx"]["enabled"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_template_written_while_the_manager_is_deleted_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -253,7 +253,7 @@ def test_a_template_written_while_the_manager_is_deleted_is_refused(monkeypatch:
         assert await pool.fetchval("SELECT count(*) FROM manager_task_templates WHERE manager_id = 'manager-xx'") == 0
         assert await profile_registry.delete_profile(profile) == {"deleted": profile}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_templates_are_checked_and_stored(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -300,7 +300,7 @@ def test_templates_are_checked_and_stored(monkeypatch: pytest.MonkeyPatch) -> No
         status, answer = await _call("DELETE", url)
         assert status == 200 and next(m for m in answer["managers"] if m["id"] == "manager-xx")["templates"] == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_template_may_only_name_the_profiles_its_project_allows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -316,7 +316,7 @@ def test_a_template_may_only_name_the_profiles_its_project_allows(monkeypatch: p
         assert status == 400 and "not on project" in answer["error"], answer
         assert (await _call("PUT", url, _template(project_id=project, profiles={"worker": other})))[0] == 200
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_example_file_validates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -335,7 +335,7 @@ def test_the_example_file_validates(monkeypatch: pytest.MonkeyPatch) -> None:
     def answer_id(example: dict[str, Any]) -> str:
         return f"manager-{example['manager']['key']}"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_profiles_and_projects_a_manager_or_template_uses_cannot_be_deleted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -366,7 +366,7 @@ def test_profiles_and_projects_a_manager_or_template_uses_cannot_be_deleted(monk
         assert await profile_registry.delete_profile(free) == {"deleted": free}
         assert await projects.delete_project(project) == {"deleted": project}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_editing_a_profile_keeps_it_able_to_run_what_managers_and_templates_use_it_for(
@@ -389,7 +389,7 @@ def test_editing_a_profile_keeps_it_able_to_run_what_managers_and_templates_use_
             await profile_registry.update_profile(as_manager, {"runtime_id": "rt-one-off", "model_id": model_id})
         await profile_registry.update_profile(as_reviewer, {"runtime_id": "rt-one-off", "model_id": model_id})
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_concurrent_enables_never_exceed_the_limit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -410,7 +410,7 @@ def test_concurrent_enables_never_exceed_the_limit(monkeypatch: pytest.MonkeyPat
         assert sorted(s for s, _ in results) == [200, 409]
         assert await managers.count_enabled() == 8
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_enabling_re_reads_the_manager_under_the_lock(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -435,7 +435,7 @@ def test_enabling_re_reads_the_manager_under_the_lock(monkeypatch: pytest.Monkey
         assert status == 409 and "at most 8 Managers" in answer["error"], answer
         assert await managers.count_enabled() == 8
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_each_managers_view_carries_the_fleets_state_under_state(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -448,4 +448,4 @@ def test_each_managers_view_carries_the_fleets_state_under_state(monkeypatch: py
                    for m in view["managers"])
         assert {m["id"] for m in view["managers"]} >= {"manager", "manager-seer"}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

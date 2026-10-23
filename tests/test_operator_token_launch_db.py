@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import shlex
 import sys
@@ -13,8 +12,8 @@ from typing import Any
 import pytest
 
 from evals.prompt_regression import dialogs, runner
+from tests.db_support import DSN
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 
 _CAPTURE = r'''from __future__ import annotations
 import json

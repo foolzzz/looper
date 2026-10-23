@@ -4,16 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from tests.test_channel_configs_db import _run
+from tests.db_support import DSN, run_with_channel_configs
 from tests.test_lark_channel_db import _call
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 requires_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 OPEN_ID = "ou_allowed000001"
@@ -105,7 +103,7 @@ def test_seed_and_secret_api_contract(monkeypatch: pytest.MonkeyPatch, platform:
         assert status == 200 and row["has_bot_token"] is False
         assert await get_bot_token("channel-lark_bot") is None
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("field", "value"), [("app_id", 1), ("app_id", "a"), ("app_id", "a bcd"),
@@ -119,7 +117,7 @@ def test_invalid_configuration_is_refused(monkeypatch: pytest.MonkeyPatch, platf
         assert status == 400 and field in answer["error"]
         assert await pool.fetchval("SELECT count(*) FROM channel_secrets WHERE channel_id = 'channel-lark_bot'") == 0
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 @requires_db
@@ -169,7 +167,7 @@ def test_allowlist_binding_status_names_and_people(monkeypatch: pytest.MonkeyPat
         await _call("GET", "/api/channels/lark_bot/people", query={"q": "alan"})
         assert all(api.base_url == "https://open.larksuite.com" for api in platform.instances[-3:])
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_check_problems_and_identity_cache(monkeypatch: pytest.MonkeyPatch, platform: Any) -> None:
@@ -241,7 +239,7 @@ def test_config_secret_is_refused_before_any_write(monkeypatch: pytest.MonkeyPat
             status, answer = await _call("GET", path)
             assert status == 200 and SECRET not in json.dumps(answer)
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_config_secret_api_rejection_does_not_reach_storage(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -302,7 +300,7 @@ def test_import_skips_extra_config_key_with_reason(monkeypatch: pytest.MonkeyPat
         assert SECRET not in change.reason
         assert await get_config("channel-lark_bot") == before
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 def test_stored_config_defaults_and_allowlist_binding() -> None:
@@ -339,7 +337,7 @@ def test_status_and_people_without_credentials(monkeypatch: pytest.MonkeyPatch, 
         assert status == 502 and "app secret" in answer["error"]
         assert platform.instances == []
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 @requires_db
@@ -350,7 +348,7 @@ def test_status_keeps_working_when_name_lookup_fails(monkeypatch: pytest.MonkeyP
         status, view = await _call("GET", "/api/channels/lark_bot/status")
         assert status == 200 and view["bot"] is not None and view["names"] == {} and view["problem"] is None
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 @requires_db
@@ -389,7 +387,7 @@ def test_config_export_import_round_trip(monkeypatch: pytest.MonkeyPatch, platfo
             assert any(c.key == "lark_bot" and c.action == Action.SKIPPED and "domain" in c.reason
                        for c in invalid.changes)
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
 
 
 @requires_db
@@ -431,4 +429,4 @@ def test_old_channel_constraints_are_widened_idempotently(monkeypatch: pytest.Mo
         assert await pool.fetchval("SELECT channel FROM task_user_gate_posts WHERE external_id = 'om_post'") == "lark_bot"
         assert await pool.fetchval("SELECT notify_channel FROM schedules WHERE id = 'schedule-a'") == "lark_bot"
 
-    _run(test, monkeypatch)
+    run_with_channel_configs(test, monkeypatch)
