@@ -120,10 +120,11 @@ async def _assert_readback(conn, old, conversion, before, history):
     projects = [json.loads(r[0]) for r in after[1]["projects"]]
     assert all(row.pop("wait_commands") is None for row in projects)
     assert projects == [json.loads(r[0]) for r in before[1]["projects"]]
-    # The seed predates the Managers' tasks: every old task is the default Manager's, without a template or a thread.
+    # The seed predates the Managers' tasks: every old task is the default Manager's, without a template or a thread,
+    # and predates the API clients: no old task was created by one.
     tasks = [json.loads(r[0]) for r in after[1]["tasks"]]
-    assert all((row.pop("manager_id"), row.pop("template"), row.pop("origin_thread")) == ("manager", None, None)
-               for row in tasks)
+    assert all((row.pop("manager_id"), row.pop("template"), row.pop("origin_thread"), row.pop("client_id"))
+               == ("manager", None, None, None) for row in tasks)
     assert tasks == [json.loads(r[0]) for r in before[1]["tasks"]]
     layers = [json.loads(r[0]) for r in before[1]["agent_setting_layers"]]
     # The already-completed effort migration left this obsolete column NULL;
