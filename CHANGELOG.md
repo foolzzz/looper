@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.57] - 2026-10-23
+
+### Fixed
+
+- **A read-only Planner can read a document path it is given.** On Claude Code the Planner chose `Bash cat`, the read-only run refused it, and the Planner dropped the document. It now reads with Read, Glob and Grep, allowed for its repository and mounted knowledge directories, and has no Bash tool (model-visible: its tool list loses Bash). Other runtimes are unchanged. ([#452](https://github.com/foolzzz/looper/pull/452))
+
 ## [2.13.56] - 2026-10-23
 
 ### Changed
