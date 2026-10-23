@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.47] - 2026-10-23
+
+### Fixed
+
+- **The nightly installed tests build the dashboard first.** `.github/workflows/installed-tests.yml` now runs `scripts/stage-dashboard.sh` before the installed tests, as the release workflow does, so the browser tests find the dashboard. The same diff also pins `actions/setup-node` to `v6` (was `v7`). Behavior change: none in the program, only the nightly CI workflow. Model-visible: none. ([#433](https://github.com/foolzzz/looper/pull/433))
+
 ## [2.13.46] - 2026-10-23
 
 ### Fixed
