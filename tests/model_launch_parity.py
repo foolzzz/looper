@@ -744,7 +744,7 @@ def generate_claude_baseline(checkout: Path, output: Path) -> None:
 
 
 def with_planner_file_reads(argv: list[str]) -> list[str]:
-    """Apply the declared Planner read-tool fix to legacy argv; never normalize current permissions away."""
+    """Apply the declared Planner read-tool fix for current comparisons; keep historical captures unchanged."""
     argv = list(argv)
     if "--permission-mode" in argv and "--disallowedTools" in argv and "--allowedTools" in argv:
         denied, allowed = argv.index("--disallowedTools") + 1, argv.index("--allowedTools") + 1
@@ -770,9 +770,7 @@ async def _capture_legacy_claude(checkout: Path) -> dict[str, Any]:
     if (Path(looper.__file__).resolve() != checkout / "looper/__init__.py"
             or Path(tiers.__file__).resolve() != checkout / "tests/agent_launch_parity.py"):
         raise LegacyBaselineUnavailable("legacy capture imported a different checkout")
-    # Deliberate launch delta: apply the read-tool fix to the pinned source in memory, as for OMP's overlay.
-    legacy_read_only_args = claude_cli.read_only_args
-    claude_cli.read_only_args = lambda library: with_planner_file_reads(legacy_read_only_args(library))
+    # Reproduce the historical permissions verbatim; declared deltas belong in current comparison expectations.
     dsn = os.environ.get("LOOPER_TEST_DATABASE_URL")
     if not dsn:
         raise LegacyBaselineUnavailable("Claude baseline requires a disposable test database")

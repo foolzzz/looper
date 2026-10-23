@@ -42,7 +42,7 @@ def pinned(runtime: str) -> dict[str, Any]:
         # of a resumed turn) gain it.
         for record in records:
             if runtime == "claude":
-                # Apply the same declared fix as the legacy capture, without refreshing fixtures.
+                # Apply the declared fix only to current expectations, without refreshing historical fixtures.
                 record["argv"] = parity.with_planner_file_reads(record["argv"])
                 if "--permission-mode" in record["argv"]:
                     # The pinned Planner runs in this repository-less task directory. Its former bare read
