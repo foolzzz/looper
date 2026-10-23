@@ -425,17 +425,32 @@ Run a second opus repetition only if the first fails; keep both results.
 Do not rerun after a change the model cannot see.
 
 Once before a release, on the release candidate (`main` after every merge):
-haiku on all 39 tasks, `run --mode real --reps 3 --jobs 4 --max-budget-usd 1.0
---case-budget-usd 2.0 --total-cap-usd 20` (the earlier baseline cost about $12.32); opus,
-`run --mode real --model opus --reps 3 --tasks planner --jobs 4
---max-budget-usd 3.0 --case-budget-usd 6.0 --total-cap-usd 40` (24 tasks;
-the earlier baseline cost about $27.73); and all 22 dialogs on haiku and on the opus xhigh Manager,
-`dialogs --mode real --reps 3 --jobs 4 --max-budget-usd 1.0
---case-budget-usd 1.0 --total-cap-usd 8` (about $4.36) and
-`dialogs --mode real --reps 3 --jobs 4 --manager-model opus
---manager-effort xhigh --max-budget-usd 3.0 --case-budget-usd 3.0
---total-cap-usd 12` (about $7.91). `--jobs` above 1 under a total cap needs
-`--case-budget-usd`. The baselines are refreshed from these runs.
+
+- haiku on all 39 tasks: `run --mode real --reps 3 --jobs 4
+  --max-budget-usd 1.0 --case-budget-usd 2.0 --total-cap-usd 20`
+  (the earlier baseline cost about $12.32);
+- sonnet on all tasks: `run --mode real --model sonnet --reps 3 --jobs 4
+  --max-budget-usd 1.0 --case-budget-usd 2.0 --total-cap-usd 40`, refreshing
+  `baselines/real-sonnet.json`;
+- opus on the 24 Planner tasks: `run --mode real --model opus --reps 3
+  --tasks planner --jobs 4 --max-budget-usd 3.0 --case-budget-usd 6.0
+  --total-cap-usd 40` (the earlier baseline cost about $27.73);
+- haiku on all 22 dialogs: `dialogs --mode real --reps 3 --jobs 4
+  --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd 8` (about $4.36);
+- sonnet on all dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
+  --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd 16`, refreshing
+  `baselines/dialogs-real-sonnet.json`;
+- the opus xhigh Manager on all dialogs: `dialogs --mode real --reps 3 --jobs 4
+  --manager-model opus --manager-effort xhigh --max-budget-usd 3.0
+  --case-budget-usd 3.0 --total-cap-usd 12` (about $7.91).
+
+`--jobs` above 1 under a total cap needs `--case-budget-usd`. Refresh each
+model's baseline from the JSON named by that command's `Run written to`
+output, including both Sonnet files above. Only promote a complete three-rep
+run covering every selected case, with no aborted, skipped or error cases;
+retain scored model failures. If a cap stops a run, raise it and rerun before
+refreshing. The existing five-task, one-rep Sonnet task baseline and missing
+Sonnet dialog baseline remain a coverage gap until those real runs complete.
 
 #### OMP on DeepSeek
 

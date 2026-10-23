@@ -17,7 +17,7 @@
     - 不给测试工具写测试：替身、fixture 生成器和对照 harness 不单独测。为一次性迁移做的对照快照不比 prompt 原文，在发布说明里写明保留到哪个版本，到期就删。
     - 数据库测试用共享 fixture，不在测试文件里复制建库 helper，也不从别的测试文件导入 helper。
     - 单个测试超过 5 秒的，要能被 xdist 拆开并行。依赖本机 CLI、浏览器或旧版本 checkout 的测试打上 `installed` 或 `provenance` 标记，放进 nightly。PR 的 Validation 里写明新增的测试行数和生产代码行数（不含 fixture）；比例超过 2:1 时说明原因。
-5. **真实评测只在改动模型可见内容时跑，PR 只跑改动涉及的部分，全量档位在发布前跑一次。** 模型可见内容指 prompt、契约、工具描述和注入的上下文。每个 PR 只跑改动涉及的任务和对话（加上新增的），`--reps 2`、sonnet，与 sonnet 基线比较（尚无基线时，在下一次发布前全量档位运行时刷新）；Planner 的 prompt、契约或上下文变了，再在这些任务上加 opus、`--reps 1`；Manager 的 prompt 或工具变了，再用 opus xhigh 的 Manager、`--reps 1` 跑同样的对话。opus 只在第一次失败时补跑第二次。发布前在候选版本（合入全部 PR 后的 `main`）上跑一次全量档位并刷新基线。在代码定稿后跑，之后只改了模型看不到的代码就不重跑。具体命令和 `--jobs 4` 和 `--case-budget-usd`（并行且有总上限时必填）的用法见 [evals/README.md](../../evals/README.md) 的 "Which tier to run"。
+5. **真实评测只在改动模型可见内容时跑，PR 只跑改动涉及的部分，全量档位在发布前跑一次。** 模型可见内容指 prompt、契约、工具描述和注入的上下文。每个 PR 只跑改动涉及的任务和对话（加上新增的），`--reps 2`、sonnet，与 sonnet 基线比较（尚无基线时，在下一次发布前全量档位运行时刷新）；Planner 的 prompt、契约或上下文变了，再在这些任务上加 opus、`--reps 1`；Manager 的 prompt 或工具变了，再用 opus xhigh 的 Manager、`--reps 1` 跑同样的对话。opus 只在第一次失败时补跑第二次。发布前在候选版本（合入全部 PR 后的 `main`）上跑一次全量档位：haiku 和 sonnet 各跑全部任务与对话，opus 跑 Planner 任务和 opus xhigh Manager 对话，均为 `--reps 3`；从对应真实运行结果刷新各模型基线，包括 `real-sonnet.json` 和 `dialogs-real-sonnet.json`。Sonnet 任务基线仍只有 5 个任务、1 次重复，对话基线尚缺，完成这两项真实运行前继续报告覆盖缺口。在代码定稿后跑，之后只改了模型看不到的代码就不重跑。具体命令和 `--jobs 4` 和 `--case-budget-usd`（并行且有总上限时必填）的用法见 [evals/README.md](../../evals/README.md) 的 "Which tier to run"。
 6. **截图只在界面改动时做，一张即可。**
 7. **文档从简。** 每个阶段交付后在第 4 节记一行（不超过 3 句），并更新第 2 节的状态列；`agent-system.md` 只在架构变化时改。
 8. **合入后部署。** 合入后同步本机 `main`，前端有改动就重新构建 `web/dist`，然后执行 `looper service restart` 重启本机服务（8767，由 `looper service` 托管）。
