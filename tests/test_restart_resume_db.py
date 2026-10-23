@@ -231,7 +231,7 @@ def test_a_task_failed_at_its_cap_continues_from_the_database_after_a_restart(tm
             failed = _wait(api, task_id, lambda d: d["status"] == "failed")
         with running_server(**server, log_path=root / "second.log") as api:
             assert api.get(f"/api/tasks/{task_id}")["status"] == "failed"  # a failed task is not resumed
-            api.post(f"/api/tasks/{task_id}/continue", {"task_budget_usd": 1})
+            api.post("/api/v1/tasks/continue", {"task_id": task_id, "task_budget_usd": 1})
             done = _wait(api, task_id, lambda d: d["status"] == "completed")
 
     assert failed["fail_kind"] == "task_budget"

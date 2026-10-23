@@ -89,7 +89,7 @@
 
 `looper/agents/api_v1.py` 在第一次被请求时从目录生成一次文档并缓存（目录是代码里的常量，进程内不变）：`openapi: 3.1.0`，`info.version` 为 Looper 版本，`info.x-looper-api: 1`，`servers: [{url: "/api/v1"}]`，`components.securitySchemes.bearer`，`components.schemas` 里有 `ErrorCode`、`OpError`、`OpOk`、`OpNeedsConfirmation`。每个操作的 200 回答是 `OpOk` 加这个操作的 `result` schema。
 
-**类型化的结果：** 状态投影有独立 schema，不新增 Manager Tool。未完成领域的工具结果继续显式标记未类型化，各领域通过 `RESULTS` 补齐。阶段 1 给 agent 用的操作写出 `result` 的 schema（顶层每个键的类型，`additionalProperties: true`）：`tasks.list`、`tasks.get`、`task_pipeline`、`task_create`、`task_control.*`、`task_update`、`task_instruct`、`gates.*`、`agent_profiles.list`、`overview`、`confirm`、`whoami`、聊天三个。其余操作的 `result` 暂为 `{"type": "object"}` 并标 `x-looper-result-typed: false`，测试列出这些操作，阶段 2 把列表清空。
+**类型化的结果：** 状态投影有独立 schema，不新增 Manager Tool。未完成领域的工具结果继续显式标记未类型化，各领域通过 `RESULTS` 补齐。任务配置领域补齐 `concurrency` 的 before/after、任务覆盖与默认值类型；控制台的 `tasks.configure`、`tasks.move`、`tasks.agents`、`tasks.continue` 单独声明完整结果（Agent 选择含 Profile、生效模式和并发来源），不新增模型工具。阶段 1 给 agent 用的操作写出 `result` 的 schema（顶层每个键的类型，`additionalProperties: true`）：`tasks.list`、`tasks.get`、`task_pipeline`、`task_create`、`task_control.*`、`task_update`、`task_instruct`、`gates.*`、`agent_profiles.list`、`overview`、`confirm`、`whoami`、聊天三个。其余操作的 `result` 暂为 `{"type": "object"}` 并标 `x-looper-result-typed: false`，测试列出这些操作，阶段 2 把列表清空。
 
 **文档覆盖什么：** 文档包含既有 v1 操作和已迁移的控制台领域，剩余旧路由仍不在文档中。状态现为 `POST /api/v1/system/status {}`，返回完整状态投影（Agent、任务计数、web 健康、自检、退出能力及可选的绑定/管家状态），客户端的 `can_sign_out` 恒为 false；操作者从真实请求头计算。旧 `GET /api/status` 已删除。
 
@@ -105,7 +105,8 @@
 | 建任务 | `POST /api/tasks/create`（`projects.create_task`） | `looper_task_create`（`_create`） | 共用 `projects.create_task_core`（放置、工作区检查、事务、配置块），两入口保留参数适配层 | 已实现；核心收两边参数并集，控制台保留 `config`、`profile_overrides` 和新项目全部字段，工具 schema 不变；数据库回归测试从两入口创建后回读并比较任务行与 Profile 覆盖 |
 | 开始 | `POST /api/tasks/:id/start` | `task_control` start | 共用 `projects.start_ready_task` | 不变 |
 | 停止、取消、重启、从头开始 | `POST /api/tasks/stop`、`cancel`、`start` | `task_control` | 共用 `projects.control_task`（状态检查加发送） | 已实现；状态不允许时控制台返回 409 和原因、不发送消息，任务列表和详情页展示错误；工具结果不变 |
-| 标题、需求、Agent Profile | `PUT /api/tasks/:id/title`、`requirement`、`agents` | `looper_task_update` | 共用 `rename_task`、`edit_requirement`、`set_task_agents` | 不变 |
+| 标题、需求 | `PUT /api/tasks/:id/title`、`requirement` | `looper_task_update` | 共用 `rename_task`、`edit_requirement` | 不变 |
+| 配置、项目归属、Agent 选择、预算续跑 | `POST /api/v1/tasks/configure`、`move`、`agents`、`continue` | Agent 选择与 `looper_task_update` 共用服务；并发工具请求不变 | 配置抽取无 writer 核心；其余共用 `projects`，移动同步 live router，并发变更唤醒等待者 | 四个旧方法删除；普通写直接执行，续跑为 high，明确任务独立额度或项目每任务额度的影响范围 |
 | 补充说明 | `POST /api/chat/send` 发给 Planner | `looper_task_instruct` | 共用 `projects.add_task_supplement`（存储加唤醒） | 已实现；每次写一行、唤醒一次，聊天保留 `USER_MESSAGE` 的补充 id 和回复关联，工具保留 `TASK_CHANGE` 与现有结果 |
 | 关卡留言、结束 | `POST /api/tasks/:id/gates/:step/messages`、`end` | `looper_task_gate_reply`、`looper_gates` reply/end | 共用 `gate_service.post_message` | 不变 |
 | 关卡列表、讨论 | `GET /api/gates`、`GET …/messages` | `looper_gates` list/messages | 共用 `gate_service.list_gates`、`thread` | 不变 |
@@ -277,7 +278,7 @@ v1 配置预览收 `{document: <配置对象>}`，和控制台一样最多 256 M
 | 领域 | 阶段 2 状态 |
 |---|---|
 | 状态与 transport | 已验证：HTTP/文档 112 项、web 26 项；隔离 serve 与 1280/390 浏览器通过，完整套件留给 CI |
-| 任务 | 待迁移；共享任务核心 [#429](https://github.com/foolzzz/looper/pull/429) 单独跟踪 |
+| 任务 | 配置、归属、Agent 选择与预算续跑已迁入 v1；领域/OpenAPI 140 项、web 30 项、隔离 serve 与桌面/窄屏验证通过；历史回归 3 项首轮失败、隔离重跑通过，最终失败 0；完整套件未跑，留给 CI；其余任务入口待迁移，共享任务核心 [#429](https://github.com/foolzzz/looper/pull/429) 单独跟踪 |
 | 聊天 | 待迁移 |
 | 项目与知识 | 待迁移 |
 | 能力目录 | 待迁移 |
@@ -294,6 +295,7 @@ v1 配置预览收 `{document: <配置对象>}`，和控制台一样最多 256 M
 ## 22. 默认行为的变化
 
 - `/api/v1/` 的普通操作也接受操作者身份；操作者的 `high` 单次执行，客户端令牌仍须两步确认。控制台确认弹窗与可见行为不变。状态及服务就绪探测改走 v1，旧状态 GET 删除；Telegram/Lark 继续使用未改动的 Manager ops/services。配置命令迁移是阶段 2a 单独列出的行为变化。
+- 任务配置仍仅 `init` 可改，需求保留版本、目录解析后读回；项目移动支持原有状态并同步运行中的归属。Agent 选择保留完成任务不可改、null 清除与降低并发不中断运行者的行为，升高并发仍是普通写。预算续跑只接受预算失败且新额度高于已花费的任务，发送一次 `AT_CAP` 重启；有独立额度时只改该任务，否则改项目每任务额度，影响其他任务；客户端确认绑定当时的项目与额度作用范围，确认前变更则拒绝，要求重新请求。四个旧方法返回 404，控制台与生成式 CLI 同步迁移。闭合请求 schema 在服务前拒绝未知字段、角色及错误类型，错误文案改为 schema 校验失败；配置或额度写入失败返回错误，不作已完成。
 - 管家：只有客户端的消息多一种渠道行。
 - 默认管家：客户端对话里建的任务把接受和结束写回那个线程（控制台对话里建的不变）。
 - 关卡通知和进度不变：照旧走全局通知目标，不进客户端的对话。

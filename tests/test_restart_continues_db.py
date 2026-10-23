@@ -241,14 +241,14 @@ def restarted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             # The failed task's Workers run on another profile, and one at a time, from its restart on.
             api.post("/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
                                              "model_id": _builtin_model(api, "sonnet")})
-            agents = api.put(f"/api/tasks/{ids['agents']}/agents", {"profiles": {"worker": "claude-code/sonnet"},
-                                                                     "concurrency": {"worker": 1}})["agents"]
+            agents = api.post("/api/v1/tasks/agents", {"task_id": ids['agents'], "profiles": {"worker": "claude-code/sonnet"},
+                                                                     "concurrency": {"worker": 1}})["result"]["agents"]
 
             for variant in VARIANTS:
                 api.post("/api/tasks/start", {"task_id": ids[variant], "start_over": variant == "startover"})
             after = _wait(api, ids, lambda variant, detail: detail["status"] == "completed")
             with pytest.raises(EvalError, match="answered 409: .*the task is completed"):
-                api.put(f"/api/tasks/{ids['agents']}/agents", {"concurrency": {"worker": 2}})
+                api.post("/api/v1/tasks/agents", {"task_id": ids['agents'], "concurrency": {"worker": 2}})
             activity = {variant: [row["summary"] for row in api.get(f"/api/tasks/{task_id}/activity", limit=500)[
                 "activity"]] for variant, task_id in ids.items()}
 

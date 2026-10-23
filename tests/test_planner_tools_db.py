@@ -290,7 +290,7 @@ def test_the_users_choice_for_the_task_wins_over_the_planners(monkeypatch: pytes
         assert (await planner("looper_task_profile_set", {"role": "worker", "profile_id": "agent-sonnet",
                                                           "step": "s1"}))["status"] == "ok"
         # The user chooses after the Planner did: theirs runs, for the step the Planner chose for too.
-        assert (await _call("PUT", "/api/tasks/task-a/agents", {"profiles": {"worker": "one-off/opus"}}))[0] == 200
+        assert (await _call("POST", "/api/v1/tasks/agents", {"task_id": "task-a", "profiles": {"worker": "one-off/opus"}}))[0] == 200
         assert await _runs_on("task-a", project, "s1") == ("one-off/opus", "task")
         # And the Planner cannot change the role the user chose for; the other one it can.
         answer = await planner("looper_task_profile_set", {"role": "worker", "profile_id": "agent-sonnet"})

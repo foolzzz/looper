@@ -15,7 +15,8 @@ HAND = {"chat.send", "chat.messages", "chat.conversations", "confirm", "openapi"
 TYPED_TOOL_OPERATIONS = {
     "tasks.list", "tasks.get", "task_pipeline", "task_create", "task_control.start", "task_control.stop",
     "task_control.restart", "task_control.start_over", "task_control.cancel", "task_update", "task_instruct",
-    "gates.list", "gates.messages", "gates.reply", "gates.end", "agent_profiles.list", "overview", "config_export"}
+    "gates.list", "gates.messages", "gates.reply", "gates.end", "agent_profiles.list", "overview", "config_export",
+    "concurrency"}
 
 
 def _actions(tool) -> list[str] | None:
