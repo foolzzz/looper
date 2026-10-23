@@ -265,10 +265,11 @@ def test_repricing_keeps_historical_spend_and_other_protocol_price(monkeypatch, 
 
 
 @pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"), reason="disposable PostgreSQL unavailable")
-def test_targeted_model_dialogs_run_through_fake_manager_and_database(tmp_path):
-    cases = dialogs.select(["provider_key", "config_tools", "task_cost", "schedule_planner_profile",
-                            "model_custom", "model_dual_protocol", "model_login_runtime",
-                            "model_missing_endpoint", "model_price_history"])
+@pytest.mark.parametrize("dialog_id", ["provider_key", "config_tools", "task_cost", "schedule_planner_profile",
+                                       "model_custom", "model_dual_protocol", "model_login_runtime",
+                                       "model_missing_endpoint", "model_price_history"])
+def test_targeted_model_dialogs_run_through_fake_manager_and_database(tmp_path, dialog_id):
+    cases = dialogs.select([dialog_id])
     result, path = dialogs.run(mode="fake", dialogs=cases, admin_url=os.environ["LOOPER_TEST_DATABASE_URL"],
                                out_dir=tmp_path, timeout=120)
     assert result["aborted"] is None, result

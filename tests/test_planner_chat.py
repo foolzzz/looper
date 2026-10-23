@@ -51,8 +51,6 @@ def _run_planner(plan: TaskPlan | None, *envelopes: MessageEnvelope) -> tuple[Pl
                 sent.append(envelope)
 
             bus.publish = _record  # type: ignore[method-assign]
-            # Nothing answers WORKER_INPUT here, so forwarding gives up quickly.
-            planner_module.WORKER_INPUT_TIMEOUT = 0.05
             planner = PlannerAgent(task_id="t1", runtime_root=Path(tmp))
             planner._bus = bus
             planner._plan = plan
@@ -81,8 +79,12 @@ def _work_items(sent: list[MessageEnvelope]) -> list[MessageEnvelope]:
 
 class TestPlannerUserMessage:
     @pytest.mark.parametrize(("status", "expected"), [("completed", "completed"), (None, "规划中")])
-    def test_finished_plan_rejects_instruction(self, status: str | None, expected: str) -> None:
+    def test_finished_plan_rejects_instruction(
+        self, monkeypatch: pytest.MonkeyPatch, status: str | None, expected: str,
+    ) -> None:
         """A finished task, or one with no plan yet, answers without touching the plan."""
+        # Nothing answers WORKER_INPUT here, so forwarding gives up quickly.
+        monkeypatch.setattr(planner_module, "WORKER_INPUT_TIMEOUT", 0.05)
         plan = None
         if status is not None:
             plan = _executing_plan(PlanStep(step_id="s1", index=0, instruction="x", status="verified"))

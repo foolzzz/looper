@@ -106,11 +106,17 @@ class _Pool:
     def waiting(self) -> set[str]:
         return {w for w, wp in self.pool._active.items() if wp.status == "pending"}
 
+    def _parked(self) -> int:
+        """The runs that wait for room in their task, as the pool holds them."""
+        return sum(len(waiters) for waiters in self.pool._slot_waiters.values())
+
     async def settled(self, running: int, waiting: int) -> tuple[set[str], set[str]]:
-        """Once ``running`` runs run and ``waiting`` wait, and a moment more for any run over a limit to start."""
-        await _until(lambda: len(self.running()) == running and len(self.waiting()) == waiting,
+        """Once ``running`` runs run and ``waiting`` wait, and every run the pool has is one of them: each holds
+        a place in its task or is parked for one, so no run over a limit is still on its way to start."""
+        await _until(lambda: len(self.running()) == running and len(self.waiting()) == waiting
+                     and len(self.pool._slots) == running and self._parked() == waiting
+                     and len(self.pool._tasks) == running + waiting,
                      f"{running} running and {waiting} waiting: {self.pool.status()}")
-        await asyncio.sleep(0.3)
         return self.running(), self.waiting()
 
     async def finish(self, worker_id: str) -> None:

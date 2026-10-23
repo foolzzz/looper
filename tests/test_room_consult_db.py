@@ -1144,9 +1144,11 @@ def test_a_consult_keeps_its_execution_bounds_and_cleans_its_children(
 ) -> None:
     import time
 
+    from looper.agents import proc_tree
     from looper.agents.claude_cli import ClaudeRunRecorder
     from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
 
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.2)  # a consult cut off ends its tree quickly
     monkeypatch.setenv("SEEN", str(tmp_path / "seen.jsonl"))
     monkeypatch.setenv("CONSULT_MODE", mode)
     monkeypatch.setenv("CHILD_PID", str(tmp_path / "child.pid"))

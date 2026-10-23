@@ -25,6 +25,7 @@ import pytest
 from evals.prompt_regression import __main__ as cli
 from evals.prompt_regression import compare, fake_claude, metrics, runner
 from evals.prompt_regression import tasks as task_list
+from evals.prompt_regression.dialogs import DIALOGS as MANAGER_DIALOGS
 from evals.prompt_regression.tasks import TASKS, EvalTask
 from looper.agents import agent_settings, profile_registry
 from looper.agents.runtimes import ApiProtocol, AuthKind
@@ -2208,145 +2209,170 @@ _MISBEHAVING = EvalTask(
 )
 
 
-@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None:
-    result, path = runner.run(mode="fake", tasks=(*TASKS, _MISBEHAVING), admin_url=str(DSN), out_dir=tmp_path,
-                              agent="claude-code/opus")
-    by_id = {task["id"]: task for task in result["tasks"]}
-    assert result["agent"] == "claude-code/opus"  # every role ran the agent named
-
-    for task in TASKS:
-        assert by_id[task.id]["success"], (task.id, by_id[task.id]["problems"])
-        assert by_id[task.id]["contract_violations"]["total"] == 0
-        assert by_id[task.id]["planner_modified_files"] == 0, (
-            task.id, by_id[task.id]["planner_changed_files"], by_id[task.id]["planner_edit_tool_paths"])
-    flow = {t: (by_id[t]["steps"], by_id[t]["retries"], by_id[t]["reviews"], by_id[t]["chat_turns"])
-            for t in by_id}
-    assert flow == {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
-                    "wait_pr_rereview": (3, 0, 0, 0), "wait_not_needed": (2, 0, 0, 0),
-                    "parallel_parts": (3, 0, 0, 0),
-                    "interface_first": (4, 0, 0, 0), "reviewed_step": (1, 0, 1, 0),
-                    "retry_after_failure": (1, 1, 0, 0), "chat_correction": (1, 0, 0, 1), "misbehaving": (1, 1, 0, 0),
-                    # The change to the second step replaced it: s1, the dropped s2, and its replacement.
-                    "supplement_replan": (3, 0, 0, 1), "requirement_edit": (3, 0, 0, 1),
-                    "supplement_no_change": (2, 0, 0, 1), "profile_choice": (1, 0, 0, 0),
-                    # The security review role reviews its step after the built-in Reviewer.
-                    "roles_tester_docs": (3, 0, 0, 0), "roles_security_review": (1, 0, 2, 0),
-                    "roles_advisory_review": (1, 0, 2, 0), "roles_two_reviews": (1, 0, 3, 0),
-                    "roles_multi_platform": (6, 0, 0, 0),
-                    "roles_not_needed": (1, 0, 0, 0), "roles_template_fits": (1, 0, 2, 0),
-                    "roles_template_unfit": (1, 0, 0, 0),
-                    # A gate is a step; the steps its closing turn added follow it.
-                    "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
-                    "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0),
-                     "operator_notes": (1, 0, 0, 0), "operator_notes_stale": (1, 0, 0, 0),
-                    "vault_closeout_keeps": (1, 0, 0, 0), "vault_closeout_nothing": (1, 0, 0, 0),
-                    "room_interface": (3, 0, 0, 0), "room_consult": (2, 0, 0, 0), "room_quiet": (1, 0, 0, 0),
-                    # The retry notes' tasks: one retry and a passing review; two retries, the first review failing.
-                    "planner_plan_file": (2, 0, 0, 0), "reviewer_retry_note": (1, 1, 1, 0),
-                    "reviewer_unrelated_note": (1, 2, 2, 0), "reviewer_elsewhere": (1, 0, 1, 0),
-                    "reviewer_elsewhere_wrong": (1, 1, 2, 0)}
-    # Only the parts that need nothing of each other run side by side; interface_first's sit between its interface
-    # step and its integration step.
-    shape = {t: (by_id[t]["independent_pairs"], by_id[t]["bracketed_pairs"], by_id[t]["parallel_workers"])
-             for t in by_id}
-    assert shape == {"single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": (0, 0, 1),
-                     "wait_pr_rereview": (0, 0, 1), "wait_not_needed": (0, 0, 1),
-                     "parallel_parts": (1, 0, 2),
-                     "interface_first": (1, 1, 2), "reviewed_step": (0, 0, 1), "retry_after_failure": (0, 0, 1),
-                     "chat_correction": (0, 0, 1), "misbehaving": (0, 0, 1),
-                     # The dropped second step and its replacement both depend on s1 alone.
-                     "supplement_replan": (1, 0, 1), "requirement_edit": (1, 0, 1),
-                     "supplement_no_change": (0, 0, 1), "profile_choice": (0, 0, 1),
-                     "roles_tester_docs": (1, 0, 2), "roles_security_review": (0, 0, 1),
-                     "roles_advisory_review": (0, 0, 1), "roles_two_reviews": (0, 0, 1), "roles_not_needed": (0, 0, 1),
-                     "roles_template_fits": (0, 0, 1), "roles_template_unfit": (0, 0, 1),
-                     # Its four platform steps run side by side between the interface step and the check.
-                     "roles_multi_platform": (6, 6, 4),
-                     "gate_ambiguous": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
-                     # The clear part runs beside the gate and then beside the step the gate's answer planned.
-                     "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1),
-                      "operator_notes": (0, 0, 1), "operator_notes_stale": (0, 0, 1),
-                     "vault_closeout_keeps": (0, 0, 1), "vault_closeout_nothing": (0, 0, 1),
-                     "room_interface": (1, 0, 2), "room_consult": (0, 0, 1), "room_quiet": (0, 0, 1),
-                     "planner_plan_file": (0, 0, 1), "reviewer_retry_note": (0, 0, 1),
-                     "reviewer_unrelated_note": (0, 0, 1), "reviewer_elsewhere": (0, 0, 1),
-                     "reviewer_elsewhere_wrong": (0, 0, 1)}
-    assert by_id["chat_correction"]["planner_turns"]["chat"] == 1
-    assert {t: (by_id[t]["vault_writes"], by_id[t]["vault_closeout"]) for t in by_id
-            if t.startswith("vault_closeout_")} == {"vault_closeout_keeps": (1, 1), "vault_closeout_nothing": (0, 1)}
-    assert all(row["vault_outside"] == 0 for row in by_id.values())
-    # Only the task whose project lets its Planner choose a profile runs a Worker on the one it chose.
-    assert {t: by_id[t]["planner_profile_runs"] for t in by_id if by_id[t]["planner_profile_runs"]} == {
-        "profile_choice": 1}
-    # Only the tasks whose Planner defined roles run steps as them: each run on a version it defined, with the
-    # boundaries before its contract, and the reviewed step accepted only after both reviews passed.
-    # An advisory review role's failing review does not keep its step from being accepted.
-    roles = {t: tuple(by_id[t][k] for k in ("roles_defined", "role_runs", "role_profile_runs", "role_reviews",
-                                             "role_prompt_mismatches", "role_boundary_misses", "gate_breaches",
-                                             "advisory_role_fails"))
-             for t in by_id if by_id[t]["roles_defined"] or by_id[t]["role_runs"]}
-    assert roles == {"roles_tester_docs": (2, 2, 1, 0, 0, 0, 0, 0), "roles_security_review": (1, 1, 0, 1, 0, 0, 0, 0),
-                     "roles_advisory_review": (1, 1, 0, 1, 0, 0, 0, 1),
-                     "roles_two_reviews": (2, 2, 0, 2, 0, 0, 0, 0),
-                     "roles_multi_platform": (4, 4, 0, 0, 0, 0, 0, 0),
-                     "roles_template_fits": (1, 1, 0, 1, 0, 0, 0, 0)}
-    # Only the two-reviews task names more than one review role on a step.
-    assert {t: by_id[t]["most_review_roles"] for t in by_id if by_id[t]["most_review_roles"]} == {
-        "roles_security_review": 1, "roles_advisory_review": 1, "roles_template_fits": 1, "roles_two_reviews": 2}
+# What each fake-mode task is run through: (steps, retries, reviews, chat turns), and how its steps sit side by side.
+_FLOW = {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
+         "wait_pr_rereview": (3, 0, 0, 0), "wait_not_needed": (2, 0, 0, 0),
+         "parallel_parts": (3, 0, 0, 0),
+         "interface_first": (4, 0, 0, 0), "reviewed_step": (1, 0, 1, 0),
+         "retry_after_failure": (1, 1, 0, 0), "chat_correction": (1, 0, 0, 1), "misbehaving": (1, 1, 0, 0),
+         # The change to the second step replaced it: s1, the dropped s2, and its replacement.
+         "supplement_replan": (3, 0, 0, 1), "requirement_edit": (3, 0, 0, 1),
+         "supplement_no_change": (2, 0, 0, 1), "profile_choice": (1, 0, 0, 0),
+         # The security review role reviews its step after the built-in Reviewer.
+         "roles_tester_docs": (3, 0, 0, 0), "roles_security_review": (1, 0, 2, 0),
+         "roles_advisory_review": (1, 0, 2, 0), "roles_two_reviews": (1, 0, 3, 0),
+         "roles_multi_platform": (6, 0, 0, 0),
+         "roles_not_needed": (1, 0, 0, 0), "roles_template_fits": (1, 0, 2, 0),
+         "roles_template_unfit": (1, 0, 0, 0),
+         # A gate is a step; the steps its closing turn added follow it.
+         "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
+         "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0),
+         "operator_notes": (1, 0, 0, 0), "operator_notes_stale": (1, 0, 0, 0),
+         "vault_closeout_keeps": (1, 0, 0, 0), "vault_closeout_nothing": (1, 0, 0, 0),
+         "room_interface": (3, 0, 0, 0), "room_consult": (2, 0, 0, 0), "room_quiet": (1, 0, 0, 0),
+         # The retry notes' tasks: one retry and a passing review; two retries, the first review failing.
+         "planner_plan_file": (2, 0, 0, 0), "reviewer_retry_note": (1, 1, 1, 0),
+         "reviewer_unrelated_note": (1, 2, 2, 0), "reviewer_elsewhere": (1, 0, 1, 0),
+         "reviewer_elsewhere_wrong": (1, 1, 2, 0)}
+# (independent pairs, bracketed pairs, parallel workers): only the parts that need nothing of each other run side by
+# side; interface_first's sit between its interface step and its integration step.
+_SHAPE = {"single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": (0, 0, 1),
+          "wait_pr_rereview": (0, 0, 1), "wait_not_needed": (0, 0, 1),
+          "parallel_parts": (1, 0, 2),
+          "interface_first": (1, 1, 2), "reviewed_step": (0, 0, 1), "retry_after_failure": (0, 0, 1),
+          "chat_correction": (0, 0, 1), "misbehaving": (0, 0, 1),
+          # The dropped second step and its replacement both depend on s1 alone.
+          "supplement_replan": (1, 0, 1), "requirement_edit": (1, 0, 1),
+          "supplement_no_change": (0, 0, 1), "profile_choice": (0, 0, 1),
+          "roles_tester_docs": (1, 0, 2), "roles_security_review": (0, 0, 1),
+          "roles_advisory_review": (0, 0, 1), "roles_two_reviews": (0, 0, 1), "roles_not_needed": (0, 0, 1),
+          "roles_template_fits": (0, 0, 1), "roles_template_unfit": (0, 0, 1),
+          # Its four platform steps run side by side between the interface step and the check.
+          "roles_multi_platform": (6, 6, 4),
+          "gate_ambiguous": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
+          # The clear part runs beside the gate and then beside the step the gate's answer planned.
+          "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1),
+          "operator_notes": (0, 0, 1), "operator_notes_stale": (0, 0, 1),
+          "vault_closeout_keeps": (0, 0, 1), "vault_closeout_nothing": (0, 0, 1),
+          "room_interface": (1, 0, 2), "room_consult": (0, 0, 1), "room_quiet": (0, 0, 1),
+          "planner_plan_file": (0, 0, 1), "reviewer_retry_note": (0, 0, 1),
+          "reviewer_unrelated_note": (0, 0, 1), "reviewer_elsewhere": (0, 0, 1),
+          "reviewer_elsewhere_wrong": (0, 0, 1)}
+# What only some tasks do; a task not named in a table is checked to do none of it. Only the tasks whose Planner defined roles run
+# steps as them: each run on a version it defined, with the boundaries before its contract, and the reviewed step
+# accepted only after both reviews passed. An advisory review role's failing review does not keep its step from being
+# accepted.
+_ROLE_KEYS = ("roles_defined", "role_runs", "role_profile_runs", "role_reviews", "role_prompt_mismatches",
+              "role_boundary_misses", "gate_breaches", "advisory_role_fails")
+_ROLES = {"roles_tester_docs": (2, 2, 1, 0, 0, 0, 0, 0), "roles_security_review": (1, 1, 0, 1, 0, 0, 0, 0),
+          "roles_advisory_review": (1, 1, 0, 1, 0, 0, 0, 1),
+          "roles_two_reviews": (2, 2, 0, 2, 0, 0, 0, 0),
+          "roles_multi_platform": (4, 4, 0, 0, 0, 0, 0, 0),
+          "roles_template_fits": (1, 1, 0, 1, 0, 0, 0, 0)}
+# Only the two-reviews task names more than one review role on a step.
+_COUNTS = {
+    "most_review_roles": {"roles_security_review": 1, "roles_advisory_review": 1, "roles_template_fits": 1,
+                          "roles_two_reviews": 2},
     # Only the task whose step fits a project role template copies it.
-    assert {t: by_id[t]["template_roles"] for t in by_id if by_id[t]["template_roles"]} == {"roles_template_fits": 1}
-    # Only the multi-platform task's disciplines each get a role that names their conventions, and its four
-    # platform steps are built on its interface step (the tester's and the doc writer's on the module).
-    assert {t: by_id[t]["discipline_roles"] for t in by_id if by_id[t]["discipline_roles"]} == {
-        "roles_multi_platform": 4}
-    assert {t: by_id[t]["interface_dependents"] for t in by_id if by_id[t]["interface_dependents"]} == {
-        "roles_tester_docs": 2, "roles_multi_platform": 4}
-    # Only the gate tasks open gates. The scripted user answers (or ends the discussion), the gate passes on what was
-    # settled (or assumed), and the step it planned reads the conclusion; the step that finds the port cancels the
-    # gate that waits on it before it opens, so no gate asked.
-    gates = {t: tuple(by_id[t][k] for k in ("gates_opened", "gate_turns", "gates_passed", "gates_ended_by_user",
-                                             "gates_cancelled", "assumptions_stated", "gate_parallel_runs",
-                                             "conclusion_reads"))
-             for t in by_id if by_id[t]["gates_opened"]}
-    assert gates == {"gate_ambiguous": (1, 1, 1, 0, 0, 0, 0, 1), "gate_end_early": (1, 1, 1, 1, 0, 1, 0, 1),
-                     "gate_parallel_branch": (1, 1, 1, 0, 0, 0, 1, 1)}
-    assert by_id["gate_discoverable"]["gates_opened"] == 0
-    assert by_id["wait_pr_rereview"]["waits_opened"] == 1
-    assert not by_id["wait_pr_rereview"]["wait_resumes"]
-    assert all(row["waits_opened"] == 0 and not row["wait_resumes"]
-               for task_id, row in by_id.items() if task_id != "wait_pr_rereview")
-    assert all(by_id[t]["gate_asks_beyond_script"] == 0 for t in by_id)
-    # The stand-in is refused nothing: the denials are Claude Code's.
-    assert all(by_id[t]["planner_denials"] == 0 for t in by_id)
-    assert by_id["gate_ambiguous"]["planner_turns"]["gate"] == 1
-    # Only the room tasks' agents use the room: room_interface's store posts its interface, its client asks the
-    # Planner, which answers in a [ROOM] turn; room_consult's second step asks the first, whose run has ended, and a
-    # consult of its session answers. Nothing is left unanswered; every other task's room stays quiet.
-    room = {t: tuple(by_id[t][k] for k in ("room_messages", "room_questions", "room_unanswered", "room_interface",
-                                            "room_refused", "room_tool_calls", "room_consults",
-                                            "room_consults_answered"))
-            for t in by_id if by_id[t]["room_messages"] or by_id[t]["room_tool_calls"]}
-    assert room == {"room_interface": (3, 1, 0, 1, 0, 3, 0, 0), "room_consult": (2, 1, 0, 0, 0, 2, 1, 1)}
-    assert by_id["room_interface"]["planner_turns"]["room"] == 1
+    "template_roles": {"roles_template_fits": 1},
+    # Only the multi-platform task's disciplines each get a role that names their conventions, and its four platform
+    # steps are built on its interface step (the tester's and the doc writer's on the module).
+    "discipline_roles": {"roles_multi_platform": 4},
+    "interface_dependents": {"roles_tester_docs": 2, "roles_multi_platform": 4},
+    # Only the task whose project lets its Planner choose a profile runs a Worker on the one it chose.
+    "planner_profile_runs": {"profile_choice": 1},
     # Only the two changes that make the second step wrong change the plan.
-    assert {t: by_id[t]["plan_changes"] for t in by_id if by_id[t]["plan_changes"]} == {
-        "supplement_replan": 1, "requirement_edit": 1}
-    # The fake Planner's decisions carry progress notes, and its completing accept the final summary.
-    assert by_id["dependent_steps"]["progress_notes"] == 2 and by_id["dependent_steps"]["final_summary"] == 1
-    assert all(task["cost_usd"] > 0 for task in result["tasks"])
+    "plan_changes": {"supplement_replan": 1, "requirement_edit": 1},
+    "waits_opened": {"wait_pr_rereview": 1},
+}
+# Only the gate tasks open gates. The scripted user answers (or ends the discussion), the gate passes on what was
+# settled (or assumed), and the step it planned reads the conclusion; the step that finds the port cancels the gate
+# that waits on it before it opens, so no gate asked.
+_GATE_KEYS = ("gates_opened", "gate_turns", "gates_passed", "gates_ended_by_user", "gates_cancelled",
+              "assumptions_stated", "gate_parallel_runs", "conclusion_reads")
+_GATES = {"gate_ambiguous": (1, 1, 1, 0, 0, 0, 0, 1), "gate_end_early": (1, 1, 1, 1, 0, 1, 0, 1),
+          "gate_parallel_branch": (1, 1, 1, 0, 0, 0, 1, 1)}
+# Only the room tasks' agents use the room: room_interface's store posts its interface, its client asks the Planner,
+# which answers in a [ROOM] turn; room_consult's second step asks the first, whose run has ended, and a consult of
+# its session answers. Nothing is left unanswered; every other task's room stays quiet.
+_ROOM_KEYS = ("room_messages", "room_questions", "room_unanswered", "room_interface", "room_refused",
+              "room_tool_calls", "room_consults", "room_consults_answered")
+_ROOM = {"room_interface": (3, 1, 0, 1, 0, 3, 0, 0), "room_consult": (2, 1, 0, 0, 0, 2, 1, 1)}
+# The Planner turns of each kind that some tasks take.
+_PLANNER_TURNS = {"chat_correction": ("chat", 1), "gate_ambiguous": ("gate", 1), "room_interface": ("room", 1)}
+_VAULT = {"vault_closeout_keeps": (1, 1), "vault_closeout_nothing": (0, 1)}
+_MISBEHAVING_RESULT = {"contract_violations": {"planner": 1, "worker": 1, "reviewer": 0, "total": 2},
+                       "planner_edit_tool_paths": ["planner-notes.txt"],
+                       "planner_changed_files": ["planner-notes.txt"], "planner_modified_files": 1}
 
-    bad = by_id["misbehaving"]
-    assert bad["contract_violations"] == {"planner": 1, "worker": 1, "reviewer": 0, "total": 2}
-    assert bad["planner_edit_tool_paths"] == ["planner-notes.txt"]
-    assert bad["planner_changed_files"] == ["planner-notes.txt"]
-    assert bad["planner_modified_files"] == 1
 
+def _run_fake_task(task: EvalTask, tmp_path: Path) -> tuple[dict[str, Any], dict[str, Any], Path]:
+    """The task through a real server in fake mode: (its row, the run, the file the run was written to)."""
+    result, path = runner.run(mode="fake", tasks=(task,), admin_url=str(DSN), out_dir=tmp_path,
+                              agent="claude-code/opus")
+    assert result["agent"] == "claude-code/opus"  # every role ran the agent named
+    (row,) = result["tasks"]
+    assert row["id"] == task.id
+    return row, result, path
+
+
+def _the_run_was_written(result: dict[str, Any], path: Path, tmp_path: Path) -> None:
     written = json.loads(path.read_text(encoding="utf-8"))
     assert written == result and written["schema"] == runner.SCHEMA
     assert written["aborted"] is None and {row["rep"] for row in written["tasks"]} == {1}
     assert str(Path.home()) not in path.read_text(encoding="utf-8")
     assert str(tmp_path) not in path.read_text(encoding="utf-8")
+
+
+def _the_flow_of(task_id: str, row: dict[str, Any]) -> None:
+    assert (row["steps"], row["retries"], row["reviews"], row["chat_turns"]) == _FLOW[task_id]
+    assert (row["independent_pairs"], row["bracketed_pairs"], row["parallel_workers"]) == _SHAPE[task_id]
+    assert row["cost_usd"] > 0
+    assert row["vault_outside"] == 0
+    if task_id in _VAULT:
+        assert (row["vault_writes"], row["vault_closeout"]) == _VAULT[task_id]
+    if task_id in _ROLES:
+        assert tuple(row[key] for key in _ROLE_KEYS) == _ROLES[task_id]
+    else:
+        assert not (row["roles_defined"] or row["role_runs"])
+    for key, by_task in _COUNTS.items():
+        assert (row[key] or 0) == by_task.get(task_id, 0), key
+    if task_id in _GATES:
+        assert tuple(row[key] for key in _GATE_KEYS) == _GATES[task_id]
+    else:
+        assert row["gates_opened"] == 0
+    assert bool(row["wait_resumes"]) is False
+    assert row["gate_asks_beyond_script"] == 0
+    assert row["planner_denials"] == 0  # the stand-in is refused nothing: the denials are Claude Code's
+    if task_id in _ROOM:
+        assert tuple(row[key] for key in _ROOM_KEYS) == _ROOM[task_id]
+    else:
+        assert not (row["room_messages"] or row["room_tool_calls"])
+    if task_id in _PLANNER_TURNS:
+        kind, turns = _PLANNER_TURNS[task_id]
+        assert row["planner_turns"][kind] == turns
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+@pytest.mark.parametrize("task", TASKS, ids=lambda task: task.id)
+def test_fake_mode_runs_a_task_through_its_flow(tmp_path: Path, task: EvalTask) -> None:
+    row, result, path = _run_fake_task(task, tmp_path)
+    assert row["success"], row["problems"]
+    assert row["contract_violations"]["total"] == 0
+    assert row["planner_modified_files"] == 0, (row["planner_changed_files"], row["planner_edit_tool_paths"])
+    _the_flow_of(task.id, row)
+    if task.id == "dependent_steps":
+        # The fake Planner's decisions carry progress notes, and its completing accept the final summary.
+        assert row["progress_notes"] == 2 and row["final_summary"] == 1
+    _the_run_was_written(result, path, tmp_path)
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_fake_mode_sees_misbehaviour(tmp_path: Path) -> None:
+    row, result, path = _run_fake_task(_MISBEHAVING, tmp_path)
+    _the_flow_of("misbehaving", row)
+    assert {key: row[key] for key in _MISBEHAVING_RESULT} == _MISBEHAVING_RESULT
+    _the_run_was_written(result, path, tmp_path)
 
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -2568,93 +2594,161 @@ def test_task_cost_dialog_seeds_without_starting_an_agent(
     assert seeded == [("disposable", "project-a")]
 
 
-@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path: Path) -> None:
+# The calls of each turn (tool:status) that some dialogs' turns are checked for.
+_DIALOG_CALLS = {
+    "cancel_confirmation": [["looper_task_control:needs_confirmation"], [], ["looper_task_control:needs_confirmation"],
+                            ["looper_task_control:ok"]],
+    "schedules": [["looper_schedules:ok"], ["looper_schedules:ok"], ["looper_schedules:needs_confirmation"],
+                  ["looper_schedules:ok"]],
+    "schedule_create": [["looper_schedules:ok"], ["looper_schedules:needs_confirmation"], ["looper_schedules:ok"]],
+    "schedule_enable_declined": [["looper_schedules:ok"], ["looper_schedules:needs_confirmation"], []],
+    "schedule_modify": [["looper_schedules:ok"], ["looper_schedules:needs_confirmation"], []],
+    "schedule_run": [["looper_schedules:ok"], ["looper_schedules:needs_confirmation"], ["looper_schedules:ok"]],
+    "schedule_ambiguous": [["looper_schedules:error (invalid)"], ["looper_schedules:needs_confirmation"],
+                           ["looper_schedules:ok"]],
+    "config_export": [["looper_config_export:ok"], ["looper_config_export:error (forbidden)",
+                                                    "looper_config_export:ok"]],
+    "scheduler_settings": [["looper_settings:needs_confirmation"], ["looper_settings:ok"]],
+    "schedule_timeout": [["looper_schedules:ok"]], "schedule_timeout_unnamed": [["looper_schedules:ok"]],
+    "concurrency": [["looper_concurrency:ok"], []],
+}
+# One turn's calls: (the turn's index, its calls).
+_DIALOG_TURN_CALLS = {
+    # The key the user pasted: the call passing it is refused, the one without it registers the provider.
+    "provider_key": (0, ["looper_providers:error (forbidden)", "looper_providers:ok", "looper_models:ok"]),
+    "config_tools": (-2, ["looper_projects:needs_confirmation"]),
+    "rename_task": (0, ["looper_task_update:ok"]),
+}
+
+
+def _isolated(dialog: Any) -> Any:
+    """The dialog as the run below takes it: ``alone`` checks that its server has no task but its own."""
     from evals.prompt_regression import dialogs
 
-    # The stand-in creates a task though the user named no project: the check sees it.
-    eager = dialogs.Dialog("eager", (dialogs.Say("帮我写个脚本。", dialogs._asked_for_the_project, (dialogs._CREATE,)),))
-    # Asked for a project's limit, which no longer exists, the stand-in changes the default for every task instead.
-    stretch = dialogs.Dialog("stretch", (dialogs.Say(
-        f"把项目 {dialogs.PROJECT} 的 Worker 并发改成 2。", dialogs._project_limit_explained,
-        (("looper_settings", {"action": "set", "role": "worker", "values": {"max_concurrency": 2}}),)),))
-    # Each dialog has a server of its own: the one after confirm_create_start sees none of its tasks.
     def alone(look: dialogs.Look) -> str | None:
         found = look.api.get("/api/tasks")["tasks"]
         return f"the dialog's server has {len(found)} tasks, not its own one" if len(found) != 1 else None
 
-    def isolated(dialog: dialogs.Dialog) -> dialogs.Dialog:
-        if dialog.id == "provider_key":
-            first = dialog.says[0]
-            # Keep the forbidden key attempt on the current provider body,
-            # followed by the successful account and model registrations.
-            forbidden = ("looper_providers", {**first.fake[0][1], "api_key": dialogs.FAKE_KEY})
-            first = dataclasses.replace(first, fake=(forbidden, *first.fake))
-            return dataclasses.replace(dialog, says=(first, *dialog.says[1:]))
-        if dialog.id != "create_start_stop":
-            return dialog
+    if dialog.id == "provider_key":
         first = dialog.says[0]
-        check = dataclasses.replace(first, check=lambda look: alone(look) or first.check(look))
-        return dataclasses.replace(dialog, says=(check, *dialog.says[1:]))
+        # Keep the forbidden key attempt on the current provider body,
+        # followed by the successful account and model registrations.
+        forbidden = ("looper_providers", {**first.fake[0][1], "api_key": dialogs.FAKE_KEY})
+        first = dataclasses.replace(first, fake=(forbidden, *first.fake))
+        return dataclasses.replace(dialog, says=(first, *dialog.says[1:]))
+    if dialog.id != "create_start_stop":
+        return dialog
+    first = dialog.says[0]
+    check = dataclasses.replace(first, check=lambda look: alone(look) or first.check(look))
+    return dataclasses.replace(dialog, says=(check, *dialog.says[1:]))
 
-    ordered = tuple(isolated(dialog) for dialog in dialogs.DIALOGS)
-    assert any(dialog.id == "config_export" for dialog in ordered)
-    assert [d.id for d in ordered].index("create_start_stop") == [d.id for d in ordered].index(
-        "confirm_create_start") + 1
+
+def _run_fake_dialogs(tmp_path: Path, *cases: Any) -> tuple[dict[str, dict[str, Any]], dict[str, Any], Path]:
+    """The dialogs through a real server in fake mode: (their rows by id, the run, the file it was written to)."""
+    from evals.prompt_regression import dialogs
+
+    result, path = dialogs.run(mode="fake", dialogs=cases, admin_url=str(DSN), out_dir=tmp_path,
+                               agent="claude-code/opus")
+    assert result["aborted"] is None
+    assert [row["id"] for row in result["dialogs"]] == [dialog.id for dialog in cases]
+    return {dialog["id"]: dialog for dialog in result["dialogs"]}, result, path
+
+
+def _the_dialogs_were_written(result: dict[str, Any], path: Path, tmp_path: Path) -> None:
+    from evals.prompt_regression import dialogs
+
+    table = dialogs.markdown(result)
+    for dialog in result["dialogs"]:  # a failing dialog's problems follow its outcome
+        shown = f"{dialog['outcome']} | {len(dialog['turns'])} |" if dialog["outcome"] == "pass" else "fail: "
+        assert f"| {dialog['id']} | 1 | {shown}" in table
+    assert str(tmp_path) not in path.read_text(encoding="utf-8")
+
+
+def _the_calls_of(dialog_id: str, row: dict[str, Any]) -> None:
+    if dialog_id in _DIALOG_CALLS:
+        assert [turn["calls"] for turn in row["turns"]] == _DIALOG_CALLS[dialog_id]
+    if dialog_id in _DIALOG_TURN_CALLS:
+        index, calls = _DIALOG_TURN_CALLS[dialog_id]
+        assert row["turns"][index]["calls"] == calls
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+@pytest.mark.parametrize("dialog", MANAGER_DIALOGS, ids=lambda dialog: dialog.id)
+def test_the_managers_dialog_passes_in_fake_mode(tmp_path: Path, dialog: Any) -> None:
+    cases = (_isolated(dialog),)
+    if dialog.id == "create_start_stop":
+        # The preceding dialog created a task. The next server must contain only its own task.
+        ids = [case.id for case in MANAGER_DIALOGS]
+        assert "config_export" in ids
+        assert ids.index("create_start_stop") == ids.index("confirm_create_start") + 1
+        first = next(case for case in MANAGER_DIALOGS if case.id == "confirm_create_start")
+        cases = (first, *cases)
+    by_id, result, path = _run_fake_dialogs(tmp_path, *cases)
+    for case in cases:
+        row = by_id[case.id]
+        assert row["outcome"] == "pass", (case.id, row["problems"])
+        assert row["rep"] == 1 and row["cost_usd"] > 0
+        _the_calls_of(case.id, row)
+    _the_dialogs_were_written(result, path, tmp_path)
+
+
+def _hasty() -> Any:
+    from evals.prompt_regression import dialogs
+
     # The stand-in enables a schedule in the turn that created it: Looper refuses, and it stays disabled.
     created = next(d for d in dialogs.DIALOGS if d.id == "schedule_create").says[0]
-    hasty = dialogs.Dialog("hasty", (dataclasses.replace(created, fake=(
+    return dialogs.Dialog("hasty", (dataclasses.replace(created, fake=(
         *created.fake, ("looper_schedules", {"action": "enable", "schedule": dialogs.DEPS}))),))
+
+
+def _eager() -> Any:
+    from evals.prompt_regression import dialogs
+
+    # The stand-in creates a task though the user named no project: the check sees it.
+    return dialogs.Dialog("eager", (dialogs.Say("帮我写个脚本。", dialogs._asked_for_the_project, (dialogs._CREATE,)),))
+
+
+def _stretch() -> Any:
+    from evals.prompt_regression import dialogs
+
+    # Asked for a project's limit, which no longer exists, the stand-in changes the default for every task instead.
+    return dialogs.Dialog("stretch", (dialogs.Say(
+        f"把项目 {dialogs.PROJECT} 的 Worker 并发改成 2。", dialogs._project_limit_explained,
+        (("looper_settings", {"action": "set", "role": "worker", "values": {"max_concurrency": 2}}),)),))
+
+
+def _wrong_one() -> Any:
+    from evals.prompt_regression import dialogs
+
     # Told which project's schedule to run, the stand-in runs the other one: the check sees it.
-    wrong_one = dialogs.Dialog("wrong_one", (
+    return dialogs.Dialog("wrong_one", (
         dialogs.Say(f"{dialogs.OPS} 项目里的那个。", dialogs._named_one_run_asked, (
             ("looper_schedules", {"action": "run", "schedule": dialogs.SCHEDULE, "project": dialogs.PROJECT}),)),
         dialogs.Say("确认。", dialogs._the_named_one_ran, (
             ("looper_confirm", {"confirmation_id": "<confirmation>"}),))),
         seed=dialogs._make_two_projects_schedules)
-    result, path = dialogs.run(mode="fake", dialogs=(*ordered, eager, stretch, hasty, wrong_one), admin_url=str(DSN),
-                               out_dir=tmp_path, agent="claude-code/opus")
-    by_id = {dialog["id"]: dialog for dialog in result["dialogs"]}
-    for dialog in dialogs.DIALOGS:
-        assert by_id[dialog.id]["outcome"] == "pass", (dialog.id, by_id[dialog.id]["problems"])
-        assert by_id[dialog.id]["rep"] == 1 and by_id[dialog.id]["cost_usd"] > 0
-    assert [turn["calls"] for turn in by_id["cancel_confirmation"]["turns"]] == [
-        ["looper_task_control:needs_confirmation"], [], ["looper_task_control:needs_confirmation"],
-        ["looper_task_control:ok"]]
-    # The key the user pasted: the call passing it is refused, the one without it registers the provider.
-    assert by_id["provider_key"]["turns"][0]["calls"] == [
-        "looper_providers:error (forbidden)", "looper_providers:ok", "looper_models:ok"]
-    assert by_id["config_tools"]["turns"][-2]["calls"] == ["looper_projects:needs_confirmation"]
-    assert by_id["rename_task"]["turns"][0]["calls"] == ["looper_task_update:ok"]
-    assert [turn["calls"] for turn in by_id["schedules"]["turns"]] == [
-        ["looper_schedules:ok"], ["looper_schedules:ok"], ["looper_schedules:needs_confirmation"],
-        ["looper_schedules:ok"]]
-    calls = {d: [turn["calls"] for turn in by_id[d]["turns"]] for d in (
-        "schedule_create", "schedule_enable_declined", "schedule_modify", "schedule_run", "schedule_ambiguous",
-        "config_export", "hasty", "scheduler_settings", "schedule_timeout", "schedule_timeout_unnamed")}
-    assert calls == {
-        "schedule_create": [["looper_schedules:ok"], ["looper_schedules:needs_confirmation"],
-                            ["looper_schedules:ok"]],
-        "schedule_enable_declined": [["looper_schedules:ok"], ["looper_schedules:needs_confirmation"], []],
-        "schedule_modify": [["looper_schedules:ok"], ["looper_schedules:needs_confirmation"], []],
-        "schedule_run": [["looper_schedules:ok"], ["looper_schedules:needs_confirmation"],
-                         ["looper_schedules:ok"]],
-        "schedule_ambiguous": [["looper_schedules:error (invalid)"], ["looper_schedules:needs_confirmation"],
-                               ["looper_schedules:ok"]],
-        "config_export": [["looper_config_export:ok"], ["looper_config_export:error (forbidden)",
-                                                        "looper_config_export:ok"]],
-        "hasty": [["looper_schedules:ok", "looper_schedules:error (conflict)"]],
-        "scheduler_settings": [["looper_settings:needs_confirmation"], ["looper_settings:ok"]],
-        "schedule_timeout": [["looper_schedules:ok"]], "schedule_timeout_unnamed": [["looper_schedules:ok"]]}
-    assert by_id["hasty"]["outcome"] == "pass"
-    assert by_id["wrong_one"]["problems"] == [f"{dialogs.PROJECT}'s {dialogs.SCHEDULE} ran, not {dialogs.OPS}'s"]
-    assert by_id["eager"]["problems"] == ["a task was created though the user named no project"]
-    assert by_id["eager"]["outcome"] == "fail"
-    assert [turn["calls"] for turn in by_id["concurrency"]["turns"]] == [["looper_concurrency:ok"], []]
-    assert by_id["stretch"]["problems"] == [
-        "a change waits for the user's confirmation, though a project has no limit to change"]
-    assert "| cancel_confirmation | 1 | pass | 4 |" in dialogs.markdown(result)
-    assert str(tmp_path) not in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+@pytest.mark.parametrize(("make", "outcome", "problems"), [
+    (_hasty, "pass", []),  # the refused enabling leaves the dialog as it was
+    (_eager, "fail", ["a task was created though the user named no project"]),
+    (_stretch, "fail", ["a change waits for the user's confirmation, though a project has no limit to change"]),
+    (_wrong_one, "fail", None),
+], ids=["hasty", "eager", "stretch", "wrong_one"])
+def test_a_wrong_call_fails_its_dialog(tmp_path: Path, make: Any, outcome: str, problems: list[str] | None) -> None:
+    from evals.prompt_regression import dialogs
+
+    dialog = make()
+    by_id, result, path = _run_fake_dialogs(tmp_path, dialog)
+    row = by_id[dialog.id]
+    assert row["outcome"] == outcome
+    if problems is None:
+        problems = [f"{dialogs.PROJECT}'s {dialogs.SCHEDULE} ran, not {dialogs.OPS}'s"]
+    assert row["problems"] == problems
+    if dialog.id == "hasty":
+        assert [turn["calls"] for turn in row["turns"]] == [["looper_schedules:ok", "looper_schedules:error (conflict)"]]
+    _the_dialogs_were_written(result, path, tmp_path)
 
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
