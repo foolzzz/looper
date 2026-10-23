@@ -511,7 +511,7 @@ def test_a_manager_enabled_at_the_limit_is_started_when_a_place_frees(tmp_path: 
             assert r.fleet.get(late) is None
             await _set_enabled(pool, "manager-m0", False)
             await r.fleet.apply("manager-m0")
-            await _until(lambda: r.fleet.state(late)["sync"] == "ok", "the retry")
+            await until(lambda: r.fleet.state(late)["sync"] == "ok", "the retry")
             assert r.fleet.get(late) is not None and r.fleet.get("manager-m0") is None
             assert not r.fleet._retries
 
