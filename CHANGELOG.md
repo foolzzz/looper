@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.51] - 2026-10-23
+
+### Fixed
+
+- **Stop runtimes: process tree and runtime binding.** Stop no longer remembers or signals the children of a process whose pid was reused: reused leaders are excluded before the tree is refreshed, and remembered groups whose leader is gone are dropped. A Grok turn that falls back from ACP to the legacy transport now announces the transport so the manager rebinds the turn before its tool bridge can call a tool. The stop real-path write probe passes only when the turn's final answer has the outcome `answered`. No model-visible change. ([#442](https://github.com/foolzzz/looper/pull/442))
+
 ## [2.13.50] - 2026-10-23
 
 ### Fixed
