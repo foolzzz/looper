@@ -23,6 +23,12 @@ How the agent system works today is described in
 - **Configuration export and import require the running service.** `looper config export` and `looper config import` have been removed. Use `loopercli config export <file>` and `loopercli config import <file>` instead; apply a preview with `loopercli config import --apply <import_id>`, then `loopercli confirm <confirmation_id>`.
 - **配置导出、导入需要运行中的服务。** 已删除 `looper config export` 和 `looper config import`，请改用 `loopercli config export <file>` 和 `loopercli config import <file>`；应用预览用 `loopercli config import --apply <import_id>`，再用 `loopercli confirm <confirmation_id>` 确认。
 
+## [2.13.46] - 2026-10-23
+
+### Fixed
+
+- **The Manager's reply no longer asks to start a task it already started.** When the Manager creates a task and starts it in the same turn, the task's configuration block in the reply now reads "任务已创建：" without the "Ready — not started" wording and without the question whether to start it. A start that fails, a turn that does not start the task, and a start of a different task keep the block and the question as before. Behavior change: the text of the Manager's reply in that case. Model-visible: no change to the Manager's prompt or tool schemas (the `looper_task_create` result still carries its `shown_to_user` note). ([#428](https://github.com/foolzzz/looper/pull/428))
+
 ## [2.13.45] - 2026-10-22
 
 ### Added
