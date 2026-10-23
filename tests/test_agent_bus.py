@@ -229,6 +229,33 @@ class TestTopicConsumers:
 
 
 class TestReplay:
+    @pytest.mark.parametrize("target", [MANAGER_ADDRESS, AgentAddress("manager", "manager-review")])
+    def test_messages_queued_before_start_are_not_replayed(self, tmp_path: Path, target: AgentAddress) -> None:
+        async def _run() -> None:
+            backlog = _make_envelope(source=channel_address("lark"), target=target)
+            MessageJournal(tmp_path / ".local" / "agent-bus").append(backlog)
+            bus = MessageBus(tmp_path)
+            observed: list[MessageEnvelope] = []
+            bus.subscribe_topic(MessageType.USER_MESSAGE, observed.append)
+            incoming = _make_envelope(source=channel_address("lark"), target=target)
+            await bus.publish(incoming)
+            assert bus.pending_count(target.agent_id) == 1
+
+            await bus.start()
+
+            assert bus.pending_count(target.agent_id) == 2
+            assert bus.take_queue(target.agent_id) == [incoming, backlog]
+            assert observed == [incoming, backlog]
+            # Skipping a replay must not acknowledge a message the Manager has not handled.
+            assert bus.journal.undelivered() == [backlog, incoming]
+            await bus.shutdown()
+            restarted = MessageBus(tmp_path)
+            await restarted.start()
+            assert await restarted.drain_queue(target.agent_id) == [backlog, incoming]
+            await restarted.shutdown()
+
+        asyncio.run(_run())
+
     def test_legacy_status_updates_are_dropped(self, tmp_path: Path) -> None:
         journal_dir = tmp_path / ".local" / "agent-bus"
         status = _make_envelope(

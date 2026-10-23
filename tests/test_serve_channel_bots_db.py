@@ -442,8 +442,6 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
             await receive(adapter)
 
         async def message_during_check() -> None:
-            if channel_type != "telegram":
-                return
             if adapters:
                 await receive(adapters[0])
             else:
@@ -478,8 +476,8 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
                 registries.append(registry)
             await register(registry, adapter)
 
-        async def ready(supervisor: Any) -> None:
-            # Inspect delivery before the agents consume their queues; no model process is launched.
+        async def ready(supervisor: Any, agent_id: str) -> None:
+            # The real start_all has replayed the journal; inspect before any agent consumes its queue.
             raise Started
 
         identity = SimpleNamespace(profile="", app_id="cli_x", bot_name="B", bot_open_id="ou_bot00000001")
@@ -488,7 +486,7 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
         monkeypatch.setattr(TelegramChannelAdapter if channel_type == "telegram" else LarkChannelAdapter, "start", start)
         monkeypatch.setattr(managers.ManagerFleet, "load", load_with_backlog)
         monkeypatch.setattr(serve.ChannelRegistry, "register", register_and_keep)
-        monkeypatch.setattr(serve.AgentSupervisor, "start_all", ready)
+        monkeypatch.setattr(serve.AgentSupervisor, "_start_agent", ready)
         monkeypatch.setattr(managers_api, "_listener", None)
         monkeypatch.setattr(operator_notes, "_root", str(tmp_path))
         monkeypatch.setattr(db, "init_pool", AsyncMock(return_value=pool))
@@ -509,8 +507,9 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
                 await asyncio.wait_for(serve._run_agent_system(ops=ops, runtime_root=tmp_path, work_dir=tmp_path,
                                                                skip_backup=True), 10)
             assert adapters and incoming
+            assert len(incoming) == 5
             if channel_type == "telegram":
-                assert len(incoming) == 5 and pending == []
+                assert pending == []
             queued = await adapters[0]._bus.drain_queue(manager_id)
             replies = [s["text"] for s in bot.sent] if channel_type == "telegram" else [
                 fields["text"] for method, fields in transport.calls if method == "send" and "text" in fields]

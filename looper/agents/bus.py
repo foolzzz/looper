@@ -118,6 +118,7 @@ class MessageBus:
         self._journal = MessageJournal(runtime_root / ".local" / "agent-bus")
         self._reply_futures: dict[str, asyncio.Future[MessageEnvelope]] = {}
         self._started = False
+        self._queued_before_start: set[str] = set()
 
     @property
     def journal(self) -> MessageJournal:
@@ -136,6 +137,10 @@ class MessageBus:
         replay: list[MessageEnvelope] = []
         dropped = 0
         for envelope in self._journal.undelivered():
+            # Channels can receive during startup checks, before journal replay.
+            # Keep their queued messages durable without delivering them a second time.
+            if envelope.message_id in self._queued_before_start:
+                continue
             # Older versions journaled statuses, but their turns ended at restart.
             if not _journaled(envelope):
                 self._journal.mark_delivered(envelope.message_id)
@@ -153,6 +158,7 @@ class MessageBus:
                 await self._deliver(envelope, journaled=True)
         self._journal.compact()
         self._started = True
+        self._queued_before_start.clear()
 
     async def publish(self, envelope: MessageEnvelope) -> None:
         """Publish a message. Journaled before delivery for crash recovery (a status is not: ``_TRANSIENT``)."""
@@ -168,6 +174,8 @@ class MessageBus:
                 self._journal.mark_delivered(envelope.message_id)
         else:
             await self.get_queue(envelope.target.agent_id).put(envelope)
+            if journaled and not self._started:
+                self._queued_before_start.add(envelope.message_id)
 
         # Resolve any pending request-reply futures
         if envelope.reply_to and envelope.reply_to in self._reply_futures:
