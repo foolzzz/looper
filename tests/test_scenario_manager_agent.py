@@ -192,6 +192,30 @@ async def test_profile_uses_its_own_definition(monkeypatch: pytest.MonkeyPatch, 
 
 @pytest.mark.usefixtures("agent_db")
 @sync
+async def test_session_view_follows_the_settings_of_its_own_manager(monkeypatch: pytest.MonkeyPatch,
+                                                                    tmp_path: Path) -> None:
+    seen: list[tuple[str, bool]] = []
+
+    async def _load(role: Any, *args: Any, manager_id: str = "manager", manager_session: bool = True,
+                    **kwargs: Any) -> Any:
+        seen.append((manager_id, manager_session))
+        settings = await real_load(role, *args, manager_id=manager_id, manager_session=manager_session, **kwargs)
+        profile = dataclasses.replace(settings.profile, name="P1" if manager_id == "manager-review" else "P2")
+        return dataclasses.replace(settings, profile=profile)
+
+    async def _choices(*_a: Any, **_k: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(manager_module, "load_agent_settings", _load)
+    monkeypatch.setattr(manager_module, "profile_choices", _choices)
+    view = await _agent(tmp_path, _definition()).session_view()
+    assert view["follow_settings"]["name"].startswith("P1")
+    assert {manager_id for manager_id, _ in seen} == {"manager-review"}
+    assert ("manager-review", False) in seen
+
+
+@pytest.mark.usefixtures("agent_db")
+@sync
 async def test_run_is_recorded_under_its_id(agent_db: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def _get(manager_id: str, **_: Any) -> dict[str, Any]:
         return _row(_definition())

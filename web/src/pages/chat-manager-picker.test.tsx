@@ -21,7 +21,7 @@ const api = vi.hoisted(() => ({
   fetchChatSessions: vi.fn(),
   fetchChatSession: vi.fn(),
   fetchManagerSession: vi.fn(),
-  watchChat: vi.fn((_sid: string, _cb: (m: unknown) => void) => () => {}),
+  watchChat: vi.fn((_sid: string, _cb: (m: unknown) => void, _managerId?: string) => () => {}),
 }));
 vi.mock("@/lib/api", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/lib/api")>();
@@ -33,7 +33,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     fetchTaskDetail: async () => ({ group: "running", gates: [] }),
     fetchLlmRecords: async () => [],
     saveChatMessage: async () => {},
-    watchChat: (sid: string, cb: (m: unknown) => void) => api.watchChat(sid, cb),
+    watchChat: (sid: string, cb: (m: unknown) => void, managerId?: string) => api.watchChat(sid, cb, managerId),
   };
 });
 
@@ -157,6 +157,24 @@ describe("chat Manager picker", () => {
     await pick("Code review");
     await click(byText(/New session/i));
     expect(api.fetchManagerSession).toHaveBeenCalledWith("manager-review", expect.anything());
+  });
+
+  it("closes the New session panel when the Manager changes", async () => {
+    await mount();
+    await pick("Code review");
+    await click(byText(/New session/i));
+    expect(byText(/Start new session/i)).toBeTruthy();
+    await pick("Manager");
+    expect(byText(/Start new session/i)).toBeUndefined();
+  });
+
+  it("watches the open thread under its Manager", async () => {
+    api.fetchChatSessions.mockResolvedValue([row("r1")]);
+    api.fetchChatMessages.mockResolvedValue([msg("m1", "hello")]);
+    await mount();
+    await pick("Code review");
+    await click(byText(/r1/));
+    expect(api.watchChat).toHaveBeenCalledWith("r1", expect.any(Function), "manager-review");
   });
 
   it("keeps a thread pointer per Manager", async () => {

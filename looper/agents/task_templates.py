@@ -234,16 +234,19 @@ async def match_patterns(checks: Sequence[tuple[str, str]], *,
             answers.append(json.loads(line))
 
     try:
-        await asyncio.wait_for(run(), timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
+        try:
+            await asyncio.wait_for(run(), timeout)
+        except asyncio.TimeoutError:
+            raise PatternTimeout(len(answers)) from None
+        except OSError:
+            raise TemplateError(
+                "Looper could not check the input's pattern now; tell the user and try again later") from None
         await proc.wait()
-        raise PatternTimeout(len(answers)) from None
-    except OSError:
-        proc.kill()
-        await proc.wait()
-        raise TemplateError("Looper could not check the input's pattern now; tell the user and try again later") from None
-    await proc.wait()
+    finally:
+        # Also when this coroutine is cancelled: a backtracking child must not outlive the check.
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
     if len(answers) < len(checks):
         raise TemplateError("Looper could not check the input's pattern now; tell the user and try again later")
     return answers

@@ -216,7 +216,11 @@ def test_disable_drops_queued_requests(tmp_path: Path, monkeypatch: pytest.Monke
             queue = r.bus.get_queue(WEB.agent_id)
             while not queue.empty():
                 replies.append(queue.get_nowait())
-            turned_off = [e for e in replies if e.message_type == MessageType.AGENT_REPLY]
+            answers = [e for e in replies if e.message_type == MessageType.AGENT_REPLY]
+            # The one in flight gets its stopped reply; the queued ones are told the Manager is off.
+            (stopped,) = [e for e in answers if e.payload["outcome"] == "stopped"]
+            assert stopped.reply_to == first.message_id
+            turned_off = [e for e in answers if e is not stopped]
             assert sorted(e.reply_to for e in turned_off) == sorted([second.message_id, third.message_id])
             assert all("turned off" in e.payload["text"] for e in turned_off)
             assert all(e.metadata["origin_channel_id"] == "channel-web" for e in turned_off)
@@ -257,11 +261,23 @@ def test_disable_settles_the_message_in_flight(tmp_path: Path, monkeypatch: pyte
         async with rig(tmp_path) as r:
             message = _user(review)
             agent = r.fleet.get(review)
+            published: list[MessageEnvelope] = []
+            publish = r.bus.publish
+
+            async def spy(envelope: MessageEnvelope) -> Any:
+                published.append(envelope)
+                return await publish(envelope)
+
+            monkeypatch.setattr(r.bus, "publish", spy)
             await r.bus.publish(message)
             await until(lambda: len(seen) == 1, "the answer to block", timeout=5)
             await _set_enabled(pool, review, False)
             await r.fleet.apply(review)
             assert [e.message_id for e in agent.stopped_in_flight] == [message.message_id]
+            # The chat gets the stopped turn's final reply, not a silence until its stream times out.
+            (reply,) = [e for e in published if e.message_type == MessageType.AGENT_REPLY]
+            assert reply.reply_to == message.message_id and reply.payload["outcome"] == "stopped"
+            assert reply.source == manager_address(review) and reply.target == WEB
             assert recorded and recorded[0] == 1  # read before the loop was cancelled
             await _set_enabled(pool, review, True)
             await r.fleet.apply(review)
@@ -471,6 +487,32 @@ def test_a_failed_apply_is_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPat
             assert r.fleet.get(review) is not None  # still in force until the retry
             await until(lambda: r.fleet.state(review)["sync"] == "ok", "the retry", timeout=5)
             assert r.fleet.get(review) is None and review not in r.supervisor.agent_status()
+            assert not r.fleet._retries
+
+    run_db(body, monkeypatch)
+
+
+def test_a_manager_enabled_at_the_limit_is_started_when_a_place_frees(tmp_path: Path,
+                                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    async def body(pool: Any) -> None:
+        from looper.agents import managers as managers_module
+
+        monkeypatch.setattr(managers_module, "RETRY_DELAYS", (0,))
+        monkeypatch.setattr(managers_module, "RETRY_LATER_SECONDS", 0.05)
+        for i in range(7):
+            await _insert(pool, f"m{i}")
+        late = await _insert(pool, "late", enabled=False)
+        async with rig(tmp_path) as r:
+            assert len(r.fleet.agents()) == 8
+            await _set_enabled(pool, late, True)
+            await r.fleet.apply(late)  # the place of m0 is not free yet
+            state = r.fleet.state(late)
+            assert state["sync"] == "pending" and "at most 8 Managers run at once" in state["sync_error"]
+            assert r.fleet.get(late) is None
+            await _set_enabled(pool, "manager-m0", False)
+            await r.fleet.apply("manager-m0")
+            await until(lambda: r.fleet.state(late)["sync"] == "ok", "the retry")
+            assert r.fleet.get(late) is not None and r.fleet.get("manager-m0") is None
             assert not r.fleet._retries
 
     run_db(body, monkeypatch)

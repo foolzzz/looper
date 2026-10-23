@@ -1779,6 +1779,7 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
     since = _newest_run(api, agent)
     before = _last_action(database_url, agent) if database_url is not None else 0
     body = {"text": text, "session_id": session, "message_id": message_id}
+    owner = {"manager": agent} if manager else {}  # a thread of a scenario Manager is read naming it
     if manager:
         body["target"] = {"kind": "manager", "id": agent}
     api.post("/api/chat/send", body)
@@ -1800,7 +1801,7 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
             if turn:
                 api.post("/api/chat/stop", {"message_id": turn["message_id"]})
                 stopped = True
-        for message in api.get("/api/chat/messages", session_id=session)["messages"]:
+        for message in api.get("/api/chat/messages", session_id=session, **owner)["messages"]:
             if message.get("message_id") == f"{message_id}:reply":
                 # A chat command such as /profile is answered by Looper itself, without a Manager run.
                 if not text.lstrip().startswith("/"):

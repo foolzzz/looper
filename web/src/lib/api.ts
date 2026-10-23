@@ -644,13 +644,18 @@ const CHAT_WATCH_RETRY_MS = 3000;
  * Manager's Claude says on its own): each reaches `onMessage` as it is saved.
  * Reconnects while watched; the returned function stops watching.
  */
-export function watchChat(sessionId: string, onMessage: (message: DbChatMessage) => void): () => void {
+export function watchChat(
+  sessionId: string,
+  onMessage: (message: DbChatMessage) => void,
+  managerId?: string,
+): () => void {
+  const owner = managerId ? `&manager=${encodeURIComponent(managerId)}` : "";
   let stopped = false;
   let stop = () => {};
   let retry: ReturnType<typeof setTimeout> | undefined;
   const connect = () => {
     stop = streamSSE(
-      `${API_BASE}/chat/events?session=${encodeURIComponent(sessionId)}`,
+      `${API_BASE}/chat/events?session=${encodeURIComponent(sessionId)}${owner}`,
       (event) => {
         if (event.kind === "chat.message") onMessage(event.payload as unknown as DbChatMessage);
       },
