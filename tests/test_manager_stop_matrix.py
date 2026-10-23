@@ -14,8 +14,9 @@ Each cell checks what the page and the next turn see: ``GET /api/chat/turn`` whi
 ``user_stop.phase``, the reply's outcome, the note the next turn is told (the user stopped it, or withdrew it), that
 the next turn is answered in the same session, and which processes the stop ended: none when the runtime ended the
 turn on its interrupt (a tool it left running is its own), the agent with its tree when it ignored it. The runtimes
-run per turn (OMP, Codex) have no interrupt: their stop is refused in every phase and the reply runs on. The runtimes'
-own windows are in ``tests/test_stop_matrix.py``.
+run per turn (Codex, OMP, pi, DSH) have no interrupt: their stop is refused and the reply runs on. A phase that does not
+reach the runtime (received, preparing, ended) runs over one runtime, and so does that refusal. The runtimes' own windows
+are in ``tests/test_stop_matrix.py``.
 """
 
 from __future__ import annotations
@@ -47,15 +48,17 @@ from tests.stop_matrix_support import BOUND, _CLAUDE, _alive, _per_turn_parts, _
 from tests.test_manager_new_session import _web
 from tests.test_manager_reply import WEB
 
-RUNTIMES = ["claude-obeys", "claude-deaf", "omp", "codex", "grok-acp"]
 STOPPABLE = ["claude-obeys", "claude-deaf", "grok-acp"]  # the runtimes with an interrupt (``can_interrupt``)
-PER_TURN = ["omp", "codex"]
+# The phases that do not reach the runtime (received, preparing, ended) and the refusal of a runtime without an
+# interrupt (the same ``PerTurnSession`` for Codex, OMP, pi and DSH) run over one runtime each: they would run the same
+# code over the others.
+SHARED, PER_TURN = "claude-obeys", "codex"
 # How each runtime's stand-in is told what to do: Grok's by the message's text, the others' by a ``mode`` file.
 GROK_TEXT = {"streaming": "HANG", "tool": "SLEEPER", "answer": "work"}
 PAD = "整理一下今天的待办事项并告诉我结果，不用着急，也不必写得太长。" * 4  # (the note quotes the first 80 characters)
 STOPPED_NOTE = "[Looper] The user stopped your previous reply"
 WITHDREW_NOTE = "[Looper] The user withdrew"
-METHOD = {"claude-obeys": "control", "claude-deaf": "kill", "omp": "kill", "codex": "kill", "grok-acp": "cancel"}
+METHOD = {"claude-obeys": "control", "claude-deaf": "kill", "grok-acp": "cancel"}
 
 
 @pytest.fixture(autouse=True)
@@ -251,12 +254,11 @@ def _run(body: Callable[[], Awaitable[None]]) -> None:
 # --- received ---
 
 
-@pytest.mark.parametrize("runtime", STOPPABLE)
 def test_a_message_stopped_while_it_waits_is_never_started(
-    runtime: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
 ) -> None:
     async def run() -> None:
-        rig = _case(runtime, tmp_path, monkeypatch, agent_db)
+        rig = _case(SHARED, tmp_path, monkeypatch, agent_db)
         await rig.start()
         try:
             await rig.answer("WARM")
@@ -288,16 +290,16 @@ def test_a_message_stopped_while_it_waits_is_never_started(
 # --- preparing ---
 
 
-@pytest.mark.parametrize("runtime", STOPPABLE)
 def test_a_message_stopped_while_it_is_prepared_never_reaches_the_model(
-    runtime: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
 ) -> None:
     async def run() -> None:
-        rig = _case(runtime, tmp_path, monkeypatch, agent_db)
+        rig = _case(SHARED, tmp_path, monkeypatch, agent_db)
         await rig.start()
         try:
             await rig.answer("WARM")
             session_id, records = rig.manager._session_id, len(rig.records())
+            finished = len(agent_db.finish_record.await_args_list)
             hold = hold_at(monkeypatch, PREPARATION_STEPS[0])
             envelope = await rig.send("PREPARING")
             await asyncio.wait_for(hold.reached.wait(), BOUND)
@@ -310,6 +312,8 @@ def test_a_message_stopped_while_it_is_prepared_never_reaches_the_model(
             replies = await rig.replied(rig.sent)
             assert replies[-1]["outcome"] == "stopped" and "error" not in replies[-1]
             assert len(rig.records()) == records and rig.user_stops() == []  # nothing ran: no record
+            assert len(agent_db.finish_record.await_args_list) == finished
+            assert replies[-1]["text"] == "已停止，这次没有回复。"
             assert rig.manager.turn_for(envelope.message_id) is None and await rig.api_turn() is None
             monkeypatch.setattr("looper.agents.tiers.turn_token.FAULTS", None)
             await _next_turn(rig, session_id, WITHDREW_NOTE, notes=1)
@@ -344,6 +348,9 @@ def test_a_message_stopped_while_its_runtime_starts_is_not_sent(
             assert replies[-1]["outcome"] == "stopped" and "error" not in replies[-1]
             assert [stop["phase"] for stop in rig.user_stops()] == ["starting"]
             assert rig.user_stops()[0]["method"] is None  # (the prompt was not written)
+            assert replies[-1]["text"] == "已停止，这次没有回复。"
+            finish = agent_db.finish_record.await_args_list[-1].kwargs
+            assert finish["status"] == "interrupted" and finish["cost_usd"] is None
             assert rig.left() == []
             monkeypatch.setattr("looper.agents.tiers.turn_token.FAULTS", None)
             await _next_turn(rig, session_id, WITHDREW_NOTE, notes=1)
@@ -410,7 +417,10 @@ def test_a_reply_stopped_while_it_streams(
             await asyncio.sleep(0.3)
             shown = await rig.api_turn()
             assert shown is not None and shown["state"] == "running"
+            runtime_cancel = rig.session._turn_cancel if runtime == "grok-acp" else rig.session._cancel
+            assert runtime_cancel is rig.token(envelope).cancel
             assert await rig.manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+            assert runtime_cancel.requested
             replies = await rig.replied(rig.sent)
             assert replies[-1]["outcome"] == "stopped" and "error" not in replies[-1]
             (stop,) = rig.user_stops()
@@ -528,9 +538,8 @@ def test_a_reply_stopped_in_a_tool_ends_only_an_agent_that_ignored_it_and_refuse
 # --- a runtime without an interrupt ---
 
 
-@pytest.mark.parametrize("runtime", PER_TURN)
 def test_a_per_turn_runtime_refuses_the_stop_and_its_reply_runs_on(
-    runtime: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
 ) -> None:
     signalled: list[int] = []
     real_signal = proc_tree._signal
@@ -542,7 +551,7 @@ def test_a_per_turn_runtime_refuses_the_stop_and_its_reply_runs_on(
     monkeypatch.setattr(proc_tree, "_signal", signal_)
 
     async def run() -> None:
-        rig = _case(runtime, tmp_path, monkeypatch, agent_db)
+        rig = _case(PER_TURN, tmp_path, monkeypatch, agent_db)
         await rig.start()
         try:
             await rig.answer("WARM")
@@ -572,12 +581,11 @@ def test_a_per_turn_runtime_refuses_the_stop_and_its_reply_runs_on(
 # --- ended ---
 
 
-@pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_stop_after_the_turn_ended_changes_nothing(
-    runtime: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
 ) -> None:
     async def run() -> None:
-        rig = _case(runtime, tmp_path, monkeypatch, agent_db)
+        rig = _case(SHARED, tmp_path, monkeypatch, agent_db)
         await rig.start()
         try:
             envelope = await rig.answer("DONE")

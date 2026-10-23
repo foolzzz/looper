@@ -91,6 +91,7 @@ def installed_session_evidence():
         return json.loads((smoke.LAST_OUTPUT / "sessions.json").read_text())
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("role", smoke.ROLES)
 def test_installed_fake_provider_session_closed_loop(installed_session_evidence, role):
     from types import SimpleNamespace
@@ -104,6 +105,7 @@ def test_installed_fake_provider_session_closed_loop(installed_session_evidence,
     smoke.assert_role_evidence(role, evidence)
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("boundary", ["wrong-token", "parent-context", "cancel-tool"])
 def test_installed_fake_provider_negative_controls(installed_session_evidence, boundary):
     assert installed_session_evidence["boundaries"][boundary] is True

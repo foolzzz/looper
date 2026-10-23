@@ -658,6 +658,7 @@ def _dsh_role_tools(state, role):
     state.tools = [tool.listing() for tool in tools[role]]
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("role", ["manager", "planner", "worker", "reviewer"])
 def test_dsh_official_mcp_lists_calls_and_refreshes_token_before_model(tmp_path, monkeypatch, dsh_mcp_state, role):
     _dsh_role_tools(dsh_mcp_state, role)
@@ -676,6 +677,7 @@ def test_dsh_official_mcp_lists_calls_and_refreshes_token_before_model(tmp_path,
     assert dsh_mcp_state.model_requests == 2
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize(("mode", "role"), [
     ("missing-token", "planner"), ("auth", "planner"), ("missing-tool", "planner"),
     ("crashed", "planner"), ("duplicate", "planner"), ("missing-tool", "manager"),
@@ -703,6 +705,7 @@ def test_dsh_mandatory_mcp_failure_stops_required_runner_with_zero_model_request
     assert dsh_mcp_state.model_requests == 0 and dsh_mcp_state.posts == []
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("mode", ["optional", "sse"])
 def test_dsh_optional_catalog_failure_keeps_diagnostic_and_runs_model(tmp_path, monkeypatch, dsh_mcp_state, mode):
     # A read-only run (a Planner's) leaves an external server out; a Worker's connects to it.

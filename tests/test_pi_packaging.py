@@ -24,9 +24,14 @@ ROOT = Path(__file__).resolve().parents[1]
 RESOURCE = "looper/agents/runtimes/pi_extension/looper.ts"
 
 
-@pytest.mark.parametrize("kind", ["responses", "deepseek", "prompt-comparison"])
-@pytest.mark.parametrize("parent_exits", [True, False])
-@pytest.mark.parametrize("separate_group", [False, True])
+# The deadline path is ``proc_tree.end`` and, in the shell, ``eval-common.sh`` (``responses`` and ``deepseek`` share it;
+# ``prompt-comparison`` has a deadline of its own). Its two dimensions, whether the runner exits on SIGTERM and whether
+# the child left its group, are run in full (each run waits for the deadline); the kinds are spread over them so that
+# each script's deadline is run.
+@pytest.mark.parametrize("kind,parent_exits,separate_group", [
+    ("responses", True, False), ("deepseek", False, False),
+    ("prompt-comparison", True, True), ("responses", False, True),
+])
 def test_eval_deadline_kills_term_ignoring_child(
     tmp_path: Path, kind: str, parent_exits: bool, separate_group: bool,
 ) -> None:
@@ -190,11 +195,14 @@ def _run(command: list[str], *, cwd: Path, env: dict[str, str], timeout: int = 6
 
 @pytest.fixture(scope="module")
 def installed(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path, dict[str, str]]:
+    from test_pi_tool_bridge import _pi_package
+
+    if not shutil.which("node") or _pi_package() is None:
+        pytest.skip("installed pi and node are required; cold-start and TS loader did not run")
     return install_wheel(tmp_path_factory.mktemp("pi-wheel"))
 
 
-def install_wheel(work: Path) -> tuple[Path, Path, dict[str, str]]:
-    """Shared by the packaging tests and examples/pi/isolated-smoke.py."""
+def build_wheel(work: Path) -> tuple[Path, dict[str, str]]:
     env = {"PATH": os.environ["PATH"], "HOME": str(work / "home"), "TMPDIR": str(work),
            "LANG": "C.UTF-8", "UV_CACHE_DIR": str(work / "cache")}
     # Callers can supply a disposable, pre-populated cache for offline validation.
@@ -215,16 +223,27 @@ def install_wheel(work: Path) -> tuple[Path, Path, dict[str, str]]:
                 shutil.copy2(source, target)
     _run(["uv", "build", "--wheel", "--out-dir", str(work / "dist")], cwd=src, env=env, timeout=90)
     wheel, = (work / "dist").glob("*.whl")
+    # Delete the build source so a repository-relative lookup cannot accidentally pass.
+    shutil.rmtree(src)
+    return wheel, env
+
+
+def test_wheel_contains_the_tool_bridge(tmp_path: Path) -> None:
+    wheel, _ = build_wheel(tmp_path)
     with zipfile.ZipFile(wheel) as archive:
         assert RESOURCE in archive.namelist(), "the wheel must carry the tool bridge explicitly"
+
+
+def install_wheel(work: Path) -> tuple[Path, Path, dict[str, str]]:
+    """Shared by the packaging tests and examples/pi/isolated-smoke.py."""
+    wheel, env = build_wheel(work)
     python = work / "venv/bin/python"
     _run(["uv", "venv", "--python", sys.executable, str(python.parent.parent)], cwd=work, env=env)
     _run(["uv", "pip", "install", "--python", str(python), str(wheel)], cwd=work, env=env)
-    # Delete the build source so a repository-relative lookup cannot accidentally pass.
-    shutil.rmtree(src)
     return work, python, env
 
 
+@pytest.mark.installed
 def test_installed_resource_loads_with_the_real_typescript_loader(installed: tuple[Path, Path, dict[str, str]]) -> None:
     from test_pi_tool_bridge import _pi_package
 
@@ -375,6 +394,7 @@ print(json.dumps({'command': command, 'env': launch.environment()}))
     return payload["command"], {**payload["env"], "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("mode", ["json", "rpc"])
 @pytest.mark.parametrize("failure", ["unauthorized", "invalid-schema"])
 def test_initialization_failure_never_calls_provider(installed: tuple[Path, Path, dict[str, str]], tmp_path: Path,
@@ -391,6 +411,7 @@ def test_initialization_failure_never_calls_provider(installed: tuple[Path, Path
     assert api.state["requests"] == []
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("bound", [True, False])
 @pytest.mark.parametrize("mode", ["json", "rpc"])
 def test_successful_cold_start_registers_the_complete_table(installed: tuple[Path, Path, dict[str, str]],

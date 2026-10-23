@@ -1,4 +1,7 @@
-"""Interrupting a resident Claude's running turn with a control request, and killing it after a grace."""
+"""The races of a resident Claude's stopped turn that no cell of ``tests/test_stop_matrix.py`` has a stand-in for: an
+event that lands as the interrupt is made, a result queued behind it, what a killed Claude writes as it dies, a stop
+before the turn's prompt is written or after its result. Each stop window (silent, streaming, blocked, tool, done;
+obeyed or deaf) is in the matrix."""
 
 from __future__ import annotations
 
@@ -6,7 +9,6 @@ import asyncio
 import contextlib
 import os
 import signal
-import time
 from pathlib import Path
 from typing import Any
 
@@ -81,15 +83,6 @@ while True:
              'total_cost_usd': 0.03, 'session_id': 's1', 'num_turns': 1})
 """
 
-_DEAF = """\
-import json, sys, time
-for raw in sys.stdin:
-    message = json.loads(raw)
-    if message['type'] == 'user':
-        print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 's1'}), flush=True)
-        time.sleep(60)
-"""
-
 # Deaf to the interrupt; ending (SIGTERM) it writes the stopped turn's answer and result before it exits.
 _ANSWERS_AS_IT_DIES = """\
 import json, signal, sys, time
@@ -108,14 +101,6 @@ for raw in sys.stdin:
         time.sleep(60)
 """
 
-# Never writes a thing, and deaf to the interrupt.
-_SILENT = """\
-import sys, time
-for raw in sys.stdin:
-    time.sleep(60)
-"""
-
-
 async def _until(check: Any) -> None:
     for _ in range(500):
         if check():
@@ -130,99 +115,6 @@ async def _until_streaming(seen: list[dict[str, Any]]) -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError("the turn never started")
-
-
-def test_an_obeyed_interrupt_ends_the_turn_and_keeps_the_process(tmp_path: Path) -> None:
-    claude = fake_claude(tmp_path / "claude", _OBEYS)
-
-    async def _run() -> None:
-        session = ResidentClaude(label="manager")
-        await session.start([claude], cwd=str(tmp_path), signature=None)
-        seen: list[dict[str, Any]] = []
-
-        async def on_event(event: dict[str, Any]) -> None:
-            seen.append(event)
-
-        pid = session.pid
-        try:
-            turn = asyncio.create_task(session.run_turn("work", on_event))
-            await _until_streaming(seen)
-            started = time.monotonic()
-            assert await session.interrupt() is StopMethod.CONTROL
-            assert time.monotonic() - started < 1
-            result = await turn
-            assert result.stopped is StopMethod.CONTROL
-            # Claude's interrupted result does not carry what the aborted request spent (measured with 2.1.x).
-            assert result.usage_complete is False
-            assert result.result_event is not None and result.result_event["is_error"] is True
-            assert not any(e.get("type") == "control_response" for e in seen)
-            assert session.totals.cost_usd == pytest.approx(0.02)
-            assert result.usage.cost_usd == pytest.approx(0.02)
-            again = await session.run_turn("next", on_event)
-            assert again.stopped is None
-            assert again.result_event is not None and again.result_event["result"] == f"pid={pid}"
-            assert session.pid == pid
-        finally:
-            await session.stop(kill=True)
-
-    asyncio.run(_run())
-
-
-def test_a_deaf_claude_is_killed_after_the_grace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(claude_cli, "INTERRUPT_GRACE_SEC", 0.3)
-    claude = fake_claude(tmp_path / "claude", _DEAF)
-
-    async def _run() -> None:
-        session = ResidentClaude(label="manager")
-        await session.start([claude], cwd=str(tmp_path), signature=None)
-        pid = session.pid
-        seen: list[dict[str, Any]] = []
-
-        async def on_event(event: dict[str, Any]) -> None:
-            seen.append(event)
-
-        try:
-            turn = asyncio.create_task(session.run_turn("work", on_event))
-            await _until_streaming(seen)
-            assert await session.interrupt() is StopMethod.KILL
-            result = await turn
-            assert result.stopped is StopMethod.KILL
-            assert session.started is False
-            assert pid is not None
-            with pytest.raises(ProcessLookupError):
-                os.kill(pid, 0)
-        finally:
-            await session.stop(kill=True)
-
-    asyncio.run(_run())
-
-
-def test_a_stop_before_claudes_first_event_is_not_lost(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(claude_cli, "INTERRUPT_GRACE_SEC", 0.3)
-    claude = fake_claude(tmp_path / "claude", _SILENT)
-
-    async def _run() -> None:
-        session = ResidentClaude(label="manager")
-        await session.start([claude], cwd=str(tmp_path), signature=None)
-        pid = session.pid
-
-        async def on_event(event: dict[str, Any]) -> None:
-            pass
-
-        try:
-            turn = asyncio.create_task(session.run_turn("work", on_event))
-            await _until(lambda: session._output is not None and session._output.turn is not None)
-            assert await asyncio.wait_for(session.interrupt(), 5) is StopMethod.KILL
-            result = await asyncio.wait_for(turn, 5)
-            assert result.stopped is StopMethod.KILL
-            assert session.started is False
-            assert pid is not None
-            with pytest.raises(ProcessLookupError):
-                os.kill(pid, 0)
-        finally:
-            await session.stop(kill=True)
-
-    asyncio.run(_run())
 
 
 def test_interrupt_with_no_turn_does_nothing(tmp_path: Path) -> None:
@@ -289,45 +181,6 @@ def test_a_stop_that_lands_on_an_event_before_the_interrupt_kills_and_says_so(tm
             result = await asyncio.wait_for(session.run_turn("work", on_event, stop=stop), 5)
             assert result.stopped is StopMethod.KILL
             assert session.started is False
-        finally:
-            await session.stop(kill=True)
-
-    asyncio.run(_run())
-
-
-def test_a_killed_turn_returns_only_after_its_process_tree_is_gone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(claude_cli, "INTERRUPT_GRACE_SEC", 0.2)
-    claude = fake_claude(tmp_path / "claude", _DEAF)
-    real_end = proc_tree.TurnTree.end
-    ended: list[bool] = []
-
-    async def slow_end(*args: Any, **kwargs: Any) -> Any:
-        await asyncio.sleep(0.5)
-        try:
-            return await real_end(*args, **kwargs)
-        finally:
-            ended.append(True)
-
-    monkeypatch.setattr(proc_tree.TurnTree, "end", slow_end)
-
-    async def _run() -> None:
-        session = ResidentClaude(label="manager")
-        await session.start([claude], cwd=str(tmp_path), signature=None)
-        seen: list[dict[str, Any]] = []
-
-        async def on_event(event: dict[str, Any]) -> None:
-            seen.append(event)
-
-        try:
-            turn = asyncio.create_task(session.run_turn("work", on_event))
-            await _until_streaming(seen)
-            stopper = asyncio.create_task(session.interrupt())
-            result = await turn
-            assert result.stopped is StopMethod.KILL
-            assert ended == [True]
-            await stopper
         finally:
             await session.stop(kill=True)
 
@@ -407,41 +260,6 @@ def test_a_killed_turn_returns_only_after_its_last_event_was_handled(
     asyncio.run(_run())
 
 
-def test_an_interrupt_blocked_by_stdin_backpressure_still_kills_after_the_grace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(claude_cli, "INTERRUPT_GRACE_SEC", 0.3)
-    claude = fake_claude(tmp_path / "claude", _DEAF)
-
-    async def _run() -> None:
-        session = ResidentClaude(label="manager")
-        await session.start([claude], cwd=str(tmp_path), signature=None)
-        pid = session.pid
-
-        async def on_event(event: dict[str, Any]) -> None:
-            pass
-
-        try:
-            turn = asyncio.create_task(session.run_turn("work", on_event))
-            await _until(lambda: session._output is not None and session._output.turn is not None)
-            assert session._process is not None and session._process.stdin is not None
-
-            async def never_drains() -> None:
-                await asyncio.Event().wait()  # a full pipe: the write never completes
-
-            session._process.stdin.drain = never_drains  # type: ignore[method-assign]
-            assert await asyncio.wait_for(session.interrupt(), 5) is StopMethod.KILL
-            result = await asyncio.wait_for(turn, 5)
-            assert result.stopped is StopMethod.KILL
-            assert pid is not None
-            with pytest.raises(ProcessLookupError):
-                os.kill(pid, 0)
-        finally:
-            await session.stop(kill=True)
-
-    asyncio.run(_run())
-
-
 # --- the turn's cancel (``run_turn(cancel=)``) ---
 
 # Logs each line it reads to ``inbox``; a user message starts a turn whose tool ``setsid``s a sleeper (its pid in
@@ -512,10 +330,6 @@ def _kill(pid: int) -> None:
         os.kill(pid, signal.SIGKILL)
 
 
-async def _next_turn_answers(session: ResidentClaude, on_event: Any) -> Any:
-    return await asyncio.wait_for(session.run_turn("next", on_event), 5)
-
-
 def test_a_cancel_before_run_turn_writes_nothing_and_leaves_the_process(tmp_path: Path) -> None:
     claude = fake_claude(tmp_path / "claude", _OBEYS)
 
@@ -557,105 +371,6 @@ def _tool_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **env: str) -
 async def _until_sleeper(tmp_path: Path) -> int:
     await _until(lambda: (tmp_path / "sleeper.pid").exists() and (tmp_path / "sleeper.pid").read_text())
     return int((tmp_path / "sleeper.pid").read_text())
-
-
-def test_an_obeyed_cancel_ends_the_turn_and_signals_no_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Claude ended the turn on the interrupt: that is all. What it left running (the turn's background tool) is its
-    # own; Looper signals nothing.
-    session, claude = _tool_session(tmp_path, monkeypatch, OBEY="1")
-    sent = _signals(monkeypatch)
-
-    async def _run() -> None:
-        await session.start([claude], cwd=str(tmp_path), signature=None, env=_ENV)
-        pid = session.pid
-        seen: list[dict[str, Any]] = []
-
-        async def on_event(event: dict[str, Any]) -> None:
-            seen.append(event)
-
-        try:
-            cancel = TurnCancel()
-            running = asyncio.create_task(session.run_turn("work", on_event, cancel=cancel))
-            sleeper = await _until_sleeper(tmp_path)
-            await _until_streaming(seen)
-            cancel.request()
-            turn = await asyncio.wait_for(running, 5)
-            assert turn.stopped is StopMethod.CONTROL and turn.prompt_sent is True
-            assert session.started and session.pid == pid
-            assert not _gone(sleeper) and sent == []
-            _ENV["OBEY"] = "0"
-            again = await _next_turn_answers(session, on_event)
-            assert again.stopped is None and session.pid == pid
-        finally:
-            await session.stop(kill=True)
-            if (tmp_path / "sleeper.pid").exists():
-                _kill(int((tmp_path / "sleeper.pid").read_text()))
-
-    asyncio.run(_run())
-
-
-def test_a_deaf_claude_is_killed_with_its_whole_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Claude ignored the interrupt for its grace: the fallback kills it with its group and the tree ``proc_tree``
-    # finds.
-    session, claude = _tool_session(tmp_path, monkeypatch)
-    sent = _signals(monkeypatch)
-
-    async def _run() -> None:
-        await session.start([claude], cwd=str(tmp_path), signature=None, env=_ENV)
-        pid = session.pid
-        seen: list[dict[str, Any]] = []
-
-        async def on_event(event: dict[str, Any]) -> None:
-            seen.append(event)
-
-        try:
-            cancel = TurnCancel()
-            running = asyncio.create_task(session.run_turn("work", on_event, cancel=cancel))
-            sleeper = await _until_sleeper(tmp_path)
-            await _until_streaming(seen)
-            started = time.monotonic()
-            cancel.request()
-            turn = await asyncio.wait_for(running, 5)
-            assert time.monotonic() - started < 3
-            assert turn.stopped is StopMethod.KILL and not session.started
-            assert pid is not None and _gone(pid) and _gone(sleeper)
-            assert signal.SIGTERM in sent
-            await session.start([claude], cwd=str(tmp_path), signature=None, env=_ENV)  # resumes the session
-            again = await _next_turn_answers(session, on_event)
-            assert again.stopped is None
-        finally:
-            await session.stop(kill=True)
-
-    asyncio.run(_run())
-
-
-def test_nothing_of_a_stopped_turn_reaches_on_event_after_the_stop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    session, claude = _tool_session(tmp_path, monkeypatch, OBEY="1", LATE="1")
-
-    async def _run() -> None:
-        await session.start([claude], cwd=str(tmp_path), signature=None, env=_ENV)
-        seen: list[dict[str, Any]] = []
-
-        async def on_event(event: dict[str, Any]) -> None:
-            seen.append(event)
-
-        try:
-            cancel = TurnCancel()
-            running = asyncio.create_task(session.run_turn("work", on_event, cancel=cancel))
-            await _until_streaming(seen)
-            await asyncio.sleep(0.1)
-            before = list(seen)
-            cancel.request()
-            turn = await asyncio.wait_for(running, 5)
-            assert turn.stopped is StopMethod.CONTROL
-            await asyncio.sleep(0.2)
-            assert seen == before
-        finally:
-            await session.stop(kill=True)
-
-    asyncio.run(_run())
 
 
 def test_a_result_queued_behind_the_control_request_is_not_an_answer(

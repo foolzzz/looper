@@ -21,6 +21,8 @@ from looper.agents.ops.service import TURN_FILE_ENV, URL_ENV, library_with_serve
 from tests import test_pi_platform_tools as pi_tools
 from tests.test_pi_platform_tools import PI, PREFIX, _launch, _running, _tool_messages
 
+pytestmark = pytest.mark.installed
+
 platform, provider = pi_tools.platform, pi_tools.provider  # the real-Pi fixtures
 
 

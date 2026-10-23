@@ -1,6 +1,9 @@
 """The user's stop of a Manager turn, for every runtime path and every window it can land in.
 
-Each runtime runs a stand-in process (real pipes, real process trees). A turn is stopped in one window:
+Each runtime runs a stand-in process (real pipes, real process trees). Codex covers every window of the shared
+``PerTurnSession`` path; OMP, pi and DSH retain their own streaming/tool windows, and Grok's fallback its
+before-spawn/tool windows. Restore a runtime's full cells if it stops using that shared path.
+A turn is stopped in one window:
 
 - ``before_spawn``: while the turn prepares, before its process exists (per-turn: the command; Grok: the session is
   readied, ``initialize`` unanswered);
@@ -44,6 +47,25 @@ from tests.stop_matrix_support import (
 
 PER_TURN = ["codex", "omp", "pi", "dsh"]
 WINDOWS = ["before_spawn", "spawning", "silent", "streaming", "blocked", "tool", "done"]
+# Codex, OMP, pi and DSH all run per turn through ``PerTurnSession._run_turn`` (spawn, write, read, tail, end the
+# tree): Codex runs every window of that shared path. Each of the others runs the two windows that read its own
+# stream, which is what differs: the text it streams, and the tool call it starts. A runtime that stops running
+# through ``PerTurnSession`` gets its cells back.
+PER_TURN_CELLS = [("codex", window) for window in WINDOWS] + [
+    (runtime, window) for runtime in PER_TURN[1:] for window in ("streaming", "tool")]
+
+
+@pytest.fixture
+def sent_signals(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    sent: list[int] = []
+    real_signal = proc_tree._signal
+
+    def record(process: Any, tree: Any, sig: int) -> None:
+        sent.append(sig)
+        real_signal(process, tree, sig)
+
+    monkeypatch.setattr(proc_tree, "_signal", record)
+    return sent
 
 
 class SlowSpawn:
@@ -66,8 +88,7 @@ class SlowSpawn:
         self._monkeypatch.setattr(proc_tree, "spawn", self._real)
 
 
-@pytest.mark.parametrize("window", WINDOWS)
-@pytest.mark.parametrize("runtime", PER_TURN)
+@pytest.mark.parametrize("runtime,window", PER_TURN_CELLS)
 def test_per_turn_stop_in_every_window(
     tmp_path: Path, runtime: str, window: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -82,9 +103,25 @@ def test_per_turn_stop_in_every_window(
         sid = json.loads((directory / "turns.jsonl").read_text().splitlines()[-1])["sid"]
         (directory / "pids").unlink()
 
+        before_usage = session.totals
         (directory / "mode").write_text("blocked" if window == "before_spawn" else
                                         "answer" if window == "spawning" else window)
         seen, stop = Seen(), Stop()
+        via_interrupt = runtime == "codex" and window == "tool"  # one cell stops through ``interrupt()``
+        if not via_interrupt:
+            seen.stop = stop  # (the interrupt is a task of its own: what the turn reads before it runs is not late)
+        ended: list[bool] = []
+        if via_interrupt:
+            real_end = proc_tree.TurnTree.end
+
+            async def slow_end(tree: Any) -> Any:  # the tree's cleanup takes a while: the turn waits for it
+                await asyncio.sleep(0.5)
+                try:
+                    return await real_end(tree)
+                finally:
+                    ended.append(True)
+
+            monkeypatch.setattr(proc_tree.TurnTree, "end", slow_end)
         release = asyncio.Event()
         slow = SlowSpawn(monkeypatch) if window == "spawning" else None
         if window == "before_spawn":
@@ -99,7 +136,7 @@ def test_per_turn_stop_in_every_window(
             monkeypatch.setattr(session, "_turn_argv", slow_argv)
         cancel = TurnCancel()
         running = asyncio.create_task(
-            session.run_turn(BIG if window == "blocked" else "work", seen, stop=stop, cancel=cancel))
+            session.run_turn(BIG if window == "blocked" else "STOPPED_TURN_PAYLOAD", seen, stop=stop, cancel=cancel))
         try:
             if window == "before_spawn":
                 await asyncio.wait_for(reached.wait(), BOUND)
@@ -112,9 +149,13 @@ def test_per_turn_stop_in_every_window(
                                  and session._process.stdin.transport.get_write_buffer_size() > 0)
                 else:  # what it wrote reaches the turn; the tool's process is seen by the next refresh
                     await asyncio.sleep(0.8 if window == "tool" else 0.3)
+            if window == "tool":
+                await _until(lambda: len(_pids(directory)) == 3)
             pids = _pids(directory)
+            if window == "tool":
+                assert len(pids) == 3 and all(_alive(pid) for pid in pids)
             stop.asked = True
-            if runtime == "codex" and window == "tool":  # one cell stops through ``interrupt()``
+            if via_interrupt:
                 method = await asyncio.wait_for(session.interrupt(), BOUND)
             else:
                 cancel.request()
@@ -123,6 +164,8 @@ def test_per_turn_stop_in_every_window(
             if slow is not None:
                 slow.release.set()
             turn = await asyncio.wait_for(running, BOUND)
+            if via_interrupt:
+                assert ended == [True]  # a stopped turn returns only after its tree's cleanup
             if slow is not None:
                 pids = _pids(directory)  # the process the held spawn went on to start
         finally:
@@ -131,6 +174,11 @@ def test_per_turn_stop_in_every_window(
                 slow.restore()
             running.cancel()
             await asyncio.gather(running, return_exceptions=True)
+        if window == "tool":
+            assert turn.session_started
+            if runtime in ("omp", "pi"):
+                assert session.totals.input_tokens == before_usage.input_tokens + turn.usage.input_tokens
+                assert session.totals.cache_read_tokens == before_usage.cache_read_tokens + turn.usage.cache_read_tokens
         seen.closed = True
         monkeypatch.undo()
         alive = [pid for pid in pids if _alive(pid)]
@@ -139,30 +187,44 @@ def test_per_turn_stop_in_every_window(
         (directory / "mode").write_text("answer")
         nxt = Seen()
         after = await asyncio.wait_for(session.run_turn("next", nxt), BOUND)
-        resumed = json.loads((directory / "turns.jsonl").read_text().splitlines()[-1])["sid"]
+        record = json.loads((directory / "turns.jsonl").read_text().splitlines()[-1])
+        resumed = record["sid"]
+        flag = {"codex": "resume", "omp": "--resume", "pi": "--session", "dsh": "--session-id"}[runtime]
+        args = record["args"]
+        assert flag in args
+        value = args[args.index(flag) + 1]
+        if runtime == "pi":
+            assert json.loads(Path(value).read_text().splitlines()[0])["id"] == sid
+        else:
+            assert value == sid
         await session.stop()
         return method, turn, seen, alive, stale, after, nxt, sid, resumed
 
     method, turn, seen, alive, stale, after, nxt, sid, resumed = asyncio.run(asyncio.wait_for(run(), 60))
     assert method is StopMethod.KILL
     assert _stopped(turn) and turn.result_event[USER_STOP], turn.result_event
-    assert not seen.late
+    assert not seen.late and not seen.after_stop
     assert window == "done" or not any(e.get("type") == "result" and not e.get("is_error") for e in seen.events)
     assert alive == []  # (the tool's process in a session of its own too)
+    if window == "tool":  # what the stopped turn spent: counted as far as the runtime reported it, else unknown
+        if runtime == "codex":
+            assert turn.usage_complete is False and not turn.usage.input_tokens
+        elif runtime in ("omp", "pi"):
+            assert turn.usage_complete
+            assert (turn.usage.input_tokens, turn.usage.output_tokens,
+                    turn.usage.cache_read_tokens, turn.usage.cache_creation_tokens) == (10, 1, 4, 2)
     assert not stale
     assert _answered(after), after.result_event
-    assert "work" not in json.dumps(nxt.events) and "half an answer" not in json.dumps(nxt.events)
+    assert "STOPPED_TURN_PAYLOAD" not in json.dumps(nxt.events) and "half an answer" not in json.dumps(nxt.events)
     assert resumed == sid
 
 
-@pytest.mark.parametrize("runtime", PER_TURN)
 def test_per_turn_stop_after_the_process_exited_before_the_turn_returned(
-    tmp_path: Path, runtime: str, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The last step of a turn whose process has exited (its stderr read): a stop that lands there is not lost."""
-    from looper.agents.runtimes import per_turn
-
-    session, command, env, directory = _per_turn(tmp_path, runtime)
+    """The last step of a turn whose process has exited (its stderr read): a stop that lands there is not lost.
+    (The step is ``PerTurnSession``'s: Codex stands for every per-turn runtime.)"""
+    session, command, env, directory = _per_turn(tmp_path, "codex")
     real_tail = per_turn.stderr_tail
     holding, release = asyncio.Event(), asyncio.Event()
 
@@ -174,6 +236,7 @@ def test_per_turn_stop_after_the_process_exited_before_the_turn_returned(
 
     async def run() -> tuple[Any, ...]:
         await session.start(command, cwd=str(tmp_path), signature="s", env=env)
+        assert await session.interrupt() is None  # no turn runs: nothing to stop
         (directory / "mode").write_text("answer")
         await session.run_turn("hello", Seen())
         monkeypatch.setattr(per_turn, "stderr_tail", held_tail)
@@ -208,10 +271,10 @@ CLAUDE_WINDOWS = ["silent", "streaming", "blocked", "tool", "done"]
 @pytest.mark.parametrize("obey", [False, True], ids=["deaf", "obeys"])
 @pytest.mark.parametrize("window", CLAUDE_WINDOWS)
 def test_resident_claude_stop_in_every_window(
-    tmp_path: Path, window: str, obey: bool, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, window: str, obey: bool, monkeypatch: pytest.MonkeyPatch, sent_signals: list[int],
 ) -> None:
     """Claude's process is spawned by ``start``, before the turn: a stop before it is the Manager's (its window
-    ``before_spawn`` is ``test_manager_stop.test_stop_before_the_process_starts``)."""
+    ``before_spawn`` is ``test_manager_stop_matrix.test_a_message_stopped_while_its_runtime_starts_is_not_sent``)."""
     monkeypatch.setattr(claude_cli, "INTERRUPT_GRACE_SEC", 0.5)
     monkeypatch.setattr(claude_cli, "STOP_GRACE_SEC", 0.5)
     monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.2)
@@ -219,6 +282,18 @@ def test_resident_claude_stop_in_every_window(
     directory.mkdir()
     env = {**os.environ, "STOP_MATRIX_DIR": str(directory)}
     claude = fake_claude(tmp_path / "claude", _CLAUDE)
+    ended: list[bool] = []
+    if window == "tool" and not obey:
+        real_end = proc_tree.TurnTree.end
+
+        async def slow_end(tree: Any) -> Any:  # the tree's cleanup takes a while: the killed turn waits for it
+            await asyncio.sleep(0.5)
+            try:
+                return await real_end(tree)
+            finally:
+                ended.append(True)
+
+        monkeypatch.setattr(proc_tree.TurnTree, "end", slow_end)
 
     async def run() -> tuple[Any, ...]:
         session = ResidentClaude(label="manager")
@@ -232,6 +307,8 @@ def test_resident_claude_stop_in_every_window(
         text = BIG if window == "blocked" else f"mode:{window}{' obey' if obey else ''}"
         running = asyncio.create_task(session.run_turn(text, seen, stop=stop, cancel=cancel))
         via_interrupt = window == "tool" and obey  # the one cell stopped through ``interrupt()``
+        if not via_interrupt:
+            seen.stop = stop
         try:
             if window == "done":
                 await asyncio.wait_for(seen.holding.wait(), BOUND)
@@ -257,10 +334,14 @@ def test_resident_claude_stop_in_every_window(
                     cancel.request()
                 turn = await asyncio.wait_for(running, BOUND)
                 method = turn.stopped
+            if window == "tool" and not obey:
+                assert ended == [True]  # a killed turn returns only after its tree's cleanup
         finally:
             seen.release.set()
             running.cancel()
             await asyncio.gather(running, return_exceptions=True)
+        if method is StopMethod.CONTROL:
+            assert sent_signals == []
         seen.closed = True
         kept = session.started and session.pid == process
         alive = [pid for pid in pids if _alive(pid)]
@@ -277,10 +358,12 @@ def test_resident_claude_stop_in_every_window(
     if window == "done" or (obey and window != "blocked"):
         assert method is StopMethod.CONTROL and kept  # the process and its session stay for the next turn
         assert process in alive and alive == pids  # nothing was signalled: a tool the turn started is Claude's
+        if window != "done":  # Claude's interrupted result does not carry what the aborted request spent (2.1.x)
+            assert turn.usage_complete is False
     else:
         assert method is StopMethod.KILL and alive == []
     assert _stopped(turn) and turn.stopped is method, turn.result_event
-    assert not seen.late
+    assert not seen.late and not seen.after_stop
     assert _answered(after) and after.result_event["result"] == "answered answer", after.result_event
     assert "half an answer" not in json.dumps(nxt.events)
 
@@ -291,7 +374,9 @@ GROK_WINDOWS = ["before_spawn", "spawning", "silent", "streaming", "blocked", "t
 
 
 @pytest.mark.parametrize("window", GROK_WINDOWS)
-def test_grok_acp_stop_in_every_window(tmp_path: Path, window: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_grok_acp_stop_in_every_window(
+    tmp_path: Path, window: str, monkeypatch: pytest.MonkeyPatch, sent_signals: list[int],
+) -> None:
     from test_grok_acp import _command, _fake
     from test_grok_runtime import GROK, _launch, _operator
 
@@ -316,6 +401,7 @@ def test_grok_acp_stop_in_every_window(tmp_path: Path, window: str, monkeypatch:
                 session._env = {**env, "FAKE_ACP_SILENT": "1"}
             else:
                 stall.touch()
+        sent_signals.clear()  # the previous process may have been ended to hold initialization
         seen, stop, cancel = Seen(hold_at="result" if window == "done" else None), Stop(), TurnCancel()
         text = {"before_spawn": "work", "spawning": "work", "silent": "QUIET", "streaming": "HANG", "blocked": BIG,
                 "tool": "SLEEPER", "done": "work"}[window]
@@ -362,6 +448,11 @@ def test_grok_acp_stop_in_every_window(tmp_path: Path, window: str, monkeypatch:
             seen.release.set()
             running.cancel()
             await asyncio.gather(running, return_exceptions=True)
+        if method is StopMethod.CANCEL:
+            assert sent_signals == []
+            assert session.pid == pid and pid is not None and _alive(pid)
+            assert turn.prompt_sent and turn.result_event["stop_reason"] == "cancelled"
+            assert seen.events[-1]["type"] == "result"
         seen.closed = True
         session._env = env
         stall.unlink(missing_ok=True)
@@ -374,6 +465,8 @@ def test_grok_acp_stop_in_every_window(tmp_path: Path, window: str, monkeypatch:
                                 env=env)
         nxt = Seen()
         after = await asyncio.wait_for(session.run_turn("next", nxt), BOUND)
+        if method is StopMethod.CANCEL:
+            assert session.pid == pid  # the following turn uses the same resident process
         resumed = session._session
         await session.stop()
         for tool in tools:
@@ -394,15 +487,17 @@ def test_grok_acp_stop_in_every_window(tmp_path: Path, window: str, monkeypatch:
     assert "thinking" not in json.dumps(nxt.events)
 
 
-# The same windows with ACP unavailable: the session runs per turn (``grok.ResidentGrok``), stopped by the same cancel.
+# ACP unavailable: the session runs per turn (``grok.ResidentGrok``), stopped by the same cancel. Its turns are
+# ``PerTurnSession``'s, whose windows are run under Codex above: what is Grok's is the fall back itself (a stop
+# asked while the session falls back) and the tool it starts.
 
-GROK_FALLBACK_WINDOWS = ["before_spawn", "spawning", "silent", "streaming", "tool", "tail"]
+GROK_FALLBACK_WINDOWS = ["before_spawn", "tool"]
 
 
 @pytest.mark.parametrize("window", GROK_FALLBACK_WINDOWS)
 def test_grok_fallback_stop_in_every_window(tmp_path: Path, window: str, monkeypatch: pytest.MonkeyPatch) -> None:
     from test_grok_acp import _command, _fake_with_headless
-    from test_grok_runtime import GROK, _launch, _operator
+    from test_grok_runtime import _launch, _operator
 
     _operator(tmp_path, monkeypatch)
     monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.2)
@@ -410,15 +505,6 @@ def test_grok_fallback_stop_in_every_window(tmp_path: Path, window: str, monkeyp
     sleeper_file = root / ".local" / "grok" / "sleeper.pid"
     cancel = TurnCancel()
     spawned: list[str] = []
-    holding, release = asyncio.Event(), asyncio.Event()
-    real_tail = per_turn.stderr_tail
-
-    async def held_tail(stream: Any, *args: Any) -> str:  # the process has exited; its stderr was read
-        text = await real_tail(stream, *args)
-        holding.set()
-        await release.wait()
-        return text
-
     if window == "before_spawn":  # asked while the session falls back, before the per-turn process exists
         fall_back = grok_acp.AcpGrok._fall_back
 
@@ -440,10 +526,7 @@ def test_grok_fallback_stop_in_every_window(tmp_path: Path, window: str, monkeyp
         session = grok_acp.AcpGrok(label="manager")
         env = {**_launch().environment(), "FAKE_ACP_DEAD": "1"}
         await session.start(_command(root, grok), cwd=str(tmp_path), signature="s", env=env)
-        # In the tail window the turn's first event is held until the stop lands: the process has exited and its stderr
-        # is read, yet the turn has not consumed its output, so the result in the pipe is what the stop must drop. Without
-        # the hold, whether the result was consumed before the stop depended on the runner's speed.
-        seen = Seen("system" if window == "tail" else None)
+        seen = Seen()
         if window == "before_spawn":
             turn = await asyncio.wait_for(session.run_turn("work", seen, cancel=cancel), BOUND)
             started = list(spawned)
@@ -452,41 +535,20 @@ def test_grok_fallback_stop_in_every_window(tmp_path: Path, window: str, monkeyp
             first = await session.run_turn("hello", Seen())  # falls back
             assert _answered(first), first.result_event
             assert session.transport == "per-turn"
-            text = {"spawning": "work", "silent": "HANG", "streaming": "STREAM", "tool": "SLEEPER",
-                    "tail": "work"}[window]
-            slow = SlowSpawn(monkeypatch) if window == "spawning" else None
-            if window == "tail":
-                monkeypatch.setattr(per_turn, "stderr_tail", held_tail)
-            running = asyncio.create_task(session.run_turn(text, seen, cancel=cancel))
+            running = asyncio.create_task(session.run_turn("SLEEPER", seen, cancel=cancel))
             try:
-                if slow is not None:
-                    await asyncio.wait_for(slow.reached.wait(), BOUND)
-                elif window == "tail":
-                    await asyncio.wait_for(holding.wait(), BOUND)  # the process has exited
-                    await asyncio.wait_for(seen.holding.wait(), BOUND)  # and the turn has read nothing past its first event
-                else:
-                    if window == "tool":
-                        await _until(sleeper_file.exists)
-                    await _until(lambda: bool(seen.events))
-                    await asyncio.sleep(0.2)
-                pids = [int(sleeper_file.read_text())] if window == "tool" else []
+                await _until(sleeper_file.exists)
+                await _until(lambda: bool(seen.events))
+                await asyncio.sleep(0.2)
+                pids = [int(sleeper_file.read_text())]
                 cancel.request()
-                if slow is not None:
-                    slow.release.set()
-                release.set()
-                seen.release.set()
                 turn = await asyncio.wait_for(running, BOUND)
             finally:
-                release.set()
-                seen.release.set()
-                if slow is not None:
-                    slow.restore()
                 running.cancel()
                 await asyncio.gather(running, return_exceptions=True)
             started = []
         seen.closed = True
         alive = [pid for pid in pids if _alive(pid)]
-        monkeypatch.setattr(per_turn, "stderr_tail", real_tail)
         nxt = Seen()
         after = await asyncio.wait_for(session.run_turn("next", nxt), BOUND)
         transport = session.transport
@@ -501,6 +563,4 @@ def test_grok_fallback_stop_in_every_window(tmp_path: Path, window: str, monkeyp
     assert "half an answer" not in json.dumps(nxt.events)
     if window == "before_spawn":
         assert started == [] and not any(e.get("type") == "assistant" for e in seen.events)
-    if window == "tail":
-        assert not any(e.get("type") == "result" and not e.get("is_error") for e in seen.events)
 

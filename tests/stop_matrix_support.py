@@ -5,7 +5,6 @@ sessions, ``tests/test_manager_stop_matrix.py`` under the Manager."""
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -36,18 +35,23 @@ async def _until(check: Any, timeout: float = BOUND) -> None:
 
 
 class Seen:
-    """``on_event`` of one turn: what it got, and what came after its turn returned (``late``). With ``hold_at``,
-    it holds the first event of that type until ``release`` is set."""
+    """``on_event`` of one turn: what it got, what came after its turn returned (``late``), and, once ``stop`` (the
+    turn's ``Stop``) was asked, what it still got (``after_stop``). With ``hold_at``, it holds the first event of that
+    type until ``release`` is set."""
 
     def __init__(self, hold_at: str | None = None) -> None:
         self.events: list[dict[str, Any]] = []
         self.closed = False
         self.late: list[dict[str, Any]] = []
+        self.stop: Any = None
+        self.after_stop: list[dict[str, Any]] = []
         self.hold_at = hold_at
         self.holding, self.release = asyncio.Event(), asyncio.Event()
 
     async def __call__(self, event: dict[str, Any]) -> None:
         (self.late if self.closed else self.events).append(event)
+        if self.stop is not None and self.stop.asked and not self.closed:
+            self.after_stop.append(event)
         if self.hold_at is not None and event.get("type") == self.hold_at and not self.holding.is_set():
             self.holding.set()
             await self.release.wait()
@@ -72,15 +76,6 @@ def _answered(turn: Any) -> bool:
     return not _stopped(turn) and turn.result_event is not None and not turn.result_event.get("is_error")
 
 
-async def _interrupt_held(session: Any, seen: Seen, stop: Stop, running: asyncio.Task[Any]) -> tuple[Any, Any]:
-    """The stop lands while the turn's owner holds an event: the interrupt runs while it is let go."""
-    stop.asked = True
-    stopping = asyncio.create_task(session.interrupt())
-    await asyncio.sleep(0.2)
-    seen.release.set()
-    return await asyncio.wait_for(stopping, BOUND), await asyncio.wait_for(running, BOUND)
-
-
 # --- One process per turn: Codex, OMP, pi, DSH (``per_turn.PerTurnSession``) ---
 
 _PRELUDE = r'''
@@ -94,12 +89,25 @@ mode = open(os.path.join(DIR, 'mode')).read().strip()
 put('pids', '%d\n' % os.getpid())
 def child():
     # A tool's process leaves for a session of its own (setsid): the group of the process does not hold it.
-    c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=mode == 'tool')
+    code = 'import time; time.sleep(60)'
+    if mode == 'tool':
+        code = (
+            "import os, subprocess, sys, time\n"
+            "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+            "with open(os.path.join(os.environ['STOP_MATRIX_DIR'], 'pids'), 'a') as f:\n"
+            "    f.write(str(g.pid) + '\\n')\n"
+            "time.sleep(60)\n"
+        )
+    c = subprocess.Popen([sys.executable, '-c', code], start_new_session=mode == 'tool')
     put('pids', '%d\n' % c.pid)
 def wait():
     child()
     put('reached', mode, 'w')
-    time.sleep(60)
+    end = time.time() + 60
+    while time.time() < end:
+        if mode == 'streaming':
+            say('tick')  # it goes on writing: nothing of it may reach the turn once the stop is asked
+        time.sleep(0.05)
     sys.exit(0)
 def emit(event):
     print(json.dumps(event), flush=True)
@@ -147,7 +155,7 @@ def answer(t):
 
 _OMP = r'''
 SID = args[args.index('--resume') + 1] if '--resume' in args else 'omp-1'
-USAGE = {'input': 10, 'output': 1, 'cacheRead': 0, 'cacheWrite': 0}
+USAGE = {'input': 10, 'output': 1, 'cacheRead': 4, 'cacheWrite': 2}
 def opening():
     emit({'type': 'session', 'version': 3, 'id': SID, 'cwd': os.getcwd()})
 def message(stop, content):
@@ -170,7 +178,7 @@ else:
     SID = 'pi-1'
     with open(os.path.join(directory, SID + '.jsonl'), 'w') as f:
         f.write(json.dumps({'type': 'session', 'id': SID}) + '\n')
-USAGE = {'input': 10, 'output': 1, 'cacheRead': 0, 'cacheWrite': 0}
+USAGE = {'input': 10, 'output': 1, 'cacheRead': 4, 'cacheWrite': 2}
 def opening():
     emit({'type': 'session', 'id': SID, 'cwd': os.getcwd()})
 def message(stop, content):
@@ -304,6 +312,10 @@ for raw in sys.stdin:
             out({'type': 'control_response', 'response': {'subtype': 'success',
                  'request_id': message['request_id']}})
             if state['running']:
+                for _ in range(5):  # it writes on for a moment after it answered: none of it reaches the turn
+                    out({'type': 'stream_event', 'event': {'type': 'content_block_delta',
+                         'delta': {'type': 'text_delta', 'text': 'late text'}}})
+                    time.sleep(0.02)
                 result('', ok=False)
         continue
     run(message['message']['content'])

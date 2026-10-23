@@ -394,7 +394,9 @@ def test_the_agents_shell_gets_the_operators_home_back_and_a_grok_home_without_t
     assert command[2] == f"HOME={_home(command)}" and "XDG_CONFIG_HOME" not in GROK.environment(_launch())
 
 
-@pytest.mark.parametrize(("variable", "value", "passed"), [
+# What the operator's environment would point Grok at is dropped or set by the runtime (a variable and the value
+# it has in the run). Each name is a line of one allowlist, so all are checked in one call.
+OPERATOR_ENVIRONMENT = [
     ("GROK_HOME", "/operator/.grok", None),  # the run's home comes with the command
     ("GROK_CONFIG", '{"models": {}}', None),
     ("GROK_CONFIG_PATH", "/operator/overlay.toml", None),
@@ -410,11 +412,15 @@ def test_the_agents_shell_gets_the_operators_home_back_and_a_grok_home_without_t
     ("GROK_MEMORY", "1", "0"),
     ("GROK_DISABLE_AUTOUPDATER", "0", "1"),
     ("RUST_LOG", "warn", None),  # not in the child environment allowlist
-])
-def test_the_environment_drops_what_points_grok_elsewhere(variable: str, value: str, passed: str | None,
-                                                          monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(variable, value)
-    assert GROK.environment(_launch()).get(variable) == passed
+]
+
+
+def test_the_environment_drops_what_points_grok_elsewhere(monkeypatch: pytest.MonkeyPatch) -> None:
+    for variable, value, _ in OPERATOR_ENVIRONMENT:
+        monkeypatch.setenv(variable, value)
+    environment = GROK.environment(_launch())
+    assert {variable: environment.get(variable) for variable, _, _ in OPERATOR_ENVIRONMENT} == {
+        variable: passed for variable, _, passed in OPERATOR_ENVIRONMENT}
 
 
 def test_every_compat_variable_is_off_and_owned_by_the_runtime() -> None:

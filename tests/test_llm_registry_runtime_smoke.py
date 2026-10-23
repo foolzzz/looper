@@ -296,6 +296,7 @@ def test_explicit_combination_is_migrated_before_launch(tmp_path, monkeypatch):
             assert capture["argv"][capture["argv"].index("--model") + 1] == item["model"]
 
 
+@pytest.mark.installed
 def test_migrated_dashboard_screenshot(migrated, tmp_path, monkeypatch):
     playwright = pytest.importorskip("playwright.sync_api", reason="not-run: Playwright missing")
     with playwright.sync_playwright() as driver:
@@ -317,6 +318,7 @@ def test_migrated_dashboard_screenshot(migrated, tmp_path, monkeypatch):
                 browser.close()
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_selected_real_runtime_request_and_continuation(runtime, tmp_path):
     rows = inventory(os.environ)

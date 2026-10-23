@@ -378,8 +378,12 @@ def test_invalid_mcp_configuration_fails_closed(tmp_path: Path, contents: str) -
         launch.environment()
 
 
-@pytest.mark.parametrize("source", ["provider", "role"])
-@pytest.mark.parametrize("name", ["LOOPER_AGENT_URL", "LOOPER_AGENT_TOKEN", "LOOPER_PI_AGENT_URL", "LOOPER_PI_AGENT_TOKEN"])
+# The four names the binding owns are refused for a provider; a role's are all ``LOOPER_`` names, one rule.
+@pytest.mark.parametrize("source,name", [
+    *(("provider", name) for name in ("LOOPER_AGENT_URL", "LOOPER_AGENT_TOKEN", "LOOPER_PI_AGENT_URL",
+                                      "LOOPER_PI_AGENT_TOKEN")),
+    ("role", "LOOPER_AGENT_TOKEN"),
+])
 def test_explicit_env_cannot_replace_the_bridge(tmp_path: Path, source: str, name: str) -> None:
     if source == "provider":
         with pytest.raises(RegistryError, match=name):
@@ -558,10 +562,15 @@ def test_private_permissions_do_not_depend_on_the_server_umask(tmp_path: Path, u
         assert (home / "agent" / name).stat().st_mode & 0o777 == 0o600
 
 
-@pytest.mark.parametrize("source", ["provider", "role"])
-@pytest.mark.parametrize("name", ["HOME", "XDG_CONFIG_HOME", "PI_CODING_AGENT_DIR", "PI_CONFIG_FILES",
-                                  "PI_SHELL_PREFIX", "PI_OFFLINE", "PI_FUTURE_PATH", "LOOPER_AGENT_TOKEN",
-                                  "LOOPER_PROVIDER_API_KEY"])
+# A provider's environment is checked against the names its binding owns, then, like a role's, against the isolation
+# directories and the ``PI_``/``LOOPER_`` prefixes: every owned name for the provider; the role's one name for each
+# of the directory, prefix and ``LOOPER_`` rules.
+@pytest.mark.parametrize("source,name", [
+    *(("provider", name) for name in ("HOME", "XDG_CONFIG_HOME", "PI_CODING_AGENT_DIR", "PI_CONFIG_FILES",
+                                      "PI_SHELL_PREFIX", "PI_OFFLINE", "PI_FUTURE_PATH", "LOOPER_AGENT_TOKEN",
+                                      "LOOPER_PROVIDER_API_KEY")),
+    *(("role", name) for name in ("HOME", "PI_FUTURE_PATH", "LOOPER_AGENT_TOKEN")),
+])
 def test_explicit_environment_cannot_override_isolation(source: str, name: str) -> None:
     with pytest.raises((RuntimeUnsupported, RegistryError), match=name):
         launch = _launch(_provider(env=((name, "override"),)) if source == "provider" else _provider())
@@ -665,6 +674,7 @@ def test_a_model_outside_a_nonempty_catalog_is_refused() -> None:
         replace(launch.profile, model_id="unknown-model")
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("transport", ["http", "fetch"])
 @pytest.mark.parametrize("configured_compat", [False, True])
 def test_pi_responses_wire_preserves_optional_tool_parameters(
