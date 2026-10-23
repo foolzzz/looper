@@ -2831,39 +2831,43 @@ def test_the_stop_dialog_checks_its_replies() -> None:
     assert dialogs._was_stopped(look("已处理（looper_projects：ok）。")) is not None
 
 
-def test_the_stop_dialog_flags_only_a_summary_no_read_backs(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("reply,reads,problem", [
+    ("汇总已经完成，还没有别的问题", (), "the reply claims the summary was finished"),
+    ("还没有真正查询任何项目，之后再汇总。", (), None),
+    ("刚才只做到加载工具，还没有真正查询任何项目或任务。要我现在继续查询，然后汇总吗？", (), None),
+    ("汇总：项目 eval-calc 最近没有任务。",
+     (("looper_projects", {"action": "list"}),
+      ("looper_tasks", {"action": "list", "project": "eval-calc", "limit": 3})), None),
+    ("汇总：项目 eval-calc 最近没有任务。", (), "the reply claims the summary was finished"),
+    ("我已经逐个查看并汇总好了。", (), "the reply claims the summary was finished"),
+    ("我已经查看了每个项目最近的三个任务，汇总完成。",
+     (("looper_projects", {"action": "list"}),), "the reply claims the summary was finished"),
+    ("我已经查看了每个项目最近的三个任务，汇总完成。",
+     (("looper_projects", {"action": "list"}), ("looper_tasks", {"action": "list"})),
+     "the reply claims the summary was finished"),
+    ("我已经查看了每个项目最近的三个任务，汇总完成。",
+     (("looper_projects", {"action": "list"}),
+      ("looper_tasks", {"action": "list", "project": "eval-calc", "limit": 3})), None),
+])
+def test_the_stop_dialog_flags_only_a_summary_no_read_backs(
+        monkeypatch: pytest.MonkeyPatch, reply: str, reads: tuple[tuple[str, dict[str, Any]], ...],
+        problem: str | None) -> None:
     from evals.prompt_regression import dialogs
 
-    # The stop waits for the first turn's tool call, so the dialog always holds a read before the follow-up turn.
-    def look(reply: str, reads: tuple[tuple[str, dict[str, Any]], ...]) -> Any:
-        class Api:
-            def get(self, path: str, **params: Any) -> dict[str, Any]:
-                return {"records": [{"id": 5, "input_text": f"{dialogs.STOPPED_NOTE} ...\n\n刚才停在哪了？",
-                                     "metadata": {}}]}
+    class Api:
+        def get(self, path: str, **params: Any) -> dict[str, Any]:
+            return {"records": [{"id": 5, "input_text": f"{dialogs.STOPPED_NOTE} ...\n\n刚才停在哪了？",
+                                 "metadata": {}}]}
 
-        trail = [{"id": 1, "tool": "looper_projects", "risk": "read", "status": "ok",
-                  "arguments": {"action": "list"}}] + [
-            {"id": 2 + i, "tool": tool, "risk": "read", "status": "ok", "arguments": arguments}
-            for i, (tool, arguments) in enumerate(reads)]
-        monkeypatch.setattr(dialogs, "_trail", lambda _url, since, *_: [a for a in trail if a["id"] > since])
-        return dialogs.Look(Api(), None, reply, "disposable", 0, frozenset(), False,  # type: ignore[arg-type]
-                            turn_since=1)
-
-    projects = ("looper_projects", {"action": "list"})
-    tasks_of_project = ("looper_tasks", {"action": "list", "project": "eval-calc", "limit": 3})
-    offered = ("刚才只做到加载工具(projects 和 tasks 的查询工具),还没有真正查询任何项目或任务。\n\n"
-               "要我现在继续吗?我会查看 eval-calc 最近的三个任务,然后汇总给你。")
-    assert dialogs._knows_it_was_stopped(look(offered, ())) is None
-    redone = "汇总：\n\n- **项目**：只有 1 个，`eval-calc`。\n- **最近的任务**：`eval-calc` 下没有任务。"
-    assert dialogs._knows_it_was_stopped(look(redone, (projects, tasks_of_project))) is None
-    # The first turn's read is no read behind this turn's summary.
-    assert dialogs._knows_it_was_stopped(look(redone, ())) is not None
-    assert dialogs._knows_it_was_stopped(look("我已经逐个查看并汇总好了。", ())) is not None
-    # Re-listing the projects, or all the tasks at once, reads no project's tasks: the claim stays one.
-    claim = "我已经查看了每个项目最近的三个任务，汇总完成。"
-    assert dialogs._knows_it_was_stopped(look(claim, (projects,))) is not None
-    assert dialogs._knows_it_was_stopped(look(claim, (projects, ("looper_tasks", {"action": "list"})))) is not None
-    assert dialogs._knows_it_was_stopped(look(claim, (projects, tasks_of_project))) is None
+    # The stopped turn's read cannot back this turn's summary.
+    trail = [{"id": 1, "tool": "looper_projects", "risk": "read", "status": "ok",
+              "arguments": {"action": "list"}}] + [
+        {"id": 2 + i, "tool": tool, "risk": "read", "status": "ok", "arguments": arguments}
+        for i, (tool, arguments) in enumerate(reads)]
+    monkeypatch.setattr(dialogs, "_trail", lambda _url, since, *_: [a for a in trail if a["id"] > since])
+    look = dialogs.Look(Api(), None, reply, "disposable", 0, frozenset(), False,  # type: ignore[arg-type]
+                        turn_since=1)
+    assert dialogs._knows_it_was_stopped(look) == problem
 
 
 def test_a_dialog_check_sees_the_calls_of_its_own_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -2987,18 +2991,29 @@ def _tool_use(name: str, **arguments: Any) -> dict[str, Any]:
                                 "message": {"content": [{"type": "tool_use", "name": name, "input": arguments}]}}}
 
 
-@pytest.mark.parametrize("after,problem", [
-    ([], None),
-    ([_tool_use("Bash", command="sleep 60")], "the Manager ran ['Bash'] after starting the task"),
+@pytest.mark.parametrize("events,start_statuses,problem", [
+    ([_tool_use("mcp__looper__looper_task_control", action="start", task_id="t")], ("ok",), None),
+    ([_tool_use("mcp__looper__looper_task_control", action="start", task_id="t"),
+      _tool_use("Bash", command="sleep 60")], ("ok",), "the Manager ran ['Bash'] after starting the task"),
+    *[([_tool_use("use_tool", tool_name="looper__looper_task_control", tool_input=arguments),
+        _tool_use("run_terminal_command", command="sleep 60")], ("ok",),
+       "the Manager ran ['run_terminal_command'] after starting the task")
+      for arguments in ({"action": "start", "task_id": "t"}, '{"action":"start","task_id":"t"}')],
+    ([_tool_use("mcp__looper__looper_task_control", action="start", task_id="t"),
+      _tool_use("Bash", command="sleep 60"),
+      _tool_use("mcp__looper__looper_task_control", action="start", task_id="t")], ("ok", "error"),
+     "the Manager ran ['Bash'] after starting the task"),
+    ([_tool_use("mcp__looper__looper_task_control", action="start", task_id="t"),
+      _tool_use("Bash", command="sleep 60"),
+      _tool_use("mcp__looper__looper_task_control", action="start", task_id="t")], ("error", "ok"), None),
+    ([_tool_use("mcp__looper__looper_task_control", action="start", task_id="t"),
+      {"event": {"type": "assistant", "message": {"content": [
+          {"type": "tool_use", "name": "looper__looper_task_control", "input": "not a dict"}]}}}], ("ok",), None),
 ])
 def test_start_no_wait_rejects_a_native_shell_after_the_start(
-    monkeypatch: pytest.MonkeyPatch, after: list[dict[str, Any]], problem: str | None,
+    monkeypatch: pytest.MonkeyPatch, events: list[dict[str, Any]], start_statuses: tuple[str, ...], problem: str | None,
 ) -> None:
     from evals.prompt_regression import dialogs
-
-    start = {"tool": "looper_task_control", "status": "ok", "risk": "write",
-             "arguments": {"action": "start", "task_id": "t"}}
-    events = [_tool_use("mcp__looper__looper_task_control", action="start", task_id="t"), *after]
 
     class Api:
         def get(self, path: str, **_: Any) -> dict[str, Any]:
@@ -3006,6 +3021,8 @@ def test_start_no_wait_rejects_a_native_shell_after_the_start(
                 return {"records": [{"id": 7, "metadata": {}}]}
             return {"events": events if _ == {} or _.get("after") == 0 else []}
 
-    monkeypatch.setattr(dialogs, "_trail", lambda *_: [start])
+    trail = [{"tool": "looper_task_control", "status": status, "risk": "write",
+              "arguments": {"action": "start", "task_id": "t"}} for status in start_statuses]
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: trail)
     look = dialogs.Look(Api(), "t", "", "", 0, frozenset(), True)  # type: ignore[arg-type]
     assert dialogs._started_without_waiting(look) == problem

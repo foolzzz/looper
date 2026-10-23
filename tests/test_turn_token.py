@@ -264,17 +264,18 @@ def _envelope(mid: str) -> MessageEnvelope:
                            message_type=MessageType.USER_MESSAGE, payload={})
 
 
-def test_registry() -> None:
+@pytest.mark.parametrize("channel_id", [None, "channel-web"])
+def test_registry(channel_id: str | None) -> None:
     reg = TurnRegistry()
-    a = reg.receive(_envelope("a"), channel="web", chat="c", client_message_id="ca")
-    b = reg.receive(_envelope("b"), channel="web", chat="c", client_message_id=None)
+    a = reg.receive(_envelope("a"), channel="web", channel_id=channel_id, chat="c", client_message_id="ca")
+    b = reg.receive(_envelope("b"), channel="web", channel_id=channel_id, chat="c", client_message_id=None)
     other = reg.receive(_envelope("o"), channel="tg", chat="c", client_message_id=None)
     assert reg.find("a") is a and reg.find("ca") is a and reg.find("zz") is None
-    assert reg.live_for("web", "c") == [a, b]
+    assert reg.live_for(channel_id or "web", "c") == [a, b]
     assert reg.oldest_for("web", "c") is a and reg.oldest_for("web", "none") is None
     a.settle("answered")
     assert reg.find("a") is None and reg.find("ca") is None
-    assert reg.live_for("web", "c") == [b]
+    assert reg.live_for(channel_id or "web", "c") == [b]
     reg.drop(b)
     assert reg.find("b") is None
     reg.clear()

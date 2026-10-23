@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -112,3 +113,15 @@ def test_read_trace_returns_keys_only(tmp_path: Path) -> None:
     trace.write_text(json.dumps({"meta_keys": ["a"]}) + "\n" + json.dumps({"meta_keys": None}) + "\nbad\n")
     assert sr.read_trace(trace) == [["a"], []]
     assert sr.read_trace(tmp_path / "missing") == []
+
+
+@pytest.mark.parametrize("outcome", ["answered", "failed"])
+def test_a_write_probe_requires_an_answered_turn(outcome: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    api = SimpleNamespace(base_url="http://localhost", token=None, post=lambda *args: {"events_url": "/events"})
+    stream = SimpleNamespace(snapshot=lambda: _events((1.0, "answer.final", {"text": "done", "outcome": outcome})),
+                             close=lambda: None)
+    monkeypatch.setattr(sr, "_Stream", lambda *args: stream)
+    monkeypatch.setattr(sr, "_db_rows", lambda *args: [
+        {"tool": "looper_providers", "risk": "write", "status": "ok", "error_code": None}])
+    result = sr.run_probe(api, "disposable", 1)
+    assert bool(result.failures) is (outcome != "answered")

@@ -76,8 +76,12 @@ function App() {
     window.location.hash = p;
   }, []);
 
-  const navigateSub = useCallback((p: Page, sub: string, query = "") => {
-    window.location.hash = (sub ? `${p}/${sub}` : p) + (query ? `?${query}` : "");
+  const navigateSub = useCallback((p: Page, sub: string, query = "", replace = false) => {
+    const hash = (sub ? `${p}/${sub}` : p) + (query ? `?${query}` : "");
+    if (replace) {
+      window.history.replaceState(null, "", `#${hash}`);
+    } else window.location.hash = hash;
+    setRoute(readHash());
   }, []);
 
   // Once the session ended nothing else renders: unmounting the pages stops every poller and stream.
@@ -138,7 +142,7 @@ function App() {
           <div className={route.page === "chat" ? "h-full" : "hidden"}>
             <ChatPage
               query={route.page === "chat" ? route.query : undefined}
-              onQuery={(q) => navigateSub("chat", "", q)}
+              onQuery={(q, replace) => navigateSub("chat", "", q, replace)}
             />
           </div>
           {route.page === "dashboard" && (

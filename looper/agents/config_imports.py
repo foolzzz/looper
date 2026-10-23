@@ -21,6 +21,7 @@ import os
 import secrets
 import shutil
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -36,7 +37,7 @@ logger = logging.getLogger(__name__)
 # The dashboard and loopercli both use this upload limit.
 UPLOAD_MAX_BYTES = 2 * LIBRARY_MAX_BYTES
 TTL_SECONDS = 3600
-# Uploads in flight and imports waiting at once; each holds a file of up to UPLOAD_MAX_BYTES on disk.
+# Uploads in flight and imports waiting per caller; each holds up to UPLOAD_MAX_BYTES on disk.
 PENDING_MAX = 4
 DIRNAME = "config-imports"
 _CHUNK_BYTES = 1024 * 1024
@@ -86,7 +87,7 @@ class ConfigImports:
     def __init__(self, runtime_root: Path) -> None:
         self._directory = runtime_root / DIRNAME
         self._pending: dict[str, _Pending] = {}
-        self._receiving = 0
+        self._receiving: Counter[str | None] = Counter()
 
     def clear(self) -> None:
         """Forget every pending import and remove the directory with every file in it."""
@@ -101,19 +102,19 @@ class ConfigImports:
 
         Raises ``ConfigFileError`` for a body that is not a usable file (its
         file is removed), and ``ImportConflict`` when ``PENDING_MAX`` imports
-        are pending or arriving.
+        are pending or arriving for this caller.
         """
         if length <= 0:
             raise ConfigFileError("the request holds no file")
         if length > UPLOAD_MAX_BYTES:
             raise ConfigFileError("the configuration file exceeds the upload limit")
-        if len(self._pending) + self._receiving >= PENDING_MAX:
+        if sum(p.owner == owner for p in self._pending.values()) + self._receiving[owner] >= PENDING_MAX:
             raise ImportConflict(f"{PENDING_MAX} imports are pending; apply or cancel one, or wait for one to "
                                  f"expire ({TTL_SECONDS // 60} minutes after its upload)")
         import_id = f"cfgimp-{secrets.token_hex(8)}"
         self._directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         path = self._directory / f"{import_id}.json"
-        self._receiving += 1
+        self._receiving[owner] += 1
         try:
             with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
                 remaining = length
@@ -130,7 +131,9 @@ class ConfigImports:
             path.unlink(missing_ok=True)
             raise
         finally:
-            self._receiving -= 1
+            self._receiving[owner] -= 1
+            if not self._receiving[owner]:
+                del self._receiving[owner]
         pending = _Pending(path, _about(data), time.monotonic() + TTL_SECONDS,
                            datetime.now(UTC) + timedelta(seconds=TTL_SECONDS), owner=owner)
         self._pending[import_id] = pending
@@ -157,8 +160,8 @@ class ConfigImports:
         self._drop(import_id)
         return {"import_id": import_id, "plan": plan.view(targets=True)}
 
-    async def cancel(self, import_id: str) -> dict[str, str]:
-        if self._get(import_id).applying:
+    async def cancel(self, import_id: str, *, owner: str | None = None) -> dict[str, str]:
+        if self._get(import_id, owner=owner).applying:
             raise ImportConflict("this import is being applied")
         self._drop(import_id)
         return {"deleted": import_id}

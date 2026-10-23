@@ -110,9 +110,10 @@ class _Orphan:
         os.kill(self.pid, sig)
 
 
-def _tree(process: _Agent, table: Table, known: Tree) -> Tree:
+def _tree(process: _Agent, table: Table, known: Tree, *, skip: frozenset[int] = frozenset()) -> Tree:
     """The processes of ``process``'s tree that ``table`` lists: the agent, every process whose parent is in the
-    tree, every member of a group the agent or one of them leads, and each of ``known`` still in its group."""
+    tree, every member of a group the agent or one of them leads, and each of ``known`` still in its group.
+    A pid in ``skip`` contributes neither its children nor its group."""
     root = process.pid
     children: defaultdict[int, list[int]] = defaultdict(list)
     members: defaultdict[int, list[int]] = defaultdict(list)
@@ -129,16 +130,17 @@ def _tree(process: _Agent, table: Table, known: Tree) -> Tree:
             groups.add(pgid)
             pending.extend(members[pgid])
 
-    add_group(root)  # the agent leads its group, whose members stay its own once it has exited
+    if root not in skip:
+        add_group(root)  # the agent leads its group, whose members stay its own once it has exited
     while pending:
         pid = pending.pop()
-        if pid in tree or pid not in table or pid == own_pid:
+        if pid in skip or pid in tree or pid not in table or pid == own_pid:
             continue
         tree[pid] = pgid = table[pid][1]
         pending.extend(children[pid])
         if pgid == pid:
             add_group(pid)
-    if not table and process.returncode is None:
+    if not table and process.returncode is None and root not in skip:
         try:  # without a listing, the agent and its own group are all that can be reached
             tree[root] = os.getpgid(root)
         except ProcessLookupError:
@@ -217,7 +219,7 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
         _ending.add(process.pid)
 
     def members(table: Table, known: Tree) -> Tree:
-        return {pid: pgid for pid, pgid in _tree(process, table, known).items() if pid not in exclude}
+        return _tree(process, table, known, skip=exclude)
 
     seen = members(_snapshot(), known)
     alive = dict(seen)
@@ -445,13 +447,14 @@ class TurnTree:
             self.seen[pid] = None
         return fresh
 
-    async def refresh(self, *, force: bool = False) -> None:
+    async def refresh(self, *, force: bool = False, skip: frozenset[int] = frozenset()) -> None:
         """Merge the current tree into ``seen``; at most once per ``_REFRESH_MIN_SEC`` unless ``force``."""
         async with self._lock:
             if not force and time.monotonic() - self._refreshed < _REFRESH_MIN_SEC:
                 return
             table = await asyncio.to_thread(_snapshot)
-            self._merge(_tree(self.process, table, self._groups))
+            self._groups = {pid: pgid for pid, pgid in self._groups.items() if pid in table}
+            self._merge(_tree(self.process, table, self._groups, skip=skip))
             unread = [pid for pid, started in self.seen.items() if started is None]
             if unread:
                 starts = await asyncio.to_thread(_start_times, unread) or {}
@@ -496,7 +499,7 @@ class TurnTree:
     async def _strays(self, exclude: frozenset[int]) -> list[_Orphan]:
         """The seen processes the tree no longer reaches (one that left its group, setsid, once its parent exited):
         each still running with the start time the snapshot read, so a reused pid is never among them."""
-        reached = _tree(self.process, await asyncio.to_thread(_snapshot), self._groups)
+        reached = _tree(self.process, await asyncio.to_thread(_snapshot), self._groups, skip=exclude)
         known = {pid: started for pid, started in self.seen.items()
                  if started is not None and pid not in reached and pid not in exclude and pid != self.process.pid}
         current = await asyncio.to_thread(_start_times, known) or {}
@@ -515,8 +518,10 @@ class TurnTree:
     async def end(self) -> None:
         """End every process of the tree seen so far and of the tree now, then reap the agent."""
         await self.stop_ticker()
-        await self.refresh(force=True)
-        await self._end_all(await self._reused())
+        # Exclude reused leaders before a refresh can remember their unrelated children.
+        exclude = await self._reused()
+        await self.refresh(force=True, skip=exclude)
+        await self._end_all(exclude)
         await _reap(self.process, self.label)
 
 

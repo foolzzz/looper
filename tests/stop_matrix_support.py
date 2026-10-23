@@ -271,15 +271,16 @@ def put(name, text, how='a'):
 def out(event):
     print(json.dumps(event), flush=True)
 put('pids', '%d\n' % os.getpid())
-state = {'running': False, 'tool': None, 'obey': False}
+state = {'running': False, 'tool': None, 'obey': False, 'cost': 0.0}
 def child():
     c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)  # setsid
     put('pids', '%d\n' % c.pid)
     return c
 def result(text, ok=True):
     state['running'] = False
+    state['cost'] = round(state['cost'] + 0.01, 2)
     out({'type': 'result', 'subtype': 'success' if ok else 'error_during_execution', 'is_error': not ok,
-         'result': text, 'total_cost_usd': 0.01, 'session_id': 's1', 'num_turns': 1})
+         'result': text, 'total_cost_usd': state['cost'], 'session_id': 's1', 'num_turns': 1})
 def run(text):
     # What to do is told by a ``mode`` file in the directory, else by the message: ``mode:<window> [obey]``.
     path = os.path.join(DIR, 'mode')

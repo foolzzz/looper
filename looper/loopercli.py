@@ -327,6 +327,10 @@ def _ok_blocks(answer: Mapping[str, Any]) -> list[str]:
         for key, value in result.items():
             if _is_scalar(value):
                 continue
+            if key == "plan" and "import_id" in result:
+                # Keep every import change, missing credential and migration note visible.
+                lines.append(f"{key}: " + json.dumps(value, ensure_ascii=False, indent=2))
+                continue
             table = _table(value) if isinstance(value, list) and value and all(
                 isinstance(item, dict) for item in value) else []
             if table:
@@ -358,8 +362,7 @@ def render(answer: Mapping[str, Any], session: str | None = None) -> None:
     else:
         error = answer.get("error")
         error = error if isinstance(error, dict) else {}
-        print(f"error: {error.get('code', 'unknown')}: {error.get('message', json.dumps(answer, ensure_ascii=False))}",
-              file=sys.stderr)
+        _print_error(f"{error.get('code', 'unknown')}: {error.get('message', json.dumps(answer, ensure_ascii=False))}")
 
 
 def finish(status: int, answer: Mapping[str, Any], as_json: bool, session: str | None = None) -> int:
@@ -390,6 +393,11 @@ class Context:
             url, token = read_client(self.client_file)
             self._api = Api(url, token, self.session)
         return self._api
+
+
+def _print_error(message: str) -> None:
+    # An argument the user mistook for an option's value may be a token; do not echo it.
+    print("error: " + re.sub(rf"{TOKEN_PREFIX}[A-Za-z0-9_-]+", f"{TOKEN_PREFIX}…", message), file=sys.stderr)
 
 
 class Parser(argparse.ArgumentParser):
@@ -521,20 +529,23 @@ def _config_arguments(parser: Parser) -> None:
     export.add_argument("--include-secrets", action="store_true")
     import_ = commands.add_parser("import")
     import_.add_argument("file", nargs="?", help="configuration JSON file ('-' reads stdin); preview only")
-    import_.add_argument("--apply", metavar="IMPORT_ID", help="request confirmation to apply a staged import")
+    actions = import_.add_mutually_exclusive_group()
+    actions.add_argument("--apply", metavar="IMPORT_ID", help="request confirmation to apply a staged import")
+    actions.add_argument("--cancel", metavar="IMPORT_ID", help="cancel a staged import")
 
 
 def _config(args: argparse.Namespace, ctx: Context) -> int:
     if args.config_command == "export":
         name = "config.export"
         body = {"include_projects": args.include_projects, "include_secrets": args.include_secrets}
-    elif args.apply:
+    elif args.apply or args.cancel:
         if args.file:
-            raise UsageError("use either FILE to preview or --apply IMPORT_ID")
-        name, body = "config.import_apply", {"import_id": args.apply}
+            raise UsageError("use either FILE to preview, --apply IMPORT_ID or --cancel IMPORT_ID")
+        name = "config.import_apply" if args.apply else "config.import_cancel"
+        body = {"import_id": args.apply or args.cancel}
     else:
         if not args.file:
-            raise UsageError("config import needs FILE to preview or --apply IMPORT_ID")
+            raise UsageError("config import needs FILE to preview, --apply IMPORT_ID or --cancel IMPORT_ID")
         try:
             document = json.loads(_read_text(args.file, "config import"))
         except ValueError:
@@ -553,10 +564,20 @@ def _config(args: argparse.Namespace, ctx: Context) -> int:
     destination = Path(args.file)
     # Exports may contain secrets. Exclusive creation avoids overwriting files or following symlinks.
     try:
-        with os.fdopen(os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as handle:
-            handle.write(raw)
+        fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except OSError as exc:
         raise UsageError(f"cannot write the export file: {exc.strerror}") from None
+    try:
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+        except OSError:
+            os.close(fd)
+            raise
+        with handle:
+            handle.write(raw)
+    except (OSError, UnicodeError) as exc:
+        destination.unlink(missing_ok=True)
+        raise UsageError(f"cannot write the export file: {getattr(exc, 'strerror', None) or exc}") from None
     return finish(status, {"status": "ok", "result": {"path": str(destination)}}, ctx.as_json, ctx.session)
 
 
@@ -658,14 +679,17 @@ def _send(args: argparse.Namespace, ctx: Context, text: str, conversation_id: st
                         print()
                     print(data.get("message", "the reply is still being written"), file=sys.stderr)
                 return turn
+    except KeyboardInterrupt as exc:
+        exc.turn = turn
+        raise
     finally:
         close = getattr(events, "close", None)
         if close is not None:
             close()
     if not quiet and printed:
         print()
-    print("error: the stream ended without a reply; read it later with: "
-          f"loopercli chat --conversation {turn.conversation_id} --read", file=sys.stderr)
+    _print_error("the stream ended without a reply; read it later with: "
+                 f"loopercli chat --conversation {turn.conversation_id} --read")
     turn.code = EXIT_ERROR
     return turn
 
@@ -775,12 +799,15 @@ def _chat_interactive(args: argparse.Namespace, ctx: Context) -> int:
         if not line:
             continue
         if len(line) > MAX_MESSAGE_CHARS:
-            print(f"error: the message has {len(line)} characters; at most {MAX_MESSAGE_CHARS}: "
-                  "summarise it and point to the files", file=sys.stderr)
+            _print_error(f"the message has {len(line)} characters; at most {MAX_MESSAGE_CHARS}: "
+                         "summarise it and point to the files")
             continue
         try:
             turn = _send(args, ctx, line, conversation_id)
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as exc:
+            turn = getattr(exc, "turn", None)
+            if turn is not None:
+                conversation_id = turn.conversation_id or conversation_id
             print(file=sys.stderr)
             where = f" --conversation {conversation_id} --read" if conversation_id else ""
             print(f"(stopped reading; the reply is still saved: loopercli chat{where})", file=sys.stderr)
@@ -1129,7 +1156,7 @@ def build_parser(document: Mapping[str, Any] | None) -> Parser:
 
 
 def _global_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser = Parser(add_help=False, allow_abbrev=False)
     parser.add_argument("--client-file")
     parser.add_argument("--session", default=os.environ.get("LOOPER_SESSION") or None)
     parser.add_argument("--json", action="store_true")
@@ -1168,16 +1195,16 @@ def _run(opts: argparse.Namespace, rest: list[str]) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    opts, rest = _global_parser().parse_known_args(list(sys.argv[1:] if argv is None else argv))
-    if opts.version:
-        print(f"loopercli {__version__}")
-        return EXIT_OK
     try:
+        opts, rest = _global_parser().parse_known_args(list(sys.argv[1:] if argv is None else argv))
+        if opts.version:
+            print(f"loopercli {__version__}")
+            return EXIT_OK
         return _run(opts, rest)
     except CliError as exc:
         if isinstance(exc, UsageError) and exc.usage:
             print(exc.usage, end="", file=sys.stderr)
-        print(f"error: {exc}", file=sys.stderr)
+        _print_error(str(exc))
         return exc.code
     except SystemExit as exc:  # argparse's --help
         return exc.code if isinstance(exc.code, int) else EXIT_OK

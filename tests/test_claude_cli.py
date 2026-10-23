@@ -268,6 +268,57 @@ class TestClaudeRunRecorder:
         assert 0.9 < waited < 5
 
 
+@pytest.mark.parametrize("close_from", ["finish", "end_left_open"])
+@pytest.mark.usefixtures("current_turn")
+def test_manager_releases_its_turn_when_a_record_close_ignores_cancellation(
+    close_from: str, tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.agents import claude_cli
+    from tests.test_manager_stop import _manager, _replies, _Session
+    from tests.test_manager_new_session import _web
+
+    monkeypatch.setattr(claude_cli, "CLOSE_TIMEOUT_SEC", 0.05)
+
+    async def run() -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def hung_write(record_id: int, **fields: Any) -> None:
+            if not entered.is_set():
+                entered.set()
+                while not release.is_set():
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        pass  # A database driver can wait for its connection's cleanup after cancellation.
+
+        async def fail_start() -> None:
+            raise RuntimeError("the runtime did not start")
+
+        agent_db.finish_record.side_effect = hung_write
+        session = _Session(hold=False, on_start=fail_start if close_from == "end_left_open" else None)
+        manager, bus, queue = _manager(tmp_path, session)
+        handling = asyncio.create_task(manager._handle(_web("first")))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            done, _ = await asyncio.wait({handling}, timeout=0.5)
+            assert handling in done, "closing a record must not keep the Manager turn alive"
+            await handling
+            assert not manager._turn_lock.locked()
+            assert not release.is_set()
+            _replies(queue)
+            session.on_start = None
+            await asyncio.wait_for(manager._handle(_web("next", 1)), 5)
+            (reply,) = _replies(queue)
+            assert reply["text"] == "好的"
+        finally:
+            release.set()
+            await asyncio.gather(handling, return_exceptions=True)
+            await asyncio.gather(*claude_cli._closing, return_exceptions=True)
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
 def test_heartbeat_counts_partial_deltas_and_is_throttled(agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.agents import claude_cli
 
