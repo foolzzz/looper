@@ -22,7 +22,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from ..message import AgentAddress, MessageEnvelope, manager_address
 
@@ -54,12 +54,20 @@ class ErrorCode(str, Enum):
     RATE_LIMITED = "rate_limited"  # over a limit of how often or how much (a room's); the message says when
 
 
+class ErrorDetails(TypedDict, total=False):
+    manager_id: str
+    state: str
+    phase: str | None
+    method: str | None
+
+
 class OpError(Exception):
     """A call Looper refuses or could not run, with the code the answer carries."""
 
-    def __init__(self, code: ErrorCode, message: str) -> None:
+    def __init__(self, code: ErrorCode, message: str, *, details: ErrorDetails | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.details = details
 
 
 class TurnState(str, Enum):

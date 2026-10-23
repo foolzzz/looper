@@ -222,12 +222,14 @@ def test_status_request_sends_the_token_and_distinguishes_a_refusal(
     monkeypatch: pytest.MonkeyPatch, token: str | None, code: int,
 ) -> None:
     def open_request(request, *, timeout):
-        assert request.full_url == "http://127.0.0.1:18834/api/status"
+        assert request.full_url == "http://127.0.0.1:18834/api/v1/system/status"
+        assert request.get_method() == "POST" and request.data == b"{}"
+        assert request.get_header("Content-type") == "application/json"
         assert request.get_header("Authorization") == (f"Bearer {token}" if token else None)
         assert timeout == 3
         if code != 200:
             raise urllib.error.HTTPError(request.full_url, code, "refused", {}, None)
-        return io.BytesIO(b'{"status": "running"}')
+        return io.BytesIO(b'{"status": "ok", "result": {"status": "running"}}')
 
     monkeypatch.setattr(service.urllib.request, "build_opener", lambda *args: SimpleNamespace(open=open_request))
     assert service._get_status(18834, token) == (
@@ -442,7 +444,7 @@ def test_status_shows_state_pid_last_exit_log_and_the_api(
     out = capsys.readouterr().out
     assert f"running, pid {fake.pid}" in out
     assert str(tmp_path / "runtime" / "logs" / "serve.log") in out
-    assert "http://127.0.0.1:9876/api/status: running, 3 task(s), 1 running; check problems: Claude login" in out
+    assert "http://127.0.0.1:9876/api/v1/system/status: running, 3 task(s), 1 running; check problems: Claude login" in out
 
     # Killed and not yet started again.
     fake.loaded = False
@@ -487,7 +489,7 @@ def test_status_reports_a_refused_operator_token_as_answering(
     capsys.readouterr()
 
     assert _looper(monkeypatch, host, "status", "--label", LABEL) == 0
-    assert (f"api        http://127.0.0.1:9876/api/status: unauthorized "
+    assert (f"api        http://127.0.0.1:9876/api/v1/system/status: unauthorized "
             f"(the operator token in {operator_auth.token_path(root)} was refused)") in capsys.readouterr().out
 
 

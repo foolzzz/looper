@@ -53,7 +53,9 @@ describe("session ended screen and sign out", () => {
     replyAborted = false;
     sse.events = 0;
     sse.done = 0;
-    status = Response.json({});
+    status = Response.json({ status: "ok", result: { status: "running", agents: {}, channels: {
+      web: { channel: "web", healthy: true, active_sse_streams: 0 },
+    }, tasks: { total: 0, running: 0, completed: 0 }, checks: [], can_sign_out: false } });
     resetSessionGuard();
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -74,7 +76,7 @@ describe("session ended screen and sign out", () => {
         return new Response(body, { status: 200 });
       }
       if (unauthorized && url.startsWith("/api/")) return new Response("{}", { status: 401 });
-      if (url === "/api/status") return status.clone();
+      if (url === "/api/v1/system/status") return status.clone();
       if (url === "/login") return new Response("{}", { status: 401 });
       if (url === "/api/overview") return Response.json(OVERVIEW);
       if (url === "/api/manager/session") return Response.json(MANAGER_SESSION);
@@ -192,7 +194,7 @@ describe("session ended screen and sign out", () => {
   });
 
   it.each([[true, 1], [false, 0]])("sign out with can_sign_out=%s shows %i control", async (can, count) => {
-    status = Response.json({ can_sign_out: can });
+    status = Response.json({ status: "ok", result: { can_sign_out: can } });
     await act(async () => root.render(<SignOut />));
     expect(container.querySelectorAll('form[method="post"][action="/logout"]')).toHaveLength(count);
     if (count) expect(container.querySelector("button")?.textContent).toBe("Sign out");

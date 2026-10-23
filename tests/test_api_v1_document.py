@@ -72,7 +72,7 @@ def test_the_document_is_shaped_as_openapi() -> None:
     doc = api_v1.document()
     assert doc["openapi"] == "3.1.0"
     assert doc["info"]["version"] == __version__ and doc["info"]["x-looper-api"] == 1
-    assert "/api routes are not described" in doc["info"]["description"]
+    assert "Remaining legacy /api routes are not described" in doc["info"]["description"]
     assert doc["servers"] == [{"url": "/api/v1"}] and doc["security"] == [{"bearer": []}]
     assert doc["components"]["securitySchemes"] == {"bearer": {"type": "http", "scheme": "bearer"}}
     schemas = doc["components"]["schemas"]
@@ -175,3 +175,21 @@ def test_find_matches_method_and_path_exactly() -> None:
 def test_the_document_is_json() -> None:
     text = json.dumps(api_v1.document())
     assert json.loads(text) == api_v1.document()
+
+
+def test_domain_registration_extends_the_document_without_extending_tools():
+    from looper.agents.v1_domains import MODULES
+
+    assert "status" in MODULES and len(MODULES) == len(set(MODULES))
+    op = api_v1.find("POST", "/api/v1/system/status")
+    assert op.operation_id == "system.status" and op.tool is None and not op.hand
+    assert api_v1.document()["paths"]["/system/status"]["post"]["operationId"] == op.operation_id
+
+
+def test_error_details_are_optional_and_typed():
+    error = api_v1.document()["components"]["schemas"]["OpError"]["properties"]["error"]
+    assert error["required"] == ["code", "message"]
+    details = error["properties"]["details"]
+    assert details["additionalProperties"] is False and "required" not in details
+    assert details["properties"] == {"manager_id": {"type": "string"}, "state": {"type": "string"},
+        "phase": {"type": ["string", "null"]}, "method": {"type": ["string", "null"]}}

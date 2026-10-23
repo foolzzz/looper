@@ -245,7 +245,7 @@ def render_report(runtime: str, results: list[CellResult], *, claude_version: st
     if binding is not None:
         matches = ", ".join(f"{m['by']}/{m['when']}: {m['count']}" for m in binding.get("matches") or []) or "none"
         by = ", ".join(f"{m['reason']}/{m['runtime']}/{m['tool']}: {m['count']}" for m in binding.get("by") or [])
-        lines += [f"- turn binding (GET /api/status): enforced {binding.get('enforced')}, mismatches "
+        lines += [f"- turn binding (POST /api/v1/system/status): enforced {binding.get('enforced')}, mismatches "
                   f"{binding.get('mismatches')}{f' ({by})' if by else ''}",
                   f"- matched calls (by how / when the tool_use was read): {matches}"]
     if log_counts is not None:
@@ -600,7 +600,7 @@ def main(argv: list[str] | None = None) -> int:
                             results.append(run_cell(api, database_url, cell, rep, work, clock_offset))
                         except Exception as exc:  # (an API error too: the cell failed, the run goes on)
                             results.append(CellResult(cell.key, rep, [f"the script failed: {exc}"]))
-                binding = api.get("/api/status").get("turn_binding")
+                binding = api.post("/api/v1/system/status", {})["result"].get("turn_binding")
         finally:
             subprocess.Popen = original_popen  # type: ignore
             for pid in _read_all_pids(work):

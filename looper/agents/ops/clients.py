@@ -153,7 +153,8 @@ class ClientOps:
                     client_id=principal.client_id, client_name=principal.client_name)
 
     async def call(self, principal: Principal, session: str, name: str, raw: Any, *,
-                   tool: Tool | None = None) -> dict[str, Any]:
+                   tool: Tool | None = None, validator: Callable[[Mapping[str, Any], Any], dict[str, Any]] = check_arguments,
+                   require_confirmation: bool = True) -> dict[str, Any]:
         """Run one operation for ``principal``; the protocol's answer (``ok``, ``needs_confirmation`` or ``error``)."""
         if not SESSION.fullmatch(session):
             return _error(ErrorCode.INVALID, "X-Looper-Session: 1–64 of letters, digits, '.', '_', ':' or '-'")
@@ -167,12 +168,13 @@ class ClientOps:
         risk = tool.risk
         arguments: dict[str, Any] = raw if isinstance(raw, dict) else {}
         try:
-            arguments = check_arguments(tool.schema, raw)
+            arguments = validator(tool.schema, raw)
             risk = tool.risk_of(arguments)
             call = Call(arguments, turn, self._platform)
             impact = await tool.escalate(call) if tool.escalate is not None else None
             if impact is not None:
                 risk = Risk.HIGH
+            if impact is not None and require_confirmation:
                 pending = self._ask(principal, session, tool, arguments, impact)
                 await self._record(turn, tool, arguments, risk, "needs_confirmation", confirmation_id=pending.id)
                 return {"status": "needs_confirmation", "confirmation_id": pending.id,
@@ -181,7 +183,10 @@ class ClientOps:
         except OpError as exc:
             await self._record(turn, tool, arguments, risk, "error", error_code=exc.code.value,
                                result={"message": str(exc)})
-            return _error(exc.code, str(exc))
+            answer = _error(exc.code, str(exc))
+            if exc.details is not None:
+                answer["error"]["details"] = exc.details
+            return answer
         except Exception as exc:
             logger.exception("an API client's call of %s failed", name)
             await self._record(turn, tool, arguments, risk, "error", error_code=ErrorCode.UNAVAILABLE.value,
@@ -211,7 +216,10 @@ class ClientOps:
         except OpError as exc:
             await self._record(turn, tool, arguments, Risk.HIGH, "error", error_code=exc.code.value,
                                result={"message": str(exc)}, confirmation_id=pending.id)
-            return _error(exc.code, str(exc))
+            answer = _error(exc.code, str(exc))
+            if exc.details is not None:
+                answer["error"]["details"] = exc.details
+            return answer
         except Exception as exc:
             logger.exception("an API client's confirmed call of %s failed", tool.name)
             await self._record(turn, tool, arguments, Risk.HIGH, "error", error_code=ErrorCode.UNAVAILABLE.value,

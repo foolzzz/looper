@@ -37,7 +37,8 @@ def _server(**parts: Any) -> Any:
     from looper.agents.tiers.task import TaskRouter
 
     supervisor = parts.pop("supervisor", SimpleNamespace(agent_status=lambda: {}))
-    return AgentHTTPServer(web_adapter=SimpleNamespace(healthcheck=lambda: {}), supervisor=supervisor,
+    return AgentHTTPServer(web_adapter=SimpleNamespace(healthcheck=lambda: {
+                               "channel": "web", "healthy": True, "active_sse_streams": 0}), supervisor=supervisor,
                            task_router=parts.pop("task_router", TaskRouter(runtime_root=Path(tempfile.mkdtemp()))),
                            **parts)
 
@@ -75,7 +76,11 @@ def test_every_task_is_counted_by_group_and_the_tasks_page_lists_a_group(monkeyp
         assert body["tasks"] == {"needs_you": 0, "in_progress": 7, "ready": 3, "attention": 2, "completed": 205,
                                  "cancelled": 1, "other": 1, "total": total, "other_statuses": {"archived": 1}}
         # The CLI's status line reads the same counts.
-        status, body = await _get(_server(), "/api/status")
+        from looper.agents import api_v1
+
+        writer = _Writer()
+        await _server()._handle_v1("POST", "/api/v1/system/status", {}, {}, b"{}", writer, api_v1.OPERATOR)
+        body = json.loads(writer.data.partition(b"\r\n\r\n")[2])["result"]
         assert body["tasks"] == {"total": total, "running": 7, "completed": 205}
 
         for group, statuses in (("attention", {"failed", "stopped"}), ("in_progress",

@@ -745,12 +745,29 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
     - **阶段 2**（✅ 已交付，looper #NNN）：每个管家可以有自己的飞书 / Telegram 机器人：`channel_configs.manager_id`，一种渠道多行（`channel-<type>-<n>`），凭据只在控制台录入，一个机器人一个运行器，添加时不调用 `getMe`；投递按渠道 id 而不是类型（任务结束通知、等待与并发通知、关卡消息），定时任务的通知仍走内置的三行；新机器人的线程 id 为 `<channel_id>:<chat_id>`（RFC 第 9.1 节）。
     - **阶段 3**（待做）：按聊天绑定：`manager_chat_bindings(channel_id, chat_id, manager_id)`，未绑定聊天归机器人所属的管家，机器人可设「只接已绑定的聊天」（未绑定的只记录、不回复，Settings 一键绑定），绑定立即生效，`/stop` 停这个聊天在所有管家里的轮；Settings 的 Managers、Channels 页配置绑定（RFC 第 9.2 节）。
     - 阶段 1 之后的待办：不再支持降级到阶段 2 之前的版本后，删掉 `task_user_gate_posts` 按类型的唯一约束；闲置的场景管家自动停进程；管家和模板进配置导出、导入；定时任务属于一个场景管家并能用它的模板；按管家分插件和 skill 的安装；任务列表按管家筛选。
-22. **一个 OpenAPI 接口、`loopercli` 与 `looper-skill`**（2026-10-22 维护者定方向，设计见[RFC](../architecture/rfcs/looper-client-skill.zh-CN.md)，阶段 1、2a 已交付）：别的 agent 会话经 skill 把讨论好的活交给 Looper 并跟进。只在本机、客户端令牌全部权限（Settings 里建、吊销，只存哈希）、写操作两步确认（按客户端和会话）；和 Looper 的一切交互走 `/api/v1/` 的 OpenAPI（从 ops 工具的 schema 生成），新程序 `loopercli` 是它的纯客户端（子命令运行时生成，几个手写别名），主路径是 `loopercli chat` 和管家对话。分三个阶段，阶段 2 按独立交付的子阶段拆 PR：
+22. **一个 OpenAPI 接口、`loopercli` 与 `looper-skill`**（2026-10-22 维护者定方向，设计见[RFC](../architecture/rfcs/looper-client-skill.zh-CN.md)，阶段 1、2a 已交付）：别的 agent 会话经 skill 把讨论好的活交给 Looper 并跟进。只在本机、客户端令牌全部权限（Settings 里建、吊销，只存哈希）、客户端 high 两步确认（按客户端和会话），操作者 high 单次执行并保留控制台既有弹窗；和 Looper 的一切交互走 `/api/v1/` 的 OpenAPI（从 ops 工具的 schema 生成），新程序 `loopercli` 是它的纯客户端（子命令运行时生成，几个手写别名），主路径是 `loopercli chat` 和管家对话。分三个阶段，阶段 2 按独立交付的子阶段拆 PR：
     - **阶段 1**（✅ 已交付，looper #NNN）：客户端令牌、v1 文档与操作（客户端目录、聊天、确认）、管家的 loopercli 渠道行与对话回报、`loopercli`、`looper-skill` 和 Claude Code 插件、两个管家对话评测（sonnet）；对话里回报任务的接受和结束，关卡和进度用 `loopercli wait` 跟进。
     - **阶段 2a**（✅ 已交付）：只认操作者的 `auth.set_password` / `auth.clear_password`、`system.check` 和配置导出、导入预览、应用进入同一 v1 文档，结果类型化；`loopercli` 的对应命令；客户端应用配置需两步确认；配置操作与旧路由、工具共用实现。`looper config export/import` 已删除，替代命令需要运行服务；`doctor` 和密码重设留在 `looper` 作离线救援。
     - **阶段 2 其余部分**（待做）：其余 HTTP 路由成为 v1 操作并全部类型化；只认操作者的客户端令牌管理；HTTP 路由与 ops 工具其余重复实现合并（建任务抽共享核心、两边各留参数适配，RFC 第 5.4 节）；控制台改用 v1。
     - **阶段 3**（待做）：可选的任务附件（上传、随任务存储、Planner 和 Worker 当文件读）。
     - 阶段 1 之后的待办：控制台聊天列表标出客户端的线程；没有 shell 的客户端需要时在同一 API 上包 MCP。
+
+| 领域 | 阶段 2 状态 |
+|---|---|
+| 状态与 transport | 已验证：HTTP/文档 112 项、web 26 项；隔离 serve 与 1280/390 浏览器通过，完整套件留给 CI |
+| 任务 | 待迁移；共享任务核心 [#429](https://github.com/foolzzz/looper/pull/429) 单独跟踪 |
+| 聊天 | 待迁移 |
+| 项目与知识 | 待迁移 |
+| 能力目录 | 待迁移 |
+| Agent 与 Profile | 待迁移 |
+| 管家与模板 | 待迁移 |
+| 渠道 | 待迁移 |
+| 文件与 Git | 待迁移 |
+| 设置 | 待迁移 |
+| 运行记录与活动流 | 待迁移 |
+| 客户端凭据 | 待迁移 |
+
+阶段 2a 保持已交付；共享任务核心独立跟踪，阶段 3 仍待做。整体完成由最终审计确认。
 
 ### 5.1 核心缺陷（优先修，穿插在阶段之间）
 

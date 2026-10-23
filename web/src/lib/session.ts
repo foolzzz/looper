@@ -46,6 +46,8 @@ function subscribe(notify: () => void): () => void {
   return () => listeners.delete(notify);
 }
 
+export { subscribe as subscribeSessionEnded };
+
 export function useSessionEnded(): boolean {
   return useSyncExternalStore(subscribe, () => ended, () => false);
 }

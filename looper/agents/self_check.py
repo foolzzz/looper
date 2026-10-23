@@ -3,7 +3,7 @@
 ``looper doctor`` prints these checks and exits 1 when one failed. ``looper
 serve`` runs the same checks first: an unreachable PostgreSQL stops it; a
 missing Claude Code CLI or login is logged as a warning, the dashboard still
-starts, and ``GET /api/status`` reports every result under ``checks``. The
+starts, and ``POST /api/v1/system/status`` reports every result under ``checks``. The
 ``pg_dump`` check matters only when the schema is about to change: serve then
 backs the database up first and does not start without a way to
 (``db_backup``); doctor reports it as a warning otherwise.
@@ -199,7 +199,7 @@ def check_codex_login(profiles: int | None, problem: dict[str, str] | None, prob
 
 
 async def codex_login_check() -> Check:
-    """``check_codex_login`` with the server's pool, read now (``/api/status`` asks on every poll; the probe's
+    """``check_codex_login`` with the server's pool, read now (``/api/v1/system/status`` asks on every poll; the probe's
     answer is reused for a while)."""
     from ..db import profile_registry
     from .runtimes import codex_login
@@ -234,7 +234,7 @@ def check_grok_login(profiles: int | None, problem: dict[str, str] | None,
 
 
 async def grok_login_check() -> Check:
-    """``check_grok_login`` with the server's pool, read now (``/api/status`` asks on every poll)."""
+    """``check_grok_login`` with the server's pool, read now (``/api/v1/system/status`` asks on every poll)."""
     from ..db import profile_registry
     from .runtimes import grok_login
 
@@ -247,7 +247,7 @@ async def grok_login_check() -> Check:
     return await asyncio.to_thread(check_grok_login, profiles, problem, grok_login.cached_probe)
 
 
-# The checks of the runtimes' own logins, by id: what reads each now (``/api/status`` reads them on every poll).
+# The checks of the runtimes' own logins, by id: what reads each now (``/api/v1/system/status`` reads them on every poll).
 LOGIN_CHECKS = {"codex_login": codex_login_check, "grok_login": grok_login_check}
 
 
