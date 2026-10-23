@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.56] - 2026-10-23
+
+### Changed
+
+- **One implementation per task operation.** The console and the Manager now share one core for creating a task, the task list and detail, stop, cancel, restart, start over and supplements. The console checks the task's state first and answers 409 (404 for an unknown task, 400 for one without a directory) instead of publishing silently, and the dashboard shows the error of a failed Stop or Cancel. No model-visible change is intended. ([#429](https://github.com/foolzzz/looper/pull/429))
+
 ## [2.13.55] - 2026-10-23
 
 ### Fixed
