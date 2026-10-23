@@ -327,6 +327,10 @@ def _ok_blocks(answer: Mapping[str, Any]) -> list[str]:
         for key, value in result.items():
             if _is_scalar(value):
                 continue
+            if key == "plan" and "import_id" in result:
+                # Keep every import change, missing credential and migration note visible.
+                lines.append(f"{key}: " + json.dumps(value, ensure_ascii=False, indent=2))
+                continue
             table = _table(value) if isinstance(value, list) and value and all(
                 isinstance(item, dict) for item in value) else []
             if table:
@@ -521,20 +525,23 @@ def _config_arguments(parser: Parser) -> None:
     export.add_argument("--include-secrets", action="store_true")
     import_ = commands.add_parser("import")
     import_.add_argument("file", nargs="?", help="configuration JSON file ('-' reads stdin); preview only")
-    import_.add_argument("--apply", metavar="IMPORT_ID", help="request confirmation to apply a staged import")
+    actions = import_.add_mutually_exclusive_group()
+    actions.add_argument("--apply", metavar="IMPORT_ID", help="request confirmation to apply a staged import")
+    actions.add_argument("--cancel", metavar="IMPORT_ID", help="cancel a staged import")
 
 
 def _config(args: argparse.Namespace, ctx: Context) -> int:
     if args.config_command == "export":
         name = "config.export"
         body = {"include_projects": args.include_projects, "include_secrets": args.include_secrets}
-    elif args.apply:
+    elif args.apply or args.cancel:
         if args.file:
-            raise UsageError("use either FILE to preview or --apply IMPORT_ID")
-        name, body = "config.import_apply", {"import_id": args.apply}
+            raise UsageError("use either FILE to preview, --apply IMPORT_ID or --cancel IMPORT_ID")
+        name = "config.import_apply" if args.apply else "config.import_cancel"
+        body = {"import_id": args.apply or args.cancel}
     else:
         if not args.file:
-            raise UsageError("config import needs FILE to preview or --apply IMPORT_ID")
+            raise UsageError("config import needs FILE to preview, --apply IMPORT_ID or --cancel IMPORT_ID")
         try:
             document = json.loads(_read_text(args.file, "config import"))
         except ValueError:
@@ -553,10 +560,20 @@ def _config(args: argparse.Namespace, ctx: Context) -> int:
     destination = Path(args.file)
     # Exports may contain secrets. Exclusive creation avoids overwriting files or following symlinks.
     try:
-        with os.fdopen(os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as handle:
-            handle.write(raw)
+        fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except OSError as exc:
         raise UsageError(f"cannot write the export file: {exc.strerror}") from None
+    try:
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+        except OSError:
+            os.close(fd)
+            raise
+        with handle:
+            handle.write(raw)
+    except (OSError, UnicodeError) as exc:
+        destination.unlink(missing_ok=True)
+        raise UsageError(f"cannot write the export file: {getattr(exc, 'strerror', None) or exc}") from None
     return finish(status, {"status": "ok", "result": {"path": str(destination)}}, ctx.as_json, ctx.session)
 
 

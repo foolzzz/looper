@@ -1,5 +1,6 @@
 """Operator credentials are transient; portable configuration travels through OpenAPI."""
 
+import errno
 import io
 import json
 import sys
@@ -8,7 +9,7 @@ import pytest
 
 from looper import loopercli
 from looper.agents import api_v1
-from tests.test_loopercli import Server, _send
+from tests.test_loopercli import FakeLooper, Server, _send, write_client_file
 
 
 @pytest.mark.parametrize("source", ["stdin", "file", "unsafe", "symlink"])
@@ -102,5 +103,120 @@ def test_doctor_and_config_commands_use_openapi(tmp_path, monkeypatch, capsys):
         assert server.requests[-1][3] == {"document": document}
         assert loopercli.main([*base, "config", "import", "--apply", "cfgimp-test"]) == 0
         assert server.requests[-1][3] == {"import_id": "cfgimp-test"}
+        assert loopercli.main([*base, "config", "import", "--cancel", "cfgimp-test"]) == 0
+        assert server.requests[-1][1] == "/api/v1/config/import_cancel"
+        assert server.requests[-1][3] == {"import_id": "cfgimp-test"}
     finally:
         server.close()
+
+
+@pytest.fixture
+def config_cli(tmp_path):
+    server = FakeLooper()
+    client = write_client_file(tmp_path / "client.json", server.url)
+    try:
+        yield server, ["--client-file", str(client)]
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize("arguments", [
+    ["config.json", "--apply", "cfgimp-test"],
+    ["config.json", "--cancel", "cfgimp-test"],
+    ["--apply", "cfgimp-test", "--cancel", "cfgimp-test"],
+])
+def test_config_import_actions_are_exclusive(config_cli, arguments):
+    server, base = config_cli
+    assert loopercli.main([*base, "config", "import", *arguments]) == 2
+    assert not server.requests
+
+
+@pytest.mark.parametrize("action", ["preview", "apply", "confirm"])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_config_import_prints_the_complete_plan(config_cli, tmp_path, capsys, action, as_json):
+    server, base = config_cli
+    plan = {"applied": action != "preview", "counts": {"projects": {"added": 8}},
+            "changes": [{"section": "projects", "key": f"project-{index}", "action": "added"}
+                        for index in range(8)],
+            "need_secret": [{"section": "accounts", "key": "provider", "names": ["provider-token"]}],
+            "notes": ["legacy configuration migrated"]}
+    answer = {"status": "ok", "result": {"import_id": "cfgimp-test", "plan": plan}}
+    server.answers.append((200, answer))
+    source = tmp_path / "config.json"
+    source.write_text("{}")
+    arguments = [str(source)] if action == "preview" else ["--apply", "cfgimp-test"]
+    command = ["confirm", "cnf-test"] if action == "confirm" else ["config", "import", *arguments]
+    assert loopercli.main([*base, *(["--json"] if as_json else []), *command]) == 0
+    output = capsys.readouterr().out
+    if as_json:
+        assert json.loads(output) == answer
+    else:
+        assert "import_id: cfgimp-test" in output
+        assert json.loads(output.split("plan: ", 1)[1]) == plan
+
+
+def test_config_export_uses_utf8_under_a_non_utf8_default(config_cli, tmp_path, monkeypatch):
+    server, base = config_cli
+    document = {"format": "looper-config/v3", "projects": [{"name": "配置项目"}]}
+    server.answers.append((200, {"status": "ok", "result": {"document": document}}))
+    fdopen = loopercli.os.fdopen
+    def non_utf8_default(fd, mode, **kwargs):
+        kwargs.setdefault("encoding", "ascii")
+        return fdopen(fd, mode, **kwargs)
+    monkeypatch.setattr(loopercli.os, "fdopen", non_utf8_default)
+    destination = tmp_path / "export.json"
+    assert loopercli.main([*base, "config", "export", str(destination)]) == 0
+    assert json.loads(destination.read_text(encoding="utf-8")) == document
+    assert destination.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("failure", ["open", "write", "close", "encoding"])
+def test_config_export_removes_a_partial_file_on_failure(config_cli, tmp_path, monkeypatch, capsys, failure):
+    server, base = config_cli
+    server.answers.append((200, {"status": "ok", "result": {"document": {"format": "looper-config/v3"}}}))
+    fdopen = loopercli.os.fdopen
+    descriptors = []
+    class FailingWriter:
+        def __init__(self, handle):
+            self.handle = handle
+        def __enter__(self):
+            return self
+        def write(self, raw):
+            self.handle.write(raw[:5])
+            if failure == "encoding":
+                "配置".encode("ascii")
+            if failure == "write":
+                raise OSError(errno.ENOSPC, "disk full")
+        def __exit__(self, *args):
+            self.handle.close()
+            if failure == "close":
+                raise OSError(errno.ENOSPC, "flush failed")
+    def failing_fdopen(fd, *args, **kwargs):
+        if failure == "open":
+            descriptors.append(fd)
+            raise OSError(errno.EIO, "cannot initialize writer")
+        return FailingWriter(fdopen(fd, *args, **kwargs))
+    monkeypatch.setattr(loopercli.os, "fdopen", failing_fdopen)
+    destination = tmp_path / "export.json"
+    assert loopercli.main([*base, "config", "export", str(destination)]) == 2
+    assert "cannot write the export file" in capsys.readouterr().err
+    assert not destination.exists()
+    for fd in descriptors:
+        with pytest.raises(OSError) as error:
+            loopercli.os.fstat(fd)
+        assert error.value.errno == errno.EBADF
+
+
+@pytest.mark.parametrize("symlink", [False, True])
+def test_config_export_preserves_an_existing_destination(config_cli, tmp_path, capsys, symlink):
+    server, base = config_cli
+    server.answers.append((200, {"status": "ok", "result": {"document": {}}}))
+    original = tmp_path / "original.json"
+    original.write_bytes(b"keep this file")
+    destination = tmp_path / "export.json" if symlink else original
+    if symlink:
+        destination.symlink_to(original)
+    assert loopercli.main([*base, "config", "export", str(destination)]) == 2
+    assert "cannot write the export file" in capsys.readouterr().err
+    assert original.read_bytes() == b"keep this file"
+    assert destination.exists() and destination.is_symlink() == symlink
