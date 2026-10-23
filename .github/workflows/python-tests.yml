@@ -17,7 +17,8 @@ concurrency:
 jobs:
   agent-system:
     name: Agent system tests
-    runs-on: ubuntu-latest
+    # Keep the runner's PostgreSQL 16 client package available alongside the service.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
       postgres:
