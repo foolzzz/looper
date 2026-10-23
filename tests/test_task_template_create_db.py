@@ -131,7 +131,7 @@ def test_the_first_call_after_a_template_is_added_is_checked_by_the_new_schema(
         (done,) = await chat.say("确认", _create())
         assert done["status"] == "ok", done
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_refusals_write_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

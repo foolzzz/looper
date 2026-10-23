@@ -515,7 +515,7 @@ def test_a_manager_enabled_at_the_limit_is_started_when_a_place_frees(tmp_path: 
             assert r.fleet.get(late) is not None and r.fleet.get("manager-m0") is None
             assert not r.fleet._retries
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_a_newer_apply_supersedes_the_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
