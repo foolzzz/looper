@@ -261,25 +261,58 @@ def _listed_view(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _read_gate_cursor(query: Mapping[str, str], name: str) -> tuple[datetime, str] | None:
+    if name not in query:
+        return None
+    try:
+        value = json.loads(query[name])
+        if not isinstance(value, list) or len(value) != 2 or not isinstance(value[1], str) or not value[1]:
+            raise ValueError
+        timestamp = datetime.fromisoformat(value[0])
+        if timestamp.tzinfo is None:
+            raise ValueError
+        return timestamp, value[1]
+    except (TypeError, ValueError):
+        raise RequestError(HTTP_400, f"{name} must be a gate list cursor") from None
+
+
+def _gate_order(row: Mapping[str, Any]) -> tuple[datetime, str]:
+    return row["opened_at"] or row["created_at"], row["step_id"]
+
+
 async def list_gates(query: Mapping[str, str]) -> dict[str, Any]:
     """The user gates of all tasks (``GET /api/gates``): ``state`` ``open`` (default: waiting, in a task not completed
     or cancelled), ``closed`` or ``all``; with ``state=open``, ``waiting_on`` ``user`` or ``planner``; ``project_id``;
-    ``limit`` and ``offset``. Newest opened first. ``counts`` apply ``project_id`` only."""
+    ``limit`` and ``offset``, or ``cursor`` after a previous page; ``through`` bounds a refresh to its loaded prefix.
+    Newest opened first. ``counts`` apply ``project_id`` only."""
     state, waiting_on, project_id, limit, offset = _list_query(query)
-    open_rows = [_listed_view(row) for row in await db_user_gates.list_gates(state="open", project_id=project_id)]
+    cursor, through = _read_gate_cursor(query, "cursor"), _read_gate_cursor(query, "through")
+    if cursor is not None and offset:
+        raise RequestError(HTTP_400, "cursor and offset cannot be combined")
+    open_rows = await db_user_gates.list_gates(state="open", project_id=project_id)
+    open_views = [_listed_view(row) for row in open_rows]
     totals = await db_user_gates.count_gates(project_id=project_id)
     counts = {"open": len(open_rows),
-              "waiting_user": sum(1 for r in open_rows if r["gate"]["waiting_on"] == "user"),
-              "waiting_planner": sum(1 for r in open_rows if r["gate"]["waiting_on"] == "planner"),
+              "waiting_user": sum(1 for r in open_views if r["gate"]["waiting_on"] == "user"),
+              "waiting_planner": sum(1 for r in open_views if r["gate"]["waiting_on"] == "planner"),
               **totals}
     if state == "open":
-        shown = [r for r in open_rows if waiting_on in (None, r["gate"]["waiting_on"])]
-        total, rows = len(shown), shown[offset:offset + limit]
+        # Compare keys in PostgreSQL so step-id ties use the same collation as the list's ORDER BY.
+        shown = open_rows
+        if cursor is not None or through is not None:
+            shown = await db_user_gates.list_gates(state=state, project_id=project_id, cursor=cursor, through=through)
+        shown = [r for r in shown if waiting_on is None or _listed_view(r)["gate"]["waiting_on"] == waiting_on]
+        total = counts["open"] if waiting_on is None else counts[f"waiting_{waiting_on}"]
+        rows = shown[offset:offset + limit + 1]
     else:
-        rows = [_listed_view(row) for row in await db_user_gates.list_gates(
-            state=state, project_id=project_id, limit=limit, offset=offset)]
+        rows = await db_user_gates.list_gates(
+            state=state, project_id=project_id, limit=limit + 1, offset=offset, cursor=cursor, through=through)
         total = totals[state]
-    return {"gates": rows, "total": total, "counts": counts, "limit": limit, "offset": offset}
+    has_more, rows = len(rows) > limit, rows[:limit]
+    last = _gate_order(rows[-1]) if rows else None
+    next_cursor = json.dumps([last[0].isoformat(), last[1]]) if last else None
+    return {"gates": [_listed_view(row) for row in rows], "total": total, "counts": counts, "limit": limit,
+            "offset": offset, "next_cursor": next_cursor, "has_more": has_more}
 
 
 def _message_view(row: Mapping[str, Any]) -> dict[str, Any]:

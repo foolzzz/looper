@@ -21,6 +21,8 @@ const api = vi.hoisted(() => ({
   stopChatReply: vi.fn(),
   fetchChatTargets: vi.fn(),
   fetchChatSessions: vi.fn(),
+  fetchChatSession: vi.fn(),
+  fetchManagerSession: vi.fn(),
   watchChat: vi.fn((_sid: string, _cb: (m: unknown) => void) => () => {}),
 }));
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -99,6 +101,10 @@ describe("chat composer flow", () => {
     api.stopChatReply.mockResolvedValue({ state: "stopping", method: "interrupt" });
     api.fetchChatTargets.mockResolvedValue([MANAGER, PLANNER]);
     api.fetchChatSessions.mockResolvedValue([]);
+    api.fetchChatSession.mockResolvedValue(null);
+    api.fetchManagerSession.mockResolvedValue({
+      session: null, selected: null, effective: { profile: null, source: "system" }, choices: [], problem: null,
+    });
     api.watchChat.mockImplementation(() => () => {});
     container = document.createElement("div");
     document.body.append(container);
@@ -121,6 +127,26 @@ describe("chat composer flow", () => {
     expect(api.sendChat).toHaveBeenCalledTimes(2);
     expect(api.sendChat.mock.calls[1][0]).toBe("a\n\nb");
     expect(sessionStorage.getItem(`looper-chat-staged-${SID}`)).toBeNull();
+  });
+
+  it.each(["/new", "/NEW"])("refreshes the displayed session profile after %s", async (command) => {
+    await mount();
+    expect(container.textContent).toContain("(Settings)");
+    await say(command);
+    api.fetchManagerSession.mockResolvedValue({
+      session: null, selected: null, effective: { profile: null, source: "session" }, choices: [], problem: null,
+    });
+    await fire("answer.final", { text: "Session reset.", outcome: "answered" });
+    expect(container.textContent).toContain("(this session)");
+  });
+
+  it.each(["/new", "/NEW"])("keeps a failed %s as a command reply instead of a retry draft", async (command) => {
+    await mount();
+    api.sendChat.mockRejectedValueOnce(new Error("session reset failed"));
+    await say(command);
+    expect(input().value).toBe("");
+    expect(container.textContent).toContain("session reset failed");
+    expect(container.textContent).toContain(command);
   });
 
   it.each(["failed", "stopped", "confirm"])("returns the queue to the draft after a %s turn", async (outcome) => {

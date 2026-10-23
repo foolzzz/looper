@@ -15,7 +15,7 @@ import { cn } from "@/lib/utils";
 
 /** How often the list refreshes. */
 const REFRESH_MS = 10_000;
-/** Rows read first and added by each "Show more"; a refresh re-reads the loaded rows in requests of MAX_ROWS. */
+/** Rows read first and added by each "Show more"; refreshes read through the last loaded gate. */
 const PAGE = 50;
 const MAX_ROWS = 200;
 
@@ -118,7 +118,7 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
   const [answering, setAnswering] = useState("");
   const latest = useRef(0);
   const loading = useRef(false);
-  const shown = useRef(0);
+  const cursor = useRef<string | null>(null);
 
   const read = useCallback(
     (mode: "refresh" | "more", force: boolean) => {
@@ -126,17 +126,17 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
       const seq = ++latest.current;
       loading.current = true;
       const more = mode === "more";
-      const request = (limit: number, offset: number) => fetchGates({
+      const request = (limit: number, after: string | null, through?: string) => fetchGates({
         state, ...(waiting ? { waitingOn: "user" as const } : {}), ...(project ? { projectId: project } : {}),
-        limit, offset,
+        limit, ...(after ? { cursor: after } : {}), ...(through ? { through } : {}),
       });
-      // A refresh re-reads every loaded row, page by page, so the rows past the first page and their drafts stay.
+      // Keysets survive a gate closing between pages. The old boundary keeps new gates from displacing drafts.
       const load = async (): Promise<GateList> => {
-        if (more) return request(PAGE, shown.current);
-        const want = Math.max(PAGE, shown.current);
-        let list = await request(Math.min(MAX_ROWS, want), 0);
-        while (list.gates.length < want && list.gates.length < list.total) {
-          const next = await request(Math.min(MAX_ROWS, want - list.gates.length), list.gates.length);
+        if (more) return request(PAGE, cursor.current);
+        const through = cursor.current ?? undefined;
+        let list = await request(through ? MAX_ROWS : PAGE, null, through);
+        while (through && list.has_more && list.next_cursor) {
+          const next = await request(MAX_ROWS, list.next_cursor, through);
           if (next.gates.length === 0) break;
           list = { ...next, gates: [...list.gates, ...next.gates] };
         }
@@ -147,7 +147,7 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
           if (seq !== latest.current) return;
           loading.current = false;
           setRows((current) => (more ? [...current, ...list.gates] : list.gates));
-          shown.current = more ? shown.current + list.gates.length : list.gates.length;
+          cursor.current = list.next_cursor;
           setData({ total: list.total, counts: list.counts });
           setError("");
         })
@@ -162,7 +162,7 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
 
   useEffect(() => {
     // A new filter starts over: the rows of the old one are not shown.
-    shown.current = 0;
+    cursor.current = null;
     setRows([]);
     setData(null);
     setAnswering("");

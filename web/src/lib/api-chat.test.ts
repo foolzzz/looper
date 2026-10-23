@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchChatTurn, stopChatReply } from "@/lib/api";
+import { fetchChatTurn, sessionProfileLabel, stopChatReply } from "@/lib/api";
 
 function stubFetch(status: number, body: unknown) {
   const fn = vi.fn(async () => new Response(JSON.stringify(body), { status }));
@@ -8,6 +8,15 @@ function stubFetch(status: number, body: unknown) {
 }
 
 afterEach(() => vi.unstubAllGlobals());
+
+it.each([
+  ["high", "Fast — codex · OpenAI / gpt · high"],
+  [null, "Fast — codex · OpenAI / gpt"],
+])("shows the session profile with effort %s", (effort, label) => {
+  expect(sessionProfileLabel({
+    profile_id: "fast", name: "Fast", runtime: "codex", provider: "OpenAI", model: "gpt", effort,
+  })).toBe(label);
+});
 
 describe("chat stop and turn", () => {
   it("stopChatReply returns the state of a 409", async () => {
