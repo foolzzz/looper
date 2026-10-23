@@ -397,19 +397,31 @@ with them. Every `--jobs` command below also takes `--case-budget-usd` (see
 Running cases in parallel).
 
 Per pull request, on the tasks and dialogs the change touches plus any new
-ones, with `--reps 2` and haiku (`--tasks a,b` or a task set, `--dialogs a,b`):
+ones, with `--reps 2` and sonnet (`--model sonnet`, `--tasks a,b` or a task
+set, `--dialogs a,b`), compared with the sonnet baselines
+(`baselines/real-sonnet.json` and `baselines/dialogs-real-sonnet.json`). If a
+sonnet baseline is missing, report the gap and refresh it at the next release
+tier run.
+
+The PR commands are:
 
 - a change to model-visible content (a recommended prompt, a contract, the
   injection order, the injected context) runs those tasks:
-  `run --mode real --reps 2 --tasks <ids> --jobs 4 --case-budget-usd 1`;
+  `run --mode real --model sonnet --reps 2 --tasks <ids> --jobs 4
+  --max-budget-usd 1.0 --case-budget-usd 2.0 --total-cap-usd 20`;
 - a change to the Planner's prompt, its contracts, the plan contract or the
   context the Planner receives also runs them on opus, `run --mode real
-  --model opus --reps 2 --tasks <ids> --jobs 4`, compared with
+  --model opus --reps 1 --tasks <ids> --jobs 4 --max-budget-usd 3.0
+  --case-budget-usd 6.0 --total-cap-usd 40`, compared with
   `baselines/real-opus.json`;
 - a change to the Manager's prompt or its tools runs `dialogs --mode real
-  --reps 2 --dialogs <ids> --jobs 4`, and also, with `--manager-model opus
-  --manager-effort xhigh`, the same dialogs on the opus Manager.
+  --model sonnet --reps 2 --dialogs <ids> --jobs 4 --max-budget-usd 1.0
+  --case-budget-usd 1.0 --total-cap-usd 8`, and also runs the same dialogs on
+  the opus xhigh Manager: `dialogs --mode real --model sonnet --reps 1
+  --dialogs <ids> --jobs 4 --manager-model opus --manager-effort xhigh
+  --max-budget-usd 3.0 --case-budget-usd 3.0 --total-cap-usd 12`.
 
+Run a second opus repetition only if the first fails; keep both results.
 Do not rerun after a change the model cannot see.
 
 Once before a release, on the release candidate (`main` after every merge):
