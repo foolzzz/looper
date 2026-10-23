@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "looper"
-version = "2.13.41"
+version = "2.13.43"
 description = "A self-hosted three-tier multi-agent system that runs Claude Code on your tasks, with a real-time web dashboard."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -48,7 +48,10 @@ include = ["looper*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["installed: requires an installed runtime CLI or browser; run by the nightly workflow"]
+markers = [
+    "installed: requires an installed runtime CLI or browser; run by the nightly workflow",
+    "provenance: clones an old revision to prove where a pinned fixture came from (slow; select with -m provenance)",
+]
 
 [tool.coverage.run]
 source = ["looper"]

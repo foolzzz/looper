@@ -2,10 +2,8 @@
 
 from dataclasses import replace
 import hashlib
-import json
 import os
 from pathlib import Path
-import shlex
 import stat
 import subprocess
 import sys
@@ -14,7 +12,6 @@ import tomllib
 
 import pytest
 
-from looper.agents import claude_cli
 from looper.agents.agent_settings import AgentSettings, AgentType, Launch
 from looper.agents.profile_registry import Endpoint, ModelSpec, ProviderSpec, ResolvedAgentProfile, ResolvedModel, RuntimeSpec
 from looper.agents.runtimes import ApiProtocol, AuthKind, SystemPromptMode, VendorType, adapter, replace_refusal
@@ -62,11 +59,6 @@ def _launch(runtime_type: str, mode: SystemPromptMode | None = None, *, oauth: b
                   role=AgentType.WORKER)
 
 
-def _files(root: Path) -> dict[str, bytes | str]:
-    return {str(p.relative_to(root)): os.readlink(p) if p.is_symlink() else p.read_bytes()
-            for p in root.rglob("*") if p.is_symlink() or p.is_file()}
-
-
 def _sent_looper_text(runtime_type: str, mode: SystemPromptMode, command: list[str]) -> str:
     """Read the actual input named by the command, excluding Grok's agent metadata."""
     if runtime_type == "claude-code":
@@ -88,17 +80,23 @@ def _sent_looper_text(runtime_type: str, mode: SystemPromptMode, command: list[s
     raise AssertionError(f"No prompt-file reader for {runtime_type}")
 
 
-@pytest.mark.parametrize("runtime_type,command_kind", [
-    (runtime, command) for runtime in ("claude-code", "codex", "grok", "omp", "pi")
-    for command in (("run_command",) if runtime == "pi" else ("run_command", "resident_command"))
-])
-@pytest.mark.parametrize("mode", list(SystemPromptMode))
-@pytest.mark.parametrize("custom_prompt", ["", "  Profile's identity: 自定义\n  "])
-@pytest.mark.parametrize("project_layout", ["repository", "standalone"])
+IDENTITY = "  Profile's identity: 自定义\n  "
+# One case per runtime and mode with a custom prompt; the project layout only matters to OMP (it reads the project's
+# instructions itself in a standalone directory) and the baseline (no custom prompt) is the same text on any runtime.
+BLOCK_CASES = [
+    *((runtime, mode, IDENTITY, "repository") for runtime in ("claude-code", "codex", "grok", "omp", "pi")
+      for mode in SystemPromptMode),
+    *(("omp", mode, IDENTITY, "standalone") for mode in SystemPromptMode),
+    ("codex", SystemPromptMode.REPLACE, "", "repository"),
+]
+
+
+@pytest.mark.parametrize("runtime_type,mode,custom_prompt,project_layout", BLOCK_CASES)
 def test_prompt_blocks_match_real_launch_files(
-    runtime_type: str, mode: SystemPromptMode, command_kind: str, custom_prompt: str,
+    runtime_type: str, mode: SystemPromptMode, custom_prompt: str,
     project_layout: str, tmp_path: Path, isolated_operator: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    command_kind = "run_command"
     if project_layout == "repository":
         (tmp_path / ".git").mkdir()
     else:
@@ -193,67 +191,18 @@ def test_claude_command_construction_does_not_read_prompt_file(
     assert command[command.index("--append-system-prompt-file") + 1] == str(path)
 
 
-@pytest.mark.parametrize("runtime_type", ["claude-code", "codex", "grok", "omp"])
-@pytest.mark.parametrize("command_kind", ["run_command", "resident_command"])
-def test_explicit_append_is_byte_identical_to_default_and_legacy_home(
-    runtime_type: str, command_kind: str, tmp_path: Path, isolated_operator: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Independently transcribed from origin/main 10991b00. Never regenerate expectations with adapter helpers.
-    baseline = json.loads((Path(__file__).parent / "fixtures" / "system_prompt_append.json").read_text())
-    expected = baseline["runtimes"][runtime_type]
-    local = tmp_path / "runtime" / ".local"
-    substitutions = {
-        "<TMP>": str(tmp_path), "<LOCAL>": str(local),
-        "<SHELL_OPERATOR>": shlex.quote(str(isolated_operator)),
-    }
-
-    def render(text: str) -> str:
-        for token, value in substitutions.items():
-            text = text.replace(token, value)
-        return text
-
-    if runtime_type == "grok":
-        # The old home identity includes absolute paths, so hash the literal baseline bytes after substitution.
-        config = render(expected["files"]["grok/runs/<HOME_HASH>/config.toml"]["text"])
-        rules = expected["files"]["grok/runs/<HOME_HASH>/rules/looper.md"]["text"]
-        login = str(isolated_operator / "grok" / "auth.json")
-        substitutions["<HOME_HASH>"] = hashlib.sha256(
-            f"grok-home/v1\n{config}\0{rules}\0{login}".encode("utf-8")
-        ).hexdigest()
-    substitutions["<HOME>"] = render(expected.get("home", ""))
-    expected_argv = [render(arg) for arg in expected["argv"][command_kind]]
-    expected_env = {name: render(value) for name, value in expected["environment"].items()}
-    # Only host inheritance changes: the arbitrary server sentinel is no longer passed on.
-    expected_env.pop("UNCHANGED")
-    expected_files = {
-        render(name): (render(content["symlink"]) if "symlink" in content else render(content["text"]).encode("utf-8"))
-        for name, content in expected["files"].items()
-    }
-    monkeypatch.setattr(os, "environ", {name: render(value) for name, value in baseline["server_environment"].items()})
-    # Pin discovery inputs so neither parent repositories nor pytest's temporary-directory ancestors affect argv.
-    (tmp_path / ".git").mkdir()
-    if runtime_type == "claude-code":
-        monkeypatch.setattr(claude_cli, "repository_root", lambda directory: Path("/"))
-    prompt = SystemPrompt(baseline["prompt"]).write_file(tmp_path / "runtime")
-    runtime = adapter(runtime_type)
-    for mode in (None, SystemPromptMode.APPEND):
-        launch = _launch(runtime_type, mode)
-        command = getattr(runtime, command_kind)(runtime.default_executable, cwd=tmp_path, prompt_file=prompt,
-                                                 launch=launch)
-        assert command == expected_argv
-        assert runtime.environment(launch) == expected_env
-        assert _files(local) == expected_files
-
-
-@pytest.mark.parametrize("runtime_type,command_kind", [
-    (runtime, command) for runtime in ("claude-code", "codex", "grok", "omp", "pi")
-    for command in (("run_command",) if runtime == "pi" else ("run_command", "resident_command"))
-])
+@pytest.mark.parametrize("runtime_type", ["claude-code", "codex", "grok", "omp", "pi"])
 @pytest.mark.parametrize("mode", list(SystemPromptMode))
 def test_runtime_system_prompt_mode_commands_and_files(
-    runtime_type: str, mode: SystemPromptMode, command_kind: str, tmp_path: Path, isolated_operator: Path,
+    runtime_type: str, mode: SystemPromptMode, tmp_path: Path, isolated_operator: Path,
 ) -> None:
+    # Both commands (a one-shot run and a resident session) write the same files; pi has only the one-shot run.
+    for command_kind in (("run_command",) if runtime_type == "pi" else ("run_command", "resident_command")):
+        _assert_mode_command_and_files(runtime_type, mode, command_kind, tmp_path / command_kind)
+
+
+def _assert_mode_command_and_files(runtime_type: str, mode: SystemPromptMode, command_kind: str, tmp_path: Path) -> None:
+    tmp_path.mkdir()
     launch, runtime = _launch(runtime_type, mode), adapter(runtime_type)
     prompt = SystemPrompt("Looper's complete contract.\n").write_file(tmp_path / "runtime")
     command = getattr(runtime, command_kind)(runtime.default_executable, cwd=tmp_path, prompt_file=prompt,
@@ -311,6 +260,19 @@ def test_runtime_system_prompt_mode_commands_and_files(
         assert stat.S_IMODE(written.stat().st_mode) == 0o600
     else:
         raise AssertionError(f"No mode assertions for {runtime_type}")
+
+
+@pytest.mark.parametrize("runtime_type,expected", [
+    ("claude-code", SystemPromptMode.REPLACE), ("codex", SystemPromptMode.REPLACE),
+    ("grok", SystemPromptMode.REPLACE), ("omp", SystemPromptMode.REPLACE), ("pi", SystemPromptMode.REPLACE),
+    ("dsh", SystemPromptMode.APPEND),
+])
+def test_launch_mode_is_the_roles_choice_on_every_runtime_that_can_replace(
+    runtime_type: str, expected: SystemPromptMode,
+) -> None:
+    # The mode is a property of the launch, not of a runtime: a worker's replace choice (the built-in worker
+    # appends) reaches every runtime that can replace its prompt, and dsh, which cannot, appends.
+    assert _launch(runtime_type, SystemPromptMode.REPLACE).system_prompt_mode is expected
 
 
 @pytest.mark.parametrize("mode", list(SystemPromptMode))

@@ -135,6 +135,10 @@ def test_the_default_manager_takes_only_a_name_and_a_description(monkeypatch: py
         assert status == 400 and "key cannot change" in answer["error"]
         assert (await _call("DELETE", "/api/managers/manager"))[0] == 409
         assert (await _call("PUT", "/api/managers/manager-nope", {"name": "x"}))[0] == 404
+        # Its task tool never takes a template, so one saved there would reach the prompt and stay unusable.
+        status, answer = await _call("PUT", "/api/managers/manager/templates/pr", _template())
+        assert status == 400 and "no task templates" in answer["error"], answer
+        assert await pool.fetchval("SELECT count(*) FROM manager_task_templates WHERE manager_id = 'manager'") == 0
 
     run_db(test, monkeypatch)
 

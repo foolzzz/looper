@@ -30,9 +30,9 @@ from looper.agents.registry_migration import plan
 from looper.agents.runtimes import ADAPTERS, ApiProtocol, AuthKind
 from looper.db import connection, registry_migration
 from tests.test_llm_models_dashboard import DashboardServer, _wait_ready
-from tests.test_llm_registry_v2_seed_db import SEED
 
 ROOT = Path(__file__).resolve().parents[1]
+SEED = ROOT / "tests" / "fixtures" / "llm_registry_v2_seed.sql"
 RUNTIMES = {"claude-code": "claude", "codex": "codex", "omp": "omp", "grok": "grok"}
 
 

@@ -355,6 +355,7 @@ class ManagerOps:
         arguments: dict[str, Any] = raw if isinstance(raw, dict) else {}
         try:
             scope = await self.current_scope()  # once: this call is judged by it throughout
+            tool = scope.tools.get(name, tool)  # its schema too: a template added since lists in the new one
             arguments = check_arguments(tool.schema, raw)
             risk = tool.risk_of(arguments)
             if tool.name != CONFIRM_TOOL:

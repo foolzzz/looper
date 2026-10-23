@@ -20,7 +20,9 @@ from .managers_api import DEFAULT_MANAGER_ID, MAX_ENABLED_MANAGERS, ManagerDefin
 from .message import MANAGER_ADDRESS, MessageEnvelope, MessageType, manager_address
 from .ops.service import ManagerOps, Platform, scope_for
 from .supervisor import AgentSupervisor
-from .tiers.manager import TURNED_OFF_REPLY, ManagerAgent, ManagerConfig, default_definition, reply_envelope
+from .tiers.manager import (
+    TURNED_OFF_REPLY, ManagerAgent, ManagerConfig, ReplyOutcome, default_definition, reply_envelope, stopped_reply,
+)
 from .tiers.turn_token import TurnToken
 
 logger = logging.getLogger(__name__)
@@ -220,9 +222,9 @@ class ManagerFleet:
                 await self._retire(manager_id)
         elif not running:
             if len(self._agents) >= MAX_ENABLED_MANAGERS:
-                logger.error("Manager %s not started: at most %d Managers run at once", manager_id,
-                             MAX_ENABLED_MANAGERS)
-                return
+                # Raising keeps the sync pending and the retry going: a Manager retiring meanwhile frees a place.
+                raise RuntimeError(f"Manager {manager_id} not started: at most {MAX_ENABLED_MANAGERS} Managers "
+                                   "run at once")
             agent = self._build(ManagerDefinition.from_row(row), await self._read_template_keys(manager_id))
             await self._supervisor.start_agent(agent)
         else:
@@ -251,6 +253,9 @@ class ManagerFleet:
             if envelope.message_type in _TASK_REPORTS:
                 await self._hand_over(envelope)
             else:
+                # The stopped turn's final reply first: the chat waits for it, and settling alone ends no stream.
+                await bus.publish(reply_envelope(envelope, stopped_reply("", []), manager_address(manager_id),
+                                                 outcome=ReplyOutcome.STOPPED))
                 bus.settle(envelope.message_id)  # a user message's token ended as stopped
         await self._deal_with(manager_id, taken)
         self._retiring.discard(manager_id)

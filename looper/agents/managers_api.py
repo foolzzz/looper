@@ -36,6 +36,8 @@ SYSTEM_PROMPT_MAX = 20_000
 NAME_MAX = 60
 DESCRIPTION_MAX = 300
 
+_DEFAULT_NO_TEMPLATES = ("the default Manager takes no task templates: its task tool is the free-form one; "
+                         "put them on a scenario Manager")
 _DEFAULT_ONLY = ("the default Manager's prompt and profile are in Settings → Roles; it uses every tool, sees every "
                  "task and is always on")
 
@@ -366,9 +368,11 @@ def _text(data: Mapping[str, Any], field: str) -> str:
 
 async def put_template(manager_id: str, key: str, data: Mapping[str, Any]) -> dict[str, Any]:
     """Create template ``key`` of the Manager or replace it whole (404 for an unknown Manager, 400 for a template
-    Looper refuses). Answers ``managers_view()``."""
+    Looper refuses, or for the default Manager, whose task tool never takes a template). Answers ``managers_view()``."""
     if await db_managers.get_manager(manager_id) is None:
         raise _refuse(f"no Manager {manager_id!r}", HTTP_404)
+    if manager_id == DEFAULT_MANAGER_ID:
+        raise _refuse(_DEFAULT_NO_TEMPLATES)
     if not re.fullmatch(task_templates.KEY_PATTERN, key):
         raise _refuse(f"template key must match {task_templates.KEY_PATTERN}")
     _fields(data, TEMPLATE_FIELDS)
