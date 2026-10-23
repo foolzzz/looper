@@ -1,7 +1,6 @@
 """The launch loader resolves one model and its exact endpoint on disposable PostgreSQL."""
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -9,39 +8,36 @@ import pytest
 from looper.agents.agent_settings import AgentType, Launch, Layer, load_agent_settings
 from looper.agents import profile_registry as registry
 from looper.agents.runtimes import ADAPTERS
-from looper.db import agent_setting_layers, connection, profile_registry as db
-from tests.test_catalog_db import DSN, _fresh_schema
+from looper.db import agent_setting_layers, profile_registry as db
+from tests.db_support import DSN, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
 def _run(test, monkeypatch):
-    async def run():
-        async with _fresh_schema() as pool:
-            await connection.ensure_schema(pool)
-            monkeypatch.setattr(connection, "_pool", pool)
-            for runtime in ADAPTERS.values():
-                monkeypatch.setattr(runtime, "login_problem", AsyncMock(return_value=None))
-            await pool.execute("""
-                INSERT INTO projects (id, name) VALUES ('binding-project', 'Binding project');
-                INSERT INTO tasks (id, project_id, requirement) VALUES
-                  ('binding-task', 'binding-project', 'Exercise model selection');
-                INSERT INTO llm_providers (id, name, vendor_type, auth) VALUES
-                  ('prov-binding', 'Binding account', 'custom', 'api_key');
-                INSERT INTO llm_provider_secrets (provider_id, api_key) VALUES
-                  ('prov-binding', 'synthetic-binding-secret');
-                INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url) VALUES
-                  ('prov-binding', 'anthropic-messages', 'https://messages.example.invalid'),
-                  ('prov-binding', 'openai-chat', 'https://chat.example.invalid'),
-                  ('prov-binding', 'openai-responses', 'https://responses.example.invalid');
-            """)
-            for index, protocol in enumerate(registry.ApiProtocol):
-                await pool.execute("""INSERT INTO llm_models (id, provider_id, name, protocol, context_window)
-                    VALUES ($1, 'prov-binding', 'Exact.Model[1m]', $2, 128000)""", f'model-binding-{index}', protocol.value)
-                await pool.execute("""INSERT INTO agent_profiles (id, name, runtime_id, model_id)
-                    VALUES ($1, $1, 'rt-claude-code', $2)""", f'profile-binding-{index}', f'model-binding-{index}')
-            await test(pool)
-    asyncio.run(asyncio.wait_for(run(), timeout=30))
+    async def setup(pool):
+        for runtime in ADAPTERS.values():
+            monkeypatch.setattr(runtime, "login_problem", AsyncMock(return_value=None))
+        await pool.execute("""
+            INSERT INTO projects (id, name) VALUES ('binding-project', 'Binding project');
+            INSERT INTO tasks (id, project_id, requirement) VALUES
+              ('binding-task', 'binding-project', 'Exercise model selection');
+            INSERT INTO llm_providers (id, name, vendor_type, auth) VALUES
+              ('prov-binding', 'Binding account', 'custom', 'api_key');
+            INSERT INTO llm_provider_secrets (provider_id, api_key) VALUES
+              ('prov-binding', 'synthetic-binding-secret');
+            INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url) VALUES
+              ('prov-binding', 'anthropic-messages', 'https://messages.example.invalid'),
+              ('prov-binding', 'openai-chat', 'https://chat.example.invalid'),
+              ('prov-binding', 'openai-responses', 'https://responses.example.invalid');
+        """)
+        for index, protocol in enumerate(registry.ApiProtocol):
+            await pool.execute("""INSERT INTO llm_models (id, provider_id, name, protocol, context_window)
+                VALUES ($1, 'prov-binding', 'Exact.Model[1m]', $2, 128000)""", f'model-binding-{index}', protocol.value)
+            await pool.execute("""INSERT INTO agent_profiles (id, name, runtime_id, model_id)
+                VALUES ($1, $1, 'rt-claude-code', $2)""", f'profile-binding-{index}', f'model-binding-{index}')
+
+    run_db(test, monkeypatch, setup=setup, timeout=30)
 
 
 def test_profile_precedence_and_builtin_remain_unchanged(monkeypatch):

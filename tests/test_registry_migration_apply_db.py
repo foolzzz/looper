@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 from pathlib import Path
 
 import asyncpg
@@ -10,10 +9,9 @@ import pytest
 
 from looper.agents.registry_migration import MigrationBlocked, plan
 from looper.db import connection, registry_migration, schedules
-from tests.test_llm_model_schema_db import _database
+from tests.db_support import DSN, fresh_connection as _database
 from tests.test_registry_migration_report_db import state
 
-DSN = os.environ.get('LOOPER_TEST_DATABASE_URL')
 pytestmark = pytest.mark.skipif(not DSN, reason='LOOPER_TEST_DATABASE_URL is not set')
 
 

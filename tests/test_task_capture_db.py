@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from looper.agents.tiers.journal import JournalKind
-from tests.test_usage_api_db import DSN, _run
+from tests.db_support import DSN, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -51,7 +51,7 @@ def test_every_kind_is_saved_and_read_back_in_order(monkeypatch: pytest.MonkeyPa
             await plans.save("task-a", journal=[{"step_id": "", "kind": "rumor", "summary": "", "learnings": []}],
                              pool=pool)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_journal_from_before_takes_the_new_kinds_after_one_migration(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -77,7 +77,7 @@ def test_a_journal_from_before_takes_the_new_kinds_after_one_migration(monkeypat
             "SELECT count(*) FROM schema_migrations WHERE name = 'task_journal_kinds_m7c'") == 1
         assert await pool.fetchval("SELECT count(*) FROM task_journal") == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_recent_chats_are_the_managers_newest_first(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -100,4 +100,4 @@ def test_the_recent_chats_are_the_managers_newest_first(monkeypatch: pytest.Monk
         assert [c["session_id"] for c in await chat.recent_conversations(sessions=1, messages=2, pool=pool)] == [
             "session-new"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

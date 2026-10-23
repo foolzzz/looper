@@ -8,8 +8,8 @@ import pytest
 
 from looper.agents import agent_settings
 from looper.agents.agent_settings import AgentType, Layer, _chain, index_layers, resolve
+from tests.db_support import DSN, run_db
 from tests.test_agent_settings import _profile, _row
-from tests.test_catalog_db import DSN, _run
 
 
 def _layer(scope: str, role: str | None, name: str | None = None) -> dict[str, Any]:
@@ -91,7 +91,7 @@ def test_list_layers_returns_the_session_row_only_when_asked(monkeypatch: pytest
         assert session[0]["profile"]["id"] == BUILTIN_PROFILE.id
         assert not [r for r in await agent_setting_layers.list_layers() if r["scope"] == "session"]
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_a_turn_never_falls_back_to_cached_settings_when_they_cannot_be_read(

@@ -192,7 +192,9 @@ class _PlanStore:
                 if gate["state"] == "open" and stored["state"] == "discussing":
                     row["state"] = "discussing"
                 row["delivered_through"] = max(stored["delivered_through"], gate["delivered_through"])
+                row["turns"] = max(stored.get("turns") or 0, gate.get("turns") or 0)
                 row["opened_at"] = stored["opened_at"] or gate["opened_at"]
+                row["closed_at"] = stored.get("closed_at") or gate.get("closed_at")
             self.gates[task_id][gate["step_id"]] = row
         for message in gate_messages:
             self.gate_messages.append({"id": next(self._ids), "task_id": task_id, "author": None, "via": "",

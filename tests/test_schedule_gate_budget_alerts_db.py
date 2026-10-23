@@ -1,7 +1,7 @@
-"""Schedules S2 against a real PostgreSQL: the gate, the previous run's unfinished input, the daily budget, the
+"""Schedules against a real PostgreSQL: the gate, the previous run's unfinished input, the daily budget, the
 messages and the two alerts (sent through a stand-in, never a real channel), and the dashboard summary.
 
-Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database; it uses the S1 tests' helpers.
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database; it uses ``schedule_support``.
 """
 
 from __future__ import annotations
@@ -14,26 +14,12 @@ from typing import Any
 import pytest
 
 from looper.agents import cron
-from tests.test_schedules_db import DSN, NOON, _Env, _run
+from tests.db_support import DSN
+from tests.schedule_support import NOON, TELEGRAM_CHAT, ScheduleEnv, allow_telegram, run_scheduled, with_sender
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 LA = cron.zone("America/Los_Angeles")
-TELEGRAM_CHAT = "1000001"  # a stand-in id in the test database's allowlist; nothing is sent anywhere
-
-
-class _Sender:
-    """Stands in for the server's channels: records each message instead of sending it."""
-
-    def __init__(self) -> None:
-        self.sent: list[tuple[str, str, str]] = []
-        self.fail_with: str | None = None
-
-    async def __call__(self, channel: str, chat: str, text: str) -> tuple[bool, str | None]:
-        if self.fail_with:
-            return False, self.fail_with
-        self.sent.append((channel, chat, text))
-        return True, None
 
 
 @pytest.fixture(autouse=True)
@@ -43,15 +29,6 @@ def _short_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.2)  # a timed-out gate's tree is ended quickly
 
 
-def _setup(env: _Env, *, day_zone: str = "America/Los_Angeles", dashboard_url: str = "") -> _Sender:
-    from looper.agents.scheduler import Scheduler
-
-    sender = _Sender()
-    env.scheduler = Scheduler(bus=env.bus, clock=env.clock, sender=sender, day_zone=day_zone,
-                              dashboard_url=dashboard_url)
-    return sender
-
-
 def _held_gate(release: Path, then: str) -> str:
     """A gate command that runs ``then`` once ``release`` exists (a test creates it when it has seen the gate
     running; the wait is bounded, so a failed test does not leave the gate behind for long)."""
@@ -59,16 +36,7 @@ def _held_gate(release: Path, then: str) -> str:
     return f"for _ in $(seq 500); do [ -e {path} ] && break; sleep 0.02; done; [ -e {path} ] || exit 1; {then}"
 
 
-async def _allow_telegram(env: _Env) -> None:
-    from looper.agents.serve import seed_channel_configs
-
-    await seed_channel_configs(env.pool)
-    await env.pool.execute(
-        "UPDATE channel_configs SET config = config || $1::jsonb WHERE channel_id = 'channel-telegram'",
-        f'{{"allowed_user_ids": ["{TELEGRAM_CHAT}"]}}')
-
-
-async def _fire(env: _Env, sid: str) -> dict[str, Any]:
+async def _fire(env: ScheduleEnv, sid: str) -> dict[str, Any]:
     """Fire ``sid`` alone on the next fire time (the other schedules wait), and wait for its gate and messages."""
     await env.due(sid)
     await env.pool.execute("UPDATE schedules SET next_fire_at = $2 WHERE enabled AND id <> $1", sid,
@@ -78,17 +46,17 @@ async def _fire(env: _Env, sid: str) -> dict[str, Any]:
     return (await env.runs(sid))[0]
 
 
-async def _requirement(env: _Env, task_id: str) -> str:
+async def _requirement(env: ScheduleEnv, task_id: str) -> str:
     return await env.pool.fetchval("SELECT requirement FROM tasks WHERE id = $1", task_id)
 
 
-async def _outbox(env: _Env, sid: str) -> list[dict[str, Any]]:
+async def _outbox(env: ScheduleEnv, sid: str) -> list[dict[str, Any]]:
     return list(reversed((await env.ok("GET", f"/api/schedules/{sid}/notifications"))["notifications"]))
 
 
 def test_the_gate_decides_whether_a_run_gets_a_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         items = tmp_path / "items.txt"
         items.write_text("")
         sid = (await env.enabled(gate_command="cat items.txt"))["schedule_id"]
@@ -116,7 +84,7 @@ def test_the_gate_decides_whether_a_run_gets_a_task(monkeypatch: pytest.MonkeyPa
         timed_out = await _fire(env, sid)
         assert timed_out["status"] == "gate_failed" and "did not finish within 1 s" in timed_out["error"]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_the_longest_schedule_requirement_and_a_large_input_still_fit_a_tasks_requirement(
@@ -127,8 +95,8 @@ def test_the_longest_schedule_requirement_and_a_large_input_still_fit_a_tasks_re
     from looper.agents.schedules import REQUIREMENT_MAX_CHARS
     from looper.agents.system_prompt import TASK_REQUIREMENT_LIMIT
 
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         (tmp_path / "items.txt").write_text("alert-123456789\n" * 10_000)
         sid = (await env.enabled(requirement="x" * REQUIREMENT_MAX_CHARS, gate_command="cat items.txt"))["schedule_id"]
         run = await _fire(env, sid)
@@ -136,13 +104,13 @@ def test_the_longest_schedule_requirement_and_a_large_input_still_fit_a_tasks_re
         assert requirement.startswith("x" * REQUIREMENT_MAX_CHARS + "\n\n## 定时运行上下文")
         assert "alert-123456789" in requirement and len(requirement) <= TASK_REQUIREMENT_LIMIT
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_run_now_goes_through_the_gate_and_a_firing_meanwhile_is_an_overlap(monkeypatch: pytest.MonkeyPatch,
                                                                             tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         sid = (await env.schedule(gate_command=_held_gate(tmp_path / "release", "echo new-item")))["schedule_id"]
         first = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
         assert (first["trigger"], first["status"]) == ("manual", "gating")
@@ -153,12 +121,12 @@ def test_run_now_goes_through_the_gate_and_a_firing_meanwhile_is_an_overlap(monk
         run = next(r for r in await env.runs(sid) if r["run_id"] == first["run_id"])
         assert (run["status"], run["gate_output"]) == ("running", "new-item")
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_gate_the_server_stopped_during_is_a_failed_gate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         sid = (await env.schedule(gate_command="true"))["schedule_id"]
         await env.pool.execute(
             "INSERT INTO schedule_runs (id, schedule_id, scheduled_for, fired_at, trigger, status) "
@@ -168,13 +136,13 @@ def test_a_gate_the_server_stopped_during_is_a_failed_gate(monkeypatch: pytest.M
         [run] = await env.runs(sid)
         assert (run["status"], run["error"]) == ("gate_failed", "the server stopped while the gate ran")
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_the_previous_runs_unfinished_input_is_handed_on_once(monkeypatch: pytest.MonkeyPatch,
                                                               tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         items = tmp_path / "items.txt"
         items.write_text("alert-7\n")
         sid = (await env.enabled(gate_command="cat items.txt"))["schedule_id"]
@@ -193,12 +161,12 @@ def test_the_previous_runs_unfinished_input_is_handed_on_once(monkeypatch: pytes
         third = await _fire(env, sid)
         assert (third["status"], third["carried_from"]) == ("skipped_gate", None)
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_the_daily_budget_skips_runs_until_the_next_day(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         sid = (await env.enabled(daily_budget_usd=0.5))["schedule_id"]
         env.clock.now = datetime(2026, 10, 20, 23, 40, tzinfo=LA)
         first = await _fire(env, sid)  # 23:45
@@ -213,14 +181,14 @@ def test_the_daily_budget_skips_runs_until_the_next_day(monkeypatch: pytest.Monk
         next_day = await _fire(env, sid)  # 00:05, a new day
         assert next_day["status"] == "running"
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 @pytest.mark.parametrize("notify", ["failures", "always", "never"])
 def test_a_runs_message_follows_notify(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, notify: str) -> None:
-    async def test(env: _Env) -> None:
-        sender = _setup(env, dashboard_url="https://looper.example.com")
-        await _allow_telegram(env)
+    async def test(env: ScheduleEnv) -> None:
+        sender = with_sender(env, dashboard_url="https://looper.example.com")
+        await allow_telegram(env)
         sid = (await env.enabled(name="Alert triage", notify=notify,
                                  notify_target={"channel": "telegram", "chat": TELEGRAM_CHAT}))["schedule_id"]
         done = await _fire(env, sid)
@@ -238,14 +206,14 @@ def test_a_runs_message_follows_notify(monkeypatch: pytest.MonkeyPatch, tmp_path
             assert text.endswith(f"花费 $0.05 · https://looper.example.com/#tasks/{done['task_id']}")
         assert [n["status"] for n in await _outbox(env, sid)] == ["sent"] * len(expected)
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_the_failures_alert_goes_out_once_per_streak_with_one_recovery(monkeypatch: pytest.MonkeyPatch,
                                                                        tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        sender = _setup(env)
-        await _allow_telegram(env)
+    async def test(env: ScheduleEnv) -> None:
+        sender = with_sender(env)
+        await allow_telegram(env)
         sid = (await env.enabled(gate_command="exit 1",
                                  notify_target={"channel": "telegram", "chat": TELEGRAM_CHAT}))["schedule_id"]
 
@@ -272,7 +240,7 @@ def test_the_failures_alert_goes_out_once_per_streak_with_one_recovery(monkeypat
         assert (schedule["alerts"]["failures_since"], schedule["consecutive_failures"]) == (None, 0)
         assert len([text for _, _, text in sender.sent if "仍没有成功运行" not in text and "又有成功" not in text]) == 6
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_gate_that_finds_nothing_ends_the_failure_streak_and_a_skip_that_ran_nothing_does_not(
@@ -283,10 +251,10 @@ def test_a_gate_that_finds_nothing_ends_the_failure_streak_and_a_skip_that_ran_n
     away. A firing that ran nothing (busy, over budget, missed) says nothing about the schedule's health."""
     from looper.db import schedules as db_schedules
 
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         env.clock.now = NOON
-        await _allow_telegram(env)
+        await allow_telegram(env)
         sid = (await env.enabled(gate_command="exit 3",
                                  notify_target={"channel": "telegram", "chat": TELEGRAM_CHAT}))["schedule_id"]
 
@@ -320,12 +288,12 @@ def test_a_gate_that_finds_nothing_ends_the_failure_streak_and_a_skip_that_ran_n
         assert (await _fire(env, sid))["firings"] == 2  # the next one is counted on it, and recovers nothing more
         assert await state() == (0, False, ["failures_alert", "failures_recovered"])
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_without_a_target_messages_stay_on_the_dashboard(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        sender = _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        sender = with_sender(env)
         sid = (await env.enabled(gate_command="exit 1"))["schedule_id"]
         for _ in range(3):
             await _fire(env, sid)
@@ -335,15 +303,15 @@ def test_without_a_target_messages_stay_on_the_dashboard(monkeypatch: pytest.Mon
             ("run", "dashboard", None)] * 3 + [("failures_alert", "dashboard", None)]
         assert sender.sent == []
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_message_the_channel_could_not_send_is_recorded_failed(monkeypatch: pytest.MonkeyPatch,
                                                                  tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        sender = _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        sender = with_sender(env)
         sender.fail_with = "the telegram channel is not running: enable it in Settings → Channels"
-        await _allow_telegram(env)
+        await allow_telegram(env)
         sid = (await env.enabled(gate_command="exit 1",
                                  notify_target={"channel": "telegram", "chat": TELEGRAM_CHAT}))["schedule_id"]
         await _fire(env, sid)
@@ -351,13 +319,13 @@ def test_a_message_the_channel_could_not_send_is_recorded_failed(monkeypatch: py
         [note] = await _outbox(env, sid)
         assert (note["status"], note["error"]) == ("failed", sender.fail_with)
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_the_no_success_alert_goes_out_once_with_one_recovery(monkeypatch: pytest.MonkeyPatch,
                                                               tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         sid = (await env.enabled())["schedule_id"]
         ok = await _fire(env, sid)
         await env.end_task(ok["task_id"], "completed")
@@ -384,14 +352,14 @@ def test_the_no_success_alert_goes_out_once_with_one_recovery(monkeypatch: pytes
         await env.scheduler.idle()
         assert [n["kind"] for n in await _outbox(env, sid)] == ["stale_alert", "stale_recovered"]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_notify_alerts_sends_the_alerts_and_their_recoveries_and_no_run_message(monkeypatch: pytest.MonkeyPatch,
                                                                                 tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        sender = _setup(env)
-        await _allow_telegram(env)
+    async def test(env: ScheduleEnv) -> None:
+        sender = with_sender(env)
+        await allow_telegram(env)
         sid = (await env.enabled(gate_command="exit 3", notify="alerts",
                                  notify_target={"channel": "telegram", "chat": TELEGRAM_CHAT}))["schedule_id"]
         assert (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]["notify"] == "alerts"
@@ -424,14 +392,14 @@ def test_notify_alerts_sends_the_alerts_and_their_recoveries_and_no_run_message(
         assert [kind for kind, _ in await sent()][2:] == ["stale_alert", "stale_recovered"]
         assert len(sender.sent) == 4 and all(status == "sent" for _, status in await sent())
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_database_from_before_takes_notify_alerts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from looper.db import connection
 
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         sid = (await env.enabled())["schedule_id"]
         await env.pool.execute("ALTER TABLE schedules DROP CONSTRAINT schedules_notify_check")
         await env.pool.execute("ALTER TABLE schedules ADD CONSTRAINT schedules_notify_check "
@@ -442,13 +410,13 @@ def test_a_database_from_before_takes_notify_alerts(monkeypatch: pytest.MonkeyPa
         status, answer = await env.call("PUT", f"/api/schedules/{sid}", {"notify": "quiet"})
         assert status == 400 and "notify" in answer["error"]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 MINUTE = timedelta(minutes=1)
 
 
-async def _next_minute(env: _Env, sid: str) -> list[dict[str, Any]]:
+async def _next_minute(env: ScheduleEnv, sid: str) -> list[dict[str, Any]]:
     """Fire ``sid`` at the next minute (the clock 10 s after it), wait for its gate; its runs, newest first."""
     at = (env.clock.now + MINUTE).replace(second=0, microsecond=0)
     await env.pool.execute("UPDATE schedules SET next_fire_at = $2 WHERE id = $1", sid, at)
@@ -466,8 +434,8 @@ def test_a_gated_schedule_every_minute_counts_its_repeated_skips_on_one_run(monk
                                                                            tmp_path: Path) -> None:
     from looper.agents.schedules import schedule_overview
 
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         env.clock.now = NOON
         items = tmp_path / "items.txt"
         items.write_text("")
@@ -505,25 +473,25 @@ def test_a_gated_schedule_every_minute_counts_its_repeated_skips_on_one_run(monk
         assert [run["status"] for run in listed["runs"]] == ["completed"]
         assert env.bus.of("task_start") == [task_id]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_skip_on_a_new_day_is_a_run_of_its_own(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         (tmp_path / "items.txt").write_text("")
         sid = (await env.enabled(cron="* * * * *", gate_command="cat items.txt"))["schedule_id"]
         env.clock.now = datetime(2030, 1, 16, 7, 58, 30, tzinfo=timezone.utc)  # 23:58:30 in Los Angeles
         await _next_minute(env, sid)
         assert _shape(await _next_minute(env, sid)) == [("skipped_gate", 1), ("skipped_gate", 1)]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_busy_streak_and_the_daily_budget_start_again_at_midnight(monkeypatch: pytest.MonkeyPatch,
                                                                     tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         (tmp_path / "items.txt").write_text("alert-1\n")
         sid = (await env.enabled(cron="* * * * *", gate_command="cat items.txt",
                                  daily_budget_usd=0.5))["schedule_id"]
@@ -542,12 +510,12 @@ def test_a_busy_streak_and_the_daily_budget_start_again_at_midnight(monkeypatch:
         over = (await _next_minute(env, sid))[0]  # 00:02
         assert over["status"] == "skipped_budget" and "today's runs cost $0.6000" in over["error"]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_slow_gate_never_runs_twice_at_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         env.clock.now = NOON
         gate = f"echo start >> gate.log; {_held_gate(tmp_path / 'release', 'echo end >> gate.log')}"
         sid = (await env.enabled(cron="* * * * *", gate_command=gate))["schedule_id"]
@@ -564,20 +532,20 @@ def test_a_slow_gate_never_runs_twice_at_once(monkeypatch: pytest.MonkeyPatch, t
         assert (tmp_path / "gate.log").read_text() == "start\nend\n"
         assert _shape(await env.runs(sid)) == [("skipped_overlap", 2), ("skipped_gate", 1)]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 EVERY_5 = cron.parse("*/5 * * * *")
 
 
-async def _stale(env: _Env, sid: str) -> list[str]:
+async def _stale(env: ScheduleEnv, sid: str) -> list[str]:
     """The schedule's no-success messages so far, after a scheduler pass at the clock's time."""
     await env.scheduler.tick()
     await env.scheduler.idle()
     return [n["kind"] for n in await _outbox(env, sid) if n["kind"].startswith("stale")]
 
 
-async def _ran_without_success(env: _Env, sid: str, *, days_ago: int) -> None:
+async def _ran_without_success(env: ScheduleEnv, sid: str, *, days_ago: int) -> None:
     """One run that did not succeed (stopped: no message under notify failures), its fire and the schedule's
     enabling moved ``days_ago`` days back; the schedule does not fire again for a day."""
     run = await _fire(env, sid)
@@ -591,7 +559,7 @@ async def _ran_without_success(env: _Env, sid: str, *, days_ago: int) -> None:
         sid, back, env.clock.now + timedelta(days=1))
 
 
-async def _enable_again(env: _Env, sid: str) -> datetime:
+async def _enable_again(env: ScheduleEnv, sid: str) -> datetime:
     """Disable the schedule and enable it again through the API; when it was enabled. It does not fire for a day."""
     await env.ok("PUT", f"/api/schedules/{sid}", {"enabled": False})
     await env.ok("PUT", f"/api/schedules/{sid}", {"enabled": True})
@@ -603,8 +571,8 @@ async def _enable_again(env: _Env, sid: str) -> datetime:
 
 def test_enabling_a_schedule_whose_last_success_is_old_raises_no_alert_at_once(monkeypatch: pytest.MonkeyPatch,
                                                                                tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         sid = (await env.enabled())["schedule_id"]
         ok = await _fire(env, sid)
         await env.end_task(ok["task_id"], "completed")
@@ -621,24 +589,24 @@ def test_enabling_a_schedule_whose_last_success_is_old_raises_no_alert_at_once(m
         env.clock.now = due
         assert await _stale(env, sid) == ["stale_alert"]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_schedule_enabled_long_ago_without_a_success_still_alerts(monkeypatch: pytest.MonkeyPatch,
                                                                      tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         sid = (await env.enabled())["schedule_id"]
         await _ran_without_success(env, sid, days_ago=7)
         assert await _stale(env, sid) == ["stale_alert"]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_disabling_and_enabling_again_starts_the_clock_again(monkeypatch: pytest.MonkeyPatch,
                                                              tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         sid = (await env.enabled())["schedule_id"]
         await _ran_without_success(env, sid, days_ago=7)  # it would be stale now
         await env.ok("PUT", f"/api/schedules/{sid}", {"enabled": False})
@@ -653,11 +621,11 @@ def test_disabling_and_enabling_again_starts_the_clock_again(monkeypatch: pytest
         await env.ok("PUT", f"/api/schedules/{sid}", {"enabled": True})
         assert await env.pool.fetchval("SELECT enabled_at FROM schedules WHERE id = $1", sid) == enabled_at
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_schedule_from_before_counts_from_its_last_change(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         from looper.db import connection
 
         sid = (await env.enabled())["schedule_id"]
@@ -671,13 +639,13 @@ def test_a_schedule_from_before_counts_from_its_last_change(monkeypatch: pytest.
         created = (await env.schedule())["schedule_id"]
         assert await env.pool.fetchval("SELECT enabled_at IS NOT NULL FROM schedules WHERE id = $1", created)
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_changing_the_rule_to_every_minute_raises_no_alert_at_once(monkeypatch: pytest.MonkeyPatch,
                                                                     tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         (tmp_path / "items.txt").write_text("")
         sid = (await env.enabled(gate_command="cat items.txt"))["schedule_id"]  # every 5 minutes
         assert (await _fire(env, sid))["status"] == "skipped_gate"
@@ -697,15 +665,15 @@ def test_changing_the_rule_to_every_minute_raises_no_alert_at_once(monkeypatch: 
         env.clock.now = due
         assert await _stale(env, sid) == ["stale_alert"]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_run_that_succeeds_while_the_pass_looks_raises_no_stale_alert(monkeypatch: pytest.MonkeyPatch,
                                                                         tmp_path: Path) -> None:
     from looper.db import schedules as db_schedules
 
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         sid = (await env.enabled())["schedule_id"]
         ok = await _fire(env, sid)
         await env.end_task(ok["task_id"], "completed")
@@ -736,12 +704,12 @@ def test_a_run_that_succeeds_while_the_pass_looks_raises_no_stale_alert(monkeypa
         env.clock.now += timedelta(minutes=20)
         assert await _stale(env, sid) == ["stale_alert"]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_minute_schedule_is_not_stale_while_its_task_runs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         env.clock.now = NOON
         items = tmp_path / "items.txt"
         items.write_text("")
@@ -761,7 +729,7 @@ def test_a_minute_schedule_is_not_stale_while_its_task_runs(monkeypatch: pytest.
         assert _shape(await _next_minute(env, sid))[:2] == [("skipped_gate", 1), ("skipped_overlap", 25)]
         assert [n["kind"] for n in await _outbox(env, sid) if n["kind"].startswith("stale")] == []
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 # --- Reentrant schedules: overlap parallel ---
@@ -769,8 +737,8 @@ def test_a_minute_schedule_is_not_stale_while_its_task_runs(monkeypatch: pytest.
 
 def test_a_parallel_schedule_starts_runs_beside_each_other_up_to_its_cap(monkeypatch: pytest.MonkeyPatch,
                                                                           tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         sid = (await env.enabled(overlap="parallel", max_parallel_runs=2))["schedule_id"]
         started = []
         for _ in range(2):
@@ -788,13 +756,13 @@ def test_a_parallel_schedule_starts_runs_beside_each_other_up_to_its_cap(monkeyp
         third = await _fire(env, sid)
         assert third["status"] == "running" and third["task_id"] not in (first["task_id"], second["task_id"])
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_parallel_schedules_gates_never_run_beside_each_other_and_know_their_run(monkeypatch: pytest.MonkeyPatch,
                                                                                     tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         env.clock.now = NOON
         gate = ("echo start >> gate.log; "
                 + _held_gate(tmp_path / "release",
@@ -820,13 +788,13 @@ def test_a_parallel_schedules_gates_never_run_beside_each_other_and_know_their_r
         await env.pool.execute("UPDATE tasks SET status = 'running' WHERE id = $1", run["task_id"])
         assert _shape(await _next_minute(env, sid))[:2] == [("running", 1), ("skipped_overlap", 1)]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_parallel_schedules_daily_budget_counts_every_run_in_progress(monkeypatch: pytest.MonkeyPatch,
                                                                          tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         env.clock.now = NOON
         sid = (await env.enabled(overlap="parallel", daily_budget_usd=0.5))["schedule_id"]
         for cost in (0.3, 0.25):  # two runs still in progress, each having spent this much so far
@@ -838,12 +806,12 @@ def test_a_parallel_schedules_daily_budget_counts_every_run_in_progress(monkeypa
         third = await _fire(env, sid)
         assert third["status"] == "skipped_budget" and "today's runs cost $0.5500" in third["error"]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_a_failed_runs_input_goes_to_the_next_run_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         env.clock.now = NOON
         items = tmp_path / "items.txt"
         items.write_text("alert-1\n")
@@ -857,14 +825,14 @@ def test_a_failed_runs_input_goes_to_the_next_run_only(monkeypatch: pytest.Monke
         await env.pool.execute("UPDATE tasks SET status = 'running' WHERE id = $1", carrying["task_id"])
         assert _shape(await _next_minute(env, sid))[0] == ("skipped_gate", 1)
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_two_parallel_runs_that_fail_before_the_next_gate_both_hand_their_input_on_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         env.clock.now = NOON
         items = tmp_path / "items.txt"
         sid = (await env.enabled(cron="* * * * *", gate_command="cat items.txt; : > items.txt",
@@ -890,14 +858,14 @@ def test_two_parallel_runs_that_fail_before_the_next_gate_both_hand_their_input_
         await env.pool.execute("UPDATE tasks SET status = 'running' WHERE id = $1", carrying["task_id"])
         assert _shape(await _next_minute(env, sid))[0] == ("skipped_gate", 1)
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_runs_from_before_hand_on_only_what_the_old_rule_would_have(monkeypatch: pytest.MonkeyPatch,
                                                                      tmp_path: Path) -> None:
     from looper.db import connection
 
-    async def test(env: _Env) -> None:
+    async def test(env: ScheduleEnv) -> None:
         sid = (await env.enabled(gate_command="cat items.txt"))["schedule_id"]
         rows = [("srun-old0000001", "failed", 3, None), ("srun-old0000002", "running", 2, "srun-old0000001"),
                 ("srun-old0000003", "failed", 1, None), ("srun-old0000004", "skipped_overlap", 0, None)]
@@ -914,18 +882,13 @@ def test_runs_from_before_hand_on_only_what_the_old_rule_would_have(monkeypatch:
         # The one carried on already is; the latest to end that ran something may still hand its input on.
         assert (handed["srun-old0000001"], handed["srun-old0000003"]) == (True, False)
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
-def test_a_parallel_schedule_is_validated_and_answered_without_warnings(
+def test_a_parallel_schedule_is_answered_without_warnings(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    async def test(env: _Env) -> None:
-        for value in (0, 11, "3", True, 2.5):
-            status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", {
-                "name": f"p-{value}", "cron": "*/5 * * * *", "requirement": "r", "overlap": "parallel",
-                "max_parallel_runs": value})
-            assert status == 400 and "max_parallel_runs must be a whole number from 1 to 10" in payload["error"]
+    async def test(env: ScheduleEnv) -> None:
         plain = await env.schedule()
         assert (plain["overlap"], plain["max_parallel_runs"]) == ("skip", 3)
         # Nothing limits how many tasks run, so a parallel schedule's runs all start: there is nothing to warn of.
@@ -939,36 +902,31 @@ def test_a_parallel_schedule_is_validated_and_answered_without_warnings(
         assert (listed["max_parallel_runs_limit"], listed["concurrency_max"]) == (10, 64)
         assert "planner_limit" not in listed
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
-@pytest.mark.parametrize(("body", "error"), [
-    ({"gate_timeout_seconds": 601}, "gate_timeout_seconds must be"),
-    ({"gate_command": "x" * 2001}, "at most 2000 characters"),
-    ({"daily_budget_usd": 0}, "daily_budget_usd must be"),
-    ({"notify": "sometimes"}, "notify must be one of failures, alerts, always, never"),
-    ({"notify_target": {"channel": "telegram", "chat": "999"}}, "is not one the channel allows"),
-    ({"notify_target": "telegram"}, "notify_target must be"),
-])
-def test_bad_s2_fields_are_refused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: dict[str, Any],
-                                   error: str) -> None:
-    async def test(env: _Env) -> None:
-        await _allow_telegram(env)
-        status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", {
-            "name": "n", "cron": "*/5 * * * *", "requirement": "r", **body})
-        assert status == 400 and error in payload["error"], payload
+def test_a_notify_target_the_channel_does_not_allow_is_refused(monkeypatch: pytest.MonkeyPatch,
+                                                              tmp_path: Path) -> None:
+    # The other fields' checks are in test_schedule_validation; a target is checked against the channels' allowlists.
+    async def test(env: ScheduleEnv) -> None:
+        await allow_telegram(env)
+        for target, error in [({"channel": "telegram", "chat": "999"}, "is not one the channel allows"),
+                              ("telegram", "notify_target must be")]:
+            status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", {
+                "name": "n", "cron": "*/5 * * * *", "requirement": "r", "notify_target": target})
+            assert status == 400 and error in payload["error"], payload
         limits = (await env.ok("GET", f"/api/projects/{env.project_id}/schedules"))["limits"]
         assert limits["notify_targets"] == [{"channel": "telegram", "chat": TELEGRAM_CHAT,
                                              "label": f"Telegram · {TELEGRAM_CHAT}", "channel_enabled": False}]
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_the_dashboard_summary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from looper.agents.schedules import schedule_overview
 
-    async def test(env: _Env) -> None:
-        _setup(env)
+    async def test(env: ScheduleEnv) -> None:
+        with_sender(env)
         healthy = (await env.enabled(name="healthy", gate_command="true"))["schedule_id"]
         failing = (await env.enabled(name="failing", gate_command="exit 1"))["schedule_id"]
         await env.schedule(name="off")
@@ -987,4 +945,4 @@ def test_the_dashboard_summary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
         assert summary["skipped_today"] == {"skipped_gate": 1, "skipped_overlap": 0, "skipped_missed": 0,
                                             "skipped_budget": 0}
 
-    _run(test, monkeypatch, tmp_path)
+    run_scheduled(test, monkeypatch, tmp_path)

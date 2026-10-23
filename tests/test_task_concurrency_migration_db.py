@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from tests.test_catalog_db import DSN, _fresh_schema
+from tests.db_support import DSN, fresh_schema
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -75,7 +75,7 @@ def test_the_upgrade_converts_a_projects_limits_clears_them_and_a_second_run_cha
     from looper.db import connection
 
     async def _main() -> None:
-        async with _fresh_schema() as pool:
+        async with fresh_schema() as pool:
             await connection.ensure_schema(pool)
             await pool.execute(_OLD_CONSTRAINT + _BEFORE)
             if planner_role is not None:
@@ -139,7 +139,7 @@ def test_a_new_database_has_the_narrow_constraint() -> None:
     from looper.db import connection
 
     async def _main() -> None:
-        async with _fresh_schema() as pool:
+        async with fresh_schema() as pool:
             await connection.ensure_schema(pool)
             assert await pool.fetchval("SELECT 1 FROM schema_migrations WHERE name = 'concurrency_per_task'") == 1
             await pool.execute("INSERT INTO agent_setting_layers (scope, role, max_concurrency) VALUES "

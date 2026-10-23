@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import shlex
 import sys
 import time
@@ -34,8 +33,8 @@ from evals.prompt_regression.runner import fresh_database, running_server
 from looper.agents.agent_settings import HARNESS_BOUNDARIES, WORKING_STYLE
 from looper.agents.ops.planner import ROLES_GUIDE
 from looper.agents.system_prompt import BOUNDARIES_LEAD, REVIEW_CONTRACT, WORK_CONTRACT
+from tests.db_support import DSN
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 VARIANTS = ("roles", "off", "restart", "startover")

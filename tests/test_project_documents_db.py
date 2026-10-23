@@ -10,47 +10,16 @@ import asyncio
 import base64
 import hashlib
 import json
-import os
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+from tests.db_support import DSN, run_db
+
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-
-
-@asynccontextmanager
-async def _fresh_schema() -> AsyncIterator[Any]:
-    import asyncpg
-
-    schema = f"looper_test_{uuid.uuid4().hex[:12]}"
-    admin = await asyncpg.connect(DSN)
-    await admin.execute(f'CREATE SCHEMA "{schema}"')
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3, server_settings={"search_path": schema})
-    try:
-        yield pool
-    finally:
-        await pool.close()
-        await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
-        await admin.close()
-
-
-def _run(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run ``test(pool)`` on a new schema that is also the server's pool."""
-    from looper.db import connection
-
-    async def _main() -> None:
-        async with _fresh_schema() as pool:
-            await connection.ensure_schema(pool)
-            monkeypatch.setattr(connection, "_pool", pool)
-            await test(pool)
-
-    asyncio.run(_main())
 
 
 def _sha(data: str) -> str:
@@ -122,7 +91,7 @@ def test_the_table_keeps_each_kind_consistent_and_goes_with_its_project(monkeypa
         assert await pool.fetchval("SELECT count(*) FROM project_documents") == 0
         assert await pool.fetchval("SELECT count(*) FROM project_document_drafts") == 0
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_the_api_adds_lists_changes_and_deletes_documents(
@@ -175,7 +144,7 @@ def test_the_api_adds_lists_changes_and_deletes_documents(
         assert (await _call(tmp_path, "DELETE", f"{base}/{upload['document']['document_id']}"))[0] == 404
         assert path["document"]["read_path"] == str(project_dir / "docs" / "runbook.md")
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_the_api_shows_one_document_with_its_body(
@@ -208,7 +177,7 @@ def test_the_api_shows_one_document_with_its_body(
         assert (await _call(tmp_path, "GET", f"{base}/doc-nope"))[0] == 404
         assert (await _call(tmp_path, "GET", f"/api/projects/{other['id']}/knowledge/{text_id}"))[0] == 404
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_concurrent_adds_cannot_both_pass_the_count_cap(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -229,7 +198,7 @@ def test_concurrent_adds_cannot_both_pass_the_count_cap(monkeypatch: pytest.Monk
         assert len(refused) == 1 and "at most 1 document" in str(refused[0])
         assert await pool.fetchval("SELECT count(*) FROM project_documents") == 1
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_a_run_loads_the_documents_from_the_database(
@@ -259,7 +228,7 @@ def test_a_run_loads_the_documents_from_the_database(
         # The view the API gives shows the same index the run got.
         assert (await knowledge.knowledge_view(project["id"], tmp_path))["index"] == loaded.index
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_a_draft_stays_out_of_runs_until_it_is_confirmed(
@@ -296,7 +265,7 @@ def test_a_draft_stays_out_of_runs_until_it_is_confirmed(
         view = await knowledge.knowledge_view(project["id"], tmp_path)
         assert [d["title"] for d in view["documents"]] == ["Lessons: build"]
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)
 
 
 def test_a_refused_confirm_or_discard_leaves_the_draft(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -330,4 +299,4 @@ def test_a_refused_confirm_or_discard_leaves_the_draft(monkeypatch: pytest.Monke
         assert [d["draft_id"] for d in (await knowledge.drafts_view(project["id"]))["drafts"]] == [draft]
         assert await pool.fetchval("SELECT count(*) FROM project_documents") == 0
 
-    _run(_test, monkeypatch)
+    run_db(_test, monkeypatch)

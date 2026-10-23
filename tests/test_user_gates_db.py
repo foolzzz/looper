@@ -17,8 +17,9 @@ from typing import Any
 
 import pytest
 
+from tests.db_support import DSN, run_db
 from tests.test_ops_tasks_db import _project, _task
-from tests.test_usage_api_db import DSN, _run, _Writer
+from tests.test_usage_api_db import _Writer
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -102,7 +103,7 @@ def test_the_planners_writes_keep_a_discussion_and_a_closed_gate_as_they_are(mon
         assert [(m["role"], m["kind"]) for m in await user_gates.thread("step-g1", pool=pool)] == [
             ("user", "message"), ("planner", "reply")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_gates_conclusion_is_a_supplement_delivered_with_it(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -125,7 +126,7 @@ def test_a_gates_conclusion_is_a_supplement_delivered_with_it(monkeypatch: pytes
         # Delivered: no CHAT turn gives it to the Planner again.
         assert (await task_changes.pending("task-a", pool=pool)).empty
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("closed", ["passed", "cancelled"])
@@ -164,7 +165,7 @@ def test_a_message_that_reaches_a_gate_as_it_closes_becomes_a_supplement_and_a_l
         await plans.save("task-a", gates=[gate], pool=pool)
         assert len((await task_changes.pending("task-a", pool=pool)).supplements) == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_message_racing_the_close_is_either_refused_or_kept_as_a_supplement(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -189,7 +190,7 @@ def test_a_message_racing_the_close_is_either_refused_or_kept_as_a_supplement(mo
             kept = [s.text for s in (await task_changes.pending(task_id, pool=pool)).supplements]
             assert kept == ([f"Written in gate g1 as it closed: late {n}"] if added else []), (n, added, kept)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_message_a_turn_failed_on_waits_for_the_user_and_reminders_come_again(
@@ -233,7 +234,7 @@ def test_a_message_a_turn_failed_on_waits_for_the_user_and_reminders_come_again(
         assert (gate_view(row)["waiting_on"], row["not_delivered"]) == ("planner", 1)
         assert await user_gates.due_reminders(pool=pool) == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_gate_tables_from_an_earlier_schema_gain_the_failure_columns_and_the_late_kind(
@@ -264,7 +265,7 @@ def test_gate_tables_from_an_earlier_schema_gain_the_failure_columns_and_the_lat
         row = await pool.fetchrow("SELECT failures, failed_through FROM task_user_gates")
         assert (row["failures"], row["failed_through"]) == (1, 7)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_reminders_come_at_the_projects_interval_while_the_gate_waits_for_the_user(
@@ -308,7 +309,7 @@ def test_reminders_come_at_the_projects_interval_while_the_gate_waits_for_the_us
         await pool.execute("UPDATE projects SET gate_reminder_hours = NULL; UPDATE tasks SET status = 'stopped'")
         assert await user_gates.due_reminders(pool=pool) == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 class _Bus:
@@ -367,7 +368,7 @@ def test_the_dashboard_writes_in_a_gate_that_waits_and_its_planner_is_woken(monk
         assert status == 200 and [(m["kind"], m["text"]) for m in thread["messages"]] == [
             ("message", "PostgreSQL"), ("end", "")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("path", "body", "status", "error"), [
@@ -393,7 +394,7 @@ def test_the_dashboard_cannot_write_what_a_gate_does_not_take(
         got, answer, _ = await _api("POST", path, body)
         assert (got, answer["error"][:len(error)]) == (status, error)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_gate_that_does_not_wait_or_a_completed_task_takes_no_message(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -408,7 +409,7 @@ def test_a_gate_that_does_not_wait_or_a_completed_task_takes_no_message(monkeypa
         status, answer, _ = await _api("POST", "/api/tasks/task-a/gates/g1/end", {})
         assert (status, answer["error"]) == (409, "the task has completed: its gates no longer take messages")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_task_whose_gate_waits_needs_the_user_and_stays_active(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -425,7 +426,7 @@ def test_a_task_whose_gate_waits_needs_the_user_and_stays_active(monkeypatch: py
         status, listing, _ = await _api("GET", "/api/tasks", query={"group": "needs_you"})
         assert status == 200 and [(t["task_id"], t["group"]) for t in listing["tasks"]] == [("task-a", "needs_you")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_projects_gate_settings_are_checked_and_kept(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -442,4 +443,4 @@ def test_the_projects_gate_settings_are_checked_and_kept(monkeypatch: pytest.Mon
                                   project["id"])
         assert (row["user_gates"], row["gate_reminder_hours"]) == ("on", 0)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

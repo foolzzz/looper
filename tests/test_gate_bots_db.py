@@ -13,8 +13,8 @@ import pytest
 
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.task_notice import NotifyTarget, TargetKind
+from tests.db_support import DSN, run_db
 from tests.test_gate_channels_db import _Bus, _Poster, _task_with_gate
-from tests.test_usage_api_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -69,7 +69,7 @@ def test_open_gates_of_a_chat_are_those_of_its_bot(monkeypatch: pytest.MonkeyPat
         assert ids(await user_gates.open_gates(10, chat=("channel-telegram-2", "42"), dashboard=True)) \
             == ["task-c", "task-b"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_reply_finds_the_gate_posted_through_its_own_bot(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -89,7 +89,7 @@ def test_a_reply_finds_the_gate_posted_through_its_own_bot(monkeypatch: pytest.M
         assert await user_gates.first_post("step-b1", "channel-telegram-2", "43") == "7"
         assert await user_gates.first_post("step-b1", "channel-telegram", "43") is None
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("first", ["channel-telegram-2", "channel-telegram"])
@@ -116,7 +116,7 @@ def test_two_bots_posting_the_same_message_id_to_the_same_chat_keep_both(
                            "DO NOTHING", message_id)
         assert await pool.fetchval("SELECT count(*) FROM task_user_gate_posts") == 2
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_lark_message_id_is_found_in_any_chat_but_only_through_its_bot(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -129,7 +129,7 @@ def test_a_lark_message_id_is_found_in_any_chat_but_only_through_its_bot(monkeyp
         assert found is not None and found["task_id"] == "task-a"
         assert await user_gates.find_reference("lark", "oc_elsewhere", ["om_1"], channel_id="channel-lark") is None
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_courier_posts_through_the_gates_bot(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -154,7 +154,7 @@ def test_the_courier_posts_through_the_gates_bot(monkeypatch: pytest.MonkeyPatch
         assert [tuple(row.values()) for row in rows] == [("task-a", None, "channel-lark-5", "ou_me"),
                                                          ("task-b", "telegram", "channel-telegram", "42")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_reply_through_a_bot_reaches_that_bots_gate_and_records_the_bot(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -183,7 +183,7 @@ def test_a_reply_through_a_bot_reaches_that_bots_gate_and_records_the_bot(monkey
         assert (await routed(_telegram("and 90 days", "channel-telegram-2", chat="42", reply_to="u1",
                                        message_id="u2"))).kind is RouteKind.DELIVERED
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_gate_lists_are_numbered_per_bot(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -219,7 +219,7 @@ def test_gate_lists_are_numbered_per_bot(monkeypatch: pytest.MonkeyPatch) -> Non
         again = await command("/gate 1 Redis", "channel-telegram-2", "c5")
         assert again is not None and again.startswith("请先用 /gates")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_manager_sees_only_the_open_gates_of_the_bots_chat(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -239,4 +239,4 @@ def test_the_manager_sees_only_the_open_gates_of_the_bots_chat(monkeypatch: pyte
         assert await tasks_in("channel-lark") == ["task-a"]
         assert await tasks_in("channel-lark-6") == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

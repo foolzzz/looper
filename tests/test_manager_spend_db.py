@@ -8,8 +8,9 @@ from typing import Any
 
 import pytest
 
+from tests.db_support import DSN, run_db
 from tests.test_task_agents_db import _call
-from tests.test_usage_api_db import DSN, _run, _task
+from tests.test_usage_api_db import _task
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -32,7 +33,7 @@ def test_manager_role_counts_every_managers_runs(monkeypatch: pytest.MonkeyPatch
         rows = await llm_records.list_records(agent_id="manager-review", pool=pool)
         assert [r["agent_id"] for r in rows] == ["manager-review"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_task_costs_reports_any_managers_run_as_the_managers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -48,7 +49,7 @@ def test_task_costs_reports_any_managers_run_as_the_managers(monkeypatch: pytest
         assert cost["cost_usd"] == pytest.approx(4.0)
         assert sum(m["cost_usd"] for m in cost["manager_by_model"]) == pytest.approx(3.0)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_manager_spend_sums_per_manager(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -67,7 +68,7 @@ def test_manager_spend_sums_per_manager(monkeypatch: pytest.MonkeyPatch) -> None
         assert spend["manager-review"] == {"today_usd": 2.0, "last_7d_usd": 6.0, "runs_today": 1}
         assert spend["manager-none"] == {"today_usd": 0.0, "last_7d_usd": 0.0, "runs_today": 0}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_api_managers_has_spend(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -81,4 +82,4 @@ def test_api_managers_has_spend(monkeypatch: pytest.MonkeyPatch) -> None:
         assert by_id["manager-review"]["spend"] == {"today_usd": 2.5, "last_7d_usd": 2.5, "runs_today": 1}
         assert by_id["manager"]["spend"] == {"today_usd": 0.0, "last_7d_usd": 0.0, "runs_today": 0}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

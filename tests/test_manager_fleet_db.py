@@ -20,7 +20,7 @@ import pytest
 from looper.agents.message import (
     AgentAddress, MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address, manager_address,
 )
-from tests.test_usage_api_db import DSN, _run
+from tests.db_support import DSN, run_db, until
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -91,14 +91,6 @@ def _report(manager_id: str, message_type: MessageType, payload: dict[str, Any],
         metadata={"origin_channel_id": "channel-web"})
 
 
-async def _until(check: Any, what: str = "condition") -> None:
-    for _ in range(500):
-        if check():
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"timed out waiting for {what}")
-
-
 def _block_handle(monkeypatch: pytest.MonkeyPatch, manager_id: str) -> tuple[asyncio.Event, list[MessageEnvelope]]:
     """``_handle`` of ``manager_id`` waits for the event; the others run as they are. The envelopes it saw."""
     from looper.agents.tiers.manager import ManagerAgent
@@ -131,7 +123,7 @@ def test_load_builds_only_the_default_manager(tmp_path: Path, monkeypatch: pytes
             assert r.fleet.ops("manager")._turn_file.parts[-2:] == (".local", "manager-turn.json")
             assert set(r.supervisor.agent_status()) == {"manager"}
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_each_manager_has_its_own_ops_and_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -150,7 +142,7 @@ def test_each_manager_has_its_own_ops_and_token(tmp_path: Path, monkeypatch: pyt
             assert a._turn_file.name == "manager-aaa-turn.json"
             assert r.fleet.ops("manager-off") is None
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_at_most_eight_managers_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -164,7 +156,7 @@ def test_at_most_eight_managers_run(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         skipped = [rec.getMessage() for rec in caplog.records if "not started" in rec.getMessage()]
         assert len(skipped) == 2 and "at most 8 Managers run at once" in skipped[0]
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_apply_stops_and_starts_a_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -183,7 +175,7 @@ def test_apply_stops_and_starts_a_manager(tmp_path: Path, monkeypatch: pytest.Mo
             await r.fleet.apply("manager")
             assert r.fleet.default.is_healthy() and len(r.fleet.agents()) == 2
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_a_deleted_manager_is_stopped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -196,7 +188,7 @@ def test_a_deleted_manager_is_stopped(tmp_path: Path, monkeypatch: pytest.Monkey
             await r.fleet.apply(review)
             assert review not in r.supervisor.agent_status() and r.fleet.get(review) is None
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_disable_drops_queued_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -206,7 +198,7 @@ def test_disable_drops_queued_requests(tmp_path: Path, monkeypatch: pytest.Monke
         async with rig(tmp_path) as r:
             first, second, third = _user(review, n=1), _user(review, n=2), _user(review, n=3)
             await r.bus.publish(first)
-            await _until(lambda: len(seen) == 1, "the loop to block on the first")
+            await until(lambda: len(seen) == 1, "the loop to block on the first", timeout=5)
             await r.bus.publish(second)
             await r.bus.publish(third)
             assert r.bus.pending_count(review) == 2
@@ -229,7 +221,7 @@ def test_disable_drops_queued_requests(tmp_path: Path, monkeypatch: pytest.Monke
             assert all("turned off" in e.payload["text"] for e in turned_off)
             assert all(e.metadata["origin_channel_id"] == "channel-web" for e in turned_off)
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def _stub_answer(monkeypatch: pytest.MonkeyPatch) -> tuple[asyncio.Event, list[MessageEnvelope]]:
@@ -266,7 +258,7 @@ def test_disable_settles_the_message_in_flight(tmp_path: Path, monkeypatch: pyte
             message = _user(review)
             agent = r.fleet.get(review)
             await r.bus.publish(message)
-            await _until(lambda: len(seen) == 1, "the answer to block")
+            await until(lambda: len(seen) == 1, "the answer to block", timeout=5)
             await _set_enabled(pool, review, False)
             await r.fleet.apply(review)
             assert [e.message_id for e in agent.stopped_in_flight] == [message.message_id]
@@ -282,7 +274,7 @@ def test_disable_settles_the_message_in_flight(tmp_path: Path, monkeypatch: pyte
         assert bus.pending_count(review) == 0
         await bus.shutdown()
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_a_shutdown_still_replays_the_message_in_flight(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -294,7 +286,7 @@ def test_a_shutdown_still_replays_the_message_in_flight(tmp_path: Path, monkeypa
         r = await Rig(tmp_path).up()
         message = _user(review)
         await r.bus.publish(message)
-        await _until(lambda: len(seen) == 1, "the answer to block")
+        await until(lambda: len(seen) == 1, "the answer to block", timeout=5)
         await r.fleet.stop()
         await r.supervisor.stop_all()
         bus = MessageBus(runtime_root=tmp_path)
@@ -302,7 +294,7 @@ def test_a_shutdown_still_replays_the_message_in_flight(tmp_path: Path, monkeypa
         assert bus.pending_count(review) == 1
         await bus.shutdown()
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def _watch_default(monkeypatch: pytest.MonkeyPatch, *, hold: bool) -> tuple[asyncio.Event, list[MessageEnvelope]]:
@@ -373,10 +365,10 @@ def test_disable_hands_task_reports_over(tmp_path: Path, monkeypatch: pytest.Mon
             for envelope in originals:
                 await r.bus.publish(envelope)
                 if envelope is originals[0]:
-                    await _until(lambda: len(seen) == 1, "the loop to block on a report")
+                    await until(lambda: len(seen) == 1, "the loop to block on a report", timeout=5)
             await _set_enabled(pool, review, False)
             await r.fleet.apply(review)
-            await _until(lambda: len(default_seen) == 1, "the default Manager to be given a report")
+            await until(lambda: len(default_seen) == 1, "the default Manager to be given a report", timeout=5)
             handed = default_seen + [e for e in r.bus.get_queue("manager")._queue]  # the rest wait in its queue
             _same(handed, originals)
             open_ids = _journal_open(tmp_path)
@@ -390,7 +382,7 @@ def test_disable_hands_task_reports_over(tmp_path: Path, monkeypatch: pytest.Mon
         await bus.shutdown()
         gate.set()
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_the_default_manager_relays_a_handed_over_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -402,17 +394,17 @@ def test_the_default_manager_relays_a_handed_over_end(tmp_path: Path, monkeypatc
             for envelope in originals:
                 await r.bus.publish(envelope)
                 if envelope is originals[0]:
-                    await _until(lambda: len(seen) == 1, "the loop to block on a report")
+                    await until(lambda: len(seen) == 1, "the loop to block on a report", timeout=5)
             await _set_enabled(pool, review, False)
             await r.fleet.apply(review)
             notices = r.bus.get_queue(channel_address("telegram").agent_id)
-            await _until(lambda: any(e.message_type == MessageType.CHAT_NOTICE for e in list(notices._queue)),
-                         "the notice")
+            await until(lambda: any(e.message_type == MessageType.CHAT_NOTICE for e in list(notices._queue)),
+                         "the notice", timeout=5)
             notice = next(e for e in notices._queue if e.message_type == MessageType.CHAT_NOTICE)
             assert notice.payload["text"] == "Task done." and notice.payload["chat"] == "42"
         gate.set()
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_a_crash_between_hand_over_and_settle_hands_over_again(tmp_path: Path,
@@ -428,7 +420,7 @@ def test_a_crash_between_hand_over_and_settle_hands_over_again(tmp_path: Path,
         in_flight = _reports(review)[0]
         r = await Rig(tmp_path).up()
         await r.bus.publish(in_flight)
-        await _until(lambda: len(seen) == 1, "the loop to block on a report")
+        await until(lambda: len(seen) == 1, "the loop to block on a report", timeout=5)
         real_settle = r.bus.settle
 
         def settle(message_id: str) -> None:
@@ -446,13 +438,13 @@ def test_a_crash_between_hand_over_and_settle_hands_over_again(tmp_path: Path,
         seen2.clear()
         r2 = await Rig(tmp_path).up()
         try:
-            await _until(lambda: len(seen2) >= 1, "the default Manager to be given the report")
+            await until(lambda: len(seen2) >= 1, "the default Manager to be given the report", timeout=5)
             assert seen2[0].payload == in_flight.payload and seen2[0].metadata["handed_over_from"] == review
             assert in_flight.message_id not in {e.message_id for e in r2.bus.journal.undelivered()}
         finally:
             await r2.down()
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_a_failed_apply_is_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -477,11 +469,11 @@ def test_a_failed_apply_is_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPat
             state = r.fleet.state(review)
             assert state["sync"] == "pending" and "database down" in state["sync_error"]
             assert r.fleet.get(review) is not None  # still in force until the retry
-            await _until(lambda: r.fleet.state(review)["sync"] == "ok", "the retry")
+            await until(lambda: r.fleet.state(review)["sync"] == "ok", "the retry", timeout=5)
             assert r.fleet.get(review) is None and review not in r.supervisor.agent_status()
             assert not r.fleet._retries
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_a_newer_apply_supersedes_the_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -506,7 +498,7 @@ def test_a_newer_apply_supersedes_the_retry(tmp_path: Path, monkeypatch: pytest.
             await r.fleet.apply(review)
             assert r.fleet.state(review)["sync"] == "ok" and not r.fleet._retries and second.cancelled()
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_is_running_is_false_from_the_first_step_of_a_retire(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -526,7 +518,7 @@ def test_is_running_is_false_from_the_first_step_of_a_retire(tmp_path: Path, mon
             await r.fleet.apply(review)
             assert seen == [False] and not r.fleet.is_running(review)
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_disable_cancels_a_pending_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -552,7 +544,7 @@ def test_disable_cancels_a_pending_restart(tmp_path: Path, monkeypatch: pytest.M
             assert review not in r.supervisor.agent_status() and r.fleet.get(review) is None
             assert not agent.is_healthy()
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_start_agent_that_fails_is_restarted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -582,7 +574,7 @@ def test_start_agent_that_fails_is_restarted(tmp_path: Path, monkeypatch: pytest
             assert "manager-broken" not in r.supervisor.agent_status()
             release.set()
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_binding_report_sums_the_managers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -596,7 +588,7 @@ def test_binding_report_sums_the_managers(tmp_path: Path, monkeypatch: pytest.Mo
             assert {(item["manager"], item["tool"]) for item in report["by"]} == {
                 ("manager", "looper_a"), (review, "looper_b")}
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)
 
 
 def test_a_message_reaches_its_own_manager_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -605,11 +597,11 @@ def test_a_message_reaches_its_own_manager_only(tmp_path: Path, monkeypatch: pyt
         gate, seen = _block_handle(monkeypatch, review)
         async with rig(tmp_path) as r:
             await r.bus.publish(_user(review, n=1))
-            await _until(lambda: len(seen) == 1, "the loop to take the first")
+            await until(lambda: len(seen) == 1, "the loop to take the first", timeout=5)
             await r.bus.publish(_user(review, n=2))
             assert r.bus.pending_count(review) == 1
             assert not [e for e in list(r.bus.get_queue("manager")._queue)
                         if e.message_type == MessageType.USER_MESSAGE]
             gate.set()
 
-    _run(body, monkeypatch)
+    run_db(body, monkeypatch)

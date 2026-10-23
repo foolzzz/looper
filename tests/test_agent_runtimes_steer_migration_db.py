@@ -10,7 +10,7 @@ import asyncio
 
 import pytest
 
-from tests.test_catalog_db import DSN, _fresh_schema
+from tests.db_support import DSN, fresh_schema
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -30,7 +30,7 @@ def test_a_new_database_accepts_steer() -> None:
     from looper.db import connection
 
     async def _main() -> None:
-        async with _fresh_schema() as pool:
+        async with fresh_schema() as pool:
             await connection.ensure_schema(pool)
             try:
                 await pool.execute(_INSERT, "rt-steer", ["steer"])
@@ -49,7 +49,7 @@ def test_an_old_constraint_is_upgraded_and_still_rejects_unknown_capabilities(co
     from looper.db import connection
 
     async def _main() -> None:
-        async with _fresh_schema() as pool:
+        async with fresh_schema() as pool:
             await connection.ensure_schema(pool)
             await pool.execute(constraint)
             try:
@@ -76,7 +76,7 @@ def test_repeated_schema_setup_keeps_one_constraint_and_preserves_runtime_data()
     from looper.db import connection
 
     async def _main() -> None:
-        async with _fresh_schema() as pool:
+        async with fresh_schema() as pool:
             await connection.ensure_schema(pool)
             try:
                 await pool.execute(_INSERT, "rt-steer", ["steer"])

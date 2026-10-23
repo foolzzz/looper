@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
-from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +24,7 @@ import pytest
 from looper.agents.bus import MessageBus
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType
 from looper.agents.tiers.manager import NEW_SESSION_REPLY, ManagerAgent, ManagerConfig
+from tests.db_support import until
 from tests.runtime_model_helpers import with_model_name
 from tests.test_agent_channels import OPEN_ID, OTHER_OPEN_ID, _allowlist, _lark_event, _tg_update
 from tests.test_manager_reply import WEB, _fake_claude, _flag, _resident
@@ -137,14 +137,6 @@ def _chat(
             if "session_reset" not in (call.kwargs["metadata"] or {})]
     return SimpleNamespace(replies=replies, argvs=[argv for argv, _ in spawned], turns=turns, runs=runs,
                            running=running)
-
-
-async def _until(check: Callable[[], bool], timeout: float = 10.0) -> None:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while not check():
-        assert loop.time() < deadline, "timed out"
-        await asyncio.sleep(0.02)
 
 
 def _dsh_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any, *, fail_second: bool = False,
@@ -431,7 +423,7 @@ class TestNewSession:
                 manager = ManagerAgent(config=ManagerConfig(claude_bin=claude, work_dir=root), runtime_root=root)
                 await manager.start(bus)  # its loop takes the bus's messages, as the server's does
                 await bus.publish(_web("hello", 0))
-                await _until((root / "busy").exists)
+                await until((root / "busy").exists, timeout=10)
                 await bus.publish(_web("/new", 1))
                 await asyncio.sleep(0.3)  # long enough for /new to act, had it not waited
                 (root / "go").write_text("")

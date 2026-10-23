@@ -12,14 +12,14 @@ import contextlib
 import io
 import json
 import urllib.parse
-import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from tests.test_catalog_db import DSN, _call, _Writer
+from tests.db_support import DSN, fresh_schema
+from tests.test_catalog_db import _call, _Writer
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -103,24 +103,15 @@ def _isolated_registry_logins(monkeypatch: pytest.MonkeyPatch) -> None:
 @contextlib.asynccontextmanager
 async def _installation(*, schema: bool = True) -> AsyncIterator[tuple[Any, str]]:
     """A new schema (with Looper's tables unless ``schema`` is False): its pool and a URL that reaches it."""
-    import asyncpg
-
     from looper.db.connection import ensure_schema
 
-    name = f"looper_test_{uuid.uuid4().hex[:12]}"
-    admin = await asyncpg.connect(DSN)
-    await admin.execute(f'CREATE SCHEMA "{name}"')
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3, server_settings={"search_path": name})
-    parts = urllib.parse.urlsplit(DSN)
-    query = urllib.parse.urlencode([*urllib.parse.parse_qsl(parts.query), ("search_path", name)])
-    try:
+    async with fresh_schema() as pool:
+        name = await pool.fetchval("SHOW search_path")
+        parts = urllib.parse.urlsplit(DSN)
+        query = urllib.parse.urlencode([*urllib.parse.parse_qsl(parts.query), ("search_path", name)])
         if schema:
             await ensure_schema(pool)
         yield pool, urllib.parse.urlunsplit(parts._replace(query=query))
-    finally:
-        await pool.close()
-        await admin.execute(f'DROP SCHEMA "{name}" CASCADE')
-        await admin.close()
 
 
 async def _looper(monkeypatch: pytest.MonkeyPatch, url: str, *argv: str) -> tuple[int, str, str]:

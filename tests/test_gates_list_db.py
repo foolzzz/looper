@@ -7,8 +7,8 @@ from typing import Any
 
 import pytest
 
+from tests.db_support import DSN, run_db
 from tests.test_ops_tasks_db import _project, _task
-from tests.test_usage_api_db import DSN, _run
 from tests.test_user_gates_db import _api, _gate, _gate_step, _user
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -65,7 +65,7 @@ def test_states_and_counts(monkeypatch: pytest.MonkeyPatch) -> None:
         assert sorted(_ids(answer)) == ["task-a-g3", "task-d-g1", "task-d-g2"]
         assert answer["total"] == 3 and answer["counts"] == counts
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_waiting_on(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -90,7 +90,7 @@ def test_waiting_on(monkeypatch: pytest.MonkeyPatch) -> None:
         assert (answer["counts"]["waiting_user"], answer["counts"]["waiting_planner"]) == (1, 0)
         assert _ids(await _list(waiting_on="user")) == ["task-a-g1"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_project_filter(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -107,7 +107,7 @@ def test_project_filter(monkeypatch: pytest.MonkeyPatch) -> None:
         answer = await _list(project_id=two["id"])
         assert _ids(answer) == ["task-b-g1"] and answer["counts"]["all"] == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_order_and_paging(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -122,7 +122,7 @@ def test_order_and_paging(monkeypatch: pytest.MonkeyPatch) -> None:
         answer = await _list(state="all", limit="1", offset="1")
         assert _ids(answer) == ["task-c-g1"] and answer["total"] == 3
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_row_shape(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,7 +144,7 @@ def test_row_shape(monkeypatch: pytest.MonkeyPatch) -> None:
         last = row["last_message"]
         assert (last["role"], last["via"]) == ("user", "dashboard") and last["created_at"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("query", [
@@ -156,4 +156,4 @@ def test_bad_queries_are_refused(monkeypatch: pytest.MonkeyPatch, query: dict[st
         status, answer, _ = await _api("GET", "/api/gates", query=query)
         assert status == 400 and answer["error"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

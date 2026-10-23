@@ -20,9 +20,9 @@ import pytest
 from evals.prompt_regression.runner import fresh_database, running_server
 from looper.agents import self_check
 from looper.agents.self_check import mask_dsn
+from tests.db_support import DSN
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 
 
 @pytest.mark.parametrize(

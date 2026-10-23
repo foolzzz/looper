@@ -12,7 +12,8 @@ import pytest
 from looper.agents import chat_settings
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.tiers.manager import is_stop_command
-from tests.test_manager_new_session import _drain, _until
+from tests.db_support import until
+from tests.test_manager_new_session import _drain
 from tests.test_manager_stop import _manager, _Session
 
 @pytest.fixture(autouse=True)
@@ -53,7 +54,7 @@ def test_stop_from_the_same_chat_stops_the_turn(agent_db: Any) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             session, manager, bus, chat, inbox = _setup(tmp)
             handling = asyncio.create_task(manager._handle(_tg("写一篇很长的文章")))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             stop = _tg("/stop")
             await bus.publish(stop)
             await handling
@@ -75,13 +76,13 @@ def test_stop_from_another_chat_or_idle(agent_db: Any) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             session, manager, bus, chat, inbox = _setup(tmp)
             await bus.publish(_tg("/stop"))
-            await _until(lambda: not chat.empty())
+            await until(lambda: not chat.empty(), timeout=10)
             assert _texts(chat) == ["现在没有正在进行的回复。"]
             handling = asyncio.create_task(manager._handle(_tg("写一篇很长的文章")))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             _drain(chat)
             await bus.publish(_tg("/stop", chat=5))
-            await _until(lambda: not chat.empty())
+            await until(lambda: not chat.empty(), timeout=10)
             assert "现在没有正在进行的回复。" in _texts(chat)
             assert manager._running_token is not None and manager._running_token.stop is None
             await manager.stop_turn(manager._running_token.message_id, via="telegram")
@@ -109,10 +110,10 @@ def test_stop_is_answered_by_looper_when_the_setting_is_off(agent_db: Any, monke
         with tempfile.TemporaryDirectory() as tmp:
             session, manager, bus, chat, inbox = _setup(tmp)
             handling = asyncio.create_task(manager._handle(_tg("写一篇很长的文章")))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             _drain(chat)
             await bus.publish(_tg("/stop"))
-            await _until(lambda: not chat.empty())
+            await until(lambda: not chat.empty(), timeout=10)
             assert _texts(chat) == ["停止功能暂未开放"]
             assert inbox.empty()  # not queued for the model
             assert manager._running_token is not None and manager._running_token.stop is None
@@ -130,14 +131,14 @@ def test_stop_takes_the_whole_chat_with_its_queued_messages(agent_db: Any) -> No
             session, manager, bus, chat, inbox = _setup(tmp)
             first = _tg("写一篇很长的文章")
             handling = asyncio.create_task(manager._handle(first))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             queued = [_tg("第二条"), _tg("第三条")]
             other = _tg("别的聊天", chat=5)
             for envelope in (*queued, other):
                 manager._register_turn(envelope)
             _drain(chat)
             await bus.publish(_tg("/stop"))
-            await _until(lambda: "已停止当前回复，另取消了 2 条排队的消息。" in _texts(chat))
+            await until(lambda: "已停止当前回复，另取消了 2 条排队的消息。" in _texts(chat), timeout=10)
             await handling
             assert manager._turns.find(other.message_id) is not None
             assert manager._turns.find(other.message_id).stop is None
@@ -154,10 +155,10 @@ def test_stop_says_a_runtime_without_an_interrupt_cannot_stop_the_reply(agent_db
             session, manager, bus, chat, inbox = _setup(tmp)
             session.can_interrupt = False
             handling = asyncio.create_task(manager._handle(_tg("写一篇很长的文章")))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             _drain(chat)
             await bus.publish(_tg("/stop"))
-            await _until(lambda: not chat.empty())
+            await until(lambda: not chat.empty(), timeout=10)
             assert _texts(chat) == ["当前运行时不能中断回复，回复会照常完成。"]
             assert inbox.empty()  # not queued for the model
             assert manager._running_token is not None and manager._running_token.stop is None

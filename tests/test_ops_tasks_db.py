@@ -19,7 +19,8 @@ from looper.agents.message import MessageEnvelope, MessageType, channel_address
 from looper.agents.ops import Turn
 from looper.agents.ops.service import ManagerOps, Platform
 from looper.agents.ops.tasks import START_QUESTION
-from tests.test_usage_api_db import DSN, _get, _run
+from tests.db_support import DSN, run_db
+from tests.test_usage_api_db import _get
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -126,7 +127,7 @@ def test_a_task_is_created_ready_in_its_project_and_its_configuration_shown(
         assert status == 200
         assert [(a["tool"], a["status"]) for a in detail["manager_actions"]] == [("looper_task_create", "ok")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_task_asked_for_in_a_lark_group_tells_the_group_and_its_requester(
@@ -144,7 +145,7 @@ def test_a_task_asked_for_in_a_lark_group_tells_the_group_and_its_requester(
         assert (row["chat_id"], row["chat_kind"], row["chat_mention"]) == ("oc_1", "chat", "ou_1")
         assert NotifyTarget.from_columns(row) == NotifyTarget(TargetKind.CHAT, "oc_1", mention="ou_1")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_tasks_from_before_groups_keep_who_they_tell(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -167,7 +168,7 @@ def test_the_tasks_from_before_groups_keep_who_they_tell(monkeypatch: pytest.Mon
                            "task-tele0000001": NotifyTarget(TargetKind.CHAT, "-1001234"),
                            "task-web00000001": None}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_new_project_is_created_only_when_the_next_message_confirms_it(
@@ -193,7 +194,7 @@ def test_a_new_project_is_created_only_when_the_next_message_confirms_it(
         assert (await tasks.get_task(done["result"]["task_id"], pool=pool))["project_id"] == project["id"]
         assert "- 项目：Tetris（新建）" in chat.turns[1].blocks[0]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("arguments", "message"), [
@@ -218,7 +219,7 @@ def test_a_task_without_what_only_the_user_can_give_is_not_created(
         assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
         assert chat.turns[0].blocks == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 _CONTINUE = {"mode": "continue"}
@@ -259,7 +260,7 @@ def test_task_control_follows_the_tasks_status(
         else:
             assert _error(answer) == outcome and chat.sent() == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_cancelling_asks_first_and_only_a_running_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -281,7 +282,7 @@ def test_cancelling_asks_first_and_only_a_running_task(monkeypatch: pytest.Monke
         (waiting,) = await chat.say("也取消它", ("looper_task_control", {"task_id": "task-r", "action": "cancel"}))
         assert waiting["status"] == "needs_confirmation"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_starting_over_asks_first(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -309,7 +310,7 @@ def test_starting_over_asks_first(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
         assert [(e.message_type, e.payload) for e in chat.sent()] == [
             (MessageType.TASK_RESTART, {"task_id": "task-a", "mode": "continue"})]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("status", "planner", "outcome"), [
@@ -337,7 +338,7 @@ def test_a_supplement_goes_to_a_task_under_way(
         else:
             assert _error(answer) == outcome and pending.empty and woken == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_manager_sets_and_clears_a_tasks_system_prompt_mode(monkeypatch: pytest.MonkeyPatch,
@@ -371,7 +372,7 @@ def test_the_manager_sets_and_clears_a_tasks_system_prompt_mode(monkeypatch: pyt
         assert [tuple(r) for r in await pool.fetch(modes)] == [("reviewer", "append")]
         assert await pool.fetchval("SELECT count(*) FROM task_system_prompt_modes") == 1
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_updating_a_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -408,7 +409,7 @@ def test_updating_a_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
         assert [e.message_type for e in chat.sent("planner-task-v")] == [MessageType.TASK_CHANGE]
         assert cleared["status"] == "ok" and await agent_setting_layers.profile_overrides("task-r", pool=pool) == {}
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_task_in_any_status_is_renamed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -441,7 +442,7 @@ def test_a_task_in_any_status_is_renamed(monkeypatch: pytest.MonkeyPatch, tmp_pa
         notes = [e for e in await journal.list_entries("task-v", pool=pool) if e["kind"] == "supplement"]
         assert [(e["via"], e["delivered_at"] is not None) for e in notes] == [("manager:lark", True)]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_tasks_are_listed_searched_and_read(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -467,7 +468,7 @@ def test_tasks_are_listed_searched_and_read(monkeypatch: pytest.MonkeyPatch, tmp
         assert task["supplements"] == [{"text": "use CSV", "delivered": False}]
         assert _error(missing) == "not_found"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("title", "stored", "problem"), [
@@ -492,4 +493,4 @@ def test_a_task_is_named_by_its_title(monkeypatch: pytest.MonkeyPatch, tmp_path:
         assert (await tasks.get_task(task_id, pool=pool))["title"] == stored
         assert f"- 任务：{stored}（{task_id}）" in chat.turns[0].blocks[0]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

@@ -19,7 +19,7 @@ import pytest
 from manager_mcp_stand_in import manager_endpoint, mcp_manager_claude
 from looper.agents.bus import MessageBus
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
-from tests.test_usage_api_db import DSN, _run
+from tests.db_support import DSN, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -94,7 +94,7 @@ def test_the_managers_calls_create_a_new_project_only_after_the_next_message_con
         trail = await manager_actions.for_task(task_id, pool=pool)
         assert [(row["status"], row["channel"]) for row in trail] == [("ok", "web")]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_manager_without_a_turn_running_only_reads(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -109,7 +109,7 @@ def test_a_manager_without_a_turn_running_only_reads(monkeypatch: pytest.MonkeyP
         assert answer["error"]["code"] == "needs_user_turn"
         assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 _CREATE_CALC = [("looper_task_create", {"requirement": "build calc", "title": "计算器", "project": "calc"})]
@@ -142,7 +142,7 @@ def test_tools_that_do_not_work_are_said_so_and_claude_never_answers(
         assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
         assert any("Looper's tools do not work" in r.getMessage() for r in caplog.records if r.levelname == "ERROR")
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_token_refused_during_a_turn_replaces_claudes_reply(
@@ -180,4 +180,4 @@ def test_a_token_refused_during_a_turn_replaces_claudes_reply(
         assert any("not the Manager's token" in r.getMessage() for r in caplog.records)
         assert any("Claude's reply was not sent" in r.getMessage() for r in caplog.records)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)

@@ -7,12 +7,12 @@ schema is applied to it and the test's rows are removed afterwards.
 from __future__ import annotations
 
 import asyncio
-import os
 import uuid
 
 import pytest
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+from tests.db_support import DSN
+
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 

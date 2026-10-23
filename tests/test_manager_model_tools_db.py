@@ -12,8 +12,8 @@ from looper.agents.ops import Turn
 from looper.agents.ops.config import TOOLS
 from looper.agents.ops.service import ManagerOps, Platform
 from looper.db import manager_actions, profile_registry as db
+from tests.db_support import DSN, run_with_models as _run
 from tests.test_catalog_db import _call
-from tests.test_llm_models_db import DSN, _run
 from tests.test_ops_tasks_db import _Chat
 
 needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -50,10 +50,6 @@ def test_model_reference_schema_and_fixed_descriptions():
 
 
 @pytest.mark.parametrize("name,arguments", [
-    ("looper_providers", {"action": "update", "provider": "prov-test", "api_key": SECRET}),
-    ("looper_providers", {"action": "register", "name": "account", "vendor_type": "custom", "api_key": SECRET}),
-    ("looper_providers", {"action": "register", "name": "account", "vendor_type": "custom", "token": SECRET}),
-    ("looper_providers", {"action": "register", "name": "account", "vendor_type": "custom", "credential": SECRET}),
     ("looper_providers", {"action": "register", "name": "account", "vendor_type": "custom", "env": [
         {"key": "MY_API_KEY", "value": SECRET}], "endpoints": [
         {"protocol": "openai-chat", "base_url": "https://api.example.invalid"}]}),

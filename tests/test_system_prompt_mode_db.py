@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-from tests.test_catalog_db import DSN
-from tests.test_profile_registry_db import _call, _model_id, _ok, _run, _runtime
+from tests.db_support import DSN, run_db
+from tests.test_profile_registry_db import _call, _model_id, _ok, _runtime
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -41,7 +41,7 @@ def test_role_modes_are_the_builtin_ones_until_set_and_unset_by_null(monkeypatch
         assert await _modes() == BUILTIN
         assert await pool.fetchval("SELECT count(*) FROM agent_setting_layers") == 0
 
-    _run(run, monkeypatch)
+    run_db(run, monkeypatch)
 
 
 @pytest.mark.parametrize("value", ["auto", "default", "", 1, True, "Replace"])
@@ -53,7 +53,7 @@ def test_role_mode_refuses_other_values(monkeypatch: pytest.MonkeyPatch, value: 
             return
         assert status == 400 and 'must be "append" or "replace"' in body["error"]
 
-    _run(run, monkeypatch)
+    run_db(run, monkeypatch)
 
 
 def test_mode_is_set_only_on_a_role_layer_and_a_profile_has_none(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -70,7 +70,7 @@ def test_mode_is_set_only_on_a_role_layer_and_a_profile_has_none(monkeypatch: py
         profile = await _profile("q")
         assert "system_prompt_mode" not in profile
 
-    _run(run, monkeypatch)
+    run_db(run, monkeypatch)
 
 
 async def _old_shape(pool: Any) -> None:
@@ -129,7 +129,7 @@ def test_migration_carries_a_replace_profile_of_any_runtime_to_the_roles_that_us
         assert await _layer_modes(pool) == {"worker": "append", "planner": None}
         assert not await _profile_column(pool)
 
-    _run(run, monkeypatch)
+    run_db(run, monkeypatch)
 
 
 def test_migration_keeps_a_mode_the_layer_already_has(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,7 +144,7 @@ def test_migration_keeps_a_mode_the_layer_already_has(monkeypatch: pytest.Monkey
         await ensure_schema(pool)
         assert (await _layer_modes(pool))["worker"] == "append"
 
-    _run(run, monkeypatch)
+    run_db(run, monkeypatch)
 
 
 def test_migration_follows_the_shared_defaults_and_the_builtin_profile(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -160,7 +160,7 @@ def test_migration_follows_the_shared_defaults_and_the_builtin_profile(monkeypat
         # The worker follows the shared defaults' replacing profile, the reviewer its own appending one.
         assert await _layer_modes(pool) == {"worker": "replace", "reviewer": None}
 
-    _run(run, monkeypatch)
+    run_db(run, monkeypatch)
 
 
 def test_migration_on_a_database_without_the_old_column_changes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -172,7 +172,7 @@ def test_migration_on_a_database_without_the_old_column_changes_nothing(monkeypa
         await ensure_schema(pool)
         assert await _layer_modes(pool) == {} and await _modes() == BUILTIN and not await _profile_column(pool)
 
-    _run(run, monkeypatch)
+    run_db(run, monkeypatch)
 
 
 async def _profile_columns(conn: Any) -> list[str]:
@@ -216,7 +216,7 @@ def test_config_transfer_carries_role_modes_and_ignores_a_profiles_old_mode(
                 plan = await import_config(conn, bad, apply=True)
             assert any(c.action is Action.SKIPPED for c in plan.changes)
 
-    _run(run, monkeypatch)
+    run_db(run, monkeypatch)
 
 
 @pytest.mark.parametrize("role", ["manager", "worker"])
@@ -249,4 +249,4 @@ def test_real_launch_applies_and_records_the_role_mode_in_history(
         detail = await _ok("GET", f"/api/llm-records/{record['id']}")
         assert detail["record"]["metadata"]["system_prompt_mode"] == used
 
-    _run(run, monkeypatch)
+    run_db(run, monkeypatch)

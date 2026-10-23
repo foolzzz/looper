@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
-from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -21,8 +20,9 @@ import pytest
 from fake_claude import fake_claude
 from looper.agents.bus import MessageBus
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+from tests.db_support import DSN, run_db, until
 from tests.test_ops_tasks_db import _Chat, _error, _project, _task
-from tests.test_usage_api_db import DSN, _run, _Writer
+from tests.test_usage_api_db import _Writer
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -65,14 +65,6 @@ async def _call(method: str, path: str, body: Any = None, *, worker_pool: Any = 
     return int(head.split()[1]), json.loads(payload)
 
 
-async def _until(check: Callable[[], bool], what: str, seconds: float = 15) -> None:
-    for _ in range(int(seconds / 0.02)):
-        if check():
-            return
-        await asyncio.sleep(0.02)
-    raise AssertionError(f"timed out waiting for {what}")
-
-
 class _Pool:
     """A real WorkerPool on a fake ``claude`` whose runs wait for a user turn, fed work items for tasks."""
 
@@ -113,7 +105,7 @@ class _Pool:
     async def settled(self, running: int, waiting: int) -> tuple[set[str], set[str]]:
         """Once ``running`` runs run and ``waiting`` wait, and every run the pool has is one of them: each holds
         a place in its task or is parked for one, so no run over a limit is still on its way to start."""
-        await _until(lambda: len(self.running()) == running and len(self.waiting()) == waiting
+        await until(lambda: len(self.running()) == running and len(self.waiting()) == waiting
                      and len(self.pool._slots) == running and self._parked() == waiting
                      and len(self.pool._tasks) == running + waiting,
                      f"{running} running and {waiting} waiting: {self.pool.status()}")
@@ -121,7 +113,7 @@ class _Pool:
 
     async def finish(self, worker_id: str) -> None:
         assert await self.pool.send_input(worker_id, "finish")
-        await _until(lambda: worker_id not in self.pool._active, f"{worker_id} to end")
+        await until(lambda: worker_id not in self.pool._active, f"{worker_id} to end")
 
 
 async def _waits(pool: Any, task_id: str) -> list[str]:
@@ -155,7 +147,7 @@ def test_a_tasks_limit_holds_its_workers_and_the_next_starts_as_one_ends(
         assert await _waits(pool, "task-a") == ["Worker waits for room in this task (1 running, limit 1)"] * 2
         assert await _waits(pool, "task-b") == []
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_two_tasks_of_one_project_each_run_their_own_limit_at_once(
@@ -175,7 +167,7 @@ def test_two_tasks_of_one_project_each_run_their_own_limit_at_once(
         for task_id in ("task-a", "task-b"):
             assert await _waits(pool, task_id) == ["Worker waits for room in this task (2 running, limit 2)"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_tasks_own_limit_above_the_default_applies_and_a_task_without_one_runs_the_default(
@@ -197,7 +189,7 @@ def test_a_tasks_own_limit_above_the_default_applies_and_a_task_without_one_runs
         assert sorted(running) == ["a1", "a2", "a3", "b1"] or sorted(running) == ["a1", "a2", "a3", "b2"]
         assert await _waits(pool, "task-b") == ["Worker waits for room in this task (1 running, limit 1)"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_raising_a_tasks_limit_starts_its_waiting_runs_at_once_and_lowering_it_stops_none(
@@ -228,7 +220,7 @@ def test_raising_a_tasks_limit_starts_its_waiting_runs_at_once_and_lowering_it_s
             await runs.finish(sorted(running)[2])
             await runs.settled(1, 0)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 async def _profiles(pool: Any) -> None:
@@ -276,7 +268,7 @@ def test_a_bad_choice_is_refused_and_nothing_is_stored(
         assert await pool.fetchval("SELECT count(*) FROM task_concurrency_limits") == 0
         assert await pool.fetchval("SELECT count(*) FROM task_profile_overrides") == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_new_task_chooses_its_profiles_by_id_or_name_as_the_agents_endpoint_does(
@@ -301,7 +293,7 @@ def test_a_new_task_chooses_its_profiles_by_id_or_name_as_the_agents_endpoint_do
         assert (status, created["error"]) == (400, "profile_overrides." + refused.removeprefix("profiles."))
         assert await pool.fetchval("SELECT count(*) FROM tasks") == 2
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("body", [{"concurrency": {"worker": 2}}, {"profiles": {"worker": "claude-code/sonnet"}}])
@@ -323,7 +315,7 @@ def test_every_task_but_a_completed_one_changes_its_choices(monkeypatch: pytest.
         assert await pool.fetchval("SELECT count(*) FROM task_concurrency_limits") + await pool.fetchval(
             "SELECT count(*) FROM task_profile_overrides") == len(can_run)
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_the_task_shows_each_roles_profile_and_limit_with_their_sources(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -382,7 +374,7 @@ def test_the_task_shows_each_roles_profile_and_limit_with_their_sources(monkeypa
         await pool.execute("UPDATE tasks SET status = 'completed' WHERE id = 'task-a'")
         assert (await agents("task-a"))["editable"] is False
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_running_tasks_new_worker_profile_runs_from_its_next_step(
@@ -411,7 +403,7 @@ def test_a_running_tasks_new_worker_profile_runs_from_its_next_step(
             await runs.finish("w2")
         assert models() == ["opus", "sonnet"]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 # --- The Manager's looper_concurrency ---
@@ -468,7 +460,7 @@ def test_a_tasks_limit_changes_at_once_and_reads_back(monkeypatch: pytest.Monkey
         assert overview["result"]["running_tasks"] == [
             {"task_id": "task-a", "name": "a", "project": "calc", "concurrency": {"reviewer": 5, "worker": 1}}]
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize("ended", ["failed", "stopped", "cancelled"])
@@ -500,7 +492,7 @@ def test_the_manager_changes_the_agents_of_a_task_that_ended_but_not_its_require
                                                    "task_concurrency_limits")] == [("task-a", "worker", 1)]
         assert await pool.fetchval("SELECT requirement FROM tasks WHERE id = 'task-a'") == "build calc"
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("arguments", "code", "message"), [
@@ -533,7 +525,7 @@ def test_the_manager_is_told_why_a_change_is_refused(
         assert await pool.fetchval("SELECT count(*) FROM agent_setting_layers WHERE max_concurrency IS NOT NULL") == 0
         assert await pool.fetchval("SELECT count(*) FROM manager_actions WHERE status = 'needs_confirmation'") == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 
 
 def test_a_turn_the_manager_runs_on_its_own_changes_no_limit(
@@ -549,5 +541,5 @@ def test_a_turn_the_manager_runs_on_its_own_changes_no_limit(
         assert _error(answer) == "needs_user_turn"
         assert await pool.fetchval("SELECT count(*) FROM task_concurrency_limits") == 0
 
-    _run(test, monkeypatch)
+    run_db(test, monkeypatch)
 

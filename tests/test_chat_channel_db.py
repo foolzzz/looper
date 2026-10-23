@@ -4,32 +4,12 @@ console can label every channel's conversation. Runs only with LOOPER_TEST_DATAB
 from __future__ import annotations
 
 import asyncio
-import os
-import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from typing import Any
 
 import pytest
 
-DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+from tests.db_support import DSN, fresh_schema
+
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-
-
-@asynccontextmanager
-async def _fresh_schema() -> AsyncIterator[Any]:
-    import asyncpg
-
-    schema = f"looper_test_{uuid.uuid4().hex[:12]}"
-    admin = await asyncpg.connect(DSN)
-    await admin.execute(f'CREATE SCHEMA "{schema}"')
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3, server_settings={"search_path": schema})
-    try:
-        yield pool
-    finally:
-        await pool.close()
-        await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
-        await admin.close()
 
 
 def test_a_channel_is_stored_and_returned() -> None:
@@ -37,7 +17,7 @@ def test_a_channel_is_stored_and_returned() -> None:
     from looper.db import connection
 
     async def _main() -> None:
-        async with _fresh_schema() as pool:
+        async with fresh_schema() as pool:
             await connection.ensure_schema(pool)
             # A web turn defaults to 'web'; a telegram turn is tagged telegram under telegram:<chat>.
             await db_chat.save_message(session_id="session-web", message_id="m1", role="user",
@@ -71,7 +51,7 @@ def test_a_telegram_resume_brief_excludes_the_current_message() -> None:
     from looper.db import connection
 
     async def _main() -> None:
-        async with _fresh_schema() as pool:
+        async with fresh_schema() as pool:
             await connection.ensure_schema(pool)
             connection._pool = pool  # the Manager reads through the default pool
             try:
@@ -119,7 +99,7 @@ def test_an_answer_its_channel_could_not_send_is_stored_and_shown_as_not_deliver
                                       metadata={CHAT_RECORD: chat_record("telegram:42", message_id)})
 
     async def _main() -> None:
-        async with _fresh_schema() as pool:
+        async with fresh_schema() as pool:
             await connection.ensure_schema(pool)
             connection._pool = pool  # record_reply and the Manager write and read through the default pool
             try:

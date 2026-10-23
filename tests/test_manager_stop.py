@@ -22,7 +22,8 @@ from looper.agents.message import MessageEnvelope, MessageType
 from looper.agents.run_usage import Usage
 from looper.agents.runtimes import StopMethod
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig, StopResult
-from tests.test_manager_new_session import _drain, _until, _web
+from tests.db_support import until
+from tests.test_manager_new_session import _drain, _web
 
 pytestmark = pytest.mark.usefixtures("current_turn")
 
@@ -105,7 +106,7 @@ def test_stop_while_the_turn_runs(agent_db: Any) -> None:
             manager, bus, queue = _manager(Path(tmp), session)
             envelope = _web("写一篇很长的文章")
             handling = asyncio.create_task(manager._handle(envelope))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
             assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.ALREADY_STOPPING
             await handling
@@ -132,7 +133,7 @@ def test_stop_of_another_message_or_when_idle(agent_db: Any) -> None:
             assert await manager.stop_turn("nothing", via="web") is StopResult.NOT_RUNNING
             envelope = _web("写一篇很长的文章")
             handling = asyncio.create_task(manager._handle(envelope))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             assert await manager.stop_turn("other", via="web") is StopResult.NOT_RUNNING
             assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
             await handling
@@ -150,7 +151,7 @@ def test_the_web_page_stops_its_message_by_the_id_it_sent(agent_db: Any) -> None
             envelope = _web("写一篇很长的文章")
             envelope.payload["channel_context"]["client_message_id"] = "m-page-1"
             handling = asyncio.create_task(manager._handle(envelope))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             assert await manager.stop_turn("m-page-2", via="web") is StopResult.NOT_RUNNING
             assert await manager.stop_turn("m-page-1", via="web") is StopResult.STOPPING
             await handling
@@ -216,7 +217,7 @@ def test_an_ordinary_turn_after_a_stopped_one(agent_db: Any) -> None:
             manager, bus, queue = _manager(Path(tmp), session)
             first = _web("先来一个", 0)
             handling = asyncio.create_task(manager._handle(first))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             await manager.stop_turn(first.message_id, via="web")
             await handling
             _drain(queue)
@@ -285,7 +286,7 @@ def test_a_stopped_turn_that_asked_to_confirm_leaves_no_confirmation(agent_db: A
             session.on_turn = ask
             envelope = _web("删掉它", 0)
             handling = asyncio.create_task(manager._handle(envelope))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             assert ops.asks_in(envelope.message_id)
             await manager.stop_turn(envelope.message_id, via="web")
             await handling
@@ -306,7 +307,7 @@ def test_the_turn_after_a_stop_is_told_once_and_new_clears_it(agent_db: Any) -> 
             manager, bus, queue = _manager(Path(tmp), session)
             first = _web("先来一个" + "很长" * 50, 0)
             handling = asyncio.create_task(manager._handle(first))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             await manager.stop_turn(first.message_id, via="web")
             await handling
             session.hold = False
@@ -323,7 +324,7 @@ def test_the_turn_after_a_stop_is_told_once_and_new_clears_it(agent_db: Any) -> 
             session._stopped.clear()
             fourth = _web("第四个", 3)
             handling = asyncio.create_task(manager._handle(fourth))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             await manager.stop_turn(fourth.message_id, via="web")
             await handling
             assert manager._stopped_notes
@@ -378,7 +379,7 @@ def test_a_confirmation_asked_after_the_stop_is_refused_and_never_runs(agent_db:
             session.on_turn = ask
             envelope = _web("删掉它", 0)
             handling = asyncio.create_task(manager._handle(envelope))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             await manager.stop_turn(envelope.message_id, via="web")
             await handling
             (reply,) = _replies(queue)
@@ -434,7 +435,7 @@ def test_a_call_whose_escalate_found_nothing_to_confirm_is_refused_after_the_sto
             session.on_turn = ask
             envelope = _web("建个任务", 0)
             handling = asyncio.create_task(manager._handle(envelope))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             await manager.stop_turn(envelope.message_id, via="web")
             await handling
 
@@ -476,7 +477,7 @@ def test_calls_that_come_after_the_stop_are_refused_as_stopped(agent_db: Any) ->
             session.on_turn = late
             confirm = _web("确认", 1)
             handling = asyncio.create_task(manager._handle(confirm))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             await handling
             assert [a["error"]["code"] for a in answers] == ["stopped", "stopped"]
             assert ran == [] and not ops._pending
@@ -607,11 +608,11 @@ def test_a_stop_whose_status_is_slow_never_interrupts_the_next_turn(agent_db: An
             manager._send_status = slow_status  # type: ignore[method-assign]
             first, second = _web("先来一个", 0), _web("再来一个", 1)
             handling = asyncio.create_task(manager._handle(first))
-            await _until(lambda: bool(session.turns))
+            await until(lambda: bool(session.turns), timeout=10)
             stopping = asyncio.create_task(manager.stop_turn(first.message_id, via="web"))
             await handling
             nxt = asyncio.create_task(manager._handle(second))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             slow.set()
             assert await stopping is StopResult.STOPPING
             await asyncio.sleep(0.1)
@@ -690,7 +691,7 @@ def test_a_message_queued_behind_a_running_turn_is_stoppable(agent_db: Any) -> N
             inbox = bus.get_queue("manager")
             assert inbox.qsize() == 2
             handling = asyncio.create_task(manager._handle(inbox.get_nowait()))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             assert await manager.stop_turn(second.message_id, via="web") is StopResult.STOPPING
             assert await manager.stop_turn(second.message_id, via="web") is StopResult.ALREADY_STOPPING
             assert not session._stopped.is_set()  # the running turn is not the one stopped
@@ -797,7 +798,7 @@ def test_a_stop_hands_the_runtime_the_very_cancel_of_the_turn(agent_db: Any) -> 
             manager, bus, queue = _manager(Path(tmp), session)
             envelope = _web("写一篇很长的文章")
             handling = asyncio.create_task(manager._handle(envelope))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             token = manager.turn_for(envelope.message_id)
             assert token is not None
             assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
@@ -881,7 +882,7 @@ def test_a_stop_while_running_records_phase_and_method_and_leaves_a_stopped_note
             manager, bus, queue = _manager(Path(tmp), session)
             envelope = _web("写一篇很长的文章")
             handling = asyncio.create_task(manager._handle(envelope))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             await manager.stop_turn(envelope.message_id, via="web")
             await handling
             stop = _user_stop(agent_db)
@@ -948,7 +949,7 @@ def test_two_stops_leave_both_notes_in_order_and_new_clears_them(agent_db: Any) 
             manager, bus, queue = _manager(Path(tmp), session)
             first = _web("甲", 0)
             handling = asyncio.create_task(manager._handle(first))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             await manager.stop_turn(first.message_id, via="web")
             await handling
             second = _web("乙", 1)
@@ -971,7 +972,7 @@ def test_two_stops_leave_both_notes_in_order_and_new_clears_them(agent_db: Any) 
             session._stopped.clear()
             envelope = _web("丁", 3)
             handling = asyncio.create_task(manager._handle(envelope))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             await manager.stop_turn(envelope.message_id, via="web")
             await handling
             await manager._handle(_web("/new", 4))
@@ -995,7 +996,7 @@ def test_a_stop_with_no_usage_reported_is_incomplete(agent_db: Any) -> None:
             session.run_turn = no_usage  # type: ignore[method-assign]
             envelope = _web("写")
             handling = asyncio.create_task(manager._handle(envelope))
-            await _until(session.running.is_set)
+            await until(session.running.is_set, timeout=10)
             await manager.stop_turn(envelope.message_id, via="web")
             await handling
             (finish,) = agent_db.finish_record.await_args_list
@@ -1037,7 +1038,7 @@ def test_closing_the_manager_while_the_runtime_starts_leaves_no_process(agent_db
             manager, bus, _ = _manager(Path(tmp), session)
             manager._running = True
             manager._task = asyncio.create_task(manager._handle(_web("你好")))
-            await _until(session.starting.is_set)
+            await until(session.starting.is_set, timeout=10)
             await manager.stop()
             await asyncio.sleep(0.6)  # long enough for an abandoned start to have spawned its process
             try:
@@ -1078,7 +1079,7 @@ def test_a_stop_while_an_answered_turns_events_still_reach_the_chat_stops_it_and
             envelope = _web("你好")
             handling = asyncio.create_task(manager._handle(envelope))
             await asyncio.wait_for(recording.wait(), 5)
-            await _until(lambda: session.turns)
+            await until(lambda: session.turns, timeout=10)
             await asyncio.sleep(0.05)  # the runtime has returned its answer
             assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
             release.set()
