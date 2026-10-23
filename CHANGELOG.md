@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.39] - 2026-10-22
+
+### Changed
+
+- **Test suite slimming, step pr1.** Each pytest-xdist worker gets a PostgreSQL database of its own, long prompt-eval tests are split by scenario, fixed sleeps are gone from the touched tests, and the Python tests job reports the 25 slowest tests (`--durations=25`). Behavior change: none. Model-visible: none. ([#409](https://github.com/foolzzz/looper/pull/409))
+
 ## [2.13.38] - 2026-10-22
 
 ### Fixed

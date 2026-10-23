@@ -34,6 +34,16 @@ from real_runtime_root_guard_plugin import (  # noqa: E402,F401
 )
 from fake_claude import fake_claude  # noqa: E402
 from lark_cli_stand_in import lark_cli_stand_in  # noqa: E402,F401 (a fixture for every test)
+import worker_database  # noqa: E402
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    # Before any test module is imported (several read the URL at import): an xdist worker gets a database of its own.
+    worker_database.start(getattr(config, "workerinput", {}).get("workerid"))
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    worker_database.finish()
 
 
 # PostgreSQL writes made by the agent tiers (Manager, Planner, TaskRouter, WorkerPool).
