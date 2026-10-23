@@ -86,6 +86,8 @@ class Turn:
     group: bool = False  # the chat is a group chat
     envelope: MessageEnvelope | None = None
     blocks: list[str] = field(default_factory=list)
+    # Created in this turn: their ready configuration blocks can change after a successful start.
+    created_task_blocks: dict[str, str] = field(default_factory=dict)
     # What this turn's calls created (a schedule's id): the user sees it only after this turn's reply.
     created: set[str] = field(default_factory=set)
     task_ids: set[str | None] = field(default_factory=set)  # each call's named task; None for global calls or creates
