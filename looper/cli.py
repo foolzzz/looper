@@ -64,38 +64,13 @@ def build_parser() -> argparse.ArgumentParser:
     config = commands.add_parser(
         "config",
         allow_abbrev=False,
-        help="Export this installation's agent configuration to one file, or import one.",
+        help="Create the service's local ops file.",
         description=(
-            "Move an installation's agent configuration as looper-config/v3: providers with per-protocol endpoints, "
-            "models and profiles, settings layers and role prompts, "
-            "the catalog with its files and MCP servers, global installs, channels and, optionally, projects. "
-            "Both commands use the database directly (the ops file's database.url); the server need not run. "
-            "init-ops writes the ops file itself."
+            "init-ops writes the local ops file used to start Looper. "
+            "For configuration export and import, use loopercli with the running service."
         ),
     )
     config_commands = config.add_subparsers(dest="config_command", required=True)
-    export = config_commands.add_parser(
-        "export", allow_abbrev=False, help="Write the configuration file (reads the database only).",
-        description="Write the configuration file. Secrets are left out as placeholders unless --include-secrets.",
-    )
-    export.add_argument("file", help="The file to write (JSON).")
-    export.add_argument("--include-projects", action="store_true",
-                        help="Also export projects with their settings, knowledge, own skills, installs and "
-                             "schedules (an import brings schedules in disabled).")
-    export.add_argument("--include-secrets", action="store_true",
-                        help="Write LLM provider API keys, MCP environment and header values and channel secrets in "
-                             "plain text.")
-    import_ = config_commands.add_parser(
-        "import", allow_abbrev=False, help="Preview importing a configuration file; --apply writes it.",
-        description=(
-            "Show what importing the file would add, change, leave and skip, without writing; with --apply, write "
-            "it in one transaction. Entries match by name; nothing missing from the file is removed, and a "
-            "placeholder never replaces a stored secret."
-        ),
-    )
-    import_.add_argument("file", help="The configuration file.")
-    import_.add_argument("--apply", action="store_true", help="Write the changes the preview shows.")
-    import_.add_argument("--json", action="store_true", help="Print the plan as JSON.")
     init_ops = config_commands.add_parser(
         "init-ops", allow_abbrev=False, help="Write the ops file from the settings in effect now (mode 0600).",
         description=(
@@ -105,8 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Looper reads for this release only. It refuses to replace an existing file, and shows no value."
         ),
     )
-    for command in (export, import_, init_ops):
-        _add_location_flags(command)
+    _add_location_flags(init_ops)
     _add_service_parser(commands)
     commands.add_parser(
         "mcp-server",
@@ -175,7 +149,12 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    argv = sys.argv[1:] if argv is None else argv
+    parser = build_parser()
+    if len(argv) >= 2 and argv[0] == "config" and argv[1] in ("export", "import"):
+        parser.error(f"looper config {argv[1]} was removed; use loopercli config {argv[1]} "
+                     "with the running service")
+    args = parser.parse_args(argv)
     if args.command == "version":
         payload = {"ok": True, "schema_version": "looper_version_v0", "name": "looper", "version": __version__}
         print(json.dumps(payload, indent=2) if args.format == "json" else f"looper {__version__}")
@@ -195,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
         ops = _load_ops(args)
         return 1 if ops is None else doctor(ops)
     if args.command == "config":
-        return _config(args)
+        return _init_ops(args)
     if args.command == "service":
         return _service(args)
     if args.command == "mcp-server":
@@ -251,40 +230,6 @@ def _init_ops(args: argparse.Namespace) -> int:
     lines.append("then remove those variables from the environment and .env, and if `looper service` runs Looper, run "
                  "`looper service install` again: its unit then names this file and carries no database URL")
     print("\n".join(lines))
-    return 0
-
-
-def _config(args: argparse.Namespace) -> int:
-    import asyncio
-
-    import asyncpg
-
-    from .agents import config_transfer
-
-    if args.config_command == "init-ops":
-        return _init_ops(args)
-    ops = _load_ops(args)
-    if ops is None:
-        return 1
-    path = Path(args.file)
-    try:
-        if args.config_command == "export":
-            if args.include_secrets:
-                print(f"warning: {path} will hold secrets (LLM provider API keys, MCP environment and header values, "
-                      "channel secrets) in plain text; keep it private and delete it once imported", file=sys.stderr)
-            summary = asyncio.run(config_transfer.export_to_file(
-                ops.database_url, path, include_projects=args.include_projects, include_secrets=args.include_secrets))
-            print(config_transfer.format_export(summary, path, include_secrets=args.include_secrets))
-            return 0
-        plan = asyncio.run(config_transfer.import_file(ops.database_url, path, apply=args.apply))
-    except (config_transfer.ConfigFileError, config_transfer.SchemaChangePending) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    except (OSError, asyncpg.PostgresError) as exc:
-        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 1
-    print(json.dumps(plan.view(), indent=2, ensure_ascii=False) if args.json
-          else config_transfer.format_plan(plan, path))
     return 0
 
 
