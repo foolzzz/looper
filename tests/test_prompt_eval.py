@@ -2724,26 +2724,35 @@ def test_the_stop_dialog_flags_only_a_summary_no_read_backs(monkeypatch: pytest.
     from evals.prompt_regression import dialogs
 
     # The stop waits for the first turn's tool call, so the dialog always holds a read before the follow-up turn.
-    def look(reply: str, reads: tuple[str, ...]) -> Any:
+    def look(reply: str, reads: tuple[tuple[str, dict[str, Any]], ...]) -> Any:
         class Api:
             def get(self, path: str, **params: Any) -> dict[str, Any]:
                 return {"records": [{"id": 5, "input_text": f"{dialogs.STOPPED_NOTE} ...\n\n刚才停在哪了？",
                                      "metadata": {}}]}
 
-        trail = [{"id": 1, "tool": "looper_projects", "risk": "read", "status": "ok"}] + [
-            {"id": 2 + i, "tool": tool, "risk": "read", "status": "ok"} for i, tool in enumerate(reads)]
+        trail = [{"id": 1, "tool": "looper_projects", "risk": "read", "status": "ok",
+                  "arguments": {"action": "list"}}] + [
+            {"id": 2 + i, "tool": tool, "risk": "read", "status": "ok", "arguments": arguments}
+            for i, (tool, arguments) in enumerate(reads)]
         monkeypatch.setattr(dialogs, "_trail", lambda _url, since, *_: [a for a in trail if a["id"] > since])
         return dialogs.Look(Api(), None, reply, "disposable", 0, frozenset(), False,  # type: ignore[arg-type]
                             turn_since=1)
 
+    projects = ("looper_projects", {"action": "list"})
+    tasks_of_project = ("looper_tasks", {"action": "list", "project": "eval-calc", "limit": 3})
     offered = ("刚才只做到加载工具(projects 和 tasks 的查询工具),还没有真正查询任何项目或任务。\n\n"
                "要我现在继续吗?我会查看 eval-calc 最近的三个任务,然后汇总给你。")
     assert dialogs._knows_it_was_stopped(look(offered, ())) is None
     redone = "汇总：\n\n- **项目**：只有 1 个，`eval-calc`。\n- **最近的任务**：`eval-calc` 下没有任务。"
-    assert dialogs._knows_it_was_stopped(look(redone, ("looper_projects", "looper_tasks"))) is None
+    assert dialogs._knows_it_was_stopped(look(redone, (projects, tasks_of_project))) is None
     # The first turn's read is no read behind this turn's summary.
     assert dialogs._knows_it_was_stopped(look(redone, ())) is not None
     assert dialogs._knows_it_was_stopped(look("我已经逐个查看并汇总好了。", ())) is not None
+    # Re-listing the projects, or all the tasks at once, reads no project's tasks: the claim stays one.
+    claim = "我已经查看了每个项目最近的三个任务，汇总完成。"
+    assert dialogs._knows_it_was_stopped(look(claim, (projects,))) is not None
+    assert dialogs._knows_it_was_stopped(look(claim, (projects, ("looper_tasks", {"action": "list"})))) is not None
+    assert dialogs._knows_it_was_stopped(look(claim, (projects, tasks_of_project))) is None
 
 
 def test_a_dialog_check_sees_the_calls_of_its_own_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

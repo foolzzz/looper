@@ -194,6 +194,13 @@ def _reads(look: Look, *, this_turn: bool = False) -> list[dict[str, Any]]:
     return [a for a in calls if a["risk"] == "read" and a["status"] == "ok"]
 
 
+def _project_task_reads(look: Look) -> list[dict[str, Any]]:
+    """This turn's reads of one project's tasks (``looper_tasks list`` with a project): what a summary of each
+    project's recent tasks stands on. Listing the projects, or all tasks at once, reads no project's tasks."""
+    return [a for a in _reads(look, this_turn=True) if a["tool"] == "looper_tasks"
+            and (a.get("arguments") or {}).get("action") == "list" and (a.get("arguments") or {}).get("project")]
+
+
 # --- The checks ---
 
 
@@ -455,9 +462,10 @@ def _knows_it_was_stopped(look: Look) -> str | None:
         return "the turn's input does not start with the note that the user stopped the previous reply"
     if look.fake:
         return None
-    # A summary this turn's reads back (it may redo the stopped turn's) is real; the stopped turn's own read, which
-    # is what the stop waited for, backs none. Without one, it is a claim unless the reply says the work was not done.
-    if "汇总" in look.reply and not _reads(look, this_turn=True) and not re.search(
+    # A summary this turn's per-project task reads back (it may redo the stopped turn's) is real; the stopped turn's
+    # own read, which is what the stop waited for, backs none, and nor does a re-listing of the projects alone.
+    # Without one, it is a claim unless the reply says the work was not done.
+    if "汇总" in look.reply and not _project_task_reads(look) and not re.search(
             r"没(有)?(来得及|完成|做完|汇总)|还没|未(完成|汇总)|停", look.reply):
         return "the reply claims the summary was finished"
     return None
