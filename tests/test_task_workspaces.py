@@ -342,26 +342,60 @@ def test_the_startup_sweep_finishes_what_ended_and_removes_what_no_task_has(repo
     assert git(repo, "show", "looper/task-gone/task:left.txt") == "left"  # its branch stays, with what it held
 
 
-@pytest.mark.parametrize("stderr", [
-    b"fatal: not a git repository (or any of the parent directories): .git\n",
-    b"fatal: not a git repository (or any parent up to mount point /)\n"
-    b"Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n",
+@pytest.mark.parametrize(("stderr", "outside_git"), [
+    (b"fatal: not a git repository (or any of the parent directories): .git\n", True),
+    (b"fatal: not a git repository (or any parent up to mount point /)\n"
+     b"Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n", False),
 ], ids=["root", "mount"])
-def test_not_git_workspace_runs_in_place_for_every_discovery_boundary(
-    tmp_path: Path, store: Store, monkeypatch: pytest.MonkeyPatch, stderr: bytes,
+def test_only_complete_discovery_outside_git_allows_running_in_place(
+    tmp_path: Path, store: Store, monkeypatch: pytest.MonkeyPatch, stderr: bytes, outside_git: bool,
 ) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
-    async def outside_git(*_: Any, **__: Any) -> ws._Run:
+    async def discovery_failure(*_: Any, **__: Any) -> ws._Run:
         return ws._Run(128, b"", stderr)
 
-    monkeypatch.setattr(ws, "_git", outside_git)
+    monkeypatch.setattr(ws, "_git", discovery_failure)
+    if not outside_git:
+        with pytest.raises(TaskWorkspaceError, match="mount point"):
+            run(tw.check(str(workspace), mode=WORKTREE))
+        with pytest.raises(TaskWorkspaceError, match="mount point"):
+            prepare(store, task("task-1", workspace), tmp_path / "rt")
+        assert not store.worktrees and not store.work_dirs and not store.notes
+        return
     checked = run(tw.check(str(workspace), mode=WORKTREE))
     assert (checked["mode"], checked["git"], [w["kind"] for w in checked["warnings"]]) == (
         "in_place", None, [WarningKind.NOT_GIT.value])
     assert prepare(store, task("task-1", workspace), tmp_path / "rt") == str(workspace)
     assert not store.worktrees
+
+
+def test_discovery_crosses_filesystems_to_isolate_a_task_from_its_parent_repository(
+    repo: Path, store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = repo / "app"
+    original = ws._git
+
+    async def mount_boundary(cwd: Any, *args: str, **kwargs: Any) -> ws._Run:
+        # Simulate a mount without privileges; all successful commands use real git.
+        if (Path(cwd) == workspace and "--show-toplevel" in args
+                and kwargs.get("env", {}).get("GIT_DISCOVERY_ACROSS_FILESYSTEM") != "1"):
+            return ws._Run(128, b"", b"fatal: not a git repository (or any parent up to mount point /)\n"
+                           b"Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n")
+        return await original(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(ws, "_git", mount_boundary)
+    before = user_view(repo)
+    checked = run(tw.check(str(workspace), mode=WORKTREE))
+    assert checked["mode"] == "worktree" and checked["git"]["repository"] == str(repo)
+    work_dir = Path(prepare(store, task("task-1", workspace), tmp_path / "rt"))
+    assert work_dir == tmp_path / "rt" / "task-worktrees" / "task-1" / "app"
+    assert store.work_dirs["task-1"] == str(work_dir)
+    assert git(work_dir, "symbolic-ref", "HEAD") == "refs/heads/looper/task-1/task"
+    (work_dir / "main.py").write_text("print('task change')\n")
+    assert (workspace / "main.py").read_text() == "print('hi')\n"
+    assert user_view(repo) == before
 
 
 @pytest.mark.parametrize("command", ["location", "head", "branch"])
