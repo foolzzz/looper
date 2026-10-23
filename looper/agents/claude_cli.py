@@ -294,8 +294,7 @@ READ_ONLY_MODE = ("--permission-mode", "manual", "--permission-prompts", "none")
 WRITE_TOOLS = ("Edit", "Write", "NotebookEdit")
 # A consult has only these built-in reading tools, with no shell.
 CONSULT_TOOLS = ("Read", "Glob", "Grep")
-# Explicit read rules also allow document paths outside cwd (for example, at the repository root).
-READ_ONLY_ALLOWED = (*CONSULT_TOOLS, "Skill", "WebFetch", "WebSearch")
+READ_ONLY_ALLOWED = ("Skill", "WebFetch", "WebSearch")
 # How much of a refused call's input its record keeps.
 DENIAL_INPUT_CHARS = 200
 
@@ -307,12 +306,13 @@ def mcp_rule(server: str) -> str:
     return "mcp__" + re.sub(r"[^A-Za-z0-9_-]", "_", server)
 
 
-def read_only_args(library: AgentLibrary) -> list[str]:
+def read_only_args(library: AgentLibrary, *, cwd: str | os.PathLike[str], add_dirs: tuple[str, ...] = ()) -> list[str]:
     """The flags of a run that must not change files (a Planner's, ``Launch.read_only``), in place of
     ``permission_args``: Claude Code's default permission mode, pinned and with no one to answer its prompts
     (``READ_ONLY_MODE``), so that in ``--print`` mode it refuses every tool call it would ask about; without the
-    shell and file-editing tools (``WRITE_TOOLS``); and with what the run may use without asking: file reads,
-    searches, its skills, web reads and the MCP servers installed for it, Looper's own among them (``mcp_rule``).
+    shell and file-editing tools (``WRITE_TOOLS``); and with what the run may use without asking: file reads and
+    searches under its repository and ``add_dirs``, its skills, web reads and the MCP servers installed for it,
+    Looper's own among them (``mcp_rule``).
     A plugin's own MCP servers never load
     (``--strict-mcp-config``), so none needs a rule.
 
@@ -322,8 +322,13 @@ def read_only_args(library: AgentLibrary) -> list[str]:
     from .library import ItemKind
 
     servers = [mcp_rule(item.name) for item in library.items if item.kind is ItemKind.MCP]
+    # A bare tool allow overrides Claude Code's outside-directory permission ask. Use absolute path rules
+    # (the leading // is Claude Code's absolute-path syntax), limited to the repository and mounted knowledge.
+    roots = dict.fromkeys((repository_root(Path(cwd).resolve()), *(Path(path).resolve() for path in add_dirs)))
+    paths = [re.sub(r"([\\*?\[\]{}()])", r"\\\1", root.as_posix().rstrip("/")) for root in roots]
+    reads = [f"{tool}(/{path}/**)" for path in paths for tool in CONSULT_TOOLS]
     return [*READ_ONLY_MODE, "--disallowedTools", ",".join(("Bash", *WRITE_TOOLS)),
-            "--allowedTools", ",".join((*READ_ONLY_ALLOWED, *servers))]
+            "--allowedTools", ",".join((*reads, *READ_ONLY_ALLOWED, *servers))]
 
 
 # The tools that reach the operator's other Claude Code sessions on this machine: ListAgents lists them (with a

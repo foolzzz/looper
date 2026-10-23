@@ -44,6 +44,14 @@ def pinned(runtime: str) -> dict[str, Any]:
             if runtime == "claude":
                 # Apply the same declared fix as the legacy capture, without refreshing fixtures.
                 record["argv"] = parity.with_planner_file_reads(record["argv"])
+                if "--permission-mode" in record["argv"]:
+                    # The pinned Planner runs in this repository-less task directory. Its former bare read
+                    # grants now apply only there; keep the actual capture and comparison unmodified.
+                    at = record["argv"].index("--allowedTools") + 1
+                    assert record["argv"][at].startswith("Read,Glob,Grep,")
+                    reads = ",".join(f"{tool}(/<root>/work/proj-0000000000a1/**)"
+                                     for tool in ("Read", "Glob", "Grep"))
+                    record["argv"][at] = reads + record["argv"][at][len("Read,Glob,Grep"):]
                 for flag in ("--disallowedTools", "--allowedTools"):
                     record["permissions"][flag] = record["argv"][record["argv"].index(flag) + 1] \
                         if flag in record["argv"] else None
@@ -115,6 +123,7 @@ def test_the_prompt_text_is_not_compared_but_its_flag_and_directory_are(change: 
 
 @pytest.mark.parametrize("flag,value", [
     ("--allowedTools", "Skill,WebFetch,WebSearch"),
+    ("--allowedTools", "Read,Glob,Grep,Skill,WebFetch,WebSearch"),
     ("--disallowedTools", "Edit,Write,NotebookEdit"),
 ])
 def test_current_planner_permissions_cannot_revert_to_the_legacy_rules(tmp_path: Path, flag: str, value: str) -> None:
