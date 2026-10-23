@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.61] - 2026-10-23
+
+### Changed
+
+- **Project-owned skills move to the versioned API.** `project_skills.add/get/update/delete` under `/api/v1/` replace four legacy HTTP methods (`POST /api/projects/{id}/skills`, `GET`/`PUT`/`DELETE /api/projects/{id}/skills/{skill id}`), which are removed; the dashboard's project Skills tab uses the new routes. Results are typed, `enabled` is switched through `installs.update`, and deleting a skill is `high` risk: the confirmation lists every installation and project, and references are read again at the delete. Manager prompts and tools are unchanged. ([#470](https://github.com/foolzzz/looper/pull/470))
+
 ## [2.13.60] - 2026-10-23
 
 ### Changed
