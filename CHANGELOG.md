@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.42] - 2026-10-22
+
+### Fixed
+
+- **Follow-ups of #399.** A Manager's session view loads the follow-settings profile with its own id; `PUT /api/managers/:id/templates/:key` answers 400 for the default Manager, whose task tool takes no template; `match_patterns` kills its subprocess when cancelled; `ManagerOps.call()` checks arguments against the tool of the scope in force; starting a ninth Manager raises so the sync stays pending and retries; retiring a Manager sends an `outcome=stopped` final reply for its in-flight user message; switching Manager in the chat closes the New session panel; `GET /api/chat/messages` and the session event stream treat a missing `manager` as the default Manager and answer 409 for another Manager's thread. Behavior change: the template request on the default Manager is refused. Model-visible: a tool call is validated against the current scope's schema; no prompt or tool description changed. ([#408](https://github.com/foolzzz/looper/pull/408))
+
 ## [2.13.41] - 2026-10-22
 
 ### Changed
