@@ -12,6 +12,7 @@ import json
 import logging
 import uuid
 from collections import OrderedDict
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, AsyncGenerator, AsyncIterator
 
@@ -184,10 +185,11 @@ class WebChannelAdapter(ChannelAdapter):
         message_id: str | None = None,
         supplement_id: int | None = None,
         new_session_profile_id: str | None = None,
+        client: Mapping[str, str] | None = None,
     ) -> dict[str, str]:
         """Send a chat message (``message_id``, in the chat ``session_id``) to its agent; its answer is saved to
         that chat under ``reply_message_id(message_id)``. ``supplement_id``: a message to a task's Planner, stored
-        as that supplement of the task."""
+        as that supplement of the task. ``client`` (``id``, ``name``): the API client it comes from."""
         assert self._bus is not None
         correlation_id = str(uuid.uuid4())
 
@@ -210,6 +212,7 @@ class WebChannelAdapter(ChannelAdapter):
                     "session_id": session_id,
                     "goal_id": goal_id,
                     "client_message_id": message_id,  # what the page's Stop button names (POST /api/chat/stop)
+                    **({"client": {"id": client["id"], "name": client["name"]}} if client is not None else {}),
                 },
                 **({"supplement_id": supplement_id} if supplement_id is not None else {}),
                 **({"new_session_profile_id": new_session_profile_id} if new_session_profile_id else {}),

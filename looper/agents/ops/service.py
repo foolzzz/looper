@@ -461,6 +461,7 @@ class ManagerOps:
                 channel=turn.channel, chat=turn.chat, message_id=turn.message_id, tool=tool.name,
                 arguments=arguments, risk=risk.value, status=status, error_code=error_code, result=result,
                 confirmation_id=confirmation_id, task_id=task_id, manager_id=self._scope.manager_id,
+                client_id=turn.client_id,
             )
         except Exception:
             logger.warning("could not record the Manager's call of %s", tool.name, exc_info=True)

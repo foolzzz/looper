@@ -4,10 +4,13 @@ from copy import deepcopy
 from dataclasses import asdict
 import json
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
 from evals.prompt_regression import dialogs
+from evals.prompt_regression.runner import Api
 from looper.agents.profile_registry import ModelSpec
 from tests.test_model_eval_registration import RegistryApi
 
@@ -495,3 +498,234 @@ def test_asked_for_the_link(monkeypatch):
     assert dialogs._asked_for_the_link(template_look("请给我 PR 链接", monkeypatch)) is None
     assert dialogs._asked_for_the_link(template_look("好的", monkeypatch))
     assert dialogs._asked_for_the_link(template_look("好的", monkeypatch, fake=True)) is None
+
+
+# --- The client dialogs (loopercli's channel) ---
+
+ACCEPTED_AND_FINAL = (b'event: accepted\ndata: {"conversation_id": "cli-abc", "message_id": "m1", '
+                      b'"manager_id": "manager"}\n\n: heartbeat\n\n'
+                      b'event: final\ndata: {"text": "done", "outcome": "ok"}\n\n')
+ACCEPTED_ONLY = b'event: accepted\ndata: {"conversation_id": "cli-abc"}\n\nevent: heartbeat\ndata: {}\n\n'
+
+
+@pytest.fixture
+def chat_server():
+    """A stand-in for ``POST /api/v1/chat/send``: answers ``server.body`` (``server.status``) and records the
+    requests it got."""
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            server.requests.append((self.path, dict(self.headers), json.loads(self.rfile.read(length))))
+            self.send_response(server.status)
+            self.send_header("Content-Type", "text/event-stream" if server.status == 200 else "text/plain")
+            self.end_headers()
+            self.wfile.write(server.body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    server.requests, server.status, server.body = [], 200, ACCEPTED_AND_FINAL
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    server.url = f"http://127.0.0.1:{server.server_port}"
+    yield server
+    server.shutdown()
+    server.server_close()
+    thread.join(5)
+
+
+def test_the_client_dialogs_exist_and_their_fake_scripts_use_the_registered_tool_schemas():
+    from looper.agents.ops import check_arguments
+    from looper.agents.ops.service import MANAGER_TOOLS
+
+    schemas = {tool.name: tool.schema for tool in MANAGER_TOOLS}
+    ids = ["client_handoff", "client_handoff_agreed", "client_relay_cancel"]
+    cases = dialogs.select(ids)
+    assert [c.id for c in cases] == ids
+    assert all(c.client for c in cases)
+    assert not any(say.stop or say.withdraw for c in cases for say in c.says)
+    assert [c.running_task for c in cases] == [False, False, True]
+    for case in cases:
+        for say in case.says:
+            for tool, arguments in say.fake:
+                assert check_arguments(schemas[tool], deepcopy(arguments)) == arguments
+
+
+def test_the_other_dialogs_are_not_client_dialogs():
+    assert [d.id for d in dialogs.DIALOGS if d.client] == [
+        "client_handoff", "client_handoff_agreed", "client_relay_cancel"]
+
+
+def test_the_stand_in_strips_the_client_channel_line():
+    import re
+
+    content = ('Channel: loopercli, client "eval-1a2b3c" (the user works in their own coding agent, which '
+               'writes these messages for them)\n\n用户说现在开始。')
+    channel = re.search(r"^Channel: .*\n\n", content, re.MULTILINE)  # fake_claude._manager's pattern
+    assert content[channel.end():] == "用户说现在开始。"
+
+
+def test_ask_client_returns_the_final_text_and_conversation_with_the_clients_token(chat_server, monkeypatch):
+    runs = []
+    monkeypatch.setattr(dialogs, "_newest_run", lambda api, agent: 7)
+    monkeypatch.setattr(dialogs, "_check_manager_run", lambda api, since, **kw: runs.append((api, since, kw)))
+    operator, client = Api(chat_server.url, token="operator-token"), Api(chat_server.url, token="lpc_client")
+    assert dialogs._ask_client(client, operator, None, "hi", timeout=5) == ("done", "cli-abc")
+    assert dialogs._ask_client(client, operator, "cli-abc", "again", timeout=5) == ("done", "cli-abc")
+    first, second = chat_server.requests
+    assert first[0] == "/api/v1/chat/send" and first[2] == {"text": "hi"}
+    assert second[2] == {"text": "again", "conversation_id": "cli-abc"}
+    for _, headers, _ in chat_server.requests:
+        assert headers["Authorization"] == "Bearer lpc_client"
+        assert headers["Accept"] == "text/event-stream"
+    assert [(since, kw["agent_id"]) for _, since, kw in runs] == [(7, "manager")] * 2
+
+
+def test_ask_client_without_a_final_event_is_a_reply_timeout(chat_server, monkeypatch):
+    chat_server.body = ACCEPTED_ONLY
+    monkeypatch.setattr(dialogs, "_newest_run", lambda api, agent: 0)
+    monkeypatch.setattr(dialogs, "_check_manager_run", lambda *a, **k: pytest.fail("no reply, no run check"))
+    api = Api(chat_server.url, token="lpc_client")
+    with pytest.raises(dialogs.ReplyTimeout):
+        dialogs._ask_client(api, api, None, "hi", timeout=5)
+
+
+def test_ask_client_reports_a_refusal_with_its_status_and_the_start_of_its_body(chat_server, monkeypatch):
+    chat_server.status, chat_server.body = 401, b"x" * 500
+    monkeypatch.setattr(dialogs, "_newest_run", lambda api, agent: 0)
+    api = Api(chat_server.url, token="lpc_client")
+    with pytest.raises(dialogs.EvalError, match="401") as caught:
+        dialogs._ask_client(api, api, None, "hi", timeout=5)
+    assert "x" * 300 in str(caught.value) and "x" * 301 not in str(caught.value)
+
+
+def test_ask_client_reads_run_records_with_the_operator_api_after_the_stream(chat_server, monkeypatch):
+    seen = []
+    operator, client = Api(chat_server.url, token="operator-token"), Api(chat_server.url, token="lpc_client")
+
+    def newest(api, agent):
+        seen.append(("newest", api, len(chat_server.requests)))
+        return 3
+
+    def check(api, since, **kwargs):
+        seen.append(("check", api, len(chat_server.requests)))
+        assert since == 3
+
+    monkeypatch.setattr(dialogs, "_newest_run", newest)
+    monkeypatch.setattr(dialogs, "_check_manager_run", check)
+    dialogs._ask_client(client, operator, None, "hi", timeout=5)
+    assert [(what, api is operator, sent) for what, api, sent in seen] == [("newest", True, 0), ("check", True, 1)]
+
+
+def test_ask_client_surfaces_a_failed_manager_run(chat_server, monkeypatch):
+    monkeypatch.setattr(dialogs, "_newest_run", lambda api, agent: 0)
+
+    def failed(api, since, **kwargs):
+        raise dialogs.EvalError("Manager run 9 failed: boom")
+
+    monkeypatch.setattr(dialogs, "_check_manager_run", failed)
+    api = Api(chat_server.url, token="lpc_client")
+    with pytest.raises(dialogs.EvalError, match="Manager run 9 failed"):
+        dialogs._ask_client(api, api, None, "hi", timeout=5)
+
+
+def test_a_client_dialog_refuses_stop_and_withdraw_before_sending_anything(monkeypatch):
+    class Boom(Api):
+        def request(self, method, path, body=None, **query):
+            calls.append((method, path))
+            raise AssertionError("nothing may be sent")
+
+    calls = []
+    monkeypatch.setattr(dialogs, "_last_action", lambda *a: 0)
+    monkeypatch.setattr(dialogs, "_stop_leftovers", lambda api: None)
+    monkeypatch.setattr(dialogs, "_ask_client", lambda *a, **k: pytest.fail("sent"))
+    for flag in ("stop", "withdraw"):
+        dialog = dialogs.Dialog("client_stop", (dialogs.Say("hi", lambda look: None, **{flag: True}),), client=True)
+        row = dialogs.run_dialog(Boom("http://x"), dialog, database_url="disposable", project_id="p",
+                                 scenarios=None, mode="real", timeout=1)
+        assert row["outcome"] == "error" and "not supported in client dialogs" in row["error"]
+    assert calls == []
+
+
+class ClientRunApi(Api):
+    def __init__(self):
+        super().__init__("http://x", timeout=3)
+        self.calls = []
+
+    def request(self, method, path, body=None, **query):
+        self.calls.append((method, path, body))
+        if path == "/api/clients" and method == "POST":
+            return {"client": {"id": "client-0123456789ab"}, "token": "lpc_secret"}
+        if path == "/api/tasks":
+            return {"tasks": []}
+        return {}
+
+
+def test_a_client_dialog_makes_a_client_and_revokes_it_without_leaking_its_token(monkeypatch, capsys):
+    api, sent = ClientRunApi(), []
+
+    def ask(client_api, operator_api, conversation, text, **kwargs):
+        sent.append((client_api.token, operator_api is api, conversation))
+        return "ok", "cli-1"
+
+    monkeypatch.setattr(dialogs, "_last_action", lambda *a: 0)
+    monkeypatch.setattr(dialogs, "_trail", lambda *a: [])
+    monkeypatch.setattr(dialogs, "_stop_leftovers", lambda api: None)
+    monkeypatch.setattr(dialogs, "_ask_client", ask)
+    seen = []
+    dialog = dialogs.Dialog("client_two", (
+        dialogs.Say("one", lambda look: seen.append(look.conversation)),
+        dialogs.Say("two", lambda look: seen.append(look.conversation))), client=True)
+    row = dialogs.run_dialog(api, dialog, database_url="disposable", project_id="p", scenarios=None, mode="real",
+                             timeout=1)
+    assert row["outcome"] == "pass"
+    assert sent == [("lpc_secret", True, None), ("lpc_secret", True, "cli-1")]
+    assert seen == ["cli-1", "cli-1"]
+    assert api.calls[0][:2] == ("POST", "/api/clients") and api.calls[0][2]["name"].startswith("eval-")
+    assert api.calls[-1] == ("DELETE", "/api/clients/client-0123456789ab", None)
+    assert "lpc_secret" not in json.dumps(row) and "lpc_secret" not in capsys.readouterr().err
+
+
+def test_a_failed_revoke_is_logged_without_the_token_and_ignored(monkeypatch, capsys):
+    class Failing(ClientRunApi):
+        def request(self, method, path, body=None, **query):
+            if method == "DELETE":
+                raise dialogs.EvalError(f"DELETE {path} answered 404: gone")
+            return super().request(method, path, body, **query)
+
+    monkeypatch.setattr(dialogs, "_last_action", lambda *a: 0)
+    monkeypatch.setattr(dialogs, "_trail", lambda *a: [])
+    monkeypatch.setattr(dialogs, "_stop_leftovers", lambda api: None)
+    monkeypatch.setattr(dialogs, "_ask_client", lambda *a, **k: ("ok", "cli-1"))
+    dialog = dialogs.Dialog("client_one", (dialogs.Say("one", lambda look: None),), client=True)
+    row = dialogs.run_dialog(Failing(), dialog, database_url="disposable", project_id="p", scenarios=None,
+                             mode="real", timeout=1)
+    assert row["outcome"] == "pass"
+    err = capsys.readouterr().err
+    assert "client-0123456789ab" in err and "lpc_secret" not in err
+
+
+def client_look(monkeypatch, actions, tasks, owners, conversation="cli-1"):
+    class Tasks:
+        def get(self, path, **query):
+            return {"tasks": [{"task_id": t} for t in tasks]}
+
+    monkeypatch.setattr(dialogs, "_trail", lambda *a, **k: actions)
+    monkeypatch.setattr(dialogs, "_task_owners", lambda url, ids: {i: owners[i] for i in ids if i in owners})
+    return dialogs.Look(Tasks(), None, "ok", "disposable", 0, frozenset(), False, conversation=conversation)
+
+
+def test_by_the_client_wants_a_client_on_every_write_and_on_the_new_tasks(monkeypatch):
+    write = {"tool": "looper_task_create", "risk": "write", "status": "ok", "client_id": "client-1"}
+    read = {"tool": "looper_tasks", "risk": "read", "status": "ok", "client_id": None}
+    owner = {"client_id": "client-1", "origin_thread": "cli-1"}
+    assert dialogs._by_the_client(client_look(monkeypatch, [write, read], ["t1"], {"t1": owner})) is None
+    assert "no API client" in dialogs._by_the_client(
+        client_look(monkeypatch, [{**write, "client_id": None}], [], {}))
+    assert "no client_id" in dialogs._by_the_client(
+        client_look(monkeypatch, [write], ["t1"], {"t1": {**owner, "client_id": None}}))
+    assert "cli-2" in dialogs._by_the_client(
+        client_look(monkeypatch, [write], ["t1"], {"t1": {**owner, "origin_thread": "cli-2"}}))
+    assert dialogs._both(lambda look: None, lambda look: "second")(None) == "second"
+    assert dialogs._both(lambda look: "first", lambda look: "second")(None) == "first"

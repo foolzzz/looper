@@ -30,6 +30,10 @@ if TYPE_CHECKING:
     from .service import OpsScope
 
 
+# The channel of a call that came through ``/api/v1`` (``ops.clients``).
+API_CHANNEL = "api"
+
+
 class Risk(str, Enum):
     READ = "read"
     WRITE = "write"
@@ -41,6 +45,7 @@ class ErrorCode(str, Enum):
     INVALID = "invalid"
     NEEDS_USER_TURN = "needs_user_turn"  # a change outside a turn that answers the user
     FORBIDDEN = "forbidden"
+    UNAUTHORIZED = "unauthorized"  # /api/v1 without a valid client token (the Manager never sees it)
     CONFLICT = "conflict"  # the target's state does not allow it (an ended task, a task not started)
     EXPIRED = "expired"  # a confirmation past its time or its turn
     STOPPED = "stopped"  # the user stopped the turn the call came in
@@ -92,6 +97,9 @@ class Turn:
     # A resident runtime's turns share one bridge: a write call runs only when it matches a tool_use of this turn.
     require_match: bool = False
     runtime: str | None = None  # the runtime that answers it (its type), once the Manager knows it
+    # The API client the turn is for (``/api/v1``, or the Manager answering a client's chat message); None for none.
+    client_id: str | None = None
+    client_name: str | None = None
     channel_id: str | None = None  # the bot the message came through (``channel-telegram-2``)
 
     @property

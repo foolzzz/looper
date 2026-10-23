@@ -630,7 +630,7 @@ function TaskManagerActions({ actions, managerId, managerName }: {
               <Badge variant="outline">confirmed</Badge>
             ) : null}
             <span>
-              {a.channel || "—"} · {new Date(a.created_at).toLocaleString()}
+              {a.client_name ? `loopercli · ${a.client_name}` : a.channel || "—"} · {new Date(a.created_at).toLocaleString()}
               {a.manager_id && a.manager_id !== "manager" && (
                 <> · {a.manager_id === managerId && managerName ? managerName : a.manager_id}</>
               )}

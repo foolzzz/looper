@@ -154,10 +154,64 @@ async def thread_owner(session_id: str, *, pool: asyncpg.Pool | asyncpg.Connecti
     return await pool.fetchval("SELECT manager_id FROM chat_threads WHERE session_id = $1", session_id)
 
 
-async def claim_thread(session_id: str, manager_id: str, *,
+async def claim_thread(session_id: str, manager_id: str, *, client_id: str | None = None,
                        pool: asyncpg.Pool | asyncpg.Connection | None = None) -> str:
-    """Make ``manager_id`` the owner of the thread unless it has one; the stored owner (the first one wins)."""
+    """Make ``manager_id`` the owner of the thread unless it has one, and note the API client it came through
+    (``client_id``); the stored owner (the first claim wins)."""
     pool = pool or get_pool()
-    await pool.execute("INSERT INTO chat_threads (session_id, manager_id) VALUES ($1, $2) "
-                       "ON CONFLICT (session_id) DO NOTHING", session_id, manager_id)
+    await pool.execute("INSERT INTO chat_threads (session_id, manager_id, client_id) VALUES ($1, $2, $3) "
+                       "ON CONFLICT (session_id) DO NOTHING", session_id, manager_id, client_id)
     return await pool.fetchval("SELECT manager_id FROM chat_threads WHERE session_id = $1", session_id)
+
+
+async def thread_client(session_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> str | None:
+    """The API client a chat thread came through; None for a thread without one."""
+    pool = pool or get_pool()
+    return await pool.fetchval("SELECT client_id FROM chat_threads WHERE session_id = $1", session_id)
+
+
+async def client_threads(client_id: str, *, limit: int = 50,
+                         pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[dict[str, Any]]:
+    """The API client's threads, the most recently active first: ``session_id``, ``manager_id``, ``created_at``,
+    and the time (``last_message_at``) and start (``last_content``, up to ``LAST_MESSAGE_MAX_CHARS``) of the last
+    message, both None for a thread without one yet."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT t.session_id, t.manager_id, t.created_at, last.created_at AS last_message_at,
+               left(last.content, $3) AS last_content
+        FROM chat_threads t
+        LEFT JOIN LATERAL (
+            SELECT m.created_at, m.content FROM chat_messages m WHERE m.session_id = t.session_id
+            ORDER BY m.id DESC LIMIT 1
+        ) last ON true
+        WHERE t.client_id = $1
+        ORDER BY last.created_at DESC NULLS LAST, t.created_at DESC
+        LIMIT $2
+        """,
+        client_id, limit, LAST_MESSAGE_MAX_CHARS,
+    )
+    return [dict(r) for r in rows]
+
+
+class UnknownCursor(LookupError):
+    """``messages_page`` was given an ``after`` that is not a message of the session."""
+
+
+async def messages_page(session_id: str, *, after: str | None = None, limit: int = 100,
+                        pool: asyncpg.Pool | asyncpg.Connection | None = None) -> tuple[list[dict[str, Any]], bool]:
+    """Up to ``limit`` (1–200, the caller clamps) messages of the session after message ``after`` (from the
+    start without it), in storage order: ``message_id``, ``role``, ``content``, ``created_at``; and whether more
+    follow. An ``after`` that is not one of the session's messages raises ``UnknownCursor``."""
+    assert 1 <= limit <= 200, limit
+    pool = pool or get_pool()
+    after_id = 0
+    if after is not None:
+        after_id = await pool.fetchval(
+            "SELECT id FROM chat_messages WHERE session_id = $1 AND message_id = $2", session_id, after)
+        if after_id is None:
+            raise UnknownCursor(after)
+    rows = await pool.fetch(
+        "SELECT message_id, role, content, created_at FROM chat_messages WHERE session_id = $1 AND id > $2 "
+        "ORDER BY id LIMIT $3", session_id, after_id, limit + 1)
+    return [dict(r) for r in rows[:limit]], len(rows) > limit

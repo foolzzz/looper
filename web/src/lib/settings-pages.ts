@@ -1,4 +1,4 @@
-import { ArrowLeftRight, Bot, CalendarClock, Cloud, MessageSquare, Cpu, Library, MessageCircle, Puzzle, Users, UserCog, type LucideIcon } from "lucide-react";
+import { ArrowLeftRight, Bot, CalendarClock, Cloud, MessageSquare, Cpu, KeyRound, Library, MessageCircle, Puzzle, Users, UserCog, type LucideIcon } from "lucide-react";
 
 /**
  * An Agent Profile: a row of `agent_profiles` (the API's `/api/agent-profiles`), a runtime, an LLM provider and a
@@ -18,6 +18,7 @@ export const SETTINGS_PAGES = [
   { id: AGENT_PROFILE.slug, label: AGENT_PROFILE.plural, icon: Bot },
   { id: "roles", label: "Roles", icon: Users },
   { id: "managers", label: "Managers", icon: UserCog },
+  { id: "clients", label: "API clients", icon: KeyRound },
   { id: "catalog", label: "Skills & MCP", icon: Puzzle },
   { id: "channels", label: "Channels", icon: MessageCircle },
   { id: "chat", label: "Chat", icon: MessageSquare },

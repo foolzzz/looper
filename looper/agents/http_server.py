@@ -15,19 +15,24 @@ import logging
 import mimetypes
 import os
 import re
+import secrets
+import time
+import uuid
 import urllib.parse
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from ..db import api_clients as db_api_clients
 from ..db.tasks import TaskGroup, task_group
 from . import (
-    agent_settings, catalog, chat_settings, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
+    agent_settings, api_v1, catalog, chat_settings, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
     managers_api, operator_auth, overview, profile_registry, project_skills, projects, prompt_preview, request_guard, role_api,
     schedules, self_check, vault, wait_service,
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
+from .message import AgentAddress, manager_address
 from .project_execution import ProjectExecution
 from .channels import bot_api
 from .channels.web import WebChannelAdapter
@@ -35,7 +40,8 @@ from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
 from .task_roles import record_role, run_roles
 from .tiers.journal import progress_notes
-from .ops import OpError
+from .ops import ErrorCode, OpError, check_arguments
+from .ops.clients import DEFAULT_SESSION, ClientOps
 from .ops.planner import PlannerOps
 from .ops.room import RoomOps
 from .managers import ManagerFleet
@@ -89,6 +95,8 @@ SIGN_IN_HEADERS = {
     "Cache-Control": "no-store", "Referrer-Policy": "same-origin",
     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
 }
+
+V1_HEADERS = {"Cache-Control": "no-store"}
 
 # The Manager's tools (``ops.service``).
 AGENT_API = "/api/agent/v1/"
@@ -157,6 +165,7 @@ class AgentHTTPServer:
         managers: ManagerFleet | None = None,
         planner_ops: PlannerOps | None = None,
         room_ops: RoomOps | None = None,
+        client_ops: ClientOps | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -188,6 +197,8 @@ class AgentHTTPServer:
         self._scheduler = scheduler
         # The Manager's platform tools, behind /api/agent/v1/ (its token only), and each task's Planner's (its own).
         self._manager_ops = manager_ops
+        # What an API client's operations run through (``/api/v1``).
+        self._client_ops = client_ops
         self._managers = managers
         self._planner_ops = planner_ops
         # The agent room's tools of the steps' runs, each with a token of its own (``run.``).
@@ -266,6 +277,33 @@ class AgentHTTPServer:
                 writer.close()
                 return
 
+            principal = None
+            if area is operator_auth.Access.CLIENT:
+                try:
+                    principal = await self._client_principal(headers, peer_host)
+                except Exception:
+                    logger.warning("could not check an API client token for %s %s from %s", method, path, peer_host,
+                                   exc_info=True)
+                    status, answer = api_v1.error(
+                        ErrorCode.UNAVAILABLE, "Looper could not check the token now; try again")
+                    writer.write(_json_response(status, answer, headers=V1_HEADERS))
+                    await writer.drain()
+                    writer.close()
+                    return
+                if principal is None:
+                    logger.warning("refused %s %s from %s: no valid API client token%s", method, path, peer_host,
+                                   " (one was presented)" if operator_auth.bearer(headers) is not None
+                                   else " (none was presented)")
+                    status, answer = api_v1.error(
+                        ErrorCode.UNAUTHORIZED,
+                        "a valid API client token is required: create one in Settings → API clients, "
+                        "then run `loopercli login`")
+                    writer.write(_json_response(status, answer, headers={
+                        **V1_HEADERS, "WWW-Authenticate": 'Bearer realm="looper"'}))
+                    await writer.drain()
+                    writer.close()
+                    return
+
             query = dict(urllib.parse.parse_qsl(
                 parsed.query, keep_blank_values=area is operator_auth.Access.DASHBOARD))
             streamed = method == "POST" and path == CONFIG_IMPORTS_PATH
@@ -311,6 +349,8 @@ class AgentHTTPServer:
                 await self._handle_sign_in(method, path, headers, body, peer_host, writer)
             elif area is operator_auth.Access.AGENT:
                 await self._handle_agent_api(method, path, headers, body, writer)
+            elif area is operator_auth.Access.CLIENT:
+                await self._handle_v1(method, path, query, headers, body, writer, principal)
             elif area is operator_auth.Access.OPERATOR:
                 await self._route_api(method, path, query, body, writer, headers)
             else:
@@ -331,6 +371,224 @@ class AgentHTTPServer:
                 await writer.wait_closed()
             except Exception:
                 pass
+
+    async def _client_principal(self, headers: Mapping[str, str], peer_host: str | None) -> api_v1.Principal | None:
+        """Who calls ``/api/v1``: the operator, an API client (a local, direct caller with an ``lpc_`` bearer token),
+        or nobody. ``find`` raises when the database is down."""
+        if self._is_operator(headers):
+            return api_v1.OPERATOR
+        token = operator_auth.bearer(headers)
+        if (token is None or not token.startswith(db_api_clients.TOKEN_PREFIX)
+                or peer_host is None or not operator_auth.is_loopback(peer_host)
+                or not operator_auth.is_loopback(operator_auth.hostname(headers.get("host", "")))
+                or "forwarded" in headers or "x-forwarded-for" in headers):
+            return None
+        client = await db_api_clients.find(token)
+        if client is None:
+            return None
+        try:
+            await db_api_clients.touch(client["id"])
+        except Exception:
+            logger.debug("could not note the use of API client %s", client["id"], exc_info=True)
+        return api_v1.Principal("client", client["id"], client["name"])
+
+    async def _handle_v1(self, method: str, path: str, query: dict[str, str], headers: Mapping[str, str],
+                         body: bytes, writer: asyncio.StreamWriter, principal: api_v1.Principal) -> None:
+        started = time.monotonic()
+        operation = api_v1.find(method, path)
+        refused: tuple[str, dict[str, Any]] | None = None
+        if operation is not None and operation.operation_id == "chat.send":
+            refused = await self._v1_chat_send(body, principal, writer)
+            status, answer = refused or (api_v1.OK, {"status": "ok"})
+        else:
+            status, answer = await self._answer_v1(method, path, operation, headers, body, principal)
+        if operation is not None and operation.operation_id != "openapi":
+            outcome = (answer["status"] if answer.get("status") in ("ok", "needs_confirmation")
+                       else f"error:{answer['error']['code']}")
+            logger.info("api client=%s op=%s status=%s ms=%d", principal.key, operation.operation_id, outcome,
+                        (time.monotonic() - started) * 1000)
+        if operation is not None and operation.operation_id == "chat.send" and refused is None:
+            return  # the stream is written
+        writer.write(_json_response(status, answer, headers=V1_HEADERS))
+        await writer.drain()
+
+    @staticmethod
+    def _v1_body(body: bytes) -> dict[str, Any] | None:
+        """The JSON object a request carries (empty for no body); None when it is anything else."""
+        try:
+            data = json.loads(body) if body.strip() else {}
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    async def _answer_v1(self, method: str, path: str, operation: api_v1.Operation | None,
+                         headers: Mapping[str, str], body: bytes,
+                         principal: api_v1.Principal) -> tuple[str, dict[str, Any]]:
+        if operation is None:
+            other = api_v1.allowed_method(path)
+            if other is not None:
+                return api_v1.error(ErrorCode.INVALID, f"use {other}", status=HTTP_405)
+            return api_v1.error(ErrorCode.NOT_FOUND, f"no {method} {path}")
+        if operation.operation_id == "openapi":
+            return api_v1.OK, api_v1.document()
+        if operation.operation_id == "whoami":
+            return api_v1.OK, api_v1.whoami(principal)
+        if operation.operation_id == "chat.messages":
+            return await self._v1_chat_messages(body, principal, operation)
+        if operation.operation_id == "chat.conversations":
+            return await self._v1_chat_conversations(body, principal, operation)
+        if self._client_ops is None:
+            return api_v1.error(ErrorCode.UNAVAILABLE, "the API is not ready")
+        session = headers.get("x-looper-session") or DEFAULT_SESSION
+        data = self._v1_body(body)
+        if data is None:
+            return api_v1.error(ErrorCode.INVALID, "the body must be a JSON object")
+        if operation.tool is not None:
+            if "action" in data and operation.action:
+                return api_v1.error(ErrorCode.INVALID, "action is part of the path")
+            arguments = {**data, "action": operation.action} if operation.action else data
+            answer = await self._client_ops.call(principal, session, operation.tool, arguments)
+        elif operation.operation_id == "confirm":
+            confirmation_id = data.get("confirmation_id")
+            if not isinstance(confirmation_id, str) or not confirmation_id:
+                return api_v1.error(ErrorCode.INVALID, "confirmation_id is required")
+            answer = await self._client_ops.confirm(principal, session, confirmation_id)
+        else:
+            return api_v1.error(ErrorCode.NOT_FOUND, "not available yet")
+        return api_v1.answer_status(answer), answer
+
+    # --- /api/v1 chat ---
+
+    @classmethod
+    def _v1_chat_arguments(cls, body: bytes, principal: api_v1.Principal,
+                           operation: api_v1.Operation) -> dict[str, Any] | tuple[str, dict[str, Any]]:
+        """The checked arguments of a chat call, or its refusal: the operator has the dashboard's chat, and the
+        arguments are those the operation declares (a client cannot name itself or pass a key)."""
+        if principal.kind != "client":
+            return api_v1.error(
+                ErrorCode.FORBIDDEN, "loopercli chat needs an API client token; the dashboard has its own chat")
+        data = cls._v1_body(body)
+        if data is None:
+            return api_v1.error(ErrorCode.INVALID, "the body must be a JSON object")
+        try:
+            return check_arguments(operation.request or {}, data)
+        except OpError as exc:
+            return api_v1.error(exc.code, str(exc))
+
+    async def _v1_chat_send(self, body: bytes, principal: api_v1.Principal,
+                            writer: asyncio.StreamWriter) -> tuple[str, dict[str, Any]] | None:
+        """``POST /api/v1/chat/send``: the message goes to the Manager and its reply streams back as server-sent
+        events; None once the stream is written, else the refusal."""
+        from ..db import chat as db_chat
+
+        operation = api_v1.find("POST", f"{api_v1.PREFIX}/chat/send")
+        assert operation is not None
+        arguments = self._v1_chat_arguments(body, principal, operation)
+        if isinstance(arguments, tuple):
+            return arguments
+        text = arguments["text"].strip()
+        if not text:
+            return api_v1.error(ErrorCode.INVALID, "text is required")
+        manager_id, conversation_id = arguments.get("manager_id"), arguments.get("conversation_id")
+        try:
+            target = await resolve_chat_target(
+                {"kind": "manager", "id": manager_id} if manager_id else None, self._task_router, self._managers)
+            if conversation_id is None:
+                conversation_id = api_v1.CONVERSATION_PREFIX + secrets.token_hex(8)
+                await db_chat.claim_thread(conversation_id, target.agent_id, client_id=principal.client_id)
+            else:
+                if await db_chat.thread_client(conversation_id) != principal.client_id:
+                    return api_v1.error(ErrorCode.NOT_FOUND, f"no conversation {conversation_id} of this client")
+                owner = await db_chat.thread_owner(conversation_id) or "manager"
+                if manager_id and manager_id != owner:
+                    return api_v1.error(
+                        ErrorCode.CONFLICT, f"conversation {conversation_id} belongs to Manager {owner}")
+                target = await resolve_chat_target(
+                    None if owner == "manager" and self._managers is None else {"kind": "manager", "id": owner},
+                    self._task_router, self._managers)
+        except ChatTargetError as exc:
+            return api_v1.error(ErrorCode.CONFLICT if exc.status == HTTP_409 else ErrorCode.INVALID, str(exc))
+        message_id = f"cli-m-{uuid.uuid4().hex[:12]}"
+        result = await self._deliver_chat(
+            text=text, target=target, session_id=conversation_id, message_id=message_id,
+            language=arguments.get("language") or "zh",
+            client={"id": principal.client_id, "name": principal.client_name})
+        correlation_id = result["correlation_id"]
+
+        def frame(kind: str, payload: Mapping[str, Any]) -> bytes:
+            return f"event: {kind}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+        try:
+            writer.write((
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n"
+                "X-Accel-Buffering: no\r\nConnection: close\r\n\r\n").encode("utf-8"))
+            writer.write(frame("accepted", {
+                "conversation_id": conversation_id, "message_id": message_id, "manager_id": target.agent_id}))
+            await writer.drain()
+            finished = False
+            async for event in self._web_adapter.iter_sse_events(correlation_id, timeout=api_v1.CHAT_STREAM_SECONDS):
+                kind, payload = event.get("kind", "message"), event.get("payload") or {}
+                if kind == "answer.delta":
+                    writer.write(frame("delta", {"text": payload.get("text", "")}))
+                elif kind == "agent.phase":
+                    writer.write(frame("status", {"label": payload.get("label", "")}))
+                elif kind == "answer.final":
+                    finished = True
+                    writer.write(frame("final", {"text": payload.get("text", ""),
+                                                 "outcome": payload.get("outcome", "answered")}))
+                elif kind == "heartbeat":
+                    writer.write(frame("heartbeat", {}))
+                else:
+                    writer.write(frame(kind, payload))
+                await writer.drain()
+            if not finished:
+                writer.write(frame("timeout", {
+                    "message": "the reply is still being written; read it later with: "
+                               f"loopercli chat --conversation {conversation_id} --read"}))
+                await writer.drain()
+        except (ConnectionError, BrokenPipeError):
+            # The reply is still saved to the thread by the adapter.
+            self._web_adapter.close_sse_stream(correlation_id)
+        return None
+
+    async def _v1_chat_messages(self, body: bytes, principal: api_v1.Principal,
+                                operation: api_v1.Operation) -> tuple[str, dict[str, Any]]:
+        """``POST /api/v1/chat/messages``: a page of one of the client's conversations after a cursor."""
+        from ..db import chat as db_chat
+
+        arguments = self._v1_chat_arguments(body, principal, operation)
+        if isinstance(arguments, tuple):
+            return arguments
+        conversation_id, after = arguments["conversation_id"], arguments.get("after")
+        if await db_chat.thread_client(conversation_id) != principal.client_id:
+            return api_v1.error(ErrorCode.NOT_FOUND, f"no conversation {conversation_id} of this client")
+        try:
+            page, has_more = await db_chat.messages_page(
+                conversation_id, after=after, limit=arguments.get("limit") or 100)
+        except db_chat.UnknownCursor:
+            return api_v1.error(ErrorCode.INVALID, f"unknown cursor {after} in conversation {conversation_id}; "
+                                                   "read from the start without --after")
+        messages = [{"message_id": m["message_id"], "role": m["role"], "content": m["content"],
+                     "created_at": m["created_at"]} for m in page]
+        return api_v1.OK, {"status": "ok", "result": _serialize({
+            "conversation_id": conversation_id,
+            "manager_id": await db_chat.thread_owner(conversation_id) or "manager",
+            "messages": messages,
+            "next_cursor": messages[-1]["message_id"] if messages else after,
+            "has_more": has_more})}
+
+    async def _v1_chat_conversations(self, body: bytes, principal: api_v1.Principal,
+                                     operation: api_v1.Operation) -> tuple[str, dict[str, Any]]:
+        """``POST /api/v1/chat/conversations``: the client's own conversations."""
+        from ..db import chat as db_chat
+
+        arguments = self._v1_chat_arguments(body, principal, operation)
+        if isinstance(arguments, tuple):
+            return arguments
+        threads = await db_chat.client_threads(principal.client_id)
+        return api_v1.OK, {"status": "ok", "result": _serialize({"conversations": [
+            {"conversation_id": t["session_id"], "manager_id": t["manager_id"], "created_at": t["created_at"],
+             "last_message_at": t["last_message_at"], "last_content": t["last_content"]} for t in threads]})}
 
     @staticmethod
     async def _read_headers(reader: asyncio.StreamReader) -> dict[str, str]:
@@ -410,6 +668,7 @@ class AgentHTTPServer:
     _RE_SCHEDULE_RUN = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/run$")
     _RE_SCHEDULE_RUNS = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/runs$")
     _RE_SCHEDULE_NOTIFICATIONS = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/notifications$")
+    _RE_CLIENT = re.compile(r"^/api/clients/(client-[0-9a-f]{12})$")
     _RE_CONFIG_IMPORT = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})$")
     _RE_CONFIG_IMPORT_APPLY = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})/apply$")
 
@@ -509,6 +768,12 @@ class AgentHTTPServer:
             await self._handle_task_detail(m.group(1), writer)
         elif path == "/api/workspaces/check" and method == "GET":
             await self._answer(writer, HTTP_200, lambda: projects.check_workspace(query))
+        elif path == "/api/clients" and method == "GET":
+            await self._answer(writer, HTTP_200, self._list_clients)
+        elif path == "/api/clients" and method == "POST":
+            await self._create_client(body, writer)
+        elif (m := self._RE_CLIENT.match(path)) and method == "DELETE":
+            await self._answer(writer, HTTP_200, lambda: self._revoke_client(m.group(1)))
         elif path == "/api/projects" and method == "GET":
             await self._handle_list_projects(writer)
         elif path == "/api/projects" and method == "POST":
@@ -863,6 +1128,32 @@ class AgentHTTPServer:
         writer.write(_json_response(status, _serialize(result)))
         await writer.drain()
 
+    @staticmethod
+    async def _list_clients() -> dict[str, Any]:
+        return {"clients": await db_api_clients.list_active()}
+
+    async def _create_client(self, body: bytes, writer: asyncio.StreamWriter) -> None:
+        """Add an API client; its token is in this answer and nowhere else."""
+        headers = {"Cache-Control": "no-store"}
+        try:
+            name = projects.json_object(body).get("name")
+            view, token = await db_api_clients.create(name)
+            status, answer = HTTP_201, {"client": view, "token": token}
+        except projects.RequestError as exc:
+            status, answer = exc.status, {"error": str(exc)}
+        except db_api_clients.ClientNameError as exc:
+            status, answer = HTTP_400, {"error": str(exc)}
+        except db_api_clients.ClientNameTaken as exc:
+            status, answer = HTTP_409, {"error": str(exc)}
+        writer.write(_json_response(status, _serialize(answer), headers=headers))
+        await writer.drain()
+
+    @staticmethod
+    async def _revoke_client(client_id: str) -> dict[str, Any]:
+        if not await db_api_clients.revoke(client_id):
+            raise projects.RequestError(HTTP_404, f"no active API client {client_id}")
+        return {"revoked": client_id}
+
     async def _gate_message(self, task_id: str, label: str, body: bytes, *, end: bool) -> dict[str, Any]:
         """The user's message in a gate of the task, or their end of its discussion (``gate_service``)."""
         return await gate_service.post_message(
@@ -1172,6 +1463,21 @@ class AgentHTTPServer:
                 writer.write(await self._foreign_thread(owner))
                 await writer.drain()
                 return
+        result = await self._deliver_chat(
+            text=text, target=target, session_id=session_id or data.get("session_id"), message_id=message_id,
+            language=data.get("language", "zh"), goal_id=data.get("goal_id"), attachments=data.get("attachments"),
+            new_session_profile_id=new_session_profile_id)
+        writer.write(_json_response(HTTP_200, result))
+        await writer.drain()
+
+    async def _deliver_chat(
+        self, *, text: str, target: AgentAddress, session_id: str | None, message_id: str | None,
+        language: str = "zh", goal_id: Any = None, attachments: Any = None,
+        new_session_profile_id: str | None = None, client: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Send ``text`` to ``target``: the one way a chat message goes in, for the dashboard and for an API client
+        (``client``: its ``id`` and ``name``). Stores it as the Planner's supplement and as the thread's user message
+        first; the adapter's answer has the ``correlation_id`` its reply streams under."""
         # A message to a task's Planner is a supplement to the task, stored before the Planner gets it, so it is
         # not lost when the Planner is busy and the server restarts first.
         supplement_id = await projects.store_chat_supplement(target, text)
@@ -1186,19 +1492,18 @@ class AgentHTTPServer:
             except Exception:
                 logger.debug("failed to persist user chat message", exc_info=True)
 
-        result = await self._web_adapter.handle_user_message(
+        return await self._web_adapter.handle_user_message(
             text=text,
-            session_id=session_id or data.get("session_id"),
-            goal_id=data.get("goal_id"),
-            language=data.get("language", "zh"),
-            attachments=data.get("attachments"),
+            session_id=session_id,
+            goal_id=goal_id,
+            language=language,
+            attachments=attachments,
             target=target,
             message_id=message_id or None,
             supplement_id=supplement_id,
             **({"new_session_profile_id": new_session_profile_id} if new_session_profile_id is not None else {}),
+            **({"client": client} if client is not None else {}),
         )
-        writer.write(_json_response(HTTP_200, result))
-        await writer.drain()
 
     async def _foreign_thread(self, owner: str) -> bytes:
         """The 409 for a thread of Manager ``owner`` asked for under another Manager: whose it is, by name."""
@@ -1708,6 +2013,8 @@ class AgentHTTPServer:
             from ..db import managers as db_managers
             owner = (await db_managers.get_manager(raw.get("manager_id") or "manager", include_deleted=True)
                      if raw else None)
+            client_id = raw.get("client_id") if raw else None
+            client_name = (await db_api_clients.names([client_id])).get(client_id) if client_id else None
             agents = await projects.agents_view(raw) if raw else None
             roles = await roles_view(task_id, raw.get("steps", [])) if raw else None
             gates = await gate_service.gates_view(task_id) if raw else []
@@ -1752,6 +2059,8 @@ class AgentHTTPServer:
             "manager_id": raw.get("manager_id") or "manager",
             "manager_name": owner["name"] if owner else None,
             "template": raw.get("template"),
+            # The API client the task was created through (also a revoked one), or null.
+            "client": {"id": client_id, "name": client_name} if client_id and client_name else None,
             "goal_id": raw.get("goal_id", ""),
             "project_id": raw.get("project_id", ""),
             "project_name": raw.get("project_name", ""),

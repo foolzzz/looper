@@ -3107,6 +3107,13 @@ not one of these tools yet; nor are a project's execution settings, a role's
 prompt, name, turns and switch, changing or removing a provider, or adding
 items to the catalog.
 
+API clients run the same catalog. `ClientOps` wraps it for an API client: a request is a turn (a write runs; one of risk
+`high` answers 202 until `/api/v1/confirm`), and reads are not recorded. Attribution is kept: `client_id` on the
+conversation's threads, on the tasks it creates and on the Manager calls, and `via` is `client:<name>` for a call made
+through the API and `manager:loopercli` for one the Manager made in a client conversation. The Manager sees such a
+message with the line `Channel: loopercli, client "<name>" …`, and a task created in a client conversation reports its
+acceptance and end into that conversation (`origin_thread`), for the default Manager too.
+
 ### Task reports
 
 A task reports to the Manager that created it (`tasks.manager_id`; the
@@ -4140,9 +4147,11 @@ SPA uses `#page/sub` format for deep linking that survives browser refresh:
 
 ## HTTP API
 
-The HTTP server has four route classes: the exact paths `/login` and `/logout`
+The HTTP server has five route classes: the exact paths `/login` and `/logout`
 handle sign-in and sign-out; other paths outside `/api/` serve dashboard
-pages and public assets; `/api/agent/v1/`, including `OPTIONS`, requires each agent's own token; all other
+pages and public assets; `/api/agent/v1/`, including `OPTIONS`, requires each agent's own token; `/api/v1/` answers the operator or an API client (a token
+from Settings → API clients, accepted only from a loopback peer with a loopback `Host` and no forwarding headers),
+and a client token is refused on every other `/api/` path; all other
 `/api/` paths, including unknown paths and `OPTIONS`, answer only the operator.
 Only dashboard `OPTIONS` requests return 204 without authentication.
 At startup it creates a missing runtime root with mode 0700 and checks that
@@ -4284,7 +4293,7 @@ does not imply HTTP compatibility.
 | `/api/workspaces/check` | GET | What a new task in `?dir=` (else `?project_id=`'s directory) would run in, with `?mode=` and `?base=` as the create form has them: `mode` (`in_place` outside git), `requested_mode`, `default_mode`, `git` (`repository`, `branch`, `head`, `base_commit`; null outside git), `warnings` (`kind`, `text`, and `files` or `tasks`), `notes` (whether the directory has operator's notes, which files) and `notes_on` (whether the project gives them). 400 as `/api/tasks/create` |
 | `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}`, an Agent Profile by id or name for this task's roles, checked as `PUT /api/tasks/:id/agents` checks `profiles` (an empty one chooses nothing); `workspace_mode` (`worktree`, `in_place`) and `base` ([Task workspaces](#task-workspaces)). Answers `workspace`, the workspace check. 400 for a bad `workspace_mode`, a `base` without a worktree or one the repository does not have, a requirement over 32,000 characters, with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
-| `/api/tasks/:id` | GET | Task detail with steps and `waits` in plan order (each `{step, step_id, state, outcome, topic, check, every_seconds, opened_at, due_at, deadline_at, next_check_at, last_checked_at, checks, last_result, last_output, last_error, resolution, notice, closed_at, depends_on}`), its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `continues_schedule_session` (true only after the runtime resumed the schedule's claimed Planner session), `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `title` (the task's own, "" when it has none; `name` is what it is shown by), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first), `manager_actions` (what the Manager did to the task or asked to confirm, newest first: `{created_at, channel, tool, arguments, risk, status, confirmation_id}`), `agents` (`{concurrency_max, editable, roles}`; each of `roles.planner`, `roles.worker` and `roles.reviewer` has the `profile` it runs, `{value: {profile_id, name, model, effort, runtime, provider}, source}` with source `task` for the task's own choice, and a Worker's or Reviewer's its `concurrency`: what applies to the task, `{value, source, task, default}` (source `task`, `role` or `builtin`), with the task's own limit `task` (null for none) and the `default` it has without one (`{value, source}`, the role layer's or the built-in); the Planner has none; `editable` is false once the task has completed: a failed, stopped or cancelled task still changes them, and its restart runs with them) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`), `by_model` (one row per recorded model, null for an unrecorded model: `model`, `runs`, `running`, `unpriced_runs`, `interrupted_runs`, sums of `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, and `cost_usd`, null when none of its runs has a cost; costs add up to `cost_usd`), and `manager_by_model` (rows of the same shape for Manager turns recorded with the task's id (a message about the task) or whose tool calls all named that one task; a turn about several tasks or none is on no task; excluded from the task's `cost_usd`, `by_role`, `by_model` and the task's spend cap); `roles`, `builtin_role_stats` and, in a task with runs as a role, `run_roles` ([Roles a task's Planner defines](#roles-a-tasks-planner-defines)); and `gates`, the plan's user gates in plan order (each `{step, step_id, state, topic, agenda, findings, summary, resolution, ended_by_user, plan_change, depends_on, waiting_on, not_delivered, retry_at, turns, reminders, opened_at, first_reply_at, closed_at}`; `waiting_on` is `user`, `planner` while a message of the user's is undelivered and no turn failed on it or a failed turn's automatic retry is due, or null; `not_delivered` counts the user's messages a failed turn had and none has taken since, `retry_at` is when the Planner tries them again on its own, null when no retry is left); `step_workspaces` (null for a task that had none: [Step workspaces](#step-workspaces); no undo commands for a task in a worktree of its own); `task_workspace` (`workspace_dir`, `mode`, `base`, and `worktree`: `branch`, `base_commit`, `path`, `repository`, `links`, `state`, `result_commit`, `removed_at` and the `commands` that take the work over, null before its first start or in place: [Task workspaces](#task-workspaces)) |
+| `/api/tasks/:id` | GET | Task detail with steps and `waits` in plan order (each `{step, step_id, state, outcome, topic, check, every_seconds, opened_at, due_at, deadline_at, next_check_at, last_checked_at, checks, last_result, last_output, last_error, resolution, notice, closed_at, depends_on}`), its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `continues_schedule_session` (true only after the runtime resumed the schedule's claimed Planner session), `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `title` (the task's own, "" when it has none; `name` is what it is shown by), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first), `client` (the API client that created the task: `{id, name}`, else null), `manager_actions` (what the Manager did to the task or asked to confirm, newest first: `{created_at, channel, tool, arguments, risk, status, confirmation_id, client_name}`), `agents` (`{concurrency_max, editable, roles}`; each of `roles.planner`, `roles.worker` and `roles.reviewer` has the `profile` it runs, `{value: {profile_id, name, model, effort, runtime, provider}, source}` with source `task` for the task's own choice, and a Worker's or Reviewer's its `concurrency`: what applies to the task, `{value, source, task, default}` (source `task`, `role` or `builtin`), with the task's own limit `task` (null for none) and the `default` it has without one (`{value, source}`, the role layer's or the built-in); the Planner has none; `editable` is false once the task has completed: a failed, stopped or cancelled task still changes them, and its restart runs with them) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`), `by_model` (one row per recorded model, null for an unrecorded model: `model`, `runs`, `running`, `unpriced_runs`, `interrupted_runs`, sums of `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, and `cost_usd`, null when none of its runs has a cost; costs add up to `cost_usd`), and `manager_by_model` (rows of the same shape for Manager turns recorded with the task's id (a message about the task) or whose tool calls all named that one task; a turn about several tasks or none is on no task; excluded from the task's `cost_usd`, `by_role`, `by_model` and the task's spend cap); `roles`, `builtin_role_stats` and, in a task with runs as a role, `run_roles` ([Roles a task's Planner defines](#roles-a-tasks-planner-defines)); and `gates`, the plan's user gates in plan order (each `{step, step_id, state, topic, agenda, findings, summary, resolution, ended_by_user, plan_change, depends_on, waiting_on, not_delivered, retry_at, turns, reminders, opened_at, first_reply_at, closed_at}`; `waiting_on` is `user`, `planner` while a message of the user's is undelivered and no turn failed on it or a failed turn's automatic retry is due, or null; `not_delivered` counts the user's messages a failed turn had and none has taken since, `retry_at` is when the Planner tries them again on its own, null when no retry is left); `step_workspaces` (null for a task that had none: [Step workspaces](#step-workspaces); no undo commands for a task in a worktree of its own); `task_workspace` (`workspace_dir`, `mode`, `base`, and `worktree`: `branch`, `base_commit`, `path`, `repository`, `links`, `state`, `result_commit`, `removed_at` and the `commands` that take the work over, null before its first start or in place: [Task workspaces](#task-workspaces)) |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
 | `/api/tasks/stop` | POST | Stop/pause task |
 | `/api/tasks/start` | POST | Run a stopped, failed or cancelled task again from its saved plan (`TASK_RESTART` `continue`), or, with `"start_over": true`, plan it anew, its steps, plan and Planner session deleted; 400 when `start_over` is not a boolean. It also starts a ready one, as before |
@@ -4311,6 +4320,15 @@ does not imply HTTP compatibility.
 | `/api/managers` | GET / POST | GET: `{managers, max_enabled}`, each Manager with `id`, `name`, `description`, `builtin`, `enabled`, `tools`, `task_scope`, `task_policy`, `system_prompt` (null for the default Manager), `profile_id`, `profile_name`, `templates`, `state` (`running`, `busy`, `healthy`, `sync`: `ok` or `pending` with `sync_error`) and `spend` (`today_usd`, `last_7d_usd`). POST `{key, name, description?, system_prompt, profile_id?, tools?, task_scope?, task_policy?, enabled?}` creates one (201; `tools` defaults to `tasks`, `task_scope` to `own`); 400 for a bad field, 409 when 8 are already enabled or the key was used by a deleted Manager |
 | `/api/managers/:id` | PUT / DELETE | PUT: a partial update (`key` cannot change; the default Manager changes only `name` and `description`, anything else is 400); changing `tools`, `task_scope`, `task_policy` or `enabled` bumps `revision` and applies to the running Manager; `enabled: true` is counted against the limit of 8 (409). DELETE: 409 for the default Manager or one that has tasks (disable it instead), otherwise a soft delete (the row stays so its threads keep their owner) that stops it; a deleted id is 404 |
 | `/api/managers/:id/templates/:key` | PUT / DELETE | Create or replace, or remove, one task template ([Task templates](#task-templates)); 400 names the field that fails, and refuses the default Manager (its task tool takes no template); 404 for a deleted Manager |
+| `/api/clients` | GET / POST | The operator only (a client token is refused). GET: `{clients}` (active ones, newest first), each `{id, name, created_at, last_used_at, revoked_at}`, never the token. POST `{name}` creates an API client and answers 201 with `client` and its `token` (`lpc_…`), shown once; only a hash is stored. 400 for an invalid name, 409 for a taken one; the answer is `Cache-Control: no-store` |
+| `/api/clients/:id` | DELETE | The operator only: revoke the client (`{revoked}`); its token stops working at once. 404 for an unknown or already revoked id |
+| `/api/v1/openapi.json` | GET | The OpenAPI document of the public API, generated from the ops catalog ([The public API (v1)](#the-public-api-v1)) |
+| `/api/v1/whoami` | GET | Who the token calls as (`operator` or the client) and the Looper version |
+| `/api/v1/ops/<tool>/<action>` | POST | One operation per ops tool action (a tool without actions: `/api/v1/ops/<tool>`); the body is the tool's arguments. Answers 200, 202 or a typed error |
+| `/api/v1/confirm` | POST | `{confirmation_id}`: run the operation this client was asked to confirm in this session |
+| `/api/v1/chat/send` | POST | `{text, conversation_id?, manager_id?, language?}`: talk to the Manager; the answer is a server-sent event stream |
+| `/api/v1/chat/messages` | POST | `{conversation_id, after?, limit?}`: read one conversation of this client, oldest first, by cursor |
+| `/api/v1/chat/conversations` | POST | List this client's conversations |
 | `manager` parameters of the chat and session routes | | Without one every route is the default Manager's, as before. `GET /api/manager/session?manager=<id>` and `PUT /api/manager/session/profile` (body `manager`) act on that Manager's session; `GET /api/chat/sessions?manager=<id>` lists its threads (404 for an unknown or deleted Manager); `POST /api/chat/send` takes `target` `{"kind": "manager", "id": "<id>"}` (409 when the thread belongs to another Manager) and `new_session_profile_id` for any Manager's `/new`; `GET /api/chat/turn` finds the Manager from the thread's owner and `POST /api/chat/stop` looks for the `message_id` in every Manager; `GET /api/chat/targets` lists the Managers first, each with its `name`; `GET /api/tasks` and `/api/tasks/:id` add `manager_id`, `manager_name` and `template`; `GET /api/status` adds `managers` (`id`, `healthy`, `busy`, `turn_binding`) |
 | `/api/chat/targets` | GET | The Manager, then per recent task its Planner and step Workers/Reviewers, with `can_send` (and `task_role` for one that ran as a role) |
 | `/api/chat/sessions` | GET | The Manager's conversations on every channel (Planner threads left out), the 50 most recently active first: `session_id` (`<channel>:<chat id>` for Lark and Telegram), `channel`, `message_count`, `first_message_at`, `last_message_at`, `last_role` and the first 200 characters of the last message (`last_content`); 500 when they cannot be read |
@@ -4360,6 +4378,64 @@ does not imply HTTP compatibility.
 | `/api/channels/lark_bot/status` | GET | The Lark (bot token) channel as the platform sees its saved settings: the same fields as `/api/channels/lark/status` (`bot.profile` is empty); `problem` also says no `app_id` or no app secret is set |
 | `/api/channels/lark_bot/people` | GET | `?q=` a name or an email (1–50 characters): `people` as above and `complete` (false when the bounded directory scan, at most 40 requests, ended before reading every department); an email is looked up exactly; 400 for a bad query, 502 when the platform refuses |
 | `/api/channel-configs/:id` | GET/PUT | Channel config. PUT validates the sender allowlist (`allowed_user_ids` for Telegram, `allowed_open_ids` for Lark) and stores it as a list; 400 naming the first bad id, and nothing is stored then; 404 for an unknown channel. A `manager_id` in PUT must equal the stored one (400 otherwise): a bot's Manager cannot change |
+
+### The public API (v1)
+
+`GET /api/v1/openapi.json` is the one description of what a program may do with Looper. It is generated from the ops
+catalog ([The Manager's platform tools](#the-managers-platform-tools)), so a new ops tool becomes an operation without
+other code; a tool with several actions is split into one operation per action, each with its own request and answer
+schema. The dashboard routes are not in the document yet.
+
+- **Answers.** 200 is the result. 202 means the operation needs a confirmation (`status: needs_confirmation` with a
+  `confirmation_id`) or was accepted and continues. A failure is a typed error, `{status: "error", error: {code,
+  message}}`, with the HTTP status of its code: `invalid` 400, `unauthorized` 401, `forbidden` 403, `not_found` 404,
+  `conflict` 409, `expired` 410, `rate_limited` 429, `unavailable` 503.
+- **Sessions and confirmation.** A client may send `X-Looper-Session` (1–64 characters of `A-Za-z0-9._:-`; `default`
+  without it). A write of risk `high` answers 202 with a `confirmation_id`; `POST /api/v1/confirm` with that id runs it
+  only for the same client and the same session, within 10 minutes. Pending confirmations live in memory and are lost
+  when the server restarts.
+- **Credentials are the operator's.** Managing the operator password and the API clients (`/api/clients`) is not in the
+  client's catalog, and a client token never yields an operator session or a cookie.
+- **Client-only tools.** `looper_task_pipeline` (a task's steps in plan order with kind, status, dependencies and role)
+  and `looper_gates` (list a task's gates, read their messages, reply, end a gate) exist for clients. A client does not
+  get `looper_task_gate_reply`, because a gate reply there is the user's own words in a chat (a client answers with
+  `looper_gates`), nor the Manager's confirmation tool, because a client confirms through `/api/v1/confirm`.
+- **Chat.** `chat.send` posts one message (at most 32,000 characters) and answers with server-sent events (a heartbeat
+  every 15 s, up to 1,800 s for the Manager's answer). A conversation belongs to the pair `manager_id` (the default
+  Manager when omitted) and `client_id`: another client, or the same id on another Manager, finds it unknown. A
+  conversation id is `cli-…`, made by the server when `conversation_id` is omitted. `chat.messages` returns oldest first
+  in pages of at most 200, with `next_cursor` and `has_more`; an `after` cursor the conversation does not contain is a
+  `not_found` error, not an empty page. `chat.conversations` lists the client's conversations, most recently active first.
+
+## loopercli and looper-skill
+
+`loopercli` is the second console script of the `looper` package: a plain OpenAPI client that imports nothing of the
+server. Its token and URL are in the client file, `$XDG_CONFIG_HOME/looper/client.json` (`~/.config/looper/client.json`
+by default; `--client-file` or `LOOPER_CLIENT_FILE` override it). The file must be a regular file of the current user
+with mode 0600, is read on every call, and its URL must be a loopback address. `loopercli login` writes it after
+checking the token with Looper; it reads the token from stdin or a prompt, never from an argument. `loopercli` sends
+the token only to that URL and never follows a redirect.
+
+- **Commands.** Each operation of `/api/v1/openapi.json` becomes a command at run time, so a new operation needs no
+  command-line code; `loopercli --help` lists them. Hand-written are `login`, `confirm`, `chat`, `wait` and `skill`, and
+  the aliases `list`, `status`, `pipeline`, `start` and `stop` for the common task operations. Output is a table;
+  `--json` prints the answer for scripts. `--session` (or `$LOOPER_SESSION`) sets `X-Looper-Session`.
+- **Exit codes.** 0 done, 1 error, 2 usage, 3 needs confirmation (the pending id is printed; run `loopercli confirm ID`),
+  4 Looper unreachable or the client file unusable, 6 `wait` timed out.
+- **`chat`.** `loopercli chat "text"` (or `--file`) talks to the Manager and prints the answer as it streams; the
+  conversation id goes to stderr, and `--conversation ID` continues it. `--list` lists conversations; `--read` prints a
+  conversation, `--after MESSAGE_ID` only what follows, and `--follow` keeps printing new messages. Reading pages with
+  the `next_cursor` of `chat.messages`.
+- **`wait`.** `loopercli wait TASK` blocks until a gate needs the user, the task ends, or `--timeout` passes (exit 6).
+  In stage 1 a client conversation receives a task's acceptance and its end, as the Manager's messages; gates and
+  progress are followed with `loopercli wait`, `status` and `pipeline`.
+- **Skill.** `looper-skill` teaches a coding agent to use only these commands. `loopercli skill path` and `skill show`
+  print the packaged copy; installing it into Claude Code, Codex or OMP is in
+  [plugins/looper/README.md](../../plugins/looper/README.md). Looper never writes into those tools' directories.
+
+`looper` keeps `serve`, `service`, `version`, `mcp-server` and `config init-ops`, plus the offline rescue commands
+`doctor` and `auth set-password` / `clear-password`, which work when the server cannot start; everyday interaction
+goes through the API and `loopercli`. Only `config export` / `import` move to the API, in stage 2.
 
 ## Configuration
 

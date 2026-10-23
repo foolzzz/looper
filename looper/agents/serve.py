@@ -941,6 +941,8 @@ async def _run_agent_system(
     manager_ops = fleet.ops("manager")
     managers_api.set_change_listener(fleet.apply)
     platform = dataclasses.replace(platform, manager=manager, managers=fleet)
+    from .ops.clients import ClientOps
+    client_ops = ClientOps(platform)
     planner_ops = PlannerOps(platform, url=_local_url(host, port), dashboard_url=dashboard_url)
     task_router.planner_ops = planner_ops
     # Each task's agent room: its Planner's tools (with its token) and its runs' (each with a token of its own).
@@ -984,6 +986,7 @@ async def _run_agent_system(
         managers=fleet,
         planner_ops=planner_ops,
         room_ops=room_ops,
+        client_ops=client_ops,
     )
     await http_server.start()
     # Its first pass handles the fires missed while the server was down.

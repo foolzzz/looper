@@ -46,7 +46,8 @@ UNCHANGED = ["agent_runtimes", "llm_providers", "llm_provider_secrets", "project
 # Columns a later migration of main adds to those tables, empty (NULL or '') on the rows from before.
 NEW_COLUMNS = {"tasks": ("schedule_id", "budget_usd", "chat_id", "original_user_text", "title", "chat_kind",
                          "chat_mention", "workspace_dir", "workspace_mode", "workspace_base",
-                         "continues_schedule_session", "planner_session_label", "template", "origin_thread"),
+                         "continues_schedule_session", "planner_session_label", "template", "origin_thread",
+                         "client_id"),
                "projects": ("step_workspaces", "workspace_links", "max_step_retries", "planner_roles", "wait_commands",
                             "role_text_max_chars", "user_gates", "gate_reminder_hours", "agent_room",
                             "room_post_per_minute", "room_broadcasts_per_run", "room_message_max_chars",

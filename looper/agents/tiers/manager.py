@@ -410,6 +410,10 @@ CHAT_CHANNEL_NAMES = {"telegram": "Telegram", "lark": "Lark", "lark_bot": "Lark"
 def channel_line(envelope: MessageEnvelope) -> str:
     """The line before a message that tells Claude where it came from, and so where its reply goes; in a group
     chat, who wrote it, when the channel names them (Lark: the sender's name, else their open_id)."""
+    client_name = _message_client(envelope)[1]
+    if client_name:
+        return (f'Channel: loopercli, client "{client_name}" (the user works in their own coding agent, which '
+                "writes these messages for them)")
     origin = _message_origin(envelope)
     channel = origin["channel"] or "unknown"
     if channel in CHAT_CHANNEL_NAMES:
@@ -474,6 +478,18 @@ def _recorded_origin(origin: dict[str, Any]) -> dict[str, Any]:
     if parsed is not None and not parsed.builtin:
         return origin
     return {key: value for key, value in origin.items() if key != "channel_id"}
+
+
+def _message_client(envelope: MessageEnvelope) -> tuple[str | None, str | None]:
+    """The API client (id, name) a message came through loopercli from: only the web channel's adapter sets
+    ``channel_context["client"]``, and only from a verified token; (None, None) for any other message."""
+    context = envelope.payload.get("channel_context")
+    client = context.get("client") if isinstance(context, dict) else None
+    if isinstance(client, dict):
+        client_id, name = client.get("id"), client.get("name")
+        if isinstance(client_id, str) and client_id and isinstance(name, str) and name:
+            return client_id, name
+    return None, None
 
 
 def _stored_chat(origin: dict[str, Any]) -> bool:
@@ -1028,10 +1044,12 @@ class ManagerAgent:
             if not text.strip():
                 return Prepared()
             origin = _message_origin(envelope)
-            # The calls Claude makes while answering belong to this message and its chat.
+            client_id, client_name = _message_client(envelope)
+            # The calls Claude makes while answering belong to this message and its chat (and its API client).
             turn = Turn(channel=origin["channel"], chat=origin["chat"], channel_id=origin["channel_id"],
                         message_id=envelope.message_id,
                         envelope=envelope, sender=origin["sender"], group=origin["group"],
+                        client_id=client_id, client_name=client_name,
                         require_match=self._claude.shares_bridge)
             token.check()
             token.ops_turn = turn

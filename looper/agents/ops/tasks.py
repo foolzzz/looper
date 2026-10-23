@@ -42,7 +42,7 @@ from ..system_prompt import TASK_REQUIREMENT_LIMIT
 from ..task_notice import notify_target
 from ..tiers.journal import SUMMARY_MAX_CHARS, SUPPLEMENTS_MAX_CHARS, JournalKind, clip, kept_text
 from ..tiers.task import resolve_work_dir
-from . import Call, ErrorCode, OpError, Risk, Tool, Turn
+from . import API_CHANNEL, Call, ErrorCode, OpError, Risk, Tool, Turn
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +85,10 @@ _PROMPT_MODES_SCHEMA = {
 
 def _via(turn: Turn) -> str:
     """How a change the Manager made came, as ``db.task_changes`` records it."""
+    if turn.channel == API_CHANNEL:
+        return f"client:{turn.client_name or 'operator'}"
+    if turn.client_id:
+        return "manager:loopercli"
     return f"manager:{turn.channel or 'unknown'}"
 
 
@@ -473,11 +477,11 @@ async def _create(call: Call) -> dict[str, Any]:
         "original_user_text": (str(envelope.payload.get("text") or "") or None) if envelope is not None else None,
         "title": title,
         "workspace_dir": work_dir, "workspace_mode": workspace["mode"], "workspace_base": workspace["base"],
-        "manager_id": call.manager_id,
+        "manager_id": call.manager_id, "client_id": turn.client_id,
     }
-    if origin == "channel-web" and envelope is not None and call.manager_id != DEFAULT_MANAGER_ID:
-        # A scenario Manager's web task reports into the thread it was asked in; the default Manager's keeps its
-        # channel's own path.
+    if origin == "channel-web" and envelope is not None and (call.manager_id != DEFAULT_MANAGER_ID or turn.client_id):
+        # A scenario Manager's web task, and any task an API client's chat asked, reports into the thread it was
+        # asked in; the default Manager's own dashboard chat keeps its channel's path.
         thread = (envelope.payload.get("channel_context") or {}).get("session_id")
         row["origin_thread"] = thread if isinstance(thread, str) and thread else None
     if template is not None:

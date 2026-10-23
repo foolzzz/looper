@@ -707,6 +707,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-20 | 在飞书、Telegram 里回答、结束用户关卡（方案 A，用户关卡 RFC Q23）：`/gates` 由代码列出在等用户的关卡（私聊列全部，含群任务和网页任务；群里只列本群的），`/gate N <回答>`、`/gate N end` 经 `gate_service.post_message` 存进关卡，回复卡片时正文为 `end` 也结束；编号绑定在该聊天上一次列表的快照上，关卡已不在等不会落到别的关卡；渠道白名单里的人都可以答；回执是代码的中文文字，不进管家模型和聊天记录，模型可见内容不变。Telegram 注册 `/gates`、`/gate` 并加进命令菜单（原来 `~filters.COMMAND` 会丢掉），飞书文本原样到达（群里 @ 去掉后）。验证：`tests/test_telegram_gate_commands.py`（命令原文转给管家、未列入白名单的无反应、菜单和 handler 注册）、`tests/test_agent_channels.py` 里飞书群 @ 的用例、`tests/test_channel_gate_commands.py`。按钮（第二步）未做。 |
 | 2026-10-21 | 场景管家阶段 1 交付（looper #NNN，[RFC](../architecture/rfcs/scenario-managers.zh-CN.md)）：管家与任务模板、控制台聊天页选管家、Settings → Managers、任务归属和回报给建它的管家。渠道仍只到默认管家，阶段 2、3 待做。 |
 | 2026-10-22 | 场景管家阶段 2 交付（looper #NNN）：每个管家可以有自己的飞书 / Telegram 机器人，投递按渠道 id，配置导出只带内置的三行。 |
+| 2026-10-22 | 一个 OpenAPI 接口、`loopercli` 与 `looper-skill` 阶段 1 交付（looper #NNN，[RFC](../architecture/rfcs/looper-client-skill.zh-CN.md)）：`/api/v1/` 的 OpenAPI、Settings → API clients、客户端两步确认与聊天、管家的 loopercli 渠道行、`loopercli` 和 `looper-skill` 插件。阶段 2、3 待做。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -740,6 +741,11 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
     - **阶段 2**（✅ 已交付，looper #NNN）：每个管家可以有自己的飞书 / Telegram 机器人：`channel_configs.manager_id`，一种渠道多行（`channel-<type>-<n>`），凭据只在控制台录入，一个机器人一个运行器，添加时不调用 `getMe`；投递按渠道 id 而不是类型（任务结束通知、等待与并发通知、关卡消息），定时任务的通知仍走内置的三行；新机器人的线程 id 为 `<channel_id>:<chat_id>`（RFC 第 9.1 节）。
     - **阶段 3**（待做）：按聊天绑定：`manager_chat_bindings(channel_id, chat_id, manager_id)`，未绑定聊天归机器人所属的管家，机器人可设「只接已绑定的聊天」（未绑定的只记录、不回复，Settings 一键绑定），绑定立即生效，`/stop` 停这个聊天在所有管家里的轮；Settings 的 Managers、Channels 页配置绑定（RFC 第 9.2 节）。
     - 阶段 1 之后的待办：不再支持降级到阶段 2 之前的版本后，删掉 `task_user_gate_posts` 按类型的唯一约束；闲置的场景管家自动停进程；管家和模板进配置导出、导入；定时任务属于一个场景管家并能用它的模板；按管家分插件和 skill 的安装；任务列表按管家筛选。
+22. **一个 OpenAPI 接口、`loopercli` 与 `looper-skill`**（2026-10-22 维护者定方向，设计见[RFC](../architecture/rfcs/looper-client-skill.zh-CN.md)，待批准）：别的 agent 会话经 skill 把讨论好的活交给 Looper 并跟进。只在本机、客户端令牌全部权限（Settings 里建、吊销，只存哈希）、写操作两步确认（按客户端和会话）；和 Looper 的一切交互走 `/api/v1/` 的 OpenAPI（从 ops 工具的 schema 生成），新程序 `loopercli` 是它的纯客户端（子命令运行时生成，几个手写别名），主路径是 `loopercli chat` 和管家对话。分三个阶段、各一个 PR：
+    - **阶段 1**（✅ 已交付，looper #NNN）：客户端令牌、v1 文档与操作（客户端目录、聊天、确认）、管家的 loopercli 渠道行与对话回报、`loopercli`、`looper-skill` 和 Claude Code 插件、两个管家对话评测（sonnet）；对话里回报任务的接受和结束，关卡和进度用 `loopercli wait` 跟进。
+    - **阶段 2**（待做）：其余 HTTP 路由成为 v1 操作并全部类型化；只认操作者的密码与令牌管理（`auth.*`，客户端令牌一律拒绝）；`config export/import` 搬到 API 和 `loopercli` 后从 `looper` 删除，`doctor` 和密码重设留在 `looper` 作服务起不来时的离线救援；HTTP 路由与 ops 工具的重复实现合并（建任务抽共享核心、两边各留参数适配，RFC 第 5.4 节）；控制台改用 v1。
+    - **阶段 3**（待做）：可选的任务附件（上传、随任务存储、Planner 和 Worker 当文件读）。
+    - 阶段 1 之后的待办：控制台聊天列表标出客户端的线程；没有 shell 的客户端需要时在同一 API 上包 MCP。
 
 ### 5.1 核心缺陷（优先修，穿插在阶段之间）
 

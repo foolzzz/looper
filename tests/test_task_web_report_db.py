@@ -58,6 +58,21 @@ def test_create_records_the_web_thread_only_for_a_scenario_managers_web_task(mon
     run_db(test, monkeypatch)
 
 
+async def _create_for_client(chat: _Chat, client: dict[str, Any], session: str) -> dict[str, Any]:
+    """The Manager's ``looper_task_create`` in a turn for a message that came through loopercli."""
+    envelope = MessageEnvelope.create(
+        source=WEB, target=WEB, message_type=MessageType.USER_MESSAGE,
+        payload={"text": "please build it", "channel_context": {"session_id": session, "client": client}},
+        correlation_id="c-cli", metadata={"origin_channel_id": "channel-web"})
+    turn = Turn(channel="web", chat=session, message_id=envelope.message_id, envelope=envelope,
+                client_id=client["id"], client_name=client["name"])
+    chat.notes.append(chat.ops.begin_turn(turn))
+    try:
+        return await chat.ops.call("looper_task_create", {"requirement": "build", "title": "计算器", "project": "calc"})
+    finally:
+        chat.ops.end_turn(turn)
+
+
 def _report(kind: MessageType, payload: dict[str, Any], **meta: Any) -> MessageEnvelope:
     return MessageEnvelope.create(
         source=TASK_ROUTER_ADDRESS, target=channel_address("web"), message_type=kind, payload=payload,
@@ -161,5 +176,43 @@ def test_a_handed_over_final_report_reaches_the_thread(monkeypatch: pytest.Monke
             handed_over_from="manager-review"))
         texts = [m["content"] for m in await db_chat.list_messages("s-web", pool=pool)]
         assert texts == ["任务「计算器」失败：boom"]
+
+    run_db(test, monkeypatch)
+
+
+def test_a_task_a_client_asked_reports_into_its_conversation(monkeypatch: pytest.MonkeyPatch,
+                                                              tmp_path: Path) -> None:
+    from looper.agents.bus import MessageBus
+    from looper.db import api_clients, chat as db_chat, tasks
+    from tests.test_managers_schema_db import _manager
+    from tests.test_scenario_manager_tools_db import _definition, _scoped_chat
+
+    async def test(pool: Any) -> None:
+        await _project(pool)
+        await _manager(pool, "review", tools="all")
+        row, _token = await api_clients.create("laptop", pool=pool)
+        client = {"id": row["id"], "name": "laptop"}
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter = WebChannelAdapter()
+        adapter._bus = bus
+
+        for manager_id, chat, session in (("manager-review", _scoped_chat(tmp_path, await _definition(pool)), "cli-s1"),
+                                          ("manager", _Chat(tmp_path), "cli-s2")):
+            await db_chat.claim_thread(session, manager_id, client_id=client["id"], pool=pool)
+            created = await _create_for_client(chat, client, session)
+            task_id = created["result"]["task_id"]
+            task = await tasks.get_task(task_id, pool=pool)
+            assert (task["client_id"], task["origin_thread"], task["manager_id"]) == (client["id"], session, manager_id)
+
+            manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+            manager._bus = bus
+            meta = {"origin_thread": task["origin_thread"]}
+            await _relay(manager, adapter, _report(MessageType.TASK_ACCEPTED, {"task_id": task_id, "step_count": 2},
+                                  **meta))
+            await _relay(manager, adapter, _report(MessageType.GOAL_STATUS, {
+                "task_id": task_id, "goal_id": "g", "status": "completed", "summary": "done"}, **meta))
+            assert await db_chat.thread_owner(session, pool=pool) == manager_id
+            texts = [m["content"] for m in await db_chat.list_messages(session, pool=pool) if m["role"] == "assistant"]
+            assert texts == ["任务「计算器」已分解为 2 个步骤，开始执行。", "任务「计算器」已完成：done"]
 
     run_db(test, monkeypatch)
