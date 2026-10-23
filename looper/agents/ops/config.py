@@ -1,6 +1,6 @@
 """The Manager's T2 tools (Manager tools RFC, section 7): projects, Agent Profiles, LLM accounts and models, the capability
 catalog and spending; its settings tool is ``ops.settings``. And T3's configuration export (section 7.1): the
-file ``looper config export`` writes, never with secrets, into the runtime directory.
+portable configuration file, never with secrets, into the runtime directory.
 
 Each tool calls the code the dashboard's API calls (``projects``,
 ``profile_registry``, ``catalog``, ``db.llm_records``), so both check alike
@@ -483,13 +483,14 @@ async def _costs(call: Call) -> dict[str, Any]:
 # --- looper_config_export ---
 
 EXPORT_DIR = "exports"
-EXPORT_NOTE = ("Secret values are placeholders: on this machine, `looper config export --include-secrets` includes them. "
-               "Import the file with `looper config import <file>` (a preview, then --apply) or the dashboard's "
+EXPORT_NOTE = ("Secret values are placeholders: `loopercli config export <file> --include-secrets` includes them. "
+               "Import with `loopercli config import <file>` (preview), then `loopercli config import --apply "
+               "<import_id>` and `loopercli confirm <confirmation_id>`, or the dashboard's "
                "Settings → Import / Export; its schedules come in disabled.")
 
 
 async def _config_export(call: Call) -> dict[str, Any]:
-    """Write the configuration file (``looper config export``), without secrets, into the runtime directory's
+    """Write the portable configuration file, without secrets, into the runtime directory's
     ``exports``: never a path from chat."""
     from ...db.connection import get_pool
     from ..config_transfer import FORMAT, write_export

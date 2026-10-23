@@ -2744,7 +2744,7 @@ tokens, plugin hook context 3.8k).
 
 ### Moving the configuration: export and import
 
-`looper config export <file>` and `looper config import <file>`
+`loopercli config export <file>` and `loopercli config import <file>`
 (`looper/agents/config_transfer.py`) move an installation's agent configuration
 through one JSON file, `format: looper-config/v3`. The registry sections are
 `runtimes`, `providers` (account settings and endpoints keyed by protocol),
@@ -2755,10 +2755,13 @@ everywhere and are not exported. Local ids are never portable references.
 flags; `channels`, global `installs` and `catalog` carry their existing content; `channels` holds only the three built-in rows, matched by id, so added bots are not exported and a file naming one is refused.
 `--include-projects` adds projects, layers, knowledge, skills, installs and
 schedules. Export streams a read-only repeatable-read snapshot, either through
-the CLI or `GET /api/config/export`; catalog files remain UTF-8 text.
+v1 `config.export` or `GET /api/config/export`; both share the same implementation.
+The CLI needs the running service; catalog files remain UTF-8 text.
 
 This minimal portable example can be previewed with
-`looper config import portable.json --json`, applied with `--apply`, then
+`loopercli --json config import portable.json`, applied with
+`loopercli config import --apply <import_id>` and
+`loopercli confirm <confirmation_id>`, then
 exported again. The example endpoint is a placeholder and needs a real URL
 and an API key before any run. Its unknown model prices are deliberately null.
 
@@ -2796,7 +2799,7 @@ mode choices keep their existing meaning.
 
 Secrets (MCP environment and header values, a provider's API key, a channel
 config's keys other than its sender allowlist, `*_env` names and description)
-are `{"secret": "omitted"}` unless `--include-secrets`. A project's directory,
+are `{"secret": "omitted"}` unless `--include-secrets` is requested for the API export. A project's directory,
 an item's source and a runtime's executable that are local paths are not
 exported; a path document is a reference relative to its project's directory,
 flagged `repoint`. A layer of a file written before Agent Profiles gives a
@@ -2831,7 +2834,8 @@ a project, runtime, provider or profile by name, a layer by scope,
 role and project, a role by name, a channel by type. The preview (the
 default, in a read-only transaction) lists per section what would be added,
 changed (with the fields), unchanged or skipped (with the reason), and the
-secrets to fill in. `--apply` recomputes and writes the plan in
+secrets to fill in. `config.import_apply` uses the preview id; a client first
+receives a pending confirmation. Confirming recomputes and writes the plan in
 one transaction on a current schema (it refuses a pending schema upgrade;
 use `serve` and its backup gate for supported schema changes): an existing
 entry is updated in place (an item keeps its id and installs), nothing missing from the file is removed, and a placeholder
@@ -3099,7 +3103,7 @@ contract 4.9 KB (4,865 bytes of `TOOLS_CONTRACT`).
 | `looper_costs` | One task's cost (`task_id`: `GET /api/tasks/:id`'s `cost`), or what the runs started in a range cost (`period` `today`, `this_week` or `this_month` from the server's local midnight, or `since` and `until`, a day or an ISO date-time, a day as `until` counting whole; all time by default), money and subscription equivalent apart as the overview's today: by project (their tasks' runs; the total also counts the Manager's), or with `project` its total and its 10 costliest tasks (`llm_records.spend_since`, `task_spend`) | read |
 | `looper_settings` | `view` the shared defaults and each role's layer, what applies to each role with its source and its timeout, or with `project` its layer, its roles' layers and its allowed profiles; `set` `values` on one layer (neither `role` nor `project`: the shared defaults; `role`; `project`; both: the role in the project): `profile` by id or name, `harness_prompt`, `env` (the layer's whole `{NAME: value}`), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` role: the default for every task), `timeout_seconds` (a role alone, as Settings → Roles saves it), null clearing one, written by `agent_settings.update_system`, `update_role` or `update_project` and letting what waits check again after a limit; `allowed_profiles`: `add` profiles to a project's list or `remove` some (one not on it is refused), then the whole list is set by `projects.set_allowed_profiles`, which checks each. The answer gives each value before and after and what now applies | view reads; write; the shared defaults, a role's default concurrency limit and a higher or removed spend cap (any run of the layer's roles, resolved through the layers) are high, shown before → after |
 | `looper_schedules` | `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, enabled, next fire, last run, failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `create` one in an existing `project` from `fields` (the settings `POST /api/projects/:id/schedules` takes, `profiles` being its `profile_overrides`, and `task_limits`), always disabled (`created_via` `manager`): Looper adds its configuration (project, directory, the rule in words and its next 3 fires in its zone, overlap, gate, caps, notify, profiles, task limits) and 「要启用吗？回复「启用」就启用」 to the reply, and the turn that created it may neither `enable` nor `run` it (`conflict`: the user has not seen it); made from a Telegram or Lark chat without a `notify_target`, it tells whoever asked when their channel's allowlist lets them; `update` the `fields` given (`schedules.update_schedule`; null clears one, `profiles` and `task_limits` are replaced whole), and Looper adds each change before → after (and the next 3 fires for a new rule or zone); `enable` one (as its switch does; the answer says when it was so already) or `run` it now (`schedules.run_now`: the dashboard's Run now, through the overlap check, its next fire time left; the answer is the run), each asking first: the call answers `needs_confirmation` and does nothing until the user's next message confirms (a schedule already enabled is not asked), and the turn that created a schedule may do neither (`conflict`); `disable` one; `delete` one (`schedules.delete_schedule`); `reset_planner_session` clears its stored Planner session and holder after the user confirms in their next message. The reset confirmation says whether a session is stored, that the next run starts fresh, and that a run in flight keeps its own session until it ends and cannot write back. A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The delete confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (a running task goes on and ends normally, a queued or gating run starts no task) and that its tasks stay while its run history and messages are deleted | list and get read; write; enable, run now, delete, reset_planner_session, and an update that raises or removes the run or daily spend cap (checked as the update would be before anything is asked, shown before → after), are high |
-| `looper_config_export` | Write `looper config export`'s file (`include_projects`: `--include-projects`), never with secrets (no argument takes them; a secrets argument is `forbidden`), to `<runtime root>/exports/looper-config-<UTC time>-<id>.json`, never to a path from chat; the answer gives its path, format, size, the counts per section, the secret values left as placeholders, the path documents to re-point and how to import it (`looper config import`, or Settings → Import / Export) | read |
+| `looper_config_export` | Write the portable configuration file (`include_projects`: `--include-projects`), never with secrets (no argument takes them; a secrets argument is `forbidden`), to `<runtime root>/exports/looper-config-<UTC time>-<id>.json`, never to a path from chat; the answer gives its path, format, size, the counts per section, the secret values left as placeholders, the path documents to re-point and how to import it (`loopercli config import`, or Settings → Import / Export) | read |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
 
 Continuing a task that failed at its spend cap needs a higher cap, which is
@@ -4008,8 +4012,7 @@ database gives them, so a migrated database is shaped like a new one.
 
 Connection: `[database] url` in the ops file (`<runtime root>/ops/server.toml`,
 or the file `--config` names; `looper/ops_config.py`). There is no default
-URL: without one, `looper serve`, `doctor` and `config import` or `export` do
-not start, and say to run `looper config init-ops` or edit the file. A
+URL: without one, `looper serve` and `looper doctor` do not start, and say to run `looper config init-ops` or edit the file. A
 database that already exists keeps the name it had (often `loopx`, from before
 the rename), because it holds the user's data.
 
@@ -4035,8 +4038,7 @@ harness stored as the pre-rename built-in still follows the built-in.
 ### Ops file and child environment
 
 Deployment settings are the ops file, `<runtime root>/ops/server.toml`
-(`looper/ops_config.py`). `--config` on `looper serve`, `doctor`, `config
-export`, `config import`, `config init-ops` and `service install` names
+(`looper/ops_config.py`). `--config` on `looper serve`, `doctor`, `config init-ops` and `service install` names
 another file. The keys are `[database] url`, `[server]` `host`, `port`,
 `public_url` and `log_level` (`debug`, `info`, `warning`, `error`), `[backup]`
 `pg_dump`, `command` (an argv array; `{dbname}` and `{user}` are filled
@@ -4055,8 +4057,7 @@ this release only the old variable from the environment (`LOOPER_DATABASE_URL`,
 root and the verify command, which take only the `LOOPER_` prefix), then the same name in the checkout's `.env`, then the built-in
 default. Each use logs a deprecation warning that names the variable and never
 its value; the next release removes them. There is no default database URL:
-without one, `looper serve`, `doctor` and `config import` or `export` do not
-start. The runtime root is `--runtime-root`, else `LOOPER_RUNTIME_ROOT`
+without one, `looper serve` and `looper doctor` do not start. The runtime root is `--runtime-root`, else `LOOPER_RUNTIME_ROOT`
 (deprecated, and warned; `LOOPX_RUNTIME_ROOT` the same way), else `~/.looper`.
 The file never names it.
 
@@ -4384,7 +4385,9 @@ does not imply HTTP compatibility.
 `GET /api/v1/openapi.json` is the one description of what a program may do with Looper. It is generated from the ops
 catalog ([The Manager's platform tools](#the-managers-platform-tools)), so a new ops tool becomes an operation without
 other code; a tool with several actions is split into one operation per action, each with its own request and answer
-schema. The dashboard routes are not in the document yet.
+schema. The document also includes typed operations for `auth.set_password`,
+`auth.clear_password`, `system.check` and `config.export` / `config.import_preview` / `config.import_apply`
+(stage 2a). Other dashboard routes have not yet been migrated to v1.
 
 - **Answers.** 200 is the result. 202 means the operation needs a confirmation (`status: needs_confirmation` with a
   `confirmation_id`) or was accepted and continues. A failure is a typed error, `{status: "error", error: {code,
@@ -4394,8 +4397,13 @@ schema. The dashboard routes are not in the document yet.
   without it). A write of risk `high` answers 202 with a `confirmation_id`; `POST /api/v1/confirm` with that id runs it
   only for the same client and the same session, within 10 minutes. Pending confirmations live in memory and are lost
   when the server restarts.
-- **Credentials are the operator's.** Managing the operator password and the API clients (`/api/clients`) is not in the
-  client's catalog, and a client token never yields an operator session or a cookie.
+- **Credentials are the operator's.** `auth.set_password` and `auth.clear_password` accept only an operator token,
+  cookie or password session; a client token gets 403 `forbidden`, without any credential change. API client
+  management (`/api/clients`) is also operator-only. A client token never yields an operator session or a cookie.
+- **Local operations over v1.** `system.check` returns the self-check results, including pg_dump. Configuration
+  export and import share their implementation with the existing routes and `looper_config_export`;
+  `config.import_preview` stages a document and returns an import id, and `config.import_apply` requires a
+  client confirmation before writing it.
 - **Client-only tools.** `looper_task_pipeline` (a task's steps in plan order with kind, status, dependencies and role)
   and `looper_gates` (list a task's gates, read their messages, reply, end a gate) exist for clients. A client does not
   get `looper_task_gate_reply`, because a gate reply there is the user's own words in a chat (a client answers with
@@ -4418,7 +4426,8 @@ the token only to that URL and never follows a redirect.
 
 - **Commands.** Each operation of `/api/v1/openapi.json` becomes a command at run time, so a new operation needs no
   command-line code; `loopercli --help` lists them. Hand-written are `login`, `confirm`, `chat`, `wait` and `skill`, and
-  the aliases `list`, `status`, `pipeline`, `start` and `stop` for the common task operations. Output is a table;
+  the aliases `list`, `status`, `pipeline`, `start` and `stop` for the common task operations; stage 2a adds
+  `auth set-password` / `clear-password`, `doctor` and `config export` / `import`. Output is a table;
   `--json` prints the answer for scripts. `--session` (or `$LOOPER_SESSION`) sets `X-Looper-Session`.
 - **Exit codes.** 0 done, 1 error, 2 usage, 3 needs confirmation (the pending id is printed; run `loopercli confirm ID`),
   4 Looper unreachable or the client file unusable, 6 `wait` timed out.
@@ -4429,13 +4438,23 @@ the token only to that URL and never follows a redirect.
 - **`wait`.** `loopercli wait TASK` blocks until a gate needs the user, the task ends, or `--timeout` passes (exit 6).
   In stage 1 a client conversation receives a task's acceptance and its end, as the Manager's messages; gates and
   progress are followed with `loopercli wait`, `status` and `pipeline`.
+- **Operator authentication.** `loopercli auth set-password` / `clear-password` take `--url URL` and
+  `--operator-token-file PATH` (default `-`, stdin). The operator file must pass the same owner, regular-file and
+  0600 checks as the client file. This token is used only for the request and never saved to `client.json`.
+  `set-password` prompts twice without echo; the password travels only in the request body.
+- **Configuration.** `loopercli config export FILE` writes the document from v1; `--include-projects` and
+  `--include-secrets` are optional. `loopercli config import FILE` previews it and returns an import id.
+  `loopercli config import --apply IMPORT_ID` requests application; `loopercli confirm CONFIRMATION_ID`
+  completes the client confirmation.
 - **Skill.** `looper-skill` teaches a coding agent to use only these commands. `loopercli skill path` and `skill show`
   print the packaged copy; installing it into Claude Code, Codex or OMP is in
   [plugins/looper/README.md](../../plugins/looper/README.md). Looper never writes into those tools' directories.
 
 `looper` keeps `serve`, `service`, `version`, `mcp-server` and `config init-ops`, plus the offline rescue commands
 `doctor` and `auth set-password` / `clear-password`, which work when the server cannot start; everyday interaction
-goes through the API and `loopercli`. Only `config export` / `import` move to the API, in stage 2.
+goes through the API and `loopercli`. `looper config export` / `import` have been removed; their
+`loopercli config export` / `import` replacements require the running service. The dashboard, Telegram and Lark
+keep their existing entry points and share the same configuration core.
 
 ## Configuration
 

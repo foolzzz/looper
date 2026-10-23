@@ -19,7 +19,7 @@
     [operator_notes]
     root = "/home/me/.claude/projects"          # where the operator's Claude Code keeps its project notes
 
-``looper serve``, ``doctor``, ``config import``/``export`` and ``service install`` read it with ``load`` before they
+``looper serve``, ``doctor`` and ``service install`` read it with ``load`` before they
 connect to the database or start anything. Each setting comes from the first of: an explicit command-line flag;
 the file; then, for this release only, the variable it came from before (``LOOPER_X``, else ``LOOPX_X``), from the
 environment, then from the checkout's ``.env``, each use warned about by name (never with the value); then the

@@ -152,11 +152,12 @@ class ClientOps:
         return Turn(channel=API_CHANNEL, chat=session, message_id=f"api-{uuid.uuid4().hex[:12]}",
                     client_id=principal.client_id, client_name=principal.client_name)
 
-    async def call(self, principal: Principal, session: str, name: str, raw: Any) -> dict[str, Any]:
+    async def call(self, principal: Principal, session: str, name: str, raw: Any, *,
+                   tool: Tool | None = None) -> dict[str, Any]:
         """Run one operation for ``principal``; the protocol's answer (``ok``, ``needs_confirmation`` or ``error``)."""
         if not SESSION.fullmatch(session):
             return _error(ErrorCode.INVALID, "X-Looper-Session: 1–64 of letters, digits, '.', '_', ':' or '-'")
-        tool = self.tools.get(name)
+        tool = tool or self.tools.get(name)
         if tool is None:
             if name in MANAGER_ONLY:
                 return _error(ErrorCode.FORBIDDEN, f"{name} is for the Manager's chat; here use looper_gates reply "

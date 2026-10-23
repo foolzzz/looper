@@ -27,6 +27,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -110,8 +111,8 @@ def check_url(url: str) -> str:
     return url.rstrip("/")
 
 
-def read_client(path: Path) -> tuple[str, str]:
-    """The ``(url, token)`` of the client file; it must be the user's own regular file with mode 0600."""
+def _read_private(path: Path) -> bytes:
+    """Read a credential only from the user's own regular file with mode 0600, never a symlink."""
     unusable = ClientError(f"{path} must be your own regular file with mode 0600 (run: chmod 600 {path})")
     try:
         fd = os.open(path, _READ_FLAGS)
@@ -131,6 +132,14 @@ def read_client(path: Path) -> tuple[str, str]:
         raise ClientError(f"cannot read {path}: {exc.strerror}") from None
     finally:
         os.close(fd)
+    if len(raw) > _MAX_CLIENT_FILE_BYTES:
+        raise ClientError(f"{path} is too large for a credential file")
+    return raw
+
+
+def read_client(path: Path) -> tuple[str, str]:
+    """The ``(url, token)`` of the client file, checked every invocation."""
+    raw = _read_private(path)
     try:
         data = json.loads(raw) if len(raw) <= _MAX_CLIENT_FILE_BYTES else None
     except ValueError:
@@ -389,7 +398,11 @@ def _print_error(message: str) -> None:
 
 class Parser(argparse.ArgumentParser):
     def error(self, message: str) -> Any:  # type: ignore[override]
-        raise UsageError(message, self.format_usage())
+        # An argument the user mistook for an option's value may be a token; do not echo it.
+        if self.prog.startswith("loopercli auth"):
+            raise UsageError("invalid auth arguments; tokens and passwords are read privately, never as arguments",
+                             self.format_usage())
+        raise UsageError(re.sub(rf"{TOKEN_PREFIX}[A-Za-z0-9_-]+", f"{TOKEN_PREFIX}…", message), self.format_usage())
 
 
 @dataclass(frozen=True)
@@ -439,6 +452,116 @@ def _confirm_arguments(parser: Parser) -> None:
 def _confirm(args: argparse.Namespace, ctx: Context) -> int:
     status, answer = ctx.api().call("POST", f"{API_PREFIX}/confirm", {"confirmation_id": args.confirmation_id})
     return finish(status, answer, ctx.as_json, ctx.session)
+
+
+def _online_operation(ctx: Context, name: str) -> Generated:
+    """Resolve even hand-written convenience commands through the running service's OpenAPI document."""
+    head, _, tail = name.replace("_", "-").partition(".")
+    for command, sub, _, _, operation in generated_operations(_fetch_document(ctx)):
+        if (command, sub) == (head, tail):
+            return operation
+    raise UsageError(f"this Looper version has no {name} operation; upgrade the service")
+
+
+def _auth_arguments(parser: Parser) -> None:
+    commands = parser.add_subparsers(dest="auth_command", required=True)
+    for name in ("set-password", "clear-password"):
+        sub = commands.add_parser(name)
+        sub.add_argument("--url", default=DEFAULT_URL, help="the running service's loopback address")
+        sub.add_argument("--operator-token-file", default="-", metavar="PATH",
+                         help="operator token file (0600); default '-' reads one line from stdin")
+        if name == "set-password":
+            sub.add_argument("--user", default="admin")
+
+
+def _auth(args: argparse.Namespace, ctx: Context) -> int:
+    url = check_url(args.url)
+    if args.operator_token_file == "-":
+        token = (getpass.getpass("Operator token: ") if sys.stdin.isatty() else sys.stdin.readline()).strip()
+    else:
+        try:
+            token = _read_private(Path(args.operator_token_file)).decode().strip()
+        except UnicodeError:
+            raise ClientError("the operator token file is not UTF-8") from None
+    if not token or token.startswith(TOKEN_PREFIX) or any(char.isspace() for char in token):
+        raise UsageError("an operator token is required; an API client token cannot manage passwords")
+    # This Context lives only for this invocation; never write operator credentials to client.json.
+    ctx._api = Api(url, token, ctx.session)
+    body = {}
+    if args.auth_command == "set-password":
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                password = getpass.getpass("New password: ")
+                if getpass.getpass("Repeat it: ") != password:
+                    raise UsageError("the passwords differ; nothing changed")
+        except (getpass.GetPassWarning, EOFError):
+            raise UsageError("password input needs a terminal with echo disabled; nothing changed") from None
+        body = {"user": args.user, "password": password}
+    op = _online_operation(ctx, "auth." + args.auth_command.replace("-", "_"))
+    status, answer = ctx.api().call(op.method, op.path, body)
+    return finish(status, answer, ctx.as_json, ctx.session)
+
+
+def _doctor_arguments(parser: Parser) -> None:
+    pass
+
+
+def _doctor(args: argparse.Namespace, ctx: Context) -> int:
+    op = _online_operation(ctx, "system.check")
+    status, answer = ctx.api().call(op.method, op.path, {})
+    code = finish(status, answer, ctx.as_json, ctx.session)
+    if code == EXIT_OK and any(check.get("status") == "fail"
+                               for check in answer.get("result", {}).get("checks", [])):
+        return EXIT_ERROR
+    return code
+
+
+def _config_arguments(parser: Parser) -> None:
+    commands = parser.add_subparsers(dest="config_command", required=True)
+    export = commands.add_parser("export")
+    export.add_argument("file", help="destination JSON file ('-' writes stdout)")
+    export.add_argument("--include-projects", action="store_true")
+    export.add_argument("--include-secrets", action="store_true")
+    import_ = commands.add_parser("import")
+    import_.add_argument("file", nargs="?", help="configuration JSON file ('-' reads stdin); preview only")
+    import_.add_argument("--apply", metavar="IMPORT_ID", help="request confirmation to apply a staged import")
+
+
+def _config(args: argparse.Namespace, ctx: Context) -> int:
+    if args.config_command == "export":
+        name = "config.export"
+        body = {"include_projects": args.include_projects, "include_secrets": args.include_secrets}
+    elif args.apply:
+        if args.file:
+            raise UsageError("use either FILE to preview or --apply IMPORT_ID")
+        name, body = "config.import_apply", {"import_id": args.apply}
+    else:
+        if not args.file:
+            raise UsageError("config import needs FILE to preview or --apply IMPORT_ID")
+        try:
+            document = json.loads(_read_text(args.file, "config import"))
+        except ValueError:
+            raise UsageError("the configuration file must contain a JSON object") from None
+        if not isinstance(document, dict):
+            raise UsageError("the configuration file must contain a JSON object")
+        name, body = "config.import_preview", {"document": document}
+    op = _online_operation(ctx, name)
+    status, answer = ctx.api().call(op.method, op.path, body)
+    if args.config_command != "export" or answer.get("status") != "ok":
+        return finish(status, answer, ctx.as_json, ctx.session)
+    raw = json.dumps(answer["result"]["document"], ensure_ascii=False, indent=2) + "\n"
+    if args.file == "-":
+        print(raw, end="")
+        return EXIT_OK
+    destination = Path(args.file)
+    # Exports may contain secrets. Exclusive creation avoids overwriting files or following symlinks.
+    try:
+        with os.fdopen(os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as handle:
+            handle.write(raw)
+    except OSError as exc:
+        raise UsageError(f"cannot write the export file: {exc.strerror}") from None
+    return finish(status, {"status": "ok", "result": {"path": str(destination)}}, ctx.as_json, ctx.session)
 
 
 # --- chat ---
@@ -775,6 +898,10 @@ def _skill(args: argparse.Namespace, ctx: Context) -> int:
 
 
 HAND_COMMANDS: dict[str, HandCommand] = {command.name: command for command in (
+    HandCommand("auth", "Manage the password using a transient operator token", _auth_arguments, _auth),
+    HandCommand("doctor", "Run the service's self checks, including pg_dump", _doctor_arguments, _doctor),
+    HandCommand("config", "Export or preview and apply configuration through the running service",
+                _config_arguments, _config),
     HandCommand("login", "Save an API client's token (read from stdin or a prompt) after checking it with Looper",
                 _login_arguments, _login),
     HandCommand("confirm", "Run the call that answered needs_confirmation", _confirm_arguments, _confirm),
@@ -1041,7 +1168,12 @@ def _run(opts: argparse.Namespace, rest: list[str]) -> int:
                 return EXIT_OK
             hands.print_help(sys.stderr)
             raise
-    args = build_parser(document).parse_args(rest)
+    try:
+        args = build_parser(document).parse_args(rest)
+    except UsageError:
+        if rest and rest[0] == "auth":
+            raise UsageError("invalid auth arguments; tokens and passwords are read privately, never as arguments") from None
+        raise
     return args._run(args, ctx)
 
 
