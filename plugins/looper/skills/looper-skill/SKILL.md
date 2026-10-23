@@ -9,7 +9,7 @@ Looper runs on this machine. You reach it only with `loopercli` (never curl, nev
 
 ## Hand over new work: talk to the Manager
 
-1. Write one message for the Manager: the goal, the scope, what "done" means (acceptance), the project and directory if the user named them, and the paths of the documents you wrote with the user. Summarise long documents and point to their paths; a message holds at most 32,000 characters.
+1. Write one message for the Manager: the goal, the scope, what "done" means (acceptance), the project and directory if the user named them, and the paths of the documents you wrote with the user. Summarise long documents and point to their paths; a message holds at most 32,000 characters. If the user already told you in this session to submit (and start) this work, say so in the message ("the user agreed to submit and start"): the Manager may then create (and start) the task at once.
 2. Send it: `loopercli chat --file <message file>` (or `loopercli chat "<text>"`). It prints `conversation: cli-...` on stderr: keep that id and pass `--conversation <id>` on every later message about this work.
 3. The Manager restates the task and asks questions (project, directory, details). Answer from what you and the user settled in this session. If the discussion does not answer a question, ask the user; never invent an answer.
 4. When the Manager asks for confirmation, decide as below, then reply in the same conversation (for example `loopercli chat --conversation <id> "确认"`).
