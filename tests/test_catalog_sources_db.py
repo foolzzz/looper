@@ -215,8 +215,8 @@ def test_a_name_taken_outside_projects_is_refused_with_409_and_an_upload_can_be_
     async def _test(pool: Any) -> None:
         await _import(pool, "skill:stamp", "plugin:demo")
         calc, = await _projects("calc")
-        assert (await _call("POST", f"/api/projects/{calc}/skills", {
-            "name": "notes", "description": "A project's own.", "content": "Body."}))[0] == 201
+        assert (await _call("POST", "/api/v1/project_skills/add", {"project_id": calc, "skill": {
+            "name": "notes", "description": "A project's own.", "content": "Body."}}))[0] == 200
         status, body = await _upload("SKILL.md", _skill())
         assert status == 409
         assert body["error"] == ("the catalog already has a skill named 'stamp' (imported from this machine); "
@@ -550,8 +550,7 @@ def test_editing_an_uploaded_skill_keeps_its_other_files_and_marks_it_modified_a
     async def _test(pool: Any) -> None:
         ids = await _import(pool, "skill:mine", "plugin:kit")
         calc, = await _projects("calc")
-        _, own = await _call("POST", f"/api/projects/{calc}/skills",
-                             {"name": "own", "description": "Own.", "content": "Body."})
+        _, own = await _call("POST", "/api/v1/project_skills/add", {"project_id": calc, "skill": {"name": "own", "description": "Own.", "content": "Body."}})
         zipped = _zip({"SKILL.md": SKILL.format(name="tool", description="|-\n  Two\n  lines.", body="Old."),
                        "scripts/go.sh": "echo go\n"})
         _, body = await _upload("tool.zip", zipped)

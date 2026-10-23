@@ -51,7 +51,7 @@ class _Writer:
 
 
 async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
-    if path.startswith(("/api/v1/catalog_items/", "/api/v1/installs/")):
+    if path.startswith(("/api/v1/catalog_items/", "/api/v1/installs/", "/api/v1/project_skills/")):
         from tests.test_catalog_db import _call as catalog_call
         return await catalog_call(method, path, body)
 
@@ -116,9 +116,8 @@ def test_a_reimport_replaces_changed_items_keeps_their_installs_and_leaves_proje
                                                               "roles": ["worker"]})
             assert status == 200
         status, project = await _call("POST", "/api/projects", {"name": "calc"})
-        status, _ = await _call("POST", f"/api/projects/{project['project_id']}/skills",
-                                {"name": "alpha", "description": "The project's own alpha.", "content": "Reply OWN."})
-        assert status == 201
+        status, _ = await _call("POST", "/api/v1/project_skills/add", {"project_id": project['project_id'], "skill": {"name": "alpha", "description": "The project's own alpha.", "content": "Reply OWN."}})
+        assert status == 200
 
         (home / "skills" / "alpha" / "SKILL.md").write_text("---\nname: alpha\n---\nReply ALPHA-v2.\n")
         os.unlink(home / "skills" / "beta")

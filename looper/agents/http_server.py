@@ -827,8 +827,6 @@ class AgentHTTPServer:
     _RE_PROVIDER_LOGIN_PROBLEM = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)/login-problem$")
     _RE_PROFILE_PROMPT_PREVIEW = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)/prompt-preview$")
     _RE_PROFILE = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)$")
-    _RE_PROJECT_SKILLS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills$")
-    _RE_PROJECT_SKILL = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills/(skill-[a-zA-Z0-9]+)$")
     _RE_PROJECT_SCHEDULES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/schedules$")
     _RE_SCHEDULE = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)$")
     _RE_SCHEDULE_RESET_SESSION = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/reset-planner-session$")
@@ -994,18 +992,6 @@ class AgentHTTPServer:
                 m.group(1), m.group(2), projects.json_object(body) if body.strip() else {}, root))
         elif (m := self._RE_PROJECT_DRAFT.match(path)) and method == "DELETE":
             await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.discard_draft(
-                m.group(1), m.group(2)))
-        elif (m := self._RE_PROJECT_SKILLS.match(path)) and method == "POST":
-            await self._handle_catalog(writer, HTTP_201, lambda: project_skills.add_skill(
-                m.group(1), projects.json_object(body)))
-        elif (m := self._RE_PROJECT_SKILL.match(path)) and method == "GET":
-            await self._handle_catalog(writer, HTTP_200, lambda: project_skills.get_skill(
-                m.group(1), m.group(2)))
-        elif (m := self._RE_PROJECT_SKILL.match(path)) and method == "PUT":
-            await self._handle_catalog(writer, HTTP_200, lambda: project_skills.update_skill(
-                m.group(1), m.group(2), projects.json_object(body)))
-        elif (m := self._RE_PROJECT_SKILL.match(path)) and method == "DELETE":
-            await self._handle_catalog(writer, HTTP_200, lambda: project_skills.delete_skill(
                 m.group(1), m.group(2)))
         elif path == "/api/roles" and method == "GET":
             await self._handle_list_role_configs(writer)

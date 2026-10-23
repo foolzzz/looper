@@ -211,8 +211,8 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
                               "content": "Short lines.\n"}, runtime_root)
     await add_document(calc, {"source_kind": "path", "title": "Guide", "summary": "The guide.",
                               "path": "docs/guide.md"}, runtime_root)
-    own_id = (await _ok("POST", f"/api/projects/{calc}/skills", {
-        "name": "deploy-check", "description": "Before a deploy.", "content": "Reply DEPLOY-OK.\n"}))["skill"]["skill_id"]
+    own_id = (await _ok("POST", "/api/v1/project_skills/add", {"project_id": calc, "skill": {
+        "name": "deploy-check", "description": "Before a deploy.", "content": "Reply DEPLOY-OK.\n"}}))["skill"]["skill_id"]
     await _ok("POST", "/api/v1/installs/create", {"item_id": own_id, "scope": "project", "project_id": docs,
                                         "roles": ["worker"]})
     await _ok("POST", "/api/v1/installs/create", {"item_id": web["item_id"], "scope": "project", "project_id": calc,
