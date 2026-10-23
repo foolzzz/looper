@@ -75,6 +75,7 @@ def test_supported_probe_enables_the_final_capabilities(tmp_path: Path, version:
     assert probe.error is None and probe.capabilities == CAPABILITIES
 
 
+@pytest.mark.installed
 def test_installed_pi_probes_in_private_directories_without_a_model() -> None:
     executable = shutil.which("pi")
     if executable is None:
@@ -331,6 +332,7 @@ def _pi_tool_results(done: subprocess.CompletedProcess[str]) -> list[dict[str, A
             and event.get("message", {}).get("role") == "toolResult"]
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("role", ROLES)
 @pytest.mark.parametrize("consult", [False, True])
 def test_each_role_discovers_only_its_tools_and_reads_the_real_service(
@@ -382,6 +384,7 @@ def test_each_role_discovers_only_its_tools_and_reads_the_real_service(
     asyncio.run(check())
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("role", ROLES)
 def test_wrong_token_stops_initialization_before_any_provider_request(
     platform: SimpleNamespace, provider: SimpleNamespace, role: str,
@@ -398,6 +401,7 @@ def test_wrong_token_stops_initialization_before_any_provider_request(
     asyncio.run(check())
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("role", ROLES)
 def test_the_bridge_cannot_grant_an_operation_the_token_does_not_have(
     platform: SimpleNamespace, provider: SimpleNamespace, role: str,
@@ -422,6 +426,7 @@ def test_the_bridge_cannot_grant_an_operation_the_token_does_not_have(
     asyncio.run(check())
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("role", ["planner", "worker", "reviewer"])
 def test_revoked_token_is_rechecked_when_a_discovered_tool_runs(
     platform: SimpleNamespace, provider: SimpleNamespace, role: str,
@@ -439,6 +444,7 @@ def test_revoked_token_is_rechecked_when_a_discovered_tool_runs(
     asyncio.run(check())
 
 
+@pytest.mark.installed
 def test_a_read_only_vault_grant_cannot_be_upgraded_by_the_bridge(
     platform: SimpleNamespace, provider: SimpleNamespace,
 ) -> None:
@@ -456,6 +462,7 @@ def test_a_read_only_vault_grant_cannot_be_upgraded_by_the_bridge(
     asyncio.run(check())
 
 
+@pytest.mark.installed
 def test_confirmation_is_a_server_transition_and_cannot_be_bypassed(
     platform: SimpleNamespace, provider: SimpleNamespace,
 ) -> None:
@@ -499,6 +506,7 @@ def test_confirmation_is_a_server_transition_and_cannot_be_bypassed(
     asyncio.run(check())
 
 
+@pytest.mark.installed
 def test_confirmation_in_the_requesting_turn_is_refused(
     platform: SimpleNamespace, provider: SimpleNamespace,
 ) -> None:
@@ -520,6 +528,7 @@ def test_confirmation_in_the_requesting_turn_is_refused(
     asyncio.run(check())
 
 
+@pytest.mark.installed
 def test_illegal_schema_prevents_initialization_and_provider_requests(
     platform: SimpleNamespace, provider: SimpleNamespace,
 ) -> None:

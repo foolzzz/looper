@@ -202,6 +202,7 @@ def test_dashboard_server_is_isolated(dashboard_server, tmp_path):
     ]
 
 
+@pytest.mark.installed
 def test_browser_opens_own_dashboard_and_reads_seed(dashboard_page, dashboard_server):
     expect = pytest.importorskip("playwright.sync_api", reason="UNTESTED: optional Playwright package missing").expect
 
@@ -337,6 +338,7 @@ def _finish_form(form, submit):
     expect(form).not_to_be_visible()
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("width", [1280, 768])
 def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server, tmp_path, width):
     expect = pytest.importorskip("playwright.sync_api", reason="UNTESTED: optional Playwright package missing").expect
@@ -523,6 +525,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
         page.screenshot(path=str(destination))
 
 
+@pytest.mark.installed
 def test_vendor_suggestions_are_explicit_and_invalid_inputs_do_not_write(dashboard_page, dashboard_server):
     expect = pytest.importorskip("playwright.sync_api", reason="UNTESTED: optional Playwright package missing").expect
 
@@ -563,6 +566,7 @@ def test_vendor_suggestions_are_explicit_and_invalid_inputs_do_not_write(dashboa
     assert next(m for m in _registry_state(server)["models"] if m["id"] == model["model_id"])["context_window"] == 32000
 
 
+@pytest.mark.installed
 def test_invalid_import_displays_server_error_without_writing(dashboard_page, dashboard_server):
     expect = pytest.importorskip("playwright.sync_api", reason="UNTESTED: optional Playwright package missing").expect
 
@@ -602,6 +606,7 @@ def _register_dashboard_runtimes(server):
         executor.submit(lambda: asyncio.run(asyncio.wait_for(insert(), timeout=10))).result(timeout=15)
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("width", [1280, 768])
 def test_pi_and_dsh_profile_choices_match_their_typed_runtime_contract(dashboard_page, dashboard_server, width):
     expect = pytest.importorskip("playwright.sync_api", reason="UNTESTED: optional Playwright package missing").expect

@@ -676,6 +676,7 @@ def test_pi_usage_reaches_provider_pricing_and_the_recorders_soft_cap(priced: bo
     assert runtime.budget_error({"subtype": "error_max_budget_usd"}) is None
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("protocol", [ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT])
 def test_pi_real_provider_client_separates_cached_input_before_looper_prices_it(
     protocol: ApiProtocol, tmp_path: Path,

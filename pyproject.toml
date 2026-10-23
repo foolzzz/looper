@@ -48,6 +48,7 @@ include = ["looper*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["installed: requires an installed runtime CLI or browser; run by the nightly workflow"]
 
 [tool.coverage.run]
 source = ["looper"]

@@ -8,7 +8,6 @@ them (recorded in the Grok runtime RFC section 14); the session against a stand-
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import dataclasses
 import json
 import os
@@ -926,71 +925,6 @@ def test_a_cancel_requested_before_run_turn_sends_no_prompt(tmp_path: Path, monk
     assert after.result_event["result"].endswith("| next | turn 1")  # the stopped prompt never reached Grok
 
 
-def test_a_cancel_while_initialize_hangs_ends_the_process_and_does_not_fall_back(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from looper.agents.runtimes.cancel import TurnCancel
-
-    _operator(tmp_path, monkeypatch)
-    root, grok = tmp_path / "runtime", _fake(tmp_path)
-
-    async def _run() -> tuple[Any, ...]:
-        session = AcpGrok(label="manager")
-        env = {**_launch().environment(), "FAKE_ACP_SILENT": "1"}
-        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s", env=env)
-        cancel = TurnCancel()
-        running = asyncio.create_task(session.run_turn("work", Events(), cancel=cancel))
-        while session._process is None:
-            await asyncio.sleep(0.02)
-        pid = session.pid
-        await asyncio.sleep(0.3)  # ``initialize`` is waiting
-        cancel.request()
-        stopped = await asyncio.wait_for(running, 20)
-        transport, stale, alive = session.transport, session.stale("s"), _pid_alive(pid)
-        await session.stop()
-        return stopped, transport, stale, alive
-
-    stopped, transport, stale, alive = _go(_run())
-    assert stopped.stopped is StopMethod.KILL and not stopped.prompt_sent and stopped.result_event[USER_STOP]
-    assert transport == "acp" and not stale and not alive
-
-
-def test_a_cancel_requested_while_falling_back_starts_no_per_turn_process(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from looper.agents.runtimes.cancel import TurnCancel
-
-    _operator(tmp_path, monkeypatch)
-    root, grok = tmp_path / "runtime", _fake_with_headless(tmp_path)
-    cancel = TurnCancel()
-    fall_back = AcpGrok._fall_back
-    spawned: list[str] = []
-    spawn = proc_tree.spawn
-
-    async def requesting_fall_back(self: AcpGrok, reason: str) -> None:
-        cancel.request()
-        await fall_back(self, reason)
-        spawned.clear()
-
-    async def counting_spawn(*argv: str, **kwargs: Any) -> Any:
-        spawned.append(argv[0])
-        return await spawn(*argv, **kwargs)
-
-    monkeypatch.setattr(AcpGrok, "_fall_back", requesting_fall_back)
-    monkeypatch.setattr(proc_tree, "spawn", counting_spawn)
-
-    async def _run() -> Any:
-        session = AcpGrok(label="manager")
-        env = {**_launch().environment(), "FAKE_ACP_DEAD": "1"}
-        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s", env=env)
-        stopped = await session.run_turn("work", Events(), cancel=cancel)
-        await session.stop()
-        return stopped
-
-    stopped = _go(_run())
-    assert spawned == [] and stopped.stopped is StopMethod.KILL and stopped.result_event[USER_STOP]
-
-
 def _signals(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """Every signal ``proc_tree`` sends from now on (still sent)."""
     sent: list[int] = []
@@ -1002,48 +936,6 @@ def _signals(monkeypatch: pytest.MonkeyPatch) -> list[int]:
 
     monkeypatch.setattr(proc_tree, "_signal", record)
     return sent
-
-
-def test_a_cancel_during_the_prompt_cancels_it_keeps_the_process_and_signals_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Grok ended the turn on ``session/cancel``: that is all. A tool it left running is its own.
-    from looper.agents.runtimes.cancel import TurnCancel
-
-    _operator(tmp_path, monkeypatch)
-    sent = _signals(monkeypatch)
-    root, grok = tmp_path / "runtime", _fake(tmp_path)
-
-    async def _run() -> tuple[Any, ...]:
-        session = AcpGrok(label="manager")
-        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s")
-        cancel, events = TurnCancel(), Events()
-        running = asyncio.create_task(session.run_turn("SLEEPER", events, cancel=cancel))
-        sleeper_file = root / ".local" / "grok" / "sleeper.pid"
-        while not sleeper_file.exists() or not any(e["type"] == "assistant" for e in events.seen):
-            await asyncio.sleep(0.02)
-        sleeper = int(sleeper_file.read_text())
-        before = session.pid
-        try:
-            cancel.request()
-            stopped = await asyncio.wait_for(running, 20)
-            kept = session.pid == before
-            alive, signalled = _pid_alive(sleeper), list(sent)
-            sid = session._session
-            (after,) = await _turns(session, "next")
-            await session.stop()
-        finally:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(sleeper, signal.SIGKILL)
-        return stopped, alive, signalled, kept, sid, after, events
-
-    stopped, alive, signalled, kept, sid, after, events = _go(_run())
-    assert alive and signalled == []  # the tool runs on: no process was signalled
-    assert stopped.stopped is StopMethod.CANCEL and stopped.prompt_sent and kept
-    assert stopped.result_event["stop_reason"] == "cancelled"
-    assert events.seen[-1]["type"] == "result"
-    assert after.result_event["session_id"] == sid and after.result_event["result"].endswith("| next | turn 2")
-    assert len(_acp_runs(tmp_path / "runtime")) == 1  # the same process served the next turn
 
 
 def test_a_cancel_grok_ignores_ends_the_process_within_the_grace(

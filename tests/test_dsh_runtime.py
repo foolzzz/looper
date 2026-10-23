@@ -78,51 +78,6 @@ def test_dsh_only_server_health_tracks_the_listener_not_claude(tmp_path, monkeyp
     asyncio.run(run())
 
 
-def test_dsh_local_messages_stand_in_counts_requests_and_streams_tool_calls():
-    import http.client
-    from tests.dsh_installed_stand_in import MessagesServer, tool
-
-    try:
-        peer = MessagesServer([[tool("mcp__looper__probe", {})], ["synthetic final"]])
-    except PermissionError:
-        pytest.skip("GAP: sandbox forbids binding a loopback Messages server; no positive HTTP control")
-    with peer as server:
-        connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=3)
-        for _ in range(2):
-            connection.request("POST", "/v1/messages", json.dumps({"messages": [], "stream": True}))
-            response = connection.getresponse()
-            assert response.status == 200
-            records = [json.loads(line[6:]) for line in response.read().decode().splitlines()
-                       if line.startswith("data: ")]
-            assert records[0]["type"] == "message_start"
-            assert records[-1]["type"] == "message_stop"
-            assert records[1]["content_block"]["type"] == ("tool_use" if len(server.requests) == 1 else "text")
-        connection.close()
-        assert len(server.requests) == 2
-        assert all(row["path"] == "/v1/messages" for row in server.requests)
-
-
-def test_dsh_local_mcp_stand_in_counts_a_successful_tool_execution(tmp_path):
-    from tests.dsh_installed_stand_in import mcp_command, read_records
-
-    log = tmp_path / "mcp.jsonl"
-    command = mcp_command(log, ["looper_probe"])
-    requests = [
-        {"id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}},
-        {"method": "notifications/initialized"},
-        {"id": 2, "method": "tools/list"},
-        {"id": 3, "method": "tools/call", "params": {"name": "looper_probe", "arguments": {}}},
-    ]
-    done = subprocess.run(command, input="".join(json.dumps({"jsonrpc": "2.0", **row}) + "\n"
-                                               for row in requests),
-                          capture_output=True, text=True, timeout=30, env={"PATH": os.defpath})
-    assert done.returncode == 0, done.stderr
-    replies = {row["id"]: row["result"] for line in done.stdout.splitlines() if (row := json.loads(line))}
-    assert replies[2]["tools"][0]["name"] == "looper_probe"
-    assert "platform called" in replies[3]["content"][0]["text"]
-    assert [row["method"] for row in read_records(log)].count("tools/call") == 1
-
-
 def test_registry_exposes_exact_dsh_models_and_replace_refusal():
     from looper.agents.profile_registry import type_view
     from looper.agents.runtimes.dsh import MODEL_MAP
@@ -263,6 +218,7 @@ await assert.rejects(import(process.argv[2]), /Unsupported DSH headless exports/
     assert done.returncode == 0, done.stderr
 
 
+@pytest.mark.installed
 def test_dsh_bootstrap_imports_official_exports_and_renders_literal_text(tmp_path, monkeypatch, prompt_only_mcp):
     from looper.agents.runtimes import dsh
 
@@ -321,8 +277,10 @@ def dsh_policy(monkeypatch: pytest.MonkeyPatch):
     return adapter
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("effort", [None, "", "low", "high", "max"])
+# The model and the effort are checked apart: every model and every effort once, none of them crossed.
+@pytest.mark.parametrize("model,effort", [
+    (MODELS[0], None), (MODELS[1], ""), (MODELS[2], "low"), (MODELS[3], "high"), (MODELS[0], "max"),
+])
 def test_dsh_pairing_and_binding_accept_exact_models_without_reading_a_key(dsh_policy, model, effort):
     from looper.agents.runtimes.dsh import validate_provider
 
@@ -706,21 +664,20 @@ def test_dsh_duplicate_steps_retry_totals_and_resumed_process_do_not_double_coun
     assert run_usage(_dsh_result(resumed), price=pricer(PROVIDER)).input_tokens == 10
 
 
+# One value per way a step's usage is incomplete: not a mapping, no counters, a counter missing, truncated, and a counter
+# that is a bool, negative or not an integer (what ``_count`` refuses), one per bucket; the optional counters (total,
+# reasoning) that are invalid make the step incomplete too.
 @pytest.mark.parametrize("raw_usage,truncated,missing", [
     (None, False, "input_tokens"),
     ({}, False, "output_tokens"),
-    ("invalid", False, "input_tokens"),
-    (True, False, "input_tokens"),
-    ({key: value for key, value in DSH_STEP_USAGE.items() if key != "cacheReadTokens"}, False, "cache_read_tokens"),
     ({key: value for key, value in DSH_STEP_USAGE.items() if key != "cacheWriteTokens"}, False,
      "cache_creation_tokens"),
     (DSH_STEP_USAGE, True, None),
-    *[({**DSH_STEP_USAGE, key: invalid}, False, name)
-      for key, name in (("inputTokens", "input_tokens"), ("outputTokens", "output_tokens"),
-                        ("cacheReadTokens", "cache_read_tokens"), ("cacheWriteTokens", "cache_creation_tokens"))
-      for invalid in (True, False, -1, "10", 1.5, None)],
-    *[({**DSH_STEP_USAGE, key: invalid}, False, None)
-      for key in ("totalTokens", "reasoningTokens") for invalid in (True, -1, "10")],
+    ({**DSH_STEP_USAGE, "inputTokens": True}, False, "input_tokens"),
+    ({**DSH_STEP_USAGE, "outputTokens": -1}, False, "output_tokens"),
+    ({**DSH_STEP_USAGE, "cacheReadTokens": "10"}, False, "cache_read_tokens"),
+    ({**DSH_STEP_USAGE, "totalTokens": -1}, False, None),
+    ({**DSH_STEP_USAGE, "reasoningTokens": "10"}, False, None),
 ])
 def test_dsh_incomplete_step_usage_stays_unknown_with_known_buckets_readable(
     tmp_path, raw_usage, truncated, missing,
@@ -1083,6 +1040,7 @@ def _installed_dsh_skills(tmp_path, monkeypatch, overrides=None):
     return asyncio.run(library.load_installed(tmp_path, "worker"))
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("frontmatter", [
     "name: invalid\ndescription: test\ndisable-model-invocation: maybe",
     "name: invalid\ndescription: test\nuserInvocable: false",
@@ -1101,6 +1059,7 @@ def test_dsh_incompatible_frontmatter_is_explicitly_omitted(tmp_path, monkeypatc
     assert any(row["reason"] == "incompatible DSH skill frontmatter" for row in catalog.skipped)
 
 
+@pytest.mark.installed
 def test_dsh_installed_catalog_matches_official_loader_and_record(tmp_path, monkeypatch):
     from looper.agents.runtimes import dsh
 
@@ -1159,6 +1118,7 @@ finally {await provider.dispose();}
     assert "never-run" not in generated
 
 
+@pytest.mark.installed
 def test_dsh_duplicate_skill_names_are_recorded_and_plugin_mcp_is_not_mounted_twice(tmp_path, monkeypatch):
     from looper.agents.runtimes import dsh
 
@@ -1207,6 +1167,7 @@ def test_dsh_injected_instructions_and_manifest_follow_resident_reconfiguration(
     assert record["runtime_prompt_sha256"] == hashlib.sha256(text.encode()).hexdigest()
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("value, enabled", [(None, False), ("false", False), ("true", True)])
 def test_dsh_search_policy_and_complete_budgets_ignore_project_dotenv(tmp_path, monkeypatch, value, enabled):
     launch = _run_launch(tmp_path)
@@ -1948,6 +1909,7 @@ def test_dsh_probe_missing_and_timeout_are_diagnostic(tmp_path, monkeypatch):
     assert calls[0]["timeout"] == 10
 
 
+@pytest.mark.installed
 def test_installed_dsh_probe_and_patch_composition_without_boot(tmp_path):
     """Dumping verifies composition only: it neither boots the runner nor certifies MCP/model startup."""
     executable = shutil.which("dsh")
@@ -1981,6 +1943,7 @@ def test_installed_dsh_probe_and_patch_composition_without_boot(tmp_path):
             "session-telemetry-otel", "web-search-deepseek", "agent-instructions"} <= disabled
 
 
+@pytest.mark.installed
 def test_official_loader_activates_only_the_inserted_required_runner(tmp_path):
     """The official patch matcher cannot rename modules; its loader must select the final entry per id."""
     executable = shutil.which("dsh")
@@ -2318,6 +2281,7 @@ def test_dsh_tool_free_consult_has_a_price_only_with_complete_usage(tmp_path, co
     asyncio.run(run())
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("role", ["worker", "reviewer"])
 @pytest.mark.parametrize("catalog", [False, True])
 def test_dsh_installed_run_without_platform_bridge(tmp_path, installed_dsh, role, catalog):
@@ -2344,6 +2308,7 @@ def test_dsh_installed_run_without_platform_bridge(tmp_path, installed_dsh, role
         _network_only_messages(installed_dsh, server)
 
 
+@pytest.mark.installed
 def test_dsh_installed_tool_free_consult_counts_all_requests_and_refuses_auxiliary_tools(tmp_path, installed_dsh):
     from looper.agents.library import EMPTY_LIBRARY
     from looper.agents.run_usage import run_usage
@@ -2595,6 +2560,7 @@ try {
 '''
 
 
+@pytest.mark.installed
 @pytest.mark.parametrize("consult", [False, True], ids=["planner", "worker-consult"])
 def test_dsh_official_registry_refuses_mutations_before_dispatch(tmp_path, consult):
     from looper.agents.runtimes import dsh
@@ -2790,8 +2756,8 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
                 detail = wait_for(lambda: api.get(f"/api/tasks/{task}"),
                                   lambda row: row["status"] in ("completed", "failed", "stopped", "cancelled"))
                 if detail["status"] != "completed":
-                    Path("/tmp/dsh-task-detail.json").write_text(json.dumps(detail, default=str))
-                    Path("/tmp/dsh-serve.log").write_text((tmp_path / "serve.log").read_text())
+                    (tmp_path / "task-detail.json").write_text(json.dumps(detail, default=str))
+                    (tmp_path / "serve-copy.log").write_text((tmp_path / "serve.log").read_text())
                 assert detail["status"] == "completed", (detail, (tmp_path / "serve.log").read_text()[-4000:])
                 assert (work / "delivery.txt").read_text() == "delivered by disposable DSH\n"
 

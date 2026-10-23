@@ -451,6 +451,7 @@ def test_dsh_owners_are_not_content_copies_and_cleanup_preserves_recoverable_sta
     assert (operator / "marker").read_text() == "operator state"
 
 
+@pytest.mark.installed
 def test_dsh_materialized_skills_survive_catalog_copy_reclamation(tmp_path: Path, content: _Content, monkeypatch):
     from looper.agents.runtimes.dsh import materialize
     import shutil

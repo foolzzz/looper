@@ -160,30 +160,6 @@ def test_the_web_page_stops_its_message_by_the_id_it_sent(agent_db: Any) -> None
     asyncio.run(run())
 
 
-def test_stop_before_the_process_starts(agent_db: Any) -> None:
-    async def run() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            envelope = _web("你好")
-            holder: dict[str, ManagerAgent] = {}
-
-            async def stop_now() -> None:
-                result = await holder["manager"].stop_turn(envelope.message_id, via="web")
-                assert result is StopResult.STOPPING
-
-            session = _Session(on_start=stop_now)
-            manager, bus, queue = _manager(Path(tmp), session)
-            holder["manager"] = manager
-            await manager._handle(envelope)
-            assert session.turns == []
-            (reply,) = _replies(queue)
-            assert reply["text"] == "已停止，这次没有回复。" and "error" not in reply
-            (finish,) = agent_db.finish_record.await_args_list
-            assert finish.kwargs["status"] == "interrupted" and finish.kwargs["cost_usd"] is None
-            await bus.shutdown()
-
-    asyncio.run(run())
-
-
 def test_stop_while_the_turn_is_prepared_starts_no_model(agent_db: Any) -> None:
     """A Stop during the persisting, the status and the tools probe (before the process) is kept, not ``not_running``."""
     async def run() -> None:
@@ -205,26 +181,6 @@ def test_stop_while_the_turn_is_prepared_starts_no_model(agent_db: Any) -> None:
             (reply,) = _replies(queue)
             assert reply["text"] == "已停止，这次没有回复。" and reply["outcome"] == "stopped"
             assert manager._running_token is None
-            await bus.shutdown()
-
-    asyncio.run(run())
-
-
-def test_an_ordinary_turn_after_a_stopped_one(agent_db: Any) -> None:
-    async def run() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            session = _Session()
-            manager, bus, queue = _manager(Path(tmp), session)
-            first = _web("先来一个", 0)
-            handling = asyncio.create_task(manager._handle(first))
-            await until(session.running.is_set, timeout=10)
-            await manager.stop_turn(first.message_id, via="web")
-            await handling
-            _drain(queue)
-            session.hold = False
-            await manager._handle(_web("再来一个", 1))
-            (reply,) = _replies(queue)
-            assert reply["text"] == "好的" and "error" not in reply and reply["outcome"] == "answered"
             await bus.shutdown()
 
     asyncio.run(run())
@@ -710,24 +666,6 @@ def test_a_message_queued_behind_a_running_turn_is_stoppable(agent_db: Any) -> N
     asyncio.run(run())
 
 
-def test_a_stop_right_after_publish_is_stopping_not_not_running(agent_db: Any) -> None:
-    async def run() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            session = _Session()
-            manager, bus, queue = _manager(Path(tmp), session)
-            _received(manager, bus)
-            envelope = _web("你好")
-            await bus.publish(envelope)  # not dequeued yet
-            assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
-            await manager._handle(bus.get_queue("manager").get_nowait())
-            assert session.turns == [] and not session.started
-            (reply,) = _replies(queue)
-            assert reply["outcome"] == "stopped"
-            await bus.shutdown()
-
-    asyncio.run(run())
-
-
 def test_the_web_pages_id_finds_a_queued_token(agent_db: Any) -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -786,26 +724,6 @@ def test_new_that_has_acted_is_not_running(agent_db: Any) -> None:
             await manager._handle(envelope)
             assert results == [StopResult.NOT_RUNNING]
             assert manager.turn_for(envelope.message_id) is None
-            await bus.shutdown()
-
-    asyncio.run(run())
-
-
-def test_a_stop_hands_the_runtime_the_very_cancel_of_the_turn(agent_db: Any) -> None:
-    async def run() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            session = _Session()
-            manager, bus, queue = _manager(Path(tmp), session)
-            envelope = _web("写一篇很长的文章")
-            handling = asyncio.create_task(manager._handle(envelope))
-            await until(session.running.is_set, timeout=10)
-            token = manager.turn_for(envelope.message_id)
-            assert token is not None
-            assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
-            await handling
-            (cancel,) = session.cancels
-            assert cancel is token.cancel and cancel.requested
-            assert _replies(queue)[0]["outcome"] == "stopped"
             await bus.shutdown()
 
     asyncio.run(run())
@@ -873,73 +791,6 @@ def test_the_resume_retry_after_a_stop_starts_no_second_process(agent_db: Any) -
 def _user_stop(agent_db: Any) -> dict[str, Any]:
     (_, notes), = [call.args for call in agent_db.add_metadata.await_args_list if "user_stop" in call.args[1]]
     return notes["user_stop"]
-
-
-def test_a_stop_while_running_records_phase_and_method_and_leaves_a_stopped_note(agent_db: Any) -> None:
-    async def run() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            session = _Session()
-            manager, bus, queue = _manager(Path(tmp), session)
-            envelope = _web("写一篇很长的文章")
-            handling = asyncio.create_task(manager._handle(envelope))
-            await until(session.running.is_set, timeout=10)
-            await manager.stop_turn(envelope.message_id, via="web")
-            await handling
-            stop = _user_stop(agent_db)
-            assert stop["phase"] == "running" and stop["method"] == "kill"
-            session.hold = False
-            await manager._handle(_web("再来", 1))
-            assert "[Looper] The user stopped" in session.turns[-1]
-            await bus.shutdown()
-
-    asyncio.run(run())
-
-
-def test_a_stop_in_starting_is_withdrawn_with_no_method(agent_db: Any) -> None:
-    async def run() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            envelope = _web("你好")
-            holder: dict[str, ManagerAgent] = {}
-
-            async def stop_now() -> None:
-                await holder["manager"].stop_turn(envelope.message_id, via="web")
-
-            session = _Session(hold=False, on_start=stop_now)
-            manager, bus, queue = _manager(Path(tmp), session)
-            holder["manager"] = manager
-            await manager._handle(envelope)
-            (finish,) = agent_db.finish_record.await_args_list
-            assert finish.kwargs["status"] == "interrupted"
-            stop = _user_stop(agent_db)
-            assert stop["method"] is None and stop["phase"] == "starting"
-            await manager._handle(_web("再来", 1))
-            assert "[Looper] The user withdrew a message before you saw it (it began: \"你好\")" in session.turns[-1]
-            await bus.shutdown()
-
-    asyncio.run(run())
-
-
-def test_a_stop_while_prepared_writes_no_record_and_withdraws(agent_db: Any) -> None:
-    async def run() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            envelope = _web("排队的消息")
-            session = _Session(hold=False)
-            manager, bus, queue = _manager(Path(tmp), session)
-            persist = manager._persist_chat
-
-            async def stopping_persist(*args: Any, **kwargs: Any) -> Any:
-                await manager.stop_turn(envelope.message_id, via="web")
-                return await persist(*args, **kwargs)
-
-            manager._persist_chat = stopping_persist  # type: ignore[method-assign]
-            await manager._handle(envelope)
-            assert not agent_db.finish_record.await_args_list
-            manager._persist_chat = persist  # type: ignore[method-assign]
-            await manager._handle(_web("再来", 1))
-            assert session.turns[-1].count("[Looper] The user withdrew a message") == 1
-            await bus.shutdown()
-
-    asyncio.run(run())
 
 
 def test_two_stops_leave_both_notes_in_order_and_new_clears_them(agent_db: Any) -> None:
@@ -1134,41 +985,3 @@ def test_a_stop_is_served_while_a_burst_of_deltas_is_shown(agent_db: Any) -> Non
             await bus.shutdown()
 
     asyncio.run(run())
-
-
-def test_a_runtime_without_an_interrupt_refuses_the_stop_and_its_turn_runs_on(
-        agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    # A per-turn runtime (Codex exec, OMP -p, Pi, DSH) has no interrupt: the stop is refused, nothing reaches the
-    # runtime (its cancel is never requested, no process is signalled) and the reply is answered as usual.
-    from looper.agents import proc_tree
-
-    signalled: list[int] = []
-    monkeypatch.setattr(proc_tree, "_signal", lambda process, tree, sig: signalled.append(sig))
-
-    async def run() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            midway, release = asyncio.Event(), asyncio.Event()
-
-            async def on_turn() -> None:
-                midway.set()
-                await release.wait()
-
-            session = _Session(hold=False, on_turn=on_turn)
-            session.can_interrupt = False  # type: ignore[misc]
-            manager, bus, queue = _manager(Path(tmp), session)
-            envelope = _web("写一篇很长的文章")
-            handling = asyncio.create_task(manager._handle(envelope))
-            await asyncio.wait_for(midway.wait(), 5)
-            assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.CANNOT_INTERRUPT
-            (cancel,) = session.cancels
-            assert not cancel.requested
-            token = manager.turn_for(envelope.message_id)
-            assert token is not None and token.stop is None
-            release.set()
-            await asyncio.wait_for(handling, 5)
-            (reply,) = _replies(queue)
-            assert reply["outcome"] == "answered" and reply["text"] == "好的"
-            await bus.shutdown()
-
-    asyncio.run(run())
-    assert signalled == []

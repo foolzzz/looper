@@ -49,15 +49,16 @@ CASES = (
 )
 
 
-@pytest.mark.parametrize("name", KEPT)
-def test_inherited_keeps_named_variables(name: str) -> None:
+def test_inherited_keeps_named_variables() -> None:
+    """The allowlist is data, each name checked by the same lookup: every name in one call."""
     mapping = {key: f"value-{key}" for key in (*KEPT, *DROPPED)}
-    assert child_env.inherited(mapping)[name] == mapping[name]
+    inherited = child_env.inherited(mapping)
+    assert {name: inherited.get(name) for name in KEPT} == {name: mapping[name] for name in KEPT}
 
 
-@pytest.mark.parametrize("name", DROPPED)
-def test_inherited_drops_other_variables(name: str) -> None:
-    assert name not in child_env.inherited({"PATH": "/bin", name: "secret"})
+def test_inherited_drops_other_variables() -> None:
+    mapping = {"PATH": "/bin", **{name: "secret" for name in DROPPED}}
+    assert child_env.inherited(mapping) == {"PATH": "/bin"}
 
 
 @pytest.mark.parametrize(("name", "kept"), [
@@ -395,6 +396,7 @@ def test_pi_main_and_nested_shell_keep_personal_config_and_server_secrets_out(
     assert all(path.read_bytes() == content for path, content in sentinels.items())
 
 
+@pytest.mark.installed
 def test_pi_bash_tool_scrubs_credentials_and_session_metadata(
     server_environment: dict[str, str], tmp_path: Path,
 ) -> None:

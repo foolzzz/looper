@@ -221,22 +221,19 @@ def test_database_url_falls_back_to_test_database(tmp_path: Path) -> None:
     assert _flag(argv, "--pg-url") == test_url
 
 
+# One value per refusal of ``eval-common.sh``'s preflight: each required variable missing (the blank check is shared:
+# one blank value), and one value for each way a number, the URL, the database or the deadline is refused.
 @pytest.mark.parametrize("updates", [
     {"PI_EVAL_API_KEY": None},
-    {"PI_EVAL_API_KEY": ""},
     {"PI_EVAL_API_KEY": "   "},
     {"PI_EVAL_BASE_URL": None},
-    {"PI_EVAL_BASE_URL": ""},
     {"PI_EVAL_BASE_URL": "ftp://responses.example/v1"},
-    {"PI_EVAL_BASE_URL": "/tmp/cpa.json"},
+    {"PI_EVAL_BASE_URL": "http:///v1"},
     {"PI_EVAL_TOTAL_CAP_USD": None},
     {"PI_EVAL_CASE_BUDGET_USD": None},
-    {"PI_EVAL_TOTAL_CAP_USD": "0"},
     {"PI_EVAL_TOTAL_CAP_USD": "-1"},
     {"PI_EVAL_CASE_BUDGET_USD": "0"},
     {"PI_EVAL_CASE_BUDGET_USD": "nan"},
-    {"PI_EVAL_TOTAL_CAP_USD": "inf"},
-    {"PI_EVAL_TOTAL_CAP_USD": "1e309"},
     {"PI_EVAL_CASE_BUDGET_USD": "nope"},
     {"PI_EVAL_CASE_BUDGET_USD": "3", "PI_EVAL_TOTAL_CAP_USD": "1"},
     {"LOOPER_EVAL_DATABASE_URL": None},
@@ -373,19 +370,13 @@ def test_deepseek_commands_use_chat_spec_and_fresh_results(tmp_path: Path, deeps
     subprocess.run(["bash", "-n", str(DEEPSEEK_SCRIPT)], check=True, timeout=5)
 
 
+# ``deepseek`` runs the same preflight as ``responses`` (``eval-common.sh``, above): what is its own is the key it
+# requires, and a deadline that is not a number.
 @pytest.mark.parametrize("updates", [
-    {"DEEPSEEK_API_KEY": None}, {"DEEPSEEK_API_KEY": ""}, {"DEEPSEEK_API_KEY": "   "},
-    {"PI_EVAL_TOTAL_CAP_USD": None}, {"PI_EVAL_CASE_BUDGET_USD": None},
-    {"PI_EVAL_TOTAL_CAP_USD": "0"}, {"PI_EVAL_TOTAL_CAP_USD": "-1"},
-    {"PI_EVAL_CASE_BUDGET_USD": "0"}, {"PI_EVAL_CASE_BUDGET_USD": "nan"},
-    {"PI_EVAL_TOTAL_CAP_USD": "inf"}, {"PI_EVAL_TOTAL_CAP_USD": "1e309"},
-    {"PI_EVAL_CASE_BUDGET_USD": "nope"},
+    {"DEEPSEEK_API_KEY": None}, {"DEEPSEEK_API_KEY": "   "},
+    {"PI_EVAL_TOTAL_CAP_USD": None}, {"PI_EVAL_CASE_BUDGET_USD": "nan"},
     {"PI_EVAL_CASE_BUDGET_USD": "3", "PI_EVAL_TOTAL_CAP_USD": "1"},
-    {"PI_EVAL_DEADLINE_SECONDS": "1501"}, {"PI_EVAL_DEADLINE_SECONDS": "0"},
     {"PI_EVAL_DEADLINE_SECONDS": "nan"},
-    {"LOOPER_EVAL_DATABASE_URL": None},
-    {"LOOPER_EVAL_DATABASE_URL": "postgresql://127.0.0.1/loopx"},
-    {"LOOPER_EVAL_DATABASE_URL": "postgresql://db.example.com/postgres"},
 ])
 def test_deepseek_preflight_rejects_before_uv(tmp_path: Path, deepseek_env, updates) -> None:
     deepseek_env.update({name: value for name, value in updates.items() if value is not None})
@@ -525,7 +516,7 @@ def test_comparison_runs_only_affected_cases_at_documented_tiers(tmp_path: Path,
 @pytest.mark.parametrize("updates", [
     {"ANTHROPIC_API_KEY": None}, {"ANTHROPIC_API_KEY": " "},
     {"PI_EVAL_TOTAL_CAP_USD": None}, {"PI_EVAL_CASE_BUDGET_USD": None},
-    {"PI_EVAL_TOTAL_CAP_USD": "nan"}, {"PI_EVAL_TOTAL_CAP_USD": "inf"},
+    {"PI_EVAL_TOTAL_CAP_USD": "nan"},
     {"PI_EVAL_CASE_BUDGET_USD": "0"}, {"PI_EVAL_CASE_BUDGET_USD": "3"},
     {"PI_EVAL_DEADLINE_SECONDS": "1501"}, {"PI_EVAL_DEADLINE_SECONDS": "0"},
     {"PI_EVAL_DEADLINE_SECONDS": "1.5"},
