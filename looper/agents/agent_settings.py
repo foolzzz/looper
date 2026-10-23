@@ -861,6 +861,8 @@ class Launch:
     # A run that must not change anything (an agent room consult): its runtime's read-only mode in place of every
     # permission (RFC decision 8's one exception), and no agent teams.
     consult: bool = False
+    # Additional directories a read-only run may inspect, such as its steps' isolated worktrees.
+    read_dirs: tuple[str, ...] = ()
 
     @property
     def system_prompt_mode(self) -> SystemPromptMode:

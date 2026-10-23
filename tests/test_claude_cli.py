@@ -449,6 +449,40 @@ RESTRICTING_FLAGS = {"--tools", "--allowedTools", "--allowed-tools", "--disallow
 
 
 class TestPermissionArgs:
+    @pytest.mark.parametrize("link_parent", [False, True])
+    def test_a_read_only_run_can_read_repo_and_knowledge_through_symlinked_paths(
+        self, tmp_path: Path, link_parent: bool,
+    ) -> None:
+        from looper.agents.claude_cli import read_only_args
+        from looper.agents.library import AgentLibrary
+
+        repo = tmp_path / "real" / "repo"
+        (repo / "src").mkdir(parents=True)
+        (repo / ".git").mkdir()
+        (repo / "DESIGN.md").write_text("Repository design\n")
+        if link_parent:
+            (tmp_path / "alias").symlink_to(repo.parent, target_is_directory=True)
+            alias = tmp_path / "alias" / "repo"
+        else:
+            alias = tmp_path / "alias"
+            alias.symlink_to(repo, target_is_directory=True)
+        knowledge = tmp_path / "knowledge"
+        knowledge.mkdir()
+        knowledge_alias = tmp_path / "knowledge-alias"
+        knowledge_alias.symlink_to(knowledge, target_is_directory=True)
+
+        args = read_only_args(AgentLibrary(), cwd=alias / "src", add_dirs=(str(knowledge_alias),))
+        allowed = set(args[args.index("--allowedTools") + 1].split(","))
+        roots = (alias, repo.resolve(), knowledge_alias, knowledge.resolve())
+        assert allowed == {*(f"{tool}(/{root.as_posix()}/**)" for root in roots
+                             for tool in ("Read", "Glob", "Grep")), "Skill", "WebFetch", "WebSearch"}
+
+    def test_a_read_only_run_cannot_create_a_worktree(self, tmp_path: Path) -> None:
+        from looper.agents.claude_cli import read_only_args
+        from looper.agents.library import AgentLibrary
+
+        assert "EnterWorktree" in _denied(read_only_args(AgentLibrary(), cwd=tmp_path))
+
     @pytest.mark.parametrize("role", [None, AgentType.MANAGER, AgentType.WORKER, AgentType.REVIEWER])
     def test_every_launch_but_a_planners_carries_them_with_and_without_a_library(
         self, tmp_path: Path, role: AgentType | None,
@@ -484,7 +518,7 @@ class TestPermissionArgs:
         assert "--dangerously-skip-permissions" not in args
         reads = ",".join(f"{tool}(/{Path.cwd().as_posix()}/**)" for tool in ("Read", "Glob", "Grep"))
         assert args[:8] == ["--permission-mode", "manual", "--permission-prompts", "none",
-                            "--disallowedTools", "Bash,Edit,Write,NotebookEdit",
+                            "--disallowedTools", "Bash,Edit,Write,NotebookEdit,EnterWorktree",
                             "--allowedTools", f"{reads},Skill,WebFetch,WebSearch,mcp__looper,mcp__docs"]
         assert launch.record()["read_only"] == "permissions"
         assert _builtin_launch(role=AgentType.PLANNER).args()[6:8] == [
@@ -534,19 +568,27 @@ class TestPermissionArgs:
         executable = shutil.which("claude")
         if not executable:
             pytest.skip("requires the installed Claude Code CLI")
-        repo, knowledge, outside = (tmp_path / name for name in (repo_name, "knowledge", "repo1"))
+        repo, knowledge, outside, worktree = (tmp_path / name for name in
+                                            (repo_name, "knowledge", "repo1", "worktrees/task/step"))
         workspace = repo / "src"
         workspace.mkdir(parents=True)
         (repo / ".git").mkdir()
         knowledge.mkdir()
         outside.mkdir()
-        for directory in (repo, knowledge, outside):
+        worktree.mkdir(parents=True)
+        for directory in (repo, knowledge, outside, worktree):
             (directory / "DESIGN.md").write_text(f"marker-{directory.name}\n")
         (repo / "escape").symlink_to(outside, target_is_directory=True)
+        repo_alias, knowledge_alias = tmp_path / f"{repo_name}-alias", tmp_path / "knowledge-alias"
+        repo_alias.symlink_to(repo, target_is_directory=True)
+        knowledge_alias.symlink_to(knowledge, target_is_directory=True)
+        workspace = repo_alias / "src"
         calls, expected = [], {}
         for tool in ("Read", "Glob", "Grep"):
             for name, directory, allowed in (
                 ("repo", repo, True), ("knowledge", knowledge, True), ("outside", outside, False),
+                ("repo-alias", repo_alias, True), ("knowledge-alias", knowledge_alias, True),
+                ("worktree", worktree, True),
                 ("traversal", workspace / ".." / ".." / "repo1", False),
                 ("symlink", repo / "escape", False),
             ):
@@ -556,6 +598,7 @@ class TestPermissionArgs:
                 calls.append({"type": "tool_use", "id": call_id, "name": tool, "input": tool_input})
                 expected[call_id] = allowed
         results: dict[str, Any] = {}
+        offered_tools: set[str] = set()
 
         class Provider(BaseHTTPRequestHandler):
             def log_message(self, *args: Any) -> None:
@@ -568,6 +611,7 @@ class TestPermissionArgs:
                     self.end_headers()
                     self.wfile.write(b'{"input_tokens":10}')
                     return
+                offered_tools.update(tool["name"] for tool in request.get("tools", []))
                 for message in request.get("messages", []):
                     for block in message.get("content", []) if isinstance(message.get("content"), list) else []:
                         if block.get("type") == "tool_result" and block.get("tool_use_id") in expected:
@@ -605,7 +649,8 @@ class TestPermissionArgs:
                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
         prompt = workspace / "prompt.md"
         prompt.write_text("Check document access.")
-        launch = _builtin_launch(role=AgentType.PLANNER, knowledge=AgentKnowledge(add_dirs=(str(knowledge),)))
+        launch = _builtin_launch(role=AgentType.PLANNER, knowledge=AgentKnowledge(add_dirs=(str(knowledge_alias),)),
+                                 read_dirs=(str(worktree),))
         command = CLAUDE_CODE.run_command(executable, cwd=workspace, prompt_file=prompt, launch=launch, max_turns=2)
         turn = {"type": "user", "message": {"role": "user", "content": "Check document access."}}
         thread.start()
@@ -617,6 +662,8 @@ class TestPermissionArgs:
             server.server_close()
             thread.join(timeout=5)
         assert run.returncode == 0, run.stderr + run.stdout
+        assert {"Read", "Glob", "Grep"} <= offered_tools
+        assert "EnterWorktree" not in offered_tools
         assert results.keys() == expected.keys(), run.stdout
         events = [json.loads(line) for line in run.stdout.splitlines()]
         denials = {denial["tool_use_id"] for event in events if event["type"] == "result"
@@ -696,7 +743,8 @@ class TestOtherSessions:
     def test_a_read_only_run_keeps_its_own_denials(self) -> None:
         planner = _teams_launch(AgentType.PLANNER, teams=False)
         consult = _teams_launch(AgentType.WORKER, teams=False, consult=True)
-        assert _denied(planner.args()) == ["Bash", "Edit", "Write", "NotebookEdit", "ListAgents", "SendMessage"]
+        assert _denied(planner.args()) == ["Bash", "Edit", "Write", "NotebookEdit", "EnterWorktree",
+                                          "ListAgents", "SendMessage"]
         assert _denied(consult.args()) == ["Bash", "Edit", "Write", "NotebookEdit", "ListAgents", "SendMessage"]
 
     @pytest.mark.parametrize("command", ["run", "resident", "consult"])

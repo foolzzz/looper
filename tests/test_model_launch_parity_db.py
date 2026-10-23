@@ -125,6 +125,7 @@ def test_the_prompt_text_is_not_compared_but_its_flag_and_directory_are(change: 
     ("--allowedTools", "Skill,WebFetch,WebSearch"),
     ("--allowedTools", "Read,Glob,Grep,Skill,WebFetch,WebSearch"),
     ("--disallowedTools", "Edit,Write,NotebookEdit"),
+    ("--disallowedTools", "Bash,Edit,Write,NotebookEdit"),
 ])
 def test_current_planner_permissions_cannot_revert_to_the_legacy_rules(tmp_path: Path, flag: str, value: str) -> None:
     records = pinned("claude")["proxy-key-background-append"]

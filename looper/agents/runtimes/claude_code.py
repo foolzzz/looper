@@ -210,7 +210,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         return [
             *(consult_args() if launch.consult else
               read_only_args(launch.library, cwd=cwd if cwd is not None else Path.cwd(),
-                             add_dirs=launch.knowledge.add_dirs) if launch.read_only else permission_args()),
+                             add_dirs=(*launch.knowledge.add_dirs, *launch.read_dirs))
+              if launch.read_only else permission_args()),
             *peer_args(launch.agent_teams),
             "--model", launch.model,
             *(["--effort", launch.effort] if launch.effort else []),

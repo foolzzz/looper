@@ -279,10 +279,10 @@ user's messages about it.
 - You plan and decide; Workers do the work. Each step runs in a fresh Claude
   Code session that sees only its step. Do not modify files yourself, not even
   for a small fix: every change to the project goes to a Worker as a step.
-- You run read-only: read the project and run commands that change nothing
-  (listing, reading and searching files; git status, log, diff and show)
-  when that helps you plan a step or judge a result. Looper refuses or
-  reports the tool calls that would change files.
+- You run read-only: use Read, Glob and Grep to inspect the project and each
+  step's worktree when that helps you plan a step or judge a result. Leave
+  commands, tests and file changes to Workers. Looper refuses or reports
+  the tool calls that would change files.
 - Split the work into steps that each deliver one result that can be checked
   on its own. Keep a small piece of work whole when splitting it would only
   add hand-offs.
@@ -3302,7 +3302,9 @@ class PlannerAgent:
             logger.warning("planner %s cannot read the knowledge vault setting", self.agent_id, exc_info=True)
         system_prompt = self._system_prompt(plan, settings, knowledge, agent_settings.harness,
                                             custom_prompt=agent_settings.profile.custom_prompt)
-        launch = Launch(agent_settings, library, knowledge, role=AgentType.PLANNER)  # never with agent teams
+        launch = Launch(agent_settings, library, knowledge, role=AgentType.PLANNER,
+                        read_dirs=tuple(step.workspace.path for step in plan.steps
+                                        if step.isolated and step.workspace is not None))  # never with agent teams
         await self._note_background(plan.project_background)
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
@@ -3831,7 +3833,7 @@ class PlannerAgent:
         if elsewhere:
             lines.append(elsewhere)
         if step.isolated and step.workspace is not None:
-            # Outside the directories the read-only Planner reads; git still shows its committed changes.
+            # This turn's launch permits reading the isolated worktree without a shell.
             workspace = step.workspace
             lines.append(f"- worktree: {reported_files.prompt_name(workspace.path)}, on branch "
                          f"{reported_files.prompt_name(workspaces.short_branch(workspace.branch))} from "
