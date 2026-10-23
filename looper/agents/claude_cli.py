@@ -1436,7 +1436,8 @@ class ClaudeRunRecorder:
         added to the record's when there are any.
 
         The write goes on when the caller is cancelled meanwhile (its run being
-        stopped), for at most ``CLOSE_TIMEOUT_SEC``; a failed write is logged.
+        stopped). Waiting is bounded by ``CLOSE_TIMEOUT_SEC`` even if the database
+        ignores cancellation; a failed write is logged.
         """
         if self._record_id is None or self._closed:
             return
@@ -1468,8 +1469,10 @@ class ClaudeRunRecorder:
             return
         _closing.add(write)
         write.add_done_callback(self._closed_write)
-        with contextlib.suppress(Exception):  # logged once the write ends (_closed_write)
-            await asyncio.shield(write)
+        # wait_for can outlive its timeout when the database suppresses cancellation.
+        done, _ = await asyncio.wait({write}, timeout=CLOSE_TIMEOUT_SEC)
+        if not done:
+            logger.warning("timed out closing llm record for %s", self._agent_id)
 
     async def _write_end(self, fields: dict[str, Any]) -> None:
         """``finish_record``, tried once more after a database error."""

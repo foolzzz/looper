@@ -149,6 +149,51 @@ def test_stop_takes_the_whole_chat_with_its_queued_messages(agent_db: Any) -> No
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("channel", ["telegram", "lark", "lark_bot"])
+def test_stop_only_takes_its_bots_running_and_queued_turns(agent_db: Any, channel: str) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session, manager, bus, _, inbox = _setup(tmp)
+            bot_a = channel_address(channel, f"channel-{channel}-1")
+            bot_b = channel_address(channel, f"channel-{channel}-2")
+
+            def message(text: str, source: Any) -> MessageEnvelope:
+                return MessageEnvelope.create(
+                    source=source, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+                    payload={"text": text, "channel_context": {"chat_id": 99, "user_id": 7}},
+                )
+
+            first = message("写一篇很长的文章", bot_a)
+            handling = asyncio.create_task(manager._handle(first))
+            try:
+                await until(session.running.is_set, timeout=10)
+                queued_a = manager._register_turn(message("继续写", bot_a))
+                queued_b = manager._register_turn(message("你好", bot_b))
+                chat_b = bus.get_queue(bot_b.agent_id)
+                await bus.publish(message("/stop", bot_b))
+                await until(lambda: not chat_b.empty(), timeout=10)
+                assert _texts(chat_b) == ["已停止当前回复。"]
+                assert queued_b.stop is not None
+                assert queued_a.stop is None
+                assert manager._running_token is not None and manager._running_token.stop is None
+                assert not session._stopped.is_set()
+
+                chat_a = bus.get_queue(bot_a.agent_id)
+                _drain(chat_a)
+                await bus.publish(message("/stop", bot_a))
+                await until(lambda: any("另取消了 1 条排队的消息" in text for text in _texts(chat_a)), timeout=10)
+                await handling
+                assert queued_a.stop is not None
+                assert inbox.empty()
+            finally:
+                if not handling.done():
+                    await manager.stop_turn(first.message_id, via=channel)
+                    await handling
+                await bus.shutdown()
+
+    asyncio.run(run())
+
+
 def test_stop_says_a_runtime_without_an_interrupt_cannot_stop_the_reply(agent_db: Any) -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmp:

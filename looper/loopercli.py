@@ -362,8 +362,7 @@ def render(answer: Mapping[str, Any], session: str | None = None) -> None:
     else:
         error = answer.get("error")
         error = error if isinstance(error, dict) else {}
-        print(f"error: {error.get('code', 'unknown')}: {error.get('message', json.dumps(answer, ensure_ascii=False))}",
-              file=sys.stderr)
+        _print_error(f"{error.get('code', 'unknown')}: {error.get('message', json.dumps(answer, ensure_ascii=False))}")
 
 
 def finish(status: int, answer: Mapping[str, Any], as_json: bool, session: str | None = None) -> int:
@@ -394,6 +393,11 @@ class Context:
             url, token = read_client(self.client_file)
             self._api = Api(url, token, self.session)
         return self._api
+
+
+def _print_error(message: str) -> None:
+    # An argument the user mistook for an option's value may be a token; do not echo it.
+    print("error: " + re.sub(rf"{TOKEN_PREFIX}[A-Za-z0-9_-]+", f"{TOKEN_PREFIX}…", message), file=sys.stderr)
 
 
 class Parser(argparse.ArgumentParser):
@@ -675,14 +679,17 @@ def _send(args: argparse.Namespace, ctx: Context, text: str, conversation_id: st
                         print()
                     print(data.get("message", "the reply is still being written"), file=sys.stderr)
                 return turn
+    except KeyboardInterrupt as exc:
+        exc.turn = turn
+        raise
     finally:
         close = getattr(events, "close", None)
         if close is not None:
             close()
     if not quiet and printed:
         print()
-    print("error: the stream ended without a reply; read it later with: "
-          f"loopercli chat --conversation {turn.conversation_id} --read", file=sys.stderr)
+    _print_error("the stream ended without a reply; read it later with: "
+                 f"loopercli chat --conversation {turn.conversation_id} --read")
     turn.code = EXIT_ERROR
     return turn
 
@@ -792,12 +799,15 @@ def _chat_interactive(args: argparse.Namespace, ctx: Context) -> int:
         if not line:
             continue
         if len(line) > MAX_MESSAGE_CHARS:
-            print(f"error: the message has {len(line)} characters; at most {MAX_MESSAGE_CHARS}: "
-                  "summarise it and point to the files", file=sys.stderr)
+            _print_error(f"the message has {len(line)} characters; at most {MAX_MESSAGE_CHARS}: "
+                         "summarise it and point to the files")
             continue
         try:
             turn = _send(args, ctx, line, conversation_id)
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as exc:
+            turn = getattr(exc, "turn", None)
+            if turn is not None:
+                conversation_id = turn.conversation_id or conversation_id
             print(file=sys.stderr)
             where = f" --conversation {conversation_id} --read" if conversation_id else ""
             print(f"(stopped reading; the reply is still saved: loopercli chat{where})", file=sys.stderr)
@@ -1146,7 +1156,7 @@ def build_parser(document: Mapping[str, Any] | None) -> Parser:
 
 
 def _global_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser = Parser(add_help=False, allow_abbrev=False)
     parser.add_argument("--client-file")
     parser.add_argument("--session", default=os.environ.get("LOOPER_SESSION") or None)
     parser.add_argument("--json", action="store_true")
@@ -1185,16 +1195,16 @@ def _run(opts: argparse.Namespace, rest: list[str]) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    opts, rest = _global_parser().parse_known_args(list(sys.argv[1:] if argv is None else argv))
-    if opts.version:
-        print(f"loopercli {__version__}")
-        return EXIT_OK
     try:
+        opts, rest = _global_parser().parse_known_args(list(sys.argv[1:] if argv is None else argv))
+        if opts.version:
+            print(f"loopercli {__version__}")
+            return EXIT_OK
         return _run(opts, rest)
     except CliError as exc:
         if isinstance(exc, UsageError) and exc.usage:
             print(exc.usage, end="", file=sys.stderr)
-        print(f"error: {exc}", file=sys.stderr)
+        _print_error(str(exc))
         return exc.code
     except SystemExit as exc:  # argparse's --help
         return exc.code if isinstance(exc.code, int) else EXIT_OK
