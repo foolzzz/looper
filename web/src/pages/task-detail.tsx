@@ -2065,7 +2065,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
   const [task, setTask] = useState<TaskDetail | null>(null);
   const taskRuns = useTaskRuns(task);
   const [error, setError] = useState("");
-  const [startError, setStartError] = useState("");
+  const [actionError, setActionError] = useState("");
   /** Start over waits for its confirmation: it deletes the task's steps and plan. */
   const [confirmStartOver, setConfirmStartOver] = useState(false);
   const [localTab, setLocalTab] = useState<Tab>("overview");
@@ -2108,8 +2108,8 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
   // A ready task is started; a stopped, failed or cancelled one goes on from its saved plan, or is planned anew.
   const start = (startOver: boolean) =>
     (task?.status === READY_STATUS ? startReadyTask(taskId) : startTask(taskId, { startOver })).then(
-      () => { setStartError(""); setConfirmStartOver(false); setRuns((n) => n + 1); },
-      (err) => setStartError(err instanceof Error ? err.message : String(err)),
+      () => { setActionError(""); setConfirmStartOver(false); setRuns((n) => n + 1); },
+      (err) => setActionError(err instanceof Error ? err.message : String(err)),
     );
 
   const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
@@ -2163,7 +2163,10 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
           {task && isActiveTask(task) && (
             <button
               type="button"
-              onClick={() => stopTask(taskId).then(() => {})}
+              onClick={() => stopTask(taskId).then(
+                () => setActionError(""),
+                (err) => setActionError(err instanceof Error ? err.message : String(err)),
+              )}
               className="flex items-center gap-1.5 rounded-md border border-warning/50 px-3 py-1.5 text-xs font-medium text-warning hover:bg-warning/10 transition-colors"
             >
               <Pause className="h-3.5 w-3.5" />
@@ -2216,7 +2219,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
             </>
           )}
         </div>
-        {startError && <p className="mt-1 text-xs text-destructive">{startError}</p>}
+        {actionError && <p role="alert" className="mt-1 text-xs text-destructive">{actionError}</p>}
 
         {/* Tabs */}
         <div role="tablist" aria-label="Task" className="flex flex-wrap gap-1 mt-3">

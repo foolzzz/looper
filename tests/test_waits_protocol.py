@@ -727,12 +727,12 @@ def test_manager_wait_settings_validate_before_confirmation(
 
 
 def test_manager_task_returns_wait_conditions_and_each_step_kind(monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.agents.ops import tasks as ops_tasks
+    from looper.agents import projects
     from looper.agents.ops.service import ManagerOps
-    from looper.db import llm_records, waits as db_waits
+    from looper.db import llm_records, task_roles, tasks, user_gates, waits as db_waits
 
     check = {"type": "github_pr", "repo": "owner/name", "number": 12, "ready_when": "head_changed"}
-    monkeypatch.setattr(ops_tasks.db_tasks, "get_task_with_steps", AsyncMock(return_value={
+    monkeypatch.setattr(tasks, "get_task_with_steps", AsyncMock(return_value={
         "id": "task-a", "name": "wait task", "status": "waiting", "steps": [
             {"step_key": "s1", "kind": "work", "status": "verified"},
             {"step_key": "w1", "kind": "wait", "status": "waiting"}]}))
@@ -740,9 +740,9 @@ def test_manager_task_returns_wait_conditions_and_each_step_kind(monkeypatch: py
         "step_id": "step-w1", "step_key": "w1", "state": "waiting", "topic": "Author pushes fixes",
         "spec": {"check": check, "every_seconds": 600}, "depends_on": ["s1"], "last_result": "not_ready",
         "opened_at": datetime(2026, 10, 20, 12, tzinfo=timezone.utc)}]))
-    monkeypatch.setattr(ops_tasks.db_roles, "current", AsyncMock(return_value=[]))
-    monkeypatch.setattr(ops_tasks.db_user_gates, "list_for_task", AsyncMock(return_value=[]))
-    monkeypatch.setattr(ops_tasks, "agents_view", AsyncMock(return_value={"roles": {}}))
+    monkeypatch.setattr(task_roles, "current", AsyncMock(return_value=[]))
+    monkeypatch.setattr(user_gates, "list_for_task", AsyncMock(return_value=[]))
+    monkeypatch.setattr(projects, "agents_view", AsyncMock(return_value={"roles": {}}))
     monkeypatch.setattr(llm_records, "task_costs", AsyncMock(return_value={}))
     monkeypatch.setattr(ManagerOps, "_record", AsyncMock())
 

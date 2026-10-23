@@ -335,6 +335,7 @@ def _run_a_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planner_claude:
         h = Harness(tmp_path, claude, always(WORK_OK))
         agent_db.find_project_by_name.return_value = {"id": "proj-1", "name": "calc", "description": "",
                                                        "work_dir": str(h.work_dir)}
+        agent_db.get_project.return_value = agent_db.find_project_by_name.return_value
         bus = h.bus
         channel._bus = bus
         channel._running = True

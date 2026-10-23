@@ -1,4 +1,4 @@
-"""Projects over HTTP: request validation, the project view and task creation.
+"""Project and task operations shared by HTTP routes and the Manager tools.
 
 Every task belongs to exactly one project and can move to another at any
 time. A new task may choose the Agent Profile of its Planner, Workers or Reviewers
@@ -22,6 +22,7 @@ import json
 import logging
 import re
 import uuid
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 import asyncpg
@@ -30,10 +31,13 @@ from ..db import agent_setting_layers as db_layers, connection as db_connection,
 from ..db import projects as db_projects, tasks as db_tasks
 from .agent_settings import CONCURRENCY_MAX, PLANNER_CHOICE_ROLES, TASK_LIMIT_ROLES, AgentType, SettingsError
 from .agent_settings import concurrency, index_layers, task_agents_view
+from .agent_settings import TASK_ROLES, AgentSettings, Layer, resolve, resolve_task_concurrency
 from .bus import MessageBus
-from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType, planner_address
+from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType, RestartMode, planner_address
 from .project_execution import FIELDS as EXECUTION_FIELDS, ProjectExecution, TaskWorkspaces, execution_fields
-from .project_execution import format_usd
+from .project_execution import LessonsMode, ReviewPolicy, TaskBudgetAction, format_usd
+from .step_workspaces import _size_text as size_text
+from .task_workspaces import WarningKind, overwrites, task_branch
 from .system_prompt import TASK_REQUIREMENT_LIMIT
 from .tiers.task import TaskRouter, resolve_work_dir
 
@@ -157,8 +161,15 @@ def _project_fields(data: dict[str, Any], *, update: bool) -> dict[str, Any]:
     return fields
 
 
+class ProjectNameTaken(RequestError):
+    """A concurrent or duplicate project name, distinguished from other conflicts."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(HTTP_409, f"a project named {name!r} already exists")
+
+
 def _name_taken(name: str) -> RequestError:
-    return RequestError(HTTP_409, f"a project named {name!r} already exists")
+    return ProjectNameTaken(name)
 
 
 async def _existing_project(project_id: str, *, manager_id: str | None = None) -> dict[str, Any]:
@@ -248,7 +259,20 @@ def _task_work_dir(raw: Any, project_default: str) -> str:
 
 
 async def create_task(data: dict[str, Any]) -> dict[str, Any]:
-    """Create a task in ``init``, in an existing project or a new one made in the same transaction."""
+    """The console's parameter and response adapter for the shared creation core."""
+    result = await create_task_core(data)
+    return {key: result[key] for key in ("task_id", "status", "created_at", "project_id", "workspace")}
+
+
+async def create_task_core(
+    data: dict[str, Any], *, task_fields: dict[str, Any] | None = None,
+    profiles: dict[str, str | None] | None = None, roles: Sequence[dict[str, Any]] = (),
+    template_name: str | None = None, lock_manager: bool = False, named: bool | None = None,
+    visible_to: str | None = None, show_configuration: bool = False,
+    template_display: tuple[str, Sequence[tuple[str, str]]] | None = None,
+) -> dict[str, Any]:
+    """Place, check and store a ready task for either entry point. Adapters supply channel/template metadata;
+    console config, project fields and role overrides share the same persistence path."""
     requirement = data.get("requirement")
     requirement = requirement.strip() if isinstance(requirement, str) else ""
     if not requirement:
@@ -260,7 +284,7 @@ async def create_task(data: dict[str, Any]) -> dict[str, Any]:
     if (project_id is None) == (new_project is None):
         raise RequestError(HTTP_400, "give exactly one of project_id (an existing project) and project (a new one)")
     project: dict[str, Any] | None = None
-    new_fields: dict[str, str] = {}
+    new_fields: dict[str, Any] = {}
     if new_project is None:
         if not isinstance(project_id, str):
             raise RequestError(HTTP_400, "project_id must be a string")
@@ -275,37 +299,63 @@ async def create_task(data: dict[str, Any]) -> dict[str, Any]:
     config = data.get("config")
     if config is not None and not isinstance(config, dict):
         raise RequestError(HTTP_400, "config must be a JSON object")
-    profiles = await _profile_overrides(data.get("profile_overrides"))
+    profiles = await _profile_overrides(data.get("profile_overrides")) if profiles is None else profiles
     work_dir = _task_work_dir(data.get("work_dir"), default_dir)
     project_mode = ProjectExecution.from_row(project if project is not None else new_fields.get("execution")).task_mode
-    workspace = await task_workspace(data, work_dir=work_dir, named=bool(str(data.get("work_dir") or "").strip()),
-                                     project_dir=default_dir, project_mode=project_mode)
+    named = bool(str(data.get("work_dir") or "").strip()) if named is None else named
+    workspace = await task_workspace(data, work_dir=work_dir, named=named, project_dir=default_dir,
+                                     project_mode=project_mode, visible_to=visible_to)
     task = {
         "task_id": f"task-{uuid.uuid4().hex[:12]}",
         "requirement": requirement,
-        "goal_id": data.get("goal_id", ""),
+        "goal_id": data.get("goal_id") or "",
         "work_dir": work_dir,
         "config": config or {},
         "status": "init",
         "workspace_dir": work_dir,
         "workspace_mode": workspace["mode"],
         "workspace_base": workspace["base"],
+        "title": db_tasks.task_title(data.get("title")),
+        **(task_fields or {}),
     }
-    if project is not None and not profiles:
-        created = await db_tasks.create_task(**task, project_id=project["id"])
-    else:
-        try:
+
+    async def persist(conn: Any = None) -> dict[str, Any]:
+        nonlocal project
+        if lock_manager:
+            from ..db import managers as db_managers
+            if not await db_managers.lock_for_task(task.get("manager_id", "manager"), conn=conn):
+                raise RequestError(HTTP_409, "this Manager was turned off or deleted; the task was not created")
+        if project is None:
+            project = await db_projects.create_project(**new_fields, pool=conn)
+        created = await db_tasks.create_task(**task, project_id=project["id"], pool=conn)
+        if profiles:
+            await db_layers.set_profile_overrides(conn, task["task_id"], profiles)
+        if roles:
+            from ..db import task_roles as db_roles
+            from .tiers.journal import JournalKind, SUMMARY_MAX_CHARS, clip
+            for role in roles:
+                summary = f"Role {role['role_key']} v1 from the task template {template_name}"
+                await db_roles.add_first_version(conn, task["task_id"], role["role_key"], {
+                    **role, "reason": f"from template {template_name}", "via": "template"},
+                    {"step_id": "", "kind": JournalKind.ROLE_DEFINED.value,
+                     "summary": clip(summary, SUMMARY_MAX_CHARS), "learnings": []})
+        return created
+
+    try:
+        if project is not None and not profiles and not lock_manager and not roles:
+            created = await persist()
+        else:
             async with db_connection.transaction() as conn:
-                if project is None:
-                    project = await db_projects.create_project(**new_fields, pool=conn)
-                created = await db_tasks.create_task(**task, project_id=project["id"], pool=conn)
-                if profiles:
-                    await db_layers.set_profile_overrides(conn, task["task_id"], profiles)
-        except asyncpg.UniqueViolationError:
-            raise _name_taken(new_fields["name"]) from None
-        except asyncpg.ForeignKeyViolationError:  # a profile removed meanwhile
-            raise RequestError(HTTP_400, "an Agent Profile the task chose was removed meanwhile; choose again") \
-                from None
+                created = await persist(conn)
+    except asyncpg.UniqueViolationError:
+        # The Manager adapter keeps its existing concurrent-create instruction.
+        raise _name_taken(new_fields["name"]) from None
+    except asyncpg.ForeignKeyViolationError:
+        raise RequestError(HTTP_400, "an Agent Profile the task chose was removed meanwhile; choose again") from None
+    shown = task["title"] or task["goal_id"] or task["task_id"]
+    block = (await configuration_block(task["task_id"], shown, project, work_dir, new_project is not None,
+                                       workspace=workspace["check"], template=template_display)
+             if show_configuration else None)
     return {
         "task_id": task["task_id"],
         "status": "init",
@@ -313,6 +363,11 @@ async def create_task(data: dict[str, Any]) -> dict[str, Any]:
         "project_id": project["id"],
         # How it runs in its workspace, and what to know before starting it (task_workspaces.check).
         "workspace": workspace["check"],
+        "project": project,
+        "project_created": new_project is not None,
+        "work_dir": work_dir,
+        "name": shown,
+        "configuration": block,
     }
 
 
@@ -373,6 +428,282 @@ async def _profile_overrides(raw: Any) -> dict[str, str]:
     return {role: profile_id for role, profile_id in chosen.items() if profile_id is not None}
 
 
+def task_listed(task: Mapping[str, Any]) -> dict[str, Any]:
+    """A task's compact list row, also the common fields of its compact detail."""
+    return {"task_id": task["id"], "name": task["name"], "status": task["status"],
+            "group": db_tasks.task_group(task.get("status")).value,
+            "project": task.get("project_name"), "created_at": task.get("created_at")}
+
+
+async def list_tasks_page(
+    *, limit: int = 50, project_id: str | None = None, status: str | None = None,
+    group: db_tasks.TaskGroup | None = None, schedule_id: str | None = None, before: str | None = None,
+    manager_id: str | None = None, query: str = "", compact: bool = False, search_limit: int = 200,
+) -> dict[str, Any]:
+    """A console page or the Manager's compact list; keyword searches retain its bounded recent-task search."""
+    from ..db.llm_records import task_costs
+
+    query = " ".join(query.split()).casefold()
+    if before is not None and not await db_tasks.task_exists(before):
+        raise RequestError(HTTP_400, f"before must be a task id; {before!r} is not one")
+    filters = {"project_id": project_id, "group": group, "schedule_id": schedule_id}
+    fetch_limit = (search_limit if query else limit) if compact else limit + 1
+    page = await db_tasks.list_tasks(limit=fetch_limit, status=status, before=before,
+                                     manager_id=manager_id, **filters)
+    if compact:
+        if query:
+            page = [t for t in page if query in " ".join(
+                str(t.get(key) or "") for key in ("id", "name", "requirement", "project_name", "goal_id")).casefold()]
+        return {"tasks": [task_listed(task) for task in page[:limit]], "more": len(page) > limit}
+
+    tasks = page[:limit]
+    counts = await db_tasks.count_by_status(**filters)
+    costs = await task_costs([t["id"] for t in tasks])
+    from ..db import managers as db_managers
+    manager_names = {m["id"]: m["name"] for m in await db_managers.list_managers(include_deleted=True)}
+    result = []
+    for t in tasks:
+        result.append({
+            "task_id": t.get("id", ""),
+            "requirement": t.get("requirement", ""),
+            "name": t.get("name", ""),
+            "goal_id": t.get("goal_id", ""),
+            "project_id": t.get("project_id", ""),
+            "project_name": t.get("project_name", ""),
+            "work_dir": t.get("work_dir", ""),
+            # The Manager the task belongs to.
+            "manager_id": t.get("manager_id") or "manager",
+            "manager_name": manager_names.get(t.get("manager_id") or "manager"),
+            # The task template it came from, as it said then (null for none).
+            "template": t.get("template"),
+            "status": t.get("status", "pending"),
+            "group": db_tasks.task_group(t.get("status")).value,
+            "phase": t.get("phase", "pending"),
+            "planner_id": t.get("planner_id"),
+            "correlation_id": t.get("correlation_id", ""),
+            "created_at": t.get("created_at"),
+            "completed_at": t.get("completed_at"),
+            # The schedule that created it (null for any other task, or once the schedule is deleted).
+            "schedule_id": t.get("schedule_id"),
+            "schedule_name": t.get("schedule_name"),
+            "continues_schedule_session": t.get("continues_schedule_session", False),
+            # What the task's Planner, Workers and Reviewers spent so far.
+            "cost": costs.get(t.get("id", "")),
+        })
+    return {"tasks": result, "next_before": tasks[-1]["id"] if len(page) > limit else None, "counts": counts}
+
+
+async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
+    """A task's detail for the console, or its compact Manager view with the same tool contract."""
+    from .wait_service import waits_view
+
+    raw = await db_tasks.get_task_with_steps(task_id)
+    if raw is None:
+        raise RequestError(HTTP_404, "task not found")
+    cost = (await db_llm_records.task_costs([task_id])).get(task_id)
+    agents = await agents_view(raw)
+    waits = await waits_view(task_id)
+    if compact:
+        return await _compact_task_detail(raw, cost=cost, agents=agents, waits=waits)
+
+    from ..db import api_clients as db_api_clients, managers as db_managers
+    from ..db.agent_setting_layers import profile_overrides
+    from ..db.llm_records import list_task_runs
+    from ..db.manager_actions import for_task as manager_actions
+    from ..db.task_changes import requirement_versions
+    from . import gate_service, profile_registry
+    from .task_roles import roles_view, run_roles
+    from .tiers.journal import progress_notes
+
+    ran_as = run_roles(await list_task_runs([task_id]), raw.get("steps", []))
+    overrides = await profile_overrides(task_id)
+    versions = await requirement_versions(task_id)
+    actions = await manager_actions(task_id)
+    owner = await db_managers.get_manager(raw.get("manager_id") or "manager", include_deleted=True)
+    client_id = raw.get("client_id")
+    client_name = (await db_api_clients.names([client_id])).get(client_id) if client_id else None
+    roles = await roles_view(task_id, raw.get("steps", []))
+    gates = await gate_service.gates_view(task_id)
+    task_workspace = await task_workspace_view(raw)
+    workspaces = await step_workspaces_view(task_id, raw.get("steps", []),
+                                            in_worktree=bool(task_workspace["worktree"]))
+    try:
+        from .room import task_view
+        room = await task_view(task_id, limit=1)
+    except Exception:
+        # The room's numbers are help on the page: without them, the task still shows.
+        logger.warning("cannot read the room of task %s", task_id, exc_info=True)
+        room = None
+    return {
+        "task_id": raw.get("id", ""),
+        "requirement": raw.get("requirement", ""),
+        "name": raw.get("name", ""),
+        "title": raw.get("title") or "",
+        # Every version of an edited requirement, oldest first (none for one never edited): version, text, via,
+        # created_at, delivered_at (when the Planner had the edit in a turn).
+        "requirement_versions": versions,
+        # What the user added to the task while it ran, oldest first: text, via, created_at, delivered_at.
+        "supplements": [{"text": entry["summary"], "via": entry.get("via") or "", "created_at": entry["created_at"],
+                         "delivered_at": entry.get("delivered_at")}
+                        for entry in raw.get("journal", []) if entry.get("kind") == "supplement"],
+        # What the Manager did to the task through its tools, or asked the user to confirm, newest first.
+        "manager_actions": actions,
+        # The Manager the task belongs to, and the task template it was created from (as it said then), or null.
+        "manager_id": raw.get("manager_id") or "manager",
+        "manager_name": owner["name"] if owner else None,
+        "template": raw.get("template"),
+        # The API client the task was created through (also a revoked one), or null.
+        "client": {"id": client_id, "name": client_name} if client_id and client_name else None,
+        "goal_id": raw.get("goal_id", ""),
+        "project_id": raw.get("project_id", ""),
+        "project_name": raw.get("project_name", ""),
+        "status": raw.get("status", "pending"),
+        "group": db_tasks.task_group(raw.get("status")).value,
+        "phase": raw.get("phase", "pending"),
+        "planner_id": raw.get("planner_id"),
+        "correlation_id": raw.get("correlation_id", ""),
+        "work_dir": raw.get("work_dir", ""),
+        "config": raw.get("config", {}),
+        # The Agent Profile the task chose for some of its roles, over the layers (agent_settings.Layer.TASK).
+        "profile_overrides": await profile_registry.profile_views(overrides),
+        # Each task role's Agent Profile, and its Workers' and Reviewers' concurrency, with where each comes from;
+        # the task's own choices are source "task" (projects.agents_view).
+        "agents": agents,
+        # The roles the task's Planner defined for its steps (current version, earlier versions, the steps that
+        # name each, its numbers), and the built-in Worker's and Reviewer's numbers (task_roles.roles_view).
+        "roles": roles["roles"],
+        "builtin_role_stats": roles["builtin"],
+        # The user gates of its plan, in plan order: state, agenda, findings, how each closed, and whom each
+        # waiting one waits for (gate_service.gate_view); their discussions are at .../gates/<step>/messages.
+        "gates": gates,
+        # Wait steps in plan order, with their check, timing and latest result (wait_service.wait_view).
+        # Only waiting rows accept .../waits/<step>/resume or /cancel; the Planner settles moved rows.
+        "waits": waits,
+        # Its workspace: the directory it names, how it runs there, and the worktree it runs in (its branch,
+        # where it started, the commands that take the work over), null for none (task_workspaces).
+        "task_workspace": task_workspace,
+        # Its steps' worktrees, in a project with step workspaces (null when it had none): where its branch
+        # started, each worktree oldest first, and the commands that undo the task's commits (none for a task
+        # in a worktree of its own: they would change its branch, not the user's).
+        "step_workspaces": workspaces,
+        # Its agent room in numbers: whether its project has it on, its messages by kind and its unanswered
+        # questions, and each step's (sent, received, unanswered); the messages are at .../room.
+        "room": {**{key: room[key] for key in ("enabled", "counts", "by_step")},
+                 "consults": {k: v for k, v in room["consults"].items() if k != "list"}} if room else None,
+        # The role each Worker and Reviewer run that ran as one ran as, by agent id (task_roles.run_roles); only
+        # in a task with such runs.
+        **({"run_roles": ran_as} if ran_as else {}),
+        "origin_channel_id": raw.get("origin_channel_id", ""),
+        "result_summary": raw.get("result_summary"),
+        "error": raw.get("error"),
+        "fail_kind": raw.get("fail_kind"),  # "task_budget": it failed at its project's task spend cap
+        # The task's spend cap as the Planner enforces it (its own, else its project's); null for none.
+        "task_budget_usd": ProjectExecution.from_row(
+            {"id": raw.get("project_id"), "task_budget_usd": raw.get("task_budget_usd")}).task_budget_usd,
+        # The task's own cap (a scheduled run's), raised alone when it continues at its cap; null for none.
+        "own_budget_usd": raw.get("budget_usd"),
+        "schedule_id": raw.get("schedule_id"),
+        "schedule_name": raw.get("schedule_name"),
+        "continues_schedule_session": raw.get("continues_schedule_session", False),
+        "created_at": raw.get("created_at"),
+        "updated_at": raw.get("updated_at"),
+        "completed_at": raw.get("completed_at"),
+        "steps": raw.get("steps", []),
+        # The task journal, oldest first: an entry per accepted step with its summary and learnings.
+        "journal": raw.get("journal", []),
+        # The Planner's progress notes (journal kind progress), newest first: done, now, next, risks, estimate, at.
+        "progress": progress_notes(raw.get("journal", [])),
+        # What the task's Planner, Workers and Reviewers spent: the total, by role, and the run count.
+        "cost": cost,
+    }
+
+
+async def _compact_task_detail(task: dict[str, Any], *, cost: dict[str, Any] | None, agents: dict[str, Any],
+                               waits: list[dict[str, Any]]) -> dict[str, Any]:
+    from ..db import task_changes as db_changes, task_roles as db_roles, user_gates as db_user_gates
+    from .tiers.journal import clip
+
+    task_id = task["id"]
+    journal = task.get("journal") or []
+    supplements = [entry for entry in journal if entry.get("kind") == db_changes.SUPPLEMENT]
+    progress = [entry for entry in journal if entry.get("kind") == "progress"]
+    return {
+        **task_listed(task),
+        "phase": task.get("phase"),
+        "work_dir": task.get("work_dir"),
+        "requirement": task.get("requirement"),
+        "steps": [{"step": s.get("step_key") or s.get("id"), "status": s.get("status"),
+                   "kind": s.get("kind") or "work",
+                   "instruction": clip(s.get("instruction") or "", 200),
+                   # The roles its Planner defined that the step runs as and is reviewed by, when it has them.
+                   **({"role": s["role_key"]} if s.get("role_key") else {}),
+                   **({"review_roles": [item["role"] if item.get("required") is not False
+                                        else {"role": item["role"], "required": False}
+                                        for item in s["review_roles"]]} if s.get("review_roles") else {})}
+                  for s in task.get("steps") or []],
+        "waits": waits,
+        # The roles the task's Planner defined, when it has any (task_roles).
+        **({"roles": roles} if (roles := [{"id": r["role_key"], "kind": r["kind"], "version": r["version"]}
+                                          for r in await db_roles.current(task_id)]) else {}),
+        "supplements": [{"text": clip(entry["summary"], 300), "delivered": entry.get("delivered_at") is not None}
+                        for entry in supplements],
+        "latest_progress": progress[-1]["summary"] if progress else None,
+        "result": clip(task.get("result_summary") or task.get("error") or "", 1_000) or None,
+        "cost_usd": (cost or {}).get("cost_usd"),
+        # How many of its Workers and Reviewers run at once, with the source; its own limits (task).
+        "concurrency": {role: view["concurrency"] for role, view in agents["roles"].items()
+                        if "concurrency" in view},
+        # Its user gates (looper_task_gate_reply answers one that waits for the user), when it has any.
+        **({"gates": gates} if (gates := [task_gate_view(g) for g in await db_user_gates.list_for_task(task_id)
+                                          if g.get("state") != "pending"]) else {}),
+    }
+
+
+def task_gate_view(gate: Mapping[str, Any]) -> dict[str, Any]:
+    """A gate as looper_tasks shows it: its label, state, topic, questions (the open ones' options), and how it
+    closed."""
+    from .tiers.journal import clip
+
+    view: dict[str, Any] = {"gate": gate["step_key"], "state": gate["state"], "topic": clip(gate["topic"], 200),
+                            "questions": [{"id": item.get("id"), "question": clip(str(item.get("question") or ""), 200),
+                                           "status": item.get("status"),
+                                           **({"options": item["options"]} if item.get("options") else {}),
+                                           **({"answer": clip(str(item["answer"]), 200)} if item.get("answer")
+                                              else {})}
+                                          for item in gate.get("agenda") or []]}
+    if gate["state"] in ("open", "discussing"):
+        view["waiting_for"] = "planner" if gate.get("waiting_for_planner") else "user"
+    if gate.get("summary"):
+        view["summary"] = gate["summary"]
+    if gate.get("resolution"):
+        view["resolution"] = clip(gate["resolution"], 300)
+    return view
+
+
+async def task_workspace_view(task: dict[str, Any]) -> dict[str, Any]:
+    from ..db import task_worktrees as db_task_worktrees
+    from .task_workspaces import TaskWorktree
+
+    row = await db_task_worktrees.get(str(task["id"]))
+    return {"workspace_dir": task.get("workspace_dir") or task.get("work_dir") or "",
+            "mode": task.get("workspace_mode") or "in_place", "base": task.get("workspace_base") or "",
+            "worktree": TaskWorktree.from_row(row).view() if row is not None else None}
+
+
+async def step_workspaces_view(task_id: str, steps: list[dict[str, Any]], *,
+                               in_worktree: bool = False) -> dict[str, Any] | None:
+    from ..db import step_workspaces as db_step_workspaces
+    from . import step_workspaces
+
+    rows = await db_step_workspaces.list_for_task(task_id)
+    if not rows:
+        return None
+    start = await db_step_workspaces.task_start(task_id)
+    view = step_workspaces.task_view(task_id, rows, start_branch=start[0], start_commit=start[1],
+                                     step_keys={str(s["id"]): str(s.get("step_key") or "") for s in steps})
+    return {**view, "undo": []} if in_worktree else view
+
+
 async def move_task(task_id: str, data: dict[str, Any], task_router: TaskRouter) -> dict[str, Any]:
     """Move a task, whatever its status, to another project; a live task follows."""
     project_id = data.get("project_id")
@@ -400,6 +731,42 @@ async def start_ready_task(task_id: str, bus: MessageBus, source: AgentAddress) 
     return {"started": task_id, "project_id": task["project_id"]}
 
 
+async def check_task_control(task_id: str, action: str) -> dict[str, Any]:
+    """The task when its state allows a control action, also used before asking for confirmation."""
+    task = await db_tasks.get_task(task_id)
+    if task is None:
+        raise RequestError(HTTP_404, f"no task {task_id}: find its id with looper_tasks")
+    status = task["status"]
+    if action == "stop":
+        if status not in db_tasks.ACTIVE_STATUSES:
+            raise RequestError(HTTP_409, f"task {task_id} is {status}: only a running task can be stopped")
+    elif action == "cancel":
+        if db_tasks.task_group(status) not in (db_tasks.TaskGroup.IN_PROGRESS, db_tasks.TaskGroup.NEEDS_YOU):
+            raise RequestError(HTTP_409, f"task {task_id} is {status}: only a running task can be cancelled")
+    elif action in ("restart", "start_over"):
+        if status not in db_tasks.RESTARTABLE_STATUSES:
+            raise RequestError(HTTP_409, f"task {task_id} is {status}: restart and start_over run a stopped, "
+                                         "failed or cancelled task again (a ready one starts with action start)")
+        if not (task.get("work_dir") or "").strip():
+            raise RequestError(HTTP_400, f"task {task_id} has no directory: set one with looper_task_update first")
+    else:
+        raise RequestError(HTTP_400, f"unknown task control action {action!r}")
+    return task
+
+
+async def control_task(task_id: str, action: str, bus: MessageBus, source: AgentAddress) -> None:
+    """Check a stop, cancel or restart and send it once to the TaskRouter."""
+    await check_task_control(task_id, action)
+    message_type = {"stop": MessageType.TASK_STOP, "cancel": MessageType.TASK_CANCEL,
+                    "restart": MessageType.TASK_RESTART, "start_over": MessageType.TASK_RESTART}[action]
+    payload: dict[str, Any] = {"task_id": task_id}
+    if action in ("restart", "start_over"):
+        payload["mode"] = (RestartMode.START_OVER if action == "start_over" else RestartMode.CONTINUE).value
+    await bus.publish(MessageEnvelope.create(
+        source=source, target=TASK_ROUTER_ADDRESS, message_type=message_type, payload=payload,
+    ))
+
+
 # How a change to a task came: on the task page, or in a message sent to its Planner on the Chat page.
 VIA_TASK_PAGE = "task_page"
 VIA_CHAT = "chat"
@@ -410,21 +777,37 @@ EDITABLE_STATUSES = (db_tasks.READY, *db_tasks.ACTIVE_STATUSES)
 AGENTS_EDITABLE_STATUSES = (*EDITABLE_STATUSES, *db_tasks.RESTARTABLE_STATUSES)
 
 
-async def store_chat_supplement(target: AgentAddress, text: str) -> int | None:
-    """Store a chat message sent to a task's Planner as a supplement of the task, before the Planner gets it, so a
-    restart meanwhile does not lose it; its id, or None for a message to another agent (or when it could not be
-    stored: the Planner stores it then)."""
-    if target.agent_type != "planner":
-        return None
+async def add_task_supplement(
+    task_id: str, text: str, *, via: str, wake: Callable[[int | None], Awaitable[Any]], best_effort: bool = False,
+) -> Any:
+    """Store a supplement before waking its Planner through the entry's existing delivery protocol.
+
+    Chat wakes it with USER_MESSAGE, carrying the supplement id and reply context; the Manager's tool uses
+    TASK_CHANGE. Chat may fall back to the Planner's durable write if storage fails, as it did before.
+    """
     from ..db import task_changes
     from .tiers.journal import SUPPLEMENTS_MAX_CHARS, kept_text
 
+    supplement_id = None
     try:
-        return await task_changes.add_supplement(target.agent_id.removeprefix("planner-"),
-                                                 kept_text(text, SUPPLEMENTS_MAX_CHARS), via=VIA_CHAT)
+        supplement_id = await task_changes.add_supplement(task_id, kept_text(text, SUPPLEMENTS_MAX_CHARS), via=via)
     except Exception:
-        logger.exception("could not store a chat message to %s as a supplement", target.agent_id)
+        if not best_effort:
+            raise
+        logger.exception("could not store a chat message to %s as a supplement", planner_address(task_id).agent_id)
+    return await wake(supplement_id)
+
+
+async def store_chat_supplement(target: AgentAddress, text: str) -> int | None:
+    """The durable supplement id for a Planner chat, or None when the Planner must store it itself."""
+    if target.agent_type != "planner":
         return None
+
+    async def stored(supplement_id: int | None) -> int | None:
+        return supplement_id
+
+    return await add_task_supplement(target.agent_id.removeprefix("planner-"), text, via=VIA_CHAT,
+                                     wake=stored, best_effort=True)
 
 
 async def edit_requirement(
@@ -714,3 +1097,107 @@ async def raise_cap_to_continue(task_id: str, data: dict[str, Any]) -> dict[str,
     elif not await db_projects.update_project(task["project_id"], execution={"task_budget_usd": cap}):
         raise RequestError(HTTP_404, f"project {task['project_id']!r} not found")
     return {"task_id": task_id, "project_id": task["project_id"], "task_budget_usd": cap, "spent_usd": spent}
+
+
+# Where a setting in a task's configuration came from (``agent_settings.Layer``), named as the dashboard names it.
+SOURCE_WORDS = {
+    Layer.BUILTIN: "内置默认",
+    Layer.SYSTEM: "共用默认（Settings → Roles → Shared defaults）",
+    Layer.ROLE: "角色默认",
+    Layer.PROJECT: "本项目",
+    Layer.ROLE_PROJECT: "本项目里的这个角色",
+    Layer.PLANNER_TASK: "规划者为本任务剩下的步骤所选",
+    Layer.PLANNER_STEP: "规划者为这一步所选",
+    Layer.TASK: "本任务",
+}
+START_QUESTION = "现在开始吗？回复「开始」就会启动；也可以稍后在 Tasks 页面点 Start。"
+
+
+def _workspace_lines(task_id: str, check: Mapping[str, Any]) -> list[str]:
+    """How the task runs in its directory, and each warning, in the user's words (the RFC's W5)."""
+    git = check.get("git") or {}
+    if check.get("mode") == TaskWorkspaces.WORKTREE.value:
+        start = str(git.get("base_commit") or "")[:12]
+        lines = [f"- 运行方式：在这个目录所在仓库的 git worktree 里，开始时建分支 {task_branch(task_id)}"
+                 f"（从 {git.get('branch') or 'HEAD'} 的 {start} 开始）；做完分支留给你，Looper 不合并"]
+    else:
+        lines = ["- 运行方式：直接在这个目录里（原地）"]
+    for warning in check.get("warnings") or ():
+        kind = warning.get("kind")
+        if kind == WarningKind.NOT_GIT.value:
+            lines.append("- 提醒：目录不在 git 仓库里（或仓库还没有提交），任务会直接在目录里运行")
+        elif kind == WarningKind.UNCOMMITTED.value:
+            files = "、".join(str(f) for f in (warning.get("files") or [])[:5])
+            lines.append(f"- 提醒：目录里有 {len(warning.get('files') or [])} 个未提交的改动不会进入任务的 worktree"
+                         f"（{files}），任务需要的话先提交")
+        elif kind == WarningKind.SHARED.value:
+            shared = warning.get("tasks") or []
+            own = [t for t in shared if not t.get("foreign")]
+            names = "、".join(f"{t['name']}（{t['status']}）" for t in own[:5])
+            if foreign := len(shared) - len(own):
+                names += ("、" if names else "") + f"另有 {foreign} 个其他管家的任务"
+            effect = ("原地运行的任务会互相覆盖文件" if overwrites(check.get("mode") or "in_place", shared)
+                      else "worktree 里的任务各在自己的分支上，不会互相干扰，合并时可能冲突")
+            lines.append(f"- 提醒：这个仓库上还有进行中的任务：{names}；{effect}")
+        elif kind == WarningKind.LARGE_CHECKOUT.value:
+            lines.append(f"- 提醒：仓库检出有 {size_text(int(warning.get('bytes') or 0))}，任务的 worktree 是它的一份完整拷贝")
+    return lines
+
+
+def _role_line(role: AgentType, settings: AgentSettings) -> str:
+    """One task role's line in a task's configuration: its Agent Profile with the profile's effort and where the
+    profile came from, and, but for the Planner (which never has them), whether it has agent teams."""
+    effort = f"effort {settings.effort}" if settings.effort else "effort 默认"
+    line = (f"- {role.value.capitalize()}：{settings.profile.name}"
+            f"（{effort}，来源：{SOURCE_WORDS[settings.profile_source]}）")
+    if role is not AgentType.PLANNER:
+        line += f"，agent teams {'开' if settings.profile.agent_teams else '关'}"
+    return line
+
+
+async def configuration_block(
+    task_id: str, name: str | None, project: Mapping[str, Any], work_dir: str, created: bool, *,
+    workspace: Mapping[str, Any] | None = None, template: tuple[str, Sequence[tuple[str, str]]] | None = None,
+) -> str:
+    """The new ready task's configuration, from the settings in effect for it (resolved as the project's agent
+    settings view resolves them, with the task's own choices), with how it runs in its directory and what to know
+    about it (``workspace``: ``task_workspaces.check``), ending with the question whether to start it."""
+    project_id = project["id"]
+    lines = [
+        "任务已创建，还没有开始（Ready — not started）：",
+        f"- 任务：{name}（{task_id}）" if name else f"- 任务：{task_id}",
+        f"- 项目：{project['name']}（{'新建' if created else '已有'}）",
+    ]
+    if template is not None:
+        template_name, template_inputs = template
+        inputs = "；".join(f"{label}：{value}" for label, value in template_inputs)
+        lines.append(f"- 模板：{template_name}（{inputs}）" if inputs else f"- 模板：{template_name}")
+    lines.append(f"- 目录：{work_dir}")
+    if workspace is not None:
+        lines += _workspace_lines(task_id, workspace)
+    limits: list[int] = []
+    try:
+        layers = index_layers(await db_layers.list_layers(project_id, task_id=task_id), project_id)
+    except Exception as exc:
+        logger.warning("could not read the agent settings of project %s", project_id, exc_info=True)
+        lines.append(f"- Agent 设置：暂时读不到（{type(exc).__name__}），可以在项目的 Settings 页查看")
+    else:
+        lines += [_role_line(role, resolve(role, layers, project_id)) for role in TASK_ROLES]
+        limits = [resolve_task_concurrency(role, layers).value for role in TASK_LIMIT_ROLES]
+    execution = ProjectExecution.from_row(project)
+    lines.append("- 评审：每一步都要 Reviewer 评审通过" if execution.review_policy is ReviewPolicy.ALL
+                 else "- 评审：由 Planner 决定哪些步骤要 Reviewer 评审")
+    if execution.task_budget_usd is None:
+        lines.append("- 每个任务的花费上限：不限")
+    else:
+        at_cap = ("再让 Planner 总结一轮后结束" if execution.on_task_budget is TaskBudgetAction.WRAP_UP
+                  else "立即失败")
+        lines.append(f"- 每个任务的花费上限：${format_usd(execution.task_budget_usd)}，达到时{at_cap}")
+    lines.append({
+        LessonsMode.OFF: "- 经验沉淀：关",
+        LessonsMode.DRAFT: "- 经验沉淀：任务完成后生成草稿，由你确认后写入项目知识",
+        LessonsMode.WRITE: "- 经验沉淀：任务完成后直接写入项目知识",
+    }[execution.distill_lessons])
+    if limits:
+        lines.append(f"- 并发：这个任务同时最多运行 {limits[0]} 个 Worker、{limits[1]} 个 Reviewer")
+    return "\n".join([*lines, "", START_QUESTION])

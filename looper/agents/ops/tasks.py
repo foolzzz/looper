@@ -13,34 +13,30 @@ import dataclasses
 import logging
 import operator
 import re
-import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-import asyncpg
-
-from ...db import agent_setting_layers as db_layers, connection as db_connection, projects as db_projects
-from ...db import steps as db_steps, task_changes as db_changes, task_roles as db_roles, tasks as db_tasks
+from ...db import agent_setting_layers as db_layers, projects as db_projects
+from ...db import steps as db_steps, tasks as db_tasks
 from ...db import managers as db_managers, user_gates as db_user_gates
 from ...db import profile_registry as db_profiles, role_templates as db_role_templates
-from ..agent_settings import TASK_LIMIT_ROLES, TASK_ROLES, AgentSettings, AgentType, Layer, index_layers, resolve
-from ..agent_settings import resolve_task_concurrency
 from .. import task_templates, task_workspaces
 from ..managers_api import DEFAULT_MANAGER_ID, TaskPolicy
 from ..profile_registry import RegistryError, check_selection
 from ..task_templates import TaskTemplate, TemplateError
 from ..gate_service import origin_chat, post_message as post_gate_message
-from ..message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode, is_lark, planner_address
-from ..project_execution import LessonsMode, ProjectExecution, ReviewPolicy, TaskBudgetAction, TaskWorkspaces
-from ..project_execution import format_usd
-from ..projects import HTTP_404, HTTP_409, PROFILES_NOTE, TASK_PROFILE_ROLES, RequestError, agents_view
-from ..projects import edit_requirement, profile_choices, project_name, rename_task, set_task_agents, task_workspace
-from ..step_workspaces import _size_text as size_text
-from ..task_workspaces import WarningKind, overwrites, task_branch
+from ..message import MessageEnvelope, MessageType, is_lark, planner_address
+from ..project_execution import ProjectExecution
+from ..projects import HTTP_404, HTTP_409, PROFILES_NOTE, TASK_PROFILE_ROLES, RequestError
+from ..projects import edit_requirement, profile_choices, project_name, rename_task, set_task_agents
+from ..projects import add_task_supplement, check_task_control, control_task
+from ..projects import create_task_core, ProjectNameTaken
+from ..projects import SOURCE_WORDS as SOURCE_WORDS, START_QUESTION as START_QUESTION
+from ..projects import configuration_block as configuration_block
 from ..system_prompt import TASK_REQUIREMENT_LIMIT
 from ..task_notice import notify_target
-from ..tiers.journal import SUMMARY_MAX_CHARS, SUPPLEMENTS_MAX_CHARS, JournalKind, clip, kept_text
+from ..tiers.journal import clip
 from ..tiers.task import resolve_work_dir
 from . import API_CHANNEL, Call, ErrorCode, OpError, Risk, Tool, Turn
 
@@ -54,19 +50,6 @@ PROJECTS_OFFERED = 10
 # The statuses a task can be run again from: "restart" goes on from its saved plan, as Start on the Tasks page does;
 # "start_over" plans it anew.
 RESTARTABLE = db_tasks.RESTARTABLE_STATUSES
-
-# Where a setting in a task's configuration came from (``agent_settings.Layer``), named as the dashboard names it.
-SOURCE_WORDS = {
-    Layer.BUILTIN: "内置默认",
-    Layer.SYSTEM: "共用默认（Settings → Roles → Shared defaults）",
-    Layer.ROLE: "角色默认",
-    Layer.PROJECT: "本项目",
-    Layer.ROLE_PROJECT: "本项目里的这个角色",
-    Layer.PLANNER_TASK: "规划者为本任务剩下的步骤所选",
-    Layer.PLANNER_STEP: "规划者为这一步所选",
-    Layer.TASK: "本任务",
-}
-START_QUESTION = "现在开始吗？回复「开始」就会启动；也可以稍后在 Tasks 页面点 Start。"
 
 _PROFILES_SCHEMA = {
     "type": "object",
@@ -112,13 +95,6 @@ def _ended(task: Mapping[str, Any]) -> bool:
     return _group(task) in (db_tasks.TaskGroup.COMPLETED, db_tasks.TaskGroup.CANCELLED, db_tasks.TaskGroup.ATTENTION)
 
 
-async def _publish(call: Call, message_type: MessageType, task_id: str, **payload: Any) -> None:
-    await call.platform.bus.publish(MessageEnvelope.create(
-        source=call.manager_address, target=TASK_ROUTER_ADDRESS, message_type=message_type,
-        payload={"task_id": task_id, **payload},
-    ))
-
-
 # --- looper_overview ---
 
 
@@ -154,11 +130,6 @@ async def _overview(call: Call) -> dict[str, Any]:
 # --- looper_tasks ---
 
 
-def _listed(task: Mapping[str, Any]) -> dict[str, Any]:
-    return {"task_id": task["id"], "name": task["name"], "status": task["status"], "group": _group(task).value,
-            "project": task.get("project_name"), "created_at": task.get("created_at")}
-
-
 async def _tasks(call: Call) -> dict[str, Any]:
     arguments = call.arguments
     if arguments["action"] in ("get", "room"):
@@ -174,13 +145,12 @@ async def _tasks(call: Call) -> dict[str, Any]:
         project_id = project["id"]
     group = db_tasks.TaskGroup(arguments["group"]) if arguments.get("group") else None
     limit = int(arguments.get("limit") or TASKS_LISTED)
-    query = " ".join(str(arguments.get("query") or "").split()).casefold()
-    tasks = await db_tasks.list_tasks(limit=TASKS_SEARCHED if query else limit, project_id=project_id, group=group,
-                                      manager_id=call.manager_id if call.scoped else None)
-    if query:
-        tasks = [t for t in tasks if query in " ".join(
-            str(t.get(key) or "") for key in ("id", "name", "requirement", "project_name", "goal_id")).casefold()]
-    return {"tasks": [_listed(task) for task in tasks[:limit]], "more": len(tasks) > limit}
+    from ..projects import list_tasks_page
+
+    return await list_tasks_page(
+        limit=limit, project_id=project_id, group=group,
+        manager_id=call.manager_id if call.scoped else None,
+        query=str(arguments.get("query") or ""), compact=True, search_limit=TASKS_SEARCHED)
 
 
 # The newest room messages ``looper_tasks`` room shows, each clipped.
@@ -203,64 +173,20 @@ async def _room_view(call: Call, task_id: str) -> dict[str, Any]:
 
 
 async def _task_view(task_id: str) -> dict[str, Any]:
-    from ...db.llm_records import task_costs
-    from ..wait_service import waits_view
+    from ..projects import task_detail
 
-    task = await db_tasks.get_task_with_steps(task_id)
-    if task is None:
-        raise OpError(ErrorCode.NOT_FOUND, f"no task {task_id}: find its id with looper_tasks")
-    journal = task.get("journal") or []
-    supplements = [entry for entry in journal if entry.get("kind") == db_changes.SUPPLEMENT]
-    progress = [entry for entry in journal if entry.get("kind") == "progress"]
-    return {
-        **_listed(task),
-        "phase": task.get("phase"),
-        "work_dir": task.get("work_dir"),
-        "requirement": task.get("requirement"),
-        "steps": [{"step": s.get("step_key") or s.get("id"), "status": s.get("status"),
-                   "kind": s.get("kind") or "work",
-                   "instruction": clip(s.get("instruction") or "", 200),
-                   # The roles its Planner defined that the step runs as and is reviewed by, when it has them.
-                   **({"role": s["role_key"]} if s.get("role_key") else {}),
-                   **({"review_roles": [item["role"] if item.get("required") is not False
-                                        else {"role": item["role"], "required": False}
-                                        for item in s["review_roles"]]} if s.get("review_roles") else {})}
-                  for s in task.get("steps") or []],
-        "waits": await waits_view(task_id),
-        # The roles the task's Planner defined, when it has any (task_roles).
-        **({"roles": roles} if (roles := [{"id": r["role_key"], "kind": r["kind"], "version": r["version"]}
-                                          for r in await db_roles.current(task_id)]) else {}),
-        "supplements": [{"text": clip(entry["summary"], 300), "delivered": entry.get("delivered_at") is not None}
-                        for entry in supplements],
-        "latest_progress": progress[-1]["summary"] if progress else None,
-        "result": clip(task.get("result_summary") or task.get("error") or "", 1_000) or None,
-        "cost_usd": ((await task_costs([task_id])).get(task_id) or {}).get("cost_usd"),
-        # How many of its Workers and Reviewers run at once, with the source; its own limits (task).
-        "concurrency": {role: view["concurrency"] for role, view in (await agents_view(task))["roles"].items()
-                        if "concurrency" in view},
-        # Its user gates (looper_task_gate_reply answers one that waits for the user), when it has any.
-        **({"gates": gates} if (gates := [_gate_listed(g) for g in await db_user_gates.list_for_task(task_id)
-                                          if g.get("state") != "pending"]) else {}),
-    }
+    try:
+        return await task_detail(task_id, compact=True)
+    except RequestError as exc:
+        if exc.status == HTTP_404:
+            raise OpError(ErrorCode.NOT_FOUND, f"no task {task_id}: find its id with looper_tasks") from None
+        raise _request_error(exc) from None
 
 
 def _gate_listed(gate: Mapping[str, Any]) -> dict[str, Any]:
-    """A gate as looper_tasks shows it: its label, state, topic, questions (the open ones' options), and how it
-    closed."""
-    view: dict[str, Any] = {"gate": gate["step_key"], "state": gate["state"], "topic": clip(gate["topic"], 200),
-                            "questions": [{"id": item.get("id"), "question": clip(str(item.get("question") or ""), 200),
-                                           "status": item.get("status"),
-                                           **({"options": item["options"]} if item.get("options") else {}),
-                                           **({"answer": clip(str(item["answer"]), 200)} if item.get("answer")
-                                              else {})}
-                                          for item in gate.get("agenda") or []]}
-    if gate["state"] in ("open", "discussing"):
-        view["waiting_for"] = "planner" if gate.get("waiting_for_planner") else "user"
-    if gate.get("summary"):
-        view["summary"] = gate["summary"]
-    if gate.get("resolution"):
-        view["resolution"] = clip(gate["resolution"], 300)
-    return view
+    from ..projects import task_gate_view
+
+    return task_gate_view(gate)
 
 
 # --- looper_task_create ---
@@ -454,160 +380,48 @@ async def _create(call: Call) -> dict[str, Any]:
             raise OpError(ErrorCode.INVALID, str(exc)) from None
     envelope = turn.envelope
     origin = envelope.metadata.get("origin_channel_id") if envelope is not None else None
-    task_id = f"task-{uuid.uuid4().hex[:12]}"
-    title = db_tasks.task_title(arguments.get("title"))
-    created = project is None
     target = notify_target(origin, sender=turn.sender, chat=turn.chat, group=turn.group)
-    project_mode = (ProjectExecution.from_row(project).task_mode if project is not None
-                    else TaskWorkspaces.WORKTREE)  # what a new project gets
-    try:
-        workspace = await task_workspace({**arguments, "workspace_mode": placement.workspace_mode},
-                                         work_dir=work_dir, named=placement.named,
-                                         project_dir=project["work_dir"] if project is not None else work_dir,
-                                         project_mode=project_mode,
-                                         visible_to=call.manager_id if call.scoped else None)
-    except RequestError as exc:
-        raise OpError(ErrorCode.INVALID, str(exc)) from None
     row = {
-        "task_id": task_id, "requirement": requirement, "goal_id": arguments.get("goal_id") or "",
-        "work_dir": work_dir, "status": db_tasks.READY,
         "correlation_id": envelope.correlation_id if envelope is not None else "", "origin_channel_id": origin or "",
-        # Who the TaskRouter tells when the task ends: in Telegram the chat, in Lark the sender or the group.
         **(target.columns() if target is not None else {}),
         "original_user_text": (str(envelope.payload.get("text") or "") or None) if envelope is not None else None,
-        "title": title,
-        "workspace_dir": work_dir, "workspace_mode": workspace["mode"], "workspace_base": workspace["base"],
         "manager_id": call.manager_id, "client_id": turn.client_id,
     }
     if origin == "channel-web" and envelope is not None and (call.manager_id != DEFAULT_MANAGER_ID or turn.client_id):
-        # A scenario Manager's web task, and any task an API client's chat asked, reports into the thread it was
-        # asked in; the default Manager's own dashboard chat keeps its channel's path.
         thread = (envelope.payload.get("channel_context") or {}).get("session_id")
         row["origin_thread"] = thread if isinstance(thread, str) and thread else None
     if template is not None:
         row["template"] = template.snapshot(values, roles=roles)
-    try:
-        # One path: the Manager's row is locked first, so a delete or a turn-off that came first refuses the task.
-        async with db_connection.transaction() as conn:
-            if not await db_managers.lock_for_task(call.manager_id, conn=conn):
-                raise OpError(ErrorCode.CONFLICT, "this Manager was turned off or deleted; the task was not created")
-            if project is None:
-                project = await db_projects.create_project(
-                    name=name, work_dir=work_dir, pool=conn,
-                    execution={"task_workspaces": TaskWorkspaces.WORKTREE.value})
-            await db_tasks.create_task(**row, project_id=project["id"], pool=conn)
-            if profiles:
-                await db_layers.set_profile_overrides(conn, task_id, profiles)
-            for role in roles:
-                summary = f"Role {role['role_key']} v1 from the task template {template.name}"
-                await db_roles.add_first_version(conn, task_id, role["role_key"], {
-                    **role, "reason": f"from template {template.name}", "via": "template"},
-                    {"step_id": "", "kind": JournalKind.ROLE_DEFINED.value,
-                     "summary": clip(summary, SUMMARY_MAX_CHARS), "learnings": []})
-    except asyncpg.UniqueViolationError:
-        raise OpError(ErrorCode.CONFLICT, f"a project named {name!r} was created meanwhile: call again to use "
-                                          "it") from None
-    shown = title or arguments.get("goal_id") or task_id
     used = None if template is None else (template.name, [(i.label, clip(values[i.key], 80))
                                                          for i in template.inputs if i.key in values])
-    block = await configuration_block(task_id, shown, project, work_dir, created,
-                                      workspace=workspace["check"], template=used)
+    data = {**arguments, "requirement": requirement, "work_dir": work_dir,
+            "workspace_mode": placement.workspace_mode}
+    # Names and template constraints are Manager parameters; storage uses the same project shape as the console.
+    data.pop("project", None)
+    if project is not None:
+        data["project_id"] = project["id"]
+    else:
+        data["project"] = {"name": name, "work_dir": work_dir}
+    try:
+        result = await create_task_core(
+            data, task_fields=row, profiles=profiles, roles=roles,
+            template_name=template.name if template is not None else None,
+            lock_manager=True, named=placement.named, visible_to=call.manager_id if call.scoped else None,
+            show_configuration=True, template_display=used)
+    except ProjectNameTaken:
+        raise OpError(ErrorCode.CONFLICT, f"a project named {name!r} was created meanwhile: call again to use "
+                                          "it") from None
+    except RequestError as exc:
+        raise _request_error(exc) from None
+    task_id, shown = result["task_id"], result["name"]
+    project, created = result["project"], result["project_created"]
+    block = result["configuration"]
     turn.blocks.append(block)
     turn.created_task_blocks[task_id] = block
     return {"task_id": task_id, "name": shown, "status": "ready", "project": project["name"],
-            "project_created": created, "work_dir": work_dir, "workspace_mode": workspace["check"]["mode"],
+            "project_created": created, "work_dir": work_dir, "workspace_mode": result["workspace"]["mode"],
             "shown_to_user": "Looper adds the task's configuration and the question whether to start it now after "
                              "your reply; do not repeat them."}
-
-
-def _workspace_lines(task_id: str, check: Mapping[str, Any]) -> list[str]:
-    """How the task runs in its directory, and each warning, in the user's words (the RFC's W5)."""
-    git = check.get("git") or {}
-    if check.get("mode") == TaskWorkspaces.WORKTREE.value:
-        start = str(git.get("base_commit") or "")[:12]
-        lines = [f"- 运行方式：在这个目录所在仓库的 git worktree 里，开始时建分支 {task_branch(task_id)}"
-                 f"（从 {git.get('branch') or 'HEAD'} 的 {start} 开始）；做完分支留给你，Looper 不合并"]
-    else:
-        lines = ["- 运行方式：直接在这个目录里（原地）"]
-    for warning in check.get("warnings") or ():
-        kind = warning.get("kind")
-        if kind == WarningKind.NOT_GIT.value:
-            lines.append("- 提醒：目录不在 git 仓库里（或仓库还没有提交），任务会直接在目录里运行")
-        elif kind == WarningKind.UNCOMMITTED.value:
-            files = "、".join(str(f) for f in (warning.get("files") or [])[:5])
-            lines.append(f"- 提醒：目录里有 {len(warning.get('files') or [])} 个未提交的改动不会进入任务的 worktree"
-                         f"（{files}），任务需要的话先提交")
-        elif kind == WarningKind.SHARED.value:
-            shared = warning.get("tasks") or []
-            own = [t for t in shared if not t.get("foreign")]
-            names = "、".join(f"{t['name']}（{t['status']}）" for t in own[:5])
-            if foreign := len(shared) - len(own):
-                names += ("、" if names else "") + f"另有 {foreign} 个其他管家的任务"
-            effect = ("原地运行的任务会互相覆盖文件" if overwrites(check.get("mode") or "in_place", shared)
-                      else "worktree 里的任务各在自己的分支上，不会互相干扰，合并时可能冲突")
-            lines.append(f"- 提醒：这个仓库上还有进行中的任务：{names}；{effect}")
-        elif kind == WarningKind.LARGE_CHECKOUT.value:
-            lines.append(f"- 提醒：仓库检出有 {size_text(int(warning.get('bytes') or 0))}，任务的 worktree 是它的一份完整拷贝")
-    return lines
-
-
-def _role_line(role: AgentType, settings: AgentSettings) -> str:
-    """One task role's line in a task's configuration: its Agent Profile with the profile's effort and where the
-    profile came from, and, but for the Planner (which never has them), whether it has agent teams."""
-    effort = f"effort {settings.effort}" if settings.effort else "effort 默认"
-    line = (f"- {role.value.capitalize()}：{settings.profile.name}"
-            f"（{effort}，来源：{SOURCE_WORDS[settings.profile_source]}）")
-    if role is not AgentType.PLANNER:
-        line += f"，agent teams {'开' if settings.profile.agent_teams else '关'}"
-    return line
-
-
-async def configuration_block(
-    task_id: str, name: str | None, project: Mapping[str, Any], work_dir: str, created: bool, *,
-    workspace: Mapping[str, Any] | None = None, template: tuple[str, Sequence[tuple[str, str]]] | None = None,
-) -> str:
-    """The new ready task's configuration, from the settings in effect for it (resolved as the project's agent
-    settings view resolves them, with the task's own choices), with how it runs in its directory and what to know
-    about it (``workspace``: ``task_workspaces.check``), ending with the question whether to start it."""
-    project_id = project["id"]
-    lines = [
-        "任务已创建，还没有开始（Ready — not started）：",
-        f"- 任务：{name}（{task_id}）" if name else f"- 任务：{task_id}",
-        f"- 项目：{project['name']}（{'新建' if created else '已有'}）",
-    ]
-    if template is not None:
-        template_name, template_inputs = template
-        inputs = "；".join(f"{label}：{value}" for label, value in template_inputs)
-        lines.append(f"- 模板：{template_name}（{inputs}）" if inputs else f"- 模板：{template_name}")
-    lines.append(f"- 目录：{work_dir}")
-    if workspace is not None:
-        lines += _workspace_lines(task_id, workspace)
-    limits: list[int] = []
-    try:
-        layers = index_layers(await db_layers.list_layers(project_id, task_id=task_id), project_id)
-    except Exception as exc:
-        logger.warning("could not read the agent settings of project %s", project_id, exc_info=True)
-        lines.append(f"- Agent 设置：暂时读不到（{type(exc).__name__}），可以在项目的 Settings 页查看")
-    else:
-        lines += [_role_line(role, resolve(role, layers, project_id)) for role in TASK_ROLES]
-        limits = [resolve_task_concurrency(role, layers).value for role in TASK_LIMIT_ROLES]
-    execution = ProjectExecution.from_row(project)
-    lines.append("- 评审：每一步都要 Reviewer 评审通过" if execution.review_policy is ReviewPolicy.ALL
-                 else "- 评审：由 Planner 决定哪些步骤要 Reviewer 评审")
-    if execution.task_budget_usd is None:
-        lines.append("- 每个任务的花费上限：不限")
-    else:
-        at_cap = ("再让 Planner 总结一轮后结束" if execution.on_task_budget is TaskBudgetAction.WRAP_UP
-                  else "立即失败")
-        lines.append(f"- 每个任务的花费上限：${format_usd(execution.task_budget_usd)}，达到时{at_cap}")
-    lines.append({
-        LessonsMode.OFF: "- 经验沉淀：关",
-        LessonsMode.DRAFT: "- 经验沉淀：任务完成后生成草稿，由你确认后写入项目知识",
-        LessonsMode.WRITE: "- 经验沉淀：任务完成后直接写入项目知识",
-    }[execution.distill_lessons])
-    if limits:
-        lines.append(f"- 并发：这个任务同时最多运行 {limits[0]} 个 Worker、{limits[1]} 个 Reviewer")
-    return "\n".join([*lines, "", START_QUESTION])
 
 
 async def _profile_choices(raw: Any, *, clearing: bool) -> dict[str, str | None]:
@@ -639,28 +453,24 @@ async def _confirming(call: Call) -> str | None:
 
 
 async def _cancellable(task_id: str) -> dict[str, Any]:
-    task = await _task(task_id)
-    if _group(task) not in (db_tasks.TaskGroup.IN_PROGRESS, db_tasks.TaskGroup.NEEDS_YOU):
-        raise OpError(ErrorCode.CONFLICT, f"task {task_id} is {task['status']}: only a running task can be "
-                                          "cancelled")
-    return task
+    try:
+        return await check_task_control(task_id, "cancel")
+    except RequestError as exc:
+        raise _request_error(exc) from None
 
 
 async def _restartable(task_id: str) -> dict[str, Any]:
-    task = await _task(task_id)
-    if task["status"] not in RESTARTABLE:
-        raise OpError(ErrorCode.CONFLICT, f"task {task_id} is {task['status']}: restart and start_over run a stopped, "
-                                          "failed or cancelled task again (a ready one starts with action start)")
-    if not (task.get("work_dir") or "").strip():
-        raise OpError(ErrorCode.INVALID, f"task {task_id} has no directory: set one with looper_task_update first")
-    return task
+    try:
+        return await check_task_control(task_id, "restart")
+    except RequestError as exc:
+        raise _request_error(exc) from None
 
 
 async def _control(call: Call) -> dict[str, Any]:
     task_id, action = call.arguments["task_id"], call.arguments["action"]
-    task = await _task(task_id)
-    status = task["status"]
     if action == "start":
+        task = await _task(task_id)
+        status = task["status"]
         if status != db_tasks.READY:
             hint = " (a stopped, failed or cancelled task runs again with action restart)" if status in RESTARTABLE \
                 else ""
@@ -676,24 +486,19 @@ async def _control(call: Call) -> dict[str, Any]:
             configuration = block.partition("\n")[2].removesuffix(f"\n\n{START_QUESTION}")
             call.turn.blocks[call.turn.blocks.index(block)] = f"任务已创建：\n{configuration}"
         return {"task_id": task_id, "started": True}
+    try:
+        await control_task(task_id, action, call.platform.bus, call.manager_address)
+    except RequestError as exc:
+        raise _request_error(exc) from None
     if action == "stop":
-        if status not in db_tasks.ACTIVE_STATUSES:
-            raise OpError(ErrorCode.CONFLICT, f"task {task_id} is {status}: only a running task can be stopped")
-        await _publish(call, MessageType.TASK_STOP, task_id)
         return {"task_id": task_id, "stopped": True}
     if action == "restart":
-        await _restartable(task_id)
-        await _publish(call, MessageType.TASK_RESTART, task_id, mode=RestartMode.CONTINUE.value)
         return {"task_id": task_id, "restarted": True,
                 "note": "it goes on from its saved plan: its accepted steps are kept and do not run again, and its "
                         "Planner decides how the steps that did not finish go on"}
     if action == "start_over":
-        await _restartable(task_id)
-        await _publish(call, MessageType.TASK_RESTART, task_id, mode=RestartMode.START_OVER.value)
         return {"task_id": task_id, "started_over": True,
                 "note": "its steps, plan and Planner session were deleted; it plans anew from its current requirement"}
-    await _cancellable(task_id)
-    await _publish(call, MessageType.TASK_CANCEL, task_id)
     return {"task_id": task_id, "cancelled": True}
 
 
@@ -709,12 +514,15 @@ async def _instruct(call: Call) -> dict[str, Any]:
     if task["status"] not in db_tasks.ACTIVE_STATUSES:
         raise OpError(ErrorCode.CONFLICT, f"task {task_id} is {task['status']}: only a running task takes a "
                                           "supplement")
-    supplement = await db_changes.add_supplement(
-        task_id, kept_text(call.arguments["text"], SUPPLEMENTS_MAX_CHARS), via=_via(call.turn))
-    if call.platform.task_router.has_planner(task_id):
-        await call.platform.bus.publish(MessageEnvelope.create(
-            source=call.manager_address, target=planner_address(task_id), message_type=MessageType.TASK_CHANGE,
-            payload={"task_id": task_id}))
+
+    async def wake(supplement_id: int | None) -> int | None:
+        if call.platform.task_router.has_planner(task_id):
+            await call.platform.bus.publish(MessageEnvelope.create(
+                source=call.manager_address, target=planner_address(task_id), message_type=MessageType.TASK_CHANGE,
+                payload={"task_id": task_id}))
+        return supplement_id
+
+    supplement = await add_task_supplement(task_id, call.arguments["text"], via=_via(call.turn), wake=wake)
     return {"task_id": task_id, "supplement_id": supplement,
             "note": "the task's Planner gets it in its next turn and decides whether to change the plan; every later "
                     "Worker and Reviewer sees it too"}
