@@ -1,3 +1,3 @@
 """Dashboard domain registry; append one module per migration."""
 
-MODULES = ("status",)
+MODULES = ("status", "catalog")

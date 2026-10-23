@@ -776,8 +776,6 @@ class AgentHTTPServer:
     # --- API routing ---
 
     _RE_TASK_DETAIL = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)$")
-    _RE_CATALOG_ITEM = re.compile(r"^/api/catalog/([a-z]+-[a-zA-Z0-9]+)$")
-    _RE_INSTALL = re.compile(r"^/api/installs/(inst-[a-zA-Z0-9]+)$")
     _RE_TASK_ACTIVITY = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity$")
     _RE_TASK_ACTIVITY_STREAM = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/stream$")
     _RE_TASK_ACTIVITY_SEQ = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/(\d+)$")
@@ -812,7 +810,6 @@ class AgentHTTPServer:
     _RE_PROJECT_DRAFT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/drafts/(draft-[a-zA-Z0-9]+)$")
     _RE_PROJECT_DRAFT_CONFIRM = re.compile(
         r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/drafts/(draft-[a-zA-Z0-9]+)/confirm$")
-    _RE_PROJECT_INSTALLS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/installs$")
     _RE_PROJECT_AGENT_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings$")
     _RE_PROJECT_ROLE_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_PROJECT_ALLOWED_PROFILES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/allowed-profiles$")
@@ -998,8 +995,6 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_DRAFT.match(path)) and method == "DELETE":
             await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.discard_draft(
                 m.group(1), m.group(2)))
-        elif (m := self._RE_PROJECT_INSTALLS.match(path)) and method == "GET":
-            await self._handle_catalog(writer, HTTP_200, lambda: catalog.project_view(m.group(1)))
         elif (m := self._RE_PROJECT_SKILLS.match(path)) and method == "POST":
             await self._handle_catalog(writer, HTTP_201, lambda: project_skills.add_skill(
                 m.group(1), projects.json_object(body)))
@@ -1122,8 +1117,6 @@ class AgentHTTPServer:
                                              lambda imports: self._apply_import(imports, m.group(1), body))
         elif (m := self._RE_CONFIG_IMPORT.match(path)) and method == "DELETE":
             await self._handle_config_import(writer, HTTP_200, lambda imports: imports.cancel(m.group(1)))
-        elif path == "/api/catalog" and method == "GET":
-            await self._handle_catalog(writer, HTTP_200, catalog.catalog_view)
         elif path == "/api/catalog/import" and method == "POST":
             await self._handle_catalog(writer, HTTP_200, library.import_from_machine)
         elif path == "/api/catalog/upload" and method == "POST":
@@ -1141,20 +1134,6 @@ class AgentHTTPServer:
             await self._handle_catalog(writer, HTTP_201, lambda: mcp.create(projects.json_object(body)))
         elif path == "/api/catalog/mcp/import" and method == "POST":
             await self._handle_catalog(writer, HTTP_200, mcp.import_from_machine)
-        elif (m := self._RE_CATALOG_ITEM.match(path)) and method == "GET":
-            await self._handle_catalog(writer, HTTP_200, lambda: catalog.item_detail(m.group(1)))
-        elif (m := self._RE_CATALOG_ITEM.match(path)) and method == "PUT":
-            await self._handle_catalog(writer, HTTP_200, lambda: catalog.update_item(
-                m.group(1), projects.json_object(body)))
-        elif (m := self._RE_CATALOG_ITEM.match(path)) and method == "DELETE":
-            await self._handle_catalog(writer, HTTP_200, lambda: catalog.delete_item(m.group(1)))
-        elif path == "/api/installs" and method == "POST":
-            await self._handle_catalog(writer, HTTP_201, lambda: catalog.install(projects.json_object(body)))
-        elif (m := self._RE_INSTALL.match(path)) and method == "PUT":
-            await self._handle_catalog(writer, HTTP_200, lambda: catalog.update_install(
-                m.group(1), projects.json_object(body)))
-        elif (m := self._RE_INSTALL.match(path)) and method == "DELETE":
-            await self._handle_catalog(writer, HTTP_200, lambda: catalog.uninstall(m.group(1)))
         elif path == "/api/channels/lark/status" and method == "GET":
             await self._answer(writer, HTTP_200, lambda: self._lark_status(query.get("channel_id")))
         elif path == "/api/channels/lark/people" and method == "GET":

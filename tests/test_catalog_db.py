@@ -40,9 +40,19 @@ async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
     writer = _Writer()
-    await server._route_api(method, path, {}, b"" if body is None else json.dumps(body).encode(), writer)
+    raw = b"" if body is None else json.dumps(body).encode()
+    if path.startswith(("/api/v1/catalog_items/", "/api/v1/installs/")):
+        from looper.agents.api_v1 import OPERATOR
+        from looper.agents.ops.clients import ClientOps
+        server._client_ops = ClientOps(SimpleNamespace())
+        await server._handle_v1(method, path, {}, {}, raw, writer, OPERATOR)
+    else:
+        await server._route_api(method, path, {}, raw, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload)
+    answer = json.loads(payload)
+    if path.startswith(("/api/v1/catalog_items/", "/api/v1/installs/")):
+        answer = answer["result"] if answer.get("status") == "ok" else {"error": answer["error"]["message"]}
+    return int(head.split()[1]), answer
 
 
 def _sha(text: str) -> str:
@@ -205,13 +215,13 @@ def test_each_run_loads_what_is_installed_for_its_role_globally_or_in_its_projec
         for role in ("manager", "planner", "worker", "reviewer"):
             assert await _loaded(root, role, calc) == []  # imported, installed nowhere
         # A global worker-only skill reaches Workers, not the Planner or the Manager.
-        status, body = await _call("POST", "/api/installs", {"item_id": ids["alpha"], "scope": "global",
+        status, body = await _call("POST", "/api/v1/installs/create", {"item_id": ids["alpha"], "scope": "global",
                                                              "roles": ["worker"]})
-        assert status == 201 and body["install"]["roles"] == ["worker"]
+        assert status == 200 and body["install"]["roles"] == ["worker"]
         # A global plugin for everyone; a skill installed in calc only.
-        assert (await _call("POST", "/api/installs", {"item_id": ids["demo@market"], "scope": "global"}))[0] == 201
-        assert (await _call("POST", "/api/installs", {"item_id": ids["beta"], "scope": "project",
-                                                      "project_id": calc}))[0] == 201
+        assert (await _call("POST", "/api/v1/installs/create", {"item_id": ids["demo@market"], "scope": "global"}))[0] == 200
+        assert (await _call("POST", "/api/v1/installs/create", {"item_id": ids["beta"], "scope": "project",
+                                                      "project_id": calc}))[0] == 200
         assert await _loaded(root, "worker", calc) == ["demo", "personal:alpha", "personal:beta"]
         assert await _loaded(root, "worker", docs) == ["demo", "personal:alpha"]
         assert await _loaded(root, "worker") == ["demo", "personal:alpha"]  # a run without a project
@@ -219,8 +229,8 @@ def test_each_run_loads_what_is_installed_for_its_role_globally_or_in_its_projec
         assert await _loaded(root, "reviewer", docs) == ["demo"]
         assert await _loaded(root, "manager") == ["demo"]
         # A skill installed globally and in the project loads once.
-        assert (await _call("POST", "/api/installs", {"item_id": ids["alpha"], "scope": "project",
-                                                      "project_id": calc, "roles": ["planner"]}))[0] == 201
+        assert (await _call("POST", "/api/v1/installs/create", {"item_id": ids["alpha"], "scope": "project",
+                                                      "project_id": calc, "roles": ["planner"]}))[0] == 200
         assert await _loaded(root, "planner", calc) == ["demo", "personal:alpha", "personal:beta"]
         assert await _loaded(root, "worker", calc) == ["demo", "personal:alpha", "personal:beta"]
 
@@ -234,24 +244,24 @@ def test_uninstalling_disabling_or_dropping_a_role_takes_the_item_out_of_the_nex
         ids = await _import(pool, "skill:alpha", "skill:beta")
         (calc,) = await _projects("calc")
         root = tmp_path / "runtime"
-        _, a = await _call("POST", "/api/installs", {"item_id": ids["alpha"], "scope": "global"})
-        _, b = await _call("POST", "/api/installs", {"item_id": ids["beta"], "scope": "project", "project_id": calc})
+        _, a = await _call("POST", "/api/v1/installs/create", {"item_id": ids["alpha"], "scope": "global"})
+        _, b = await _call("POST", "/api/v1/installs/create", {"item_id": ids["beta"], "scope": "project", "project_id": calc})
         assert await _loaded(root, "worker", calc) == ["personal:alpha", "personal:beta"]
 
-        status, body = await _call("PUT", f"/api/installs/{b['install']['install_id']}", {"enabled": False})
+        status, body = await _call("POST", "/api/v1/installs/update", {"install_id": b['install']['install_id'], "enabled": False})
         assert status == 200 and body["install"]["enabled"] is False
         assert await _loaded(root, "worker", calc) == ["personal:alpha"]
-        status, body = await _call("PUT", f"/api/installs/{a['install']['install_id']}", {"roles": ["planner"]})
+        status, body = await _call("POST", "/api/v1/installs/update", {"install_id": a['install']['install_id'], "roles": ["planner"]})
         assert status == 200 and body["item"]["installs"][0]["roles"] == ["planner"]
         assert await _loaded(root, "worker", calc) == []
         assert await _loaded(root, "planner", calc) == ["personal:alpha"]
-        status, body = await _call("DELETE", f"/api/installs/{a['install']['install_id']}")
+        status, body = await _call("POST", "/api/v1/installs/delete", {"install_id": a['install']['install_id']})
         assert status == 200 and body["item"]["installs"] == []
         assert await _loaded(root, "planner", calc) == []
         # The item stays in the catalog, and can be installed again.
-        _, catalog = await _call("GET", "/api/catalog")
+        _, catalog = await _call("POST", "/api/v1/catalog_items/list", {})
         assert {i["name"]: len(i["installs"]) for i in catalog["items"]} == {"alpha": 0, "beta": 1}
-        assert (await _call("POST", "/api/installs", {"item_id": ids["alpha"], "scope": "global"}))[0] == 201
+        assert (await _call("POST", "/api/v1/installs/create", {"item_id": ids["alpha"], "scope": "global"}))[0] == 200
 
     run_db(_test, monkeypatch)
 
@@ -266,32 +276,32 @@ def test_the_install_api_refuses_what_an_install_cannot_be(monkeypatch: pytest.M
         refused = [
             ({"item_id": ids["alpha"], "scope": "project", "project_id": calc, "roles": ["manager"]}, 400,
              "cannot include the manager"),
-            ({"item_id": ids["alpha"], "scope": "global", "roles": []}, 400, "non-empty list"),
-            ({"item_id": ids["alpha"], "scope": "global", "roles": ["admin"]}, 400, "unknown role 'admin'"),
-            ({"item_id": ids["alpha"], "scope": "everywhere"}, 400, "scope is 'global' or 'project'"),
+            ({"item_id": ids["alpha"], "scope": "global", "roles": []}, 400, "does not match the declared schema"),
+            ({"item_id": ids["alpha"], "scope": "global", "roles": ["admin"]}, 400, "does not match the declared schema"),
+            ({"item_id": ids["alpha"], "scope": "everywhere"}, 400, "does not match the declared schema"),
             ({"item_id": ids["alpha"], "scope": "project"}, 400, "needs a project_id"),
             ({"item_id": ids["alpha"], "scope": "global", "project_id": calc}, 400, "no project_id"),
-            ({"item_id": ids["alpha"], "scope": "global", "enabled": "yes"}, 400, "true or false"),
-            ({"item_id": ids["alpha"], "scope": "global", "where": "x"}, 400, "unknown field 'where'"),
+            ({"item_id": ids["alpha"], "scope": "global", "enabled": "yes"}, 400, "does not match the declared schema"),
+            ({"item_id": ids["alpha"], "scope": "global", "where": "x"}, 400, "does not match the declared schema"),
             ({"item_id": own_id, "scope": "global"}, 400, "installed in projects only"),
             ({"item_id": "lib-000000000000", "scope": "global"}, 404, "no catalog item"),
             ({"item_id": ids["alpha"], "scope": "project", "project_id": "proj-nope"}, 404, "not found"),
             ({"item_id": own_id, "scope": "project", "project_id": calc}, 409, "installed there already"),
         ]
         for body, status, reason in refused:
-            got, answer = await _call("POST", "/api/installs", body)
+            got, answer = await _call("POST", "/api/v1/installs/create", body)
             assert (got, reason in answer.get("error", "")) == (status, True), (body, answer)
-        assert (await _call("POST", "/api/installs", {"item_id": ids["alpha"], "scope": "global"}))[0] == 201
-        status, answer = await _call("POST", "/api/installs", {"item_id": ids["alpha"], "scope": "global"})
+        assert (await _call("POST", "/api/v1/installs/create", {"item_id": ids["alpha"], "scope": "global"}))[0] == 200
+        status, answer = await _call("POST", "/api/v1/installs/create", {"item_id": ids["alpha"], "scope": "global"})
         assert status == 409 and "installed there already" in answer["error"]
-        _, view = await _call("GET", f"/api/projects/{calc}/installs")
+        _, view = await _call("POST", "/api/v1/installs/project", {"project_id": calc})
         install_id = next(e["install_id"] for e in view["installs"] if e["item"]["item_id"] == own_id)
-        status, answer = await _call("PUT", f"/api/installs/{install_id}", {"roles": ["manager", "worker"]})
+        status, answer = await _call("POST", "/api/v1/installs/update", {"install_id": install_id, "roles": ["manager", "worker"]})
         assert status == 400 and "cannot include the manager" in answer["error"]
-        assert (await _call("PUT", "/api/installs/inst-000000000000", {"enabled": True}))[0] == 404
-        assert (await _call("DELETE", "/api/installs/inst-000000000000"))[0] == 404
-        assert (await _call("GET", "/api/catalog/lib-000000000000"))[0] == 404
-        assert (await _call("GET", "/api/projects/proj-nope/installs"))[0] == 404
+        assert (await _call("POST", "/api/v1/installs/update", {"install_id": 'inst-000000000000', "enabled": True}))[0] == 404
+        assert (await _call("POST", "/api/v1/installs/delete", {"install_id": 'inst-000000000000'}))[0] == 404
+        assert (await _call("POST", "/api/v1/catalog_items/get", {"item_id": 'lib-000000000000'}))[0] == 404
+        assert (await _call("POST", "/api/v1/installs/project", {"project_id": 'proj-nope'}))[0] == 404
         assert await pool.fetchval("SELECT count(*) FROM library_installs") == 2
 
     run_db(_test, monkeypatch)
@@ -301,14 +311,14 @@ def test_the_catalog_and_a_projects_view_show_where_each_item_is_installed(monke
     async def _test(pool: Any) -> None:
         ids = await _import(pool, "plugin:demo@market", "skill:alpha", "skill:mgr-only")
         calc, docs = await _projects("calc", "docs")
-        await _call("POST", "/api/installs", {"item_id": ids["demo@market"], "scope": "global"})
-        await _call("POST", "/api/installs", {"item_id": ids["mgr-only"], "scope": "global", "roles": ["manager"]})
-        await _call("POST", "/api/installs", {"item_id": ids["alpha"], "scope": "project", "project_id": calc,
+        await _call("POST", "/api/v1/installs/create", {"item_id": ids["demo@market"], "scope": "global"})
+        await _call("POST", "/api/v1/installs/create", {"item_id": ids["mgr-only"], "scope": "global", "roles": ["manager"]})
+        await _call("POST", "/api/v1/installs/create", {"item_id": ids["alpha"], "scope": "project", "project_id": calc,
                                               "roles": ["worker", "reviewer"]})
         await _call("POST", f"/api/projects/{calc}/skills",
                     {"name": "deploy-check", "description": "Deploy.", "content": "Reply OK."})
 
-        status, catalog = await _call("GET", "/api/catalog")
+        status, catalog = await _call("POST", "/api/v1/catalog_items/list", {})
         # The roles an install may name, the ones a task's Planner defines last; an install names those only when
         # asked to (demo's names the four built-in roles).
         assert status == 200 and catalog["roles"] == ["manager", *TASK_ROLES, "task_role"]
@@ -320,19 +330,19 @@ def test_the_catalog_and_a_projects_view_show_where_each_item_is_installed(monke
         assert [(s["scope"], s["project_name"], s["roles"]) for s in by_name["alpha"]["installs"]] == [
             ("project", "calc", ["worker", "reviewer"])]
         assert catalog["installed_count"] == 4
-        status, detail = await _call("GET", f"/api/catalog/{ids['alpha']}")
+        status, detail = await _call("POST", "/api/v1/catalog_items/get", {"item_id": ids['alpha']})
         assert status == 200 and detail["skill_md"] == "alpha body\n"
         assert detail["files"] == [{"path": "SKILL.md", "size_bytes": 11, "executable": False}]
 
         # A project sees its own installs, then the global ones that reach its task roles (not the manager-only one).
-        _, view = await _call("GET", f"/api/projects/{calc}/installs")
+        _, view = await _call("POST", "/api/v1/installs/project", {"project_id": calc})
         assert [(e["item"]["qualified_name"], e["scope"], e["inherited"]) for e in view["installs"]] == [
             ("personal:alpha", "project", False), ("project:deploy-check", "project", False),
             ("demo", "global", True)]
         assert (view["owned_count"], view["task_roles"]) == (1, [*TASK_ROLES, "task_role"])
         assert next(e for e in view["installs"] if e["item"]["qualified_name"] == "demo")["roles"] == [
             "manager", *TASK_ROLES]
-        _, other = await _call("GET", f"/api/projects/{docs}/installs")
+        _, other = await _call("POST", "/api/v1/installs/project", {"project_id": docs})
         assert [e["item"]["qualified_name"] for e in other["installs"]] == ["demo"]
 
     run_db(_test, monkeypatch)

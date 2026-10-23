@@ -32,6 +32,10 @@ class _Writer:
 
 
 async def _call(root: Path, method: str, path: str, body: Any = None) -> tuple[int, Any]:
+    if path.startswith(("/api/v1/catalog_items/", "/api/v1/installs/")):
+        from tests.test_catalog_db import _call as catalog_call
+        return await catalog_call(method, path, body)
+
     from looper.agents.http_server import AgentHTTPServer
     from looper.agents.tiers.task import TaskRouter
 
@@ -165,12 +169,12 @@ def test_a_skill_installed_in_another_project_keeps_one_name_per_project(
         _, deploy = await _call(tmp_path, "POST", f"/api/projects/{calc['id']}/skills", _skill("deploy-check"))
         _, notes = await _call(tmp_path, "POST", f"/api/projects/{calc['id']}/skills", _skill("notes"))
         _, theirs = await _call(tmp_path, "POST", f"/api/projects/{docs['id']}/skills", _skill("deploy-check"))
-        status, answer = await _call(tmp_path, "POST", "/api/installs", {
+        status, answer = await _call(tmp_path, "POST", "/api/v1/installs/create", {
             "item_id": deploy["skill"]["skill_id"], "scope": "project", "project_id": docs["id"]})
         assert status == 409 and "both would load as project:deploy-check" in answer["error"]
-        status, _ = await _call(tmp_path, "POST", "/api/installs", {
+        status, _ = await _call(tmp_path, "POST", "/api/v1/installs/create", {
             "item_id": notes["skill"]["skill_id"], "scope": "project", "project_id": docs["id"], "roles": ["worker"]})
-        assert status == 201
+        assert status == 200
         # docs cannot now write a skill named notes, and calc cannot rename notes onto a name docs has.
         status, answer = await _call(tmp_path, "POST", f"/api/projects/{docs['id']}/skills", _skill("notes"))
         assert status == 409 and "project:notes" in answer["error"]
@@ -181,7 +185,7 @@ def test_a_skill_installed_in_another_project_keeps_one_name_per_project(
         status, answer = await _call(tmp_path, "PUT", f"/api/projects/{calc['id']}/skills/{notes['skill']['skill_id']}",
                                      {"name": "release-notes"})
         assert status == 200
-        _, view = await _call(tmp_path, "GET", f"/api/projects/{docs['id']}/installs")
+        _, view = await _call(tmp_path, "POST", "/api/v1/installs/project", {"project_id": docs['id']})
         assert sorted((e["item"]["qualified_name"], e["item"]["owner_project_name"], e["roles"])
                       for e in view["installs"]) == [
             ("project:deploy-check", "docs", ["planner", "worker", "reviewer"]),
