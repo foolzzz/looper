@@ -10,7 +10,6 @@ import sys
 import tomllib
 from pathlib import Path
 
-from looper import __version__
 from looper.agents import api_v1
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -98,7 +97,8 @@ def test_every_option_after_a_generated_command_is_in_its_request_schema() -> No
 
 def test_the_plugin_and_the_marketplace_parse_and_point_at_the_skill() -> None:
     plugin = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
-    assert plugin["name"] == "looper" and plugin["version"] == __version__ and plugin["license"] == "Apache-2.0"
+    # No version in the manifest: it would go stale with every release (the package carries the version).
+    assert plugin["name"] == "looper" and "version" not in plugin and plugin["license"] == "Apache-2.0"
     marketplace = json.loads((REPO_ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
     (entry,) = marketplace["plugins"]
     assert entry["name"] == "looper" and entry["source"] == "./plugins/looper"

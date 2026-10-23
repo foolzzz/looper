@@ -1,7 +1,8 @@
 {
   "name": "looper",
   "description": "Hand work to a local Looper and follow it, through loopercli.",
-  "version": "2.13.36",
-  "author": {"name": "Looper contributors"},
+  "author": {
+    "name": "Looper contributors"
+  },
   "license": "Apache-2.0"
 }
