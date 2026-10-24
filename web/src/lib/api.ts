@@ -1930,17 +1930,33 @@ export interface RoomView extends RoomSummary {
   messages: RoomMessage[];
   /** Older messages than these are not in it (with `after`: more newer ones than `limit`). */
   more: boolean;
+  consults: {
+    total: number;
+    answered: number;
+    by_reason: Record<string, number>;
+    cost_usd: number;
+    list: {
+      seat: string;
+      questions: number[];
+      state: "queued" | "running" | "answered" | "fallback" | "failed";
+      reason: string | null;
+      read_only: "runtime" | "snapshot" | null;
+      denied_writes: number;
+      cost_usd: number | null;
+      at: string | null;
+    }[];
+  };
 }
 
 /** The task's room: its seats, its numbers and its messages; with `after` (a message id) only the newer ones. */
 export async function fetchTaskRoom(
   taskId: string,
-  { after = 0, signal }: { after?: number; signal?: AbortSignal } = {},
+  { signal, ...filters }: { kind?: RoomMessageKind; from?: string; unanswered?: boolean; after?: number;
+    limit?: number; signal?: AbortSignal } = {},
 ): Promise<RoomView> {
-  const query = after > 0 ? `?after=${after}` : "";
-  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/room${query}`, { signal });
-  if (!res.ok) await failed(res, "room");
-  return res.json();
+  const result = await callV1<RoomView>("/api/v1/tasks/room_view", { task_id: taskId, ...filters }, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Where a user gate stands: "pending" until its dependencies are done, "open" (waiting for the user's first word),
@@ -1973,9 +1989,9 @@ export interface TaskWait {
 }
 
 async function moveWait(taskId: string, step: string, action: "resume" | "cancel"): Promise<TaskWait> {
-  const result = await scheduleCall<{ task_id: string; wait: TaskWait }>(
-    "POST", `${API_BASE}/tasks/${encodeURIComponent(taskId)}/waits/${encodeURIComponent(step)}/${action}`, `${action} wait`,
-  );
+  const result = await callV1<{ task_id: string; wait: TaskWait }>(
+    `/api/v1/waits/${action}`, { task_id: taskId, step });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result.wait;
 }
 
@@ -2103,11 +2119,10 @@ export async function fetchGateThread(
   step: string,
   signal?: AbortSignal,
 ): Promise<{ task_id: string; gate: UserGate; messages: GateMessage[] }> {
-  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/gates/${encodeURIComponent(step)}/messages`, {
-    signal,
-  });
-  if (!res.ok) await failed(res, "gate discussion");
-  return res.json();
+  const result = await callV1<{ task_id: string; gate: UserGate; messages: GateMessage[] }>(
+    "/api/v1/ops/gates/messages", { task_id: taskId, gate: step }, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** What the server did with a message in a gate: "queued" for the Planner's next turn, or "kept" because the task is
@@ -2120,13 +2135,10 @@ export interface GatePosted {
 }
 
 async function postGate(taskId: string, step: string, action: "messages" | "end", body: object): Promise<GatePosted> {
-  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/gates/${encodeURIComponent(step)}/${action}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) await failed(res, action === "end" ? "end discussion" : "send");
-  return res.json();
+  const result = await callV1<GatePosted>(
+    `/api/v1/ops/gates/${action === "messages" ? "reply" : "end"}`, { task_id: taskId, gate: step, ...body });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** The user's message in a gate that waits for them; an option button sends its option as the text, with the
@@ -2224,12 +2236,15 @@ export interface TaskRoleEdit {
 
 /** Write `fields` as a new version of the task's role `key`, by the user; its Planner hears of it. Fails for a
  * completed task, or a definition that changes nothing. */
-export function editTaskRole(
+export async function editTaskRole(
   taskId: string,
   key: string,
   fields: TaskRoleEdit,
 ): Promise<{ id: string; version: number; changed: string[] }> {
-  return putJson(`/tasks/${encodeURIComponent(taskId)}/roles/${encodeURIComponent(key)}`, fields, "edit role");
+  const result = await callV1<{ task_id: string; id: string; kind: "work" | "review"; version: number;
+    via: "user"; changed: string[] }>("/api/v1/tasks/role_update", { task_id: taskId, key, ...fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** What a task journal entry records; code writes each when its event happens. */
@@ -3952,10 +3967,10 @@ export function streamSSE(
   return () => abortController.abort();
 }
 
-/** Which gates `GET /api/gates` lists: waiting ones, closed ones (passed, cancelled, skipped) or all. */
+/** Which gates `gates.list` lists: waiting ones, closed ones (passed, cancelled, skipped) or all. */
 export type GateListState = "open" | "closed" | "all";
 
-/** One row of `GET /api/gates`: a gate, its task, and what the list shows beside it. */
+/** One row of `gates.list`: a gate, its task, and what the list shows beside it. */
 export interface GateListRow {
   task: {
     task_id: string;
@@ -3995,18 +4010,61 @@ export async function fetchGates(
     through?: string;
   } = {},
 ): Promise<GateList> {
-  const params = new URLSearchParams();
-  if (filters.state && filters.state !== "open") params.set("state", filters.state);
-  if (filters.waitingOn) params.set("waiting_on", filters.waitingOn);
-  if (filters.projectId) params.set("project_id", filters.projectId);
-  if (filters.limit) params.set("limit", String(filters.limit));
-  if (filters.offset) params.set("offset", String(filters.offset));
-  if (filters.cursor) params.set("cursor", filters.cursor);
-  if (filters.through) params.set("through", filters.through);
-  const qs = params.toString();
-  const res = await fetch(`${API_BASE}/gates${qs ? `?${qs}` : ""}`);
-  if (!res.ok) await failed(res, "gates");
-  return res.json();
+  const limit = filters.limit ?? 50;
+  const offset = filters.offset ?? 0;
+  if (filters.cursor && offset) throw new Error("cursor and offset cannot be combined");
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200 || !Number.isInteger(offset) || offset < 0)
+    throw new Error("Invalid gate list limit or offset");
+  const request = async (at: number): Promise<GateList> => {
+    const result = await callV1<GateList>("/api/v1/ops/gates/list", {
+      ...(filters.state ? { state: filters.state } : {}),
+      ...(filters.waitingOn ? { waiting_on: filters.waitingOn } : {}),
+      ...(filters.projectId ? { project_id: filters.projectId } : {}), limit: 200, offset: at,
+    });
+    if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+    return result;
+  };
+  // The Tool accepts offsets only. Read its complete ordered list and keep opaque boundaries for dashboard refreshes;
+  // using the server's order also preserves PostgreSQL's collation when opened_at timestamps tie.
+  const list = await request(0);
+  const rows = [...list.gates];
+  let page = list;
+  while (page.has_more) {
+    if (page.gates.length === 0 || rows.length >= list.total)
+      throw new Error("The gate list changed while loading. Retry the request.");
+    page = await request(rows.length);
+    if (page.total !== list.total) throw new Error("The gate list changed while loading. Retry the request.");
+    rows.push(...page.gates);
+  }
+  const keys = rows.map((row) => JSON.stringify([row.task.task_id, row.gate.step]));
+  if (rows.length !== list.total || new Set(keys).size !== keys.length)
+    throw new Error("The gate list changed while loading. Retry the request.");
+  const positions = new Map(keys.map((key, index) => [key, index]));
+  const boundary = (raw: string, side: "after" | "through"): number => {
+    let saved: { keys: string[]; end: number };
+    try { saved = JSON.parse(raw); } catch { throw new Error("Invalid gate list cursor"); }
+    if (!saved || !Array.isArray(saved.keys) || !saved.keys.every((key) => typeof key === "string")
+      || !Number.isInteger(saved.end) || saved.end < 0 || saved.end > saved.keys.length)
+      throw new Error("Invalid gate list cursor");
+    const known = side === "after" ? saved.keys.slice(0, saved.end).reverse() : saved.keys.slice(saved.end);
+    for (const key of known) {
+      const index = positions.get(key);
+      if (index !== undefined) return side === "after" ? index + 1 : index;
+    }
+    const opposite = side === "after" ? saved.keys.slice(saved.end) : saved.keys.slice(0, saved.end).reverse();
+    for (const key of opposite) {
+      const index = positions.get(key);
+      if (index !== undefined) return side === "after" ? index : index + 1;
+    }
+    if (rows.length === 0) return 0;
+    throw new Error("The gate list changed while loading. Retry the request.");
+  };
+  const start = filters.cursor ? boundary(filters.cursor, "after") : offset;
+  const stop = filters.through ? boundary(filters.through, "through") : rows.length;
+  const gates = rows.slice(start, Math.max(start, Math.min(start + limit, stop)));
+  const end = start + gates.length;
+  return { ...list, gates, limit, offset, has_more: end < stop,
+    next_cursor: gates.length ? JSON.stringify({ keys, end }) : null };
 }
 
 // --- Managers: each with its own duty, tools, task visibility and task templates ---

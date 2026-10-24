@@ -102,10 +102,10 @@ def _request(port: int, line: str, headers: dict[str, str] | None = None, body: 
         ("GET /api/nothing-here", "mixed_case_bearer", 404),
         ("POST /api/chat/stop", "agent", 401),
         ("GET /api/chat/turn", "agent", 401),
-        ("GET /api/gates", None, 401),
-        ("GET /api/gates", "agent", 401),
-        ("PUT /api/tasks/task-1/roles/coder", None, 401),
-        ("PUT /api/tasks/task-1/roles/coder", "agent", 401),
+        ("POST /api/v1/ops/gates/list", None, 401),
+        ("POST /api/v1/ops/gates/list", "agent", 401),
+        ("POST /api/v1/tasks/role_update", None, 401),
+        ("POST /api/v1/tasks/role_update", "agent", 401),
         ("OPTIONS /api/tasks/create", None, 401),
         ("GET /api/agent/v1/tools", "agent", 200),
         ("GET /api/agent/v1/tools", "operator", 401),
@@ -160,7 +160,7 @@ import sys
 import urllib.parse
 import urllib.error
 import urllib.request
-request = urllib.request.Request(sys.argv[1], data=b'{}', method='PUT',
+request = urllib.request.Request(sys.argv[1], data=b'{}', method='POST',
                                  headers={'Content-Type': 'application/json'})
 try:
     with urllib.request.urlopen(request, timeout=5) as response:
@@ -173,7 +173,7 @@ except urllib.error.HTTPError as error:
         async with _server(tmp_path) as port:
             result = await asyncio.to_thread(
                 subprocess.run,
-                [sys.executable, "-c", script, f"http://127.0.0.1:{port}/api/tasks/task-1/roles/coder"],
+                [sys.executable, "-c", script, f"http://127.0.0.1:{port}/api/v1/tasks/role_update"],
                 env=dict(os.environ), capture_output=True, text=True, timeout=10,
             )
             assert result.returncode == 0, result.stderr
