@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.74] - 2026-10-24
+
+### Changed
+
+- **Project role templates and role statistics move to the versioned API.** `role_templates.list`, `role_templates.put`, `role_templates.delete` and `project_roles.stats` (`POST /api/v1/<domain>/<action>`) replace four legacy HTTP routes (`GET /api/projects/{id}/role-templates`, `PUT` and `DELETE /api/projects/{id}/role-templates/{key}`, `GET /api/projects/{id}/role-stats`), which are removed. Requests are closed and typed and the answers declare full template, item and statistics definitions. Deleting a template asks for confirmation; task roles already copied from a template keep their content and versions. The dashboard and the prompt-regression runner use the new routes. Manager prompts and tools are unchanged. ([#503](https://github.com/foolzzz/looper/pull/503))
+
+## [2.13.73] - 2026-10-24
+
+### Changed
+
+- **Dashboard task creation goes through the v1 API.** The dashboard now creates tasks with `POST /api/v1/tasks/create`, which uses the shared creation core and keeps the full project and task configuration. The old `POST /api/tasks/create` route is removed; the v1 answer wraps the same fields in `result` and returns 200 instead of 201. An operator's call is not written to the Manager/client action trail; a client that creates a new project must confirm in the same session. The created task is read back and checked, and a mismatch fails with an `unavailable` error. A worker whose Claude process closes stdin early now still releases the input-ready wait. Manager prompts and tools are unchanged. ([#476](https://github.com/foolzzz/looper/pull/476))
+
 ## [2.13.72] - 2026-10-24
 
 ### Changed

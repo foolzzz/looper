@@ -9,9 +9,11 @@ from typing import Any
 
 import pytest
 
+from looper.agents.api_v1 import OPERATOR
 from looper.agents.bus import MessageBus
 from looper.agents.http_server import AgentHTTPServer
 from looper.agents.ops import Call, Turn
+from looper.agents.ops.clients import ClientOps
 from looper.agents.ops.service import Platform
 from looper.agents.ops.tasks import _create
 from looper.db import agent_setting_layers, projects, tasks
@@ -33,7 +35,7 @@ def test_both_create_entries_preserve_all_task_configuration(
         work = tmp_path / "work"
         work.mkdir()
         config = {"nested": {"enabled": False, "items": [1, "two"]}, "zero": 0}
-        fields = {"requirement": " build a calculator ", "title": "计算器", "goal_id": "calculator",
+        fields = {"requirement": " build a calculator ", "goal_id": "calculator",
                   "config": config, "work_dir": str(work), "workspace_mode": "in_place"}
         console_project = {"project": {"name": "Console project", "description": "description",
                                        "background": "background", "work_dir": str(work),
@@ -42,14 +44,14 @@ def test_both_create_entries_preserve_all_task_configuration(
             project = await projects.create_project(name="Existing", work_dir=str(work), pool=pool)
             console_project = {"project_id": project["id"]}
         server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
-                                 task_router=SimpleNamespace())
+                                 task_router=SimpleNamespace(), client_ops=ClientOps(SimpleNamespace()))
         writer = _Writer()
-        await server._route_api("POST", "/api/tasks/create", {}, json.dumps({
+        await server._handle_v1("POST", "/api/v1/tasks/create", {}, {}, json.dumps({
             **fields, **console_project, "profile_overrides": {"worker": "profile-worker"},
-        }).encode(), writer)
+        }).encode(), writer, OPERATOR)
         head, _, body = writer.data.partition(b"\r\n\r\n")
-        assert int(head.split()[1]) == 201, body
-        console = json.loads(body)
+        assert int(head.split()[1]) == 200, body
+        console = json.loads(body)["result"]
         stored = await tasks.get_task(console["task_id"])
         assert stored["config"] == config
         if new_project:
@@ -71,5 +73,5 @@ def test_both_create_entries_preserve_all_task_configuration(
             k: v for k, v in manager.items() if k not in ignored and k != "project_name"}
         assert await agent_setting_layers.profile_overrides(console["task_id"]) == (
             await agent_setting_layers.profile_overrides(result["task_id"]))
-        assert len(turn.blocks) == 1 and "计算器" in turn.blocks[0]
+        assert len(turn.blocks) == 1 and "calculator" in turn.blocks[0]
     run_db(test, monkeypatch, timeout=30)

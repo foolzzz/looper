@@ -764,7 +764,7 @@ export async function discardStepWorkspace(taskId: string, workspaceId: number):
   return (await res.json()).workspace;
 }
 
-export interface NewProjectFields {
+export interface NewProjectFields extends Partial<ProjectExecution> {
   name: string;
   description?: string;
   /** Absolute default work directory; omit or "" for none. */
@@ -793,13 +793,10 @@ export async function createTask(
     base?: string;
   } & TaskProjectChoice,
 ): Promise<{ task_id: string; status: string; created_at: string; project_id: string; workspace: WorkspaceCheck }> {
-  const res = await fetch(`${API_BASE}/tasks/create`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(params),
-  });
-  if (!res.ok) await failed(res, "create task");
-  const data = await res.json();
+  const data = await callV1<{ task_id: string; status: string; created_at: string; project_id: string; workspace: WorkspaceCheck }>(
+    "/api/v1/tasks/create", params,
+  );
+  if ("confirmation_id" in data) throw new V1Error(202, "unavailable", data.impact);
   notifyProjectsChanged();
   return data;
 }
@@ -3307,31 +3304,29 @@ export interface ProjectRoleStats {
 }
 
 export async function fetchProjectRoleStats(projectId: string): Promise<ProjectRoleStats> {
-  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/role-stats`);
-  if (!res.ok) await failed(res, "role numbers");
-  return res.json();
+  const result = await callV1<ProjectRoleStats>("/api/v1/project_roles/stats", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
-const roleTemplatesPath = (projectId: string) => `/projects/${encodeURIComponent(projectId)}/role-templates`;
-
 export async function fetchRoleTemplates(projectId: string): Promise<RoleTemplates> {
-  const res = await fetch(`${API_BASE}${roleTemplatesPath(projectId)}`);
-  if (!res.ok) await failed(res, "role templates");
-  return res.json();
+  const result = await callV1<RoleTemplates>("/api/v1/role_templates/list", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Create template `key` or replace it whole; resolves to the project's templates. */
-export function putRoleTemplate(projectId: string, key: string, fields: RoleTemplateFields): Promise<RoleTemplates> {
-  return putJson(`${roleTemplatesPath(projectId)}/${encodeURIComponent(key)}`, fields, "save role template");
+export async function putRoleTemplate(projectId: string, key: string, fields: RoleTemplateFields): Promise<RoleTemplates> {
+  const result = await callV1<RoleTemplates>("/api/v1/role_templates/put", { project_id: projectId, key, ...fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Delete template `key`; the task roles copied from it keep their versions. */
 export async function deleteRoleTemplate(projectId: string, key: string): Promise<RoleTemplates> {
-  const res = await fetch(`${API_BASE}${roleTemplatesPath(projectId)}/${encodeURIComponent(key)}`, {
-    method: "DELETE",
-  });
-  if (!res.ok) await failed(res, "delete role template");
-  return res.json();
+  const result = await callV1<RoleTemplates>("/api/v1/role_templates/delete", { project_id: projectId, key });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 // --- The capability catalog: items acquired into Looper, and where they are installed ---

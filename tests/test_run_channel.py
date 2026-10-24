@@ -121,6 +121,57 @@ def test_a_rejected_turn_stops_accepting_input(tmp_path: Path, error: type[Excep
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("outcome", ["started", "failed", "killed"])
+def test_input_sent_while_a_worker_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any, outcome: str,
+) -> None:
+    async def run() -> None:
+        starting, release = asyncio.Event(), asyncio.Event()
+        spawn = proc_tree.spawn
+
+        async def blocked_spawn(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+            starting.set()
+            await release.wait()
+            if outcome == "failed":
+                raise OSError("cannot start worker")
+            return await spawn(*args, **kwargs)
+
+        monkeypatch.setattr(proc_tree, "spawn", blocked_spawn)
+        bus = MessageBus(runtime_root=tmp_path)
+        pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(tmp_path, _LISTENING_CLAUDE)),
+                          runtime_root=tmp_path)
+        await pool.start(bus)
+        delivery = None
+        try:
+            await pool._dispatch(_work_item(tmp_path))
+            await asyncio.wait_for(starting.wait(), 5)
+            delivery = asyncio.create_task(pool.send_input("w1", "hello"))
+            await asyncio.sleep(0)
+            assert not delivery.done()  # no acknowledgement before the input channel opens
+            if outcome == "killed":
+                assert await pool.kill("w1")
+            else:
+                release.set()
+            assert await asyncio.wait_for(delivery, 5) is (outcome == "started")
+            if outcome == "started":
+                queue = bus.get_queue("planner-t1")
+                result = await asyncio.wait_for(queue.get(), 20)
+                while result.message_type != MessageType.WORK_RESULT:
+                    result = await asyncio.wait_for(queue.get(), 20)
+                assert result.payload["summary"] == "got: hello"
+            else:
+                assert not pool.accepts_input("w1")
+                assert not await pool.send_input("w1", "too late")
+        finally:
+            if delivery is not None:
+                delivery.cancel()
+                await asyncio.gather(delivery, return_exceptions=True)
+            await pool.stop()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("steer", [False, True])
 def test_worker_uses_its_run_channel_over_the_bus(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any, steer: bool,

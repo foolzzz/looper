@@ -33,6 +33,7 @@ schedule_admin.list schedule_admin.project_list schedule_admin.get schedule_admi
 schedule_admin.runs schedule_admin.notifications
 schedule_admin.create schedule_admin.update schedule_admin.delete schedule_admin.reset_planner_session
 schedule_admin.run
+project_roles.stats role_templates.list role_templates.put role_templates.delete
 """.split()
 
 
@@ -47,7 +48,7 @@ def test_discovery_finds_every_current_domain():
 
 def test_openapi_operations_keep_main_order():
     assert [op["operationId"] for item in api_v1.document()["paths"].values()
-            for op in item.values()] == _MAIN_OPERATION_IDS
+            for op in item.values()] == [*_MAIN_OPERATION_IDS, "tasks.create"]
 
 
 @pytest.fixture

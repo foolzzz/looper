@@ -106,6 +106,7 @@ class Operation:
     credential_write: bool = False  # bypass argument/result audit and redact failures
     stream_description: str | None = None
     stream_events: Mapping[str, Any] | None = None
+    audit_operator: bool = True  # dashboard operations may opt out of the Manager/client action trail
 
 
 def _summary(description: str) -> str:
