@@ -114,7 +114,7 @@ class Look:
     fake: bool
     runtime_root: Path | None = None  # the server's, where a configuration export is written
     registry_before: dict[str, Any] | None = None
-    runs_since: int = 0  # the Manager's newest run record before the dialog (the session-profile dialogs only)
+    runs_since: int = 0  # the Manager's newest run record before the dialog (independent of the action trail)
     manager_id: str | None = None  # a scenario Manager's agent id: only its trail rows count
     conversation: str | None = None  # a client dialog's conversation id (the API client's)
     turn_since: int = 0  # the trail's last id before the turn's message (``since`` when it is the dialog's first)
@@ -468,7 +468,7 @@ def _project_limit_explained(look: Look) -> str | None:
                if not (a["tool"] == "looper_concurrency" and a["task_id"] == look.task)]
     if changed:
         return f"something changed though a project has no limit to change: {', '.join(changed)}"
-    default = look.api.get("/api/agent-settings")["roles"]["worker"]["effective"]["max_concurrency"]
+    default = look.api.post("/api/v1/agent_settings/get", {})["result"]["roles"]["worker"]["effective"]["max_concurrency"]
     if default["source"] != "builtin":
         return f"the Workers' default limit changed to {default['value']}"
     if look.task and look.detail()["agents"]["roles"]["worker"]["concurrency"]["task"] != 1:
@@ -509,8 +509,7 @@ def _was_stopped(look: Look) -> str | None:
 
 def _knows_it_was_withdrawn(look: Look) -> str | None:
     """The turn after a withdrawn message was told so, first of all; a real Manager must not claim it did the work."""
-    records = look.api.post("/api/v1/runs/list", {"agent_id": "manager", "limit": 500})["result"]["records"]
-    new = [r for r in records if r["id"] > look.since and not (r.get("metadata") or {}).get("autonomous")]
+    new = _manager_runs(look)
     if not new:
         return "no Manager run record for the turn"
     record = max(new, key=lambda row: row["id"])
@@ -526,8 +525,7 @@ def _knows_it_was_withdrawn(look: Look) -> str | None:
 
 def _knows_it_was_stopped(look: Look) -> str | None:
     """The turn after a stop was told of it; a real Manager must not claim the summary was finished."""
-    records = look.api.post("/api/v1/runs/list", {"agent_id": "manager", "limit": 500})["result"]["records"]
-    new = [r for r in records if r["id"] > look.since and not (r.get("metadata") or {}).get("autonomous")]
+    new = _manager_runs(look)
     if not new:
         return "no Manager run record for the turn"
     record = max(new, key=lambda row: row["id"])
@@ -2067,9 +2065,10 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
         runs_since = 0
         if dialog.seed is _make_switch_profile:
             _make_switch_profile(api, project_id, fake=mode == "fake", spec=switch_spec)
-            runs_since = max((r["id"] for r in api.post("/api/v1/runs/list", {"agent_id": "manager", "limit": 1})["result"]["records"]), default=0)
         elif dialog.seed is not None:
             dialog.seed(api, project_id)
+        if dialog.seed is _make_switch_profile or any(say.stop or say.withdraw for say in dialog.says):
+            runs_since = _newest_run(api, "manager")
         if dialog.id == "model_price_history":
             _price_history(database_url, seed=True)
         if dialog.id == "model_login_runtime":
@@ -2154,7 +2153,8 @@ def _manager_profile(api: Api, model: str, effort: str | None) -> dict[str, Any]
     """Claude Code with ``model`` and ``effort`` for the Manager alone (its role layer), registered if missing."""
     name = f"claude-code/{model}" + (f" · {effort}" if effort else "")
     chosen = _subscription_profile(api, name, model, effort)
-    api.put("/api/agent-settings/roles/manager", {"profile_id": chosen["profile_id"]})
+    api.post("/api/v1/agent_settings/update_role", {
+        "role": "manager", "values": {"profile_id": chosen["profile_id"]}})["result"]
     return chosen
 
 
@@ -2256,8 +2256,8 @@ def run(
                     named = register_agent(api, register)["name"] if register is not None else agent
                     picked = select_agent(api, agent=named, model=model)
                     if register is not None:
-                        api.put("/api/agent-settings/system", {"profile_id": picked["profile_id"],
-                                                               "run_budget_usd": max_budget_usd})
+                        api.post("/api/v1/agent_settings/update_system", {"values": {
+                            "profile_id": picked["profile_id"], "run_budget_usd": max_budget_usd}})["result"]
                     configs[dialog.id, rep] = (picked, _manager_profile(api, manager_model, manager_effort)
                                                if manager_model else picked)
                     project_id = api.post("/api/projects",

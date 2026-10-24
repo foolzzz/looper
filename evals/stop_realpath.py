@@ -540,7 +540,8 @@ def _set_profile(api: Api, runtime: str, *, deepseek_model: str = "deepseek-flas
                          "endpoints": [{"protocol": "openai-chat", "base_url": "https://api.deepseek.com"}]},
             "model": {"name": deepseek_model, "protocol": "openai-chat"},
             "agent": {"name": "stop-real/omp"}})
-    api.put("/api/agent-settings/roles/manager", {"profile_id": chosen["profile_id"]})
+    api.post("/api/v1/agent_settings/update_role", {
+        "role": "manager", "values": {"profile_id": chosen["profile_id"]}})["result"]
 
 
 def _kill_tree(process: subprocess.Popen) -> None:

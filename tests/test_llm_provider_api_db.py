@@ -29,6 +29,9 @@ class Client:
         self.server = server
 
     async def call(self, method, path, body=None, *, token=TOKEN, raw=None, length=None):
+        if method == "POST" and path == "/api/v1/agent_settings/update_role":
+            from looper.agents.ops.clients import ClientOps
+            self.server._client_ops = ClientOps(SimpleNamespace())
         payload = raw if raw is not None else b"" if body is None else json.dumps(body).encode()
         # Real HTTP bytes through the production connection handler. A socket pair
         # needs no listening port and keeps the test independent of host services.

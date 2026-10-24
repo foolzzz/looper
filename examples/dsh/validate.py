@@ -607,9 +607,9 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
                     summary["stage"] = "profile"
                     profile = runner.register_agent(api, json.loads(SPEC.read_text()))
                     for role in ROLES:
-                        api.put(f"/api/agent-settings/roles/{role}", {
-                            "profile_id": profile["profile_id"], "run_budget_usd": RUN_SOFT_CAP_USD})
-                    settings = api.get("/api/agent-settings")
+                        api.post("/api/v1/agent_settings/update_role", {"role": role, "values": {
+                            "profile_id": profile["profile_id"], "run_budget_usd": RUN_SOFT_CAP_USD}})["result"]
+                    settings = api.post("/api/v1/agent_settings/get", {})["result"]
                     _require(all(settings["roles"][role]["values"]["profile_id"] == profile["profile_id"]
                                  for role in ROLES))
 

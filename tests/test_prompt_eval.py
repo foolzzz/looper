@@ -253,6 +253,14 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
             raise AssertionError(path)
 
         def post(self, path: str, body: Any) -> dict[str, Any]:
+            if path == "/api/v1/agent_settings/update_system":
+                body = body["values"]
+                profile = next(p for p in self.profiles if p["profile_id"] == body["profile_id"])
+                chosen = profile_registry.ResolvedAgentProfile(profile["profile_id"], profile["name"], self.runtime,
+                    profile["model_id"], resolved_model=self.models[profile["model_id"]])
+                profile_registry.check_roles(chosen, [role.value for role in agent_settings.AgentType])
+                self.layers[agent_settings.Layer.SYSTEM, None] = agent_settings.LayerValues(profile=chosen)
+                return {"status": "ok", "result": {}}
             if path.startswith("/api/v1/runs/"):
                 return {"status": "ok", "result": self.get(path, **body)}
             if path == "/api/v1/operator_chat/messages":
@@ -298,14 +306,6 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
             assert path == "/api/v1/operator_chat/send", path
             self.messages.append({"message_id": f"{body['message_id']}:reply", "content": self.launch("manager")})
             return {}
-
-        def put(self, path: str, body: Any) -> None:
-            assert path == "/api/agent-settings/system"
-            profile = next(p for p in self.profiles if p["profile_id"] == body["profile_id"])
-            chosen = profile_registry.ResolvedAgentProfile(profile["profile_id"], profile["name"], self.runtime,
-                profile["model_id"], resolved_model=self.models[profile["model_id"]])
-            profile_registry.check_roles(chosen, [role.value for role in agent_settings.AgentType])
-            self.layers[agent_settings.Layer.SYSTEM, None] = agent_settings.LayerValues(profile=chosen)
 
     return Registry()
 
@@ -2929,6 +2929,33 @@ def test_the_stop_dialog_flags_only_a_summary_no_read_backs(
     look = dialogs.Look(Api(), None, reply, "disposable", 0, frozenset(), False,  # type: ignore[arg-type]
                         turn_since=1)
     assert dialogs._knows_it_was_stopped(look) == problem
+
+
+@pytest.mark.parametrize("kind", ["stop", "withdraw"])
+@pytest.mark.parametrize("action_since", [0, 100])
+@pytest.mark.parametrize("record_id,metadata,found", [
+    (5, {}, True),
+    (4, {}, False),
+    (6, {"autonomous": True}, False),
+])
+def test_stop_continuation_uses_the_run_cursor_instead_of_the_action_cursor(
+    kind: str, action_since: int, record_id: int, metadata: dict[str, Any], found: bool,
+) -> None:
+    from evals.prompt_regression import dialogs
+
+    note = dialogs.STOPPED_NOTE if kind == "stop" else dialogs.WITHDREW_NOTE
+
+    class Api:
+        def post(self, path: str, body: Any) -> dict[str, Any]:
+            assert path == "/api/v1/runs/list"
+            return {"status": "ok", "result": {"records": [
+                {"id": record_id, "input_text": note, "metadata": metadata}]}}
+
+    # Audited setup and LLM runs have independent database sequences.
+    look = dialogs.Look(Api(), None, "", "disposable", action_since, frozenset(), True,  # type: ignore[arg-type]
+                        runs_since=4)
+    check = dialogs._knows_it_was_stopped if kind == "stop" else dialogs._knows_it_was_withdrawn
+    assert check(look) == (None if found else "no Manager run record for the turn")
 
 
 def test_a_dialog_check_sees_the_calls_of_its_own_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

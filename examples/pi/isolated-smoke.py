@@ -525,8 +525,9 @@ asyncio.run(check())
         })["profile"]
         profile_id = profile["profile_id"]
         for role in ROLES:
-            request(base, f"/api/agent-settings/roles/{role}", token, "PUT", {"profile_id": profile_id})
-        settings = request(base, "/api/agent-settings", token)
+            request(base, "/api/v1/agent_settings/update_role", token, "POST",
+                    {"role": role, "values": {"profile_id": profile_id}})["result"]
+        settings = request(base, "/api/v1/agent_settings/get", token, "POST", {})["result"]
         for role in ROLES:
             assert settings["roles"][role]["values"]["profile_id"] == profile_id
             assert settings["roles"][role]["effective"]["profile"]["value"]["profile_id"] == profile_id
