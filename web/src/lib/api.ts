@@ -4083,6 +4083,9 @@ export interface ManagerInfo {
   profile_id: string | null;
   profile_name: string | null;
   templates: TaskTemplate[];
+  revision: number;
+  created_at: string;
+  updated_at: string;
   state: { running: boolean; busy: boolean; healthy: boolean; sync: "ok" | "pending"; sync_error?: string };
   spend: { today_usd: number; last_7d_usd: number; runs_today: number };
 }
@@ -4098,8 +4101,6 @@ export interface ManagerFields {
   task_policy?: TaskPolicy;
   enabled?: boolean;
 }
-
-const managerPath = (id: string) => `${API_BASE}/managers/${encodeURIComponent(id)}`;
 
 async function managerJson<T>(url: string, method: string, body: unknown | undefined, label: string): Promise<T> {
   const res = await fetch(url, {
@@ -4133,27 +4134,41 @@ export async function revokeApiClient(id: string): Promise<void> {
   await managerJson(`${API_BASE}/clients/${encodeURIComponent(id)}`, "DELETE", undefined, "revoke API client");
 }
 
+type ManagerView = Omit<ManagerInfo, "state" | "spend"> & Partial<Pick<ManagerInfo, "state" | "spend">>;
+type ManagersSnapshot = { managers: ManagerView[]; max_enabled: number };
+
 export async function fetchManagers(): Promise<ManagerInfo[]> {
-  const data = await managerJson<{ managers?: ManagerInfo[] }>(`${API_BASE}/managers`, "GET", undefined, "managers");
-  return data.managers ?? [];
+  const result = await callV1<{ managers: ManagerInfo[]; max_enabled: number }>("/api/v1/managers/list", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.managers;
 }
 
-export function createManager(body: ManagerFields): Promise<ManagerInfo> {
-  return managerJson(`${API_BASE}/managers`, "POST", body, "create manager");
+export async function createManager(body: ManagerFields): Promise<{ manager: ManagerView }> {
+  const result = await callV1<{ manager: ManagerView }>("/api/v1/managers/create", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
-export function updateManager(id: string, body: ManagerFields): Promise<ManagerInfo> {
-  return managerJson(managerPath(id), "PUT", body, "update manager");
+export async function updateManager(id: string, body: ManagerFields): Promise<{ manager: ManagerView }> {
+  const result = await callV1<{ manager: ManagerView }>("/api/v1/managers/update", { manager_id: id, fields: body });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
-export async function deleteManager(id: string): Promise<void> {
-  await managerJson(managerPath(id), "DELETE", undefined, "delete manager");
+export async function deleteManager(id: string): Promise<ManagersSnapshot> {
+  const result = await callV1<ManagersSnapshot>("/api/v1/managers/delete", { manager_id: id });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
-export function putManagerTemplate(id: string, key: string, body: TaskTemplateFields): Promise<ManagerInfo> {
-  return managerJson(`${managerPath(id)}/templates/${encodeURIComponent(key)}`, "PUT", body, "save template");
+export async function putManagerTemplate(id: string, key: string, body: TaskTemplateFields): Promise<ManagersSnapshot> {
+  const result = await callV1<ManagersSnapshot>("/api/v1/manager_templates/put", { manager_id: id, key, ...body });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
-export function deleteManagerTemplate(id: string, key: string): Promise<ManagerInfo> {
-  return managerJson(`${managerPath(id)}/templates/${encodeURIComponent(key)}`, "DELETE", undefined, "delete template");
+export async function deleteManagerTemplate(id: string, key: string): Promise<ManagersSnapshot> {
+  const result = await callV1<ManagersSnapshot>("/api/v1/manager_templates/delete", { manager_id: id, key });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
