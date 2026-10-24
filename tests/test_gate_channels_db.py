@@ -184,6 +184,8 @@ def test_a_failed_post_is_tried_again_and_the_gates_later_messages_wait_behind_i
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def test(pool: Any) -> None:
+        from datetime import datetime, timezone
+
         from looper.agents.gate_courier import POST_ATTEMPTS, POST_RETRY_SEC, GateCourier
 
         await _task_with_gate(pool, origin="channel-telegram", chat=TELEGRAM_CHAT, kind="chat")
@@ -201,8 +203,9 @@ def test_a_failed_post_is_tried_again_and_the_gates_later_messages_wait_behind_i
 
         poster.fail = 1
         await courier.run_once()  # the card fails once: it is tried again in POST_RETRY_SEC[0]
-        retry_in = await pool.fetchval("SELECT extract(epoch FROM post_retry_at - now()) FROM "
-                                       "task_user_gate_messages WHERE kind = 'opened'")
+        retry_at = await pool.fetchval("SELECT post_retry_at FROM task_user_gate_messages WHERE kind = 'opened'")
+        # The courier makes the deadline on the application clock; PostgreSQL's clock can differ.
+        retry_in = (retry_at - datetime.now(timezone.utc)).total_seconds()
         assert POST_RETRY_SEC[0] - 60 < retry_in <= POST_RETRY_SEC[0]
         assert await posts() == [("opened", None, 1, True)]
         (gate,) = (await _api("POST", "/api/v1/tasks/detail", {"task_id": "task-a"}))[1]["gates"]

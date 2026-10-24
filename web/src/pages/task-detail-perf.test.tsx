@@ -190,17 +190,19 @@ describe("useTaskRuns refresh", () => {
 });
 
 describe("task page polling", () => {
-  const taskBody = JSON.stringify({
+  const detailUrl = "/api/v1/tasks/detail";
+  const taskBody = {
     task_id: "task-a", name: "t", requirement: "r", status: "running", group: "active", phase: "x", planner_id: null,
     steps: [], journal: [], progress: [], gates: [], roles: [], config: {}, requirement_versions: [], supplements: [],
     manager_actions: [], profile_overrides: {}, project_id: "p1",
-  });
+  };
   const respond = (url: string) =>
-    new Response(url.endsWith("/tasks/task-a") ? taskBody : JSON.stringify({ activity: [], conversation: [], runs: [] }), {
-      status: 200, headers: { "Content-Type": "application/json" },
+    Response.json({
+      status: "ok",
+      result: url === detailUrl ? taskBody : { activity: [], conversation: [], runs: [] },
     });
   const taskCalls = (fetchMock: ReturnType<typeof vi.fn>) =>
-    fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/tasks/task-a"));
+    fetchMock.mock.calls.filter(([url]) => String(url) === detailUrl);
   const visibility = (state: "visible" | "hidden") => {
     Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
     document.dispatchEvent(new Event("visibilitychange"));
@@ -219,7 +221,7 @@ describe("task page polling", () => {
     const signals: AbortSignal[] = [];
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (!url.endsWith("/tasks/task-a")) return Promise.resolve(respond(url));
+      if (url !== detailUrl) return Promise.resolve(respond(url));
       if (init?.signal) signals.push(init.signal);
       return new Promise<Response>((resolve) => releases.push(() => resolve(respond(url))));
     });
@@ -227,7 +229,11 @@ describe("task page polling", () => {
     await act(async () => root.render(<TaskDetailRoute taskId="task-a" onBack={() => {}} />));
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
     expect(taskCalls(fetchMock)).toHaveLength(1);
+    expect(taskCalls(fetchMock)[0][1]).toMatchObject({ method: "POST", body: JSON.stringify({ task_id: "task-a" }) });
+    expect(signals).toHaveLength(1);
+    expect(signals[0].aborted).toBe(false);
     await act(async () => { releases[0](); await vi.advanceTimersByTimeAsync(0); });
+    expect(container.querySelector("h1")?.textContent).toBe(taskBody.name);
     await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
     expect(taskCalls(fetchMock)).toHaveLength(2);
 

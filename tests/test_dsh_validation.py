@@ -814,16 +814,16 @@ def smoke_peer(tmp_path, monkeypatch):
         root = tmp_path / "workflow"
         root.mkdir()
 
-        class ProcessApi:
+        class ProcessApi(runner.Api):
             def __init__(self, base_url):
-                self.base_url, self.token, self.timeout = base_url, None, 2
+                super().__init__(base_url)
                 self.number = 0
 
             def request(self, method, path, body=None, **query):
                 number = self.number
                 self.number += 1
                 peer = root / "runtime" / "ipc"
-                deadline = time.monotonic() + 2
+                deadline = time.monotonic() + self.timeout
                 while not peer.exists():
                     if time.monotonic() > deadline:
                         raise runner.EvalError("synthetic peer did not start")
