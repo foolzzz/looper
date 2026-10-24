@@ -232,7 +232,7 @@ API 只响应操作者：在这台机器的浏览器中打开控制台会自动�
 | 状态 | `GET /api/status`、`GET /api/overview` | 系统健康状态和启动自检（`checks`）；Dashboard 的“此刻在发生什么”总览 |
 | 项目 | `/api/projects`、`/api/projects/:id`、`/api/projects/:id/knowledge/...` | 创建、修改和删除项目；项目的知识文档和草稿 |
 | 任务 | `/api/tasks`、`/api/tasks/create`、`/api/tasks/:id/...`、`/api/tasks/{start,stop,cancel,delete}` | 列出和创建任务（属于某个项目，可带 `profile_overrides`）、查看、开始、停止、取消、删除；活动及其 SSE 流 |
-| 定时任务 | `/api/projects/:id/schedules`、`GET /api/schedules`、`/api/schedules/:id/...`、`POST /api/schedules/preview` | 创建、修改、启用和删除项目的定时任务；列出所有项目的定时任务；立即运行；运行历史和通知；时间规则接下来的触发时刻 |
+| 定时任务 | `POST /api/v1/schedule_admin/<action>` | 创建、修改、启用和删除项目的定时任务；列出所有项目的定时任务；立即运行；运行历史和通知；时间规则接下来的触发时刻 |
 | 能力目录与安装 | `/api/catalog/...`、`/api/installs/...`、`/api/projects/:id/installs`、`/api/projects/:id/skills/...` | 插件、skill 和 MCP 服务器：导入、上传、git、编写、修改、删除；全局安装或装到项目 |
 | Agent 设置 | `/api/agent-settings/...`、`/api/projects/:id/agent-settings/...`、`/api/roles/...` | 各设置层，每个字段的生效值及其来源；每个角色的 prompt 和限制 |
 | 注册表 | `GET /api/registry`、`/api/runtimes/:id/probe`、`/api/providers/...`、`/api/agent-profiles/...` | 运行时类型和内置运行时（Re-detect 重新探测）；注册、修改和删除提供方（API key 打码）和 Agent Profile，并写明各自被谁使用 |

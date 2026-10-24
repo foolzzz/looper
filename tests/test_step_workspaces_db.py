@@ -211,16 +211,17 @@ def test_the_task_page_shows_a_task_s_workspaces_and_discards_one_a_stopped_task
             f"git switch main && git revert -m 1 {merged.merge_commit}"]
         assert (await _call(server, "GET", "/api/tasks/task-b"))[1]["step_workspaces"] is None
 
-        discard = f"/api/tasks/task-a/workspaces/{unmerged.id}/discard"
-        assert await _call(server, "POST", discard) == (409, {"error": "stop the task before discarding its step "
-                                                                       "worktrees"})
+        discard = "/api/v1/workspaces/discard"
+        discard_args = {"task_id": "task-a", "workspace_id": unmerged.id}
+        assert await _call(server, "POST", discard, discard_args) == (
+            409, {"error": "stop the task before discarding its step worktrees"})
         await pool.execute("UPDATE tasks SET status = 'stopped' WHERE id = 'task-a'")
         monkeypatch.setattr(router, "has_planner", lambda task_id: True)  # its Planner has not ended yet
-        assert (await _call(server, "POST", discard))[0] == 409
+        assert (await _call(server, "POST", discard, discard_args))[0] == 409
         monkeypatch.setattr(router, "has_planner", lambda task_id: False)
         assert Path(unmerged.path).exists() and ws.StepWorkspace.from_row(await db.get(unmerged.id)) == unmerged
 
-        status, body = await _call(server, "POST", discard)
+        status, body = await _call(server, "POST", discard, discard_args)
         assert status == 200 and (body["workspace"]["state"], body["workspace"]["discardable"]) == ("discarded", False)
         row = await db.get(unmerged.id)
         assert row is not None and (row["state"], row["removed_at"] is not None) == ("discarded", True)
@@ -228,12 +229,15 @@ def test_the_task_page_shows_a_task_s_workspaces_and_discards_one_a_stopped_task
         notes = [r["summary"] for r in await activity.list_activity("task-a")]
         assert f"Discarded a step worktree from the task page: branch {unmerged.branch} and its directory removed" \
             in notes
-        assert (await _call(server, "POST", discard))[1] == {
+        assert (await _call(server, "POST", discard, discard_args))[1] == {
             "error": f"step workspace {unmerged.id} is gone; it cannot be discarded"}
-        assert (await _call(server, "POST", f"/api/tasks/task-a/workspaces/{merged.id}/discard"))[1] == {
+        assert (await _call(server, "POST", discard,
+                            {"task_id": "task-a", "workspace_id": merged.id}))[1] == {
             "error": f"step workspace {merged.id} is merged; it cannot be discarded"}
-        assert (await _call(server, "POST", f"/api/tasks/task-b/workspaces/{three.id}/discard"))[0] == 404
-        assert (await _call(server, "POST", "/api/tasks/task-a/workspaces/999999/discard"))[0] == 404
+        assert (await _call(server, "POST", discard,
+                            {"task_id": "task-b", "workspace_id": three.id}))[0] == 404
+        assert (await _call(server, "POST", discard,
+                            {"task_id": "task-a", "workspace_id": 999999}))[0] == 404
         assert Path(three.path).exists()  # only the one asked for
 
         # While it is discarded, the task's row is locked: a restart's status update waits for it.
@@ -252,7 +256,8 @@ def test_the_task_page_shows_a_task_s_workspaces_and_discards_one_a_stopped_task
             return await real(workspace)
 
         monkeypatch.setattr(ws, "discard", discard_while_restarted)
-        assert (await _call(server, "POST", f"/api/tasks/task-a/workspaces/{three.id}/discard"))[0] == 200
+        assert (await _call(server, "POST", discard,
+                            {"task_id": "task-a", "workspace_id": three.id}))[0] == 200
         assert blocked == ["waited"] and not Path(three.path).exists()
         assert await pool.fetchval("SELECT status FROM tasks WHERE id = 'task-a'") == "stopped"
 

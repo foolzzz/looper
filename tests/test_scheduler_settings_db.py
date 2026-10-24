@@ -121,10 +121,10 @@ def test_the_minimum_interval_setting_decides_which_rules_a_schedule_may_have(
 ) -> None:
     async def test(env: ScheduleEnv) -> None:
         body = {"name": "often", "cron": "*/2 * * * *", "timezone": "UTC", "requirement": "Look."}
-        status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", body)
-        assert status == 400 and "fires 2 minutes apart" in payload["error"]
+        status, payload = await env.call("POST", "/api/v1/schedule_admin/create", {"project_id": env.project_id, "fields": body})
+        assert status == 400 and "fires 2 minutes apart" in payload["error"]["message"]
         await env.ok("PUT", "/api/scheduler-settings", {"min_interval_seconds": 120})
-        await env.ok("POST", f"/api/projects/{env.project_id}/schedules", body)
+        await env.ok("POST", "/api/v1/schedule_admin/create", {"project_id": env.project_id, "fields": body})
         limits = (await env.ok("POST", "/api/v1/schedule_admin/project_list", {"project_id": env.project_id}))["limits"]
         assert (limits["min_interval_seconds"], limits["min_interval_gated_seconds"]) == (120, 60)
 
@@ -153,10 +153,10 @@ def test_a_schedule_follows_the_default_has_its_own_timeout_or_none(monkeypatch:
                 for s in (followed, own, none)] == [("inherit", None), ("seconds", 120), ("none", None)]
 
         # An update that leaves it out keeps it; each choice can be switched to any other.
-        await env.ok("PUT", f"/api/schedules/{own['schedule_id']}", {"name": "renamed"})
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": own['schedule_id'], "fields": {"name": "renamed"}})
         assert (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": own['schedule_id']}))["schedule"]["run_timeout_seconds"] == 120
         for value, expected in (("default", "default"), (None, None), (45, 45)):
-            changed = await env.ok("PUT", f"/api/schedules/{own['schedule_id']}", {"run_timeout_seconds": value})
+            changed = await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": own['schedule_id'], "fields": {"run_timeout_seconds": value}})
             assert changed["schedule"]["run_timeout_seconds"] == expected
         # The list of limits tells the form the default.
         limits = (await env.ok("POST", "/api/v1/schedule_admin/project_list", {"project_id": env.project_id}))["limits"]
@@ -170,8 +170,8 @@ def test_a_bad_schedule_timeout_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_
     async def test(env: ScheduleEnv) -> None:
         body = {"name": "x", "cron": "*/5 * * * *", "timezone": "UTC", "requirement": "Look.",
                 "run_timeout_seconds": value}
-        status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", body)
-        assert status == 400 and 'null for no limit, or "default"' in payload["error"], payload
+        status, payload = await env.call("POST", "/api/v1/schedule_admin/create", {"project_id": env.project_id, "fields": body})
+        assert status == 400 and payload["error"]["code"] == "invalid", payload
 
     run_scheduled(test, monkeypatch, tmp_path)
 
@@ -189,7 +189,7 @@ def test_a_run_keeps_the_timeout_it_started_with(monkeypatch: pytest.MonkeyPatch
 
         # Neither the default nor the schedule changing reaches the run in progress.
         await env.ok("PUT", "/api/scheduler-settings", {"run_timeout_seconds": 3000})
-        await env.ok("PUT", f"/api/schedules/{sid}", {"run_timeout_seconds": None})
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"run_timeout_seconds": None}})
         env.clock.now += timedelta(seconds=119)
         await env.scheduler.tick()
         assert (await env.runs(sid))[0]["status"] == "running"
@@ -290,8 +290,8 @@ def test_an_export_carries_the_scheduler_settings_and_each_schedules_timeout_cho
 
         # Changed here, the file puts both back; a setting left at the built-in is not carried.
         await env.ok("PUT", "/api/scheduler-settings", {"min_interval_seconds": 200, "run_timeout_seconds": None})
-        await env.ok("PUT", f"/api/schedules/{ids['follows']}", {"run_timeout_seconds": 5})
-        await env.ok("PUT", f"/api/schedules/{ids['numbered']}", {"run_timeout_seconds": "default"})
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": ids['follows'], "fields": {"run_timeout_seconds": 5}})
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": ids['numbered'], "fields": {"run_timeout_seconds": "default"}})
         async with env.pool.acquire() as conn:
             plan = await config_transfer.run_import(conn, config_transfer.read_file(path), apply=False)
         scheduler = {c.key: c.action.value for c in plan.changes if c.section == "settings.scheduler"}
