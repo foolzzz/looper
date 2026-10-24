@@ -694,11 +694,12 @@ def _serve_smoke_stand_in(mode):
                 result = {"profile": profiles}
                 if mode == "profile":
                     status = 500
-            elif path.startswith("/api/agent-settings/roles/"):
-                assert body["run_budget_usd"] == .5
-                roles[path.rsplit("/", 1)[1]] = {"values": body}
-            elif path == "/api/agent-settings":
-                result = {"roles": roles}
+            elif path == "/api/v1/agent_settings/update_role":
+                assert body["values"]["run_budget_usd"] == .5
+                roles[body["role"]] = {"values": body["values"]}
+                result = {"status": "ok", "result": {"roles": roles}}
+            elif path == "/api/v1/agent_settings/get":
+                result = {"status": "ok", "result": {"roles": roles}}
             elif path == "/api/chat/send":
                 record("manager")
                 if mode != "manager-timeout":

@@ -191,8 +191,10 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             seen["before_restart"] = detail("restart")["gates"]
             api.post("/api/v1/ops/task_control/restart", {"task_id": ids["restart"]})
             api.post("/api/v1/ops/task_control/start_over", {"task_id": ids["startover"]})
-            time.sleep(0.5)
-            again = {v: _until(lambda v=v: (d := detail(v))["status"] in ENDED and d, f"{v} to end again")
+            # Controls queue a message: wait for the new Planner before accepting an ended state, otherwise
+            # the router may not have consumed the restart yet and we would read the first run's failure.
+            again = {v: _until(lambda v=v: len(_log(state, "planner.jsonl", v)) > 1
+                              and (d := detail(v))["status"] in ENDED and d, f"{v} to end again")
                      for v in ("restart", "startover")}
             threads = {v: api.post("/api/v1/ops/gates/messages", {"task_id": ids[v], "gate": "g1"})["result"] for v in ("pass", "restart")}
     return {"first": first, "again": again, "ids": ids, "state": state, "seen": seen, "threads": threads,

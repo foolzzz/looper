@@ -442,7 +442,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     _settings(page, server, "roles/worker")
     role = page.locator("#roles-worker-panel")
     selection = role.get_by_label("Agent Profile", exact=True)
-    before = server.api.get("/api/agent-settings")["roles"]["worker"]["values"]["profile_id"]
+    before = server.api.post("/api/v1/agent_settings/get", {})["result"]["roles"]["worker"]["values"]["profile_id"]
     selection.select_option("__new_profile__")
     nested = role.get_by_role("group", name="New Agent Profile", exact=True)
     nested.get_by_label("Name *", exact=True).fill("Embedded smoke profile")
@@ -452,11 +452,11 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     expect(selection).to_have_value(before or "")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     # Registering an embedded profile must not silently persist a role selection.
-    assert server.api.get("/api/agent-settings")["roles"]["worker"]["values"]["profile_id"] == before
+    assert server.api.post("/api/v1/agent_settings/get", {})["result"]["roles"]["worker"]["values"]["profile_id"] == before
     selection.select_option(profile_id)
     role.get_by_role("button", name="Save overrides", exact=True).click()
     expect(role.get_by_text("Saved; applies to the next run", exact=True)).to_be_visible()
-    assert server.api.get("/api/agent-settings")["roles"]["worker"]["values"]["profile_id"] == profile_id
+    assert server.api.post("/api/v1/agent_settings/get", {})["result"]["roles"]["worker"]["values"]["profile_id"] == profile_id
     assert any(layer["scope"] == "role" and layer["role"] == "worker" and layer["profile_id"] == profile_id
                for layer in _registry_state(server)["layers"])
 
