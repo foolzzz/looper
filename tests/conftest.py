@@ -438,7 +438,7 @@ def stub_claude_on_path(_stub_claude: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
 
 _PLANNER_CLAUDE = """\
-import json, os, sys, time
+import fcntl, json, os, sys, time
 STATE = {state!r}
 REPLIES = json.loads({replies!r})
 AUTONOMOUS = json.loads({autonomous!r})
@@ -466,8 +466,11 @@ cost = float(open(session_cost).read()) if '--resume' in sys.argv and os.path.ex
 def emit(event):
     print(json.dumps(event), flush=True)
 for line in sys.stdin:
-    n = int(open(counter).read()) + 1 if os.path.exists(counter) else 1
-    open(counter, 'w').write(str(n))
+    # Several Planners may share this stand-in: never read another process's truncated counter.
+    with open(counter + '.lock', 'w') as counter_lock:
+        fcntl.flock(counter_lock, fcntl.LOCK_EX)
+        n = int(open(counter).read()) + 1 if os.path.exists(counter) else 1
+        open(counter, 'w').write(str(n))
     message = json.loads(line)
     log('turns.jsonl', {{'pid': os.getpid(), 'text': message['message']['content']}})
     reply = REPLIES[n - 1] if n <= len(REPLIES) else REPLIES[-1]

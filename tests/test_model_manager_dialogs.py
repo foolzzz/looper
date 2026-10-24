@@ -330,17 +330,14 @@ class RunsApi:
     def post(self, path, body):
         if path.startswith("/api/v1/runs/"):
             return {"status": "ok", "result": self.get(path, **body)}
-        raise AssertionError(path)
+        assert path == "/api/v1/manager_session/get"
+        return {"result": {"selected": self.selected}}
 
     def get(self, path, **query):
         if path == "/api/v1/runs/list":
             return {"records": list(reversed(self.records))}
         assert path == "/api/registry"
         return {"profiles": [{"profile_id": "agent-1", "name": dialogs.SWITCH}]}
-
-    def post(self, path, body):
-        assert path == "/api/v1/manager_session/get"
-        return {"result": {"selected": self.selected}}
 
 
 def runs_look(records, *, selected=None, reply="ok", fake=False):
