@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.83] - 2026-10-24
+
+### Changed
+
+- **Dashboard chat sending and its reply streams go through v1.** Sending a chat message to the Manager or a running task's Planner, following one reply, and following an open thread are the operator-only operations `operator_chat.send` (risk `write`), `operator_chat.reply_events` and `operator_chat.thread_events` (risk `read`), as `POST /api/v1/operator_chat/<action>`. The send result carries `correlation_id` only. The task-template pattern check now waits up to 10 seconds for its checker to start before the matching budget begins. Manager prompts and tools are unchanged. ([#524](https://github.com/foolzzz/looper/pull/524))
+
+### Removed
+
+- **`POST /api/chat/send` and `GET /api/chat/events`.** Use the `operator_chat` operations. ([#524](https://github.com/foolzzz/looper/pull/524))
+
 ## [2.13.82] - 2026-10-24
 
 ### Changed
