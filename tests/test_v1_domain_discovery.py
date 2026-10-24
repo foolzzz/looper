@@ -46,7 +46,8 @@ def test_discovery_finds_every_current_domain():
 
 def test_openapi_operations_keep_main_order():
     assert [op["operationId"] for item in api_v1.document()["paths"].values()
-            for op in item.values()] == [*_MAIN_OPERATION_IDS, "tasks.create"]
+            for op in item.values()] == [*_MAIN_OPERATION_IDS, "tasks.create",
+                                        "tasks.delete", "workspaces.check", "workspaces.discard"]
 
 
 @pytest.fixture
