@@ -465,29 +465,33 @@ def test_the_task_page_reads_the_room(monkeypatch: pytest.MonkeyPatch) -> None:
         room, workers = _room()
         question = await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd"])
         await room.post("task-r", BACKEND, kind="answer", body="yes", reply_to=question["id"])
-        server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
+        server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(bus=_Bus()),
                                  task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())), worker_pool=workers)
 
-        async def get(path: str, query: dict[str, str]) -> tuple[int, Any]:
+        async def get(path: str, query: dict[str, Any]) -> tuple[int, Any]:
+            if path == "/api/v1/tasks/room_view":
+                from tests.db_support import call_v1
+                body = {"task_id": "task-r", **query}
+                return await call_v1(server, path, body)
             writer = _Writer()
             await server._route_api("GET", path, query, b"", writer)
             head, _, payload = writer.data.partition(b"\r\n\r\n")
             return int(head.split()[1]), json.loads(payload)
 
-        status, view = await get("/api/tasks/task-r/room", {})
+        status, view = await get("/api/v1/tasks/room_view", {})
         assert status == 200 and view["enabled"] and view["counts"]["questions"] == 1
         assert view["messages"][0]["answered"] and view["by_step"]["s2"] == {"sent": 1, "received": 1,
                                                                             "unanswered": 0}
         assert {s["seat"]: s["presence"] for s in view["seats"]}["worker@s3"] == "planned"
-        status, after = await get("/api/tasks/task-r/room", {"after": str(question["id"])})
+        status, after = await get("/api/v1/tasks/room_view", {"after": question["id"]})
         assert [m["kind"] for m in after["messages"]] == ["answer"]
-        status, _ = await get("/api/tasks/task-r/room", {"after": "x"})
+        status, _ = await get("/api/v1/tasks/room_view", {"after": "x"})
         assert status == 400
         status, detail = await get("/api/tasks/task-r", {})
         assert detail["room"]["counts"]["messages"] == 2
         # A message between two seats of one step counts once for it.
         await room.post("task-r", REVIEWER, kind="question", body="where are the tests?", to=["backend_rd@s1"])
-        status, view = await get("/api/tasks/task-r/room", {})
+        status, view = await get("/api/v1/tasks/room_view", {})
         assert view["by_step"]["s1"] == {"sent": 2, "received": 1, "unanswered": 1}
 
     run_db(test, monkeypatch)

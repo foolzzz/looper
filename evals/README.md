@@ -158,7 +158,7 @@ interval and a 45-second maximum wait, within both the fake case's 60 seconds an
 Runs containing this fixture set the disposable server's minimum check interval to 10 seconds.
 
 Only tasks with `wait_resume_after_s` set let the runner manually resume waits: after that many seconds from
-`opened_at`, each wait still in `waiting` is resumed through `POST /api/tasks/:id/waits/:step/resume`, once.
+`opened_at`, each wait still in `waiting` is resumed through `POST /api/v1/waits/resume` (`{task_id, step}`), once.
 Each row records successful resumes in `wait_resumes` (step label to timestamp, on the database clock).
 With the field unset (`None`), as in `wait_pr_rereview`, the runner never resumes waits. Flow expectations
 include `min_waits_opened`, `max_waits_opened`, `min_wait_github_checks` and `min_wait_dependents`.
