@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.64] - 2026-10-24
+
+### Added
+
+- **`api` runtime type, first step.** Adds the in-process Model API adapter (OpenAI Responses over an API key, Manager only, no executable) and the registry support it needs: a typed per-adapter role restriction (`RuntimeAdapter.roles`), in-process detection and probing (`RuntimeAdapter.in_process`) and import messages. The adapter is not in `ADAPTERS`, so it cannot be detected, selected or started and users see no change; no prompt or tool changed. Adds the `openai` package as a dependency. ([#478](https://github.com/foolzzz/looper/pull/478))
+
 ## [2.13.63] - 2026-10-24
 
 ### Documentation
