@@ -62,7 +62,8 @@ OPERATIONS = (Operation(
     "Create a ready task in an existing or new project. Full configuration is preserved; "
     "a client creating a new project must confirm in the same session.",
     REQUEST, _object({"task_id": _STR, "status": _STR, "created_at": _STR,
-                      "project_id": _STR, "workspace": WORKSPACE_CHECK}), risk="write", confirms=True),)
+                      "project_id": _STR, "workspace": WORKSPACE_CHECK}), risk="write", confirms=True,
+    audit_operator=False),)
 
 
 async def impact(server, operation, arguments, principal, headers):

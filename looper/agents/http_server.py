@@ -502,8 +502,9 @@ class AgentHTTPServer:
             data = self._v1_body(body)
             if data is None:
                 raise OpError(ErrorCode.INVALID, "the body must be a JSON object")
-            # Dashboard domains execute the operator's own request, outside the Manager/client action trail.
-            if (principal.kind == "operator" or writer is not None or operation.credential_write
+            # Only explicitly declared dashboard operations bypass the operator action trail.
+            if ((principal.kind == "operator" and not operation.audit_operator)
+                    or writer is not None or operation.credential_write
                     or operation.risk in (None, "read")):
                 arguments = api_v1.validate_arguments(operation.request or {}, data)
                 if writer is not None:
