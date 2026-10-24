@@ -1,11 +1,15 @@
 """Credential contracts through real HTTP and a disposable PostgreSQL schema."""
 
+import asyncio
+import io
 import json
 import logging
+import sys
 from contextlib import asynccontextmanager
 
 import pytest
 
+from looper import loopercli
 from looper.agents import api_v1, operator_auth
 from looper.agents.bus import MessageBus
 from looper.agents.ops.clients import ClientOps
@@ -16,6 +20,47 @@ from tests.test_api_v1_auth import _bearer, _send, _serving
 from tests.test_operator_auth import TOKEN
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+
+@pytest.mark.parametrize("source", ["stdin", "file"])
+def test_cli_manages_clients_with_transient_operator_auth(tmp_path, monkeypatch, capsys, source):
+    async def run(pool):
+        async with _api(tmp_path) as (server, call):
+            url = f"http://127.0.0.1:{server._port}"
+            token = (await call("create", {"name": "CLI login"}))[2]["result"]["token"]
+            client_file = tmp_path / "client.json"
+            base = ["--client-file", str(client_file), "--json"]
+            monkeypatch.setattr(sys, "stdin", io.StringIO(token + "\n"))
+            assert await asyncio.to_thread(loopercli.main, [*base, "login", "--url", url]) == 0
+            capsys.readouterr()
+            saved = client_file.read_bytes()
+            operator_file = tmp_path / "operator-token"
+            operator_file.write_text(TOKEN + "\n")
+            operator_file.chmod(0o600)
+
+            async def cli(action, *flags):
+                monkeypatch.setattr(sys, "stdin", io.StringIO(TOKEN + "\n"))
+                argv = [*base, "clients", action, "--url", url, *flags]
+                if source == "file":
+                    argv += ["--operator-token-file", str(operator_file)]
+                assert await asyncio.to_thread(loopercli.main, argv) == 0
+                output = capsys.readouterr()
+                assert output.err == "" and TOKEN not in output.out
+                assert client_file.read_bytes() == saved
+                return json.loads(output.out)["result"]
+
+            created = await cli("create", "--name", "Managed by CLI")
+            client_id = created["client"]["id"]
+            assert (await pool.fetchrow("SELECT name FROM api_clients WHERE id=$1", client_id))["name"] == "Managed by CLI"
+            assert (await _send(server, "GET /api/v1/whoami", _bearer(created["token"])))[0] == 200
+            listed = await cli("list")
+            assert client_id in {client["id"] for client in listed["clients"]}
+            assert created["token"] not in json.dumps(listed)
+            assert await cli("revoke", "--client-id", client_id) == {"revoked": client_id}
+            assert (await _send(server, "GET /api/v1/whoami", _bearer(created["token"])))[0] == 401
+            assert client_id not in {client["id"] for client in (await cli("list"))["clients"]}
+            assert await pool.fetchval("SELECT revoked_at IS NOT NULL FROM api_clients WHERE id=$1", client_id)
+    run_db(run, monkeypatch, timeout=30)
 
 
 @asynccontextmanager
