@@ -12,8 +12,8 @@ vi.mock("@/lib/api", async (importOriginal) => {
   const api = await importOriginal<typeof import("@/lib/api")>();
   return {
     ...api,
-    streamSSE: (url: string, onEvent: Parameters<typeof api.streamSSE>[1], onDone?: () => void) =>
-      api.streamSSE(url, (e) => { sse.events++; onEvent(e); }, () => { sse.done++; onDone?.(); }),
+    streamChatReply: (correlationId: string, onEvent: Parameters<typeof api.streamChatReply>[1], onDone?: () => void) =>
+      api.streamChatReply(correlationId, (e) => { sse.events++; onEvent(e); }, () => { sse.done++; onDone?.(); }),
   };
 });
 
@@ -60,8 +60,8 @@ describe("session ended screen and sign out", () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       calls.push(url);
-      if (url === "/api/chat/send") return Response.json({ events_url: "/api/reply-stream" });
-      if (url === "/api/reply-stream") {
+      if (url === "/api/v1/operator_chat/send") return Response.json({ status: "ok", result: { correlation_id: "reply-correlation" } });
+      if (url === "/api/v1/operator_chat/reply_events") {
         const body = new ReadableStream<Uint8Array>({
           start(controller) {
             push = (text) => {
@@ -72,8 +72,9 @@ describe("session ended screen and sign out", () => {
               controller.error(new DOMException("aborted", "AbortError"));
             });
           },
+          cancel() { replyAborted = true; },
         });
-        return new Response(body, { status: 200 });
+        return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
       }
       if (unauthorized && url.startsWith("/api/")) return new Response("{}", { status: 401 });
       if (url === "/api/v1/system/status") return status.clone();
@@ -161,9 +162,9 @@ describe("session ended screen and sign out", () => {
       input.form!.requestSubmit();
       await vi.advanceTimersByTimeAsync(100);
     });
-    expect(calls).toContain("/api/reply-stream");
+    expect(calls).toContain("/api/v1/operator_chat/reply_events");
     await act(async () => {
-      push('data: {"kind":"agent.phase","payload":{"label":"working"}}\n\n');
+      push('event: agent.phase\ndata: {"label":"working"}\n\n');
       await vi.advanceTimersByTimeAsync(100);
     });
     expect(sse.events).toBe(1);
@@ -176,7 +177,7 @@ describe("session ended screen and sign out", () => {
     expect(sse.done).toBe(1);
     const before = calls.length;
     await act(async () => {
-      push('data: {"kind":"agent.phase","payload":{"label":"late"}}\n\n');
+      push('event: agent.phase\ndata: {"label":"late"}\n\n');
       await vi.advanceTimersByTimeAsync(60_000);
     });
     expect(sse.events).toBe(1);

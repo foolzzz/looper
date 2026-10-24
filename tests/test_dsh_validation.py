@@ -699,7 +699,7 @@ def _serve_smoke_stand_in(mode):
                 roles[path.rsplit("/", 1)[1]] = {"values": body}
             elif path == "/api/agent-settings":
                 result = {"roles": roles}
-            elif path == "/api/chat/send":
+            elif path == "/api/v1/operator_chat/send":
                 record("manager")
                 if mode != "manager-timeout":
                     messages.append({"message_id": body["message_id"] + ":reply", "role": "assistant",

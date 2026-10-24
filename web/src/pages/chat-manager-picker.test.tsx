@@ -12,7 +12,7 @@ function ChatWithQuery() {
 
 const api = vi.hoisted(() => ({
   sendChat: vi.fn(),
-  streamSSE: vi.fn(),
+  streamChatReply: vi.fn(),
   fetchChatMessages: vi.fn(),
   fetchChatTurn: vi.fn(),
   fetchChatSettings: vi.fn(),
@@ -97,8 +97,8 @@ describe("chat Manager picker", () => {
     localStorage.clear();
     localStorage.setItem("looper-chat-session-id", SID);
     for (const fn of Object.values(api)) fn.mockReset();
-    api.sendChat.mockResolvedValue({ events_url: "/events" });
-    api.streamSSE.mockImplementation(() => () => {});
+    api.sendChat.mockResolvedValue({ correlation_id: "reply-correlation" });
+    api.streamChatReply.mockImplementation(() => () => {});
     api.fetchChatMessages.mockResolvedValue([]);
     api.fetchChatTurn.mockResolvedValue(null);
     api.fetchChatSettings.mockResolvedValue({ stop_enabled: true });

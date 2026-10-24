@@ -117,7 +117,7 @@ def test_read_trace_returns_keys_only(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("outcome", ["answered", "failed"])
 def test_a_write_probe_requires_an_answered_turn(outcome: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    api = SimpleNamespace(base_url="http://localhost", token=None, post=lambda *args: {"events_url": "/events"})
+    api = SimpleNamespace(base_url="http://localhost", token=None, post=lambda *args: {"status": "ok", "result": {"correlation_id": "c1"}})
     stream = SimpleNamespace(snapshot=lambda: _events((1.0, "answer.final", {"text": "done", "outcome": outcome})),
                              close=lambda: None)
     monkeypatch.setattr(sr, "_Stream", lambda *args: stream)
@@ -125,3 +125,25 @@ def test_a_write_probe_requires_an_answered_turn(outcome: str, monkeypatch: pyte
         {"tool": "looper_providers", "risk": "write", "status": "ok", "error_code": None}])
     result = sr.run_probe(api, "disposable", 1)
     assert bool(result.failures) is (outcome != "answered")
+
+
+def test_reply_stream_posts_the_correlation_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+
+    requests = []
+    def open_stream(request, *, timeout):
+        requests.append(request)
+        return io.BytesIO(b'event: answer.final\ndata: {"text":"done","outcome":"answered"}\n\n')
+
+    monkeypatch.setattr(sr.urllib.request, "urlopen", open_stream)
+    stream = sr._Stream("http://localhost/api/v1/operator_chat/reply_events", "c1", "operator-token")
+    try:
+        stream._thread.join(timeout=1)
+        assert not stream._thread.is_alive()
+        assert requests[0].get_method() == "POST"
+        assert json.loads(requests[0].data) == {"correlation_id": "c1"}
+        assert requests[0].get_header("Authorization") == "Bearer operator-token"
+        assert [(kind, payload) for _, kind, payload in stream.snapshot()] == [
+            ("answer.final", {"text": "done", "outcome": "answered"})]
+    finally:
+        stream.close()

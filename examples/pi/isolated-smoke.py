@@ -268,7 +268,7 @@ def session_smoke(base, token, root, work, output, provider, *, helper, installe
 
     def send(text, role="manager", task_id=None):
         target = {"kind": role, **({"task_id": task_id} if task_id else {})}
-        return request(base, "/api/chat/send", token, "POST", {"text": text, "session_id": "smoke-" + role,
+        return request(base, "/api/v1/operator_chat/send", token, "POST", {"text": text, "session_id": "smoke-" + role,
                        "message_id": "smoke-" + str(time.monotonic_ns()), "target": target})
 
     def task(marker):

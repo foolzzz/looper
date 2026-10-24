@@ -38,7 +38,7 @@ class TestWebChannelAdapter:
                 )
 
                 assert "correlation_id" in result
-                assert "events_url" in result
+                assert "events_url" not in result
                 assert result["correlation_id"]
 
                 # Message should be in the manager's queue

@@ -78,7 +78,7 @@ class _Web:
 
     async def handle_user_message(self, **kwargs: Any) -> dict[str, Any]:
         self.targets.append(kwargs["target"])
-        return {"ok": True}
+        return {"correlation_id": "c1"}
 
 
 async def _call(fleet: _Fleet, web: _Web, method: str, path: str, body: Any = None,
@@ -138,20 +138,20 @@ def test_a_thread_belongs_to_the_manager_that_first_took_it(monkeypatch: pytest.
 
     async def test(pool: Any) -> None:
         fleet, web, _, _ = await _setup(pool)
-        status, _ = await _call(fleet, web, "POST", "/api/chat/send", _send("s-new", "manager-review"))
+        status, _ = await _call(fleet, web, "POST", "/api/v1/operator_chat/send", _send("s-new", "manager-review"))
         assert status == 200 and web.targets[-1].agent_id == "manager-review"
         assert await chat.thread_owner("s-new") == "manager-review"
 
-        status, answer = await _call(fleet, web, "POST", "/api/chat/send", _send("s-new", None))
-        assert status == 409 and answer["manager_id"] == "manager-review"
-        assert "belongs to Manager Code review" in answer["error"]
+        status, answer = await _call(fleet, web, "POST", "/api/v1/operator_chat/send", _send("s-new", None))
+        assert status == 409 and answer["error"]["details"]["manager_id"] == "manager-review"
+        assert "belongs to Manager Code review" in answer["error"]["message"]
         assert len(web.targets) == 1
         assert await pool.fetchval("SELECT count(*) FROM chat_messages WHERE session_id = 's-new'") == 1
 
         await _say(pool, "s-old")  # a thread from before: no row, the default Manager's
-        status, answer = await _call(fleet, web, "POST", "/api/chat/send", _send("s-old", "manager-review"))
-        assert status == 409 and answer["manager_id"] == "manager"
-        status, _ = await _call(fleet, web, "POST", "/api/chat/send", _send("s-old", None))
+        status, answer = await _call(fleet, web, "POST", "/api/v1/operator_chat/send", _send("s-old", "manager-review"))
+        assert status == 409 and answer["error"]["details"]["manager_id"] == "manager"
+        status, _ = await _call(fleet, web, "POST", "/api/v1/operator_chat/send", _send("s-old", None))
         assert status == 200 and web.targets[-1].agent_id == "manager"
 
     run_db(test, monkeypatch)
@@ -161,10 +161,10 @@ def test_an_unknown_or_disabled_manager_takes_no_message(monkeypatch: pytest.Mon
     async def test(pool: Any) -> None:
         fleet, web, _, _ = await _setup(pool)
         await _manager(pool, "off", name="Off", enabled=False)
-        status, answer = await _call(fleet, web, "POST", "/api/chat/send", _send("s1", "manager-nope"))
-        assert status == 400 and answer["error"] == "no Manager 'manager-nope'"
-        status, answer = await _call(fleet, web, "POST", "/api/chat/send", _send("s1", "manager-off"))
-        assert status == 409 and answer["error"] == "Manager 'manager-off' is disabled"
+        status, answer = await _call(fleet, web, "POST", "/api/v1/operator_chat/send", _send("s1", "manager-nope"))
+        assert status == 400 and answer["error"]["message"] == "no Manager 'manager-nope'"
+        status, answer = await _call(fleet, web, "POST", "/api/v1/operator_chat/send", _send("s1", "manager-off"))
+        assert status == 409 and answer["error"]["message"] == "Manager 'manager-off' is disabled"
         assert web.targets == []
 
     run_db(test, monkeypatch)
@@ -273,12 +273,12 @@ def test_another_managers_thread_is_named_never_listed_or_read_as_a_new_one(monk
         # No `manager` is the default Manager: a scenario Manager's thread is not read through it, by messages or events.
         await _say(pool, "s-rev")
         await chat.claim_thread("s-rev", "manager-review")
-        for path, key in (("/api/v1/operator_chat/messages", "session_id"), ("/api/chat/events", "session")):
+        for path, key in (("/api/v1/operator_chat/messages", "session_id"), ("/api/v1/operator_chat/thread_events", "session_id")):
             status, answer = await get(path, {key: "s-rev"})
-            details = answer["error"]["details"] if path.startswith("/api/v1/") else answer
+            details = answer["error"]["details"]
             assert status == 409 and details["manager_id"] == "manager-review" and "messages" not in answer
-        status, answer = await get("/api/chat/events", {"session": "s-old", "manager": "manager-review"})
-        assert status == 409 and answer["manager_id"] == "manager"
+        status, answer = await get("/api/v1/operator_chat/thread_events", {"session_id": "s-old", "manager": "manager-review"})
+        assert status == 409 and answer["error"]["details"]["manager_id"] == "manager"
         # Its owner reads it.
         status, answer = await get("/api/v1/operator_chat/sessions", {"session_id": "s-def"})
         assert status == 200 and [s["session_id"] for s in answer["sessions"]] == ["s-def"]
@@ -302,8 +302,8 @@ def test_a_deleted_managers_threads_are_in_no_list(monkeypatch: pytest.MonkeyPat
         assert status == 200 and answer["sessions"] == []
         status, _ = await _call(fleet, web, "POST", "/api/v1/operator_chat/sessions", {"manager": "manager-review"})
         assert status == 404
-        status, answer = await _call(fleet, web, "POST", "/api/chat/send", _send("s-rev", None))
-        assert status == 409 and "deleted Manager" in answer["error"]
+        status, answer = await _call(fleet, web, "POST", "/api/v1/operator_chat/send", _send("s-rev", None))
+        assert status == 409 and "deleted Manager" in answer["error"]["message"]
         assert web.targets == []
 
     run_db(test, monkeypatch)

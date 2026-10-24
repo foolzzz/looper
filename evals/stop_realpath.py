@@ -5,7 +5,7 @@ Run by hand (it needs Claude Code or OMP with a DeepSeek key, and a disposable P
     python -m evals.stop_realpath --runtime claude|omp [--repeat 3] [--out FILE] [--pg-url URL]
         [--ports 8791-8799] [--deepseek-model deepseek-flash] [--key-from-zsh]
 
-Every cell sends a message through ``POST /api/chat/send``, follows its events, stops at the cell's moment through
+Every cell sends a message through ``POST /api/v1/operator_chat/send``, follows its events, stops at the cell's moment through
 ``POST /api/v1/operator_chat/stop`` and checks what is left. OMP runs per turn and has no interrupt: its cell checks that the
 stop is refused and the reply completes. A process that detached from the agent's tree is not in scope. The server
 has a database, runtime root and port of its own; it never touches ``~/.looper`` and is killed with its process tree
@@ -271,11 +271,13 @@ def claude_version() -> str | None:
 class _Stream:
     """The SSE events of one message, read on a thread."""
 
-    def __init__(self, url: str, token: str | None = None) -> None:
+    def __init__(self, url: str, correlation_id: str, token: str | None = None) -> None:
         self.events: list[tuple[float, str, dict[str, Any]]] = []
         self._lock = threading.Lock()
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
-        self._response = urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=300)
+        headers = {"Content-Type": "application/json", **({"Authorization": f"Bearer {token}"} if token else {})}
+        request = urllib.request.Request(url, data=json.dumps({"correlation_id": correlation_id}).encode(),
+                                         headers=headers, method="POST")
+        self._response = urllib.request.urlopen(request, timeout=300)
         self._thread = threading.Thread(target=self._read, daemon=True)
         self._thread.start()
 
@@ -407,8 +409,8 @@ def run_cell(api: Api, database_url: str, cell: Cell, rep: int, work: Path, cloc
     since = max((r["id"] for r in records), default=0)
     message_id = f"m-{uuid.uuid4().hex[:10]}"
     sent_at = time.monotonic()
-    sent = api.post("/api/chat/send", {"text": prompt, "session_id": session, "message_id": message_id})
-    stream = _Stream(api.base_url + sent["events_url"], api.token)
+    sent = api.post("/api/v1/operator_chat/send", {"text": prompt, "session_id": session, "message_id": message_id})
+    stream = _Stream(api.base_url + "/api/v1/operator_chat/reply_events", sent["result"]["correlation_id"], api.token)
     marks: dict[str, float] = {}
 
     def timeline() -> str:
@@ -472,7 +474,7 @@ def run_cell(api: Api, database_url: str, cell: Cell, rep: int, work: Path, cloc
     confirmations = sum(1 for a in actions if a["status"] == "needs_confirmation")
     before = (api.post("/api/v1/manager_session/get", {})["result"] or {}).get("session_id")
     nxt = f"stop-next-{uuid.uuid4().hex[:8]}"
-    api.post("/api/chat/send", {"text": "Say hi in one word.", "session_id": session, "message_id": nxt})
+    api.post("/api/v1/operator_chat/send", {"text": "Say hi in one word.", "session_id": session, "message_id": nxt})
     reply = _wait(lambda: next((m for m in api.post("/api/v1/operator_chat/messages", {"session_id": session})["result"]["messages"]
                                 if m.get("message_id") == f"{nxt}:reply"), None), 180)
     after_id = (api.post("/api/v1/manager_session/get", {})["result"] or {}).get("session_id")
@@ -505,9 +507,9 @@ def run_probe(api: Api, database_url: str, rep: int) -> CellResult:
     """An ordinary turn with one write call of Looper's tools: it runs (matched), and the turn answers."""
     session = f"probe-{uuid.uuid4().hex[:10]}"
     message_id = f"m-{uuid.uuid4().hex[:10]}"
-    sent = api.post("/api/chat/send", {"text": _PROBE.format(name=f"stop-probe-{rep}-{uuid.uuid4().hex[:6]}"),
+    sent = api.post("/api/v1/operator_chat/send", {"text": _PROBE.format(name=f"stop-probe-{rep}-{uuid.uuid4().hex[:6]}"),
                                      "session_id": session, "message_id": message_id})
-    stream = _Stream(api.base_url + sent["events_url"], api.token)
+    stream = _Stream(api.base_url + "/api/v1/operator_chat/reply_events", sent["result"]["correlation_id"], api.token)
     try:
         final = _wait(lambda: next((p for _, k, p in stream.snapshot() if k == "answer.final"), None), 240)
     finally:

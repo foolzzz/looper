@@ -295,7 +295,7 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
                 for role in ("planner", "worker", "reviewer"):
                     self.launch(role)
                 return {}
-            assert path == "/api/chat/send", path
+            assert path == "/api/v1/operator_chat/send", path
             self.messages.append({"message_id": f"{body['message_id']}:reply", "content": self.launch("manager")})
             return {}
 
@@ -1951,7 +1951,7 @@ def test_dialog_checks_the_final_manager_run_before_scoring_a_reply(
                 return {"status": "ok", "result": {"messages": [
                     {"message_id": self.sent["message_id"] + ":reply",
                      "content": "该配对不兼容，已保持所有配置不变。"}]}}
-            assert path == "/api/chat/send"
+            assert path == "/api/v1/operator_chat/send"
             self.sent = data
             return {}
 
@@ -2028,7 +2028,7 @@ def test_dialogs_use_the_reserved_case_budget_only_in_parallel_mode(
                 return {"status": "ok", "result": {"messages": self.messages}}
             if path == "/api/projects":
                 return {"project_id": "project-a"}
-            assert path == "/api/chat/send"
+            assert path == "/api/v1/operator_chat/send"
             if not self.messages:
                 gate.wait()
             self.cost += 0.2

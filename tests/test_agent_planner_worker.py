@@ -1262,9 +1262,12 @@ class TestWorkerInput:
                 ))
                 await asyncio.wait_for(starting.wait(), 5)
                 writer = _Writer()
-                await server._handle_chat_send(json.dumps({
+                from looper.agents.api_v1 import OPERATOR
+                from looper.agents.ops.clients import ClientOps
+                server._client_ops = ClientOps(SimpleNamespace())
+                await server._handle_v1("POST", "/api/v1/operator_chat/send", {}, {}, json.dumps({
                     "text": correction, "target": {"kind": "planner", "task_id": "t1"},
-                }).encode(), writer)
+                }).encode(), writer, OPERATOR)
                 assert writer.data.startswith(b"HTTP/1.1 200"), writer.data
                 await asyncio.wait_for(input_attempted.wait(), 5)
                 release.set()

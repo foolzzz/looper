@@ -206,7 +206,7 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 - 控制台 Chat 页
 - 左上角列出所有 agent（`POST /api/v1/operator_chat/targets`）：默认 Manager 和每个启用的场景管家（在这个 agent 列表里选一个管家，就和它对话，各有各的会话和线程），以及最近 30 个任务。每个任务下有它固定的一个 Planner，和每个步骤各自独立的 Worker（做了验收的步骤还有 Reviewer）。已经结束的任务和 agent 也列出来，可以查看消息
 - 能发消息的只有 Manager 和运行中任务的 Planner。发给 Planner 的消息由它的 Claude 回复（一个 `[CHAT]` turn），Claude 可以把消息转给正在执行某一步的 Worker，作为它的下一个 user turn，也可以给计划追加步骤；Worker 已经结束的，这条消息留到这一步的决策 turn 给 Claude 看。事件按到达顺序处理，正在跑别的 turn 时发来的消息会排在它后面；任务还没有计划或已经结束时，消息不经过 Claude，直接回复。选中 Planner 时，旁边折叠显示它最近 10 次 Claude 运行。Worker 和 Reviewer 只读，页面显示它的完整运行记录
-- `POST /api/chat/send` 发送消息，`target` 指定对话对象
+- `POST /api/v1/operator_chat/send` 发送消息，`target` 指定对话对象，返回 `correlation_id`
 - 输入框在管家回复期间照样能用：
   - 回复期间按 Enter，消息进入输入框上方的暂存区（最多 20 条），不发出。回复正常结束（`answer.final` 的 `outcome` 为 `answered`）后，暂存的消息用空行连成一条消息发出一次；回复出错、被停止或在等用户确认时不发，暂存的消息回到输入框里。暂存区按聊天存在 `sessionStorage`，刷新页面不丢
   - ↑（光标在第一行、没有选中文字）或暂存区的 Edit 按钮把暂存的消息拉回输入框，排在已输入文字之前
@@ -226,7 +226,7 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
     - 压缩清单（第几个 turn、时间、触发方式、压缩前 → 压缩后）；
     - 一张可展开的 turn 表。
   - 每张运行卡片显示这次运行自己的 token（未缓存输入、缓存读、缓存写、输出）、结束时的上下文 `ctx`、`compacted` 标记和自身花费。记录里的压缩事件显示为一行。`result` 那一行的金额标为 `session total`，因为那是 Claude 报告的会话累计值。
-- SSE `GET /api/chat/events` 接收实时响应
+- SSE `POST /api/v1/operator_chat/reply_events` 按 `correlation_id` 接收实时响应，`POST /api/v1/operator_chat/thread_events` 按 `session_id` 接收对话中的自主消息
 - 页面结构：左侧栏顶部是 Dashboard、Chat、Tasks、User Gates、Runs、Schedules，中间是项目列表，底部是可折叠的 **Settings** 分组（打开某个 Settings 页时自动展开，折叠状态按浏览器记住），每个子页一个地址 `#settings/<page>`：
   - **LLM Providers**（`providers`）：provider 列表和预设、API key（打码）、base URL、带价格和 background model 的模型目录、额外环境变量、并发上限；
   - **Agent Runtimes**（`runtimes`，只读）：每种运行时类型一张卡片（Claude Code CLI、Codex CLI、OMP CLI，以及标为 planned 的 Claude Code SDK、OpenAI Agents SDK、norma），写明类型（CLI/SDK）、是否检测到、路径、版本、能力、能跑哪些角色、安装提示和「Re-detect」；运行时内置、按服务的 PATH 自动检测，不能在界面上新增、修改或删除。以前手动注册、仍有 Agent Profile 在用的运行时显示为「custom (legacy)」；
