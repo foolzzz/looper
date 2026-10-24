@@ -793,14 +793,6 @@ class AgentHTTPServer:
     _RE_TASK_START = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/start$")
     _RE_TASK_REQUIREMENT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/requirement$")
     _RE_TASK_TITLE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/title$")
-    _RE_TASK_ROOM = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/room$")
-    _RE_TASK_ROLE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/roles/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})$")
-    # A user gate of the task, by its step's label (planner_protocol._STEP_ID).
-    _RE_TASK_GATE_MESSAGES = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/gates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})"
-                                        r"/messages$")
-    _RE_TASK_GATE_END = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/gates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})/end$")
-    _RE_TASK_WAIT_ACTION = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/waits/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})"
-                                      r"/(resume|cancel)$")
     _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
     _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
@@ -894,27 +886,11 @@ class AgentHTTPServer:
         elif (m := self._RE_TASK_TITLE.match(path)) and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: projects.rename_task(
                 m.group(1), projects.json_object(body), via=projects.VIA_TASK_PAGE))
-        elif (m := self._RE_TASK_ROLE.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: role_api.edit_task_role(
-                m.group(1), m.group(2), projects.json_object(body), task_router=self._task_router,
-                bus=self._supervisor.bus, source=self._web_adapter._address))
-        elif path == "/api/gates" and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: gate_service.list_gates(query))
-        elif (m := self._RE_TASK_GATE_MESSAGES.match(path)) and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: gate_service.thread(m.group(1), m.group(2)))
-        elif (m := self._RE_TASK_GATE_MESSAGES.match(path)) and method == "POST":
-            await self._answer(writer, HTTP_200, lambda: self._gate_message(m.group(1), m.group(2), body, end=False))
-        elif (m := self._RE_TASK_GATE_END.match(path)) and method == "POST":
-            await self._answer(writer, HTTP_200, lambda: self._gate_message(m.group(1), m.group(2), body, end=True))
-        elif (m := self._RE_TASK_WAIT_ACTION.match(path)) and method == "POST":
-            await self._answer(writer, HTTP_200, lambda: self._wait_action(m.group(1), m.group(2), m.group(3)))
         elif (m := self._RE_TASK_WORKSPACE_DISCARD.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: self._discard_workspace(m.group(1), int(m.group(2))))
         elif (m := self._RE_TASK_START.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: projects.start_ready_task(
                 m.group(1), self._supervisor.bus, self._web_adapter._address))
-        elif (m := self._RE_TASK_ROOM.match(path)) and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: self._task_room(m.group(1), query))
         elif (m := self._RE_TASK_DETAIL.match(path)) and method == "GET":
             await self._handle_task_detail(m.group(1), writer)
         elif path == "/api/workspaces/check" and method == "GET":
@@ -1274,18 +1250,6 @@ class AgentHTTPServer:
         if not await db_api_clients.revoke(client_id):
             raise projects.RequestError(HTTP_404, f"no active API client {client_id}")
         return {"revoked": client_id}
-
-    async def _gate_message(self, task_id: str, label: str, body: bytes, *, end: bool) -> dict[str, Any]:
-        """The user's message in a gate of the task, or their end of its discussion (``gate_service``)."""
-        return await gate_service.post_message(
-            task_id, label, projects.json_object(body) if body else {},
-            has_planner=self._task_router.has_planner(task_id), bus=self._supervisor.bus,
-            source=self._web_adapter._address, end=end)
-
-    async def _wait_action(self, task_id: str, label: str, action: str) -> dict[str, Any]:
-        request = wait_service.resume if action == "resume" else wait_service.cancel
-        return await request(task_id, label, has_planner=self._task_router.has_planner(task_id),
-                             bus=self._supervisor.bus, source=self._web_adapter._address)
 
     async def _discard_workspace(self, task_id: str, workspace_id: int) -> dict[str, Any]:
         """The user drops a step worktree a task that is not running keeps: its directory and branch go. The task's
@@ -1990,28 +1954,6 @@ class AgentHTTPServer:
         await writer.drain()
 
     # --- Task detail handlers ---
-
-    async def _task_room(self, task_id: str, query: Mapping[str, str]) -> dict[str, Any]:
-        """``GET /api/tasks/:id/room``: the task's agent room (``room.task_view``), filtered by ``kind``, ``from``,
-        ``unanswered`` and ``after`` (a message id; the newer ones only), at most ``limit``."""
-        from .room import TASK_VIEW_LIMIT, task_view
-
-        def number(name: str, default: int) -> int:
-            raw = query.get(name) or ""
-            if not raw:
-                return default
-            if not raw.isdigit():
-                raise projects.RequestError(HTTP_400, f"{name} must be a whole number")
-            return int(raw)
-
-        pool = self._worker_pool
-        view = await task_view(task_id, runs=pool.room_runs(task_id) if pool is not None else None,
-                               kind=query.get("kind") or None, sender=query.get("from") or None,
-                               unanswered=query.get("unanswered") in ("1", "true"),
-                               after=number("after", 0), limit=number("limit", TASK_VIEW_LIMIT))
-        if view is None:
-            raise projects.RequestError(HTTP_404, "task not found")
-        return view
 
     async def _handle_task_detail(
         self, task_id: str, writer: asyncio.StreamWriter,

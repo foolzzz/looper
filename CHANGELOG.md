@@ -18,6 +18,24 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.65] - 2026-10-24
+
+### Changed
+
+- **Task gates, waits, role edits and the task room move to the versioned API.** The gate list and discussion (`ops/gates/*`), `waits.resume`/`waits.cancel`, `tasks.role_update` and `tasks.room_view` under `/api/v1/` replace eight legacy HTTP methods (`GET /api/gates`, `GET`/`POST /api/tasks/{id}/gates/{step}/messages`, `POST .../gates/{step}/end`, `POST .../waits/{step}/{resume|cancel}`, `PUT .../roles/{key}`, `GET .../room`), which are removed; the dashboard and the prompt-evaluation and DSH scripts use the new routes. A gate message posted without an API client is now attributed to the dashboard. Manager prompts and tools are unchanged. ([#474](https://github.com/foolzzz/looper/pull/474))
+
+## [2.13.64] - 2026-10-24
+
+### Added
+
+- **`api` runtime type, first step.** Adds the in-process Model API adapter (OpenAI Responses over an API key, Manager only, no executable) and the registry support it needs: a typed per-adapter role restriction (`RuntimeAdapter.roles`), in-process detection and probing (`RuntimeAdapter.in_process`) and import messages. The adapter is not in `ADAPTERS`, so it cannot be detected, selected or started and users see no change; no prompt or tool changed. Adds the `openai` package as a dependency. ([#478](https://github.com/foolzzz/looper/pull/478))
+
+## [2.13.63] - 2026-10-24
+
+### Documentation
+
+- **API runtime RFC.** Adds the approved RFC for an agent runtime that calls model APIs directly through the official Python SDKs, with the Manager as its first role, and its development schedule (stage 1: `openai` SDK on OpenAI Responses; stage 2: `anthropic` SDK). Documentation only; no code, prompt or tool changes. ([#475](https://github.com/foolzzz/looper/pull/475))
+
 ## [2.13.62] - 2026-10-23
 
 ### Changed

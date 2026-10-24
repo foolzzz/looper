@@ -38,11 +38,11 @@ function answer(url: string): unknown {
   if (url.includes("/conversation")) return { conversation: [] };
   if (url.endsWith("/projects")) return { projects: [{ project_id: "p1", name: "Proj", description: "", work_dir: "", task_count: 1, active_count: 0 }] };
   if (url.includes("/manager/session")) return { effective: { profile: null }, choices: [], session: null };
-  if (url.includes("/api/gates")) return { gates: [], total: 0, limit: 50, offset: 0, counts: { open: 0, waiting_user: 0, waiting_planner: 0, closed: 0, all: 0 } };
+  if (url.includes("/api/v1/ops/gates/list")) return { status: "ok", result: { gates: [], total: 0, limit: 50, offset: 0, next_cursor: null, has_more: false, counts: { open: 0, waiting_user: 0, waiting_planner: 0, closed: 0, all: 0 } } };
   if (url.includes("/agent-settings")) return undefined; // a 404: the card says it could not load
   if (url.includes("/knowledge")) return { documents: [], skills: [], total_bytes: 0 };
   if (url.includes("/schedules")) return { schedules: [] };
-  if (url.includes("/room")) return { enabled: true, seats: [], by_step: {}, more: false, counts: { messages: 0, by_kind: {}, questions: 0, unanswered: 0 }, messages: [] };
+  if (url.includes("/room")) return { status: "ok", result: { enabled: true, seats: [], by_step: {}, more: false, counts: { messages: 0, by_kind: {}, questions: 0, unanswered: 0 }, messages: [] } };
   return {};
 }
 
@@ -284,7 +284,8 @@ describe("the dashboard keeps its place in the URL", () => {
 
     it("opens the user gates filters from the hash", async () => {
       await open("#gates?state=closed");
-      expect(requests.some((u) => u.includes("/gates") && u.includes("state=closed"))).toBe(true);
+      expect(vi.mocked(fetch).mock.calls.some(([url, options]) =>
+        url === "/api/v1/ops/gates/list" && JSON.parse(String(options?.body)).state === "closed")).toBe(true);
     });
 
     it("opens a schedule's list filter from the hash", async () => {
