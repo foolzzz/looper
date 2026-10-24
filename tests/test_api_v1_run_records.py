@@ -67,15 +67,31 @@ def test_missing_record_is_typed_not_found(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("action,body,reader,legacy", READS)
-@pytest.mark.parametrize("token", [TOKEN, CLIENT_TOKEN])
+def test_run_reads_refuse_authenticated_clients_before_validation_or_database_access(
+        tmp_path, monkeypatch, clients, action, body, reader, legacy):
+    read = AsyncMock(side_effect=AssertionError("must not read"))
+    monkeypatch.setattr(llm_records, reader, read)
+    async def run():
+        async with _serving(tmp_path, listen=True) as server:
+            status, _, answer = await _send(server, "GET /api/v1/whoami", _bearer(CLIENT_TOKEN))
+            assert status == 200 and answer["result"]["principal"] == "client"
+            for payload in (json.dumps(body), "not json"):
+                status, _, answer = await _send(server, f"POST /api/v1/runs/{action}",
+                                                _bearer(CLIENT_TOKEN), payload)
+                assert status == 403 and answer["status"] == "error" and answer["error"]["code"] == "forbidden"
+            read.assert_not_awaited()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("action,body,reader,legacy", READS)
 def test_retired_get_is_404_with_authenticated_v1_positive_control(
-        tmp_path, monkeypatch, clients, action, body, reader, legacy, token):
+        tmp_path, monkeypatch, clients, action, body, reader, legacy):
     record = {"id": 1, "metadata": None, "status": "interrupted"}
     value = record if action == "get" else {"agent_id": "worker-example"} if action == "usage" else [record]
     monkeypatch.setattr(llm_records, reader, AsyncMock(return_value=value))
     async def run():
         async with _serving(tmp_path) as server:
-            status, _, answer = await post(server, action, body, token)
+            status, _, answer = await post(server, action, body)
             assert status == 200 and answer["status"] == "ok" and answer["result"]
             assert (await _send(server, f"GET {legacy}", _bearer(TOKEN)))[0] == 404
     asyncio.run(run())
@@ -102,7 +118,8 @@ def test_generated_cli_sends_the_declared_ordinary_read(tmp_path, capsys, action
         method, path, _, sent = server.requests[-1]
         assert (method, path, sent) == ("POST", f"/api/v1/runs/{action}", body)
         op = api_v1.find(method, path)
-        assert not op.hand and op.tool is None and op.risk == "read"
+        assert not op.hand and op.tool is None and op.risk == "read" and op.operator_only
+        assert api_v1.document()["paths"][f"/runs/{action}"]["post"]["x-looper-operator-only"] is True
         assert "202" not in api_v1.document()["paths"][f"/runs/{action}"]["post"]["responses"]
     finally:
         server.close()

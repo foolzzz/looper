@@ -19,9 +19,15 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 async def _api(tmp_path, pool, *, client=True):
     _, token = await api_clients.create("Run records", pool=pool)
     async with _serving(tmp_path, listen=True) as server:
+        if client:
+            status, _, answer = await _send(server, "GET /api/v1/whoami", _bearer(token))
+            assert status == 200 and answer["result"]["principal"] == "client"
         async def call(action, body):
             path = f"/api/v1/runs/{action}"
-            status, _, answer = await _send(server, f"POST {path}", _bearer(token if client else TOKEN),
+            if client:
+                status, _, answer = await _send(server, f"POST {path}", _bearer(token), json.dumps(body))
+                assert status == 403 and answer["error"]["code"] == "forbidden"
+            status, _, answer = await _send(server, f"POST {path}", _bearer(TOKEN),
                                              json.dumps(body))
             assert status == 200, answer
             assert answer["status"] == "ok"
