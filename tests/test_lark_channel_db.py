@@ -34,15 +34,24 @@ class _Writer:
 
 
 async def _call(method: str, path: str, body: Any = None, query: dict[str, str] | None = None) -> tuple[int, Any]:
+    from looper.agents import api_v1
     from looper.agents.http_server import AgentHTTPServer
+    from looper.agents.ops.clients import ClientOps
+    from looper.agents.ops.service import Platform
     from looper.agents.tiers.task import TaskRouter
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
     writer = _Writer()
-    await server._route_api(method, path, query or {}, b"" if body is None else json.dumps(body).encode(), writer)
+    payload = b"" if body is None else json.dumps(body).encode()
+    if path.startswith("/api/v1/"):
+        server._client_ops = ClientOps(Platform(bus=SimpleNamespace(), task_router=server._task_router))
+        await server._handle_v1(method, path, query or {}, {}, payload, writer, api_v1.OPERATOR)
+    else:
+        await server._route_api(method, path, query or {}, payload, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload)
+    status, answer = int(head.split()[1]), json.loads(payload)
+    return status, answer["result"] if path.startswith("/api/v1/") and status == 200 else answer
 
 
 def test_a_lark_row_from_before_loses_its_app_keys_and_old_name(monkeypatch: pytest.MonkeyPatch,
@@ -90,7 +99,7 @@ def test_saving_binds_the_allowlist_and_the_status_names_people(monkeypatch: pyt
         await record_rejected("channel-lark", OTHER)
         await record_rejected("channel-lark", OTHER, chat_id="oc_team")  # an @-mention of the bot in a group
         await record_rejected("channel-lark", OPEN_ID)  # on the allowlist meanwhile: not shown
-        status, lark = await _call("GET", "/api/channels/lark/status")
+        status, lark = await _call("POST", "/api/v1/channels/status", {"channel_type": "lark"})
         assert status == 200
         assert lark["bot"] == {"name": "HelperBot", "app_id": "cli_main", "open_id": "ou_bot0000001",
                                "profile": "cli_main"}
@@ -105,13 +114,13 @@ def test_saving_binds_the_allowlist_and_the_status_names_people(monkeypatch: pyt
         status, view = await _call("PUT", "/api/channel-configs/channel-lark", {
             "config": {**view["config"], "profile": "other"}})
         assert status == 200 and view["config"]["allowlist_app_id"] == "cli_main"
-        status, lark = await _call("GET", "/api/channels/lark/status")
+        status, lark = await _call("POST", "/api/v1/channels/status", {"channel_type": "lark"})
         assert lark["problem"].startswith("the sender allowlist was made for app cli_main; profile other is app "
                                           "cli_other")
 
-        status, found = await _call("GET", "/api/channels/lark/people", query={"q": "alan"})
+        status, found = await _call("POST", "/api/v1/channels/people", {"channel_type": "lark", "q": "alan"})
         assert status == 200 and [p["open_id"] for p in found["people"]] == [OTHER]
-        assert (await _call("GET", "/api/channels/lark/people", query={"q": ""}))[0] == 400
+        assert (await _call("POST", "/api/v1/channels/people", {"channel_type": "lark", "q": ""}))[0] == 400
         status, payload = await _call("PUT", "/api/channel-configs/channel-lark", {
             "config": {"profile": "bad profile", "allowed_open_ids": [OPEN_ID]}})
         assert status == 400 and "not a lark-cli profile name" in payload["error"]
