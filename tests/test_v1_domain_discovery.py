@@ -1,4 +1,4 @@
-"""Domain discovery and the operation order captured from main (287755b90)."""
+"""Domain discovery and the operation order captured from main (284892a11)."""
 
 import importlib
 import pkgutil
@@ -26,6 +26,7 @@ installs.create installs.update installs.delete installs.project catalog_sources
 catalog_sources.import_mcp catalog_sources.upload catalog_sources.git_preview catalog_sources.git_import
 catalog_sources.create_skill catalog_sources.create_mcp project_skills.add project_skills.get
 project_skills.update project_skills.delete waits.resume waits.cancel tasks.role_update tasks.room_view
+tasks.activity tasks.activity_detail tasks.conversation tasks.activity_stream
 channels.status channels.people gate_settings.get gate_settings.update managers.list managers.create
 managers.update managers.delete manager_templates.put manager_templates.delete
 """.split()

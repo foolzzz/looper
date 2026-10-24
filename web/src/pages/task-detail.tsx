@@ -1453,19 +1453,23 @@ function EarlierLine() {
   );
 }
 
-export function SessionsTab({ taskId }: { taskId: string }) {
+export function SessionsTab({ taskId, status }: { taskId: string; status: TaskDetail["status"] }) {
   const [live, setLive] = useState(true);
   const { events, loadingEarlier, latestSeq, scrollRef, onScroll, append } = useEventWindow(
     taskId,
     (before, signal) => fetchTaskActivityWindow(taskId, before, signal),
   );
 
-  // Stream what comes after the latest loaded event, once the first page is read.
+  // A terminal stream ends with done; subscribe again when the task resumes.
   useEffect(() => {
     if (latestSeq === null) return;
+    let stopped = false;
     setLive(true);
-    return streamTaskActivity(taskId, latestSeq, append, () => setLive(false));
-  }, [taskId, latestSeq, append]);
+    const stop = streamTaskActivity(taskId, latestSeq, append, () => {
+      if (!stopped) setLive(false);
+    });
+    return () => { stopped = true; stop(); };
+  }, [taskId, status, latestSeq, append]);
 
   const grouped = new Map<string, ActivityEvent[]>();
   for (const ev of events) {
@@ -2278,7 +2282,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
         {task && tab === "agents" && (
           <TaskAgentsTab task={task} runs={taskRuns.runs} runsError={taskRuns.error} onAgents={(agents) => setTask((t) => (t ? { ...t, agents } : t))} />
         )}
-        {task && tab === "sessions" && <SessionsTab taskId={taskId} />}
+        {task && tab === "sessions" && <SessionsTab taskId={taskId} status={task.status} />}
         {task && tab === "conversation" && <ConversationTab taskId={taskId} />}
       </div>
     </div>
