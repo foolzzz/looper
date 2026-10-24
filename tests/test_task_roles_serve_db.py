@@ -235,8 +235,8 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             sonnet = api.post("/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
                                                       "model_id": _builtin_model(api, "sonnet")})
             # A skill installed for the roles a Planner defines only: it loads for a run of a role naming it.
-            notes = api.post("/api/catalog/skills", {"name": "role-notes", "description": "Notes for roles.",
-                                                     "content": "Reply ROLE-NOTES.\n"})["item"]
+            notes = api.post("/api/v1/catalog_sources/create_skill", {"name": "role-notes", "description": "Notes for roles.",
+                                                     "content": "Reply ROLE-NOTES.\n"})["result"]["item"]
             installed = api.post("/api/v1/installs/create", {"item_id": notes["item_id"], "scope": "global", "roles": ["task_role"]})["result"]
             assert installed["install"]["roles"] == ["task_role"]
             ids: dict[str, str] = {}
@@ -250,15 +250,15 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
                             {"profile_ids": [sonnet["profile"]["profile_id"]]})
                 ids[variant] = api.post("/api/tasks/create", {"requirement": f"build calc variant={variant}",
                                                               "project_id": project["project_id"]})["task_id"]
-                api.post("/api/tasks/start", {"task_id": ids[variant]})
+                api.post("/api/v1/ops/task_control/start", {"task_id": ids[variant]})
             first = _wait(api, ids, VARIANTS, ("completed", "failed", "stopped", "cancelled"))
             before = {variant: first[variant]["roles"] for variant in ("restart", "startover")}
             # Where the dashboard lists runs: the Runs page and a History page (their records), and the Chat page.
             listed = {"records": {variant: api.get("/api/llm-records", task_id=ids[variant], limit=500)["records"]
                                   for variant in ("roles", "off")},
                       "targets": api.get("/api/chat/targets")["targets"]}
-            api.post("/api/tasks/start", {"task_id": ids["restart"]})
-            api.post("/api/tasks/start", {"task_id": ids["startover"], "start_over": True})
+            api.post("/api/v1/ops/task_control/restart", {"task_id": ids["restart"]})
+            api.post("/api/v1/ops/task_control/start_over", {"task_id": ids["startover"]})
             # Until both left their failed state: waiting for an end at once would read the first run's.
             _wait_left(api, ids, ("restart", "startover"), "failed")
             again = _wait(api, ids, ("restart", "startover"), ("completed", "failed", "stopped", "cancelled"))

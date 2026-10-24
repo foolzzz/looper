@@ -1,3 +1,3 @@
 """Dashboard domain registry; append one module per migration."""
 
-MODULES = ("status", "catalog", "schedule_reads")
+MODULES = ("status", "task_controls", "task_configuration", "catalog", "catalog_sources", "project_skills", "task_interactions", "channel_discovery", "managers", "schedule_reads")

@@ -185,9 +185,10 @@ REVIEW_EXAMPLE = Path(__file__).resolve().parents[2] / "docs" / "examples" / "ma
 def _seed_review_manager(api: Api, project_id: str) -> None:
     """The example Manager and its pr_review template (bound to the dialog's project), through the API."""
     example = json.loads(REVIEW_EXAMPLE.read_text(encoding="utf-8"))
-    api.post("/api/managers", example["manager"])
-    api.put(f"/api/managers/manager-{example['manager']['key']}/templates/pr_review",
-            {**example["templates"]["pr_review"], "project_id": project_id})
+    api.post("/api/v1/managers/create", example["manager"])
+    api.post("/api/v1/manager_templates/put",
+             {"manager_id": f"manager-{example['manager']['key']}", "key": "pr_review",
+              **example["templates"]["pr_review"], "project_id": project_id})
 
 
 def _writes(look: Look, *, status: str | None = None, tool: str | None = None) -> list[dict[str, Any]]:
@@ -1186,7 +1187,7 @@ def _make_two_projects_schedules(api: Api, project_id: str) -> None:
 _CREATE = ("looper_task_create", {"requirement": SLOW_TASK, "title": "hello 脚本", "project": PROJECT})
 def _gate_messages(look: Look) -> list[dict[str, Any]]:
     """The user's messages in the running task's gate."""
-    thread = look.api.get(f"/api/tasks/{look.task}/gates/{GATE_LABEL}/messages")["messages"]
+    thread = look.api.post("/api/v1/ops/gates/messages", {"task_id": look.task, "gate": GATE_LABEL})["result"]["messages"]
     return [m for m in thread if m["role"] == "user"]
 
 
@@ -1911,7 +1912,7 @@ def _start_slow_task(api: Api, project_id: str, *, timeout: float,
     if check_budget is not None:
         check_budget()
     task_id = api.post("/api/tasks/create", {"requirement": SLOW_TASK, "project_id": project_id})["task_id"]
-    api.post(f"/api/tasks/{task_id}/start", {})
+    api.post("/api/v1/ops/task_control/start", {"task_id": task_id})
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if INTERRUPTED.is_set():
@@ -2006,7 +2007,7 @@ def _stop_leftovers(api: Api) -> None:
     try:
         for task in api.get("/api/tasks")["tasks"]:
             if task.get("status") in ACTIVE:
-                api.post("/api/tasks/stop", {"task_id": task["task_id"]})
+                api.post("/api/v1/ops/task_control/stop", {"task_id": task["task_id"]})
     except Exception:
         pass
 
@@ -2036,7 +2037,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
     No reply within ``timeout`` is an error of class ``timeout``, and any other exception, such as the slow task
     not getting under way, one of class ``harness``; the turns after an error are not sent. With ``cap_left``,
     check the case's spend before sending a turn and while waiting for its task or reply."""
-    started, since = time.monotonic(), _last_action(database_url)
+    started = time.monotonic()
     turns: list[dict[str, Any]] = []
     error: dict[str, Any] = {}
 
@@ -2082,6 +2083,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             client_id = created["client"]["id"]
             client_api = Api(api.base_url, token=created["token"], timeout=api.timeout)
         known = frozenset(t["task_id"] for t in api.get("/api/tasks")["tasks"])
+        # Setup uses audited operator operations too; only the dialog's actions belong to its checks.
+        since = _last_action(database_url)
         previous: Look | None = None
         for say in dialog.says:
             text = say.text_from(previous) if say.text_from and previous else say.text

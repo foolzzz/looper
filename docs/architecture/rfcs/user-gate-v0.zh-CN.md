@@ -350,7 +350,7 @@ task_user_gate_posts           Looper 发到渠道的关卡消息：路由表（
 - `PlanStep` 加 `kind`；关卡的 `started` 为「不是 pending」。`PlanView` 加 `gates`（`{编号: 状态}`），供 `gates` 和 `replan` 的校验用。
 - 任务日志加 `gate_opened`、`gate_updated`、`gate_cancelled`、`gate_closed`，只给任务页看（同 `profile_choice`）；规划者从计划行看到关卡。
 - 项目执行设置：`user_gates`（`on` | `off`；G1 为空即 `off`，G2 起为空即 `on`）和 `gate_reminder_hours`（0–168，空为 24，0 为不提醒），随项目设置导出导入。
-- 系统设置 `user_gates.dashboard_target`：`{channel, chat}`，或为空（G2）。只能是某个渠道白名单里已有的聊天（同定时任务的通知目标，`schedules.notify_targets`）；接口 `GET`、`PUT /api/gate-settings`（Q17）。只对不是从飞书、Telegram 来的任务生效。
+- 系统设置 `user_gates.dashboard_target`：`{channel, chat}`，或为空（G2）。只能是某个渠道白名单里已有的聊天（同定时任务的通知目标，`schedules.notify_targets`）；接口 `POST /api/v1/gate_settings/get`、`POST /api/v1/gate_settings/update`（Q17）。只对不是从飞书、Telegram 来的任务生效。
 - `STATUS_GROUPS` 加 `"waiting_user": TaskGroup.NEEDS_YOU`；`ACTIVE_STATUSES` 改为包括 `NEEDS_YOU` 分组；`task.py` 重启判断里写死的状态列表改为由分组推出，或至少加上 `waiting_user`。
 
 ## 13. 提醒
@@ -465,7 +465,7 @@ task_user_gate_posts           Looper 发到渠道的关卡消息：路由表（
 | Q14 | 关卡后面的消息发成新消息，还是回复在卡片下（G2，按建议） | **已定：回复在卡片下**，飞书成一个话题，Telegram 成一串回复；规划者的回复回复在它回答的那条用户消息下（那条消息来自这个聊天时）。这样回复其中任何一条都对得上关卡。没有采用的做法：每条都发新消息（群里刷屏，上下文散开） |
 | Q15 | 哪些关卡消息发到渠道（G2，按建议） | **已定：规划者和 Looper 的全部消息**，包括规划者没能处理（`error`）、关闭时才到（`late`）和任务继续（`resumed`）。只在渠道里作答的用户要知道自己的话没送到或变成了补充说明。用户自己的消息不发 |
 | Q16 | Telegram 的关卡消息用不用 MarkdownV2（G2，按建议） | **已定：纯文本。** 规划者的回复是任意 Markdown，MarkdownV2 要转义十几个字符，转义错了整条发不出去；任务结束通知现在先试 MarkdownV2、失败再发纯文本，关卡消息直接发纯文本。飞书照旧发 Markdown |
-| Q17 | 网页任务的目标怎么存、在哪里设置（G2，按建议） | **已定：系统设置 `user_gates.dashboard_target`（JSON `{channel, chat}`），`GET`、`PUT /api/gate-settings`，在 Settings → Channels 选**；候选只有渠道白名单里已有的聊天（同定时任务的通知目标），存之前再查一次。没有采用的做法：放进渠道配置（`channel_configs`）：它是「发给谁」的选择，跨两个渠道，不属于某一个渠道 |
+| Q17 | 网页任务的目标怎么存、在哪里设置（G2，按建议） | **已定：系统设置 `user_gates.dashboard_target`（JSON `{channel, chat}`），`POST /api/v1/gate_settings/get`、`POST /api/v1/gate_settings/update`，在 Settings → Channels 选**；候选只有渠道白名单里已有的聊天（同定时任务的通知目标），存之前再查一次。没有采用的做法：放进渠道配置（`channel_configs`）：它是「发给谁」的选择，跨两个渠道，不属于某一个渠道 |
 | Q18 | 渠道里回复关卡的消息要不要写进管家的聊天记录（G2，按建议） | **已定：不写。** 它在关卡的讨论记录里，任务页和规划者都看得到；写进管家的聊天记录会让管家以为这是它的对话，下一轮的「最近的对话」里还会重复出现 |
 | Q19 | 发到渠道失败了怎么办（评审 S1，按建议） | **已定：什么都没发出去的，2 分钟、8 分钟后各重试一次，三次都失败才记 `failed`**，关卡后面的消息排在它后面。只在渠道里作答的用户看不到任务页，一次瞬时错误不该让规划者的追问就此丢掉，要等到 24 小时后的提醒。没有采用的做法：不重试（原来的做法）；一直重试（渠道长期不通时刷日志，任务页上也看不出失败） |
 | Q20 | 怎么避免重复发（评审 S2，按建议） | **已定：飞书带幂等键 `gate-<编号>`，只有被回复的消息不在了才改成单独发**。先发后记，发出和记下之间重启或数据库出错时会再发一次；回复超时其实已发出时，原来「失败就改成单独发」也会重复。Telegram 没有幂等键，这种重复仍可能，用 `allow_sending_without_reply` 处理消息不在的情况。没有采用的做法：先记「发送中」再发（重启后不知道发没发出去，还是要猜） |

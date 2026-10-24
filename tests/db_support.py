@@ -113,3 +113,17 @@ async def until(check: Callable[[], Any], what: str = "the condition", timeout: 
     while not check():
         assert loop.time() < deadline, f"timed out waiting for {what}"
         await asyncio.sleep(0.01)
+
+
+async def call_v1(server, path, body):
+    """Exercise v1 dispatch on existing service fixtures; retain their decoded legacy assertions."""
+    import json
+    from looper.agents import api_v1
+    from looper.agents.ops.clients import ClientOps
+    from looper.agents.ops.service import Platform
+
+    if server._client_ops is None:
+        server._client_ops = ClientOps(Platform(bus=server._supervisor.bus, task_router=server._task_router))
+    status, answer = await server._answer_v1("POST", path, api_v1.find("POST", path), {},
+                                             json.dumps(body).encode(), api_v1.OPERATOR)
+    return int(status.split()[0]), answer.get("result", {"error": answer.get("error", {}).get("message", "")})

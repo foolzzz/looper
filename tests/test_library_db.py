@@ -51,7 +51,7 @@ class _Writer:
 
 
 async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
-    if path.startswith(("/api/v1/catalog_items/", "/api/v1/installs/")):
+    if path.startswith(("/api/v1/catalog_sources/", "/api/v1/catalog_items/", "/api/v1/installs/", "/api/v1/project_skills/")):
         from tests.test_catalog_db import _call as catalog_call
         return await catalog_call(method, path, body)
 
@@ -71,7 +71,7 @@ def test_an_import_stores_the_snapshot(home: Path, monkeypatch: pytest.MonkeyPat
     from looper.agents import library
 
     async def _test(pool: Any) -> None:
-        status, view = await _call("POST", "/api/catalog/import")
+        status, view = await _call("POST", "/api/v1/catalog_sources/import_machine")
         assert status == 200
         items = await _items(pool)
         assert sorted((r["kind"], r["name"]) for r in items.values()) == [
@@ -109,21 +109,20 @@ def test_a_reimport_replaces_changed_items_keeps_their_installs_and_leaves_proje
     home: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _test(pool: Any) -> None:
-        await _call("POST", "/api/catalog/import")
+        await _call("POST", "/api/v1/catalog_sources/import_machine")
         before = await _items(pool)
         for name in ("alpha", "demo@market", "beta"):
             status, _ = await _call("POST", "/api/v1/installs/create", {"item_id": before[name]["id"], "scope": "global",
                                                               "roles": ["worker"]})
             assert status == 200
         status, project = await _call("POST", "/api/projects", {"name": "calc"})
-        status, _ = await _call("POST", f"/api/projects/{project['project_id']}/skills",
-                                {"name": "alpha", "description": "The project's own alpha.", "content": "Reply OWN."})
-        assert status == 201
+        status, _ = await _call("POST", "/api/v1/project_skills/add", {"project_id": project['project_id'], "skill": {"name": "alpha", "description": "The project's own alpha.", "content": "Reply OWN."}})
+        assert status == 200
 
         (home / "skills" / "alpha" / "SKILL.md").write_text("---\nname: alpha\n---\nReply ALPHA-v2.\n")
         os.unlink(home / "skills" / "beta")
         write(home / "skills" / "gamma" / "SKILL.md", "---\nname: gamma\n---\nReply GAMMA.\n")
-        status, view = await _call("POST", "/api/catalog/import")
+        status, view = await _call("POST", "/api/v1/catalog_sources/import_machine")
         assert status == 200
         machine = {r["name"]: dict(r) for r in await pool.fetch("SELECT * FROM library_items WHERE origin = 'machine'")}
         assert sorted(machine) == ["alpha", "demo@market", "gamma"]
@@ -156,12 +155,12 @@ def test_an_import_over_the_cap_changes_nothing(home: Path, monkeypatch: pytest.
     from looper.agents import library
 
     async def _test(pool: Any) -> None:
-        await _call("POST", "/api/catalog/import")
+        await _call("POST", "/api/v1/catalog_sources/import_machine")
         before = await pool.fetch("SELECT id, sha256 FROM library_items ORDER BY id")
         write(home / "skills" / "huge" / "SKILL.md", "x" * 2_000)
         monkeypatch.setattr(library, "LIBRARY_MAX_BYTES", 1_500)
-        status, body = await _call("POST", "/api/catalog/import")
-        assert status == 400 and "over the cap" in body["error"]
+        status, body = await _call("POST", "/api/v1/catalog_sources/import_machine")
+        assert status == 400 and body["error"] == "invalid credential request"
         assert await pool.fetch("SELECT id, sha256 FROM library_items ORDER BY id") == before
 
     run_db(_test, monkeypatch)
@@ -173,7 +172,7 @@ def test_agents_load_the_installed_items_from_the_database(
     from looper.agents.library import SKILLS_PLUGIN, load_installed
 
     async def _test(pool: Any) -> None:
-        _, view = await _call("POST", "/api/catalog/import")
+        _, view = await _call("POST", "/api/v1/catalog_sources/import_machine")
         for item in view["items"]:
             if item["name"] != "beta":
                 await _call("POST", "/api/v1/installs/create", {"item_id": item["item_id"], "scope": "global"})

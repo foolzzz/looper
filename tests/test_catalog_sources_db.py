@@ -61,7 +61,7 @@ async def _upload(filename: str, data: bytes | str, name: str | None = None) -> 
     body: dict[str, Any] = {"filename": filename, "content_base64": _b64(data)}
     if name is not None:
         body["name"] = name
-    return await _call("POST", "/api/catalog/upload", body)
+    return await _call("POST", "/api/v1/catalog_sources/upload", body)
 
 
 async def _items() -> list[dict[str, Any]]:
@@ -156,7 +156,7 @@ def test_an_uploaded_skill_enters_the_catalog_installed_nowhere_and_loads_where_
 
     async def _test(pool: Any) -> None:
         status, body = await _upload("SKILL.md", _skill())
-        assert status == 201, body
+        assert status == 200, body
         item = body["item"]
         assert (item["kind"], item["name"], item["origin"], item["qualified_name"]) == (
             "skill", "stamp", "upload", "personal:stamp")
@@ -165,7 +165,7 @@ def test_an_uploaded_skill_enters_the_catalog_installed_nowhere_and_loads_where_
         zipped = _zip({"tool/SKILL.md": _skill("tool", "Run scripts/go.sh."), "tool/scripts/go.sh": "echo go\n"},
                       modes={"tool/scripts/go.sh": 0o755})
         status, body = await _upload("tool.zip", zipped)
-        assert status == 201 and body["item"]["file_count"] == 2, body
+        assert status == 200 and body["item"]["file_count"] == 2, body
         tool = body["item"]["item_id"]
         root = tmp_path / "runtime"
         assert (await load_installed(root, "worker")).items == ()  # in the catalog, installed nowhere
@@ -196,7 +196,7 @@ def test_an_uploaded_plugin_zip_enters_whole_and_its_binary_files_are_left_out(
             "demo/.DS_Store": b"\x00",
         })
         status, body = await _upload("demo.zip", zipped)
-        assert status == 201, body
+        assert status == 200, body
         item = body["item"]
         assert (item["kind"], item["name"], item["version"], item["description"], item["file_count"]) == (
             "plugin", "demo", "2.0.0", "Demo plugin.", 3)
@@ -215,22 +215,22 @@ def test_a_name_taken_outside_projects_is_refused_with_409_and_an_upload_can_be_
     async def _test(pool: Any) -> None:
         await _import(pool, "skill:stamp", "plugin:demo")
         calc, = await _projects("calc")
-        assert (await _call("POST", f"/api/projects/{calc}/skills", {
-            "name": "notes", "description": "A project's own.", "content": "Body."}))[0] == 201
+        assert (await _call("POST", "/api/v1/project_skills/add", {"project_id": calc, "skill": {
+            "name": "notes", "description": "A project's own.", "content": "Body."}}))[0] == 200
         status, body = await _upload("SKILL.md", _skill())
         assert status == 409
         assert body["error"] == ("the catalog already has a skill named 'stamp' (imported from this machine); "
                                  "give this one another name")
         status, body = await _upload("SKILL.md", _skill(), name="stamp-two")
-        assert status == 201 and body["item"]["qualified_name"] == "personal:stamp-two"
+        assert status == 200 and body["item"]["qualified_name"] == "personal:stamp-two"
         assert "\nname: stamp-two\n" in await _skill_md(body["item"]["item_id"])
         assert "license: MIT" in await _skill_md(body["item"]["item_id"])  # other frontmatter stays
         # A project's own skill loads as project:<name>; an upload of its name does not clash with it.
-        assert (await _upload("SKILL.md", _skill("notes")))[0] == 201
+        assert (await _upload("SKILL.md", _skill("notes")))[0] == 200
         plugin = _zip({".claude-plugin/plugin.json": json.dumps({"name": "demo"}), "README.md": "x\n"})
         assert (await _upload("demo.zip", plugin))[0] == 409
         status, body = await _upload("demo.zip", plugin, name="demo-two")
-        assert status == 201
+        assert status == 200
         _, detail = await _call("POST", "/api/v1/catalog_items/get", {"item_id": body['item']['item_id']})
         assert detail["item"]["qualified_name"] == "demo-two"
         for bad, reason in (("Bad Name", "must be lowercase letters"), ("personal", "a plugin Looper generates")):
@@ -272,7 +272,18 @@ def test_an_unsafe_or_invalid_zip_is_refused_whole_with_its_reason(
     run_db(_test, monkeypatch)
 
 
-def test_an_upload_that_is_not_a_skill_md_or_zip_or_over_its_cap_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(("filename", "content_base64", "extra", "reason"), [
+    ("skill.zip", _b64(b"PK\x03\x04 not really"), {}, "not a valid zip file"),
+    ("skill.tar", _b64(b"x"), {}, "upload a SKILL.md or a .zip"),
+    ("SKILL.md", _b64("---\ndescription: d\n---\nBody.\n"), {}, "has no name in its frontmatter"),
+    ("SKILL.md", _b64(b"\xff\xfe binary"), {}, "is not UTF-8 text"),
+    ("SKILL.md", _b64("x" * 101), {}, "an upload has at most 100 bytes"),
+    ("SKILL.md", "%%%", {}, "is not valid base64"),
+    ("SKILL.md", "eA==", {"extra": 1}, "does not match the declared schema"),
+])
+def test_an_upload_that_is_not_a_skill_md_or_zip_or_over_its_cap_is_refused(
+    monkeypatch: pytest.MonkeyPatch, filename: str, content_base64: str, extra: dict[str, Any], reason: str,
+) -> None:
     from looper.agents import catalog_sources
     from looper.agents.http_server import REQUEST_BODY_MAX_BYTES
 
@@ -281,19 +292,9 @@ def test_an_upload_that_is_not_a_skill_md_or_zip_or_over_its_cap_is_refused(monk
     monkeypatch.setattr(catalog_sources, "UPLOAD_MAX_BYTES", 100)
 
     async def _test(pool: Any) -> None:
-        cases = [
-            (await _upload("skill.zip", b"PK\x03\x04 not really"), "not a valid zip file"),
-            (await _upload("skill.tar", b"x"), "upload a SKILL.md or a .zip"),
-            (await _upload("SKILL.md", "---\ndescription: d\n---\nBody.\n"), "has no name in its frontmatter"),
-            (await _upload("SKILL.md", b"\xff\xfe binary"), "is not UTF-8 text"),
-            (await _upload("SKILL.md", "x" * 101), "an upload has at most 100 bytes"),
-            (await _call("POST", "/api/catalog/upload", {"filename": "SKILL.md", "content_base64": "%%%"}),
-             "is not valid base64"),
-            (await _call("POST", "/api/catalog/upload", {"filename": "SKILL.md", "content_base64": "eA==",
-                                                         "extra": 1}), "unknown field 'extra'"),
-        ]
-        for (status, body), reason in cases:
-            assert status == 400 and reason in body["error"], (reason, body)
+        status, body = await _call("POST", "/api/v1/catalog_sources/upload", {
+            "filename": filename, "content_base64": content_base64, **extra})
+        assert status == 400 and reason in body["error"], body
         assert await _items() == []
 
     run_db(_test, monkeypatch)
@@ -307,7 +308,7 @@ def test_a_git_preview_lists_what_the_repository_holds_and_leaves_no_clone_behin
 ) -> None:
     async def _test(pool: Any) -> None:
         await _import(pool, "skill:beta")
-        status, body = await _call("POST", "/api/catalog/git/preview", {"url": repo.as_uri()})
+        status, body = await _call("POST", "/api/v1/catalog_sources/git_preview", {"url": repo.as_uri()})
         assert status == 200, body
         assert body["commit"] == _git(repo, "rev-parse", "HEAD") and (body["ref"], body["subpath"]) == (None, "")
         assert [(i["path"], i["kind"], i["name"], i["status"]) for i in body["items"]] == [
@@ -322,7 +323,7 @@ def test_a_git_preview_lists_what_the_repository_holds_and_leaves_no_clone_behin
             ("skills/alpha", "logo.png", "binary"), ("skills/beta", "hosts", "link out of the item"),
             ("skills/broken", "", "the SKILL.md of skills/broken has no frontmatter: it starts with a --- line, "
                                   "then name: and description:, then ---")}
-        status, body = await _call("POST", "/api/catalog/git/preview", {"url": repo.as_uri(),
+        status, body = await _call("POST", "/api/v1/catalog_sources/git_preview", {"url": repo.as_uri(),
                                                                         "subpath": "skills/alpha"})
         assert status == 200 and [(i["path"], i["name"]) for i in body["items"]] == [(".", "alpha")]
         assert _clones(scratch) == []
@@ -337,7 +338,7 @@ def test_a_git_import_adds_the_chosen_items_and_importing_again_updates_them_in_
     async def _test(pool: Any) -> None:
         url = repo.as_uri()
         commit = _git(repo, "rev-parse", "HEAD")
-        status, body = await _call("POST", "/api/catalog/git/import", {
+        status, body = await _call("POST", "/api/v1/catalog_sources/git_import", {
             "url": url + "/", "commit": commit,
             "items": [{"path": "skills/alpha"}, {"path": "plugins/demo", "name": "demo-kit"}]})
         assert status == 200, body
@@ -355,10 +356,10 @@ def test_a_git_import_adds_the_chosen_items_and_importing_again_updates_them_in_
         assert (await _call("POST", "/api/v1/catalog_items/update", {"item_id": alpha['item_id'], "fields": {"content": "Edited."}}))[1]["item"][
             "modified"] is True
         newer = _commit(repo, {"skills/alpha/SKILL.md": _skill("alpha", "Reply ALPHA-2.")})
-        _, preview = await _call("POST", "/api/catalog/git/preview", {"url": url})
+        _, preview = await _call("POST", "/api/v1/catalog_sources/git_preview", {"url": url})
         statuses = {i["path"]: (i["status"], i.get("modified")) for i in preview["items"]}
         assert statuses["skills/alpha"] == ("update", True) and statuses["plugins/demo"] == ("new", None)
-        status, body = await _call("POST", "/api/catalog/git/import", {
+        status, body = await _call("POST", "/api/v1/catalog_sources/git_import", {
             "url": url, "commit": newer, "items": [{"path": "skills/alpha"}, {"path": "skills/beta"}]})
         assert status == 200, body
         assert (body["added"], body["updated"]) == (["skill:beta"], ["skill:alpha"])
@@ -366,7 +367,7 @@ def test_a_git_import_adds_the_chosen_items_and_importing_again_updates_them_in_
         assert again["item_id"] == alpha["item_id"] and again["modified"] is False
         assert again["source"] == f"{url}@{newer}" and again["installs"] == [install["install"]]
         assert (await _skill_md(alpha["item_id"])).endswith("Reply ALPHA-2.\n")
-        _, preview = await _call("POST", "/api/catalog/git/preview", {"url": url})
+        _, preview = await _call("POST", "/api/v1/catalog_sources/git_preview", {"url": url})
         assert {i["path"]: i["status"] for i in preview["items"]}["skills/alpha"] == "unchanged"
         assert _clones(scratch) == []
 
@@ -379,26 +380,26 @@ def test_a_git_import_refuses_a_clash_a_moved_ref_and_an_unknown_path(
     async def _test(pool: Any) -> None:
         url = repo.as_uri()
         commit = _git(repo, "rev-parse", "HEAD")
-        assert (await _upload("SKILL.md", _skill("alpha")))[0] == 201
-        status, body = await _call("POST", "/api/catalog/git/import", {
-            "url": url, "items": [{"path": "skills/alpha"}, {"path": "skills/beta"}]})
+        assert (await _upload("SKILL.md", _skill("alpha")))[0] == 200
+        status, body = await _call("POST", "/api/v1/catalog_sources/git_import", {
+            "url": url, "commit": _git(repo, "rev-parse", "HEAD"), "items": [{"path": "skills/alpha"}, {"path": "skills/beta"}]})
         assert status == 409
         assert body["error"] == "the catalog already has a skill named 'alpha' (uploaded); give this one another name"
-        status, body = await _call("POST", "/api/catalog/git/import", {
-            "url": url, "items": [{"path": "skills/alpha", "name": "beta"}, {"path": "skills/beta"}]})
+        status, body = await _call("POST", "/api/v1/catalog_sources/git_import", {
+            "url": url, "commit": _git(repo, "rev-parse", "HEAD"), "items": [{"path": "skills/alpha", "name": "beta"}, {"path": "skills/beta"}]})
         assert status == 409 and body["error"] == "two of the chosen items are both named skill 'beta'; give one " \
                                                   "another name"
         assert [i["name"] for i in await _items()] == ["alpha"]  # nothing of a refused import is added
         _commit(repo, {"README.md": "# moved\n"})
-        status, body = await _call("POST", "/api/catalog/git/import", {
+        status, body = await _call("POST", "/api/v1/catalog_sources/git_import", {
             "url": url, "commit": commit, "items": [{"path": "skills/beta"}]})
         assert status == 409 and "moved from" in body["error"] and "preview it again" in body["error"]
         for path, reason in (("skills/broken", "has no frontmatter"),
                              ("skills/nowhere", "the repository has no plugin or skill at skills/nowhere")):
-            status, body = await _call("POST", "/api/catalog/git/import", {"url": url, "items": [{"path": path}]})
+            status, body = await _call("POST", "/api/v1/catalog_sources/git_import", {"url": url, "commit": _git(repo, "rev-parse", "HEAD"), "items": [{"path": path}]})
             assert status == 400 and reason in body["error"], body
-        status, body = await _call("POST", "/api/catalog/git/import", {
-            "url": url, "items": [{"path": "skills/alpha", "name": "alpha-from-git"}]})
+        status, body = await _call("POST", "/api/v1/catalog_sources/git_import", {
+            "url": url, "commit": _git(repo, "rev-parse", "HEAD"), "items": [{"path": "skills/alpha", "name": "alpha-from-git"}]})
         assert status == 200 and body["added"] == ["skill:alpha-from-git"]
         assert _clones(scratch) == []
 
@@ -428,8 +429,8 @@ def test_a_repository_that_is_not_plain_https_is_refused_before_anything_is_clon
     monkeypatch.setattr(catalog_sources, "_clone", _never)
 
     async def _test(pool: Any) -> None:
-        for path, body in (("/api/catalog/git/preview", fields),
-                           ("/api/catalog/git/import", {**fields, "items": [{"path": "."}]})):
+        for path, body in (("/api/v1/catalog_sources/git_preview", fields),
+                           ("/api/v1/catalog_sources/git_import", {**fields, "commit": "0" * 40, "items": [{"path": "."}]})):
             status, answer = await _call("POST", path, body)
             assert status == 400 and reason in answer["error"], answer
 
@@ -461,7 +462,7 @@ def test_a_clone_runs_no_hooks_fetches_no_submodules_and_reads_only_the_tree(
     marker.unlink()
 
     async def _test(pool: Any) -> None:
-        status, body = await _call("POST", "/api/catalog/git/preview", {"url": repo.as_uri()})
+        status, body = await _call("POST", "/api/v1/catalog_sources/git_preview", {"url": repo.as_uri()})
         assert status == 200, body
         assert not marker.exists()
         assert "inner" not in {i["name"] for i in body["items"]}
@@ -477,7 +478,7 @@ def test_a_clone_over_its_size_or_time_is_stopped_and_removed(
 
     async def _test(pool: Any) -> None:
         monkeypatch.setattr(catalog_sources, "GIT_CLONE_MAX_BYTES", 1024)
-        status, body = await _call("POST", "/api/catalog/git/preview", {"url": repo.as_uri()})
+        status, body = await _call("POST", "/api/v1/catalog_sources/git_preview", {"url": repo.as_uri()})
         assert status == 400 and "when cloned; the clone was stopped" in body["error"], body
         assert _clones(scratch) == []
         monkeypatch.setattr(catalog_sources, "GIT_CLONE_MAX_BYTES", 64 * 1024 * 1024)
@@ -499,7 +500,7 @@ def test_a_clone_over_its_size_or_time_is_stopped_and_removed(
             return process
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", noted)
-        status, body = await _call("POST", "/api/catalog/git/preview", {"url": repo.as_uri()})
+        status, body = await _call("POST", "/api/v1/catalog_sources/git_preview", {"url": repo.as_uri()})
         assert status == 400 and "took more than 1 seconds and was stopped" in body["error"], body
         assert _clones(scratch) == []
         # Nothing of the stopped git's process group is left; another process on the machine does not count.
@@ -516,9 +517,9 @@ def test_a_clone_over_its_size_or_time_is_stopped_and_removed(
 
 def test_a_skill_written_in_settings_is_created_edited_and_deleted(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _test(pool: Any) -> None:
-        status, body = await _call("POST", "/api/catalog/skills", {
+        status, body = await _call("POST", "/api/v1/catalog_sources/create_skill", {
             "name": "release-notes", "description": 'Drafts notes: "short"', "content": "Write them."})
-        assert status == 201, body
+        assert status == 200, body
         item = body["item"]
         assert (item["origin"], item["qualified_name"], item["installs"]) == ("ui", "personal:release-notes", [])
         assert await _skill_md(item["item_id"]) == (
@@ -530,7 +531,7 @@ def test_a_skill_written_in_settings_is_created_edited_and_deleted(monkeypatch: 
         assert body["item"]["installs"] == [install["install"]]
         _, detail = await _call("POST", "/api/v1/catalog_items/get", {"item_id": item['item_id']})
         assert detail["content"] == "New.\n" and detail["skill_md"].startswith("---\nname: notes\n")
-        assert (await _call("POST", "/api/catalog/skills", {"name": "notes", "description": "d",
+        assert (await _call("POST", "/api/v1/catalog_sources/create_skill", {"name": "notes", "description": "d",
                                                              "content": "c"}))[0] == 409
         for fields in ({"name": "Bad Name"}, {"description": "two\nlines"},
                        {"content": "---\nname: x\n---\n"}, {}, {"enabled": True}):
@@ -550,8 +551,7 @@ def test_editing_an_uploaded_skill_keeps_its_other_files_and_marks_it_modified_a
     async def _test(pool: Any) -> None:
         ids = await _import(pool, "skill:mine", "plugin:kit")
         calc, = await _projects("calc")
-        _, own = await _call("POST", f"/api/projects/{calc}/skills",
-                             {"name": "own", "description": "Own.", "content": "Body."})
+        _, own = await _call("POST", "/api/v1/project_skills/add", {"project_id": calc, "skill": {"name": "own", "description": "Own.", "content": "Body."}})
         zipped = _zip({"SKILL.md": SKILL.format(name="tool", description="|-\n  Two\n  lines.", body="Old."),
                        "scripts/go.sh": "echo go\n"})
         _, body = await _upload("tool.zip", zipped)
@@ -588,7 +588,7 @@ def test_a_machine_import_leaves_out_a_name_another_source_holds(
     from looper.agents.library import import_from_machine
 
     async def _test(pool: Any) -> None:
-        assert (await _upload("SKILL.md", _skill("alpha")))[0] == 201
+        assert (await _upload("SKILL.md", _skill("alpha")))[0] == 200
         view = await import_from_machine(fake_claude_home(tmp_path))
         assert {(i["name"], i["origin"]) for i in view["items"] if i["name"] == "alpha"} == {("alpha", "upload")}
         assert {"item": "alpha", "path": "", "reason": "the catalog has a skill of this name from another source "

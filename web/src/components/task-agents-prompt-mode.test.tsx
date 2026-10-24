@@ -30,17 +30,22 @@ describe("a task's system prompt mode", () => {
 
   it("is shown for every role, on any runtime, saves a choice and resets the task's own", async () => {
     const bodies: unknown[] = [];
-    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      if (init?.method === "PUT") {
+    const savedAgents = agents();
+    const onSaved = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === "/api/v1/tasks/agents" && init?.method === "POST") {
         bodies.push(JSON.parse(String(init.body)));
-        return new Response(JSON.stringify({ agents: agents() }), { status: 200 });
+        return Response.json({ status: "ok", result: { task_id: "task-1", agents: savedAgents } });
       }
-      return new Response(JSON.stringify({ profiles: [], runtimes: [], providers: [], runtime_types: [], limits: {} }), { status: 200 });
+      if (input === "/api/registry") {
+        return Response.json({ profiles: [], runtimes: [], providers: [], runtime_types: [], limits: {} });
+      }
+      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${input}`);
     }));
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
-    await act(async () => root.render(<TaskAgentsSection taskId="task-1" agents={agents()} onSaved={() => {}} />));
+    await act(async () => root.render(<TaskAgentsSection taskId="task-1" agents={agents()} onSaved={onSaved} />));
     const fields = [...container.querySelectorAll<HTMLSelectElement>("select[id$='-mode']")];
     expect(fields).toHaveLength(3); // planner, worker (on Codex) and reviewer
     expect(fields.map((f) => f.value)).toEqual(["replace", "append", "append"]);
@@ -48,22 +53,30 @@ describe("a task's system prompt mode", () => {
       fields[0].value = "append";
       fields[0].dispatchEvent(new Event("change", { bubbles: true }));
     });
-    expect(bodies).toEqual([{ system_prompt_modes: { planner: "append" } }]);
+    expect(bodies).toEqual([{ task_id: "task-1", system_prompt_modes: { planner: "append" } }]);
+    expect(onSaved).toHaveBeenCalledExactlyOnceWith(savedAgents);
     const reset = [...container.querySelectorAll("button")].filter((b) => b.textContent === "task setting · reset");
     expect(reset).toHaveLength(1); // only the reviewer's mode is the task's own
     await act(async () => reset[0].click());
-    expect(bodies[1]).toEqual({ system_prompt_modes: { reviewer: null } });
+    expect(bodies).toEqual([
+      { task_id: "task-1", system_prompt_modes: { planner: "append" } },
+      { task_id: "task-1", system_prompt_modes: { reviewer: null } },
+    ]);
+    expect(onSaved.mock.calls).toEqual([[savedAgents], [savedAgents]]);
     act(() => root.unmount());
     container.remove();
   });
 
   it("is text only once the task has completed", async () => {
+    const fetcher = vi.fn(async () => Response.json({ profiles: [], runtimes: [], providers: [], runtime_types: [], limits: {} }));
+    vi.stubGlobal("fetch", fetcher);
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
     await act(async () => root.render(<TaskAgentsSection taskId="task-1" agents={agents(false)} onSaved={() => {}} />));
     expect(container.querySelector("select[id$='-mode']")).toBeNull();
     expect(container.textContent).toContain("Replace the runtime's prompt");
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/registry");
     act(() => root.unmount());
     container.remove();
   });

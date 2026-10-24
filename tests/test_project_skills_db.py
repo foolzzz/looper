@@ -32,7 +32,7 @@ class _Writer:
 
 
 async def _call(root: Path, method: str, path: str, body: Any = None) -> tuple[int, Any]:
-    if path.startswith(("/api/v1/catalog_items/", "/api/v1/installs/")):
+    if path.startswith(("/api/v1/catalog_items/", "/api/v1/installs/", "/api/v1/project_skills/")):
         from tests.test_catalog_db import _call as catalog_call
         return await catalog_call(method, path, body)
 
@@ -92,14 +92,13 @@ def test_the_api_writes_a_catalog_item_installed_in_the_project_then_changes_and
 
     async def _test(pool: Any) -> None:
         project = await projects.create_project(name="calc", pool=pool)
-        base = f"/api/projects/{project['id']}/skills"
-        status, added = await _call(tmp_path, "POST", base, _skill("release-notes", content="Notes · 中文\n"))
-        assert status == 201 and added["skill"]["size_bytes"] == len(
+        status, added = await _call(tmp_path, "POST", "/api/v1/project_skills/add", {"project_id": project["id"], "skill": _skill("release-notes", content="Notes · 中文\n")})
+        assert status == 200 and added["skill"]["size_bytes"] == len(
             skill_file("release-notes", "Use for release-notes.", "Notes · 中文\n").encode())
-        status, deploy = await _call(tmp_path, "POST", base, _skill("deploy-check", enabled=False))
-        assert status == 201
-        assert (await _call(tmp_path, "POST", base, _skill("deploy-check")))[0] == 409
-        assert (await _call(tmp_path, "POST", "/api/projects/proj-nope/skills", _skill("x")))[0] == 404
+        status, deploy = await _call(tmp_path, "POST", "/api/v1/project_skills/add", {"project_id": project["id"], "skill": _skill("deploy-check", enabled=False)})
+        assert status == 200
+        assert (await _call(tmp_path, "POST", "/api/v1/project_skills/add", {"project_id": project["id"], "skill": _skill("deploy-check")}))[0] == 409
+        assert (await _call(tmp_path, "POST", "/api/v1/project_skills/add", {"project_id": 'proj-nope', "skill": _skill("x")}))[0] == 404
 
         # Each is a catalog item owned by the project, one SKILL.md, installed there for the task roles.
         item = (await _items(pool))[f"{project['id']}/release-notes"]
@@ -115,21 +114,21 @@ def test_the_api_writes_a_catalog_item_installed_in_the_project_then_changes_and
         assert deploy["owned_count"] == 2
 
         skill_id = deploy["skill"]["skill_id"]
-        assert (await _call(tmp_path, "PUT", f"{base}/{skill_id}", {"name": "release-notes"}))[0] == 409
-        status, renamed = await _call(tmp_path, "PUT", f"{base}/{skill_id}", {"name": "deploy-gate", "content": "X"})
+        assert (await _call(tmp_path, "POST", "/api/v1/project_skills/update", {"project_id": project["id"], "skill_id": skill_id, "fields": {"name": "release-notes"}}))[0] == 409
+        status, renamed = await _call(tmp_path, "POST", "/api/v1/project_skills/update", {"project_id": project["id"], "skill_id": skill_id, "fields": {"name": "deploy-gate", "content": "X"}})
         assert status == 200 and renamed["skill"]["qualified_name"] == "project:deploy-gate"
         assert await pool.fetchval("SELECT content FROM library_files WHERE item_id = $1", skill_id) == skill_file(
             "deploy-gate", "Use for deploy-check.", "X")
-        status, shown = await _call(tmp_path, "GET", f"{base}/{skill_id}")
+        status, shown = await _call(tmp_path, "POST", "/api/v1/project_skills/get", {"project_id": project["id"], "skill_id": skill_id})
         assert status == 200 and (shown["content"], shown["skill"]["description"]) == ("X\n", "Use for deploy-check.")
         # The description alone changes; the body stays.
-        assert (await _call(tmp_path, "PUT", f"{base}/{skill_id}", {"description": "Gate a deploy."}))[0] == 200
-        assert (await _call(tmp_path, "GET", f"{base}/{skill_id}"))[1]["content"] == "X\n"
-        assert (await _call(tmp_path, "PUT", f"{base}/skill-nope", {"name": "y"}))[0] == 404
+        assert (await _call(tmp_path, "POST", "/api/v1/project_skills/update", {"project_id": project["id"], "skill_id": skill_id, "fields": {"description": "Gate a deploy."}}))[0] == 200
+        assert (await _call(tmp_path, "POST", "/api/v1/project_skills/get", {"project_id": project["id"], "skill_id": skill_id}))[1]["content"] == "X\n"
+        assert (await _call(tmp_path, "POST", "/api/v1/project_skills/update", {"project_id": project["id"], "skill_id": 'skill-nope', "fields": {"name": "y"}}))[0] == 404
 
-        status, after = await _call(tmp_path, "DELETE", f"{base}/{skill_id}")
+        status, after = await _call(tmp_path, "POST", "/api/v1/project_skills/delete", {"project_id": project["id"], "skill_id": skill_id})
         assert status == 200 and after["owned_count"] == 1 and after["deleted"] == skill_id
-        assert (await _call(tmp_path, "DELETE", f"{base}/{skill_id}"))[0] == 404
+        assert (await _call(tmp_path, "POST", "/api/v1/project_skills/delete", {"project_id": project["id"], "skill_id": skill_id}))[0] == 404
         assert await pool.fetchval("SELECT count(*) FROM library_installs WHERE item_id = $1", skill_id) == 0
 
     run_db(_test, monkeypatch)
@@ -141,18 +140,16 @@ def test_a_skill_is_read_and_changed_through_its_own_project_only(monkeypatch: p
     async def _test(pool: Any) -> None:
         project = await projects.create_project(name="calc", pool=pool)
         other = await projects.create_project(name="other", pool=pool)
-        base = f"/api/projects/{project['id']}/skills"
-        _, added = await _call(tmp_path, "POST", base, _skill("release-notes", content="Notes · 中文\n"))
+        _, added = await _call(tmp_path, "POST", "/api/v1/project_skills/add", {"project_id": project["id"], "skill": _skill("release-notes", content="Notes · 中文\n")})
         skill_id = added["skill"]["skill_id"]
 
-        status, shown = await _call(tmp_path, "GET", f"{base}/{skill_id}")
+        status, shown = await _call(tmp_path, "POST", "/api/v1/project_skills/get", {"project_id": project["id"], "skill_id": skill_id})
         assert status == 200
         assert (shown["skill"]["qualified_name"], shown["content"]) == ("project:release-notes", "Notes · 中文\n")
-        assert (await _call(tmp_path, "GET", f"{base}/skill-nope"))[0] == 404
-        elsewhere = f"/api/projects/{other['id']}/skills/{skill_id}"
-        assert (await _call(tmp_path, "GET", elsewhere))[0] == 404
-        assert (await _call(tmp_path, "PUT", elsewhere, {"name": "mine"}))[0] == 404
-        assert (await _call(tmp_path, "DELETE", elsewhere))[0] == 404
+        assert (await _call(tmp_path, "POST", "/api/v1/project_skills/get", {"project_id": project["id"], "skill_id": 'skill-nope'}))[0] == 404
+        assert (await _call(tmp_path, "POST", "/api/v1/project_skills/get", {"project_id": other["id"], "skill_id": skill_id}))[0] == 404
+        assert (await _call(tmp_path, "POST", "/api/v1/project_skills/update", {"project_id": other["id"], "skill_id": skill_id, "fields": {"name": "mine"}}))[0] == 404
+        assert (await _call(tmp_path, "POST", "/api/v1/project_skills/delete", {"project_id": other["id"], "skill_id": skill_id}))[0] == 404
 
     run_db(_test, monkeypatch)
 
@@ -166,9 +163,9 @@ def test_a_skill_installed_in_another_project_keeps_one_name_per_project(
     async def _test(pool: Any) -> None:
         calc = await projects.create_project(name="calc", pool=pool)
         docs = await projects.create_project(name="docs", pool=pool)
-        _, deploy = await _call(tmp_path, "POST", f"/api/projects/{calc['id']}/skills", _skill("deploy-check"))
-        _, notes = await _call(tmp_path, "POST", f"/api/projects/{calc['id']}/skills", _skill("notes"))
-        _, theirs = await _call(tmp_path, "POST", f"/api/projects/{docs['id']}/skills", _skill("deploy-check"))
+        _, deploy = await _call(tmp_path, "POST", "/api/v1/project_skills/add", {"project_id": calc['id'], "skill": _skill("deploy-check")})
+        _, notes = await _call(tmp_path, "POST", "/api/v1/project_skills/add", {"project_id": calc['id'], "skill": _skill("notes")})
+        _, theirs = await _call(tmp_path, "POST", "/api/v1/project_skills/add", {"project_id": docs['id'], "skill": _skill("deploy-check")})
         status, answer = await _call(tmp_path, "POST", "/api/v1/installs/create", {
             "item_id": deploy["skill"]["skill_id"], "scope": "project", "project_id": docs["id"]})
         assert status == 409 and "both would load as project:deploy-check" in answer["error"]
@@ -176,14 +173,12 @@ def test_a_skill_installed_in_another_project_keeps_one_name_per_project(
             "item_id": notes["skill"]["skill_id"], "scope": "project", "project_id": docs["id"], "roles": ["worker"]})
         assert status == 200
         # docs cannot now write a skill named notes, and calc cannot rename notes onto a name docs has.
-        status, answer = await _call(tmp_path, "POST", f"/api/projects/{docs['id']}/skills", _skill("notes"))
+        status, answer = await _call(tmp_path, "POST", "/api/v1/project_skills/add", {"project_id": docs['id'], "skill": _skill("notes")})
         assert status == 409 and "project:notes" in answer["error"]
-        await _call(tmp_path, "POST", f"/api/projects/{docs['id']}/skills", _skill("docs-only"))
-        status, answer = await _call(tmp_path, "PUT", f"/api/projects/{calc['id']}/skills/{notes['skill']['skill_id']}",
-                                     {"name": "docs-only"})
+        await _call(tmp_path, "POST", "/api/v1/project_skills/add", {"project_id": docs['id'], "skill": _skill("docs-only")})
+        status, answer = await _call(tmp_path, "POST", "/api/v1/project_skills/update", {"project_id": calc['id'], "skill_id": notes['skill']['skill_id'], "fields": {"name": "docs-only"}})
         assert status == 409 and "the skill is installed there" in answer["error"]
-        status, answer = await _call(tmp_path, "PUT", f"/api/projects/{calc['id']}/skills/{notes['skill']['skill_id']}",
-                                     {"name": "release-notes"})
+        status, answer = await _call(tmp_path, "POST", "/api/v1/project_skills/update", {"project_id": calc['id'], "skill_id": notes['skill']['skill_id'], "fields": {"name": "release-notes"}})
         assert status == 200
         _, view = await _call(tmp_path, "POST", "/api/v1/installs/project", {"project_id": docs['id']})
         assert sorted((e["item"]["qualified_name"], e["item"]["owner_project_name"], e["roles"])
