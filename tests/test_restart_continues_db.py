@@ -29,6 +29,7 @@ run creates and drops a database beside it).
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -209,7 +210,9 @@ def restarted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     init_repository(work["worktree"])
 
     with fresh_database(str(DSN)) as (database_url, _):
-        server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home}
+        # Only the stand-ins and system tools: installed runtimes otherwise get probed at startup.
+        server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home,
+                  "env": {"PATH": f"{bin_dir}{os.pathsep}{os.defpath}"}}
         with running_server(**server, log_path=root / "serve.log") as api:
             ids: dict[str, str] = {}
             for variant in VARIANTS:
@@ -241,14 +244,14 @@ def restarted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             # The failed task's Workers run on another profile, and one at a time, from its restart on.
             api.post("/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
                                              "model_id": _builtin_model(api, "sonnet")})
-            agents = api.put(f"/api/tasks/{ids['agents']}/agents", {"profiles": {"worker": "claude-code/sonnet"},
-                                                                     "concurrency": {"worker": 1}})["agents"]
+            agents = api.post("/api/v1/tasks/agents", {"task_id": ids['agents'], "profiles": {"worker": "claude-code/sonnet"},
+                                                                     "concurrency": {"worker": 1}})["result"]["agents"]
 
             for variant in VARIANTS:
                 api.post("/api/tasks/start", {"task_id": ids[variant], "start_over": variant == "startover"})
             after = _wait(api, ids, lambda variant, detail: detail["status"] == "completed")
             with pytest.raises(EvalError, match="answered 409: .*the task is completed"):
-                api.put(f"/api/tasks/{ids['agents']}/agents", {"concurrency": {"worker": 2}})
+                api.post("/api/v1/tasks/agents", {"task_id": ids['agents'], "concurrency": {"worker": 2}})
             activity = {variant: [row["summary"] for row in api.get(f"/api/tasks/{task_id}/activity", limit=500)[
                 "activity"]] for variant, task_id in ids.items()}
 

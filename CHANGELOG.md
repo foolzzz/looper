@@ -18,6 +18,24 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.64] - 2026-10-24
+
+### Added
+
+- **`api` runtime type, first step.** Adds the in-process Model API adapter (OpenAI Responses over an API key, Manager only, no executable) and the registry support it needs: a typed per-adapter role restriction (`RuntimeAdapter.roles`), in-process detection and probing (`RuntimeAdapter.in_process`) and import messages. The adapter is not in `ADAPTERS`, so it cannot be detected, selected or started and users see no change; no prompt or tool changed. Adds the `openai` package as a dependency. ([#478](https://github.com/foolzzz/looper/pull/478))
+
+## [2.13.63] - 2026-10-24
+
+### Documentation
+
+- **API runtime RFC.** Adds the approved RFC for an agent runtime that calls model APIs directly through the official Python SDKs, with the Manager as its first role, and its development schedule (stage 1: `openai` SDK on OpenAI Responses; stage 2: `anthropic` SDK). Documentation only; no code, prompt or tool changes. ([#475](https://github.com/foolzzz/looper/pull/475))
+
+## [2.13.62] - 2026-10-23
+
+### Changed
+
+- **Task configuration, placement, Agent choices and budget continuation move to the versioned API.** `tasks.configure/move/agents/continue` under `/api/v1/` replace four legacy HTTP methods (`PUT /api/tasks/{id}/config`, `PUT /api/tasks/{id}/project`, `POST /api/tasks/{id}/continue`, `PUT /api/tasks/{id}/agents`), which are removed; the dashboard uses the new routes. Closed request schemas reject unknown fields, a failed configuration write is now an error, and continuing a budget-failed task is `high` risk: the confirmation names whether the task's own cap or the project's per-task cap changes and is refused if that scope changed meanwhile. Ending a turn's process tree now finishes cleanup when its preparation is cancelled. Manager prompts and tools are unchanged. ([#467](https://github.com/foolzzz/looper/pull/467))
+
 ## [2.13.61] - 2026-10-23
 
 ### Changed

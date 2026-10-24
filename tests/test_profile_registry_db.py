@@ -19,6 +19,9 @@ from urllib.parse import parse_qsl, urlsplit
 import pytest
 
 from fake_claude import fake_claude
+
+from looper.agents import api_v1
+from looper.agents.ops.clients import ClientOps
 from tests.db_support import DSN, run_db
 from tests.test_catalog_db import _Writer
 from tests.test_dsh_runtime import MODELS as DSH_MODELS, dsh_policy as dsh_policy
@@ -36,10 +39,17 @@ async def _call(method: str, path: str, body: Any = None, *, claude: str = "clau
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())), claude_bin=claude)
     writer = _Writer()
     parsed = urlsplit(path)
-    await server._route_api(method, parsed.path, dict(parse_qsl(parsed.query)),
-                            b"" if body is None else json.dumps(body).encode(), writer)
+    raw = b"" if body is None else json.dumps(body).encode()
+    if parsed.path == "/api/v1/tasks/agents":
+        server._client_ops = ClientOps(SimpleNamespace())
+        await server._handle_v1(method, parsed.path, dict(parse_qsl(parsed.query)), {}, raw, writer, api_v1.OPERATOR)
+    else:
+        await server._route_api(method, parsed.path, dict(parse_qsl(parsed.query)), raw, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload)
+    answer = json.loads(payload)
+    if path == "/api/v1/tasks/agents":
+        answer = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
+    return int(head.split()[1]), answer
 
 
 async def _ok(method: str, path: str, body: Any = None, **kwargs: Any) -> Any:
