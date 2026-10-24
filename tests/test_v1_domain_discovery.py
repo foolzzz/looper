@@ -52,6 +52,12 @@ def test_discovery_finds_exactly_the_public_domain_modules():
     assert set(domains) == {importlib.import_module(f"{v1_domains.__name__}.{name}") for name in names}
 
 
+def test_task_workspace_operations_keep_their_order_in_openapi():
+    expected = ["tasks.create", "tasks.delete", "workspaces.check", "workspaces.discard"]
+    assert [op["operationId"] for item in api_v1.document()["paths"].values()
+            for op in item.values() if op["operationId"] in expected] == expected
+
+
 def test_discovered_operations_appear_in_openapi_exactly_once():
     operations = api_v1.operations()
     assert len({op.operation_id for op in operations}) == len(operations)
@@ -60,6 +66,12 @@ def test_discovered_operations_appear_in_openapi_exactly_once():
     paths = api_v1.document()["paths"]
     operation_ids = Counter(op["operationId"] for item in paths.values() for op in item.values())
     assert all(count == 1 for count in operation_ids.values())
+    assert {
+        "schedules.create", "schedules.update", "schedules.enable", "schedules.disable",
+        "schedules.run", "schedules.delete", "schedules.reset_planner_session",
+        "schedule_admin.create", "schedule_admin.update", "schedule_admin.delete",
+        "schedule_admin.reset_planner_session", "schedule_admin.run",
+    } <= operation_ids.keys()
     for domain in api_v1.domains():
         for operation in domain.OPERATIONS:
             assert operation_ids[operation.operation_id] == 1

@@ -240,15 +240,15 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
                 "profile_id": None, "items": []})
     # Schedules: an enabled one with every setting, a directory of its own and a chat the allowlist lets in; a
     # disabled one on the defaults.
-    nightly = (await _ok("POST", f"/api/projects/{calc}/schedules", {
+    nightly = (await _ok("POST", "/api/v1/schedule_admin/create", {"project_id": calc, "fields": {
         "name": "nightly", "cron": "0 2 * * *", "timezone": "Asia/Shanghai", "requirement": "Check the deps.",
         "work_dir": str(work_dir), "overlap": "parallel", "max_parallel_runs": 2, "catch_up": "skip",
         "run_timeout_seconds": 1800, "run_budget_usd": 1.5, "gate_command": "echo new", "gate_timeout_seconds": 30,
         "daily_budget_usd": 3, "notify": "always", "notify_target": {"channel": "telegram", "chat": "123456789"},
-        "profile_overrides": {"worker": "claude-code/sonnet"}, "task_limits": {"worker": 2}}))["schedule"]
-    await _ok("PUT", f"/api/schedules/{nightly['schedule_id']}", {"enabled": True})
-    await _ok("POST", f"/api/projects/{calc}/schedules", {"name": "weekly", "cron": "0 9 * * 1",
-                                                         "timezone": "UTC", "requirement": "Sum up the week."})
+        "profile_overrides": {"worker": "claude-code/sonnet"}, "task_limits": {"worker": 2}}}))["schedule"]
+    await _ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": nightly['schedule_id'], "fields": {"enabled": True}})
+    await _ok("POST", "/api/v1/schedule_admin/create", {"project_id": calc, "fields": {"name": "weekly", "cron": "0 9 * * 1",
+                                                         "timezone": "UTC", "requirement": "Sum up the week."}})
     return {"calc": calc, "docs": docs, "mcp": mcp["item_id"], "web": web["item_id"], "skill": skill["item_id"],
             "nightly": nightly["schedule_id"]}
 
@@ -1044,7 +1044,7 @@ def test_a_schedule_whose_settings_changed_is_rewritten_disabled_and_one_that_di
             # As the note asks: a directory here, then each schedule enabled.
             await target.execute("UPDATE projects SET work_dir = $1 WHERE name = 'calc'", str(tmp_path))
             for row in await target.fetch("SELECT id FROM schedules"):
-                await _ok("PUT", f"/api/schedules/{row['id']}", {"enabled": True})
+                await _ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": row['id'], "fields": {"enabled": True}})
 
             nightly["cron"] = "0 3 * * *"
             exported.write_text(json.dumps(json.loads(exported.read_text()) | {"projects": [

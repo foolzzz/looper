@@ -18,6 +18,26 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.81] - 2026-10-24
+
+### Changed
+
+- **Schedule changes and immediate runs go through v1.** Creating, updating (including enabling and disabling), deleting and resetting the Planner session of a schedule, and running one now, are the operations `schedule_admin.create`, `.update` (risk `write`), `.delete`, `.reset_planner_session` and `.run` (risk `high`), as `POST /api/v1/schedule_admin/<action>`. Everything but create can ask for confirmation first; an update asks only when it enables a schedule or raises a cap. Manager prompts and tools are unchanged. ([#500](https://github.com/foolzzz/looper/pull/500))
+
+### Removed
+
+- **`POST /api/projects/{id}/schedules`, `PUT` and `DELETE /api/schedules/{id}`, `POST /api/schedules/{id}/reset-planner-session` and `POST /api/schedules/{id}/run`.** Use the `schedule_admin` operations. ([#500](https://github.com/foolzzz/looper/pull/500))
+
+## [2.13.80] - 2026-10-24
+
+### Changed
+
+- **Task deletion and step-workspace management go through v1.** Deleting a stopped task, discarding a stopped task's step workspace and checking a workspace before creating a task are now `tasks.delete`, `workspaces.discard` (both risk `high`, both ask for confirmation) and `workspaces.check` (risk `read`), as `POST /api/v1/tasks/delete`, `POST /api/v1/workspaces/discard` and `POST /api/v1/workspaces/check`. The cleanup order, the refusal to delete a running task and the kept result branch are unchanged. Manager prompts and tools are unchanged. ([#516](https://github.com/foolzzz/looper/pull/516))
+
+### Removed
+
+- **`POST /api/tasks/delete`, `POST /api/tasks/{id}/workspaces/{n}/discard` and `GET /api/workspaces/check`.** Use the `tasks.delete`, `workspaces.discard` and `workspaces.check` operations. ([#516](https://github.com/foolzzz/looper/pull/516))
+
 ## [2.13.79] - 2026-10-24
 
 ### Changed

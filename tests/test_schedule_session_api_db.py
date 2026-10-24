@@ -56,15 +56,15 @@ def test_schedule_api_shows_session_metadata_without_its_id_and_reset_clears_it(
         status, body = await _call("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid})
         assert status == 200 and body["schedule"]["planner_session"]["last_task_title"] == "Nightly goal"
 
-        assert await _call("POST", f"/api/schedules/{sid}/reset-planner-session") == (200, {"cleared": True})
+        assert await _call("POST", "/api/v1/schedule_admin/reset_planner_session", {"schedule_id": sid}) == (200, {"cleared": True})
         row = await pool.fetchrow("SELECT * FROM schedules WHERE id = $1", sid)
         assert all(row[key] is None for key in SESSION_COLUMNS if key != "planner_session_totals")
         assert json.loads(row["planner_session_totals"]) == {}
-        assert await _call("POST", f"/api/schedules/{sid}/reset-planner-session") == (200, {"cleared": False})
+        assert await _call("POST", "/api/v1/schedule_admin/reset_planner_session", {"schedule_id": sid}) == (200, {"cleared": False})
         status, body = await _call("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid})
         assert status == 200
         assert body["schedule"]["planner_session"] == {key: False if key == "active" else None for key in expected}
-        assert (await _call("POST", "/api/schedules/sched-missing/reset-planner-session"))[0] == 404
+        assert (await _call("POST", "/api/v1/schedule_admin/reset_planner_session", {"schedule_id": 'sched-missing'}))[0] == 404
 
     run_db(test, monkeypatch)
 

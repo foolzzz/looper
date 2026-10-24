@@ -28,7 +28,7 @@ async def _api(tmp_path, pool):
             path = action if action.startswith("/") else f"/api/v1/schedule_admin/{action}"
             status, _, answer = await _send(server, f"{method} {path}", _bearer(token if client else TOKEN),
                                             json.dumps(body or {}))
-            if status == 200 and path.startswith("/api/v1/"):
+            if status in (200, 201) and path.startswith("/api/v1/"):
                 assert answer["status"] == "ok"
                 result = answer["result"]
                 schema = api_v1.find(method, path).result
@@ -174,7 +174,7 @@ def test_unknown_schedule_or_project_is_typed_not_found(tmp_path, monkeypatch, a
     run_db(run, monkeypatch, timeout=30)
 
 
-def test_old_reads_are_404_while_corresponding_v1_reads_and_legacy_writes_work(tmp_path, monkeypatch):
+def test_old_reads_are_404_while_corresponding_v1_reads_and_writes_work(tmp_path, monkeypatch):
     async def run(pool):
         pid, sid, rid = await _seed(pool)
         await db_schedules.insert_notification(pool, schedule_id=sid, run_id=rid, kind="run", channel=None,
@@ -189,11 +189,11 @@ def test_old_reads_are_404_while_corresponding_v1_reads_and_legacy_writes_work(t
                 ("POST", "/api/schedules/preview", "preview", {"cron": "0 * * * *"})):
                 assert (await call(action, body, client=False))[0] == 200
                 assert (await call(path, body, method=method, client=False))[0] == 404
-            assert (await call(f"/api/schedules/{sid}", {"name": "Renamed"}, method="PUT", client=False))[0] == 200
+            assert (await call("update", {"schedule_id": sid, "fields": {"name": "Renamed"}}, client=False))[0] == 200
             assert (await call("get", {"schedule_id": sid}))[1]["schedule"]["name"] == "Renamed"
-            assert (await call(f"/api/schedules/{sid}/reset-planner-session", client=False))[1] == {"cleared": True}
-            status, created = await call(f"/api/projects/{pid}/schedules", {"name": "Disabled", "cron": "0 * * * *",
-                "requirement": "Read", "timezone": "UTC"}, client=False)
-            assert status == 201
-            assert (await call(f"/api/schedules/{created['schedule']['schedule_id']}", method="DELETE", client=False))[0] == 200
+            assert (await call("reset_planner_session", {"schedule_id": sid}, client=False))[1] == {"cleared": True}
+            status, created = await call("create", {"project_id": pid, "fields": {"name": "Disabled", "cron": "0 * * * *",
+                "requirement": "Read", "timezone": "UTC"}}, client=False)
+            assert status == 200
+            assert (await call("delete", {"schedule_id": created['schedule']['schedule_id']}, client=False))[0] == 200
     run_db(run, monkeypatch, timeout=30)

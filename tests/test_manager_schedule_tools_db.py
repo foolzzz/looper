@@ -21,7 +21,7 @@ from tests.db_support import DSN, run_db
 from tests.test_manager_config_tools_db import _ok, _trail
 from tests.test_manager_ops import _Clock
 from tests.test_ops_tasks_db import _Chat, _error, _project, _task
-from tests.test_task_agents_db import _call
+from tests.test_catalog_db import _call
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -166,12 +166,13 @@ def test_enabling_is_refused_with_the_dashboards_message(monkeypatch: pytest.Mon
         answer = await _confirm(chat, asked)
         assert _error(answer) == "invalid"
         assert "a work directory is required" in answer["error"]["message"]
-        status, dashboard = await _call("PUT", f"/api/schedules/{sid}", {"enabled": True})
-        assert status == 400 and dashboard["error"] == answer["error"]["message"]
+        status, dashboard = await _call("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"enabled": True}})
+        assert status == 400 and dashboard["error"]["message"] == answer["error"]["message"]
         assert await _starting_state(pool, sid) == (False, 0)
-        assert await _trail(pool) == [(TOOL, "high", "needs_confirmation"), (TOOL, "high", "error")]
+        assert await _trail(pool) == [(TOOL, "high", "needs_confirmation"), (TOOL, "high", "error"),
+                                     ("schedule_admin.update", "high", "error")]
         assert tuple(await pool.fetchrow(
-            "SELECT confirmation_id, error_code FROM manager_actions ORDER BY id DESC LIMIT 1")) == (
+            "SELECT confirmation_id, error_code FROM manager_actions WHERE tool = 'looper_schedules' ORDER BY id DESC LIMIT 1")) == (
                 asked["confirmation_id"], "invalid")
 
     run_db(test, monkeypatch)

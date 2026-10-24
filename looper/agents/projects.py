@@ -394,7 +394,7 @@ async def task_workspace(data: dict[str, Any], *, work_dir: str, named: bool, pr
 
 
 async def check_workspace(query: dict[str, str]) -> dict[str, Any]:
-    """``GET /api/workspaces/check``: what a new task in ``dir`` (else ``project_id``'s directory) would run in,
+    """``workspaces.check``: what a new task in ``dir`` (else ``project_id``'s directory) would run in,
     with ``mode`` and ``base`` as the create form has them, and the warnings."""
     project = await _existing_project(query["project_id"]) if query.get("project_id") else None
     named = (query.get("dir") or "").strip()
