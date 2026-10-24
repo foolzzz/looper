@@ -332,6 +332,10 @@ async def _api(method: str, path: str, body: Any = None, *, live: bool = False,
     router.has_planner = lambda task_id: live  # type: ignore[method-assign]
     server = AgentHTTPServer(web_adapter=SimpleNamespace(_address=channel_address("web")),
                              supervisor=SimpleNamespace(bus=bus), task_router=router)
+    if path.startswith("/api/v1/"):
+        from tests.db_support import call_v1
+        status, answer = await call_v1(server, path, body or {})
+        return status, answer, bus
     writer = _Writer()
     await server._route_api(method, path, query or {}, b"" if body is None else json.dumps(body).encode(), writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
@@ -346,8 +350,8 @@ def test_the_dashboard_writes_in_a_gate_that_waits_and_its_planner_is_woken(monk
         await _task(pool, "task-a", "waiting_user", project)
         await _plan_with_gate(pool, state="open")
 
-        status, answer, bus = await _api("POST", "/api/tasks/task-a/gates/g1/messages",
-                                         {"text": "PostgreSQL", "agenda_item": "q1", "option": "PostgreSQL"}, live=True)
+        status, answer, bus = await _api("POST", "/api/v1/ops/gates/reply",
+                                         {"task_id": "task-a", "gate": "g1", "text": "PostgreSQL", "agenda_item": "q1", "option": "PostgreSQL"}, live=True)
         assert status == 200 and answer["delivered"] == "queued", answer
         assert answer["gate"]["state"] == "discussing" and answer["gate"]["waiting_on"] == "planner"
         assert (answer["message"]["agenda_item"], answer["message"]["option"]) == ("q1", "PostgreSQL")
@@ -356,7 +360,7 @@ def test_the_dashboard_writes_in_a_gate_that_waits_and_its_planner_is_woken(monk
 
         # A stopped task keeps the message for its restart; the end of the discussion is a message too.
         await pool.execute("UPDATE tasks SET status = 'stopped'")
-        status, answer, bus = await _api("POST", "/api/tasks/task-a/gates/g1/end", {})
+        status, answer, bus = await _api("POST", "/api/v1/ops/gates/end", {"task_id": "task-a", "gate": "g1"})
         assert status == 200 and answer["delivered"] == "kept" and answer["message"]["kind"] == "end"
         assert bus.published == []
 
@@ -364,34 +368,34 @@ def test_the_dashboard_writes_in_a_gate_that_waits_and_its_planner_is_woken(monk
         (gate,) = detail["gates"]
         assert (gate["step"], gate["state"], gate["topic"], gate["agenda"][0]["id"]) == ("g1", "discussing",
                                                                                           "storage", "q1")
-        status, thread, _ = await _api("GET", "/api/tasks/task-a/gates/g1/messages")
+        status, thread, _ = await _api("POST", "/api/v1/ops/gates/messages", {"task_id": "task-a", "gate": "g1"})
         assert status == 200 and [(m["kind"], m["text"]) for m in thread["messages"]] == [
             ("message", "PostgreSQL"), ("end", "")]
 
     run_db(test, monkeypatch)
 
 
-@pytest.mark.parametrize(("path", "body", "status", "error"), [
-    ("/api/tasks/task-a/gates/g1/messages", {"text": ""}, 400, "text must be a non-empty string"),
-    ("/api/tasks/task-a/gates/g1/messages", {"text": "x" * 8001}, 400, "text has 8001 characters; at most 8000"),
-    ("/api/tasks/task-a/gates/g1/messages", {"text": "x", "agenda_item": "q1"}, 400,
+@pytest.mark.parametrize(("task_id", "gate", "body", "status", "error"), [
+    ("task-a", "g1", {"text": ""}, 400, "text must not be empty"),
+    ("task-a", "g1", {"text": "x" * 8001}, 400, "text has 8001 characters; at most 8000"),
+    ("task-a", "g1", {"text": "x", "agenda_item": "q1"}, 400,
      "agenda_item and option go together"),
-    ("/api/tasks/task-a/gates/g1/messages", {"text": "x", "agenda_item": "q1", "option": "Oracle"}, 400,
+    ("task-a", "g1", {"text": "x", "agenda_item": "q1", "option": "Oracle"}, 400,
      "option 'Oracle' is not one of q1's options"),
-    ("/api/tasks/task-a/gates/g1/messages", {"text": "x", "agenda_item": "q7", "option": "a"}, 400,
+    ("task-a", "g1", {"text": "x", "agenda_item": "q7", "option": "a"}, 400,
      "agenda_item 'q7' is not an item of this gate's agenda"),
-    ("/api/tasks/task-a/gates/g9/messages", {"text": "x"}, 404, "task task-a has no gate g9"),
-    ("/api/tasks/task-zz/gates/g1/messages", {"text": "x"}, 404, "task not found"),
+    ("task-a", "g9", {"text": "x"}, 404, "task task-a has no gate g9"),
+    ("task-zz", "g1", {"text": "x"}, 404, "task not found"),
 ])
 def test_the_dashboard_cannot_write_what_a_gate_does_not_take(
-    monkeypatch: pytest.MonkeyPatch, path: str, body: dict[str, Any], status: int, error: str,
+    monkeypatch: pytest.MonkeyPatch, task_id: str, gate: str, body: dict[str, Any], status: int, error: str,
 ) -> None:
     async def test(pool: Any) -> None:
         project = await _project(pool)
         await _task(pool, "task-a", "waiting_user", project)
         await _plan_with_gate(pool, state="open")
 
-        got, answer, _ = await _api("POST", path, body)
+        got, answer, _ = await _api("POST", "/api/v1/ops/gates/reply", {"task_id": task_id, "gate": gate, **body})
         assert (got, answer["error"][:len(error)]) == (status, error)
 
     run_db(test, monkeypatch)
@@ -403,10 +407,10 @@ def test_a_gate_that_does_not_wait_or_a_completed_task_takes_no_message(monkeypa
         await _task(pool, "task-a", "running", project)
         await _plan_with_gate(pool, state="pending")
 
-        status, answer, _ = await _api("POST", "/api/tasks/task-a/gates/g1/messages", {"text": "x"})
+        status, answer, _ = await _api("POST", "/api/v1/ops/gates/reply", {"task_id": "task-a", "gate": "g1", "text": "x"})
         assert (status, answer["error"]) == (409, "gate g1 is pending: it does not wait for the user")
         await pool.execute("UPDATE tasks SET status = 'completed'")
-        status, answer, _ = await _api("POST", "/api/tasks/task-a/gates/g1/end", {})
+        status, answer, _ = await _api("POST", "/api/v1/ops/gates/end", {"task_id": "task-a", "gate": "g1"})
         assert (status, answer["error"]) == (409, "the task has completed: its gates no longer take messages")
 
     run_db(test, monkeypatch)

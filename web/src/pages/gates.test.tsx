@@ -44,6 +44,7 @@ describe("GatesPage", () => {
     act(() => root.unmount());
     container.remove();
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
   const show = async (query = "", onQuery = vi.fn()) => {
     await act(async () => root.render(<GatesPage query={query} onQuery={onQuery} />));
@@ -118,6 +119,38 @@ describe("GatesPage", () => {
     vi.mocked(fetchGates).mockResolvedValue(list([row("t1", gate("g1"), "completed")]));
     await show("state=all");
     expect([...container.querySelectorAll("button")].some((b) => b.textContent === "Answer")).toBe(false);
+  });
+
+  it.each([0, 1, 205])("refreshes after every old gate disappears, with %i replacements", async (count) => {
+    const api = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
+    vi.mocked(fetchGates).mockImplementation(api.fetchGates);
+    let current = [row("old", gate("old"))];
+    vi.stubGlobal("fetch", vi.fn(async (_path: string, init?: RequestInit) => {
+      const { limit, offset } = JSON.parse(String(init?.body));
+      return Response.json({ status: "ok", result: list(current.slice(offset, offset + limit), {
+        total: current.length, limit, offset, has_more: offset + limit < current.length,
+        counts: { open: current.length, waiting_user: current.length, waiting_planner: 0, closed: 0, all: current.length },
+      }) });
+    }));
+    await show();
+    expect(container.querySelector("a[href='#tasks/old']")).not.toBeNull();
+
+    current = Array.from({ length: count }, (_, i) => row(`new${i}`, gate(`new${i}`)));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(container.querySelector("[role=alert]")).toBeNull();
+    expect(container.querySelector("a[href='#tasks/old']")).toBeNull();
+    expect(container.querySelectorAll("li")).toHaveLength(count);
+    for (const item of current) {
+      expect(container.querySelector(`a[href='#tasks/${item.task.task_id}']`)).not.toBeNull();
+    }
+    expect(container.textContent).toContain(`${count} open · ${count} waiting for you`);
+    if (!count) expect(container.textContent).toContain("No gate waits for an answer.");
+
+    current.unshift(row("latest", gate("latest")));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(container.querySelector("[role=alert]")).toBeNull();
+    expect(container.querySelector("a[href='#tasks/latest']")).not.toBeNull();
+    expect(container.querySelectorAll("li")).toHaveLength(count + 1);
   });
 
   it.each(["close", "insert"] as const)("keeps a loaded gate and its draft during refresh after %s", async (change) => {
