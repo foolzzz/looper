@@ -157,7 +157,7 @@ def test_smoke_readiness_uses_v1_and_checks_the_response(tmp_path, status_data, 
                 original_request = smoke.request
 
                 def request(base, path, *args):
-                    if path == "/api/channel-configs":
+                    if path == "/api/v1/channel_configs/list":
                         raise Ready  # Readiness succeeded; the Pi registry flow is outside this regression.
                     return original_request(base, path, *args)
 

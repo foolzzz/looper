@@ -15,11 +15,11 @@ describe("Lark bot-token settings", () => {
     bot = { name: "Example bot", app_id: "cli_example", open_id: "ou_botexample", profile: "" };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url === "/api/channel-configs") return Response.json({ configs: [{
+      if (url === "/api/v1/channel_configs/list") return Response.json({ status: "ok", result: { configs: [{
         channel_id: "channel-lark_bot", channel_type: "lark_bot", display_name: "Lark (bot token)",
         enabled: true, has_bot_token: true, created_at: "2026-10-18T00:00:00Z", updated_at: "2026-10-18T00:00:00Z",
         config: { app_id: "cli_example", domain: "feishu", allowed_open_ids: ["ou_example123"], allowlist_app_id: "cli_example", description: "" },
-      }] });
+      }] } });
       if (url === "/api/v1/channels/status") return Response.json({ status: "ok", result: {
         bot, problem: bot ? null : "the platform rejected the app credentials: invalid secret", names: { ou_example123: "Allowed person" },
         rejected: [{ open_id: "ou_refused123", name: "Refused person", count: 1, last_at: "2026-10-18T00:00:00Z", chat_id: null }],
