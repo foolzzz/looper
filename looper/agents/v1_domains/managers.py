@@ -5,6 +5,8 @@ from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..ops.config import answered
 from ..ops.service import _plain
 
+ORDER = 9
+
 
 def _enum(*values):
     return {"type": "string", "enum": list(values)}

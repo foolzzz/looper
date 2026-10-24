@@ -5,6 +5,8 @@ from ..api_v1 import Operation, STATUS, _array, _object, _STR, _NULL_STR, _INT, 
 from ..ops import ErrorCode, OpError
 from ..system_prompt import TASK_REQUIREMENT_LIMIT
 
+ORDER = 2
+
 _NUM = {"type": "number"}
 _LOAD = _object({"running": _INT, "waiting": _INT})
 _PLANNER = _object({"agent_id": _STR, "task_id": _STR, "project_id": _NULL_STR,
