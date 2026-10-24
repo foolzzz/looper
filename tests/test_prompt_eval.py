@@ -250,8 +250,7 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
                 return {"records": self.records}
             if path == "/api/v1/runs/events":
                 return {"events": self.events[_["record_id"]]}
-            assert path == "/api/chat/messages", path
-            return {"messages": self.messages}
+            raise AssertionError(path)
 
         def post(self, path: str, body: Any) -> dict[str, Any]:
             if path == "/api/v1/agent_settings/update_system":
@@ -264,6 +263,8 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
                 return {"status": "ok", "result": {}}
             if path.startswith("/api/v1/runs/"):
                 return {"status": "ok", "result": self.get(path, **body)}
+            if path == "/api/v1/operator_chat/messages":
+                return {"status": "ok", "result": {"messages": self.messages}}
             if path == "/api/v1/tasks/activity":
                 return {"status": "ok", "result": {"activity": []}}
             self.posts.append((path, body))
@@ -1945,6 +1946,11 @@ def test_dialog_checks_the_final_manager_run_before_scoring_a_reply(
         def post(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
             if path.startswith("/api/v1/runs/"):
                 return {"status": "ok", "result": self.get(path, **data)}
+            if path == "/api/v1/operator_chat/messages":
+                assert self.sent is not None
+                return {"status": "ok", "result": {"messages": [
+                    {"message_id": self.sent["message_id"] + ":reply",
+                     "content": "该配对不兼容，已保持所有配置不变。"}]}}
             assert path == "/api/chat/send"
             self.sent = data
             return {}
@@ -1952,10 +1958,6 @@ def test_dialog_checks_the_final_manager_run_before_scoring_a_reply(
         def get(self, path: str, **query: Any) -> dict[str, Any]:
             if path == "/api/tasks":
                 return {"tasks": []}
-            if path == "/api/chat/messages":
-                assert self.sent is not None
-                return {"messages": [{"message_id": self.sent["message_id"] + ":reply",
-                                      "content": "该配对不兼容，已保持所有配置不变。"}]}
             if path == "/api/v1/runs/list":
                 assert query["agent_id"] == "manager"
                 rows = [{"id": 1, "status": "failed", "error": "old turn failed"}]
@@ -2022,6 +2024,8 @@ def test_dialogs_use_the_reserved_case_budget_only_in_parallel_mode(
         def post(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
             if path.startswith("/api/v1/runs/"):
                 return {"status": "ok", "result": self.get(path, **data)}
+            if path == "/api/v1/operator_chat/messages":
+                return {"status": "ok", "result": {"messages": self.messages}}
             if path == "/api/projects":
                 return {"project_id": "project-a"}
             assert path == "/api/chat/send"
@@ -2039,8 +2043,7 @@ def test_dialogs_use_the_reserved_case_budget_only_in_parallel_mode(
                                     for i in reversed(range(len(self.messages)))]}
             if path == "/api/v1/runs/events":
                 return {"events": [{"seq": 1, "event": {"type": "result", "subtype": "success"}}]}
-            assert path == "/api/chat/messages"
-            return {"messages": self.messages}
+            raise AssertionError(path)
 
     @contextmanager
     def database(_: str) -> Any:

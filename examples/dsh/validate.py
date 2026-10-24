@@ -636,7 +636,7 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
                         message = f"smoke-{turn}"
                         api.post("/api/chat/send", {"text": "Read the platform status using looper_overview.",
                             "session_id": "smoke", "message_id": message})
-                        rows = _wait(lambda: api.get("/api/chat/messages", session_id="smoke")["messages"],
+                        rows = _wait(lambda: api.post("/api/v1/operator_chat/messages", {"session_id": "smoke"})["result"]["messages"],
                             lambda rows: any(r.get("message_id") == message + ":reply" for r in rows),
                             check_budget=check_budget)
                         _require(any(r.get("message_id") == message + ":reply" and r.get("content") for r in rows))

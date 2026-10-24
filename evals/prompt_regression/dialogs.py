@@ -1842,7 +1842,7 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
             if turn:
                 api.post("/api/v1/operator_chat/stop", {"message_id": turn["message_id"]})
                 stopped = True
-        for message in api.get("/api/chat/messages", session_id=session, **owner)["messages"]:
+        for message in api.post("/api/v1/operator_chat/messages", {"session_id": session, **owner})["result"]["messages"]:
             if message.get("message_id") == f"{message_id}:reply":
                 # A chat command such as /profile is answered by Looper itself, without a Manager run.
                 if not text.lstrip().startswith("/"):
