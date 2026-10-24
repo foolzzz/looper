@@ -73,6 +73,8 @@ class ScheduleEnv(SimpleNamespace):
         raw = b"" if body is None else json.dumps(body).encode()
         if path.startswith("/api/v1/schedule_admin/"):
             from looper.agents.api_v1 import OPERATOR
+            from looper.agents.ops.clients import ClientOps
+            server._client_ops = ClientOps(SimpleNamespace())
             await server._handle_v1(method, path, query or {}, {}, raw, writer, OPERATOR)
         else:
             await server._route_api(method, path, query or {}, raw, writer)
@@ -90,11 +92,11 @@ class ScheduleEnv(SimpleNamespace):
     async def schedule(self, **fields: Any) -> dict[str, Any]:
         body = {"name": f"s-{uuid.uuid4().hex[:6]}", "cron": "*/5 * * * *", "timezone": "America/Los_Angeles",
                 "requirement": "Look at the new alerts.", **fields}
-        return (await self.ok("POST", f"/api/projects/{self.project_id}/schedules", body))["schedule"]
+        return (await self.ok("POST", "/api/v1/schedule_admin/create", {"project_id": self.project_id, "fields": body}))["schedule"]
 
     async def enabled(self, **fields: Any) -> dict[str, Any]:
         schedule = await self.schedule(**fields)
-        return (await self.ok("PUT", f"/api/schedules/{schedule['schedule_id']}", {"enabled": True}))["schedule"]
+        return (await self.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": schedule['schedule_id'], "fields": {"enabled": True}}))["schedule"]
 
     async def due(self, schedule_id: str, *, fires_ago: int = 0, step: timedelta = timedelta(minutes=5)) -> None:
         """Make the schedule's next fire ``fires_ago`` fire times in the past, and the clock 10 s after the latest."""
