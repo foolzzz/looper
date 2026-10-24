@@ -80,7 +80,7 @@ def test_projects_are_created_changed_and_read_back_as_the_dashboard_reads_them(
         (changed,) = await chat.say("把 tetris 改名叫 Tetris2，背景改成 Blocks.", ("looper_projects", {
             "action": "update", "project": "TETRIS", "name": "Tetris2", "background": "Blocks."}))
         assert changed["result"]["project"]["name"] == "Tetris2"
-        (project,) = [p for p in (await _ok("GET", "/api/projects"))["projects"] if p["name"] == "Tetris2"]
+        (project,) = [p for p in (await _ok("POST", "/api/v1/project_admin/list", {}))["projects"] if p["name"] == "Tetris2"]
         assert (project["work_dir"], project["background"]) == ("/srv/tetris", "Blocks.")
         (listed,) = await chat.say("有哪些项目", ("looper_projects", {"action": "list"}))
         assert listed["result"]["projects"] == [{"project": "Tetris2", "work_dir": "/srv/tetris", "tasks": 0,

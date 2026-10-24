@@ -34,6 +34,13 @@ class _Writer:
 
 
 async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
+    if path.startswith("/api/v1/project_admin/"):
+        from tests.test_api_v1_ops_db import _v1
+        from looper.agents.ops.clients import ClientOps
+
+        status, answer = await _v1(method, path, body, ops=ClientOps(SimpleNamespace()))
+        result = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
+        return status, result.get("project", result)
     from looper.agents.http_server import AgentHTTPServer
     from looper.agents.tiers.task import TaskRouter
 
@@ -193,8 +200,8 @@ async def _import(pool: Any, *names: str) -> dict[str, str]:
 async def _projects(*names: str) -> list[str]:
     ids = []
     for name in names:
-        status, body = await _call("POST", "/api/projects", {"name": name})
-        assert status == 201, body
+        status, body = await _call("POST", "/api/v1/project_admin/create", {"name": name})
+        assert status == 200, body
         ids.append(body["project_id"])
     return ids
 

@@ -300,8 +300,8 @@ def session_smoke(base, token, root, work, output, provider, *, helper, installe
         project_work.mkdir()
         (project_work / "AGENTS.md").write_text(PROJECT_SENTINEL)
         (work / "AGENTS.md").write_text(PARENT_SENTINEL)
-        project_id = request(base, "/api/projects", token, "POST", {
-            "name": "isolated-session-smoke", "work_dir": str(project_work)})["project_id"]
+        project_id = request(base, "/api/v1/project_admin/create", token, "POST", {
+            "name": "isolated-session-smoke", "work_dir": str(project_work)})["result"]["project"]["project_id"]
         task_id = task("SMOKE_WORK")
         wait(lambda: provider["worker"].is_set(), "Worker never reached local provider")
         send(STEER_SENTINEL, "planner", task_id)

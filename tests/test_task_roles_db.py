@@ -26,7 +26,7 @@ TESTER = {"id": "tester", "kind": "work", "role_prompt": "You write the tests of
 
 async def _roles_on(pool: Any, project: dict[str, Any], **settings: Any) -> None:
     """Let ``project``'s Planners define roles (``planner_roles`` on), with its other execution ``settings``."""
-    status, answer = await _call("PUT", f"/api/projects/{project['id']}", {"planner_roles": "on", **settings})
+    status, answer = await _call("POST", "/api/v1/project_admin/update", {"project_id": project['id'], "fields": {"planner_roles": "on", **settings}})
     assert status == 200, answer
 
 
@@ -63,7 +63,7 @@ def test_the_role_tools_are_listed_and_work_only_where_the_project_lets_its_plan
         assert await _versions(pool, "task-a") == [("tester", 1, None, None)]
 
         # Switched off again: its roles stay, but none is defined any more.
-        status, _ = await _call("PUT", f"/api/projects/{project['id']}", {"planner_roles": None})
+        status, _ = await _call("POST", "/api/v1/project_admin/update", {"project_id": project['id'], "fields": {"planner_roles": None}})
         assert status == 200
         assert _error(await planner("looper_task_role_set", {**TESTER, "role_prompt": "other"})) == "forbidden"
         assert await _versions(pool, "task-a") == [("tester", 1, None, None)]

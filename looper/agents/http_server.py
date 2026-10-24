@@ -793,7 +793,6 @@ class AgentHTTPServer:
     _RE_ROLE_CONFIG_RESET = re.compile(r"^/api/roles/([a-zA-Z0-9_-]+)/reset-prompt$")
     _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
     _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
-    _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
     _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
     _RE_PROJECT_DOCUMENT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/(doc-[a-zA-Z0-9]+)$")
     _RE_PROJECT_DRAFTS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/drafts$")
@@ -840,15 +839,6 @@ class AgentHTTPServer:
             await self._handle_task_detail(m.group(1), writer)
         elif path == "/api/workspaces/check" and method == "GET":
             await self._answer(writer, HTTP_200, lambda: projects.check_workspace(query))
-        elif path == "/api/projects" and method == "GET":
-            await self._handle_list_projects(writer)
-        elif path == "/api/projects" and method == "POST":
-            await self._answer(writer, HTTP_201, lambda: projects.create_project(projects.json_object(body)))
-        elif (m := self._RE_PROJECT.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: projects.update_project(
-                m.group(1), projects.json_object(body)))
-        elif (m := self._RE_PROJECT.match(path)) and method == "DELETE":
-            await self._answer(writer, HTTP_200, lambda: projects.delete_project(m.group(1)))
         elif (m := self._RE_PROJECT_SCHEDULES.match(path)) and method == "POST":
             await self._answer(writer, HTTP_201, lambda: schedules.create_schedule(
                 m.group(1), projects.json_object(body)))
@@ -1115,17 +1105,6 @@ class AgentHTTPServer:
         if self._scheduler is None:
             raise projects.RequestError(HTTP_409, "the scheduler is not running in this server")
         return await schedules.run_now(schedule_id, self._scheduler)
-
-    async def _handle_list_projects(self, writer: asyncio.StreamWriter) -> None:
-        try:
-            result = await projects.list_projects()
-        except Exception:
-            logger.exception("DB unavailable for list_projects")
-            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
-            await writer.drain()
-            return
-        writer.write(_json_response(HTTP_200, _serialize(result)))
-        await writer.drain()
 
     async def _checks_now(self) -> list[dict[str, str]]:
         """The startup self-check, with the runtimes' own logins read now: a run may have found one forked since."""

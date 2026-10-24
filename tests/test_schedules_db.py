@@ -645,10 +645,10 @@ def test_a_project_with_schedules_is_not_deleted_and_a_deleted_schedule_keeps_it
             "name": "n", "cron": "0 9 * * *", "requirement": "r"})
         assert status == 201
         sid = schedule["schedule"]["schedule_id"]
-        counts = {p["project_id"]: p["schedule_count"] for p in (await env.ok("GET", "/api/projects"))["projects"]}
+        counts = {p["project_id"]: p["schedule_count"] for p in (await env.ok("POST", "/api/v1/project_admin/list", {}))["projects"]}
         assert counts == {env.project_id: 0, empty["id"]: 1}
 
-        status, payload = await env.call("DELETE", f"/api/projects/{empty['id']}")
+        status, payload = await env.call("POST", "/api/v1/project_admin/delete", {"project_id": empty['id']})
         assert status == 409 and "still has 1 schedule; delete them first" in payload["error"]
 
         run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]

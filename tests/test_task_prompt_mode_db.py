@@ -14,7 +14,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 
 
 async def _task(tmp_path: Path, name: str = "calc") -> str:
-    project = (await _ok("POST", "/api/projects", {"name": name}))["project_id"]
+    project = (await _ok("POST", "/api/v1/project_admin/create", {"name": name}))["project_id"]
     return (await _ok("POST", "/api/v1/tasks/create", {
         "requirement": "do it", "project_id": project, "work_dir": str(tmp_path / "work")}))["task_id"]
 

@@ -446,7 +446,7 @@ def test_a_profile_an_open_tasks_role_chose_cannot_be_deleted_and_a_racing_choic
         project = await _project(pool)
         await _task(pool, "task-a", "running", project)
         await _profiles(pool)
-        assert (await _call("PUT", f"/api/projects/{project['id']}", {"planner_roles": "on"}))[0] == 200
+        assert (await _call("POST", "/api/v1/project_admin/update", {"project_id": project['id'], "fields": {"planner_roles": "on"}}))[0] == 200
         planner = _Planner(_ops(), "task-a")
         role = {"id": "tester", "kind": "work", "role_prompt": "test it", "profile_id": "agent-sonnet"}
         assert (await planner("looper_task_role_set", role))["status"] == "ok"

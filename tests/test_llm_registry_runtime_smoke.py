@@ -230,7 +230,7 @@ def test_migrated_service_manager_creates_dashboard_reads(migrated, tmp_path):
         assert unknown["cost"]["unpriced"] == ["seed-open-model"]
         assert unknown["warnings"]
         api.put("/api/agent-settings/roles/manager", {"profile_id": profile["profile_id"]})
-        project = api.post("/api/projects", {"name": "runtime smoke", "work_dir": str(running.home.parent / "work")})
+        project = api.post("/api/v1/project_admin/create", {"name": "runtime smoke", "work_dir": str(running.home.parent / "work")})["result"]["project"]
         dialog = dialogs.select(["model_custom"])[0]
         result = dialogs.run_dialog(api, dialog, database_url=migrated, project_id=project["project_id"],
                                     scenarios=tmp_path / "scenarios.json", mode="fake", timeout=30,

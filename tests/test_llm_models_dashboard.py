@@ -193,7 +193,7 @@ def test_dashboard_server_is_isolated(dashboard_server, tmp_path):
         assert Path(server.env[key]).is_relative_to(tmp_path)
     assert not any(key.startswith(("LOOPER_", "LOOPX_")) for key in server.env)
     assert server.env["PATH"] == str(tmp_path / "bin")
-    projects = server.api.get("/api/projects")["projects"]
+    projects = server.api.post("/api/v1/project_admin/list", {})["result"]["projects"]
     assert [project["name"] for project in projects] == [SEED_NAME]
     state = _database_state(server.database_url)
     assert state["database"].startswith("looper_eval_")

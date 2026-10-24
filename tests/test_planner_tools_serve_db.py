@@ -170,7 +170,7 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             for variant in VARIANTS:
                 work = root / f"work-{variant}"
                 work.mkdir()
-                project = api.post("/api/projects", {"name": f"calc-{variant}", "work_dir": str(work)})
+                project = api.post("/api/v1/project_admin/create", {"name": f"calc-{variant}", "work_dir": str(work)})["result"]["project"]
                 if variant == "profile":
                     api.put(f"/api/projects/{project['project_id']}/allowed-profiles",
                             {"profile_ids": [sonnet["profile"]["profile_id"]]})

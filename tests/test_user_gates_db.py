@@ -436,12 +436,11 @@ def test_a_task_whose_gate_waits_needs_the_user_and_stays_active(monkeypatch: py
 def test_the_projects_gate_settings_are_checked_and_kept(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         project = await _project(pool)
-        status, answer, _ = await _api("PUT", f"/api/projects/{project['id']}", {"user_gates": "maybe"})
-        assert status == 400 and "user_gates must be one of off, on" in answer["error"]
-        status, answer, _ = await _api("PUT", f"/api/projects/{project['id']}", {"gate_reminder_hours": 200})
+        status, answer, _ = await _api("POST", "/api/v1/project_admin/update", {"project_id": project['id'], "fields": {"user_gates": "maybe"}})
+        assert status == 400 and "declared schema" in answer["error"]
+        status, answer, _ = await _api("POST", "/api/v1/project_admin/update", {"project_id": project['id'], "fields": {"gate_reminder_hours": 200}})
         assert status == 400 and "gate_reminder_hours must be a whole number of hours from 0" in answer["error"]
-        status, answer, _ = await _api("PUT", f"/api/projects/{project['id']}",
-                                       {"user_gates": "on", "gate_reminder_hours": 0})
+        status, answer, _ = await _api("POST", "/api/v1/project_admin/update", {"project_id": project['id'], "fields": {"user_gates": "on", "gate_reminder_hours": 0}})
         assert status == 200, answer
         row = await pool.fetchrow("SELECT user_gates, gate_reminder_hours FROM projects WHERE id = $1",
                                   project["id"])

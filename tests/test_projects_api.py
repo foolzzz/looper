@@ -69,6 +69,9 @@ class _Store:
         row = self.projects.get(project_id)
         return self._with_counts(row) if row else None
 
+    async def find_project_by_name(self, name: str, **_: Any) -> dict[str, Any] | None:
+        return next((self._with_counts(p) for p in self.projects.values() if p["name"].lower() == name.lower()), None)
+
     async def create_project(self, *, name: str, description: str = "", work_dir: str = "", background: str = "",
                              execution: dict[str, Any] | None = None, pool: Any = None) -> dict[str, Any]:
         if self._name_taken(name):
@@ -189,7 +192,7 @@ class _Store:
 @pytest.fixture
 def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     fake = _Store()
-    for name in ("list_projects", "get_project", "create_project", "update_project", "delete_project"):
+    for name in ("list_projects", "get_project", "find_project_by_name", "create_project", "update_project", "delete_project"):
         monkeypatch.setattr(db_projects, name, getattr(fake, name))
     for name in ("create_task", "set_task_project", "list_tasks", "count_by_status", "task_exists", "get_task",
                  "get_task_with_steps"):
@@ -277,13 +280,15 @@ def _call(method: str, path: str, body: Any = None, *, query: dict[str, str] | N
     answer = json.loads(payload)
     if path.startswith("/api/v1/"):
         answer = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
+        if path.startswith("/api/v1/project_admin/"):
+            answer = answer.get("project", answer)
     return int(head.split()[1]), answer
 
 
 class TestProjectEndpoints:
     def test_create_returns_the_project(self, store: _Store) -> None:
-        status, body = _call("POST", "/api/projects", {"name": "  tetris ", "description": "game", "work_dir": "~/tetris"})
-        assert status == 201
+        status, body = _call("POST", "/api/v1/project_admin/create", {"name": "  tetris ", "description": "game", "work_dir": "~/tetris"})
+        assert status == 200
         assert body["project_id"].startswith("proj-")
         assert (body["name"], body["description"]) == ("tetris", "game")
         assert body["work_dir"] == os.path.join(os.path.expanduser("~"), "tetris")
@@ -299,8 +304,8 @@ class TestProjectEndpoints:
                              "operator_notes", "vault"}
 
     def test_work_dir_is_optional(self, store: _Store) -> None:
-        status, body = _call("POST", "/api/projects", {"name": "notes"})
-        assert status == 201 and (body["work_dir"], body["background"]) == ("", "")
+        status, body = _call("POST", "/api/v1/project_admin/create", {"name": "notes"})
+        assert status == 200 and (body["work_dir"], body["background"]) == ("", "")
 
     @pytest.mark.parametrize("body", [
         b"{not json", [], {}, {"name": ""}, {"name": "   "}, {"name": 7}, {"name": "x" * 81},
@@ -308,16 +313,16 @@ class TestProjectEndpoints:
         {"name": "a", "background": 5}, {"name": "a", "worker_harness_prompt": "x"},
     ])
     def test_create_rejects_a_bad_request(self, store: _Store, body: Any) -> None:
-        status, response = _call("POST", "/api/projects", body)
+        status, response = _call("POST", "/api/v1/project_admin/create", body)
         assert status == 400 and response["error"]
         assert store.projects == {}
 
     def test_create_accepts_an_80_character_name(self, store: _Store) -> None:
-        assert _call("POST", "/api/projects", {"name": "x" * 80})[0] == 201
+        assert _call("POST", "/api/v1/project_admin/create", {"name": "x" * 80})[0] == 200
 
     def test_create_rejects_a_taken_name_whatever_its_case(self, store: _Store) -> None:
         store.add_project("proj-a", "Tetris")
-        status, body = _call("POST", "/api/projects", {"name": "TETRIS"})
+        status, body = _call("POST", "/api/v1/project_admin/create", {"name": "TETRIS"})
         assert status == 409 and "TETRIS" in body["error"]
 
     def test_list_reports_a_database_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -325,46 +330,46 @@ class TestProjectEndpoints:
             raise ConnectionError("database is down")
 
         monkeypatch.setattr(db_projects, "list_projects", broken)
-        assert _call("GET", "/api/projects") == (500, {"error": "database unavailable"})
+        assert _call("POST", "/api/v1/project_admin/list", {}) == (503, {"error": "the operation failed; try again later"})
 
     def test_update_changes_only_the_given_fields(self, store: _Store) -> None:
         store.add_project("proj-a", "tetris", "/srv/tetris")
-        status, body = _call("PUT", "/api/projects/proj-a", {"description": "falling blocks"})
+        status, body = _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-a', "fields": {"description": "falling blocks"}})
         assert status == 200
         assert (body["name"], body["description"], body["work_dir"]) == ("tetris", "falling blocks", "/srv/tetris")
 
     def test_update_with_an_empty_work_dir_clears_the_default(self, store: _Store) -> None:
         store.add_project("proj-a", "tetris", "/srv/tetris")
-        status, body = _call("PUT", "/api/projects/proj-a", {"name": "Tetris", "work_dir": ""})
+        status, body = _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-a', "fields": {"name": "Tetris", "work_dir": ""}})
         assert status == 200 and (body["name"], body["work_dir"]) == ("Tetris", "")
 
-    @pytest.mark.parametrize("body", [b"[", {}, {"name": ""}, {"work_dir": "rel"}, {"description": None}])
+    @pytest.mark.parametrize("body", [[], {}, {"name": ""}, {"work_dir": "rel"}, {"description": None}])
     def test_update_rejects_a_bad_request(self, store: _Store, body: Any) -> None:
         store.add_project("proj-a", "tetris")
-        assert _call("PUT", "/api/projects/proj-a", body)[0] == 400
+        assert _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-a', "fields": body})[0] == 400
 
     def test_update_of_an_unknown_project_is_404(self, store: _Store) -> None:
-        assert _call("PUT", "/api/projects/proj-nope", {"name": "x"})[0] == 404
+        assert _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-nope', "fields": {"name": "x"}})[0] == 404
 
     def test_update_to_a_taken_name_is_409(self, store: _Store) -> None:
         store.add_project("proj-a", "tetris")
         store.add_project("proj-b", "notes")
-        assert _call("PUT", "/api/projects/proj-b", {"name": "Tetris"})[0] == 409
+        assert _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-b', "fields": {"name": "Tetris"}})[0] == 409
 
     def test_delete_an_empty_project(self, store: _Store) -> None:
         store.add_project("proj-a", "tetris")
-        assert _call("DELETE", "/api/projects/proj-a") == (200, {"deleted": "proj-a"})
+        assert _call("POST", "/api/v1/project_admin/delete", {"project_id": 'proj-a'}) == (200, {"deleted": "proj-a"})
         assert store.projects == {}
 
     def test_delete_of_a_project_with_tasks_is_409(self, store: _Store) -> None:
         store.add_project("proj-a", "tetris")
         store.add_task("task-1", "proj-a", "completed")
-        status, body = _call("DELETE", "/api/projects/proj-a")
+        status, body = _call("POST", "/api/v1/project_admin/delete", {"project_id": 'proj-a'})
         assert status == 409 and "task" in body["error"]
         assert "proj-a" in store.projects
 
     def test_delete_of_an_unknown_project_is_404(self, store: _Store) -> None:
-        assert _call("DELETE", "/api/projects/proj-nope")[0] == 404
+        assert _call("POST", "/api/v1/project_admin/delete", {"project_id": 'proj-nope'})[0] == 404
 
 
 class TestProjectBackground:
@@ -384,19 +389,19 @@ class TestProjectBackground:
         assert project_background(raw) == stored
 
     def test_the_limit_is_10000_characters(self, store: _Store) -> None:
-        assert _call("POST", "/api/projects", {"name": "a", "background": "x" * 10000})[0] == 201
-        status, body = _call("POST", "/api/projects", {"name": "b", "background": "x" * 10001})
+        assert _call("POST", "/api/v1/project_admin/create", {"name": "a", "background": "x" * 10000})[0] == 200
+        status, body = _call("POST", "/api/v1/project_admin/create", {"name": "b", "background": "x" * 10001})
         assert status == 400 and "10000" in body["error"]
         assert [p["name"] for p in store.projects.values()] == ["a"]
         # Blank lines around it do not count.
-        assert _call("POST", "/api/projects", {"name": "c", "background": "\n\n" + "x" * 10000 + "\n\n"})[0] == 201
+        assert _call("POST", "/api/v1/project_admin/create", {"name": "c", "background": "\n\n" + "x" * 10000 + "\n\n"})[0] == 200
 
     def test_put_sets_it_and_an_empty_string_clears_it(self, store: _Store) -> None:
         store.add_project("proj-a", "calc", "/srv/calc", background="old")
-        status, body = _call("PUT", "/api/projects/proj-a", {"background": "Use uv.\n"})
+        status, body = _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-a', "fields": {"background": "Use uv.\n"}})
         assert status == 200 and body["background"] == "Use uv."
         assert (body["name"], body["work_dir"]) == ("calc", "/srv/calc")  # the rest is kept
-        status, body = _call("PUT", "/api/projects/proj-a", {"background": ""})
+        status, body = _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-a', "fields": {"background": ""}})
         assert status == 200 and body["background"] == ""
 
     def test_a_new_project_made_with_a_task_takes_it(self, store: _Store) -> None:
@@ -413,10 +418,10 @@ class TestMovedProjectFields:
 
     @pytest.mark.parametrize("field", ["planner_harness_prompt", "worker_harness_prompt", "model", "run_budget_usd"])
     def test_create_update_and_a_new_project_with_a_task_refuse_them(self, store: _Store, field: str) -> None:
-        status, body = _call("POST", "/api/projects", {"name": "calc", field: "x"})
-        assert status == 400 and "agent-settings" in body["error"] and store.projects == {}
+        status, body = _call("POST", "/api/v1/project_admin/create", {"name": "calc", field: "x"})
+        assert status == 400 and "declared schema" in body["error"] and store.projects == {}
         store.add_project("proj-c", "c")
-        assert _call("PUT", "/api/projects/proj-c", {"name": "renamed", field: "x"})[0] == 400
+        assert _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-c', "fields": {"name": "renamed", field: "x"}})[0] == 400
         assert store.projects["proj-c"]["name"] == "c"
         status, _ = _call("POST", "/api/v1/tasks/create", {"requirement": "r", "work_dir": "/tmp/calc",
                                                         "project": {"name": "calc", field: "x"}})

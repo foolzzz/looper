@@ -228,7 +228,7 @@ def test_a_task_failed_at_its_cap_continues_from_the_database_after_a_restart(tm
                   "env": {"PATH": f"{bin_dir}{os.pathsep}{os.defpath}"}}
         with running_server(**server, log_path=root / "first.log") as api:
             # The plan turn ($0.001) leaves room for both Workers; their $0.002 each crosses the cap.
-            project = api.post("/api/projects", {"name": "capped", "work_dir": str(work), "task_budget_usd": 0.0015})
+            project = api.post("/api/v1/project_admin/create", {"name": "capped", "work_dir": str(work), "task_budget_usd": 0.0015})["result"]["project"]
             task_id = api.post("/api/v1/tasks/create", {"requirement": "capped calc", "project_id": project["project_id"]})["result"][
                 "task_id"]
             api.post("/api/v1/ops/task_control/start", {"task_id": task_id})

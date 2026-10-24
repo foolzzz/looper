@@ -209,10 +209,10 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
 
     (work_dir / "docs").mkdir(parents=True)
     (work_dir / "docs" / "guide.md").write_text("# Guide\n")
-    calc = (await _ok("POST", "/api/projects", {"name": "calc", "work_dir": str(work_dir), "description": "A calc.",
+    calc = (await _ok("POST", "/api/v1/project_admin/create", {"name": "calc", "work_dir": str(work_dir), "description": "A calc.",
                                                 "background": "Python 3.12.", "review_policy": "all",
                                                 "distill_lessons": True}))["project_id"]
-    docs = (await _ok("POST", "/api/projects", {"name": "docs"}))["project_id"]
+    docs = (await _ok("POST", "/api/v1/project_admin/create", {"name": "docs"}))["project_id"]
     await _ok("PUT", f"/api/projects/{calc}/agent-settings", {"profile_id": beta_haiku})
     await _ok("PUT", f"/api/projects/{calc}/agent-settings/roles/worker", {"harness_prompt": "Test first."})
     from looper.agents.knowledge import add_document
@@ -556,7 +556,7 @@ def test_an_entry_with_the_same_key_is_updated_in_place_and_nothing_else_is_remo
             await _ok("POST", "/api/v1/installs/create", {"item_id": mine["item_id"], "scope": "global", "roles": ["planner"]})
             other = (await _ok("POST", "/api/v1/catalog_sources/create_skill", {"name": "keep-me", "description": "Only here.",
                                                                "content": "Stay.\n"}))["item"]
-            calc = (await _ok("POST", "/api/projects", {"name": "CALC", "work_dir": str(tmp_path),
+            calc = (await _ok("POST", "/api/v1/project_admin/create", {"name": "CALC", "work_dir": str(tmp_path),
                                                         "background": "Old."}))["project_id"]
 
             code, out, _ = await _transfer_file(target_url, "import", str(exported))
@@ -955,7 +955,7 @@ def test_a_projects_role_templates_import_checked_and_the_ones_the_file_does_not
     async def _test() -> None:
         async with _installation() as (target, target_url):
             _serve(monkeypatch, target)
-            calc = (await _ok("POST", "/api/projects", {"name": "calc"}))["project_id"]
+            calc = (await _ok("POST", "/api/v1/project_admin/create", {"name": "calc"}))["project_id"]
             await _ok("POST", "/api/v1/role_templates/put", {"project_id": calc, "key": "mine",
                 "kind": "work", "role_prompt": "Mine.", "description": "", "harness": None,
                 "profile_id": None, "items": []})

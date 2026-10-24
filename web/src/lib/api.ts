@@ -935,22 +935,16 @@ function notifyProjectsChanged() {
 }
 
 export async function fetchProjects(): Promise<Project[]> {
-  const res = await fetch(`${API_BASE}/projects`);
-  if (!res.ok) await failed(res, "projects");
-  const data = await res.json();
-  return data.projects ?? [];
+  const result = await callV1<{ projects: Project[] }>("/api/v1/project_admin/list", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.projects;
 }
 
 export async function createProject(fields: NewProjectFields): Promise<Project> {
-  const res = await fetch(`${API_BASE}/projects`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-  });
-  if (!res.ok) await failed(res, "create project");
-  const project: Project = await res.json();
+  const result = await callV1<{ project: Project }>("/api/v1/project_admin/create", fields);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   notifyProjectsChanged();
-  return project;
+  return result.project;
 }
 
 /** The project fields an update can change; an execution setting set to null inherits again. */
@@ -960,23 +954,16 @@ export type ProjectUpdate = Partial<Omit<NewProjectFields, "name">> & { name?: s
 
 /** Send only the fields to change; `work_dir: ""` and `background: ""` clear them. */
 export async function updateProject(projectId: string, fields: ProjectUpdate): Promise<Project> {
-  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-  });
-  if (!res.ok) await failed(res, "update project");
-  const project: Project = await res.json();
+  const result = await callV1<{ project: Project }>("/api/v1/project_admin/update", { project_id: projectId, fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   notifyProjectsChanged();
-  return project;
+  return result.project;
 }
 
 /** Only an empty project can be deleted; the server answers 409 otherwise. */
 export async function deleteProject(projectId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}`, {
-    method: "DELETE",
-  });
-  if (!res.ok) await failed(res, "delete project");
+  const result = await callV1<{ deleted: string }>("/api/v1/project_admin/delete", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   notifyProjectsChanged();
 }
 

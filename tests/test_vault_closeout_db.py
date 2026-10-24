@@ -132,9 +132,9 @@ def test_task_vault_closeout_is_once_and_preserves_its_result(tmp_path: Path, mo
                             log_path=root / "serve.log") as api:
             api.put("/api/knowledge-vault", {"path": str(vault), "writable": ["codex-mem"],
                                              "rules_file": "codex-mem/AGENTS.md"})
-            project = api.post("/api/projects", {"name": "build", "work_dir": str(work), "vault": mode,
+            project = api.post("/api/v1/project_admin/create", {"name": "build", "work_dir": str(work), "vault": mode,
                                                  "distill_lessons": "off", "agent_room": "off",
-                                                 "operator_notes": "off", "task_workspaces": "in_place"})
+                                                 "operator_notes": "off", "task_workspaces": "in_place"})["result"]["project"]
             task_id = api.post("/api/v1/tasks/create", {"requirement": "build the package",
                                                        "project_id": project["project_id"]})["result"]["task_id"]
             api.post("/api/v1/ops/task_control/start", {"task_id": task_id})

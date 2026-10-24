@@ -136,9 +136,8 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
 def _project_fields(data: dict[str, Any], *, update: bool) -> dict[str, Any]:
     """The project fields in ``data``, validated; a new project needs a name."""
     if moved := [name for name in MOVED_FIELDS if name in data]:
-        raise RequestError(HTTP_400, f"{moved[0]} is an agent setting now: set it with PUT "
-                                     "/api/projects/<id>/agent-settings (the project) or "
-                                     ".../agent-settings/roles/<role> (one role in the project)")
+        raise RequestError(HTTP_400, f"{moved[0]} is an agent setting now: use settings.set "
+                                     "with project and, for one role in it, role")
     fields: dict[str, Any] = {}
     try:
         if not update or "name" in data:

@@ -17,7 +17,7 @@ TYPED_TOOL_OPERATIONS = {
     "task_control.restart", "task_control.start_over", "task_control.cancel", "task_update", "task_instruct",
     "gates.list", "gates.messages", "gates.reply", "gates.end", "agent_profiles.list", "overview", "config_export",
     "concurrency", "schedules.list", "schedules.get", "catalog.list", "catalog.install", "catalog.update", "catalog.uninstall",
-    "costs"}
+    "costs", "projects.list", "projects.get", "projects.create", "projects.update", "projects.delete"}
 
 
 def _actions(tool) -> list[str] | None:

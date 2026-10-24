@@ -52,6 +52,12 @@ async def _failed_task(pool: Any, router: TaskRouter, fail_kind: str | None) -> 
 
 
 async def _call(server: AgentHTTPServer, method: str, path: str, body: Any = None) -> tuple[int, Any]:
+    if path.startswith("/api/v1/project_admin/"):
+        from tests.test_api_v1_ops_db import _v1
+
+        status, answer = await _v1(method, path, body, ops=ClientOps(SimpleNamespace()))
+        result = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
+        return status, result.get("project", result)
     if path == "/api/v1/tasks/create":
         from tests.test_api_v1_ops_db import _v1
 
