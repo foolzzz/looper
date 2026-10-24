@@ -4068,7 +4068,7 @@ async function managerJson<T>(url: string, method: string, body: unknown | undef
   return res.json();
 }
 
-/** A token for an agent or script that uses Looper through loopercli (`/api/clients`); the token itself is never listed. */
+/** A token for an agent or script that uses Looper through loopercli; the token itself is never listed. */
 export interface ApiClient {
   id: string;
   name: string;
@@ -4077,17 +4077,21 @@ export interface ApiClient {
 }
 
 export async function fetchApiClients(): Promise<ApiClient[]> {
-  const data = await managerJson<{ clients?: ApiClient[] }>(`${API_BASE}/clients`, "GET", undefined, "API clients");
-  return data.clients ?? [];
+  const result = await callV1<{ clients: ApiClient[] }>("/api/v1/clients/list", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.clients;
 }
 
 /** Add a client; the answer holds its token, which the server shows once and does not keep. */
-export function createApiClient(name: string): Promise<{ client: ApiClient; token: string }> {
-  return managerJson(`${API_BASE}/clients`, "POST", { name }, "create API client");
+export async function createApiClient(name: string): Promise<{ client: ApiClient; token: string }> {
+  const result = await callV1<{ client: ApiClient; token: string }>("/api/v1/clients/create", { name });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function revokeApiClient(id: string): Promise<void> {
-  await managerJson(`${API_BASE}/clients/${encodeURIComponent(id)}`, "DELETE", undefined, "revoke API client");
+  const result = await callV1<{ revoked: string }>("/api/v1/clients/revoke", { client_id: id });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
 }
 
 type ManagerView = Omit<ManagerInfo, "state" | "spend"> & Partial<Pick<ManagerInfo, "state" | "spend">>;

@@ -2079,7 +2079,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
         client_api: Api | None = None
         conversation: str | None = None
         if dialog.client:
-            created = api.post("/api/clients", {"name": f"eval-{uuid.uuid4().hex[:6]}"})
+            created = api.post("/api/v1/clients/create", {"name": f"eval-{uuid.uuid4().hex[:6]}"})["result"]
             client_id = created["client"]["id"]
             client_api = Api(api.base_url, token=created["token"], timeout=api.timeout)
         known = frozenset(t["task_id"] for t in api.get("/api/tasks")["tasks"])
@@ -2128,7 +2128,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
         _stop_leftovers(api)
         if client_id is not None:
             try:
-                api.request("DELETE", f"/api/clients/{client_id}")
+                api.post("/api/v1/clients/revoke", {"client_id": client_id})
             except Exception as exc:  # the token is never in this message: it names the client, not the token
                 print(f"could not revoke the eval's API client {client_id}: {exc}", file=sys.stderr)
     passed = all(t["problem"] is None for t in turns) and len(turns) == len(dialog.says)

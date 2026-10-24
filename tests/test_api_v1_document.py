@@ -121,7 +121,9 @@ def test_responses_say_which_calls_may_ask_for_confirmation() -> None:
 
 def test_only_explicit_operator_operations_touch_credentials() -> None:
     for op in api_v1.operations():
-        assert not op.operation_id.startswith("clients")
+        if op.operation_id.startswith("clients."):
+            assert op.operation_id in {"clients.list", "clients.create", "clients.revoke"}
+            assert op.operator_only and op.tool is None
         if op.operation_id.startswith("auth."):
             assert op.operation_id in {"auth.set_password", "auth.clear_password"}
             assert op.tool is None
