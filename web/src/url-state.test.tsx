@@ -22,18 +22,22 @@ const web = (id: string) => ({ session_id: id, channel: "web", message_count: 1,
 const lark = (id: string) => ({ ...web(id), channel: "lark", last_content: "from lark" });
 
 let requests: string[] = [];
-function answer(url: string): unknown {
+let chatReads: { path: string; session_id?: string }[] = [];
+function answer(url: string, payload: Record<string, string>): unknown {
   requests.push(url);
   if (/\/api\/tasks\/task-a$/.test(url)) return task;
   if (/\/api\/tasks(\?|$)/.test(url)) return { tasks: [], counts: { failed: 2 }, next_before: null };
-  if (url.includes("/chat/targets")) return { targets: [{ kind: "manager", id: "manager", can_send: true }, planner("task-a")] };
-  if (url.includes("/chat/sessions")) {
-    const asked = new URL(url, "http://x").searchParams.get("session_id");
-    if (asked === "lark-old") return { sessions: [lark("lark-old")] }; // past the newest 50: only by its id
-    return { sessions: asked ? [] : [web("web-1"), lark("lark-1")] };
+  if (url === "/api/v1/operator_chat/targets") return { status: "ok", result: { targets: [{ kind: "manager", id: "manager", can_send: true }, planner("task-a")] } };
+  if (url === "/api/v1/operator_chat/sessions") {
+    const asked = payload.session_id;
+    if (asked === "lark-old") return { status: "ok", result: { sessions: [lark("lark-old")] } }; // past the newest 50: only by its id
+    return { status: "ok", result: { sessions: asked ? [] : [web("web-1"), lark("lark-1")] } };
   }
-  if (url.includes("/chat/messages")) return { messages: new URL(url, "http://x").searchParams.get("session_id") === "web-1"
-    ? [{ message_id: "a1", role: "user", content: "The original conversation", created_at: "2026-01-01T00:00:00Z" }] : [] };
+  if (url === "/api/v1/operator_chat/messages") {
+    chatReads.push({ path: url, session_id: payload.session_id });
+    return { status: "ok", result: { messages: payload.session_id === "web-1"
+      ? [{ message_id: "a1", role: "user", content: "The original conversation", created_at: "2026-01-01T00:00:00Z" }] : [] } };
+  }
   if (url === "/api/v1/tasks/activity") return { status: "ok", result: { activity: [] } };
   if (url === "/api/v1/tasks/conversation") return { status: "ok", result: { rows: [], has_more: false } };
   if (url.endsWith("/projects")) return { projects: [{ project_id: "p1", name: "Proj", description: "", work_dir: "", task_count: 1, active_count: 0 }] };
@@ -52,9 +56,10 @@ describe("the dashboard keeps its place in the URL", () => {
 
   beforeEach(() => {
     requests = [];
+    chatReads = [];
     window.location.hash = "";
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
-      const body = answer(String(input));
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const body = answer(String(input), init?.body ? JSON.parse(String(init.body)) : {});
       return body === undefined ? new Response("{}", { status: 404 }) : Response.json(body);
     }));
     container = document.createElement("div");
@@ -237,7 +242,7 @@ describe("the dashboard keeps its place in the URL", () => {
       localStorage.setItem("looper-chat-session-id", "session-other");
       await open("#chat?conversation=web-1");
       expect(localStorage.getItem("looper-chat-session-id")).toBe("web-1");
-      expect(requests.some((u) => u.includes("/chat/messages") && u.includes("session_id=web-1"))).toBe(true);
+      expect(chatReads).toContainEqual({ path: "/api/v1/operator_chat/messages", session_id: "web-1" });
       await act(async () => (container.querySelector('button[title^="New conversation"]') as HTMLButtonElement).click());
       await settle();
       expect(new URLSearchParams(window.location.hash.split("?")[1]).get("conversation")).toBe(localStorage.getItem("looper-chat-session-id"));
