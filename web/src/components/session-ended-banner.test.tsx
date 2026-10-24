@@ -78,7 +78,7 @@ describe("session ended screen and sign out", () => {
       if (unauthorized && url.startsWith("/api/")) return new Response("{}", { status: 401 });
       if (url === "/api/v1/system/status") return status.clone();
       if (url === "/login") return new Response("{}", { status: 401 });
-      if (url === "/api/overview") return Response.json(OVERVIEW);
+      if (url === "/api/v1/system/overview") return Response.json({ status: "ok", result: OVERVIEW });
       if (url === "/api/manager/session") return Response.json(MANAGER_SESSION);
       return Response.json({});
     }));
@@ -100,19 +100,19 @@ describe("session ended screen and sign out", () => {
     expect(container.textContent).toBe("");
     unauthorized = true;
     await act(async () => {
-      await expect(fetch("/api/overview")).rejects.toBeInstanceOf(SessionEndedError);
+      await expect(fetch("/api/v1/system/overview")).rejects.toBeInstanceOf(SessionEndedError);
     });
     expect(container.querySelectorAll('[role="alert"]')).toHaveLength(1);
     expect(container.textContent).toContain("Your session ended. Reload to sign in again.");
     expect(container.querySelector("button")?.textContent).toBe("Reload");
-    await expect(fetch("/api/overview")).rejects.toBeInstanceOf(SessionEndedError);
-    expect(calls).toEqual(["/api/overview"]); // the call after the end sent no request
+    await expect(fetch("/api/v1/system/overview")).rejects.toBeInstanceOf(SessionEndedError);
+    expect(calls).toEqual(["/api/v1/system/overview"]); // the call after the end sent no request
   });
 
   it("settles every concurrent call that gets 401", async () => {
     installSessionGuard();
     unauthorized = true;
-    const results = await Promise.allSettled(Array.from({ length: 20 }, () => fetch("/api/overview")));
+    const results = await Promise.allSettled(Array.from({ length: 20 }, () => fetch("/api/v1/system/overview")));
     expect(results.every((r) => r.status === "rejected" && r.reason instanceof SessionEndedError)).toBe(true);
   });
 

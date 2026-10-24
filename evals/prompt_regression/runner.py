@@ -551,7 +551,7 @@ def run_task(
         gates = _project_user_gates(task, user_gates)
         if gates is not None:
             api.put(f"/api/projects/{created['project_id']}", {"user_gates": gates})
-        api.post("/api/tasks/start", {"task_id": task_id})
+        api.post("/api/v1/ops/task_control/start", {"task_id": task_id})
         answered: dict[str, int] = {}  # each gate's script entries posted so far
         resumed: dict[str, float] = {}  # each wait resumed by the runner, and when (database clock)
 
@@ -568,10 +568,10 @@ def run_task(
             cost = float((detail.get("cost") or {}).get("cost_usd") or 0.0)
             if cap_left is not None and cost >= cap_left and not stopped_by_cap:
                 stopped_by_cap = True
-                api.post("/api/tasks/cancel", {"task_id": task_id})
+                api.post("/api/v1/ops/task_control/cancel", {"task_id": task_id})
             elif time.monotonic() - started > timeout and not timed_out:
                 timed_out = True
-                api.post("/api/tasks/cancel", {"task_id": task_id})
+                api.post("/api/v1/ops/task_control/cancel", {"task_id": task_id})
             elif push_pr_fixes(task, work_dir, detail, now=time.time() + clock_offset):
                 pass  # the next real gh check sees the fix, just as the dependent Worker will
             elif resume_waits(api, task, task_id, detail, resumed, now=time.time() + clock_offset):
@@ -585,7 +585,7 @@ def run_task(
                 except EvalError:
                     pass  # the Planner is not live yet; try again at the next poll
             elif edit_pending and detail.get("steps") and detail.get("phase") in ("executing", "verifying"):
-                api.put(f"/api/tasks/{task_id}/requirement", {"requirement": task.edit_requirement})
+                api.post("/api/v1/tasks/requirement_update", {"task_id": task_id, "requirement": task.edit_requirement})
                 edit_pending = False
             time.sleep(poll)
         duration = time.monotonic() - started
@@ -669,7 +669,8 @@ def answer_gates(api: Api, task: EvalTask, task_id: str, detail: dict[str, Any],
     """Play the user: post the next entry of ``task``'s gate script (``_script``) in each of the task's gates that
     waits for the user, once it has waited ``gate_reply_after_s`` since it opened; ``END_DISCUSSION`` ends the
     discussion, and so does a gate that asks again after the script ran out (so the task ends instead of waiting
-    for its timeout). Whether anything was posted."""
+    for its timeout). When requested, the first answer also waits for a recorded Worker run overlapping the
+    open gate. Whether anything was posted."""
     script = _script(task)
     posted = False
     for gate in detail.get("gates") or []:
@@ -680,6 +681,13 @@ def answer_gates(api: Api, task: EvalTask, task_id: str, detail: dict[str, Any],
         opened = metrics.timestamp(gate.get("opened_at")) or now
         if now - opened < task.gate_reply_after_s:
             continue
+        if done == 0 and task.gate_reply_after_worker_start:
+            records = api.get("/api/llm-records", task_id=task_id, limit=500)["records"]
+            if not any(metrics.role(record) == "worker" and
+                       metrics.timestamp(record.get("created_at")) is not None and
+                       (record.get("finished_at") is None or
+                        (metrics.timestamp(record["finished_at"]) or 0) > opened) for record in records):
+                continue
         entry = script[done] if done < len(script) else END_DISCUSSION
         try:
             if entry == END_DISCUSSION:
@@ -697,7 +705,7 @@ def _cancel_after_error(api: Api, task_id: str) -> float:
     """Cancel a task the harness could not follow (so it runs alongside nothing), and return its cost so far;
     best effort, as the server may be gone."""
     try:
-        api.post("/api/tasks/cancel", {"task_id": task_id})
+        api.post("/api/v1/ops/task_control/cancel", {"task_id": task_id})
     except Exception:  # it may have ended, or the server may be gone
         pass
     try:
