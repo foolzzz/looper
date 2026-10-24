@@ -28,7 +28,7 @@ from ..db.tasks import TaskGroup
 from ..ops_config import OpsConfig
 from . import (
     agent_settings, api_v1, chat_settings, config_imports, config_transfer, gate_service, knowledge,
-    operator_auth, overview, profile_registry, projects, prompt_preview, request_guard, role_api,
+    operator_auth, overview, profile_registry, projects, prompt_preview, request_guard,
     schedules, self_check, vault, wait_service,
 )
 from .broadcast import Broadcaster
@@ -804,10 +804,6 @@ class AgentHTTPServer:
     _RE_PROJECT_AGENT_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings$")
     _RE_PROJECT_ROLE_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_PROJECT_ALLOWED_PROFILES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/allowed-profiles$")
-    _RE_PROJECT_ROLE_TEMPLATES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-templates$")
-    _RE_PROJECT_ROLE_STATS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-stats$")
-    _RE_PROJECT_ROLE_TEMPLATE = re.compile(
-        r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-templates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})$")
     _RE_ROLE_SETTINGS = re.compile(r"^/api/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_RUNTIME_PROBE = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)/probe$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
@@ -991,15 +987,6 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_ALLOWED_PROFILES.match(path)) and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: projects.set_allowed_profiles(
                 m.group(1), projects.json_object(body)))
-        elif (m := self._RE_PROJECT_ROLE_STATS.match(path)) and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: role_api.role_stats(m.group(1), query.get("since")))
-        elif (m := self._RE_PROJECT_ROLE_TEMPLATES.match(path)) and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: role_api.templates_view(m.group(1)))
-        elif (m := self._RE_PROJECT_ROLE_TEMPLATE.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: role_api.put_template(
-                m.group(1), m.group(2), projects.json_object(body)))
-        elif (m := self._RE_PROJECT_ROLE_TEMPLATE.match(path)) and method == "DELETE":
-            await self._answer(writer, HTTP_200, lambda: role_api.delete_template(m.group(1), m.group(2)))
         elif (m := self._RE_PROJECT_ROLE_SETTINGS.match(path)) and method == "PUT":
             await self._handle_agent_settings(writer, lambda: self._write_layer(
                 body, lambda data: agent_settings.update_project(m.group(1), data, role=m.group(2))))
