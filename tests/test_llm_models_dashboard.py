@@ -300,9 +300,9 @@ def test_incompatible_protocol_cannot_create_profile(dashboard_server, runtime, 
     provider = api.post("/api/providers", {"name": ACCOUNT, "vendor_type": "custom", "endpoints": [
         {"protocol": protocol, "base_url": "https://example.invalid/v1"}
         for protocol in (compatible, incompatible)]})["provider"]
-    models = {protocol: api.post("/api/models", {
-        "provider_id": provider["provider_id"], "name": exact_model, "protocol": protocol,
-    })["model"] for protocol in (compatible, incompatible)}
+    models = {protocol: api.post("/api/v1/ops/models/create", {
+        "provider": provider["provider_id"], "name": exact_model, "protocol": protocol,
+    })["result"]["model"] for protocol in (compatible, incompatible)}
     before = _registry_state(dashboard_server)
     assert before["profiles"]  # Positive control for the DB readback.
     with pytest.raises(EvalError, match=r"answered 400:.*protocol"):
@@ -382,7 +382,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
                 (protocol, f"https://example.invalid/{protocol}") for protocol in ("anthropic-messages", "openai-chat")}
     account.get_by_role("button", name=f"Models for provider {ACCOUNT}", exact=True).click()
     expect(account).to_contain_text("No models registered")
-    assert server.api.get("/api/models", provider_id=pid)["models"] == []
+    assert server.api.post("/api/v1/ops/models/list", {"provider": pid})["result"]["models"] == []
 
     for protocol in ("anthropic-messages", "openai-chat"):
         account.get_by_role("button", name="Add model", exact=True).click()
@@ -396,7 +396,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
         model_form.get_by_label("Effort support", exact=True).select_option("supported")
         model_form.get_by_label("Supported efforts", exact=True).fill("low, high")
         _finish_form(model_form, "Add model")
-    models = server.api.get("/api/models", provider_id=pid)["models"]
+    models = server.api.post("/api/v1/ops/models/list", {"provider": pid})["result"]["models"]
     assert len(models) == 2 and {m["name"] for m in models} == {MODEL_NAME}
     by_protocol = {m["protocol"]: m for m in models}
     mid = by_protocol["anthropic-messages"]["model_id"]
@@ -472,7 +472,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
         "button", name=f"Delete model {MODEL_NAME} (anthropic-messages)", exact=True))
     model_row.get_by_role("button", name=f"Delete model {MODEL_NAME} (anthropic-messages)", exact=True).click()
     expect(model_row.get_by_role("alert")).to_be_visible()
-    assert next(m for m in server.api.get("/api/models", provider_id=pid)["models"] if m["model_id"] == mid)
+    assert next(m for m in server.api.post("/api/v1/ops/models/list", {"provider": pid})["result"]["models"] if m["model_id"] == mid)
     account.get_by_role("button", name=f"Edit provider {ACCOUNT}", exact=True).click()
     edit = page.get_by_role("form", name=f"Edit provider {ACCOUNT}", exact=True)
     edit.get_by_label("API key", exact=True).fill(SECRET)
@@ -534,10 +534,12 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     assert not errors
     # One opt-in local artifact, containing only synthetic public UI data.
     screenshot = os.environ.get("LOOPER_DASHBOARD_SMOKE_SCREENSHOT")
-    if screenshot and width == 1280:
+    if screenshot:
         destination = Path(screenshot).resolve()
         assert destination.is_relative_to(REPO_ROOT / ".local")
-        page.screenshot(path=str(destination))
+        _settings(page, server, "providers")
+        _row(page, "Smoke account").get_by_role("button", name="Models for provider Smoke account", exact=True).click()
+        _row(page, "Smoke account").screenshot(path=str(destination.with_stem(f"{destination.stem}-{width}")))
 
 
 @pytest.mark.installed
@@ -566,17 +568,19 @@ def test_vendor_suggestions_are_explicit_and_invalid_inputs_do_not_write(dashboa
         s["name"] for s in vendor["suggested_models"] if s["protocol"] == suggestion["protocol"]]
     suggestions.select_option(suggestion["name"])
     expect(form.get_by_label("Exact model name *", exact=True)).to_have_value(suggestion["name"])
-    assert server.api.get("/api/models", provider_id=provider["provider_id"])["models"] == []
+    assert server.api.post("/api/v1/ops/models/list", {"provider": provider["provider_id"]})["result"]["models"] == []
     before = _registry_state(server)
-    form.get_by_label("Context window", exact=True).fill("-1")
-    with page.expect_response(lambda r: r.url.endswith("/api/models") and r.request.method == "POST") as invalid:
-        form.get_by_role("button", name="Add model", exact=True).click()
-    assert invalid.value.status == 400
-    expect(form.get_by_role("alert")).to_be_visible()
-    assert _registry_state(server) == before
+    for value in ("-1", "not-a-number"):
+        form.get_by_label("Context window", exact=True).fill(value)
+        with page.expect_response(lambda r: r.url.endswith("/api/v1/ops/models/create") and r.request.method == "POST") as invalid:
+            form.get_by_role("button", name="Add model", exact=True).click()
+        assert invalid.value.status == 400
+        expect(form.get_by_role("alert")).to_be_visible()
+        expect(form.get_by_label("Context window", exact=True)).to_have_value(value)
+        assert _registry_state(server) == before
     form.get_by_label("Context window", exact=True).fill("32000")
     _finish_form(form, "Add model")
-    [model] = server.api.get("/api/models", provider_id=provider["provider_id"])["models"]
+    [model] = server.api.post("/api/v1/ops/models/list", {"provider": provider["provider_id"]})["result"]["models"]
     assert (model["name"], model["protocol"], model["context_window"]) == (suggestion["name"], suggestion["protocol"], 32000)
     assert next(m for m in _registry_state(server)["models"] if m["id"] == model["model_id"])["context_window"] == 32000
 
@@ -636,9 +640,9 @@ def test_pi_and_dsh_profile_choices_match_their_typed_runtime_contract(dashboard
     })["provider"]
     pid = provider["provider_id"]
     supported = ("deepseek-flash", "deepseek-flash[1m]", "deepseek-v4-pro", "deepseek-v4-pro[1m]")
-    models = [server.api.post("/api/models", {"provider_id": pid, "protocol": protocol, "name": name,
+    models = [server.api.post("/api/v1/ops/models/create", {"provider": pid, "protocol": protocol, "name": name,
                                             "input_usd_per_mtok": 0, "output_usd_per_mtok": 0,
-                                            "cache_read_usd_per_mtok": 0, "cache_write_usd_per_mtok": 0})["model"]
+                                            "cache_read_usd_per_mtok": 0, "cache_write_usd_per_mtok": 0})["result"]["model"]
               for protocol in ("openai-responses", "openai-chat", "anthropic-messages")
               for name in (*supported, "unrestricted-model")]
     _settings(page, server, "profiles/new")

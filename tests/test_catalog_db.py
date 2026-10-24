@@ -66,7 +66,7 @@ async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
     raw = b"" if body is None else json.dumps(body).encode()
     if (method == "POST" and path in ("/api/v1/registry/view", "/api/v1/runtimes/probe")) or path.startswith(
             ("/api/v1/catalog_sources/", "/api/v1/catalog_items/", "/api/v1/installs/",
-             "/api/v1/project_skills/", "/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/schedule_admin/")):
+             "/api/v1/project_skills/", "/api/v1/ops/models/", "/api/v1/models/", "/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/schedule_admin/")):
         from looper.agents.api_v1 import OPERATOR
         from looper.agents.ops.clients import ClientOps
         server._client_ops = ClientOps(SimpleNamespace())
@@ -77,7 +77,7 @@ async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
     answer = json.loads(payload)
     if (method == "POST" and path in ("/api/v1/registry/view", "/api/v1/runtimes/probe")) or path.startswith(
             ("/api/v1/catalog_sources/", "/api/v1/catalog_items/", "/api/v1/installs/",
-             "/api/v1/project_skills/", "/api/v1/roles/", "/api/v1/agent_settings/")):
+             "/api/v1/project_skills/", "/api/v1/ops/models/", "/api/v1/models/", "/api/v1/roles/", "/api/v1/agent_settings/")):
         answer = answer["result"] if answer.get("status") == "ok" else {"error": answer["error"]["message"]}
     if path.startswith("/api/v1/schedule_admin/") and answer.get("status") == "ok":
         answer = answer["result"]

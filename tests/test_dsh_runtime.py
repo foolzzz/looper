@@ -1811,7 +1811,9 @@ def test_dsh_channel_timeout_or_cancel_reaps_process(tmp_path, cancel):
 
         task = asyncio.create_task(read())
         try:
-            await asyncio.wait_for(ready.wait(), 3)
+            # Startup is setup, not the channel timeout under test. The outer
+            # watchdog bounds startup and cleanup, including on a loaded host.
+            await ready.wait()
             if cancel:
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
@@ -1825,7 +1827,7 @@ def test_dsh_channel_timeout_or_cancel_reaps_process(tmp_path, cancel):
             await asyncio.gather(task, return_exceptions=True)
             await proc_tree.end(process, label="test DSH")
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), 15))
 
 
 @pytest.mark.parametrize("version,code,help_code", [("0.2.1-rc.2", 0, 0), ("0.2.1-rc.3", 0, 0),
@@ -2729,9 +2731,9 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
                                "base_url": "https://deepseek.example.invalid/anthropic"}],
                 "api_key": "synthetic-dsh-key",
             })["provider"]["provider_id"]
-            model = api.post("/api/models", {
-                "provider_id": provider, "name": "deepseek-flash", "protocol": "anthropic-messages",
-            })["model"]["model_id"]
+            model = api.post("/api/v1/ops/models/create", {
+                "provider": provider, "name": "deepseek-flash", "protocol": "anthropic-messages",
+            })["result"]["model"]["model_id"]
             profile = api.post("/api/agent-profiles", {
                 "name": "disposable-dsh", "runtime_id": "rt-dsh", "model_id": model, "effort": "high",
             })["profile"]["profile_id"]

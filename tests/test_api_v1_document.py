@@ -19,7 +19,7 @@ TYPED_TOOL_OPERATIONS = {
     "settings.set", "concurrency", "schedules.list", "schedules.get", "schedules.create", "schedules.update",
     "schedules.enable", "schedules.disable", "schedules.run", "schedules.delete", "schedules.reset_planner_session",
     "catalog.list", "catalog.install", "catalog.update", "catalog.uninstall",
-    "costs"}
+    "models.list", "models.create", "models.update", "models.delete", "costs"}
 
 
 def _actions(tool) -> list[str] | None:

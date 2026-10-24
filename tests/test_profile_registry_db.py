@@ -48,7 +48,7 @@ async def _call(method: str, path: str, body: Any = None, *, claude: str = "clau
     raw = b"" if body is None else json.dumps(body).encode()
     if (method == "POST" and parsed.path in ("/api/v1/registry/view", "/api/v1/runtimes/probe")) or (
             parsed.path == "/api/v1/tasks/agents" or parsed.path.startswith(
-                ("/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/runs/"))):
+                ("/api/v1/ops/models/", "/api/v1/models/", "/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/runs/"))):
         server._client_ops = ClientOps(SimpleNamespace())
         await server._handle_v1(method, parsed.path, dict(parse_qsl(parsed.query)), {}, raw, writer, api_v1.OPERATOR)
     else:
@@ -57,7 +57,7 @@ async def _call(method: str, path: str, body: Any = None, *, claude: str = "clau
     answer = json.loads(payload)
     if (method == "POST" and parsed.path in ("/api/v1/registry/view", "/api/v1/runtimes/probe")) or (
             parsed.path == "/api/v1/tasks/agents" or parsed.path.startswith(
-                ("/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/runs/"))):
+                ("/api/v1/ops/models/", "/api/v1/models/", "/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/runs/"))):
         answer = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
     return int(head.split()[1]), answer
 
@@ -471,11 +471,11 @@ async def _provider(body: dict[str, Any]) -> str:
 
 
 async def _model_id(provider_id: str, name: str, protocol: str = "anthropic-messages") -> str:
-    models = (await _ok("GET", f"/api/models?provider_id={provider_id}"))["models"]
+    models = (await _ok("POST", "/api/v1/ops/models/list", {"provider": provider_id}))["models"]
     found = next((m for m in models if m["name"] == name and m["protocol"] == protocol), None)
     if found is None:
-        found = (await _ok("POST", "/api/models", {
-            "provider_id": provider_id, "name": name, "protocol": protocol}))["model"]
+        found = (await _ok("POST", "/api/v1/ops/models/create", {
+            "provider": provider_id, "name": name, "protocol": protocol}))["model"]
     return found["model_id"]
 
 
@@ -1043,7 +1043,7 @@ def test_a_change_that_would_break_a_profile_is_refused_and_one_in_use_is_kept(
         status, payload = await _call("DELETE", f"/api/providers/{provider_id}")
         assert status == 409 and "first" in payload["error"]
         await _ok("DELETE", f"/api/agent-profiles/{profile['profile_id']}")
-        await _ok("DELETE", f"/api/models/{profile['model_id']}")
+        await _ok("POST", "/api/v1/ops/models/delete", {"model": profile['model_id']})
         await _ok("DELETE", f"/api/providers/{provider_id}")
         assert runtime_id in {r["runtime_id"] for r in (await _registry())["runtimes"]}
 
@@ -1373,11 +1373,11 @@ def test_a_provider_keeps_its_model_catalog_and_concurrency_with_unknowns_as_nul
                 {"protocol": "openai-chat", "base_url": "https://llm.example.invalid/v1"}]}))["provider"]
         assert provider["max_concurrency"] == 4
         assert provider["model_count"] == 0
-        first = (await _ok("POST", "/api/models", {
-            "provider_id": provider["provider_id"], "name": "glm-4.6", "protocol": "anthropic-messages",
+        first = (await _ok("POST", "/api/v1/ops/models/create", {
+            "provider": provider["provider_id"], "name": "glm-4.6", "protocol": "anthropic-messages",
             "context_window": 200_000, "input_usd_per_mtok": 0.6, "efforts": ["low", "high"]}))["model"]
-        second = (await _ok("POST", "/api/models", {
-            "provider_id": provider["provider_id"], "name": "glm-4.5", "protocol": "anthropic-messages"}))["model"]
+        second = (await _ok("POST", "/api/v1/ops/models/create", {
+            "provider": provider["provider_id"], "name": "glm-4.5", "protocol": "anthropic-messages"}))["model"]
         assert (first["context_window"], first["input_usd_per_mtok"], first["efforts"]) == (
             200_000, 0.6, ["low", "high"])
         assert all(second[key] is None for key in (
@@ -1395,7 +1395,7 @@ def test_a_provider_keeps_its_model_catalog_and_concurrency_with_unknowns_as_nul
     ({"context_window": 0}, "context_window must be"),
     ({"efforts": ["Low"]}, "efforts must be"),
     ({"input_usd_per_mtok": -1}, "per million tokens"),
-    ({"speed": 1}, "unknown field"),
+    ({"speed": 1}, "unknown argument"),
 ])
 def test_model_settings_that_do_not_validate_are_refused(
     monkeypatch: pytest.MonkeyPatch, change: dict[str, Any], error: str,
@@ -1403,8 +1403,8 @@ def test_model_settings_that_do_not_validate_are_refused(
     async def _test(_pool: Any) -> None:
         provider = await _provider({"name": "p", "vendor_type": "custom", "endpoints": [
             {"protocol": "openai-chat", "base_url": "https://llm.example.invalid/v1"}]})
-        status, payload = await _call("POST", "/api/models", {
-            "provider_id": provider, "name": "m", "protocol": "openai-chat", **change})
+        status, payload = await _call("POST", "/api/v1/ops/models/create", {
+            "provider": provider, "name": "m", "protocol": "openai-chat", **change})
         assert status == 400 and error in payload["error"], payload
         status, payload = await _call("PUT", f"/api/providers/{provider}", {"max_concurrency": 0})
         assert status == 400 and "max_concurrency must be" in payload["error"]

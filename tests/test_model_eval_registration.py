@@ -42,7 +42,9 @@ class RegistryApi:
                         "api_key": "***", "auth": "api_key", "oauth_runtime_type": None}
             self.registry["providers"].append(provider)
             return {"provider": deepcopy(provider)}
-        if path == "/api/models":
+        if path == "/api/v1/ops/models/create":
+            assert "provider" in body and "provider_id" not in body
+            body = {"provider_id" if k == "provider" else k: v for k, v in body.items()}
             ModelSpec.from_entry({"id": "draft", **body})
             provider = next(p for p in self.registry["providers"] if p["provider_id"] == body["provider_id"])
             assert body["protocol"] in {e["protocol"] for e in provider["endpoints"]}
@@ -50,7 +52,7 @@ class RegistryApi:
                            for m in self.registry["models"])
             model = {**body, "model_id": f"model-{len(self.registry['models'])}"}
             self.registry["models"].append(model)
-            return {"model": deepcopy(model)}
+            return {"status": "ok", "result": {"model": deepcopy(model), "warnings": []}}
         assert path == "/api/agent-profiles"
         assert set(body) <= {"name", "runtime_id", "model_id", "effort", "agent_teams", "custom_prompt"}
         model = next(m for m in self.registry["models"] if m["model_id"] == body["model_id"])
@@ -84,7 +86,7 @@ def test_four_layer_registration_and_readback_keep_model_settings_and_secrets_se
     original = deepcopy(spec)
     profile = runner.register_agent(api, spec)
     assert spec == original
-    assert [path for path, _ in api.posts] == ["/api/providers", "/api/models", "/api/agent-profiles"]
+    assert [path for path, _ in api.posts] == ["/api/providers", "/api/v1/ops/models/create", "/api/agent-profiles"]
     assert api.posts[0][1]["api_key"] == "synthetic-eval-secret"
     saved = api.post("/api/v1/registry/view", {})["result"]
     assert saved["models"][0] == {**spec["model"], "provider_id": "prov-1", "model_id": profile["model_id"]}
@@ -190,7 +192,7 @@ def test_legacy_spec_can_reference_saved_login_account(api):
         "agent": {"name": "legacy login", "model": "sonnet", "effort": "high"}})
     assert profile["model"]["name"] == "sonnet"
     assert profile["model"]["protocol"] == "anthropic-messages"
-    assert [path for path, _ in api.posts] == ["/api/models", "/api/agent-profiles"]
+    assert [path for path, _ in api.posts] == ["/api/v1/ops/models/create", "/api/agent-profiles"]
 
 
 def test_missing_key_fails_without_writing_or_mutating_spec(api, monkeypatch):
@@ -272,7 +274,7 @@ def test_model_option_creates_subscription_model_once_and_reuses_profile(api):
     assert first == second
     assert first["model"]["protocol"] == "anthropic-messages"
     assert first["provider_id"] == "prov-claude-subscription"
-    assert [path for path, _ in api.posts] == ["/api/models", "/api/agent-profiles"]
+    assert [path for path, _ in api.posts] == ["/api/v1/ops/models/create", "/api/agent-profiles"]
 
 
 def test_run_copies_only_model_reference_and_reports_identity_and_cost(api, monkeypatch, tmp_path):

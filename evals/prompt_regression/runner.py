@@ -1085,7 +1085,7 @@ def _eval_model(api: Api, registry: dict[str, Any], provider_id: str, wanted: An
         model = next((m for m in registry["models"] if m["provider_id"] == provider_id
                       and m["name"] == wanted["name"] and m["protocol"] == wanted["protocol"]), None)
         if model is None and "provider_id" not in wanted:
-            return api.post("/api/models", {**wanted, "provider_id": provider_id})["model"]
+            return api.post("/api/v1/ops/models/create", {**wanted, "provider": provider_id})["result"]["model"]
     if model is None:
         raise EvalError("no saved model matches the eval model reference")
     if model["provider_id"] != provider_id:
@@ -1211,8 +1211,8 @@ def register_provider_agent(api: Api, choice: ProviderChoice) -> dict[str, Any]:
     for entry in preset["apis"]:
         for protocol in entry["protocols"]:
             for model in api_models(preset, entry):
-                saved = api.post("/api/models", {**model, "provider_id": provider["provider_id"],
-                                                 "protocol": protocol})["model"]
+                saved = api.post("/api/v1/ops/models/create", {**model, "provider": provider["provider_id"],
+                                                 "protocol": protocol})["result"]["model"]
                 if protocol == "anthropic-messages" and model["name"] == name:
                     selected = saved
     assert selected is not None
