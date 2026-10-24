@@ -28,7 +28,7 @@ from ..db.tasks import TaskGroup
 from ..ops_config import OpsConfig
 from . import (
     agent_settings, api_v1, chat_settings, config_imports, config_transfer, gate_service, knowledge,
-    operator_auth, overview, profile_registry, projects, prompt_preview, request_guard,
+    operator_auth, overview, profile_registry, projects, prompt_preview, request_guard, role_api,
     schedules, self_check, vault, wait_service,
 )
 from .broadcast import Broadcaster
@@ -816,7 +816,6 @@ class AgentHTTPServer:
     _RE_SCHEDULE = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)$")
     _RE_SCHEDULE_RESET_SESSION = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/reset-planner-session$")
     _RE_SCHEDULE_RUN = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/run$")
-    _RE_CLIENT = re.compile(r"^/api/clients/(client-[0-9a-f]{12})$")
     _RE_CONFIG_IMPORT = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})$")
     _RE_CONFIG_IMPORT_APPLY = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})/apply$")
 
@@ -861,12 +860,6 @@ class AgentHTTPServer:
             await self._handle_task_detail(m.group(1), writer)
         elif path == "/api/workspaces/check" and method == "GET":
             await self._answer(writer, HTTP_200, lambda: projects.check_workspace(query))
-        elif path == "/api/clients" and method == "GET":
-            await self._answer(writer, HTTP_200, self._list_clients)
-        elif path == "/api/clients" and method == "POST":
-            await self._create_client(body, writer)
-        elif (m := self._RE_CLIENT.match(path)) and method == "DELETE":
-            await self._answer(writer, HTTP_200, lambda: self._revoke_client(m.group(1)))
         elif path == "/api/projects" and method == "GET":
             await self._handle_list_projects(writer)
         elif path == "/api/projects" and method == "POST":
@@ -1109,31 +1102,6 @@ class AgentHTTPServer:
         writer.write(_json_response(status, _serialize(result)))
         await writer.drain()
 
-    @staticmethod
-    async def _list_clients() -> dict[str, Any]:
-        return {"clients": await db_api_clients.list_active()}
-
-    async def _create_client(self, body: bytes, writer: asyncio.StreamWriter) -> None:
-        """Add an API client; its token is in this answer and nowhere else."""
-        headers = {"Cache-Control": "no-store"}
-        try:
-            name = projects.json_object(body).get("name")
-            view, token = await db_api_clients.create(name)
-            status, answer = HTTP_201, {"client": view, "token": token}
-        except projects.RequestError as exc:
-            status, answer = exc.status, {"error": str(exc)}
-        except db_api_clients.ClientNameError as exc:
-            status, answer = HTTP_400, {"error": str(exc)}
-        except db_api_clients.ClientNameTaken as exc:
-            status, answer = HTTP_409, {"error": str(exc)}
-        writer.write(_json_response(status, _serialize(answer), headers=headers))
-        await writer.drain()
-
-    @staticmethod
-    async def _revoke_client(client_id: str) -> dict[str, Any]:
-        if not await db_api_clients.revoke(client_id):
-            raise projects.RequestError(HTTP_404, f"no active API client {client_id}")
-        return {"revoked": client_id}
 
     async def _discard_workspace(self, task_id: str, workspace_id: int) -> dict[str, Any]:
         """The user drops a step worktree a task that is not running keeps: its directory and branch go. The task's

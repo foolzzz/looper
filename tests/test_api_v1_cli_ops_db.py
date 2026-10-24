@@ -89,7 +89,8 @@ def test_cli_commands_against_disposable_serve(tmp_path, monkeypatch, capsys):
                                     "--config", str(config)], cwd=tmp_path, env=env, stdout=handle, stderr=handle,
                                    start_new_session=True)
         try:
-            deadline = time.monotonic() + 25
+            # Cold runtime self-checks share the isolated server's 90-second startup budget.
+            deadline = time.monotonic() + 90
             while True:
                 assert process.poll() is None, log.read_text()
                 if (root / operator_auth.TOKEN_FILE).exists():
@@ -102,8 +103,9 @@ def test_cli_commands_against_disposable_serve(tmp_path, monkeypatch, capsys):
                         pass
                 assert time.monotonic() < deadline, log.read_text()
                 time.sleep(0.1)
-            status, created = api.call("POST", "/api/clients", {"name": "smoke"})
-            assert status == 201
+            status, created = api.call("POST", "/api/v1/clients/create", {"name": "smoke"})
+            assert status == 200
+            created = created["result"]
             client = tmp_path / "client.json"
             loopercli.write_client(client, api.url, created["token"])
             base = ["--client-file", str(client), "--json"]
