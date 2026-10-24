@@ -6,6 +6,8 @@ from ..ops import ErrorCode, OpError
 from ..ops.service import _plain
 from ..projects import RequestError
 
+ORDER = 4
+
 
 def _enum(*values):
     return {"type": "string", "enum": list(values)}

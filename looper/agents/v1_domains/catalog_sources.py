@@ -7,6 +7,8 @@ from ..ops.service import _plain
 from ..projects import RequestError
 from .catalog import CATALOG, CATALOG_ITEM, MCP_CONFIG, LIBRARY_SKIPPED, _enum
 
+ORDER = 5
+
 
 _GIT = {"url": _STR, "ref": _STR, "subpath": _STR}
 _SOURCE = {"url": _STR, "ref": _NULL_STR, "subpath": _STR, "commit": _STR}
