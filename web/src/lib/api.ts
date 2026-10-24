@@ -759,14 +759,11 @@ export async function startReadyTask(taskId: string): Promise<void> {
   if (!res.ok) await failed(res, "start");
 }
 
-/** Raise the project's task spend cap above what a task that failed at it spent, and continue the task. */
+/** Raise the task's own cap, or its project's per-task cap, above its spend and continue the budget-failed task. */
 export async function continueTaskAtCap(taskId: string, taskBudgetUsd: number): Promise<void> {
-  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/continue`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ task_budget_usd: taskBudgetUsd }),
-  });
-  if (!res.ok) await failed(res, "continue");
+  const result = await callV1<{ task_id: string; project_id: string; task_budget_usd: number;
+    spent_usd: number; continued: string }>("/api/v1/tasks/continue", { task_id: taskId, task_budget_usd: taskBudgetUsd });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
 }
 
 /** Drop a step worktree a task that is not running keeps: its directory and branch are deleted. */
@@ -880,13 +877,9 @@ export async function setTaskProject(
   taskId: string,
   projectId: string,
 ): Promise<{ task_id: string; project_id: string; project_name: string }> {
-  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/project`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ project_id: projectId }),
-  });
-  if (!res.ok) await failed(res, "move task");
-  const data = await res.json();
+  const data = await callV1<{ task_id: string; project_id: string; project_name: string }>(
+    "/api/v1/tasks/move", { task_id: taskId, project_id: projectId });
+  if ("status" in data) throw new V1Error(202, "unavailable", data.impact);
   notifyProjectsChanged();
   return data;
 }
@@ -1608,12 +1601,9 @@ export async function updateTaskConfig(
   taskId: string,
   fields: { requirement?: string; work_dir?: string; config?: Record<string, unknown> },
 ): Promise<void> {
-  const res = await fetch(`${API_BASE}/tasks/${taskId}/config`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-  });
-  if (!res.ok) await failed(res, "update task config");
+  const result = await callV1<{ task_id: string; requirement: string; work_dir: string; status: string;
+    config: Record<string, unknown> }>("/api/v1/tasks/configure", { task_id: taskId, ...fields });
+  if ("impact" in result) throw new V1Error(202, "unavailable", result.impact);
 }
 
 /** One text a task's requirement has had (version 1 is the text it was created with). */
@@ -1730,13 +1720,9 @@ export async function setTaskAgents(
   taskId: string,
   changes: TaskAgentsUpdate,
 ): Promise<{ agents: TaskAgents; note?: string }> {
-  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/agents`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(changes),
-  });
-  if (!res.ok) await failed(res, "change agents");
-  const data = await res.json();
+  const data = await callV1<{ task_id: string; agents: TaskAgents; note?: string }>(
+    "/api/v1/tasks/agents", { task_id: taskId, ...changes });
+  if ("status" in data) throw new V1Error(202, "unavailable", data.impact);
   return { agents: data.agents, note: data.note };
 }
 

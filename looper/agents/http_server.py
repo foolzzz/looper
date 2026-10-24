@@ -787,13 +787,9 @@ class AgentHTTPServer:
     _RE_LLM_RECORD_EVENTS = re.compile(r"^/api/llm-records/(\d+)/events$")
     _RE_AGENT_USAGE = re.compile(r"^/api/agents/([a-zA-Z0-9_-]+)/usage$")
     _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
-    _RE_TASK_CONFIG = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/config$")
-    _RE_TASK_PROJECT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/project$")
-    _RE_TASK_CONTINUE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/continue$")
     _RE_TASK_START = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/start$")
     _RE_TASK_REQUIREMENT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/requirement$")
     _RE_TASK_TITLE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/title$")
-    _RE_TASK_AGENTS = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/agents$")
     _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
     _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
@@ -882,13 +878,6 @@ class AgentHTTPServer:
             await self._handle_task_conversation(m.group(1), query, writer)
         elif (m := self._RE_TASK_RUNS.match(path)) and method == "GET":
             await self._handle_task_runs(m.group(1), writer)
-        elif (m := self._RE_TASK_CONFIG.match(path)) and method == "PUT":
-            await self._handle_task_config_update(m.group(1), body, writer)
-        elif (m := self._RE_TASK_PROJECT.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: projects.move_task(
-                m.group(1), projects.json_object(body), self._task_router))
-        elif (m := self._RE_TASK_CONTINUE.match(path)) and method == "POST":
-            await self._answer(writer, HTTP_200, lambda: self._continue_at_cap(m.group(1), body))
         elif (m := self._RE_TASK_REQUIREMENT.match(path)) and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: projects.edit_requirement(
                 m.group(1), projects.json_object(body), task_router=self._task_router, bus=self._supervisor.bus,
@@ -896,8 +885,6 @@ class AgentHTTPServer:
         elif (m := self._RE_TASK_TITLE.match(path)) and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: projects.rename_task(
                 m.group(1), projects.json_object(body), via=projects.VIA_TASK_PAGE))
-        elif (m := self._RE_TASK_AGENTS.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: self._set_task_agents(m.group(1), body))
         elif (m := self._RE_TASK_WORKSPACE_DISCARD.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: self._discard_workspace(m.group(1), int(m.group(2))))
         elif (m := self._RE_TASK_START.match(path)) and method == "POST":
@@ -1786,77 +1773,41 @@ class AgentHTTPServer:
         finally:
             await events.aclose()
 
-    async def _handle_task_config_update(
-        self, task_id: str, body: bytes, writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
-            await writer.drain()
-            return
-
+    async def _task_config_result(self, task_id: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Edit an unstarted task's configuration and retain requirement history; no HTTP writer."""
         from ..db.tasks import update_task_config, get_task
 
         task = await get_task(task_id)
         if task is None:
-            writer.write(_json_response(HTTP_404, {"error": "task not found"}))
-            await writer.drain()
-            return
-
+            raise projects.RequestError(HTTP_404, "task not found")
         if task.get("status") != "init":
-            writer.write(_json_response(HTTP_400, {"error": "can only edit config when status is init"}))
-            await writer.drain()
-            return
-
+            raise projects.RequestError(HTTP_400, "can only edit config when status is init")
         config = data.get("config")
         if config is not None and not isinstance(config, dict):
-            writer.write(_json_response(HTTP_400, {"error": "config must be a JSON object"}))
-            await writer.drain()
-            return
-
+            raise projects.RequestError(HTTP_400, "config must be a JSON object")
         work_dir = None
         if "work_dir" in data:
             from .tiers.task import resolve_work_dir
             try:
-                work_dir = resolve_work_dir(data.get("work_dir"))
+                work_dir = resolve_work_dir(data["work_dir"])
             except ValueError as exc:
-                writer.write(_json_response(HTTP_400, {"error": str(exc)}))
-                await writer.drain()
-                return
-
+                raise projects.RequestError(HTTP_400, str(exc)) from None
         requirement = data.get("requirement")
         if isinstance(requirement, str):
-            try:
-                projects.check_requirement(requirement)
-            except projects.RequestError as exc:
-                writer.write(_json_response(exc.status, {"error": str(exc)}))
-                await writer.drain()
-                return
+            projects.check_requirement(requirement)
         if isinstance(requirement, str) and requirement.strip() and requirement != task.get("requirement"):
-            # Kept as a new version, like an edit of a running task's; the task has no Planner to tell yet.
             from ..db.task_changes import edit_requirement
-            await edit_requirement(task_id, requirement, via=projects.VIA_TASK_PAGE, delivered=True)
-        ok = work_dir is None and config is None or await update_task_config(
-            task_id,
-            work_dir=work_dir,
-            config=config,
-        )
-        if not ok:
-            writer.write(_json_response(HTTP_500, {"error": "update failed"}))
-            await writer.drain()
-            return
-
+            if await edit_requirement(task_id, requirement, via=projects.VIA_TASK_PAGE, delivered=True) is None:
+                raise projects.RequestError(HTTP_404, "task not found")
+        if (work_dir is not None or config is not None) and not await update_task_config(
+                task_id, work_dir=work_dir, config=config):
+            raise OpError(ErrorCode.UNAVAILABLE, "task configuration update failed")
         updated = await get_task(task_id)
-        result = _serialize({
-            "task_id": updated["id"],
-            "requirement": updated.get("requirement", ""),
-            "work_dir": updated.get("work_dir", ""),
-            "config": updated.get("config", {}),
-            "status": updated.get("status", ""),
-        })
-        writer.write(_json_response(HTTP_200, result))
-        await writer.drain()
+        if updated is None:
+            raise projects.RequestError(HTTP_404, "task not found")
+        return _serialize({"task_id": updated["id"], "requirement": updated.get("requirement", ""),
+                           "work_dir": updated.get("work_dir", ""), "config": updated.get("config", {}),
+                           "status": updated.get("status", "")})
 
     async def _handle_task_cancel(
         self, body: bytes, writer: asyncio.StreamWriter
@@ -1950,19 +1901,6 @@ class AgentHTTPServer:
             return
         writer.write(_json_response(HTTP_200, {"started": task_id}))
         await writer.drain()
-
-    async def _continue_at_cap(self, task_id: str, body: bytes) -> dict[str, Any]:
-        """Raise the cap of a task that failed at it, then restart it from its saved plan."""
-        from .message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode
-
-        result = await projects.raise_cap_to_continue(task_id, projects.json_object(body))
-        await self._supervisor.bus.publish(MessageEnvelope.create(
-            source=self._web_adapter._address,
-            target=TASK_ROUTER_ADDRESS,
-            message_type=MessageType.TASK_RESTART,
-            payload={"task_id": task_id, "mode": RestartMode.AT_CAP.value},
-        ))
-        return {**result, "continued": task_id}
 
     async def _handle_task_delete(
         self, body: bytes, writer: asyncio.StreamWriter
@@ -2273,14 +2211,6 @@ class AgentHTTPServer:
     async def _recheck_concurrency(self) -> None:
         """Start the runs that wait for room a raised limit now gives; a lowered limit stops nothing."""
         await recheck_limits(self._worker_pool)
-
-    async def _set_task_agents(self, task_id: str, body: bytes) -> dict[str, Any]:
-        """Change the task's own profiles or concurrency per role; when it set a limit, start what it lets start."""
-        data = projects.json_object(body)
-        result = await projects.set_task_agents(task_id, data)
-        if data.get("concurrency"):
-            await self._recheck_concurrency()
-        return result
 
     async def _handle_agent_settings(
         self, writer: asyncio.StreamWriter, request: Callable[[], Awaitable[dict[str, Any]]],
