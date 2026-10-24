@@ -149,9 +149,9 @@ class Say:
     # The stand-in Manager's calls: "<task>" is the dialog's task, "<task id>" the last task id an answer gave,
     # "<confirmation>" the confirmation id the note before the message names.
     fake: tuple[tuple[str, dict[str, Any]], ...] = ()
-    # The user stops the Manager's turn once it has made its first tool call (``POST /api/chat/stop``).
+    # The user stops the Manager's turn once it has made its first tool call (``POST /api/v1/operator_chat/stop``).
     stop: bool = False
-    # The user withdraws the message right after sending it (``POST /api/chat/stop`` before the Manager has begun).
+    # The user withdraws the message right after sending it (``POST /api/v1/operator_chat/stop`` before the Manager has begun).
     withdraw: bool = False
     # The text computed from the previous turn's Look (``text`` is then only a label).
     text_from: Callable[[Look], str] | None = None
@@ -961,7 +961,7 @@ def _make_light_profile(api: Api, project_id: str) -> None:
 
 def _enable_stop(api: Api, project_id: str) -> None:
     """Stopping a reply is off by default (Settings → Chat): the stop dialog turns it on for its own server."""
-    api.put("/api/chat-settings", {"stop_enabled": True})
+    api.post("/api/v1/chat_settings/update", {"stop_enabled": True})
 
 
 def _restrict_planner_choices(api: Api, project_id: str) -> None:
@@ -1320,7 +1320,7 @@ def _switch_text(look: Look) -> str:
 
 
 def _selected(look: Look) -> dict[str, Any] | None:
-    return look.api.get("/api/manager/session")["selected"]
+    return look.api.post("/api/v1/manager_session/get", {})["result"]["selected"]
 
 
 def _switch_selected(look: Look) -> str | None:
@@ -1827,10 +1827,10 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
         body["target"] = {"kind": "manager", "id": agent}
     api.post("/api/chat/send", body)
     if withdraw:  # the message has its turn from its delivery on: the stop finds it wherever it is
-        turn = api.get("/api/chat/turn", session_id=session).get("turn")
+        turn = api.post("/api/v1/operator_chat/turn", {"session_id": session})["result"].get("turn")
         if not turn:
             raise EvalError("no turn to withdraw: the message is not live")
-        api.post("/api/chat/stop", {"message_id": turn["message_id"]})
+        api.post("/api/v1/operator_chat/stop", {"message_id": turn["message_id"]})
     deadline = time.monotonic() + timeout
     stopped = not stop
     while time.monotonic() < deadline:
@@ -1840,9 +1840,9 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
             check_budget()
         if not stopped and _made_a_tool_call(api, since, database_url, before, agent):
             # The stop names the Manager's turn (its envelope's id), which the chat's turn endpoint tells.
-            turn = api.get("/api/chat/turn", session_id=session).get("turn")
+            turn = api.post("/api/v1/operator_chat/turn", {"session_id": session})["result"].get("turn")
             if turn:
-                api.post("/api/chat/stop", {"message_id": turn["message_id"]})
+                api.post("/api/v1/operator_chat/stop", {"message_id": turn["message_id"]})
                 stopped = True
         for message in api.get("/api/chat/messages", session_id=session, **owner)["messages"]:
             if message.get("message_id") == f"{message_id}:reply":

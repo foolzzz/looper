@@ -46,7 +46,7 @@ class _Stub:
     async def session_view(self) -> dict[str, Any]:
         return {"manager": self.agent_id}
 
-    async def select_session_profile(self, profile_id: Any, *, via: str, origin: Any) -> Any:
+    async def select_session_profile(self, profile_id: Any, *, via: str, origin: Any, input_text: str) -> Any:
         return SimpleNamespace(effect=SimpleNamespace(value="applied"), text="ok")
 
 
@@ -90,9 +90,18 @@ async def _call(fleet: _Fleet, web: _Web, method: str, path: str, body: Any = No
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
     writer = _Writer()
     raw = b"" if body is None else json.dumps(body).encode()
-    await server._route_api(method, path, query or {}, raw, writer)
+    if path.startswith("/api/v1/"):
+        from looper.agents.api_v1 import OPERATOR
+        from looper.agents.ops.clients import ClientOps
+        server._client_ops = ClientOps(SimpleNamespace())
+        await server._handle_v1(method, path, {}, {}, raw, writer, OPERATOR)
+    else:
+        await server._route_api(method, path, query or {}, raw, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload)
+    answer = json.loads(payload)
+    if path.startswith("/api/v1/"):
+        answer = answer["result"] if answer["status"] == "ok" else answer
+    return int(head.split()[1]), answer
 
 
 async def _setup(pool: Any) -> tuple[_Fleet, _Web, _Stub, _Stub]:
@@ -166,11 +175,11 @@ def test_stop_finds_the_manager_whose_turn_it_is(monkeypatch: pytest.MonkeyPatch
         from looper.agents import chat_settings
         monkeypatch.setattr(chat_settings, "stop_enabled", lambda: True)
         fleet, web, default, review = await _setup(pool)
-        status, answer = await _call(fleet, web, "POST", "/api/chat/stop", {"message_id": "m-review"})
+        status, answer = await _call(fleet, web, "POST", "/api/v1/operator_chat/stop", {"message_id": "m-review"})
         assert status == 200 and answer["state"] == "stopping"
         assert review.stopped == ["m-review"] and default.stopped == []
-        status, answer = await _call(fleet, web, "POST", "/api/chat/stop", {"message_id": "m-none"})
-        assert status == 409 and answer["state"] == "not_running" and default.stopped == ["m-none"]
+        status, answer = await _call(fleet, web, "POST", "/api/v1/operator_chat/stop", {"message_id": "m-none"})
+        assert status == 409 and answer["error"]["details"]["state"] == "not_running" and default.stopped == ["m-none"]
 
     run_db(test, monkeypatch)
 
@@ -181,9 +190,9 @@ def test_the_running_turn_is_asked_of_the_threads_owner(monkeypatch: pytest.Monk
     async def test(pool: Any) -> None:
         fleet, web, default, review = await _setup(pool)
         await chat.claim_thread("s-r", "manager-review")
-        assert await _call(fleet, web, "GET", "/api/chat/turn", query={"session_id": "s-r"}) == (200, {"turn": None})
+        assert await _call(fleet, web, "POST", "/api/v1/operator_chat/turn", body={"session_id": "s-r"}) == (200, {"turn": None})
         assert review.turn_asked == [("web", "s-r")] and default.turn_asked == []
-        await _call(fleet, web, "GET", "/api/chat/turn", query={"session_id": "s-other"})
+        await _call(fleet, web, "POST", "/api/v1/operator_chat/turn", body={"session_id": "s-other"})
         assert default.turn_asked == [("web", "s-other")]
 
     run_db(test, monkeypatch)
@@ -193,15 +202,15 @@ def test_a_managers_session_is_the_one_asked_for(monkeypatch: pytest.MonkeyPatch
     async def test(pool: Any) -> None:
         fleet, web, _, _ = await _setup(pool)
         query = {"manager": "manager-review"}
-        assert await _call(fleet, web, "GET", "/api/manager/session", query=query) == (
+        assert await _call(fleet, web, "POST", "/api/v1/manager_session/get", body=query) == (
             200, {"manager": "manager-review"})
-        assert (await _call(fleet, web, "GET", "/api/manager/session"))[1] == {"manager": "manager"}
-        status, answer = await _call(fleet, web, "GET", "/api/manager/session", query={"manager": "manager-nope"})
-        assert status == 404 and answer == {"error": "no running Manager 'manager-nope'"}
-        status, answer = await _call(fleet, web, "PUT", "/api/manager/session/profile",
+        assert (await _call(fleet, web, "POST", "/api/v1/manager_session/get"))[1] == {"manager": "manager"}
+        status, answer = await _call(fleet, web, "POST", "/api/v1/manager_session/get", body={"manager": "manager-nope"})
+        assert status == 404 and answer["error"]["code"] == "not_found"
+        status, answer = await _call(fleet, web, "POST", "/api/v1/manager_session/select_profile",
                                      {"manager": "manager-nope", "profile_id": None})
         assert status == 404
-        status, answer = await _call(fleet, web, "PUT", "/api/manager/session/profile",
+        status, answer = await _call(fleet, web, "POST", "/api/v1/manager_session/select_profile",
                                      {"manager": "manager-review", "profile_id": None})
         assert status == 200 and answer["manager"] == "manager-review"
 
