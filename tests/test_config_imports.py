@@ -81,7 +81,7 @@ def test_only_the_import_route_takes_more_than_the_request_cap(tmp_path: Path) -
     async def _test() -> None:
         async with _server(tmp_path) as port:
             # Only the headers: each answer comes without the server waiting for the body.
-            other = await _request(port, "POST", "/api/catalog/upload", length=REQUEST_BODY_MAX_BYTES + 1)
+            other = await _request(port, "POST", "/api/v1/catalog_sources/upload", length=REQUEST_BODY_MAX_BYTES + 1)
             over = await _request(port, "POST", CONFIG_IMPORTS_PATH, length=config_imports.UPLOAD_MAX_BYTES + 1)
         assert other[0] == 413 and "the server takes at most 8 MiB" in other[1]["error"]
         assert config_imports.UPLOAD_MAX_BYTES == 256 * 1024 * 1024
