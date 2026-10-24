@@ -73,14 +73,14 @@ def test_the_gate_decides_whether_a_run_gets_a_task(monkeypatch: pytest.MonkeyPa
         assert "的输出就是这一轮的输入：只处理这些，不要再自己运行这条命令或读它的来源去找别的条目：\n```\nalert-1\nalert-2\n```" in await _requirement(env, found["task_id"])
         await env.end_task(found["task_id"], "completed")
 
-        await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "echo half; echo broken >&2; exit 4"})
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"gate_command": "echo half; echo broken >&2; exit 4"}})
         failed = await _fire(env, sid)
         assert (failed["status"], failed["task_id"], failed["gate_output"]) == ("gate_failed", None, "half")
         assert failed["error"] == "the gate exited with status 4; stderr: broken"
         assert (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]["consecutive_failures"] == 1
 
-        await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "trap '' TERM; sleep 30",
-                                                      "gate_timeout_seconds": 1})
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"gate_command": "trap '' TERM; sleep 30",
+                                                      "gate_timeout_seconds": 1}})
         timed_out = await _fire(env, sid)
         assert timed_out["status"] == "gate_failed" and "did not finish within 1 s" in timed_out["error"]
 
@@ -112,9 +112,9 @@ def test_run_now_goes_through_the_gate_and_a_firing_meanwhile_is_an_overlap(monk
     async def test(env: ScheduleEnv) -> None:
         with_sender(env)
         sid = (await env.schedule(gate_command=_held_gate(tmp_path / "release", "echo new-item")))["schedule_id"]
-        first = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
+        first = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]
         assert (first["trigger"], first["status"]) == ("manual", "gating")
-        second = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
+        second = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]
         assert second["status"] == "skipped_overlap" and "still checking its gate" in second["error"]
         (tmp_path / "release").touch()
         await env.scheduler.idle()
@@ -228,7 +228,7 @@ def test_the_failures_alert_goes_out_once_per_streak_with_one_recovery(monkeypat
         assert "已连续失败 3 次" in alert["text"] and alert["status"] == "sent"
         assert (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]["alerts"]["failures_since"]
 
-        await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "echo item"})
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"gate_command": "echo item"}})
         recovered = await _fire(env, sid)
         await env.end_task(recovered["task_id"], "completed")
         await env.scheduler.idle()
@@ -268,9 +268,9 @@ def test_a_gate_that_finds_nothing_ends_the_failure_streak_and_a_skip_that_ran_n
         assert await state() == (3, True, ["failures_alert"])
 
         # A firing while the gate runs is skipped as busy: the streak goes on.
-        await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": _held_gate(tmp_path / "release", "exit 3")})
-        assert (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]["status"] == "gating"
-        assert (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]["status"] == "skipped_overlap"
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"gate_command": _held_gate(tmp_path / "release", "exit 3")}})
+        assert (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]["status"] == "gating"
+        assert (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]["status"] == "skipped_overlap"
         assert await state() == (3, True, ["failures_alert"])
         (tmp_path / "release").touch()
         await env.scheduler.idle()
@@ -279,7 +279,7 @@ def test_a_gate_that_finds_nothing_ends_the_failure_streak_and_a_skip_that_ran_n
             await db_schedules.count_outcome(env.pool, sid, status, env.clock.now)
         assert await state() == (4, True, ["failures_alert"])
 
-        await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "true"})
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"gate_command": "true"}})
         assert (await _fire(env, sid))["status"] == "skipped_gate"
         assert await state() == (0, False, ["failures_alert", "failures_recovered"])
         # An ok run, not a success: no task completed.
@@ -370,11 +370,11 @@ def test_notify_alerts_sends_the_alerts_and_their_recoveries_and_no_run_message(
         for _ in range(3):
             await _fire(env, sid)
         assert await sent() == [("failures_alert", "sent")]  # no 「前置检查失败」 message per run
-        await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "true"})
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"gate_command": "true"}})
         assert (await _fire(env, sid))["status"] == "skipped_gate"
         assert await sent() == [("failures_alert", "sent"), ("failures_recovered", "sent")]
 
-        await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "echo item"})
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"gate_command": "echo item"}})
         done = await _fire(env, sid)
         await env.end_task(done["task_id"], "completed")
         await env.scheduler.idle()
@@ -387,7 +387,7 @@ def test_notify_alerts_sends_the_alerts_and_their_recoveries_and_no_run_message(
         env.clock.now = later
         await env.scheduler.tick()
         await env.scheduler.idle()
-        await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "true"})
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"gate_command": "true"}})
         await _fire(env, sid)
         assert [kind for kind, _ in await sent()][2:] == ["stale_alert", "stale_recovered"]
         assert len(sender.sent) == 4 and all(status == "sent" for _, status in await sent())
@@ -406,9 +406,9 @@ def test_a_database_from_before_takes_notify_alerts(monkeypatch: pytest.MonkeyPa
                                "CHECK (notify IN ('failures', 'always', 'never'))")
         await env.pool.execute("DELETE FROM schema_migrations WHERE name = 'schedules_notify_alerts'")
         await connection.ensure_schema(env.pool)
-        assert (await env.ok("PUT", f"/api/schedules/{sid}", {"notify": "alerts"}))["schedule"]["notify"] == "alerts"
-        status, answer = await env.call("PUT", f"/api/schedules/{sid}", {"notify": "quiet"})
-        assert status == 400 and "notify" in answer["error"]
+        assert (await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"notify": "alerts"}}))["schedule"]["notify"] == "alerts"
+        status, answer = await env.call("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"notify": "quiet"}})
+        assert status == 400 and answer["error"]["code"] == "invalid"
 
     run_scheduled(test, monkeypatch, tmp_path)
 
@@ -561,8 +561,8 @@ async def _ran_without_success(env: ScheduleEnv, sid: str, *, days_ago: int) -> 
 
 async def _enable_again(env: ScheduleEnv, sid: str) -> datetime:
     """Disable the schedule and enable it again through the API; when it was enabled. It does not fire for a day."""
-    await env.ok("PUT", f"/api/schedules/{sid}", {"enabled": False})
-    await env.ok("PUT", f"/api/schedules/{sid}", {"enabled": True})
+    await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"enabled": False}})
+    await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"enabled": True}})
     enabled_at = await env.pool.fetchval("SELECT enabled_at FROM schedules WHERE id = $1", sid)
     await env.pool.execute("UPDATE schedules SET next_fire_at = $2 WHERE id = $1", sid,
                            enabled_at + timedelta(days=1))
@@ -609,7 +609,7 @@ def test_disabling_and_enabling_again_starts_the_clock_again(monkeypatch: pytest
         with_sender(env)
         sid = (await env.enabled())["schedule_id"]
         await _ran_without_success(env, sid, days_ago=7)  # it would be stale now
-        await env.ok("PUT", f"/api/schedules/{sid}", {"enabled": False})
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"enabled": False}})
         assert await _stale(env, sid) == []  # a disabled schedule is never stale
         enabled_at = await _enable_again(env, sid)
         due = cron.next_fire(EVERY_5, LA, enabled_at) + timedelta(minutes=15)
@@ -618,7 +618,7 @@ def test_disabling_and_enabling_again_starts_the_clock_again(monkeypatch: pytest
         env.clock.now = due
         assert await _stale(env, sid) == ["stale_alert"]
         # Enabling an enabled schedule changes nothing.
-        await env.ok("PUT", f"/api/schedules/{sid}", {"enabled": True})
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"enabled": True}})
         assert await env.pool.fetchval("SELECT enabled_at FROM schedules WHERE id = $1", sid) == enabled_at
 
     run_scheduled(test, monkeypatch, tmp_path)
@@ -652,7 +652,7 @@ def test_changing_the_rule_to_every_minute_raises_no_alert_at_once(monkeypatch: 
         # The last ok firing was hours ago, as for a schedule whose gate failed for a while, enabled long ago.
         await env.pool.execute("UPDATE schedules SET last_ok_at = last_ok_at - interval '7 hours', "
                                "enabled_at = enabled_at - interval '2 days' WHERE id = $1", sid)
-        changed = (await env.ok("PUT", f"/api/schedules/{sid}", {"cron": "* * * * *"}))["schedule"]
+        changed = (await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"cron": "* * * * *"}}))["schedule"]
         assert changed["cron"] == "* * * * *"
         at = datetime.fromisoformat(changed["updated_at"])  # when the rule changed
         await env.pool.execute("UPDATE schedules SET next_fire_at = $2 WHERE id = $1", sid, at + timedelta(days=1))
@@ -892,11 +892,11 @@ def test_a_parallel_schedule_is_answered_without_warnings(
         plain = await env.schedule()
         assert (plain["overlap"], plain["max_parallel_runs"]) == ("skip", 3)
         # Nothing limits how many tasks run, so a parallel schedule's runs all start: there is nothing to warn of.
-        status, made = await env.call("POST", f"/api/projects/{env.project_id}/schedules", {
+        status, made = await env.call("POST", "/api/v1/schedule_admin/create", {"project_id": env.project_id, "fields": {
             "name": "parallel", "cron": "*/5 * * * *", "requirement": "r", "overlap": "parallel",
-            "max_parallel_runs": 10})
-        assert status == 201 and made["schedule"]["max_parallel_runs"] == 10 and set(made) == {"schedule"}
-        fixed = await env.ok("PUT", f"/api/schedules/{made['schedule']['schedule_id']}", {"max_parallel_runs": 2})
+            "max_parallel_runs": 10}})
+        assert status == 200 and made["schedule"]["max_parallel_runs"] == 10 and set(made) == {"schedule"}
+        fixed = await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": made['schedule']['schedule_id'], "fields": {"max_parallel_runs": 2}})
         assert fixed["schedule"]["max_parallel_runs"] == 2 and set(fixed) == {"schedule"}
         listed = (await env.ok("POST", "/api/v1/schedule_admin/project_list", {"project_id": env.project_id}))["limits"]
         assert (listed["max_parallel_runs_limit"], listed["concurrency_max"]) == (10, 64)
@@ -911,10 +911,10 @@ def test_a_notify_target_the_channel_does_not_allow_is_refused(monkeypatch: pyte
     async def test(env: ScheduleEnv) -> None:
         await allow_telegram(env)
         for target, error in [({"channel": "telegram", "chat": "999"}, "is not one the channel allows"),
-                              ("telegram", "notify_target must be")]:
-            status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", {
-                "name": "n", "cron": "*/5 * * * *", "requirement": "r", "notify_target": target})
-            assert status == 400 and error in payload["error"], payload
+                              ("telegram", "the request does not match the declared schema")]:
+            status, payload = await env.call("POST", "/api/v1/schedule_admin/create", {"project_id": env.project_id, "fields": {
+                "name": "n", "cron": "*/5 * * * *", "requirement": "r", "notify_target": target}})
+            assert status == 400 and error in payload["error"]["message"], payload
         limits = (await env.ok("POST", "/api/v1/schedule_admin/project_list", {"project_id": env.project_id}))["limits"]
         assert limits["notify_targets"] == [{"channel": "telegram", "chat": TELEGRAM_CHAT,
                                              "label": f"Telegram · {TELEGRAM_CHAT}", "channel_enabled": False}]

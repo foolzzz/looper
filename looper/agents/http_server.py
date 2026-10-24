@@ -815,10 +815,6 @@ class AgentHTTPServer:
     _RE_PROVIDER_LOGIN_PROBLEM = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)/login-problem$")
     _RE_PROFILE_PROMPT_PREVIEW = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)/prompt-preview$")
     _RE_PROFILE = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)$")
-    _RE_PROJECT_SCHEDULES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/schedules$")
-    _RE_SCHEDULE = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)$")
-    _RE_SCHEDULE_RESET_SESSION = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/reset-planner-session$")
-    _RE_SCHEDULE_RUN = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/run$")
     _RE_CLIENT = re.compile(r"^/api/clients/(client-[0-9a-f]{12})$")
     _RE_CONFIG_IMPORT = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})$")
     _RE_CONFIG_IMPORT_APPLY = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})/apply$")
@@ -881,18 +877,6 @@ class AgentHTTPServer:
                 m.group(1), projects.json_object(body)))
         elif (m := self._RE_PROJECT.match(path)) and method == "DELETE":
             await self._answer(writer, HTTP_200, lambda: projects.delete_project(m.group(1)))
-        elif (m := self._RE_PROJECT_SCHEDULES.match(path)) and method == "POST":
-            await self._answer(writer, HTTP_201, lambda: schedules.create_schedule(
-                m.group(1), projects.json_object(body)))
-        elif (m := self._RE_SCHEDULE.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: schedules.update_schedule(
-                m.group(1), projects.json_object(body)))
-        elif (m := self._RE_SCHEDULE.match(path)) and method == "DELETE":
-            await self._answer(writer, HTTP_200, lambda: schedules.delete_schedule(m.group(1)))
-        elif (m := self._RE_SCHEDULE_RESET_SESSION.match(path)) and method == "POST":
-            await self._answer(writer, HTTP_200, lambda: schedules.reset_planner_session(m.group(1)))
-        elif (m := self._RE_SCHEDULE_RUN.match(path)) and method == "POST":
-            await self._answer(writer, HTTP_200, lambda: self._run_schedule_now(m.group(1)))
         elif (m := self._RE_PROJECT_KNOWLEDGE.match(path)) and method == "GET":
             await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.knowledge_view(m.group(1), root))
         elif (m := self._RE_PROJECT_KNOWLEDGE.match(path)) and method == "POST":
@@ -1188,11 +1172,6 @@ class AgentHTTPServer:
             summary=f"Discarded a step worktree from the task page: branch {workspace.branch} and its directory "
                     "removed"[:500])
         return {"workspace": workspace.view()}
-
-    async def _run_schedule_now(self, schedule_id: str) -> dict[str, Any]:
-        if self._scheduler is None:
-            raise projects.RequestError(HTTP_409, "the scheduler is not running in this server")
-        return await schedules.run_now(schedule_id, self._scheduler)
 
     async def _handle_list_projects(self, writer: asyncio.StreamWriter) -> None:
         try:
