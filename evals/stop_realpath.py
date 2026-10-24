@@ -6,7 +6,7 @@ Run by hand (it needs Claude Code or OMP with a DeepSeek key, and a disposable P
         [--ports 8791-8799] [--deepseek-model deepseek-flash] [--key-from-zsh]
 
 Every cell sends a message through ``POST /api/chat/send``, follows its events, stops at the cell's moment through
-``POST /api/chat/stop`` and checks what is left. OMP runs per turn and has no interrupt: its cell checks that the
+``POST /api/v1/operator_chat/stop`` and checks what is left. OMP runs per turn and has no interrupt: its cell checks that the
 stop is refused and the reply completes. A process that detached from the agent's tree is not in scope. The server
 has a database, runtime root and port of its own; it never touches ``~/.looper`` and is killed with its process tree
 in ``finally``. The report is Markdown, home and temp paths redacted.
@@ -361,18 +361,18 @@ def _db_rows(database_url: str, sql: str, *args: Any) -> list[dict[str, Any]]:
 
 
 def _latest_record(api: Api, since: int) -> dict[str, Any] | None:
-    for brief in api.get("/api/llm-records", agent_id="manager", limit=20)["records"]:
+    for brief in api.post("/api/v1/runs/list", {"agent_id": "manager", "limit": 20})["result"]["records"]:
         if brief["id"] > since:
-            return api.get(f"/api/llm-records/{brief['id']}")["record"]
+            return api.post("/api/v1/runs/get", {"record_id": brief["id"]})["result"]["record"]
     return None
 
 
 def _record_events(api: Api, since: int) -> list[dict[str, Any]]:
-    brief = next((r for r in api.get("/api/llm-records", agent_id="manager", limit=20)["records"] if r["id"] > since),
+    brief = next((r for r in api.post("/api/v1/runs/list", {"agent_id": "manager", "limit": 20})["result"]["records"] if r["id"] > since),
                  None)
     if brief is None:
         return []
-    return [e.get("event") or {} for e in api.get(f"/api/llm-records/{brief['id']}/events", limit=1000)["events"]]
+    return [e.get("event") or {} for e in api.post("/api/v1/runs/events", {"record_id": brief["id"], "limit": 1000})["result"]["events"]]
 
 
 def tool_calls(events: list[dict[str, Any]], limit: int = 300) -> str:
@@ -403,7 +403,7 @@ def run_cell(api: Api, database_url: str, cell: Cell, rep: int, work: Path, cloc
     session = f"stop-{uuid.uuid4().hex[:10]}"
     pid_file = work / f"pids-{cell.key}-{rep}.txt"
     prompt = cell.prompt.format(file=pid_file)
-    records = api.get("/api/llm-records", agent_id="manager", limit=1)["records"]
+    records = api.post("/api/v1/runs/list", {"agent_id": "manager", "limit": 1})["result"]["records"]
     since = max((r["id"] for r in records), default=0)
     message_id = f"m-{uuid.uuid4().hex[:10]}"
     sent_at = time.monotonic()
@@ -426,7 +426,7 @@ def run_cell(api: Api, database_url: str, cell: Cell, rep: int, work: Path, cloc
             time.sleep(cell.after_s)
         if cell.running and not _wait(lambda: len(_read_pids(pid_file)) >= cell.running, 30):
             with contextlib.suppress(EvalError):  # end the turn before the next cell
-                api.post("/api/chat/stop", {"message_id": message_id})
+                api.post("/api/v1/operator_chat/stop", {"message_id": message_id})
             _wait(lambda: any(k == "answer.final" for _, k, _ in stream.snapshot()), FINAL_WITHIN_S)
             return CellResult(cell.key, rep, [
                 f"the command did not write {cell.running} pid(s) within 30 s (wrote {len(_read_pids(pid_file))}); "
@@ -434,7 +434,7 @@ def run_cell(api: Api, database_url: str, cell: Cell, rep: int, work: Path, cloc
         started_at = time.time()
         stopped_at = marks["stop"] = time.monotonic()
         try:
-            api.post("/api/chat/stop", {"message_id": message_id})
+            api.post("/api/v1/operator_chat/stop", {"message_id": message_id})
         except EvalError as exc:
             if cell.refused:
                 return refused_cell(cell, rep, stream, exc, timeline)
@@ -470,12 +470,12 @@ def run_cell(api: Api, database_url: str, cell: Cell, rep: int, work: Path, cloc
                        session)
     # needs_confirmation rows no later call of the session answered: a confirmation left open
     confirmations = sum(1 for a in actions if a["status"] == "needs_confirmation")
-    before = (api.get("/api/manager/session") or {}).get("session_id")
+    before = (api.post("/api/v1/manager_session/get", {})["result"] or {}).get("session_id")
     nxt = f"stop-next-{uuid.uuid4().hex[:8]}"
     api.post("/api/chat/send", {"text": "Say hi in one word.", "session_id": session, "message_id": nxt})
     reply = _wait(lambda: next((m for m in api.get("/api/chat/messages", session_id=session)["messages"]
                                 if m.get("message_id") == f"{nxt}:reply"), None), 180)
-    after_id = (api.get("/api/manager/session") or {}).get("session_id")
+    after_id = (api.post("/api/v1/manager_session/get", {})["result"] or {}).get("session_id")
     obs = Observation(
         final=final, final_after_s=after, pids=pids, alive=alive, record=record,
         actions=actions, confirmations=confirmations, next_text=str((reply or {}).get("content") or ""),
@@ -589,7 +589,7 @@ def main(argv: list[str] | None = None) -> int:
             with runner.running_server(database_url=database_url, runtime_root=tmp / "runtime", bin_dir=bin_dir,
                                        log_path=tmp / "server.log", home=home, env=server_env) as api:
                 api.timeout = 60.0
-                api.put("/api/chat-settings", {"stop_enabled": True})
+                api.post("/api/v1/chat_settings/update", {"stop_enabled": True})
                 _set_profile(api, args.runtime, deepseek_model=args.deepseek_model)
                 for rep in range(1, args.repeat + 1):
                     try:

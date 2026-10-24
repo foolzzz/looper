@@ -1,7 +1,8 @@
-"""``GET /api/tasks/<id>/runs``: compact rows of a task's runs, against a disposable PostgreSQL."""
+"""``POST /api/v1/runs/for_task``: compact rows of a task's runs, against a disposable PostgreSQL."""
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -9,7 +10,7 @@ import pytest
 from looper.db import llm_records
 from tests.db_support import run_db
 from tests.test_ops_tasks_db import _project, _task
-from tests.test_usage_api_db import _get
+from tests.test_profile_registry_db import _call
 from tests.test_waits_api_db import _api
 
 PROFILE = {"id": "profile-1", "name": "Fast", "model": "profile-model", "source": "project",
@@ -42,7 +43,7 @@ def test_runs_are_compact_rows_matching_the_records(monkeypatch: pytest.MonkeyPa
         await _record(pool, "manager", "task-a", {"profile": PROFILE})
         await _record(pool, "worker-9", "task-b", big)
 
-        status, body = await _get("/api/tasks/task-a/runs")
+        status, body = await _call("POST", "/api/v1/runs/for_task", {"task_id": "task-a"})
         assert status == 200
         runs = body["runs"]
         assert [r["id"] for r in runs] == [planner, worker, reviewer, old, bare]
@@ -72,18 +73,18 @@ def test_runs_are_compact_rows_matching_the_records(monkeypatch: pytest.MonkeyPa
         assert runs[3]["profile"]["name"] == "Old" and runs[3]["model"] == "profile-model"
         assert runs[4]["model"] is None and runs[4]["runtime"] == {"type": None, "name": None}
 
-        status, body = await _get("/api/tasks/task-c/runs")
+        status, body = await _call("POST", "/api/v1/runs/for_task", {"task_id": "task-c"})
         assert (status, body) == (200, {"runs": []})
 
     run_db(test, monkeypatch)
 
 
-def test_runs_are_operator_only(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_runs_require_authentication(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         await _task(pool, "task-a", "running", await _project(pool))
-        status, _, _ = await _api("GET", "/api/tasks/task-a/runs", auth=False)
+        status, _, _ = await _api("POST", "/api/v1/runs/for_task", json.dumps({"task_id": "task-a"}).encode(), auth=False)
         assert status in (401, 403)
-        status, body, _ = await _api("GET", "/api/tasks/task-a/runs")
+        status, body, _ = await _api("POST", "/api/v1/runs/for_task", json.dumps({"task_id": "task-a"}).encode())
         assert status == 200 and body == {"runs": []}
 
     run_db(test, monkeypatch)

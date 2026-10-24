@@ -10,7 +10,7 @@ pipes, real process trees) under the runtimes' own sessions. The turn is stopped
   after the stop);
 - ``ended``: the turn has been answered.
 
-Each cell checks what the page and the next turn see: ``GET /api/chat/turn`` while the turn is held, the record's
+Each cell checks what the page and the next turn see: ``POST /api/v1/operator_chat/turn`` while the turn is held, the record's
 ``user_stop.phase``, the reply's outcome, the note the next turn is told (the user stopped it, or withdrew it), that
 the next turn is answered in the same session, and which processes the stop ended: none when the runtime ended the
 turn on its interrupt (a tool it left running is its own), the agent with its tree when it ignored it. The runtimes
@@ -198,7 +198,7 @@ class Rig:
         return token
 
     async def api_turn(self) -> dict[str, Any] | None:
-        """``GET /api/chat/turn`` of the chat the messages are in."""
+        """``POST /api/v1/operator_chat/turn`` of the chat the messages are in."""
         from looper.agents.http_server import AgentHTTPServer
 
         class Writer:
@@ -213,8 +213,10 @@ class Rig:
         server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                                  task_router=SimpleNamespace(), manager=self.manager)
         writer = Writer()
-        await server._route_api("GET", "/api/chat/turn", {"session_id": "session-a"}, b"", writer)
-        return json.loads(writer.data.partition(b"\r\n\r\n")[2])["turn"]
+        from looper.agents.api_v1 import OPERATOR
+        await server._handle_v1("POST", "/api/v1/operator_chat/turn", {}, {},
+                                b'{"session_id":"session-a"}', writer, OPERATOR)
+        return json.loads(writer.data.partition(b"\r\n\r\n")[2])["result"]["turn"]
 
     def user_stops(self) -> list[dict[str, Any]]:
         return [call.args[1]["user_stop"] for call in self.agent_db.add_metadata.await_args_list

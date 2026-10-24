@@ -333,11 +333,15 @@ class RunsApi:
     def __init__(self, records, selected=None):
         self.records, self.selected = records, selected
 
+    def post(self, path, body):
+        if path.startswith("/api/v1/runs/"):
+            return {"status": "ok", "result": self.get(path, **body)}
+        assert path == "/api/v1/manager_session/get"
+        return {"result": {"selected": self.selected}}
+
     def get(self, path, **query):
-        if path == "/api/llm-records":
+        if path == "/api/v1/runs/list":
             return {"records": list(reversed(self.records))}
-        if path == "/api/manager/session":
-            return {"selected": self.selected}
         assert path == "/api/registry"
         return {"profiles": [{"profile_id": "agent-1", "name": dialogs.SWITCH}]}
 
@@ -417,17 +421,17 @@ class RecordingApi:
 
     def get(self, path, **query):
         self.gets.append((path, query))
-        if path == "/api/llm-records":
+        if path == "/api/v1/runs/list":
             return {"records": []}
-        if path == "/api/chat/turn":
-            return {"turn": None}
         if path == "/api/chat/messages":
             return {"messages": [{"message_id": self.posts[-1][1]["message_id"] + ":reply", "content": "ok"}]}
         raise AssertionError(path)
 
     def post(self, path, body):
+        if path.startswith("/api/v1/runs/"):
+            return {"status": "ok", "result": self.get(path, **body)}
         self.posts.append((path, body))
-        return {}
+        return {"result": {"turn": None}} if path == "/api/v1/operator_chat/turn" else {}
 
 
 def _ask_once(manager):
@@ -440,13 +444,13 @@ def _ask_once(manager):
 def test_an_existing_dialog_sends_no_target_and_asks_for_manager_runs():
     api = _ask_once(None)
     assert "target" not in api.posts[0][1]
-    assert {q["agent_id"] for p, q in api.gets if p == "/api/llm-records"} == {"manager"}
+    assert {q["agent_id"] for p, q in api.gets if p == "/api/v1/runs/list"} == {"manager"}
 
 
 def test_a_scenario_manager_dialog_targets_and_reads_its_own_runs():
     api = _ask_once("code-review")
     assert api.posts[0][1]["target"] == {"kind": "manager", "id": "manager-code-review"}
-    reads = [q["agent_id"] for p, q in api.gets if p == "/api/llm-records"]
+    reads = [q["agent_id"] for p, q in api.gets if p == "/api/v1/runs/list"]
     assert reads and set(reads) == {"manager-code-review"}
 
 

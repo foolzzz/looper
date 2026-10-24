@@ -135,7 +135,7 @@ Task 是系统的一等实体，代表一个完整的用户需求。
 读取方式：
 
 - `GET /api/tasks/<id>` 和 `GET /api/tasks` 的每个任务都带 `cost`：总额 `cost_usd`、`runs`、`running`（还在跑，花费未知）、`unpriced_runs`（结束了但没报花费）、`by_role`（planner、worker、reviewer 各自的 `cost_usd` 和 `runs`）；`by_model`（每个模型一行：`model`、`runs`、`running`、`unpriced_runs`、`interrupted_runs`、四种 token 之和 `input_tokens`、`output_tokens`、`cache_read_tokens`、`cache_creation_tokens`、`cost_usd`，没有一次运行有花费时为 null；花费加起来等于 `cost_usd`）；`manager_by_model`（同样形状的行，Manager 记录时带这个任务 id（消息关于这个任务）、或工具调用只指向这一个任务的 turn，不算进任务的 `cost_usd`、`by_role`、`by_model` 和任务的花费上限；涉及多个任务或没有任务的 turn 不归任何任务）。定时任务的运行还在进行时，其花费按同样口径统计该任务已发生的花费，不含 Manager。
-- `GET /api/agents/<agent_id>/usage` 给出一个 agent 的数据，例如 `manager`、`planner-<task_id>`：
+- `POST /api/v1/runs/usage {agent_id, turns?}` 给出一个 agent 的数据，例如 `manager`、`planner-<task_id>`：
   - 总花费、运行数、压缩次数；
   - 按会话和按 UTC 日的花费；
   - 最近 N 个 turn（默认 100）各自的上下文、花费和压缩，以及最新的上下文规模。

@@ -113,7 +113,7 @@ class Look:
     fake: bool
     runtime_root: Path | None = None  # the server's, where a configuration export is written
     registry_before: dict[str, Any] | None = None
-    runs_since: int = 0  # the Manager's newest run record before the dialog (the session-profile dialogs only)
+    runs_since: int = 0  # the Manager's newest run record before the dialog (independent of the action trail)
     manager_id: str | None = None  # a scenario Manager's agent id: only its trail rows count
     conversation: str | None = None  # a client dialog's conversation id (the API client's)
     turn_since: int = 0  # the trail's last id before the turn's message (``since`` when it is the dialog's first)
@@ -149,9 +149,9 @@ class Say:
     # The stand-in Manager's calls: "<task>" is the dialog's task, "<task id>" the last task id an answer gave,
     # "<confirmation>" the confirmation id the note before the message names.
     fake: tuple[tuple[str, dict[str, Any]], ...] = ()
-    # The user stops the Manager's turn once it has made its first tool call (``POST /api/chat/stop``).
+    # The user stops the Manager's turn once it has made its first tool call (``POST /api/v1/operator_chat/stop``).
     stop: bool = False
-    # The user withdraws the message right after sending it (``POST /api/chat/stop`` before the Manager has begun).
+    # The user withdraws the message right after sending it (``POST /api/v1/operator_chat/stop`` before the Manager has begun).
     withdraw: bool = False
     # The text computed from the previous turn's Look (``text`` is then only a label).
     text_from: Callable[[Look], str] | None = None
@@ -508,8 +508,7 @@ def _was_stopped(look: Look) -> str | None:
 
 def _knows_it_was_withdrawn(look: Look) -> str | None:
     """The turn after a withdrawn message was told so, first of all; a real Manager must not claim it did the work."""
-    records = look.api.get("/api/llm-records", agent_id="manager", limit=500)["records"]
-    new = [r for r in records if r["id"] > look.since and not (r.get("metadata") or {}).get("autonomous")]
+    new = _manager_runs(look)
     if not new:
         return "no Manager run record for the turn"
     record = max(new, key=lambda row: row["id"])
@@ -525,8 +524,7 @@ def _knows_it_was_withdrawn(look: Look) -> str | None:
 
 def _knows_it_was_stopped(look: Look) -> str | None:
     """The turn after a stop was told of it; a real Manager must not claim the summary was finished."""
-    records = look.api.get("/api/llm-records", agent_id="manager", limit=500)["records"]
-    new = [r for r in records if r["id"] > look.since and not (r.get("metadata") or {}).get("autonomous")]
+    new = _manager_runs(look)
     if not new:
         return "no Manager run record for the turn"
     record = max(new, key=lambda row: row["id"])
@@ -961,7 +959,7 @@ def _make_light_profile(api: Api, project_id: str) -> None:
 
 def _enable_stop(api: Api, project_id: str) -> None:
     """Stopping a reply is off by default (Settings → Chat): the stop dialog turns it on for its own server."""
-    api.put("/api/chat-settings", {"stop_enabled": True})
+    api.post("/api/v1/chat_settings/update", {"stop_enabled": True})
 
 
 def _restrict_planner_choices(api: Api, project_id: str) -> None:
@@ -1214,7 +1212,7 @@ def _not_relayed(look: Look) -> str | None:
 def _native_calls_after_start(look: Look) -> list[str]:
     """The native tools (Bash, ...) the newest Manager run called after its start call; the action trail holds
     only the MCP tools, so a ``sleep`` would not show there."""
-    records = look.api.get("/api/llm-records", agent_id="manager", limit=500)["records"]
+    records = look.api.post("/api/v1/runs/list", {"agent_id": "manager", "limit": 500})["result"]["records"]
     runs = [r for r in records if not (r.get("metadata") or {}).get("autonomous")]
     if not runs:
         return []
@@ -1284,7 +1282,7 @@ def _make_switch_profile(api: Api, project_id: str, *, fake: bool = True, spec: 
 
 def _manager_runs(look: Look) -> list[dict[str, Any]]:
     """The Manager's runs since the dialog started, oldest first."""
-    records = look.api.get("/api/llm-records", agent_id="manager", limit=500)["records"]
+    records = look.api.post("/api/v1/runs/list", {"agent_id": "manager", "limit": 500})["result"]["records"]
     return sorted((r for r in records if r["id"] > look.runs_since
                    and not (r.get("metadata") or {}).get("autonomous")), key=lambda r: r["id"])
 
@@ -1320,7 +1318,7 @@ def _switch_text(look: Look) -> str:
 
 
 def _selected(look: Look) -> dict[str, Any] | None:
-    return look.api.get("/api/manager/session")["selected"]
+    return look.api.post("/api/v1/manager_session/get", {})["result"]["selected"]
 
 
 def _switch_selected(look: Look) -> str | None:
@@ -1754,7 +1752,7 @@ def _check_manager_run(api: Api, since: int, *, stop: bool = False, withdraw: bo
     it was sent (``withdraw``) has no run (the model never began), or the same interrupted one."""
     from looper.agents.claude_cli import BUDGET_SUBTYPE
 
-    records = api.get("/api/llm-records", agent_id=agent_id, limit=500)["records"]
+    records = api.post("/api/v1/runs/list", {"agent_id": agent_id, "limit": 500})["result"]["records"]
     new = [record for record in records if record["id"] > since
            and not (record.get("metadata") or {}).get("autonomous")]
     if not new and withdraw:
@@ -1771,7 +1769,7 @@ def _check_manager_run(api: Api, since: int, *, stop: bool = False, withdraw: bo
     result: dict[str, Any] = {}
     after = 0
     while True:
-        events = api.get(f"/api/llm-records/{record['id']}/events", after=after, limit=5000)["events"]
+        events = api.post("/api/v1/runs/events", {"record_id": record["id"], "after": after, "limit": 5000})["result"]["events"]
         for row in events:
             event = row["event"]
             if event.get("type") == "result" and event.get("parent_tool_use_id") is None:
@@ -1793,9 +1791,9 @@ def _made_a_tool_call(api: Api, since: int, database_url: str | None, before: in
     with a tool event."""
     if database_url is not None and _trail(database_url, before, agent):
         return True
-    for record in api.get("/api/llm-records", agent_id=agent, limit=50)["records"]:
+    for record in api.post("/api/v1/runs/list", {"agent_id": agent, "limit": 50})["result"]["records"]:
         if record["id"] > since and record["status"] == "running":
-            events = api.get(f"/api/llm-records/{record['id']}/events", after=0, limit=5000)["events"]
+            events = api.post("/api/v1/runs/events", {"record_id": record["id"], "after": 0, "limit": 5000})["result"]["events"]
             if any(row["event"].get("type") == "assistant" and any(
                     isinstance(b, dict) and b.get("type") == "tool_use"
                     for b in (row["event"].get("message") or {}).get("content") or []) for row in events):
@@ -1805,7 +1803,7 @@ def _made_a_tool_call(api: Api, since: int, database_url: str | None, before: in
 
 def _newest_run(api: Api, agent: str) -> int:
     """The id of ``agent``'s newest run record (0 for none): the turn's runs are the ones after it."""
-    records = api.get("/api/llm-records", agent_id=agent, limit=1)["records"]
+    records = api.post("/api/v1/runs/list", {"agent_id": agent, "limit": 1})["result"]["records"]
     return max((record["id"] for record in records), default=0)
 
 
@@ -1827,10 +1825,10 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
         body["target"] = {"kind": "manager", "id": agent}
     api.post("/api/chat/send", body)
     if withdraw:  # the message has its turn from its delivery on: the stop finds it wherever it is
-        turn = api.get("/api/chat/turn", session_id=session).get("turn")
+        turn = api.post("/api/v1/operator_chat/turn", {"session_id": session})["result"].get("turn")
         if not turn:
             raise EvalError("no turn to withdraw: the message is not live")
-        api.post("/api/chat/stop", {"message_id": turn["message_id"]})
+        api.post("/api/v1/operator_chat/stop", {"message_id": turn["message_id"]})
     deadline = time.monotonic() + timeout
     stopped = not stop
     while time.monotonic() < deadline:
@@ -1840,9 +1838,9 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
             check_budget()
         if not stopped and _made_a_tool_call(api, since, database_url, before, agent):
             # The stop names the Manager's turn (its envelope's id), which the chat's turn endpoint tells.
-            turn = api.get("/api/chat/turn", session_id=session).get("turn")
+            turn = api.post("/api/v1/operator_chat/turn", {"session_id": session})["result"].get("turn")
             if turn:
-                api.post("/api/chat/stop", {"message_id": turn["message_id"]})
+                api.post("/api/v1/operator_chat/stop", {"message_id": turn["message_id"]})
                 stopped = True
         for message in api.get("/api/chat/messages", session_id=session, **owner)["messages"]:
             if message.get("message_id") == f"{message_id}:reply":
@@ -2017,7 +2015,7 @@ def _root_overrun(api: Api, seen: dict[int, float]) -> float:
     dialog runs; ``seen`` keeps the runs already read (a run's result does not change)."""
     offset = 0
     while True:
-        page = api.get("/api/llm-records", limit=200, offset=offset)["records"]
+        page = api.post("/api/v1/runs/list", {"limit": 200, "offset": offset})["result"]["records"]
         for record in page:
             if record["id"] in seen or record.get("status") == "running":
                 continue
@@ -2065,10 +2063,10 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
         runs_since = 0
         if dialog.seed is _make_switch_profile:
             _make_switch_profile(api, project_id, fake=mode == "fake", spec=switch_spec)
-            runs_since = max((r["id"] for r in api.get("/api/llm-records", agent_id="manager",
-                                                       limit=1)["records"]), default=0)
         elif dialog.seed is not None:
             dialog.seed(api, project_id)
+        if dialog.seed is _make_switch_profile or any(say.stop or say.withdraw for say in dialog.says):
+            runs_since = _newest_run(api, "manager")
         if dialog.id == "model_price_history":
             _price_history(database_url, seed=True)
         if dialog.id == "model_login_runtime":
@@ -2162,13 +2160,13 @@ def runtime_evidence(api: Api) -> list[dict[str, Any]]:
     """Read actual launches and root observations, without commands or credentials."""
     records = []
     while True:
-        page = api.get("/api/llm-records", limit=200, offset=len(records))["records"]
+        page = api.post("/api/v1/runs/list", {"limit": 200, "offset": len(records)})["result"]["records"]
         records.extend(page)
         if len(page) < 200:
             break
     evidence = []
     for brief in sorted(records, key=lambda row: row["id"]):
-        record = api.get(f"/api/llm-records/{brief['id']}")["record"]
+        record = api.post("/api/v1/runs/get", {"record_id": brief["id"]})["result"]["record"]
         metadata = record.get("metadata") or {}
         command = list(metadata.get("command") or [])
         if command[:1] == ["env"]:

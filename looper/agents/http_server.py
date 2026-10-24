@@ -790,10 +790,6 @@ class AgentHTTPServer:
     # --- API routing ---
 
     _RE_TASK_DETAIL = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)$")
-    _RE_TASK_RUNS = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/runs$")
-    _RE_LLM_RECORD = re.compile(r"^/api/llm-records/(\d+)$")
-    _RE_LLM_RECORD_EVENTS = re.compile(r"^/api/llm-records/(\d+)/events$")
-    _RE_AGENT_USAGE = re.compile(r"^/api/agents/([a-zA-Z0-9_-]+)/usage$")
     _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
     _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
@@ -832,10 +828,6 @@ class AgentHTTPServer:
             await self._handle_list_tasks(query, writer)
         elif path == "/api/chat/send" and method == "POST":
             await self._handle_chat_send(body, writer)
-        elif path == "/api/manager/session" and method == "GET":
-            await self._handle_manager_session(query, writer)
-        elif path == "/api/manager/session/profile" and method == "PUT":
-            await self._handle_manager_session_profile(body, writer)
         elif path == "/api/chat/targets" and method == "GET":
             await self._handle_chat_targets(writer)
         elif path == "/api/chat/sessions" and method == "GET":
@@ -844,16 +836,10 @@ class AgentHTTPServer:
             await self._handle_chat_messages(query, writer)
         elif path == "/api/chat/messages" and method == "POST":
             await self._handle_chat_save_message(body, writer)
-        elif path == "/api/chat/stop" and method == "POST":
-            await self._handle_chat_stop(body, writer)
-        elif path == "/api/chat/turn" and method == "GET":
-            await self._handle_chat_turn(query, writer)
         elif path == "/api/chat/events" and method == "GET":
             await self._handle_sse_events(query, writer)
         elif path == "/api/tasks/delete" and method == "POST":
             await self._handle_task_delete(body, writer)
-        elif (m := self._RE_TASK_RUNS.match(path)) and method == "GET":
-            await self._handle_task_runs(m.group(1), writer)
         elif (m := self._RE_TASK_WORKSPACE_DISCARD.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: self._discard_workspace(m.group(1), int(m.group(2))))
         elif (m := self._RE_TASK_DETAIL.match(path)) and method == "GET":
@@ -904,14 +890,6 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_DRAFT.match(path)) and method == "DELETE":
             await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.discard_draft(
                 m.group(1), m.group(2)))
-        elif path == "/api/llm-records" and method == "GET":
-            await self._handle_list_llm_records(query, writer)
-        elif (m := self._RE_LLM_RECORD.match(path)) and method == "GET":
-            await self._handle_get_llm_record(int(m.group(1)), writer)
-        elif (m := self._RE_LLM_RECORD_EVENTS.match(path)) and method == "GET":
-            await self._handle_llm_record_events(int(m.group(1)), query, writer)
-        elif (m := self._RE_AGENT_USAGE.match(path)) and method == "GET":
-            await self._handle_agent_usage(m.group(1), query, writer)
         elif path == "/api/registry" and method == "GET":
             await self._handle_registry(writer, HTTP_200, lambda: profile_registry.registry_view(
                 server_claude=self._claude_bin))
@@ -979,10 +957,6 @@ class AgentHTTPServer:
         elif path == "/api/scheduler-settings" and method == "PUT":
             await self._answer(writer, HTTP_200,
                                lambda: schedules.update_scheduler_settings(projects.json_object(body)))
-        elif path == "/api/chat-settings" and method == "GET":
-            await self._answer(writer, HTTP_200, self._chat_settings)
-        elif path == "/api/chat-settings" and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: self._update_chat_settings(body))
         elif path == "/api/wait-settings" and method == "GET":
             await self._answer(writer, HTTP_200, wait_service.settings_view)
         elif path == "/api/wait-settings" and method == "PUT":
@@ -1223,15 +1197,6 @@ class AgentHTTPServer:
         writer.write(_json_response(HTTP_200, _serialize(result)))
         await writer.drain()
 
-    async def _chat_settings(self) -> dict[str, Any]:
-        return chat_settings.settings_view()
-
-    async def _update_chat_settings(self, body: bytes) -> dict[str, Any]:
-        try:
-            return await chat_settings.update(projects.json_object(body))
-        except ValueError as exc:
-            raise projects.RequestError(HTTP_400, str(exc)) from None
-
     def _stop_agent(self, message_id: str) -> Any:
         """The Manager whose turn answers ``message_id`` (the default one when none does)."""
         if self._managers is None:
@@ -1244,61 +1209,6 @@ class AgentHTTPServer:
         if self._managers is None:
             return self._manager
         return self._managers.get(manager_id or "manager")
-
-    async def _handle_chat_stop(self, body: bytes, writer: asyncio.StreamWriter) -> None:
-        if not chat_settings.stop_enabled():
-            writer.write(_json_response(HTTP_409, {
-                "state": "disabled", "error": "Stopping a reply is off (Settings → Chat; experimental)."}))
-            await writer.drain()
-            return
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            data = None
-        message_id = data.get("message_id") if isinstance(data, dict) else None
-        if data is None:
-            response = _json_response(HTTP_400, {"error": "invalid JSON body"})
-        elif not isinstance(message_id, str) or not message_id.strip():
-            response = _json_response(HTTP_400, {"error": "message_id is required"})
-        elif (agent := self._stop_agent(message_id)) is None:
-            response = _json_response(HTTP_503, {"error": "the Manager is not running"})
-        else:
-            result = await agent.stop_turn(message_id, via="web")
-            if result.value in ("stopping", "already_stopping"):
-                current = agent.turn_for(message_id)
-                method = current.method if current is not None else None
-                found = current.stop.phase if current is not None and current.stop is not None else None
-                phase = found if found is not None else (current.phase if current is not None else None)
-                response = _json_response(HTTP_200, {
-                    "state": result.value, "phase": getattr(phase, "value", phase),
-                    "method": getattr(method, "value", method)})
-            else:
-                errors = {"not_running": "No turn is running.",
-                          "other_message": "The running turn answers a different message.",
-                          "cannot_interrupt": "This runtime cannot interrupt a reply."}
-                response = _json_response(HTTP_409, {"state": result.value, "error": errors[result.value]})
-        writer.write(response)
-        await writer.drain()
-
-    async def _handle_chat_turn(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
-        session_id = query.get("session_id", "")
-        if not session_id:
-            response = _json_response(HTTP_400, {"error": "session_id is required"})
-        elif self._managers is None and self._manager is None:
-            response = _json_response(HTTP_503, {"error": "the Manager is not running"})
-        else:
-            agent = self._manager
-            if self._managers is not None:
-                from ..db import managers as db_managers
-                agent = self._managers.get(await db_managers.thread_owner(session_id) or "manager")
-            current = None if agent is None else agent.current_turn_for("web", session_id)
-            response = _json_response(HTTP_200, {"turn": None if current is None else {
-                "message_id": current.message_id, "client_message_id": current.client_message_id,
-                "channel": current.channel, "started_at": current.received_at.isoformat(), "state": current.phase.value,
-                "method": getattr(current.method, "value", current.method), "stopping": current.stop is not None,
-                "can_interrupt": agent.can_interrupt}})
-        writer.write(response)
-        await writer.drain()
 
     async def _handle_chat_send(
         self, body: bytes, writer: asyncio.StreamWriter
@@ -1418,53 +1328,6 @@ class AgentHTTPServer:
             owner = await db_chat.claim_thread(
                 session_id, "manager" if await db_chat.has_messages(session_id) else wanted)
         return owner
-
-    def _no_running_manager(self, manager_id: str | None) -> bytes:
-        if self._managers is not None and self._managers.get(manager_id or "manager") is None:
-            return _json_response(HTTP_404, {"error": f"no running Manager '{manager_id or 'manager'}'"})
-        return _json_response(HTTP_503, {"error": "the Manager is not running"})
-
-    async def _handle_manager_session(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
-        manager_id = query.get("manager") or None
-        agent = self._manager_for(manager_id)
-        if agent is None:
-            writer.write(self._no_running_manager(manager_id))
-        else:
-            writer.write(_json_response(HTTP_200, await agent.session_view()))
-        await writer.drain()
-
-    async def _handle_manager_session_profile(self, body: bytes, writer: asyncio.StreamWriter) -> None:
-        """Choose the Agent Profile of the Manager's session (``profile_id`` null: follow the Settings)."""
-        manager_id = None
-        try:
-            parsed = json.loads(body.decode("utf-8"))
-            if isinstance(parsed, dict) and isinstance(parsed.get("manager"), str):
-                manager_id = parsed["manager"]
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
-        agent = self._manager_for(manager_id)
-        if agent is None:
-            writer.write(self._no_running_manager(manager_id))
-            await writer.drain()
-            return
-        try:
-            data = json.loads(body.decode("utf-8"))
-            if not isinstance(data, dict) or "profile_id" not in data:
-                raise ValueError("profile_id is required (null follows the Settings)")
-            profile_id = data["profile_id"]
-            if profile_id is not None and not isinstance(profile_id, str):
-                raise ValueError("profile_id must be a string or null")
-            result = await agent.select_session_profile(
-                profile_id, via="api",
-                origin={"channel": "web", "chat": None, "sender": "dashboard", "group": False})
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
-        except (ValueError, profile_registry.RegistryError) as exc:
-            writer.write(_json_response(HTTP_400, {"error": str(exc)}))
-        else:
-            writer.write(_json_response(
-                HTTP_200, {**await agent.session_view(), "effect": result.effect.value, "text": result.text}))
-        await writer.drain()
 
     async def _handle_chat_targets(self, writer: asyncio.StreamWriter) -> None:
         """The Manager, then each recent task's Planner and step agents (finished ones too)."""
@@ -1722,15 +1585,6 @@ class AgentHTTPServer:
                                in_worktree: bool = False) -> dict[str, Any] | None:
         return await projects.step_workspaces_view(task_id, steps, in_worktree=in_worktree)
 
-    async def _handle_task_runs(self, task_id: str, writer: asyncio.StreamWriter) -> None:
-        try:
-            from ..db.llm_records import task_run_rows
-            runs = await task_run_rows(task_id)
-        except Exception:
-            runs = []
-        writer.write(_json_response(HTTP_200, {"runs": runs}))
-        await writer.drain()
-
     # --- Agent settings (the defaults every agent inherits) ---
 
     async def _write_layer(
@@ -1813,82 +1667,6 @@ class AgentHTTPServer:
             logger.exception("knowledge request failed")
             status, result = HTTP_500, {"error": "the knowledge request failed; see the server log"}
         writer.write(_json_response(status, _serialize(result)))
-        await writer.drain()
-
-    # --- LLM record handlers ---
-
-    async def _handle_get_llm_record(self, record_id: int, writer: asyncio.StreamWriter) -> None:
-        from ..db.llm_records import get_record
-        try:
-            record = await get_record(record_id)
-        except Exception:
-            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
-            await writer.drain()
-            return
-        if record is None:
-            writer.write(_json_response(HTTP_404, {"error": f"llm record {record_id} not found"}))
-        else:
-            writer.write(_json_response(HTTP_200, {"record": _with_run_role(record)}))
-        await writer.drain()
-
-    async def _handle_llm_record_events(
-        self, record_id: int, query: dict[str, str], writer: asyncio.StreamWriter,
-    ) -> None:
-        """Transcript events after ``after`` (a seq), so a viewer can follow a running agent."""
-        from ..db.llm_records import list_events
-        try:
-            after = int(query.get("after", "0"))
-            limit = min(int(query.get("limit", "1000")), 5000)
-        except ValueError:
-            writer.write(_json_response(HTTP_400, {"error": "after and limit must be integers"}))
-            await writer.drain()
-            return
-        try:
-            events = await list_events(record_id, after_seq=after, limit=limit)
-        except Exception:
-            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
-            await writer.drain()
-            return
-        writer.write(_json_response(HTTP_200, {"events": events}))
-        await writer.drain()
-
-    async def _handle_agent_usage(
-        self, agent_id: str, query: dict[str, str], writer: asyncio.StreamWriter,
-    ) -> None:
-        """An agent's spending (in total, by session, by UTC day) and its context over its latest turns."""
-        from ..db.llm_records import agent_usage
-        try:
-            turns = min(max(int(query.get("turns", "100")), 1), 1000)
-        except ValueError:
-            writer.write(_json_response(HTTP_400, {"error": "turns must be an integer"}))
-            await writer.drain()
-            return
-        try:
-            usage = await agent_usage(agent_id, turns=turns)
-        except Exception:
-            logger.exception("DB unavailable for agent usage %s", agent_id)
-            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
-            await writer.drain()
-            return
-        writer.write(_json_response(HTTP_200, _serialize(usage)))
-        await writer.drain()
-
-    async def _handle_list_llm_records(
-        self, query: dict[str, str], writer: asyncio.StreamWriter,
-    ) -> None:
-        agent_id = query.get("agent_id")
-        task_id = query.get("task_id")
-        role = query.get("role")
-        limit = min(int(query.get("limit", "100")), 500)
-        offset = int(query.get("offset", "0"))
-        try:
-            from ..db.llm_records import list_records
-            records = await list_records(
-                agent_id=agent_id, task_id=task_id, role=role, limit=limit, offset=offset,
-            )
-        except Exception:
-            records = []
-        writer.write(_json_response(HTTP_200, {"records": [_with_run_role(record) for record in records]}))
         await writer.drain()
 
     # --- Configuration export ---

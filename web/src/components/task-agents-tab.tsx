@@ -79,7 +79,7 @@ export interface StepRun {
   status: LlmRecord["status"];
 }
 
-/** The task's Worker and Reviewer runs (each role's records as `GET /api/llm-records` answers for it) by step (in
+/** The task's Worker and Reviewer runs (each role's records as `runs.list` answers for it) by step (in
  * plan order), then by when each started. */
 export function stepRuns(steps: TaskStep[], records: Record<TaskLimitRole, LlmRecord[]>): StepRun[] {
   const byId = new Map(steps.map((step) => [step.id, step]));

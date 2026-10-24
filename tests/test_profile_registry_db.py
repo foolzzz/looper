@@ -46,14 +46,16 @@ async def _call(method: str, path: str, body: Any = None, *, claude: str = "clau
     writer = _Writer()
     parsed = urlsplit(path)
     raw = b"" if body is None else json.dumps(body).encode()
-    if parsed.path == "/api/v1/tasks/agents" or parsed.path.startswith(("/api/v1/roles/", "/api/v1/agent_settings/")):
+    if parsed.path == "/api/v1/tasks/agents" or parsed.path.startswith(
+            ("/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/runs/")):
         server._client_ops = ClientOps(SimpleNamespace())
         await server._handle_v1(method, parsed.path, dict(parse_qsl(parsed.query)), {}, raw, writer, api_v1.OPERATOR)
     else:
         await server._route_api(method, parsed.path, dict(parse_qsl(parsed.query)), raw, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
     answer = json.loads(payload)
-    if parsed.path == "/api/v1/tasks/agents" or parsed.path.startswith(("/api/v1/roles/", "/api/v1/agent_settings/")):
+    if parsed.path == "/api/v1/tasks/agents" or parsed.path.startswith(
+            ("/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/runs/")):
         answer = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
     return int(head.split()[1]), answer
 
