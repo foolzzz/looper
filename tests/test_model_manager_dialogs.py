@@ -330,8 +330,9 @@ class RunsApi:
     def post(self, path, body):
         if path.startswith("/api/v1/runs/"):
             return {"status": "ok", "result": self.get(path, **body)}
-        assert path == "/api/v1/manager_session/get"
-        return {"result": {"selected": self.selected}}
+        if path == "/api/v1/manager_session/get":
+            return {"status": "ok", "result": {"selected": self.selected}}
+        raise AssertionError(path)
 
     def get(self, path, **query):
         if path == "/api/v1/runs/list":

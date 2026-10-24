@@ -438,8 +438,10 @@ def stub_claude_on_path(_stub_claude: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
 
 _PLANNER_CLAUDE = """\
-import json, os, sys, time
+import hashlib, json, os, sys, time
 STATE = {state!r}
+SESSION = os.path.join(STATE, hashlib.sha256(os.fsencode(os.getcwd())).hexdigest()) if {sessions_by_cwd!r} else STATE
+os.makedirs(SESSION, exist_ok=True)
 REPLIES = json.loads({replies!r})
 AUTONOMOUS = json.loads({autonomous!r})
 DENIED = json.loads({denied!r})
@@ -459,9 +461,9 @@ if {forget_sessions!r} and '--resume' in sys.argv:
 # Like Claude, read the appended system prompt's file when the process starts.
 if any(f in sys.argv for f in ('--append-system-prompt-file', '--system-prompt-file')):
     log('prompts.jsonl', open(sys.argv[sys.argv.index(next(f for f in ('--append-system-prompt-file', '--system-prompt-file') if f in sys.argv)) + 1], encoding='utf-8').read())
-counter = os.path.join(STATE, 'turns')
+counter = os.path.join(SESSION, 'turns')
 # Like Claude, a process that resumes a session carries on from the session's running total.
-session_cost = os.path.join(STATE, 'session_cost')
+session_cost = os.path.join(SESSION, 'session_cost')
 cost = float(open(session_cost).read()) if '--resume' in sys.argv and os.path.exists(session_cost) else 0.0
 def emit(event):
     print(json.dumps(event), flush=True)
@@ -540,16 +542,19 @@ class FakePlannerClaude:
     Claude does once background work ends (0.25 more). Turn N's result reports
     ``denied[N]`` as its ``permission_denials``, the tool calls Claude Code refused,
     and turn N writes ``writes[N]`` (file name to content) into its working directory.
+    With ``sessions_by_cwd``, concurrent tasks keep separate turn counts and costs
+    in each working directory's session; the logs still collect all processes.
     """
 
     def __init__(
         self, state: Path, replies: tuple[str, ...], *, linger: bool = False, forget_sessions: bool = False,
         autonomous: dict[int, str] | None = None, denied: dict[int, list[dict[str, Any]]] | None = None,
-        writes: dict[int, dict[str, str]] | None = None,
+        writes: dict[int, dict[str, str]] | None = None, sessions_by_cwd: bool = False,
     ) -> None:
         self.state = state
         self.bin = fake_claude(state / "fake-claude", _PLANNER_CLAUDE.format(
             state=str(state), replies=json.dumps(replies), linger=linger, forget_sessions=forget_sessions,
+            sessions_by_cwd=sessions_by_cwd,
             autonomous=json.dumps({str(turn): text for turn, text in (autonomous or {}).items()}),
             denied=json.dumps({str(turn): calls for turn, calls in (denied or {}).items()}),
             writes=json.dumps({str(turn): files for turn, files in (writes or {}).items()}),
@@ -580,10 +585,11 @@ def planner_claude(tmp_path_factory: pytest.TempPathFactory) -> Callable[..., Fa
     def make(
         *replies: str, linger: bool = False, forget_sessions: bool = False, autonomous: dict[int, str] | None = None,
         denied: dict[int, list[dict[str, Any]]] | None = None, writes: dict[int, dict[str, str]] | None = None,
+        sessions_by_cwd: bool = False,
     ) -> FakePlannerClaude:
         return FakePlannerClaude(
             tmp_path_factory.mktemp("planner-claude"), replies, linger=linger, forget_sessions=forget_sessions,
-            autonomous=autonomous, denied=denied, writes=writes,
+            autonomous=autonomous, denied=denied, writes=writes, sessions_by_cwd=sessions_by_cwd,
         )
 
     return make
