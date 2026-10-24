@@ -333,13 +333,13 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 
 ### 12.1 开发排期
 
-每一步一个 PR，各自是完整、可单独回滚的结果（计划第 1 节第 1 条）。第 1、2 步互不依赖，可以并行。
+每一步一个 PR，各自是完整、可单独回滚的结果（计划第 1 节第 1 条）。第 4、5 步可以并行。
 
 | 步 | 内容 | 依赖 | 完成时 |
 |---|---|---|---|
-| 1 | 运行时类型与 Profile、provider 接线：`api` 适配器、类型化的角色限制、按 SDK 检测、只接 API key 的 Responses 绑定、描述行 | — | 适配器先不进 `ADAPTERS`，用户看不到；注册表的角色限制与无可执行文件的检测有测试 |
-| 2 | 协议无关的循环与 Responses 编解码器：`AgentLoop`、`ProtocolCodec`、事件翻译、重试与超时、请求上限、错误分类、每次请求的用量；本地假 Responses 服务；`openai` 依赖 | — | 不接管家；循环在假服务上跑通文本、工具循环和各种错误 |
-| 3 | 管家跑在 `api` 上：`ApiSession`、进程内平台工具（`TurnTools` → `ManagerOps.call`，与 MCP 桥给出的文本和留痕一致）、管家的改动、运行时说明、软上限；适配器进 `ADAPTERS` | 1、2 | 管家能在 `api` Profile 上回答、调工具、两步确认；会话只在进程内，重启后走续接失败的现有路径；停止仍被拒绝 |
+| 1 | 运行时类型与 Profile、provider 接线：`api` 适配器、类型化的角色限制、按 SDK 检测、只接 API key 的 Responses 绑定、描述行；`openai` 依赖 | — | 适配器先不进 `ADAPTERS`，用户看不到；注册表的角色限制与无可执行文件的检测有测试 |
+| 2 | 协议无关的循环与 Responses 编解码器：`AgentLoop`、`ProtocolCodec`、重试与超时、请求上限、错误分类、每次请求的用量；本地假 Responses 服务 | 1 | 不接管家；循环在假服务上跑通文本、工具循环和各种错误 |
+| 3 | 管家跑在 `api` 上：`ApiSession`、进程内平台工具（`TurnTools` → `ManagerOps.call`，与 MCP 桥给出的文本和留痕一致）、单条工具结果上限、内部事件翻译、管家的改动、运行时说明、软上限；适配器进 `ADAPTERS` | 1、2 | 管家能在 `api` Profile 上回答、调工具、两步确认；会话只在进程内，重启后走续接失败的现有路径；停止仍被拒绝 |
 | 4 | 会话表与续接、上下文换会话：`api_session_items`、跨重启续接、协议不同不续接、半轮补齐、会话丢弃后删除；`SwitchReason.CONTEXT_FULL`、阈值、第一次请求超限时重跑 | 3 | 重启后接着同一会话；长会话按 D6 交接换新 |
 | 5 | 停止与用量记录：`can_interrupt = True`、取消请求、停止后原文合法、`usage_complete`、`metadata.api`、每次请求的结构化日志 | 3 | 停止在控制台和渠道上可用；Runs 里每轮的 token、花费、未知用量都对 |
 | 6 | 入口：控制台（运行时卡、Profile 表单、Roles、停止按钮）、Telegram 与飞书的 `/profile`、`/stop`，CLI 与 `loopercli` 的核对；`agent-system.md` 一节 | 5 | 各入口按第 2 节表现，截图一张 |
