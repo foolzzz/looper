@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.67] - 2026-10-24
+
+### Changed
+
+- **Lark channel discovery and gate notification settings move to the versioned API.** `channels.status`, `channels.people`, `gate_settings.get` and `gate_settings.update` under `/api/v1/` replace six legacy HTTP methods (`GET /api/channels/{lark|lark_bot}/status`, `GET /api/channels/{lark|lark_bot}/people`, `GET`/`PUT /api/gate-settings`), which are removed; the dashboard uses the new routes. An API client's gate target change needs a second-step confirmation. Manager prompts and tools are unchanged. ([#481](https://github.com/foolzzz/looper/pull/481))
+
 ## [2.13.66] - 2026-10-24
 
 ### Changed
