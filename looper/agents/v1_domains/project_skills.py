@@ -6,6 +6,8 @@ from ..ops import ErrorCode, OpError
 from ..ops.service import _plain
 from .catalog import PROJECT_INSTALLS, _answer as catalog_answer
 
+ORDER = 6
+
 
 PROJECT_SKILL = _object({
     "skill_id": _STR, "name": _STR, "qualified_name": _STR, "description": _STR,

@@ -8,6 +8,8 @@ from ..ops import ErrorCode, OpError
 from ..ops.service import _plain
 from ..projects import RequestError
 
+ORDER = 9
+
 
 GATE_TARGET = _object({"channel": {"type": "string", "enum": ["telegram", "lark", "lark_bot"]},
                        "chat": _STR}, closed=True)
