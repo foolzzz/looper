@@ -4043,6 +4043,8 @@ export async function fetchGates(
       if (index !== undefined) return side === "after" ? index : index + 1;
     }
     if (rows.length === 0) return 0;
+    // With no surviving boundary, a refresh starts over with the current list.
+    if (side === "through") return rows.length;
     throw new Error("The gate list changed while loading. Retry the request.");
   };
   const start = filters.cursor ? boundary(filters.cursor, "after") : offset;
