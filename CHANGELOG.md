@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.66] - 2026-10-24
+
+### Changed
+
+- **Catalog acquisition moves to the versioned API.** `catalog_sources.import_machine`, `import_mcp`, `upload`, `git_preview`, `git_import`, `create_skill` and `create_mcp` under `/api/v1/` replace seven legacy POST routes (`/api/catalog/import`, `/upload`, `/git/preview`, `/git/import`, `/skills`, `/mcp`, `/mcp/import`), which are removed; the dashboard uses the new routes. Machine and MCP import and MCP creation are operator-only; a client's Git import needs a second-step confirmation and is refused if the repository moved since the preview. Manager prompts and tools are unchanged. ([#484](https://github.com/foolzzz/looper/pull/484))
+
 ## [2.13.65] - 2026-10-24
 
 ### Changed
