@@ -953,7 +953,8 @@ async def choosable_profiles(project_id: str | None) -> tuple[list[dict[str, Any
     if listed:
         return listed, True
     return [row for row in await db_profiles.list_profiles()
-            if set(servable_roles(AgentProfile.from_row(row).runtime.capabilities)) & set(_CHOOSABLE)], False
+            if set(servable_roles((profile := AgentProfile.from_row(row)).runtime.capabilities,
+                                  profile.runtime.type)) & set(_CHOOSABLE)], False
 
 
 def allowed_profile_view(row: dict[str, Any]) -> dict[str, Any]:
@@ -966,7 +967,8 @@ def allowed_profile_view(row: dict[str, Any]) -> dict[str, Any]:
     price = model_price(profile.resolved_model, profile.model)
     return {"profile_id": profile.id, "name": profile.name, "runtime": profile.runtime.type, "model": profile.model,
             "effort": profile.effort or None,
-            "roles": [role for role in servable_roles(profile.runtime.capabilities) if role in _CHOOSABLE],
+            "roles": [role for role in servable_roles(profile.runtime.capabilities, profile.runtime.type)
+                      if role in _CHOOSABLE],
             "usd_per_million_tokens": {"input": price.input_usd_per_mtok, "output": price.output_usd_per_mtok}}
 
 
@@ -1007,7 +1009,8 @@ async def set_allowed_profiles(project_id: str, data: dict[str, Any]) -> dict[st
         if match is None:
             names = ", ".join(str(p["name"]) for p in registered[:20])
             raise RequestError(HTTP_400, f"profile_ids: no Agent Profile {item!r}; registered: {names}")
-        if not set(servable_roles(AgentProfile.from_row(match).runtime.capabilities)) & set(_CHOOSABLE):
+        profile = AgentProfile.from_row(match)
+        if not set(servable_roles(profile.runtime.capabilities, profile.runtime.type)) & set(_CHOOSABLE):
             raise RequestError(HTTP_400, f"profile_ids: Agent Profile {match['name']!r} can run neither the worker "
                                          "nor the reviewer, so a Planner could never choose it")
         if match["id"] not in ids:
