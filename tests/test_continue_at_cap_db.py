@@ -65,14 +65,16 @@ async def _call(server: AgentHTTPServer, method: str, path: str, body: Any = Non
         return status, answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
     writer = _Writer()
     raw = json.dumps(body).encode() if body is not None else b""
-    if path == "/api/v1/tasks/continue":
+    if path in {"/api/v1/tasks/continue", "/api/v1/tasks/delete", "/api/v1/workspaces/discard",
+                "/api/v1/workspaces/check"}:
         server._client_ops = ClientOps(SimpleNamespace())
         await server._handle_v1(method, path, {}, {}, raw, writer, api_v1.OPERATOR)
     else:
         await server._route_api(method, path, {}, raw, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
     answer = json.loads(payload)
-    if path == "/api/v1/tasks/continue":
+    if path in {"/api/v1/tasks/continue", "/api/v1/tasks/delete", "/api/v1/workspaces/discard",
+                "/api/v1/workspaces/check"}:
         answer = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
     return int(head.split()[1]), answer
 

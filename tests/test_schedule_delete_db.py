@@ -40,12 +40,12 @@ def test_a_schedule_deleted_while_its_task_runs_lets_the_task_end_and_says_nothi
         await allow_telegram(env)
         sid = (await env.enabled(notify="always", notify_target={"channel": "telegram", "chat": TELEGRAM_CHAT},
                                  run_timeout_seconds=60))["schedule_id"]
-        run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
+        run = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]
         task_id = run["task_id"]
         await env.pool.execute("UPDATE tasks SET status = 'running' WHERE id = $1", task_id)
         caplog.clear()
 
-        assert await env.ok("DELETE", f"/api/schedules/{sid}") == {"deleted": sid}
+        assert await env.ok("POST", "/api/v1/schedule_admin/delete", {"schedule_id": sid}) == {"deleted": sid}
         task = await env.ok("GET", f"/api/tasks/{task_id}")
         assert (task["status"], task["schedule_id"]) == ("running", None)
         await env.scheduler.tick()  # the run's timeout or its task's end are no longer the scheduler's
@@ -72,7 +72,7 @@ def test_a_schedule_deleted_while_its_gate_runs_creates_no_task(
         sender = with_sender(env)
         gate = "touch started; while [ ! -e go ]; do sleep 0.05; done; echo alert-1"
         sid = (await env.enabled(gate_command=gate, gate_timeout_seconds=30, notify="always"))["schedule_id"]
-        run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
+        run = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]
         assert run["status"] == "gating"
         for _ in range(500):  # the gate is under way
             if (tmp_path / "started").exists():
@@ -81,7 +81,7 @@ def test_a_schedule_deleted_while_its_gate_runs_creates_no_task(
         assert (tmp_path / "started").exists()
         caplog.clear()
 
-        assert await env.ok("DELETE", f"/api/schedules/{sid}") == {"deleted": sid}
+        assert await env.ok("POST", "/api/v1/schedule_admin/delete", {"schedule_id": sid}) == {"deleted": sid}
         (tmp_path / "go").write_text("")  # the gate finds something now
         await env.scheduler.idle()
         await env.scheduler.tick()
@@ -100,12 +100,12 @@ def test_a_schedule_deleted_with_a_queued_run_never_starts_it(
 ) -> None:
     async def test(env: ScheduleEnv) -> None:
         sid = (await env.enabled(overlap="queue"))["schedule_id"]
-        first = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
-        queued = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
+        first = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]
+        queued = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]
         assert (first["status"], queued["status"]) == ("running", "queued")
         caplog.clear()
 
-        assert await env.ok("DELETE", f"/api/schedules/{sid}") == {"deleted": sid}
+        assert await env.ok("POST", "/api/v1/schedule_admin/delete", {"schedule_id": sid}) == {"deleted": sid}
         await env.end_task(first["task_id"], "completed")
         await env.scheduler.tick()
         assert env.bus.of("task_start") == [first["task_id"]]  # the queued run started nothing
@@ -138,7 +138,7 @@ def test_a_schedule_deleted_while_its_runs_end_is_recorded_is_deleted_and_the_en
     async def test(env: ScheduleEnv) -> None:
         with_sender(env)
         sid = (await env.enabled())["schedule_id"]
-        task_id = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]["task_id"]
+        task_id = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]["task_id"]
         await env.pool.execute("UPDATE tasks SET status = 'completed' WHERE id = $1", task_id)
         counting, go = asyncio.Event(), asyncio.Event()
         count_outcome = db_schedules.count_outcome
@@ -152,7 +152,7 @@ def test_a_schedule_deleted_while_its_runs_end_is_recorded_is_deleted_and_the_en
         caplog.clear()
         ending = asyncio.create_task(env.scheduler.task_ended(task_id, "completed"))
         await counting.wait()
-        deleting = asyncio.create_task(env.call("DELETE", f"/api/schedules/{sid}"))
+        deleting = asyncio.create_task(env.call("POST", "/api/v1/schedule_admin/delete", {"schedule_id": sid}))
         await _waits_for_a_lock(env.pool, "DELETE FROM schedules")
         go.set()
         status, payload = await deleting
@@ -179,12 +179,12 @@ def test_a_message_about_a_run_of_a_schedule_deleted_meanwhile_is_dropped_withou
         await allow_telegram(env)
         sid = (await env.enabled(notify="always", notify_target={"channel": "telegram", "chat": TELEGRAM_CHAT})
                )["schedule_id"]
-        run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
+        run = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]
         async with env.pool.acquire() as conn:
             assert await db_schedules.finish_run(conn, run["run_id"], status="completed", at=env.clock.now)
 
         async def deleted_while_sending(channel: str, chat: str, text: str) -> tuple[bool, str | None]:
-            await env.ok("DELETE", f"/api/schedules/{sid}")
+            await env.ok("POST", "/api/v1/schedule_admin/delete", {"schedule_id": sid})
             return await sender(channel, chat, text)
 
         env.scheduler._notifier._sender = deleted_while_sending

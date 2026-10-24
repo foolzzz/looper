@@ -50,7 +50,7 @@ describe("schedule Planner session", () => {
 
   it("asks before reset, leaves a cancelled reset alone, and refreshes after confirming", async () => {
     const fetch = vi.fn(async (url: RequestInfo | URL, _init?: RequestInit) => {
-      if (url === "/api/schedules/sched%2Fa/reset-planner-session") return Response.json({ cleared: true });
+      if (url === "/api/v1/schedule_admin/reset_planner_session") return Response.json({ status: "ok", result: { cleared: true } });
       if (url === "/api/v1/schedule_admin/get") return Response.json({ status: "ok", result: { schedule: schedule(false) } });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -65,8 +65,9 @@ describe("schedule Planner session", () => {
     await act(async () => button.click());
     expect(confirm.mock.calls[0][0]).toContain("next run starts a new session");
     expect(confirm.mock.calls[0][0]).toContain("will not write it back");
-    expect(fetch.mock.calls[0][0]).toBe("/api/schedules/sched%2Fa/reset-planner-session");
+    expect(fetch.mock.calls[0][0]).toBe("/api/v1/schedule_admin/reset_planner_session");
     expect(fetch.mock.calls[0][1]?.method).toBe("POST");
+    expect(fetch.mock.calls[0][1]?.body).toBe(JSON.stringify({ schedule_id: "sched/a" }));
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(fetch.mock.calls[1]).toEqual(["/api/v1/schedule_admin/get", expect.objectContaining({
       method: "POST", body: JSON.stringify({ schedule_id: "sched/a" }),
@@ -76,12 +77,28 @@ describe("schedule Planner session", () => {
 
   it("allows reset without a stored session and shows a refused reset", async () => {
     vi.stubGlobal("confirm", vi.fn(() => true));
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error: "not available" }, { status: 500 })));
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      status: "error", error: { code: "unavailable", message: "not available" },
+    }, { status: 503 })));
     const onReset = vi.fn();
     await act(async () => root.render(<ResetPlannerSession schedule={schedule(false)} onReset={onReset} />));
     expect(container.querySelector("button")?.disabled).toBe(false);
     await act(async () => container.querySelector("button")!.click());
     expect(container.querySelector("[role=alert]")?.textContent).toContain("not available");
     expect(onReset).not.toHaveBeenCalled();
+  });
+
+  it("shows a pending reset's impact without refreshing or reporting it as completed", async () => {
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const fetch = vi.fn(async () => Response.json({ status: "needs_confirmation", confirmation_id: "confirm-reset",
+      expires_in_seconds: 300, impact: "Reset the stored Planner session; the next run starts fresh." }, { status: 202 }));
+    vi.stubGlobal("fetch", fetch);
+    const onReset = vi.fn();
+    await act(async () => root.render(<ResetPlannerSession schedule={schedule()} onReset={onReset} />));
+    await act(async () => container.querySelector("button")!.click());
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(onReset).not.toHaveBeenCalled();
+    expect(container.querySelector("[role=alert]")?.textContent).toContain("the next run starts fresh");
+    expect(container.textContent).not.toContain("Planner session reset;");
   });
 });

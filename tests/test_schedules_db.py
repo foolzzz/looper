@@ -35,9 +35,9 @@ def test_a_refused_schedule_writes_nothing_and_a_profile_the_registry_lacks_is_r
         for body, error in [({"cron": "*/3 * * * *"}, "fires 3 minutes apart"),
                             ({"profile_overrides": {"planner": "agent-nope"}}, "planner:")]:
             full = {"name": "triage", "cron": "*/5 * * * *", "requirement": "Look at the alerts.", **body}
-            status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", full)
+            status, payload = await env.call("POST", "/api/v1/schedule_admin/create", {"project_id": env.project_id, "fields": full})
             assert status == 400, payload
-            assert error in payload["error"]
+            assert error in payload["error"]["message"]
             assert await env.pool.fetchval("SELECT count(*) FROM schedules") == 0
 
     run_scheduled(test, monkeypatch, tmp_path)
@@ -55,9 +55,9 @@ def test_a_new_schedule_is_disabled_named_once_per_project_and_previewed(monkeyp
                                                  "worker": "agent-claude-code-opus"}
         assert schedule["task_limits"] == {"worker": None, "reviewer": None}
 
-        status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", {
-            "name": "triage", "cron": "*/5 * * * *", "requirement": "r"})
-        assert status == 409 and "already has a schedule named" in payload["error"]
+        status, payload = await env.call("POST", "/api/v1/schedule_admin/create", {"project_id": env.project_id, "fields": {
+            "name": "triage", "cron": "*/5 * * * *", "requirement": "r"}})
+        assert status == 409 and "already has a schedule named" in payload["error"]["message"]
 
         listed = await env.ok("POST", "/api/v1/schedule_admin/project_list", {"project_id": env.project_id})
         assert [s["name"] for s in listed["schedules"]] == ["Triage"]
@@ -72,9 +72,9 @@ def test_a_new_schedule_is_disabled_named_once_per_project_and_previewed(monkeyp
         assert status == 400
 
         assert (await env.call("POST", "/api/v1/schedule_admin/get", {"schedule_id": "sched-000000000000"}))[0] == 404
-        assert (await env.call("PUT", f"/api/schedules/{schedule['schedule_id']}", {}))[0] == 400
-        status, payload = await env.call("PUT", f"/api/schedules/{schedule['schedule_id']}", {"enabled": "yes"})
-        assert status == 400 and "true or false" in payload["error"]
+        assert (await env.call("POST", "/api/v1/schedule_admin/update", {"schedule_id": schedule['schedule_id'], "fields": {}}))[0] == 400
+        status, payload = await env.call("POST", "/api/v1/schedule_admin/update", {"schedule_id": schedule['schedule_id'], "fields": {"enabled": "yes"}})
+        assert status == 400 and payload["error"]["code"] == "invalid"
 
     run_scheduled(test, monkeypatch, tmp_path)
 
@@ -88,16 +88,16 @@ def test_enabling_sets_the_next_fire_from_now_and_never_back_fills(monkeypatch: 
         assert datetime.now(UTC) < first <= datetime.now(UTC) + timedelta(minutes=5)
 
         # Disabled for a day, then enabled again: nothing that fell due meanwhile runs.
-        disabled = (await env.ok("PUT", f"/api/schedules/{sid}", {"enabled": False}))["schedule"]
+        disabled = (await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"enabled": False}}))["schedule"]
         assert disabled["next_fire_at"] is None
         await env.pool.execute("UPDATE schedules SET last_fired_at = now() - interval '1 day' WHERE id = $1", sid)
-        again = (await env.ok("PUT", f"/api/schedules/{sid}", {"enabled": True}))["schedule"]
+        again = (await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"enabled": True}}))["schedule"]
         assert datetime.fromisoformat(again["next_fire_at"]) > datetime.now(UTC)
         await env.scheduler.tick()
         assert await env.runs(sid) == []
 
         # A new rule on an enabled schedule recomputes it, also from now.
-        hourly = (await env.ok("PUT", f"/api/schedules/{sid}", {"cron": "0 * * * *"}))["schedule"]
+        hourly = (await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"cron": "0 * * * *"}}))["schedule"]
         assert datetime.fromisoformat(hourly["next_fire_at"]).minute == 0
 
     run_scheduled(test, monkeypatch, tmp_path)
@@ -110,11 +110,11 @@ def test_every_projects_schedules_are_listed_together_the_disabled_ones_too(monk
     async def test(env: ScheduleEnv) -> None:
         assert await env.ok("POST", "/api/v1/schedule_admin/list", {}) == {"schedules": []}
         billing = await projects.create_project(name="Billing", work_dir=env.work_dir, pool=env.pool)
-        await env.ok("POST", f"/api/projects/{billing['id']}/schedules", {
-            "name": "Invoices", "cron": "0 6 * * *", "timezone": "Europe/Berlin", "requirement": "Check them."})
+        await env.ok("POST", "/api/v1/schedule_admin/create", {"project_id": billing['id'], "fields": {
+            "name": "Invoices", "cron": "0 6 * * *", "timezone": "Europe/Berlin", "requirement": "Check them."}})
         await env.schedule(name="nightly")
         hourly = await env.enabled(name="Hourly check", cron="0 * * * *")
-        run = (await env.ok("POST", f"/api/schedules/{hourly['schedule_id']}/run"))["run"]
+        run = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": hourly['schedule_id']}))["run"]
         await env.end_task(run["task_id"], "completed", summary="nothing new", cost=0.25)
 
         listed = (await env.ok("POST", "/api/v1/schedule_admin/list", {}))["schedules"]
@@ -137,7 +137,7 @@ def test_a_schedules_runs_page_by_cursor_and_can_leave_out_the_routine_skips(mon
                                                                            tmp_path: Path) -> None:
     async def test(env: ScheduleEnv) -> None:
         sid = (await env.enabled())["schedule_id"]
-        run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]  # the oldest, with its task
+        run = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]  # the oldest, with its task
         await env.pool.execute("UPDATE tasks SET title = 'Look at the new alerts' WHERE id = $1", run["task_id"])
         start = datetime.now(UTC)
         statuses = ["skipped_gate", "completed", "skipped_overlap", "skipped_gate", "failed", "skipped_budget"]
@@ -184,19 +184,18 @@ def test_a_schedules_runs_page_by_cursor_and_can_leave_out_the_routine_skips(mon
 def test_a_schedule_with_a_gate_may_fire_every_minute(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(env: ScheduleEnv) -> None:
         base = {"name": "every minute", "cron": "* * * * *", "timezone": "UTC", "requirement": "Look."}
-        status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", base)
+        status, payload = await env.call("POST", "/api/v1/schedule_admin/create", {"project_id": env.project_id, "fields": base})
         assert status == 400
-        assert "fires 1 minute apart" in payload["error"] and "at least 5 minutes apart" in payload["error"]
-        assert "(a schedule with a gate command may fire every 1 minute)" in payload["error"]
+        assert "fires 1 minute apart" in payload["error"]["message"] and "at least 5 minutes apart" in payload["error"]["message"]
+        assert "(a schedule with a gate command may fire every 1 minute)" in payload["error"]["message"]
 
-        sid = (await env.ok("POST", f"/api/projects/{env.project_id}/schedules",
-                            {**base, "gate_command": "cat items.txt"}))["schedule"]["schedule_id"]
+        sid = (await env.ok("POST", "/api/v1/schedule_admin/create", {"project_id": env.project_id, "fields": {**base, "gate_command": "cat items.txt"}}))["schedule"]["schedule_id"]
         # Its gate cannot go while it fires every minute; with a 5-minute rule in the same change it can.
-        status, payload = await env.call("PUT", f"/api/schedules/{sid}", {"gate_command": None})
+        status, payload = await env.call("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"gate_command": None}})
         assert status == 400
-        assert payload["error"].startswith("without its gate command, the rule '* * * * *' fires 1 minute apart")
-        await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "", "cron": "*/5 * * * *"})
-        back = await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "true", "cron": "* * * * *"})
+        assert payload["error"]["message"].startswith("without its gate command, the rule '* * * * *' fires 1 minute apart")
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"gate_command": "", "cron": "*/5 * * * *"}})
+        back = await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"gate_command": "true", "cron": "* * * * *"}})
         assert (back["schedule"]["cron"], back["schedule"]["gate_command"]) == ("* * * * *", "true")
 
         for gated, valid, least in ((True, True, 60), (False, False, 300)):
@@ -222,12 +221,12 @@ def test_a_schedules_task_limits_are_replaced_whole_and_given_to_each_task_it_fi
         assert schedule["task_limits"] == {"worker": 8, "reviewer": 3}
         # A given object replaces the schedule's limits (a role left out has none), null clears both, and a change
         # of another field keeps them.
-        changed = await env.ok("PUT", f"/api/schedules/{sid}", {"task_limits": {"worker": 2, "reviewer": None}})
+        changed = await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"task_limits": {"worker": 2, "reviewer": None}}})
         assert changed["schedule"]["task_limits"] == {"worker": 2, "reviewer": None}
-        cleared = await env.ok("PUT", f"/api/schedules/{sid}", {"task_limits": None})
+        cleared = await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"task_limits": None}})
         assert cleared["schedule"]["task_limits"] == {"worker": None, "reviewer": None}
-        await env.ok("PUT", f"/api/schedules/{sid}", {"task_limits": {"reviewer": 3, "worker": 8}})
-        kept = await env.ok("PUT", f"/api/schedules/{sid}", {"name": "renamed", "enabled": True})
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"task_limits": {"reviewer": 3, "worker": 8}}})
+        kept = await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"name": "renamed", "enabled": True}})
         assert kept["schedule"]["task_limits"] == {"worker": 8, "reviewer": 3}
 
         await env.due(sid)
@@ -295,7 +294,7 @@ def test_a_schedules_planner_profile_reaches_its_tasks_and_no_other_change_touch
         plain = await env.enabled(name="Project planner")
         assert plain["profile_overrides"] == {}
         # Another change to the schedule leaves its Planner as it was.
-        changed = (await env.ok("PUT", f"/api/schedules/{cheap['schedule_id']}", {"cron": "*/10 * * * *"}))["schedule"]
+        changed = (await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": cheap['schedule_id'], "fields": {"cron": "*/10 * * * *"}}))["schedule"]
         assert changed["profile_overrides"] == {"planner": "agent-claude-code-opus"}
 
         for schedule in (cheap, plain):
@@ -468,19 +467,19 @@ def test_run_now_fires_a_manual_run_and_keeps_the_next_fire(monkeypatch: pytest.
     async def test(env: ScheduleEnv) -> None:
         sid = (await env.enabled())["schedule_id"]
         before = await env.pool.fetchval("SELECT next_fire_at FROM schedules WHERE id = $1", sid)
-        run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
+        run = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]
         assert (run["trigger"], run["status"]) == ("manual", "running")
         assert env.bus.of("task_start") == [run["task_id"]]
         assert await env.pool.fetchval("SELECT next_fire_at FROM schedules WHERE id = $1", sid) == before
         # A second one goes through the overlap check.
-        again = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
+        again = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]
         assert again["status"] == "skipped_overlap"
-        assert (await env.call("POST", "/api/schedules/sched-000000000000/run"))[0] == 404
+        assert (await env.call("POST", "/api/v1/schedule_admin/run", {"schedule_id": 'sched-000000000000'}))[0] == 404
 
         # A disabled schedule can run now too; without a work directory the run fails, saying why.
         manual = await env.schedule()
         await env.pool.execute("UPDATE projects SET work_dir = '' WHERE id = $1", env.project_id)
-        failed = (await env.ok("POST", f"/api/schedules/{manual['schedule_id']}/run"))["run"]
+        failed = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": manual['schedule_id']}))["run"]
         assert failed["status"] == "failed" and "work directory is required" in failed["error"]
 
     run_scheduled(test, monkeypatch, tmp_path)
@@ -493,7 +492,7 @@ def test_a_running_runs_spend_excludes_the_manager_linked_to_its_task(
 
     async def test(env: ScheduleEnv) -> None:
         sid = (await env.enabled())["schedule_id"]
-        run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
+        run = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]
         task_id = run["task_id"]
         for agent_id, cost in ((f"planner-{task_id}", 0.125), ("worker-1", 0.25), ("reviewer-1", 0.125),
                                ("manager", 5.0)):
@@ -516,7 +515,7 @@ def test_a_runs_spend_rounds_each_role_and_model_like_its_final_cost(
 
     async def test(env: ScheduleEnv) -> None:
         sid = (await env.enabled())["schedule_id"]
-        run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
+        run = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]
         task_id = run["task_id"]
         # Two groups round up separately; two records in one group must be summed before rounding.
         for agent_id, run_model, cost in ((f"planner-{task_id}", "haiku", 0.0000006),
@@ -641,9 +640,9 @@ def test_a_project_with_schedules_is_not_deleted_and_a_deleted_schedule_keeps_it
     async def test(env: ScheduleEnv) -> None:
         empty = await db_projects.create_project(name="empty", pool=env.pool)
         await env.pool.execute("UPDATE projects SET work_dir = $2 WHERE id = $1", empty["id"], env.work_dir)
-        status, schedule = await env.call("POST", f"/api/projects/{empty['id']}/schedules", {
-            "name": "n", "cron": "0 9 * * *", "requirement": "r"})
-        assert status == 201
+        status, schedule = await env.call("POST", "/api/v1/schedule_admin/create", {"project_id": empty['id'], "fields": {
+            "name": "n", "cron": "0 9 * * *", "requirement": "r"}})
+        assert status == 200
         sid = schedule["schedule"]["schedule_id"]
         counts = {p["project_id"]: p["schedule_count"] for p in (await env.ok("POST", "/api/v1/project_admin/list", {}))["projects"]}
         assert counts == {env.project_id: 0, empty["id"]: 1}
@@ -651,8 +650,8 @@ def test_a_project_with_schedules_is_not_deleted_and_a_deleted_schedule_keeps_it
         status, payload = await env.call("POST", "/api/v1/project_admin/delete", {"project_id": empty['id']})
         assert status == 409 and "still has 1 schedule; delete them first" in payload["error"]
 
-        run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
-        await env.ok("DELETE", f"/api/schedules/{sid}")
+        run = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]
+        await env.ok("POST", "/api/v1/schedule_admin/delete", {"schedule_id": sid})
         assert await env.pool.fetchval("SELECT schedule_id FROM tasks WHERE id = $1", run["task_id"]) is None
         assert await env.pool.fetchval("SELECT count(*) FROM schedule_runs") == 0
         assert (await env.call("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))[0] == 404
@@ -672,7 +671,7 @@ def test_a_profile_a_schedule_chose_is_not_deleted(monkeypatch: pytest.MonkeyPat
         status, payload = await env.call("DELETE", f"/api/agent-profiles/{profile_id}")
         assert status == 409 and "1 schedule" in payload["error"]
 
-        await env.ok("PUT", f"/api/schedules/{sid}", {"profile_overrides": {}})
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"profile_overrides": {}}})
         await env.ok("DELETE", f"/api/agent-profiles/{profile_id}")
 
     run_scheduled(test, monkeypatch, tmp_path)
