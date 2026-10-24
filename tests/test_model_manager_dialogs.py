@@ -327,8 +327,13 @@ class RunsApi:
     def __init__(self, records, selected=None):
         self.records, self.selected = records, selected
 
+    def post(self, path, body):
+        if path.startswith("/api/v1/runs/"):
+            return {"status": "ok", "result": self.get(path, **body)}
+        raise AssertionError(path)
+
     def get(self, path, **query):
-        if path == "/api/llm-records":
+        if path == "/api/v1/runs/list":
             return {"records": list(reversed(self.records))}
         if path == "/api/manager/session":
             return {"selected": self.selected}
@@ -411,7 +416,7 @@ class RecordingApi:
 
     def get(self, path, **query):
         self.gets.append((path, query))
-        if path == "/api/llm-records":
+        if path == "/api/v1/runs/list":
             return {"records": []}
         if path == "/api/chat/turn":
             return {"turn": None}
@@ -420,6 +425,8 @@ class RecordingApi:
         raise AssertionError(path)
 
     def post(self, path, body):
+        if path.startswith("/api/v1/runs/"):
+            return {"status": "ok", "result": self.get(path, **body)}
         self.posts.append((path, body))
         return {}
 
@@ -434,13 +441,13 @@ def _ask_once(manager):
 def test_an_existing_dialog_sends_no_target_and_asks_for_manager_runs():
     api = _ask_once(None)
     assert "target" not in api.posts[0][1]
-    assert {q["agent_id"] for p, q in api.gets if p == "/api/llm-records"} == {"manager"}
+    assert {q["agent_id"] for p, q in api.gets if p == "/api/v1/runs/list"} == {"manager"}
 
 
 def test_a_scenario_manager_dialog_targets_and_reads_its_own_runs():
     api = _ask_once("code-review")
     assert api.posts[0][1]["target"] == {"kind": "manager", "id": "manager-code-review"}
-    reads = [q["agent_id"] for p, q in api.gets if p == "/api/llm-records"]
+    reads = [q["agent_id"] for p, q in api.gets if p == "/api/v1/runs/list"]
     assert reads and set(reads) == {"manager-code-review"}
 
 

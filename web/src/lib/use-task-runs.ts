@@ -31,7 +31,7 @@ function asRecord(run: TaskRunRow): LlmRecord {
 }
 
 /** The task's Planner, Worker and Reviewer runs, read again whenever a step or the Planner changes (a new run or a
- * run's end moves one); null until read. One compact request (`GET /api/tasks/<id>/runs`). */
+ * run's end moves one); null until read. One compact request (`runs.for_task`). */
 export function useTaskRuns(task: TaskDetail | null): { runs: TaskRuns | null; error: string } {
   const [runs, setRuns] = useState<TaskRuns | null>(null);
   const [error, setError] = useState("");

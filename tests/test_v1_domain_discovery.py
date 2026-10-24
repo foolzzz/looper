@@ -33,6 +33,7 @@ schedule_admin.list schedule_admin.project_list schedule_admin.get schedule_admi
 schedule_admin.runs schedule_admin.notifications
 clients.list clients.create clients.revoke
 project_roles.stats role_templates.list role_templates.put role_templates.delete
+runs.for_task runs.list runs.get runs.events runs.usage
 """.split()
 
 

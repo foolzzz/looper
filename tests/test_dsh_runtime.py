@@ -2766,11 +2766,11 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
                 assert detail["status"] == "completed", (detail, (tmp_path / "serve.log").read_text()[-4000:])
                 assert (work / "delivery.txt").read_text() == "delivered by disposable DSH\n"
 
-            records = api.get("/api/llm-records", limit=100)["records"]
+            records = api.post("/api/v1/runs/list", {"limit": 100})["result"]["records"]
             assert len(records) >= 10
             persisted = []
             for row in records:
-                record = api.get(f"/api/llm-records/{row['id']}")["record"]
+                record = api.post("/api/v1/runs/get", {"record_id": row["id"]})["result"]["record"]
                 persisted.append(record)
                 assert record["status"] == "completed", record
                 assert record["model"] == "deepseek-flash" and record["session_id"]
@@ -2782,7 +2782,7 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
                 assert metadata["profile"]["provider"]["id"] == provider
                 assert metadata["profile"]["id"] == profile
                 assert metadata["usage_complete"] is False and metadata["cost_basis"] == "observed"
-                events = api.get(f"/api/llm-records/{row['id']}/events", limit=1000)["events"]
+                events = api.post("/api/v1/runs/events", {"record_id": row["id"], "limit": 1000})["result"]["events"]
                 assert {event["event"]["type"] for event in events} >= {"system", "assistant", "result"}
                 result = next(event["event"] for event in events if event["event"]["type"] == "result")
                 assert not result["is_error"] and result["usage_complete"] is False

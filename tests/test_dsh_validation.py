@@ -324,10 +324,15 @@ def test_dialog_runtime_readback_keeps_unknown_usage_and_omits_private_command()
     from evals.prompt_regression import dialogs
 
     class Api:
+        def post(self, path, body):
+            if path.startswith("/api/v1/runs/"):
+                return {"status": "ok", "result": self.get(path, **body)}
+            raise AssertionError(path)
+
         def get(self, path, **kwargs):
-            if path == "/api/llm-records":
+            if path == "/api/v1/runs/list":
                 return {"records": [{"id": 1}] if not kwargs.get("offset") else []}
-            if path.endswith("/events"):
+            if path == "/api/v1/runs/events":
                 return {"events": [{"seq": 1, "event": {"type": "result", "observed_cost_usd": .02,
                                                         "root_usage_complete": False}}]}
             return {"record": {"id": 1, "agent_id": "manager", "session_id": "continued",
@@ -725,16 +730,19 @@ def _serve_smoke_stand_in(mode):
                                       "list": [{"state": "failed" if mode == "consult" else "answered"}]}}}
             elif path.startswith("/api/tasks/"):
                 result = {"status": "running" if mode == "task-timeout" else "completed"}
-            elif path == "/api/llm-records":
+            elif path == "/api/v1/runs/list":
                 result = {"records": [{"id": r["id"]} for r in state["records"]]}
-            elif path.endswith("/events"):
+            elif path == "/api/v1/runs/events":
                 result = {"events": [{"seq": 1, "event": {"type": "result", "is_error": False,
                     "observed_cost_usd": .6 if mode == "budget" else .000008442}}]}
-            elif path.startswith("/api/llm-records/"):
-                row = dict(state["records"][int(path.rsplit("/", 1)[1]) - 1])
+            elif path == "/api/v1/runs/get":
+                row = dict(state["records"][body["record_id"] - 1])
                 if mode == "readback":
                     row["status"] = "failed"
                 result = {"record": row}
+            if path.startswith("/api/v1/runs/"):
+                assert method == "POST"
+                result = {"status": "ok", "result": result}
             state_path.write_text(json.dumps(state))
             wire = json.dumps(result).encode()
             self.send_response(status)
@@ -1024,8 +1032,13 @@ def test_a_dialogs_running_check_counts_observed_root_spend():
     from evals.prompt_regression import dialogs
 
     class Api:
+        def post(self, path, body):
+            if path.startswith("/api/v1/runs/"):
+                return {"status": "ok", "result": self.get(path, **body)}
+            raise AssertionError(path)
+
         def get(self, path, **params):
-            if path == "/api/llm-records":
+            if path == "/api/v1/runs/list":
                 return {"records": [{"id": 1, "status": "completed", "cost_usd": None}]}
             return {"events": [{"seq": 1, "event": {"type": "result", "observed_cost_usd": 1.2}}]}
 

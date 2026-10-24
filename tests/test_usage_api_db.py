@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from tests.db_support import run_db
+from tests.test_profile_registry_db import _call
 
 
 class _Writer:
@@ -300,7 +301,7 @@ def test_an_agents_usage_reads_back_its_context_cost_and_compactions(monkeypatch
         await _run_record(pool, "manager", session_id="s1", cost=0.5, context=24000)
         await _run_record(pool, "manager", session_id="s1", cost=0.75, context=17000, compactions=compacted)
 
-        status, usage = await _get("/api/agents/manager/usage")
+        status, usage = await _call("POST", "/api/v1/runs/usage", {"agent_id": "manager"})
         assert status == 200
         assert usage["total"]["cost_usd"] == pytest.approx(1.5)
         assert (usage["total"]["runs"], usage["total"]["compactions"]) == (3, 1)
@@ -310,9 +311,9 @@ def test_an_agents_usage_reads_back_its_context_cost_and_compactions(monkeypatch
         assert [(s["session_id"], s["runs"]) for s in usage["by_session"]] == [("s1", 3)]
         assert len(usage["by_day"]) == 1
 
-        status, latest = await _get("/api/agents/manager/usage", {"turns": "1"})
+        status, latest = await _call("POST", "/api/v1/runs/usage", {"agent_id": "manager", "turns": 1})
         assert status == 200 and [t["context_tokens"] for t in latest["turns"]] == [17000]
-        status, bad = await _get("/api/agents/manager/usage", {"turns": "many"})
-        assert status == 400 and "turns" in bad["error"]
+        status, bad = await _call("POST", "/api/v1/runs/usage", {"agent_id": "manager", "turns": "many"})
+        assert status == 400 and bad["error"]
 
     run_db(test, monkeypatch)

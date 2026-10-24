@@ -763,8 +763,8 @@ def test_dsh_manager_failed_result_is_failed_in_the_database_and_never_a_success
             await steward._claude.stop()
         row = await pool.fetchrow("SELECT id FROM llm_records WHERE task_id = $1 AND agent_id = 'manager'", task)
         assert row is not None
-        record = (await _ok("GET", f"/api/llm-records/{row['id']}"))["record"]
-        events = (await _ok("GET", f"/api/llm-records/{row['id']}/events"))["events"]
+        record = (await _ok("POST", "/api/v1/runs/get", {"record_id": row["id"]}))["record"]
+        events = (await _ok("POST", "/api/v1/runs/events", {"record_id": row["id"]}))["events"]
         assert record["status"] == "failed" and record["error"]
         assert record["session_id"] == "failed-manager-session"
         assert record["model"] == "deepseek-flash"
@@ -832,7 +832,7 @@ def test_dsh_resident_budget_failure_is_read_back_without_inventing_a_total_cost
             await bus.shutdown()
         row = await pool.fetchrow("SELECT id FROM llm_records WHERE task_id = $1", task)
         assert row is not None
-        record = (await _ok("GET", f"/api/llm-records/{row['id']}"))["record"]
+        record = (await _ok("POST", "/api/v1/runs/get", {"record_id": row["id"]}))["record"]
         assert record["status"] == "failed" and "spend cap" in record["error"]
         assert record["session_id"] == "stand-in-session" and record["model"] == "deepseek-flash"
         assert record["cost_usd"] is None and record["cost_source"] == "provider_price"
@@ -927,8 +927,8 @@ if {mode in ('cancel', 'soft-cap', 'unknown-cap')!r}:
 
         row = await pool.fetchrow("SELECT * FROM llm_records WHERE task_id = $1", task)
         assert row is not None
-        record = (await _ok("GET", f"/api/llm-records/{row['id']}"))["record"]
-        transcript = (await _ok("GET", f"/api/llm-records/{row['id']}/events"))["events"]
+        record = (await _ok("POST", "/api/v1/runs/get", {"record_id": row["id"]}))["record"]
+        transcript = (await _ok("POST", "/api/v1/runs/events", {"record_id": row["id"]}))["events"]
         assert record["status"] == ("interrupted" if mode == "cancel" else
                                      "completed" if mode in ("success", "unknown") else "failed")
         assert record["session_id"] == "binding-session"
@@ -1020,8 +1020,8 @@ def test_dsh_rejected_saved_session_is_replaced_before_any_turn_executes(
 
         rows = await pool.fetch("SELECT id FROM llm_records WHERE agent_id = $1 ORDER BY id", agent_id)
         assert len(rows) == 2  # Exactly one rejected restore and one newly executed turn.
-        records = [(await _ok("GET", f"/api/llm-records/{row['id']}"))["record"] for row in rows]
-        transcripts = [(await _ok("GET", f"/api/llm-records/{row['id']}/events"))["events"] for row in rows]
+        records = [(await _ok("POST", "/api/v1/runs/get", {"record_id": row["id"]}))["record"] for row in rows]
+        transcripts = [(await _ok("POST", "/api/v1/runs/events", {"record_id": row["id"]}))["events"] for row in rows]
         first, second = records
         assert first["status"] == "failed" and "could not be resumed" in first["error"]
         assert first["session_id"] == "not-a-session"
