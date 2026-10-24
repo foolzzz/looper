@@ -18,6 +18,7 @@ from looper.agents.channels.base import PostReceipt
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.task_notice import NotifyTarget, TargetKind
 from tests.db_support import DSN, run_db
+from tests.test_lark_channel_db import _call as _settings_api
 from tests.test_ops_tasks_db import _project
 from tests.test_user_gates_db import _api, _gate, _gate_step
 
@@ -303,16 +304,17 @@ def test_a_web_tasks_gates_go_to_the_chat_the_setting_names(monkeypatch: pytest.
                            "('channel-telegram', 'telegram', true, $1::jsonb) ON CONFLICT (channel_id) DO UPDATE SET "
                            "config = EXCLUDED.config, enabled = true",
                            json.dumps({"allowed_user_ids": [TELEGRAM_CHAT]}))
-        status, settings, _ = await _api("GET", "/api/gate-settings")
+        status, settings = await _settings_api("POST", "/api/v1/gate_settings/get", {})
         assert status == 200 and settings["dashboard_target"] is None
         assert {"channel": "telegram", "chat": TELEGRAM_CHAT} in [
             {k: t[k] for k in ("channel", "chat")} for t in settings["targets"]]
-        status, refused, _ = await _api("PUT", "/api/gate-settings",
+        status, refused = await _settings_api("POST", "/api/v1/gate_settings/update",
                                         {"dashboard_target": {"channel": "telegram", "chat": "999"}})
-        assert status == 400 and "allowlist" in refused["error"]
-        status, refused, _ = await _api("PUT", "/api/gate-settings", {"target": None})
+        assert status == 400 and refused["error"]["code"] == "invalid"
+        assert "allowlist" in refused["error"]["message"]
+        status, refused = await _settings_api("POST", "/api/v1/gate_settings/update", {"target": None})
         assert status == 400
-        status, saved, _ = await _api("PUT", "/api/gate-settings",
+        status, saved = await _settings_api("POST", "/api/v1/gate_settings/update",
                                       {"dashboard_target": {"channel": "telegram", "chat": TELEGRAM_CHAT}})
         assert status == 200 and saved["dashboard_target"] == {"channel": "telegram", "chat": TELEGRAM_CHAT}
 
@@ -328,18 +330,18 @@ def test_a_web_tasks_gates_go_to_the_chat_the_setting_names(monkeypatch: pytest.
         await courier.run_once()
         assert len(poster.posts) == 1
         assert await pool.fetchval("SELECT post_state FROM task_user_gate_messages ORDER BY id DESC LIMIT 1") == "none"
-        status, settings, _ = await _api("GET", "/api/gate-settings")
+        status, settings = await _settings_api("POST", "/api/v1/gate_settings/get", {})
         assert settings["dashboard_target"] == {"channel": "telegram", "chat": TELEGRAM_CHAT}
         assert settings["dashboard_target_problem"] == (
             f"Telegram {TELEGRAM_CHAT} is no longer on the Telegram channel's sender allowlist: the gates of dashboard "
             "tasks go to the task page only")
         # A chat on a channel that is off cannot be chosen.
         await pool.execute("UPDATE channel_configs SET enabled = false WHERE channel_id = 'channel-telegram'")
-        status, refused, _ = await _api("PUT", "/api/gate-settings",
+        status, refused = await _settings_api("POST", "/api/v1/gate_settings/update",
                                         {"dashboard_target": {"channel": "telegram", "chat": "5151"}})
-        assert status == 400 and refused["error"] == ("the Telegram channel is off: turn it on in Settings → Channels "
-                                                      "first")
-        status, cleared, _ = await _api("PUT", "/api/gate-settings", {"dashboard_target": None})
+        assert status == 400 and refused["error"]["message"] == (
+            "the Telegram channel is off: turn it on in Settings → Channels first")
+        status, cleared = await _settings_api("POST", "/api/v1/gate_settings/update", {"dashboard_target": None})
         assert status == 200 and cleared["dashboard_target"] is None and cleared["dashboard_target_problem"] is None
 
     run_db(test, monkeypatch)

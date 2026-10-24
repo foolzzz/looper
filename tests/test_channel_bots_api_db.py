@@ -146,15 +146,18 @@ def test_lark_cli_bots_name_their_profile(monkeypatch: pytest.MonkeyPatch, lark_
         status, answer = await _call("POST", "/api/channel-configs", {**body, "config": {"profile": "other"}})
         assert status == 409 and lark_id in answer["error"]
 
-        status, lark = await _call("GET", "/api/channels/lark/status", query={"channel_id": lark_id})
+        status, lark = await _call("POST", "/api/v1/channels/status", {"channel_type": "lark", "channel_id": lark_id})
         assert status == 200 and lark["bot"]["name"] == "OtherBot"
-        status, lark = await _call("GET", "/api/channels/lark/status")
+        status, lark = await _call("POST", "/api/v1/channels/status", {"channel_type": "lark"})
         assert status == 200 and lark["bot"]["name"] == "HelperBot"
-        status, _ = await _call("GET", "/api/channels/lark/status", query={"channel_id": "channel-lark_bot"})
+        status, _ = await _call("POST", "/api/v1/channels/status",
+                                {"channel_type": "lark", "channel_id": "channel-lark_bot"})
         assert status == 404
-        status, _ = await _call("GET", "/api/channels/lark/status", query={"channel_id": "channel-lark-99"})
+        status, _ = await _call("POST", "/api/v1/channels/status",
+                                {"channel_type": "lark", "channel_id": "channel-lark-99"})
         assert status == 404
-        status, found = await _call("GET", "/api/channels/lark/people", query={"q": "alan", "channel_id": lark_id})
+        status, found = await _call("POST", "/api/v1/channels/people",
+                                    {"channel_type": "lark", "q": "alan", "channel_id": lark_id})
         assert status == 200 and found["people"]
 
         # Moving the built-in row onto the added bot's profile clashes too.
@@ -200,10 +203,11 @@ def test_lark_bot_apps_are_added_once(monkeypatch: pytest.MonkeyPatch, platform:
         status, again = await _call("POST", "/api/channel-configs", {**body, "bot_token": "another-secret"})
         assert status == 409 and answer["channel_id"] in again["error"] and "another-secret" not in json.dumps(again)
 
-        status, lark = await _call("GET", "/api/channels/lark_bot/status",
-                                   query={"channel_id": answer["channel_id"]})
+        status, lark = await _call("POST", "/api/v1/channels/status",
+                                   {"channel_type": "lark_bot", "channel_id": answer["channel_id"]})
         assert status == 200 and lark["bot"]["name"] == "HelperBot" and lark["bot"]["app_id"] == "cli_second"
-        status, _ = await _call("GET", "/api/channels/lark_bot/status", query={"channel_id": "channel-lark"})
+        status, _ = await _call("POST", "/api/v1/channels/status",
+                                {"channel_type": "lark_bot", "channel_id": "channel-lark"})
         assert status == 404
 
     run_with_channel_configs(test, monkeypatch)

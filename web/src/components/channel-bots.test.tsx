@@ -41,9 +41,8 @@ describe("Managers' bots in Settings → Channels", () => {
         { id: "manager", name: "Manager", enabled: true },
         { id: "manager-review", name: "Code review", enabled: true },
       ], max_enabled: 8 });
-      if (url.startsWith("/api/channels/lark_bot/status")) return Response.json({ bot: null, problem: null, names: {}, rejected: [] });
-      if (url.startsWith("/api/channels/lark/status")) return Response.json({ bot: null, problem: null, names: {}, rejected: [] });
-      if (url === "/api/gate-settings") return Response.json({ targets: [], dashboard_target: null });
+      if (url === "/api/v1/channels/status") return Response.json({ status: "ok", result: { bot: null, problem: null, names: {}, rejected: [] } });
+      if (url === "/api/v1/gate_settings/get") return Response.json({ status: "ok", result: { targets: [], dashboard_target: null } });
       throw new Error(`Unexpected request: ${url}`);
     }));
     container = document.createElement("div");
@@ -104,7 +103,7 @@ describe("Managers' bots in Settings → Channels", () => {
     await fillTelegramForm();
     configs = [...BUILTIN, ADDED_TG];
     await click(button("Save"));
-    const posts = calls.filter((c) => c.method === "POST");
+    const posts = calls.filter((c) => c.url === "/api/channel-configs" && c.method === "POST");
     expect(posts).toHaveLength(1);
     expect(JSON.parse(posts[0].body!)).toEqual({
       channel_type: "telegram", manager_id: "manager-review", bot_token: "123456:SECRET", enabled: false,
@@ -139,11 +138,11 @@ describe("Managers' bots in Settings → Channels", () => {
     expect(calls.filter((c) => c.url === "/api/channel-configs" && c.method === "GET")).toHaveLength(2);
   });
 
-  it("asks for a bot's Lark status by channel id, the built-in row without", async () => {
+  it("preserves the channel type and id for added and built-in Lark status", async () => {
     configs = [...BUILTIN, ADDED_LARK];
     await render();
-    const urls = calls.map((c) => c.url);
-    expect(urls).toContain("/api/channels/lark/status?channel_id=channel-lark-5");
-    expect(urls).toContain("/api/channels/lark/status");
+    const requests = calls.filter((c) => c.url === "/api/v1/channels/status").map((c) => JSON.parse(c.body!));
+    expect(requests).toContainEqual({ channel_type: "lark", channel_id: "channel-lark-5" });
+    expect(requests).toContainEqual({ channel_type: "lark", channel_id: "channel-lark" });
   });
 });
