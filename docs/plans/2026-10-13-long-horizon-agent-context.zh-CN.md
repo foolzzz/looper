@@ -770,6 +770,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 阶段 2a 保持已交付；共享任务核心独立跟踪，阶段 3 仍待做。整体完成由最终审计确认。
 
+23. **API 运行时：管家直连模型 API**（2026-10-24 维护者定方向，设计见[API 运行时 RFC](../architecture/rfcs/api-runtime-v0.zh-CN.md)，待批准）：新运行时类型 `api` 在 `looper serve` 进程内用官方 SDK 跑管家的循环，平台工具在进程内调用；阶段 1 用 `openai` SDK（Responses）在 CPA 上验证，阶段 2 用 `anthropic` SDK 接 DeepSeek、GLM、Kimi、OpenCode 的 Anthropic 接口，以 DeepSeek 验证。
+
 ### 5.1 核心缺陷（优先修，穿插在阶段之间）
 
 - ~~**任务结束后运行记录仍是 `running`**~~（✅ 已修复 looper #177，issue #175）：运行被停止、出错或服务被强杀时 `llm_records` 停在 `running`，任务花费和今日花费里既不算花费也不算未定价；现在每次运行无论怎么结束都写成终态（`interrupted`、`failed`），启动时清理遗留记录，任务停止时也停掉评审中的 Reviewer。
