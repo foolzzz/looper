@@ -246,8 +246,6 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
                 return {"tasks": []}
             if path == "/api/tasks/task-eval":
                 return {"status": "completed", "steps": [{"id": "s1"}]}
-            if path == "/api/tasks/task-eval/activity":
-                return {"activity": []}
             if path == "/api/llm-records":
                 return {"records": self.records}
             if path.endswith("/events"):
@@ -256,6 +254,8 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
             return {"messages": self.messages}
 
         def post(self, path: str, body: Any) -> dict[str, Any]:
+            if path == "/api/v1/tasks/activity":
+                return {"status": "ok", "result": {"activity": []}}
             self.posts.append((path, body))
             if path == "/api/providers":
                 assert "api_key_env" not in body
@@ -288,7 +288,7 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
             if path == "/api/tasks/create":
                 self.work = Path(body["project"]["work_dir"])
                 return {"task_id": "task-eval", "project_id": "project-eval"}
-            if path == "/api/tasks/start":
+            if path == "/api/v1/ops/task_control/start":
                 for role in ("planner", "worker", "reviewer"):
                     self.launch(role)
                 return {}
@@ -891,8 +891,10 @@ def test_vault_tasks_enable_the_project_and_read_back_their_commits(
     logs: list[Path] = []
 
     def post(path: str, body: Any) -> dict[str, Any]:
+        if path == "/api/v1/tasks/activity":
+            return {"status": "ok", "result": {"activity": [{"kind": "phase", "summary": "Vault closeout: done"}]}}
         posts.append((path, body))
-        if path == "/api/tasks/start":
+        if path == "/api/v1/ops/task_control/start":
             for name, content in task.fake["attempts"]["s1"][0]["files"].items():
                 (work / name).write_text(content, encoding="utf-8")
         return {"task_id": "task-1"}
@@ -902,7 +904,7 @@ def test_vault_tasks_enable_the_project_and_read_back_their_commits(
             return {"status": "completed", "steps": [{}]}
         if path == "/api/llm-records":
             return {"records": []}
-        return {"activity": [{"kind": "phase", "summary": "Vault closeout: done"}]}
+        raise AssertionError(path)
 
     def git(directory: Path, *args: str) -> str:
         logs.append(directory)
@@ -1460,7 +1462,8 @@ def test_wait_resumes_after_delay_once_per_wait_and_only_when_opted_in() -> None
     detail["waits"][1].update(state="waiting", opened_at="1970-01-01T00:01:42Z")
     assert runner.resume_waits(api, task, "t1", detail, resumed, now=107.0)
     assert resumed == {"w1": 105.0, "w2": 107.0}
-    assert api.posted == [("/api/tasks/t1/waits/w1/resume", {}), ("/api/tasks/t1/waits/w2/resume", {})]
+    assert api.posted == [("/api/v1/waits/resume", {"task_id": "t1", "step": "w1"}),
+                          ("/api/v1/waits/resume", {"task_id": "t1", "step": "w2"})]
     api = _Poster()
     for state in ("pending", "ready", "done", "timed_out", "cancel_requested", "failed", "skipped"):
         detail["waits"][0]["state"] = state
@@ -1509,6 +1512,8 @@ def test_run_task_pushes_fixes_without_resuming_the_pr_wait(
     posted: list[tuple[str, Any]] = []
 
     def post(path: str, body: Any) -> dict[str, Any]:
+        if path == "/api/v1/tasks/activity":
+            return {"status": "ok", "result": {"activity": []}}
         posted.append((path, body))
         return {"task_id": "t1", "project_id": "p1"} if path == "/api/tasks/create" else {}
 
@@ -1519,8 +1524,7 @@ def test_run_task_pushes_fixes_without_resuming_the_pr_wait(
             return {"records": records}
         if path.startswith("/api/llm-records/"):
             return {"events": events[int(path.split("/")[-2])]}
-        assert path == "/api/tasks/t1/activity"
-        return {"activity": []}
+        raise AssertionError(path)
 
     monkeypatch.setattr(runner.time, "time", lambda: 104.0)
     result = runner.run_task(SimpleNamespace(post=post, get=get), task, tmp_path, timeout=10, poll=0,
@@ -1530,7 +1534,7 @@ def test_run_task_pushes_fixes_without_resuming_the_pr_wait(
     if fault is not None:
         assert result["problems"]  # aggregate counts pass; only the task-specific flow check rejects this
     assert result["wait_resumes"] == {}
-    assert [path for path, _ in posted] == ["/api/tasks/create", "/api/tasks/start"]
+    assert [path for path, _ in posted] == ["/api/tasks/create", "/api/v1/ops/task_control/start"]
     assert ("for value in values" in runner._git_in(tmp_path, "show", "HEAD:totals.py")) is (fault != "wrong_pr")
 
 
@@ -1589,18 +1593,48 @@ def test_the_scripted_user_ends_a_gate_that_asks_again_after_its_script_ran_out(
     waiting = {"gates": [{"step": "g1", "waiting_on": "user", "opened_at": None}]}
     for _ in range(4):
         runner.answer_gates(api, task, "t1", waiting, answered, now=0.0)
-    assert api.posted == [("/api/tasks/t1/gates/g1/messages", {"text": task.gate_script[0]}),
-                          ("/api/tasks/t1/gates/g1/end", {})]
+    assert api.posted == [("/api/v1/ops/gates/reply", {"task_id": "t1", "gate": "g1", "text": task.gate_script[0]}),
+                          ("/api/v1/ops/gates/end", {"task_id": "t1", "gate": "g1"})]
     # A script that ends the discussion itself gets no second end.
     ends = next(t for t in TASKS if t.id == "gate_end_early")
     api, answered = _Poster(), {}
     for _ in range(3):
         runner.answer_gates(api, ends, "t1", waiting, answered, now=0.0)
-    assert api.posted == [("/api/tasks/t1/gates/g1/end", {})]
+    assert api.posted == [("/api/v1/ops/gates/end", {"task_id": "t1", "gate": "g1"})]
     # Nothing while the gate waits for the Planner.
     api = _Poster()
     runner.answer_gates(api, task, "t1", {"gates": [{"step": "g1", "waiting_on": "planner"}]}, {}, now=0.0)
     assert api.posted == []
+
+
+@pytest.mark.parametrize(("records", "replies"), [
+    ([], False),
+    ([{"agent_id": "planner-t1", "created_at": "2026-01-01T00:00:01Z"}], False),
+    ([{"agent_id": "worker-a"}], False),
+    ([{"agent_id": "worker-a", "created_at": "2026-01-01T00:00:00Z",
+       "finished_at": "2026-01-01T00:00:01Z"}], False),
+    ([{"agent_id": "worker-a", "created_at": "2026-01-01T00:00:02Z"}], True),
+    ([{"agent_id": "worker-a", "created_at": "2026-01-01T00:00:00Z",
+       "finished_at": "2026-01-01T00:00:03Z"}], True),
+])
+def test_scripted_gate_answer_waits_for_an_overlapping_worker_run(records: list[dict[str, Any]],
+                                                                replies: bool) -> None:
+    class Api(_Poster):
+        def get(self, path: str, **query: Any) -> dict[str, Any]:
+            assert (path, query) == ("/api/llm-records", {"task_id": "t1", "limit": 500})
+            return {"records": records}
+
+    task = next(t for t in TASKS if t.id == "gate_parallel_branch")
+    api, answered = Api(), {}
+    gate = {"step": "g1", "waiting_on": "user", "opened_at": "2026-01-01T00:00:02Z"}
+    assert runner.answer_gates(api, task, "t1", {"gates": [gate]}, answered,
+                               now=metrics.timestamp("2026-01-01T00:00:04Z") or 0) is replies
+    assert api.posted == ([("/api/v1/ops/gates/reply",
+                           {"task_id": "t1", "gate": "g1", "text": task.gate_script[0]})] if replies else [])
+    assert answered == ({"g1": 1} if replies else {})
+    gate["waiting_on"] = "planner"
+    assert not runner.answer_gates(api, task, "t1", {"gates": [gate]}, answered, now=0.0)
+    assert len(api.posted) == int(replies)
 
 
 def test_a_gate_that_asks_after_its_script_ran_out_fails_a_task_that_bounds_it(tmp_path: Path) -> None:
@@ -2104,8 +2138,10 @@ class _CostlyApi:
         self.cancelled = False
 
     def post(self, path: str, body: Any) -> Any:
+        if path == "/api/v1/tasks/activity":
+            return {"status": "ok", "result": {"activity": []}}
         self.posts.append((path, body))
-        if path == "/api/tasks/cancel":
+        if path == "/api/v1/ops/task_control/cancel":
             self.cancelled = True
         return {"task_id": "task-1"} if path == "/api/tasks/create" else {}
 
@@ -2117,13 +2153,13 @@ class _CostlyApi:
             return {"status": status, "phase": "executing", "steps": [], "cost": {"cost_usd": self.cost}}
         if path == "/api/llm-records":
             return {"records": []}
-        return {"activity": [], "events": []}
+        return {"events": []}
 
 
 def test_a_task_is_cancelled_when_it_reaches_the_cap_left(tmp_path: Path) -> None:
     api = _CostlyApi()
     result = runner.run_task(api, _task("a"), tmp_path / "work", timeout=60, poll=0, cap_left=0.25)  # type: ignore[arg-type]
-    assert [path for path, _ in api.posts] == ["/api/tasks/create", "/api/tasks/start", "/api/tasks/cancel"]
+    assert [path for path, _ in api.posts] == ["/api/tasks/create", "/api/v1/ops/task_control/start", "/api/v1/ops/task_control/cancel"]
     assert result["stopped_by_cap"] is True and result["success"] is False
     # Cancelled at the cap: an error, not the model's failure.
     assert (result["outcome"], result["error_class"], result["error"]) == (
@@ -2145,7 +2181,7 @@ def test_a_task_the_harness_cannot_follow_is_cancelled_with_its_cost(tmp_path: P
         runner.run_task(api, _task("a"), tmp_path / "work", timeout=60, poll=0)  # type: ignore[arg-type]
     assert str(raised.value) == "EvalError: GET /api/llm-records answered 500: boom"
     assert raised.value.cost_usd == pytest.approx(0.0)
-    assert [path for path, _ in api.posts] == ["/api/tasks/create", "/api/tasks/start", "/api/tasks/cancel"]
+    assert [path for path, _ in api.posts] == ["/api/tasks/create", "/api/v1/ops/task_control/start", "/api/v1/ops/task_control/cancel"]
 
 
 def test_real_claude_gets_the_per_run_budget(tmp_path: Path) -> None:

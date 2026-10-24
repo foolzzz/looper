@@ -18,6 +18,8 @@ from typing import Any
 import pytest
 
 from fake_claude import fake_claude
+from looper.agents import api_v1
+from looper.agents.ops.clients import ClientOps
 from looper.agents.bus import MessageBus
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
 from tests.db_support import DSN, run_db, until
@@ -60,9 +62,22 @@ def _server(worker_pool: Any = None) -> Any:
 async def _call(method: str, path: str, body: Any = None, *, worker_pool: Any = None) -> tuple[int, Any]:
     writer = _Writer()
     raw = b"" if body is None else json.dumps(body).encode()
-    await _server(worker_pool)._route_api(method, path, {}, raw, writer)
+    server = _server(worker_pool)
+    if path == "/api/v1/tasks/agents":
+        server._client_ops = ClientOps(SimpleNamespace())
+        await server._handle_v1(method, path, {}, {}, raw, writer, api_v1.OPERATOR)
+    elif path.startswith("/api/v1/schedule_admin/"):
+        from looper.agents.api_v1 import OPERATOR
+        await server._handle_v1(method, path, {}, {}, raw, writer, OPERATOR)
+    else:
+        await server._route_api(method, path, {}, raw, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload)
+    answer = json.loads(payload)
+    if path == "/api/v1/tasks/agents":
+        answer = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
+    if path.startswith("/api/v1/schedule_admin/") and answer.get("status") == "ok":
+        answer = answer["result"]
+    return int(head.split()[1]), answer
 
 
 class _Pool:
@@ -128,7 +143,7 @@ def test_a_tasks_limit_holds_its_workers_and_the_next_starts_as_one_ends(
         project = await _project(pool)
         await _task(pool, "task-a", "running", project)
         await _task(pool, "task-b", "running", project)
-        status, _ = await _call("PUT", "/api/tasks/task-a/agents", {"concurrency": {"worker": 1}})
+        status, _ = await _call("POST", "/api/v1/tasks/agents", {"task_id": "task-a", "concurrency": {"worker": 1}})
         assert status == 200
         async with _Pool(tmp_path) as runs:
             for worker_id in ("w1", "w2", "w3"):
@@ -157,7 +172,7 @@ def test_two_tasks_of_one_project_each_run_their_own_limit_at_once(
         project = await _project(pool)
         for task_id in ("task-a", "task-b"):
             await _task(pool, task_id, "running", project)
-            assert (await _call("PUT", f"/api/tasks/{task_id}/agents", {"concurrency": {"worker": 2}}))[0] == 200
+            assert (await _call("POST", "/api/v1/tasks/agents", {"task_id": task_id, "concurrency": {"worker": 2}}))[0] == 200
         async with _Pool(tmp_path) as runs:
             for worker_id in ("a1", "a2", "a3", "b1", "b2", "b3"):
                 await runs.send(worker_id, f"task-{worker_id[0]}")
@@ -179,7 +194,7 @@ def test_a_tasks_own_limit_above_the_default_applies_and_a_task_without_one_runs
         await _task(pool, "task-b", "running", project)
         assert (await _call("PUT", "/api/agent-settings/roles/worker", {"max_concurrency": 1}))[0] == 200
         # Nothing caps a task's own limit but the most a limit may be: 3 over the default 1 is taken as it is.
-        status, answer = await _call("PUT", "/api/tasks/task-a/agents", {"concurrency": {"worker": 3}})
+        status, answer = await _call("POST", "/api/v1/tasks/agents", {"task_id": "task-a", "concurrency": {"worker": 3}})
         assert status == 200 and answer["agents"]["roles"]["worker"]["concurrency"] == {
             "value": 3, "source": "task", "task": 3, "default": {"value": 1, "source": "role"}}
         async with _Pool(tmp_path) as runs:
@@ -199,16 +214,16 @@ def test_raising_a_tasks_limit_starts_its_waiting_runs_at_once_and_lowering_it_s
         project = await _project(pool)
         await _task(pool, "task-a", "running", project)
         async with _Pool(tmp_path) as runs:
-            assert (await _call("PUT", "/api/tasks/task-a/agents", {"concurrency": {"worker": 1}}, worker_pool=runs.pool))[0] \
+            assert (await _call("POST", "/api/v1/tasks/agents", {"task_id": "task-a", "concurrency": {"worker": 1}}, worker_pool=runs.pool))[0] \
                 == 200
             for worker_id in ("w1", "w2", "w3"):
                 await runs.send(worker_id, "task-a")
             await runs.settled(1, 2)
             # No run ends: the raise alone starts the two that wait.
-            assert (await _call("PUT", "/api/tasks/task-a/agents", {"concurrency": {"worker": 3}}, worker_pool=runs.pool))[0] \
+            assert (await _call("POST", "/api/v1/tasks/agents", {"task_id": "task-a", "concurrency": {"worker": 3}}, worker_pool=runs.pool))[0] \
                 == 200
             await runs.settled(3, 0)
-            assert (await _call("PUT", "/api/tasks/task-a/agents", {"concurrency": {"worker": 1}}, worker_pool=runs.pool))[0] \
+            assert (await _call("POST", "/api/v1/tasks/agents", {"task_id": "task-a", "concurrency": {"worker": 1}}, worker_pool=runs.pool))[0] \
                 == 200
             running, _ = await runs.settled(3, 0)
             # Over the lowered limit, a new run waits until fewer than one run.
@@ -234,27 +249,26 @@ async def _profiles(pool: Any) -> None:
 
 
 @pytest.mark.parametrize(("body", "message"), [
-    ({"concurrency": {"worker": 0}}, "concurrency.worker: max_concurrency must be a whole number from 1 to 64"),
-    ({"concurrency": {"worker": 65}}, "got 65"),
-    ({"concurrency": {"reviewer": True}}, "got True"),
-    ({"concurrency": {"worker": "2"}}, "got '2'"),
-    ({"concurrency": {"worker": 2.0}}, "got 2.0"),
-    ({"concurrency": {"planner": 2}}, "concurrency: one Planner runs a task, so a task has no Planner limit, and "
-                                      "nothing limits how many tasks run at once"),
-    ({"concurrency": {"manager": 1}}, "concurrency: unknown role 'manager'"),
-    ({"concurrency": [2]}, "concurrency must be an object"),
+    ({"concurrency": {"worker": 0}}, "the request does not match the declared schema"),
+    ({"concurrency": {"worker": 65}}, "the request does not match the declared schema"),
+    ({"concurrency": {"reviewer": True}}, "the request does not match the declared schema"),
+    ({"concurrency": {"worker": "2"}}, "the request does not match the declared schema"),
+    ({"concurrency": {"worker": 2.0}}, "the request does not match the declared schema"),
+    ({"concurrency": {"planner": 2}}, "the request does not match the declared schema"),
+    ({"concurrency": {"manager": 1}}, "the request does not match the declared schema"),
+    ({"concurrency": [2]}, "the request does not match the declared schema"),
     ({"profiles": {"worker": "nope"}}, "profiles.worker: no Agent Profile 'nope'; registered: "),
     ({"profiles": {"planner": "one-off/opus"}}, "profiles.planner: Agent Profile 'one-off/opus' cannot run the "
                                                 "planner"),
-    ({"profiles": {"manager": "claude-code/sonnet"}}, "not 'manager'"),
-    ({"profiles": {"worker": 3}}, "profiles.worker: give an Agent Profile's id or name, or null"),
-    ({"profiles": "claude-code/sonnet"}, "profiles must be an object"),
+    ({"profiles": {"manager": "claude-code/sonnet"}}, "the request does not match the declared schema"),
+    ({"profiles": {"worker": 3}}, "the request does not match the declared schema"),
+    ({"profiles": "claude-code/sonnet"}, "the request does not match the declared schema"),
     # One bad value refuses the whole change: nothing of it is stored.
-    ({"profiles": {"worker": "claude-code/sonnet"}, "concurrency": {"worker": 0}}, "got 0"),
+    ({"profiles": {"worker": "claude-code/sonnet"}, "concurrency": {"worker": 0}}, "the request does not match the declared schema"),
     ({"profiles": {"worker": "claude-code/sonnet", "reviewer": "nope"}, "concurrency": {"worker": 2}}, "'nope'"),
     ({}, "give at least one role's profiles, concurrency, system_prompt_modes"),
     ({"concurrency": {}}, "give at least one role's profiles, concurrency, system_prompt_modes"),
-    ({"worker": 2}, "unknown field 'worker'; the fields are profiles, concurrency"),
+    ({"worker": 2}, "the request does not match the declared schema"),
     ([1], "body must be a JSON object"),
 ])
 def test_a_bad_choice_is_refused_and_nothing_is_stored(
@@ -263,7 +277,7 @@ def test_a_bad_choice_is_refused_and_nothing_is_stored(
     async def test(pool: Any) -> None:
         await _task(pool, "task-a", "running", await _project(pool))
         await _profiles(pool)
-        status, answer = await _call("PUT", "/api/tasks/task-a/agents", body)
+        status, answer = await _call("POST", "/api/v1/tasks/agents", ({"task_id": "task-a", **body} if isinstance(body, dict) else body))
         assert status == 400 and message in answer["error"], answer
         assert await pool.fetchval("SELECT count(*) FROM task_concurrency_limits") == 0
         assert await pool.fetchval("SELECT count(*) FROM task_profile_overrides") == 0
@@ -289,7 +303,7 @@ def test_a_new_task_chooses_its_profiles_by_id_or_name_as_the_agents_endpoint_do
                                      answer["task_id"])) == {"worker": "agent-sonnet", "planner": "agent-sonnet"}
         # An unknown profile is refused as the agents endpoint refuses it, under the field the request named.
         status, created = await create({"worker": "nope"})
-        refused = (await _call("PUT", "/api/tasks/task-a/agents", {"profiles": {"worker": "nope"}}))[1]["error"]
+        refused = (await _call("POST", "/api/v1/tasks/agents", {"task_id": "task-a", "profiles": {"worker": "nope"}}))[1]["error"]
         assert (status, created["error"]) == (400, "profile_overrides." + refused.removeprefix("profiles."))
         assert await pool.fetchval("SELECT count(*) FROM tasks") == 2
 
@@ -301,16 +315,16 @@ def test_every_task_but_a_completed_one_changes_its_choices(monkeypatch: pytest.
     async def test(pool: Any) -> None:
         project = await _project(pool)
         await _profiles(pool)
-        status, answer = await _call("PUT", "/api/tasks/task-nope/agents", body)
+        status, answer = await _call("POST", "/api/v1/tasks/agents", {"task_id": "task-nope", **body})
         assert (status, answer) == (404, {"error": "task not found"})
         await _task(pool, "task-completed", "completed", project)
-        status, answer = await _call("PUT", "/api/tasks/task-completed/agents", body)
+        status, answer = await _call("POST", "/api/v1/tasks/agents", {"task_id": "task-completed", **body})
         assert status == 409 and "the task is completed" in answer["error"]
         # A failed, stopped or cancelled task changes too: its restart runs with the new choices.
         can_run = ("init", "pending", "running", "executing", "failed", "stopped", "cancelled")
         for state in can_run:
             await _task(pool, f"task-{state}", state, project)
-            status, answer = await _call("PUT", f"/api/tasks/task-{state}/agents", body)
+            status, answer = await _call("POST", "/api/v1/tasks/agents", {"task_id": f"task-{state}", **body})
             assert (status, answer["agents"]["editable"]) == (200, True), (state, answer)
         assert await pool.fetchval("SELECT count(*) FROM task_concurrency_limits") + await pool.fetchval(
             "SELECT count(*) FROM task_profile_overrides") == len(can_run)
@@ -347,15 +361,15 @@ def test_the_task_shows_each_roles_profile_and_limit_with_their_sources(monkeypa
         assert (await _call("PUT", "/api/agent-settings/roles/worker", {"max_concurrency": 10}))[0] == 200
         role = {"value": 10, "source": "role"}
         assert await limit("task-a", "worker") == {**role, "task": None, "default": role}
-        status, answer = await _call("PUT", "/api/tasks/task-a/agents", {"concurrency": {"worker": 2}})
+        status, answer = await _call("POST", "/api/v1/tasks/agents", {"task_id": "task-a", "concurrency": {"worker": 2}})
         assert await limit("task-a", "worker") == {"value": 2, "source": "task", "task": 2, "default": role}
         assert answer["agents"] == await agents("task-a") and "note" not in answer
         # Cleared, the task follows the default again.
-        await _call("PUT", "/api/tasks/task-a/agents", {"concurrency": {"worker": None}})
+        await _call("POST", "/api/v1/tasks/agents", {"task_id": "task-a", "concurrency": {"worker": None}})
         assert await limit("task-a", "worker") == {**role, "task": None, "default": role}
 
         # A profile, by name or by id, and a limit of the same role are one task layer, set together.
-        status, answer = await _call("PUT", "/api/tasks/task-a/agents", {
+        status, answer = await _call("POST", "/api/v1/tasks/agents", {"task_id": "task-a",
             "profiles": {"worker": "Claude-Code/Sonnet", "planner": "agent-sonnet"},
             "concurrency": {"worker": 1, "reviewer": 4}})
         assert status == 200 and "from its next step on" in answer["note"]
@@ -368,7 +382,7 @@ def test_the_task_shows_each_roles_profile_and_limit_with_their_sources(monkeypa
         assert (settings.profile.id, settings.profile_source) == ("agent-sonnet", Layer.TASK)
         assert set((await _call("GET", "/api/tasks/task-a"))[1]["profile_overrides"]) == {"worker", "planner"}
         # Dropping the task's profile leaves its limit, and the other way round.
-        await _call("PUT", "/api/tasks/task-a/agents", {"profiles": {"worker": None}})
+        await _call("POST", "/api/v1/tasks/agents", {"task_id": "task-a", "profiles": {"worker": None}})
         roles = (await agents("task-a"))["roles"]
         assert (roles["worker"]["profile"]["source"], roles["worker"]["concurrency"]["task"]) == ("builtin", 1)
         await pool.execute("UPDATE tasks SET status = 'completed' WHERE id = 'task-a'")
@@ -394,8 +408,8 @@ def test_a_running_tasks_new_worker_profile_runs_from_its_next_step(
             await runs.send("w1", "task-a")
             await runs.settled(1, 0)
             # The step that runs keeps the profile it started with; the next one runs the new one.
-            status, answer = await _call("PUT", "/api/tasks/task-a/agents",
-                                         {"profiles": {"worker": "claude-code/sonnet"}})
+            status, answer = await _call("POST", "/api/v1/tasks/agents",
+                                         {"task_id": "task-a", "profiles": {"worker": "claude-code/sonnet"}})
             assert status == 200, answer
             await runs.finish("w1")
             await runs.send("w2", "task-a")

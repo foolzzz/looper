@@ -53,6 +53,8 @@ class EvalTask:
     user_gates: bool = False
     gate_script: tuple[str, ...] = ()
     gate_reply_after_s: float = 0.0
+    # Before its first scripted answer, wait for a recorded Worker run overlapping the open gate.
+    gate_reply_after_worker_start: bool = False
     # Resume each waiting wait after this delay from opened_at; None leaves waits alone.
     wait_resume_after_s: float | None = None
     # Fixed diffs returned by the server's gh stand-in, keyed by owner/repo#number (empty for other PRs).
@@ -1074,13 +1076,14 @@ GATE_TASKS: tuple[EvalTask, ...] = (
                      "in the working directory whose whole content is `hello`. Part B: " + _SETTINGS),
         user_gates=True,
         gate_script=(_TOML_ANSWER,),
+        gate_reply_after_worker_start=True,
         check=_all(_equals("readme.txt", "hello"), _settings_as_decided),
         expect={"min_gates_opened": 1, "min_gate_parallel_runs": 1},
         fake={
             "plan": [_step("sA", "Run sleep 20, then create readme.txt containing hello.", ["readme.txt holds hello"]),
                      _SETTINGS_GATE],
             "gate_close_steps": [_write_settings(["g1"])],
-            "attempts": {"sA": [{"status": "completed", "seconds": 3, "files": {"readme.txt": "hello\n"}}],
+            "attempts": {"sA": [{"status": "completed", "seconds": 20, "files": {"readme.txt": "hello\n"}}],
                          "s1": [{"status": "completed",
                                  "files": {"settings.toml": '[service]\nname = "demo"\nport = 8080\n'}}]},
         },

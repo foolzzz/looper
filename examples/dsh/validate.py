@@ -652,12 +652,12 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
                             "finished Worker's seat a question via looper_room_post, wait for its session "
                             "consult answer, then finish."})["task_id"]
                         tasks.append(task)
-                        api.post(f"/api/tasks/{task}/start", {})
+                        api.post("/api/v1/ops/task_control/start", {"task_id": task})
                         detail = _wait(lambda: api.get(f"/api/tasks/{task}"),
                             lambda r: r["status"] in ("completed", "failed", "stopped", "cancelled"),
                             check_budget=check_budget)
                         if detail["status"] != "completed":
-                            activity = api.get(f"/api/tasks/{task}/activity", limit=40).get("activity") or []
+                            activity = api.post("/api/v1/tasks/activity", {"task_id": task, "limit": 40})["result"].get("activity") or []
                             records = api.get("/api/llm-records", limit=20).get("records") or []
                             ARTIFACTS.mkdir(parents=True, exist_ok=True, mode=0o700)
                             (ARTIFACTS / "task-diag.json").write_text(json.dumps({
@@ -669,7 +669,7 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
                         _require(detail["status"] == "completed")
                         _require((work / "delivery.txt").read_text() == "delivered by disposable DSH\n")
                         summary["stage"] = "room_consult"
-                        room = api.get(f"/api/tasks/{task}/room")
+                        room = api.post("/api/v1/tasks/room_view", {"task_id": task})["result"]
                         _require(room["consults"]["answered"] >= 1)
                         _require(all(c["state"] == "answered" for c in room["consults"]["list"]))
                         summary["stage"] = "tasks"

@@ -1,6 +1,6 @@
 """Raising the spend cap of a task that failed at it, and continuing it, against a real PostgreSQL.
 
-``POST /api/tasks/<id>/continue`` takes the new cap per task. It is taken
+``POST /api/v1/tasks/continue`` takes the new cap per task. It is taken
 only for a task that failed at its cap and only above what the task has
 spent; then the project's cap is raised and the task restarts from its saved
 plan, its steps kept. Runs only when LOOPER_TEST_DATABASE_URL points at a
@@ -18,6 +18,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from looper.agents import api_v1
+from looper.agents.ops.clients import ClientOps
 from looper.agents.http_server import AgentHTTPServer
 from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, channel_address, planner_address
 from looper.agents.tiers.task import Task, TaskRouter
@@ -51,9 +53,17 @@ async def _failed_task(pool: Any, router: TaskRouter, fail_kind: str | None) -> 
 
 async def _call(server: AgentHTTPServer, method: str, path: str, body: Any = None) -> tuple[int, Any]:
     writer = _Writer()
-    await server._route_api(method, path, {}, json.dumps(body).encode() if body is not None else b"", writer)
+    raw = json.dumps(body).encode() if body is not None else b""
+    if path == "/api/v1/tasks/continue":
+        server._client_ops = ClientOps(SimpleNamespace())
+        await server._handle_v1(method, path, {}, {}, raw, writer, api_v1.OPERATOR)
+    else:
+        await server._route_api(method, path, {}, raw, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload)
+    answer = json.loads(payload)
+    if path == "/api/v1/tasks/continue":
+        answer = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
+    return int(head.split()[1]), answer
 
 
 def _setup() -> tuple[AgentHTTPServer, TaskRouter, list[MessageEnvelope]]:
@@ -81,7 +91,7 @@ def test_a_task_that_failed_at_its_cap_continues_from_its_plan_with_a_higher_cap
         assert (detail["status"], detail["fail_kind"], detail["task_budget_usd"]) == ("failed", "task_budget", 0.4)
         assert detail["cost"]["cost_usd"] == pytest.approx(0.5)
 
-        status, body = await _call(server, "POST", "/api/tasks/task-a/continue", {"task_budget_usd": 1.25})
+        status, body = await _call(server, "POST", "/api/v1/tasks/continue", {"task_id": "task-a", "task_budget_usd": 1.25})
         assert status == 200, body
         assert (body["task_budget_usd"], body["spent_usd"], body["continued"]) == (1.25, 0.5, "task-a")
         assert (await projects.get_project(project_id, pool=pool))["task_budget_usd"] == 1.25
@@ -120,7 +130,7 @@ def test_a_manager_turn_linked_to_the_task_counts_toward_neither_its_cost_nor_it
         (manager,) = cost["manager_by_model"]
         assert (manager["runs"], manager["cost_usd"]) == (1, 5.0)
 
-        status, body = await _call(server, "POST", "/api/tasks/task-a/continue", {"task_budget_usd": 0.6})
+        status, body = await _call(server, "POST", "/api/v1/tasks/continue", {"task_id": "task-a", "task_budget_usd": 0.6})
         assert status == 200, body
         assert (body["task_budget_usd"], body["spent_usd"], body["continued"]) == (0.6, 0.5, "task-a")
         assert (await projects.get_project(project_id, pool=pool))["task_budget_usd"] == 0.6
@@ -135,8 +145,8 @@ def test_a_manager_turn_linked_to_the_task_counts_toward_neither_its_cost_nor_it
     (None, {"task_budget_usd": 2}, "only a task that failed at its spend cap"),  # it failed for another reason
     ("task_budget", {"task_budget_usd": 0.5}, "above the $0.5 the task has spent"),  # equal to the spend
     ("task_budget", {"task_budget_usd": 0.45}, "above the $0.5 the task has spent"),
-    ("task_budget", {}, "task_budget_usd is required"),
-    ("task_budget", {"task_budget_usd": "2"}, "number of US dollars"),
+    ("task_budget", {}, "declared schema"),
+    ("task_budget", {"task_budget_usd": "2"}, "declared schema"),
 ])
 def test_continuing_is_refused_unless_the_task_failed_at_its_cap_and_the_cap_is_above_its_spend(
     monkeypatch: pytest.MonkeyPatch, fail_kind: str | None, body: dict[str, Any], error: str,
@@ -147,7 +157,7 @@ def test_continuing_is_refused_unless_the_task_failed_at_its_cap_and_the_cap_is_
         server, router, published = _setup()
         project_id = await _failed_task(pool, router, fail_kind)
 
-        status, answer = await _call(server, "POST", "/api/tasks/task-a/continue", body)
+        status, answer = await _call(server, "POST", "/api/v1/tasks/continue", {"task_id": "task-a", **body})
         assert status == 400 and error in answer["error"]
         assert (await projects.get_project(project_id, pool=pool))["task_budget_usd"] == 0.4
         assert published == []

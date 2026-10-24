@@ -1,4 +1,4 @@
-"""``GET /api/gates``: the user gates of all tasks (gates-page RFC D1-D6)."""
+"""The v1 gate list and the core's cursor boundaries (gates-page RFC D1-D6)."""
 
 from __future__ import annotations
 
@@ -37,10 +37,18 @@ def _ids(answer: dict[str, Any]) -> list[str]:
     return [g["gate"]["step_id"] for g in answer["gates"]]
 
 
-async def _list(**query: str) -> dict[str, Any]:
-    status, answer, _ = await _api("GET", "/api/gates", query=query)
+async def _list(**query: Any) -> dict[str, Any]:
+    status, answer, _ = await _api("POST", "/api/v1/ops/gates/list", query)
     assert status == 200, answer
     return answer
+
+
+async def _core_list(**query: str) -> dict[str, Any]:
+    # Cursor/through belong to the reusable core; the public Tool declares offset paging.
+    from looper.agents.gate_service import list_gates
+    from looper.agents.ops.service import _plain
+
+    return _plain(await list_gates(query))
 
 
 def test_states_and_counts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -117,9 +125,9 @@ def test_order_and_paging(monkeypatch: pytest.MonkeyPatch) -> None:
             await _task(pool, f"task-{n}", "running", project)
             await _gates(pool, f"task-{n}", "open", opened_at=NOW - timedelta(hours=age))
         assert _ids(await _list()) == ["task-b-g1", "task-c-g1", "task-a-g1"]
-        answer = await _list(limit="1", offset="1")
+        answer = await _list(limit=1, offset=1)
         assert _ids(answer) == ["task-c-g1"] and answer["total"] == 3 and (answer["limit"], answer["offset"]) == (1, 1)
-        answer = await _list(state="all", limit="1", offset="1")
+        answer = await _list(state="all", limit=1, offset=1)
         assert _ids(answer) == ["task-c-g1"] and answer["total"] == 3
 
     run_db(test, monkeypatch)
@@ -155,15 +163,15 @@ def test_cursor_keeps_loaded_rows_when_an_earlier_gate_closes(monkeypatch: pytes
         await _gates(pool, "task-a", *(["passed" if state == "closed" else "open"] * 4))
         # Equal timestamps exercise the step-id tiebreaker and the created_at fallback.
         await pool.execute("UPDATE task_user_gates SET opened_at = NULL, created_at = $1 WHERE step_id = 'task-a-g1'", NOW)
-        first = await _list(state=state, limit="2")
+        first = await _core_list(state=state, limit="2")
         assert _ids(first) == ["task-a-g4", "task-a-g3"]
         await pool.execute("DELETE FROM task_user_gates WHERE step_id = 'task-a-g4'")
-        second = await _list(state=state, limit="2", cursor=first["next_cursor"])
+        second = await _core_list(state=state, limit="2", cursor=first["next_cursor"])
         assert _ids(second) == ["task-a-g2", "task-a-g1"]
         # A refresh keeps its old boundary even if a newer gate opens, or its last gate closes.
         await pool.execute("DELETE FROM task_user_gates WHERE step_id = 'task-a-g1'")
         await pool.execute("UPDATE task_user_gates SET opened_at = $1 WHERE step_id = 'task-a-g3'", NOW + timedelta(hours=1))
-        refreshed = await _list(state=state, limit="200", through=second["next_cursor"])
+        refreshed = await _core_list(state=state, limit="200", through=second["next_cursor"])
         assert _ids(refreshed) == ["task-a-g3", "task-a-g2"]
         assert not refreshed["has_more"]
 
@@ -172,13 +180,13 @@ def test_cursor_keeps_loaded_rows_when_an_earlier_gate_closes(monkeypatch: pytes
 
 @pytest.mark.parametrize("query", [
     {"state": "bogus"}, {"waiting_on": "user", "state": "closed"}, {"waiting_on": "nobody"},
-    {"limit": "0"}, {"limit": "201"}, {"offset": "-1"}, {"offset": "x"}, {"limit": "²"}, {"offset": "²"},
+    {"limit": 0}, {"limit": 201}, {"offset": -1}, {"offset": "x"}, {"limit": "²"}, {"offset": "²"},
     {"cursor": "bogus"}, {"cursor": "[]"}, {"through": '["not-a-date", "step"]'},
     {"cursor": '["2026-10-20T10:00:00Z", "step"]', "offset": "1"},
 ])
-def test_bad_queries_are_refused(monkeypatch: pytest.MonkeyPatch, query: dict[str, str]) -> None:
+def test_bad_queries_are_refused(monkeypatch: pytest.MonkeyPatch, query: dict[str, Any]) -> None:
     async def test(pool: Any) -> None:
-        status, answer, _ = await _api("GET", "/api/gates", query=query)
+        status, answer, _ = await _api("POST", "/api/v1/ops/gates/list", query)
         assert status == 400 and answer["error"]
 
     run_db(test, monkeypatch)

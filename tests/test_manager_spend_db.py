@@ -1,5 +1,5 @@
 """Each Manager's runs and spend (scenario Managers RFC §6, §10): the Manager role counts every Manager's runs, and
-``manager_spend`` and ``/api/managers`` split them per Manager. Needs LOOPER_TEST_DATABASE_URL."""
+``manager_spend`` and ``managers.list`` split them per Manager. Needs LOOPER_TEST_DATABASE_URL."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from tests.db_support import DSN, run_db
-from tests.test_task_agents_db import _call
+from tests.test_api_v1_managers_templates import _call
 from tests.test_usage_api_db import _task
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -73,10 +73,10 @@ def test_manager_spend_sums_per_manager(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_api_managers_has_spend(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
-        status, _ = await _call("POST", "/api/managers", {"key": "review", "name": "Review", "system_prompt": "x"})
-        assert status == 201
+        status, _ = await _call("managers.create", {"key": "review", "name": "Review", "system_prompt": "x"})
+        assert status == 200
         await _record(pool, "manager-review", 2.5)
-        status, answer = await _call("GET", "/api/managers")
+        status, answer = await _call("managers.list")
         assert status == 200
         by_id = {m["id"]: m for m in answer["managers"]}
         assert by_id["manager-review"]["spend"] == {"today_usd": 2.5, "last_7d_usd": 2.5, "runs_today": 1}

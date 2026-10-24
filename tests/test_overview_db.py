@@ -45,9 +45,15 @@ def _server(**parts: Any) -> Any:
 
 async def _get(server: Any, path: str, query: dict[str, str] | None = None) -> tuple[int, Any]:
     writer = _Writer()
-    await server._route_api("GET", path, query or {}, b"", writer)
+    if path == "/api/v1/system/overview":
+        from looper.agents.api_v1 import OPERATOR
+
+        await server._handle_v1("POST", path, {}, {}, b"{}", writer, OPERATOR)
+    else:
+        await server._route_api("GET", path, query or {}, b"", writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload)
+    answer = json.loads(payload)
+    return int(head.split()[1]), answer["result"] if path == "/api/v1/system/overview" else answer
 
 
 async def _tasks(pool: Any, project_id: str, status: str, count: int) -> None:
@@ -70,7 +76,7 @@ def test_every_task_is_counted_by_group_and_the_tasks_page_lists_a_group(monkeyp
             await _tasks(pool, b["id"], status, count)
         total = await pool.fetchval("SELECT count(*) FROM tasks")
 
-        status, body = await _get(_server(), "/api/overview")
+        status, body = await _get(_server(), "/api/v1/system/overview")
         assert status == 200
         # A started task whose Planner is starting (pending) is in progress: no task waits for room any more.
         assert body["tasks"] == {"needs_you": 0, "in_progress": 7, "ready": 3, "attention": 2, "completed": 205,
@@ -137,7 +143,7 @@ def test_the_agents_running_now_and_each_active_projects_load(monkeypatch: pytes
         server = _server(task_router=router, worker_pool=SimpleNamespace(runs=lambda: pool_runs),
                          manager=SimpleNamespace(agent_id="manager", busy=True), supervisor=supervisor)
 
-        status, body = await _get(server, "/api/overview")
+        status, body = await _get(server, "/api/v1/system/overview")
         assert status == 200
         from looper import __version__
         assert body["version"] == __version__
@@ -180,7 +186,7 @@ def test_the_agents_running_now_and_each_active_projects_load(monkeypatch: pytes
         ]}
 
         # Without a Manager, a router or a pool to ask, nothing runs.
-        status, body = await _get(_server(), "/api/overview")
+        status, body = await _get(_server(), "/api/v1/system/overview")
         assert body["agents"] == {"manager": None, "planners": [], "workers": [], "reviewers": []}
         assert [p["name"] for p in body["projects"]] == ["alpha", "beta"]
 
@@ -220,7 +226,7 @@ def test_todays_spend_keeps_money_apart_from_the_subscription_equivalent(
         await record("api_key", None, None, status="running")
         await record("api_key", "provider_price", 9.0, at=local_midnight() - timedelta(minutes=1))  # yesterday
 
-        status, body = await _get(_server(), "/api/overview")
+        status, body = await _get(_server(), "/api/v1/system/overview")
         spend = body["spend_today"]
         assert datetime.fromisoformat(spend["since"]) == local_midnight()
         assert spend["provider_priced_usd"] == pytest.approx(0.3)
@@ -267,7 +273,7 @@ def test_runs_a_previous_server_left_running_end_at_startup_and_count_as_ended(
         cost = detail["cost"]
         assert (status, cost["runs"], cost["running"], cost["unpriced_runs"]) == (200, 4, 0, 2)
         assert cost["cost_usd"] == pytest.approx(0.35)
-        status, body = await _get(server, "/api/overview")
+        status, body = await _get(server, "/api/v1/system/overview")
         spend = body["spend_today"]
         assert (status, spend["runs"], spend["running"], spend["unpriced_runs"]) == (200, 4, 0, 2)
         assert spend["provider_priced_usd"] + spend["equivalent_usd"] == pytest.approx(0.35)

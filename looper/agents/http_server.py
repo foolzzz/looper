@@ -27,8 +27,8 @@ from ..db import api_clients as db_api_clients
 from ..db.tasks import TaskGroup
 from ..ops_config import OpsConfig
 from . import (
-    agent_settings, api_v1, catalog, chat_settings, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
-    managers_api, operator_auth, overview, profile_registry, project_skills, projects, prompt_preview, request_guard, role_api,
+    agent_settings, api_v1, chat_settings, config_imports, config_transfer, knowledge,
+    operator_auth, overview, profile_registry, projects, prompt_preview, request_guard, role_api,
     schedules, self_check, vault, wait_service,
 )
 from .broadcast import Broadcaster
@@ -85,7 +85,6 @@ HTTP_405 = "405 Method Not Allowed"
 HTTP_409 = "409 Conflict"
 HTTP_413 = "413 Content Too Large"
 HTTP_500 = "500 Internal Server Error"
-HTTP_502 = "502 Bad Gateway"
 HTTP_429 = "429 Too Many Requests"
 HTTP_503 = "503 Service Unavailable"
 # same-origin, not no-referrer: under no-referrer a browser sends `Origin: null` with the form's POST,
@@ -352,7 +351,18 @@ class AgentHTTPServer:
             elif area is operator_auth.Access.AGENT:
                 await self._handle_agent_api(method, path, headers, body, writer)
             elif area is operator_auth.Access.CLIENT:
-                await self._handle_v1(method, path, query, headers, body, writer, principal)
+                if method == "POST" and path == "/api/v1/tasks/activity_stream":
+                    stream = asyncio.create_task(self._handle_v1(method, path, query, headers, body, writer, principal))
+                    disconnected = asyncio.create_task(reader.read())
+                    try:
+                        await asyncio.wait((stream, disconnected), return_when=asyncio.FIRST_COMPLETED)
+                    finally:
+                        for task in (stream, disconnected):
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(stream, disconnected, return_exceptions=True)
+                else:
+                    await self._handle_v1(method, path, query, headers, body, writer, principal)
             elif area is operator_auth.Access.OPERATOR:
                 await self._route_api(method, path, query, body, writer, headers)
             else:
@@ -776,10 +786,6 @@ class AgentHTTPServer:
     # --- API routing ---
 
     _RE_TASK_DETAIL = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)$")
-    _RE_TASK_ACTIVITY = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity$")
-    _RE_TASK_ACTIVITY_STREAM = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/stream$")
-    _RE_TASK_ACTIVITY_SEQ = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/(\d+)$")
-    _RE_TASK_CONVERSATION = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/conversation$")
     _RE_TASK_RUNS = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/runs$")
     _RE_ROLE_CONFIG = re.compile(r"^/api/roles/([a-zA-Z0-9_-]+)$")
     _RE_ROLE_CONFIG_RESET = re.compile(r"^/api/roles/([a-zA-Z0-9_-]+)/reset-prompt$")
@@ -787,21 +793,6 @@ class AgentHTTPServer:
     _RE_LLM_RECORD_EVENTS = re.compile(r"^/api/llm-records/(\d+)/events$")
     _RE_AGENT_USAGE = re.compile(r"^/api/agents/([a-zA-Z0-9_-]+)/usage$")
     _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
-    _RE_TASK_CONFIG = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/config$")
-    _RE_TASK_PROJECT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/project$")
-    _RE_TASK_CONTINUE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/continue$")
-    _RE_TASK_START = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/start$")
-    _RE_TASK_REQUIREMENT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/requirement$")
-    _RE_TASK_TITLE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/title$")
-    _RE_TASK_AGENTS = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/agents$")
-    _RE_TASK_ROOM = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/room$")
-    _RE_TASK_ROLE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/roles/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})$")
-    # A user gate of the task, by its step's label (planner_protocol._STEP_ID).
-    _RE_TASK_GATE_MESSAGES = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/gates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})"
-                                        r"/messages$")
-    _RE_TASK_GATE_END = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/gates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})/end$")
-    _RE_TASK_WAIT_ACTION = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/waits/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})"
-                                      r"/(resume|cancel)$")
     _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
     _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
@@ -817,9 +808,6 @@ class AgentHTTPServer:
     _RE_PROJECT_ROLE_STATS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-stats$")
     _RE_PROJECT_ROLE_TEMPLATE = re.compile(
         r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-templates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})$")
-    _RE_MANAGER = re.compile(r"^/api/managers/(manager(?:-[a-z][a-z0-9-]{1,30})?)$")
-    _RE_MANAGER_TEMPLATE = re.compile(
-        r"^/api/managers/(manager(?:-[a-z][a-z0-9-]{1,30})?)/templates/([a-z][a-z0-9_-]{0,31})$")
     _RE_ROLE_SETTINGS = re.compile(r"^/api/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_RUNTIME_PROBE = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)/probe$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
@@ -831,8 +819,6 @@ class AgentHTTPServer:
     _RE_SCHEDULE = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)$")
     _RE_SCHEDULE_RESET_SESSION = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/reset-planner-session$")
     _RE_SCHEDULE_RUN = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/run$")
-    _RE_SCHEDULE_RUNS = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/runs$")
-    _RE_SCHEDULE_NOTIFICATIONS = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/notifications$")
     _RE_CONFIG_IMPORT = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})$")
     _RE_CONFIG_IMPORT_APPLY = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})/apply$")
 
@@ -845,9 +831,7 @@ class AgentHTTPServer:
         writer: asyncio.StreamWriter,
         headers: Mapping[str, str] | None = None,
     ) -> None:
-        if path == "/api/overview" and method == "GET":
-            await self._handle_overview(writer)
-        elif path == "/api/tasks" and method == "GET":
+        if path == "/api/tasks" and method == "GET":
             await self._handle_list_tasks(query, writer)
         elif path == "/api/chat/send" and method == "POST":
             await self._handle_chat_send(body, writer)
@@ -871,61 +855,12 @@ class AgentHTTPServer:
             await self._handle_sse_events(query, writer)
         elif path == "/api/tasks/create" and method == "POST":
             await self._answer(writer, HTTP_201, lambda: projects.create_task(projects.json_object(body)))
-        elif path == "/api/tasks/cancel" and method == "POST":
-            await self._handle_task_cancel(body, writer)
-        elif path == "/api/tasks/stop" and method == "POST":
-            await self._handle_task_stop(body, writer)
-        elif path == "/api/tasks/start" and method == "POST":
-            await self._handle_task_start(body, writer)
         elif path == "/api/tasks/delete" and method == "POST":
             await self._handle_task_delete(body, writer)
-        elif (m := self._RE_TASK_ACTIVITY_STREAM.match(path)) and method == "GET":
-            await self._handle_task_activity_stream(m.group(1), query, writer)
-        elif (m := self._RE_TASK_ACTIVITY_SEQ.match(path)) and method == "GET":
-            await self._handle_task_activity_detail(m.group(1), int(m.group(2)), writer)
-        elif (m := self._RE_TASK_ACTIVITY.match(path)) and method == "GET":
-            await self._handle_task_activity(m.group(1), query, writer)
-        elif (m := self._RE_TASK_CONVERSATION.match(path)) and method == "GET":
-            await self._handle_task_conversation(m.group(1), query, writer)
         elif (m := self._RE_TASK_RUNS.match(path)) and method == "GET":
             await self._handle_task_runs(m.group(1), writer)
-        elif (m := self._RE_TASK_CONFIG.match(path)) and method == "PUT":
-            await self._handle_task_config_update(m.group(1), body, writer)
-        elif (m := self._RE_TASK_PROJECT.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: projects.move_task(
-                m.group(1), projects.json_object(body), self._task_router))
-        elif (m := self._RE_TASK_CONTINUE.match(path)) and method == "POST":
-            await self._answer(writer, HTTP_200, lambda: self._continue_at_cap(m.group(1), body))
-        elif (m := self._RE_TASK_REQUIREMENT.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: projects.edit_requirement(
-                m.group(1), projects.json_object(body), task_router=self._task_router, bus=self._supervisor.bus,
-                source=self._web_adapter._address, via=projects.VIA_TASK_PAGE))
-        elif (m := self._RE_TASK_TITLE.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: projects.rename_task(
-                m.group(1), projects.json_object(body), via=projects.VIA_TASK_PAGE))
-        elif (m := self._RE_TASK_AGENTS.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: self._set_task_agents(m.group(1), body))
-        elif (m := self._RE_TASK_ROLE.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: role_api.edit_task_role(
-                m.group(1), m.group(2), projects.json_object(body), task_router=self._task_router,
-                bus=self._supervisor.bus, source=self._web_adapter._address))
-        elif path == "/api/gates" and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: gate_service.list_gates(query))
-        elif (m := self._RE_TASK_GATE_MESSAGES.match(path)) and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: gate_service.thread(m.group(1), m.group(2)))
-        elif (m := self._RE_TASK_GATE_MESSAGES.match(path)) and method == "POST":
-            await self._answer(writer, HTTP_200, lambda: self._gate_message(m.group(1), m.group(2), body, end=False))
-        elif (m := self._RE_TASK_GATE_END.match(path)) and method == "POST":
-            await self._answer(writer, HTTP_200, lambda: self._gate_message(m.group(1), m.group(2), body, end=True))
-        elif (m := self._RE_TASK_WAIT_ACTION.match(path)) and method == "POST":
-            await self._answer(writer, HTTP_200, lambda: self._wait_action(m.group(1), m.group(2), m.group(3)))
         elif (m := self._RE_TASK_WORKSPACE_DISCARD.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: self._discard_workspace(m.group(1), int(m.group(2))))
-        elif (m := self._RE_TASK_START.match(path)) and method == "POST":
-            await self._answer(writer, HTTP_200, lambda: projects.start_ready_task(
-                m.group(1), self._supervisor.bus, self._web_adapter._address))
-        elif (m := self._RE_TASK_ROOM.match(path)) and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: self._task_room(m.group(1), query))
         elif (m := self._RE_TASK_DETAIL.match(path)) and method == "GET":
             await self._handle_task_detail(m.group(1), writer)
         elif path == "/api/workspaces/check" and method == "GET":
@@ -939,17 +874,9 @@ class AgentHTTPServer:
                 m.group(1), projects.json_object(body)))
         elif (m := self._RE_PROJECT.match(path)) and method == "DELETE":
             await self._answer(writer, HTTP_200, lambda: projects.delete_project(m.group(1)))
-        elif (m := self._RE_PROJECT_SCHEDULES.match(path)) and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: schedules.list_schedules(m.group(1)))
         elif (m := self._RE_PROJECT_SCHEDULES.match(path)) and method == "POST":
             await self._answer(writer, HTTP_201, lambda: schedules.create_schedule(
                 m.group(1), projects.json_object(body)))
-        elif path == "/api/schedules" and method == "GET":
-            await self._answer(writer, HTTP_200, schedules.list_all_schedules)
-        elif path == "/api/schedules/preview" and method == "POST":
-            await self._answer(writer, HTTP_200, lambda: self._preview_schedule(body))
-        elif (m := self._RE_SCHEDULE.match(path)) and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: schedules.get_schedule(m.group(1)))
         elif (m := self._RE_SCHEDULE.match(path)) and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: schedules.update_schedule(
                 m.group(1), projects.json_object(body)))
@@ -959,10 +886,6 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_200, lambda: schedules.reset_planner_session(m.group(1)))
         elif (m := self._RE_SCHEDULE_RUN.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: self._run_schedule_now(m.group(1)))
-        elif (m := self._RE_SCHEDULE_RUNS.match(path)) and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: schedules.list_runs(m.group(1), query))
-        elif (m := self._RE_SCHEDULE_NOTIFICATIONS.match(path)) and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: schedules.list_notifications(m.group(1), query))
         elif (m := self._RE_PROJECT_KNOWLEDGE.match(path)) and method == "GET":
             await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.knowledge_view(m.group(1), root))
         elif (m := self._RE_PROJECT_KNOWLEDGE.match(path)) and method == "POST":
@@ -1070,22 +993,6 @@ class AgentHTTPServer:
                 m.group(1), m.group(2), projects.json_object(body)))
         elif (m := self._RE_PROJECT_ROLE_TEMPLATE.match(path)) and method == "DELETE":
             await self._answer(writer, HTTP_200, lambda: role_api.delete_template(m.group(1), m.group(2)))
-        elif path == "/api/managers" and method == "GET":
-            await self._answer(
-                writer, HTTP_200,
-                lambda: managers_api.managers_view(extra=self._managers.state if self._managers else None))
-        elif path == "/api/managers" and method == "POST":
-            await self._answer(writer, HTTP_201, lambda: managers_api.create_manager(projects.json_object(body)))
-        elif (m := self._RE_MANAGER.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: managers_api.update_manager(
-                m.group(1), projects.json_object(body)))
-        elif (m := self._RE_MANAGER.match(path)) and method == "DELETE":
-            await self._answer(writer, HTTP_200, lambda: managers_api.delete_manager(m.group(1)))
-        elif (m := self._RE_MANAGER_TEMPLATE.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: managers_api.put_template(
-                m.group(1), m.group(2), projects.json_object(body)))
-        elif (m := self._RE_MANAGER_TEMPLATE.match(path)) and method == "DELETE":
-            await self._answer(writer, HTTP_200, lambda: managers_api.delete_template(m.group(1), m.group(2)))
         elif (m := self._RE_PROJECT_ROLE_SETTINGS.match(path)) and method == "PUT":
             await self._handle_agent_settings(writer, lambda: self._write_layer(
                 body, lambda data: agent_settings.update_project(m.group(1), data, role=m.group(2))))
@@ -1096,32 +1003,6 @@ class AgentHTTPServer:
                                              lambda imports: self._apply_import(imports, m.group(1), body))
         elif (m := self._RE_CONFIG_IMPORT.match(path)) and method == "DELETE":
             await self._handle_config_import(writer, HTTP_200, lambda imports: imports.cancel(m.group(1)))
-        elif path == "/api/catalog/import" and method == "POST":
-            await self._handle_catalog(writer, HTTP_200, library.import_from_machine)
-        elif path == "/api/catalog/upload" and method == "POST":
-            await self._handle_catalog(writer, HTTP_201, lambda: catalog_sources.upload(projects.json_object(body)))
-        elif path == "/api/catalog/git/preview" and method == "POST":
-            await self._handle_catalog(writer, HTTP_200, lambda: catalog_sources.git_preview(
-                projects.json_object(body)))
-        elif path == "/api/catalog/git/import" and method == "POST":
-            await self._handle_catalog(writer, HTTP_200, lambda: catalog_sources.git_import(
-                projects.json_object(body)))
-        elif path == "/api/catalog/skills" and method == "POST":
-            await self._handle_catalog(writer, HTTP_201, lambda: catalog_sources.create_skill(
-                projects.json_object(body)))
-        elif path == "/api/catalog/mcp" and method == "POST":
-            await self._handle_catalog(writer, HTTP_201, lambda: mcp.create(projects.json_object(body)))
-        elif path == "/api/catalog/mcp/import" and method == "POST":
-            await self._handle_catalog(writer, HTTP_200, mcp.import_from_machine)
-        elif path == "/api/channels/lark/status" and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: self._lark_status(query.get("channel_id")))
-        elif path == "/api/channels/lark/people" and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: self._lark_people(query.get("q", ""), query.get("channel_id")))
-        elif path == "/api/channels/lark_bot/status" and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: self._lark_bot_status(query.get("channel_id")))
-        elif path == "/api/channels/lark_bot/people" and method == "GET":
-            await self._answer(writer, HTTP_200,
-                               lambda: self._lark_bot_people(query.get("q", ""), query.get("channel_id")))
         elif path == "/api/scheduler-settings" and method == "GET":
             await self._answer(writer, HTTP_200, schedules.scheduler_settings)
         elif path == "/api/scheduler-settings" and method == "PUT":
@@ -1131,10 +1012,6 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_200, self._chat_settings)
         elif path == "/api/chat-settings" and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: self._update_chat_settings(body))
-        elif path == "/api/gate-settings" and method == "GET":
-            await self._answer(writer, HTTP_200, gate_service.gate_settings)
-        elif path == "/api/gate-settings" and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: gate_service.update_gate_settings(projects.json_object(body)))
         elif path == "/api/wait-settings" and method == "GET":
             await self._answer(writer, HTTP_200, wait_service.settings_view)
         elif path == "/api/wait-settings" and method == "PUT":
@@ -1254,17 +1131,6 @@ class AgentHTTPServer:
         writer.write(_json_response(status, _serialize(result)))
         await writer.drain()
 
-    async def _gate_message(self, task_id: str, label: str, body: bytes, *, end: bool) -> dict[str, Any]:
-        """The user's message in a gate of the task, or their end of its discussion (``gate_service``)."""
-        return await gate_service.post_message(
-            task_id, label, projects.json_object(body) if body else {},
-            has_planner=self._task_router.has_planner(task_id), bus=self._supervisor.bus,
-            source=self._web_adapter._address, end=end)
-
-    async def _wait_action(self, task_id: str, label: str, action: str) -> dict[str, Any]:
-        request = wait_service.resume if action == "resume" else wait_service.cancel
-        return await request(task_id, label, has_planner=self._task_router.has_planner(task_id),
-                             bus=self._supervisor.bus, source=self._web_adapter._address)
 
     async def _discard_workspace(self, task_id: str, workspace_id: int) -> dict[str, Any]:
         """The user drops a step worktree a task that is not running keeps: its directory and branch go. The task's
@@ -1290,9 +1156,6 @@ class AgentHTTPServer:
             summary=f"Discarded a step worktree from the task page: branch {workspace.branch} and its directory "
                     "removed"[:500])
         return {"workspace": workspace.view()}
-
-    async def _preview_schedule(self, body: bytes) -> dict[str, Any]:
-        return schedules.preview(projects.json_object(body))
 
     async def _run_schedule_now(self, schedule_id: str) -> dict[str, Any]:
         if self._scheduler is None:
@@ -1348,19 +1211,6 @@ class AgentHTTPServer:
         elif self._manager_ops is not None:
             status["turn_binding"] = self._manager_ops.binding_report()
         return status
-
-    async def _handle_overview(self, writer: asyncio.StreamWriter) -> None:
-        try:
-            result = await overview.build_overview(task_router=self._task_router, worker_pool=self._worker_pool,
-                                                   manager=self._manager, supervisor=self._supervisor,
-                                                   managers=self._managers)
-        except Exception:
-            logger.exception("DB unavailable for the overview")
-            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
-            await writer.drain()
-            return
-        writer.write(_json_response(HTTP_200, _serialize(result)))
-        await writer.drain()
 
     async def _handle_list_tasks(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
         """A page of tasks, newest first, filtered by project, schedule, group and status: ``limit`` of them
@@ -1789,183 +1639,42 @@ class AgentHTTPServer:
         finally:
             await events.aclose()
 
-    async def _handle_task_config_update(
-        self, task_id: str, body: bytes, writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
-            await writer.drain()
-            return
-
+    async def _task_config_result(self, task_id: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Edit an unstarted task's configuration and retain requirement history; no HTTP writer."""
         from ..db.tasks import update_task_config, get_task
 
         task = await get_task(task_id)
         if task is None:
-            writer.write(_json_response(HTTP_404, {"error": "task not found"}))
-            await writer.drain()
-            return
-
+            raise projects.RequestError(HTTP_404, "task not found")
         if task.get("status") != "init":
-            writer.write(_json_response(HTTP_400, {"error": "can only edit config when status is init"}))
-            await writer.drain()
-            return
-
+            raise projects.RequestError(HTTP_400, "can only edit config when status is init")
         config = data.get("config")
         if config is not None and not isinstance(config, dict):
-            writer.write(_json_response(HTTP_400, {"error": "config must be a JSON object"}))
-            await writer.drain()
-            return
-
+            raise projects.RequestError(HTTP_400, "config must be a JSON object")
         work_dir = None
         if "work_dir" in data:
             from .tiers.task import resolve_work_dir
             try:
-                work_dir = resolve_work_dir(data.get("work_dir"))
+                work_dir = resolve_work_dir(data["work_dir"])
             except ValueError as exc:
-                writer.write(_json_response(HTTP_400, {"error": str(exc)}))
-                await writer.drain()
-                return
-
+                raise projects.RequestError(HTTP_400, str(exc)) from None
         requirement = data.get("requirement")
         if isinstance(requirement, str):
-            try:
-                projects.check_requirement(requirement)
-            except projects.RequestError as exc:
-                writer.write(_json_response(exc.status, {"error": str(exc)}))
-                await writer.drain()
-                return
+            projects.check_requirement(requirement)
         if isinstance(requirement, str) and requirement.strip() and requirement != task.get("requirement"):
-            # Kept as a new version, like an edit of a running task's; the task has no Planner to tell yet.
             from ..db.task_changes import edit_requirement
-            await edit_requirement(task_id, requirement, via=projects.VIA_TASK_PAGE, delivered=True)
-        ok = work_dir is None and config is None or await update_task_config(
-            task_id,
-            work_dir=work_dir,
-            config=config,
-        )
-        if not ok:
-            writer.write(_json_response(HTTP_500, {"error": "update failed"}))
-            await writer.drain()
-            return
-
+            if await edit_requirement(task_id, requirement, via=projects.VIA_TASK_PAGE, delivered=True) is None:
+                raise projects.RequestError(HTTP_404, "task not found")
+        if (work_dir is not None or config is not None) and not await update_task_config(
+                task_id, work_dir=work_dir, config=config):
+            raise OpError(ErrorCode.UNAVAILABLE, "task configuration update failed")
         updated = await get_task(task_id)
-        result = _serialize({
-            "task_id": updated["id"],
-            "requirement": updated.get("requirement", ""),
-            "work_dir": updated.get("work_dir", ""),
-            "config": updated.get("config", {}),
-            "status": updated.get("status", ""),
-        })
-        writer.write(_json_response(HTTP_200, result))
-        await writer.drain()
+        if updated is None:
+            raise projects.RequestError(HTTP_404, "task not found")
+        return _serialize({"task_id": updated["id"], "requirement": updated.get("requirement", ""),
+                           "work_dir": updated.get("work_dir", ""), "config": updated.get("config", {}),
+                           "status": updated.get("status", "")})
 
-    async def _handle_task_cancel(
-        self, body: bytes, writer: asyncio.StreamWriter
-    ) -> None:
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
-            await writer.drain()
-            return
-
-        task_id = data.get("task_id", "").strip()
-        if not task_id:
-            writer.write(
-                _json_response(HTTP_400, {"error": "task_id is required"})
-            )
-            await writer.drain()
-            return
-
-        try:
-            await projects.control_task(task_id, "cancel", self._supervisor.bus, self._web_adapter._address)
-        except projects.RequestError as exc:
-            writer.write(_json_response(exc.status, {"error": str(exc)}))
-            await writer.drain()
-            return
-        writer.write(_json_response(HTTP_200, {"cancelled": task_id}))
-        await writer.drain()
-
-    async def _handle_task_stop(
-        self, body: bytes, writer: asyncio.StreamWriter
-    ) -> None:
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
-            await writer.drain()
-            return
-
-        task_id = data.get("task_id", "").strip()
-        if not task_id:
-            writer.write(_json_response(HTTP_400, {"error": "task_id is required"}))
-            await writer.drain()
-            return
-
-        try:
-            await projects.control_task(task_id, "stop", self._supervisor.bus, self._web_adapter._address)
-        except projects.RequestError as exc:
-            writer.write(_json_response(exc.status, {"error": str(exc)}))
-            await writer.drain()
-            return
-        writer.write(_json_response(HTTP_200, {"stopped": task_id}))
-        await writer.drain()
-
-    async def _handle_task_start(
-        self, body: bytes, writer: asyncio.StreamWriter
-    ) -> None:
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
-            await writer.drain()
-            return
-
-        task_id = data.get("task_id", "").strip()
-        if not task_id:
-            writer.write(_json_response(HTTP_400, {"error": "task_id is required"}))
-            await writer.drain()
-            return
-        # A ready task starts for the first time; a stopped, failed or cancelled one goes on from its saved plan.
-        start_over = data.get("start_over", False)
-        if not isinstance(start_over, bool):
-            writer.write(_json_response(HTTP_400, {"error": "start_over must be true or false"}))
-            await writer.drain()
-            return
-
-        try:
-            from ..db import tasks as db_tasks
-
-            task = await db_tasks.get_task(task_id)
-            if task is not None and task["status"] == db_tasks.READY:
-                # Keep the legacy endpoint's ready-task support without treating Manager restarts as starts.
-                if not (task.get("work_dir") or "").strip():
-                    raise projects.RequestError(HTTP_400, "set the task's work directory before starting it")
-                await projects.start_ready_task(task_id, self._supervisor.bus, self._web_adapter._address)
-            else:
-                await projects.control_task(task_id, "start_over" if start_over else "restart",
-                                            self._supervisor.bus, self._web_adapter._address)
-        except projects.RequestError as exc:
-            writer.write(_json_response(exc.status, {"error": str(exc)}))
-            await writer.drain()
-            return
-        writer.write(_json_response(HTTP_200, {"started": task_id}))
-        await writer.drain()
-
-    async def _continue_at_cap(self, task_id: str, body: bytes) -> dict[str, Any]:
-        """Raise the cap of a task that failed at it, then restart it from its saved plan."""
-        from .message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode
-
-        result = await projects.raise_cap_to_continue(task_id, projects.json_object(body))
-        await self._supervisor.bus.publish(MessageEnvelope.create(
-            source=self._web_adapter._address,
-            target=TASK_ROUTER_ADDRESS,
-            message_type=MessageType.TASK_RESTART,
-            payload={"task_id": task_id, "mode": RestartMode.AT_CAP.value},
-        ))
-        return {**result, "continued": task_id}
 
     async def _handle_task_delete(
         self, body: bytes, writer: asyncio.StreamWriter
@@ -2019,28 +1728,6 @@ class AgentHTTPServer:
 
     # --- Task detail handlers ---
 
-    async def _task_room(self, task_id: str, query: Mapping[str, str]) -> dict[str, Any]:
-        """``GET /api/tasks/:id/room``: the task's agent room (``room.task_view``), filtered by ``kind``, ``from``,
-        ``unanswered`` and ``after`` (a message id; the newer ones only), at most ``limit``."""
-        from .room import TASK_VIEW_LIMIT, task_view
-
-        def number(name: str, default: int) -> int:
-            raw = query.get(name) or ""
-            if not raw:
-                return default
-            if not raw.isdigit():
-                raise projects.RequestError(HTTP_400, f"{name} must be a whole number")
-            return int(raw)
-
-        pool = self._worker_pool
-        view = await task_view(task_id, runs=pool.room_runs(task_id) if pool is not None else None,
-                               kind=query.get("kind") or None, sender=query.get("from") or None,
-                               unanswered=query.get("unanswered") in ("1", "true"),
-                               after=number("after", 0), limit=number("limit", TASK_VIEW_LIMIT))
-        if view is None:
-            raise projects.RequestError(HTTP_404, "task not found")
-        return view
-
     async def _handle_task_detail(
         self, task_id: str, writer: asyncio.StreamWriter,
     ) -> None:
@@ -2063,126 +1750,6 @@ class AgentHTTPServer:
     async def _task_workspaces(task_id: str, steps: list[dict[str, Any]], *,
                                in_worktree: bool = False) -> dict[str, Any] | None:
         return await projects.step_workspaces_view(task_id, steps, in_worktree=in_worktree)
-
-    async def _handle_task_activity(
-        self, task_id: str, query: dict[str, str], writer: asyncio.StreamWriter,
-    ) -> None:
-        """Without ``since``/``after``: the latest ``limit`` rows (``before``: those just before that seq), oldest
-        first, with ``has_more``, ``oldest_seq`` and ``latest_seq``. With one: the rows after it, as streaming reads
-        them."""
-        forward = query.get("after", query.get("since"))
-        try:
-            if forward is not None:
-                from ..db.activity import list_activity
-                rows = await list_activity(task_id, since_seq=int(forward), limit=min(int(query.get("limit", "100")), 500))
-                body: dict[str, Any] = {"activity": [_serialize(r) for r in rows]}
-            else:
-                from ..db.activity import WINDOW_LIMIT, activity_window
-                before = int(query["before"]) if "before" in query else None
-                window = await activity_window(task_id, before=before, limit=int(query.get("limit", WINDOW_LIMIT)))
-                body = {"activity": [_serialize(r) for r in window.pop("rows")], **window}
-        except ValueError:
-            writer.write(_json_response(HTTP_400, {"error": "since, after, before and limit must be integers"}))
-            await writer.drain()
-            return
-        except Exception:
-            body = {"activity": []}
-        writer.write(_json_response(HTTP_200, body))
-        await writer.drain()
-
-    async def _handle_task_activity_detail(
-        self, task_id: str, seq: int, writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            from ..db.activity import get_activity_detail
-            row = await get_activity_detail(seq)
-        except Exception:
-            row = None
-        if row is None:
-            writer.write(_json_response(HTTP_404, {"error": "activity not found"}))
-            await writer.drain()
-            return
-        writer.write(_json_response(HTTP_200, _serialize(row)))
-        await writer.drain()
-
-    async def _handle_task_activity_stream(
-        self,
-        task_id: str,
-        query: dict[str, str],
-        writer: asyncio.StreamWriter,
-    ) -> None:
-        """SSE stream for task activity with cursor-based gap replay."""
-        since = int(query.get("since", "0"))
-
-        sse_headers = (
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/event-stream\r\n"
-            "Cache-Control: no-cache\r\n"
-            "Connection: keep-alive\r\n"
-            "X-Accel-Buffering: no\r\n"
-            "\r\n"
-        )
-        writer.write(sse_headers.encode("utf-8"))
-        await writer.drain()
-
-        cursor = since
-        try:
-            from ..db.activity import list_activity
-            while True:
-                rows = await list_activity(task_id, since_seq=cursor, limit=500)
-                if not rows:
-                    break
-                for row in rows:
-                    data = json.dumps(_serialize(row), ensure_ascii=False)
-                    seq = row.get("seq", 0)
-                    writer.write(f"id: {seq}\nevent: activity\ndata: {data}\n\n".encode("utf-8"))
-                    await writer.drain()
-                    cursor = seq
-        except Exception:
-            pass
-
-        sub = self._broadcaster.subscribe(task_id)
-        try:
-            while True:
-                try:
-                    event = await asyncio.wait_for(sub.get(), timeout=20.0)
-                except asyncio.TimeoutError:
-                    writer.write(b": ping\n\n")
-                    await writer.drain()
-                    continue
-
-                if event is None:
-                    writer.write(b"event: done\ndata: {}\n\n")
-                    await writer.drain()
-                    break
-
-                data = json.dumps(event, ensure_ascii=False)
-                seq = event.get("seq", "")
-                line = f"id: {seq}\nevent: activity\ndata: {data}\n\n"
-                writer.write(line.encode("utf-8"))
-                await writer.drain()
-
-        except (ConnectionError, BrokenPipeError, asyncio.CancelledError):
-            pass
-        finally:
-            self._broadcaster.unsubscribe(task_id, sub)
-
-    async def _handle_task_conversation(
-        self, task_id: str, query: dict[str, str], writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            from ..db.activity import WINDOW_LIMIT, conversation_window
-            before = int(query["before"]) if "before" in query else None
-            window = await conversation_window(task_id, before=before, limit=int(query.get("limit", WINDOW_LIMIT)))
-            body: dict[str, Any] = {"conversation": [_serialize(r) for r in window.pop("rows")], **window}
-        except ValueError:
-            writer.write(_json_response(HTTP_400, {"error": "before and limit must be integers"}))
-            await writer.drain()
-            return
-        except Exception:
-            body = {"conversation": []}
-        writer.write(_json_response(HTTP_200, body))
-        await writer.drain()
 
     async def _handle_task_runs(self, task_id: str, writer: asyncio.StreamWriter) -> None:
         try:
@@ -2299,14 +1866,6 @@ class AgentHTTPServer:
         """Start the runs that wait for room a raised limit now gives; a lowered limit stops nothing."""
         await recheck_limits(self._worker_pool)
 
-    async def _set_task_agents(self, task_id: str, body: bytes) -> dict[str, Any]:
-        """Change the task's own profiles or concurrency per role; when it set a limit, start what it lets start."""
-        data = projects.json_object(body)
-        result = await projects.set_task_agents(task_id, data)
-        if data.get("concurrency"):
-            await self._recheck_concurrency()
-        return result
-
     async def _handle_agent_settings(
         self, writer: asyncio.StreamWriter, request: Callable[[], Awaitable[dict[str, Any]]],
     ) -> None:
@@ -2363,28 +1922,6 @@ class AgentHTTPServer:
         except Exception:
             logger.exception("knowledge request failed")
             status, result = HTTP_500, {"error": "the knowledge request failed; see the server log"}
-        writer.write(_json_response(status, _serialize(result)))
-        await writer.drain()
-
-    # --- The capability catalog: its items, their installs and the skills projects write ---
-
-    async def _handle_catalog(
-        self, writer: asyncio.StreamWriter, status: str, request: Callable[[], Awaitable[Any]],
-    ) -> None:
-        """Answer with ``request()``'s result; a refused request is 400, an unknown item, install, project or
-        skill 404, and an install that is there already or a name that is taken 409."""
-        try:
-            result = await request()
-        except (catalog.CatalogError, library.LibraryError, project_skills.ProjectSkillError,
-                projects.RequestError) as exc:
-            status, result = getattr(exc, "status", HTTP_400), {"error": str(exc)}
-        except (catalog.CatalogNotFound, project_skills.ProjectSkillNotFound) as exc:
-            status, result = HTTP_404, {"error": str(exc)}
-        except (catalog.CatalogConflict, project_skills.ProjectSkillConflict) as exc:
-            status, result = HTTP_409, {"error": str(exc)}
-        except Exception:
-            logger.exception("catalog request failed")
-            status, result = HTTP_500, {"error": "the catalog request failed; see the server log"}
         writer.write(_json_response(status, _serialize(result)))
         await writer.drain()
 
@@ -2523,51 +2060,6 @@ class AgentHTTPServer:
         await writer.drain()
 
     # --- Channel config handlers ---
-
-    @staticmethod
-    def _not_found(exc: LookupError) -> projects.RequestError:
-        return projects.RequestError(HTTP_404, str(exc))
-
-    async def _lark_status(self, channel_id: str | None) -> dict[str, Any]:
-        from .channels import lark_settings
-
-        try:
-            return await lark_settings.status(channel_id or lark_settings.CHANNEL_ID)
-        except LookupError as exc:
-            raise self._not_found(exc) from None
-
-    async def _lark_people(self, q: str, channel_id: str | None) -> dict[str, Any]:
-        from .channels import lark_cli, lark_settings
-
-        try:
-            return await lark_settings.people(q, channel_id or lark_settings.CHANNEL_ID)
-        except ValueError as exc:
-            raise projects.RequestError(HTTP_400, str(exc)) from None
-        except LookupError as exc:
-            raise self._not_found(exc) from None
-        except lark_cli.LarkCliError as exc:
-            raise projects.RequestError(HTTP_502, f"lark-cli could not search: {exc}") from None
-
-    async def _lark_bot_status(self, channel_id: str | None) -> dict[str, Any]:
-        from .channels import lark_bot_settings
-
-        try:
-            return await lark_bot_settings.status(channel_id or lark_bot_settings.CHANNEL_ID)
-        except LookupError as exc:
-            raise self._not_found(exc) from None
-
-    async def _lark_bot_people(self, q: str, channel_id: str | None) -> dict[str, Any]:
-        from .channels import lark_bot_settings
-        from .channels.lark_api import LarkApiError
-
-        try:
-            return await lark_bot_settings.people(q, channel_id or lark_bot_settings.CHANNEL_ID)
-        except ValueError as exc:
-            raise projects.RequestError(HTTP_400, str(exc)) from None
-        except LookupError as exc:
-            raise self._not_found(exc) from None
-        except LarkApiError as exc:
-            raise projects.RequestError(HTTP_502, f"the Lark platform could not search: {exc}") from None
 
     async def _handle_list_channel_configs(self, writer: asyncio.StreamWriter) -> None:
         from .channels.allowlist import channel_view

@@ -18,6 +18,66 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.71] - 2026-10-24
+
+### Changed
+
+- **Schedule definitions, the rule preview, run history and notifications move to the versioned API.** `schedule_admin.list`, `project_list`, `get`, `preview`, `runs` and `notifications` (`POST /api/v1/schedule_admin/<action>`) replace six legacy HTTP routes (`GET /api/schedules`, `GET /api/projects/{id}/schedules`, `GET /api/schedules/{id}`, `POST /api/schedules/preview`, `GET /api/schedules/{id}/runs` and `/notifications`), which are removed; the dashboard and the prompt-regression runner use the new routes. Requests are closed and typed, and the answers declare full Schedule, Run, limits, preview and notification definitions. The schedule write routes and scheduler settings are unchanged. Manager prompts and tools are unchanged. ([#494](https://github.com/foolzzz/looper/pull/494))
+
+## [2.13.70] - 2026-10-24
+
+### Changed
+
+- **Task activity, the task conversation and the live activity stream move to the versioned API.** `tasks.activity`, `tasks.activity_detail`, `tasks.conversation` and `tasks.activity_stream` (`POST /api/v1/tasks/<name>`) replace four legacy GET routes (`/api/tasks/{id}/activity`, `/activity/{seq}`, `/activity/stream` and `/conversation`), which are removed; the dashboard and the generated CLI (`loopercli tasks activity-stream`) use the new routes. A database failure now answers `unavailable` instead of an empty list, an event of another task answers not found, and the conversation list key is `rows`. The stream sends complete events read from the database and ends on client disconnect. Manager prompts and tools are unchanged. ([#488](https://github.com/foolzzz/looper/pull/488))
+
+## [2.13.69] - 2026-10-24
+
+### Changed
+
+- **The dashboard overview, task controls, task titles and task requirements move to the versioned API.** `system.overview` (`POST /api/v1/system/overview`), `task_control.start`, `stop`, `restart`, `start_over` and `cancel` (`POST /api/v1/ops/task_control/<action>`), `task_update` (`POST /api/v1/ops/task_update`) and `tasks.requirement_update` (`POST /api/v1/tasks/requirement_update`) replace seven legacy HTTP methods (`GET /api/overview`, `POST /api/tasks/cancel`, `/stop` and `/start`, `POST /api/tasks/{id}/start`, `PUT /api/tasks/{id}/requirement` and `/title`), which are removed; the dashboard uses the new routes. An API client's requirement edit needs a second-step confirmation. Starting a ready task no longer checks the work directory first. A message sent to a dispatched Worker before its input channel opens now waits for startup instead of being dropped. Manager prompts and tools are unchanged. ([#491](https://github.com/foolzzz/looper/pull/491))
+
+## [2.13.68] - 2026-10-24
+
+### Changed
+
+- **Scenario Managers and task templates move to the versioned API.** `managers.list`, `managers.create`, `managers.update`, `managers.delete`, `manager_templates.put` and `manager_templates.delete` under `/api/v1/` replace six legacy HTTP methods (`GET`/`POST /api/managers`, `PUT`/`DELETE /api/managers/{id}`, `PUT`/`DELETE /api/managers/{id}/templates/{key}`), which are removed; the dashboard uses the new routes. Creating a Manager now answers 200 instead of 201. An API client's definition or template write needs a second-step confirmation. Manager prompts and tools are unchanged. ([#487](https://github.com/foolzzz/looper/pull/487))
+
+## [2.13.67] - 2026-10-24
+
+### Changed
+
+- **Lark channel discovery and gate notification settings move to the versioned API.** `channels.status`, `channels.people`, `gate_settings.get` and `gate_settings.update` under `/api/v1/` replace six legacy HTTP methods (`GET /api/channels/{lark|lark_bot}/status`, `GET /api/channels/{lark|lark_bot}/people`, `GET`/`PUT /api/gate-settings`), which are removed; the dashboard uses the new routes. An API client's gate target change needs a second-step confirmation. Manager prompts and tools are unchanged. ([#481](https://github.com/foolzzz/looper/pull/481))
+
+## [2.13.66] - 2026-10-24
+
+### Changed
+
+- **Catalog acquisition moves to the versioned API.** `catalog_sources.import_machine`, `import_mcp`, `upload`, `git_preview`, `git_import`, `create_skill` and `create_mcp` under `/api/v1/` replace seven legacy POST routes (`/api/catalog/import`, `/upload`, `/git/preview`, `/git/import`, `/skills`, `/mcp`, `/mcp/import`), which are removed; the dashboard uses the new routes. Machine and MCP import and MCP creation are operator-only; a client's Git import needs a second-step confirmation and is refused if the repository moved since the preview. Manager prompts and tools are unchanged. ([#484](https://github.com/foolzzz/looper/pull/484))
+
+## [2.13.65] - 2026-10-24
+
+### Changed
+
+- **Task gates, waits, role edits and the task room move to the versioned API.** The gate list and discussion (`ops/gates/*`), `waits.resume`/`waits.cancel`, `tasks.role_update` and `tasks.room_view` under `/api/v1/` replace eight legacy HTTP methods (`GET /api/gates`, `GET`/`POST /api/tasks/{id}/gates/{step}/messages`, `POST .../gates/{step}/end`, `POST .../waits/{step}/{resume|cancel}`, `PUT .../roles/{key}`, `GET .../room`), which are removed; the dashboard and the prompt-evaluation and DSH scripts use the new routes. A gate message posted without an API client is now attributed to the dashboard. Manager prompts and tools are unchanged. ([#474](https://github.com/foolzzz/looper/pull/474))
+
+## [2.13.64] - 2026-10-24
+
+### Added
+
+- **`api` runtime type, first step.** Adds the in-process Model API adapter (OpenAI Responses over an API key, Manager only, no executable) and the registry support it needs: a typed per-adapter role restriction (`RuntimeAdapter.roles`), in-process detection and probing (`RuntimeAdapter.in_process`) and import messages. The adapter is not in `ADAPTERS`, so it cannot be detected, selected or started and users see no change; no prompt or tool changed. Adds the `openai` package as a dependency. ([#478](https://github.com/foolzzz/looper/pull/478))
+
+## [2.13.63] - 2026-10-24
+
+### Documentation
+
+- **API runtime RFC.** Adds the approved RFC for an agent runtime that calls model APIs directly through the official Python SDKs, with the Manager as its first role, and its development schedule (stage 1: `openai` SDK on OpenAI Responses; stage 2: `anthropic` SDK). Documentation only; no code, prompt or tool changes. ([#475](https://github.com/foolzzz/looper/pull/475))
+
+## [2.13.62] - 2026-10-23
+
+### Changed
+
+- **Task configuration, placement, Agent choices and budget continuation move to the versioned API.** `tasks.configure/move/agents/continue` under `/api/v1/` replace four legacy HTTP methods (`PUT /api/tasks/{id}/config`, `PUT /api/tasks/{id}/project`, `POST /api/tasks/{id}/continue`, `PUT /api/tasks/{id}/agents`), which are removed; the dashboard uses the new routes. Closed request schemas reject unknown fields, a failed configuration write is now an error, and continuing a budget-failed task is `high` risk: the confirmation names whether the task's own cap or the project's per-task cap changes and is refused if that scope changed meanwhile. Ending a turn's process tree now finishes cleanup when its preparation is cancelled. Manager prompts and tools are unchanged. ([#467](https://github.com/foolzzz/looper/pull/467))
+
 ## [2.13.61] - 2026-10-23
 
 ### Changed

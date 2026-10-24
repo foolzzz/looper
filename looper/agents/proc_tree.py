@@ -520,11 +520,17 @@ class TurnTree:
 
     async def end(self) -> None:
         """End every process of the tree seen so far and of the tree now, then reap the agent."""
-        await self.stop_ticker()
-        # Exclude reused leaders before a refresh can remember their unrelated children.
-        exclude = await self._reused()
-        await self.refresh(force=True, skip=exclude)
         try:
+            try:
+                await self.stop_ticker()
+                # Exclude reused leaders before a refresh can remember their unrelated children.
+                exclude = await self._reused()
+                await self.refresh(force=True, skip=exclude)
+            except asyncio.CancelledError:
+                # begin_end may already own the exited agent's record. Finish cleanup even when preparation
+                # is cancelled, checking identities again before signalling anything from the saved tree.
+                await self._end_all(await self._reused())
+                raise
             await self._end_all(exclude)
         finally:
             await _reap(self.process, self.label)

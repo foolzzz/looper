@@ -6,7 +6,7 @@ and one task per variant, each in a project of its own:
 - ``none``, ``replan``, ``add``: the Planner plans ``a`` and ``b``, then ``c``
   after both and ``d`` after ``c``; ``c`` fails and the Planner fails the task
   (``a`` and ``b`` verified, ``c`` failed, ``d`` not started). Start (the
-  dashboard's ``POST /api/tasks/start``) goes on from the plan: the Planner's
+  dashboard's ``task_control.restart``) goes on from the plan: the Planner's
   [RESTART] turn answers ``none`` (``c`` and ``d`` run as they are),
   ``replan`` (``c`` gets a new instruction and ``d`` is dropped) or
   ``add_steps`` (``e`` after ``c``);
@@ -29,6 +29,7 @@ run creates and drops a database beside it).
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -209,7 +210,9 @@ def restarted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     init_repository(work["worktree"])
 
     with fresh_database(str(DSN)) as (database_url, _):
-        server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home}
+        # Only the stand-ins and system tools: installed runtimes otherwise get probed at startup.
+        server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home,
+                  "env": {"PATH": f"{bin_dir}{os.pathsep}{os.defpath}"}}
         with running_server(**server, log_path=root / "serve.log") as api:
             ids: dict[str, str] = {}
             for variant in VARIANTS:
@@ -219,9 +222,9 @@ def restarted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
                     project["step_workspaces"] = "worktree"
                 ids[variant] = api.post("/api/tasks/create", {"requirement": f"build calc variant={variant}",
                                                                "project": project})["task_id"]
-                api.post("/api/tasks/start", {"task_id": ids[variant]})
-            with pytest.raises(EvalError, match="answered 400: .*start_over must be true or false"):
-                api.post("/api/tasks/start", {"task_id": ids["none"], "start_over": "yes"})
+                api.post("/api/v1/ops/task_control/start", {"task_id": ids[variant]})
+            with pytest.raises(EvalError, match="answered 400: .*start_over"):
+                api.post("/api/v1/ops/task_control/start", {"task_id": ids["none"], "start_over": "yes"})
 
             # Each task gets to where it ends: failed at c; b running (stopped below); the plan turn (stopped below).
             def ready(variant: str, detail: dict[str, Any]) -> bool:
@@ -234,22 +237,23 @@ def restarted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
 
             _wait(api, ids, ready)
             for variant in ("stop", "worktree", "noplan"):
-                api.post("/api/tasks/stop", {"task_id": ids[variant]})
+                api.post("/api/v1/ops/task_control/stop", {"task_id": ids[variant]})
             before = _wait(api, ids, _ended)
             merged_a = _git(work["worktree"], "log", "--format=%H", "--grep=^looper: merge step a")
             (state / "release-plan").touch()
             # The failed task's Workers run on another profile, and one at a time, from its restart on.
             api.post("/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
                                              "model_id": _builtin_model(api, "sonnet")})
-            agents = api.put(f"/api/tasks/{ids['agents']}/agents", {"profiles": {"worker": "claude-code/sonnet"},
-                                                                     "concurrency": {"worker": 1}})["agents"]
+            agents = api.post("/api/v1/tasks/agents", {"task_id": ids['agents'], "profiles": {"worker": "claude-code/sonnet"},
+                                                                     "concurrency": {"worker": 1}})["result"]["agents"]
 
             for variant in VARIANTS:
-                api.post("/api/tasks/start", {"task_id": ids[variant], "start_over": variant == "startover"})
+                api.post("/api/v1/ops/task_control/" + ("start_over" if variant == "startover" else "restart"),
+                         {"task_id": ids[variant]})
             after = _wait(api, ids, lambda variant, detail: detail["status"] == "completed")
             with pytest.raises(EvalError, match="answered 409: .*the task is completed"):
-                api.put(f"/api/tasks/{ids['agents']}/agents", {"concurrency": {"worker": 2}})
-            activity = {variant: [row["summary"] for row in api.get(f"/api/tasks/{task_id}/activity", limit=500)[
+                api.post("/api/v1/tasks/agents", {"task_id": ids['agents'], "concurrency": {"worker": 2}})
+            activity = {variant: [row["summary"] for row in api.post("/api/v1/tasks/activity", {"task_id": task_id, "since": 0, "limit": 500})["result"][
                 "activity"]] for variant, task_id in ids.items()}
 
     return {"before": before, "after": after, "activity": activity, "state": state, "work": work,

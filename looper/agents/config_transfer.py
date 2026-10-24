@@ -1080,6 +1080,9 @@ class _Importer:
             if row is not None and row["type"] != runtime.type:
                 raise _Skip(f"a {row['type']} runtime has this name here")
             if row is None and runtime.type not in self.builtin_runtimes:
+                if runtime.in_process:
+                    raise _Skip(f"runtimes are built in, and {runtime.label} cannot run here: "
+                                f"{runtime.probe('').error}; then Re-detect it in Settings, Agent Runtimes")
                 raise _Skip(f"runtimes are built in, and {runtime.label} ({runtime.default_executable}) is not on "
                             "this machine: install it, then Re-detect it in Settings, Agent Runtimes")
         except _Skip as exc:

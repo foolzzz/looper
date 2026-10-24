@@ -964,6 +964,7 @@ class Generated:
     path: str
     properties: Mapping[str, Mapping[str, Any]]
     has_body: bool
+    response_media_type: str = "application/json"
 
 
 def generated_operations(document: Mapping[str, Any]) -> list[tuple[str, str, str, str, Generated]]:
@@ -979,9 +980,13 @@ def generated_operations(document: Mapping[str, Any]) -> list[tuple[str, str, st
             schema = (((operation.get("requestBody") or {}).get("content") or {}).get("application/json") or {}
                       ).get("schema")
             properties = schema.get("properties") if isinstance(schema, dict) else None
+            media_types = [media for status, response in (operation.get("responses") or {}).items()
+                           if str(status).startswith("2") for media in response.get("content", {})]
+            media_type = "text/event-stream" if "text/event-stream" in media_types else next(
+                iter(media_types), "application/json")
             found.append((head.replace("_", "-"), tail.replace("_", "-"), operation.get("summary") or "",
                           operation.get("description") or "",
-                          Generated(method.upper(), prefix + path, properties or {}, schema is not None)))
+                          Generated(method.upper(), prefix + path, properties or {}, schema is not None, media_type)))
     return found
 
 
@@ -1066,6 +1071,19 @@ def request_body(args: argparse.Namespace, operation: Generated) -> dict[str, An
 def _run_generated(args: argparse.Namespace, ctx: Context) -> int:
     operation: Generated = args._generated
     body = request_body(args, operation) if operation.method == "POST" else None
+    if operation.response_media_type == "text/event-stream":
+        with contextlib.ExitStack() as cleanup:
+            events = ctx.api().stream(operation.path, body or {})
+            if close := getattr(events, "close", None):
+                cleanup.callback(close)
+            for event, data in events:
+                if event == "answer":
+                    return finish(0, data, ctx.as_json, ctx.session)
+                if ctx.as_json:
+                    print(json.dumps({"event": event, "data": data}, ensure_ascii=False), flush=True)
+                else:
+                    print(f"{event}: {json.dumps(data, ensure_ascii=False)}", flush=True)
+        return EXIT_OK
     status, answer = ctx.api().call(operation.method, operation.path, body)
     return finish(status, answer, ctx.as_json, ctx.session)
 

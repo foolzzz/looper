@@ -581,6 +581,52 @@ def test_a_cancelled_end_reaps_the_agent_and_removes_its_record(
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize("preparation", ["_reused", "refresh"])
+def test_cancelling_tree_preparation_removes_a_gracefully_exited_agents_record(
+    runtime_root: Path, monkeypatch: pytest.MonkeyPatch, preparation: str,
+) -> None:
+    async def _run() -> None:
+        await proc_tree.sweep(runtime_root)
+        process = await proc_tree.spawn("/bin/cat", stdin=asyncio.subprocess.PIPE,
+                                        stdout=asyncio.subprocess.DEVNULL)
+        tree = proc_tree.track(process)
+        record = runtime_root / proc_tree.RECORDS_DIR / f"{process.pid}.json"
+        reached, release = asyncio.Event(), asyncio.Event()
+        original = getattr(tree, preparation)
+
+        async def paused(*args: Any, **kwargs: Any) -> Any:
+            reached.set()
+            await release.wait()
+            return await original(*args, **kwargs)
+
+        ending = None
+        try:
+            await tree.begin_end()
+            assert process.stdin is not None
+            process.stdin.close()
+            await process.wait()
+            await asyncio.gather(*proc_tree._forgetting)
+            assert record.exists()  # the tree's end owns cleanup after begin_end
+            monkeypatch.setattr(tree, preparation, paused)
+            ending = asyncio.create_task(tree.end())
+            await asyncio.wait_for(reached.wait(), 5)
+            ending.cancel()
+            release.set()  # a cleanup retry can finish; the first await is already cancelled
+            with pytest.raises(asyncio.CancelledError):
+                await ending
+            assert process.returncode == 0
+            assert not record.exists()
+            assert process.pid not in proc_tree._ending
+            assert process.pid not in proc_tree._recorded
+        finally:
+            release.set()
+            if ending is not None:
+                await asyncio.gather(ending, return_exceptions=True)
+            await proc_tree.end(process, label="agent")
+
+    asyncio.run(_run())
+
+
 # --- TurnTree: a turn's tree snapshotted at spawn, refreshed, ended from the snapshot ---
 
 _DETACHED_CHILD = (

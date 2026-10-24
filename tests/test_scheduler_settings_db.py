@@ -125,7 +125,7 @@ def test_the_minimum_interval_setting_decides_which_rules_a_schedule_may_have(
         assert status == 400 and "fires 2 minutes apart" in payload["error"]
         await env.ok("PUT", "/api/scheduler-settings", {"min_interval_seconds": 120})
         await env.ok("POST", f"/api/projects/{env.project_id}/schedules", body)
-        limits = (await env.ok("GET", f"/api/projects/{env.project_id}/schedules"))["limits"]
+        limits = (await env.ok("POST", "/api/v1/schedule_admin/project_list", {"project_id": env.project_id}))["limits"]
         assert (limits["min_interval_seconds"], limits["min_interval_gated_seconds"]) == (120, 60)
 
     run_scheduled(test, monkeypatch, tmp_path)
@@ -141,7 +141,7 @@ def test_a_schedule_follows_the_default_has_its_own_timeout_or_none(monkeypatch:
         assert (followed["run_timeout_seconds"], followed["run_timeout_effective_seconds"]) == ("default", None)
         await env.ok("PUT", "/api/scheduler-settings", {"run_timeout_seconds": 900})
         sid = followed["schedule_id"]
-        view = (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]
+        view = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
         assert (view["run_timeout_seconds"], view["run_timeout_effective_seconds"]) == ("default", 900)
 
         own = await env.schedule(run_timeout_seconds=120)
@@ -154,12 +154,12 @@ def test_a_schedule_follows_the_default_has_its_own_timeout_or_none(monkeypatch:
 
         # An update that leaves it out keeps it; each choice can be switched to any other.
         await env.ok("PUT", f"/api/schedules/{own['schedule_id']}", {"name": "renamed"})
-        assert (await env.ok("GET", f"/api/schedules/{own['schedule_id']}"))["schedule"]["run_timeout_seconds"] == 120
+        assert (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": own['schedule_id']}))["schedule"]["run_timeout_seconds"] == 120
         for value, expected in (("default", "default"), (None, None), (45, 45)):
             changed = await env.ok("PUT", f"/api/schedules/{own['schedule_id']}", {"run_timeout_seconds": value})
             assert changed["schedule"]["run_timeout_seconds"] == expected
         # The list of limits tells the form the default.
-        limits = (await env.ok("GET", f"/api/projects/{env.project_id}/schedules"))["limits"]
+        limits = (await env.ok("POST", "/api/v1/schedule_admin/project_list", {"project_id": env.project_id}))["limits"]
         assert limits["run_timeout_default_seconds"] == 900
 
     run_scheduled(test, monkeypatch, tmp_path)
@@ -258,7 +258,7 @@ def test_schedules_from_before_keep_their_meaning(monkeypatch: pytest.MonkeyPatc
         assert [tuple(r.values()) for r in rows] == [("sched-numbered", "seconds", 300), ("sched-unlimited", "none", None)]
         runs = await env.pool.fetch("SELECT id, run_timeout_seconds FROM schedule_runs ORDER BY id")
         assert [tuple(r.values()) for r in runs] == [("run-numbered", 300), ("run-unlimited", None)]
-        view = (await env.ok("GET", "/api/schedules/sched-numbered"))["schedule"]
+        view = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": 'sched-numbered'}))["schedule"]
         assert (view["run_timeout_seconds"], view["run_timeout_effective_seconds"]) == (300, 300)
         # A schedule created afterwards follows the default.
         assert (await env.schedule())["run_timeout_seconds"] == "default"
@@ -300,7 +300,7 @@ def test_an_export_carries_the_scheduler_settings_and_each_schedules_timeout_cho
             await config_transfer.run_import(conn, config_transfer.read_file(path), apply=True)
         view = await env.ok("GET", "/api/scheduler-settings")
         assert (view["min_interval_seconds"]["value"], view["run_timeout_seconds"]["value"]) == (200, 600)
-        got = {s["name"]: s["run_timeout_seconds"] for s in (await env.ok("GET", "/api/schedules"))["schedules"]}
+        got = {s["name"]: s["run_timeout_seconds"] for s in (await env.ok("POST", "/api/v1/schedule_admin/list", {}))["schedules"]}
         assert got == {"follows": "default", "numbered": 90, "unlimited": None}
 
         data["settings"]["scheduler"] = {"min_interval_seconds": 0, "run_timeout_seconds": None, "other": 1}
