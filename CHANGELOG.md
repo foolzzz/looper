@@ -18,6 +18,30 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.74] - 2026-10-24
+
+### Changed
+
+- **Project role templates and role statistics move to the versioned API.** `role_templates.list`, `role_templates.put`, `role_templates.delete` and `project_roles.stats` (`POST /api/v1/<domain>/<action>`) replace four legacy HTTP routes (`GET /api/projects/{id}/role-templates`, `PUT` and `DELETE /api/projects/{id}/role-templates/{key}`, `GET /api/projects/{id}/role-stats`), which are removed. Requests are closed and typed and the answers declare full template, item and statistics definitions. Deleting a template asks for confirmation; task roles already copied from a template keep their content and versions. The dashboard and the prompt-regression runner use the new routes. Manager prompts and tools are unchanged. ([#503](https://github.com/foolzzz/looper/pull/503))
+
+## [2.13.73] - 2026-10-24
+
+### Changed
+
+- **Dashboard task creation goes through the v1 API.** The dashboard now creates tasks with `POST /api/v1/tasks/create`, which uses the shared creation core and keeps the full project and task configuration. The old `POST /api/tasks/create` route is removed; the v1 answer wraps the same fields in `result` and returns 200 instead of 201. An operator's call is not written to the Manager/client action trail; a client that creates a new project must confirm in the same session. The created task is read back and checked, and a mismatch fails with an `unavailable` error. A worker whose Claude process closes stdin early now still releases the input-ready wait. Manager prompts and tools are unchanged. ([#476](https://github.com/foolzzz/looper/pull/476))
+
+## [2.13.72] - 2026-10-24
+
+### Changed
+
+- **v1 domain modules register themselves.** The package imports every public module under `looper/agents/v1_domains/` instead of reading a shared list, so parallel domain changes no longer conflict. An optional integer `ORDER` keeps the OpenAPI order (existing modules have one); a missing export, a bad `ORDER`, or a duplicate operation id or route fails with a named error when the domains load. No operation, route or OpenAPI output changes. Manager prompts and tools are unchanged. ([#495](https://github.com/foolzzz/looper/pull/495))
+
+## [2.13.71] - 2026-10-24
+
+### Changed
+
+- **Schedule definitions, the rule preview, run history and notifications move to the versioned API.** `schedule_admin.list`, `project_list`, `get`, `preview`, `runs` and `notifications` (`POST /api/v1/schedule_admin/<action>`) replace six legacy HTTP routes (`GET /api/schedules`, `GET /api/projects/{id}/schedules`, `GET /api/schedules/{id}`, `POST /api/schedules/preview`, `GET /api/schedules/{id}/runs` and `/notifications`), which are removed; the dashboard and the prompt-regression runner use the new routes. Requests are closed and typed, and the answers declare full Schedule, Run, limits, preview and notification definitions. The schedule write routes and scheduler settings are unchanged. Manager prompts and tools are unchanged. ([#494](https://github.com/foolzzz/looper/pull/494))
+
 ## [2.13.70] - 2026-10-24
 
 ### Changed

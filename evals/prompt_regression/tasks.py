@@ -1083,7 +1083,7 @@ GATE_TASKS: tuple[EvalTask, ...] = (
             "plan": [_step("sA", "Run sleep 20, then create readme.txt containing hello.", ["readme.txt holds hello"]),
                      _SETTINGS_GATE],
             "gate_close_steps": [_write_settings(["g1"])],
-            "attempts": {"sA": [{"status": "completed", "seconds": 3, "files": {"readme.txt": "hello\n"}}],
+            "attempts": {"sA": [{"status": "completed", "seconds": 20, "files": {"readme.txt": "hello\n"}}],
                          "s1": [{"status": "completed",
                                  "files": {"settings.toml": '[service]\nname = "demo"\nport = 8080\n'}}]},
         },

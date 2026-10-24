@@ -62,18 +62,28 @@ def _server(worker_pool: Any = None) -> Any:
 
 async def _call(method: str, path: str, body: Any = None, *, worker_pool: Any = None) -> tuple[int, Any]:
     method, path, body = _global_settings_request(method, path, body)
+    if path == "/api/v1/tasks/create":
+        from tests.test_api_v1_ops_db import _v1
+
+        status, answer = await _v1(method, path, body, ops=ClientOps(SimpleNamespace()))
+        return status, answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
     writer = _Writer()
     raw = b"" if body is None else json.dumps(body).encode()
     server = _server(worker_pool)
     if path == "/api/v1/tasks/agents" or path.startswith(("/api/v1/roles/", "/api/v1/agent_settings/")):
         server._client_ops = ClientOps(SimpleNamespace())
         await server._handle_v1(method, path, {}, {}, raw, writer, api_v1.OPERATOR)
+    elif path.startswith("/api/v1/schedule_admin/"):
+        from looper.agents.api_v1 import OPERATOR
+        await server._handle_v1(method, path, {}, {}, raw, writer, OPERATOR)
     else:
         await server._route_api(method, path, {}, raw, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
     answer = json.loads(payload)
     if path == "/api/v1/tasks/agents" or path.startswith(("/api/v1/roles/", "/api/v1/agent_settings/")):
         answer = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
+    if path.startswith("/api/v1/schedule_admin/") and answer.get("status") == "ok":
+        answer = answer["result"]
     return int(head.split()[1]), answer
 
 
@@ -291,11 +301,11 @@ def test_a_new_task_chooses_its_profiles_by_id_or_name_as_the_agents_endpoint_do
         await _profiles(pool)
 
         async def create(profiles: dict[str, Any]) -> tuple[int, Any]:
-            return await _call("POST", "/api/tasks/create", {"requirement": "r", "project_id": project["id"],
+            return await _call("POST", "/api/v1/tasks/create", {"requirement": "r", "project_id": project["id"],
                                                              "profile_overrides": profiles})
 
-        status, answer = await create({"worker": "Claude-Code/Sonnet", "planner": "agent-sonnet", "reviewer": None})
-        assert status == 201, answer
+        status, answer = await create({"worker": "Claude-Code/Sonnet", "planner": "agent-sonnet"})
+        assert status == 200, answer
         assert dict(await pool.fetch("SELECT role, profile_id FROM task_profile_overrides WHERE task_id = $1",
                                      answer["task_id"])) == {"worker": "agent-sonnet", "planner": "agent-sonnet"}
         # An unknown profile is refused as the agents endpoint refuses it, under the field the request named.

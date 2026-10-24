@@ -23,7 +23,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 
 async def _gone(env: ScheduleEnv, sid: str) -> None:
     """Nothing of the schedule is left, and nothing brought it back."""
-    assert (await env.call("GET", f"/api/schedules/{sid}"))[0] == 404
+    assert (await env.call("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))[0] == 404
     for table in ("schedules", "schedule_runs", "schedule_notifications"):
         assert await env.pool.fetchval(f"SELECT count(*) FROM {table}") == 0, table
 

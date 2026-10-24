@@ -14,13 +14,12 @@ from typing import Any
 
 import pytest
 
-from tests.db_support import DSN, run_db
+from tests.db_support import DSN, call_v1, run_db
 from tests.test_catalog_db import _call as _catalog_call
 from tests.test_ops_tasks_db import _error, _project, _task
 from tests.test_planner_tools_db import _allow, _haiku, _journal, _ops, _Planner
 from tests.test_task_agents_db import _call, _profiles
 from tests.test_task_roles_db import TESTER, _roles_on, _versions
-from tests.test_usage_api_db import _Writer
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -32,23 +31,34 @@ def _templates(answer: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {t["key"]: t for t in answer["templates"]}
 
 
+async def _role_call(action: str, body: dict[str, Any]) -> tuple[int, Any]:
+    from looper.agents.ops.clients import ClientOps
+    from tests.test_task_agents_db import _server
+
+    server = _server()
+    server._client_ops = ClientOps(SimpleNamespace())
+    family = "project_roles" if action == "stats" else "role_templates"
+    return await call_v1(server, f"/api/v1/{family}/{action}", body)
+
+
 async def _put(project: dict[str, Any], key: str, body: dict[str, Any]) -> tuple[int, Any]:
-    return await _call("PUT", f"/api/projects/{project['id']}/role-templates/{key}", body)
+    return await _role_call("put", {"description": "", "harness": None, "profile_id": None, "items": [],
+                                    **body, "project_id": project["id"], "key": key})
 
 
 def test_a_template_is_checked_as_a_task_role_is_and_listed_by_key(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         await _profiles(pool)
         project = await _project(pool)
-        status, answer = await _call("GET", f"/api/projects/{project['id']}/role-templates")
+        status, answer = await _role_call("list", {"project_id": project["id"]})
         assert (status, answer["templates"], answer["role_text_max_chars"]) == (200, [], 8000)
-        assert (await _call("GET", "/api/projects/proj-nope/role-templates"))[0] == 404
+        assert (await _role_call("list", {"project_id": "proj-nope"}))[0] == 404
 
         await _roles_on(pool, project, role_text_max_chars=500)
         refused = [
-            ("security", {**SECURITY, "color": "red"}, "unknown field 'color'"),
+            ("security", {**SECURITY, "color": "red"}, "the request does not match the declared schema"),
             ("Worker", SECURITY, "names a built-in role"),
-            ("security", {**SECURITY, "kind": "plan"}, "kind must be one of"),
+            ("security", {**SECURITY, "kind": "plan"}, "the request does not match the declared schema"),
             ("security", {**SECURITY, "role_prompt": "  "}, "role_prompt is required"),
             ("security", {**SECURITY, "role_prompt": "x" * 501}, "this project allows at most 500"),
             ("security", {**SECURITY, "description": "x" * 301}, "at most 300 characters"),
@@ -57,7 +67,7 @@ def test_a_template_is_checked_as_a_task_role_is_and_listed_by_key(monkeypatch: 
             status, answer = await _put(project, key, body)
             assert status == 400 and message in answer["error"], (key, body, answer)
         assert await pool.fetchval("SELECT count(*) FROM project_role_templates") == 0
-        assert (await _call("PUT", "/api/projects/proj-nope/role-templates/security", SECURITY))[0] == 404
+        assert (await _put({"id": "proj-nope"}, "security", SECURITY))[0] == 404
 
         await _allow(project, "agent-sonnet", "agent-one-off")
         status, answer = await _put(project, "security", {**SECURITY, "profile_id": "claude-code/opus"})
@@ -79,11 +89,11 @@ def test_a_template_is_checked_as_a_task_role_is_and_listed_by_key(monkeypatch: 
         # A profile the list drops afterwards stays on the template, shown as not allowed now.
         await _put(project, "security", {**SECURITY, "profile_id": "agent-sonnet"})
         await _allow(project, "agent-one-off")
-        status, answer = await _call("GET", f"/api/projects/{project['id']}/role-templates")
+        status, answer = await _role_call("list", {"project_id": project["id"]})
         assert _templates(answer)["security"]["profile"]["allowed"] is False
 
-        assert (await _call("DELETE", f"/api/projects/{project['id']}/role-templates/nope"))[0] == 404
-        status, answer = await _call("DELETE", f"/api/projects/{project['id']}/role-templates/tester")
+        assert (await _role_call("delete", {"project_id": project["id"], "key": "nope"}))[0] == 404
+        status, answer = await _role_call("delete", {"project_id": project["id"], "key": "tester"})
         assert status == 200 and list(_templates(answer)) == ["security"]
 
     run_db(test, monkeypatch)
@@ -326,7 +336,7 @@ def test_a_role_names_the_items_installed_for_roles_and_its_runs_load_them(
         status, answer = await _put(project, "notes-review", {**SECURITY, "items": ["notes", "lint"]})
         assert status == 200 and [i["name"] for i in _templates(answer)["notes-review"]["items"]] == ["notes", "lint"]
         assert [i["name"] for i in answer["role_items"]] == sorted(["lint", "notes"])
-        for items, message in ((["plain"], "items: 'plain' is not installed"), ("notes", "items must be a list")):
+        for items, message in ((["plain"], "items: 'plain' is not installed"), ("notes", "the request does not match the declared schema")):
             status, answer = await _put(project, "bad", {**SECURITY, "items": items})
             assert status == 400 and message in answer["error"], answer
         await pool.execute("UPDATE library_installs SET roles = ARRAY['worker'] WHERE item_id = $1", lint)
@@ -335,15 +345,6 @@ def test_a_role_names_the_items_installed_for_roles_and_its_runs_load_them(
         assert await pool.fetchval("SELECT items FROM task_roles WHERE role_key = 'notes-review'") == [notes]
 
     run_db(test, monkeypatch)
-
-
-async def _get(path: str, **query: str) -> tuple[int, Any]:
-    from tests.test_task_agents_db import _server
-
-    writer = _Writer()
-    await _server()._route_api("GET", path, query, b"", writer)
-    head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload)
 
 
 def test_a_projects_role_summary_sums_each_role_across_its_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -373,7 +374,7 @@ def test_a_projects_role_summary_sums_each_role_across_its_tasks(monkeypatch: py
             await run(pool, task_id, f"reviewer-{task_id}-1", "s1", "passed", 0.05)
         await run(pool, "task-a", "worker-task-a-3", "s1", "contract", 0.25, "tester")
 
-        status, answer = await _call("GET", f"/api/projects/{project['id']}/role-stats")
+        status, answer = await _role_call("stats", {"project_id": project["id"]})
         assert status == 200 and answer["tasks"] == 2, answer
         (tester,) = answer["roles"]
         assert (tester["id"], tester["kinds"], tester["tasks"], tester["templates"]) == ("tester", ["work"], 2,
@@ -390,10 +391,10 @@ def test_a_projects_role_summary_sums_each_role_across_its_tasks(monkeypatch: py
         # Only the tasks created since the day given; a day that does not read as one, or no such project.
         await pool.execute("UPDATE tasks SET created_at = now() - interval '10 days' WHERE id = 'task-a'")
         day = (await pool.fetchval("SELECT (now() - interval '1 day')::date")).isoformat()
-        status, answer = await _get(f"/api/projects/{project['id']}/role-stats", since=day)
+        status, answer = await _role_call("stats", {"project_id": project["id"], "since": day})
         assert answer["tasks"] == 1 and answer["roles"][0]["templates"] == []
-        assert (await _get(f"/api/projects/{project['id']}/role-stats", since="soon"))[0] == 400
-        assert (await _call("GET", "/api/projects/proj-nope/role-stats"))[0] == 404
+        assert (await _role_call("stats", {"project_id": project["id"], "since": "soon"}))[0] == 400
+        assert (await _role_call("stats", {"project_id": "proj-nope"}))[0] == 404
 
     run_db(test, monkeypatch)
 

@@ -536,7 +536,7 @@ def run_task(
         project["vault"] = "on"
     before = snapshot(work_dir)
     started = time.monotonic()
-    created = api.post("/api/tasks/create", {"requirement": task.requirement, "project": project})
+    created = api.post("/api/v1/tasks/create", {"requirement": task.requirement, "project": project})["result"]
     task_id = created["task_id"]
     try:
         if task.planner_may_choose:
@@ -546,8 +546,8 @@ def run_task(
         if task.roles_on:
             api.put(f"/api/projects/{created['project_id']}", {"planner_roles": "on"})
         for template in task.role_templates:
-            fields = {k: v for k, v in template.items() if k != "key"}
-            api.put(f"/api/projects/{created['project_id']}/role-templates/{template['key']}", fields)
+            fields = {"description": "", "harness": None, "profile_id": None, "items": [], **template}
+            api.post("/api/v1/role_templates/put", {**fields, "project_id": created["project_id"]})
         gates = _project_user_gates(task, user_gates)
         if gates is not None:
             api.put(f"/api/projects/{created['project_id']}", {"user_gates": gates})

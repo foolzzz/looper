@@ -6,6 +6,8 @@ from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL, _
 from ..message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode
 from ..ops.config import answered
 
+ORDER = 3
+
 _LIMIT = {"type": "integer", "minimum": 1, "maximum": CONCURRENCY_MAX}
 _NULL_LIMIT = {**_LIMIT, "type": ["integer", "null"]}
 _MODE = {"type": "string", "enum": ["append", "replace"]}

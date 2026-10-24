@@ -235,7 +235,7 @@ def test_real_launch_applies_and_records_the_role_mode_in_history(
         used = mode or BUILTIN[role]
         if role == "worker":
             project = (await _ok("POST", "/api/projects", {"name": "calc"}))["project_id"]
-            task = (await _ok("POST", "/api/tasks/create", {
+            task = (await _ok("POST", "/api/v1/tasks/create", {
                 "requirement": "do it", "project_id": project, "work_dir": str(tmp_path / "work")}))["task_id"]
             seen = await _launch("worker", task, tmp_path / "work", tmp_path)
         else:

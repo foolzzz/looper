@@ -130,7 +130,7 @@ def test_api_profile_is_refused_at_other_selection_layers(api, monkeypatch, scop
             if scope == "project-role":
                 path += f"/roles/{role}"
             elif scope == "task":
-                status, payload = await _call("POST", "/api/tasks/create", {
+                status, payload = await _call("POST", "/api/v1/tasks/create", {
                     "requirement": "Check role selection", "project_id": project_id,
                     "profile_overrides": {role: profile["profile_id"]},
                 })

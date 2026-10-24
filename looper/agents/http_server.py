@@ -28,7 +28,7 @@ from ..db.tasks import TaskGroup
 from ..ops_config import OpsConfig
 from . import (
     agent_settings, api_v1, chat_settings, config_imports, config_transfer, gate_service, knowledge,
-    operator_auth, overview, profile_registry, projects, prompt_preview, request_guard, role_api,
+    operator_auth, overview, profile_registry, projects, prompt_preview, request_guard,
     schedules, self_check, vault, wait_service,
 )
 from .broadcast import Broadcaster
@@ -512,11 +512,14 @@ class AgentHTTPServer:
             data = self._v1_body(body)
             if data is None:
                 raise OpError(ErrorCode.INVALID, "the body must be a JSON object")
-            if writer is not None or operation.credential_write or operation.risk in (None, "read"):
+            # Only explicitly declared dashboard operations bypass the operator action trail.
+            if ((principal.kind == "operator" and not operation.audit_operator)
+                    or writer is not None or operation.credential_write
+                    or operation.risk in (None, "read")):
                 arguments = api_v1.validate_arguments(operation.request or {}, data)
                 if writer is not None:
                     return await invoke(domain.stream, arguments, writer)
-                return api_v1.OK, {"status": "ok", "result": await invoke(domain.run, arguments)}
+                return api_v1.OK, {"status": "ok", "result": _serialize(await invoke(domain.run, arguments))}
             if self._client_ops is None:
                 raise OpError(ErrorCode.UNAVAILABLE, "the API is not ready")
 
@@ -803,10 +806,6 @@ class AgentHTTPServer:
     _RE_PROJECT_AGENT_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings$")
     _RE_PROJECT_ROLE_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_PROJECT_ALLOWED_PROFILES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/allowed-profiles$")
-    _RE_PROJECT_ROLE_TEMPLATES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-templates$")
-    _RE_PROJECT_ROLE_STATS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-stats$")
-    _RE_PROJECT_ROLE_TEMPLATE = re.compile(
-        r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-templates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})$")
     _RE_RUNTIME_PROBE = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)/probe$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
     _RE_MODEL = re.compile(r"^/api/models/(model-[a-zA-Z0-9-]+)$")
@@ -817,8 +816,6 @@ class AgentHTTPServer:
     _RE_SCHEDULE = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)$")
     _RE_SCHEDULE_RESET_SESSION = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/reset-planner-session$")
     _RE_SCHEDULE_RUN = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/run$")
-    _RE_SCHEDULE_RUNS = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/runs$")
-    _RE_SCHEDULE_NOTIFICATIONS = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/notifications$")
     _RE_CLIENT = re.compile(r"^/api/clients/(client-[0-9a-f]{12})$")
     _RE_CONFIG_IMPORT = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})$")
     _RE_CONFIG_IMPORT_APPLY = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})/apply$")
@@ -854,8 +851,6 @@ class AgentHTTPServer:
             await self._handle_chat_turn(query, writer)
         elif path == "/api/chat/events" and method == "GET":
             await self._handle_sse_events(query, writer)
-        elif path == "/api/tasks/create" and method == "POST":
-            await self._answer(writer, HTTP_201, lambda: projects.create_task(projects.json_object(body)))
         elif path == "/api/tasks/delete" and method == "POST":
             await self._handle_task_delete(body, writer)
         elif (m := self._RE_TASK_RUNS.match(path)) and method == "GET":
@@ -881,17 +876,9 @@ class AgentHTTPServer:
                 m.group(1), projects.json_object(body)))
         elif (m := self._RE_PROJECT.match(path)) and method == "DELETE":
             await self._answer(writer, HTTP_200, lambda: projects.delete_project(m.group(1)))
-        elif (m := self._RE_PROJECT_SCHEDULES.match(path)) and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: schedules.list_schedules(m.group(1)))
         elif (m := self._RE_PROJECT_SCHEDULES.match(path)) and method == "POST":
             await self._answer(writer, HTTP_201, lambda: schedules.create_schedule(
                 m.group(1), projects.json_object(body)))
-        elif path == "/api/schedules" and method == "GET":
-            await self._answer(writer, HTTP_200, schedules.list_all_schedules)
-        elif path == "/api/schedules/preview" and method == "POST":
-            await self._answer(writer, HTTP_200, lambda: self._preview_schedule(body))
-        elif (m := self._RE_SCHEDULE.match(path)) and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: schedules.get_schedule(m.group(1)))
         elif (m := self._RE_SCHEDULE.match(path)) and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: schedules.update_schedule(
                 m.group(1), projects.json_object(body)))
@@ -901,10 +888,6 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_200, lambda: schedules.reset_planner_session(m.group(1)))
         elif (m := self._RE_SCHEDULE_RUN.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: self._run_schedule_now(m.group(1)))
-        elif (m := self._RE_SCHEDULE_RUNS.match(path)) and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: schedules.list_runs(m.group(1), query))
-        elif (m := self._RE_SCHEDULE_NOTIFICATIONS.match(path)) and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: schedules.list_notifications(m.group(1), query))
         elif (m := self._RE_PROJECT_KNOWLEDGE.match(path)) and method == "GET":
             await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.knowledge_view(m.group(1), root))
         elif (m := self._RE_PROJECT_KNOWLEDGE.match(path)) and method == "POST":
@@ -988,15 +971,6 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_ALLOWED_PROFILES.match(path)) and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: projects.set_allowed_profiles(
                 m.group(1), projects.json_object(body)))
-        elif (m := self._RE_PROJECT_ROLE_STATS.match(path)) and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: role_api.role_stats(m.group(1), query.get("since")))
-        elif (m := self._RE_PROJECT_ROLE_TEMPLATES.match(path)) and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: role_api.templates_view(m.group(1)))
-        elif (m := self._RE_PROJECT_ROLE_TEMPLATE.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: role_api.put_template(
-                m.group(1), m.group(2), projects.json_object(body)))
-        elif (m := self._RE_PROJECT_ROLE_TEMPLATE.match(path)) and method == "DELETE":
-            await self._answer(writer, HTTP_200, lambda: role_api.delete_template(m.group(1), m.group(2)))
         elif (m := self._RE_PROJECT_ROLE_SETTINGS.match(path)) and method == "PUT":
             await self._handle_agent_settings(writer, lambda: self._write_layer(
                 body, lambda data: agent_settings.update_project(m.group(1), data, role=m.group(2))))
@@ -1185,9 +1159,6 @@ class AgentHTTPServer:
             summary=f"Discarded a step worktree from the task page: branch {workspace.branch} and its directory "
                     "removed"[:500])
         return {"workspace": workspace.view()}
-
-    async def _preview_schedule(self, body: bytes) -> dict[str, Any]:
-        return schedules.preview(projects.json_object(body))
 
     async def _run_schedule_now(self, schedule_id: str) -> dict[str, Any]:
         if self._scheduler is None:
