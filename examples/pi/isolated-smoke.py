@@ -508,7 +508,7 @@ asyncio.run(check())
         channels = request(base, "/api/v1/channel_configs/list", token, "POST", {})["result"]["configs"]
         assert {c["channel_type"] for c in channels} >= {"telegram", "lark", "lark_bot"}
         assert all(not c["enabled"] for c in channels if c["channel_type"] in ("telegram", "lark", "lark_bot"))
-        probe = request(base, "/api/runtimes/rt-pi/probe", token, "POST", {})
+        probe = request(base, "/api/v1/runtimes/probe", token, "POST", {"runtime_id": "rt-pi"})["result"]
         assert not probe["runtime"]["probe_error"], "pi probe failed"
         provider = request(base, "/api/providers", token, "POST", {
             "name": "isolated-smoke", "vendor_type": "custom",
@@ -531,7 +531,7 @@ asyncio.run(check())
         for role in ROLES:
             assert settings["roles"][role]["values"]["profile_id"] == profile_id
             assert settings["roles"][role]["effective"]["profile"]["value"]["profile_id"] == profile_id
-        registry = request(base, "/api/registry", token)
+        registry = request(base, "/api/v1/registry/view", token, "POST", {})["result"]
         saved = next(p for p in registry["profiles"] if p["profile_id"] == profile_id)
         assert saved["runtime_type"] == "pi"
         assert set(saved["roles"]) == set(ROLES)

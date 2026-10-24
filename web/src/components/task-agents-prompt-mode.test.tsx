@@ -37,8 +37,8 @@ describe("a task's system prompt mode", () => {
         bodies.push(JSON.parse(String(init.body)));
         return Response.json({ status: "ok", result: { task_id: "task-1", agents: savedAgents } });
       }
-      if (input === "/api/registry") {
-        return Response.json({ profiles: [], runtimes: [], providers: [], runtime_types: [], limits: {} });
+      if (input === "/api/v1/registry/view") {
+        return Response.json({ status: "ok", result: { profiles: [], runtimes: [], providers: [], runtime_types: [], limits: {} } });
       }
       throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${input}`);
     }));
@@ -68,7 +68,7 @@ describe("a task's system prompt mode", () => {
   });
 
   it("is text only once the task has completed", async () => {
-    const fetcher = vi.fn(async () => Response.json({ profiles: [], runtimes: [], providers: [], runtime_types: [], limits: {} }));
+    const fetcher = vi.fn(async () => Response.json({ status: "ok", result: { profiles: [], runtimes: [], providers: [], runtime_types: [], limits: {} } }));
     vi.stubGlobal("fetch", fetcher);
     const container = document.createElement("div");
     document.body.append(container);
@@ -76,7 +76,7 @@ describe("a task's system prompt mode", () => {
     await act(async () => root.render(<TaskAgentsSection taskId="task-1" agents={agents(false)} onSaved={() => {}} />));
     expect(container.querySelector("select[id$='-mode']")).toBeNull();
     expect(container.textContent).toContain("Replace the runtime's prompt");
-    expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/registry");
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/v1/registry/view", expect.objectContaining({ method: "POST", body: "{}" }));
     act(() => root.unmount());
     container.remove();
   });

@@ -48,7 +48,7 @@ let warnings: string[];
 beforeEach(() => {
   data = registry(); bodies = []; failure = ""; warnings = [];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (String(input) === "/api/registry") return Response.json(data);
+    if (String(input) === "/api/v1/registry/view") return Response.json({ status: "ok", result: data });
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     bodies.push(body);
     if (failure) return Response.json({ error: failure }, { status: 409 });

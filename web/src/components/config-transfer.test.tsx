@@ -44,8 +44,8 @@ describe("configuration import", () => {
     vi.stubGlobal("confirm", vi.fn(() => true));
     fetcher = vi.fn<typeof fetch>(async (input, init) => {
       const url = String(input);
-      if (url === "/api/registry") {
-        return Response.json({ models: [{ name: imported ? "Imported model" : "Existing model" }] });
+      if (url === "/api/v1/registry/view") {
+        return Response.json({ status: "ok", result: { models: [{ name: imported ? "Imported model" : "Existing model" }] } });
       }
       if (url === "/api/config/imports") {
         return Response.json({
@@ -163,14 +163,14 @@ describe("configuration import", () => {
     await show(true);
     expect([...container.querySelectorAll("output")].map((item) => item.textContent)).toEqual(["Existing model", "Existing model"]);
     await upload();
-    expect(fetcher.mock.calls.filter(([url]) => url === "/api/registry")).toHaveLength(1);
+    expect(fetcher.mock.calls.filter(([url]) => url === "/api/v1/registry/view")).toHaveLength(1);
     await click("Apply 3 changes");
     expect(onImported).toHaveBeenCalledTimes(1);
-    expect(fetcher.mock.calls.filter(([url]) => url === "/api/registry")).toHaveLength(2);
+    expect(fetcher.mock.calls.filter(([url]) => url === "/api/v1/registry/view")).toHaveLength(2);
     expect([...container.querySelectorAll("output")].map((item) => item.textContent)).toEqual(["Imported model", "Imported model"]);
     await show(true, 3);
     expect([...container.querySelectorAll("output")].every((item) => item.textContent === "Imported model")).toBe(true);
-    expect(fetcher.mock.calls.filter(([url]) => url === "/api/registry")).toHaveLength(2);
+    expect(fetcher.mock.calls.filter(([url]) => url === "/api/v1/registry/view")).toHaveLength(2);
     expect(fetcher.mock.calls.some(([url, init]) => String(url).endsWith("/apply") && init?.body !== undefined)).toBe(false);
   });
 
@@ -192,11 +192,11 @@ describe("configuration import", () => {
     expect(container.querySelector('[role="status"]')).toBeNull();
     expect(button("Apply 3 changes").disabled).toBe(false);
     expect(onImported).not.toHaveBeenCalled();
-    expect(fetcher.mock.calls.filter(([url]) => url === "/api/registry")).toHaveLength(1);
+    expect(fetcher.mock.calls.filter(([url]) => url === "/api/v1/registry/view")).toHaveLength(1);
     await click("Apply 3 changes");
     expect(container.querySelector('[role="alert"]')).toBeNull();
     expect(onImported).toHaveBeenCalledTimes(1);
-    expect(fetcher.mock.calls.filter(([url]) => url === "/api/registry")).toHaveLength(2);
+    expect(fetcher.mock.calls.filter(([url]) => url === "/api/v1/registry/view")).toHaveLength(2);
   });
 
   it("leaves the preview pending when confirmation is declined and cancels it on request", async () => {
