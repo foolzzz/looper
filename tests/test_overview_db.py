@@ -301,9 +301,10 @@ def test_a_planning_or_verifying_task_is_active_for_the_sidebar_and_the_delete_g
             "planning": "in_progress", "verifying": "in_progress", "executing": "in_progress", "pending": "in_progress",
             "init": "ready", "completed": "completed"}
 
-        server, writer = _server(), _Writer()
-        await server._route_api("POST", "/api/tasks/delete", {}, json.dumps({"task_id": "planning"}).encode(), writer)
-        assert writer.data.startswith(b"HTTP/1.1 400") and b"stop the task before deleting" in writer.data
+        from tests.test_continue_at_cap_db import _call
+
+        status, body = await _call(_server(), "POST", "/api/v1/tasks/delete", {"task_id": "planning"})
+        assert status == 400 and "stop the task before deleting" in body["error"]
         assert await pool.fetchval("SELECT count(*) FROM tasks WHERE id = 'planning'") == 1
 
     run_db(test, monkeypatch)

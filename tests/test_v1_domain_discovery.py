@@ -17,6 +17,12 @@ def test_discovery_finds_exactly_the_public_domain_modules():
     assert set(domains) == {importlib.import_module(f"{v1_domains.__name__}.{name}") for name in names}
 
 
+def test_task_workspace_operations_keep_their_order_in_openapi():
+    expected = ["tasks.create", "tasks.delete", "workspaces.check", "workspaces.discard"]
+    assert [op["operationId"] for item in api_v1.document()["paths"].values()
+            for op in item.values() if op["operationId"] in expected] == expected
+
+
 def test_discovered_operations_appear_in_openapi_exactly_once():
     operations = api_v1.operations()
     assert len({op.operation_id for op in operations}) == len(operations)

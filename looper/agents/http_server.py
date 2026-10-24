@@ -790,6 +790,7 @@ class AgentHTTPServer:
     _RE_TASK_DETAIL = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)$")
     _RE_ROLE_CONFIG = re.compile(r"^/api/roles/([a-zA-Z0-9_-]+)$")
     _RE_ROLE_CONFIG_RESET = re.compile(r"^/api/roles/([a-zA-Z0-9_-]+)/reset-prompt$")
+    _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
     _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
     _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
@@ -830,14 +831,8 @@ class AgentHTTPServer:
             await self._handle_chat_send(body, writer)
         elif path == "/api/chat/events" and method == "GET":
             await self._handle_sse_events(query, writer)
-        elif path == "/api/tasks/delete" and method == "POST":
-            await self._handle_task_delete(body, writer)
-        elif (m := self._RE_TASK_WORKSPACE_DISCARD.match(path)) and method == "POST":
-            await self._answer(writer, HTTP_200, lambda: self._discard_workspace(m.group(1), int(m.group(2))))
         elif (m := self._RE_TASK_DETAIL.match(path)) and method == "GET":
             await self._handle_task_detail(m.group(1), writer)
-        elif path == "/api/workspaces/check" and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: projects.check_workspace(query))
         elif path == "/api/projects" and method == "GET":
             await self._handle_list_projects(writer)
         elif path == "/api/projects" and method == "POST":
@@ -1427,36 +1422,16 @@ class AgentHTTPServer:
                            "status": updated.get("status", "")})
 
 
-    async def _handle_task_delete(
-        self, body: bytes, writer: asyncio.StreamWriter
-    ) -> None:
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
-            await writer.drain()
-            return
-
-        task_id = data.get("task_id", "").strip()
-        if not task_id:
-            writer.write(_json_response(HTTP_400, {"error": "task_id is required"}))
-            await writer.drain()
-            return
-
+    async def _delete_task(self, task_id: str) -> dict[str, Any]:
+        """Delete a stopped task, preserving the established workspace/session cleanup order."""
         from ..db.tasks import ACTIVE_STATUSES, delete_task, get_task
 
+        task_id = task_id.strip()
         task = await get_task(task_id)
         if task is None:
-            writer.write(_json_response(HTTP_404, {"error": "task not found"}))
-            await writer.drain()
-            return
-
+            raise projects.RequestError(HTTP_404, "task not found")
         if task.get("status", "") in ACTIVE_STATUSES:
-            writer.write(
-                _json_response(HTTP_400, {"error": "stop the task before deleting"})
-            )
-            await writer.drain()
-            return
+            raise projects.RequestError(HTTP_400, "stop the task before deleting")
 
         from . import step_workspaces, task_workspaces
         try:
@@ -1467,15 +1442,13 @@ class AgentHTTPServer:
             # After the steps' worktrees, which are of the task's: what it left goes onto its branch, which stays.
             await task_workspaces.finish(task_id, deleted=True)
         except task_workspaces.TaskWorkspaceError as exc:
-            writer.write(_json_response(HTTP_409, {"error": f"the task's worktree was kept, so nothing is lost: {exc}"}))
-            await writer.drain()
-            return
+            raise projects.RequestError(
+                HTTP_409, f"the task's worktree was kept, so nothing is lost: {exc}") from None
         if self._runtime_root is not None:
             from .room import remove_run_sessions
             remove_run_sessions(self._runtime_root, task_id)
         await delete_task(task_id)
-        writer.write(_json_response(HTTP_200, {"deleted": task_id}))
-        await writer.drain()
+        return {"deleted": task_id}
 
     # --- Task detail handlers ---
 
