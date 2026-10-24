@@ -37,7 +37,7 @@ def test_light_and_manager_seeds_register_model_references_once():
     second = dialogs._manager_profile(api, "sonnet", "high")
     assert first == second
     assert len(api.registry["models"]) == 2
-    assert [path for path, _ in api.posts] == ["/api/v1/ops/models/create", "/api/agent-profiles"] * 2
+    assert [path for path, _ in api.posts] == ["/api/v1/ops/models/create", "/api/v1/profiles/create"] * 2
     assert api.settings[-1] == ("/api/v1/agent_settings/update_role", {"role": "manager", "values": {"profile_id": first["profile_id"]}})
 
 
@@ -49,7 +49,7 @@ def test_light_and_manager_profiles_share_an_existing_model_without_copying_it()
     dialogs._make_light_profile(api, "project-test")
     manager = dialogs._manager_profile(api, "haiku", "high")
     assert manager["model_id"] == model_id
-    assert [path for path, _ in api.posts] == ["/api/agent-profiles"]
+    assert [path for path, _ in api.posts] == ["/api/v1/profiles/create"]
 
 
 def test_model_dialog_fake_scripts_use_the_registered_tool_schemas():

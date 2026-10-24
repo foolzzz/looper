@@ -242,8 +242,8 @@ def restarted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             merged_a = _git(work["worktree"], "log", "--format=%H", "--grep=^looper: merge step a")
             (state / "release-plan").touch()
             # The failed task's Workers run on another profile, and one at a time, from its restart on.
-            api.post("/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
-                                             "model_id": _builtin_model(api, "sonnet")})
+            api.post("/api/v1/profiles/create", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
+                                             "model_id": _builtin_model(api, "sonnet")})["result"]
             agents = api.post("/api/v1/tasks/agents", {"task_id": ids['agents'], "profiles": {"worker": "claude-code/sonnet"},
                                                                      "concurrency": {"worker": 1}})["result"]["agents"]
 

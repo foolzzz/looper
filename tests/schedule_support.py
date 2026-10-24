@@ -69,9 +69,12 @@ class ScheduleEnv(SimpleNamespace):
         server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                                  task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())),
                                  scheduler=self.scheduler)
+        from tests.runtime_model_helpers import profile_request
+
+        method, path, body = profile_request(method, path, body)
         writer = _Writer()
         raw = b"" if body is None else json.dumps(body).encode()
-        if path.startswith(("/api/v1/schedule_admin/", "/api/v1/ops/models/")):
+        if path.startswith(("/api/v1/profiles/", "/api/v1/schedule_admin/", "/api/v1/ops/models/")):
             from looper.agents.api_v1 import OPERATOR
             from looper.agents.ops.clients import ClientOps
             server._client_ops = ClientOps(SimpleNamespace())
@@ -80,8 +83,10 @@ class ScheduleEnv(SimpleNamespace):
             await server._route_api(method, path, query or {}, raw, writer)
         head, _, payload = writer.data.partition(b"\r\n\r\n")
         answer = json.loads(payload)
-        if path.startswith(("/api/v1/schedule_admin/", "/api/v1/ops/models/")) and answer.get("status") == "ok":
+        if path.startswith(("/api/v1/profiles/", "/api/v1/schedule_admin/", "/api/v1/ops/models/")) and answer.get("status") == "ok":
             answer = answer["result"]
+        if path.startswith("/api/v1/profiles/") and "error" in answer:
+            answer = {"error": answer["error"]["message"]}
         return int(head.split()[1]), answer
 
     async def ok(self, method: str, path: str, body: Any = None) -> Any:

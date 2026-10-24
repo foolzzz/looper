@@ -2734,9 +2734,9 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
             model = api.post("/api/v1/ops/models/create", {
                 "provider": provider, "name": "deepseek-flash", "protocol": "anthropic-messages",
             })["result"]["model"]["model_id"]
-            profile = api.post("/api/agent-profiles", {
+            profile = api.post("/api/v1/profiles/create", {
                 "name": "disposable-dsh", "runtime_id": "rt-dsh", "model_id": model, "effort": "high",
-            })["profile"]["profile_id"]
+            })["result"]["profile"]["profile_id"]
             for role in ("manager", "planner", "worker", "reviewer"):
                 api.post("/api/v1/agent_settings/update_role", {"role": role, "values": {"profile_id": profile}})
             settings = api.post("/api/v1/agent_settings/get", {})["result"]

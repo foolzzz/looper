@@ -164,8 +164,8 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     with fresh_database(str(DSN)) as (database_url, _):
         server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home}
         with running_server(**server, log_path=root / "serve.log") as api:
-            sonnet = api.post("/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
-                                                      "model_id": _builtin_model(api, "sonnet")})
+            sonnet = api.post("/api/v1/profiles/create", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
+                                                      "model_id": _builtin_model(api, "sonnet")})["result"]
             ids: dict[str, str] = {}
             for variant in VARIANTS:
                 work = root / f"work-{variant}"
