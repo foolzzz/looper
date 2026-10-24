@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.87] - 2026-10-24
+
+### Changed
+
+- **Model management in the dashboard goes through v1.** Adding, editing and deleting a saved model call the existing `models.create`, `models.update` and `models.delete` operations (`/api/v1/ops/models/...`; the provider is passed as `provider`), and a new `models.get` operation (`POST /api/v1/models/get`, risk `read`) reads one saved model with its settings, prices, usage and warnings. Model results are typed in the OpenAPI document. Manager prompts and tools are unchanged. ([#537](https://github.com/foolzzz/looper/pull/537))
+
+### Removed
+
+- **The legacy model routes:** `GET /api/models`, `POST /api/models`, `GET /api/models/<id>`, `PUT /api/models/<id>` and `DELETE /api/models/<id>`. Use the `models` operations. ([#537](https://github.com/foolzzz/looper/pull/537))
+
 ## [2.13.86] - 2026-10-24
 
 ### Changed
