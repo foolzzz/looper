@@ -2361,7 +2361,9 @@ def test_dsh_installed_tool_free_consult_counts_all_requests_and_refuses_auxilia
                 await process.wait()
                 await stderr
 
-        asyncio.run(asyncio.wait_for(run(), 30))
+        # This checks consult accounting and permissions, not installed CLI startup latency.
+        # Match the 120-second process watchdog used by the installed DSH helper (_finish).
+        asyncio.run(asyncio.wait_for(run(), 120))
         assert len(server.requests) == 4  # one original request, three consult steps; no auxiliary calls
         assert not (tmp_path / "escaped.txt").exists()
         assert _tree_bytes(tmp_path / "owner") == source

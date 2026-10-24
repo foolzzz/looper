@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import copy
 import functools
-import importlib
 import math
 import re
 from collections.abc import Mapping, Sequence
@@ -332,10 +331,10 @@ def operations(tools: Sequence[Tool] | None = None) -> list[Operation]:
 
 @functools.cache
 def domains() -> tuple[Any, ...]:
-    """Load after Operation and schema helpers exist; registry order is explicit."""
-    from .v1_domains import MODULES
+    """Load discovered domains after Operation and schema helpers exist."""
+    from .v1_domains import _DOMAINS
 
-    return tuple(importlib.import_module(f"{__package__}.v1_domains.{name}") for name in MODULES)
+    return _DOMAINS
 
 
 def domain_for(operation: Operation) -> Any | None:
