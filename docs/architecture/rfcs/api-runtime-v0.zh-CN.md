@@ -79,14 +79,15 @@
 
 以后 norma（M9d）若以 Python 的形式接入，可以作为 `AgentLoop` 的另一种实现，`ApiSession`、provider 绑定和管家都不用改。这是可能的后续阶段，不在本文范围内。
 
-**适配器**（`looper/agents/runtimes/api.py`，名字暂定）：
+**适配器**（`looper/agents/runtimes/api/adapter.py`，阶段 1 第 1 步已实现，尚未加入 `ADAPTERS`）：
 
-- `type = "api"`，`label = "Model API (SDK)"`；`protocols = {openai-responses}`，第二阶段加 `anthropic-messages`；`auth_kinds = {api_key}`；`capabilities = {resident_session, resume}`；`can_interrupt = True`。
+- `type = "api"`，`label = "Model API (SDK)"`；`protocols = {openai-responses}`，第二阶段加 `anthropic-messages`；`auth_kinds = {api_key}`；`capabilities = {resident_session, resume}`；`roles = {manager}` 限定只跑管家；`in_process = True`；`can_interrupt = False`，第 5 步接好停止后再改为 `True`。
 - `can_replace_system_prompt = True`：这个运行时没有自带的提示，追加和替换得到的是同一份文本，记录里照写所选的模式。
-- 没有可执行文件：`probe` 只导入 SDK、读版本。`_detect`（`profile_registry.py:1119`）对这种类型不查 PATH，SDK 能导入就登记 `rt-api`。
+- 没有可执行文件：`probe` 只用 `importlib.metadata.version("openai")` 读包版本，不导入 SDK、不请求模型。`_detect` 对进程内类型不查 PATH，包已安装时才登记 `rt-api`；缺包时说明需要重装 Looper。`openai>=3.37,<4` 是普通依赖，SDK 只在这个运行时的函数内延迟导入。
 - `bind_provider` 只接 API key，把 key 放进 `ProviderBinding.env` 的 `LOOPER_PROVIDER_API_KEY`，与 Codex、OMP 一样，不进 argv、记录和日志。
 - `resident_command` 返回一行描述（`looper-api --protocol … --model … --base-url … --system-prompt-file …`，续接时加 `--session <id>`），给运行记录、Runs 页和重启签名用，由 `ApiSession` 自己解析，里面没有 key。
 - `run_command`、`write_turn`、`parse` 这些 CLI 方法抛 `RuntimeUnsupported`。
+- 当前 `resident_session` 也拒绝启动；第 3 步实现 `ApiSession` 后才开放注册，描述行不会交给子进程。
 - `environment(launch)` 只返回绑定的变量，不含 `child_env.inherited()`。这个字典只交给 `ApiSession.start`，不用来起子进程。
 - `launch_record` 列出没有加载的条目：skill、插件、目录里的 MCP。
 
@@ -337,7 +338,7 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 
 | 步 | 内容 | 依赖 | 完成时 |
 |---|---|---|---|
-| 1 | 运行时类型与 Profile、provider 接线：`api` 适配器、类型化的角色限制、按 SDK 检测、只接 API key 的 Responses 绑定、描述行；`openai` 依赖 | — | 适配器先不进 `ADAPTERS`，用户看不到；注册表的角色限制与无可执行文件的检测有测试 |
+| 1 | 运行时类型与 Profile、provider 接线：`api` 适配器、类型化的角色限制、按 SDK 检测、只接 API key 的 Responses 绑定、描述行；`openai` 依赖 | — | 本分支已实现；适配器不进 `ADAPTERS`，用户看不到；注册表的角色限制与无可执行文件的检测有测试 |
 | 2 | 协议无关的循环与 Responses 编解码器：`AgentLoop`、`ProtocolCodec`、重试与超时、请求上限、错误分类、每次请求的用量；本地假 Responses 服务 | 1 | 不接管家；循环在假服务上跑通文本、工具循环和各种错误 |
 | 3 | 管家跑在 `api` 上：`ApiSession`、进程内平台工具（`TurnTools` → `ManagerOps.call`，与 MCP 桥给出的文本和留痕一致）、单条工具结果上限、内部事件翻译、管家的改动、运行时说明、软上限；适配器进 `ADAPTERS` | 1、2 | 管家能在 `api` Profile 上回答、调工具、两步确认；会话只在进程内，重启后走续接失败的现有路径；停止仍被拒绝 |
 | 4 | 会话表与续接、上下文换会话：`api_session_items`、跨重启续接、协议不同不续接、半轮补齐、会话丢弃后删除；`SwitchReason.CONTEXT_FULL`、阈值、第一次请求超限时重跑 | 3 | 重启后接着同一会话；长会话按 D6 交接换新 |
