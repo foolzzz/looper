@@ -418,10 +418,9 @@ export interface ChatTargetInfo {
 }
 
 export async function fetchChatTargets(): Promise<ChatTargetInfo[]> {
-  const res = await fetch(`${API_BASE}/chat/targets`);
-  if (!res.ok) throw new Error(`chat targets ${res.status}`);
-  const data = await res.json();
-  return data.targets ?? [];
+  const result = await callV1<{ targets: ChatTargetInfo[] }>("/api/v1/operator_chat/targets", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.targets;
 }
 
 export async function sendChat(
@@ -589,10 +588,9 @@ export class ForeignConversationError extends Error {
   }
 }
 
-async function foreignConversation(res: Response): Promise<ForeignConversationError | null> {
-  if (res.status !== 409) return null;
-  const data = await res.json().catch(() => ({}));
-  return new ForeignConversationError(data.error || "this conversation belongs to another Manager", data.manager_id ?? "");
+function foreignConversation(error: unknown): ForeignConversationError | null {
+  if (!(error instanceof V1Error) || error.status !== 409 || typeof error.details?.manager_id !== "string") return null;
+  return new ForeignConversationError(error.message, error.details.manager_id);
 }
 
 /** A session's newest messages (up to 200), oldest first. With `managerId`, a session of another Manager is a
@@ -602,13 +600,15 @@ export async function fetchChatMessages(
   signal?: AbortSignal,
   managerId?: string,
 ): Promise<DbChatMessage[]> {
-  const owner = managerId ? `&manager=${encodeURIComponent(managerId)}` : "";
-  const res = await fetch(`${API_BASE}/chat/messages?session_id=${encodeURIComponent(sessionId)}${owner}`, { signal });
-  const foreign = await foreignConversation(res);
-  if (foreign) throw foreign;
-  if (!res.ok) return [];
-  const data = await res.json();
-  return data.messages || [];
+  try {
+    const result = await callV1<{ messages: DbChatMessage[] }>("/api/v1/operator_chat/messages", {
+      session_id: sessionId, ...(managerId ? { manager: managerId } : {}),
+    }, { signal });
+    if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+    return result.messages;
+  } catch (error) {
+    throw foreignConversation(error) ?? error;
+  }
 }
 
 /** One of the Manager's conversations on any channel, for the Chat page's conversation list (Planner threads are
@@ -626,11 +626,10 @@ export interface ChatSession {
 }
 
 export async function fetchChatSessions(managerId = "manager", signal?: AbortSignal): Promise<ChatSession[]> {
-  const query = managerId === "manager" ? "" : `?manager=${encodeURIComponent(managerId)}`;
-  const res = await fetch(`${API_BASE}/chat/sessions${query}`, { signal });
-  if (!res.ok) await failed(res, "list conversations");
-  const data = await res.json();
-  return data.sessions ?? [];
+  const result = await callV1<{ sessions: ChatSession[] }>("/api/v1/operator_chat/sessions",
+    managerId === "manager" ? {} : { manager: managerId }, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.sessions;
 }
 
 /** One conversation by its id, however long ago it was active (null when it has no messages: a new one): the list holds
@@ -640,13 +639,15 @@ export async function fetchChatSession(
   managerId = "manager",
   signal?: AbortSignal,
 ): Promise<ChatSession | null> {
-  const owner = managerId === "manager" ? "" : `&manager=${encodeURIComponent(managerId)}`;
-  const res = await fetch(`${API_BASE}/chat/sessions?session_id=${encodeURIComponent(sessionId)}${owner}`, { signal });
-  const foreign = await foreignConversation(res);
-  if (foreign) throw foreign;
-  if (!res.ok) await failed(res, "load the conversation");
-  const data = await res.json();
-  return data.sessions?.[0] ?? null;
+  try {
+    const result = await callV1<{ sessions: ChatSession[] }>("/api/v1/operator_chat/sessions", {
+      session_id: sessionId, ...(managerId === "manager" ? {} : { manager: managerId }),
+    }, { signal });
+    if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+    return result.sessions[0] ?? null;
+  } catch (error) {
+    throw foreignConversation(error) ?? error;
+  }
 }
 
 /** How long a dropped chat watch waits before it reconnects. */
@@ -691,11 +692,9 @@ export async function saveChatMessage(params: {
   role: string;
   content: string;
 }): Promise<void> {
-  await fetch(`${API_BASE}/chat/messages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(params),
-  }).catch(() => {});
+  const result = await callV1<{ ok: boolean }>("/api/v1/operator_chat/save_message", params);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  if (!result.ok) throw new V1Error(503, "unavailable", "The message could not be saved.");
 }
 
 export async function cancelTask(taskId: string): Promise<void> {
@@ -4067,16 +4066,6 @@ export interface ManagerFields {
   task_scope?: TaskScope;
   task_policy?: TaskPolicy;
   enabled?: boolean;
-}
-
-async function managerJson<T>(url: string, method: string, body: unknown | undefined, label: string): Promise<T> {
-  const res = await fetch(url, {
-    method,
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!res.ok) await failed(res, label);
-  return res.json();
 }
 
 /** A token for an agent or script that uses Looper through loopercli; the token itself is never listed. */

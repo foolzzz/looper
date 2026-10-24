@@ -418,13 +418,14 @@ class RecordingApi:
         self.gets.append((path, query))
         if path == "/api/v1/runs/list":
             return {"records": []}
-        if path == "/api/chat/messages":
-            return {"messages": [{"message_id": self.posts[-1][1]["message_id"] + ":reply", "content": "ok"}]}
         raise AssertionError(path)
 
     def post(self, path, body):
         if path.startswith("/api/v1/runs/"):
             return {"status": "ok", "result": self.get(path, **body)}
+        if path == "/api/v1/operator_chat/messages":
+            return {"status": "ok", "result": {"messages": [
+                {"message_id": self.posts[-1][1]["message_id"] + ":reply", "content": "ok"}]}}
         self.posts.append((path, body))
         return {"result": {"turn": None}} if path == "/api/v1/operator_chat/turn" else {}
 

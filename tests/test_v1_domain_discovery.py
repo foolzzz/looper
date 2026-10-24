@@ -1,8 +1,9 @@
-"""Domain discovery and the expected OpenAPI operation order."""
+"""Domain discovery, OpenAPI operation order and registration invariants."""
 
 import importlib
 import pkgutil
 import sys
+from collections import Counter
 
 import pytest
 
@@ -35,19 +36,35 @@ manager_session.get manager_session.select_profile operator_chat.turn operator_c
 chat_settings.get chat_settings.update
 clients.list clients.create clients.revoke
 config.import_upload config.import_cancel
+operator_chat.targets operator_chat.sessions operator_chat.messages operator_chat.save_message
 project_roles.stats role_templates.list role_templates.put role_templates.delete
 runs.for_task runs.list runs.get runs.events runs.usage
 tasks.create
 """.split()
 
 
-def test_discovery_finds_every_current_domain():
+def test_discovery_finds_exactly_the_public_domain_modules():
     names = {info.name for info in pkgutil.iter_modules(v1_domains.__path__) if not info.name.startswith("_")}
     assert set(v1_domains.MODULES) == names
     domains = api_v1.domains()
     assert tuple(domain.__name__.rsplit(".", 1)[-1] for domain in domains) == v1_domains.MODULES
-    assert all(domain is importlib.import_module(f"{v1_domains.__name__}.{name}")
-               for name, domain in zip(v1_domains.MODULES, domains))
+    assert len(domains) == len(names)
+    assert set(domains) == {importlib.import_module(f"{v1_domains.__name__}.{name}") for name in names}
+
+
+def test_discovered_operations_appear_in_openapi_exactly_once():
+    operations = api_v1.operations()
+    assert len({op.operation_id for op in operations}) == len(operations)
+    assert len({(op.method, op.path) for op in operations}) == len(operations)
+
+    paths = api_v1.document()["paths"]
+    operation_ids = Counter(op["operationId"] for item in paths.values() for op in item.values())
+    assert all(count == 1 for count in operation_ids.values())
+    for domain in api_v1.domains():
+        for operation in domain.OPERATIONS:
+            assert operation_ids[operation.operation_id] == 1
+            path = operation.path.removeprefix(api_v1.PREFIX)
+            assert paths[path][operation.method.lower()]["operationId"] == operation.operation_id
 
 
 def test_openapi_operations_keep_main_order():
