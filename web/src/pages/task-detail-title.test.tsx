@@ -23,21 +23,21 @@ describe("the task page heading", () => {
   let container: HTMLDivElement;
   let root: Root;
   let title: string;
-  let puts: { url: string; body: unknown }[];
+  let writes: { url: string; body: unknown }[];
   let refusal: string | null;
 
   beforeEach(() => {
     title = "Parser";
-    puts = [];
+    writes = [];
     refusal = null;
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (init?.method === "PUT" && url.endsWith("/api/tasks/task-a/title")) {
+      if (init?.method === "POST" && url.endsWith("/api/v1/ops/task_update")) {
         const body = JSON.parse(String(init.body));
-        puts.push({ url, body });
-        if (refusal) return Response.json({ error: refusal }, { status: 400 });
+        writes.push({ url, body });
+        if (refusal) return Response.json({ status: "error", error: { code: "invalid", message: refusal } }, { status: 400 });
         title = body.title;
-        return Response.json({ task_id: "task-a", title });
+        return Response.json({ status: "ok", result: { task_id: "task-a", changed: ["title"], title } });
       }
       if (url.endsWith("/api/tasks/task-a")) return Response.json(detail(title));
       if (url.includes("/activity")) return Response.json({ activity: [] });
@@ -83,7 +83,7 @@ describe("the task page heading", () => {
     await type("Better parser");
     await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Save")!.click());
     await settle();
-    expect(puts).toEqual([{ url: "/api/tasks/task-a/title", body: { title: "Better parser" } }]);
+    expect(writes).toEqual([{ url: "/api/v1/ops/task_update", body: { task_id: "task-a", title: "Better parser" } }]);
     expect(input()).toBeNull();
     expect(heading()).toBe("Better parser");
   });
@@ -92,7 +92,7 @@ describe("the task page heading", () => {
     await open();
     await type("Entered");
     await key("Enter");
-    expect(puts.map((p) => p.body)).toEqual([{ title: "Entered" }]);
+    expect(writes.map((p) => p.body)).toEqual([{ task_id: "task-a", title: "Entered" }]);
     expect(heading()).toBe("Entered");
   });
 
@@ -101,7 +101,7 @@ describe("the task page heading", () => {
     await type("Never saved");
     await key("Escape");
     expect(input()).toBeNull();
-    expect(puts).toEqual([]);
+    expect(writes).toEqual([]);
     expect(heading()).toBe("Parser");
   });
 

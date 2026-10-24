@@ -792,9 +792,6 @@ class AgentHTTPServer:
     _RE_TASK_CONFIG = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/config$")
     _RE_TASK_PROJECT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/project$")
     _RE_TASK_CONTINUE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/continue$")
-    _RE_TASK_START = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/start$")
-    _RE_TASK_REQUIREMENT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/requirement$")
-    _RE_TASK_TITLE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/title$")
     _RE_TASK_AGENTS = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/agents$")
     _RE_TASK_ROOM = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/room$")
     _RE_TASK_ROLE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/roles/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})$")
@@ -851,9 +848,7 @@ class AgentHTTPServer:
         writer: asyncio.StreamWriter,
         headers: Mapping[str, str] | None = None,
     ) -> None:
-        if path == "/api/overview" and method == "GET":
-            await self._handle_overview(writer)
-        elif path == "/api/tasks" and method == "GET":
+        if path == "/api/tasks" and method == "GET":
             await self._handle_list_tasks(query, writer)
         elif path == "/api/chat/send" and method == "POST":
             await self._handle_chat_send(body, writer)
@@ -877,12 +872,6 @@ class AgentHTTPServer:
             await self._handle_sse_events(query, writer)
         elif path == "/api/tasks/create" and method == "POST":
             await self._answer(writer, HTTP_201, lambda: projects.create_task(projects.json_object(body)))
-        elif path == "/api/tasks/cancel" and method == "POST":
-            await self._handle_task_cancel(body, writer)
-        elif path == "/api/tasks/stop" and method == "POST":
-            await self._handle_task_stop(body, writer)
-        elif path == "/api/tasks/start" and method == "POST":
-            await self._handle_task_start(body, writer)
         elif path == "/api/tasks/delete" and method == "POST":
             await self._handle_task_delete(body, writer)
         elif (m := self._RE_TASK_ACTIVITY_STREAM.match(path)) and method == "GET":
@@ -902,13 +891,6 @@ class AgentHTTPServer:
                 m.group(1), projects.json_object(body), self._task_router))
         elif (m := self._RE_TASK_CONTINUE.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: self._continue_at_cap(m.group(1), body))
-        elif (m := self._RE_TASK_REQUIREMENT.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: projects.edit_requirement(
-                m.group(1), projects.json_object(body), task_router=self._task_router, bus=self._supervisor.bus,
-                source=self._web_adapter._address, via=projects.VIA_TASK_PAGE))
-        elif (m := self._RE_TASK_TITLE.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: projects.rename_task(
-                m.group(1), projects.json_object(body), via=projects.VIA_TASK_PAGE))
         elif (m := self._RE_TASK_AGENTS.match(path)) and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: self._set_task_agents(m.group(1), body))
         elif (m := self._RE_TASK_ROLE.match(path)) and method == "PUT":
@@ -927,9 +909,6 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_200, lambda: self._wait_action(m.group(1), m.group(2), m.group(3)))
         elif (m := self._RE_TASK_WORKSPACE_DISCARD.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: self._discard_workspace(m.group(1), int(m.group(2))))
-        elif (m := self._RE_TASK_START.match(path)) and method == "POST":
-            await self._answer(writer, HTTP_200, lambda: projects.start_ready_task(
-                m.group(1), self._supervisor.bus, self._web_adapter._address))
         elif (m := self._RE_TASK_ROOM.match(path)) and method == "GET":
             await self._answer(writer, HTTP_200, lambda: self._task_room(m.group(1), query))
         elif (m := self._RE_TASK_DETAIL.match(path)) and method == "GET":
@@ -1416,19 +1395,6 @@ class AgentHTTPServer:
         elif self._manager_ops is not None:
             status["turn_binding"] = self._manager_ops.binding_report()
         return status
-
-    async def _handle_overview(self, writer: asyncio.StreamWriter) -> None:
-        try:
-            result = await overview.build_overview(task_router=self._task_router, worker_pool=self._worker_pool,
-                                                   manager=self._manager, supervisor=self._supervisor,
-                                                   managers=self._managers)
-        except Exception:
-            logger.exception("DB unavailable for the overview")
-            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
-            await writer.drain()
-            return
-        writer.write(_json_response(HTTP_200, _serialize(result)))
-        await writer.drain()
 
     async def _handle_list_tasks(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
         """A page of tasks, newest first, filtered by project, schedule, group and status: ``limit`` of them
@@ -1927,99 +1893,6 @@ class AgentHTTPServer:
             "status": updated.get("status", ""),
         })
         writer.write(_json_response(HTTP_200, result))
-        await writer.drain()
-
-    async def _handle_task_cancel(
-        self, body: bytes, writer: asyncio.StreamWriter
-    ) -> None:
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
-            await writer.drain()
-            return
-
-        task_id = data.get("task_id", "").strip()
-        if not task_id:
-            writer.write(
-                _json_response(HTTP_400, {"error": "task_id is required"})
-            )
-            await writer.drain()
-            return
-
-        try:
-            await projects.control_task(task_id, "cancel", self._supervisor.bus, self._web_adapter._address)
-        except projects.RequestError as exc:
-            writer.write(_json_response(exc.status, {"error": str(exc)}))
-            await writer.drain()
-            return
-        writer.write(_json_response(HTTP_200, {"cancelled": task_id}))
-        await writer.drain()
-
-    async def _handle_task_stop(
-        self, body: bytes, writer: asyncio.StreamWriter
-    ) -> None:
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
-            await writer.drain()
-            return
-
-        task_id = data.get("task_id", "").strip()
-        if not task_id:
-            writer.write(_json_response(HTTP_400, {"error": "task_id is required"}))
-            await writer.drain()
-            return
-
-        try:
-            await projects.control_task(task_id, "stop", self._supervisor.bus, self._web_adapter._address)
-        except projects.RequestError as exc:
-            writer.write(_json_response(exc.status, {"error": str(exc)}))
-            await writer.drain()
-            return
-        writer.write(_json_response(HTTP_200, {"stopped": task_id}))
-        await writer.drain()
-
-    async def _handle_task_start(
-        self, body: bytes, writer: asyncio.StreamWriter
-    ) -> None:
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
-            await writer.drain()
-            return
-
-        task_id = data.get("task_id", "").strip()
-        if not task_id:
-            writer.write(_json_response(HTTP_400, {"error": "task_id is required"}))
-            await writer.drain()
-            return
-        # A ready task starts for the first time; a stopped, failed or cancelled one goes on from its saved plan.
-        start_over = data.get("start_over", False)
-        if not isinstance(start_over, bool):
-            writer.write(_json_response(HTTP_400, {"error": "start_over must be true or false"}))
-            await writer.drain()
-            return
-
-        try:
-            from ..db import tasks as db_tasks
-
-            task = await db_tasks.get_task(task_id)
-            if task is not None and task["status"] == db_tasks.READY:
-                # Keep the legacy endpoint's ready-task support without treating Manager restarts as starts.
-                if not (task.get("work_dir") or "").strip():
-                    raise projects.RequestError(HTTP_400, "set the task's work directory before starting it")
-                await projects.start_ready_task(task_id, self._supervisor.bus, self._web_adapter._address)
-            else:
-                await projects.control_task(task_id, "start_over" if start_over else "restart",
-                                            self._supervisor.bus, self._web_adapter._address)
-        except projects.RequestError as exc:
-            writer.write(_json_response(exc.status, {"error": str(exc)}))
-            await writer.drain()
-            return
-        writer.write(_json_response(HTTP_200, {"started": task_id}))
         await writer.drain()
 
     async def _continue_at_cap(self, task_id: str, body: bytes) -> dict[str, Any]:

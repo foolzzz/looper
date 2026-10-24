@@ -91,7 +91,7 @@
 
 **类型化的结果：** 状态投影有独立 schema，不新增 Manager Tool。未完成领域的工具结果继续显式标记未类型化，各领域通过 `RESULTS` 补齐。阶段 1 给 agent 用的操作写出 `result` 的 schema（顶层每个键的类型，`additionalProperties: true`）：`tasks.list`、`tasks.get`、`task_pipeline`、`task_create`、`task_control.*`、`task_update`、`task_instruct`、`gates.*`、`agent_profiles.list`、`overview`、`confirm`、`whoami`、聊天三个。其余操作的 `result` 暂为 `{"type": "object"}` 并标 `x-looper-result-typed: false`，测试列出这些操作，阶段 2 把列表清空。
 
-**文档覆盖什么：** 文档包含既有 v1 操作和已迁移的控制台领域，剩余旧路由仍不在文档中。状态现为 `POST /api/v1/system/status {}`，返回完整状态投影（Agent、任务计数、web 健康、自检、退出能力及可选的绑定/管家状态），客户端的 `can_sign_out` 恒为 false；操作者从真实请求头计算。旧 `GET /api/status` 已删除。
+**文档覆盖什么：** 文档包含既有 v1 操作和已迁移的控制台领域，剩余旧路由仍不在文档中。状态现为 `POST /api/v1/system/status {}`，返回完整状态投影（Agent、任务计数、web 健康、自检、退出能力及可选的绑定/管家状态），客户端的 `can_sign_out` 恒为 false；操作者从真实请求头计算。旧 `GET /api/status` 已删除。总览现为 `POST /api/v1/system/overview {}`，返回控制台完整 Overview（运行步骤、关卡、花费、组件健康和并发）；直接调用 `overview.build_overview`，精简 `overview` 工具的 schema、说明和结果保持原样。需求全文更新由 `POST /api/v1/tasks/requirement_update {task_id, requirement}` 保留 `{task_id, version, requirement}`，与精简 `task_update` 共用 `projects.edit_requirement`。
 
 领域注册表为有序模块名元组，按需加载；每个模块声明 `OPERATIONS`、补齐现有工具的 `RESULTS` 和 `run`，按需声明 `stream` / `impact`。生成时拒绝重复 id/方法路径，领域 stream 自带事件说明/schema，当前仅接受只读操作（注册时拒绝写流，防止绕过确认/审计）；`high` 必须提供 impact。请求头直接传回调。普通写复用 ClientOps 校验、审计和客户端确认，领域 DTO 使用 transport 校验一次（保留必填 null、对象数组与联合类型，拒绝未声明字段）；Manager Tool 校验/列表不变。凭据写先拒绝客户端，参数/结果不审计，失败脱敏。错误可带类型化 `details`（`manager_id`、`state`、可空的 `phase`/`method`），不透传原始异常或请求值。
 
@@ -103,13 +103,14 @@
 | 列任务 | `GET /api/tasks` | `looper_tasks` list | 共用 `projects.list_tasks_page`（游标、状态、定时任务、分组和工具的关键字搜索） | 已实现；ops 的 list 使用精简形状，保留原有搜索范围与 `more` 语义，控制台保留游标、计数和花费 |
 | 任务详情 | `GET /api/tasks/:id` | `looper_tasks` get（`_task_view`） | 共用 `projects.task_detail` | 已实现；ops 的 get 使用精简视图，保留原有键、裁剪和结果文案 |
 | 建任务 | `POST /api/tasks/create`（`projects.create_task`） | `looper_task_create`（`_create`） | 共用 `projects.create_task_core`（放置、工作区检查、事务、配置块），两入口保留参数适配层 | 已实现；核心收两边参数并集，控制台保留 `config`、`profile_overrides` 和新项目全部字段，工具 schema 不变；数据库回归测试从两入口创建后回读并比较任务行与 Profile 覆盖 |
-| 开始 | `POST /api/tasks/:id/start` | `task_control` start | 共用 `projects.start_ready_task` | 不变 |
-| 停止、取消、重启、从头开始 | `POST /api/tasks/stop`、`cancel`、`start` | `task_control` | 共用 `projects.control_task`（状态检查加发送） | 已实现；状态不允许时控制台返回 409 和原因、不发送消息，任务列表和详情页展示错误；工具结果不变 |
-| 标题、需求、Agent Profile | `PUT /api/tasks/:id/title`、`requirement`、`agents` | `looper_task_update` | 共用 `rename_task`、`edit_requirement`、`set_task_agents` | 不变 |
+| 开始 | `POST /api/v1/ops/task_control/start` | `task_control` start | 共用 `projects.start_ready_task` | 返回 `{task_id, started}`；非 ready 状态返回 409，不发送消息 |
+| 停止、取消、重启、从头开始 | `POST /api/v1/ops/task_control/stop`、`cancel`、`restart`、`start_over` | `task_control` | 共用 `projects.control_task`（状态检查加发送） | 工具结果不变；非法状态 409 且不发送消息；操作者单次执行并保留控制台原有确认，客户端 high 两步确认 |
+| 标题、需求 | `POST /api/v1/ops/task_update`、`POST /api/v1/tasks/requirement_update` | `looper_task_update` | 共用 `rename_task`、`edit_requirement` | 标题保留 typed `changed/title`，控制台适配原签名；全文需求保留 `version/requirement`，普通修改只写一次 |
+| Agent Profile | `PUT /api/tasks/:id/agents` | `looper_task_update` | 共用 `set_task_agents` | 本领域不迁移 |
 | 补充说明 | `POST /api/chat/send` 发给 Planner | `looper_task_instruct` | 共用 `projects.add_task_supplement`（存储加唤醒） | 已实现；每次写一行、唤醒一次，聊天保留 `USER_MESSAGE` 的补充 id 和回复关联，工具保留 `TASK_CHANGE` 与现有结果 |
 | 关卡留言、结束 | `POST /api/tasks/:id/gates/:step/messages`、`end` | `looper_task_gate_reply`、`looper_gates` reply/end | 共用 `gate_service.post_message` | 不变 |
 | 关卡列表、讨论 | `GET /api/gates`、`GET …/messages` | `looper_gates` list/messages | 共用 `gate_service.list_gates`、`thread` | 不变 |
-| 总览 | `GET /api/overview` | `looper_overview` | 共用 `overview.build_overview` | 不变 |
+| 总览 | `POST /api/v1/system/overview` | `looper_overview` | 共用 `overview.build_overview` | 控制台完整投影与精简工具各保留原形状，不新增 Manager Tool |
 | 项目、Profile、provider、模型、目录与安装、设置层、可选 Profile、定时任务、花费 | 各自的路由 | 各自的工具 | 共用 `projects`、`profile_registry`、`catalog`、`agent_settings`、`schedules`、`llm_records` | 不变（这些工具建时就要求调控制台的代码） |
 | 配置导出、导入 | `GET /api/config/export`、`/api/config/imports` | `looper_config_export` | 阶段 2a：v1 与旧路由、工具共用 `config_transfer` 和 `ConfigImports` | 已交付：`loopercli config export` / `import` 调 v1；旧控制台路由保留 |
 
@@ -277,7 +278,7 @@ v1 配置预览收 `{document: <配置对象>}`，和控制台一样最多 256 M
 | 领域 | 阶段 2 状态 |
 |---|---|
 | 状态与 transport | 已验证：HTTP/文档 112 项、web 26 项；隔离 serve 与 1280/390 浏览器通过，完整套件留给 CI |
-| 任务 | 待迁移；共享任务核心 [#429](https://github.com/foolzzz/looper/pull/429) 单独跟踪 |
+| 任务 | 总览、开始/停止/取消/重启/从头开始、标题和需求全文已迁移 v1，七个旧方法删除；本域 HTTP/DB 31 项、文档/transport 122 项、web 39 项通过，隔离 serve、1280/390 浏览器、安装包 smoke 与需求编辑替身评测通过；评测准备操作审计边界与并行关卡脚本竞态已修复并复测；本次广泛回归仍有 DSH 启动检查超时，未计为通过；其余任务路由待迁移，完整套件留给 CI；共享任务核心 [#429](https://github.com/foolzzz/looper/pull/429) 单独跟踪 |
 | 聊天 | 待迁移 |
 | 项目与知识 | 待迁移 |
 | 能力目录 | 待迁移 |
@@ -294,7 +295,8 @@ v1 配置预览收 `{document: <配置对象>}`，和控制台一样最多 256 M
 ## 22. 默认行为的变化
 
 - `/api/v1/` 的普通操作也接受操作者身份；操作者的 `high` 单次执行，客户端令牌仍须两步确认。控制台确认弹窗与可见行为不变。状态及服务就绪探测改走 v1，旧状态 GET 删除；Telegram/Lark 继续使用未改动的 Manager ops/services。配置命令迁移是阶段 2a 单独列出的行为变化。
+- 总览、任务控制、标题和需求全文的七个旧 HTTP 方法删除；对应 v1 返回 `OpOk/result` 和类型化错误；总览读库失败返回 `503 unavailable`（旧路由为 500）。需求全文回答仍有 `version/requirement`；标题使用已有 `task_update` 的 60 字符校验（直接请求超长标题返回 400，不再由旧路由截断），留痕使用 `client:<名字或 operator>`。控制台保留原有确认交互；Telegram/Lark 的 Manager ops/services 不变。
 - 管家：只有客户端的消息多一种渠道行。
 - 默认管家：客户端对话里建的任务把接受和结束写回那个线程（控制台对话里建的不变）。
 - 关卡通知和进度不变：照旧走全局通知目标，不进客户端的对话。
-- 阶段 2a 已删除 `looper config export` / `import`，改用要求运行服务的 `loopercli config export` / `import`，发布说明已写明；`looper doctor` 和密码重设保留。控制台的停止和取消对不允许的状态回答 409 仍是阶段 2 其余部分的工作。
+- 阶段 2a 已删除 `looper config export` / `import`，改用要求运行服务的 `loopercli config export` / `import`，发布说明已写明；`looper doctor` 和密码重设保留。任务控制沿用共享核心的状态校验，不允许的状态返回 409；开始、停止、取消、重启、从头开始已切到 v1。ready 任务统一走既有 `start_ready_task`，不保留旧通用 start 路由独有的目录预检查。

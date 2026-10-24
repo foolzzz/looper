@@ -1212,6 +1212,139 @@ _LISTENING_CLAUDE = (
 class TestWorkerInput:
     """A running worker reads further user turns on stdin (stream-json input)."""
 
+    def test_dashboard_correction_reaches_a_worker_still_starting(
+        self, agent_db: Any, planner_claude: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from looper.agents.channels.web import WebChannelAdapter
+        from looper.agents.http_server import AgentHTTPServer
+        from looper.agents.message import TASK_ROUTER_ADDRESS
+        from tests.db_support import until
+        from tests.test_planner_agent import chat, decide, plan, step
+        from tests.test_usage_api_db import _Writer
+
+        correction = "color.txt must contain blue instead of red"
+        claude = planner_claude(plan(step("s1")), chat("Passing it on.", "forward", step="s1", text=correction),
+                                decide("accept"))
+
+        async def run() -> None:
+            bus = MessageBus(runtime_root=tmp_path)
+            pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(tmp_path, _LISTENING_CLAUDE)),
+                              runtime_root=tmp_path)
+            planner = PlannerAgent(task_id="t1", runtime_root=tmp_path, claude_bin=claude.bin)
+            web = WebChannelAdapter()
+            server = AgentHTTPServer(web_adapter=web, runtime_root=tmp_path, supervisor=SimpleNamespace(bus=bus),
+                                     task_router=SimpleNamespace(has_planner=lambda task_id: task_id == "t1"))
+            starting, release, input_attempted = asyncio.Event(), asyncio.Event(), asyncio.Event()
+            take_slot, send_input = pool._take_slot, pool.send_input
+
+            async def hold_start(wp: Any) -> None:
+                starting.set()
+                await release.wait()
+                await take_slot(wp)
+
+            async def capture_input(worker_id: str, text: str) -> bool:
+                input_attempted.set()
+                return await send_input(worker_id, text)
+
+            monkeypatch.setattr(pool, "_take_slot", hold_start)
+            monkeypatch.setattr(pool, "send_input", capture_input)
+            results: list[MessageEnvelope] = []
+            acknowledgements: list[MessageEnvelope] = []
+            bus.subscribe_topic(MessageType.WORK_RESULT, results.append)
+            bus.subscribe_topic(MessageType.WORKER_INPUT_RESULT, acknowledgements.append)
+            await web.start(bus)
+            await pool.start(bus)
+            await planner.start(bus)
+            try:
+                await bus.publish(MessageEnvelope.create(
+                    source=TASK_ROUTER_ADDRESS, target=planner.agent_address, message_type=MessageType.TASK_REQUEST,
+                    payload={"requirement": "Create color.txt containing red", "work_dir": str(tmp_path)},
+                ))
+                await asyncio.wait_for(starting.wait(), 5)
+                writer = _Writer()
+                await server._handle_chat_send(json.dumps({
+                    "text": correction, "target": {"kind": "planner", "task_id": "t1"},
+                }).encode(), writer)
+                assert writer.data.startswith(b"HTTP/1.1 200"), writer.data
+                await asyncio.wait_for(input_attempted.wait(), 5)
+                release.set()
+                await until(lambda: acknowledgements)
+                assert acknowledgements[0].payload["delivered"] is True
+                await until(lambda: planner._plan is not None and planner._plan.status == "completed")
+                assert len(results) == 1
+                assert results[0].payload["summary"].endswith(correction)
+                assert planner._plan.steps[0].missed_messages == []
+                supplements = [entry for entry in agent_db.store.journal["t1"] if entry["kind"] == "supplement"]
+                assert len(supplements) == 1 and supplements[0]["delivered"]
+                assert correction in supplements[0]["summary"]
+                chat_turns = [turn for turn in claude.turns() if turn["text"].startswith("[CHAT]")]
+                assert len(chat_turns) == 1 and correction in chat_turns[0]["text"]
+            finally:
+                await planner.stop()
+                await pool.stop()
+                await web.stop()
+                await bus.shutdown()
+
+        asyncio.run(asyncio.wait_for(run(), 25))
+
+    @pytest.mark.parametrize("startup", ["ready", "failed", "cancelled"])
+    def test_input_during_startup_waits_for_the_channel(self, agent_db: Any, tmp_path: Path,
+                                                      monkeypatch: pytest.MonkeyPatch, startup: str) -> None:
+        async def run() -> None:
+            bus = MessageBus(runtime_root=tmp_path)
+            pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(tmp_path, _LISTENING_CLAUDE)),
+                              runtime_root=tmp_path)
+            planner = PlannerAgent(task_id="t1", runtime_root=tmp_path)
+            planner._bus = bus
+            step = PlanStep(step_id="s1", index=0, instruction="write the color", status="dispatched", worker_id="w1")
+            starting, release, input_attempted = asyncio.Event(), asyncio.Event(), asyncio.Event()
+            take_slot, send_input = pool._take_slot, pool.send_input
+
+            async def hold_start(wp: Any) -> None:
+                starting.set()
+                await release.wait()
+                await take_slot(wp)
+
+            async def capture_input(worker_id: str, text: str) -> bool:
+                input_attempted.set()
+                return await send_input(worker_id, text)
+
+            async def fail_execute(*args: Any, **kwargs: Any) -> None:
+                raise RuntimeError("startup failed")
+
+            monkeypatch.setattr(pool, "_take_slot", hold_start)
+            monkeypatch.setattr(pool, "send_input", capture_input)
+            if startup == "failed":
+                monkeypatch.setattr(pool, "_execute", fail_execute)
+            await pool.start(bus)
+            await asyncio.sleep(0)  # register the bus subscriptions
+            try:
+                await bus.publish(_work_item(tmp_path))
+                await asyncio.wait_for(starting.wait(), 5)
+                request = asyncio.create_task(planner._send_worker_input(step, "use blue", "chat-correction"))
+                await asyncio.wait_for(input_attempted.wait(), 5)
+                if startup == "cancelled":
+                    assert await pool.kill("w1")
+                else:
+                    release.set()
+                answer = await request
+                assert answer is (startup == "ready")
+                if startup != "cancelled":
+                    queue = bus.get_queue("planner-t1")
+                    while True:
+                        result = await asyncio.wait_for(queue.get(), 10)
+                        if result.message_type == MessageType.WORK_RESULT:
+                            break
+                    if startup == "ready":
+                        assert result.payload["summary"] == "got: use blue"
+                    else:
+                        assert result.payload["error"] == "startup failed"
+            finally:
+                await pool.stop()
+                await bus.shutdown()
+
+        asyncio.run(asyncio.wait_for(run(), 20))
+
     def test_worker_input_over_the_bus(self, agent_db: Any) -> None:
         async def _run() -> tuple[bool, str, bool, bool]:
             with tempfile.TemporaryDirectory() as tmp:

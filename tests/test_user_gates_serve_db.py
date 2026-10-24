@@ -174,7 +174,7 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
                 api.put(f"/api/projects/{project['project_id']}", {"user_gates": "off" if variant == "off" else "on"})
                 ids[variant] = api.post("/api/tasks/create", {"requirement": f"build calc variant={variant}",
                                                               "project_id": project["project_id"]})["task_id"]
-                api.post("/api/tasks/start", {"task_id": ids[variant]})
+                api.post("/api/v1/ops/task_control/start", {"task_id": ids[variant]})
 
             def detail(variant: str) -> dict[str, Any]:
                 return api.get(f"/api/tasks/{ids[variant]}")
@@ -189,8 +189,8 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             # restart: the user writes in the gate of the failed task, which keeps the message for the restart.
             seen["kept"] = api.post(f"/api/tasks/{ids['restart']}/gates/g1/messages", {"text": "PostgreSQL please"})
             seen["before_restart"] = detail("restart")["gates"]
-            api.post("/api/tasks/start", {"task_id": ids["restart"]})
-            api.post("/api/tasks/start", {"task_id": ids["startover"], "start_over": True})
+            api.post("/api/v1/ops/task_control/restart", {"task_id": ids["restart"]})
+            api.post("/api/v1/ops/task_control/start_over", {"task_id": ids["startover"]})
             time.sleep(0.5)
             again = {v: _until(lambda v=v: (d := detail(v))["status"] in ENDED and d, f"{v} to end again")
                      for v in ("restart", "startover")}
