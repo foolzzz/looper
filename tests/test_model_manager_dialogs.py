@@ -327,11 +327,6 @@ class RunsApi:
     def __init__(self, records, selected=None):
         self.records, self.selected = records, selected
 
-    def post(self, path, body):
-        if path.startswith("/api/v1/runs/"):
-            return {"status": "ok", "result": self.get(path, **body)}
-        raise AssertionError(path)
-
     def get(self, path, **query):
         if path == "/api/v1/runs/list":
             return {"records": list(reversed(self.records))}
@@ -339,6 +334,8 @@ class RunsApi:
         return {"profiles": [{"profile_id": "agent-1", "name": dialogs.SWITCH}]}
 
     def post(self, path, body):
+        if path == "/api/v1/runs/list":
+            return {"status": "ok", "result": self.get(path, **body)}
         assert path == "/api/v1/manager_session/get"
         return {"result": {"selected": self.selected}}
 
