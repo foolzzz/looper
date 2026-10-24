@@ -197,7 +197,7 @@ def test_the_task_page_shows_a_task_s_workspaces_and_discards_one_a_stopped_task
         assert unmerged.merge_error is MergeError.CONFLICT
         server, router, _ = _setup()
 
-        status, detail = await _call(server, "GET", "/api/tasks/task-a")
+        status, detail = await _call(server, "POST", "/api/v1/tasks/detail", {"task_id": "task-a"})
         assert status == 200
         view = detail["step_workspaces"]
         assert view["start"] == {"branch": "main", "commit": start}
@@ -209,7 +209,7 @@ def test_the_task_page_shows_a_task_s_workspaces_and_discards_one_a_stopped_task
         assert [c["command"] for c in view["undo"]][:2] == [
             "git log --first-parent --grep='^Looper-Task: task-a$' main",
             f"git switch main && git revert -m 1 {merged.merge_commit}"]
-        assert (await _call(server, "GET", "/api/tasks/task-b"))[1]["step_workspaces"] is None
+        assert (await _call(server, "POST", "/api/v1/tasks/detail", {"task_id": "task-b"}))[1]["step_workspaces"] is None
 
         discard = "/api/v1/workspaces/discard"
         discard_args = {"task_id": "task-a", "workspace_id": unmerged.id}

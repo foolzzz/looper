@@ -376,17 +376,16 @@ export async function fetchTasks(
     limit?: number;
   } = {},
 ): Promise<TasksPage> {
-  const params = new URLSearchParams();
-  if (filters.projectId) params.set("project_id", filters.projectId);
-  if (filters.group) params.set("group", filters.group);
-  if (filters.scheduleId) params.set("schedule_id", filters.scheduleId);
-  if (filters.status) params.set("status", filters.status);
-  if (filters.before) params.set("before", filters.before);
-  if (filters.limit) params.set("limit", String(filters.limit));
-  const qs = params.toString();
-  const res = await fetch(`${API_BASE}/tasks${qs ? `?${qs}` : ""}`);
-  if (!res.ok) await failed(res, "tasks");
-  return res.json();
+  const result = await callV1<TasksPage>("/api/v1/tasks/page", {
+    ...(filters.projectId ? { project_id: filters.projectId } : {}),
+    ...(filters.group ? { group: filters.group } : {}),
+    ...(filters.scheduleId ? { schedule_id: filters.scheduleId } : {}),
+    ...(filters.status ? { status: filters.status } : {}),
+    ...(filters.before ? { before: filters.before } : {}),
+    ...(filters.limit ? { limit: filters.limit } : {}),
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Who a chat message goes to: the global Manager or a running task's Planner. */
@@ -2321,9 +2320,14 @@ export class TaskDetailError extends Error {
 }
 
 export async function fetchTaskDetail(taskId: string, signal?: AbortSignal): Promise<TaskDetail> {
-  const res = await fetch(`${API_BASE}/tasks/${taskId}`, { signal });
-  if (!res.ok) throw new TaskDetailError(res.status);
-  return res.json();
+  try {
+    const result = await callV1<TaskDetail>("/api/v1/tasks/detail", { task_id: taskId }, { signal });
+    if (result.status === "needs_confirmation" && "confirmation_id" in result) throw new TaskDetailError(202);
+    return result as TaskDetail;
+  } catch (error) {
+    if (error instanceof V1Error) throw new TaskDetailError(error.status);
+    throw error;
+  }
 }
 
 export async function fetchTaskActivity(

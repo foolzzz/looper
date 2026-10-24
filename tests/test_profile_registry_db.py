@@ -38,6 +38,9 @@ async def _call(method: str, path: str, body: Any = None, *, claude: str = "clau
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())), claude_bin=claude)
     method, path, body = _global_settings_request(method, path, body)
+    if path in {"/api/v1/tasks/detail", "/api/v1/tasks/page"}:
+        from tests.db_support import call_v1
+        return await call_v1(server, path, body or {})
     if path == "/api/v1/tasks/create":
         from tests.test_api_v1_ops_db import _v1
 
@@ -1257,9 +1260,9 @@ def test_a_tasks_profile_override_reaches_only_that_tasks_role(
         # Every run went through the Claude Code runtime with its own login: its cost is what Claude reports.
         assert {r["cost_source"] for r in await pool.fetch("SELECT cost_source FROM llm_records")} == {"runtime"}
 
-        detail = (await _ok("GET", f"/api/tasks/{chose['task_id']}"))["profile_overrides"]
+        detail = (await _ok("POST", "/api/v1/tasks/detail", {"task_id": chose['task_id']}))["profile_overrides"]
         assert {role: a["name"] for role, a in detail.items()} == {"worker": "claude-code/haiku"}
-        assert (await _ok("GET", f"/api/tasks/{plain['task_id']}"))["profile_overrides"] == {}
+        assert (await _ok("POST", "/api/v1/tasks/detail", {"task_id": plain['task_id']}))["profile_overrides"] == {}
         assert (await _call("DELETE", f"/api/agent-profiles/{haiku}"))[0] == 409  # a task chose it
 
         # A task chooses only for its own roles, a profile that exists and can run the role.

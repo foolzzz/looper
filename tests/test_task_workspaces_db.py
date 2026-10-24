@@ -81,7 +81,7 @@ def test_a_task_names_its_workspace_and_is_told_what_it_will_run_in(
         row = await tasks.get_task(body["task_id"], pool=pool)
         assert (row["workspace_dir"], row["workspace_mode"], row["workspace_base"], row["work_dir"]) == (
             str(workspace), "worktree", "main", str(workspace))
-        status, detail = await _call(server, "GET", f"/api/tasks/{body['task_id']}")
+        status, detail = await _call(server, "POST", "/api/v1/tasks/detail", {"task_id": body['task_id']})
         assert detail["task_workspace"] == {"workspace_dir": str(workspace), "mode": "worktree", "base": "main",
                                             "worktree": None}
 
@@ -126,7 +126,7 @@ def test_a_worktree_tasks_row_its_page_and_its_deletion(tmp_path: Path, monkeypa
             await task_worktrees.save({**row, "state": "removed", "removed_at": None}, pool=pool)
 
         server, _, _ = _setup()
-        status, detail = await _call(server, "GET", "/api/tasks/task-w")
+        status, detail = await _call(server, "POST", "/api/v1/tasks/detail", {"task_id": "task-w"})
         view = detail["task_workspace"]["worktree"]
         assert (view["branch"], view["state"], view["path"]) == ("looper/task-w/task", "active", work_dir)
         assert [c["what"] for c in view["commands"]] == ["See the task's commits", "See its changes",

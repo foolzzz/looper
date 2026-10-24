@@ -84,7 +84,7 @@ def test_the_task_detail_gives_each_steps_start(monkeypatch: pytest.MonkeyPatch)
     async def test(pool: Any) -> None:
         await _task(pool, "task-a", "running", await _project(pool))
         await plans.save("task-a", steps=[_row("s1", "dispatched", FIRST), _row("s2", "pending", None, 1)], pool=pool)
-        status, detail = await _call("GET", "/api/tasks/task-a")
+        status, detail = await _call("POST", "/api/v1/tasks/detail", {"task_id": "task-a"})
         assert status == 200, detail
         started = {s["step_key"]: s["started_at"] for s in detail["steps"]}
         assert started["s2"] is None

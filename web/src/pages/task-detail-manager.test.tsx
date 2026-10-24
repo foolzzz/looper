@@ -46,7 +46,7 @@ describe("TaskDetailRoute manager attribution", () => {
   const show = async (extra: Record<string, unknown>) => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (/\/api\/tasks\/task-a$/.test(url)) return Response.json({ ...detail("task-a"), ...extra });
+      if (url === "/api/v1/tasks/detail") return Response.json({ status: "ok", result: { ...detail("task-a"), ...extra } });
       if (url === "/api/v1/tasks/activity") return Response.json({ status: "ok", result: { activity: [] } });
       if (url === "/api/v1/tasks/conversation") return Response.json({ status: "ok", result: { rows: [], has_more: false } });
       return Response.json({});

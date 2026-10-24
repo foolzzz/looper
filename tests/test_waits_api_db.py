@@ -86,7 +86,7 @@ def test_detail_waits_are_in_plan_order_with_all_fields(monkeypatch: pytest.Monk
         await pool.execute("UPDATE task_waits SET resolution = 'Keep waiting', notice = 'dashboard'")
         await plans.save("task-a", steps=[{"id": "step-w0", "index": 0, "key": "w0", "kind": "wait",
                                            "instruction": "earlier"}], waits=[_wait("step-w0")], pool=pool)
-        status, detail, _ = await _api("GET", "/api/tasks/task-a")
+        status, detail, _ = await _api("POST", "/api/v1/tasks/detail", json.dumps({"task_id": "task-a"}).encode())
         assert status == 200, detail
         before, row = detail["waits"]
         assert before == {"step": "w0", "step_id": "step-w0", "state": "pending", "outcome": None,
@@ -306,7 +306,7 @@ def test_manager_task_detail_includes_wait_conditions_states_and_step_kinds(
         assert answer["status"] == "ok", answer
         detail = answer["result"]
         assert [(step["step"], step["kind"]) for step in detail["steps"]] == [("s1", "work"), ("w1", "wait")]
-        expected = (await _api("GET", "/api/tasks/task-a"))[1]["waits"]
+        expected = (await _api("POST", "/api/v1/tasks/detail", json.dumps({"task_id": "task-a"}).encode()))[1]["waits"]
         assert detail["waits"] == expected
         assert detail["waits"][0]["check"] == check
         assert detail["waits"][0]["state"] == "waiting"

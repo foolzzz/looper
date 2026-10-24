@@ -70,6 +70,9 @@ class ScheduleEnv(SimpleNamespace):
                                  task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())),
                                  scheduler=self.scheduler)
         writer = _Writer()
+        if path in {"/api/v1/tasks/detail", "/api/v1/tasks/page"}:
+            from tests.db_support import call_v1
+            return await call_v1(server, path, body or {})
         raw = b"" if body is None else json.dumps(body).encode()
         if path.startswith("/api/v1/schedule_admin/"):
             from looper.agents.api_v1 import OPERATOR

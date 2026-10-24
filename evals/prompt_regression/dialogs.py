@@ -127,11 +127,11 @@ class Look:
         return _trail(self.database_url, max(self.since, self.turn_since), self.manager_id)
 
     def detail(self, task_id: str | None = None) -> dict[str, Any]:
-        return self.api.get(f"/api/tasks/{task_id or self.task}")
+        return self.api.post("/api/v1/tasks/detail", {"task_id": task_id or self.task})["result"]
 
     def new_tasks(self) -> list[dict[str, Any]]:
         """The tasks created since the dialog's first message, newest first."""
-        return [t for t in self.api.get("/api/tasks")["tasks"] if t["task_id"] not in self.known]
+        return [t for t in self.api.post("/api/v1/tasks/page", {})["result"]["tasks"] if t["task_id"] not in self.known]
 
     def until(self, problem: Callable[[], str | None], seconds: float) -> str | None:
         """``problem()`` once it is None, else its last answer after ``seconds``."""
@@ -1919,7 +1919,7 @@ def _start_slow_task(api: Api, project_id: str, *, timeout: float,
             raise EvalError("the run was interrupted")
         if check_budget is not None:
             check_budget()
-        detail = api.get(f"/api/tasks/{task_id}")
+        detail = api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"]
         if detail.get("steps") and detail.get("phase") in ("executing", "verifying"):
             return task_id
         if detail.get("status") not in (*ACTIVE, "init"):
@@ -2005,7 +2005,7 @@ def _stop_leftovers(api: Api) -> None:
     """Stop the dialog's tasks still running, as the operator would before the server stops; best effort, as the
     server may be gone after an error."""
     try:
-        for task in api.get("/api/tasks")["tasks"]:
+        for task in api.post("/api/v1/tasks/page", {})["result"]["tasks"]:
             if task.get("status") in ACTIVE:
                 api.post("/api/v1/ops/task_control/stop", {"task_id": task["task_id"]})
     except Exception:
@@ -2082,7 +2082,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             created = api.post("/api/v1/clients/create", {"name": f"eval-{uuid.uuid4().hex[:6]}"})["result"]
             client_id = created["client"]["id"]
             client_api = Api(api.base_url, token=created["token"], timeout=api.timeout)
-        known = frozenset(t["task_id"] for t in api.get("/api/tasks")["tasks"])
+        known = frozenset(t["task_id"] for t in api.post("/api/v1/tasks/page", {})["result"]["tasks"])
         # Setup uses audited operator operations too; only the dialog's actions belong to its checks.
         since = _last_action(database_url)
         previous: Look | None = None

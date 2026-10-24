@@ -283,7 +283,7 @@ def test_the_task_page_lists_each_roles_versions_steps_and_numbers(monkeypatch: 
         await run(pool, "reviewer-3", "s1", "not_passed", 0.01, "security")
         await run(pool, "reviewer-4", "s1", "passed", 0.01, "security")
 
-        status, detail = await _call("GET", "/api/tasks/task-a")
+        status, detail = await _call("POST", "/api/v1/tasks/detail", {"task_id": "task-a"})
         assert status == 200
         roles = {role["id"]: role for role in detail["roles"]}
         assert [role["id"] for role in detail["roles"]] == ["tester", "security"]

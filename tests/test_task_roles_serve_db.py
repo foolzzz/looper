@@ -194,7 +194,7 @@ def _log(state: Path, name: str, variant: str) -> list[dict[str, Any]]:
 def _wait(api: Any, ids: dict[str, str], variants: tuple[str, ...], ended: tuple[str, ...]) -> dict[str, Any]:
     deadline = time.monotonic() + 120
     while True:
-        details = {variant: api.get(f"/api/tasks/{ids[variant]}") for variant in variants}
+        details = {variant: api.post("/api/v1/tasks/detail", {"task_id": ids[variant]})["result"] for variant in variants}
         if all(d["status"] in ended for d in details.values()):
             return details
         assert time.monotonic() < deadline, {v: d["status"] for v, d in details.items()}
@@ -203,7 +203,7 @@ def _wait(api: Any, ids: dict[str, str], variants: tuple[str, ...], ended: tuple
 
 def _wait_left(api: Any, ids: dict[str, str], variants: tuple[str, ...], status: str) -> None:
     deadline = time.monotonic() + 60
-    while any(api.get(f"/api/tasks/{ids[variant]}")["status"] == status for variant in variants):
+    while any(api.post("/api/v1/tasks/detail", {"task_id": ids[variant]})["result"]["status"] == status for variant in variants):
         assert time.monotonic() < deadline, f"{variants} stayed {status}"
         time.sleep(0.05)
 

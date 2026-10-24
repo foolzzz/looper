@@ -43,7 +43,10 @@ def _server(**parts: Any) -> Any:
                            **parts)
 
 
-async def _get(server: Any, path: str, query: dict[str, str] | None = None) -> tuple[int, Any]:
+async def _get(server: Any, path: str, query: dict[str, Any] | None = None) -> tuple[int, Any]:
+    if path in {"/api/v1/tasks/detail", "/api/v1/tasks/page"}:
+        from tests.db_support import call_v1
+        return await call_v1(server, path, query or {})
     writer = _Writer()
     if path == "/api/v1/system/overview":
         from looper.agents.api_v1 import OPERATOR
@@ -91,14 +94,14 @@ def test_every_task_is_counted_by_group_and_the_tasks_page_lists_a_group(monkeyp
 
         for group, statuses in (("attention", {"failed", "stopped"}), ("in_progress",
                                 {"executing", "planning", "verifying", "assigned", "pending"}), ("other", {"archived"})):
-            status, body = await _get(_server(), "/api/tasks", {"group": group})
+            status, body = await _get(_server(), "/api/v1/tasks/page", {"group": group})
             assert status == 200
             assert {t["status"] for t in body["tasks"]} == statuses
-        status, body = await _get(_server(), "/api/tasks", {"group": "completed", "project_id": b["id"]})
+        status, body = await _get(_server(), "/api/v1/tasks/page", {"group": "completed", "project_id": b["id"]})
         assert body["tasks"] == []
         for unknown in ("busy", "queued"):
-            status, body = await _get(_server(), "/api/tasks", {"group": unknown})
-            assert status == 400 and "in_progress" in body["error"]
+            status, body = await _get(_server(), "/api/v1/tasks/page", {"group": unknown})
+            assert status == 400 and body["error"] == "the request does not match the declared schema"
 
     run_db(test, monkeypatch)
 
@@ -259,7 +262,7 @@ def test_runs_a_previous_server_left_running_end_at_startup_and_count_as_ended(
         left = [await run("worker-2", "running"), await run("planner-task-a", "running")]  # the server was killed
         await llm_records.touch_record(left[0], pool=pool)  # it wrote output; the other never did
         server = _server()
-        assert (await _get(server, "/api/tasks/task-a"))[1]["cost"]["running"] == 2
+        assert (await _get(server, "/api/v1/tasks/detail", {"task_id": "task-a"}))[1]["cost"]["running"] == 2
 
         assert await llm_records.end_unfinished_records(pool=pool) == 2
         ended = [await llm_records.get_record(record_id, pool=pool) for record_id in left]
@@ -269,7 +272,7 @@ def test_runs_a_previous_server_left_running_end_at_startup_and_count_as_ended(
         assert await llm_records.end_unfinished_records(pool=pool) == 0
         assert [await llm_records.get_record(record_id, pool=pool) for record_id in left] == ended
 
-        status, detail = await _get(server, "/api/tasks/task-a")
+        status, detail = await _get(server, "/api/v1/tasks/detail", {"task_id": "task-a"})
         cost = detail["cost"]
         assert (status, cost["runs"], cost["running"], cost["unpriced_runs"]) == (200, 4, 0, 2)
         assert cost["cost_usd"] == pytest.approx(0.35)
@@ -296,7 +299,7 @@ def test_a_planning_or_verifying_task_is_active_for_the_sidebar_and_the_delete_g
         assert status == 200
         (listed,) = body["projects"]
         assert (listed["task_count"], listed["active_count"]) == (6, 4)
-        status, body = await _get(_server(), "/api/tasks")
+        status, body = await _get(_server(), "/api/v1/tasks/page", {})
         assert {t["task_id"]: t["group"] for t in body["tasks"]} == {
             "planning": "in_progress", "verifying": "in_progress", "executing": "in_progress", "pending": "in_progress",
             "init": "ready", "completed": "completed"}
@@ -322,11 +325,11 @@ def test_a_tasks_name_is_its_title_else_its_goal_else_its_requirement(monkeypatc
         await tasks.create_task(task_id="task-plain", requirement="  Write hello.py.\nThen test it.",
                                 project_id=project["id"], pool=pool)
         server = _server()
-        status, body = await _get(server, "/api/tasks")
+        status, body = await _get(server, "/api/v1/tasks/page", {})
         assert status == 200
         assert {t["task_id"]: t["name"] for t in body["tasks"]} == {
             "task-titled": "写 hello 脚本", "task-goal": "hello-world", "task-plain": "Write hello.py."}
-        status, detail = await _get(server, "/api/tasks/task-titled")
+        status, detail = await _get(server, "/api/v1/tasks/detail", {"task_id": "task-titled"})
         assert (status, detail["name"], detail["requirement"]) == (200, "写 hello 脚本", "Write hello.py.")
         assert await pool.fetchval("SELECT title FROM tasks WHERE id = 'task-titled'") == "写 hello 脚本"
 
@@ -354,8 +357,8 @@ def test_the_tasks_list_pages_newest_first_under_its_filters(monkeypatch: pytest
             ids: list[str] = []
             before, pages = None, 0
             while True:
-                status, body = await _get(server, "/api/tasks", {
-                    **query, "limit": str(limit), **({"before": before} if before else {})})
+                status, body = await _get(server, "/api/v1/tasks/page", {
+                    **query, "limit": limit, **({"before": before} if before else {})})
                 assert status == 200, body
                 ids += [t["task_id"] for t in body["tasks"]]
                 pages += 1
@@ -367,7 +370,7 @@ def test_the_tasks_list_pages_newest_first_under_its_filters(monkeypatch: pytest
         assert (everything, pages) == ([r[0] for r in newest_first], 3)
         assert counts == {"completed": 83, "failed": 40}
         # The default page is 50, the newest.
-        status, body = await _get(server, "/api/tasks")
+        status, body = await _get(server, "/api/v1/tasks/page", {})
         assert [t["task_id"] for t in body["tasks"]] == everything[:50] and body["next_before"] == everything[49]
 
         alpha_failed, _, counts = await every_page(limit=7, project_id=a["id"], status="failed")
@@ -379,10 +382,10 @@ def test_the_tasks_list_pages_newest_first_under_its_filters(monkeypatch: pytest
         ties, _, _ = await every_page(limit=1, project_id=b["id"], status="completed")
         assert len(ties) == len(set(ties)) == 43 and ties[:3] == ["task-tie2", "task-tie1", "task-tie0"]
 
-        for query, says in [({"limit": "0"}, "limit must be a whole number from 1 to 200"),
-                            ({"limit": "201"}, "limit must be"), ({"status": "busy"}, "status must be one of"),
+        for query, says in [({"limit": 0}, "declared schema"),
+                            ({"limit": 201}, "declared schema"), ({"status": "busy"}, "declared schema"),
                             ({"before": "task-nope"}, "before must be a task id")]:
-            status, body = await _get(server, "/api/tasks", query)
+            status, body = await _get(server, "/api/v1/tasks/page", query)
             assert status == 400 and says in body["error"], body
 
     run_db(test, monkeypatch)

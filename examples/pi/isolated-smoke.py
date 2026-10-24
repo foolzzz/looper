@@ -305,7 +305,7 @@ def session_smoke(base, token, root, work, output, provider, *, helper, installe
         task_id = task("SMOKE_WORK")
         wait(lambda: provider["worker"].is_set(), "Worker never reached local provider")
         send(STEER_SENTINEL, "planner", task_id)
-        detail = wait(lambda: (value if (value := request(base, "/api/tasks/" + task_id, token))["status"]
+        detail = wait(lambda: (value if (value := request(base, "/api/v1/tasks/detail", token, "POST", {"task_id": task_id})["result"])["status"]
                               in ("completed", "failed", "cancelled", "stopped") else None), "task did not finish")
         assert detail["status"] == "completed", detail["status"]
         # Capture completed records before the cancellation task adds any more.
@@ -353,7 +353,7 @@ print(json.dumps({'pids': list(tree), 'groups': list(set(tree.values()))}))
         cancelled_token = grants["worker"]["token"]
         count_before = len([r for r in provider["requests"] if r["role"] == "worker"])
         request(base, "/api/v1/ops/task_control/cancel", token, "POST", {"task_id": cancelled})
-        wait(lambda: request(base, "/api/tasks/" + cancelled, token)["status"] == "cancelled", "task not cancelled")
+        wait(lambda: request(base, "/api/v1/tasks/detail", token, "POST", {"task_id": cancelled})["result"]["status"] == "cancelled", "task not cancelled")
         wait(lambda: all(r["status"] != "running" for r in records()), "cancel left running records")
         def reaped():
             for pid in tree["pids"]:

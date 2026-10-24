@@ -2758,7 +2758,7 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
                 tasks.append((task, work))
                 api.post("/api/v1/ops/task_control/start", {"task_id": task})
             for task, work in tasks:
-                detail = wait_for(lambda: api.get(f"/api/tasks/{task}"),
+                detail = wait_for(lambda: api.post("/api/v1/tasks/detail", {"task_id": task})["result"],
                                   lambda row: row["status"] in ("completed", "failed", "stopped", "cancelled"))
                 if detail["status"] != "completed":
                     (tmp_path / "task-detail.json").write_text(json.dumps(detail, default=str))

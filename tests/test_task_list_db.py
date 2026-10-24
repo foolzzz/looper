@@ -39,7 +39,7 @@ def test_console_and_manager_task_lists_keep_their_filters_and_compact_keys(
         assert bounded["result"]["more"] is False  # the tool's existing bounded-list contract
         assert [row["task_id"] for row in ready["result"]["tasks"]] == ["task-b"]
 
-        status, page = await _get(_server(), "/api/tasks", {"limit": "1"})
+        status, page = await _get(_server(), "/api/v1/tasks/page", {"limit": 1})
         assert status == 200, page
         assert page["next_before"] == "task-c"
         assert page["counts"] == {"running": 1, "init": 1, "failed": 1}

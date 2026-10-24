@@ -216,7 +216,6 @@ def test_a_body_is_not_read_without_a_credential(tmp_path: Path, clients: Simple
 
 
 @pytest.mark.parametrize(("line", "body"), [
-    ("GET /api/tasks", ""),
     ("GET /api/clients", ""),
     ("POST /api/clients", '{"name": "x"}'),
     ("DELETE /api/clients/client-000000000000", ""),
@@ -242,7 +241,7 @@ def test_a_client_token_does_not_sign_in(tmp_path: Path, clients: SimpleNamespac
                 assert "set-cookie" not in fields, line
                 assert status != 303, line
             cookie = {"Cookie": f"{operator_auth.cookie_name(server._port)}={CLIENT_TOKEN}"}
-            status, _, _ = await _send_raw(server, "GET /api/tasks", cookie)
+            status, _, _ = await _send_raw(server, "GET /api/clients", cookie)
             assert status == 401
             assert clients.found == []
 

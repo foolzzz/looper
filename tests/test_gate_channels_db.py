@@ -151,7 +151,7 @@ def test_a_lark_tasks_gate_posts_its_card_and_the_rest_under_it(monkeypatch: pyt
                                              ("lark", LARK_USER, "om_103")]
         # Each post is keyed by its message, so Lark sends it once however often it is tried.
         assert [p["key"] for p in poster.posts] == [f"gate-{m['id']}" for m in thread if m["post_state"] == "sent"]
-        (gate,) = (await _api("GET", "/api/tasks/task-a"))[1]["gates"]
+        (gate,) = (await _api("POST", "/api/v1/tasks/detail", {"task_id": "task-a"}))[1]["gates"]
         assert gate["channel_posts"] == {"channel": "lark", "target": f"Lark {LARK_USER}", "sent": 3, "failed": 0,
                                          "last_error": None}
 
@@ -205,7 +205,7 @@ def test_a_failed_post_is_tried_again_and_the_gates_later_messages_wait_behind_i
                                        "task_user_gate_messages WHERE kind = 'opened'")
         assert POST_RETRY_SEC[0] - 60 < retry_in <= POST_RETRY_SEC[0]
         assert await posts() == [("opened", None, 1, True)]
-        (gate,) = (await _api("GET", "/api/tasks/task-a"))[1]["gates"]
+        (gate,) = (await _api("POST", "/api/v1/tasks/detail", {"task_id": "task-a"}))[1]["gates"]
         assert gate["channel_posts"]["failed"] == 0  # not failed yet
         # The reminder written meanwhile waits behind the card, so the chat gets them in order.
         await _say("task-a", "step-g1", "reminder", "Still waiting")
@@ -226,7 +226,7 @@ def test_a_failed_post_is_tried_again_and_the_gates_later_messages_wait_behind_i
             await due()
         assert await posts() == [("opened", "sent", 2, False), ("reminder", "sent", 1, False),
                                  ("updated", "failed", POST_ATTEMPTS, False)]
-        (gate,) = (await _api("GET", "/api/tasks/task-a"))[1]["gates"]
+        (gate,) = (await _api("POST", "/api/v1/tasks/detail", {"task_id": "task-a"}))[1]["gates"]
         assert gate["channel_posts"] == {"channel": "telegram", "target": f"Telegram {TELEGRAM_CHAT}", "sent": 2,
                                          "failed": 1, "last_error": "the bot was removed from the chat"}
         activity = [r["summary"] for r in await pool.fetch("SELECT summary FROM activity WHERE kind = 'error'")]
@@ -296,7 +296,7 @@ def test_a_web_tasks_gates_go_to_the_chat_the_setting_names(monkeypatch: pytest.
         assert poster.posts == []  # no setting: the task page only
         state = await pool.fetchval("SELECT post_state FROM task_user_gate_messages")
         assert state == "none"
-        (gate,) = (await _api("GET", "/api/tasks/task-a"))[1]["gates"]
+        (gate,) = (await _api("POST", "/api/v1/tasks/detail", {"task_id": "task-a"}))[1]["gates"]
         assert gate["channel_posts"] is None
 
         # Only a chat a channel's allowlist lets in may be named.

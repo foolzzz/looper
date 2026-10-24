@@ -62,6 +62,9 @@ async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
     method, path, body = _global_settings_request(method, path, body)
+    if path in {"/api/v1/tasks/detail", "/api/v1/tasks/page"}:
+        from tests.db_support import call_v1
+        return await call_v1(server, path, body or {})
     writer = _Writer()
     raw = b"" if body is None else json.dumps(body).encode()
     if path.startswith(("/api/v1/catalog_sources/", "/api/v1/catalog_items/", "/api/v1/installs/",

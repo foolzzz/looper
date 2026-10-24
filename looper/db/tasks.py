@@ -565,6 +565,9 @@ _FILTERS = """
     ($1::text IS NULL OR t.project_id = $1) AND ($2::text IS NULL OR t.status = $2)
     AND ($3::text[] IS NULL OR (t.status = ANY($3::text[])) = $4) AND ($5::text IS NULL OR t.schedule_id = $5)
 """
+# A literal substring, so '%' and '_' in a search never become SQL wildcards.
+_SEARCH = ("strpos(lower(regexp_replace(concat_ws(' ', t.id, t.title, t.requirement, p.name, t.goal_id), "
+           "'\\s+', ' ', 'g')), {parameter}) > 0")
 
 
 async def list_tasks(
@@ -577,11 +580,13 @@ async def list_tasks(
     schedule_id: str | None = None,
     before: str | None = None,
     manager_id: str | None = None,
+    query: str = "",
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
     """The newest tasks (by creation, then id), each with its ``project_name`` and ``schedule_name``; only one
     project's when ``project_id`` is given, one schedule's when ``schedule_id`` is, only those in ``status``, or in
-    ``group``, when it is, only those older than the task ``before`` when it is, and only ``manager_id``'s when given."""
+    ``group``, when it is, only those older than the task ``before`` when it is, and only ``manager_id``'s when given.
+    ``query`` searches the id, title, requirement, project name and goal before paging."""
     pool = pool or get_pool()
     statuses, inside = _group_filter(group)
     rows = await pool.fetch(
@@ -590,9 +595,10 @@ async def list_tasks(
         WHERE {_FILTERS}
           AND ($6::text IS NULL OR (t.created_at, t.id) < (SELECT b.created_at, b.id FROM tasks b WHERE b.id = $6))
           AND ($9::text IS NULL OR t.manager_id = $9)
+          AND ($10 = '' OR {_SEARCH.format(parameter='$10')})
         ORDER BY t.created_at DESC, t.id DESC LIMIT $7 OFFSET $8
         """,
-        project_id, status, statuses, inside, schedule_id, before, limit, offset, manager_id,
+        project_id, status, statuses, inside, schedule_id, before, limit, offset, manager_id, query,
     )
     return [_task(r) for r in rows]
 
@@ -602,14 +608,16 @@ async def count_by_status(
     project_id: str | None = None,
     group: TaskGroup | None = None,
     schedule_id: str | None = None,
+    query: str = "",
     pool: asyncpg.Pool | None = None,
 ) -> dict[str, int]:
     """How many tasks ``list_tasks`` with these filters holds in all, by status."""
     pool = pool or get_pool()
     statuses, inside = _group_filter(group)
     rows = await pool.fetch(
-        f"SELECT t.status, count(*) AS n FROM tasks t WHERE {_FILTERS} GROUP BY t.status",
-        project_id, None, statuses, inside, schedule_id,
+        f"SELECT t.status, count(*) AS n FROM tasks t JOIN projects p ON p.id=t.project_id "
+        f"WHERE {_FILTERS} AND ($6 = '' OR {_SEARCH.format(parameter='$6')}) GROUP BY t.status",
+        project_id, None, statuses, inside, schedule_id, query,
     )
     return {row["status"]: int(row["n"]) for row in rows}
 
