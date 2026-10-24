@@ -1,4 +1,4 @@
-"""Adding, changing and removing a Manager's bots over ``/api/channel-configs`` (``channels/bot_api.py``) against a
+"""Adding, changing and removing a Manager's bots over ``/api/v1/channel_configs/*`` (``channels/bot_api.py``) against a
 real PostgreSQL, with the stand-in lark-cli for ``lark`` rows and the fake platform for ``lark_bot`` rows.
 
 Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database.
@@ -45,19 +45,19 @@ async def _telegram(manager: str, token: str | None = TOKEN, **extra: Any) -> tu
     body: dict[str, Any] = {"channel_type": "telegram", "manager_id": manager, "config": dict(ALLOW), **extra}
     if token is not None:
         body["bot_token"] = token
-    return await _call("POST", "/api/channel-configs", body)
+    return await _call("POST", "channel_configs", body)
 
 
 def test_add_a_telegram_bot_lists_it_after_the_built_in_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         manager = await _manager(pool)
         status, row = await _telegram(manager)
-        assert status == 201, row
+        assert status == 200, row
         assert row["channel_id"] == "channel-telegram-2" and row["manager_id"] == manager
         assert row["manager_name"] == "Review" and row["builtin"] is False and row["has_bot_token"] is True
         assert row["enabled"] is False and row["display_name"] == "Telegram · Review"
         assert TOKEN not in json.dumps(row)
-        status, listed = await _call("GET", "/api/channel-configs")
+        status, listed = await _call("GET", "channel_configs")
         ids = [c["channel_id"] for c in listed["configs"]]
         assert ids[-1] == "channel-telegram-2" and set(ids[:-1]) == {"channel-telegram", "channel-lark",
                                                                     "channel-lark_bot"}
@@ -71,13 +71,13 @@ def test_add_a_telegram_bot_lists_it_after_the_built_in_rows(monkeypatch: pytest
 def test_the_same_telegram_bot_is_not_added_twice(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         first, second = await _manager(pool), await _manager(pool, "other")
-        assert (await _telegram(first))[0] == 201
+        assert (await _telegram(first))[0] == 200
         for token in (TOKEN, SAME_BOT_NEW_SECRET):
             status, body = await _telegram(second, token)
-            assert status == 409 and "channel-telegram-2" in body["error"], body
+            assert status == 409 and body["error"] == "invalid credential request", body
             assert token not in json.dumps(body)
         assert await pool.fetchval("SELECT count(*) FROM channel_configs WHERE channel_type = 'telegram'") == 2
-        assert (await _telegram(second, OTHER_TOKEN))[0] == 201
+        assert (await _telegram(second, OTHER_TOKEN))[0] == 200
 
     run_with_channel_configs(test, monkeypatch)
 
@@ -88,7 +88,7 @@ def test_the_built_in_row_reading_the_environment_counts(monkeypatch: pytest.Mon
     async def test(pool: Any) -> None:
         manager = await _manager(pool)
         status, body = await _telegram(manager, TOKEN)
-        assert status == 409 and "channel-telegram" in body["error"]
+        assert status == 409 and body["error"] == "invalid credential request"
         assert TOKEN not in json.dumps(body) and SAME_BOT_NEW_SECRET not in json.dumps(body)
 
     run_with_channel_configs(test, monkeypatch)
@@ -101,11 +101,11 @@ def test_the_built_in_row_whose_bot_token_env_is_unset_counts_the_standard_varia
     monkeypatch.delenv("UNSET_TELEGRAM_TOKEN", raising=False)
 
     async def test(pool: Any) -> None:
-        status, _ = await _call("PUT", "/api/channel-configs/channel-telegram",
+        status, _ = await _call("PUT", "channel-telegram",
                                 {"config": {**ALLOW, "bot_token_env": "UNSET_TELEGRAM_TOKEN"}})
         assert status == 200
         status, body = await _telegram(await _manager(pool), TOKEN)
-        assert status == 409 and "channel-telegram" in body["error"]
+        assert status == 409 and body["error"] == "invalid credential request"
 
     run_with_channel_configs(test, monkeypatch)
 
@@ -118,18 +118,18 @@ def test_refused_adds_write_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
         before = await pool.fetchval("SELECT count(*) FROM channel_configs")
         assert (await _telegram(manager, None))[0] == 400
         status, body = await _telegram(manager, TOKEN, config={**ALLOW, "bot_token_env": "X"})
-        assert status == 400 and "environment" in body["error"]
+        assert status == 400 and body["error"] == "invalid credential request"
         assert (await _telegram(manager, TOKEN, surprise=1))[0] == 400
         assert (await _telegram(manager, TOKEN, channel_type="slack"))[0] == 400
         assert (await _telegram(manager, TOKEN, config={"allowed_user_ids": ["nope"]}))[0] == 400
         assert (await _telegram("manager-nobody", TOKEN))[0] == 404
         assert (await _telegram("manager-gone", TOKEN))[0] == 404
-        assert (await _call("POST", "/api/channel-configs", [1]))[0] == 400
+        assert (await _call("POST", "channel_configs", [1]))[0] == 400
         assert await pool.fetchval("SELECT count(*) FROM channel_configs") == before
         assert await pool.fetchval("SELECT count(*) FROM channel_secrets") == 0
         await pool.execute("UPDATE managers SET enabled = false WHERE id = $1", manager)
         status, row = await _telegram(manager)
-        assert status == 201 and row["manager_id"] == manager
+        assert status == 200 and row["manager_id"] == manager
 
     run_with_channel_configs(test, monkeypatch)
 
@@ -138,14 +138,14 @@ def test_lark_cli_bots_name_their_profile(monkeypatch: pytest.MonkeyPatch, lark_
     async def test(pool: Any) -> None:
         manager = await _manager(pool)
         body = {"channel_type": "lark", "manager_id": manager}
-        status, answer = await _call("POST", "/api/channel-configs", {**body, "config": {"profile": ""}})
-        assert status == 400 and "lark-cli profile" in answer["error"]
-        status, answer = await _call("POST", "/api/channel-configs", {**body, "config": {"profile": "other"}})
-        assert status == 201, answer
+        status, answer = await _call("POST", "channel_configs", {**body, "config": {"profile": ""}})
+        assert status == 400 and answer["error"] == "invalid credential request"
+        status, answer = await _call("POST", "channel_configs", {**body, "config": {"profile": "other"}})
+        assert status == 200, answer
         lark_id = answer["channel_id"]
         assert lark_id == "channel-lark-2" and answer["display_name"] == "Lark (lark-cli) · Review"
-        status, answer = await _call("POST", "/api/channel-configs", {**body, "config": {"profile": "other"}})
-        assert status == 409 and lark_id in answer["error"]
+        status, answer = await _call("POST", "channel_configs", {**body, "config": {"profile": "other"}})
+        assert status == 409 and answer["error"] == "invalid credential request"
 
         status, lark = await _call("POST", "/api/v1/channels/status", {"channel_type": "lark", "channel_id": lark_id})
         assert status == 200 and lark["bot"]["name"] == "OtherBot"
@@ -162,8 +162,8 @@ def test_lark_cli_bots_name_their_profile(monkeypatch: pytest.MonkeyPatch, lark_
         assert status == 200 and found["people"]
 
         # Moving the built-in row onto the added bot's profile clashes too.
-        status, answer = await _call("PUT", "/api/channel-configs/channel-lark", {"config": {"profile": "other"}})
-        assert status == 409 and lark_id in answer["error"]
+        status, answer = await _call("PUT", "channel-lark", {"config": {"profile": "other"}})
+        assert status == 409 and answer["error"] == "invalid credential request"
 
     run_with_channel_configs(test, monkeypatch)
 
@@ -172,19 +172,19 @@ def test_an_added_lark_cli_bot_keeps_naming_its_profile(monkeypatch: pytest.Monk
                                                          lark_cli_stand_in: Path) -> None:
     async def test(pool: Any) -> None:
         manager = await _manager(pool)
-        status, answer = await _call("POST", "/api/channel-configs",
+        status, answer = await _call("POST", "channel_configs",
                                      {"channel_type": "lark", "manager_id": manager, "config": {"profile": "other"}})
-        assert status == 201, answer
+        assert status == 200, answer
         lark_id = answer["channel_id"]
         # With the built-in row on another profile, an empty one clashes with no row, and is still refused.
-        status, answer = await _call("PUT", "/api/channel-configs/channel-lark", {"config": {"profile": "out"}})
+        status, answer = await _call("PUT", "channel-lark", {"config": {"profile": "out"}})
         assert status == 200, answer
-        status, answer = await _call("PUT", f"/api/channel-configs/{lark_id}", {"config": {"profile": ""}})
-        assert status == 400 and "lark-cli profile" in answer["error"], answer
-        status, answer = await _call("GET", f"/api/channel-configs/{lark_id}")
+        status, answer = await _call("PUT", f"{lark_id}", {"config": {"profile": ""}})
+        assert status == 400 and answer["error"] == "invalid credential request", answer
+        status, answer = await _call("GET", f"{lark_id}")
         assert answer["config"]["profile"] == "other"
         # The built-in row may still use lark-cli's active profile.
-        status, answer = await _call("PUT", "/api/channel-configs/channel-lark", {"config": {"profile": ""}})
+        status, answer = await _call("PUT", "channel-lark", {"config": {"profile": ""}})
         assert status == 200, answer
 
     run_with_channel_configs(test, monkeypatch)
@@ -195,14 +195,14 @@ def test_lark_bot_apps_are_added_once(monkeypatch: pytest.MonkeyPatch, platform:
         manager = await _manager(pool)
         body = {"channel_type": "lark_bot", "manager_id": manager, "config": {"app_id": "cli_second"},
                 "bot_token": SECRET}
-        status, answer = await _call("POST", "/api/channel-configs", {**body, "bot_token": None})
+        status, answer = await _call("POST", "channel_configs", {**body, "bot_token": None})
         assert status == 400
-        status, answer = await _call("POST", "/api/channel-configs", {**body, "config": {}})
+        status, answer = await _call("POST", "channel_configs", {**body, "config": {}})
         assert status == 400
-        status, answer = await _call("POST", "/api/channel-configs", body)
-        assert status == 201 and answer["has_bot_token"] is True and SECRET not in json.dumps(answer)
-        status, again = await _call("POST", "/api/channel-configs", {**body, "bot_token": "another-secret"})
-        assert status == 409 and answer["channel_id"] in again["error"] and "another-secret" not in json.dumps(again)
+        status, answer = await _call("POST", "channel_configs", body)
+        assert status == 200 and answer["has_bot_token"] is True and SECRET not in json.dumps(answer)
+        status, again = await _call("POST", "channel_configs", {**body, "bot_token": "another-secret"})
+        assert status == 409 and again["error"] == "invalid credential request" and "another-secret" not in json.dumps(again)
 
         status, lark = await _call("POST", "/api/v1/channels/status",
                                    {"channel_type": "lark_bot", "channel_id": answer["channel_id"]})
@@ -220,16 +220,16 @@ def test_a_lark_app_is_one_bot_whatever_names_it(monkeypatch: pytest.MonkeyPatch
         manager = await _manager(pool)
         lark = {"channel_type": "lark", "manager_id": manager}
         lark_bot = {"channel_type": "lark_bot", "manager_id": manager, "bot_token": SECRET}
-        status, answer = await _call("POST", "/api/channel-configs", {**lark, "config": {"profile": "cli_main"}})
-        assert status == 409 and "channel-lark)" in answer["error"], answer
-        status, answer = await _call("POST", "/api/channel-configs", {**lark_bot, "config": {"app_id": "cli_main"}})
-        assert status == 409 and "channel-lark)" in answer["error"], answer
-        status, added = await _call("POST", "/api/channel-configs", {**lark_bot, "config": {"app_id": "cli_other"}})
-        assert status == 201, added
-        status, answer = await _call("POST", "/api/channel-configs", {**lark, "config": {"profile": "other"}})
-        assert status == 409 and added["channel_id"] in answer["error"], answer
-        status, answer = await _call("PUT", "/api/channel-configs/channel-lark", {"config": {"profile": "other"}})
-        assert status == 409 and added["channel_id"] in answer["error"], answer
+        status, answer = await _call("POST", "channel_configs", {**lark, "config": {"profile": "cli_main"}})
+        assert status == 409 and answer["error"] == "invalid credential request", answer
+        status, answer = await _call("POST", "channel_configs", {**lark_bot, "config": {"app_id": "cli_main"}})
+        assert status == 409 and answer["error"] == "invalid credential request", answer
+        status, added = await _call("POST", "channel_configs", {**lark_bot, "config": {"app_id": "cli_other"}})
+        assert status == 200, added
+        status, answer = await _call("POST", "channel_configs", {**lark, "config": {"profile": "other"}})
+        assert status == 409 and answer["error"] == "invalid credential request", answer
+        status, answer = await _call("PUT", "channel-lark", {"config": {"profile": "other"}})
+        assert status == 409 and answer["error"] == "invalid credential request", answer
         assert await pool.fetchval("SELECT count(*) FROM channel_configs WHERE channel_type LIKE 'lark%'") == 3
 
     run_with_channel_configs(test, monkeypatch)
@@ -240,17 +240,17 @@ def test_the_built_in_lark_bot_row_may_act_as_the_built_in_lark_cli_rows_app(
     # The built-in lark-cli row acts as cli_main (lark-cli's active profile); the built-in bot token row may too, as
     # today, while an added bot of cli_main may not.
     async def test(pool: Any) -> None:
-        status, answer = await _call("PUT", "/api/channel-configs/channel-lark_bot",
+        status, answer = await _call("PUT", "channel-lark_bot",
                                      {"config": {"app_id": "cli_main"}, "bot_token": SECRET})
         assert status == 200, answer
-        status, answer = await _call("PUT", "/api/channel-configs/channel-lark_bot", {"bot_token": "new-secret"})
+        status, answer = await _call("PUT", "channel-lark_bot", {"bot_token": "new-secret"})
         assert status == 200, answer
-        status, answer = await _call("PUT", "/api/channel-configs/channel-lark", {"config": {"profile": ""}})
+        status, answer = await _call("PUT", "channel-lark", {"config": {"profile": ""}})
         assert status == 200, answer
         manager = await _manager(pool)
-        status, answer = await _call("POST", "/api/channel-configs", {
+        status, answer = await _call("POST", "channel_configs", {
             "channel_type": "lark_bot", "manager_id": manager, "config": {"app_id": "cli_main"}, "bot_token": SECRET})
-        assert status == 409 and "(channel-lark" in answer["error"], answer
+        assert status == 409 and answer["error"] == "invalid credential request", answer
 
     run_with_channel_configs(test, monkeypatch)
 
@@ -261,13 +261,13 @@ def test_the_built_in_telegram_row_falling_back_to_the_environment_is_checked(
     monkeypatch.setenv("ALT_TELEGRAM_TOKEN", SAME_BOT_NEW_SECRET)
 
     async def test(pool: Any) -> None:
-        path = "/api/channel-configs/channel-telegram"
+        path = "channel-telegram"
         assert (await _call("PUT", path, {"bot_token": OTHER_TOKEN}))[0] == 200
-        assert (await _telegram(await _manager(pool), TOKEN))[0] == 201  # channel-telegram-2, bot 1111111
+        assert (await _telegram(await _manager(pool), TOKEN))[0] == 200  # channel-telegram-2, bot 1111111
 
         # Without its stored token the built-in row would read the environment's: the added bot's.
         status, body = await _call("PUT", path, {"bot_token": None})
-        assert status == 409 and "channel-telegram-2" in body["error"], body
+        assert status == 409 and body["error"] == "invalid credential request", body
         assert SAME_BOT_NEW_SECRET not in json.dumps(body) and TOKEN not in json.dumps(body)
         assert await pool.fetchval("SELECT bot_token FROM channel_secrets WHERE channel_id = 'channel-telegram'"
                                    ) == OTHER_TOKEN
@@ -275,7 +275,7 @@ def test_the_built_in_telegram_row_falling_back_to_the_environment_is_checked(
         monkeypatch.setenv("LOOPER_TELEGRAM_BOT_TOKEN", "3333333:AAthird-env-token")
         assert (await _call("PUT", path, {"bot_token": None}))[0] == 200
         status, body = await _call("PUT", path, {"config": {**ALLOW, "bot_token_env": "ALT_TELEGRAM_TOKEN"}})
-        assert status == 409 and "channel-telegram-2" in body["error"], body
+        assert status == 409 and body["error"] == "invalid credential request", body
         assert "bot_token_env" not in ((await _call("GET", path))[1]["config"] or {})
 
     run_with_channel_configs(test, monkeypatch)
@@ -291,9 +291,9 @@ def test_a_token_removal_is_checked_against_a_bot_token_env_changed_meanwhile(
     async def test(pool: Any) -> None:
         from looper.agents.channels import bot_api
 
-        path = "/api/channel-configs/channel-telegram"
+        path = "channel-telegram"
         assert (await _call("PUT", path, {"bot_token": OTHER_TOKEN}))[0] == 200
-        assert (await _telegram(await _manager(pool), TOKEN))[0] == 201  # channel-telegram-2, bot 1111111
+        assert (await _telegram(await _manager(pool), TOKEN))[0] == 200  # channel-telegram-2, bot 1111111
         real = bot_api.db_channel_configs.get_config
         raced: list[int] = []
 
@@ -307,7 +307,7 @@ def test_a_token_removal_is_checked_against_a_bot_token_env_changed_meanwhile(
 
         monkeypatch.setattr(bot_api.db_channel_configs, "get_config", get_config)
         status, body = await _call("PUT", path, {"bot_token": None})
-        assert raced and status == 409 and "channel-telegram-2" in body["error"], body
+        assert raced and status == 409 and body["error"] == "invalid credential request", body
         assert await pool.fetchval("SELECT bot_token FROM channel_secrets WHERE channel_id = 'channel-telegram'"
                                    ) == OTHER_TOKEN
 
@@ -317,17 +317,17 @@ def test_a_token_removal_is_checked_against_a_bot_token_env_changed_meanwhile(
 def test_put_keeps_the_manager_and_checks_a_new_token(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         manager, other = await _manager(pool), await _manager(pool, "other")
-        assert (await _telegram(manager))[0] == 201
-        assert (await _telegram(other, OTHER_TOKEN))[0] == 201  # channel-telegram-3
-        path = "/api/channel-configs/channel-telegram-2"
+        assert (await _telegram(manager))[0] == 200
+        assert (await _telegram(other, OTHER_TOKEN))[0] == 200  # channel-telegram-3
+        path = "channel-telegram-2"
         status, body = await _call("PUT", path, {"manager_id": "manager", "display_name": "changed"})
-        assert status == 400 and "cannot change" in body["error"]
+        assert status == 400 and body["error"] == "invalid credential request"
         assert (await _call("GET", path))[1]["display_name"] == "Telegram · Review"
         status, body = await _call("PUT", path, {"manager_id": manager, "display_name": "Mine"})
         assert status == 200 and body["display_name"] == "Mine" and body["manager_id"] == manager
 
         status, body = await _call("PUT", path, {"bot_token": OTHER_TOKEN})
-        assert status == 409 and "channel-telegram-3" in body["error"] and OTHER_TOKEN not in json.dumps(body)
+        assert status == 409 and body["error"] == "invalid credential request" and OTHER_TOKEN not in json.dumps(body)
         assert await pool.fetchval("SELECT bot_token FROM channel_secrets WHERE channel_id = 'channel-telegram-2'"
                                    ) == TOKEN
         status, body = await _call("PUT", path, {"bot_token": "1111111:rotated-secret-xx"})
@@ -336,9 +336,9 @@ def test_put_keeps_the_manager_and_checks_a_new_token(monkeypatch: pytest.Monkey
         assert status == 400
         status, body = await _call("PUT", path, {"bot_token": None})
         assert status == 200 and body["has_bot_token"] is False
-        status, body = await _call("PUT", "/api/channel-configs/channel-telegram", {"manager_id": "manager"})
+        status, body = await _call("PUT", "channel-telegram", {"manager_id": "manager"})
         assert status == 200
-        status, body = await _call("PUT", "/api/channel-configs/channel-telegram", {"manager_id": manager})
+        status, body = await _call("PUT", "channel-telegram", {"manager_id": manager})
         assert status == 400
 
     run_with_channel_configs(test, monkeypatch)
@@ -347,20 +347,20 @@ def test_put_keeps_the_manager_and_checks_a_new_token(monkeypatch: pytest.Monkey
 def test_delete_removes_an_added_bot_and_its_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         manager = await _manager(pool)
-        assert (await _telegram(manager))[0] == 201
-        status, body = await _call("DELETE", "/api/channel-configs/channel-telegram")
-        assert status == 400 and "built-in telegram channel cannot be removed" in body["error"]
-        assert (await _call("GET", "/api/channel-configs/channel-telegram"))[0] == 200
+        assert (await _telegram(manager))[0] == 200
+        status, body = await _call("DELETE", "channel-telegram")
+        assert status == 400 and "built-in channel cannot be removed" in body["error"]
+        assert (await _call("GET", "channel-telegram"))[0] == 200
 
         status, body = await _manager_call("managers.delete", {"manager_id": manager})
         assert status == 409 and "remove them in Settings → Channels" in body["error"]
 
-        status, body = await _call("DELETE", "/api/channel-configs/channel-telegram-2")
+        status, body = await _call("DELETE", "channel-telegram-2")
         assert status == 200 and body == {"deleted": "channel-telegram-2", "restart": True}
-        ids = [c["channel_id"] for c in (await _call("GET", "/api/channel-configs"))[1]["configs"]]
+        ids = [c["channel_id"] for c in (await _call("GET", "channel_configs"))[1]["configs"]]
         assert "channel-telegram-2" not in ids
         assert await pool.fetchval("SELECT count(*) FROM channel_secrets WHERE channel_id = 'channel-telegram-2'") == 0
-        assert (await _call("DELETE", "/api/channel-configs/channel-telegram-2"))[0] == 404
+        assert (await _call("DELETE", "channel-telegram-2"))[0] == 404
         assert (await _manager_call("managers.delete", {"manager_id": manager}))[0] == 200
 
     run_with_channel_configs(test, monkeypatch)
@@ -370,7 +370,7 @@ def test_two_adds_of_one_token_at_once_make_one_bot(monkeypatch: pytest.MonkeyPa
     async def test(pool: Any) -> None:
         manager, other = await _manager(pool), await _manager(pool, "other")
         results = await asyncio.gather(_telegram(manager), _telegram(other))
-        assert sorted(status for status, _ in results) == [201, 409]
+        assert sorted(status for status, _ in results) == [200, 409]
         assert await pool.fetchval("SELECT count(*) FROM channel_configs WHERE channel_type = 'telegram'") == 2
 
     run_with_channel_configs(test, monkeypatch)
@@ -386,11 +386,11 @@ def test_no_log_line_carries_a_token(monkeypatch: pytest.MonkeyPatch, caplog: py
         manager = await _manager(pool)
         await _telegram(manager)
         await _telegram(manager)
-        await _call("PUT", "/api/channel-configs/channel-telegram-2", {"bot_token": OTHER_TOKEN})
-        await _call("POST", "/api/channel-configs", {
+        await _call("PUT", "channel-telegram-2", {"bot_token": OTHER_TOKEN})
+        await _call("POST", "channel_configs", {
             "channel_type": "lark_bot", "manager_id": manager, "config": {"app_id": "cli_third"},
             "bot_token": SECRET})
-        await _call("DELETE", "/api/channel-configs/channel-telegram-2")
+        await _call("DELETE", "channel-telegram-2")
 
     run_with_channel_configs(test, monkeypatch)
     formatter = log_redaction.RedactingFormatter("%(message)s")

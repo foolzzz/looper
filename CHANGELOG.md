@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.79] - 2026-10-24
+
+### Changed
+
+- **Channel bot settings are managed through v1.** Listing, reading, adding, updating and removing Telegram and Lark bots are now `channel_configs.list`, `channel_configs.get`, `channel_configs.create`, `channel_configs.update` and `channel_configs.delete` (`POST /api/v1/channel_configs/<action>`). Creating and updating are operator-only credential writes; the token is write-only and responses show only whether one is stored. Removal asks for confirmation. A bot's Manager still cannot change. Manager prompts and tools are unchanged. ([#518](https://github.com/foolzzz/looper/pull/518))
+
+### Removed
+
+- **`GET`, `POST`, `PUT` and `DELETE` on `/api/channel-configs` and `/api/channel-configs/<id>`.** Use the `channel_configs` operations. ([#518](https://github.com/foolzzz/looper/pull/518))
+
 ## [2.13.78] - 2026-10-24
 
 ### Changed

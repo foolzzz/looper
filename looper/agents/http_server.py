@@ -34,7 +34,6 @@ from . import (
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, resolve_chat_target
 from .message import AgentAddress
-from .channels import bot_api
 from .channels.web import WebChannelAdapter
 from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
@@ -790,7 +789,6 @@ class AgentHTTPServer:
     # --- API routing ---
 
     _RE_TASK_DETAIL = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)$")
-    _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
     _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
     _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
@@ -957,16 +955,6 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_200, vault.settings_view)
         elif path == "/api/knowledge-vault" and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: vault.update_settings(projects.json_object(body)))
-        elif path == "/api/channel-configs" and method == "GET":
-            await self._handle_list_channel_configs(writer)
-        elif (m := self._RE_CHANNEL_CONFIG.match(path)) and method == "GET":
-            await self._handle_get_channel_config(m.group(1), writer)
-        elif path == "/api/channel-configs" and method == "POST":
-            await self._answer(writer, HTTP_201, lambda: bot_api.add_bot(projects.json_object(body)))
-        elif (m := self._RE_CHANNEL_CONFIG.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: bot_api.update_bot(m.group(1), projects.json_object(body)))
-        elif (m := self._RE_CHANNEL_CONFIG.match(path)) and method == "DELETE":
-            await self._answer(writer, HTTP_200, lambda: bot_api.remove_bot(m.group(1)))
         else:
             writer.write(_json_response(HTTP_404, {"error": "not found"}))
             await writer.drain()
@@ -1637,34 +1625,6 @@ class AgentHTTPServer:
             logger.exception("config import request failed")
             status, result = HTTP_500, {"error": "the import failed; see the server log"}
         writer.write(_json_response(status, _serialize(result)))
-        await writer.drain()
-
-    # --- Channel config handlers ---
-
-    async def _handle_list_channel_configs(self, writer: asyncio.StreamWriter) -> None:
-        from .channels.allowlist import channel_view
-
-        try:
-            from ..db.channel_configs import list_configs
-            configs = await list_configs()
-        except Exception:
-            configs = []
-        writer.write(_json_response(HTTP_200, {"configs": [channel_view(c) for c in configs]}))
-        await writer.drain()
-
-    async def _handle_get_channel_config(
-        self, channel_id: str, writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            from ..db.channel_configs import get_config
-            config = await get_config(channel_id)
-        except Exception:
-            config = None
-        if config is None:
-            writer.write(_json_response(HTTP_404, {"error": f"channel '{channel_id}' not found"}))
-        else:
-            from .channels.allowlist import channel_view
-            writer.write(_json_response(HTTP_200, channel_view(config)))
         await writer.drain()
 
     def _password_record(self) -> operator_auth.PasswordRecord | None:

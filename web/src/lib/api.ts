@@ -3710,30 +3710,25 @@ export async function searchLarkPeople(query: string, channelType = "lark", chan
 }
 
 export async function fetchChannelConfigs(): Promise<ChannelConfig[]> {
-  const res = await fetch(`${API_BASE}/channel-configs`);
-  if (!res.ok) throw new Error(`channel-configs ${res.status}`);
-  const data = await res.json();
-  return data.configs ?? [];
+  const result = await callV1<{ configs: ChannelConfig[] }>("/api/v1/channel_configs/list", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.configs;
 }
 
 export async function fetchChannelConfig(channelId: string): Promise<ChannelConfig> {
-  const res = await fetch(`${API_BASE}/channel-configs/${channelId}`);
-  if (!res.ok) throw new Error(`channel-config ${res.status}`);
-  return res.json();
+  const result = await callV1<ChannelConfig>("/api/v1/channel_configs/get", { channel_id: channelId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function updateChannelConfig(
   channelId: string,
-  /** `bot_token`: the mask ("***") keeps the stored token, "" removes it, any other value stores it. */
-  fields: Partial<ChannelConfig> & { bot_token?: string },
+  /** `bot_token`: omitted or the mask ("***") keeps the token; null or "" removes it. */
+  fields: Partial<ChannelConfig> & { bot_token?: string | null },
 ): Promise<ChannelConfig> {
-  const res = await fetch(`${API_BASE}/channel-configs/${channelId}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-  });
-  if (!res.ok) await failed(res, "update channel-config");
-  return res.json();
+  const result = await callV1<ChannelConfig>("/api/v1/channel_configs/update", { channel_id: channelId, fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function createChannelBot(body: {
@@ -3744,18 +3739,14 @@ export async function createChannelBot(body: {
   config?: Record<string, unknown>;
   bot_token?: string;
 }): Promise<ChannelConfig> {
-  const res = await fetch(`${API_BASE}/channel-configs`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) await failed(res, "add bot");
-  return res.json();
+  const result = await callV1<ChannelConfig>("/api/v1/channel_configs/create", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function deleteChannelBot(channelId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/channel-configs/${encodeURIComponent(channelId)}`, { method: "DELETE" });
-  if (!res.ok) await failed(res, "remove bot");
+  const result = await callV1<{ deleted: string; restart: boolean }>("/api/v1/channel_configs/delete", { channel_id: channelId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
 }
 
 /** A chat of a channel: where a dashboard task's gate messages also go. */
