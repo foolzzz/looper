@@ -657,7 +657,7 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
                             lambda r: r["status"] in ("completed", "failed", "stopped", "cancelled"),
                             check_budget=check_budget)
                         if detail["status"] != "completed":
-                            activity = api.get(f"/api/tasks/{task}/activity", limit=40).get("activity") or []
+                            activity = api.post("/api/v1/tasks/activity", {"task_id": task, "limit": 40})["result"].get("activity") or []
                             records = api.get("/api/llm-records", limit=20).get("records") or []
                             ARTIFACTS.mkdir(parents=True, exist_ok=True, mode=0o700)
                             (ARTIFACTS / "task-diag.json").write_text(json.dumps({

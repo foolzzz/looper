@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.70] - 2026-10-24
+
+### Changed
+
+- **Task activity, the task conversation and the live activity stream move to the versioned API.** `tasks.activity`, `tasks.activity_detail`, `tasks.conversation` and `tasks.activity_stream` (`POST /api/v1/tasks/<name>`) replace four legacy GET routes (`/api/tasks/{id}/activity`, `/activity/{seq}`, `/activity/stream` and `/conversation`), which are removed; the dashboard and the generated CLI (`loopercli tasks activity-stream`) use the new routes. A database failure now answers `unavailable` instead of an empty list, an event of another task answers not found, and the conversation list key is `rows`. The stream sends complete events read from the database and ends on client disconnect. Manager prompts and tools are unchanged. ([#488](https://github.com/foolzzz/looper/pull/488))
+
 ## [2.13.69] - 2026-10-24
 
 ### Changed
