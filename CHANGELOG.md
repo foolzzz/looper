@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.82] - 2026-10-24
+
+### Changed
+
+- **Global roles and the shared settings layers go through v1.** Listing, reading, updating and resetting the prompt of a global role, and reading and updating the system and role setting layers, are the operations `roles.list`, `roles.get`, `roles.update`, `roles.reset_prompt`, `agent_settings.get`, `agent_settings.update_system` (risk `high`) and `agent_settings.update_role`, as `POST /api/v1/<domain>/<action>`. For API clients, `update_system` and `update_role` ask for confirmation first (shared defaults, concurrency, or a higher spend cap). `roles.update` now rejects unknown or read-only fields instead of ignoring them. Manager prompts and tools are unchanged. ([#480](https://github.com/foolzzz/looper/pull/480))
+
+### Removed
+
+- **`GET /api/roles`, `GET` and `PUT /api/roles/{role}`, `POST /api/roles/{role}/reset-prompt`, `GET /api/agent-settings`, `PUT /api/agent-settings/system` and `PUT /api/agent-settings/roles/{role}`.** Use the `roles` and `agent_settings` operations. ([#480](https://github.com/foolzzz/looper/pull/480))
+
 ## [2.13.81] - 2026-10-24
 
 ### Changed
