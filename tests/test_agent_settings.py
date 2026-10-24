@@ -438,11 +438,24 @@ def _call(method: str, path: str, body: Any = None, *, router: Any = None, pool:
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=router or TaskRouter(runtime_root=Path(tempfile.mkdtemp())), worker_pool=pool)
+    from looper.agents.api_v1 import OPERATOR
+    from looper.agents.ops.clients import ClientOps
+    from tests.test_catalog_db import _global_settings_request
+
+    method, path, body = _global_settings_request(method, path, body)
     raw = body if isinstance(body, bytes) else (b"" if body is None else json.dumps(body).encode())
     writer = _Writer()
-    asyncio.run(server._route_api(method, path, {}, raw, writer))
+    v1 = path.startswith(("/api/v1/roles/", "/api/v1/agent_settings/"))
+    if v1:
+        server._client_ops = ClientOps(SimpleNamespace())
+        asyncio.run(server._handle_v1(method, path, {}, {}, raw, writer, OPERATOR))
+    else:
+        asyncio.run(server._route_api(method, path, {}, raw, writer))
     head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload)
+    answer = json.loads(payload)
+    if v1:
+        answer = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
+    return int(head.split()[1]), answer
 
 
 UNSET = {"harness_prompt": None, "profile_id": None, "env": [], "run_budget_usd": None, "max_concurrency": None,
@@ -507,23 +520,22 @@ class TestSettingsApi:
 
     @pytest.mark.parametrize(("path", "body", "status", "message"), [
         ("/api/agent-settings/system", {"harness_prompt": "x" * 20_001}, 400, "at most 20000"),
-        ("/api/agent-settings/system", {"model": "sonnet"}, 400, "part of the Agent Profile"),
+        ("/api/agent-settings/system", {"model": "sonnet"}, 400, "declared schema"),
         ("/api/agent-settings/system", {"profile_id": "agent-nowhere"}, 400, "no Agent Profile 'agent-nowhere'"),
-        ("/api/agent-settings/system", {"profile_id": 5}, 400, "profile_id must be the id"),
+        ("/api/agent-settings/system", {"profile_id": 5}, 400, "declared schema"),
         # The effort is the Agent Profile's: a layer refuses one, valid or not, with or without a profile.
-        ("/api/agent-settings/system", {"effort": "high"}, 400, "effort is part of the Agent Profile"),
-        ("/api/agent-settings/roles/worker", {"effort": None}, 400, "effort is part of the Agent Profile"),
+        ("/api/agent-settings/system", {"effort": "high"}, 400, "declared schema"),
+        ("/api/agent-settings/roles/worker", {"effort": None}, 400, "declared schema"),
         ("/api/projects/proj-a/agent-settings/roles/worker", {"effort": "low"}, 400,
          "effort is part of the Agent Profile"),
         ("/api/agent-settings/system", {"env": [{"key": "GITHUB_TOKEN", "value": "x"}]}, 400, "secrets"),
         ("/api/agent-settings/system", {"env": [{"key": "TZ", "value": None}]}, 400, "at most 4000"),
         ("/api/agent-settings/system", {"run_budget_usd": 0}, 400, "more than 0"),
-        ("/api/agent-settings/system", {"profile_id": "agent-sonnet", "effort": "high"}, 400,
-         "choose or create a profile with the effort you want"),
-        ("/api/agent-settings/system", {"default_model": "sonnet"}, 400, "unknown field"),
+        ("/api/agent-settings/system", {"profile_id": "agent-sonnet", "effort": "high"}, 400, "declared schema"),
+        ("/api/agent-settings/system", {"default_model": "sonnet"}, 400, "declared schema"),
         ("/api/agent-settings/system", {}, 400, "at least one"),
-        ("/api/agent-settings/system", b"not json", 400, "invalid JSON"),
-        ("/api/agent-settings/roles/boss", {"profile_id": "agent-sonnet"}, 404, "no role"),
+        ("/api/agent-settings/system", b"not json", 400, "body must be a JSON object"),
+        ("/api/agent-settings/roles/boss", {"profile_id": "agent-sonnet"}, 400, "declared schema"),
         ("/api/projects/proj-a/agent-settings/roles/manager", {"profile_id": "agent-sonnet"}, 400, "spans every project"),
         ("/api/projects/proj-zzz/agent-settings", {"profile_id": "agent-sonnet"}, 404, "not found"),
         # Concurrency is per task: only the Workers' and the Reviewers' role layers take a limit, the default for
@@ -534,9 +546,9 @@ class TestSettingsApi:
             "/api/projects/proj-a/agent-settings/roles/worker", "/api/projects/proj-a/agent-settings/roles/reviewer")],
         ("/api/agent-settings/roles/worker", {"max_concurrency": 0}, 400, "from 1 to 64"),
         ("/api/agent-settings/roles/worker", {"max_concurrency": 65}, 400, "from 1 to 64"),
-        ("/api/agent-settings/roles/worker", {"max_concurrency": 2.5}, 400, "from 1 to 64"),
+        ("/api/agent-settings/roles/worker", {"max_concurrency": 2.5}, 400, "declared schema"),
         ("/api/agent-settings/roles/worker", {"max_concurrency": "3"}, 400, "from 1 to 64"),
-        ("/api/agent-settings/roles/reviewer", {"max_concurrency": True}, 400, "from 1 to 64"),
+        ("/api/agent-settings/roles/reviewer", {"max_concurrency": True}, 400, "declared schema"),
     ])
     def test_refused_updates_change_nothing(
         self, layers: _Layers, path: str, body: Any, status: int, message: str,
@@ -632,4 +644,4 @@ class TestMovedFields:
 
         monkeypatch.setattr(role_configs, "set_config", set_config)
         status, body = _call("PUT", "/api/roles/worker", {field: "x", "system_prompt": "y"})
-        assert status == 400 and "/api/agent-settings/roles/worker" in body["error"] and updates == []
+        assert status == 400 and "agent_settings.update_role" in body["error"] and updates == []

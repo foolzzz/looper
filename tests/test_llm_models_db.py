@@ -589,7 +589,7 @@ def test_http_profile_preview_uses_saved_binding_role_project_and_mode_source(mo
             "name": "Preview profile", "runtime_id": "rt-claude-code", "model_id": mid,
             "custom_prompt": "Preview identity"}, status=201))["profile"]["profile_id"]
         project = (await client.ok("POST", "/api/projects", {"name": "Preview project"}, status=201))["project_id"]
-        await client.ok("PUT", "/api/agent-settings/roles/worker", {"system_prompt_mode": "replace"})
+        await client.ok("POST", "/api/v1/agent_settings/update_role", {"role": "worker", "values": {"system_prompt_mode": "replace"}})
         builds = []
         def capture(**kwargs):
             result = build_system_prompt(**kwargs)

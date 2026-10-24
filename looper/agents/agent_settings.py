@@ -1191,12 +1191,19 @@ def role_config_fields(role: str, data: dict[str, Any]) -> dict[str, Any]:
         if name in data:
             raise SettingsError(
                 f"{name} was removed: a role runs an Agent Profile (a runtime, an LLM provider and a model), "
-                f"registered in Settings and selected on the {role}'s role layer"
+                f"registered in Settings and selected on the {role}'s role layer "
+                "(agent_settings.update_role: POST /api/v1/agent_settings/update_role)"
             )
     for name in _MOVED_ROLE_FIELDS:
         if name in data:
             raise SettingsError(
                 f"{name} is an agent setting: set it on the {role}'s role layer "
-                f"(PUT /api/agent-settings/roles/{role})"
+                "(agent_settings.update_role: POST /api/v1/agent_settings/update_role)"
             )
+    from ..db.role_configs import _UPDATABLE_FIELDS
+
+    unknown = sorted(set(data) - set(_UPDATABLE_FIELDS))
+    if unknown:
+        raise SettingsError(f"{unknown[0]} is unknown or read-only; roles.update "
+                            "(POST /api/v1/roles/update) accepts only role configuration fields")
     return dict(data)
