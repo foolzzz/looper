@@ -491,18 +491,33 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     assert len([m for m in data["models"] if m["provider"] == ACCOUNT]) == 2
     assert next(p for p in data["profiles"] if p["name"] == "Smoke profile")["model"] == {
         "provider": ACCOUNT, "name": MODEL_NAME, "protocol": "anthropic-messages"}
+    page.get_by_role("switch", name="Include secrets", exact=True).click()
+    with page.expect_download() as secret_download:
+        page.get_by_role("button", name="Export configuration", exact=True).click()
+    secret_file = tmp_path / "private-config.json"
+    secret_download.value.save_as(secret_file)
+    private = json.loads(secret_file.read_text())
+    assert private["secrets"] == "included"
+    assert next(p for p in private["providers"] if p["name"] == ACCOUNT)["api_key"] == SECRET
+    page.get_by_role("switch", name="Include secrets", exact=True).click()
+    assert SECRET not in page.content()
     # A real exported file with one edit proves preview/apply, rather than a no-op import.
     next(m for m in data["models"] if m["provider"] == ACCOUNT and m["protocol"] == "anthropic-messages")["context_window"] = 96000
     exported.write_text(json.dumps(data))
     before_import = _registry_state(server)
     with page.expect_file_chooser() as chooser:
         page.get_by_role("button", name="Choose file", exact=True).click()
-    with page.expect_response(lambda r: "/api/config/imports" in r.url and r.request.method == "POST") as upload:
+    with page.expect_response(lambda r: r.url.endswith("/api/v1/config/import_upload") and r.request.method == "POST") as upload:
         chooser.value.set_files(exported)
     assert upload.value.status in (200, 201)
     expect(page.get_by_text(re.compile("nothing written yet"))).to_be_visible()
     assert _registry_state(server) == before_import
-    with page.expect_response(lambda r: r.url.endswith("/apply")) as applied:
+    with page.expect_response(lambda r: r.url.endswith("/api/v1/config/import_cancel")) as cancelled:
+        page.get_by_role("button", name="Cancel", exact=True).click()
+    assert cancelled.value.status == 200 and _registry_state(server) == before_import
+    page.locator('input[type="file"]').set_input_files(exported)
+    expect(page.get_by_text(re.compile("nothing written yet"))).to_be_visible()
+    with page.expect_response(lambda r: r.url.endswith("/api/v1/config/import_apply")) as applied:
         page.get_by_role("button", name=re.compile(r"^Apply \d+ changes?$")).click()
     assert applied.value.status == 200
     expect(page.get_by_role("status").filter(has_text="Applied smoke-config.json")).to_be_visible()
@@ -580,7 +595,7 @@ def test_invalid_import_displays_server_error_without_writing(dashboard_page, da
     assert before["models"] and before["profiles"]
     with page.expect_file_chooser() as chooser:
         page.get_by_role("button", name="Choose file", exact=True).click()
-    with page.expect_response(lambda r: "/api/config/imports" in r.url and r.request.method == "POST") as invalid:
+    with page.expect_response(lambda r: r.url.endswith("/api/v1/config/import_upload") and r.request.method == "POST") as invalid:
         chooser.value.set_files({"name": "invalid.json", "mimeType": "application/json", "buffer": b"{broken"})
     assert invalid.value.status == 400
     expect(page.get_by_role("alert").filter(has_text="invalid.json")).to_be_visible()

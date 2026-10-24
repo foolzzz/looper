@@ -2,7 +2,7 @@
 
 A configuration file with the catalog's files is usually far over the 8 MiB
 the server reads into memory for a request (``REQUEST_BODY_MAX_BYTES``), so
-``POST /api/config/imports`` alone takes up to ``UPLOAD_MAX_BYTES`` and
+``POST /api/v1/config/import_upload`` alone takes up to ``UPLOAD_MAX_BYTES`` and
 streams the body to a file under ``<runtime root>/config-imports/`` (mode
 0600: the file may hold secrets) instead. The file is then checked and
 previewed by the shared configuration importer, and waits under an import id:
@@ -22,6 +22,7 @@ import secrets
 import shutil
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -97,7 +98,8 @@ class ConfigImports:
         self._pending.clear()
         shutil.rmtree(self._directory, ignore_errors=True)
 
-    async def receive(self, reader: asyncio.StreamReader, length: int, *, owner: str | None = None) -> dict[str, Any]:
+    async def receive(self, reader: asyncio.StreamReader, length: int, *, owner: str | None = None,
+                      validate: Callable[[dict[str, Any]], Any] | None = None) -> dict[str, Any]:
         """Stream a body of ``length`` bytes to a file, check it and preview it; the file waits under a new id.
 
         Raises ``ConfigFileError`` for a body that is not a usable file (its
@@ -126,6 +128,8 @@ class ConfigImports:
                     handle.write(chunk)
                     remaining -= len(chunk)
             data = await asyncio.to_thread(config_transfer.read_file, path, label=_LABEL)
+            if validate is not None:
+                validate(data)
             plan = await _run(data, apply=False)
         except BaseException:
             path.unlink(missing_ok=True)
