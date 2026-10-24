@@ -109,6 +109,18 @@ def test_match_patterns_answers_and_empty():
     assert got[:2] == [True, False] and isinstance(got[2], str)
 
 
+def test_match_patterns_budget_starts_when_the_subprocess_is_ready(monkeypatch):
+    monkeypatch.setattr(tt, "_MATCHER", "import time; time.sleep(0.4)\n" + tt._MATCHER)
+    assert run(match_patterns([("a+", "aa")], timeout=0.2)) == [True]
+
+
+def test_match_patterns_startup_timeout_does_not_blame_the_pattern(monkeypatch):
+    monkeypatch.setattr(tt, "PATTERN_STARTUP_TIMEOUT_SEC", 0.1)
+    monkeypatch.setattr(tt, "_MATCHER", "import time; time.sleep(0.4)\n" + tt._MATCHER)
+    with pytest.raises(TemplateError, match="could not check.*try again later"):
+        run(check_patterns(parse_inputs([item(pattern="a+")])))
+
+
 def test_check_requirement_ok():
     check_requirement("Review {{pr_url}}", parse_inputs([item()]))
 

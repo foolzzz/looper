@@ -1,5 +1,5 @@
 """The Manager session's profile over HTTP: v1 session get/select_profile, and
-``new_session_profile_id`` on POST /api/chat/send. The Manager is a stub, so no database is needed."""
+``new_session_profile_id`` on POST /api/v1/operator_chat/send. The Manager is a stub, so no database is needed."""
 
 from __future__ import annotations
 
@@ -121,7 +121,7 @@ def _send(tmp_path: Path, body: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr(profile_registry, "check_selection", AsyncMock(return_value=None))
     from looper.agents import projects
     monkeypatch.setattr(projects, "store_chat_supplement", AsyncMock(return_value=None))
-    status, payload = _call("POST", "/api/chat/send", body, tmp_path, adapter=adapter, **kwargs)
+    status, payload = _call("POST", "/api/v1/operator_chat/send", body, tmp_path, adapter=adapter, **kwargs)
     return status, payload, adapter.handle_user_message
 
 
@@ -139,14 +139,14 @@ def test_send_without_the_profile_passes_nothing_new(tmp_path: Path, monkeypatch
 
 def test_send_profile_with_other_text_is_400(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     status, payload, handle = _send(tmp_path, {"text": "hello", "new_session_profile_id": "agent-a"}, monkeypatch)
-    assert status == 400 and payload == {"error": "new_session_profile_id goes only with /new to the Manager"}
+    assert status == 400 and payload["error"]["message"] == "new_session_profile_id goes only with /new to the Manager"
     handle.assert_not_awaited()
 
 
 def test_send_profile_to_a_planner_is_400(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     body = {"text": "/new", "new_session_profile_id": "agent-a", "target": {"kind": "planner", "task_id": "task-1"}}
     status, payload, handle = _send(tmp_path, body, monkeypatch, planner=True)
-    assert status == 400 and "only with /new to the Manager" in payload["error"]
+    assert status == 400 and "only with /new to the Manager" in payload["error"]["message"]
     handle.assert_not_awaited()
 
 
@@ -154,9 +154,9 @@ def test_send_refused_profile_is_400(tmp_path: Path, monkeypatch: pytest.MonkeyP
     adapter = SimpleNamespace(handle_user_message=AsyncMock())
     monkeypatch.setattr(profile_registry, "check_selection",
                         AsyncMock(side_effect=profile_registry.RegistryError("cannot serve")))
-    status, payload = _call("POST", "/api/chat/send", {"text": "/new", "new_session_profile_id": "x"}, tmp_path,
+    status, payload = _call("POST", "/api/v1/operator_chat/send", {"text": "/new", "new_session_profile_id": "x"}, tmp_path,
                             adapter=adapter)
-    assert (status, payload) == (400, {"error": "cannot serve"})
+    assert (status, payload) == (400, {"status": "error", "error": {"code": "invalid", "message": "cannot serve"}})
     adapter.handle_user_message.assert_not_awaited()
 
 

@@ -77,6 +77,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from looper.agents.ops import API_CHANNEL
 from looper.agents.tiers.manager import _looper_call
 
 from .compare import outcome
@@ -1698,6 +1699,7 @@ def select(ids: list[str] | None) -> tuple[Dialog, ...]:
 
 
 def _trail(database_url: str, since: int, manager_id: str | None = None) -> list[dict[str, Any]]:
+    """The Manager's tool calls, excluding direct API requests such as sending its input message."""
     import asyncpg
 
     async def read() -> list[dict[str, Any]]:
@@ -1705,7 +1707,7 @@ def _trail(database_url: str, since: int, manager_id: str | None = None) -> list
         try:
             rows = await conn.fetch("SELECT id, tool, risk, status, error_code, confirmation_id, task_id, client_id, "
                                     "arguments, result FROM manager_actions WHERE id > $1 AND ($2::text IS NULL OR manager_id = $2) "
-                                    "ORDER BY id", since, manager_id)
+                                    "AND channel <> $3 ORDER BY id", since, manager_id, API_CHANNEL)
         finally:
             await conn.close()
         return [{**dict(row), "arguments": json.loads(row["arguments"]),
@@ -1823,7 +1825,7 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
     owner = {"manager": agent} if manager else {}  # a thread of a scenario Manager is read naming it
     if manager:
         body["target"] = {"kind": "manager", "id": agent}
-    api.post("/api/chat/send", body)
+    api.post("/api/v1/operator_chat/send", body)
     if withdraw:  # the message has its turn from its delivery on: the stop finds it wherever it is
         turn = api.post("/api/v1/operator_chat/turn", {"session_id": session})["result"].get("turn")
         if not turn:

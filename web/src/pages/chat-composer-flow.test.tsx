@@ -14,7 +14,7 @@ type Handler = (e: { kind: string; payload: Record<string, unknown> }) => void;
 
 const api = vi.hoisted(() => ({
   sendChat: vi.fn(),
-  streamSSE: vi.fn(),
+  streamChatReply: vi.fn(),
   fetchChatMessages: vi.fn(),
   fetchChatTurn: vi.fn(),
   fetchChatSettings: vi.fn(),
@@ -89,8 +89,8 @@ describe("chat composer flow", () => {
     sessionStorage.clear();
     localStorage.setItem("looper-chat-session-id", SID);
     for (const fn of Object.values(api)) fn.mockReset();
-    api.sendChat.mockResolvedValue({ events_url: "/events" });
-    api.streamSSE.mockImplementation((_url: string, onEvent: Handler, onDone?: () => void) => {
+    api.sendChat.mockResolvedValue({ correlation_id: "reply-correlation" });
+    api.streamChatReply.mockImplementation((_url: string, onEvent: Handler, onDone?: () => void) => {
       emit = onEvent;
       done = onDone;
       return () => {};

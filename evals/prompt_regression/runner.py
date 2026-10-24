@@ -579,7 +579,7 @@ def run_task(
                 pass  # the user answered a gate; look again at the next poll
             elif chat_pending and detail.get("steps") and detail.get("phase") in ("executing", "verifying"):
                 try:
-                    api.post("/api/chat/send", {"text": task.chat, "target": {"kind": "planner", "task_id": task_id}})
+                    api.post("/api/v1/operator_chat/send", {"text": task.chat, "target": {"kind": "planner", "task_id": task_id}})
                     chat_pending = False
                 except EvalError:
                     pass  # the Planner is not live yet; try again at the next poll

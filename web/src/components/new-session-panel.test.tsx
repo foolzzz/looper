@@ -27,7 +27,7 @@ describe("NewSessionPanel", () => {
 describe("sendChat", () => {
   afterEach(() => vi.unstubAllGlobals());
   const body = async (options?: { newSessionProfileId?: string }) => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ status: "ok", result: { correlation_id: "new-session-reply" } }) });
     vi.stubGlobal("fetch", fetchMock);
     await sendChat("/new", "s", "m", { kind: "manager" }, options);
     return JSON.parse(fetchMock.mock.calls[0][1].body);

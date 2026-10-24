@@ -700,7 +700,7 @@ def _serve_smoke_stand_in(mode):
                 result = {"status": "ok", "result": {"roles": roles}}
             elif path == "/api/v1/agent_settings/get":
                 result = {"status": "ok", "result": {"roles": roles}}
-            elif path == "/api/chat/send":
+            elif path == "/api/v1/operator_chat/send":
                 record("manager")
                 if mode != "manager-timeout":
                     messages.append({"message_id": body["message_id"] + ":reply", "role": "assistant",

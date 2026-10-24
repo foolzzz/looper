@@ -224,7 +224,6 @@ class WebChannelAdapter(ChannelAdapter):
 
         return {
             "correlation_id": correlation_id,
-            "events_url": f"/api/chat/events?cid={correlation_id}",
         }
 
     async def iter_sse_events(

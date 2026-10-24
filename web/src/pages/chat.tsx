@@ -31,7 +31,7 @@ import {
   fetchManagerSession,
   fetchTaskActivity,
   fetchTaskDetail,
-  streamSSE,
+  streamChatReply,
   fetchRoleConfigs,
   fetchLlmRecords,
   watchChat,
@@ -967,10 +967,10 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     setMessages((prev) => [...prev, assistantMsg]);
 
     try {
-      const { events_url } = await sendChat(text, sessionId, userMsg.id, sendTargetOf(target), { newSessionProfileId });
+      const { correlation_id } = await sendChat(text, sessionId, userMsg.id, sendTargetOf(target), { newSessionProfileId });
 
-      const close = streamSSE(
-        events_url,
+      const close = streamChatReply(
+        correlation_id,
         (event: SSEEvent) => {
           switch (event.kind) {
             case "answer.delta":
