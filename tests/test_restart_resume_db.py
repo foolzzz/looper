@@ -16,6 +16,7 @@ drops a database beside it).
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import sys
 import time
@@ -165,7 +166,9 @@ def test_a_task_carries_on_after_the_server_restarts(tmp_path: Path) -> None:
     cut_off = {"a": "verified", "b": "dispatched", "c": "completed", "d": "pending"}
 
     with fresh_database(str(DSN)) as (database_url, _):
-        server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home}
+        # Only the stand-ins and system tools: installed runtimes otherwise get probed at startup.
+        server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home,
+                  "env": {"PATH": f"{bin_dir}{os.pathsep}{os.defpath}"}}
         with running_server(**server, log_path=root / "first.log") as api:
             created = api.post("/api/v1/tasks/create", {"requirement": "build calc",
                                                       "project": {"name": "calc", "work_dir": str(work)}})["result"]
@@ -221,7 +224,8 @@ def test_a_task_failed_at_its_cap_continues_from_the_database_after_a_restart(tm
         path.mkdir()
 
     with fresh_database(str(DSN)) as (database_url, _):
-        server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home}
+        server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home,
+                  "env": {"PATH": f"{bin_dir}{os.pathsep}{os.defpath}"}}
         with running_server(**server, log_path=root / "first.log") as api:
             # The plan turn ($0.001) leaves room for both Workers; their $0.002 each crosses the cap.
             project = api.post("/api/projects", {"name": "capped", "work_dir": str(work), "task_budget_usd": 0.0015})
@@ -231,7 +235,7 @@ def test_a_task_failed_at_its_cap_continues_from_the_database_after_a_restart(tm
             failed = _wait(api, task_id, lambda d: d["status"] == "failed")
         with running_server(**server, log_path=root / "second.log") as api:
             assert api.get(f"/api/tasks/{task_id}")["status"] == "failed"  # a failed task is not resumed
-            api.post(f"/api/tasks/{task_id}/continue", {"task_budget_usd": 1})
+            api.post("/api/v1/tasks/continue", {"task_id": task_id, "task_budget_usd": 1})
             done = _wait(api, task_id, lambda d: d["status"] == "completed")
 
     assert failed["fail_kind"] == "task_budget"
@@ -252,7 +256,8 @@ def test_a_ready_task_stays_ready_through_a_restart_until_it_is_started(tmp_path
         path.mkdir()
 
     with fresh_database(str(DSN)) as (database_url, _):
-        server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home}
+        server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home,
+                  "env": {"PATH": f"{bin_dir}{os.pathsep}{os.defpath}"}}
         with running_server(**server, log_path=root / "first.log") as api:
             task_id = api.post("/api/v1/tasks/create", {"requirement": "build calc",
                                                       "project": {"name": "calc", "work_dir": str(work)}})["result"]["task_id"]

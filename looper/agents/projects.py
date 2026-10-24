@@ -1061,8 +1061,8 @@ async def set_task_agents(task_id: str, data: dict[str, Any]) -> dict[str, Any]:
     return {"task_id": task_id, "agents": await agents_view(task), **({"note": PROFILES_NOTE} if profiles else {})}
 
 
-async def raise_cap_to_continue(task_id: str, data: dict[str, Any]) -> dict[str, Any]:
-    """Raise the task's spend cap so a task that failed at it can continue; the caller restarts it.
+async def check_cap_to_continue(task_id: str, data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate continuation and return the task and proposed cap without writing or restarting.
 
     Only a task that failed at its cap qualifies, and the new ``task_budget_usd``
     must be above what the task has spent, or it would stop again at once.
@@ -1086,11 +1086,22 @@ async def raise_cap_to_continue(task_id: str, data: dict[str, Any]) -> dict[str,
     if cap <= spent:
         raise RequestError(HTTP_400, f"task_budget_usd must be above the ${format_usd(spent)} the task has "
                                      f"spent; got {format_usd(cap)}")
+    return task, {"task_id": task_id, "project_id": task["project_id"], "task_budget_usd": cap, "spent_usd": spent}
+
+
+async def raise_cap_to_continue(task_id: str, data: dict[str, Any], *,
+                                expected_scope: tuple[str, bool] | None = None) -> dict[str, Any]:
+    """Validate and raise the task's own cap, or its project's per-task cap; the caller restarts it."""
+    task, result = await check_cap_to_continue(task_id, data)
+    if expected_scope is not None and expected_scope != (task["project_id"], task.get("budget_usd") is not None):
+        raise RequestError(HTTP_409, "the budget scope changed; request continuation again")
+    cap = result["task_budget_usd"]
     if task.get("budget_usd") is not None:
-        await db_tasks.set_task_budget(task_id, cap)
+        if not await db_tasks.set_task_budget(task_id, cap):
+            raise RequestError(HTTP_404, "task not found")
     elif not await db_projects.update_project(task["project_id"], execution={"task_budget_usd": cap}):
         raise RequestError(HTTP_404, f"project {task['project_id']!r} not found")
-    return {"task_id": task_id, "project_id": task["project_id"], "task_budget_usd": cap, "spent_usd": spent}
+    return result
 
 
 # Where a setting in a task's configuration came from (``agent_settings.Layer``), named as the dashboard names it.

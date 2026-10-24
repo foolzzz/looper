@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { callV1, confirmV1, streamV1, V1Error, type V1PendingConfirmation } from "@/lib/v1";
-import { fetchStatus } from "@/lib/api";
+import { fetchStatus, updateTaskConfig, setTaskProject, setTaskAgents, continueTaskAtCap, PROJECTS_CHANGED_EVENT } from "@/lib/api";
 import { installSessionGuard, resetSessionGuard, SessionEndedError } from "@/lib/session";
 
 beforeEach(() => resetSessionGuard());
@@ -140,4 +140,46 @@ it("a different request's 401 terminates an idle active stream", async () => {
   await expect(callV1(path, {})).rejects.toBeInstanceOf(SessionEndedError);
   await expect(running).rejects.toBeInstanceOf(SessionEndedError);
   expect(cancel).toHaveBeenCalledOnce();
+});
+
+const taskWrites = [
+  { action: "configure", run: () => updateTaskConfig("task-a", { requirement: "Build", work_dir: "/workspace" }),
+    body: { task_id: "task-a", requirement: "Build", work_dir: "/workspace" }, result: { status: "init" }, value: undefined },
+  { action: "move", run: () => setTaskProject("task-a", "project-b"),
+    body: { task_id: "task-a", project_id: "project-b" },
+    result: { task_id: "task-a", project_id: "project-b", project_name: "Example" },
+    value: { task_id: "task-a", project_id: "project-b", project_name: "Example" } },
+  { action: "agents", run: () => setTaskAgents("task-a", { profiles: { worker: null }, concurrency: { worker: 2 },
+      system_prompt_modes: { planner: "append" } }),
+    body: { task_id: "task-a", profiles: { worker: null }, concurrency: { worker: 2 }, system_prompt_modes: { planner: "append" } },
+    result: { task_id: "task-a", agents: { editable: true }, note: "Next run" }, value: { agents: { editable: true }, note: "Next run" } },
+  { action: "continue", run: () => continueTaskAtCap("task-a", 2), body: { task_id: "task-a", task_budget_usd: 2 },
+    result: { task_id: "task-a", project_id: "project-b", task_budget_usd: 2, spent_usd: 1, continued: "task-a" }, value: undefined },
+];
+it.each(taskWrites)("task $action uses v1 and keeps its return and project event", async ({ action, run, body, result, value }) => {
+  const fetcher = vi.fn(async () => Response.json({ status: "ok", result }));
+  vi.stubGlobal("fetch", fetcher);
+  const changed = vi.fn();
+  window.addEventListener(PROJECTS_CHANGED_EVENT, changed);
+  try {
+    expect(await run()).toEqual(value);
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith(`/api/v1/tasks/${action}`,
+      expect.objectContaining({ method: "POST", body: JSON.stringify(body) }));
+    expect(changed).toHaveBeenCalledTimes(action === "move" ? 1 : 0);
+  } finally { window.removeEventListener(PROJECTS_CHANGED_EVENT, changed); }
+});
+it.each(taskWrites)("task $action never reports a pending write as completed", async ({ run }) => {
+  const fetcher = vi.fn(async () => Response.json({ status: "needs_confirmation", confirmation_id: "pending",
+    expires_in_seconds: 60, impact: "Raise the project's cap." }, { status: 202 }));
+  vi.stubGlobal("fetch", fetcher);
+  await expect(run()).rejects.toMatchObject({ name: "V1Error", status: 202, message: "Raise the project's cap." });
+  expect(fetcher).toHaveBeenCalledOnce();
+});
+it.each(taskWrites)("task $action stops after the operator session ends", async ({ run }) => {
+  const fetcher = vi.fn(async () => new Response(null, { status: 401 }));
+  vi.stubGlobal("fetch", fetcher);
+  installSessionGuard();
+  await expect(run()).rejects.toBeInstanceOf(SessionEndedError);
+  await expect(run()).rejects.toBeInstanceOf(SessionEndedError);
+  expect(fetcher).toHaveBeenCalledOnce();
 });
