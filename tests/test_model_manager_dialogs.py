@@ -73,9 +73,9 @@ class ObservedApi:
     def __init__(self, registry):
         self.registry = registry
 
-    def get(self, path):
-        assert path == "/api/registry"
-        return deepcopy(self.registry)
+    def post(self, path, body):
+        assert path == "/api/v1/registry/view" and body == {}
+        return {"status": "ok", "result": deepcopy(self.registry)}
 
 
 def observed(monkeypatch, registry, actions, *, row=None, reply="已完成"):
@@ -194,8 +194,10 @@ def test_fake_dialog_outcome_uses_observations_instead_of_success_words(monkeypa
     # Keep the real run_dialog/check path; only replace HTTP and DB I/O.
     class Api(ObservedApi):
         def post(self, path, body):
-            assert path == "/api/v1/tasks/page" and body == {}
-            return {"status": "ok", "result": {"tasks": [], "counts": {}, "next_before": None}}
+            if path == "/api/v1/tasks/page":
+                assert body == {}
+                return {"status": "ok", "result": {"tasks": [], "counts": {}, "next_before": None}}
+            return super().post(path, body)
 
     monkeypatch.setattr(dialogs, "_last_action", lambda *_: 0)
     monkeypatch.setattr(dialogs, "_trail", lambda *_: deepcopy(actions))
@@ -337,6 +339,9 @@ class RunsApi:
     def post(self, path, body):
         if path.startswith("/api/v1/runs/"):
             return {"status": "ok", "result": self.get(path, **body)}
+        if path == "/api/v1/registry/view":
+            assert body == {}
+            return {"status": "ok", "result": {"profiles": [{"profile_id": "agent-1", "name": dialogs.SWITCH}]}}
         if path == "/api/v1/manager_session/get":
             return {"status": "ok", "result": {"selected": self.selected}}
         raise AssertionError(path)
@@ -344,8 +349,7 @@ class RunsApi:
     def get(self, path, **query):
         if path == "/api/v1/runs/list":
             return {"records": list(reversed(self.records))}
-        assert path == "/api/registry"
-        return {"profiles": [{"profile_id": "agent-1", "name": dialogs.SWITCH}]}
+        raise AssertionError(path)
 
 
 def runs_look(records, *, selected=None, reply="ok", fake=False):

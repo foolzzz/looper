@@ -346,8 +346,9 @@ def test_v3_preview_merge_apply_and_readback_share_the_core_contract(
             assert need == [{"section": "providers", "key": "account", "names": ["api_key"],
                              "target": {"kind": "provider", "id": await target.fetchval(
                                  "SELECT id FROM llm_providers WHERE name = 'account'")}}]
-            status, registry = await _request(port, "GET", "/api/registry")
+            status, registry = await _request(port, "POST", "/api/v1/registry/view", b"{}")
             assert status == 200, registry
+            registry = registry["result"]
             model = next(m for m in registry["models"] if m["name"] == "exact")
             profile = next(p for p in registry["profiles"] if p["name"] == "imported")
             assert profile["model_id"] == model["model_id"]
@@ -383,8 +384,9 @@ def test_v3_preview_merge_apply_and_readback_share_the_core_contract(
             assert await _rows(target) == before
             status, answer = await _request(port, "POST", f"{CONFIG_IMPORTS_PATH}/{merged['import_id']}/apply")
             assert status == 200, answer
-            status, registry = await _request(port, "GET", "/api/registry")
+            status, registry = await _request(port, "POST", "/api/v1/registry/view", b"{}")
             assert status == 200
+            registry = registry["result"]
             updated = next(m for m in registry["models"] if m["name"] == "exact")
             assert updated["model_id"] == model["model_id"] and updated["input_usd_per_mtok"] == 4
             retained = next(p for p in registry["profiles"] if p["name"] == "imported")

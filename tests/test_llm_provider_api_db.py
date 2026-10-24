@@ -61,7 +61,7 @@ class Client:
     async def ok(self, method, path, body=None, *, status=200):
         actual, answer = await self.call(method, path, body)
         assert actual == status, answer
-        return answer
+        return answer["result"] if path == "/api/v1/registry/view" else answer
 
 
 def _run(test, monkeypatch, tmp_path, *, database=True):
@@ -112,7 +112,7 @@ def test_invalid_creation_is_rejected_before_database_access(monkeypatch, tmp_pa
 @needs_db
 def test_vendor_creation_registry_models_and_saved_defaults(monkeypatch, tmp_path):
     async def test(client, pool):
-        registry = await client.ok("GET", "/api/registry")
+        registry = await client.ok("POST", "/api/v1/registry/view", {})
         assert {v["vendor_type"] for v in registry["vendor_types"]} == {v.value for v in VendorType}
         assert "provider_presets" not in registry
         assert registry["prices"] and registry["limits"]["secret_mask"] == "***"
@@ -138,7 +138,7 @@ def test_vendor_creation_registry_models_and_saved_defaults(monkeypatch, tmp_pat
         models = (await client.ok("GET", f"/api/models?provider_id={pid}"))["models"]
         assert [m["model_id"] for m in models] == ["model-http"]
         assert models[0]["protocol"] == protocol and models[0]["profile_count"] == 0
-        registry = await client.ok("GET", "/api/registry")
+        registry = await client.ok("POST", "/api/v1/registry/view", {})
         assert next(m for m in registry["models"] if m["model_id"] == "model-http") == models[0]
         listed = next(p for p in (await client.ok("GET", "/api/providers"))["providers"]
                       if p["provider_id"] == pid)
@@ -163,8 +163,8 @@ def test_keys_masks_omission_replacement_and_null_clear(monkeypatch, tmp_path):
             assert updated["api_key"] == "***" and await db.get_api_key(pid) == SECRET
         await client.ok("PUT", f"/api/providers/{pid}", {"api_key": SECRET + "-replacement"})
         assert await db.get_api_key(pid) == SECRET + "-replacement"
-        for path in ("/api/providers", "/api/registry"):
-            saved = next(p for p in (await client.ok("GET", path))["providers"] if p["provider_id"] == pid)
+        for method, path in (("GET", "/api/providers"), ("POST", "/api/v1/registry/view")):
+            saved = next(p for p in (await client.ok(method, path, {}))["providers"] if p["provider_id"] == pid)
             assert saved["api_key"] == "***"
         cleared = (await client.ok("PUT", f"/api/providers/{pid}", {"api_key": None}))["provider"]
         assert cleared["api_key"] is None and await db.get_api_key(pid) is None
@@ -243,8 +243,8 @@ def test_model_profile_counts_and_reference_deletion_conflicts(monkeypatch, tmp_
                            "('model-http', $1, 'http-model', 'anthropic-messages')", pid)
         await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id) VALUES "
                            "('agent-http', 'HTTP profile', 'rt-claude-code', 'model-http')")
-        for path in ("/api/registry", "/api/providers"):
-            account = next(p for p in (await client.ok("GET", path))["providers"] if p["provider_id"] == pid)
+        for method, path in (("POST", "/api/v1/registry/view"), ("GET", "/api/providers")):
+            account = next(p for p in (await client.ok(method, path, {}))["providers"] if p["provider_id"] == pid)
             assert (account["model_count"], account["profile_count"]) == (1, 1)
         models = (await client.ok("GET", f"/api/models?provider_id={pid}&runtime_id=rt-claude-code"))["models"]
         assert len(models) == 1 and models[0]["profile_count"] == 1
@@ -259,7 +259,7 @@ def test_model_profile_counts_and_reference_deletion_conflicts(monkeypatch, tmp_
 
 
 @pytest.mark.parametrize("method,path", [
-    ("GET", "/api/registry"), ("GET", "/api/providers"), ("GET", "/api/models"),
+    ("POST", "/api/v1/registry/view"), ("GET", "/api/providers"), ("GET", "/api/models"),
     ("POST", "/api/providers"), ("PUT", "/api/providers/prov-codex-login"),
     ("DELETE", "/api/providers/prov-codex-login"),
     ("DELETE", "/api/providers/prov-codex-login/login-problem"),
@@ -268,7 +268,11 @@ def test_operator_authentication_is_required(monkeypatch, tmp_path, method, path
     async def test(client, pool):
         for token in (None, "wrong-token"):
             status, answer = await client.call(method, path, _account(api_key=SECRET), token=token)
-            assert status == 401 and set(answer) == {"error"}
+            assert status == 401
+            if path == "/api/v1/registry/view":
+                assert answer["status"] == "error" and answer["error"]["code"] == "unauthorized"
+            else:
+                assert set(answer) == {"error"}
     _run(test, monkeypatch, tmp_path, database=False)
 
 

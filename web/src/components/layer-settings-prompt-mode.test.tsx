@@ -68,7 +68,7 @@ describe("the role layer's system prompt mode", () => {
     const roles = { manager: state, planner: state, worker: state, reviewer: state };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      const result = url.endsWith("/registry") ? SUMMARY_REGISTRY
+      const result = url === "/api/v1/registry/view" ? SUMMARY_REGISTRY
         : url.endsWith("/allowed-profiles") ? { profiles: [], choosable: [] }
         : url.endsWith("/roles/list") ? { configs: [{ role: "planner", display_name: "Planner", enabled: true }] }
         : url.includes("/projects/") ? { limits: LIMITS, project: { values: VALUES }, roles }

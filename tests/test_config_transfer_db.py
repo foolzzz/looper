@@ -55,7 +55,7 @@ def test_documented_v3_example_previews_applies_and_reads_back(monkeypatch, tmp_
             assert code == 0, err
             assert _plan(out)["applied"]
             _serve(monkeypatch, pool)
-            registry = await _ok("GET", "/api/registry")
+            registry = await _ok("POST", "/api/v1/registry/view", {})
             profile = next(p for p in registry["profiles"] if p["name"] == data["profiles"][0]["name"])
             model = next(m for m in registry["models"] if m["model_id"] == profile["model_id"])
             assert (model["provider_name"], model["name"], model["protocol"]) == tuple(
@@ -580,7 +580,7 @@ def test_an_entry_with_the_same_key_is_updated_in_place_and_nothing_else_is_remo
             assert state["projects"]["CALC"]["background"] == "Python 3.12."
             assert state["projects"]["CALC"]["work_dir"] == str(tmp_path)  # a directory is never imported
             assert project["project"]["values"]["profile_id"] == next(
-                a["profile_id"] for a in (await _call("GET", "/api/registry"))[1]["profiles"]
+                a["profile_id"] for a in (await _call("POST", "/api/v1/registry/view", {}))[1]["profiles"]
                 if a["name"] == "beta-haiku")
 
     asyncio.run(_test())

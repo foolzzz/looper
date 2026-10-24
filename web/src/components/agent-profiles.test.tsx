@@ -74,8 +74,9 @@ describe("Agent Profiles", () => {
       if (url === "/api/v1/system/status") {
         return Response.json({ status: "ok", result: { checks: [] } });
       }
+      if (url === "/api/v1/registry/view") return Response.json({ status: "ok", result: registry });
       if (init?.body) requests.push({ url, body: JSON.parse(String(init.body)) });
-      const answer = url.endsWith("/registry") ? registry : { profile: PROFILE, warnings: [] };
+      const answer = { profile: PROFILE, warnings: [] };
       return new Response(JSON.stringify(answer), { status: 200 });
     }));
     container = document.createElement("div");
@@ -125,7 +126,7 @@ describe("Agent Profiles", () => {
 
   it("shares one registry fetch and refresh across mounted consumers and later selectors", async () => {
     let registry = REGISTRY;
-    const fetcher = vi.fn(async () => Response.json(registry));
+    const fetcher = vi.fn(async () => Response.json({ status: "ok", result: registry }));
     vi.stubGlobal("fetch", fetcher);
     await act(async () => root.render(<><RegistryReader id="first" /><RegistryReader id="second" /></>));
     expect(fetcher).toHaveBeenCalledTimes(1);
@@ -141,9 +142,9 @@ describe("Agent Profiles", () => {
   });
 
   it("retains the last registry after refresh failure and clears the shared error on retry", async () => {
-    const fetcher = vi.fn().mockResolvedValueOnce(Response.json(REGISTRY))
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json({ status: "ok", result: REGISTRY }))
       .mockRejectedValueOnce(new Error("Registry unavailable"))
-      .mockResolvedValueOnce(Response.json({ ...REGISTRY, profiles: [{ ...PROFILE, name: "Renamed" }] }));
+      .mockResolvedValueOnce(Response.json({ status: "ok", result: { ...REGISTRY, profiles: [{ ...PROFILE, name: "Renamed" }] } }));
     vi.stubGlobal("fetch", fetcher);
     await act(async () => root.render(<RegistryReader id="reader" />));
     await act(async () => window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT)));
@@ -157,10 +158,10 @@ describe("Agent Profiles", () => {
   it("ignores an older registry answer after a newer refresh completes", async () => {
     let resolveFirst!: (response: Response) => void;
     vi.stubGlobal("fetch", vi.fn().mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveFirst = resolve; }))
-      .mockResolvedValueOnce(Response.json({ ...REGISTRY, profiles: [{ ...PROFILE, name: "Latest" }] })));
+      .mockResolvedValueOnce(Response.json({ status: "ok", result: { ...REGISTRY, profiles: [{ ...PROFILE, name: "Latest" }] } })));
     await act(async () => root.render(<RegistryReader id="reader" />));
     await act(async () => window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT)));
-    await act(async () => resolveFirst(Response.json(REGISTRY)));
+    await act(async () => resolveFirst(Response.json({ status: "ok", result: REGISTRY })));
     expect(container.querySelector("output")!.textContent).toContain("Latest —");
   });
 
@@ -404,6 +405,7 @@ describe("Agent Profiles", () => {
     const saved: AgentProfile = { ...PROFILE, profile_id: "new", name: "New profile" };
     let registry = REGISTRY;
     vi.stubGlobal("fetch", vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
+      if (String(request) === "/api/v1/registry/view") return Response.json({ status: "ok", result: registry });
       if (init?.method === "POST") {
         requests.push({ url: String(request), body: JSON.parse(String(init.body)) });
         registry = { ...REGISTRY, profiles: [...REGISTRY.profiles, saved] };
@@ -440,7 +442,7 @@ describe("Agent Profiles", () => {
 
   it("refreshes model options after a registry mutation event", async () => {
     let registry = REGISTRY;
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(registry))));
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ status: "ok", result: registry })));
     await act(async () => root.render(<AgentProfilesSection />));
     await act(async () => [...container.querySelectorAll("button")].find((item) => item.textContent?.includes("Add Agent Profile"))!.click());
     registry = { ...REGISTRY, models: [...REGISTRY.models, { ...model("fresh", "anthropic-messages"), name: "fresh" }] };
@@ -480,7 +482,7 @@ describe("Agent Profiles", () => {
       { scope: "project", role: null, project_id: "project", project_name: "Project" },
       { scope: "role_project", role: "reviewer", project_id: "project", project_name: "Project" },
     ] } };
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ ...REGISTRY, profiles: [profile] })));
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ status: "ok", result: { ...REGISTRY, profiles: [profile] } })));
     await act(async () => root.render(<AgentProfilesSection />));
     expect([...container.querySelectorAll("a")].map((item) => item.getAttribute("href"))).toEqual([
       "#settings/roles/shared", "#settings/roles/worker", "#projects/project/profiles/project", "#projects/project/profiles/reviewer",
@@ -517,7 +519,7 @@ describe("Agent Profiles", () => {
           { name: "Default prompt", owner: "runtime", text: null, note: "Claude Code's default prompt (not shown)" },
           { name: "Looper prompt", owner: "looper", text: "Speak briefly.\n\nHarness", note: "Appended to the main block" },
         ], notes: ["the Task section is filled in at launch"],
-      } : { ...REGISTRY, profiles: [{ ...PROFILE, roles: ["worker", "reviewer"] }] }), { status: 200 });
+      } : { status: "ok", result: { ...REGISTRY, profiles: [{ ...PROFILE, roles: ["worker", "reviewer"] }] } }), { status: 200 });
     });
     vi.stubGlobal("fetch", fetcher);
     await act(async () => root.render(<AgentProfilesSection />));
@@ -546,7 +548,7 @@ describe("Agent Profiles", () => {
   it("shows preview errors without claiming the prompt loaded", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => String(input).includes("prompt-preview")
       ? new Response(JSON.stringify({ error: "Profile cannot run this role" }), { status: 400 })
-      : new Response(JSON.stringify(REGISTRY), { status: 200 })));
+      : Response.json({ status: "ok", result: REGISTRY })));
     await act(async () => root.render(<AgentProfilesSection />));
     const load = [...container.querySelectorAll("button")].find((button) => button.textContent === "Load")!;
     await act(async () => load.click());
@@ -619,8 +621,9 @@ describe("pi Agent Profiles", () => {
     requests = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url === "/api/v1/registry/view") return Response.json({ status: "ok", result: PI_REGISTRY });
       if (init?.body) requests.push({ url, body: JSON.parse(String(init.body)) });
-      const answer = url.endsWith("/registry") ? PI_REGISTRY : { profile: PI_PROFILE, warnings: [] };
+      const answer = { profile: PI_PROFILE, warnings: [] };
       return new Response(JSON.stringify(answer), { status: 200 });
     }));
     container = document.createElement("div");
