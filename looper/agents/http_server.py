@@ -34,7 +34,6 @@ from . import (
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, resolve_chat_target
 from .message import AgentAddress
-from .channels import bot_api
 from .channels.web import WebChannelAdapter
 from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
@@ -825,7 +824,6 @@ class AgentHTTPServer:
     _RE_TASK_DETAIL = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)$")
     _RE_ROLE_CONFIG = re.compile(r"^/api/roles/([a-zA-Z0-9_-]+)$")
     _RE_ROLE_CONFIG_RESET = re.compile(r"^/api/roles/([a-zA-Z0-9_-]+)/reset-prompt$")
-    _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
     _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
     _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
@@ -999,16 +997,6 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_200, vault.settings_view)
         elif path == "/api/knowledge-vault" and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: vault.update_settings(projects.json_object(body)))
-        elif path == "/api/channel-configs" and method == "GET":
-            await self._handle_list_channel_configs(writer)
-        elif (m := self._RE_CHANNEL_CONFIG.match(path)) and method == "GET":
-            await self._handle_get_channel_config(m.group(1), writer)
-        elif path == "/api/channel-configs" and method == "POST":
-            await self._answer(writer, HTTP_201, lambda: bot_api.add_bot(projects.json_object(body)))
-        elif (m := self._RE_CHANNEL_CONFIG.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: bot_api.update_bot(m.group(1), projects.json_object(body)))
-        elif (m := self._RE_CHANNEL_CONFIG.match(path)) and method == "DELETE":
-            await self._answer(writer, HTTP_200, lambda: bot_api.remove_bot(m.group(1)))
         else:
             writer.write(_json_response(HTTP_404, {"error": "not found"}))
             await writer.drain()
@@ -1728,6 +1716,64 @@ class AgentHTTPServer:
         else:
             from .channels.allowlist import channel_view
             writer.write(_json_response(HTTP_200, channel_view(config)))
+        await writer.drain()
+
+    # --- Configuration export ---
+
+    async def _handle_config_export(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
+        """Stream the configuration file as a download, piece by piece from one read-only snapshot.
+
+        ``projects=1`` and ``secrets=1`` are ``looper config export``'s
+        ``--include-projects`` and ``--include-secrets``. The status line is
+        sent before the first piece, so a failure after it ends the download
+        early, which leaves a file that is not valid JSON.
+        """
+        import datetime
+
+        from ..db.connection import get_pool
+        from .config_transfer import export_chunks
+
+        include_projects, include_secrets = query.get("projects") == "1", query.get("secrets") == "1"
+        name = f"looper-config-{datetime.date.today().isoformat()}.json"
+        async with get_pool().acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
+            chunks = export_chunks(conn, include_projects=include_projects, include_secrets=include_secrets)
+            first = await anext(chunks)
+            writer.write(
+                f"HTTP/1.1 {HTTP_200}\r\n"
+                "Content-Type: application/json; charset=utf-8\r\n"
+                f'Content-Disposition: attachment; filename="{name}"\r\n'
+                "Cache-Control: no-store\r\n"
+                "Connection: close\r\n"
+                "\r\n".encode() + first.encode("utf-8")
+            )
+            async for chunk in chunks:
+                writer.write(chunk.encode("utf-8"))
+                await writer.drain()
+        await writer.drain()
+
+    async def _handle_config_import(
+        self, writer: asyncio.StreamWriter, status: str,
+        request: Callable[[config_imports.ConfigImports], Awaitable[Any]],
+    ) -> None:
+        """Answer with ``request(imports)``'s result: a file that is not a usable configuration file is 400, an
+        unknown or expired import 404, and too many pending, one being applied or a schema awaiting
+        ``looper serve``'s migration 409."""
+        try:
+            if self._config_imports is None:
+                raise RuntimeError("the server was started without a runtime root")
+            result = await request(self._config_imports)
+        except config_transfer.ConfigFileError as exc:
+            status, result = HTTP_400, {"error": str(exc)}
+        except config_imports.ImportNotFound as exc:
+            status, result = HTTP_404, {"error": str(exc)}
+        except (config_imports.ImportConflict, config_transfer.SchemaChangePending) as exc:
+            status, result = HTTP_409, {"error": str(exc)}
+        except (asyncio.TimeoutError, ConnectionError, asyncio.IncompleteReadError):
+            raise  # the client stopped sending; there is no one to answer
+        except Exception:
+            logger.exception("config import request failed")
+            status, result = HTTP_500, {"error": "the import failed; see the server log"}
+        writer.write(_json_response(status, _serialize(result)))
         await writer.drain()
 
     def _password_record(self) -> operator_auth.PasswordRecord | None:

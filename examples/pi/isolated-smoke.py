@@ -505,7 +505,7 @@ asyncio.run(check())
                 if time.monotonic() > deadline:
                     raise TimeoutError("installed serve readiness timed out")
                 time.sleep(0.2)
-        channels = request(base, "/api/channel-configs", token)["configs"]
+        channels = request(base, "/api/v1/channel_configs/list", token, "POST", {})["result"]["configs"]
         assert {c["channel_type"] for c in channels} >= {"telegram", "lark", "lark_bot"}
         assert all(not c["enabled"] for c in channels if c["channel_type"] in ("telegram", "lark", "lark_bot"))
         probe = request(base, "/api/runtimes/rt-pi/probe", token, "POST", {})

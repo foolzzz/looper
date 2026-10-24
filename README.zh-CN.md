@@ -239,7 +239,7 @@ API 只响应操作者：在这台机器的浏览器中打开控制台会自动�
 | 配置迁移 | `POST /api/v1/config/export`、`/api/v1/config/import_upload`、`/api/v1/config/import_apply`、`/api/v1/config/import_cancel` | 下载配置文件；上传配置文件、预览，再应用或取消 |
 | 对话 | `/api/chat/send`、`/api/v1/operator_chat/{targets,sessions,messages,save_message}`、`/api/chat/events` | 与 Manager 或运行中任务的 Planner 对话；按渠道列出 Manager 的对话；历史和 SSE 流 |
 | 运行记录 | `POST /api/v1/runs/{list,get,events,for_task,usage}` | 每次 agent 运行的启动命令、用量、花费和事件；单个 agent 的花费和上下文 |
-| 渠道 | `/api/channel-configs/...`、`/api/channels/lark/...` | Telegram 和飞书的设置、Telegram bot token（接口不返回）和发送者名单；飞书机器人的状态、被拒的发送者和按人搜索 |
+| 渠道 | `/api/v1/channel_configs/...`、`/api/channels/lark/...` | Telegram 和飞书的设置、Telegram bot token（接口不返回）和发送者名单；飞书机器人的状态、被拒的发送者和按人搜索 |
 
 各接口的字段和错误说明见 [HTTP API 参考](docs/architecture/agent-system.md#http-api)。
 
