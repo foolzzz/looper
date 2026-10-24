@@ -181,14 +181,6 @@ RESULTS: dict[str, dict[str, Any]] = {
     "task_create": _object({
         **_TASK_ID_ONLY, "name": _STR, "status": _STR, "project": _STR, "project_created": _BOOL, "work_dir": _STR,
         "workspace_mode": _STR}),
-    "task_control.start": _object({**_TASK_ID_ONLY, "started": _BOOL}),
-    "task_control.stop": _object({**_TASK_ID_ONLY, "stopped": _BOOL}),
-    "task_control.restart": _object({**_TASK_ID_ONLY, "restarted": _BOOL, "note": _STR}),
-    "task_control.start_over": _object({**_TASK_ID_ONLY, "started_over": _BOOL, "note": _STR}),
-    "task_control.cancel": _object({**_TASK_ID_ONLY, "cancelled": _BOOL}),
-    "task_update": _object({
-        **_TASK_ID_ONLY, "title": _NULL_STR, "requirement_version": {"type": ["integer", "null"]},
-        "changed": _array(_STR), "profiles_note": _STR, "requirement_note": _STR}, ["task_id", "changed"]),
     "task_instruct": _object({**_TASK_ID_ONLY, "supplement_id": {"type": ["integer", "string"]}, "note": _STR}),
     "gates.list": _object({"gates": _array(), "total": _INT, "counts": _OBJ, "limit": _INT, "offset": _INT}),
     "gates.messages": _object({**_TASK_ID_ONLY, "gate": _OBJ, "messages": _array()}),

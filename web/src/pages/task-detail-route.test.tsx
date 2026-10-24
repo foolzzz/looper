@@ -196,9 +196,9 @@ describe("TaskDetailRoute", () => {
     const response = (data: unknown) => new Response(JSON.stringify(data), { status: 200 });
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/start")) {
+      if (url === "/api/v1/ops/task_control/start_over") {
         restarted = true;
-        return response({});
+        return response({ status: "ok", result: { task_id: "task-a", started_over: true, note: "Started." } });
       }
       if (url.includes("/room")) {
         reads.push(JSON.parse(String(init?.body)));

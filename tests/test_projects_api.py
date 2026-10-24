@@ -209,6 +209,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     from looper.db import manager_actions
 
     monkeypatch.setattr(manager_actions, "for_task", fake.manager_actions)
+    monkeypatch.setattr(manager_actions, "record", AsyncMock())
     from looper.db import task_roles
 
     monkeypatch.setattr(task_roles, "versions", AsyncMock(return_value=[]))
@@ -259,14 +260,17 @@ def _call(method: str, path: str, body: Any = None, *, query: dict[str, str] | N
     raw = body if isinstance(body, bytes) else (b"" if body is None else json.dumps(body).encode())
     writer = _Writer()
     server = server or _server()
-    if path in {"/api/v1/tasks/configure", "/api/v1/tasks/move"}:
-        server._client_ops = ClientOps(SimpleNamespace())
+    if path.startswith("/api/v1/"):
+        from looper.agents.ops.service import Platform
+
+        server._client_ops = ClientOps(Platform(bus=getattr(server._supervisor, "bus", None),
+                                                task_router=server._task_router))
         asyncio.run(server._handle_v1(method, path, query or {}, {}, raw, writer, api_v1.OPERATOR))
     else:
         asyncio.run(server._route_api(method, path, query or {}, raw, writer))
     head, _, payload = writer.data.partition(b"\r\n\r\n")
     answer = json.loads(payload)
-    if path in {"/api/v1/tasks/configure", "/api/v1/tasks/move"}:
+    if path.startswith("/api/v1/"):
         answer = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
     return int(head.split()[1]), answer
 
@@ -561,7 +565,7 @@ class TestTaskReads:
 
 
 class TestStartReadyTask:
-    """``POST /api/tasks/<id>/start`` starts a ready task through the TaskRouter (``TASK_START``), and only one."""
+    """``task_control.start`` starts a ready task through the TaskRouter (``TASK_START``), and only one."""
 
     @staticmethod
     def _call(task_id: str) -> tuple[int, Any, list[Any]]:
@@ -575,7 +579,7 @@ class TestStartReadyTask:
         server = AgentHTTPServer(web_adapter=SimpleNamespace(_address=channel_address("web")),
                                  task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())),
                                  supervisor=SimpleNamespace(bus=SimpleNamespace(publish=publish)))
-        status, body = _call("POST", f"/api/tasks/{task_id}/start", server=server)
+        status, body = _call("POST", "/api/v1/ops/task_control/start", {"task_id": task_id}, server=server)
         return status, body, published
 
     def test_a_ready_task_is_started_through_the_router(self, store: _Store) -> None:
@@ -584,16 +588,16 @@ class TestStartReadyTask:
         store.add_project("proj-a", "tetris")
         store.add_task("task-1", "proj-a", "init")
         status, body, (envelope,) = self._call("task-1")
-        assert (status, body) == (200, {"started": "task-1", "project_id": "proj-a"})
+        assert (status, body) == (200, {"task_id": "task-1", "started": True})
         assert (envelope.message_type, envelope.target, envelope.payload) == (
             MessageType.TASK_START, TASK_ROUTER_ADDRESS, {"task_id": "task-1"})
 
     @pytest.mark.parametrize("task_status", ["pending", "running", "stopped", "failed", "cancelled", "completed"])
-    def test_a_task_that_is_not_ready_is_400(self, store: _Store, task_status: str) -> None:
+    def test_a_task_that_is_not_ready_is_409(self, store: _Store, task_status: str) -> None:
         store.add_project("proj-a", "tetris")
         store.add_task("task-1", "proj-a", task_status)
         status, body, published = self._call("task-1")
-        assert (status, published) == (400, [])
+        assert (status, published) == (409, [])
         assert task_status in body["error"]
 
     def test_an_unknown_task_is_404(self, store: _Store) -> None:
@@ -602,45 +606,45 @@ class TestStartReadyTask:
 
 
 class TestRenameTask:
-    """``PUT /api/tasks/<id>/title`` sets a task's title in any status and notes it in the task's history."""
+    """``task_update`` sets a task's title in any status and notes it in the task's history."""
 
     @pytest.mark.parametrize("task_status", ["init", "running", "completed", "cancelled"])
     def test_any_status_can_be_renamed(self, store: _Store, task_status: str) -> None:
         store.add_project("proj-a", "tetris")
         store.add_task("task-1", "proj-a", task_status)
-        status, body = _call("PUT", "/api/tasks/task-1/title", {"title": "  Tetris \n game  "})
-        assert (status, body) == (200, {"task_id": "task-1", "title": "Tetris game"})
+        status, body = _call("POST", "/api/v1/ops/task_update", {"task_id": "task-1", "title": "  Tetris \n game  "})
+        assert (status, body) == (200, {"task_id": "task-1", "title": "Tetris game", "changed": ["title"]})
         assert store.tasks["task-1"]["title"] == "Tetris game"
-        assert [(s["task_id"], s["via"], s["delivered"]) for s in store.supplements] == [("task-1", "task_page", True)]
+        assert [(s["task_id"], s["via"], s["delivered"]) for s in store.supplements] == [("task-1", "client:operator", True)]
         assert "Tetris game" in store.supplements[0]["text"]
 
-    def test_a_long_title_is_cut_and_the_same_title_is_not_noted_again(self, store: _Store) -> None:
+    def test_the_same_title_is_not_noted_again(self, store: _Store) -> None:
         store.add_project("proj-a", "tetris")
         store.add_task("task-1", "proj-a", "running")
-        status, body = _call("PUT", "/api/tasks/task-1/title", {"title": "x" * 100})
+        status, body = _call("POST", "/api/v1/ops/task_update", {"task_id": "task-1", "title": "x" * db_tasks.TITLE_MAX_CHARS})
         assert (status, body["title"]) == (200, "x" * db_tasks.TITLE_MAX_CHARS)
-        assert _call("PUT", "/api/tasks/task-1/title", {"title": "x" * 100})[0] == 200
+        assert _call("POST", "/api/v1/ops/task_update", {"task_id": "task-1", "title": "x" * db_tasks.TITLE_MAX_CHARS})[0] == 200
         assert len(store.supplements) == 1
 
     @pytest.mark.parametrize(("body", "problem"), [
-        ({}, "title must be a string"),
+        ({}, "give at least one"),
         ({"title": 5}, "title must be a string"),
-        ({"title": None}, "title must be a string"),
+        ({"title": None}, "give at least one"),
         ({"title": " \n "}, "title must not be empty"),
     ])
     def test_a_missing_or_empty_title_is_refused(self, store: _Store, body: Any, problem: str) -> None:
         store.add_project("proj-a", "tetris")
         store.add_task("task-1", "proj-a", "running")
-        status, answer = _call("PUT", "/api/tasks/task-1/title", body)
-        assert (status, answer) == (400, {"error": problem})
+        status, answer = _call("POST", "/api/v1/ops/task_update", {"task_id": "task-1", **body})
+        assert status == 400 and problem in answer["error"]
         assert "title" not in store.tasks["task-1"] and store.supplements == []
 
     def test_an_unknown_task_is_not_found(self, store: _Store) -> None:
-        assert _call("PUT", "/api/tasks/task-9/title", {"title": "x"})[0] == 404
+        assert _call("POST", "/api/v1/ops/task_update", {"task_id": "task-9", "title": "x"})[0] == 404
 
 
 class TestEditRequirement:
-    """``PUT /api/tasks/<id>/requirement`` edits the requirement of a task that has not ended, keeping every
+    """``tasks.requirement_update`` edits the requirement of a task that has not ended, keeping every
     version; a running task's Planner is woken to get it in a turn."""
 
     @staticmethod
@@ -658,7 +662,7 @@ class TestEditRequirement:
             router._planners = {task_id: PlannerAgent(task_id=task_id, runtime_root=Path(tempfile.mkdtemp()))}
         server = AgentHTTPServer(web_adapter=SimpleNamespace(_address=channel_address("web")), task_router=router,
                                  supervisor=SimpleNamespace(bus=SimpleNamespace(publish=publish)))
-        status, answer = _call("PUT", f"/api/tasks/{task_id}/requirement", body, server=server)
+        status, answer = _call("POST", "/api/v1/tasks/requirement_update", {"task_id": task_id, **body}, server=server)
         return status, answer, published
 
     @pytest.mark.parametrize(("task_status", "planner", "delivered"), [
