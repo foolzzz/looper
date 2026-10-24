@@ -1132,6 +1132,7 @@ export interface ScheduleInfo {
 export type ScheduleTaskLimits = Record<TaskLimitRole, number | null>;
 
 export interface ScheduleLimits {
+  run_timeout_max_seconds: number;
   name_max_chars: number;
   requirement_max_chars: number;
   /** Fires closer than this make a rule invalid. */
@@ -1155,6 +1156,7 @@ export interface ScheduleLimits {
 
 /** A rule checked by the server: its description and next fire times, or why it is invalid. */
 export interface SchedulePreview {
+  min_interval_seconds: number;
   valid: boolean;
   cron: string;
   timezone: string;
@@ -1232,12 +1234,17 @@ async function scheduleCall<T>(method: string, url: string, label: string, body?
 
 /** Every project's schedules, the disabled ones too, by project name and then name (the Schedules page). */
 export async function fetchAllSchedules(): Promise<ScheduleInfo[]> {
-  return (await scheduleCall<{ schedules: ScheduleInfo[] }>("GET", `${API_BASE}/schedules`, "schedules")).schedules;
+  const result = await callV1<{ schedules: ScheduleInfo[] }>("/api/v1/schedule_admin/list", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.schedules;
 }
 
 /** A project's schedules, ordered by name, and the limits their fields have. */
-export function fetchSchedules(projectId: string): Promise<{ schedules: ScheduleInfo[]; limits: ScheduleLimits }> {
-  return scheduleCall("GET", `${API_BASE}/projects/${encodeURIComponent(projectId)}/schedules`, "schedules");
+export async function fetchSchedules(projectId: string): Promise<{ schedules: ScheduleInfo[]; limits: ScheduleLimits }> {
+  const result = await callV1<{ schedules: ScheduleInfo[]; limits: ScheduleLimits }>(
+    "/api/v1/schedule_admin/project_list", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Create a schedule, disabled; 409 when the project has one with that name already. */
@@ -1253,7 +1260,9 @@ export async function createSchedule(projectId: string, fields: ScheduleFields):
 }
 
 export async function fetchSchedule(scheduleId: string): Promise<ScheduleInfo> {
-  return (await scheduleCall<{ schedule: ScheduleInfo }>("GET", scheduleUrl(scheduleId), "schedule")).schedule;
+  const result = await callV1<{ schedule: ScheduleInfo }>("/api/v1/schedule_admin/get", { schedule_id: scheduleId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.schedule;
 }
 
 /** Send only the fields to change; enabling sets the next fire time from now, disabling clears it. */
@@ -1293,16 +1302,13 @@ export interface ScheduleRunsPage {
 
 /** A page of a schedule's runs: `limit` (default 50, at most 200), older than the run `before`, and without the
  * routine skips when `skips` is "hide". */
-export function fetchScheduleRuns(
+export async function fetchScheduleRuns(
   scheduleId: string,
   options: { limit?: number; before?: string | null; skips?: "show" | "hide" } = {},
 ): Promise<ScheduleRunsPage> {
-  const query = new URLSearchParams();
-  if (options.limit) query.set("limit", String(options.limit));
-  if (options.before) query.set("before", options.before);
-  if (options.skips) query.set("skips", options.skips);
-  const qs = query.toString();
-  return scheduleCall("GET", `${scheduleUrl(scheduleId)}/runs${qs ? `?${qs}` : ""}`, "schedule runs");
+  const result = await callV1<ScheduleRunsPage>("/api/v1/schedule_admin/runs", { schedule_id: scheduleId, ...options });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** A message about a schedule: a run's result, or an alert or its recovery. */
@@ -1321,21 +1327,19 @@ export interface ScheduleNotification {
 
 /** A schedule's notifications, newest first. */
 export async function fetchScheduleNotifications(scheduleId: string, limit?: number): Promise<ScheduleNotification[]> {
-  const qs = limit ? `?limit=${limit}` : "";
-  return (
-    await scheduleCall<{ notifications: ScheduleNotification[] }>(
-      "GET",
-      `${scheduleUrl(scheduleId)}/notifications${qs}`,
-      "schedule notifications",
-    )
-  ).notifications;
+  const result = await callV1<{ notifications: ScheduleNotification[] }>(
+    "/api/v1/schedule_admin/notifications", { schedule_id: scheduleId, ...(limit === undefined ? {} : { limit }) });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.notifications;
 }
 
 /** Check a rule: its description and next `count` fire times (5 by default), or why it is invalid. */
-export function previewSchedule(
+export async function previewSchedule(
   fields: { cron: string; timezone?: string; count?: number; gated?: boolean },
 ): Promise<SchedulePreview> {
-  return scheduleCall("POST", `${API_BASE}/schedules/preview`, "preview", fields);
+  const result = await callV1<SchedulePreview>("/api/v1/schedule_admin/preview", fields);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 // --- A project's knowledge: documents its Planner, Workers and Reviewers read on demand ---

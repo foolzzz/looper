@@ -43,8 +43,9 @@ def test_schedule_api_shows_session_metadata_without_its_id_and_reset_clears_it(
         expected = {"active": True, "runtime": "claude-code", "profile": "prof-test",
                     "last_task_id": "task-session", "last_task_title": "Nightly run",
                     "updated_at": SINCE.isoformat()}
-        for path in (f"/api/schedules/{sid}", "/api/schedules", f"/api/projects/{project['id']}/schedules"):
-            status, body = await _call("GET", path)
+        for action, arguments in (("get", {"schedule_id": sid}), ("list", {}),
+                                  ("project_list", {"project_id": project["id"]})):
+            status, body = await _call("POST", f"/api/v1/schedule_admin/{action}", arguments)
             assert status == 200, body
             view = body["schedule"] if "schedule" in body else body["schedules"][0]
             assert view["planner_session"] == expected
@@ -52,7 +53,7 @@ def test_schedule_api_shows_session_metadata_without_its_id_and_reset_clears_it(
             assert not any(key.startswith("planner_session_") for key in view)
 
         await pool.execute("UPDATE tasks SET title = NULL, goal_id = 'Nightly goal' WHERE id = 'task-session'")
-        status, body = await _call("GET", f"/api/schedules/{sid}")
+        status, body = await _call("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid})
         assert status == 200 and body["schedule"]["planner_session"]["last_task_title"] == "Nightly goal"
 
         assert await _call("POST", f"/api/schedules/{sid}/reset-planner-session") == (200, {"cleared": True})
@@ -60,7 +61,7 @@ def test_schedule_api_shows_session_metadata_without_its_id_and_reset_clears_it(
         assert all(row[key] is None for key in SESSION_COLUMNS if key != "planner_session_totals")
         assert json.loads(row["planner_session_totals"]) == {}
         assert await _call("POST", f"/api/schedules/{sid}/reset-planner-session") == (200, {"cleared": False})
-        status, body = await _call("GET", f"/api/schedules/{sid}")
+        status, body = await _call("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid})
         assert status == 200
         assert body["schedule"]["planner_session"] == {key: False if key == "active" else None for key in expected}
         assert (await _call("POST", "/api/schedules/sched-missing/reset-planner-session"))[0] == 404
