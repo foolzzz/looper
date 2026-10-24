@@ -131,7 +131,7 @@ def _serve(monkeypatch: pytest.MonkeyPatch, pool: Any) -> None:
 
 
 async def _ok(method: str, path: str, body: Any = None) -> Any:
-    if path.startswith("/api/v1/role_templates/"):
+    if path.startswith(("/api/v1/role_templates/", "/api/v1/channel_configs/")):
         from types import SimpleNamespace
 
         from looper.agents.ops.clients import ClientOps
@@ -185,8 +185,11 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
                                                           "env": [{"key": "LOOPER_MODE", "value": None}],
                                                           "max_concurrency": 6})
     await _ok("PUT", "/api/roles/planner", {"system_prompt": "Plan in small steps.", "timeout_seconds": 900})
-    await _ok("PUT", "/api/channel-configs/channel-telegram", {"enabled": True, "config": {
-        "bot_token_env": "MY_TG_TOKEN", "allowed_user_ids": ["123456789"], "webhook_secret": SECRET}})
+    await _ok("POST", "/api/v1/channel_configs/update", {"channel_id": "channel-telegram", "fields": {"enabled": True, "config": {
+        "bot_token_env": "MY_TG_TOKEN", "allowed_user_ids": ["123456789"]}}})
+    # An older installation may still hold an extension secret; export must mask it.
+    await pool.execute("UPDATE channel_configs SET config = config || $1::jsonb WHERE channel_id = 'channel-telegram'",
+                       json.dumps({"webhook_secret": SECRET}))
 
     skill = (await _ok("POST", "/api/v1/catalog_sources/create_skill", {"name": "release-notes", "description": "Drafts notes.",
                                                        "content": "Reply NOTES-OK.\n"}))["item"]

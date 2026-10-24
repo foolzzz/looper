@@ -8,9 +8,6 @@ test works in a new schema of its own, dropped afterwards, seeded the way
 from __future__ import annotations
 
 import json
-import tempfile
-from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -22,35 +19,17 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 OPEN_ID = "ou_7dab8a3d3cdcc9da365777c7ad535d62"
 
 
-class _Writer:
-    def __init__(self) -> None:
-        self.data = b""
-
-    def write(self, data: bytes) -> None:
-        self.data += data
-
-    async def drain(self) -> None:
-        pass
-
-
 async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
-    from looper.agents.http_server import AgentHTTPServer
-    from looper.agents.tiers.task import TaskRouter
+    from tests.test_lark_channel_db import _call as call
 
-    server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
-                             task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
-    raw = body if isinstance(body, bytes) else (b"" if body is None else json.dumps(body).encode())
-    writer = _Writer()
-    await server._route_api(method, path, {}, raw, writer)
-    head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload)
+    return await call(method, path, body)
 
 
 def test_the_seeded_channels_have_empty_allowlists_and_say_why_they_do_not_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _test(pool: Any) -> None:
-        status, body = await _call("GET", "/api/channel-configs")
+        status, body = await _call("GET", "channel_configs")
         assert status == 200
         channels = {c["channel_id"]: c for c in body["configs"]}
         assert channels["channel-telegram"]["config"]["allowed_user_ids"] == []
@@ -64,7 +43,7 @@ def test_the_seeded_channels_have_empty_allowlists_and_say_why_they_do_not_start
 
 def test_an_allowlist_round_trips_validated(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _test(pool: Any) -> None:
-        status, lark = await _call("PUT", "/api/channel-configs/channel-lark", {
+        status, lark = await _call("PUT", "channel-lark", {
             "enabled": True,
             "config": {"profile": "", "allowed_open_ids": [f" {OPEN_ID} ", OPEN_ID, ""]},
         })
@@ -73,12 +52,12 @@ def test_an_allowlist_round_trips_validated(monkeypatch: pytest.MonkeyPatch) -> 
         assert lark["config"]["allowed_open_ids"] == [OPEN_ID]
         assert lark["start_problem"] is None
         # A Telegram list written the way it was stored before comes back as a list.
-        status, telegram = await _call("PUT", "/api/channel-configs/channel-telegram", {
+        status, telegram = await _call("PUT", "channel-telegram", {
             "config": {"bot_token_env": "LOOPER_TELEGRAM_BOT_TOKEN", "allowed_user_ids": "7, 8"},
         })
         assert status == 200 and telegram["config"]["allowed_user_ids"] == ["7", "8"]
 
-        status, again = await _call("GET", "/api/channel-configs/channel-lark")
+        status, again = await _call("GET", "channel-lark")
         assert status == 200 and again["config"]["allowed_open_ids"] == [OPEN_ID] and again["start_problem"] is None
         stored = await pool.fetchval("SELECT config FROM channel_configs WHERE channel_id = 'channel-telegram'")
         assert json.loads(stored)["allowed_user_ids"] == ["7", "8"]
@@ -88,16 +67,16 @@ def test_an_allowlist_round_trips_validated(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_a_bad_id_is_refused_and_nothing_changes(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _test(pool: Any) -> None:
-        await _call("PUT", "/api/channel-configs/channel-telegram", {"config": {"allowed_user_ids": ["7"]}})
+        await _call("PUT", "channel-telegram", {"config": {"allowed_user_ids": ["7"]}})
         for config in ({"allowed_user_ids": ["7", "abc"]}, {"allowed_user_ids": ["-1001234567890"]}, ["7"]):
-            status, body = await _call("PUT", "/api/channel-configs/channel-telegram",
+            status, body = await _call("PUT", "channel-telegram",
                                        {"enabled": True, "config": config})
             assert status == 400, config
             assert body["error"]
-        status, body = await _call("PUT", "/api/channel-configs/channel-lark",
+        status, body = await _call("PUT", "channel-lark",
                                    {"config": {"allowed_open_ids": ["on_7dab8a3d3cdcc9da365777c7ad535d62"]}})
-        assert status == 400 and "is not a Lark open_id" in body["error"]
-        _, telegram = await _call("GET", "/api/channel-configs/channel-telegram")
+        assert status == 400 and body["error"] == "invalid credential request"
+        _, telegram = await _call("GET", "channel-telegram")
         assert telegram["enabled"] is False and telegram["config"] == {"allowed_user_ids": ["7"]}
 
     run_with_channel_configs(_test, monkeypatch)
@@ -107,11 +86,11 @@ def test_an_enabled_channel_with_an_empty_list_is_saved_but_says_it_will_not_sta
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _test(pool: Any) -> None:
-        status, lark = await _call("PUT", "/api/channel-configs/channel-lark",
+        status, lark = await _call("PUT", "channel-lark",
                                    {"enabled": True, "config": {"profile": "", "allowed_open_ids": []}})
         assert status == 200 and lark["enabled"] is True
         assert "allowlist is empty" in lark["start_problem"]
-        status, _ = await _call("PUT", "/api/channel-configs/channel-none", {"enabled": True})
+        status, _ = await _call("PUT", "channel-none", {"enabled": True})
         assert status == 404
 
     run_with_channel_configs(_test, monkeypatch)
@@ -124,12 +103,12 @@ def test_bot_token_is_stored_masked_and_never_returned(monkeypatch: pytest.Monke
 
     async def _test(pool: Any) -> None:
         # No token to start with.
-        status, body = await _call("GET", "/api/channel-configs/channel-telegram")
+        status, body = await _call("GET", "channel-telegram")
         assert status == 200 and body.get("has_bot_token") is False
         assert "bot_token" not in body["config"]
 
         # Store a token.
-        status, body = await _call("PUT", "/api/channel-configs/channel-telegram", {"bot_token": "123:secret"})
+        status, body = await _call("PUT", "channel-telegram", {"bot_token": "123:secret"})
         assert status == 200 and body["has_bot_token"] is True
         # The token value never leaves the server, in config or anywhere in the view.
         assert "123:secret" not in json.dumps(body)
@@ -139,19 +118,19 @@ def test_bot_token_is_stored_masked_and_never_returned(monkeypatch: pytest.Monke
         assert "bot_token" not in json.loads(stored)
 
         # The mask keeps the stored token; other fields can change alongside it.
-        status, body = await _call("PUT", "/api/channel-configs/channel-telegram",
+        status, body = await _call("PUT", "channel-telegram",
                                    {"bot_token": "***", "config": {"allowed_user_ids": ["7"]}})
         assert status == 200 and body["has_bot_token"] is True
         assert await get_bot_token("channel-telegram") == "123:secret"
         assert body["config"]["allowed_user_ids"] == ["7"]
 
         # An empty string removes it.
-        status, body = await _call("PUT", "/api/channel-configs/channel-telegram", {"bot_token": ""})
+        status, body = await _call("PUT", "channel-telegram", {"bot_token": ""})
         assert status == 200 and body["has_bot_token"] is False
         assert await get_bot_token("channel-telegram") is None
 
         # A non-string token is refused.
-        status, _ = await _call("PUT", "/api/channel-configs/channel-telegram", {"bot_token": 123})
+        status, _ = await _call("PUT", "channel-telegram", {"bot_token": 123})
         assert status == 400
 
     run_with_channel_configs(_test, monkeypatch)
@@ -162,15 +141,15 @@ def test_a_rejected_update_does_not_change_the_token(monkeypatch: pytest.MonkeyP
     from looper.db.channel_configs import get_bot_token
 
     async def _test(pool: Any) -> None:
-        status, _ = await _call("PUT", "/api/channel-configs/channel-telegram", {"bot_token": "keep:me"})
+        status, _ = await _call("PUT", "channel-telegram", {"bot_token": "keep:me"})
         assert status == 200 and await get_bot_token("channel-telegram") == "keep:me"
         # Change the token and break the allowlist in the same request.
-        status, _ = await _call("PUT", "/api/channel-configs/channel-telegram",
+        status, _ = await _call("PUT", "channel-telegram",
                                  {"bot_token": "new:token", "config": {"allowed_user_ids": "12,abc"}})
         assert status == 400
         assert await get_bot_token("channel-telegram") == "keep:me"  # unchanged
         # Clearing the token with a bad allowlist must not delete it either.
-        status, _ = await _call("PUT", "/api/channel-configs/channel-telegram",
+        status, _ = await _call("PUT", "channel-telegram",
                                  {"bot_token": "", "config": {"allowed_user_ids": "12,abc"}})
         assert status == 400
         assert await get_bot_token("channel-telegram") == "keep:me"  # still there

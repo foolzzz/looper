@@ -1,6 +1,4 @@
-"""Add, change and remove a Manager's bots over the HTTP API (RFC §9.1): the checks and the writes behind
-``POST /api/channel-configs``, ``PUT`` and ``DELETE /api/channel-configs/<id>``. The routes live in
-``looper.agents.http_server``; a refusal is a ``projects.RequestError`` it answers with.
+"""Add, change and remove a Manager's bots for the versioned channel settings API.
 
 A bot's token (the Telegram bot token or the Lark app secret) is registered with ``log_redaction`` as soon as it is
 read, and no error text is built from the request body."""
