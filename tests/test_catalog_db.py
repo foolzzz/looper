@@ -41,16 +41,16 @@ async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
     writer = _Writer()
     raw = b"" if body is None else json.dumps(body).encode()
-    if path.startswith(("/api/v1/catalog_items/", "/api/v1/installs/", "/api/v1/project_skills/")):
+    if path.startswith(("/api/v1/catalog_sources/", "/api/v1/catalog_items/", "/api/v1/installs/", "/api/v1/project_skills/")):
         from looper.agents.api_v1 import OPERATOR
         from looper.agents.ops.clients import ClientOps
         server._client_ops = ClientOps(SimpleNamespace())
-        await server._handle_v1(method, path, {}, {}, raw, writer, OPERATOR)
+        await server._handle_v1(method, path, {}, {}, raw or b"{}", writer, OPERATOR)
     else:
         await server._route_api(method, path, {}, raw, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
     answer = json.loads(payload)
-    if path.startswith(("/api/v1/catalog_items/", "/api/v1/installs/", "/api/v1/project_skills/")):
+    if path.startswith(("/api/v1/catalog_sources/", "/api/v1/catalog_items/", "/api/v1/installs/", "/api/v1/project_skills/")):
         answer = answer["result"] if answer.get("status") == "ok" else {"error": answer["error"]["message"]}
     return int(head.split()[1]), answer
 

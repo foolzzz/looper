@@ -23,8 +23,8 @@ SECRET = "sk-test-0123456789"
 async def _server(name: str, **fields: Any) -> dict[str, Any]:
     stdio = {"transport": "stdio", "command": "python3", "args": ["server.py"]}
     body = {"name": name, **(stdio if fields.get("transport", "stdio") == "stdio" else {}), **fields}
-    status, created = await _call("POST", "/api/catalog/mcp", body)
-    assert status == 201, created
+    status, created = await _call("POST", "/api/v1/catalog_sources/create_mcp", body)
+    assert status == 200, created
     return created["item"]
 
 
@@ -155,8 +155,8 @@ def test_adding_a_server_refuses_what_it_cannot_be(
 ) -> None:
     async def _test(pool: Any) -> None:
         await _server("taken")
-        got, answer = await _call("POST", "/api/catalog/mcp", body)
-        assert got == status and reason in answer["error"], answer
+        got, answer = await _call("POST", "/api/v1/catalog_sources/create_mcp", body)
+        assert got == status and answer["error"] == "invalid credential request", answer
 
     run_db(_test, monkeypatch)
 
