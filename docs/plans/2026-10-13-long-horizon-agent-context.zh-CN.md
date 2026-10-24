@@ -762,6 +762,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 能力目录 | 目录条目与安装已迁移：完整 DTO 与 compact Tool 结果类型化，控制台改走 v1，八个旧方法删除；上传、导入与项目 skill 路由保留。249 项定向测试、隔离真实 serve 与桌面/390px 浏览器验收通过；全量 CI 待跑，session-ended/abort 未单独实测 |
 | Agent 与 Profile | 待迁移 |
 | 管家与模板 | 待迁移 |
+| 定时任务读取 | 已迁移：六个完整只读投影、compact list/get 类型化与旧读方法删除，控制台及评测读回走 v1。通过：305 项 pytest（含三个 fake Manager 对话）、20 项前端测试、构建与隔离真实 serve 和 1280/390px 浏览器；失败：无；未验证：全量 CI、真实浏览器 session 失效/abort 竞态（session guard 已有前端定向覆盖）。写接口及 settings 保留 |
 | 渠道 | 待迁移 |
 | 文件与 Git | 待迁移 |
 | 设置 | 待迁移 |

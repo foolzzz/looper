@@ -53,7 +53,7 @@ async def _starting_chat(pool: Any, tmp_path: Path) -> AsyncIterator[tuple[_Chat
 
 async def _starting_state(pool: Any, sid: str) -> tuple[bool, int]:
     """Read the switch through the dashboard, and count every run, including one not yet started."""
-    schedule = (await _ok("GET", f"/api/schedules/{sid}"))["schedule"]
+    schedule = (await _ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
     return schedule["enabled"], await pool.fetchval("SELECT count(*) FROM schedule_runs WHERE schedule_id = $1", sid)
 
 
@@ -97,7 +97,7 @@ def test_schedules_are_listed_and_read_as_the_schedules_page_reads_them(
         chat = _Chat(tmp_path)
 
         (every,) = await chat.say("我有哪些定时任务", (TOOL, {"action": "list"}))
-        page = (await _ok("GET", "/api/schedules"))["schedules"]
+        page = (await _ok("POST", "/api/v1/schedule_admin/list", {}))["schedules"]
         assert [(s["name"], s["project"], s["enabled"]) for s in every["result"]["schedules"]] == \
             [(s["name"], s["project_name"], s["enabled"]) for s in page] == \
             [("nightly", "calc", True), ("weekly", "calc", False), ("archive", "ops", False), ("triage", "ops", True)]
@@ -130,13 +130,13 @@ def test_a_schedule_is_enabled_and_disabled_as_its_switch_does_in_a_turn_answeri
         # A turn Claude runs on its own only reads.
         refused = await chat.ops.call(TOOL, {"action": "enable", "schedule": "nightly"})
         assert _error(refused) == "needs_user_turn"
-        assert (await _ok("GET", f"/api/schedules/{sid}"))["schedule"]["enabled"] is False
+        assert (await _ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]["enabled"] is False
 
         (asked,) = await chat.say("启用 nightly", (TOOL, {"action": "enable", "schedule": "nightly"}))
         assert await _starting_state(pool, sid) == (False, 0)
         on = await _confirm(chat, asked)
         assert on["status"] == "ok", on
-        schedule = (await _ok("GET", f"/api/schedules/{sid}"))["schedule"]
+        schedule = (await _ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
         assert schedule["enabled"] is True and "note" not in on["result"]
         assert datetime.fromisoformat(on["result"]["schedule"]["next_fire_at"]) == \
             datetime.fromisoformat(schedule["next_fire_at"])
@@ -145,7 +145,7 @@ def test_a_schedule_is_enabled_and_disabled_as_its_switch_does_in_a_turn_answeri
         assert again["result"]["note"] == "it was enabled already"
         assert chat.turns[-1].blocks == []
         (off,) = await chat.say("停用 nightly", (TOOL, {"action": "disable", "schedule": "NIGHTLY"}))
-        schedule = (await _ok("GET", f"/api/schedules/{sid}"))["schedule"]
+        schedule = (await _ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
         assert (schedule["enabled"], schedule["next_fire_at"], off["result"]["schedule"]["enabled"]) == (
             False, None, False)
         assert await _trail(pool) == [(TOOL, "write", "error"), (TOOL, "high", "needs_confirmation"),
@@ -197,7 +197,7 @@ def test_starting_a_schedule_asks_first_and_runs_only_on_the_next_messages_confi
             assert done["status"] == "ok", done
             assert await _starting_state(pool, sid) == (action == "enable", int(action == "run"))
             if action == "run":
-                runs = (await _ok("GET", f"/api/schedules/{sid}/runs"))["runs"]
+                runs = (await _ok("POST", "/api/v1/schedule_admin/runs", {"schedule_id": sid}))["runs"]
                 assert [(r["trigger"], r["status"]) for r in runs] == [("manual", "running")]
                 assert runs[0]["run_id"] == done["result"]["run"]["run_id"]
             assert await _trail(pool) == [(TOOL, "high", "needs_confirmation"), (TOOL, "high", "ok")]
@@ -287,17 +287,17 @@ def test_deleting_a_schedule_asks_first_and_runs_only_on_the_next_messages_confi
             "排队中和前置检查中的不会再开始任务。\n它建出的任务都保留；它的运行记录和通知记录会一起删除，不能恢复。\n"
             "回复「确认」就执行；回复别的就不执行。")
         assert await chat.say("算了，先留着") == []  # a message that does not confirm it: it lapses
-        assert (await _call("GET", f"/api/schedules/{sid}"))[0] == 200
+        assert (await _call("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))[0] == 200
         (lapsed,) = await chat.say("确认", ("looper_confirm", {"confirmation_id": asked["confirmation_id"]}))
         assert _error(lapsed) == "not_found"
-        assert (await _call("GET", f"/api/schedules/{sid}"))[0] == 200
+        assert (await _call("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))[0] == 200
 
         (again,) = await chat.say("还是删掉 nightly", (TOOL, {"action": "delete", "schedule": "nightly"}))
         (done,) = await chat.say("确认", ("looper_confirm", {"confirmation_id": again["confirmation_id"]}))
         assert done == {"status": "ok", "result": {
             "deleted": "nightly", "schedule_id": sid, "project": "calc",
             "note": "the tasks it created stay; its run history was deleted with it"}}
-        assert (await _call("GET", f"/api/schedules/{sid}"))[0] == 404
+        assert (await _call("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))[0] == 404
         task = await _ok("GET", "/api/tasks/task-run")
         assert (task["status"], task["schedule_id"]) == ("running", None)
         assert await pool.fetchval("SELECT count(*) FROM schedule_runs") == 0

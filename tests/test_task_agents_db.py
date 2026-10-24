@@ -60,9 +60,17 @@ def _server(worker_pool: Any = None) -> Any:
 async def _call(method: str, path: str, body: Any = None, *, worker_pool: Any = None) -> tuple[int, Any]:
     writer = _Writer()
     raw = b"" if body is None else json.dumps(body).encode()
-    await _server(worker_pool)._route_api(method, path, {}, raw, writer)
+    server = _server(worker_pool)
+    if path.startswith("/api/v1/schedule_admin/"):
+        from looper.agents.api_v1 import OPERATOR
+        await server._handle_v1(method, path, {}, {}, raw, writer, OPERATOR)
+    else:
+        await server._route_api(method, path, {}, raw, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload)
+    answer = json.loads(payload)
+    if path.startswith("/api/v1/schedule_admin/") and answer.get("status") == "ok":
+        answer = answer["result"]
+    return int(head.split()[1]), answer
 
 
 class _Pool:

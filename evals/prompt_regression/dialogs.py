@@ -872,7 +872,7 @@ SCHEDULE = "eval-nightly"
 
 
 def _schedule(look: Look) -> dict[str, Any] | None:
-    return next((s for s in look.api.get("/api/schedules")["schedules"] if s["name"] == SCHEDULE), None)
+    return next((s for s in look.api.post("/api/v1/schedule_admin/list", {})["result"]["schedules"] if s["name"] == SCHEDULE), None)
 
 
 def _schedules_listed(look: Look) -> str | None:
@@ -927,12 +927,12 @@ OPS = "eval-ops"
 
 
 def _named(look: Look, name: str, project: str | None = None) -> dict[str, Any] | None:
-    return next((s for s in look.api.get("/api/schedules")["schedules"]
+    return next((s for s in look.api.post("/api/v1/schedule_admin/list", {})["result"]["schedules"]
                  if s["name"] == name and (project is None or s["project_name"] == project)), None)
 
 
 def _manual_runs(look: Look, schedule: dict[str, Any]) -> list[dict[str, Any]]:
-    return [r for r in look.api.get(f"/api/schedules/{schedule['schedule_id']}/runs")["runs"]
+    return [r for r in look.api.post("/api/v1/schedule_admin/runs", {"schedule_id": schedule['schedule_id']})["result"]["runs"]
             if r["trigger"] == "manual"]
 
 
@@ -1063,7 +1063,7 @@ def _schedule_follows_the_default(look: Look) -> str | None:
 
 
 def _no_schedule_without_a_project(look: Look) -> str | None:
-    if look.api.get("/api/schedules")["schedules"]:
+    if look.api.post("/api/v1/schedule_admin/list", {})["result"]["schedules"]:
         return "a schedule was created though the user named no project"
     return _asked_for_the_project(look)
 
