@@ -208,7 +208,7 @@ def test_the_glm_preset_starts_claude_code_as_the_vendors_guide_says(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     async def _test(_pool: Any) -> None:
-        preset = next(p for p in (await _ok("GET", "/api/registry"))["vendor_types"]
+        preset = next(p for p in (await _ok("POST", "/api/v1/registry/view", {}))["vendor_types"]
                       if p["vendor_type"] == "glm-bigmodel")
         api = next(a for a in preset["endpoints"] if a["protocol"] == "anthropic-messages")
         provider = await _provider(base_url=api["base_url"], env=preset["env"],
@@ -235,7 +235,7 @@ _DEEPSEEK_RESPONSES = "https://api-docs.deepseek.com/guides/responses_api/"
 
 def test_every_preset_makes_providers_whose_profiles_are_priced(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _test(_pool: Any) -> None:
-        registry = await _ok("GET", "/api/registry")
+        registry = await _ok("POST", "/api/v1/registry/view", {})
         assert {p["vendor_type"] for p in registry["vendor_types"]} >= {"glm-bigmodel", "glm-zai", "deepseek",
                                                                           "kimi-moonshot-cn", "kimi-moonshot", "cpa"}
         for preset in registry["vendor_types"]:
@@ -273,7 +273,7 @@ def test_the_deepseek_preset_serves_responses_and_chat_at_one_url_and_prices_eac
     monkeypatch.setenv("PATH", str(tmp_path))
 
     async def _test(_pool: Any) -> None:
-        preset = next(p for p in (await _ok("GET", "/api/registry"))["vendor_types"]
+        preset = next(p for p in (await _ok("POST", "/api/v1/registry/view", {}))["vendor_types"]
                       if p["vendor_type"] == "deepseek")
         # Endpoints are keyed by protocol; their presentation order is not a preference order.
         assert sorted((api["base_url"], api["protocol"], [model["name"] for model in preset["suggested_models"]
@@ -289,7 +289,7 @@ def test_the_deepseek_preset_serves_responses_and_chat_at_one_url_and_prices_eac
         from looper.agents.provider_presets import PRESETS
 
         assert _DEEPSEEK_RESPONSES in next(p for p in PRESETS if p.id == "deepseek").docs
-        codex = (await _ok("POST", "/api/runtimes/rt-codex/probe"))["runtime"]["runtime_id"]
+        codex = (await _ok("POST", "/api/v1/runtimes/probe", {"runtime_id": "rt-codex"}))["runtime"]["runtime_id"]
         for api in preset["endpoints"]:
             protocol = api["protocol"]
             anthropic = protocol == "anthropic-messages"
@@ -332,7 +332,7 @@ def test_a_profile_whose_models_have_no_price_is_registered_with_a_warning(monke
         again = await _ok("PUT", f"/api/agent-profiles/{answer['profile']['profile_id']}", {"name": "mystery"})
         assert again["warnings"] == []
         # Claude Code's own figures: the subscription's is an equivalent, an Anthropic key's real spend.
-        registry = await _ok("GET", "/api/registry")
+        registry = await _ok("POST", "/api/v1/registry/view", {})
         builtin = next(a for a in registry["profiles"] if a["builtin"])
         assert builtin["cost"] == {"source": "runtime", "equivalent": True, "unpriced": []}
         anthropic = await _profile(await _provider("anthropic", base_url=""), "mystery-1")

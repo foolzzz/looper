@@ -801,7 +801,6 @@ class AgentHTTPServer:
     _RE_PROJECT_AGENT_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings$")
     _RE_PROJECT_ROLE_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_PROJECT_ALLOWED_PROFILES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/allowed-profiles$")
-    _RE_RUNTIME_PROBE = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)/probe$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
     _RE_MODEL = re.compile(r"^/api/models/(model-[a-zA-Z0-9-]+)$")
     _RE_PROVIDER_LOGIN_PROBLEM = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)/login-problem$")
@@ -859,12 +858,6 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_DRAFT.match(path)) and method == "DELETE":
             await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.discard_draft(
                 m.group(1), m.group(2)))
-        elif path == "/api/registry" and method == "GET":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.registry_view(
-                server_claude=self._claude_bin))
-        elif (m := self._RE_RUNTIME_PROBE.match(path)) and method == "POST":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.probe_runtime(
-                m.group(1), server_claude=self._claude_bin))
         elif path == "/api/providers" and method == "GET":
             await self._handle_registry(writer, HTTP_200, profile_registry.list_providers)
         elif path == "/api/providers" and method == "POST":

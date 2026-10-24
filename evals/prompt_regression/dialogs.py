@@ -660,7 +660,7 @@ def _registered_without_the_key(look: Look) -> str | None:
     problem = _model_writes(look, (("looper_providers", "register"), ("looper_models", "create")))
     if problem:
         return problem
-    registry = look.api.get("/api/registry")
+    registry = look.api.post("/api/v1/registry/view", {})["result"]
     provider = next((p for p in registry["providers"] if p["name"] == "eval-deepseek"), None)
     if provider is None:
         return "no provider eval-deepseek"
@@ -692,7 +692,7 @@ def _model_writes(look: Look, expected: tuple[tuple[str, str], ...]) -> str | No
         return "the reply repeats the key"
     if FAKE_KEY in json.dumps(look.actions(), ensure_ascii=False):
         return "the key is in the Manager's trail"
-    if FAKE_KEY in json.dumps(look.api.get("/api/registry"), ensure_ascii=False):
+    if FAKE_KEY in json.dumps(look.api.post("/api/v1/registry/view", {})["result"], ensure_ascii=False):
         return "the key is in the registry response"
     writes = _writes(look, status="ok") + _writes(look, status="needs_confirmation")
     actual = tuple((a["tool"], a["arguments"].get("action")) for a in writes)
@@ -722,7 +722,7 @@ def _bound_model(look: Look, name: str, account: str, model: str, protocol: str,
     from looper.agents.runtimes import adapter
     from looper.agents.runtimes.pricing import pricer
 
-    registry = look.api.get("/api/registry")
+    registry = look.api.post("/api/v1/registry/view", {})["result"]
     chosen = next((p for p in registry["profiles"] if p["name"] == name), None)
     if chosen is None:
         return f"no Agent Profile {name}"
@@ -774,7 +774,7 @@ def _model_refused(look: Look) -> str | None:
     problem = _model_writes(look, ())
     if problem:
         return problem
-    if look.registry_before is None or look.api.get("/api/registry") != look.registry_before:
+    if look.registry_before is None or look.api.post("/api/v1/registry/view", {})["result"] != look.registry_before:
         return "a refused configuration changed the registry"
     return _answered_by_reading(look)
 
@@ -792,7 +792,7 @@ def _seed_dual_models(api: Api, project_id: str) -> None:
 
 def _seed_price_model(api: Api, project_id: str) -> None:
     _seed_dual_models(api, project_id)
-    registry = api.get("/api/registry")
+    registry = api.post("/api/v1/registry/view", {})["result"]
     model = next(m for m in registry["models"] if m["name"] == DUAL_MODEL
                  and m["protocol"] == "anthropic-messages")
     api.post("/api/agent-profiles", {"name": DUAL_PROFILE, "runtime_id": "rt-claude-code",
@@ -857,7 +857,7 @@ def _price_changed_history_kept(look: Look) -> str | None:
                             "pricing": {"input_usd_per_mtok": 1, "output_usd_per_mtok": 3}}}]:
         return "repricing changed historical tokens, cost or price snapshot"
     # The other protocol's price must not be changed along with its homonym.
-    other = next(m for m in look.api.get("/api/registry")["models"] if m["name"] == DUAL_MODEL
+    other = next(m for m in look.api.post("/api/v1/registry/view", {})["result"]["models"] if m["name"] == DUAL_MODEL
                  and m["protocol"] == "openai-chat")
     if other["input_usd_per_mtok"] != 9:
         return "repricing changed the other protocol's model"
@@ -949,7 +949,7 @@ def _schedule_created_disabled(look: Look) -> str | None:
 
 
 def _planner_profile_names(look: Look, schedule: dict[str, Any]) -> dict[str, str]:
-    names = {p["profile_id"]: p["name"] for p in look.api.get("/api/registry")["profiles"]}
+    names = {p["profile_id"]: p["name"] for p in look.api.post("/api/v1/registry/view", {})["result"]["profiles"]}
     return {role: names.get(profile, profile) for role, profile in schedule["profile_overrides"].items()}
 
 
@@ -1300,7 +1300,7 @@ def _answers(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _switch_id(look: Look) -> str | None:
-    return next((p["profile_id"] for p in look.api.get("/api/registry")["profiles"] if p["name"] == SWITCH), None)
+    return next((p["profile_id"] for p in look.api.post("/api/v1/registry/view", {})["result"]["profiles"] if p["name"] == SWITCH), None)
 
 
 def _profile_listed(look: Look) -> str | None:
@@ -2071,7 +2071,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             _price_history(database_url, seed=True)
         if dialog.id == "model_login_runtime":
             _seed_login_runtime(database_url)
-        registry_before = api.get("/api/registry") if dialog.id in {
+        registry_before = api.post("/api/v1/registry/view", {})["result"] if dialog.id in {
             "model_login_runtime", "model_missing_endpoint"} else None
         session = f"eval-{dialog.id}-{uuid.uuid4().hex[:6]}"
         client_api: Api | None = None
@@ -2138,7 +2138,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
 
 def _subscription_profile(api: Api, name: str, model: str, effort: str | None) -> dict[str, Any]:
     """Reuse the saved subscription model; profiles contain only its reference."""
-    profiles = {p["name"]: p for p in api.get("/api/registry")["profiles"]}
+    profiles = {p["name"]: p for p in api.post("/api/v1/registry/view", {})["result"]["profiles"]}
     if name in profiles:
         return profiles[name]
     return register_agent(api, {"runtime": {"type": "claude-code"},

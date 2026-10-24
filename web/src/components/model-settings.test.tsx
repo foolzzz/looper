@@ -44,7 +44,7 @@ beforeEach(() => {
   vi.stubGlobal("confirm", () => true);
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
-    if (url === "/api/registry") return Response.json(data);
+    if (url === "/api/v1/registry/view") return Response.json({ status: "ok", result: data });
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     writes.push({ url, method: init!.method!, body });
     if (!url.startsWith("/api/models")) throw new Error(`Unexpected write: ${url}`);

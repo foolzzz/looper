@@ -47,18 +47,22 @@ describe("pi on Agent Runtimes", () => {
   let root: Root;
   let body: Registry;
   let calls: { url: string; method: string }[];
+  let probeError: string;
 
   beforeEach(() => {
     calls = [];
+    probeError = "";
     body = registry(runtime({}));
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? "GET";
       calls.push({ url, method });
-      if (url === "/api/registry" && method === "GET") return Response.json(body);
-      if (url === "/api/runtimes/rt-pi/probe" && method === "POST") {
+      if (url === "/api/v1/registry/view" && method === "POST") return Response.json({ status: "ok", result: body });
+      if (url === "/api/v1/runtimes/probe" && method === "POST") {
+        expect(JSON.parse(String(init?.body))).toEqual({ runtime_id: "rt-pi" });
+        if (probeError) return Response.json({ status: "error", error: { code: "unavailable", message: probeError } }, { status: 503 });
         body = registry(runtime({}));
-        return Response.json({ runtime: body.runtimes[0] });
+        return Response.json({ status: "ok", result: { runtime: body.runtimes[0] } });
       }
       throw new Error(`unexpected ${method} ${url}`);
     }));
@@ -121,13 +125,23 @@ describe("pi on Agent Runtimes", () => {
     expect(node.textContent).not.toMatch(/login/i);
   });
 
+  it("shows a re-detect failure and keeps the current runtime without reloading", async () => {
+    await show();
+    probeError = "The executable could not be probed";
+    await act(async () => card().querySelector("button")!.click());
+    expect(card().querySelector('[role="alert"]')?.textContent).toContain(probeError);
+    expect(fact(card(), "Version")).toContain("1.3.0");
+    expect(calls.filter(({ url }) => url === "/api/v1/registry/view")).toHaveLength(1);
+    expect(card().querySelector("button")!.disabled).toBe(false);
+  });
+
   it("re-detects pi and replaces the probe error", async () => {
     body = registry(runtime({ version: "1.2.0", probe_error: OLD_VERSION, capabilities: [], roles: [] }));
     await show();
     const probe = card().querySelector("button")!;
     expect(probe.getAttribute("aria-label")).toBe("Re-detect Pi CLI");
     await act(async () => probe.click());
-    expect(calls).toContainEqual({ url: "/api/runtimes/rt-pi/probe", method: "POST" });
+    expect(calls).toContainEqual({ url: "/api/v1/runtimes/probe", method: "POST" });
     const node = card();
     expect(node.textContent).toContain("Detected");
     expect(fact(node, "Version")).toContain("1.3.0");

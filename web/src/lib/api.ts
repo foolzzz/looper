@@ -2961,15 +2961,18 @@ async function registryCall<T>(method: string, path: string, body: unknown, labe
 }
 
 export async function fetchRegistry(): Promise<Registry> {
-  const res = await fetch(`${API_BASE}/registry`);
-  if (!res.ok) await failed(res, "registry");
-  return res.json();
+  const result = await callV1<Registry>("/api/v1/registry/view", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Re-detect: run `<executable> --version` again and record its version or error; for a type's built-in runtime
  * not found yet (rt-<type>), look for it on the server's PATH again (404 when it is not there). */
-export function probeRuntime(runtimeId: string): Promise<{ runtime: Runtime }> {
-  return registryCall("POST", `/runtimes/${encodeURIComponent(runtimeId)}/probe`, undefined, "re-detect runtime");
+export async function probeRuntime(runtimeId: string): Promise<{ runtime: Runtime }> {
+  const result = await callV1<{ runtime: Runtime }>("/api/v1/runtimes/probe", { runtime_id: runtimeId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
 export function createProvider(fields: ProviderFields): Promise<{ provider: Provider; warnings: string[] }> {

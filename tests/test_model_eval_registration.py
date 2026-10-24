@@ -28,11 +28,10 @@ class RegistryApi:
         self.posts = []
         self.settings = []
 
-    def get(self, path, **query):
-        assert path == "/api/registry"
-        return deepcopy(self.registry)
-
     def post(self, path, body):
+        if path == "/api/v1/registry/view":
+            assert body == {}
+            return {"status": "ok", "result": deepcopy(self.registry)}
         if path == "/api/v1/agent_settings/update_system":
             self.settings.append(deepcopy(body["values"]))
             return {"status": "ok", "result": {}}
@@ -87,7 +86,7 @@ def test_four_layer_registration_and_readback_keep_model_settings_and_secrets_se
     assert spec == original
     assert [path for path, _ in api.posts] == ["/api/providers", "/api/models", "/api/agent-profiles"]
     assert api.posts[0][1]["api_key"] == "synthetic-eval-secret"
-    saved = api.get("/api/registry")
+    saved = api.post("/api/v1/registry/view", {})["result"]
     assert saved["models"][0] == {**spec["model"], "provider_id": "prov-1", "model_id": profile["model_id"]}
     chosen = runner.select_agent(api, agent=profile["name"], model=None)
     assert chosen["model"]["name"] == "Exact.Model"
@@ -164,7 +163,7 @@ def test_legacy_registration_uses_shared_converter_and_patched_protocol_priority
     profile = runner.register_agent(api, legacy_spec(runtime))
     assert len(calls) == 1
     assert profile["model"]["protocol"] == protocol
-    models = api.get("/api/registry")["models"]
+    models = api.post("/api/v1/registry/view", {})["result"]["models"]
     assert {m["protocol"] for m in models} == {"anthropic-messages", "openai-chat", "openai-responses"}
     assert all(m["context_window"] == 32000 and m["input_usd_per_mtok"] == 1.5 for m in models)
     assert "model" not in api.posts[-1][1] and "provider_id" not in api.posts[-1][1]
@@ -214,7 +213,11 @@ def test_inline_api_key_is_rejected(api):
 
 @pytest.mark.parametrize("truncated", [False, True])
 def test_provider_registration_errors_never_echo_credentials(api, monkeypatch, truncated):
+    original_post = api.post
+
     def rejected(path, body):
+        if path == "/api/v1/registry/view":
+            return original_post(path, body)
         assert path == "/api/providers"
         # HTTP errors are clipped by Api.request before the registration helper sees them.
         detail = body["api_key"][:10] if truncated else json.dumps(body)
