@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.72] - 2026-10-24
+
+### Changed
+
+- **v1 domain modules register themselves.** The package imports every public module under `looper/agents/v1_domains/` instead of reading a shared list, so parallel domain changes no longer conflict. An optional integer `ORDER` keeps the OpenAPI order (existing modules have one); a missing export, a bad `ORDER`, or a duplicate operation id or route fails with a named error when the domains load. No operation, route or OpenAPI output changes. Manager prompts and tools are unchanged. ([#495](https://github.com/foolzzz/looper/pull/495))
+
 ## [2.13.71] - 2026-10-24
 
 ### Changed
