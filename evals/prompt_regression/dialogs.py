@@ -1912,7 +1912,7 @@ def _start_slow_task(api: Api, project_id: str, *, timeout: float,
     if check_budget is not None:
         check_budget()
     task_id = api.post("/api/v1/tasks/create", {"requirement": SLOW_TASK, "project_id": project_id})["result"]["task_id"]
-    api.post(f"/api/tasks/{task_id}/start", {})
+    api.post("/api/v1/ops/task_control/start", {"task_id": task_id})
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if INTERRUPTED.is_set():
@@ -2007,7 +2007,7 @@ def _stop_leftovers(api: Api) -> None:
     try:
         for task in api.get("/api/tasks")["tasks"]:
             if task.get("status") in ACTIVE:
-                api.post("/api/tasks/stop", {"task_id": task["task_id"]})
+                api.post("/api/v1/ops/task_control/stop", {"task_id": task["task_id"]})
     except Exception:
         pass
 
@@ -2037,7 +2037,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
     No reply within ``timeout`` is an error of class ``timeout``, and any other exception, such as the slow task
     not getting under way, one of class ``harness``; the turns after an error are not sent. With ``cap_left``,
     check the case's spend before sending a turn and while waiting for its task or reply."""
-    started, since = time.monotonic(), _last_action(database_url)
+    started = time.monotonic()
     turns: list[dict[str, Any]] = []
     error: dict[str, Any] = {}
 
@@ -2083,6 +2083,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             client_id = created["client"]["id"]
             client_api = Api(api.base_url, token=created["token"], timeout=api.timeout)
         known = frozenset(t["task_id"] for t in api.get("/api/tasks")["tasks"])
+        # Setup uses audited operator operations too; only the dialog's actions belong to its checks.
+        since = _last_action(database_url)
         previous: Look | None = None
         for say in dialog.says:
             text = say.text_from(previous) if say.text_from and previous else say.text

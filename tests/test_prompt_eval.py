@@ -288,7 +288,7 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
             if path == "/api/v1/tasks/create":
                 self.work = Path(body["project"]["work_dir"])
                 return {"status": "ok", "result": {"task_id": "task-eval", "project_id": "project-eval"}}
-            if path == "/api/tasks/start":
+            if path == "/api/v1/ops/task_control/start":
                 for role in ("planner", "worker", "reviewer"):
                     self.launch(role)
                 return {}
@@ -892,7 +892,7 @@ def test_vault_tasks_enable_the_project_and_read_back_their_commits(
 
     def post(path: str, body: Any) -> dict[str, Any]:
         posts.append((path, body))
-        if path == "/api/tasks/start":
+        if path == "/api/v1/ops/task_control/start":
             for name, content in task.fake["attempts"]["s1"][0]["files"].items():
                 (work / name).write_text(content, encoding="utf-8")
         return {"status": "ok", "result": {"task_id": "task-1"}} if path == "/api/v1/tasks/create" else {}
@@ -1531,7 +1531,7 @@ def test_run_task_pushes_fixes_without_resuming_the_pr_wait(
     if fault is not None:
         assert result["problems"]  # aggregate counts pass; only the task-specific flow check rejects this
     assert result["wait_resumes"] == {}
-    assert [path for path, _ in posted] == ["/api/v1/tasks/create", "/api/tasks/start"]
+    assert [path for path, _ in posted] == ["/api/v1/tasks/create", "/api/v1/ops/task_control/start"]
     assert ("for value in values" in runner._git_in(tmp_path, "show", "HEAD:totals.py")) is (fault != "wrong_pr")
 
 
@@ -1602,6 +1602,36 @@ def test_the_scripted_user_ends_a_gate_that_asks_again_after_its_script_ran_out(
     api = _Poster()
     runner.answer_gates(api, task, "t1", {"gates": [{"step": "g1", "waiting_on": "planner"}]}, {}, now=0.0)
     assert api.posted == []
+
+
+@pytest.mark.parametrize(("records", "replies"), [
+    ([], False),
+    ([{"agent_id": "planner-t1", "created_at": "2026-01-01T00:00:01Z"}], False),
+    ([{"agent_id": "worker-a"}], False),
+    ([{"agent_id": "worker-a", "created_at": "2026-01-01T00:00:00Z",
+       "finished_at": "2026-01-01T00:00:01Z"}], False),
+    ([{"agent_id": "worker-a", "created_at": "2026-01-01T00:00:02Z"}], True),
+    ([{"agent_id": "worker-a", "created_at": "2026-01-01T00:00:00Z",
+       "finished_at": "2026-01-01T00:00:03Z"}], True),
+])
+def test_scripted_gate_answer_waits_for_an_overlapping_worker_run(records: list[dict[str, Any]],
+                                                                replies: bool) -> None:
+    class Api(_Poster):
+        def get(self, path: str, **query: Any) -> dict[str, Any]:
+            assert (path, query) == ("/api/llm-records", {"task_id": "t1", "limit": 500})
+            return {"records": records}
+
+    task = next(t for t in TASKS if t.id == "gate_parallel_branch")
+    api, answered = Api(), {}
+    gate = {"step": "g1", "waiting_on": "user", "opened_at": "2026-01-01T00:00:02Z"}
+    assert runner.answer_gates(api, task, "t1", {"gates": [gate]}, answered,
+                               now=metrics.timestamp("2026-01-01T00:00:04Z") or 0) is replies
+    assert api.posted == ([("/api/v1/ops/gates/reply",
+                           {"task_id": "t1", "gate": "g1", "text": task.gate_script[0]})] if replies else [])
+    assert answered == ({"g1": 1} if replies else {})
+    gate["waiting_on"] = "planner"
+    assert not runner.answer_gates(api, task, "t1", {"gates": [gate]}, answered, now=0.0)
+    assert len(api.posted) == int(replies)
 
 
 def test_a_gate_that_asks_after_its_script_ran_out_fails_a_task_that_bounds_it(tmp_path: Path) -> None:
@@ -2106,7 +2136,7 @@ class _CostlyApi:
 
     def post(self, path: str, body: Any) -> Any:
         self.posts.append((path, body))
-        if path == "/api/tasks/cancel":
+        if path == "/api/v1/ops/task_control/cancel":
             self.cancelled = True
         return {"status": "ok", "result": {"task_id": "task-1"}} if path == "/api/v1/tasks/create" else {}
 
@@ -2124,7 +2154,7 @@ class _CostlyApi:
 def test_a_task_is_cancelled_when_it_reaches_the_cap_left(tmp_path: Path) -> None:
     api = _CostlyApi()
     result = runner.run_task(api, _task("a"), tmp_path / "work", timeout=60, poll=0, cap_left=0.25)  # type: ignore[arg-type]
-    assert [path for path, _ in api.posts] == ["/api/v1/tasks/create", "/api/tasks/start", "/api/tasks/cancel"]
+    assert [path for path, _ in api.posts] == ["/api/v1/tasks/create", "/api/v1/ops/task_control/start", "/api/v1/ops/task_control/cancel"]
     assert result["stopped_by_cap"] is True and result["success"] is False
     # Cancelled at the cap: an error, not the model's failure.
     assert (result["outcome"], result["error_class"], result["error"]) == (
@@ -2146,7 +2176,7 @@ def test_a_task_the_harness_cannot_follow_is_cancelled_with_its_cost(tmp_path: P
         runner.run_task(api, _task("a"), tmp_path / "work", timeout=60, poll=0)  # type: ignore[arg-type]
     assert str(raised.value) == "EvalError: GET /api/llm-records answered 500: boom"
     assert raised.value.cost_usd == pytest.approx(0.0)
-    assert [path for path, _ in api.posts] == ["/api/v1/tasks/create", "/api/tasks/start", "/api/tasks/cancel"]
+    assert [path for path, _ in api.posts] == ["/api/v1/tasks/create", "/api/v1/ops/task_control/start", "/api/v1/ops/task_control/cancel"]
 
 
 def test_real_claude_gets_the_per_run_budget(tmp_path: Path) -> None:

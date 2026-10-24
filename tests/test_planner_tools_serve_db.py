@@ -176,7 +176,7 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
                             {"profile_ids": [sonnet["profile"]["profile_id"]]})
                 ids[variant] = api.post("/api/v1/tasks/create", {"requirement": f"build calc variant={variant}",
                                                               "project_id": project["project_id"]})["result"]["task_id"]
-                api.post("/api/tasks/start", {"task_id": ids[variant]})
+                api.post("/api/v1/ops/task_control/start", {"task_id": ids[variant]})
             deadline = time.monotonic() + 90
             while True:
                 details = {variant: api.get(f"/api/tasks/{task_id}") for variant, task_id in ids.items()}

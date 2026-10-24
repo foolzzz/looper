@@ -652,7 +652,7 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
                             "finished Worker's seat a question via looper_room_post, wait for its session "
                             "consult answer, then finish."})["result"]["task_id"]
                         tasks.append(task)
-                        api.post(f"/api/tasks/{task}/start", {})
+                        api.post("/api/v1/ops/task_control/start", {"task_id": task})
                         detail = _wait(lambda: api.get(f"/api/tasks/{task}"),
                             lambda r: r["status"] in ("completed", "failed", "stopped", "cancelled"),
                             check_budget=check_budget)

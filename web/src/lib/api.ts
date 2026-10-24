@@ -270,7 +270,7 @@ export interface RoleLoad {
   waiting: number;
 }
 
-/** `GET /api/overview`: what is happening now. */
+/** `system.overview`: what is happening now. */
 /** A supervisor component that is not simply running: down and waiting to be restarted ("restarting"), or restarted
  * three times in a row without staying up 5 minutes ("crash_looping", up or down now). It is restarted for as long as
  * the server runs, each wait twice the last, from 1 s up to 5 minutes. */
@@ -351,9 +351,9 @@ export interface OverviewSchedules {
 }
 
 export async function fetchOverview(): Promise<Overview> {
-  const res = await fetch(`${API_BASE}/overview`);
-  if (!res.ok) await failed(res, "overview");
-  return res.json();
+  const result = await callV1<Overview>("/api/v1/system/overview", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** A page of the Tasks list, newest first. */
@@ -709,12 +709,8 @@ export async function saveChatMessage(params: {
 }
 
 export async function cancelTask(taskId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/tasks/cancel`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ task_id: taskId }),
-  });
-  if (!res.ok) await failed(res, "cancel");
+  const result = await callV1<{ task_id: string; cancelled: boolean }>("/api/v1/ops/task_control/cancel", { task_id: taskId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
 }
 
 export async function deleteTask(taskId: string): Promise<void> {
@@ -728,12 +724,8 @@ export async function deleteTask(taskId: string): Promise<void> {
 }
 
 export async function stopTask(taskId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/tasks/stop`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ task_id: taskId }),
-  });
-  if (!res.ok) await failed(res, "stop");
+  const result = await callV1<{ task_id: string; stopped: boolean }>("/api/v1/ops/task_control/stop", { task_id: taskId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
 }
 
 /** Throw with the server's reason when it gives one. */
@@ -745,18 +737,16 @@ async function failed(res: Response, label: string): Promise<never> {
 /** Run a stopped, failed or cancelled task again: from its saved plan, or, with `startOver`, planned anew (its steps,
  * plan and Planner session are deleted). */
 export async function startTask(taskId: string, { startOver = false }: { startOver?: boolean } = {}): Promise<void> {
-  const res = await fetch(`${API_BASE}/tasks/start`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ task_id: taskId, start_over: startOver }),
-  });
-  if (!res.ok) await failed(res, "start");
+  const action = startOver ? "start_over" : "restart";
+  const result = await callV1<{ task_id: string; restarted?: boolean; started_over?: boolean; note: string }>(
+    `/api/v1/ops/task_control/${action}`, { task_id: taskId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
 }
 
 /** Start a ready task; it runs at once. Fails unless the task is ready. */
 export async function startReadyTask(taskId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/start`, { method: "POST" });
-  if (!res.ok) await failed(res, "start");
+  const result = await callV1<{ task_id: string; started: boolean }>("/api/v1/ops/task_control/start", { task_id: taskId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
 }
 
 /** Raise the task's own cap, or its project's per-task cap, above its spend and continue the budget-failed task. */
@@ -1644,23 +1634,17 @@ export interface ManagerAction {
 
 /** Edit the requirement of a task that has not ended; its Planner, if it runs, gets the edit in a turn. */
 export async function editTaskRequirement(taskId: string, requirement: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/requirement`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ requirement }),
-  });
-  if (!res.ok) await failed(res, "edit requirement");
+  const result = await callV1<{ task_id: string; version: number; requirement: string }>(
+    "/api/v1/tasks/requirement_update", { task_id: taskId, requirement });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
 }
 
 /** Rename a task, in any status; the stored title is returned (one line, at most 60 characters). */
 export async function renameTask(taskId: string, title: string): Promise<{ task_id: string; title: string }> {
-  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/title`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title }),
-  });
-  if (!res.ok) await failed(res, "rename task");
-  return res.json();
+  const result = await callV1<{ task_id: string; title: string; changed: string[] }>(
+    "/api/v1/ops/task_update", { task_id: taskId, title });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return { task_id: result.task_id, title: result.title };
 }
 
 /** The roles with a limit in each task: how many of them run at once there. */
