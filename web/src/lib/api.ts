@@ -4041,16 +4041,6 @@ export interface ManagerFields {
   enabled?: boolean;
 }
 
-async function managerJson<T>(url: string, method: string, body: unknown | undefined, label: string): Promise<T> {
-  const res = await fetch(url, {
-    method,
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!res.ok) await failed(res, label);
-  return res.json();
-}
-
 /** A token for an agent or script that uses Looper through loopercli; the token itself is never listed. */
 export interface ApiClient {
   id: string;

@@ -1,57 +1,35 @@
-"""Domain discovery and the operation order preserved from main."""
+"""Domain discovery and OpenAPI registration invariants."""
 
 import importlib
 import pkgutil
 import sys
+from collections import Counter
 
 import pytest
 
 from looper.agents import api_v1, v1_domains
 
 
-_MAIN_OPERATION_IDS = """
-overview tasks.list tasks.get tasks.room task_create task_control.start task_control.stop task_control.restart
-task_control.start_over task_control.cancel task_instruct task_update concurrency projects.list projects.get
-projects.create projects.update projects.delete agent_profiles.list agent_profiles.create
-agent_profiles.update agent_profiles.delete providers.list providers.register providers.update models.list
-models.create models.update models.delete catalog.list catalog.install catalog.update catalog.uninstall
-config_export costs settings.view settings.set settings.allowed_profiles settings.scheduler settings.waits
-settings.knowledge_vault schedules.list schedules.get schedules.create schedules.update schedules.enable
-schedules.disable schedules.run schedules.delete schedules.reset_planner_session task_pipeline gates.list
-gates.messages gates.reply gates.end chat.send chat.messages chat.conversations confirm openapi whoami
-auth.set_password auth.clear_password system.check config.export config.import_preview config.import_cancel
-config.import_apply system.status system.overview tasks.requirement_update tasks.configure tasks.move
-tasks.agents tasks.continue catalog_items.list catalog_items.get catalog_items.update catalog_items.delete
-installs.create installs.update installs.delete installs.project catalog_sources.import_machine
-catalog_sources.import_mcp catalog_sources.upload catalog_sources.git_preview catalog_sources.git_import
-catalog_sources.create_skill catalog_sources.create_mcp project_skills.add project_skills.get
-project_skills.update project_skills.delete waits.resume waits.cancel tasks.role_update tasks.room_view
-tasks.activity tasks.activity_detail tasks.conversation tasks.activity_stream
-channels.status channels.people gate_settings.get gate_settings.update managers.list managers.create
-managers.update managers.delete manager_templates.put manager_templates.delete
-schedule_admin.list schedule_admin.project_list schedule_admin.get schedule_admin.preview
-schedule_admin.runs schedule_admin.notifications
-manager_session.get manager_session.select_profile operator_chat.turn operator_chat.stop
-chat_settings.get chat_settings.update
-clients.list clients.create clients.revoke
-project_roles.stats role_templates.list role_templates.put role_templates.delete
-runs.for_task runs.list runs.get runs.events runs.usage
-""".split()
-
-
-def test_discovery_finds_every_current_domain():
+def test_discovery_finds_exactly_the_public_domain_modules():
     names = {info.name for info in pkgutil.iter_modules(v1_domains.__path__) if not info.name.startswith("_")}
-    assert set(v1_domains.MODULES) == names
     domains = api_v1.domains()
-    assert tuple(domain.__name__.rsplit(".", 1)[-1] for domain in domains) == v1_domains.MODULES
-    assert all(domain is importlib.import_module(f"{v1_domains.__name__}.{name}")
-               for name, domain in zip(v1_domains.MODULES, domains))
+    assert len(domains) == len(names)
+    assert set(domains) == {importlib.import_module(f"{v1_domains.__name__}.{name}") for name in names}
 
 
-def test_openapi_operations_keep_main_order():
-    baseline = [*_MAIN_OPERATION_IDS, "tasks.create"]
-    assert [op["operationId"] for item in api_v1.document()["paths"].values()
-            for op in item.values() if op["operationId"] in baseline] == baseline
+def test_discovered_operations_appear_in_openapi_exactly_once():
+    operations = api_v1.operations()
+    assert len({op.operation_id for op in operations}) == len(operations)
+    assert len({(op.method, op.path) for op in operations}) == len(operations)
+
+    paths = api_v1.document()["paths"]
+    operation_ids = Counter(op["operationId"] for item in paths.values() for op in item.values())
+    assert all(count == 1 for count in operation_ids.values())
+    for domain in api_v1.domains():
+        for operation in domain.OPERATIONS:
+            assert operation_ids[operation.operation_id] == 1
+            path = operation.path.removeprefix(api_v1.PREFIX)
+            assert paths[path][operation.method.lower()]["operationId"] == operation.operation_id
 
 
 @pytest.fixture

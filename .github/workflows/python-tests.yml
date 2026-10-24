@@ -74,4 +74,4 @@ jobs:
           node-version: "24"
 
       - name: Run the tests
-        run: npm ci && npm test
+        run: npm ci && npx tsc -b && npm test
