@@ -18,6 +18,26 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.79] - 2026-10-24
+
+### Changed
+
+- **Channel bot settings are managed through v1.** Listing, reading, adding, updating and removing Telegram and Lark bots are now `channel_configs.list`, `channel_configs.get`, `channel_configs.create`, `channel_configs.update` and `channel_configs.delete` (`POST /api/v1/channel_configs/<action>`). Creating and updating are operator-only credential writes; the token is write-only and responses show only whether one is stored. Removal asks for confirmation. A bot's Manager still cannot change. Manager prompts and tools are unchanged. ([#518](https://github.com/foolzzz/looper/pull/518))
+
+### Removed
+
+- **`GET`, `POST`, `PUT` and `DELETE` on `/api/channel-configs` and `/api/channel-configs/<id>`.** Use the `channel_configs` operations. ([#518](https://github.com/foolzzz/looper/pull/518))
+
+## [2.13.78] - 2026-10-24
+
+### Changed
+
+- **The dashboard Chat page reads and saves conversations through v1.** Targets, conversation list, message history and message saving are now the operator-only operations `operator_chat.targets`, `operator_chat.sessions`, `operator_chat.messages` and `operator_chat.save_message` (`POST /api/v1/operator_chat/<action>`). Thread ownership across Managers is kept. A database failure now answers unavailable instead of an empty history, and a failed save no longer answers `ok`. Manager prompts and tools are unchanged. ([#510](https://github.com/foolzzz/looper/pull/510))
+
+### Removed
+
+- **`GET /api/chat/targets`, `GET /api/chat/sessions`, `GET /api/chat/messages` and `POST /api/chat/messages`.** Use the `operator_chat` operations with an operator credential. `/api/chat/send` and `/api/chat/events` are unchanged. ([#510](https://github.com/foolzzz/looper/pull/510))
+
 ## [2.13.77] - 2026-10-24
 
 ### Changed

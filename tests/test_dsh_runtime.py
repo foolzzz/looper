@@ -2717,7 +2717,7 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
         with running_server(database_url=database_url, runtime_root=runtime, bin_dir=bin_dir,
                             home=home, log_path=tmp_path / "serve.log", startup_timeout=90) as api:
             assert not api.base_url.endswith(":8767")
-            channels = api.get("/api/channel-configs")["configs"]
+            channels = api.post("/api/v1/channel_configs/list", {})["result"]["configs"]
             assert channels and all(not channel["enabled"] for channel in channels)
             registry = api.get("/api/registry")
             detected = [row for row in registry["runtimes"] if row["type"] == "dsh"]

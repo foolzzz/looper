@@ -602,7 +602,7 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
 
                     api.request = bounded_request
                     _require(not api.base_url.endswith(":8767"))
-                    channels = api.get("/api/channel-configs")["configs"]
+                    channels = api.post("/api/v1/channel_configs/list", {})["result"]["configs"]
                     _require(channels and all(not c["enabled"] for c in channels))
                     summary["stage"] = "profile"
                     profile = runner.register_agent(api, json.loads(SPEC.read_text()))
