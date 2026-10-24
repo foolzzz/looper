@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import json
 import os
 import stat
 from contextlib import asynccontextmanager
@@ -24,9 +23,10 @@ from typing import Any
 
 import pytest
 
-from looper.agents import knowledge
+from looper.agents import api_v1, knowledge
+from looper.agents.ops import OpError
+from looper.agents.v1_domains import project_knowledge
 from tests.runtime_model_helpers import builtin_launch
-from looper.agents.http_server import AgentHTTPServer
 from looper.agents.knowledge import (
     EMPTY_KNOWLEDGE,
     INDEX_HEADING,
@@ -40,7 +40,6 @@ from looper.agents.knowledge import (
     safe_filename,
 )
 from looper.agents.runtimes.claude_code import TEAMMATE_MODE_ARGS
-from looper.agents.tiers.task import TaskRouter
 from looper.db import project_documents as db_documents, projects as db_projects
 
 NOW = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
@@ -118,26 +117,22 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     return fake
 
 
-class _Writer:
-    def __init__(self) -> None:
-        self.data = b""
-
-    def write(self, data: bytes) -> None:
-        self.data += data
-
-    async def drain(self) -> None:
-        pass
-
-
-def _call(root: Path, method: str, path: str, body: Any = None) -> tuple[int, Any]:
-    """Route one API request on a server whose runtime root is ``root``; return the status and the JSON body."""
-    raw = body if isinstance(body, bytes) else (b"" if body is None else json.dumps(body).encode())
-    server = AgentHTTPServer(web_adapter=SimpleNamespace(), task_router=TaskRouter(runtime_root=root),
-                             supervisor=SimpleNamespace(), runtime_root=root)
-    writer = _Writer()
-    asyncio.run(server._route_api(method, path, {}, raw, writer))
-    head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload)
+def _call(root: Path, action: str, body: Any = None, *, project_id="proj-1", document_id=None) -> tuple[int, Any]:
+    """Exercise the declared domain on the stubbed store; transport/auth live in the v1 DB tests."""
+    arguments = {"project_id": project_id}
+    if document_id is not None:
+        arguments["document_id"] = document_id
+    if action == "add":
+        arguments["document"] = body
+    elif action == "update":
+        arguments["fields"] = body
+    operation = api_v1.find("POST", "/api/v1/project_knowledge/" + action)
+    try:
+        api_v1.validate_arguments(operation.request, arguments)
+        return 200, asyncio.run(project_knowledge.run(SimpleNamespace(_runtime_root=root), operation,
+                                                      arguments, api_v1.OPERATOR, {}))
+    except OpError as exc:
+        return int(api_v1.STATUS[exc.code].split()[0]), {"error": str(exc)}
 
 
 def _text(title: str = "Glossary", summary: str = "Terms the code uses", content: str = "MARKER-ALPHA") -> dict:
@@ -171,8 +166,8 @@ def project_dir(tmp_path: Path) -> Path:
 class TestAdd:
     def test_a_text_document_is_stored_and_listed_with_its_read_path(self, store: _Store, tmp_path: Path) -> None:
         store.add_project()
-        status, body = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _text())
-        assert status == 201
+        status, body = _call(tmp_path, "add", _text())
+        assert status == 200
         doc = body["document"]
         set_dir = Path(doc["read_path"]).parent
         assert set_dir.parent == tmp_path / ".local" / "projects" / "proj-1" / "knowledge" and len(set_dir.name) == 64
@@ -191,11 +186,11 @@ class TestAdd:
 
     def test_an_upload_keeps_a_safe_file_name(self, store: _Store, tmp_path: Path) -> None:
         store.add_project()
-        status, body = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", {
+        status, body = _call(tmp_path, "add", {
             "source_kind": "upload", "title": "Schema", "summary": "The tables",
             "filename": "../../etc/My Schema (v2).sql", "content_base64": _b64("CREATE TABLE t();\n".encode()),
         })
-        assert status == 201
+        assert status == 200
         assert body["document"]["filename"] == "My-Schema-v2.sql"
         assert body["document"]["read_path"].endswith("/My-Schema-v2.sql")
         assert body["index"].endswith("- Schema: The tables (My-Schema-v2.sql)")
@@ -207,7 +202,7 @@ class TestAdd:
     ])
     def test_a_binary_upload_is_refused(self, store: _Store, tmp_path: Path, data: bytes, reason: str) -> None:
         store.add_project()
-        status, body = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", {
+        status, body = _call(tmp_path, "add", {
             "source_kind": "upload", "title": "Logo", "summary": "The logo", "filename": "logo.png",
             "content_base64": _b64(data),
         })
@@ -222,36 +217,36 @@ class TestAdd:
             "source_kind": "upload", "title": "Big", "summary": "s", "filename": "big.txt",
             "content_base64": _b64(big.encode()),
         }
-        status, answer = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", body)
+        status, answer = _call(tmp_path, "add", body)
         assert status == 400 and "2 MiB" in answer["error"]
         assert store.documents == {}
 
     def test_a_document_of_exactly_2_mib_is_accepted(self, store: _Store, tmp_path: Path) -> None:
         store.add_project()
-        assert _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _text(content="x" * 2 * 1024 * 1024))[0] == 201
+        assert _call(tmp_path, "add", _text(content="x" * 2 * 1024 * 1024))[0] == 200
 
     @pytest.mark.parametrize(("body", "reason"), [
-        ({"source_kind": "url", "title": "T", "summary": "S", "url": "https://example.com"}, "URLs are not supported"),
+        ({"source_kind": "url", "title": "T", "summary": "S", "url": "https://example.com"}, "declared schema"),
         ({**_text(), "title": ""}, "title"),
         ({**_text(), "title": "x" * 121}, "at most 120"),
         ({**_text(), "summary": ""}, "summary"),
-        ({k: v for k, v in _text().items() if k != "summary"}, "summary"),
+        ({k: v for k, v in _text().items() if k != "summary"}, "declared schema"),
         ({**_text(), "summary": "two\nlines"}, "one line"),
         ({**_text(), "content": "   "}, "content"),
-        ({**_text(), "path": "docs/runbook.md"}, "unknown field 'path'"),
+        ({**_text(), "path": "docs/runbook.md"}, "declared schema"),
         ({"source_kind": "upload", "title": "Notes", "summary": "s", "filename": "notes.txt",
           "content_base64": "not base64!"}, "base64"),
-        ([], "JSON object"),
+        ([], "declared schema"),
     ])
     def test_a_bad_request_is_refused(self, store: _Store, tmp_path: Path, body: Any, reason: str) -> None:
         store.add_project()
-        status, answer = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", body)
+        status, answer = _call(tmp_path, "add", body)
         assert status == 400 and reason in answer["error"]
         assert store.documents == {}
 
     def test_an_unknown_project_is_404(self, store: _Store, tmp_path: Path) -> None:
-        assert _call(tmp_path, "POST", "/api/projects/proj-nope/knowledge", _text())[0] == 404
-        assert _call(tmp_path, "GET", "/api/projects/proj-nope/knowledge")[0] == 404
+        assert _call(tmp_path, "add", _text(), project_id="proj-nope")[0] == 404
+        assert _call(tmp_path, "list", project_id="proj-nope")[0] == 404
 
 
 class TestPathDocuments:
@@ -261,8 +256,8 @@ class TestPathDocuments:
     ) -> None:
         store.add_project(work_dir=str(project_dir))
         path = str(project_dir / "docs" / "runbook.md") if absolute else "docs/../docs/./runbook.md"
-        status, body = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _path(path))
-        assert status == 201
+        status, body = _call(tmp_path, "add", _path(path))
+        assert status == 200
         doc = body["document"]
         assert (doc["path"], doc["filename"], doc["missing"]) == ("docs/runbook.md", None, False)
         assert doc["read_path"] == str(project_dir / "docs" / "runbook.md")
@@ -284,7 +279,7 @@ class TestPathDocuments:
         self, store: _Store, tmp_path: Path, project_dir: Path, path: str, reason: str,
     ) -> None:
         store.add_project(work_dir=str(project_dir))
-        status, body = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _path(path))
+        status, body = _call(tmp_path, "add", _path(path))
         assert status == 400 and reason in body["error"]
         assert store.documents == {}
 
@@ -293,21 +288,21 @@ class TestPathDocuments:
     ) -> None:
         os.symlink(tmp_path / "secret.txt", project_dir / "docs" / "innocent.md")
         store.add_project(work_dir=str(project_dir))
-        status, body = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _path("docs/innocent.md"))
+        status, body = _call(tmp_path, "add", _path("docs/innocent.md"))
         assert status == 400 and "leads outside" in body["error"]
 
     def test_a_project_without_a_directory_cannot_reference_a_path(self, store: _Store, tmp_path: Path) -> None:
         store.add_project(work_dir="")
-        status, body = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _path("docs/runbook.md"))
+        status, body = _call(tmp_path, "add", _path("docs/runbook.md"))
         assert status == 400 and "no default directory" in body["error"]
 
     def test_a_file_removed_later_is_listed_as_missing(
         self, store: _Store, tmp_path: Path, project_dir: Path,
     ) -> None:
         store.add_project(work_dir=str(project_dir))
-        _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _path("docs/runbook.md"))
+        _call(tmp_path, "add", _path("docs/runbook.md"))
         (project_dir / "docs" / "runbook.md").unlink()
-        status, body = _call(tmp_path, "GET", "/api/projects/proj-1/knowledge")
+        status, body = _call(tmp_path, "list")
         assert status == 200 and body["documents"][0]["missing"] is True
         assert body["index"].endswith(f"In {project_dir}:\n- Runbook: How to deploy (missing: docs/runbook.md)")
 
@@ -319,8 +314,8 @@ class TestCaps:
         monkeypatch.setattr(knowledge, "PROJECT_MAX_DOCUMENTS", 2)
         store.add_project()
         for n in range(2):
-            assert _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _text(title=f"D{n}", content=f"c{n}"))[0] == 201
-        status, body = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _text(title="D2", content="c2"))
+            assert _call(tmp_path, "add", _text(title=f"D{n}", content=f"c{n}"))[0] == 200
+        status, body = _call(tmp_path, "add", _text(title="D2", content="c2"))
         assert status == 400 and "at most 2 documents" in body["error"]
         assert len(store.documents) == 2
 
@@ -330,25 +325,25 @@ class TestCaps:
         monkeypatch.setattr(knowledge, "PROJECT_MAX_BYTES", 10 * 1024 * 1024)
         monkeypatch.setattr(knowledge, "DOCUMENT_MAX_BYTES", 6 * 1024 * 1024)
         store.add_project(work_dir=str(project_dir))
-        assert _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _text(title="A", content="a" * 6_000_000))[0] == 201
-        status, body = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _text(title="B", content="b" * 5_000_000))
+        assert _call(tmp_path, "add", _text(title="A", content="a" * 6_000_000))[0] == 200
+        status, body = _call(tmp_path, "add", _text(title="B", content="b" * 5_000_000))
         assert status == 400 and "10 MiB" in body["error"]
         # A path document is not stored, so it does not count.
-        assert _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _path("docs/runbook.md"))[0] == 201
+        assert _call(tmp_path, "add", _path("docs/runbook.md"))[0] == 200
 
     def test_a_document_that_would_make_the_index_too_long_is_refused(self, store: _Store, tmp_path: Path) -> None:
         store.add_project()
         added = 0
         while True:
-            status, body = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge",
+            status, body = _call(tmp_path, "add",
                                  _text(title=f"Document {added}", summary="s" * 250, content=f"content {added}"))
-            if status != 201:
+            if status != 200:
                 break
             added += 1
             assert body["index_chars"] <= INDEX_MAX_CHARS
         assert status == 400 and "at most 4000 characters" in body["error"]
         assert added >= 5 and len(store.documents) == added
-        assert _call(tmp_path, "GET", "/api/projects/proj-1/knowledge")[1]["index_chars"] <= INDEX_MAX_CHARS
+        assert _call(tmp_path, "list")[1]["index_chars"] <= INDEX_MAX_CHARS
 
     def test_a_line_costs_its_own_text_not_the_runtime_root_so_short_documents_reach_the_count_cap(
         self, store: _Store, tmp_path: Path,
@@ -359,22 +354,22 @@ class TestCaps:
         root = tmp_path / "home" / "someone-with-a-long-name" / ".looper"
         store.add_project()
         for n in range(100):
-            status, body = _call(root, "POST", "/api/projects/proj-1/knowledge",
+            status, body = _call(root, "add",
                                  _text(title=f"Doc {n:03d}", summary="A note.", content=f"content {n}"))
-            assert status == 201, body
+            assert status == 200, body
         assert body["index_chars"] <= INDEX_MAX_CHARS
         lines = [line for line in body["index"].splitlines() if line.startswith("- ")]
         assert len(lines) == 100 and lines[-1] == "- Doc 099: A note. (Doc-099.md)"
-        status, body = _call(root, "POST", "/api/projects/proj-1/knowledge", _text(title="Doc 100", content="c"))
+        status, body = _call(root, "add", _text(title="Doc 100", content="c"))
         assert status == 400 and "at most 100 documents" in body["error"]
 
 
 class TestChangeAndDelete:
     def test_update_changes_the_title_summary_and_content(self, store: _Store, tmp_path: Path) -> None:
         store.add_project()
-        doc_id = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _text())[1]["document"]["document_id"]
-        status, body = _call(tmp_path, "PUT", f"/api/projects/proj-1/knowledge/{doc_id}",
-                             {"title": "Terms", "summary": "Every term", "content": "MARKER-GAMMA"})
+        doc_id = _call(tmp_path, "add", _text())[1]["document"]["document_id"]
+        status, body = _call(tmp_path, "update",
+                             {"title": "Terms", "summary": "Every term", "content": "MARKER-GAMMA"}, document_id=doc_id)
         assert status == 200
         doc = body["document"]
         assert (doc["title"], doc["summary"], doc["filename"], doc["sha256"]) == (
@@ -391,9 +386,9 @@ class TestChangeAndDelete:
         self, store: _Store, tmp_path: Path, body: dict, reason: str,
     ) -> None:
         store.add_project()
-        doc_id = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _text())[1]["document"]["document_id"]
+        doc_id = _call(tmp_path, "add", _text())[1]["document"]["document_id"]
         before = dict(store.documents[doc_id])
-        status, answer = _call(tmp_path, "PUT", f"/api/projects/proj-1/knowledge/{doc_id}", body)
+        status, answer = _call(tmp_path, "update", body, document_id=doc_id)
         assert status == 400 and reason in answer["error"]
         assert store.documents[doc_id] == before
 
@@ -401,23 +396,23 @@ class TestChangeAndDelete:
         self, store: _Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         store.add_project()
-        doc_id = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _text())[1]["document"]["document_id"]
-        _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _text(title="Style", content="other"))
-        cap = _call(tmp_path, "GET", "/api/projects/proj-1/knowledge")[1]["index_chars"] + 10
+        doc_id = _call(tmp_path, "add", _text())[1]["document"]["document_id"]
+        _call(tmp_path, "add", _text(title="Style", content="other"))
+        cap = _call(tmp_path, "list")[1]["index_chars"] + 10
         monkeypatch.setattr(knowledge, "INDEX_MAX_CHARS", cap)  # 10 characters to spare
-        status, body = _call(tmp_path, "PUT", f"/api/projects/proj-1/knowledge/{doc_id}", {"summary": "s" * 40})
+        status, body = _call(tmp_path, "update", {"summary": "s" * 40}, document_id=doc_id)
         assert status == 400 and f"at most {cap} characters" in body["error"]
         assert store.documents[doc_id]["summary"] == "Terms the code uses"
-        assert _call(tmp_path, "PUT", f"/api/projects/proj-1/knowledge/{doc_id}", {"summary": "Terms"})[0] == 200
+        assert _call(tmp_path, "update", {"summary": "Terms"}, document_id=doc_id)[0] == 200
 
     def test_delete_removes_the_document(self, store: _Store, tmp_path: Path) -> None:
         store.add_project()
-        doc_id = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _text())[1]["document"]["document_id"]
-        status, body = _call(tmp_path, "DELETE", f"/api/projects/proj-1/knowledge/{doc_id}")
+        doc_id = _call(tmp_path, "add", _text())[1]["document"]["document_id"]
+        status, body = _call(tmp_path, "delete", document_id=doc_id)
         assert status == 200 and body["deleted"] == doc_id
         assert (body["count"], body["documents"], body["index"]) == (0, [], "")
-        assert _call(tmp_path, "DELETE", f"/api/projects/proj-1/knowledge/{doc_id}")[0] == 404
-        assert _call(tmp_path, "PUT", f"/api/projects/proj-1/knowledge/{doc_id}", {"title": "x"})[0] == 404
+        assert _call(tmp_path, "delete", document_id=doc_id)[0] == 404
+        assert _call(tmp_path, "update", {"title": "x"}, document_id=doc_id)[0] == 404
 
 
 # --- The index and what a run gets ---

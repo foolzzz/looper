@@ -793,12 +793,6 @@ class AgentHTTPServer:
     _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
     _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
-    _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
-    _RE_PROJECT_DOCUMENT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/(doc-[a-zA-Z0-9]+)$")
-    _RE_PROJECT_DRAFTS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/drafts$")
-    _RE_PROJECT_DRAFT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/drafts/(draft-[a-zA-Z0-9]+)$")
-    _RE_PROJECT_DRAFT_CONFIRM = re.compile(
-        r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/drafts/(draft-[a-zA-Z0-9]+)/confirm$")
     _RE_PROJECT_AGENT_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings$")
     _RE_PROJECT_ROLE_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_PROJECT_ALLOWED_PROFILES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/allowed-profiles$")
@@ -832,29 +826,6 @@ class AgentHTTPServer:
                 m.group(1), projects.json_object(body)))
         elif (m := self._RE_PROJECT.match(path)) and method == "DELETE":
             await self._answer(writer, HTTP_200, lambda: projects.delete_project(m.group(1)))
-        elif (m := self._RE_PROJECT_KNOWLEDGE.match(path)) and method == "GET":
-            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.knowledge_view(m.group(1), root))
-        elif (m := self._RE_PROJECT_KNOWLEDGE.match(path)) and method == "POST":
-            await self._handle_knowledge(writer, HTTP_201, lambda root: knowledge.add_document(
-                m.group(1), projects.json_object(body), root))
-        elif (m := self._RE_PROJECT_DOCUMENT.match(path)) and method == "GET":
-            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.get_document(
-                m.group(1), m.group(2), root))
-        elif (m := self._RE_PROJECT_DOCUMENT.match(path)) and method == "PUT":
-            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.update_document(
-                m.group(1), m.group(2), projects.json_object(body), root))
-        elif (m := self._RE_PROJECT_DOCUMENT.match(path)) and method == "DELETE":
-            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.delete_document(
-                m.group(1), m.group(2), root))
-        elif (m := self._RE_PROJECT_DRAFTS.match(path)) and method == "GET":
-            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.drafts_view(m.group(1)))
-        elif (m := self._RE_PROJECT_DRAFT_CONFIRM.match(path)) and method == "POST":
-            # The body is optional: the title, summary or content to confirm the draft with.
-            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.confirm_draft(
-                m.group(1), m.group(2), projects.json_object(body) if body.strip() else {}, root))
-        elif (m := self._RE_PROJECT_DRAFT.match(path)) and method == "DELETE":
-            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.discard_draft(
-                m.group(1), m.group(2)))
         elif path == "/api/providers" and method == "GET":
             await self._handle_registry(writer, HTTP_200, profile_registry.list_providers)
         elif path == "/api/providers" and method == "POST":
@@ -1370,27 +1341,6 @@ class AgentHTTPServer:
         except Exception:
             logger.exception("registry request failed")
             status, result = HTTP_500, {"error": "the request failed; see the server log"}
-        writer.write(_json_response(status, _serialize(result)))
-        await writer.drain()
-
-    # --- A project's knowledge (the documents its task agents read on demand) ---
-
-    async def _handle_knowledge(
-        self, writer: asyncio.StreamWriter, status: str, request: Callable[[Path], Awaitable[Any]],
-    ) -> None:
-        """Answer with ``request(runtime_root)``'s result; a refused request is 400, an unknown project or
-        document 404."""
-        try:
-            if self._runtime_root is None:
-                raise RuntimeError("the server was started without a runtime root")
-            result = await request(self._runtime_root)
-        except (knowledge.KnowledgeError, projects.RequestError) as exc:
-            status, result = getattr(exc, "status", HTTP_400), {"error": str(exc)}
-        except knowledge.KnowledgeNotFound as exc:
-            status, result = HTTP_404, {"error": str(exc)}
-        except Exception:
-            logger.exception("knowledge request failed")
-            status, result = HTTP_500, {"error": "the knowledge request failed; see the server log"}
         writer.write(_json_response(status, _serialize(result)))
         await writer.drain()
 
