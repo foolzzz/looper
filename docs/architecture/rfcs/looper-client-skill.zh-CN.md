@@ -93,6 +93,8 @@
 
 目录条目与安装提供 `catalog_items.list/get/update/delete`、`installs.create/update/delete/project`，均为 `hand=false` 的普通 JSON 操作。完整目录、详情、安装与项目安装 DTO 保留文件、归属及继承信息；现有 `catalog.list/install/update/uninstall` 的请求和路径不变，compact 回答分别类型化，列表用 `oneOf` 区分全局与项目。获取来源的迁移另行交付。项目自有 skill 由 `project_skills.add/get/update/delete` 提供，复用完整 `ProjectInstalls`、`CatalogItem`、`Install` 投影及 `ProjectSkill`；请求标识为必填字符串，更新字段非空且不接受 `enabled`，开关走 `installs.update`。名称、描述、正文和项目数量限制沿用 `project_skills` 核心常量。
 
+全局角色由 `roles.list/get/update/reset_prompt` 提供，完整 `RoleConfig` 只接受核心允许修改的字段，未知、只读、已移走或删除的字段明确拒绝并给 v1 操作提示。`agent_settings.get/update_system/update_role` 返回完整层值、生效 Profile、值与来源及各项限制，保留 null/空值继承、环境列表整体替换和角色提示词模式；共享 schema 供项目层等领域复用。`settings.set` 补齐实际 compact 结果类型，`settings.view` 和设置页的定时、等待、知识库结果另行迁移。
+
 **文档覆盖什么：** 文档包含既有 v1 操作和已迁移的控制台领域，剩余旧路由仍不在文档中。状态现为 `POST /api/v1/system/status {}`，返回完整状态投影（Agent、任务计数、web 健康、自检、退出能力及可选的绑定/管家状态），客户端的 `can_sign_out` 恒为 false；操作者从真实请求头计算。旧 `GET /api/status` 已删除。
 
 领域注册表为有序模块名元组，按需加载；每个模块声明 `OPERATIONS`、补齐现有工具的 `RESULTS` 和 `run`，按需声明 `stream` / `impact`。生成时拒绝重复 id/方法路径，领域 stream 自带事件说明/schema，当前仅接受只读操作（注册时拒绝写流，防止绕过确认/审计）；`high` 必须提供 impact。请求头直接传回调。普通写复用 ClientOps 校验、审计和客户端确认，领域 DTO 使用 transport 校验一次（保留必填 null、对象数组与联合类型，拒绝未声明字段）；Manager Tool 校验/列表不变。凭据写先拒绝客户端，参数/结果不审计，失败脱敏。错误可带类型化 `details`（`manager_id`、`state`、可空的 `phase`/`method`），不透传原始异常或请求值。
@@ -113,9 +115,10 @@
 | 关卡留言、结束 | `POST /api/tasks/:id/gates/:step/messages`、`end` | `looper_task_gate_reply`、`looper_gates` reply/end | 共用 `gate_service.post_message` | 不变 |
 | 关卡列表、讨论 | `GET /api/gates`、`GET …/messages` | `looper_gates` list/messages | 共用 `gate_service.list_gates`、`thread` | 不变 |
 | 总览 | `GET /api/overview` | `looper_overview` | 共用 `overview.build_overview` | 不变 |
-| 项目、Profile、provider、模型、设置层、可选 Profile、定时任务、花费 | 各自的路由 | 各自的工具 | 共用 `projects`、`profile_registry`、`catalog`、`agent_settings`、`schedules`、`llm_records` | 不变（这些工具建时就要求调控制台的代码） |
+| 项目、Profile、provider、模型、项目设置层、可选 Profile、定时任务、花费 | 各自的路由 | 各自的工具 | 共用 `projects`、`profile_registry`、`catalog`、`agent_settings`、`schedules`、`llm_records` | 不变（这些工具建时就要求调控制台的代码） |
 | 目录条目与安装 | `catalog_items.*`、`installs.*`（v1） | `looper_catalog` | 沿用 `catalog` 事务与安装普通写策略，删除目录条目为 high 并重验归属 | 控制台和客户端共用；MCP/skill 更新只认操作者，回答遮罩秘密 |
 | 项目自有 skill | `project_skills.add/get/update/delete`（v1） | 无新增 Tool | 共用 `project_skills` 归属校验与事务 | 控制台与客户端共用完整结果；删除列明所有安装项目，确认执行时重读实际引用并级联删除安装 |
+| 全局角色与设置 | `roles.*`、`agent_settings.*`（v1） | `looper_settings` 保持原接口 | 共用 `role_configs`、`agent_settings` 与既有风险判断 | 共享默认值、角色并发及提高或解除生效花费上限对客户端需确认；操作者单次执行，降低额度普通写；并发改后仅重新检查等待者，不终止运行者 |
 | 配置导出、导入 | `GET /api/config/export`、`/api/config/imports` | `looper_config_export` | 阶段 2a：v1 与旧路由、工具共用 `config_transfer` 和 `ConfigImports` | 已交付：`loopercli config export` / `import` 调 v1；旧控制台路由保留 |
 
 ## 6. 客户端身份与令牌
@@ -290,13 +293,15 @@ v1 配置预览收 `{document: <配置对象>}`，和控制台一样最多 256 M
 | 管家与模板 | 待迁移 |
 | 渠道 | 待迁移 |
 | 文件与 Git | 待迁移 |
-| 设置 | 待迁移 |
+| 设置 | 全局角色与设置层已迁入 v1，七个旧方法删除；通过：领域、认证、CLI/OpenAPI 163 项（含新增领域 34 项），前端 30 项与构建，既有调用方定向回归、隔离 serve 与替身 DSH/Manager 链路、1280/390px 浏览器增改/重置/生效读回及错误/空态/中止/会话过期检查；最终失败 0（首轮旧文案与夹具不兼容已修复）。未测：完整套件、其余未重跑的 DB/fake eval 分支和 installed 真实运行时；其余设置页仍待迁移 |
 | 运行记录与活动流 | 待迁移 |
 | 客户端凭据 | 待迁移 |
 
 阶段 2a 保持已交付；共享任务核心独立跟踪，阶段 3 仍待做。整体完成由最终审计确认。
 
 ## 22. 默认行为的变化
+
+- 全局角色与设置层改走七个普通 v1 操作；控制台保留原有交互及操作者直接执行行为。客户端的共享默认值、角色并发及提高或解除生效花费上限需先确认，降低额度直接保存；并发确认后重新检查一次，已有运行继续。角色 patch 原来忽略的未知/只读字段现在拒绝；闭合 schema 在服务前拒绝错误类型、未知角色或字段（未知角色为 400）。七个旧方法返回 404，评测和 smoke 调用方同步迁移，项目层旧路由继续保留。推荐 prompt、Manager 工具及 Telegram/Lark 共用服务不变，无模型可见内容变化。
 
 - `/api/v1/` 的普通操作也接受操作者身份；操作者的 `high` 单次执行，客户端令牌仍须两步确认。控制台确认弹窗与可见行为不变。状态及服务就绪探测改走 v1，旧状态 GET 删除；Telegram/Lark 继续使用未改动的 Manager ops/services。配置命令迁移是阶段 2a 单独列出的行为变化。
 - 任务配置仍仅 `init` 可改，需求保留版本、目录解析后读回；项目移动支持原有状态并同步运行中的归属。Agent 选择保留完成任务不可改、null 清除与降低并发不中断运行者的行为，升高并发仍是普通写。预算续跑只接受预算失败且新额度高于已花费的任务，发送一次 `AT_CAP` 重启；有独立额度时只改该任务，否则改项目每任务额度，影响其他任务；客户端确认绑定当时的项目与额度作用范围，确认前变更则拒绝，要求重新请求。四个旧方法返回 404，控制台与生成式 CLI 同步迁移。闭合请求 schema 在服务前拒绝未知字段、角色及错误类型，错误文案改为 schema 校验失败；配置或额度写入失败返回错误，不作已完成。

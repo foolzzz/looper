@@ -25,6 +25,7 @@ from looper.agents.message import MessageEnvelope, MessageType, planner_address,
 from tests.db_support import DSN, run_db, until
 from tests.test_ops_tasks_db import _Chat, _error, _project, _task
 from tests.test_usage_api_db import _Writer
+from tests.test_catalog_db import _global_settings_request
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -60,17 +61,18 @@ def _server(worker_pool: Any = None) -> Any:
 
 
 async def _call(method: str, path: str, body: Any = None, *, worker_pool: Any = None) -> tuple[int, Any]:
+    method, path, body = _global_settings_request(method, path, body)
     writer = _Writer()
     raw = b"" if body is None else json.dumps(body).encode()
     server = _server(worker_pool)
-    if path == "/api/v1/tasks/agents":
+    if path == "/api/v1/tasks/agents" or path.startswith(("/api/v1/roles/", "/api/v1/agent_settings/")):
         server._client_ops = ClientOps(SimpleNamespace())
         await server._handle_v1(method, path, {}, {}, raw, writer, api_v1.OPERATOR)
     else:
         await server._route_api(method, path, {}, raw, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
     answer = json.loads(payload)
-    if path == "/api/v1/tasks/agents":
+    if path == "/api/v1/tasks/agents" or path.startswith(("/api/v1/roles/", "/api/v1/agent_settings/")):
         answer = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
     return int(head.split()[1]), answer
 

@@ -16,6 +16,12 @@ from tests.test_model_eval_registration import RegistryApi
 
 
 class SeedApi(RegistryApi):
+    def post(self, path, body):
+        if path == "/api/v1/agent_settings/update_role":
+            self.settings.append((path, deepcopy(body)))
+            return {"status": "ok", "result": {}}
+        return super().post(path, body)
+
     def put(self, path, body):
         self.settings.append((path, deepcopy(body)))
 
@@ -32,7 +38,7 @@ def test_light_and_manager_seeds_register_model_references_once():
     assert first == second
     assert len(api.registry["models"]) == 2
     assert [path for path, _ in api.posts] == ["/api/models", "/api/agent-profiles"] * 2
-    assert api.settings[-1] == ("/api/agent-settings/roles/manager", {"profile_id": first["profile_id"]})
+    assert api.settings[-1] == ("/api/v1/agent_settings/update_role", {"role": "manager", "values": {"profile_id": first["profile_id"]}})
 
 
 def test_light_and_manager_profiles_share_an_existing_model_without_copying_it():

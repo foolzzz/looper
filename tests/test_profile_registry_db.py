@@ -23,7 +23,7 @@ from fake_claude import fake_claude
 from looper.agents import api_v1
 from looper.agents.ops.clients import ClientOps
 from tests.db_support import DSN, run_db
-from tests.test_catalog_db import _Writer
+from tests.test_catalog_db import _Writer, _global_settings_request
 from tests.test_dsh_runtime import MODELS as DSH_MODELS, dsh_policy as dsh_policy
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -37,17 +37,18 @@ async def _call(method: str, path: str, body: Any = None, *, claude: str = "clau
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())), claude_bin=claude)
+    method, path, body = _global_settings_request(method, path, body)
     writer = _Writer()
     parsed = urlsplit(path)
     raw = b"" if body is None else json.dumps(body).encode()
-    if parsed.path == "/api/v1/tasks/agents":
+    if parsed.path == "/api/v1/tasks/agents" or parsed.path.startswith(("/api/v1/roles/", "/api/v1/agent_settings/")):
         server._client_ops = ClientOps(SimpleNamespace())
         await server._handle_v1(method, parsed.path, dict(parse_qsl(parsed.query)), {}, raw, writer, api_v1.OPERATOR)
     else:
         await server._route_api(method, parsed.path, dict(parse_qsl(parsed.query)), raw, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
     answer = json.loads(payload)
-    if path == "/api/v1/tasks/agents":
+    if parsed.path == "/api/v1/tasks/agents" or parsed.path.startswith(("/api/v1/roles/", "/api/v1/agent_settings/")):
         answer = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
     return int(head.split()[1]), answer
 

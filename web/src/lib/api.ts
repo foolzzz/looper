@@ -2670,38 +2670,28 @@ export interface LlmRecordEvent {
 }
 
 export async function fetchRoleConfigs(): Promise<RoleConfig[]> {
-  const res = await fetch(`${API_BASE}/roles`);
-  if (!res.ok) throw new Error(`roles ${res.status}`);
-  const data = await res.json();
-  return data.configs ?? [];
+  const result = await callV1<{ configs: RoleConfig[] }>("/api/v1/roles/list", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", "Roles unexpectedly need confirmation.");
+  return result.configs;
 }
 
 export async function fetchRoleConfig(role: string): Promise<RoleConfig> {
-  const res = await fetch(`${API_BASE}/roles/${role}`);
-  if (!res.ok) throw new Error(`role ${res.status}`);
-  return res.json();
+  const result = await callV1<RoleConfig>("/api/v1/roles/get", { role });
+  if ("status" in result) throw new V1Error(202, "unavailable", "Role unexpectedly needs confirmation.");
+  return result;
 }
 
-export async function updateRoleConfig(
-  role: string,
-  fields: Partial<RoleConfig>,
-): Promise<RoleConfig> {
-  const res = await fetch(`${API_BASE}/roles/${role}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-  });
-  if (!res.ok) await failed(res, "update role");
-  return res.json();
+export async function updateRoleConfig(role: string, fields: Partial<RoleConfig>): Promise<RoleConfig> {
+  const result = await callV1<RoleConfig>("/api/v1/roles/update", { role, fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", "Role update needs explicit confirmation.");
+  return result;
 }
 
 /** Reset a role's prompt to the system-recommended default. */
 export async function resetRolePrompt(role: string): Promise<RoleConfig> {
-  const res = await fetch(`${API_BASE}/roles/${role}/reset-prompt`, {
-    method: "POST",
-  });
-  if (!res.ok) throw new Error(`reset role prompt ${res.status}`);
-  return res.json();
+  const result = await callV1<RoleConfig>("/api/v1/roles/reset_prompt", { role });
+  if ("status" in result) throw new V1Error(202, "unavailable", "Role reset needs explicit confirmation.");
+  return result;
 }
 
 export async function fetchLlmRecords(params: {
@@ -3199,19 +3189,23 @@ async function putJson<T>(path: string, body: unknown, label: string): Promise<T
 }
 
 export async function fetchAgentSettings(): Promise<AgentSettings> {
-  const res = await fetch(`${API_BASE}/agent-settings`);
-  if (!res.ok) await failed(res, "agent settings");
-  return res.json();
+  const result = await callV1<AgentSettings>("/api/v1/agent_settings/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", "Agent settings unexpectedly need confirmation.");
+  return result;
 }
 
 /** The system layer: what every agent inherits (Settings). */
-export function updateSystemSettings(fields: LayerUpdate): Promise<AgentSettings> {
-  return putJson("/agent-settings/system", fields, "update agent settings");
+export async function updateSystemSettings(fields: LayerUpdate): Promise<AgentSettings> {
+  const result = await callV1<AgentSettings>("/api/v1/agent_settings/update_system", { values: fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", "Settings update needs explicit confirmation.");
+  return result;
 }
 
 /** A role's layer (Settings → Roles). */
-export function updateRoleSettings(role: AgentRole, fields: LayerUpdate): Promise<AgentSettings> {
-  return putJson(`/agent-settings/roles/${encodeURIComponent(role)}`, fields, "update agent settings");
+export async function updateRoleSettings(role: AgentRole, fields: LayerUpdate): Promise<AgentSettings> {
+  const result = await callV1<AgentSettings>("/api/v1/agent_settings/update_role", { role, values: fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", "Settings update needs explicit confirmation.");
+  return result;
 }
 
 export async function fetchProjectAgentSettings(projectId: string): Promise<ProjectAgentSettings> {

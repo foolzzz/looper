@@ -2731,8 +2731,8 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
                 "name": "disposable-dsh", "runtime_id": "rt-dsh", "model_id": model, "effort": "high",
             })["profile"]["profile_id"]
             for role in ("manager", "planner", "worker", "reviewer"):
-                api.put(f"/api/agent-settings/roles/{role}", {"profile_id": profile})
-            settings = api.get("/api/agent-settings")
+                api.post("/api/v1/agent_settings/update_role", {"role": role, "values": {"profile_id": profile}})
+            settings = api.post("/api/v1/agent_settings/get", {})["result"]
             assert {settings["roles"][role]["values"]["profile_id"]
                     for role in ("manager", "planner", "worker", "reviewer")} == {profile}
 
