@@ -20,12 +20,12 @@ describe("Lark bot-token settings", () => {
         enabled: true, has_bot_token: true, created_at: "2026-10-18T00:00:00Z", updated_at: "2026-10-18T00:00:00Z",
         config: { app_id: "cli_example", domain: "feishu", allowed_open_ids: ["ou_example123"], allowlist_app_id: "cli_example", description: "" },
       }] });
-      if (url === "/api/channels/lark_bot/status") return Response.json({
+      if (url === "/api/v1/channels/status") return Response.json({ status: "ok", result: {
         bot, problem: bot ? null : "the platform rejected the app credentials: invalid secret", names: { ou_example123: "Allowed person" },
         rejected: [{ open_id: "ou_refused123", name: "Refused person", count: 1, last_at: "2026-10-18T00:00:00Z", chat_id: null }],
-      });
-      if (url === "/api/channels/lark_bot/people?q=Example") return Response.json({ people: [], complete: false });
-      if (url === "/api/gate-settings") return Response.json({ targets: [], dashboard_target: null });
+      } });
+      if (url === "/api/v1/channels/people") return Response.json({ status: "ok", result: { people: [], complete: false } });
+      if (url === "/api/v1/gate_settings/get") return Response.json({ status: "ok", result: { targets: [], dashboard_target: null } });
       throw new Error(`Unexpected request: ${url}`);
     }));
     container = document.createElement("div");
