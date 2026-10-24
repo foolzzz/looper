@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.78] - 2026-10-24
+
+### Changed
+
+- **The dashboard Chat page reads and saves conversations through v1.** Targets, conversation list, message history and message saving are now the operator-only operations `operator_chat.targets`, `operator_chat.sessions`, `operator_chat.messages` and `operator_chat.save_message` (`POST /api/v1/operator_chat/<action>`). Thread ownership across Managers is kept. A database failure now answers unavailable instead of an empty history, and a failed save no longer answers `ok`. Manager prompts and tools are unchanged. ([#510](https://github.com/foolzzz/looper/pull/510))
+
+### Removed
+
+- **`GET /api/chat/targets`, `GET /api/chat/sessions`, `GET /api/chat/messages` and `POST /api/chat/messages`.** Use the `operator_chat` operations with an operator credential. `/api/chat/send` and `/api/chat/events` are unchanged. ([#510](https://github.com/foolzzz/looper/pull/510))
+
 ## [2.13.77] - 2026-10-24
 
 ### Changed
