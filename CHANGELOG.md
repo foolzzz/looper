@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.77] - 2026-10-24
+
+### Changed
+
+- **The costs query has a typed result contract.** The existing `looper_costs` Tool (`POST /api/v1/ops/costs`) now declares its answer in the versioned API document for all three scopes: a task (`task_id`), a project (`project`) and global spend. The request, arithmetic, transport and risk (read) are unchanged, and Manager prompts and tools are unchanged. ([#514](https://github.com/foolzzz/looper/pull/514))
+
 ## [2.13.76] - 2026-10-24
 
 ### Changed
