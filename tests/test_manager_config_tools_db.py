@@ -31,7 +31,7 @@ SECRET = "sk-test-0123456789"
 
 
 async def _ok(method: str, path: str, body: Any = None) -> Any:
-    call = _catalog_call if path.startswith("/api/v1/installs/") else _call
+    call = _catalog_call if path.startswith(("/api/v1/installs/", "/api/v1/catalog_sources/")) else _call
     status, answer = await call(method, path, body)
     assert status in (200, 201), (status, answer)
     return answer
@@ -884,7 +884,7 @@ def test_a_catalog_item_is_installed_changed_and_uninstalled_as_the_dashboard_do
 ) -> None:
     async def test(pool: Any) -> None:
         project = await _project(pool)
-        server = (await _ok("POST", "/api/catalog/mcp", {"name": "search", "transport": "stdio", "command": "python3",
+        server = (await _ok("POST", "/api/v1/catalog_sources/create_mcp", {"name": "search", "transport": "stdio", "command": "python3",
                                                           "env": {"SEARCH_KEY": SECRET}}))["item"]
         chat = _Chat(tmp_path)
         (listed,) = await chat.say("有哪些 MCP", ("looper_catalog", {"action": "list"}))

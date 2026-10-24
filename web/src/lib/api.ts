@@ -3545,29 +3545,25 @@ export async function fetchCatalogItem(itemId: string): Promise<CatalogItemDetai
 
 /** Import (or re-import) this machine's enabled Claude Code plugins and personal skills; new items are installed nowhere. */
 export async function importCatalog(): Promise<Catalog> {
-  const res = await fetch(`${API_BASE}/catalog/import`, { method: "POST" });
-  if (!res.ok) await failed(res, "import");
-  return res.json();
+  const result = await callV1<Catalog>("/api/v1/catalog_sources/import_machine", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Import (or re-import) this machine's user-level MCP servers (~/.claude.json); new ones are installed nowhere. */
 export async function importMcpServers(): Promise<Catalog> {
-  const res = await fetch(`${API_BASE}/catalog/mcp/import`, { method: "POST" });
-  if (!res.ok) await failed(res, "MCP import");
-  return res.json();
+  const result = await callV1<Catalog>("/api/v1/catalog_sources/import_mcp", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Add an MCP server to the catalog, installed nowhere. 409 when its name is taken. */
 export async function createMcpServer(server: { name: string; description?: string } & Partial<McpConfig>): Promise<{
   item: CatalogItem;
 }> {
-  const res = await fetch(`${API_BASE}/catalog/mcp`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(server),
-  });
-  if (!res.ok) await failed(res, "add MCP server");
-  return res.json();
+  const result = await callV1<{ item: CatalogItem }>("/api/v1/catalog_sources/create_mcp", server);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Change an MCP server; a field left out stays, and the mask as a value keeps the stored one. */
@@ -3615,25 +3611,16 @@ export async function uninstall(installId: string): Promise<{ deleted: string; i
   return result;
 }
 
-/** Send JSON to a catalog endpoint; a refusal throws the server's reason. */
-async function catalogRequest<T>(method: string, path: string, label: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE}/catalog${path}`, {
-    method,
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!res.ok) await failed(res, label);
-  return res.json();
-}
-
 /** Upload a SKILL.md or a zip of a skill or plugin directory; `name` renames it. Installed nowhere; 409 when the
  * name is taken. `skipped` lists the binary files left out. */
-export function uploadCatalogItem(upload: {
+export async function uploadCatalogItem(upload: {
   filename: string;
   content_base64: string;
   name?: string;
 }): Promise<{ item: CatalogItem; skipped: LibrarySkipped[] }> {
-  return catalogRequest("POST", "/upload", "upload", upload);
+  const result = await callV1<{ item: CatalogItem; skipped: LibrarySkipped[] }>("/api/v1/catalog_sources/upload", upload);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export interface GitSource {
@@ -3683,20 +3670,26 @@ export interface GitImport {
 }
 
 /** Clone a repository and list its plugins and skills; nothing is added. */
-export function previewGitRepo(source: GitSource): Promise<GitPreview> {
-  return catalogRequest("POST", "/git/preview", "git preview", source);
+export async function previewGitRepo(source: GitSource): Promise<GitPreview> {
+  const result = await callV1<GitPreview>("/api/v1/catalog_sources/git_preview", source);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Import the chosen items of a previewed repository; 409 when a name is taken or the ref moved since `commit`. */
-export function importGitRepo(
+export async function importGitRepo(
   source: GitSource & { commit: string; items: { path: string; name?: string }[] },
 ): Promise<GitImport> {
-  return catalogRequest("POST", "/git/import", "git import", source);
+  const result = await callV1<GitImport>("/api/v1/catalog_sources/git_import", source);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Write a skill in Settings (origin "ui"); installed nowhere. */
-export function createCatalogSkill(skill: NewProjectSkill): Promise<{ item: CatalogItem }> {
-  return catalogRequest("POST", "/skills", "new skill", skill);
+export async function createCatalogSkill(skill: NewProjectSkill): Promise<{ item: CatalogItem }> {
+  const result = await callV1<{ item: CatalogItem }>("/api/v1/catalog_sources/create_skill", skill);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Change a Settings, uploaded or git skill; an uploaded or git one is marked modified. */

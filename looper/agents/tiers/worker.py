@@ -375,6 +375,8 @@ class WorkerPool:
         self._workers_dir.mkdir(parents=True, exist_ok=True)
         # The channel of each running worker, open until its result: more user turns go here.
         self._inputs: dict[str, RunChannel] = {}
+        # Accepted runs can receive a turn before setup has opened their channel.
+        self._input_ready: dict[str, asyncio.Event] = {}
         # The agent room's tools for the runs (``ops.room.RoomOps``); without them a run has no room.
         self.room_ops: Any = None
         # Each running Claude's room reminders: the one waiting for a tool call to run, the uuids written, when.
@@ -513,9 +515,14 @@ class WorkerPool:
         return worker_id in self._inputs
 
     async def send_input(self, worker_id: str, text: str) -> bool:
-        """Add a user turn to a running worker; Claude reads it at its next turn."""
+        """Add a user turn once an accepted worker's channel opens; False if it ends first."""
+        if not text.strip():
+            return False
         channel = self._inputs.get(worker_id)
-        if channel is None or not text.strip():
+        if channel is None and (ready := self._input_ready.get(worker_id)) is not None:
+            await ready.wait()
+            channel = self._inputs.get(worker_id)
+        if channel is None:
             return False
         try:
             await channel.send(text)
@@ -584,11 +591,14 @@ class WorkerPool:
             return
 
         logger.info("dispatching worker %s (active=%d)", worker_id, len(self._active))
+        self._input_ready[worker_id] = asyncio.Event()
         task = asyncio.create_task(self._run_worker(envelope))
         self._tasks[worker_id] = task
         task.add_done_callback(lambda t: self._cleanup_worker(worker_id))
 
     def _cleanup_worker(self, worker_id: str) -> None:
+        if (ready := self._input_ready.pop(worker_id, None)) is not None:
+            ready.set()
         self._tasks.pop(worker_id, None)
         self._active.pop(worker_id, None)
         held = self._slots.pop(worker_id, None)
@@ -959,6 +969,8 @@ class WorkerPool:
             except (BrokenPipeError, ConnectionResetError):
                 # Claude exited before reading; its output decides the outcome.
                 logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
+            if (ready := self._input_ready.get(worker_id)) is not None:
+                ready.set()
 
             input_ended = False
 

@@ -235,8 +235,8 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             sonnet = api.post("/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
                                                       "model_id": _builtin_model(api, "sonnet")})
             # A skill installed for the roles a Planner defines only: it loads for a run of a role naming it.
-            notes = api.post("/api/catalog/skills", {"name": "role-notes", "description": "Notes for roles.",
-                                                     "content": "Reply ROLE-NOTES.\n"})["item"]
+            notes = api.post("/api/v1/catalog_sources/create_skill", {"name": "role-notes", "description": "Notes for roles.",
+                                                     "content": "Reply ROLE-NOTES.\n"})["result"]["item"]
             installed = api.post("/api/v1/installs/create", {"item_id": notes["item_id"], "scope": "global", "roles": ["task_role"]})["result"]
             assert installed["install"]["roles"] == ["task_role"]
             ids: dict[str, str] = {}
