@@ -7,15 +7,6 @@ import * as api from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-vi.mock("@/lib/api", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/api")>()),
-  fetchApiClients: vi.fn(),
-  createApiClient: vi.fn(),
-  revokeApiClient: vi.fn(),
-}));
-
-const m = vi.mocked(api);
-
 // Not a token any server issued.
 const TOKEN = "lpc_" + "x".repeat(43);
 
@@ -27,6 +18,11 @@ const CI: api.ApiClient = { id: "client-bbbbbbbbbbbb", name: "ci", created_at: "
 describe("API clients settings", () => {
   let container: HTMLDivElement;
   let root: Root;
+  let clients: api.ApiClient[];
+  let listError: string | undefined;
+  let createError: string | undefined;
+  const fetcher = vi.fn();
+  const calls = (action: string) => fetcher.mock.calls.filter(([path]) => path === `/api/v1/clients/${action}`);
 
   const render = async () => {
     await act(async () => root.render(<ApiClientsSection />));
@@ -48,9 +44,28 @@ describe("API clients settings", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    m.fetchApiClients.mockResolvedValue([LAPTOP, CI]);
-    m.createApiClient.mockResolvedValue({ client: { ...CI, id: "client-cccccccccccc", name: "new" }, token: TOKEN });
-    m.revokeApiClient.mockResolvedValue(undefined);
+    clients = [LAPTOP, CI];
+    listError = createError = undefined;
+    fetcher.mockImplementation(async (path: string, init: RequestInit) => {
+      expect(init.method).toBe("POST");
+      const body = JSON.parse(init.body as string);
+      let result: unknown;
+      let error: string | undefined;
+      if (path === "/api/v1/clients/list") {
+        expect(body).toEqual({});
+        result = { clients };
+        error = listError;
+      } else if (path === "/api/v1/clients/create") {
+        result = { client: { ...CI, id: "client-cccccccccccc", name: body.name }, token: TOKEN };
+        error = createError;
+      } else if (path === "/api/v1/clients/revoke") {
+        result = { revoked: body.client_id };
+      } else throw new Error(`unexpected request: ${path}`);
+      return new Response(JSON.stringify(error
+        ? { status: "error", error: { code: "conflict", message: error } }
+        : { status: "ok", result }), { status: error ? 409 : 200 });
+    });
+    vi.stubGlobal("fetch", fetcher);
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -73,7 +88,7 @@ describe("API clients settings", () => {
   });
 
   it("shows the load error inline", async () => {
-    m.fetchApiClients.mockRejectedValue(new Error("clients 500"));
+    listError = "clients 500";
     await render();
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("clients 500");
   });
@@ -81,7 +96,7 @@ describe("API clients settings", () => {
   it("creates a client, shows the token and the login command, and Done removes the token", async () => {
     await render();
     await create("  new ");
-    expect(m.createApiClient).toHaveBeenCalledWith("new");
+    expect(JSON.parse(calls("create")[0][1].body)).toEqual({ name: "new" });
     const field = container.querySelector("input[readonly]") as HTMLInputElement;
     expect(field.value).toBe(TOKEN);
     expect(container.textContent).toContain(`loopercli login --url ${window.location.origin}`);
@@ -106,7 +121,7 @@ describe("API clients settings", () => {
   });
 
   it("shows a refusal of the name and no token box", async () => {
-    m.createApiClient.mockRejectedValue(new Error("an API client named 'ci' exists; revoke it or pick another name"));
+    createError = "an API client named 'ci' exists; revoke it or pick another name";
     await render();
     await create("ci");
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("an API client named 'ci' exists");
@@ -118,12 +133,12 @@ describe("API clients settings", () => {
     const ask = vi.fn(() => true);
     vi.stubGlobal("confirm", ask);
     await render();
-    m.fetchApiClients.mockResolvedValue([CI]);
+    clients = [CI];
     await click(container.querySelector('[aria-label="Revoke API client laptop"]')!);
     expect(ask).toHaveBeenCalledWith(
       "Revoke laptop? The token stops working at once; what it did stays recorded under its name.");
-    expect(m.revokeApiClient).toHaveBeenCalledWith(LAPTOP.id);
-    expect(m.fetchApiClients).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(calls("revoke")[0][1].body)).toEqual({ client_id: LAPTOP.id });
+    expect(calls("list")).toHaveLength(2);
     expect(container.textContent).not.toContain("laptop");
   });
 
@@ -131,7 +146,7 @@ describe("API clients settings", () => {
     vi.stubGlobal("confirm", vi.fn(() => false));
     await render();
     await click(container.querySelector('[aria-label="Revoke API client laptop"]')!);
-    expect(m.revokeApiClient).not.toHaveBeenCalled();
-    expect(m.fetchApiClients).toHaveBeenCalledTimes(1);
+    expect(calls("revoke")).toHaveLength(0);
+    expect(calls("list")).toHaveLength(1);
   });
 });

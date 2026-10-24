@@ -31,6 +31,7 @@ channels.status channels.people gate_settings.get gate_settings.update managers.
 managers.update managers.delete manager_templates.put manager_templates.delete
 schedule_admin.list schedule_admin.project_list schedule_admin.get schedule_admin.preview
 schedule_admin.runs schedule_admin.notifications
+clients.list clients.create clients.revoke
 project_roles.stats role_templates.list role_templates.put role_templates.delete
 """.split()
 
