@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.86] - 2026-10-24
+
+### Changed
+
+- **Configuration transfer in the dashboard goes through v1.** Exporting the configuration is `POST /api/v1/config/export`; uploading a file to preview an import is `POST /api/v1/config/import_upload` (risk `read`, the raw document streamed as `application/json`, up to the existing import size cap, answered in the v1 envelope); applying is `config.import_apply` and cancelling is the new `config.import_cancel` operation (risk `write`, moved to its own domain), each acting only on the caller's own staged import. The export is written to the response in chunks instead of being built in memory first. The preview, plan and document schemas are published in the OpenAPI document, and `looper config` keeps its export and import commands while generated subcommands can be added to it. Manager prompts and tools are unchanged. ([#513](https://github.com/foolzzz/looper/pull/513))
+
+### Removed
+
+- **The legacy configuration routes:** `GET /api/config/export`, `POST /api/config/imports`, `POST /api/config/imports/<id>/apply` and `DELETE /api/config/imports/<id>`. Use the `config` operations. ([#513](https://github.com/foolzzz/looper/pull/513))
+
 ## [2.13.85] - 2026-10-24
 
 ### Changed
