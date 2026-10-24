@@ -229,7 +229,7 @@ def test_migrated_service_manager_creates_dashboard_reads(migrated, tmp_path):
         unknown = next(p for p in registry["profiles"] if p["profile_id"] == "agent-seed-custom")
         assert unknown["cost"]["unpriced"] == ["seed-open-model"]
         assert unknown["warnings"]
-        api.put("/api/agent-settings/roles/manager", {"profile_id": profile["profile_id"]})
+        api.post("/api/v1/agent_settings/update_role", {"role": "manager", "values": {"profile_id": profile["profile_id"]}})
         project = api.post("/api/projects", {"name": "runtime smoke", "work_dir": str(running.home.parent / "work")})
         dialog = dialogs.select(["model_custom"])[0]
         result = dialogs.run_dialog(api, dialog, database_url=migrated, project_id=project["project_id"],
@@ -284,7 +284,7 @@ def test_explicit_combination_is_migrated_before_launch(tmp_path, monkeypatch):
         report = migrate(url, real=item)
         assert report["profiles_mapped"] == 21 and report["models_after"] == 28
         with server(tmp_path, url) as running:
-            running.api.put("/api/agent-settings/roles/manager", {"profile_id": "agent-smoke-real"})
+            running.api.post("/api/v1/agent_settings/update_role", {"role": "manager", "values": {"profile_id": "agent-smoke-real"}})
             dialogs._ask(running.api, "smoke-combination", "Reply OK without tools", timeout=30)
             record = query(url, "SELECT * FROM llm_records WHERE agent_id='manager' AND task_id IS NULL")[0]
             metadata = json.loads(record["metadata"])
@@ -359,7 +359,7 @@ def _real_continuation(case, url, item, status, rows, evidence):
         profile = next(p for p in api.get("/api/registry")["profiles"] if p["profile_id"] == "agent-smoke-real")
         assert profile["model"]["name"] == item["model"]
         assert profile["model"]["protocol"] == item["protocol"]
-        api.put("/api/agent-settings/roles/manager", {"profile_id": profile["profile_id"]})
+        api.post("/api/v1/agent_settings/update_role", {"role": "manager", "values": {"profile_id": profile["profile_id"]}})
         marker = hashlib.sha256(str(case).encode()).hexdigest()[:12]
         first = dialogs._ask(api, "smoke-real", f"Remember {marker}. Reply only OK. Do not use tools.", timeout=90)
         previous = query(url, "SELECT session_id,session_totals FROM agent_sessions WHERE agent_id='manager'")[0]
