@@ -25,8 +25,8 @@ function detail(id: string) {
 function answer(url: string): unknown {
   const task = url.match(/\/api\/tasks\/(task-[a-z]+)$/);
   if (task) return detail(task[1]);
-  if (url.includes("/activity")) return { activity: [] };
-  if (url.includes("/conversation")) return { conversation: [] };
+  if (url === "/api/v1/tasks/activity") return { status: "ok", result: { activity: [] } };
+  if (url === "/api/v1/tasks/conversation") return { status: "ok", result: { rows: [], has_more: false } };
   if (url.endsWith("/projects")) return { projects: [] };
   return {};
 }
@@ -61,6 +61,51 @@ describe("TaskDetailRoute", () => {
     await act(async () => tab!.click());
     await settle();
   };
+
+  it.each(["stopped", "failed", "cancelled"])("resumes Sessions activity after starting a %s task", async (initialStatus) => {
+    let status = initialStatus;
+    let liveStream: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const activity = (seq: number) => ({
+      seq, task_id: "task-a", worker: "worker-1", kind: "text", summary: `activity ${seq}`,
+      metadata: null, input_tokens: null, output_tokens: null, created_at: "2026-10-24T00:00:00Z",
+    });
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/tasks/task-a") return Response.json({ ...detail("task-a"), status });
+      if (url === "/api/v1/ops/task_control/restart") {
+        status = "running";
+        return Response.json({ status: "ok", result: { task_id: "task-a", restarted: true, note: "Started." } });
+      }
+      if (url === "/api/v1/tasks/activity") return Response.json({
+        status: "ok", result: { activity: [activity(7)], has_more: false },
+      });
+      if (url === "/api/v1/tasks/activity_stream") return new Response(
+        status === "running"
+          ? new ReadableStream<Uint8Array>({ start(controller) { liveStream = controller; } })
+          : "event: done\ndata: {}\n\n",
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+      return Response.json(answer(url));
+    });
+    vi.stubGlobal("fetch", fetcher);
+    await act(async () => root.render(<TaskDetailRoute taskId="task-a" tab="sessions" onTab={() => {}} onBack={() => {}} />));
+    await settle();
+    expect(container.textContent).toContain("activity 7");
+    expect(container.textContent).not.toContain("Live"); // The terminal stream has delivered done.
+
+    await openTab("Start"); // Stay on Sessions while the task starts again.
+    expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Sessions");
+    expect(liveStream).toBeDefined();
+    expect(container.textContent).toContain("Live");
+    await act(async () => {
+      liveStream!.enqueue(new TextEncoder().encode(`event: activity\ndata: ${JSON.stringify(activity(8))}\n\n`));
+    });
+    await settle();
+    expect(container.textContent).toContain("activity 7");
+    expect(container.textContent).toContain("activity 8");
+    expect(container.textContent).toContain("2 events");
+    expect(fetcher.mock.calls.filter(([url]) => String(url) === "/api/v1/tasks/activity")).toHaveLength(1);
+  });
 
   it.each([false, true])("shows the schedule session note only after a confirmed continuation (%s)", async (continues) => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {

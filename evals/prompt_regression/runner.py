@@ -467,7 +467,8 @@ def _without(changes: dict[str, float], paths: set[str]) -> dict[str, float]:
 def _all_activity(api: Api, task_id: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     while True:
-        page = api.get(f"/api/tasks/{task_id}/activity", since=rows[-1]["seq"] if rows else 0, limit=500)["activity"]
+        page = api.post("/api/v1/tasks/activity", {"task_id": task_id, "since": rows[-1]["seq"] if rows else 0,
+                                                   "limit": 500})["result"]["activity"]
         rows += page
         if len(page) < 500:
             return rows

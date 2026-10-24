@@ -103,11 +103,14 @@
 
 领域注册表为有序模块名元组，按需加载；每个模块声明 `OPERATIONS`、补齐现有工具的 `RESULTS` 和 `run`，按需声明 `stream` / `impact`。生成时拒绝重复 id/方法路径，领域 stream 自带事件说明/schema，当前仅接受只读操作（注册时拒绝写流，防止绕过确认/审计）；`high` 必须提供 impact。请求头直接传回调。普通写复用 ClientOps 校验、审计和客户端确认，领域 DTO 使用 transport 校验一次（保留必填 null、对象数组与联合类型，拒绝未声明字段）；Manager Tool 校验/列表不变。凭据写先拒绝客户端，参数/结果不审计，失败脱敏。错误可带类型化 `details`（`manager_id`、`state`、可空的 `phase`/`method`），不透传原始异常或请求值。
 
+任务活动的 `tasks.activity`、`activity_detail`、`conversation`、`activity_stream` 使用完整 DTO；对话窗口沿用 `db.activity.conversation_window` 的 `rows` 集合键，只含 seq、worker、kind、summary、created_at。活动与对话的后向窗口将 limit 夹到 1–1000，默认 1000；活动有 after/since 时改为前向读取，after 优先于 since，两者均优先于 before，limit 为 min(请求值, 500)，默认 100，不新增通用上限。SSE 的操作说明及 `x-looper-events` 声明 ActivityEvent、id=seq、done `{}` 和心跳注释，JSON 拒绝沿用 OpError。
+
 ### 5.4 HTTP 路由和 ops 工具的重叠
 
 | 做的事 | 控制台路由 | ops 工具 | 当前实现 | 共享实现与状态（阶段 2） |
 |---|---|---|---|---|
 | 控制台状态 | `POST /api/v1/system/status` | 无 | 已抽取 `_status_result` | 领域模块提供完整投影，服务状态命令与控制台共用 v1 |
+| 任务活动与对话 | `POST /api/v1/tasks/activity`、`activity_detail`、`conversation`、`activity_stream` | 无新增 Tool | 共用 `db.activity` 和现有 broadcaster，先订阅再回放，按 seq 续传，断连注销 | 四个旧 GET 删除；控制台与生成式 CLI 同步迁移，运行列表与聊天流不变 |
 | 列任务 | `GET /api/tasks` | `looper_tasks` list | 共用 `projects.list_tasks_page`（游标、状态、定时任务、分组和工具的关键字搜索） | 已实现；ops 的 list 使用精简形状，保留原有搜索范围与 `more` 语义，控制台保留游标、计数和花费 |
 | 任务详情 | `GET /api/tasks/:id` | `looper_tasks` get（`_task_view`） | 共用 `projects.task_detail` | 已实现；ops 的 get 使用精简视图，保留原有键、裁剪和结果文案 |
 | 建任务 | `POST /api/tasks/create`（`projects.create_task`） | `looper_task_create`（`_create`） | 共用 `projects.create_task_core`（放置、工作区检查、事务、配置块），两入口保留参数适配层 | 已实现；核心收两边参数并集，控制台保留 `config`、`profile_overrides` 和新项目全部字段，工具 schema 不变；数据库回归测试从两入口创建后回读并比较任务行与 Profile 覆盖 |
@@ -189,6 +192,8 @@
 - **回报：** 客户端对话里建的任务记 `origin_thread`（D9），接受和结束写进这个线程。关卡和进度不写进线程（第 11 节）。
 - **读线程：** `POST /api/v1/chat/messages {conversation_id, after?, limit?}`，在数据库里按游标向后分页：游标是线程里一条消息的 `message_id`，按存储顺序（`chat_messages.id`）取它之后的最多 `limit` 条（默认 100，最多 200）；不给 `after` 从线程开头取。回答 `{conversation_id, manager_id, messages, next_cursor, has_more}`：`next_cursor` 是本页最后一条的 `message_id`（本页为空时是传入的 `after`，空线程是 null），`has_more` 说明游标之后还有没有。`after` 不是这个线程的消息 → 400 `invalid`（「unknown cursor」），绝不静默从头重放或漏掉。`POST /api/v1/chat/conversations {}` → 这个客户端的线程，最近活跃的 50 个。
 - **命令行：** 一次性 `loopercli chat "…"`、`--file PATH`（`-` 读标准输入）；没有消息又在终端上时进交互模式（一行一条，`Ctrl-D` 退出）；`--conversation ID` 接着同一线程，`--manager ID` 选管家；开头在标准错误打印 `conversation: cli-…`；`--read [--after ID]` 只读线程（按 `next_cursor` 翻页直到 `has_more` 为假）；`--list` 列出这个客户端的对话；`--follow` 回复后继续每 5 秒从上次的 `next_cursor` 读线程、打印新消息，直到 `Ctrl-C`；`--json` 打印 `{conversation_id, message_id, reply, outcome}`。
+
+活动流由 OpenAPI 发现：生成式 `loopercli tasks activity-stream --task-id ID --since SEQ` 调用现有 `Api.stream`；终端输出事件名与数据，`--json` 逐行输出 `{event,data}`，不假设聊天事件。中断关闭连接，拒绝重定向；手写 chat 命令不变。
 
 ## 11. 客户端怎么跟进任务
 
@@ -305,12 +310,14 @@ v1 配置预览收 `{document: <配置对象>}`，和控制台一样最多 256 M
 | 渠道 | Lark 身份/人员发现与 dashboard 关卡通知设置已迁移：四个普通 v1 操作、完整 DTO、六个旧方法删除，控制台与生成 CLI 同步；操作者单次执行，客户端 high 同会话确认并在执行时重验目标。新增契约、文档及既有调用方的 202 项定向 pytest 与 web 39 项（含共享 v1 传输）、TypeScript 检查通过；隔离全应用 serve 的 29 个 HTTP 请求通过。渠道配置等其余部分待迁移，1280/768px 浏览器以假适配器验收身份问题、搜索结果/空/错误、目标保存/清空及 abort/session-ended 通过（无消息发送）；完整套件留给 CI |
 | 文件与 Git | 待迁移 |
 | 设置 | 待迁移 |
-| 运行记录与活动流 | 待迁移 |
+| 运行记录与活动流 | 活动、detail、对话和 SSE 已迁入 v1，四个旧 GET 删除；控制台与生成式 CLI 已迁移。通过：733 项 pytest、89 项前端测试、构建及隔离 serve 桌面/390px 浏览器分页和重连；最终失败 0；98 项跳过不计通过，完整套件留 CI，运行列表待迁移 |
 | 客户端凭据 | 待迁移 |
 
 阶段 2a 保持已交付；共享任务核心独立跟踪，阶段 3 仍待做。整体完成由最终审计确认。
 
 ## 22. 默认行为的变化
+
+- 任务活动读取的数据库失败现在返回 `unavailable`（503），不再伪装成空成功；detail 同时检查 task_id 和 seq，未知任务或记录返回 not_found。窗口、游标优先级保持上述原有规则；对话窗口使用数据库的 `rows` 集合键，控制台同步适配。SSE 从数据库生成完整事件，回放与实时按 seq 衔接，终态 done 与断连清理保留。Telegram/Lark 使用未改动的 Manager ops/services，无伴随 transport 改动。
 
 - 等待恢复/取消、任务角色编辑与完整办公台查询新增普通 v1 操作，生成 CLI 子命令；关卡讨论复用 `gates.*`。八个旧方法删除，等待与关卡设置保持原路径。控制台关卡列表通过 v1 offset 分页读取完整排序结果，保留已加载边界；超过 200 行时刷新需多次请求，检测到跨页条数变化、重复行或已保存边界全部失效则显示可重试错误，保留原界面数据。等待操作的 JSON 必须提供 `task_id/step`；角色编辑须提供 `harness/profile_id`（可为 null），省略 `items` 仍保留原值；办公台过滤参数按声明拒绝非法类型、负游标和超出 1–500 的条数。完整办公台不裁剪消息并保留咨询，`tasks.room` 继续裁剪；Telegram/Lark 的 Manager ops/services 不变。
 - `/api/v1/` 的普通操作也接受操作者身份；操作者的 `high` 单次执行，客户端令牌仍须两步确认。控制台确认弹窗与可见行为不变。状态及服务就绪探测改走 v1，旧状态 GET 删除；Telegram/Lark 继续使用未改动的 Manager ops/services。配置命令迁移是阶段 2a 单独列出的行为变化。

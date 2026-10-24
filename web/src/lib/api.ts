@@ -1,5 +1,5 @@
 import { isSessionEnded, SessionEndedError } from "@/lib/session";
-import { callV1, V1Error } from "@/lib/v1";
+import { callV1, streamV1, V1Error } from "@/lib/v1";
 
 const API_BASE = "/api";
 
@@ -2324,7 +2324,7 @@ export interface TaskStep {
 export interface ActivityEvent {
   seq: number;
   task_id: string;
-  worker: string;
+  worker: string | null;
   kind: string;
   summary: string | null;
   detail?: string | null;
@@ -2333,6 +2333,8 @@ export interface ActivityEvent {
   output_tokens: number | null;
   created_at: string;
 }
+
+export type ConversationEvent = Pick<ActivityEvent, "seq" | "worker" | "kind" | "summary" | "created_at">;
 
 export class TaskDetailError extends Error {
   readonly status: number;
@@ -2353,16 +2355,14 @@ export async function fetchTaskActivity(
   since = 0,
   limit = 100,
 ): Promise<{ activity: ActivityEvent[] }> {
-  const res = await fetch(
-    `${API_BASE}/tasks/${taskId}/activity?since=${since}&limit=${limit}`,
-  );
-  if (!res.ok) throw new Error(`activity ${res.status}`);
-  return res.json();
+  const data = await callV1<{ activity: ActivityEvent[] }>("/api/v1/tasks/activity", { task_id: taskId, since, limit });
+  if ("status" in data) throw new V1Error(202, "unavailable", data.impact);
+  return data;
 }
 
 /** A window of a task's events or conversation, oldest first: the latest ones, or those just before `before`. */
-export interface EventWindow {
-  events: ActivityEvent[];
+export interface EventWindow<T = ActivityEvent> {
+  events: T[];
   hasMore: boolean;
 }
 
@@ -2372,11 +2372,10 @@ export async function fetchTaskActivityWindow(
   before?: number,
   signal?: AbortSignal,
 ): Promise<EventWindow> {
-  const qs = before === undefined ? "" : `?before=${before}`;
-  const res = await fetch(`${API_BASE}/tasks/${taskId}/activity${qs}`, { signal });
-  if (!res.ok) throw new Error(`activity ${res.status}`);
-  const data = await res.json();
-  return { events: data.activity ?? [], hasMore: !!data.has_more };
+  const data = await callV1<{ activity: ActivityEvent[]; has_more?: boolean }>(
+    "/api/v1/tasks/activity", { task_id: taskId, before }, { signal });
+  if ("status" in data) throw new V1Error(202, "unavailable", data.impact);
+  return { events: data.activity, hasMore: !!data.has_more };
 }
 
 /** The latest messages of a task's conversation (1000), or those just before the seq `before`. */
@@ -2384,12 +2383,11 @@ export async function fetchTaskConversation(
   taskId: string,
   before?: number,
   signal?: AbortSignal,
-): Promise<EventWindow> {
-  const qs = before === undefined ? "" : `?before=${before}`;
-  const res = await fetch(`${API_BASE}/tasks/${taskId}/conversation${qs}`, { signal });
-  if (!res.ok) throw new Error(`conversation ${res.status}`);
-  const data = await res.json();
-  return { events: data.conversation ?? [], hasMore: !!data.has_more };
+): Promise<EventWindow<ConversationEvent>> {
+  const data = await callV1<{ rows: ConversationEvent[]; has_more: boolean }>(
+    "/api/v1/tasks/conversation", { task_id: taskId, before }, { signal });
+  if ("status" in data) throw new V1Error(202, "unavailable", data.impact);
+  return { events: data.rows, hasMore: data.has_more };
 }
 
 /** One run of a task as `GET /api/tasks/<id>/runs` answers: no prompts, metadata body or events. */
@@ -2423,53 +2421,38 @@ export function streamTaskActivity(
   onDone?: () => void,
 ): () => void {
   const abortController = new AbortController();
-
-
+  const signal = abortController.signal;
+  let cursor = since;
+  let done = false;
   (async () => {
     try {
-      const res = await fetch(
-        `${API_BASE}/tasks/${taskId}/activity/stream?since=${since}`,
-        { signal: abortController.signal },
-      );
-      if (!res.ok || !res.body) return;
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let eventData = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done || abortController.signal.aborted) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (abortController.signal.aborted) break;
-          if (line.startsWith("data: ")) {
-            eventData = line.slice(6);
-          } else if (line === "" && eventData) {
-            try {
-              const parsed = JSON.parse(eventData);
-              onEvent(parsed);
-            } catch {
-              // skip
-            }
-            eventData = "";
-          }
+      while (!signal.aborted && !isSessionEnded() && !done) {
+        try {
+          const pending = await streamV1<ActivityEvent | Record<string, never>>(
+            "/api/v1/tasks/activity_stream", { task_id: taskId, since: cursor }, ({ event, data }) => {
+              if (event === "done") done = true;
+              else if (event === "activity" && "seq" in data && data.seq > cursor) {
+                cursor = data.seq;
+                onEvent(data as ActivityEvent);
+              }
+            }, { signal });
+          if (pending) throw new V1Error(202, "unavailable", pending.impact);
+        } catch (error) {
+          if (signal.aborted || error instanceof SessionEndedError || (error instanceof V1Error && error.status < 500)) throw error;
+          console.error("Activity SSE error:", error);
         }
+        if (!signal.aborted && !isSessionEnded() && !done) await new Promise<void>((resolve) => {
+          const finish = () => { clearTimeout(timer); signal.removeEventListener("abort", finish); resolve(); };
+          const timer = setTimeout(finish, 1000);
+          signal.addEventListener("abort", finish, { once: true });
+        });
       }
-    } catch (e) {
-      if ((e as Error).name !== "AbortError" && !(e instanceof SessionEndedError)) {
-        console.error("Activity SSE error:", e);
-      }
+    } catch (error) {
+      if (!signal.aborted && !(error instanceof SessionEndedError)) console.error("Activity SSE error:", error);
     } finally {
       onDone?.();
     }
   })();
-
   return () => abortController.abort();
 }
 
