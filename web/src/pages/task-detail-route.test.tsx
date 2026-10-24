@@ -25,8 +25,8 @@ function detail(id: string) {
 function answer(url: string): unknown {
   const task = url.match(/\/api\/tasks\/(task-[a-z]+)$/);
   if (task) return detail(task[1]);
-  if (url.includes("/activity")) return { activity: [] };
-  if (url.includes("/conversation")) return { conversation: [] };
+  if (url === "/api/v1/tasks/activity") return { status: "ok", result: { activity: [] } };
+  if (url === "/api/v1/tasks/conversation") return { status: "ok", result: { rows: [], has_more: false } };
   if (url.endsWith("/projects")) return { projects: [] };
   return {};
 }

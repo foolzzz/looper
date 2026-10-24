@@ -352,7 +352,18 @@ class AgentHTTPServer:
             elif area is operator_auth.Access.AGENT:
                 await self._handle_agent_api(method, path, headers, body, writer)
             elif area is operator_auth.Access.CLIENT:
-                await self._handle_v1(method, path, query, headers, body, writer, principal)
+                if method == "POST" and path == "/api/v1/tasks/activity_stream":
+                    stream = asyncio.create_task(self._handle_v1(method, path, query, headers, body, writer, principal))
+                    disconnected = asyncio.create_task(reader.read())
+                    try:
+                        await asyncio.wait((stream, disconnected), return_when=asyncio.FIRST_COMPLETED)
+                    finally:
+                        for task in (stream, disconnected):
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(stream, disconnected, return_exceptions=True)
+                else:
+                    await self._handle_v1(method, path, query, headers, body, writer, principal)
             elif area is operator_auth.Access.OPERATOR:
                 await self._route_api(method, path, query, body, writer, headers)
             else:
@@ -776,10 +787,6 @@ class AgentHTTPServer:
     # --- API routing ---
 
     _RE_TASK_DETAIL = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)$")
-    _RE_TASK_ACTIVITY = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity$")
-    _RE_TASK_ACTIVITY_STREAM = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/stream$")
-    _RE_TASK_ACTIVITY_SEQ = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/(\d+)$")
-    _RE_TASK_CONVERSATION = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/conversation$")
     _RE_TASK_RUNS = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/runs$")
     _RE_ROLE_CONFIG = re.compile(r"^/api/roles/([a-zA-Z0-9_-]+)$")
     _RE_ROLE_CONFIG_RESET = re.compile(r"^/api/roles/([a-zA-Z0-9_-]+)/reset-prompt$")
@@ -868,14 +875,6 @@ class AgentHTTPServer:
             await self._handle_task_start(body, writer)
         elif path == "/api/tasks/delete" and method == "POST":
             await self._handle_task_delete(body, writer)
-        elif (m := self._RE_TASK_ACTIVITY_STREAM.match(path)) and method == "GET":
-            await self._handle_task_activity_stream(m.group(1), query, writer)
-        elif (m := self._RE_TASK_ACTIVITY_SEQ.match(path)) and method == "GET":
-            await self._handle_task_activity_detail(m.group(1), int(m.group(2)), writer)
-        elif (m := self._RE_TASK_ACTIVITY.match(path)) and method == "GET":
-            await self._handle_task_activity(m.group(1), query, writer)
-        elif (m := self._RE_TASK_CONVERSATION.match(path)) and method == "GET":
-            await self._handle_task_conversation(m.group(1), query, writer)
         elif (m := self._RE_TASK_RUNS.match(path)) and method == "GET":
             await self._handle_task_runs(m.group(1), writer)
         elif (m := self._RE_TASK_REQUIREMENT.match(path)) and method == "PUT":
@@ -1959,126 +1958,6 @@ class AgentHTTPServer:
     async def _task_workspaces(task_id: str, steps: list[dict[str, Any]], *,
                                in_worktree: bool = False) -> dict[str, Any] | None:
         return await projects.step_workspaces_view(task_id, steps, in_worktree=in_worktree)
-
-    async def _handle_task_activity(
-        self, task_id: str, query: dict[str, str], writer: asyncio.StreamWriter,
-    ) -> None:
-        """Without ``since``/``after``: the latest ``limit`` rows (``before``: those just before that seq), oldest
-        first, with ``has_more``, ``oldest_seq`` and ``latest_seq``. With one: the rows after it, as streaming reads
-        them."""
-        forward = query.get("after", query.get("since"))
-        try:
-            if forward is not None:
-                from ..db.activity import list_activity
-                rows = await list_activity(task_id, since_seq=int(forward), limit=min(int(query.get("limit", "100")), 500))
-                body: dict[str, Any] = {"activity": [_serialize(r) for r in rows]}
-            else:
-                from ..db.activity import WINDOW_LIMIT, activity_window
-                before = int(query["before"]) if "before" in query else None
-                window = await activity_window(task_id, before=before, limit=int(query.get("limit", WINDOW_LIMIT)))
-                body = {"activity": [_serialize(r) for r in window.pop("rows")], **window}
-        except ValueError:
-            writer.write(_json_response(HTTP_400, {"error": "since, after, before and limit must be integers"}))
-            await writer.drain()
-            return
-        except Exception:
-            body = {"activity": []}
-        writer.write(_json_response(HTTP_200, body))
-        await writer.drain()
-
-    async def _handle_task_activity_detail(
-        self, task_id: str, seq: int, writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            from ..db.activity import get_activity_detail
-            row = await get_activity_detail(seq)
-        except Exception:
-            row = None
-        if row is None:
-            writer.write(_json_response(HTTP_404, {"error": "activity not found"}))
-            await writer.drain()
-            return
-        writer.write(_json_response(HTTP_200, _serialize(row)))
-        await writer.drain()
-
-    async def _handle_task_activity_stream(
-        self,
-        task_id: str,
-        query: dict[str, str],
-        writer: asyncio.StreamWriter,
-    ) -> None:
-        """SSE stream for task activity with cursor-based gap replay."""
-        since = int(query.get("since", "0"))
-
-        sse_headers = (
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/event-stream\r\n"
-            "Cache-Control: no-cache\r\n"
-            "Connection: keep-alive\r\n"
-            "X-Accel-Buffering: no\r\n"
-            "\r\n"
-        )
-        writer.write(sse_headers.encode("utf-8"))
-        await writer.drain()
-
-        cursor = since
-        try:
-            from ..db.activity import list_activity
-            while True:
-                rows = await list_activity(task_id, since_seq=cursor, limit=500)
-                if not rows:
-                    break
-                for row in rows:
-                    data = json.dumps(_serialize(row), ensure_ascii=False)
-                    seq = row.get("seq", 0)
-                    writer.write(f"id: {seq}\nevent: activity\ndata: {data}\n\n".encode("utf-8"))
-                    await writer.drain()
-                    cursor = seq
-        except Exception:
-            pass
-
-        sub = self._broadcaster.subscribe(task_id)
-        try:
-            while True:
-                try:
-                    event = await asyncio.wait_for(sub.get(), timeout=20.0)
-                except asyncio.TimeoutError:
-                    writer.write(b": ping\n\n")
-                    await writer.drain()
-                    continue
-
-                if event is None:
-                    writer.write(b"event: done\ndata: {}\n\n")
-                    await writer.drain()
-                    break
-
-                data = json.dumps(event, ensure_ascii=False)
-                seq = event.get("seq", "")
-                line = f"id: {seq}\nevent: activity\ndata: {data}\n\n"
-                writer.write(line.encode("utf-8"))
-                await writer.drain()
-
-        except (ConnectionError, BrokenPipeError, asyncio.CancelledError):
-            pass
-        finally:
-            self._broadcaster.unsubscribe(task_id, sub)
-
-    async def _handle_task_conversation(
-        self, task_id: str, query: dict[str, str], writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            from ..db.activity import WINDOW_LIMIT, conversation_window
-            before = int(query["before"]) if "before" in query else None
-            window = await conversation_window(task_id, before=before, limit=int(query.get("limit", WINDOW_LIMIT)))
-            body: dict[str, Any] = {"conversation": [_serialize(r) for r in window.pop("rows")], **window}
-        except ValueError:
-            writer.write(_json_response(HTTP_400, {"error": "before and limit must be integers"}))
-            await writer.drain()
-            return
-        except Exception:
-            body = {"conversation": []}
-        writer.write(_json_response(HTTP_200, body))
-        await writer.drain()
 
     async def _handle_task_runs(self, task_id: str, writer: asyncio.StreamWriter) -> None:
         try:

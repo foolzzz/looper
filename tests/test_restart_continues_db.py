@@ -252,7 +252,7 @@ def restarted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             after = _wait(api, ids, lambda variant, detail: detail["status"] == "completed")
             with pytest.raises(EvalError, match="answered 409: .*the task is completed"):
                 api.post("/api/v1/tasks/agents", {"task_id": ids['agents'], "concurrency": {"worker": 2}})
-            activity = {variant: [row["summary"] for row in api.get(f"/api/tasks/{task_id}/activity", limit=500)[
+            activity = {variant: [row["summary"] for row in api.post("/api/v1/tasks/activity", {"task_id": task_id, "since": 0, "limit": 500})["result"][
                 "activity"]] for variant, task_id in ids.items()}
 
     return {"before": before, "after": after, "activity": activity, "state": state, "work": work,

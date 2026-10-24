@@ -47,8 +47,8 @@ describe("TaskDetailRoute manager attribution", () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (/\/api\/tasks\/task-a$/.test(url)) return Response.json({ ...detail("task-a"), ...extra });
-      if (url.includes("/activity")) return Response.json({ activity: [] });
-      if (url.includes("/conversation")) return Response.json({ conversation: [] });
+      if (url === "/api/v1/tasks/activity") return Response.json({ status: "ok", result: { activity: [] } });
+      if (url === "/api/v1/tasks/conversation") return Response.json({ status: "ok", result: { rows: [], has_more: false } });
       return Response.json({});
     }));
     await act(async () => root.render(<TaskDetailRoute taskId="task-a" onBack={() => {}} />));

@@ -40,8 +40,8 @@ describe("the task page heading", () => {
         return Response.json({ task_id: "task-a", title });
       }
       if (url.endsWith("/api/tasks/task-a")) return Response.json(detail(title));
-      if (url.includes("/activity")) return Response.json({ activity: [] });
-      if (url.includes("/conversation")) return Response.json({ conversation: [] });
+      if (url === "/api/v1/tasks/activity") return Response.json({ status: "ok", result: { activity: [] } });
+      if (url === "/api/v1/tasks/conversation") return Response.json({ status: "ok", result: { rows: [], has_more: false } });
       if (url.endsWith("/projects")) return Response.json({ projects: [] });
       return Response.json({});
     }));

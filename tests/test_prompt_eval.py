@@ -246,8 +246,6 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
                 return {"tasks": []}
             if path == "/api/tasks/task-eval":
                 return {"status": "completed", "steps": [{"id": "s1"}]}
-            if path == "/api/tasks/task-eval/activity":
-                return {"activity": []}
             if path == "/api/llm-records":
                 return {"records": self.records}
             if path.endswith("/events"):
@@ -256,6 +254,8 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
             return {"messages": self.messages}
 
         def post(self, path: str, body: Any) -> dict[str, Any]:
+            if path == "/api/v1/tasks/activity":
+                return {"status": "ok", "result": {"activity": []}}
             self.posts.append((path, body))
             if path == "/api/providers":
                 assert "api_key_env" not in body
@@ -891,6 +891,8 @@ def test_vault_tasks_enable_the_project_and_read_back_their_commits(
     logs: list[Path] = []
 
     def post(path: str, body: Any) -> dict[str, Any]:
+        if path == "/api/v1/tasks/activity":
+            return {"status": "ok", "result": {"activity": [{"kind": "phase", "summary": "Vault closeout: done"}]}}
         posts.append((path, body))
         if path == "/api/tasks/start":
             for name, content in task.fake["attempts"]["s1"][0]["files"].items():
@@ -902,7 +904,7 @@ def test_vault_tasks_enable_the_project_and_read_back_their_commits(
             return {"status": "completed", "steps": [{}]}
         if path == "/api/llm-records":
             return {"records": []}
-        return {"activity": [{"kind": "phase", "summary": "Vault closeout: done"}]}
+        raise AssertionError(path)
 
     def git(directory: Path, *args: str) -> str:
         logs.append(directory)
@@ -1510,6 +1512,8 @@ def test_run_task_pushes_fixes_without_resuming_the_pr_wait(
     posted: list[tuple[str, Any]] = []
 
     def post(path: str, body: Any) -> dict[str, Any]:
+        if path == "/api/v1/tasks/activity":
+            return {"status": "ok", "result": {"activity": []}}
         posted.append((path, body))
         return {"task_id": "t1", "project_id": "p1"} if path == "/api/tasks/create" else {}
 
@@ -1520,8 +1524,7 @@ def test_run_task_pushes_fixes_without_resuming_the_pr_wait(
             return {"records": records}
         if path.startswith("/api/llm-records/"):
             return {"events": events[int(path.split("/")[-2])]}
-        assert path == "/api/tasks/t1/activity"
-        return {"activity": []}
+        raise AssertionError(path)
 
     monkeypatch.setattr(runner.time, "time", lambda: 104.0)
     result = runner.run_task(SimpleNamespace(post=post, get=get), task, tmp_path, timeout=10, poll=0,
@@ -2105,6 +2108,8 @@ class _CostlyApi:
         self.cancelled = False
 
     def post(self, path: str, body: Any) -> Any:
+        if path == "/api/v1/tasks/activity":
+            return {"status": "ok", "result": {"activity": []}}
         self.posts.append((path, body))
         if path == "/api/tasks/cancel":
             self.cancelled = True
@@ -2118,7 +2123,7 @@ class _CostlyApi:
             return {"status": status, "phase": "executing", "steps": [], "cost": {"cost_usd": self.cost}}
         if path == "/api/llm-records":
             return {"records": []}
-        return {"activity": [], "events": []}
+        return {"events": []}
 
 
 def test_a_task_is_cancelled_when_it_reaches_the_cap_left(tmp_path: Path) -> None:
