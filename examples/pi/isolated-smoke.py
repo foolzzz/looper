@@ -274,7 +274,7 @@ def session_smoke(base, token, root, work, output, provider, *, helper, installe
     def task(marker):
         task_id = request(base, "/api/tasks/create", token, "POST", {
             "project_id": project_id, "requirement": marker})["task_id"]
-        request(base, "/api/tasks/start", token, "POST", {"task_id": task_id})
+        request(base, "/api/v1/ops/task_control/start", token, "POST", {"task_id": task_id})
         return task_id
 
     try:
@@ -352,7 +352,7 @@ print(json.dumps({'pids': list(tree), 'groups': list(set(tree.values()))}))
         evidence["cancel_tree"] = tree
         cancelled_token = grants["worker"]["token"]
         count_before = len([r for r in provider["requests"] if r["role"] == "worker"])
-        request(base, "/api/tasks/cancel", token, "POST", {"task_id": cancelled})
+        request(base, "/api/v1/ops/task_control/cancel", token, "POST", {"task_id": cancelled})
         wait(lambda: request(base, "/api/tasks/" + cancelled, token)["status"] == "cancelled", "task not cancelled")
         wait(lambda: all(r["status"] != "running" for r in records()), "cancel left running records")
         def reaped():

@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.69] - 2026-10-24
+
+### Changed
+
+- **The dashboard overview, task controls, task titles and task requirements move to the versioned API.** `system.overview` (`POST /api/v1/system/overview`), `task_control.start`, `stop`, `restart`, `start_over` and `cancel` (`POST /api/v1/ops/task_control/<action>`), `task_update` (`POST /api/v1/ops/task_update`) and `tasks.requirement_update` (`POST /api/v1/tasks/requirement_update`) replace seven legacy HTTP methods (`GET /api/overview`, `POST /api/tasks/cancel`, `/stop` and `/start`, `POST /api/tasks/{id}/start`, `PUT /api/tasks/{id}/requirement` and `/title`), which are removed; the dashboard uses the new routes. An API client's requirement edit needs a second-step confirmation. Starting a ready task no longer checks the work directory first. A message sent to a dispatched Worker before its input channel opens now waits for startup instead of being dropped. Manager prompts and tools are unchanged. ([#491](https://github.com/foolzzz/looper/pull/491))
+
 ## [2.13.68] - 2026-10-24
 
 ### Changed
