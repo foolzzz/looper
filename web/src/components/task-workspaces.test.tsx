@@ -135,15 +135,17 @@ describe("TaskWorkspaceField", () => {
   it("clears the base when Default resolves to an in-place project", async () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.useFakeTimers();
-    const requests: URL[] = [];
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
-      const url = new URL(String(input), "http://localhost");
-      requests.push(url);
-      return new Response(JSON.stringify({
-        workspace: "/srv/calc", mode: url.searchParams.get("mode") || "in_place", default_mode: "in_place",
+    const requests: Record<string, string>[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init: RequestInit) => {
+      expect(String(input)).toBe("/api/v1/workspaces/check");
+      expect(init.method).toBe("POST");
+      const body = JSON.parse(String(init.body));
+      requests.push(body);
+      return Response.json({ status: "ok", result: {
+        workspace: "/srv/calc", mode: body.mode || "in_place", default_mode: "in_place",
         git: { repository: "/srv/calc", branch: "main", head: "a".repeat(40) },
         warnings: [], notes: { found: false, files: [], omitted: [] },
-      }), { status: 200 });
+      } });
     }));
     let choice: WorkspaceChoice = { mode: "", base: "" };
     function Form() {
@@ -176,7 +178,7 @@ describe("TaskWorkspaceField", () => {
       expect(choice).toEqual({ mode: "", base: "" });
       expect(container.querySelector("input")).toBeNull();
       await act(async () => { await vi.advanceTimersByTimeAsync(400); });
-      expect(requests.at(-1)?.searchParams.has("base")).toBe(false);
+      expect(requests.at(-1)).not.toHaveProperty("base");
     } finally {
       act(() => root.unmount());
       vi.useRealTimers();

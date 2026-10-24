@@ -8,7 +8,6 @@ at a disposable database.
 
 from __future__ import annotations
 
-import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +18,7 @@ import pytest
 from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
 from tests.db_support import DSN, run_db
 from tests.test_ops_tasks_db import _project, _task
-from tests.test_usage_api_db import _Writer
+from tests.test_continue_at_cap_db import _call
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -51,10 +50,8 @@ def test_waiting_is_in_progress_found_active_and_kept(monkeypatch: pytest.Monkey
             task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())),
         )
         for task_id in ("task-run", "task-wait"):
-            writer = _Writer()
-            await server._route_api("POST", "/api/tasks/delete", {},
-                                    json.dumps({"task_id": task_id}).encode(), writer)
-            assert writer.data.startswith(b"HTTP/1.1 400") and b"stop the task before deleting" in writer.data
+            status, body = await _call(server, "POST", "/api/v1/tasks/delete", {"task_id": task_id})
+            assert status == 400 and "stop the task before deleting" in body["error"]
         assert await pool.fetchval("SELECT count(*) FROM tasks") == 2
 
     run_db(test, monkeypatch)

@@ -714,12 +714,8 @@ export async function cancelTask(taskId: string): Promise<void> {
 }
 
 export async function deleteTask(taskId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/tasks/delete`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ task_id: taskId }),
-  });
-  if (!res.ok) throw new Error(`delete ${res.status}`);
+  const result = await callV1<{ deleted: string }>("/api/v1/tasks/delete", { task_id: taskId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   notifyProjectsChanged();
 }
 
@@ -758,10 +754,10 @@ export async function continueTaskAtCap(taskId: string, taskBudgetUsd: number): 
 
 /** Drop a step worktree a task that is not running keeps: its directory and branch are deleted. */
 export async function discardStepWorkspace(taskId: string, workspaceId: number): Promise<StepWorkspace> {
-  const res = await fetch(
-    `${API_BASE}/tasks/${encodeURIComponent(taskId)}/workspaces/${workspaceId}/discard`, { method: "POST" });
-  if (!res.ok) await failed(res, "discard");
-  return (await res.json()).workspace;
+  const result = await callV1<{ workspace: StepWorkspace }>("/api/v1/workspaces/discard",
+    { task_id: taskId, workspace_id: workspaceId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.workspace;
 }
 
 export interface NewProjectFields extends Partial<ProjectExecution> {
@@ -833,10 +829,9 @@ export async function checkWorkspace(
   params: { dir?: string; project_id?: string; mode?: WorkspaceMode; base?: string },
   signal?: AbortSignal,
 ): Promise<WorkspaceCheck> {
-  const query = new URLSearchParams(Object.entries(params).filter(([, v]) => v) as [string, string][]);
-  const res = await fetch(`${API_BASE}/workspaces/check?${query}`, { signal });
-  if (!res.ok) await failed(res, "check");
-  return res.json();
+  const result = await callV1<WorkspaceCheck>("/api/v1/workspaces/check", params, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** A task's workspace as its page shows it. */
