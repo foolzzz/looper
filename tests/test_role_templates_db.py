@@ -256,7 +256,7 @@ def test_a_version_is_written_only_on_top_of_the_one_its_writer_read(monkeypatch
 
 
 async def _skill(name: str) -> str:
-    status, answer = await _call("POST", "/api/catalog/skills", {"name": name, "description": f"{name}.",
+    status, answer = await _catalog_call("POST", "/api/v1/catalog_sources/create_skill", {"name": name, "description": f"{name}.",
                                                                  "content": f"Reply {name}.\n"})
     assert status in (200, 201), answer
     return answer["item"]["item_id"]

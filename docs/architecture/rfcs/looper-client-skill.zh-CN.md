@@ -91,7 +91,9 @@
 
 **类型化的结果：** 状态投影有独立 schema，不新增 Manager Tool。未完成领域的工具结果继续显式标记未类型化，各领域通过 `RESULTS` 补齐。任务配置领域补齐 `concurrency` 的 before/after、任务覆盖与默认值类型；控制台的 `tasks.configure`、`tasks.move`、`tasks.agents`、`tasks.continue` 单独声明完整结果（Agent 选择含 Profile、生效模式和并发来源），不新增模型工具。阶段 1 给 agent 用的操作写出 `result` 的 schema（顶层每个键的类型，`additionalProperties: true`）：`tasks.list`、`tasks.get`、`task_pipeline`、`task_create`、`task_control.*`、`task_update`、`task_instruct`、`gates.*`、`agent_profiles.list`、`overview`、`confirm`、`whoami`、聊天三个。任务交互领域补齐 `tasks.room` 的紧凑结果，以及 `waits.resume/cancel`、`tasks.role_update`、`tasks.room_view` 的完整 DTO；完整 Room 保留正文与咨询字段。其余操作的 `result` 暂为 `{"type": "object"}` 并标 `x-looper-result-typed: false`，测试列出这些操作，阶段 2 把列表清空。
 
-目录条目与安装提供 `catalog_items.list/get/update/delete`、`installs.create/update/delete/project`，均为 `hand=false` 的普通 JSON 操作。完整目录、详情、安装与项目安装 DTO 保留文件、归属及继承信息；现有 `catalog.list/install/update/uninstall` 的请求和路径不变，compact 回答分别类型化，列表用 `oneOf` 区分全局与项目。获取来源的迁移另行交付。项目自有 skill 由 `project_skills.add/get/update/delete` 提供，复用完整 `ProjectInstalls`、`CatalogItem`、`Install` 投影及 `ProjectSkill`；请求标识为必填字符串，更新字段非空且不接受 `enabled`，开关走 `installs.update`。名称、描述、正文和项目数量限制沿用 `project_skills` 核心常量。
+目录条目与安装提供 `catalog_items.list/get/update/delete`、`installs.create/update/delete/project`，均为 `hand=false` 的普通 JSON 操作。完整目录、详情、安装与项目安装 DTO 保留文件、归属及继承信息；现有 `catalog.list/install/update/uninstall` 的请求和路径不变，compact 回答分别类型化，列表用 `oneOf` 区分全局与项目。获取来源由 `catalog_sources.import_machine/import_mcp/upload/git_preview/git_import/create_skill/create_mcp` 提供，复用 `Catalog`、`CatalogItem`、`McpConfig`，补齐 `GitPreview`、`GitImport` 和跳过条目 DTO；预览不写库，导入必填预览 commit 与非空选中项。MCP 输入的 env/headers 标为 writeOnly，输出沿用遮罩。项目自有 skill 由 `project_skills.add/get/update/delete` 提供，复用完整 `ProjectInstalls`、`CatalogItem`、`Install` 投影及 `ProjectSkill`；请求标识为必填字符串，更新字段非空且不接受 `enabled`，开关走 `installs.update`。名称、描述、正文和项目数量限制沿用 `project_skills` 核心常量。
+
+渠道身份与人员发现由 `channels.status/people` 提供：`channel_type` 为 `lark` 或 `lark_bot`，可选 `channel_id` 省略时使用对应内置 bot，显式 id 保留新增 bot 归属。返回完整 `LarkStatus`（含拒绝发送者及 bot 不可用的 null）和 `LarkPerson`；lark-cli 未给 `complete` 时归一为 true，外部查询失败为 `unavailable`，未知或类型不符的渠道为 404，非法查询为 400。`gate_settings.get/update` 返回完整通知目标投影；更新为 high，客户端同会话确认、操作者单次执行，确认影响列出目标，执行时由原服务重验启用状态与白名单。四个操作均为 `hand=false`，控制台与生成 CLI 共用。
 
 全局角色由 `roles.list/get/update/reset_prompt` 提供，完整 `RoleConfig` 只接受核心允许修改的字段，未知、只读、已移走或删除的字段明确拒绝并给 v1 操作提示。`agent_settings.get/update_system/update_role` 返回完整层值、生效 Profile、值与来源及各项限制，保留 null/空值继承、环境列表整体替换和角色提示词模式；共享 schema 供项目层等领域复用。`settings.set` 补齐实际 compact 结果类型，`settings.view` 和设置页的定时、等待、知识库结果另行迁移。
 
@@ -113,11 +115,13 @@
 | 配置、项目归属、Agent 选择、预算续跑 | `POST /api/v1/tasks/configure`、`move`、`agents`、`continue` | Agent 选择与 `looper_task_update` 共用服务；并发工具请求不变 | 配置抽取无 writer 核心；其余共用 `projects`，移动同步 live router，并发变更唤醒等待者 | 四个旧方法删除；普通写直接执行，续跑为 high，明确任务独立额度或项目每任务额度的影响范围 |
 | 补充说明 | `POST /api/chat/send` 发给 Planner | `looper_task_instruct` | 共用 `projects.add_task_supplement`（存储加唤醒） | 已实现；每次写一行、唤醒一次，聊天保留 `USER_MESSAGE` 的补充 id 和回复关联，工具保留 `TASK_CHANGE` 与现有结果 |
 | 关卡留言、结束 | `POST /api/v1/ops/gates/reply`、`end` | `looper_task_gate_reply`、`looper_gates` reply/end | 共用 `gate_service.post_message` | 旧控制台方法删除；客户端来源由认证确定，无 Planner 时保存待续跑 |
+| Lark 身份、人员与关卡通知设置 | `POST /api/v1/channels/status`、`channels/people`、`gate_settings/get`、`gate_settings/update` | 无新增 Tool | 共用 `channels.lark_settings/lark_bot_settings` 与 `gate_service` | 六个旧 GET/PUT 方法删除；channel-configs 配置核心不变 |
 | 关卡列表、讨论 | `POST /api/v1/ops/gates/list`、`messages` | `looper_gates` list/messages | 共用 `gate_service.list_gates`、`thread` | 旧方法删除；控制台通过现有 offset 分页保留加载边界，不扩展 Tool schema |
 | 等待、任务角色、办公台 | `POST /api/v1/waits/resume`、`cancel`、`tasks/role_update`、`tasks/room_view` | `tasks.room` 保留紧凑只读投影 | 共用 `wait_service`、`role_api`、`room.task_view` | 普通写走 ClientOps 审计；完整办公台保留正文和咨询，角色 `via=user` 表示明确人工编辑 |
 | 总览 | `GET /api/overview` | `looper_overview` | 共用 `overview.build_overview` | 不变 |
 | 项目、Profile、provider、模型、项目设置层、可选 Profile、定时任务、花费 | 各自的路由 | 各自的工具 | 共用 `projects`、`profile_registry`、`catalog`、`agent_settings`、`schedules`、`llm_records` | 不变（这些工具建时就要求调控制台的代码） |
 | 目录条目与安装 | `catalog_items.*`、`installs.*`（v1） | `looper_catalog` | 沿用 `catalog` 事务与安装普通写策略，删除目录条目为 high 并重验归属 | 控制台和客户端共用；MCP/skill 更新只认操作者，回答遮罩秘密 |
+| 目录获取来源 | `catalog_sources.*`（v1） | 无新增 Tool | 共用 `library.import_from_machine`、`mcp.import_from_machine/create`、`catalog_sources` 上传与 Git 服务 | 七个旧 POST 删除；本机/MCP 导入与 MCP 新建只认操作者，不审计凭据；客户端 Git 导入为 high，确认覆盖执行时的同源内容（包括本地修改），commit 漂移整批拒绝 |
 | 项目自有 skill | `project_skills.add/get/update/delete`（v1） | 无新增 Tool | 共用 `project_skills` 归属校验与事务 | 控制台与客户端共用完整结果；删除列明所有安装项目，确认执行时重读实际引用并级联删除安装 |
 | 全局角色与设置 | `roles.*`、`agent_settings.*`（v1） | `looper_settings` 保持原接口 | 共用 `role_configs`、`agent_settings` 与既有风险判断 | 共享默认值、角色并发及提高或解除生效花费上限对客户端需确认；操作者单次执行，降低额度普通写；并发改后仅重新检查等待者，不终止运行者 |
 | 配置导出、导入 | `GET /api/config/export`、`/api/config/imports` | `looper_config_export` | 阶段 2a：v1 与旧路由、工具共用 `config_transfer` 和 `ConfigImports` | 已交付：`loopercli config export` / `import` 调 v1；旧控制台路由保留 |
@@ -290,10 +294,10 @@ v1 配置预览收 `{document: <配置对象>}`，和控制台一样最多 256 M
 | 任务 | 配置、归属、Agent 选择与预算续跑已迁入 v1；领域/OpenAPI 140 项、web 30 项、隔离 serve 与桌面/窄屏验证通过；历史回归 3 项首轮失败、隔离重跑通过，最终失败 0；完整套件未跑，留给 CI；其余任务入口待迁移，共享任务核心 [#429](https://github.com/foolzzz/looper/pull/429) 单独跟踪 |
 | 聊天 | 待迁移 |
 | 项目与知识 | 待迁移 |
-| 能力目录 | 目录条目与安装已迁移：完整 DTO 与 compact Tool 结果类型化，控制台改走 v1，八个旧方法删除；上传、导入路由保留。此前目录与安装的 249 项定向测试、隔离 serve 与桌面/390px 验收通过（其 session-ended/abort 未单独实测）；项目自有 skill 四个操作已迁移，沿用默认启用、核心限制及事务，删除列明跨项目安装影响并重验引用。本次相关定向 pytest 218 项及前端构建通过，隔离 serve 与 1280/390px 浏览器增改、开关、删除、错误、abort、session-ended 验收通过，旧 skill 路由请求为 0；独立 Vitest 专项因 worker 启动超时未取得有效通过结果，完整套件留给 CI |
+| 能力目录 | 目录条目与安装已迁移：完整 DTO 与 compact Tool 结果类型化，控制台改走 v1，八个旧方法删除。此前目录与安装的 249 项定向测试、隔离 serve 与桌面/390px 验收通过（其 session-ended/abort 未单独实测）；项目自有 skill 四个操作已迁移，沿用默认启用、核心限制及事务，删除列明跨项目安装影响并重验引用。本次相关定向 pytest 218 项及前端构建通过，隔离 serve 与 1280/390px 浏览器增改、开关、删除、错误、abort、session-ended 验收通过，旧 skill 路由请求为 0；独立 Vitest 专项因 worker 启动超时未取得有效通过结果，完整套件留给 CI；目录获取来源七操作与控制台同步迁移，七个旧 POST 删除，凭据入口只认操作者并脱敏，客户端 Git 导入统一 high 确认且固定预览 commit。此轮验证通过：相关定向 pytest 386 项（分批执行，初轮失败修复后对应重跑通过）、前端 30 项、构建与隔离 serve 的 1440/390px 浏览器流程（含错误、空态、abort、session-ended）；最终失败 0、跳过 0；完整套件未跑，留给 CI |
 | Agent 与 Profile | 待迁移 |
 | 管家与模板 | 待迁移 |
-| 渠道 | 待迁移 |
+| 渠道 | Lark 身份/人员发现与 dashboard 关卡通知设置已迁移：四个普通 v1 操作、完整 DTO、六个旧方法删除，控制台与生成 CLI 同步；操作者单次执行，客户端 high 同会话确认并在执行时重验目标。新增契约、文档及既有调用方的 202 项定向 pytest 与 web 39 项（含共享 v1 传输）、TypeScript 检查通过；隔离全应用 serve 的 29 个 HTTP 请求通过。渠道配置等其余部分待迁移，1280/768px 浏览器以假适配器验收身份问题、搜索结果/空/错误、目标保存/清空及 abort/session-ended 通过（无消息发送）；完整套件留给 CI |
 | 文件与 Git | 待迁移 |
 | 设置 | 全局角色与设置层已迁入 v1，七个旧方法删除；通过：领域、认证、CLI/OpenAPI 163 项（含新增领域 34 项），前端 30 项与构建，既有调用方定向回归、隔离 serve 与替身 DSH/Manager 链路、1280/390px 浏览器增改/重置/生效读回及错误/空态/中止/会话过期检查；最终失败 0（首轮旧文案与夹具不兼容已修复）。未测：完整套件、其余未重跑的 DB/fake eval 分支和 installed 真实运行时；其余设置页仍待迁移 |
 | 运行记录与活动流 | 待迁移 |
@@ -308,7 +312,9 @@ v1 配置预览收 `{document: <配置对象>}`，和控制台一样最多 256 M
 - `/api/v1/` 的普通操作也接受操作者身份；操作者的 `high` 单次执行，客户端令牌仍须两步确认。控制台确认弹窗与可见行为不变。状态及服务就绪探测改走 v1，旧状态 GET 删除；Telegram/Lark 继续使用未改动的 Manager ops/services。配置命令迁移是阶段 2a 单独列出的行为变化。
 - 任务配置仍仅 `init` 可改，需求保留版本、目录解析后读回；项目移动支持原有状态并同步运行中的归属。Agent 选择保留完成任务不可改、null 清除与降低并发不中断运行者的行为，升高并发仍是普通写。预算续跑只接受预算失败且新额度高于已花费的任务，发送一次 `AT_CAP` 重启；有独立额度时只改该任务，否则改项目每任务额度，影响其他任务；客户端确认绑定当时的项目与额度作用范围，确认前变更则拒绝，要求重新请求。四个旧方法返回 404，控制台与生成式 CLI 同步迁移。闭合请求 schema 在服务前拒绝未知字段、角色及错误类型，错误文案改为 schema 校验失败；配置或额度写入失败返回错误，不作已完成。
 - 目录条目与安装的八个旧 HTTP 方法已删除；控制台改走 v1 并保留原有弹窗。目录删除对客户端为 high 两步确认，卸载仍与原 `catalog` Tool 共用普通写策略；条目更新只认操作者，避免 MCP 环境变量或 header 秘密进入凭据审计。
+- 目录获取来源的七个旧 POST 删除，控制台和生成式 CLI 改走 `catalog_sources.*`；不新增 Manager Tool，Telegram/Lark 继续使用原有 ops/services。Git 导入要求预览 commit 与选中子集；漂移返回 409，事务不写入任何选中项。客户端 Git 导入统一 high 两步确认，覆盖范围包含执行时的本地修改（避免 clone 期间编辑绕过确认），操作者单次执行且保留控制台既有确认。预览只读，上传和新建仍安装到零处，归档与 URL 安全规则不变。本机/MCP 导入和 MCP 新建只认操作者，在校验前拒绝客户端且不记录请求/结果审计。
 - 项目自有 skill 的旧 POST/GET/PUT/DELETE 方法已删除，控制台与生成的 `loopercli project-skills add|get|update|delete` 改走 v1。新增仍默认启用，显式 `false` 保留；只修改提供的字段。删除为 high，影响覆盖其他项目的安装：客户端须同会话确认，操作者单次执行，控制台保留既有确认弹窗。Telegram/Lark 的 Manager ops/services 与模型可见内容不变。
+- Lark 身份/人员发现及 dashboard 关卡通知设置改走 v1，六个旧方法删除；控制台可见行为保持，lark-cli 的缺省 `complete` 明确为 true，外部人员查询失败改为类型化 503 `unavailable`（原为 502），不伪装为空结果。Telegram/Lark 仍走原 Manager ops/services，不新增模型可见 Tool。
 - 管家：只有客户端的消息多一种渠道行。
 - 默认管家：客户端对话里建的任务把接受和结束写回那个线程（控制台对话里建的不变）。
 - 关卡通知和进度不变：照旧走全局通知目标，不进客户端的对话。
