@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.68] - 2026-10-24
+
+### Changed
+
+- **Scenario Managers and task templates move to the versioned API.** `managers.list`, `managers.create`, `managers.update`, `managers.delete`, `manager_templates.put` and `manager_templates.delete` under `/api/v1/` replace six legacy HTTP methods (`GET`/`POST /api/managers`, `PUT`/`DELETE /api/managers/{id}`, `PUT`/`DELETE /api/managers/{id}/templates/{key}`), which are removed; the dashboard uses the new routes. Creating a Manager now answers 200 instead of 201. An API client's definition or template write needs a second-step confirmation. Manager prompts and tools are unchanged. ([#487](https://github.com/foolzzz/looper/pull/487))
+
 ## [2.13.67] - 2026-10-24
 
 ### Changed

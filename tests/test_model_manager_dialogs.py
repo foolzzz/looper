@@ -276,7 +276,8 @@ def test_repricing_keeps_historical_spend_and_other_protocol_price(monkeypatch, 
 @pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"), reason="disposable PostgreSQL unavailable")
 @pytest.mark.parametrize("dialog_id", ["provider_key", "config_tools", "task_cost", "schedule_planner_profile",
                                        "model_custom", "model_dual_protocol", "model_login_runtime",
-                                       "model_missing_endpoint", "model_price_history"])
+                                       "model_missing_endpoint", "model_price_history", "template_review_task",
+                                       "template_missing_input"])
 def test_targeted_model_dialogs_run_through_fake_manager_and_database(tmp_path, dialog_id):
     cases = dialogs.select([dialog_id])
     result, path = dialogs.run(mode="fake", dialogs=cases, admin_url=os.environ["LOOPER_TEST_DATABASE_URL"],
@@ -469,8 +470,8 @@ def test_review_seed_creates_the_manager_and_its_template_in_the_project():
 
     api = Api()
     dialogs._seed_review_manager(api, "project-x")
-    assert api.calls[0][:2] == ("POST", "/api/managers") and api.calls[0][2]["key"] == "code-review"
-    assert api.calls[1][:2] == ("PUT", "/api/managers/manager-code-review/templates/pr_review")
+    assert api.calls[0][:2] == ("POST", "/api/v1/managers/create") and api.calls[0][2]["key"] == "code-review"
+    assert api.calls[1][:2] == ("POST", "/api/v1/manager_templates/put")
     assert api.calls[1][2]["project_id"] == "project-x"
 
 
