@@ -473,7 +473,7 @@ def run_cell(api: Api, database_url: str, cell: Cell, rep: int, work: Path, cloc
     before = (api.get("/api/manager/session") or {}).get("session_id")
     nxt = f"stop-next-{uuid.uuid4().hex[:8]}"
     api.post("/api/chat/send", {"text": "Say hi in one word.", "session_id": session, "message_id": nxt})
-    reply = _wait(lambda: next((m for m in api.get("/api/chat/messages", session_id=session)["messages"]
+    reply = _wait(lambda: next((m for m in api.post("/api/v1/operator_chat/messages", {"session_id": session})["result"]["messages"]
                                 if m.get("message_id") == f"{nxt}:reply"), None), 180)
     after_id = (api.get("/api/manager/session") or {}).get("session_id")
     obs = Observation(

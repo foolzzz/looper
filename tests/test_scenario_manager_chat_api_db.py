@@ -90,9 +90,14 @@ async def _call(fleet: _Fleet, web: _Web, method: str, path: str, body: Any = No
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
     writer = _Writer()
     raw = b"" if body is None else json.dumps(body).encode()
-    await server._route_api(method, path, query or {}, raw, writer)
+    if path.startswith("/api/v1/"):
+        from looper.agents.api_v1 import OPERATOR
+        await server._handle_v1(method, path, {}, {}, raw, writer, OPERATOR)
+    else:
+        await server._route_api(method, path, query or {}, raw, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload)
+    answer = json.loads(payload)
+    return int(head.split()[1]), answer.get("result", answer) if path.startswith("/api/v1/") else answer
 
 
 async def _setup(pool: Any) -> tuple[_Fleet, _Web, _Stub, _Stub]:
@@ -115,7 +120,7 @@ def _send(session_id: str, manager: str | None, text: str = "hello") -> dict[str
 def test_targets_list_the_running_managers_with_names(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         fleet, web, _, _ = await _setup(pool)
-        status, answer = await _call(fleet, web, "GET", "/api/chat/targets")
+        status, answer = await _call(fleet, web, "POST", "/api/v1/operator_chat/targets", {})
         managers = [t for t in answer["targets"] if t["kind"] == "manager"]
         assert status == 200 and managers == [
             {"kind": "manager", "id": "manager", "name": "Manager", "can_send": True},
@@ -220,17 +225,17 @@ def test_each_manager_lists_its_own_conversations(monkeypatch: pytest.MonkeyPatc
         await chat.claim_thread("s-rev", "manager-review")
 
         async def ids(query: dict[str, str]) -> list[str]:
-            status, answer = await _call(fleet, web, "GET", "/api/chat/sessions", query=query)
+            status, answer = await _call(fleet, web, "POST", "/api/v1/operator_chat/sessions", query)
             assert status == 200, answer
             return sorted(s["session_id"] for s in answer["sessions"])
 
         assert await ids({}) == ["s-def", "s-old"]
         assert await ids({"manager": "manager-review"}) == ["s-rev"]
         assert await ids({"manager": "manager-review", "session_id": "s-rev"}) == ["s-rev"]
-        status, answer = await _call(fleet, web, "GET", "/api/chat/sessions", query={"session_id": "s-rev"})
-        assert status == 409 and answer["manager_id"] == "manager-review"
-        status, answer = await _call(fleet, web, "GET", "/api/chat/sessions", query={"manager": "manager-nope"})
-        assert status == 404 and answer == {"error": "no Manager 'manager-nope'"}
+        status, answer = await _call(fleet, web, "POST", "/api/v1/operator_chat/sessions", {"session_id": "s-rev"})
+        assert status == 409 and answer["error"]["details"]["manager_id"] == "manager-review"
+        status, answer = await _call(fleet, web, "POST", "/api/v1/operator_chat/sessions", {"manager": "manager-nope"})
+        assert status == 404 and answer["error"]["code"] == "not_found"
 
     run_db(test, monkeypatch)
 
@@ -246,32 +251,34 @@ def test_another_managers_thread_is_named_never_listed_or_read_as_a_new_one(monk
         await chat.claim_thread("s-claimed", "manager")  # claimed by a send whose message is not saved yet
 
         async def get(path: str, query: dict[str, str]) -> tuple[int, Any]:
+            if path.startswith("/api/v1/"):
+                return await _call(fleet, web, "POST", path, query)
             return await _call(fleet, web, "GET", path, query=query)
 
         for session_id in ("s-old", "s-def", "s-claimed"):
-            status, answer = await get("/api/chat/sessions", {"manager": "manager-review", "session_id": session_id})
+            status, answer = await get("/api/v1/operator_chat/sessions", {"manager": "manager-review", "session_id": session_id})
             assert status == 409, (session_id, answer)
-            assert answer == {"error": "this conversation belongs to Manager Manager: open it there or start a new "
-                                       "one", "manager_id": "manager"}
-            status, answer = await get("/api/chat/messages", {"manager": "manager-review", "session_id": session_id})
-            assert status == 409 and answer["manager_id"] == "manager" and "messages" not in answer
+            assert answer["error"]["details"]["manager_id"] == "manager"
+            status, answer = await get("/api/v1/operator_chat/messages", {"manager": "manager-review", "session_id": session_id})
+            assert status == 409 and answer["error"]["details"]["manager_id"] == "manager" and "messages" not in answer
         # A new id is a new thread: the empty list, no messages.
-        assert await get("/api/chat/sessions", {"manager": "manager-review", "session_id": "s-new"}) == (
+        assert await get("/api/v1/operator_chat/sessions", {"manager": "manager-review", "session_id": "s-new"}) == (
             200, {"sessions": []})
-        assert await get("/api/chat/messages", {"manager": "manager-review", "session_id": "s-new"}) == (
+        assert await get("/api/v1/operator_chat/messages", {"manager": "manager-review", "session_id": "s-new"}) == (
             200, {"messages": []})
         # No `manager` is the default Manager: a scenario Manager's thread is not read through it, by messages or events.
         await _say(pool, "s-rev")
         await chat.claim_thread("s-rev", "manager-review")
-        for path, key in (("/api/chat/messages", "session_id"), ("/api/chat/events", "session")):
+        for path, key in (("/api/v1/operator_chat/messages", "session_id"), ("/api/chat/events", "session")):
             status, answer = await get(path, {key: "s-rev"})
-            assert status == 409 and answer["manager_id"] == "manager-review" and "messages" not in answer
+            details = answer["error"]["details"] if path.startswith("/api/v1/") else answer
+            assert status == 409 and details["manager_id"] == "manager-review" and "messages" not in answer
         status, answer = await get("/api/chat/events", {"session": "s-old", "manager": "manager-review"})
         assert status == 409 and answer["manager_id"] == "manager"
         # Its owner reads it.
-        status, answer = await get("/api/chat/sessions", {"session_id": "s-def"})
+        status, answer = await get("/api/v1/operator_chat/sessions", {"session_id": "s-def"})
         assert status == 200 and [s["session_id"] for s in answer["sessions"]] == ["s-def"]
-        status, answer = await get("/api/chat/messages", {"manager": "manager", "session_id": "s-def"})
+        status, answer = await get("/api/v1/operator_chat/messages", {"manager": "manager", "session_id": "s-def"})
         assert status == 200 and len(answer["messages"]) == 1
 
     run_db(test, monkeypatch)
@@ -287,9 +294,9 @@ def test_a_deleted_managers_threads_are_in_no_list(monkeypatch: pytest.MonkeyPat
         assert await managers.delete_manager("manager-review") == "deleted"
         fleet._agents.pop("manager-review")
 
-        status, answer = await _call(fleet, web, "GET", "/api/chat/sessions")
+        status, answer = await _call(fleet, web, "POST", "/api/v1/operator_chat/sessions", {})
         assert status == 200 and answer["sessions"] == []
-        status, _ = await _call(fleet, web, "GET", "/api/chat/sessions", query={"manager": "manager-review"})
+        status, _ = await _call(fleet, web, "POST", "/api/v1/operator_chat/sessions", {"manager": "manager-review"})
         assert status == 404
         status, answer = await _call(fleet, web, "POST", "/api/chat/send", _send("s-rev", None))
         assert status == 409 and "deleted Manager" in answer["error"]

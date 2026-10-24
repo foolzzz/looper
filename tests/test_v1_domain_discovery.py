@@ -31,6 +31,7 @@ channels.status channels.people gate_settings.get gate_settings.update managers.
 managers.update managers.delete manager_templates.put manager_templates.delete
 schedule_admin.list schedule_admin.project_list schedule_admin.get schedule_admin.preview
 schedule_admin.runs schedule_admin.notifications
+operator_chat.targets operator_chat.sessions operator_chat.messages operator_chat.save_message
 """.split()
 
 

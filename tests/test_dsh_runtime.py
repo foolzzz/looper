@@ -2740,7 +2740,7 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
             for number in (1, 2):
                 api.post("/api/chat/send", {"text": f"read disposable status {number}",
                                            "session_id": "disposable-chat", "message_id": f"message-{number}"})
-                wait_for(lambda: api.get("/api/chat/messages", session_id="disposable-chat")["messages"],
+                wait_for(lambda: api.post("/api/v1/operator_chat/messages", {"session_id": "disposable-chat"})["result"]["messages"],
                          lambda rows: sum(row["role"] == "assistant" for row in rows) >= number)
 
             tasks = []

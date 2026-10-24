@@ -256,7 +256,7 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             # Where the dashboard lists runs: the Runs page and a History page (their records), and the Chat page.
             listed = {"records": {variant: api.get("/api/llm-records", task_id=ids[variant], limit=500)["records"]
                                   for variant in ("roles", "off")},
-                      "targets": api.get("/api/chat/targets")["targets"]}
+                      "targets": api.post("/api/v1/operator_chat/targets", {})["result"]["targets"]}
             api.post("/api/v1/ops/task_control/restart", {"task_id": ids["restart"]})
             api.post("/api/v1/ops/task_control/start_over", {"task_id": ids["startover"]})
             # Until both left their failed state: waiting for an end at once would read the first run's.
