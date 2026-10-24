@@ -41,7 +41,7 @@ function answer(url: string): unknown {
   if (url.includes("/api/v1/ops/gates/list")) return { status: "ok", result: { gates: [], total: 0, limit: 50, offset: 0, next_cursor: null, has_more: false, counts: { open: 0, waiting_user: 0, waiting_planner: 0, closed: 0, all: 0 } } };
   if (url.includes("/agent-settings")) return undefined; // a 404: the card says it could not load
   if (url.includes("/knowledge")) return { documents: [], skills: [], total_bytes: 0 };
-  if (url.includes("/schedules")) return { schedules: [] };
+  if (url === "/api/v1/schedule_admin/list" || url === "/api/v1/schedule_admin/project_list") return { status: "ok", result: { schedules: [] } };
   if (url.includes("/room")) return { status: "ok", result: { enabled: true, seats: [], by_step: {}, more: false, counts: { messages: 0, by_kind: {}, questions: 0, unanswered: 0 }, messages: [] } };
   return {};
 }
@@ -290,7 +290,11 @@ describe("the dashboard keeps its place in the URL", () => {
 
     it("opens a schedule's list filter from the hash", async () => {
       await open("#schedules?enabled=true");
-      expect(requests.some((u) => u.includes("schedules"))).toBe(true);
+      expect(vi.mocked(fetch)).toHaveBeenCalledWith("/api/v1/schedule_admin/list", expect.objectContaining({
+        method: "POST", body: JSON.stringify({}),
+      }));
+      expect(container.querySelector<HTMLSelectElement>('select[id$="-status"]')?.value).toBe("enabled");
+      expect(container.textContent).toContain("No schedules yet.");
     });
   });
 });
