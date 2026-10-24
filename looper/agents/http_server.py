@@ -27,8 +27,8 @@ from ..db import api_clients as db_api_clients
 from ..db.tasks import TaskGroup
 from ..ops_config import OpsConfig
 from . import (
-    agent_settings, api_v1, catalog, chat_settings, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
-    managers_api, operator_auth, overview, profile_registry, project_skills, projects, prompt_preview, request_guard, role_api,
+    agent_settings, api_v1, chat_settings, config_imports, config_transfer, gate_service, knowledge,
+    managers_api, operator_auth, overview, profile_registry, projects, prompt_preview, request_guard, role_api,
     schedules, self_check, vault, wait_service,
 )
 from .broadcast import Broadcaster
@@ -1065,23 +1065,6 @@ class AgentHTTPServer:
                                              lambda imports: self._apply_import(imports, m.group(1), body))
         elif (m := self._RE_CONFIG_IMPORT.match(path)) and method == "DELETE":
             await self._handle_config_import(writer, HTTP_200, lambda imports: imports.cancel(m.group(1)))
-        elif path == "/api/catalog/import" and method == "POST":
-            await self._handle_catalog(writer, HTTP_200, library.import_from_machine)
-        elif path == "/api/catalog/upload" and method == "POST":
-            await self._handle_catalog(writer, HTTP_201, lambda: catalog_sources.upload(projects.json_object(body)))
-        elif path == "/api/catalog/git/preview" and method == "POST":
-            await self._handle_catalog(writer, HTTP_200, lambda: catalog_sources.git_preview(
-                projects.json_object(body)))
-        elif path == "/api/catalog/git/import" and method == "POST":
-            await self._handle_catalog(writer, HTTP_200, lambda: catalog_sources.git_import(
-                projects.json_object(body)))
-        elif path == "/api/catalog/skills" and method == "POST":
-            await self._handle_catalog(writer, HTTP_201, lambda: catalog_sources.create_skill(
-                projects.json_object(body)))
-        elif path == "/api/catalog/mcp" and method == "POST":
-            await self._handle_catalog(writer, HTTP_201, lambda: mcp.create(projects.json_object(body)))
-        elif path == "/api/catalog/mcp/import" and method == "POST":
-            await self._handle_catalog(writer, HTTP_200, mcp.import_from_machine)
         elif path == "/api/scheduler-settings" and method == "GET":
             await self._answer(writer, HTTP_200, schedules.scheduler_settings)
         elif path == "/api/scheduler-settings" and method == "PUT":
@@ -2254,28 +2237,6 @@ class AgentHTTPServer:
         except Exception:
             logger.exception("knowledge request failed")
             status, result = HTTP_500, {"error": "the knowledge request failed; see the server log"}
-        writer.write(_json_response(status, _serialize(result)))
-        await writer.drain()
-
-    # --- The capability catalog: its items, their installs and the skills projects write ---
-
-    async def _handle_catalog(
-        self, writer: asyncio.StreamWriter, status: str, request: Callable[[], Awaitable[Any]],
-    ) -> None:
-        """Answer with ``request()``'s result; a refused request is 400, an unknown item, install, project or
-        skill 404, and an install that is there already or a name that is taken 409."""
-        try:
-            result = await request()
-        except (catalog.CatalogError, library.LibraryError, project_skills.ProjectSkillError,
-                projects.RequestError) as exc:
-            status, result = getattr(exc, "status", HTTP_400), {"error": str(exc)}
-        except (catalog.CatalogNotFound, project_skills.ProjectSkillNotFound) as exc:
-            status, result = HTTP_404, {"error": str(exc)}
-        except (catalog.CatalogConflict, project_skills.ProjectSkillConflict) as exc:
-            status, result = HTTP_409, {"error": str(exc)}
-        except Exception:
-            logger.exception("catalog request failed")
-            status, result = HTTP_500, {"error": "the catalog request failed; see the server log"}
         writer.write(_json_response(status, _serialize(result)))
         await writer.drain()
 
