@@ -7,6 +7,8 @@ from ..ops import API_CHANNEL, ErrorCode, OpError
 from ..ops.service import _plain
 from ..projects import RequestError
 
+ORDER = 7
+
 
 def _enum(values, *, nullable=False):
     return {"type": ["string", "null"] if nullable else "string",

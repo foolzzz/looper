@@ -258,12 +258,6 @@ def _task_work_dir(raw: Any, project_default: str) -> str:
     raise RequestError(HTTP_400, NO_WORK_DIR)
 
 
-async def create_task(data: dict[str, Any]) -> dict[str, Any]:
-    """The console's parameter and response adapter for the shared creation core."""
-    result = await create_task_core(data)
-    return {key: result[key] for key in ("task_id", "status", "created_at", "project_id", "workspace")}
-
-
 async def create_task_core(
     data: dict[str, Any], *, task_fields: dict[str, Any] | None = None,
     profiles: dict[str, str | None] | None = None, roles: Sequence[dict[str, Any]] = (),

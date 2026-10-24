@@ -220,8 +220,8 @@ def restarted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
                 project = {"name": f"calc-{variant}", "work_dir": str(work[variant]), "task_workspaces": "in_place"}
                 if variant == "worktree":
                     project["step_workspaces"] = "worktree"
-                ids[variant] = api.post("/api/tasks/create", {"requirement": f"build calc variant={variant}",
-                                                               "project": project})["task_id"]
+                ids[variant] = api.post("/api/v1/tasks/create", {"requirement": f"build calc variant={variant}",
+                                                               "project": project})["result"]["task_id"]
                 api.post("/api/v1/ops/task_control/start", {"task_id": ids[variant]})
             with pytest.raises(EvalError, match="answered 400: .*start_over"):
                 api.post("/api/v1/ops/task_control/start", {"task_id": ids["none"], "start_over": "yes"})

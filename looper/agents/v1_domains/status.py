@@ -2,6 +2,8 @@
 
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 
+ORDER = 1
+
 _AGENT = _object({"healthy": _BOOL, "state": _STR, "up": _BOOL, "restart_count": _INT,
                   "last_crash_at": _NULL_STR, "next_restart_at": _NULL_STR, "agent_type": _STR})
 _BINDING = _object({

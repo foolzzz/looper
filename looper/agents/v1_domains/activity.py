@@ -8,6 +8,8 @@ from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL, _
 from ..ops import ErrorCode, OpError
 from ..ops.service import _plain
 
+ORDER = 8
+
 _SEQ = {"type": "integer", "minimum": 1}
 _CURSOR = {"type": "integer", "minimum": 0}
 _NULL_INT = {"type": ["integer", "null"]}
