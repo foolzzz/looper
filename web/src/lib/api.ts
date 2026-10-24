@@ -457,6 +457,8 @@ export interface ChatTurn {
   client_message_id: string | null;
   channel: string;
   started_at: string;
+  state: string;
+  method: string | null;
   stopping: boolean;
   /** Whether the Manager's runtime can interrupt the reply (Claude Code, Grok); a runtime run per turn cannot. */
   can_interrupt: boolean;
@@ -465,17 +467,17 @@ export interface ChatTurn {
 /** Stop the Manager's reply to a message. A 409 (no turn running, or another message's turn) resolves with its
  * `state`; other errors throw with the server's reason. */
 export async function stopChatReply(messageId: string): Promise<{ state: string; method: string | null }> {
-  const res = await fetch(`${API_BASE}/chat/stop`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message_id: messageId }),
-  });
-  if (res.ok || res.status === 409) {
-    const data = await res.json().catch(() => ({}));
-    if (res.ok) return { state: data.state, method: data.method ?? null };
-    return { state: data.state, method: null };
+  try {
+    const result = await callV1<{ state: "stopping" | "already_stopping"; phase: string | null; method: string | null }>(
+      "/api/v1/operator_chat/stop", { message_id: messageId });
+    if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+    return { state: result.state, method: result.method };
+  } catch (error) {
+    if (error instanceof V1Error && error.status === 409 && error.code === "conflict" && error.details?.state) {
+      return { state: error.details.state, method: null };
+    }
+    throw error;
   }
-  return failed(res, "stop reply");
 }
 
 /** The chat's system settings (Settings → Chat). */
@@ -485,27 +487,22 @@ export interface ChatSettings {
 }
 
 export async function fetchChatSettings(): Promise<ChatSettings> {
-  const res = await fetch(`${API_BASE}/chat-settings`);
-  if (!res.ok) await failed(res, "chat settings");
-  return res.json();
+  const result = await callV1<ChatSettings>("/api/v1/chat_settings/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function updateChatSettings(body: { stop_enabled: boolean | null }): Promise<ChatSettings> {
-  const res = await fetch(`${API_BASE}/chat-settings`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) await failed(res, "chat settings");
-  return res.json();
+  const result = await callV1<ChatSettings>("/api/v1/chat_settings/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** The Manager's running turn that answers this web chat, or null when none is running. */
 export async function fetchChatTurn(sessionId: string): Promise<ChatTurn | null> {
-  const res = await fetch(`${API_BASE}/chat/turn?session_id=${encodeURIComponent(sessionId)}`);
-  if (!res.ok) await failed(res, "chat turn");
-  const data = await res.json();
-  return data.turn ?? null;
+  const result = await callV1<{ turn: ChatTurn | null }>("/api/v1/operator_chat/turn", { session_id: sessionId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.turn;
 }
 
 /** What choosing a profile does to the Manager's session. */
@@ -546,17 +543,11 @@ export interface ManagerSessionView {
   choices: ManagerProfileChoice[];
 }
 
-async function managerSessionResponse<T>(res: Response, what: string): Promise<T> {
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `${what} ${res.status}`);
-  }
-  return res.json();
-}
-
 export async function fetchManagerSession(managerId = "manager", signal?: AbortSignal): Promise<ManagerSessionView> {
-  const query = managerId === "manager" ? "" : `?manager=${encodeURIComponent(managerId)}`;
-  return managerSessionResponse(await fetch(`${API_BASE}/manager/session${query}`, { signal }), "manager session");
+  const result = await callV1<ManagerSessionView>("/api/v1/manager_session/get",
+    managerId === "manager" ? {} : { manager: managerId }, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Choose the Manager session's Agent Profile; null follows Settings. */
@@ -564,12 +555,11 @@ export async function setManagerSessionProfile(
   profileId: string | null,
   managerId = "manager",
 ): Promise<ManagerSessionView & { effect: ManagerSessionEffect; text: string }> {
-  const res = await fetch(`${API_BASE}/manager/session/profile`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(managerId === "manager" ? { profile_id: profileId } : { profile_id: profileId, manager: managerId }),
-  });
-  return managerSessionResponse(res, "manager session profile");
+  const result = await callV1<ManagerSessionView & { effect: ManagerSessionEffect; text: string }>(
+    "/api/v1/manager_session/select_profile",
+    managerId === "manager" ? { profile_id: profileId } : { profile_id: profileId, manager: managerId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Why a Lark or Telegram answer did not reach its chat: the channel no longer knew the chat (it restarted), or it
@@ -2382,7 +2372,7 @@ export async function fetchTaskConversation(
   return { events: data.rows, hasMore: data.has_more };
 }
 
-/** One run of a task as `GET /api/tasks/<id>/runs` answers: no prompts, metadata body or events. */
+/** One run of a task as `runs.for_task` answers: no prompts, metadata body or events. */
 export interface TaskRunRow {
   id: number;
   role: TaskRole;
@@ -2400,10 +2390,9 @@ export interface TaskRunRow {
 
 /** A task's Planner, Worker and Reviewer runs, oldest first, in one compact request. */
 export async function fetchTaskRuns(taskId: string, signal?: AbortSignal): Promise<TaskRunRow[]> {
-  const res = await fetch(`${API_BASE}/tasks/${taskId}/runs`, { signal });
-  if (!res.ok) throw new Error(`runs ${res.status}`);
-  const data = await res.json();
-  return data.runs ?? [];
+  const result = await callV1<{ runs: TaskRunRow[] }>("/api/v1/runs/for_task", { task_id: taskId }, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.runs;
 }
 
 export function streamTaskActivity(
@@ -2635,9 +2624,9 @@ export interface AgentUsage {
 }
 
 export async function fetchAgentUsage(agentId: string, turns = 100, signal?: AbortSignal): Promise<AgentUsage> {
-  const res = await fetch(`${API_BASE}/agents/${encodeURIComponent(agentId)}/usage?turns=${turns}`, { signal });
-  if (!res.ok) throw new Error(`agent usage ${res.status}`);
-  return res.json();
+  const result = await callV1<AgentUsage>("/api/v1/runs/usage", { agent_id: agentId, turns }, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** One stream-json event of a run, in order. */
@@ -2690,29 +2679,22 @@ export async function fetchLlmRecords(params: {
   limit?: number;
   offset?: number;
 }): Promise<LlmRecord[]> {
-  const qs = new URLSearchParams();
-  if (params.agent_id) qs.set("agent_id", params.agent_id);
-  if (params.role) qs.set("role", params.role);
-  if (params.task_id) qs.set("task_id", params.task_id);
-  if (params.limit) qs.set("limit", String(params.limit));
-  if (params.offset) qs.set("offset", String(params.offset));
-  const res = await fetch(`${API_BASE}/llm-records?${qs}`);
-  if (!res.ok) throw new Error(`llm-records ${res.status}`);
-  const data = await res.json();
-  return data.records ?? [];
+  const result = await callV1<{ records: LlmRecord[] }>("/api/v1/runs/list", params);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.records;
 }
 
 export async function fetchLlmRecord(recordId: number): Promise<LlmRecord> {
-  const res = await fetch(`${API_BASE}/llm-records/${recordId}`);
-  if (!res.ok) throw new Error(`llm-record ${res.status}`);
-  return (await res.json()).record;
+  const result = await callV1<{ record: LlmRecord }>("/api/v1/runs/get", { record_id: recordId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.record;
 }
 
 /** Events with seq greater than `after`, so a viewer can follow a running agent. */
 export async function fetchLlmRecordEvents(recordId: number, after = 0): Promise<LlmRecordEvent[]> {
-  const res = await fetch(`${API_BASE}/llm-records/${recordId}/events?after=${after}`);
-  if (!res.ok) throw new Error(`llm-record events ${res.status}`);
-  return (await res.json()).events ?? [];
+  const result = await callV1<{ events: LlmRecordEvent[] }>("/api/v1/runs/events", { record_id: recordId, after });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.events;
 }
 
 // --- The registry: runtimes, LLM providers and the Agent Profiles made of them ---
@@ -4073,7 +4055,7 @@ async function managerJson<T>(url: string, method: string, body: unknown | undef
   return res.json();
 }
 
-/** A token for an agent or script that uses Looper through loopercli (`/api/clients`); the token itself is never listed. */
+/** A token for an agent or script that uses Looper through loopercli; the token itself is never listed. */
 export interface ApiClient {
   id: string;
   name: string;
@@ -4082,17 +4064,21 @@ export interface ApiClient {
 }
 
 export async function fetchApiClients(): Promise<ApiClient[]> {
-  const data = await managerJson<{ clients?: ApiClient[] }>(`${API_BASE}/clients`, "GET", undefined, "API clients");
-  return data.clients ?? [];
+  const result = await callV1<{ clients: ApiClient[] }>("/api/v1/clients/list", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.clients;
 }
 
 /** Add a client; the answer holds its token, which the server shows once and does not keep. */
-export function createApiClient(name: string): Promise<{ client: ApiClient; token: string }> {
-  return managerJson(`${API_BASE}/clients`, "POST", { name }, "create API client");
+export async function createApiClient(name: string): Promise<{ client: ApiClient; token: string }> {
+  const result = await callV1<{ client: ApiClient; token: string }>("/api/v1/clients/create", { name });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function revokeApiClient(id: string): Promise<void> {
-  await managerJson(`${API_BASE}/clients/${encodeURIComponent(id)}`, "DELETE", undefined, "revoke API client");
+  const result = await callV1<{ revoked: string }>("/api/v1/clients/revoke", { client_id: id });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
 }
 
 type ManagerView = Omit<ManagerInfo, "state" | "spend"> & Partial<Pick<ManagerInfo, "state" | "spend">>;

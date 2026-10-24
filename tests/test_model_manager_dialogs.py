@@ -327,13 +327,20 @@ class RunsApi:
     def __init__(self, records, selected=None):
         self.records, self.selected = records, selected
 
+    def post(self, path, body):
+        if path.startswith("/api/v1/runs/"):
+            return {"status": "ok", "result": self.get(path, **body)}
+        raise AssertionError(path)
+
     def get(self, path, **query):
-        if path == "/api/llm-records":
+        if path == "/api/v1/runs/list":
             return {"records": list(reversed(self.records))}
-        if path == "/api/manager/session":
-            return {"selected": self.selected}
         assert path == "/api/registry"
         return {"profiles": [{"profile_id": "agent-1", "name": dialogs.SWITCH}]}
+
+    def post(self, path, body):
+        assert path == "/api/v1/manager_session/get"
+        return {"result": {"selected": self.selected}}
 
 
 def runs_look(records, *, selected=None, reply="ok", fake=False):
@@ -411,17 +418,17 @@ class RecordingApi:
 
     def get(self, path, **query):
         self.gets.append((path, query))
-        if path == "/api/llm-records":
+        if path == "/api/v1/runs/list":
             return {"records": []}
-        if path == "/api/chat/turn":
-            return {"turn": None}
         if path == "/api/chat/messages":
             return {"messages": [{"message_id": self.posts[-1][1]["message_id"] + ":reply", "content": "ok"}]}
         raise AssertionError(path)
 
     def post(self, path, body):
+        if path.startswith("/api/v1/runs/"):
+            return {"status": "ok", "result": self.get(path, **body)}
         self.posts.append((path, body))
-        return {}
+        return {"result": {"turn": None}} if path == "/api/v1/operator_chat/turn" else {}
 
 
 def _ask_once(manager):
@@ -434,13 +441,13 @@ def _ask_once(manager):
 def test_an_existing_dialog_sends_no_target_and_asks_for_manager_runs():
     api = _ask_once(None)
     assert "target" not in api.posts[0][1]
-    assert {q["agent_id"] for p, q in api.gets if p == "/api/llm-records"} == {"manager"}
+    assert {q["agent_id"] for p, q in api.gets if p == "/api/v1/runs/list"} == {"manager"}
 
 
 def test_a_scenario_manager_dialog_targets_and_reads_its_own_runs():
     api = _ask_once("code-review")
     assert api.posts[0][1]["target"] == {"kind": "manager", "id": "manager-code-review"}
-    reads = [q["agent_id"] for p, q in api.gets if p == "/api/llm-records"]
+    reads = [q["agent_id"] for p, q in api.gets if p == "/api/v1/runs/list"]
     assert reads and set(reads) == {"manager-code-review"}
 
 
@@ -656,8 +663,8 @@ class ClientRunApi(Api):
 
     def request(self, method, path, body=None, **query):
         self.calls.append((method, path, body))
-        if path == "/api/clients" and method == "POST":
-            return {"client": {"id": "client-0123456789ab"}, "token": "lpc_secret"}
+        if path == "/api/v1/clients/create" and method == "POST":
+            return {"status": "ok", "result": {"client": {"id": "client-0123456789ab"}, "token": "lpc_secret"}}
         if path == "/api/tasks":
             return {"tasks": []}
         return {}
@@ -683,16 +690,16 @@ def test_a_client_dialog_makes_a_client_and_revokes_it_without_leaking_its_token
     assert row["outcome"] == "pass"
     assert sent == [("lpc_secret", True, None), ("lpc_secret", True, "cli-1")]
     assert seen == ["cli-1", "cli-1"]
-    assert api.calls[0][:2] == ("POST", "/api/clients") and api.calls[0][2]["name"].startswith("eval-")
-    assert api.calls[-1] == ("DELETE", "/api/clients/client-0123456789ab", None)
+    assert api.calls[0][:2] == ("POST", "/api/v1/clients/create") and api.calls[0][2]["name"].startswith("eval-")
+    assert api.calls[-1] == ("POST", "/api/v1/clients/revoke", {"client_id": "client-0123456789ab"})
     assert "lpc_secret" not in json.dumps(row) and "lpc_secret" not in capsys.readouterr().err
 
 
 def test_a_failed_revoke_is_logged_without_the_token_and_ignored(monkeypatch, capsys):
     class Failing(ClientRunApi):
         def request(self, method, path, body=None, **query):
-            if method == "DELETE":
-                raise dialogs.EvalError(f"DELETE {path} answered 404: gone")
+            if path == "/api/v1/clients/revoke":
+                raise dialogs.EvalError(f"POST {path} answered 404: gone")
             return super().request(method, path, body, **query)
 
     monkeypatch.setattr(dialogs, "_last_action", lambda *a: 0)

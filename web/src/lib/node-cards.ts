@@ -18,7 +18,7 @@ import {
   type TaskWait,
 } from "@/lib/api";
 
-/** The task's runs by role, as `GET /api/llm-records` answers for each. */
+/** The task's runs by role, as `runs.list` answers for each. */
 export type TaskRuns = Record<TaskRole, LlmRecord[]>;
 
 /** The runtime, model and effort of the latest of `records` (of one step, when `stepId` is given), or undefined
