@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.81] - 2026-10-24
+
+### Changed
+
+- **Schedule changes and immediate runs go through v1.** Creating, updating (including enabling and disabling), deleting and resetting the Planner session of a schedule, and running one now, are the operations `schedule_admin.create`, `.update` (risk `write`), `.delete`, `.reset_planner_session` and `.run` (risk `high`), as `POST /api/v1/schedule_admin/<action>`. Everything but create can ask for confirmation first; an update asks only when it enables a schedule or raises a cap. Manager prompts and tools are unchanged. ([#500](https://github.com/foolzzz/looper/pull/500))
+
+### Removed
+
+- **`POST /api/projects/{id}/schedules`, `PUT` and `DELETE /api/schedules/{id}`, `POST /api/schedules/{id}/reset-planner-session` and `POST /api/schedules/{id}/run`.** Use the `schedule_admin` operations. ([#500](https://github.com/foolzzz/looper/pull/500))
+
 ## [2.13.80] - 2026-10-24
 
 ### Changed
