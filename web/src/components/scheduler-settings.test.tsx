@@ -109,17 +109,22 @@ describe("Settings → Scheduler", () => {
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      return Response.json(url.endsWith("/registry") ? { profiles: [{
+      if (url === "/api/registry") return Response.json({ profiles: [{
         profile_id: "p", name: "Schedule profile", effort: "high", runtime_name: "Runtime",
         provider: { provider_id: "v", name: "Schedule account", auth: "api_key", vendor_type: "custom" },
         model: { model_id: "m", provider_id: "v", name: "Exact model", protocol: "openai-responses" },
-      }] } : url.includes("/runs?") ? { runs: [], next_before: null, routine_skips: { skipped_gate: 0, skipped_overlap: 0 } }
-        : { schedule });
+      }] });
+      if (url === "/api/v1/schedule_admin/get") return Response.json({ status: "ok", result: { schedule } });
+      if (url === "/api/v1/schedule_admin/runs") return Response.json({ status: "ok", result: {
+        runs: [], next_before: null, routine_skips: { skipped_gate: 0, skipped_overlap: 0 },
+      } });
+      throw new Error(`Unexpected request: ${url}`);
     }));
     await act(async () => root.render(<ScheduleDetail scheduleId="schedule" onDeleted={() => {}} />));
     expect(container.textContent).toContain(override
       ? "Schedule profile · high — Runtime · Schedule account / Exact model / openai-responses"
       : "As the project sets them");
+    expect(container.querySelector("[role=alert]")).toBeNull();
   });
 
   it("shows wait defaults and sources, saves seconds, resets to default and shows a refusal", async () => {

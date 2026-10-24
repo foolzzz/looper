@@ -38,7 +38,7 @@ def _create(**fields: Any) -> tuple[str, dict[str, Any]]:
 
 
 async def _view(name: str) -> dict[str, Any]:
-    return next(s for s in (await _ok("GET", "/api/schedules"))["schedules"] if s["name"] == name)
+    return next(s for s in (await _ok("POST", "/api/v1/schedule_admin/list", {}))["schedules"] if s["name"] == name)
 
 
 def _with(chat: _Chat, **platform: Any) -> _Chat:
@@ -346,7 +346,7 @@ def test_run_now_fires_the_schedule_once_as_the_dashboards_button_does(
 
         assert ran["status"] == "ok", ran
         assert ran["result"]["run"]["status"] == status and ran["result"]["run"]["trigger"] == "manual"
-        runs = (await _ok("GET", f"/api/schedules/{(await _view('nightly'))['schedule_id']}/runs"))["runs"]
+        runs = (await _ok("POST", "/api/v1/schedule_admin/runs", {"schedule_id": (await _view('nightly'))['schedule_id']}))["runs"]
         assert [(r["status"], r["trigger"]) for r in runs] == [(status, "manual")]
         assert ((await _view("nightly"))["enabled"], (await _view("nightly"))["next_fire_at"]) == (False, None)
         assert await _trail(pool) == [(TOOL, "high", "needs_confirmation"), (TOOL, "high", "ok")]

@@ -51,7 +51,7 @@ async def _requirement(env: ScheduleEnv, task_id: str) -> str:
 
 
 async def _outbox(env: ScheduleEnv, sid: str) -> list[dict[str, Any]]:
-    return list(reversed((await env.ok("GET", f"/api/schedules/{sid}/notifications"))["notifications"]))
+    return list(reversed((await env.ok("POST", "/api/v1/schedule_admin/notifications", {"schedule_id": sid}))["notifications"]))
 
 
 def test_the_gate_decides_whether_a_run_gets_a_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -64,7 +64,7 @@ def test_the_gate_decides_whether_a_run_gets_a_task(monkeypatch: pytest.MonkeyPa
         nothing = await _fire(env, sid)
         assert (nothing["status"], nothing["task_id"], nothing["gate_output"]) == ("skipped_gate", None, None)
         assert env.bus.of("task_start") == []
-        assert (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]["consecutive_failures"] == 0
+        assert (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]["consecutive_failures"] == 0
 
         items.write_text("alert-1\nalert-2\n")
         found = await _fire(env, sid)
@@ -77,7 +77,7 @@ def test_the_gate_decides_whether_a_run_gets_a_task(monkeypatch: pytest.MonkeyPa
         failed = await _fire(env, sid)
         assert (failed["status"], failed["task_id"], failed["gate_output"]) == ("gate_failed", None, "half")
         assert failed["error"] == "the gate exited with status 4; stderr: broken"
-        assert (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]["consecutive_failures"] == 1
+        assert (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]["consecutive_failures"] == 1
 
         await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "trap '' TERM; sleep 30",
                                                       "gate_timeout_seconds": 1})
@@ -226,7 +226,7 @@ def test_the_failures_alert_goes_out_once_per_streak_with_one_recovery(monkeypat
         assert await kinds() == ["run", "run", "run", "failures_alert", "run"]
         alert = [n for n in await _outbox(env, sid) if n["kind"] == "failures_alert"][0]
         assert "已连续失败 3 次" in alert["text"] and alert["status"] == "sent"
-        assert (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]["alerts"]["failures_since"]
+        assert (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]["alerts"]["failures_since"]
 
         await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "echo item"})
         recovered = await _fire(env, sid)
@@ -236,7 +236,7 @@ def test_the_failures_alert_goes_out_once_per_streak_with_one_recovery(monkeypat
         await env.end_task(again["task_id"], "completed")
         await env.scheduler.idle()
         assert (await kinds())[5:] == ["failures_recovered"]  # once; completed runs send nothing under "failures"
-        schedule = (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]
+        schedule = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
         assert (schedule["alerts"]["failures_since"], schedule["consecutive_failures"]) == (None, 0)
         assert len([text for _, _, text in sender.sent if "仍没有成功运行" not in text and "又有成功" not in text]) == 6
 
@@ -259,7 +259,7 @@ def test_a_gate_that_finds_nothing_ends_the_failure_streak_and_a_skip_that_ran_n
                                  notify_target={"channel": "telegram", "chat": TELEGRAM_CHAT}))["schedule_id"]
 
         async def state() -> tuple[int, bool, list[str]]:
-            schedule = (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]
+            schedule = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
             kinds = [n["kind"] for n in await _outbox(env, sid) if n["kind"].startswith("failures")]
             return schedule["consecutive_failures"], bool(schedule["alerts"]["failures_since"]), kinds
 
@@ -345,7 +345,7 @@ def test_the_no_success_alert_goes_out_once_with_one_recovery(monkeypatch: pytes
         await env.scheduler.tick()
         await env.scheduler.idle()
         assert [n["kind"] for n in await _outbox(env, sid)] == ["stale_alert"]
-        assert (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]["alerts"]["stale_since"]
+        assert (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]["alerts"]["stale_since"]
 
         recovered = await _fire(env, sid)
         await env.end_task(recovered["task_id"], "completed")
@@ -362,7 +362,7 @@ def test_notify_alerts_sends_the_alerts_and_their_recoveries_and_no_run_message(
         await allow_telegram(env)
         sid = (await env.enabled(gate_command="exit 3", notify="alerts",
                                  notify_target={"channel": "telegram", "chat": TELEGRAM_CHAT}))["schedule_id"]
-        assert (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]["notify"] == "alerts"
+        assert (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]["notify"] == "alerts"
 
         async def sent() -> list[tuple[str, str]]:
             return [(n["kind"], n["status"]) for n in await _outbox(env, sid)]
@@ -468,7 +468,7 @@ def test_a_gated_schedule_every_minute_counts_its_repeated_skips_on_one_run(monk
         skipped = (await schedule_overview(NOON - timedelta(hours=12)))["skipped_today"]
         assert (skipped["skipped_gate"], skipped["skipped_overlap"]) == (4, 2)
         # So does a schedule's run history, over its whole history, shown or left out.
-        status, listed = await env.call("GET", f"/api/schedules/{sid}/runs", query={"skips": "hide"})
+        status, listed = await env.call("POST", "/api/v1/schedule_admin/runs", {"schedule_id": sid, "skips": "hide"})
         assert (status, listed["routine_skips"]) == (200, {"skipped_gate": 4, "skipped_overlap": 2})
         assert [run["status"] for run in listed["runs"]] == ["completed"]
         assert env.bus.of("task_start") == [task_id]
@@ -898,7 +898,7 @@ def test_a_parallel_schedule_is_answered_without_warnings(
         assert status == 201 and made["schedule"]["max_parallel_runs"] == 10 and set(made) == {"schedule"}
         fixed = await env.ok("PUT", f"/api/schedules/{made['schedule']['schedule_id']}", {"max_parallel_runs": 2})
         assert fixed["schedule"]["max_parallel_runs"] == 2 and set(fixed) == {"schedule"}
-        listed = (await env.ok("GET", f"/api/projects/{env.project_id}/schedules"))["limits"]
+        listed = (await env.ok("POST", "/api/v1/schedule_admin/project_list", {"project_id": env.project_id}))["limits"]
         assert (listed["max_parallel_runs_limit"], listed["concurrency_max"]) == (10, 64)
         assert "planner_limit" not in listed
 
@@ -915,7 +915,7 @@ def test_a_notify_target_the_channel_does_not_allow_is_refused(monkeypatch: pyte
             status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", {
                 "name": "n", "cron": "*/5 * * * *", "requirement": "r", "notify_target": target})
             assert status == 400 and error in payload["error"], payload
-        limits = (await env.ok("GET", f"/api/projects/{env.project_id}/schedules"))["limits"]
+        limits = (await env.ok("POST", "/api/v1/schedule_admin/project_list", {"project_id": env.project_id}))["limits"]
         assert limits["notify_targets"] == [{"channel": "telegram", "chat": TELEGRAM_CHAT,
                                              "label": f"Telegram · {TELEGRAM_CHAT}", "channel_enabled": False}]
 

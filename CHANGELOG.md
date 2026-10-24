@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.71] - 2026-10-24
+
+### Changed
+
+- **Schedule definitions, the rule preview, run history and notifications move to the versioned API.** `schedule_admin.list`, `project_list`, `get`, `preview`, `runs` and `notifications` (`POST /api/v1/schedule_admin/<action>`) replace six legacy HTTP routes (`GET /api/schedules`, `GET /api/projects/{id}/schedules`, `GET /api/schedules/{id}`, `POST /api/schedules/preview`, `GET /api/schedules/{id}/runs` and `/notifications`), which are removed; the dashboard and the prompt-regression runner use the new routes. Requests are closed and typed, and the answers declare full Schedule, Run, limits, preview and notification definitions. The schedule write routes and scheduler settings are unchanged. Manager prompts and tools are unchanged. ([#494](https://github.com/foolzzz/looper/pull/494))
+
+## [2.13.70] - 2026-10-24
+
+### Changed
+
+- **Task activity, the task conversation and the live activity stream move to the versioned API.** `tasks.activity`, `tasks.activity_detail`, `tasks.conversation` and `tasks.activity_stream` (`POST /api/v1/tasks/<name>`) replace four legacy GET routes (`/api/tasks/{id}/activity`, `/activity/{seq}`, `/activity/stream` and `/conversation`), which are removed; the dashboard and the generated CLI (`loopercli tasks activity-stream`) use the new routes. A database failure now answers `unavailable` instead of an empty list, an event of another task answers not found, and the conversation list key is `rows`. The stream sends complete events read from the database and ends on client disconnect. Manager prompts and tools are unchanged. ([#488](https://github.com/foolzzz/looper/pull/488))
+
 ## [2.13.69] - 2026-10-24
 
 ### Changed

@@ -59,19 +59,19 @@ def test_a_new_schedule_is_disabled_named_once_per_project_and_previewed(monkeyp
             "name": "triage", "cron": "*/5 * * * *", "requirement": "r"})
         assert status == 409 and "already has a schedule named" in payload["error"]
 
-        listed = await env.ok("GET", f"/api/projects/{env.project_id}/schedules")
+        listed = await env.ok("POST", "/api/v1/schedule_admin/project_list", {"project_id": env.project_id})
         assert [s["name"] for s in listed["schedules"]] == ["Triage"]
         assert listed["limits"]["min_interval_seconds"] == 300
 
-        preview = await env.ok("POST", "/api/schedules/preview", {"cron": "30 2 * * *",
+        preview = await env.ok("POST", "/api/v1/schedule_admin/preview", {"cron": "30 2 * * *",
                                                                     "timezone": "America/Los_Angeles", "count": 3})
         assert preview["valid"] and len(preview["next"]) == 3
-        bad = await env.ok("POST", "/api/schedules/preview", {"cron": "* * * * *"})
+        bad = await env.ok("POST", "/api/v1/schedule_admin/preview", {"cron": "* * * * *"})
         assert (bad["valid"], bad["next"]) == (False, []) and "1 minute apart" in bad["error"]
-        status, _ = await env.call("POST", "/api/schedules/preview", {"cron": 5})
+        status, _ = await env.call("POST", "/api/v1/schedule_admin/preview", {"cron": 5})
         assert status == 400
 
-        assert (await env.call("GET", "/api/schedules/sched-000000000000"))[0] == 404
+        assert (await env.call("POST", "/api/v1/schedule_admin/get", {"schedule_id": "sched-000000000000"}))[0] == 404
         assert (await env.call("PUT", f"/api/schedules/{schedule['schedule_id']}", {}))[0] == 400
         status, payload = await env.call("PUT", f"/api/schedules/{schedule['schedule_id']}", {"enabled": "yes"})
         assert status == 400 and "true or false" in payload["error"]
@@ -108,7 +108,7 @@ def test_every_projects_schedules_are_listed_together_the_disabled_ones_too(monk
     from looper.db import projects
 
     async def test(env: ScheduleEnv) -> None:
-        assert await env.ok("GET", "/api/schedules") == {"schedules": []}
+        assert await env.ok("POST", "/api/v1/schedule_admin/list", {}) == {"schedules": []}
         billing = await projects.create_project(name="Billing", work_dir=env.work_dir, pool=env.pool)
         await env.ok("POST", f"/api/projects/{billing['id']}/schedules", {
             "name": "Invoices", "cron": "0 6 * * *", "timezone": "Europe/Berlin", "requirement": "Check them."})
@@ -117,7 +117,7 @@ def test_every_projects_schedules_are_listed_together_the_disabled_ones_too(monk
         run = (await env.ok("POST", f"/api/schedules/{hourly['schedule_id']}/run"))["run"]
         await env.end_task(run["task_id"], "completed", summary="nothing new", cost=0.25)
 
-        listed = (await env.ok("GET", "/api/schedules"))["schedules"]
+        listed = (await env.ok("POST", "/api/v1/schedule_admin/list", {}))["schedules"]
         # By project name, then by name, ignoring case; the disabled ones too.
         assert [(s["project_name"], s["name"], s["enabled"]) for s in listed] == [
             ("alerts", "Hourly check", True), ("alerts", "nightly", False), ("Billing", "Invoices", False)]
@@ -127,8 +127,8 @@ def test_every_projects_schedules_are_listed_together_the_disabled_ones_too(monk
         assert listed[0]["spent_today_usd"] == pytest.approx(0.25) and listed[1]["spent_today_usd"] == 0
         assert listed[0]["alerts"] == {"failures_since": None, "stale_since": None}
         # The same rows a project's list and a schedule's own answer give.
-        assert (await env.ok("GET", f"/api/projects/{env.project_id}/schedules"))["schedules"] == listed[:2]
-        assert (await env.ok("GET", f"/api/schedules/{hourly['schedule_id']}"))["schedule"] == listed[0]
+        assert (await env.ok("POST", "/api/v1/schedule_admin/project_list", {"project_id": env.project_id}))["schedules"] == listed[:2]
+        assert (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": hourly['schedule_id']}))["schedule"] == listed[0]
 
     run_scheduled(test, monkeypatch, tmp_path)
 
@@ -147,8 +147,8 @@ def test_a_schedules_runs_page_by_cursor_and_can_leave_out_the_routine_skips(mon
                 "VALUES ($1, $2, $3, $3, 'scheduled', $4, $3)",
                 f"srun-test{i:04d}", sid, start + timedelta(minutes=i + 1), status)
 
-        async def page(**query: str) -> dict[str, Any]:
-            status, payload = await env.call("GET", f"/api/schedules/{sid}/runs", query=query)
+        async def page(**query: Any) -> dict[str, Any]:
+            status, payload = await env.call("POST", "/api/v1/schedule_admin/runs", {"schedule_id": sid, **query})
             assert status == 200, payload
             return payload
 
@@ -162,23 +162,21 @@ def test_a_schedules_runs_page_by_cursor_and_can_leave_out_the_routine_skips(mon
             run["task_id"], "Look at the new alerts", task_status)
 
         # Without the routine skips, two at a time, each page going on from the last one's oldest run.
-        first = await page(skips="hide", limit="2")
+        first = await page(skips="hide", limit=2)
         assert [r["status"] for r in first["runs"]] == ["skipped_budget", "failed"]
-        second = await page(skips="hide", limit="2", before=first["next_before"])
+        second = await page(skips="hide", limit=2, before=first["next_before"])
         assert [r["status"] for r in second["runs"]] == ["completed", "running"] and second["next_before"] is None
         assert second["routine_skips"] == everything["routine_skips"]  # counted whether shown or not
-        assert [r["status"] for r in (await page(limit="3", before="srun-test0003"))["runs"]] == [
+        assert [r["status"] for r in (await page(limit=3, before="srun-test0003"))["runs"]] == [
             "skipped_overlap", "completed", "skipped_gate"]
 
-        for query, says in [({"skips": "some"}, "skips must be one of show, hide"),
-                            ({"before": "srun-nope"}, "before must be a run of schedule"),
-                            ({"limit": "0"}, "limit must be a whole number")]:
-            status, payload = await env.call("GET", f"/api/schedules/{sid}/runs", query=query)
-            assert status == 400 and says in payload["error"], payload
+        for query in ({"skips": "some"}, {"before": "srun-nope"}, {"limit": 0}):
+            status, payload = await env.call("POST", "/api/v1/schedule_admin/runs", {"schedule_id": sid, **query})
+            assert status == 400 and payload["error"]["code"] == "invalid", payload
         other = await env.schedule()
-        status, payload = await env.call("GET", f"/api/schedules/{other['schedule_id']}/runs",
-                                         query={"before": "srun-test0001"})
-        assert status == 400 and "before must be a run of schedule" in payload["error"]
+        status, payload = await env.call("POST", "/api/v1/schedule_admin/runs",
+                                         {"schedule_id": other["schedule_id"], "before": "srun-test0001"})
+        assert status == 400 and "before must be a run of schedule" in payload["error"]["message"]
 
     run_scheduled(test, monkeypatch, tmp_path)
 
@@ -202,11 +200,11 @@ def test_a_schedule_with_a_gate_may_fire_every_minute(monkeypatch: pytest.Monkey
         assert (back["schedule"]["cron"], back["schedule"]["gate_command"]) == ("* * * * *", "true")
 
         for gated, valid, least in ((True, True, 60), (False, False, 300)):
-            preview = await env.ok("POST", "/api/schedules/preview", {"cron": "* * * * *", "gated": gated})
+            preview = await env.ok("POST", "/api/v1/schedule_admin/preview", {"cron": "* * * * *", "gated": gated})
             assert (preview["valid"], preview["min_interval_seconds"]) == (valid, least)
-        status, payload = await env.call("POST", "/api/schedules/preview", {"cron": "* * * * *", "gated": "yes"})
-        assert status == 400 and "gated must be true or false" in payload["error"]
-        limits = (await env.ok("GET", f"/api/projects/{env.project_id}/schedules"))["limits"]
+        status, payload = await env.call("POST", "/api/v1/schedule_admin/preview", {"cron": "* * * * *", "gated": "yes"})
+        assert status == 400 and payload["error"]["code"] == "invalid"
+        limits = (await env.ok("POST", "/api/v1/schedule_admin/project_list", {"project_id": env.project_id}))["limits"]
         assert (limits["min_interval_seconds"], limits["min_interval_gated_seconds"]) == (300, 60)
 
     run_scheduled(test, monkeypatch, tmp_path)
@@ -460,7 +458,7 @@ def test_missed_fires_run_once_as_a_catch_up_or_are_skipped(monkeypatch: pytest.
         skipped = (await env.runs(skip))[0]
         assert (skipped["status"], skipped["missed"], skipped["task_id"]) == ("skipped_missed", 3, None)
         assert datetime.fromisoformat(
-            (await env.ok("GET", f"/api/schedules/{skip}"))["schedule"]["next_fire_at"]) > env.clock.now
+            (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": skip}))["schedule"]["next_fire_at"]) > env.clock.now
 
     run_scheduled(test, monkeypatch, tmp_path)
 
@@ -505,7 +503,7 @@ def test_a_running_runs_spend_excludes_the_manager_linked_to_its_task(
         since = datetime.fromisoformat(run["fired_at"])
         assert await schedules.spent_since(env.pool, sid, since) == 0.5
         assert await schedules.spent_since_each(env.pool, [sid], since) == {sid: 0.5}
-        assert (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]["spent_today_usd"] == 0.5
+        assert (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]["spent_today_usd"] == 0.5
 
     run_scheduled(test, monkeypatch, tmp_path)
 
@@ -556,17 +554,17 @@ def test_a_task_end_writes_the_run_outcome_and_the_failure_count(monkeypatch: py
                                                                             "the API was down")
         assert failed["cost_usd"] == pytest.approx(0.02) and failed["finished_at"]
         await fire_and_end("failed", "still down", 0.0)
-        schedule = (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]
+        schedule = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
         assert (schedule["consecutive_failures"], schedule["last_success_at"]) == (2, None)
 
         # A user stopping a run is neither a failure nor a success.
         stopped = await fire_and_end("stopped", "", 0.0)
         assert stopped["status"] == "stopped"
-        assert (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]["consecutive_failures"] == 2
+        assert (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]["consecutive_failures"] == 2
 
         done = await fire_and_end("completed", "2 new alerts, both known", 0.05)
         assert (done["status"], done["summary"], done["error"]) == ("completed", "2 new alerts, both known", None)
-        schedule = (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]
+        schedule = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
         assert schedule["consecutive_failures"] == 0 and schedule["last_success_at"]
         assert schedule["last_run"]["run_id"] == done["run_id"]
 
@@ -601,7 +599,7 @@ def test_a_run_past_its_timeout_is_stopped_and_counts_as_a_failure(monkeypatch: 
         [timed_out] = await env.runs(sid)
         assert timed_out["status"] == "timed_out" and "run timeout of 60 s" in timed_out["error"]
         assert env.bus.of("task_stop") == [run["task_id"]]
-        assert (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]["consecutive_failures"] == 1
+        assert (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]["consecutive_failures"] == 1
         # The stop then ends the task: the run keeps timed_out.
         await env.end_task(run["task_id"], "stopped")
         assert (await env.runs(sid))[0]["status"] == "timed_out"
@@ -657,7 +655,7 @@ def test_a_project_with_schedules_is_not_deleted_and_a_deleted_schedule_keeps_it
         await env.ok("DELETE", f"/api/schedules/{sid}")
         assert await env.pool.fetchval("SELECT schedule_id FROM tasks WHERE id = $1", run["task_id"]) is None
         assert await env.pool.fetchval("SELECT count(*) FROM schedule_runs") == 0
-        assert (await env.call("GET", f"/api/schedules/{sid}"))[0] == 404
+        assert (await env.call("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))[0] == 404
 
     run_scheduled(test, monkeypatch, tmp_path)
 
