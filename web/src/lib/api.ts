@@ -867,9 +867,19 @@ export async function setTaskProject(
  * Window event fired after this dashboard creates, edits or deletes a project,
  * or creates, moves or deletes a task, so project lists and counts reload at once.
  */
-/** The download of the whole configuration (``looper config export``'s --include-projects and --include-secrets). */
-export function configExportUrl({ projects, secrets }: { projects: boolean; secrets: boolean }): string {
-  return `${API_BASE}/config/export?projects=${projects ? 1 : 0}&secrets=${secrets ? 1 : 0}`;
+/** Download the portable document from the v1 JSON envelope. */
+export async function downloadConfigExport({ projects, secrets }: { projects: boolean; secrets: boolean }, signal?: AbortSignal): Promise<void> {
+  const result = await callV1<{ document: Record<string, unknown> }>("/api/v1/config/export",
+    { include_projects: projects, include_secrets: secrets }, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  if (isSessionEnded()) throw new SessionEndedError();
+  signal?.throwIfAborted();
+  const url = URL.createObjectURL(new Blob([JSON.stringify(result.document)], { type: "application/json" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `looper-config-${new Date().toISOString().slice(0, 10)}.json`;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 /** The largest configuration file the dashboard can import (the server's config_imports.UPLOAD_MAX_BYTES). */
@@ -901,29 +911,38 @@ export interface ConfigImportUpload {
 
 /** Upload a configuration file (streamed to the server) and preview importing it; nothing is written. */
 export async function uploadConfigImport(file: File): Promise<ConfigImportUpload> {
-  const res = await fetch(`${API_BASE}/config/imports`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+  if (isSessionEnded()) throw new SessionEndedError();
+  const res = await fetch("/api/v1/config/import_upload", {
+    method: "POST", credentials: "same-origin",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: file,
   });
-  if (!res.ok) await failed(res, "upload");
-  return res.json();
+  if (isSessionEnded()) throw new SessionEndedError();
+  const answer = await res.json();
+  if (isSessionEnded()) throw new SessionEndedError();
+  if (res.ok && res.status !== 202 && answer.status === "ok") return answer.result;
+  throw new V1Error(res.status, answer.error?.code ?? "unavailable", answer.error?.message ?? "The upload failed.");
 }
 
-/** Write an uploaded file in one transaction, like `looper config import --apply`; the server deletes the file. */
+/** Apply from the dashboard's existing confirmation dialog; operator calls execute once. */
 export async function applyConfigImport(importId: string): Promise<{ import_id: string; plan: ConfigImportPlan }> {
-  const res = await fetch(`${API_BASE}/config/imports/${encodeURIComponent(importId)}/apply`, { method: "POST" });
-  if (!res.ok) await failed(res, "apply");
-  const data = await res.json();
+  const data = await callV1<{ import_id: string; plan: ConfigImportPlan }>(
+    "/api/v1/config/import_apply", { import_id: importId });
+  if ("status" in data) throw new V1Error(202, "unavailable", data.impact);
+  if (!data.plan.applied) throw new V1Error(200, "unavailable", "The import was not applied.");
   notifyProjectsChanged();
   window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
   return data;
 }
 
-/** Drop an uploaded file without applying it. */
+/** Drop an uploaded file without applying it; already gone is harmless. */
 export async function cancelConfigImport(importId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/config/imports/${encodeURIComponent(importId)}`, { method: "DELETE" });
-  if (!res.ok && res.status !== 404) await failed(res, "cancel");
+  try {
+    const data = await callV1<{ deleted: string }>("/api/v1/config/import_cancel", { import_id: importId });
+    if ("status" in data) throw new V1Error(202, "unavailable", data.impact);
+  } catch (err) {
+    if (!(err instanceof V1Error) || err.status !== 404) throw err;
+  }
 }
 
 export const PROJECTS_CHANGED_EVENT = "looper:projects-changed";

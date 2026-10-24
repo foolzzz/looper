@@ -47,17 +47,17 @@ describe("configuration import", () => {
       if (url === "/api/registry") {
         return Response.json({ models: [{ name: imported ? "Imported model" : "Existing model" }] });
       }
-      if (url === "/api/config/imports") {
-        return Response.json({
+      if (url === "/api/v1/config/import_upload") {
+        return Response.json({ status: "ok", result: {
           import_id: "pending-import", bytes: 512, expires_at: "2030-01-01T12:00:00Z",
           file: { format: "looper-config/v3", secrets: "included" }, plan,
-        } satisfies ConfigImportUpload);
+        } satisfies ConfigImportUpload });
       }
-      if (url === "/api/config/imports/pending-import/apply") {
+      if (url === "/api/v1/config/import_apply") {
         imported = true;
-        return Response.json({ import_id: "pending-import", plan: applied });
+        return Response.json({ status: "ok", result: { import_id: "pending-import", plan: applied } });
       }
-      if (url === "/api/config/imports/pending-import" && init?.method === "DELETE") return Response.json({});
+      if (url === "/api/v1/config/import_cancel" && init?.method === "POST") return Response.json({ status: "ok", result: { deleted: "pending-import" } });
       throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
     });
     vi.stubGlobal("fetch", fetcher);
@@ -109,7 +109,32 @@ describe("configuration import", () => {
     expect(button("Apply 3 changes").disabled).toBe(false);
     expect(container.querySelector('[role="status"]')).toBeNull();
     expect(container.textContent).not.toContain("secret-never-rendered");
-    expect(fetcher).toHaveBeenCalledWith("/api/config/imports", expect.objectContaining({ method: "POST", body: file }));
+    expect(fetcher).toHaveBeenCalledWith("/api/v1/config/import_upload", expect.objectContaining({ method: "POST", body: file }));
+  });
+
+  it("downloads only the portable document from the export envelope", async () => {
+    const document = { format: "looper-config/v3", secrets: "included", providers: [{ api_key: "synthetic-export" }] };
+    fetcher.mockResolvedValueOnce(Response.json({ status: "ok", result: { document } }));
+    const objectUrl = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:configuration");
+    const anchor = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    await show();
+    await click("Export configuration");
+    expect(JSON.parse(await (objectUrl.mock.calls[0][0] as Blob).text())).toEqual(document);
+    expect((anchor.mock.instances[0] as HTMLAnchorElement).download).toMatch(/^looper-config-.*\.json$/);
+    expect(container.textContent).not.toContain("synthetic-export");
+    objectUrl.mockRestore(); anchor.mockRestore();
+  });
+
+  it("keeps 202 pending and tolerates an already expired cancellation", async () => {
+    await show();
+    await upload();
+    fetcher.mockResolvedValueOnce(Response.json({ status: "needs_confirmation", impact: "Pending import", confirmation_id: "confirmation" }, { status: 202 }));
+    await click("Apply 3 changes");
+    expect(onImported).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Pending import");
+    fetcher.mockResolvedValueOnce(Response.json({ status: "error", error: { code: "not_found", message: "expired" } }, { status: 404 }));
+    await click("Cancel");
+    expect(container.querySelector("table")).toBeNull();
   });
 
   it("keeps a skipped-only plan unapplied", async () => {
@@ -171,11 +196,11 @@ describe("configuration import", () => {
     await show(true, 3);
     expect([...container.querySelectorAll("output")].every((item) => item.textContent === "Imported model")).toBe(true);
     expect(fetcher.mock.calls.filter(([url]) => url === "/api/registry")).toHaveLength(2);
-    expect(fetcher.mock.calls.some(([url, init]) => String(url).endsWith("/apply") && init?.body !== undefined)).toBe(false);
+    expect(fetcher).toHaveBeenCalledWith("/api/v1/config/import_apply", expect.objectContaining({ body: JSON.stringify({ import_id: "pending-import" }) }));
   });
 
   it("reads back upload errors without showing a successful preview", async () => {
-    fetcher.mockResolvedValueOnce(Response.json({ error: "unsupported configuration format" }, { status: 400 }));
+    fetcher.mockResolvedValueOnce(Response.json({ status: "error", error: { code: "invalid", message: "unsupported configuration format" } }, { status: 400 }));
     await show();
     await upload();
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("unsupported configuration format");
@@ -186,7 +211,7 @@ describe("configuration import", () => {
   it("keeps a failed apply retryable and refreshes only after a successful retry", async () => {
     await show(true);
     await upload();
-    fetcher.mockResolvedValueOnce(Response.json({ error: "provider endpoint conflicts with an existing profile" }, { status: 409 }));
+    fetcher.mockResolvedValueOnce(Response.json({ status: "error", error: { code: "conflict", message: "provider endpoint conflicts with an existing profile" } }, { status: 409 }));
     await click("Apply 3 changes");
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("provider endpoint conflicts");
     expect(container.querySelector('[role="status"]')).toBeNull();
@@ -204,11 +229,11 @@ describe("configuration import", () => {
     await upload();
     vi.stubGlobal("confirm", vi.fn(() => false));
     await click("Apply 3 changes");
-    expect(fetcher.mock.calls.some(([url]) => String(url).endsWith("/apply"))).toBe(false);
+    expect(fetcher.mock.calls.some(([url]) => String(url).endsWith("/import_apply"))).toBe(false);
     expect(onImported).not.toHaveBeenCalled();
     expect(container.querySelector("table")).not.toBeNull();
     await click("Cancel");
-    expect(fetcher).toHaveBeenCalledWith("/api/config/imports/pending-import", { method: "DELETE" });
+    expect(fetcher).toHaveBeenCalledWith("/api/v1/config/import_cancel", expect.objectContaining({ method: "POST", body: JSON.stringify({ import_id: "pending-import" }) }));
     expect(container.querySelector("table")).toBeNull();
     expect(container.querySelector('[role="status"]')).toBeNull();
   });

@@ -290,7 +290,7 @@ The main route groups:
 | Catalog and installs | `/api/catalog/...`, `/api/installs/...`, `/api/projects/:id/installs`, `/api/projects/:id/skills/...` | Plugins, skills and MCP servers: import, upload, git, write, edit, delete; install them globally or in a project |
 | Agent settings | `/api/agent-settings/...`, `/api/projects/:id/agent-settings/...`, `/api/roles/...` | The settings layers, each field with its effective value and source; each role's prompt and limits |
 | Registry | `GET /api/registry`, `/api/runtimes/:id/probe`, `/api/providers/...`, `/api/agent-profiles/...` | Runtime types and the built-in runtimes (Re-detect probes one); register, edit and delete providers (API keys masked) and Agent Profiles, each with where it is used |
-| Configuration transfer | `GET /api/config/export`, `/api/config/imports/...` | Download the configuration file; upload one, preview it, then apply or cancel |
+| Configuration transfer | `POST /api/v1/config/export`, `/api/v1/config/import_upload`, `/api/v1/config/import_apply`, `/api/v1/config/import_cancel` | Download the configuration file; upload one, preview it, then apply or cancel |
 | Chat | `/api/chat/send`, `/api/chat/targets`, `/api/chat/sessions`, `/api/chat/messages`, `/api/chat/events` | Talk to the Manager or a running task's Planner; the Manager's conversations by channel; history and SSE stream |
 | Runs | `POST /api/v1/runs/{list,get,events,for_task,usage}` | Every agent run with its launch command, usage, cost and events; one agent's spending and context |
 | Channels | `/api/channel-configs/...`, `/api/channels/lark/...` | Telegram and Lark settings, the Telegram bot token (never returned) and sender allowlists; the Lark bot's status, refused senders and people search |

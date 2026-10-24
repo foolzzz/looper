@@ -26,13 +26,14 @@ def test_config_round_trip_matches_dashboard_and_requires_confirmation(tmp_path,
                                    {**_bearer(CLIENT_TOKEN if client else TOKEN), "X-Looper-Session": session},
                                    "" if data is None else json.dumps(data))
 
-            status, _, old = await request("/api/config/imports", document, client=False)
-            assert status == 201
+            status, _, uploaded = await request("/api/v1/config/import_upload", document, client=False)
+            assert status == 200
+            uploaded = uploaded["result"]
             status, _, preview = await request("/api/v1/config/import_preview", {"document": document})
-            assert status == 200 and preview["result"]["plan"] == old["plan"]
+            assert status == 200 and preview["result"]["plan"] == uploaded["plan"]
             assert await pool.fetchval("SELECT count(*) FROM projects WHERE name='Portable'") == 0
             import_id = preview["result"]["import_id"]
-            status, _, refused = await request("/api/v1/config/import_apply", {"import_id": old["import_id"]})
+            status, _, refused = await request("/api/v1/config/import_apply", {"import_id": uploaded["import_id"]})
             assert status == 404  # a client's import ids cannot name an operator's staged file
             status, _, asked = await request("/api/v1/config/import_apply", {"import_id": import_id})
             assert status == 202
@@ -42,16 +43,19 @@ def test_config_round_trip_matches_dashboard_and_requires_confirmation(tmp_path,
             status, _, applied = await request("/api/v1/confirm", {"confirmation_id": asked["confirmation_id"]})
             assert status == 200 and applied["result"]["plan"]["applied"]
             assert await pool.fetchval("SELECT background FROM projects WHERE name='Portable'") == "context"
-            status, _, old_applied = await request(f"/api/config/imports/{old['import_id']}/apply", client=False)
-            assert status == 200 and old_applied["plan"]["applied"]
-            status, _, old_export = await request("/api/config/export?projects=1", client=False, method="GET")
+            status, _, operator_applied = await request("/api/v1/config/import_apply",
+                                                       {"import_id": uploaded["import_id"]}, client=False)
+            assert status == 200 and operator_applied["result"]["plan"]["applied"]
+            status, _, dashboard_export = await request("/api/v1/config/export",
+                                                       {"include_projects": True}, client=False)
             assert status == 200
+            dashboard_export = dashboard_export["result"]["document"]
             status, _, exported = await request("/api/v1/config/export", {"include_projects": True})
             assert status == 200
             new_export = exported["result"]["document"]
-            for value in (old_export, new_export):
+            for value in (dashboard_export, new_export):
                 value.pop("exported_at")
-            assert new_export == old_export
+            assert new_export == dashboard_export
             status, _, again = await request("/api/v1/config/import_preview", {"document": new_export})
             assert status == 200 and again["result"]["plan"]["changes"] == []
             server._config_imports.clear()

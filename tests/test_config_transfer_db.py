@@ -619,7 +619,9 @@ def test_file_transfer_accepts_an_export_over_the_http_request_cap(monkeypatch: 
 def test_the_settings_download_streams_the_same_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def _test() -> None:
         from looper.agents.http_server import AgentHTTPServer
-        from looper.agents.tiers.task import TaskRouter
+        from looper.agents.ops.clients import ClientOps
+        from tests.test_api_v1_auth import _bearer, _send_raw
+        from tests.test_operator_auth import TOKEN
         from types import SimpleNamespace
 
         async with _installation() as (source, source_url):
@@ -627,17 +629,19 @@ def test_the_settings_download_streams_the_same_file(monkeypatch: pytest.MonkeyP
             exported = tmp_path / "config.json"
             assert (await _transfer_file(source_url, "export", str(exported), include_projects=True))[0] == 0
             server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
-                                     task_router=TaskRouter(runtime_root=tmp_path / "runtime"))
-            writer = _Writer()
-            await server._route_api("GET", "/api/config/export", {"projects": "1"}, b"", writer)
+                                     task_router=SimpleNamespace(), operator_token=TOKEN)
+            server._client_ops = ClientOps(SimpleNamespace())
+            status, headers, payload = await _send_raw(server, "POST /api/v1/config/export", _bearer(TOKEN),
+                                                       json.dumps({"include_projects": True}))
 
-            head, _, payload = writer.data.partition(b"\r\n\r\n")
-            assert head.startswith(b"HTTP/1.1 200") and b"Content-Length" not in head
-            assert b'Content-Disposition: attachment; filename="looper-config-' in head
-            downloaded = json.loads(payload)
+            assert status == 200 and "content-length" not in headers
+            assert headers["content-type"].startswith("application/json")
+            envelope = json.loads(payload)
+            assert envelope["status"] == "ok"
+            downloaded = envelope["result"]["document"]
             downloaded.pop("exported_at")
             assert downloaded == _without_time(exported)
-            assert SECRET.encode() not in payload
+            assert SECRET not in payload
 
     asyncio.run(_test())
 

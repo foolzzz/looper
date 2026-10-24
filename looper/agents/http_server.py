@@ -105,13 +105,12 @@ _RE_AGENT_OP = re.compile(r"^/api/agent/v1/ops/([a-z_]{1,64})$")
 # knowledge upload: a document of at most knowledge.DOCUMENT_MAX_BYTES (2 MiB)
 # as base64 in JSON is about 2.7 MiB, and as JSON-escaped text up to twice its
 # size; 8 MiB leaves room for both. A larger body is refused unread. The one
-# exception is a configuration import (CONFIG_IMPORTS_PATH), which streams its
+# exception is a configuration import (/api/v1/config/import_upload), which streams its
 # body to a file and takes up to config_imports.UPLOAD_MAX_BYTES.
 REQUEST_BODY_MAX_BYTES = 4 * knowledge.DOCUMENT_MAX_BYTES
 # The Tasks list's page: how many tasks GET /api/tasks returns by default, and at most.
 TASKS_PAGE = 50
 TASKS_PAGE_MAX = 200
-CONFIG_IMPORTS_PATH = "/api/config/imports"
 
 
 def _json_response(status: str, body: Any, *, headers: Mapping[str, str] | None = None) -> bytes:
@@ -253,6 +252,7 @@ class AgentHTTPServer:
             headers = await self._read_headers(reader)
             parsed = urllib.parse.urlparse(raw_path)
             path = parsed.path
+            streamed = method == "POST" and path == "/api/v1/config/import_upload"
 
             area = operator_auth.access(path)
             sign_in_headers = SIGN_IN_HEADERS if area is operator_auth.Access.SIGN_IN else None
@@ -261,7 +261,9 @@ class AgentHTTPServer:
             refused = request_guard.refusal(headers, bind_host=self._host)
             if refused:
                 logger.warning("refused %s %s: %s", method, path, refused)
-                writer.write(_json_response(HTTP_403, {"error": refused}, headers=sign_in_headers))
+                status, answer = (api_v1.error(ErrorCode.FORBIDDEN, refused) if streamed
+                                  else (HTTP_403, {"error": refused}))
+                writer.write(_json_response(status, answer, headers=sign_in_headers))
                 await writer.drain()
                 writer.close()
                 return
@@ -306,7 +308,6 @@ class AgentHTTPServer:
 
             query = dict(urllib.parse.parse_qsl(
                 parsed.query, keep_blank_values=area is operator_auth.Access.DASHBOARD))
-            streamed = method == "POST" and path == CONFIG_IMPORTS_PATH
             cap = (config_imports.UPLOAD_MAX_BYTES if streamed or path == "/api/v1/config/import_preview"
                    else REQUEST_BODY_MAX_BYTES)
             if area is operator_auth.Access.SIGN_IN:
@@ -317,23 +318,26 @@ class AgentHTTPServer:
             except ValueError:
                 content_length = -1
             if content_length < 0:
-                writer.write(_json_response(HTTP_400, {"error": "bad Content-Length"}, headers=sign_in_headers))
+                status, answer = (api_v1.error(ErrorCode.INVALID, "bad Content-Length") if streamed
+                                  else (HTTP_400, {"error": "bad Content-Length"}))
+                writer.write(_json_response(status, answer, headers=V1_HEADERS if streamed else sign_in_headers))
                 await writer.drain()
                 return
             if content_length > cap:
-                writer.write(_json_response(HTTP_413, {
-                    "error": f"the request body has {content_length} bytes; "
-                             f"{'a configuration import' if streamed else 'the server'} takes at most "
-                             f"{cap // (1024 * 1024)} MiB ({cap} bytes)",
-                }, headers=sign_in_headers))
+                message = (f"the request body has {content_length} bytes; "
+                           f"{'a configuration import' if streamed else 'the server'} takes at most "
+                           f"{cap // (1024 * 1024)} MiB ({cap} bytes)")
+                status, answer = (api_v1.error(ErrorCode.INVALID, message, status=HTTP_413) if streamed
+                                  else (HTTP_413, {"error": message}))
+                writer.write(_json_response(status, answer, headers=V1_HEADERS if streamed else sign_in_headers))
                 await writer.drain()
                 return
             if streamed:
                 if headers.get("expect", "").lower() == "100-continue":
                     writer.write(b"HTTP/1.1 100 Continue\r\n\r\n")
                     await writer.drain()
-                await self._handle_config_import(
-                    writer, HTTP_201, lambda imports: imports.receive(reader, content_length))
+                await self._handle_v1(method, path, query, headers, b"", writer, principal,
+                                      upload=(reader, content_length))
                 return
             if content_length > 0:
                 body = await asyncio.wait_for(
@@ -405,11 +409,42 @@ class AgentHTTPServer:
         return api_v1.Principal("client", client["id"], client["name"])
 
     async def _handle_v1(self, method: str, path: str, query: dict[str, str], headers: Mapping[str, str],
-                         body: bytes, writer: asyncio.StreamWriter, principal: api_v1.Principal) -> None:
+                         body: bytes, writer: asyncio.StreamWriter, principal: api_v1.Principal, *,
+                         upload: tuple[asyncio.StreamReader, int] | None = None) -> None:
         started = time.monotonic()
         operation = api_v1.find(method, path)
         refused: tuple[str, dict[str, Any]] | None = None
-        if operation is not None and operation.operator_only and principal.kind != "operator":
+        json_started = False
+
+        async def export_json(arguments: dict[str, Any]) -> dict[str, Any]:
+            # Keep the snapshot and chunks on the writer path; no second full document in memory.
+            from ..db.connection import get_pool
+            nonlocal json_started
+            async with get_pool().acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
+                chunks = config_transfer.export_chunks(conn,
+                    include_projects=bool(arguments.get("include_projects")),
+                    include_secrets=bool(arguments.get("include_secrets")))
+                try:
+                    first = await anext(chunks)  # pre-header failures still get a typed JSON refusal
+                    writer.write((f"HTTP/1.1 {HTTP_200}\r\nContent-Type: application/json; charset=utf-8\r\n"
+                                  "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
+                                  '{"status":"ok","result":{"document":').encode() + first.encode("utf-8"))
+                    json_started = True
+                    await writer.drain()
+                    async for chunk in chunks:
+                        writer.write(chunk.encode("utf-8"))
+                        await writer.drain()
+                finally:
+                    await chunks.aclose()
+            # Only close the envelope after the snapshot exits successfully. A failed download is invalid JSON.
+            writer.write(b"}}")
+            await writer.drain()
+            return {}
+
+        if upload is not None:
+            domain = api_v1.domain_for(operation)
+            status, answer = await domain.receive(self, *upload, principal, headers)
+        elif operation is not None and operation.operator_only and principal.kind != "operator":
             status, answer = api_v1.error(ErrorCode.FORBIDDEN, "operator identity is required")
         elif operation is not None and operation.stream and api_v1.domain_for(operation) is not None:
             refused = await self._v1_domain(operation, headers, body, principal, writer=writer)
@@ -417,6 +452,8 @@ class AgentHTTPServer:
         elif operation is not None and operation.operation_id == "chat.send":
             refused = await self._v1_chat_send(body, principal, writer)
             status, answer = refused or (api_v1.OK, {"status": "ok"})
+        elif operation is not None and operation.operation_id == "config.export":
+            status, answer = await self._v1_online(operation, headers, body, principal, json_export=export_json)
         else:
             status, answer = await self._answer_v1(method, path, operation, headers, body, principal)
         if operation is not None and operation.operation_id != "openapi":
@@ -424,6 +461,8 @@ class AgentHTTPServer:
                        else f"error:{answer['error']['code']}")
             logger.info("api client=%s op=%s status=%s ms=%d", principal.key, operation.operation_id, outcome,
                         (time.monotonic() - started) * 1000)
+        if json_started:
+            return  # errors after headers leave a visibly truncated JSON response, never a second response
         if operation is not None and operation.stream and refused is None and answer.get("status") == "ok":
             return  # the stream is written
         writer.write(_json_response(status, answer, headers=V1_HEADERS))
@@ -543,7 +582,8 @@ class AgentHTTPServer:
                                 details=None if operation.credential_write else exc.details)
 
     async def _v1_online(self, operation: api_v1.Operation, headers: Mapping[str, str], body: bytes,
-                         principal: api_v1.Principal) -> tuple[str, dict[str, Any]]:
+                         principal: api_v1.Principal, *, json_export: Callable[..., Awaitable[Any]] | None = None
+                         ) -> tuple[str, dict[str, Any]]:
         name = operation.operation_id
         # Refuse before validating arguments: credential requests never enter the ops argument audit trail.
         if operation.operator_only and principal.kind != "operator":
@@ -589,13 +629,9 @@ class AgentHTTPServer:
             async def run(call: Call) -> dict[str, Any]:
                 try:
                     if name == "config.export":
-                        from ..db.connection import get_pool
-                        async with get_pool().acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
-                            chunks = config_transfer.export_chunks(conn,
-                                include_projects=bool(call.arguments.get("include_projects")),
-                                include_secrets=bool(call.arguments.get("include_secrets")))
-                            document = json.loads("".join([chunk async for chunk in chunks]))
-                        return {"document": document}
+                        if json_export is None:
+                            raise OpError(ErrorCode.UNAVAILABLE, "configuration export requires the JSON writer")
+                        return await json_export(call.arguments)
                     if self._config_imports is None:
                         raise OpError(ErrorCode.UNAVAILABLE, "the server has no runtime root")
                     if name == "config.import_preview":
@@ -604,8 +640,6 @@ class AgentHTTPServer:
                         reader.feed_data(raw)
                         reader.feed_eof()
                         return await self._config_imports.receive(reader, len(raw), owner=principal.key)
-                    if name == "config.import_cancel":
-                        return await self._config_imports.cancel(call.arguments["import_id"], owner=principal.key)
                     return await self._apply_import(self._config_imports, call.arguments["import_id"],
                                                     owner=principal.key)
                 except config_transfer.ConfigFileError as exc:
@@ -814,8 +848,6 @@ class AgentHTTPServer:
     _RE_SCHEDULE = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)$")
     _RE_SCHEDULE_RESET_SESSION = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/reset-planner-session$")
     _RE_SCHEDULE_RUN = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/run$")
-    _RE_CONFIG_IMPORT = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})$")
-    _RE_CONFIG_IMPORT_APPLY = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})/apply$")
 
     async def _route_api(
         self,
@@ -962,13 +994,6 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_ROLE_SETTINGS.match(path)) and method == "PUT":
             await self._handle_agent_settings(writer, lambda: self._write_layer(
                 body, lambda data: agent_settings.update_project(m.group(1), data, role=m.group(2))))
-        elif path == "/api/config/export" and method == "GET":
-            await self._handle_config_export(query, writer)
-        elif (m := self._RE_CONFIG_IMPORT_APPLY.match(path)) and method == "POST":
-            await self._handle_config_import(writer, HTTP_200,
-                                             lambda imports: self._apply_import(imports, m.group(1), body))
-        elif (m := self._RE_CONFIG_IMPORT.match(path)) and method == "DELETE":
-            await self._handle_config_import(writer, HTTP_200, lambda imports: imports.cancel(m.group(1)))
         elif path == "/api/scheduler-settings" and method == "GET":
             await self._answer(writer, HTTP_200, schedules.scheduler_settings)
         elif path == "/api/scheduler-settings" and method == "PUT":
@@ -1695,11 +1720,9 @@ class AgentHTTPServer:
             await self._recheck_concurrency()
         return result
 
-    async def _apply_import(self, imports: config_imports.ConfigImports, import_id: str, body: bytes = b"", *,
+    async def _apply_import(self, imports: config_imports.ConfigImports, import_id: str, *,
                             owner: str | None = None) -> Any:
         """Apply an import; its layers may raise a concurrency limit."""
-        if body:
-            raise config_transfer.ConfigFileError("apply takes no request body; the server recomputes the import plan")
         result = await imports.apply(import_id, owner=owner)
         await self._recheck_concurrency()
         return result
@@ -1764,64 +1787,6 @@ class AgentHTTPServer:
         except Exception:
             logger.exception("knowledge request failed")
             status, result = HTTP_500, {"error": "the knowledge request failed; see the server log"}
-        writer.write(_json_response(status, _serialize(result)))
-        await writer.drain()
-
-    # --- Configuration export ---
-
-    async def _handle_config_export(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
-        """Stream the configuration file as a download, piece by piece from one read-only snapshot.
-
-        ``projects=1`` and ``secrets=1`` are ``looper config export``'s
-        ``--include-projects`` and ``--include-secrets``. The status line is
-        sent before the first piece, so a failure after it ends the download
-        early, which leaves a file that is not valid JSON.
-        """
-        import datetime
-
-        from ..db.connection import get_pool
-        from .config_transfer import export_chunks
-
-        include_projects, include_secrets = query.get("projects") == "1", query.get("secrets") == "1"
-        name = f"looper-config-{datetime.date.today().isoformat()}.json"
-        async with get_pool().acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
-            chunks = export_chunks(conn, include_projects=include_projects, include_secrets=include_secrets)
-            first = await anext(chunks)
-            writer.write(
-                f"HTTP/1.1 {HTTP_200}\r\n"
-                "Content-Type: application/json; charset=utf-8\r\n"
-                f'Content-Disposition: attachment; filename="{name}"\r\n'
-                "Cache-Control: no-store\r\n"
-                "Connection: close\r\n"
-                "\r\n".encode() + first.encode("utf-8")
-            )
-            async for chunk in chunks:
-                writer.write(chunk.encode("utf-8"))
-                await writer.drain()
-        await writer.drain()
-
-    async def _handle_config_import(
-        self, writer: asyncio.StreamWriter, status: str,
-        request: Callable[[config_imports.ConfigImports], Awaitable[Any]],
-    ) -> None:
-        """Answer with ``request(imports)``'s result: a file that is not a usable configuration file is 400, an
-        unknown or expired import 404, and too many pending, one being applied or a schema awaiting
-        ``looper serve``'s migration 409."""
-        try:
-            if self._config_imports is None:
-                raise RuntimeError("the server was started without a runtime root")
-            result = await request(self._config_imports)
-        except config_transfer.ConfigFileError as exc:
-            status, result = HTTP_400, {"error": str(exc)}
-        except config_imports.ImportNotFound as exc:
-            status, result = HTTP_404, {"error": str(exc)}
-        except (config_imports.ImportConflict, config_transfer.SchemaChangePending) as exc:
-            status, result = HTTP_409, {"error": str(exc)}
-        except (asyncio.TimeoutError, ConnectionError, asyncio.IncompleteReadError):
-            raise  # the client stopped sending; there is no one to answer
-        except Exception:
-            logger.exception("config import request failed")
-            status, result = HTTP_500, {"error": "the import failed; see the server log"}
         writer.write(_json_response(status, _serialize(result)))
         await writer.drain()
 

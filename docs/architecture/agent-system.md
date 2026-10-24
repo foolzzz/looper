@@ -2754,8 +2754,8 @@ everywhere and are not exported. Local ids are never portable references.
 `settings` carries the system/role layers, role prompts, timeouts and enabled
 flags; `channels`, global `installs` and `catalog` carry their existing content; `channels` holds only the three built-in rows, matched by id, so added bots are not exported and a file naming one is refused.
 `--include-projects` adds projects, layers, knowledge, skills, installs and
-schedules. Export streams a read-only repeatable-read snapshot, either through
-v1 `config.export` or `GET /api/config/export`; both share the same implementation.
+schedules. Export streams a read-only repeatable-read snapshot through
+v1 `config.export`, wrapped in its JSON `result.document` envelope for both the CLI and dashboard.
 The CLI needs the running service; catalog files remain UTF-8 text.
 
 This minimal portable example can be previewed with
@@ -2844,12 +2844,14 @@ items keep their origin. Importing the same file again changes nothing, and
 exporting the new installation gives the same file.
 
 Settings imports too (`looper/agents/config_imports.py`). `POST
-/api/config/imports` is the one route that reads past the 8 MiB request cap:
+/api/v1/config/import_upload` accepts a raw configuration document beyond the 8 MiB request cap:
 it streams up to 256 MiB (twice the catalog's cap) to a 0600 file under
-`<runtime root>/config-imports/`, after the Origin and Host checks, and
-answers with an import id and the same preview. `POST
-/api/config/imports/<id>/apply` runs `--apply`'s transaction and deletes the
-file; `DELETE` cancels; an import left alone expires after an hour, and the
+`<runtime root>/config-imports/`, after authentication and the Origin and Host checks, and
+answers with an import id and the same preview in `result`. `POST
+/api/v1/config/import_apply` accepts that `import_id`, runs `--apply`'s transaction and deletes the
+file; `/api/v1/config/import_cancel` cancels only the caller's own import. The dashboard
+operator applies in one call after its existing explicit choice; client tokens use
+`/api/v1/confirm`. An import left alone expires after an hour, and the
 server clears the directory when it starts and stops. After applying, each
 secret to fill in names the provider, MCP server or channel that takes it, and
 Settings links to its form (`#settings/providers/<id>`,
