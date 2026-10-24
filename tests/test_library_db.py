@@ -51,6 +51,10 @@ class _Writer:
 
 
 async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
+    if path.startswith(("/api/v1/catalog_items/", "/api/v1/installs/", "/api/v1/project_skills/")):
+        from tests.test_catalog_db import _call as catalog_call
+        return await catalog_call(method, path, body)
+
     from looper.agents.http_server import AgentHTTPServer
     from looper.agents.tiers.task import TaskRouter
 
@@ -95,7 +99,7 @@ def test_an_import_stores_the_snapshot(home: Path, monkeypatch: pytest.MonkeyPat
                 "size_bytes": 17} in report["skipped"]
         assert view["installed_count"] == 0
         assert await pool.fetchval("SELECT count(*) FROM library_installs") == 0
-        status, again = await _call("GET", "/api/catalog")
+        status, again = await _call("POST", "/api/v1/catalog_items/list", {})
         assert status == 200 and again["items"] == view["items"] and again["last_import"] == report
 
     run_db(_test, monkeypatch)
@@ -108,13 +112,12 @@ def test_a_reimport_replaces_changed_items_keeps_their_installs_and_leaves_proje
         await _call("POST", "/api/catalog/import")
         before = await _items(pool)
         for name in ("alpha", "demo@market", "beta"):
-            status, _ = await _call("POST", "/api/installs", {"item_id": before[name]["id"], "scope": "global",
+            status, _ = await _call("POST", "/api/v1/installs/create", {"item_id": before[name]["id"], "scope": "global",
                                                               "roles": ["worker"]})
-            assert status == 201
+            assert status == 200
         status, project = await _call("POST", "/api/projects", {"name": "calc"})
-        status, _ = await _call("POST", f"/api/projects/{project['project_id']}/skills",
-                                {"name": "alpha", "description": "The project's own alpha.", "content": "Reply OWN."})
-        assert status == 201
+        status, _ = await _call("POST", "/api/v1/project_skills/add", {"project_id": project['project_id'], "skill": {"name": "alpha", "description": "The project's own alpha.", "content": "Reply OWN."}})
+        assert status == 200
 
         (home / "skills" / "alpha" / "SKILL.md").write_text("---\nname: alpha\n---\nReply ALPHA-v2.\n")
         os.unlink(home / "skills" / "beta")
@@ -172,7 +175,7 @@ def test_agents_load_the_installed_items_from_the_database(
         _, view = await _call("POST", "/api/catalog/import")
         for item in view["items"]:
             if item["name"] != "beta":
-                await _call("POST", "/api/installs", {"item_id": item["item_id"], "scope": "global"})
+                await _call("POST", "/api/v1/installs/create", {"item_id": item["item_id"], "scope": "global"})
         runtime = tmp_path / "runtime"
         loaded = await load_installed(runtime, "reviewer")
         assert [i["name"] for i in loaded.record()["items"]] == ["demo@market", "alpha"]

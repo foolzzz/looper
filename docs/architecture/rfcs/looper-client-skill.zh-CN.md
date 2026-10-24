@@ -91,6 +91,8 @@
 
 **类型化的结果：** 状态投影与完整参数的 `tasks.create` 有独立 schema（创建结果含 `WorkspaceCheck`），不新增 Manager Tool。未完成领域的工具结果继续显式标记未类型化，各领域通过 `RESULTS` 补齐。阶段 1 给 agent 用的操作写出 `result` 的 schema（顶层每个键的类型，`additionalProperties: true`）：`tasks.list`、`tasks.get`、`task_pipeline`、`task_create`、`task_control.*`、`task_update`、`task_instruct`、`gates.*`、`agent_profiles.list`、`overview`、`confirm`、`whoami`、聊天三个。其余操作的 `result` 暂为 `{"type": "object"}` 并标 `x-looper-result-typed: false`，测试列出这些操作，阶段 2 把列表清空。
 
+目录条目与安装提供 `catalog_items.list/get/update/delete`、`installs.create/update/delete/project`，均为 `hand=false` 的普通 JSON 操作。完整目录、详情、安装与项目安装 DTO 保留文件、归属及继承信息；现有 `catalog.list/install/update/uninstall` 的请求和路径不变，compact 回答分别类型化，列表用 `oneOf` 区分全局与项目。获取来源的迁移另行交付。项目自有 skill 由 `project_skills.add/get/update/delete` 提供，复用完整 `ProjectInstalls`、`CatalogItem`、`Install` 投影及 `ProjectSkill`；请求标识为必填字符串，更新字段非空且不接受 `enabled`，开关走 `installs.update`。名称、描述、正文和项目数量限制沿用 `project_skills` 核心常量。
+
 **文档覆盖什么：** 文档包含既有 v1 操作和已迁移的控制台领域，剩余旧路由仍不在文档中。状态现为 `POST /api/v1/system/status {}`，返回完整状态投影（Agent、任务计数、web 健康、自检、退出能力及可选的绑定/管家状态），客户端的 `can_sign_out` 恒为 false；操作者从真实请求头计算。旧 `GET /api/status` 已删除。
 
 领域注册表为有序模块名元组，按需加载；每个模块声明 `OPERATIONS`、补齐现有工具的 `RESULTS` 和 `run`，按需声明 `stream` / `impact`。生成时拒绝重复 id/方法路径，领域 stream 自带事件说明/schema，当前仅接受只读操作（注册时拒绝写流，防止绕过确认/审计）；`high` 必须提供 impact。请求头直接传回调。普通写复用 ClientOps 校验、审计和客户端确认，领域 DTO 使用 transport 校验一次（保留必填 null、对象数组与联合类型，拒绝未声明字段）；Manager Tool 校验/列表不变。凭据写先拒绝客户端，参数/结果不审计，失败脱敏。错误可带类型化 `details`（`manager_id`、`state`、可空的 `phase`/`method`），不透传原始异常或请求值。
@@ -110,7 +112,9 @@
 | 关卡留言、结束 | `POST /api/tasks/:id/gates/:step/messages`、`end` | `looper_task_gate_reply`、`looper_gates` reply/end | 共用 `gate_service.post_message` | 不变 |
 | 关卡列表、讨论 | `GET /api/gates`、`GET …/messages` | `looper_gates` list/messages | 共用 `gate_service.list_gates`、`thread` | 不变 |
 | 总览 | `GET /api/overview` | `looper_overview` | 共用 `overview.build_overview` | 不变 |
-| 项目、Profile、provider、模型、目录与安装、设置层、可选 Profile、定时任务、花费 | 各自的路由 | 各自的工具 | 共用 `projects`、`profile_registry`、`catalog`、`agent_settings`、`schedules`、`llm_records` | 不变（这些工具建时就要求调控制台的代码） |
+| 项目、Profile、provider、模型、设置层、可选 Profile、定时任务、花费 | 各自的路由 | 各自的工具 | 共用 `projects`、`profile_registry`、`catalog`、`agent_settings`、`schedules`、`llm_records` | 不变（这些工具建时就要求调控制台的代码） |
+| 目录条目与安装 | `catalog_items.*`、`installs.*`（v1） | `looper_catalog` | 沿用 `catalog` 事务与安装普通写策略，删除目录条目为 high 并重验归属 | 控制台和客户端共用；MCP/skill 更新只认操作者，回答遮罩秘密 |
+| 项目自有 skill | `project_skills.add/get/update/delete`（v1） | 无新增 Tool | 共用 `project_skills` 归属校验与事务 | 控制台与客户端共用完整结果；删除列明所有安装项目，确认执行时重读实际引用并级联删除安装 |
 | 配置导出、导入 | `GET /api/config/export`、`/api/config/imports` | `looper_config_export` | 阶段 2a：v1 与旧路由、工具共用 `config_transfer` 和 `ConfigImports` | 已交付：`loopercli config export` / `import` 调 v1；旧控制台路由保留 |
 
 ## 6. 客户端身份与令牌
@@ -280,7 +284,7 @@ v1 配置预览收 `{document: <配置对象>}`，和控制台一样最多 256 M
 | 任务 | 创建已迁移：`tasks.create` 复用 [#429](https://github.com/foolzzz/looper/pull/429) 完整参数核心，控制台改用 v1，旧创建路由已删除；定向测试、隔离 serve 与 1280/390 浏览器通过，完整套件留给 CI；其余任务操作待迁移 |
 | 聊天 | 待迁移 |
 | 项目与知识 | 待迁移 |
-| 能力目录 | 待迁移 |
+| 能力目录 | 目录条目与安装已迁移：完整 DTO 与 compact Tool 结果类型化，控制台改走 v1，八个旧方法删除；上传、导入路由保留。此前目录与安装的 249 项定向测试、隔离 serve 与桌面/390px 验收通过（其 session-ended/abort 未单独实测）；项目自有 skill 四个操作已迁移，沿用默认启用、核心限制及事务，删除列明跨项目安装影响并重验引用。本次相关定向 pytest 218 项及前端构建通过，隔离 serve 与 1280/390px 浏览器增改、开关、删除、错误、abort、session-ended 验收通过，旧 skill 路由请求为 0；独立 Vitest 专项因 worker 启动超时未取得有效通过结果，完整套件留给 CI |
 | Agent 与 Profile | 待迁移 |
 | 管家与模板 | 待迁移 |
 | 渠道 | 待迁移 |
@@ -295,6 +299,8 @@ v1 配置预览收 `{document: <配置对象>}`，和控制台一样最多 256 M
 
 - `/api/v1/` 的普通操作也接受操作者身份；操作者的 `high` 单次执行，客户端令牌仍须两步确认。控制台确认弹窗与可见行为不变。状态及服务就绪探测改走 v1，旧状态 GET 删除；Telegram/Lark 继续使用未改动的 Manager ops/services。配置命令迁移是阶段 2a 单独列出的行为变化。
 - 任务创建：控制台调用 `POST /api/v1/tasks/create`，返回类型化的任务标识、状态、创建时间、项目标识和 `WorkspaceCheck`；旧 `POST /api/tasks/create` 返回 404。完整配置和 Profile 覆盖经共享核心保存并回读校验。闭合请求拒绝未知字段、非对象配置和 null 覆盖；空字符串覆盖保留继承语义。已有项目直接创建；新项目仅客户端令牌需要同会话两步确认，操作者单次执行，表单行为不变。任务归属默认 Manager，客户端标识由认证身份填写。Telegram/Lark 的 Manager 工具和 `loopercli create` 原别名不变；生成的 `loopercli tasks create` 可用完整参数。
+- 目录条目与安装的八个旧 HTTP 方法已删除；控制台改走 v1 并保留原有弹窗。目录删除对客户端为 high 两步确认，卸载仍与原 `catalog` Tool 共用普通写策略；条目更新只认操作者，避免 MCP 环境变量或 header 秘密进入凭据审计。
+- 项目自有 skill 的旧 POST/GET/PUT/DELETE 方法已删除，控制台与生成的 `loopercli project-skills add|get|update|delete` 改走 v1。新增仍默认启用，显式 `false` 保留；只修改提供的字段。删除为 high，影响覆盖其他项目的安装：客户端须同会话确认，操作者单次执行，控制台保留既有确认弹窗。Telegram/Lark 的 Manager ops/services 与模型可见内容不变。
 - 管家：只有客户端的消息多一种渠道行。
 - 默认管家：客户端对话里建的任务把接受和结束写回那个线程（控制台对话里建的不变）。
 - 关卡通知和进度不变：照旧走全局通知目标，不进客户端的对话。

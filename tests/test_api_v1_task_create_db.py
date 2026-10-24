@@ -12,6 +12,7 @@ from looper.db import agent_setting_layers, api_clients, manager_actions, projec
 from tests.db_support import DSN, run_db
 from tests.test_api_v1_auth import _bearer, _send, _serving
 from tests.test_operator_auth import TOKEN
+from tests.test_ops_tasks_db import _Chat
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 PATH = "/api/v1/tasks/create"
@@ -31,34 +32,49 @@ def repository(path):
     return str(path)
 
 
-@pytest.mark.parametrize("as_client", [False, True], ids=["dashboard", "client"])
+@pytest.mark.parametrize("origin", ["dashboard", "manager", "client"])
 @pytest.mark.parametrize("new_project", [False, True], ids=["existing-project", "new-project"])
-def test_only_client_creates_enter_the_action_trail(monkeypatch, tmp_path, as_client, new_project):
+def test_only_manager_and_client_creates_enter_the_action_trail(monkeypatch, tmp_path, origin, new_project):
     async def test(pool):
         client, token = await api_clients.create("Client", pool=pool)
+        as_client = origin == "client"
         choice = ({"project": {"name": "Example", "work_dir": str(tmp_path)}} if new_project else
                   {"project_id": (await projects.create_project(
                       name="Example", work_dir=str(tmp_path), pool=pool))["id"]})
         async with _serving(tmp_path) as server:
             server._client_ops = ClientOps(SimpleNamespace())
-            code, answer = await post(server, {"requirement": "Build", **choice},
-                                      token=token if as_client else TOKEN)
-            if as_client and new_project:
-                assert code == 202, answer
-                code, answer = await post(server, {"confirmation_id": answer["confirmation_id"]},
-                                          token=token, path="/api/v1/confirm")
-            assert code == 200, answer
+            if origin == "manager":
+                chat = _Chat(tmp_path)
+                (answer,) = await chat.say("Create a task", ("looper_task_create", {
+                    "requirement": "Build", "title": "Build", "project": "Example", "work_dir": str(tmp_path)}))
+                if new_project:
+                    assert answer["status"] == "needs_confirmation", answer
+                    (answer,) = await chat.say("Confirm", ("looper_confirm", {
+                        "confirmation_id": answer["confirmation_id"]}))
+                assert answer["status"] == "ok", answer
+            else:
+                code, answer = await post(server, {"requirement": "Build", **choice},
+                                          token=token if as_client else TOKEN)
+                if as_client and new_project:
+                    assert code == 202, answer
+                    code, answer = await post(server, {"confirmation_id": answer["confirmation_id"]},
+                                              token=token, path="/api/v1/confirm")
+                assert code == 200, answer
             task_id = answer["result"]["task_id"]
             row = await tasks.get_task(task_id)
             assert row["manager_id"] == "manager"  # Task ownership is separate from who performed the action.
             assert row["client_id"] == (client["id"] if as_client else None)
             trail = await manager_actions.for_task(task_id, pool=pool)
+            tool = "looper_task_create" if origin == "manager" else "tasks.create"
+            client_id = client["id"] if as_client else None
             assert [(a["tool"], a["status"], a["client_id"]) for a in trail] == (
-                [("tasks.create", "ok", client["id"])] if as_client else [])
-            actions = await pool.fetch("SELECT tool, status, client_id FROM manager_actions ORDER BY id")
+                [(tool, "ok", client_id)] if origin != "dashboard" else [])
+            actions = await pool.fetch("SELECT tool, status, manager_id, client_id, channel "
+                                       "FROM manager_actions ORDER BY id")
             statuses = ["needs_confirmation", "ok"] if new_project else ["ok"]
-            assert [(a["tool"], a["status"], a["client_id"]) for a in actions] == (
-                [("tasks.create", status, client["id"]) for status in statuses] if as_client else [])
+            assert [(a["tool"], a["status"], a["manager_id"], a["client_id"], a["channel"]) for a in actions] == (
+                [(tool, status, "manager", client_id, "api" if as_client else "lark") for status in statuses]
+                if origin != "dashboard" else [])
     run_db(test, monkeypatch, timeout=60)
 
 

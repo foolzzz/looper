@@ -237,7 +237,8 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             # A skill installed for the roles a Planner defines only: it loads for a run of a role naming it.
             notes = api.post("/api/catalog/skills", {"name": "role-notes", "description": "Notes for roles.",
                                                      "content": "Reply ROLE-NOTES.\n"})["item"]
-            api.post("/api/installs", {"item_id": notes["item_id"], "scope": "global", "roles": ["task_role"]})
+            installed = api.post("/api/v1/installs/create", {"item_id": notes["item_id"], "scope": "global", "roles": ["task_role"]})["result"]
+            assert installed["install"]["roles"] == ["task_role"]
             ids: dict[str, str] = {}
             for variant in VARIANTS:
                 work = root / f"work-{variant}"

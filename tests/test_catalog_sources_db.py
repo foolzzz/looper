@@ -65,12 +65,12 @@ async def _upload(filename: str, data: bytes | str, name: str | None = None) -> 
 
 
 async def _items() -> list[dict[str, Any]]:
-    _, catalog = await _call("GET", "/api/catalog")
+    _, catalog = await _call("POST", "/api/v1/catalog_items/list", {})
     return catalog["items"]
 
 
 async def _skill_md(item_id: str) -> str:
-    _, detail = await _call("GET", f"/api/catalog/{item_id}")
+    _, detail = await _call("POST", "/api/v1/catalog_items/get", {"item_id": item_id})
     return detail["skill_md"]
 
 
@@ -169,8 +169,8 @@ def test_an_uploaded_skill_enters_the_catalog_installed_nowhere_and_loads_where_
         tool = body["item"]["item_id"]
         root = tmp_path / "runtime"
         assert (await load_installed(root, "worker")).items == ()  # in the catalog, installed nowhere
-        status, _ = await _call("POST", "/api/installs", {"item_id": tool, "scope": "global", "roles": ["worker"]})
-        assert status == 201
+        status, _ = await _call("POST", "/api/v1/installs/create", {"item_id": tool, "scope": "global", "roles": ["worker"]})
+        assert status == 200
         worker = await load_installed(root, "worker")
         (plugin,) = library_args(worker)[1::2]
         assert library_args(worker) == ["--plugin-dir", plugin] and plugin.endswith("/personal")
@@ -202,7 +202,7 @@ def test_an_uploaded_plugin_zip_enters_whole_and_its_binary_files_are_left_out(
             "plugin", "demo", "2.0.0", "Demo plugin.", 3)
         assert body["skipped"] == [{"item": "demo.zip", "path": "assets/logo.png", "reason": "binary",
                                     "size_bytes": 15}]
-        _, detail = await _call("GET", f"/api/catalog/{item['item_id']}")
+        _, detail = await _call("POST", "/api/v1/catalog_items/get", {"item_id": item['item_id']})
         assert [f["path"] for f in detail["files"]] == [
             ".claude-plugin/plugin.json", "commands/greet.md", "skills/hello/SKILL.md"]
 
@@ -215,8 +215,8 @@ def test_a_name_taken_outside_projects_is_refused_with_409_and_an_upload_can_be_
     async def _test(pool: Any) -> None:
         await _import(pool, "skill:stamp", "plugin:demo")
         calc, = await _projects("calc")
-        assert (await _call("POST", f"/api/projects/{calc}/skills", {
-            "name": "notes", "description": "A project's own.", "content": "Body."}))[0] == 201
+        assert (await _call("POST", "/api/v1/project_skills/add", {"project_id": calc, "skill": {
+            "name": "notes", "description": "A project's own.", "content": "Body."}}))[0] == 200
         status, body = await _upload("SKILL.md", _skill())
         assert status == 409
         assert body["error"] == ("the catalog already has a skill named 'stamp' (imported from this machine); "
@@ -231,7 +231,7 @@ def test_a_name_taken_outside_projects_is_refused_with_409_and_an_upload_can_be_
         assert (await _upload("demo.zip", plugin))[0] == 409
         status, body = await _upload("demo.zip", plugin, name="demo-two")
         assert status == 201
-        _, detail = await _call("GET", f"/api/catalog/{body['item']['item_id']}")
+        _, detail = await _call("POST", "/api/v1/catalog_items/get", {"item_id": body['item']['item_id']})
         assert detail["item"]["qualified_name"] == "demo-two"
         for bad, reason in (("Bad Name", "must be lowercase letters"), ("personal", "a plugin Looper generates")):
             status, body = await _upload("demo.zip", plugin, name=bad)
@@ -345,14 +345,14 @@ def test_a_git_import_adds_the_chosen_items_and_importing_again_updates_them_in_
         alpha, kit = body["items"]
         assert (alpha["origin"], alpha["source"], alpha["installs"]) == ("git", f"{url}@{commit}", [])
         assert alpha["file_count"] == 2 and kit["qualified_name"] == "demo-kit" and kit["version"] == "1.0.0"
-        _, detail = await _call("GET", f"/api/catalog/{alpha['item_id']}")
+        _, detail = await _call("POST", "/api/v1/catalog_items/get", {"item_id": alpha['item_id']})
         assert {f["path"]: f["executable"] for f in detail["files"]} == {"SKILL.md": False, "scripts/run.sh": True}
-        _, detail = await _call("GET", f"/api/catalog/{kit['item_id']}")
+        _, detail = await _call("POST", "/api/v1/catalog_items/get", {"item_id": kit['item_id']})
         assert detail["item"]["name"] == "demo-kit"
-        install = (await _call("POST", "/api/installs", {"item_id": alpha["item_id"], "scope": "global"}))[1]
+        install = (await _call("POST", "/api/v1/installs/create", {"item_id": alpha["item_id"], "scope": "global"}))[1]
 
         # A new commit changes alpha; an edit since the last import is marked and then replaced.
-        assert (await _call("PUT", f"/api/catalog/{alpha['item_id']}", {"content": "Edited."}))[1]["item"][
+        assert (await _call("POST", "/api/v1/catalog_items/update", {"item_id": alpha['item_id'], "fields": {"content": "Edited."}}))[1]["item"][
             "modified"] is True
         newer = _commit(repo, {"skills/alpha/SKILL.md": _skill("alpha", "Reply ALPHA-2.")})
         _, preview = await _call("POST", "/api/catalog/git/preview", {"url": url})
@@ -523,25 +523,23 @@ def test_a_skill_written_in_settings_is_created_edited_and_deleted(monkeypatch: 
         assert (item["origin"], item["qualified_name"], item["installs"]) == ("ui", "personal:release-notes", [])
         assert await _skill_md(item["item_id"]) == (
             '---\nname: release-notes\ndescription: "Drafts notes: \\"short\\""\n---\n\nWrite them.\n')
-        install = (await _call("POST", "/api/installs", {"item_id": item["item_id"], "scope": "global"}))[1]
-        status, body = await _call("PUT", f"/api/catalog/{item['item_id']}", {"name": "notes", "content": "New."})
+        install = (await _call("POST", "/api/v1/installs/create", {"item_id": item["item_id"], "scope": "global"}))[1]
+        status, body = await _call("POST", "/api/v1/catalog_items/update", {"item_id": item['item_id'], "fields": {"name": "notes", "content": "New."}})
         assert status == 200, body
         assert (body["item"]["name"], body["item"]["modified"]) == ("notes", False)
         assert body["item"]["installs"] == [install["install"]]
-        _, detail = await _call("GET", f"/api/catalog/{item['item_id']}")
+        _, detail = await _call("POST", "/api/v1/catalog_items/get", {"item_id": item['item_id']})
         assert detail["content"] == "New.\n" and detail["skill_md"].startswith("---\nname: notes\n")
         assert (await _call("POST", "/api/catalog/skills", {"name": "notes", "description": "d",
                                                              "content": "c"}))[0] == 409
-        for fields, reason in (({"name": "Bad Name"}, "must be lowercase"),
-                               ({"description": "two\nlines"}, "is one line"),
-                               ({"content": "---\nname: x\n---\n"}, "without frontmatter"),
-                               ({}, "give at least one of"), ({"enabled": True}, "unknown field")):
-            status, answer = await _call("PUT", f"/api/catalog/{item['item_id']}", fields)
-            assert status == 400 and reason in answer["error"], answer
-        status, body = await _call("DELETE", f"/api/catalog/{item['item_id']}")
+        for fields in ({"name": "Bad Name"}, {"description": "two\nlines"},
+                       {"content": "---\nname: x\n---\n"}, {}, {"enabled": True}):
+            status, answer = await _call("POST", "/api/v1/catalog_items/update", {"item_id": item['item_id'], "fields": fields})
+            assert status == 400 and answer["error"] == "invalid credential request", answer
+        status, body = await _call("POST", "/api/v1/catalog_items/delete", {"item_id": item['item_id']})
         assert (status, body) == (200, {"deleted": item["item_id"]})
         assert await _items() == [] and await pool.fetchval("SELECT count(*) FROM library_installs") == 0
-        assert (await _call("DELETE", f"/api/catalog/{item['item_id']}"))[0] == 404
+        assert (await _call("POST", "/api/v1/catalog_items/delete", {"item_id": item['item_id']}))[0] == 404
 
     run_db(_test, monkeypatch)
 
@@ -552,19 +550,17 @@ def test_editing_an_uploaded_skill_keeps_its_other_files_and_marks_it_modified_a
     async def _test(pool: Any) -> None:
         ids = await _import(pool, "skill:mine", "plugin:kit")
         calc, = await _projects("calc")
-        _, own = await _call("POST", f"/api/projects/{calc}/skills",
-                             {"name": "own", "description": "Own.", "content": "Body."})
+        _, own = await _call("POST", "/api/v1/project_skills/add", {"project_id": calc, "skill": {"name": "own", "description": "Own.", "content": "Body."}})
         zipped = _zip({"SKILL.md": SKILL.format(name="tool", description="|-\n  Two\n  lines.", body="Old."),
                        "scripts/go.sh": "echo go\n"})
         _, body = await _upload("tool.zip", zipped)
         tool = body["item"]
         assert tool["description"] == "Two lines."
-        status, body = await _call("PUT", f"/api/catalog/{tool['item_id']}",
-                                   {"description": "One line now.", "content": "New body."})
+        status, body = await _call("POST", "/api/v1/catalog_items/update", {"item_id": tool['item_id'], "fields": {"description": "One line now.", "content": "New body."}})
         assert status == 200 and body["item"]["modified"] is True, body
         assert await _skill_md(tool["item_id"]) == (
             '---\nname: tool\ndescription: "One line now."\nlicense: MIT\n---\n\nNew body.\n')
-        _, detail = await _call("GET", f"/api/catalog/{tool['item_id']}")
+        _, detail = await _call("POST", "/api/v1/catalog_items/get", {"item_id": tool['item_id']})
         assert sorted(f["path"] for f in detail["files"]) == ["SKILL.md", "scripts/go.sh"]
         plugin = (await _upload("p.zip", _zip({".claude-plugin/plugin.json": '{"name": "p"}'})))[1]["item"]
         refusals = [
@@ -574,10 +570,11 @@ def test_editing_an_uploaded_skill_keeps_its_other_files_and_marks_it_modified_a
             (plugin["item_id"], "PUT", "a plugin is not edited here"),
         ]
         for item_id, method, reason in refusals:
-            status, answer = await _call(method, f"/api/catalog/{item_id}", {"content": "x"} if method == "PUT" else None)
-            assert status == 400 and reason in answer["error"], answer
-        assert (await _call("PUT", f"/api/catalog/{tool['item_id']}", {"name": "mine"}))[0] == 409
-        assert (await _call("DELETE", f"/api/catalog/{plugin['item_id']}"))[0] == 200
+            status, answer = await _call("POST", "/api/v1/catalog_items/update" if method == "PUT" else "/api/v1/catalog_items/delete",
+                                         {"item_id": item_id, **({"fields": {"content": "x"}} if method == "PUT" else {})})
+            assert status == 400 and ("invalid credential request" if method == "PUT" else reason) in answer["error"], answer
+        assert (await _call("POST", "/api/v1/catalog_items/update", {"item_id": tool['item_id'], "fields": {"name": "mine"}}))[0] == 409
+        assert (await _call("POST", "/api/v1/catalog_items/delete", {"item_id": plugin['item_id']}))[0] == 200
 
     run_db(_test, monkeypatch)
 

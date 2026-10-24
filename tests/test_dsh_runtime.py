@@ -1590,8 +1590,11 @@ def test_worker_and_reviewer_read_back_dsh_stand_in_results(tmp_path, monkeypatc
 
 @pytest.mark.parametrize("unknown", [False, True], ids=["observed-cap", "unknown-root-usage"])
 def test_dsh_resident_recorder_stops_at_observed_or_unverifiable_budget(tmp_path, agent_db, unknown):
+    from looper.agents import proc_tree
     from looper.agents.claude_cli import ClaudeRunRecorder, SOFT_CAP
 
+    # Cover startup and the real TERM/reap grace; this checks a budget stop, not startup latency.
+    timeout = 10 + proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC
     usage = {"inputTokens": 10, "cacheReadTokens": 7} if unknown else DSH_STEP_USAGE
     executable = _headless_stand_in(tmp_path, usage=usage, hang=True)
     launch = _run_launch(tmp_path, budget=1 if unknown else .000001, role="manager")
@@ -1607,7 +1610,7 @@ def test_dsh_resident_recorder_stops_at_observed_or_unverifiable_budget(tmp_path
         try:
             async with recorder:
                 turn = await asyncio.wait_for(owner.run_turn("budgeted turn", recorder.record,
-                                                            stop=lambda: recorder.cap_stop), 2)
+                                                            stop=lambda: recorder.cap_stop), timeout)
                 result = turn.result_event
                 assert result[SOFT_CAP] and result["is_error"] and result["result"] == ""
                 assert result["usage_complete"] is False and result["cost_basis"] == "observed"
@@ -1623,7 +1626,7 @@ def test_dsh_resident_recorder_stops_at_observed_or_unverifiable_budget(tmp_path
         finally:
             await owner.stop()
 
-    asyncio.run(asyncio.wait_for(check(), 5))
+    asyncio.run(asyncio.wait_for(check(), timeout + 10))
     pid = json.loads((tmp_path / "seen.json").read_text())["pid"]
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
