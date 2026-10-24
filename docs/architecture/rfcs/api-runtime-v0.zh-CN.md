@@ -1,6 +1,6 @@
 # RFC：API 运行时 v0（管家直连模型 API）
 
-- **状态：** 草案，待维护者批准。2026-10-24 维护者已定：第一阶段接 `openai` Python SDK，用本机 CPA 的 OpenAI 协议模型验证；第二阶段接 `anthropic` Python SDK，目标是 DeepSeek、GLM、Kimi、OpenCode 的 Anthropic 格式接口，用维护者已有的 DeepSeek key 验证；以后有官方 Anthropic key，只是多登记一个 provider，不改代码。其余是本文的建议，待定的项见第 14 节。
+- **状态：** 已批准（2026-10-24），阶段 1 待做。维护者先定了阶段顺序：第一阶段接 `openai` Python SDK，用本机 CPA 的 OpenAI 协议模型验证；第二阶段接 `anthropic` Python SDK，目标是 DeepSeek、GLM、Kimi、OpenCode 的 Anthropic 格式接口，用维护者已有的 DeepSeek key 验证；以后有官方 Anthropic key，只是多登记一个 provider，不改代码。同日维护者按本文的建议批准了其余决定（第 4 节、第 14 节）。开发排期见第 12 节；第 15 节是仍需真实运行核实的项。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.0 节第 23 项。它落实 M9d「SDK 运行时」里不依赖 norma 的部分，以及[管家平台工具 RFC](manager-platform-tools-v0.zh-CN.md) D8：「原生 tool 不单做，等 SDK 运行时上线时从同一份操作目录生成」。
 - **相关：** [多运行时](multi-runtime-agents-v0.zh-CN.md)、[dsh 运行时](dsh-runtime-v0.zh-CN.md)、[停止管家的回复 v2](chat-stop-v2.zh-CN.md)、[管家会话的 Agent Profile](manager-session-profile-v0.zh-CN.md)、[场景管家](scenario-managers.zh-CN.md)、[LLM 模型层](llm-models-v0.zh-CN.md)。
 - **代码基线：** `main` `787610ec2`（v2.13.62）。SDK 的接口在一次性虚拟环境里离线核对过：`openai` 3.37.0、`anthropic` 2.3.0。全程没有发出带 key 的请求。
@@ -43,20 +43,20 @@
 
 | 方案 | 做法 | 复杂度 | 延迟与花费 | 故障半径 | 可维护性 |
 |---|---|---|---|---|---|
-| **(a) 新运行时类型 `api`**（推荐） | 一个 `RuntimeAdapter`，加一个进程内的 `ResidentSession`（`ApiSession`）；循环在一个小接口后面，与协议无关，每种协议一个编解码器；v0 用类型化的角色限制只开放管家 | 中：适配器里的 CLI 方法要给出明确的「不支持」；管家改 4 处 | 没有进程、MCP 子进程和探测子进程；请求里也没有 CLI 自带的提示和工具定义 | 一个会话对象；SDK 的异常止于这一轮 | 复用 Profile、`/profile`、换会话与交接、记录器、花费、停止和评测；以后给规划者用，只需加工作区工具 |
+| **(a) 新运行时类型 `api`**（选定） | 一个 `RuntimeAdapter`，加一个进程内的 `ResidentSession`（`ApiSession`）；循环在一个小接口后面，与协议无关，每种协议一个编解码器；v0 用类型化的角色限制只开放管家 | 中：适配器里的 CLI 方法要给出明确的「不支持」；管家改 4 处 | 没有进程、MCP 子进程和探测子进程；请求里也没有 CLI 自带的提示和工具定义 | 一个会话对象；SDK 的异常止于这一轮 | 复用 Profile、`/profile`、换会话与交接、记录器、花费、停止和评测；以后给规划者用，只需加工作区工具 |
 | (b) 管家专用循环 | 在 `ManagerAgent` 里按运行时分支，直接调用 SDK 和 `ManagerOps` | 起步低，之后高：记录、停止、续接、交接、花费都要在管家里再写一遍 | 同 (a) | 同 (a) | 差：`tiers/manager.py` 已有 2351 行，每个管家功能都要维护两条路径；违反「tier 不自己起运行时」（`runtimes/__init__.py:5-7`）；规划者用不上 |
 | (c) 进程外的 API 运行器 | 新命令 `looper api-agent` 在子进程里跑循环、输出 stream-json，工具仍经 `looper mcp-server`，复用 `PerTurnSession` | 中 | 每轮要起进程和 MCP 子进程（约 0.3–1 秒，管家工具 RFC 第 10 节）；停止又变回杀进程 | 最小：崩溃不影响服务 | 多一套进程协议；进程内的好处（能中断、不要桥、key 不进子进程）都没有了 |
 
-推荐 (a)。(c) 的隔离对 SDK 帮助不大：SDK 全是异步网络 I/O，而 `looper serve` 本来就在同一个事件循环里跑 Telegram、飞书和数据库客户端。P11 为 norma 建议子进程，是为了隔离一个完整的 harness；SDK 只是 HTTP 客户端，情况不同。另外也考虑过让 SDK 自带的循环来跑工具（`anthropic` 的 `beta.messages.tool_runner`、OpenAI Agents SDK），没有采用：两家各一套，停止、软上限、轮次归属和留痕都插不进去。
+选 (a)。(c) 的隔离对 SDK 帮助不大：SDK 全是异步网络 I/O，而 `looper serve` 本来就在同一个事件循环里跑 Telegram、飞书和数据库客户端。P11 为 norma 建议子进程，是为了隔离一个完整的 harness；SDK 只是 HTTP 客户端，情况不同。另外也考虑过让 SDK 自带的循环来跑工具（`anthropic` 的 `beta.messages.tool_runner`、OpenAI Agents SDK），没有采用：两家各一套，停止、软上限、轮次归属和留痕都插不进去。
 
 ## 4. 决定
 
-「已定」是维护者 2026-10-24 拍板的，其余都是建议，在第 14 节等维护者决定。
+全部已定：D2 的阶段顺序是维护者先定的，其余由维护者 2026-10-24 按本文的建议批准（第 14 节）。
 
 | # | 决定 | 理由 |
 |---|---|---|
 | D1 | 新运行时类型 `api`（方案 a），v0 只能跑管家。适配器加一个类型化字段 `roles = {"manager"}`，`servable_roles` 和 `check_roles`（`profile_registry.py:728、789`）按它收窄 | 它有 `resident_session` 和 `resume`，按 `ROLE_CAPABILITIES`（`runtimes/__init__.py:174`）会被算成也能跑规划者。用类型化字段而不新增能力，已登记运行时存下的能力就不用迁移 |
-| D2 | **已定：** 第一阶段 `openai` SDK + CPA，第二阶段 `anthropic` SDK + DeepSeek（另有 GLM、Kimi、OpenCode）。**建议：** 第一阶段只做 OpenAI Responses，传 `store: false`，每次请求发完整输入，不用 `previous_response_id` | 第 8.1 节 |
+| D2 | 第一阶段 `openai` SDK + CPA，第二阶段 `anthropic` SDK + DeepSeek（另有 GLM、Kimi、OpenCode）。第一阶段只做 OpenAI Responses，传 `store: false`，每次请求发完整输入，不用 `previous_response_id` | 第 8.1 节 |
 | D3 | 循环放在接口 `AgentLoop` 后面（第 5 节），默认实现与协议无关，由编解码器（`ProtocolCodec`）负责请求参数、流事件翻译和会话条目的原生格式 | 第二阶段只加一个编解码器；以后别的 harness（如 norma）也只需替换循环 |
 | D4 | 工具在进程内调用 `ManagerOps.call`（`ops/service.py:333`），带上这一轮的 binding 和模型给的调用 id，不经过 MCP 桥、HTTP 和令牌 | 校验、分档、确认和留痕仍只有一处（管家工具 RFC D5），进程内调用的就是 HTTP 处理器调用的那个函数（`http_server.py:1156-1191`） |
 | D5 | 会话原文由 Looper 存进 PostgreSQL 新表 `api_session_items`，用原生格式，每完成一次模型请求写一次；会话丢弃后删除 | CLI 运行时的会话由它们自己存成文件；API 运行时没有别人替它存 |
@@ -287,7 +287,7 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 
 **变化：**
 
-- 没有 CLI 自带的工具定义（Bash、Read 等）和环境说明，也没有 skill 和插件。预计每次请求少约一万 token 的运行时自带内容：M1.6 实测 Claude Code 最小的一次运行，首个请求就有 15,674 token，而本运行时的工具定义约 15 KB（管家工具 RFC 第 11 节）。这是推测，阶段 1a 实测。
+- 没有 CLI 自带的工具定义（Bash、Read 等）和环境说明，也没有 skill 和插件。预计每次请求少约一万 token 的运行时自带内容：M1.6 实测 Claude Code 最小的一次运行，首个请求就有 15,674 token，而本运行时的工具定义约 15 KB（管家工具 RFC 第 11 节）。这是推测，第 12 节第 7 步实测。
 - 新增一段运行时说明，与其他运行时一样由 `runtime_prompt_text` 放在 harness 前面。大意是：「你只有 Looper 的平台工具（looper_*），不能读文件、执行命令、上网或使用 skill；需要这些时，向用户提议建任务。」
 - 单条工具结果截断时附的那句说明。
 
@@ -326,18 +326,33 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 | API 管家做不了 CLI 管家能做的事（读文件、跑命令） | 用户说「看看这个仓库」，得不到直接的回答 | 运行时说明让它提议建任务；第 2 节和发布说明里写明 |
 | 长会话的花费 | 每次请求都重发整个上下文 | 前缀缓存；D6 的阈值；`/new` |
 
-## 12. 上线与分期
+## 12. 上线与开发排期
 
 - **启用：** 不加开关，选 Profile 就是开关。可以在三处选一个 `api` Profile：Settings → Roles → Manager；某个场景管家的 Profile；或者在一个聊天里发 `/profile <n>`。最后一种只影响这条会话，最适合试用。
 - **退回：** 发 `/profile 0`，或者选回 CLI Profile。换运行时按现有规则，先交接再开新会话（管家会话 RFC D3）。不自动退回。
-- **分期**（每期一个 PR，计划第 1 节第 1 条）：
 
-| 期 | 内容 | 验收 |
+### 12.1 开发排期
+
+每一步一个 PR，各自是完整、可单独回滚的结果（计划第 1 节第 1 条）。第 1、2 步互不依赖，可以并行。
+
+| 步 | 内容 | 依赖 | 完成时 |
+|---|---|---|---|
+| 1 | 运行时类型与 Profile、provider 接线：`api` 适配器、类型化的角色限制、按 SDK 检测、只接 API key 的 Responses 绑定、描述行 | — | 适配器先不进 `ADAPTERS`，用户看不到；注册表的角色限制与无可执行文件的检测有测试 |
+| 2 | 协议无关的循环与 Responses 编解码器：`AgentLoop`、`ProtocolCodec`、事件翻译、重试与超时、请求上限、错误分类、每次请求的用量；本地假 Responses 服务；`openai` 依赖 | — | 不接管家；循环在假服务上跑通文本、工具循环和各种错误 |
+| 3 | 管家跑在 `api` 上：`ApiSession`、进程内平台工具（`TurnTools` → `ManagerOps.call`，与 MCP 桥给出的文本和留痕一致）、管家的改动、运行时说明、软上限；适配器进 `ADAPTERS` | 1、2 | 管家能在 `api` Profile 上回答、调工具、两步确认；会话只在进程内，重启后走续接失败的现有路径；停止仍被拒绝 |
+| 4 | 会话表与续接、上下文换会话：`api_session_items`、跨重启续接、协议不同不续接、半轮补齐、会话丢弃后删除；`SwitchReason.CONTEXT_FULL`、阈值、第一次请求超限时重跑 | 3 | 重启后接着同一会话；长会话按 D6 交接换新 |
+| 5 | 停止与用量记录：`can_interrupt = True`、取消请求、停止后原文合法、`usage_complete`、`metadata.api`、每次请求的结构化日志 | 3 | 停止在控制台和渠道上可用；Runs 里每轮的 token、花费、未知用量都对 |
+| 6 | 入口：控制台（运行时卡、Profile 表单、Roles、停止按钮）、Telegram 与飞书的 `/profile`、`/stop`，CLI 与 `loopercli` 的核对；`agent-system.md` 一节 | 5 | 各入口按第 2 节表现，截图一张 |
+| 7 | CPA 真实验证与评测：`dialogs --manager-agent`、示例 spec、验收脚本；隔离服务上的真实 smoke；全部对话与同模型 Codex 管家对照；把结果写回第 8.4、15 节 | 4、5、6 | D11 的门槛 |
+
+**阶段 2**（阶段 1 全部合入之后）：
+
+| 步 | 内容 | 依赖 |
 |---|---|---|
-| 1a | `api` 适配器、角色限制和检测；`ApiSession`、`AgentLoop` 和 Responses 编解码器；`api_session_items`；管家的四处改动；停止、重试和错误；用量与花费；最小界面（运行时卡、Profile 表单） | 假服务测试全部通过；在隔离的 `looper serve` 上，用 CPA 真实跑 `status`、`confirm_create_start`、`cancel_confirmation`、`stop_then_continue`，读回 `manager_actions`、`llm_records`、`agent_sessions`；界面截图一张 |
-| 1b | 按上下文阈值换会话；工具结果截断；运行时说明；`dialogs --manager-agent`；在 CPA 上跑全部对话，与同模型的 Codex 管家对照；在 `agent-system.md` 加一节 | D11 的门槛 |
-| 2 | `anthropic` 编解码器：Bearer 认证、`[1m]` 后缀、缓存标记、thinking 块回传、`max_tokens`；在 DeepSeek 上核实第 8.4 节的右列 | DeepSeek 上跑全部对话，与 Claude Code + DeepSeek 对照；GLM、Kimi、OpenCode 有 key 时跑三个对话 |
-| 之后 | 需要时再做 Chat Completions 编解码器；目录里的外部 MCP；norma 作为另一种 `AgentLoop`（M9d）；规划者（需要工作区工具，另立 RFC） | — |
+| 2.1 | `anthropic` 编解码器：Bearer 认证、`[1m]` 后缀、缓存标记、thinking 块回传、`max_tokens`；假 Messages 服务；`anthropic` 依赖 | 阶段 1 第 2、3 步 |
+| 2.2 | DeepSeek 真实验证：key 在运行时读进内存，全部对话与 Claude Code + DeepSeek 对照；GLM、Kimi、OpenCode 有 key 时跑三个对话；核实第 8.4 节右列 | 2.1 |
+
+**之后：** 需要时再做 Chat Completions 编解码器；目录里的外部 MCP；norma 作为另一种 `AgentLoop`（M9d）；规划者（需要工作区工具，另立 RFC）。
 
 ## 13. 测试计划
 
@@ -366,17 +381,19 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 - **评测：** 见第 9 节。
 - PR 的 Validation 里写明新增的测试行数和生产代码行数。
 
-## 14. 待维护者决定
+## 14. 维护者的决定（2026-10-24）
 
-1. **方案**（D1）：(a) 新运行时类型 `api`，v0 只给管家用。**建议 (a)。**
-2. **第一阶段的协议**（D2）：Responses，`store: false`，每次发完整输入；不做 Chat Completions。**建议如此**，理由见第 8.1 节。
-3. **SDK 依赖**（D9）：普通依赖（设上界、延迟导入），还是可选的 `looper[api]`。**建议普通依赖**：`install.sh` 装的是 wheel，做成可选依赖就要改它的三种安装方式，用户也不知道要加；而且 SDK 只在选了 `api` Profile 时才导入。
-4. **工具怎么执行**（D4）：在进程内调用 `ManagerOps.call`，不经 MCP，也不经 HTTP。**建议进程内。** 备选是在进程内带着令牌请求 `/api/agent/v1/ops`（pi 的做法）：多一跳，但规划者和办公台的工具以后能原样复用。
-5. **会话原文**（D5）：存进 PostgreSQL 新表，会话丢弃后删除。**建议如此。** 如果不想删，就保留 30 天，另做清理（记为非核心待办）。
-6. **上下文阈值**（D6）：窗口的 70%，且不超过 200k token，到了就交接、换会话。**建议如此**，200k 以后可以按花费再调。
-7. **能力边界：** v0 的 API 管家只有平台工具。**建议接受**，外部 MCP 放到之后。
-8. **每轮的请求上限**（D10）：30 次。**建议 30。**
-9. **准入门槛**（D11）：阶段 1 用 `gpt-6.1-sol`、阶段 2 用 `deepseek-v4-pro`，全部对话 `--reps 2`；每个对话的通过次数不低于同模型 CLI 对照减 1；确认类对话（`cancel_confirmation`、`config_tools`、`provider_key`、`schedule_*`、`client_relay_cancel`）全部通过。**建议如此**；如果 CPA 实际还提供更强的一档（例如 `gpt-6-astra`），阶段 1 改用它。
+以下 9 项都按本文的建议批准，已写进第 4 节：
+
+1. 方案：新运行时类型 `api`，v0 只给管家用（D1）。
+2. 第一阶段的协议：Responses，`store: false`，每次发完整输入；不做 Chat Completions（D2）。
+3. SDK 依赖：普通依赖，设上界、延迟导入，不做可选的 `looper[api]`（D9）。
+4. 工具执行：进程内调用 `ManagerOps.call`，不经 MCP，也不经 HTTP（D4）。
+5. 会话原文：存进 PostgreSQL 新表，会话丢弃后删除（D5）。
+6. 上下文阈值：窗口的 70%，且不超过 200k token，到了就交接、换会话（D6）。
+7. 能力边界：v0 的 API 管家只有平台工具，外部 MCP 放到之后。
+8. 每轮最多 30 次模型请求（D10）。
+9. 准入门槛：阶段 1 用 `gpt-6.1-sol`、阶段 2 用 `deepseek-v4-pro`，全部对话 `--reps 2`；每个对话的通过次数不低于同模型 CLI 对照减 1；确认类对话（`cancel_confirmation`、`config_tools`、`provider_key`、`schedule_*`、`client_relay_cancel`）全部通过（D11）。CPA 实际还提供更强的一档（例如 `gpt-6-astra`）时，阶段 1 改用它。
 
 ## 15. 需要验证（汇总）
 

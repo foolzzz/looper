@@ -770,7 +770,9 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 阶段 2a 保持已交付；共享任务核心独立跟踪，阶段 3 仍待做。整体完成由最终审计确认。
 
-23. **API 运行时：管家直连模型 API**（2026-10-24 维护者定方向，设计见[API 运行时 RFC](../architecture/rfcs/api-runtime-v0.zh-CN.md)，待批准）：新运行时类型 `api` 在 `looper serve` 进程内用官方 SDK 跑管家的循环，平台工具在进程内调用；阶段 1 用 `openai` SDK（Responses）在 CPA 上验证，阶段 2 用 `anthropic` SDK 接 DeepSeek、GLM、Kimi、OpenCode 的 Anthropic 接口，以 DeepSeek 验证。
+23. **API 运行时：管家直连模型 API**（2026-10-24 维护者定方向并批准，设计见[API 运行时 RFC](../architecture/rfcs/api-runtime-v0.zh-CN.md)，阶段 1 待做）：新运行时类型 `api` 在 `looper serve` 进程内用官方 SDK 跑管家的循环，平台工具在进程内调用。分步见 RFC 第 12.1 节：
+    - **阶段 1**（`openai` SDK、Responses，在 CPA 上验证）：① 运行时类型与 Profile、provider 接线；② 协议无关的循环与 Responses 编解码器（假服务）；③ 管家跑在 `api` 上，进程内平台工具与确认、留痕一致（依赖 ①②）；④ 会话表、跨重启续接与上下文换会话（依赖 ③）；⑤ 停止与用量记录（依赖 ③）；⑥ 控制台、Telegram、飞书、CLI 入口（依赖 ⑤）；⑦ CPA 真实验证与全部对话评测（依赖 ④⑤⑥）。
+    - **阶段 2**（阶段 1 之后）：`anthropic` 编解码器，DeepSeek 真实验证；GLM、Kimi、OpenCode 有 key 时补跑。
 
 ### 5.1 核心缺陷（优先修，穿插在阶段之间）
 
