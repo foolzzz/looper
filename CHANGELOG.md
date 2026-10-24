@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.65] - 2026-10-24
+
+### Changed
+
+- **Task gates, waits, role edits and the task room move to the versioned API.** The gate list and discussion (`ops/gates/*`), `waits.resume`/`waits.cancel`, `tasks.role_update` and `tasks.room_view` under `/api/v1/` replace eight legacy HTTP methods (`GET /api/gates`, `GET`/`POST /api/tasks/{id}/gates/{step}/messages`, `POST .../gates/{step}/end`, `POST .../waits/{step}/{resume|cancel}`, `PUT .../roles/{key}`, `GET .../room`), which are removed; the dashboard and the prompt-evaluation and DSH scripts use the new routes. A gate message posted without an API client is now attributed to the dashboard. Manager prompts and tools are unchanged. ([#474](https://github.com/foolzzz/looper/pull/474))
+
 ## [2.13.64] - 2026-10-24
 
 ### Added
