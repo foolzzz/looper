@@ -96,14 +96,14 @@ describe("wait panel", () => {
     await act(async () => button("Resume now").click());
     expect(button("Resume now").disabled).toBe(true);
     expect(button("Cancel").disabled).toBe(true);
-    expect(fetch.mock.calls[0]).toMatchObject(["/api/tasks/task-a/waits/w1/resume", { method: "POST" }]);
-    await act(async () => release(Response.json({ task_id: "task-a", wait: wait({ state: "ready", outcome: "resumed" }) })));
+    expect(fetch.mock.calls[0]).toMatchObject(["/api/v1/waits/resume", { method: "POST" }]);
+    await act(async () => release(Response.json({ status: "ok", result: { task_id: "task-a", wait: wait({ state: "ready", outcome: "resumed" }) } })));
     expect(changed).toHaveBeenCalledOnce();
   });
 
   it("confirms cancellation and shows the API's conflict text without refreshing", async () => {
     const reason = "wait w1 is timed_out: its Planner decides what happens next";
-    const fetch = vi.fn(async () => Response.json({ error: reason }, { status: 409 }));
+    const fetch = vi.fn(async () => Response.json({ status: "error", error: { code: "conflict", message: reason } }, { status: 409 }));
     vi.stubGlobal("fetch", fetch);
     await show(wait());
     await act(async () => button("Cancel").click());
@@ -113,7 +113,7 @@ describe("wait panel", () => {
     expect(document.activeElement).toBe(button("Cancel"));
     await act(async () => button("Cancel").click());
     await act(async () => button("Confirm cancel").click());
-    expect(fetch.mock.calls[0]).toMatchObject(["/api/tasks/task-a/waits/w1/cancel", { method: "POST" }]);
+    expect(fetch.mock.calls[0]).toMatchObject(["/api/v1/waits/cancel", { method: "POST" }]);
     expect(container.querySelector("[role=alert]")?.textContent).toContain(reason);
     expect(changed).not.toHaveBeenCalled();
     expect(button("Confirm cancel").disabled).toBe(false);

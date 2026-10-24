@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 from ...db import manager_actions as db_actions, tasks as db_tasks, user_gates as db_user_gates
 from .. import gate_service
 from ..managers_api import DEFAULT_MANAGER_ID
+from ..message import channel_address
 from ..tiers.journal import clip
 from ..user_gates import MESSAGE_MAX_CHARS
 from . import API_CHANNEL, Call, ErrorCode, OpError, Risk, Tool, Turn, check_arguments
@@ -97,7 +98,8 @@ async def _gates(call: Call) -> dict[str, Any]:
             {key: arguments[key] for key in ("text", "agenda_item", "option") if arguments.get(key) is not None})
     return await answered(gate_service.post_message(
         task_id, label, data, has_planner=call.platform.task_router.has_planner(task_id), bus=call.platform.bus,
-        source=call.manager_address, via=_via(call.turn), end=end))
+        source=call.manager_address if call.turn.client_id else channel_address("web"),
+        via=_via(call.turn) if call.turn.client_id else gate_service.VIA_DASHBOARD, end=end))
 
 
 GATES_TOOL = Tool(

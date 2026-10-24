@@ -1186,7 +1186,7 @@ def _make_two_projects_schedules(api: Api, project_id: str) -> None:
 _CREATE = ("looper_task_create", {"requirement": SLOW_TASK, "title": "hello 脚本", "project": PROJECT})
 def _gate_messages(look: Look) -> list[dict[str, Any]]:
     """The user's messages in the running task's gate."""
-    thread = look.api.get(f"/api/tasks/{look.task}/gates/{GATE_LABEL}/messages")["messages"]
+    thread = look.api.post("/api/v1/ops/gates/messages", {"task_id": look.task, "gate": GATE_LABEL})["result"]["messages"]
     return [m for m in thread if m["role"] == "user"]
 
 

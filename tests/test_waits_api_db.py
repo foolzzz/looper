@@ -13,6 +13,8 @@ import pytest
 
 from looper.agents import waits
 from looper.agents.http_server import AgentHTTPServer
+from looper.agents.ops.clients import ClientOps
+from looper.agents.ops.service import Platform
 from looper.agents.message import MessageType, channel_address, planner_address
 from looper.db import activity, plans, waits as db_waits
 from tests.db_support import DSN, run_db
@@ -50,6 +52,7 @@ async def _api(method: str, path: str, body: bytes = b"", *, live: bool = False,
                              web_adapter=SimpleNamespace(_address=channel_address("web")),
                              supervisor=SimpleNamespace(bus=bus),
                              task_router=SimpleNamespace(has_planner=lambda _: live))
+    server._client_ops = ClientOps(Platform(bus=bus, task_router=server._task_router))
     headers = [f"Host: {host}", f"Content-Length: {len(body)}"]
     if auth:
         headers.append(f"Authorization: Bearer {TOKEN}")
@@ -61,7 +64,11 @@ async def _api(method: str, path: str, body: bytes = b"", *, live: bool = False,
     writer = Writer()
     await server._handle_connection(reader, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload), bus
+    answer = json.loads(payload)
+    if path.startswith("/api/v1/"):
+        error = answer.get("error", "")
+        answer = answer.get("result", {"error": error.get("message", "") if isinstance(error, dict) else error})
+    return int(head.split()[1]), answer, bus
 
 
 async def _open(pool: Any, **kwargs: Any) -> None:
@@ -105,8 +112,8 @@ def test_user_moves_wait_and_only_wakes_an_existing_planner(
 ) -> None:
     async def test(pool: Any) -> None:
         await _open(pool)
-        # These actions ignore the body; a JSON parser must not become another input contract.
-        status, answer, bus = await _api("POST", f"/api/tasks/task-a/waits/w1/{action}", b"not JSON", live=live)
+        status, answer, bus = await _api("POST", f"/api/v1/waits/{action}",
+            json.dumps({"task_id": "task-a", "step": "w1"}).encode(), live=live)
         assert status == 200, answer
         row = await db_waits.get("task-a", "w1")
         assert row is not None
@@ -125,7 +132,7 @@ def test_user_moves_wait_and_only_wakes_an_existing_planner(
             assert (message.source, message.target, message.message_type, message.payload) == (
                 channel_address("web"), planner_address("task-a"), MessageType.WAIT_EVENT,
                 {"task_id": "task-a", "wait": "w1"})
-        status, _, bus = await _api("POST", f"/api/tasks/task-a/waits/w1/{action}", live=True)
+        status, _, bus = await _api("POST", f"/api/v1/waits/{action}", b'{"task_id":"task-a","step":"w1"}', live=True)
         assert status == 409 and not bus.messages
         assert len(await activity.list_activity("task-a")) == 1
 
@@ -134,8 +141,9 @@ def test_user_moves_wait_and_only_wakes_an_existing_planner(
 
 # Each way a move is refused once; a task that ended, or a wait that is not waiting, is refused alike by its status.
 @pytest.mark.parametrize(("action", "case"), [
-    ("resume", "no_task"), ("cancel", "no_label"), ("resume", "stopped"), ("cancel", "timed_out"),
-    ("resume", "done"), ("cancel", "race"),
+    ("resume", "no_task"), ("cancel", "no_label"), ("resume", "stopped"), ("cancel", "race"),
+    *[(action, state) for action in ("resume", "cancel") for state in
+      ("pending", "ready", "done", "timed_out", "cancel_requested", "failed", "skipped")],
 ])
 def test_refused_moves_leave_no_activity_or_wakeup(
     monkeypatch: pytest.MonkeyPatch, action: str, case: str,
@@ -162,7 +170,8 @@ def test_refused_moves_leave_no_activity_or_wakeup(
         else:
             await pool.execute("UPDATE task_waits SET state = $1, outcome = $2", case,
                                "ready" if case in ("ready", "done") else None)
-        status, answer, bus = await _api("POST", f"/api/tasks/{task_id}/waits/{label}/{action}", live=True)
+        status, answer, bus = await _api("POST", f"/api/v1/waits/{action}",
+            json.dumps({"task_id": task_id, "step": label}).encode(), live=True)
         assert status == expected, answer
         assert not bus.messages and not await activity.list_activity("task-a")
         if case in ("timed_out", "cancel_requested"):
@@ -176,7 +185,7 @@ def test_refused_moves_leave_no_activity_or_wakeup(
 
 
 @pytest.mark.parametrize(("method", "path"), [
-    ("POST", "/api/tasks/task-a/waits/w1/resume"), ("GET", "/api/wait-settings"), ("PUT", "/api/wait-settings"),
+    ("POST", "/api/v1/waits/resume"), ("GET", "/api/wait-settings"), ("PUT", "/api/wait-settings"),
 ])
 def test_wait_routes_use_operator_auth_and_request_guard(
     monkeypatch: pytest.MonkeyPatch, method: str, path: str,
@@ -193,7 +202,8 @@ def test_wait_routes_use_operator_auth_and_request_guard(
         assert (await db_waits.get("task-a", "w1"))["state"] == "waiting"
         assert not await activity.list_activity("task-a")
         # An authorized request reaches the same handler, rather than being refused unconditionally.
-        status, _, _ = await _api(method, path, b'{"max_wait_seconds": 3600}')
+        status, _, _ = await _api(method, path, b'{"task_id":"task-a","step":"w1"}'
+                                   if path.startswith("/api/v1/") else b'{"max_wait_seconds": 3600}')
         assert status == (404 if "/gates/" in path else 200)
 
     run_db(test, monkeypatch)

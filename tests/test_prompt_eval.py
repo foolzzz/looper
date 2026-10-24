@@ -1460,7 +1460,8 @@ def test_wait_resumes_after_delay_once_per_wait_and_only_when_opted_in() -> None
     detail["waits"][1].update(state="waiting", opened_at="1970-01-01T00:01:42Z")
     assert runner.resume_waits(api, task, "t1", detail, resumed, now=107.0)
     assert resumed == {"w1": 105.0, "w2": 107.0}
-    assert api.posted == [("/api/tasks/t1/waits/w1/resume", {}), ("/api/tasks/t1/waits/w2/resume", {})]
+    assert api.posted == [("/api/v1/waits/resume", {"task_id": "t1", "step": "w1"}),
+                          ("/api/v1/waits/resume", {"task_id": "t1", "step": "w2"})]
     api = _Poster()
     for state in ("pending", "ready", "done", "timed_out", "cancel_requested", "failed", "skipped"):
         detail["waits"][0]["state"] = state
@@ -1589,14 +1590,14 @@ def test_the_scripted_user_ends_a_gate_that_asks_again_after_its_script_ran_out(
     waiting = {"gates": [{"step": "g1", "waiting_on": "user", "opened_at": None}]}
     for _ in range(4):
         runner.answer_gates(api, task, "t1", waiting, answered, now=0.0)
-    assert api.posted == [("/api/tasks/t1/gates/g1/messages", {"text": task.gate_script[0]}),
-                          ("/api/tasks/t1/gates/g1/end", {})]
+    assert api.posted == [("/api/v1/ops/gates/reply", {"task_id": "t1", "gate": "g1", "text": task.gate_script[0]}),
+                          ("/api/v1/ops/gates/end", {"task_id": "t1", "gate": "g1"})]
     # A script that ends the discussion itself gets no second end.
     ends = next(t for t in TASKS if t.id == "gate_end_early")
     api, answered = _Poster(), {}
     for _ in range(3):
         runner.answer_gates(api, ends, "t1", waiting, answered, now=0.0)
-    assert api.posted == [("/api/tasks/t1/gates/g1/end", {})]
+    assert api.posted == [("/api/v1/ops/gates/end", {"task_id": "t1", "gate": "g1"})]
     # Nothing while the gate waits for the Planner.
     api = _Poster()
     runner.answer_gates(api, task, "t1", {"gates": [{"step": "g1", "waiting_on": "planner"}]}, {}, now=0.0)

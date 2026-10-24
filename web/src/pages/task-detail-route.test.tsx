@@ -186,7 +186,7 @@ describe("TaskDetailRoute", () => {
   it("clears the mounted room and reads from zero after Start over", async () => {
     let restarted = false;
     let releaseRoom = () => {};
-    const reads: string[] = [];
+    const reads: { task_id: string; after?: number }[] = [];
     const room = (id: number, body: string) => ({
       enabled: true, seats: [], by_step: {}, more: false,
       counts: { messages: 1, by_kind: { info: 1 }, questions: 0, unanswered: 0 },
@@ -194,17 +194,17 @@ describe("TaskDetailRoute", () => {
                    cc_planner: false, answered: false }],
     });
     const response = (data: unknown) => new Response(JSON.stringify(data), { status: 200 });
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/start")) {
         restarted = true;
         return response({});
       }
       if (url.includes("/room")) {
-        reads.push(url);
-        if (!restarted) return response(room(7, "Previous run's message"));
+        reads.push(JSON.parse(String(init?.body)));
+        if (!restarted) return response({ status: "ok", result: room(7, "Previous run's message") });
         return new Promise<Response>((resolve) => {
-          releaseRoom = () => resolve(response(room(1, "Restarted run's message")));
+          releaseRoom = () => resolve(response({ status: "ok", result: room(1, "Restarted run's message") }));
         });
       }
       if (url.endsWith("/tasks/task-a") && restarted) {
@@ -220,8 +220,9 @@ describe("TaskDetailRoute", () => {
     await openTab("Start over"); // restart while Room stays selected
     expect(container.textContent).not.toContain("Previous run's message");
     expect(reads.length).toBeGreaterThan(1);
-    for (const url of reads.slice(1)) {
-      expect(new URL(url, "http://localhost").searchParams.get("after") ?? "0").toBe("0");
+    for (const body of reads.slice(1)) {
+      expect(body).toMatchObject({ task_id: "task-a" });
+      expect(body.after ?? 0).toBe(0);
     }
     await act(async () => releaseRoom());
     await settle();
