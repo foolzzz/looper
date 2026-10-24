@@ -293,7 +293,7 @@ The main route groups:
 | Configuration transfer | `GET /api/config/export`, `/api/config/imports/...` | Download the configuration file; upload one, preview it, then apply or cancel |
 | Chat | `/api/chat/send`, `/api/chat/targets`, `/api/chat/sessions`, `/api/chat/messages`, `/api/chat/events` | Talk to the Manager or a running task's Planner; the Manager's conversations by channel; history and SSE stream |
 | Runs | `POST /api/v1/runs/{list,get,events,for_task,usage}` | Every agent run with its launch command, usage, cost and events; one agent's spending and context |
-| Channels | `/api/channel-configs/...`, `/api/channels/lark/...` | Telegram and Lark settings, the Telegram bot token (never returned) and sender allowlists; the Lark bot's status, refused senders and people search |
+| Channels | `/api/v1/channel_configs/...`, `/api/channels/lark/...` | Telegram and Lark settings, the Telegram bot token (never returned) and sender allowlists; the Lark bot's status, refused senders and people search |
 
 The [HTTP API reference](docs/architecture/agent-system.md#http-api) describes
 the endpoints with their fields and errors.

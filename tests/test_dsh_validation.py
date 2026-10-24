@@ -673,8 +673,8 @@ def _serve_smoke_stand_in(mode):
             status = 200
             if method == "POST" and path == "/api/v1/system/status":
                 result = {"status": "ok", "result": {"status": "running"}}
-            elif path == "/api/channel-configs":
-                result = {"configs": [{"enabled": mode == "channels"}]}
+            elif path == "/api/v1/channel_configs/list":
+                result = {"status": "ok", "result": {"configs": [{"enabled": mode == "channels"}]}}
             elif path == "/api/registry":
                 result = {"runtimes": [{"name": "DSH", "type": "dsh", "builtin": True, "runtime_id": "rt-dsh"}],
                           "providers": [], "models": []}
