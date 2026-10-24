@@ -467,7 +467,7 @@ def _project_limit_explained(look: Look) -> str | None:
                if not (a["tool"] == "looper_concurrency" and a["task_id"] == look.task)]
     if changed:
         return f"something changed though a project has no limit to change: {', '.join(changed)}"
-    default = look.api.get("/api/agent-settings")["roles"]["worker"]["effective"]["max_concurrency"]
+    default = look.api.post("/api/v1/agent_settings/get", {})["result"]["roles"]["worker"]["effective"]["max_concurrency"]
     if default["source"] != "builtin":
         return f"the Workers' default limit changed to {default['value']}"
     if look.task and look.detail()["agents"]["roles"]["worker"]["concurrency"]["task"] != 1:
@@ -2153,7 +2153,8 @@ def _manager_profile(api: Api, model: str, effort: str | None) -> dict[str, Any]
     """Claude Code with ``model`` and ``effort`` for the Manager alone (its role layer), registered if missing."""
     name = f"claude-code/{model}" + (f" · {effort}" if effort else "")
     chosen = _subscription_profile(api, name, model, effort)
-    api.put("/api/agent-settings/roles/manager", {"profile_id": chosen["profile_id"]})
+    api.post("/api/v1/agent_settings/update_role", {
+        "role": "manager", "values": {"profile_id": chosen["profile_id"]}})["result"]
     return chosen
 
 
@@ -2255,8 +2256,8 @@ def run(
                     named = register_agent(api, register)["name"] if register is not None else agent
                     picked = select_agent(api, agent=named, model=model)
                     if register is not None:
-                        api.put("/api/agent-settings/system", {"profile_id": picked["profile_id"],
-                                                               "run_budget_usd": max_budget_usd})
+                        api.post("/api/v1/agent_settings/update_system", {"values": {
+                            "profile_id": picked["profile_id"], "run_budget_usd": max_budget_usd}})["result"]
                     configs[dialog.id, rep] = (picked, _manager_profile(api, manager_model, manager_effort)
                                                if manager_model else picked)
                     project_id = api.post("/api/projects",

@@ -256,6 +256,14 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
             return {"messages": self.messages}
 
         def post(self, path: str, body: Any) -> dict[str, Any]:
+            if path == "/api/v1/agent_settings/update_system":
+                body = body["values"]
+                profile = next(p for p in self.profiles if p["profile_id"] == body["profile_id"])
+                chosen = profile_registry.ResolvedAgentProfile(profile["profile_id"], profile["name"], self.runtime,
+                    profile["model_id"], resolved_model=self.models[profile["model_id"]])
+                profile_registry.check_roles(chosen, [role.value for role in agent_settings.AgentType])
+                self.layers[agent_settings.Layer.SYSTEM, None] = agent_settings.LayerValues(profile=chosen)
+                return {"status": "ok", "result": {}}
             self.posts.append((path, body))
             if path == "/api/providers":
                 assert "api_key_env" not in body
@@ -295,14 +303,6 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
             assert path == "/api/chat/send", path
             self.messages.append({"message_id": f"{body['message_id']}:reply", "content": self.launch("manager")})
             return {}
-
-        def put(self, path: str, body: Any) -> None:
-            assert path == "/api/agent-settings/system"
-            profile = next(p for p in self.profiles if p["profile_id"] == body["profile_id"])
-            chosen = profile_registry.ResolvedAgentProfile(profile["profile_id"], profile["name"], self.runtime,
-                profile["model_id"], resolved_model=self.models[profile["model_id"]])
-            profile_registry.check_roles(chosen, [role.value for role in agent_settings.AgentType])
-            self.layers[agent_settings.Layer.SYSTEM, None] = agent_settings.LayerValues(profile=chosen)
 
     return Registry()
 

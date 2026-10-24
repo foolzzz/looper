@@ -33,6 +33,9 @@ class RegistryApi:
         return deepcopy(self.registry)
 
     def post(self, path, body):
+        if path == "/api/v1/agent_settings/update_system":
+            self.settings.append(deepcopy(body["values"]))
+            return {"status": "ok", "result": {}}
         self.posts.append((path, deepcopy(body)))
         if path == "/api/providers":
             assert not {"protocols", "models", "base_url", "api_key_env", "auth"} & body.keys()
@@ -58,10 +61,6 @@ class RegistryApi:
                    "cost": {"source": "provider_price", "equivalent": False, "unpriced": []}}
         self.registry["profiles"].append(profile)
         return {"profile": deepcopy(profile)}
-
-    def put(self, path, body):
-        assert path == "/api/agent-settings/system"
-        self.settings.append(deepcopy(body))
 
 
 def explicit_spec():

@@ -70,10 +70,11 @@ describe("the role layer's system prompt mode", () => {
       const url = String(input);
       const result = url.endsWith("/registry") ? SUMMARY_REGISTRY
         : url.endsWith("/allowed-profiles") ? { profiles: [], choosable: [] }
-        : url.endsWith("/roles") ? { configs: [{ role: "planner", display_name: "Planner", enabled: true }] }
+        : url.endsWith("/roles/list") ? { configs: [{ role: "planner", display_name: "Planner", enabled: true }] }
         : url.includes("/projects/") ? { limits: LIMITS, project: { values: VALUES }, roles }
         : { limits: LIMITS, system: state, roles };
-      return Response.json(result);
+      // Roles and agent settings are v1 operations. callV1 accepts only { status: "ok", result }.
+      return Response.json(url.startsWith("/api/v1/") ? { status: "ok", result } : result);
     }));
     const container = document.createElement("div");
     document.body.append(container);

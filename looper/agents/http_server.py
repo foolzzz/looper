@@ -522,7 +522,8 @@ class AgentHTTPServer:
                         risk=Risk(operation.risk), run=run,
                         escalate=impact if callable(getattr(domain, "impact", None)) else None)
             answer = await self._call_v1(principal, headers.get("x-looper-session") or DEFAULT_SESSION,
-                                         tool.name, data, tool=tool, validator=api_v1.validate_arguments)
+                                         tool.name, data, tool=tool,
+                                         validator=getattr(domain, "validate_arguments", api_v1.validate_arguments))
             return api_v1.answer_status(answer), answer
         except OpError as exc:
             return api_v1.error(exc.code, "invalid credential request" if operation.credential_write else str(exc),
@@ -780,8 +781,6 @@ class AgentHTTPServer:
     _RE_TASK_ACTIVITY_SEQ = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/(\d+)$")
     _RE_TASK_CONVERSATION = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/conversation$")
     _RE_TASK_RUNS = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/runs$")
-    _RE_ROLE_CONFIG = re.compile(r"^/api/roles/([a-zA-Z0-9_-]+)$")
-    _RE_ROLE_CONFIG_RESET = re.compile(r"^/api/roles/([a-zA-Z0-9_-]+)/reset-prompt$")
     _RE_LLM_RECORD = re.compile(r"^/api/llm-records/(\d+)$")
     _RE_LLM_RECORD_EVENTS = re.compile(r"^/api/llm-records/(\d+)/events$")
     _RE_AGENT_USAGE = re.compile(r"^/api/agents/([a-zA-Z0-9_-]+)/usage$")
@@ -801,7 +800,6 @@ class AgentHTTPServer:
     _RE_PROJECT_ROLE_STATS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-stats$")
     _RE_PROJECT_ROLE_TEMPLATE = re.compile(
         r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-templates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})$")
-    _RE_ROLE_SETTINGS = re.compile(r"^/api/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_RUNTIME_PROBE = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)/probe$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
     _RE_MODEL = re.compile(r"^/api/models/(model-[a-zA-Z0-9-]+)$")
@@ -931,14 +929,6 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_DRAFT.match(path)) and method == "DELETE":
             await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.discard_draft(
                 m.group(1), m.group(2)))
-        elif path == "/api/roles" and method == "GET":
-            await self._handle_list_role_configs(writer)
-        elif (m := self._RE_ROLE_CONFIG.match(path)) and method == "GET":
-            await self._handle_get_role_config(m.group(1), writer)
-        elif (m := self._RE_ROLE_CONFIG_RESET.match(path)) and method == "POST":
-            await self._handle_reset_role_prompt(m.group(1), writer)
-        elif (m := self._RE_ROLE_CONFIG.match(path)) and method == "PUT":
-            await self._handle_update_role_config(m.group(1), body, writer)
         elif path == "/api/llm-records" and method == "GET":
             await self._handle_list_llm_records(query, writer)
         elif (m := self._RE_LLM_RECORD.match(path)) and method == "GET":
@@ -989,13 +979,6 @@ class AgentHTTPServer:
                 m.group(1), projects.json_object(body)))
         elif (m := self._RE_PROFILE.match(path)) and method == "DELETE":
             await self._handle_registry(writer, HTTP_200, lambda: profile_registry.delete_profile(m.group(1)))
-        elif path == "/api/agent-settings" and method == "GET":
-            await self._handle_agent_settings(writer, agent_settings.settings_view)
-        elif path == "/api/agent-settings/system" and method == "PUT":
-            await self._handle_agent_settings(writer, lambda: agent_settings.update_system(projects.json_object(body)))
-        elif (m := self._RE_ROLE_SETTINGS.match(path)) and method == "PUT":
-            await self._handle_agent_settings(writer, lambda: self._write_layer(
-                body, lambda data: agent_settings.update_role(m.group(1), data)))
         elif (m := self._RE_PROJECT_AGENT_SETTINGS.match(path)) and method == "GET":
             await self._handle_agent_settings(writer, lambda: agent_settings.project_settings_view(m.group(1)))
         elif (m := self._RE_PROJECT_AGENT_SETTINGS.match(path)) and method == "PUT":
@@ -1928,87 +1911,6 @@ class AgentHTTPServer:
         except Exception:
             runs = []
         writer.write(_json_response(HTTP_200, {"runs": runs}))
-        await writer.drain()
-
-    # --- Role config handlers ---
-
-    async def _handle_list_role_configs(self, writer: asyncio.StreamWriter) -> None:
-        try:
-            from ..db.role_configs import list_configs
-            configs = await list_configs()
-        except Exception:
-            configs = []
-        writer.write(_json_response(HTTP_200, {"configs": configs}))
-        await writer.drain()
-
-    async def _handle_get_role_config(
-        self, role: str, writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            from ..db.role_configs import get_config
-            config = await get_config(role)
-        except Exception:
-            config = None
-        if config is None:
-            writer.write(_json_response(HTTP_404, {"error": f"role '{role}' not found"}))
-        else:
-            writer.write(_json_response(HTTP_200, config))
-        await writer.drain()
-
-    async def _handle_update_role_config(
-        self, role: str, body: bytes, writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
-            await writer.drain()
-            return
-
-        if not isinstance(data, dict):
-            writer.write(_json_response(HTTP_400, {"error": "body must be a JSON object"}))
-            await writer.drain()
-            return
-
-        try:
-            data = agent_settings.role_config_fields(role, data)
-        except agent_settings.SettingsError as exc:
-            writer.write(_json_response(HTTP_400, {"error": str(exc)}))
-            await writer.drain()
-            return
-
-        try:
-            from ..db.role_configs import set_config
-            updated = await set_config(role, data)
-        except Exception as exc:
-            writer.write(_json_response(HTTP_500, {"error": str(exc)}))
-            await writer.drain()
-            return
-
-        if updated is None:
-            writer.write(_json_response(HTTP_404, {"error": f"role '{role}' not found"}))
-        else:
-            writer.write(_json_response(HTTP_200, updated))
-        await writer.drain()
-
-    async def _handle_reset_role_prompt(
-        self, role: str, writer: asyncio.StreamWriter,
-    ) -> None:
-        """Reset a role's prompt to the system-recommended default."""
-        try:
-            from ..db.role_configs import reset_prompt
-            updated = await reset_prompt(role)
-        except Exception as exc:
-            writer.write(_json_response(HTTP_500, {"error": str(exc)}))
-            await writer.drain()
-            return
-
-        if updated is None:
-            writer.write(_json_response(
-                HTTP_404, {"error": f"role '{role}' has no recommended prompt to reset to"},
-            ))
-        else:
-            writer.write(_json_response(HTTP_200, updated))
         await writer.drain()
 
     # --- Agent settings (the defaults every agent inherits) ---

@@ -1005,8 +1005,8 @@ def run(
                 agent = register_agent(api, register)["name"]
             chosen = select_agent(api, agent=agent, model=model, provider=provider, run_budget_usd=max_budget_usd)
             if register is not None:
-                api.put("/api/agent-settings/system", {"profile_id": chosen["profile_id"],
-                                                       "run_budget_usd": max_budget_usd})
+                api.post("/api/v1/agent_settings/update_system", {"values": {
+                    "profile_id": chosen["profile_id"], "run_budget_usd": max_budget_usd}})["result"]
             chosen_profile_id = None
             if any(task.planner_may_choose for task in tasks):
                 chosen_profile_id = api.post("/api/agent-profiles", {
@@ -1236,7 +1236,8 @@ def select_agent(api: Api, *, agent: str | None, model: str | None, provider: Pr
         chosen = agents[agent]
     elif provider is not None:
         chosen = register_provider_agent(api, provider)
-        api.put("/api/agent-settings/system", {"profile_id": chosen["profile_id"], "run_budget_usd": run_budget_usd})
+        api.post("/api/v1/agent_settings/update_system", {"values": {
+            "profile_id": chosen["profile_id"], "run_budget_usd": run_budget_usd}})["result"]
         return chosen
     elif model:
         name = f"claude-code/{model}"
@@ -1245,7 +1246,7 @@ def select_agent(api: Api, *, agent: str | None, model: str | None, provider: Pr
             "model": {"name": model, "protocol": "anthropic-messages"}, "agent": {"name": name}})
     else:
         return next(a for a in registry["profiles"] if a["builtin"])
-    api.put("/api/agent-settings/system", {"profile_id": chosen["profile_id"]})
+    api.post("/api/v1/agent_settings/update_system", {"values": {"profile_id": chosen["profile_id"]}})["result"]
     return chosen
 
 

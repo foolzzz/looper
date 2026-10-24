@@ -33,15 +33,39 @@ class _Writer:
         pass
 
 
+def _global_settings_request(method: str, path: str, body: Any) -> tuple[str, str, Any]:
+    """Keep existing service-contract fixtures on the global settings v1 transport."""
+    parts = path.split("/")
+    operation, data = None, body
+    if method == "GET" and path == "/api/roles":
+        operation, data = "roles/list", {}
+    elif len(parts) == 4 and parts[1:3] == ["api", "roles"] and method in ("GET", "PUT"):
+        operation = "roles/get" if method == "GET" else "roles/update"
+        data = {"role": parts[3], **({"fields": body} if method == "PUT" else {})}
+    elif method == "POST" and len(parts) == 5 and parts[1:3] == ["api", "roles"] and parts[4] == "reset-prompt":
+        operation, data = "roles/reset_prompt", {"role": parts[3]}
+    elif method == "GET" and path == "/api/agent-settings":
+        operation, data = "agent_settings/get", {}
+    elif method == "PUT" and path == "/api/agent-settings/system":
+        operation, data = "agent_settings/update_system", {"values": body}
+    elif method == "PUT" and len(parts) == 5 and parts[1:4] == ["api", "agent-settings", "roles"]:
+        operation, data = "agent_settings/update_role", {"role": parts[4], "values": body}
+    if operation:
+        return "POST", f"/api/v1/{operation}", body if isinstance(body, bytes) else data
+    return method, path, body
+
+
 async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
     from looper.agents.http_server import AgentHTTPServer
     from looper.agents.tiers.task import TaskRouter
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
+    method, path, body = _global_settings_request(method, path, body)
     writer = _Writer()
     raw = b"" if body is None else json.dumps(body).encode()
-    if path.startswith(("/api/v1/catalog_sources/", "/api/v1/catalog_items/", "/api/v1/installs/", "/api/v1/project_skills/")):
+    if path.startswith(("/api/v1/catalog_sources/", "/api/v1/catalog_items/", "/api/v1/installs/",
+                        "/api/v1/project_skills/", "/api/v1/roles/", "/api/v1/agent_settings/")):
         from looper.agents.api_v1 import OPERATOR
         from looper.agents.ops.clients import ClientOps
         server._client_ops = ClientOps(SimpleNamespace())
@@ -50,7 +74,8 @@ async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
         await server._route_api(method, path, {}, raw, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
     answer = json.loads(payload)
-    if path.startswith(("/api/v1/catalog_sources/", "/api/v1/catalog_items/", "/api/v1/installs/", "/api/v1/project_skills/")):
+    if path.startswith(("/api/v1/catalog_sources/", "/api/v1/catalog_items/", "/api/v1/installs/",
+                        "/api/v1/project_skills/", "/api/v1/roles/", "/api/v1/agent_settings/")):
         answer = answer["result"] if answer.get("status") == "ok" else {"error": answer["error"]["message"]}
     return int(head.split()[1]), answer
 

@@ -51,7 +51,8 @@ def test_role_mode_refuses_other_values(monkeypatch: pytest.MonkeyPatch, value: 
         if value == "":  # an empty value unsets, like every setting
             assert status == 200
             return
-        assert status == 400 and 'must be "append" or "replace"' in body["error"]
+        message = 'must be "append" or "replace"' if isinstance(value, str) else "declared schema"
+        assert status == 400 and message in body["error"]
 
     run_db(run, monkeypatch)
 
