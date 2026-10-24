@@ -31,6 +31,12 @@ def test_discovered_operations_appear_in_openapi_exactly_once():
     paths = api_v1.document()["paths"]
     operation_ids = Counter(op["operationId"] for item in paths.values() for op in item.values())
     assert all(count == 1 for count in operation_ids.values())
+    assert {
+        "schedules.create", "schedules.update", "schedules.enable", "schedules.disable",
+        "schedules.run", "schedules.delete", "schedules.reset_planner_session",
+        "schedule_admin.create", "schedule_admin.update", "schedule_admin.delete",
+        "schedule_admin.reset_planner_session", "schedule_admin.run",
+    } <= operation_ids.keys()
     for domain in api_v1.domains():
         for operation in domain.OPERATIONS:
             assert operation_ids[operation.operation_id] == 1

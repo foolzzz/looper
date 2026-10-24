@@ -1200,8 +1200,6 @@ export async function updateSchedulerSettings(body: SchedulerSettingsUpdate): Pr
   return scheduleCall<SchedulerSettings>("PUT", `${API_BASE}/scheduler-settings`, "scheduler settings", body);
 }
 
-const scheduleUrl = (scheduleId: string) => `${API_BASE}/schedules/${encodeURIComponent(scheduleId)}`;
-
 /** Send JSON (or nothing) to a schedule endpoint; a refusal throws the server's reason. */
 async function scheduleCall<T>(method: string, url: string, label: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
@@ -1230,12 +1228,9 @@ export async function fetchSchedules(projectId: string): Promise<{ schedules: Sc
 
 /** Create a schedule, disabled; 409 when the project has one with that name already. */
 export async function createSchedule(projectId: string, fields: ScheduleFields): Promise<ScheduleInfo> {
-  const data = await scheduleCall<{ schedule: ScheduleInfo }>(
-    "POST",
-    `${API_BASE}/projects/${encodeURIComponent(projectId)}/schedules`,
-    "create schedule",
-    fields,
-  );
+  const data = await callV1<{ schedule: ScheduleInfo }>(
+    "/api/v1/schedule_admin/create", { project_id: projectId, fields });
+  if ("status" in data) throw new V1Error(202, "unavailable", data.impact);
   notifyProjectsChanged();
   return data.schedule;
 }
@@ -1248,24 +1243,32 @@ export async function fetchSchedule(scheduleId: string): Promise<ScheduleInfo> {
 
 /** Send only the fields to change; enabling sets the next fire time from now, disabling clears it. */
 export async function updateSchedule(scheduleId: string, fields: ScheduleUpdate): Promise<ScheduleInfo> {
-  return (await scheduleCall<{ schedule: ScheduleInfo }>("PUT", scheduleUrl(scheduleId), "update schedule", fields))
-    .schedule;
+  const result = await callV1<{ schedule: ScheduleInfo }>(
+    "/api/v1/schedule_admin/update", { schedule_id: scheduleId, fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.schedule;
 }
 
 /** Delete a schedule with its runs; the tasks it created stay. */
 export async function deleteSchedule(scheduleId: string): Promise<void> {
-  await scheduleCall("DELETE", scheduleUrl(scheduleId), "delete schedule");
+  const result = await callV1<{ deleted: string }>("/api/v1/schedule_admin/delete", { schedule_id: scheduleId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   notifyProjectsChanged();
 }
 
 /** Clear the stored Planner session. A run in progress keeps its own session without writing it back. */
-export function resetSchedulePlannerSession(scheduleId: string): Promise<{ cleared: boolean }> {
-  return scheduleCall("POST", `${scheduleUrl(scheduleId)}/reset-planner-session`, "reset Planner session");
+export async function resetSchedulePlannerSession(scheduleId: string): Promise<{ cleared: boolean }> {
+  const result = await callV1<{ cleared: boolean }>(
+    "/api/v1/schedule_admin/reset_planner_session", { schedule_id: scheduleId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Run now, also while disabled: the run is running, queued, skipped_overlap, or failed with its error. */
 export async function runSchedule(scheduleId: string): Promise<ScheduleRunInfo> {
-  return (await scheduleCall<{ run: ScheduleRunInfo }>("POST", `${scheduleUrl(scheduleId)}/run`, "run schedule")).run;
+  const result = await callV1<{ run: ScheduleRunInfo }>("/api/v1/schedule_admin/run", { schedule_id: scheduleId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.run;
 }
 
 /** A schedule's runs, newest first. */
