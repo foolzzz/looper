@@ -142,7 +142,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   A failed store is logged and never blocks the reply, nor stops the channel
 - `/new`, a chat message that is exactly that (trimmed, any case) from the web
   chat, Lark or Telegram (the sender allowlists apply), is answered by Looper,
-  never by Claude. The dashboard's `POST /api/chat/send` may add
+  never by Claude. The dashboard's `POST /api/v1/operator_chat/send` may add
   `new_session_profile_id`, the Agent Profile the new session runs on; any
   `/new` clears the session's earlier choice, and one without that field leaves
   the session following Settings. After any turn under way, the Manager stops its Claude and
@@ -2754,8 +2754,8 @@ everywhere and are not exported. Local ids are never portable references.
 `settings` carries the system/role layers, role prompts, timeouts and enabled
 flags; `channels`, global `installs` and `catalog` carry their existing content; `channels` holds only the three built-in rows, matched by id, so added bots are not exported and a file naming one is refused.
 `--include-projects` adds projects, layers, knowledge, skills, installs and
-schedules. Export streams a read-only repeatable-read snapshot through
-v1 `config.export`, wrapped in its JSON `result.document` envelope for both the CLI and dashboard.
+schedules. Export streams a read-only repeatable-read snapshot, either through
+v1 `config.export` or `GET /api/config/export`; both share the same implementation.
 The CLI needs the running service; catalog files remain UTF-8 text.
 
 This minimal portable example can be previewed with
@@ -2844,14 +2844,12 @@ items keep their origin. Importing the same file again changes nothing, and
 exporting the new installation gives the same file.
 
 Settings imports too (`looper/agents/config_imports.py`). `POST
-/api/v1/config/import_upload` accepts a raw configuration document beyond the 8 MiB request cap:
+/api/config/imports` is the one route that reads past the 8 MiB request cap:
 it streams up to 256 MiB (twice the catalog's cap) to a 0600 file under
-`<runtime root>/config-imports/`, after authentication and the Origin and Host checks, and
-answers with an import id and the same preview in `result`. `POST
-/api/v1/config/import_apply` accepts that `import_id`, runs `--apply`'s transaction and deletes the
-file; `/api/v1/config/import_cancel` cancels only the caller's own import. The dashboard
-operator applies in one call after its existing explicit choice; client tokens use
-`/api/v1/confirm`. An import left alone expires after an hour, and the
+`<runtime root>/config-imports/`, after the Origin and Host checks, and
+answers with an import id and the same preview. `POST
+/api/config/imports/<id>/apply` runs `--apply`'s transaction and deletes the
+file; `DELETE` cancels; an import left alone expires after an hour, and the
 server clears the directory when it starts and stops. After applying, each
 secret to fill in names the provider, MCP server or channel that takes it, and
 Settings links to its form (`#settings/providers/<id>`,
@@ -4138,7 +4136,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 
 - **Activity SSE**: `GET /api/tasks/:id/activity/stream` — server-sent events from Worker subprocess
 - **Task polling**: 2-second interval with auto-stop on terminal status
-- **Chat SSE**: `GET /api/chat/events` — real-time chat responses; the `answer.final` of a Manager reply carries its `outcome` (`answered`, `failed`, `stopped` or `confirm`; absent reads as `answered`), which the page uses to send queued messages only after `answered`
+- **Chat SSE**: `POST /api/v1/operator_chat/reply_events` (`correlation_id`) and `POST /api/v1/operator_chat/thread_events` (`session_id`, optional `manager`) — real-time replies and autonomous thread messages; the `answer.final` of a Manager reply carries its `outcome` (`answered`, `failed`, `stopped` or `confirm`; absent reads as `answered`), which the page uses to send queued messages only after `answered`
 
 ### Hash Routing
 
@@ -4317,7 +4315,7 @@ does not imply HTTP compatibility.
 | `/api/tasks/delete` | POST | Delete task (must be stopped first) |
 | `/api/tasks/:id/activity` | GET | Activity events |
 | `/api/tasks/:id/activity/stream` | GET | SSE activity stream |
-| `/api/chat/send` | POST | Send chat message; `target` is the Manager (default) or `{kind: planner, task_id}` (the message is stored as a supplement of the task first), 409 when that task has no running Planner. `new_session_profile_id` goes only with `/new` to the Manager (else 400) and names the Agent Profile the new session runs on; it is checked as `/profile` checks it (400 for an unknown profile or one that cannot run the Manager), and a profile that cannot launch at `/new` leaves the session as it was |
+| `/api/v1/operator_chat/send` | POST | Send chat message; `target` is the Manager (default) or `{kind: planner, task_id}` (the message is stored as a supplement of the task first), 409 when that task has no running Planner. `new_session_profile_id` goes only with `/new` to the Manager (else 400) and names the Agent Profile the new session runs on; it is checked as `/profile` checks it (400 for an unknown profile or one that cannot run the Manager), and a profile that cannot launch at `/new` leaves the session as it was |
 | `/api/chat/stop` | POST | Stop the Manager's running reply: body `{message_id}` (400 without it or on bad JSON, 503 without a Manager). 200 `{state: "stopping" \| "already_stopping", method}` (`method` is `control`, `cancel`, `kill`, or null while the interrupt is still under way); 409 `{state: "not_running" \| "other_message" \| "cannot_interrupt", error}` (`cannot_interrupt`: "This runtime cannot interrupt a reply.") |
 | `/api/chat/turn` | GET | `?session_id=<web chat id>`: `{turn: null}` or `{turn: {message_id, channel, started_at, stopping, can_interrupt}}` when the Manager's running user turn answers that chat; 400 without `session_id`, 503 without a Manager. The page reads it after a reload or when its stream broke |
 | `/api/manager/session` | GET | The Manager's session and its Agent Profile, never the session id: `session` (`active`, `runtime`, `profile_id`: what the saved session ran), `selected` (`{profile_id, name}` or null: the session's own choice), `effective` (`{profile, source}`: what the next turn runs and the layer it comes from, `session` or a settings layer), `problem` (why that profile cannot launch, else null) and `choices` (the numbered profiles `/profile` lists, each with its `problem` when it cannot serve the Manager). 503 while the Manager is not running |
@@ -4334,7 +4332,7 @@ does not imply HTTP compatibility.
 | `/api/v1/chat/send` | POST | `{text, conversation_id?, manager_id?, language?}`: talk to the Manager; the answer is a server-sent event stream |
 | `/api/v1/chat/messages` | POST | `{conversation_id, after?, limit?}`: read one conversation of this client, oldest first, by cursor |
 | `/api/v1/chat/conversations` | POST | List this client's conversations |
-| `manager` parameters of the chat and session routes | | Without one every route is the default Manager's, as before. `GET /api/manager/session?manager=<id>` and `PUT /api/manager/session/profile` (body `manager`) act on that Manager's session; `POST /api/v1/operator_chat/sessions` (body `manager`) lists its threads (404 for an unknown or deleted Manager); `POST /api/chat/send` takes `target` `{"kind": "manager", "id": "<id>"}` (409 when the thread belongs to another Manager) and `new_session_profile_id` for any Manager's `/new`; `GET /api/chat/turn` finds the Manager from the thread's owner and `POST /api/chat/stop` looks for the `message_id` in every Manager; `POST /api/v1/operator_chat/targets` lists the Managers first, each with its `name`; `GET /api/tasks` and `/api/tasks/:id` add `manager_id`, `manager_name` and `template`; `GET /api/status` adds `managers` (`id`, `healthy`, `busy`, `turn_binding`) |
+| `manager` parameters of the chat and session routes | | Without one every route is the default Manager's, as before. `GET /api/manager/session?manager=<id>` and `PUT /api/manager/session/profile` (body `manager`) act on that Manager's session; `POST /api/v1/operator_chat/sessions` (body `manager`) lists its threads (404 for an unknown or deleted Manager); `POST /api/v1/operator_chat/send` takes `target` `{"kind": "manager", "id": "<id>"}` (409 when the thread belongs to another Manager) and `new_session_profile_id` for any Manager's `/new`; `GET /api/chat/turn` finds the Manager from the thread's owner and `POST /api/chat/stop` looks for the `message_id` in every Manager; `POST /api/v1/operator_chat/targets` lists the Managers first, each with its `name`; `GET /api/tasks` and `/api/tasks/:id` add `manager_id`, `manager_name` and `template`; `GET /api/status` adds `managers` (`id`, `healthy`, `busy`, `turn_binding`) |
 | `/api/v1/operator_chat/targets` | POST | The Manager, then per recent task its Planner and step Workers/Reviewers, with `can_send` (and `task_role` for one that ran as a role) |
 | `/api/v1/operator_chat/sessions` | POST | The Manager's conversations on every channel (Planner threads left out), the 50 most recently active first; body `session_id` reads only that conversation, however old (an empty list when absent, 409 naming its Manager when it belongs to another). Each has `session_id` (`<channel>:<chat id>` for Lark and Telegram), `channel`, `message_count`, `first_message_at`, `last_message_at`, `last_role` and the first 200 characters of the last message (`last_content`); typed `unavailable` when they cannot be read |
 | `/api/v1/operator_chat/messages`, `/api/v1/operator_chat/save_message` | POST | Operator-only chat history, with typed v1 result/error envelopes. `messages` takes `session_id` and optional `manager`, and returns the session's newest 200 messages, oldest first, each with its `channel`; a foreign thread returns 409 with `error.details.manager_id`. `save_message` takes `session_id`, `message_id`, `role` and `content`, and is idempotent per message id. Persistence failure now returns typed `unavailable` instead of claiming success. The server saves both sides of a web chat: the message when it is sent, and its answer when it comes (`<message_id>:reply`), whether or not a page still reads its stream; the answer is also pushed to the chat's open pages (`chat.message`), so a page opened again before it came shows it |

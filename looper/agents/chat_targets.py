@@ -32,7 +32,7 @@ class ChatTargetError(Exception):
 
 
 async def resolve_chat_target(raw: Any, task_router: TaskRouter, fleet: Any = None) -> AgentAddress:
-    """Map a ``/api/chat/send`` target to a bus address; the Manager is the default."""
+    """Map an operator chat target to a bus address; the Manager is the default."""
     target = raw or {"kind": "manager"}
     kind = target.get("kind", "manager") if isinstance(target, dict) else None
     if kind == "manager":
