@@ -1777,7 +1777,7 @@ class TestTaskEnd:
         """The server stops its worker pool, then the TaskRouter and its Planners (``AgentSupervisor.stop_all``):
         with 12 steps running in 3 tasks, and Planners' Claudes that take their 5 s to exit, it is done well inside
         launchd's 20 s grace, every run ``interrupted``."""
-        claude = planner_claude(plan(*(step(f"s{i}") for i in range(1, 5))), linger=True)
+        claude = planner_claude(plan(*(step(f"s{i}") for i in range(1, 5))), linger=True, sessions_by_cwd=True)
         answers: list[MessageEnvelope] = []
 
         async def _run() -> float:

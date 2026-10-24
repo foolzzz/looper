@@ -18,6 +18,44 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.79] - 2026-10-24
+
+### Changed
+
+- **Channel bot settings are managed through v1.** Listing, reading, adding, updating and removing Telegram and Lark bots are now `channel_configs.list`, `channel_configs.get`, `channel_configs.create`, `channel_configs.update` and `channel_configs.delete` (`POST /api/v1/channel_configs/<action>`). Creating and updating are operator-only credential writes; the token is write-only and responses show only whether one is stored. Removal asks for confirmation. A bot's Manager still cannot change. Manager prompts and tools are unchanged. ([#518](https://github.com/foolzzz/looper/pull/518))
+
+### Removed
+
+- **`GET`, `POST`, `PUT` and `DELETE` on `/api/channel-configs` and `/api/channel-configs/<id>`.** Use the `channel_configs` operations. ([#518](https://github.com/foolzzz/looper/pull/518))
+
+## [2.13.78] - 2026-10-24
+
+### Changed
+
+- **The dashboard Chat page reads and saves conversations through v1.** Targets, conversation list, message history and message saving are now the operator-only operations `operator_chat.targets`, `operator_chat.sessions`, `operator_chat.messages` and `operator_chat.save_message` (`POST /api/v1/operator_chat/<action>`). Thread ownership across Managers is kept. A database failure now answers unavailable instead of an empty history, and a failed save no longer answers `ok`. Manager prompts and tools are unchanged. ([#510](https://github.com/foolzzz/looper/pull/510))
+
+### Removed
+
+- **`GET /api/chat/targets`, `GET /api/chat/sessions`, `GET /api/chat/messages` and `POST /api/chat/messages`.** Use the `operator_chat` operations with an operator credential. `/api/chat/send` and `/api/chat/events` are unchanged. ([#510](https://github.com/foolzzz/looper/pull/510))
+
+## [2.13.77] - 2026-10-24
+
+### Changed
+
+- **The costs query has a typed result contract.** The existing `looper_costs` Tool (`POST /api/v1/ops/costs`) now declares its answer in the versioned API document for all three scopes: a task (`task_id`), a project (`project`) and global spend. The request, arithmetic, transport and risk (read) are unchanged, and Manager prompts and tools are unchanged. ([#514](https://github.com/foolzzz/looper/pull/514))
+
+## [2.13.76] - 2026-10-24
+
+### Changed
+
+- **Run records and usage move to the versioned API.** `runs.for_task`, `runs.list`, `runs.get`, `runs.events` and `runs.usage` (`POST /api/v1/runs/<action>`) are operator-only reads that replace five legacy routes (`GET /api/tasks/{id}/runs`, `GET /api/llm-records`, `GET /api/llm-records/{id}`, `GET /api/llm-records/{id}/events`, `GET /api/agents/{id}/usage`), which are removed. Requests are closed and typed, and a database failure answers `unavailable` instead of an empty list. The dashboard, the prompt-regression runner and the example smoke scripts use the new routes. Manager prompts and tools are unchanged. ([#506](https://github.com/foolzzz/looper/pull/506))
+- **Chat controls and Manager sessions move to the versioned API.** `manager_session.get`, `manager_session.select_profile`, `operator_chat.turn`, `operator_chat.stop`, `chat_settings.get` and `chat_settings.update` (`POST /api/v1/<domain>/<action>`) replace the legacy `GET /api/manager/session`, `PUT /api/manager/session/profile`, `GET /api/chat/turn`, `POST /api/chat/stop` and `GET`/`PUT /api/chat-settings`, which are removed. `operator_chat.turn` and `operator_chat.stop` are operator-only, and changing the chat stop setting asks for confirmation. The dashboard and the eval scripts use the new routes. Manager prompts and tools are unchanged. ([#507](https://github.com/foolzzz/looper/pull/507))
+
+### Fixed
+
+- **The dashboard builds again.** An unused helper left by an earlier v1 migration failed the TypeScript build; it is removed and the Dashboard CI job now type-checks (`tsc -b`) before its tests. ([#512](https://github.com/foolzzz/looper/pull/512))
+- **Agent system tests are green on main again.** A Manager dialog test and a Planner test broke when the run-records and session domains merged together; the fix is test-only (the fake Planner Claude can keep a session per working directory). ([#515](https://github.com/foolzzz/looper/pull/515))
+
 ## [2.13.75] - 2026-10-24
 
 ### Changed

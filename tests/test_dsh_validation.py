@@ -673,8 +673,8 @@ def _serve_smoke_stand_in(mode):
             status = 200
             if method == "POST" and path == "/api/v1/system/status":
                 result = {"status": "ok", "result": {"status": "running"}}
-            elif path == "/api/channel-configs":
-                result = {"configs": [{"enabled": mode == "channels"}]}
+            elif path == "/api/v1/channel_configs/list":
+                result = {"status": "ok", "result": {"configs": [{"enabled": mode == "channels"}]}}
             elif path == "/api/registry":
                 result = {"runtimes": [{"name": "DSH", "type": "dsh", "builtin": True, "runtime_id": "rt-dsh"}],
                           "providers": [], "models": []}
@@ -704,8 +704,9 @@ def _serve_smoke_stand_in(mode):
                 if mode != "manager-timeout":
                     messages.append({"message_id": body["message_id"] + ":reply", "role": "assistant",
                                      "content": "private transcript /synthetic/private/project"})
-            elif path == "/api/chat/messages":
-                result = {"messages": messages}
+            elif path == "/api/v1/operator_chat/messages":
+                assert method == "POST" and body == {"session_id": "smoke"}
+                result = {"status": "ok", "result": {"messages": messages}}
             elif path == "/api/projects":
                 project = "project-" + str(len(projects) + 1)
                 projects[project] = body

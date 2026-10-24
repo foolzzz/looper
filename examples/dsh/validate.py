@@ -602,7 +602,7 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
 
                     api.request = bounded_request
                     _require(not api.base_url.endswith(":8767"))
-                    channels = api.get("/api/channel-configs")["configs"]
+                    channels = api.post("/api/v1/channel_configs/list", {})["result"]["configs"]
                     _require(channels and all(not c["enabled"] for c in channels))
                     summary["stage"] = "profile"
                     profile = runner.register_agent(api, json.loads(SPEC.read_text()))
@@ -636,7 +636,7 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
                         message = f"smoke-{turn}"
                         api.post("/api/chat/send", {"text": "Read the platform status using looper_overview.",
                             "session_id": "smoke", "message_id": message})
-                        rows = _wait(lambda: api.get("/api/chat/messages", session_id="smoke")["messages"],
+                        rows = _wait(lambda: api.post("/api/v1/operator_chat/messages", {"session_id": "smoke"})["result"]["messages"],
                             lambda rows: any(r.get("message_id") == message + ":reply" for r in rows),
                             check_budget=check_budget)
                         _require(any(r.get("message_id") == message + ":reply" and r.get("content") for r in rows))

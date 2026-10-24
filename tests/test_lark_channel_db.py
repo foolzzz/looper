@@ -42,6 +42,18 @@ async def _call(method: str, path: str, body: Any = None, query: dict[str, str] 
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
+    # Channel configuration fixtures name a channel (or the collection); dispatch the real v1 operation.
+    channel_config = path == "channel_configs" or path.startswith("channel-")
+    if channel_config:
+        action = {"GET": "list" if path == "channel_configs" else "get", "POST": "create",
+                  "PUT": "update", "DELETE": "delete"}[method]
+        if action == "update":
+            body = {"channel_id": path, "fields": body}
+        elif action in {"get", "delete"}:
+            body = {"channel_id": path}
+        elif action == "list":
+            body = {}
+        method, path = "POST", f"/api/v1/channel_configs/{action}"
     writer = _Writer()
     payload = b"" if body is None else json.dumps(body).encode()
     if path.startswith("/api/v1/"):
@@ -51,6 +63,8 @@ async def _call(method: str, path: str, body: Any = None, query: dict[str, str] 
         await server._route_api(method, path, query or {}, payload, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
     status, answer = int(head.split()[1]), json.loads(payload)
+    if channel_config and status != 200:
+        return status, {"error": answer["error"]["message"], "code": answer["error"]["code"]}
     return status, answer["result"] if path.startswith("/api/v1/") and status == 200 else answer
 
 
@@ -91,7 +105,7 @@ def test_saving_binds_the_allowlist_and_the_status_names_people(monkeypatch: pyt
 
     async def test(pool: Any) -> None:
         await seed_channel_configs(pool)
-        status, view = await _call("PUT", "/api/channel-configs/channel-lark", {
+        status, view = await _call("PUT", "channel-lark", {
             "enabled": True, "config": {"profile": "", "allowed_open_ids": [OPEN_ID], "app_id_env": "X"}})
         assert status == 200, view
         assert view["config"]["allowlist_app_id"] == "cli_main" and "app_id_env" not in view["config"]
@@ -111,7 +125,7 @@ def test_saving_binds_the_allowlist_and_the_status_names_people(monkeypatch: pyt
         assert set(rejected) == {"open_id", "name", "count", "last_at", "chat_id"}  # never what they wrote
 
         # Another app's profile, the allowlist unchanged: it does not start, and says why.
-        status, view = await _call("PUT", "/api/channel-configs/channel-lark", {
+        status, view = await _call("PUT", "channel-lark", {
             "config": {**view["config"], "profile": "other"}})
         assert status == 200 and view["config"]["allowlist_app_id"] == "cli_main"
         status, lark = await _call("POST", "/api/v1/channels/status", {"channel_type": "lark"})
@@ -121,9 +135,9 @@ def test_saving_binds_the_allowlist_and_the_status_names_people(monkeypatch: pyt
         status, found = await _call("POST", "/api/v1/channels/people", {"channel_type": "lark", "q": "alan"})
         assert status == 200 and [p["open_id"] for p in found["people"]] == [OTHER]
         assert (await _call("POST", "/api/v1/channels/people", {"channel_type": "lark", "q": ""}))[0] == 400
-        status, payload = await _call("PUT", "/api/channel-configs/channel-lark", {
+        status, payload = await _call("PUT", "channel-lark", {
             "config": {"profile": "bad profile", "allowed_open_ids": [OPEN_ID]}})
-        assert status == 400 and "not a lark-cli profile name" in payload["error"]
+        assert status == 400 and payload["error"] == "invalid credential request"
 
     run_db(test, monkeypatch)
 

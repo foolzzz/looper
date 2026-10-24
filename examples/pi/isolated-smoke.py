@@ -293,7 +293,7 @@ def session_smoke(base, token, root, work, output, provider, *, helper, installe
             send(f"SMOKE_MANAGER_TURN_{turn}: list projects")
             wait(lambda: len([r for r in records(agent_id="manager") if r["status"] == "completed"]) >= turn,
                  "Manager turn did not complete")
-        wait(lambda: "SMOKE_MANAGER_DONE" in json.dumps(request(base, "/api/chat/messages?session_id=smoke-manager", token)),
+        wait(lambda: "SMOKE_MANAGER_DONE" in json.dumps(request(base, "/api/v1/operator_chat/messages", token, "POST", {"session_id": "smoke-manager"})["result"]),
              "Manager reply was not persisted in chat")
         snapshot_role("manager", records(agent_id="manager"))
         project_work = work / "project"
@@ -505,7 +505,7 @@ asyncio.run(check())
                 if time.monotonic() > deadline:
                     raise TimeoutError("installed serve readiness timed out")
                 time.sleep(0.2)
-        channels = request(base, "/api/channel-configs", token)["configs"]
+        channels = request(base, "/api/v1/channel_configs/list", token, "POST", {})["result"]["configs"]
         assert {c["channel_type"] for c in channels} >= {"telegram", "lark", "lark_bot"}
         assert all(not c["enabled"] for c in channels if c["channel_type"] in ("telegram", "lark", "lark_bot"))
         probe = request(base, "/api/runtimes/rt-pi/probe", token, "POST", {})

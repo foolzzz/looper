@@ -259,18 +259,18 @@ describe("chat Manager picker", () => {
   describe("with the server's answers", () => {
     const OWNED = "this conversation belongs to Manager Manager: open it there or start a new one";
     // The server: thread "a-sid" is the default Manager's; any other id is new (no row, no messages).
-    const server = vi.fn(async (url: string) => {
-      const params = new URL(url, "http://x").searchParams;
-      const manager = params.get("manager") ?? "manager";
-      if (params.get("session_id") === "a-sid" && manager !== "manager") {
-        return new Response(JSON.stringify({ error: OWNED, manager_id: "manager" }), { status: 409 });
+    const server = vi.fn(async (url: string, init?: RequestInit) => {
+      const params = JSON.parse(String(init?.body ?? "{}"));
+      const manager = params.manager ?? "manager";
+      if (params.session_id === "a-sid" && manager !== "manager") {
+        return Response.json({ status: "error", error: { code: "conflict", message: OWNED, details: { manager_id: "manager" } } }, { status: 409 });
       }
-      if (url.includes("/chat/messages")) {
-        const rows = params.get("session_id") === "a-sid" ? [msg("a1", "A's secret history")] : [];
-        return new Response(JSON.stringify({ messages: rows }), { status: 200 });
+      if (url === "/api/v1/operator_chat/messages") {
+        const rows = params.session_id === "a-sid" ? [msg("a1", "A's secret history")] : [];
+        return Response.json({ status: "ok", result: { messages: rows } });
       }
-      const rows = params.get("session_id") === "a-sid" ? [row("a-sid", "A's secret history")] : [];
-      return new Response(JSON.stringify({ sessions: rows }), { status: 200 });
+      const rows = params.session_id === "a-sid" ? [row("a-sid", "A's secret history")] : [];
+      return Response.json({ status: "ok", result: { sessions: rows } });
     });
 
     beforeEach(async () => {
@@ -283,7 +283,8 @@ describe("chat Manager picker", () => {
     afterEach(() => vi.unstubAllGlobals());
 
     const asked = (path: string, sid: string) =>
-      server.mock.calls.filter(([url]) => url.includes(path) && url.includes(`session_id=${sid}`)).map(([url]) => url);
+      server.mock.calls.filter(([url, init]) => url === `/api/v1/operator_chat/${path}` && JSON.parse(String(init?.body)).session_id === sid)
+        .map(([, init]) => JSON.parse(String(init?.body)));
 
     it.each(["planner-t1", "telegram:9"])("does not adopt the missing conversation %s", async (id) => {
       await mount(`conversation=${encodeURIComponent(id)}`);
@@ -295,7 +296,7 @@ describe("chat Manager picker", () => {
 
     it("opens an id the server answers with an empty list as a new thread of the selected Manager", async () => {
       await mount("target=manager-review&conversation=new-sid");
-      expect(asked("/chat/sessions", "new-sid")).toEqual([expect.stringContaining("manager=manager-review")]);
+      expect(asked("sessions", "new-sid")).toEqual([{ session_id: "new-sid", manager: "manager-review" }]);
       expect(localStorage.getItem(KEY_REVIEW)).toBe("new-sid");
       expect(container.textContent).not.toContain("another Manager");
       expect(container.textContent).toContain("Send a message to start");
@@ -313,7 +314,7 @@ describe("chat Manager picker", () => {
       expect(container.textContent).not.toContain("A's secret history");
       expect(container.textContent).not.toContain("Send a message to start");
       expect(input()).toBeNull();
-      expect(asked("/chat/messages", "a-sid")).toEqual([]);
+      expect(asked("messages", "a-sid")).toEqual([]);
       // It opens under the Manager it belongs to.
       await click(byText(/Open it there/));
       expect(localStorage.getItem("looper-chat-session-id")).toBe("a-sid");
@@ -324,7 +325,7 @@ describe("chat Manager picker", () => {
     it("starts a new thread instead of a stored pointer to another Manager's conversation", async () => {
       localStorage.setItem(KEY_REVIEW, "a-sid");
       await mount("target=manager-review");
-      expect(asked("/chat/messages", "a-sid")).toEqual([expect.stringContaining("manager=manager-review")]);
+      expect(asked("messages", "a-sid")).toEqual([{ session_id: "a-sid", manager: "manager-review" }]);
       const pointer = localStorage.getItem(KEY_REVIEW);
       expect(pointer).toBeTruthy();
       expect(pointer).not.toBe("a-sid");
@@ -351,10 +352,11 @@ describe("chat Manager picker", () => {
       const before = server.mock.calls.length;
       await pick("Code review");
       await flush();
-      const afterSwitch = server.mock.calls.slice(before).map(([url]) => url as string)
-        .filter((url) => url.includes("/chat/messages") && url.includes("session_id=a-sid"));
+      const afterSwitch = server.mock.calls.slice(before)
+        .filter(([url, init]) => url === "/api/v1/operator_chat/messages" && JSON.parse(String(init?.body)).session_id === "a-sid")
+        .map(([, init]) => JSON.parse(String(init?.body)));
       // The only read of A's thread under B is the scoped one, which the server refuses.
-      expect(afterSwitch).toEqual([expect.stringContaining("manager=manager-review")]);
+      expect(afterSwitch).toEqual([{ session_id: "a-sid", manager: "manager-review" }]);
       expect(watched[0].closed).toBe(true);
       expect(watched.filter((w) => w.sid === "a-sid")).toHaveLength(1);
       expect(container.textContent).not.toContain("A's secret history");
