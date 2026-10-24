@@ -16,13 +16,13 @@ describe("Chat settings", () => {
     stored = { stop_enabled: false };
     puts = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input) !== "/api/chat-settings") throw new Error(`Unexpected request: ${input}`);
-      if (init?.method === "PUT") {
-        const body = JSON.parse(String(init.body));
+      if (!["/api/v1/chat_settings/get", "/api/v1/chat_settings/update"].includes(String(input))) throw new Error(`Unexpected request: ${input}`);
+      if (String(input) === "/api/v1/chat_settings/update") {
+        const body = JSON.parse(String(init?.body));
         puts.push(body);
         stored = { stop_enabled: body.stop_enabled };
       }
-      return Response.json(stored);
+      return Response.json({ status: "ok", result: stored });
     }));
     container = document.createElement("div");
     document.body.append(container);

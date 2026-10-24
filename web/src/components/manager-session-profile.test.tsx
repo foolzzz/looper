@@ -58,11 +58,11 @@ describe("manager session profile", () => {
   });
 
   it("sends a null profile_id to follow Settings", async () => {
-    const fetch = vi.fn().mockResolvedValue(Response.json({ ...view(), effect: "current", text: "ok" }));
+    const fetch = vi.fn().mockResolvedValue(Response.json({ status: "ok", result: { ...view(), effect: "current", text: "ok" } }));
     vi.stubGlobal("fetch", fetch);
     await setManagerSessionProfile(null);
-    expect(fetch.mock.calls[0][0]).toBe("/api/manager/session/profile");
-    expect(fetch.mock.calls[0][1].method).toBe("PUT");
+    expect(fetch.mock.calls[0][0]).toBe("/api/v1/manager_session/select_profile");
+    expect(fetch.mock.calls[0][1].method).toBe("POST");
     expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ profile_id: null });
   });
 });
