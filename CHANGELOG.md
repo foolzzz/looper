@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.75] - 2026-10-24
+
+### Changed
+
+- **API client tokens move to the versioned API.** `clients.list`, `clients.create` and `clients.revoke` (`POST /api/v1/clients/<action>`) are operator-only and replace three legacy routes (`GET` and `POST /api/clients`, `DELETE /api/clients/{id}`), which are removed. An API client token is refused, arguments and results stay out of the action audit, and create answers 200 with the token in `result` (shown once) instead of a bare 201. The list no longer returns the always-null `revoked_at`. `loopercli clients list|create|revoke` takes an operator token for one call, and the dashboard and the prompt-regression runner use the new routes. Manager prompts and tools are unchanged. ([#472](https://github.com/foolzzz/looper/pull/472))
+
 ## [2.13.74] - 2026-10-24
 
 ### Changed
