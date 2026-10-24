@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.63] - 2026-10-24
+
+### Documentation
+
+- **API runtime RFC.** Adds the approved RFC for an agent runtime that calls model APIs directly through the official Python SDKs, with the Manager as its first role, and its development schedule (stage 1: `openai` SDK on OpenAI Responses; stage 2: `anthropic` SDK). Documentation only; no code, prompt or tool changes. ([#475](https://github.com/foolzzz/looper/pull/475))
+
 ## [2.13.62] - 2026-10-23
 
 ### Changed
