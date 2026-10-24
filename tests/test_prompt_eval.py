@@ -246,14 +246,16 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
                 return {"tasks": []}
             if path == "/api/tasks/task-eval":
                 return {"status": "completed", "steps": [{"id": "s1"}]}
-            if path == "/api/llm-records":
+            if path == "/api/v1/runs/list":
                 return {"records": self.records}
-            if path.endswith("/events"):
-                return {"events": self.events[int(path.split("/")[-2])]}
+            if path == "/api/v1/runs/events":
+                return {"events": self.events[_["record_id"]]}
             assert path == "/api/chat/messages", path
             return {"messages": self.messages}
 
         def post(self, path: str, body: Any) -> dict[str, Any]:
+            if path.startswith("/api/v1/runs/"):
+                return {"status": "ok", "result": self.get(path, **body)}
             if path == "/api/v1/tasks/activity":
                 return {"status": "ok", "result": {"activity": []}}
             self.posts.append((path, body))
@@ -891,6 +893,8 @@ def test_vault_tasks_enable_the_project_and_read_back_their_commits(
     logs: list[Path] = []
 
     def post(path: str, body: Any) -> dict[str, Any]:
+        if path.startswith("/api/v1/runs/"):
+            return {"status": "ok", "result": get(path, **body)}
         if path == "/api/v1/tasks/activity":
             return {"status": "ok", "result": {"activity": [{"kind": "phase", "summary": "Vault closeout: done"}]}}
         posts.append((path, body))
@@ -902,7 +906,7 @@ def test_vault_tasks_enable_the_project_and_read_back_their_commits(
     def get(path: str, **_: Any) -> dict[str, Any]:
         if path == "/api/tasks/task-1":
             return {"status": "completed", "steps": [{}]}
-        if path == "/api/llm-records":
+        if path == "/api/v1/runs/list":
             return {"records": []}
         raise AssertionError(path)
 
@@ -1512,6 +1516,8 @@ def test_run_task_pushes_fixes_without_resuming_the_pr_wait(
     posted: list[tuple[str, Any]] = []
 
     def post(path: str, body: Any) -> dict[str, Any]:
+        if path.startswith("/api/v1/runs/"):
+            return {"status": "ok", "result": get(path, **body)}
         if path == "/api/v1/tasks/activity":
             return {"status": "ok", "result": {"activity": []}}
         posted.append((path, body))
@@ -1520,10 +1526,10 @@ def test_run_task_pushes_fixes_without_resuming_the_pr_wait(
     def get(path: str, **_: Any) -> dict[str, Any]:
         if path == "/api/tasks/t1":
             return next(details)
-        if path == "/api/llm-records":
+        if path == "/api/v1/runs/list":
             return {"records": records}
-        if path.startswith("/api/llm-records/"):
-            return {"events": events[int(path.split("/")[-2])]}
+        if path == "/api/v1/runs/events":
+            return {"events": events[_["record_id"]]}
         raise AssertionError(path)
 
     monkeypatch.setattr(runner.time, "time", lambda: 104.0)
@@ -1620,8 +1626,13 @@ def test_the_scripted_user_ends_a_gate_that_asks_again_after_its_script_ran_out(
 def test_scripted_gate_answer_waits_for_an_overlapping_worker_run(records: list[dict[str, Any]],
                                                                 replies: bool) -> None:
     class Api(_Poster):
+        def post(self, path, body):
+            if path.startswith("/api/v1/runs/"):
+                return {"status": "ok", "result": self.get(path, **body)}
+            return super().post(path, body)
+
         def get(self, path: str, **query: Any) -> dict[str, Any]:
-            assert (path, query) == ("/api/llm-records", {"task_id": "t1", "limit": 500})
+            assert (path, query) == ("/api/v1/runs/list", {"task_id": "t1", "limit": 500})
             return {"records": records}
 
     task = next(t for t in TASKS if t.id == "gate_parallel_branch")
@@ -1932,6 +1943,8 @@ def test_dialog_checks_the_final_manager_run_before_scoring_a_reply(
             self.event_offsets: list[int] = []
 
         def post(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
+            if path.startswith("/api/v1/runs/"):
+                return {"status": "ok", "result": self.get(path, **data)}
             assert path == "/api/chat/send"
             self.sent = data
             return {}
@@ -1943,7 +1956,7 @@ def test_dialog_checks_the_final_manager_run_before_scoring_a_reply(
                 assert self.sent is not None
                 return {"messages": [{"message_id": self.sent["message_id"] + ":reply",
                                       "content": "该配对不兼容，已保持所有配置不变。"}]}
-            if path == "/api/llm-records":
+            if path == "/api/v1/runs/list":
                 assert query["agent_id"] == "manager"
                 rows = [{"id": 1, "status": "failed", "error": "old turn failed"}]
                 if self.sent is not None and case != "missing":
@@ -1957,7 +1970,7 @@ def test_dialog_checks_the_final_manager_run_before_scoring_a_reply(
                                      "error": None, "metadata": {"autonomous": True}})
                 return {"records": list(reversed(rows))}
             event_ids = {final_id, final_id + 1} if case.startswith("autonomous_after_") else {final_id}
-            assert path in {f"/api/llm-records/{record_id}/events" for record_id in event_ids}
+            assert path == "/api/v1/runs/events" and query["record_id"] in event_ids
             after = int(query.get("after", 0))
             limit = int(query.get("limit", 1000))
             self.event_offsets.append(after)
@@ -2007,6 +2020,8 @@ def test_dialogs_use_the_reserved_case_budget_only_in_parallel_mode(
             self.messages: list[dict[str, Any]] = []
 
         def post(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
+            if path.startswith("/api/v1/runs/"):
+                return {"status": "ok", "result": self.get(path, **data)}
             if path == "/api/projects":
                 return {"project_id": "project-a"}
             assert path == "/api/chat/send"
@@ -2019,10 +2034,10 @@ def test_dialogs_use_the_reserved_case_budget_only_in_parallel_mode(
         def get(self, path: str, **_: Any) -> dict[str, Any]:
             if path == "/api/tasks":
                 return {"tasks": []}
-            if path == "/api/llm-records":
+            if path == "/api/v1/runs/list":
                 return {"records": [{"id": i + 1, "status": "completed", "error": None}
                                     for i in reversed(range(len(self.messages)))]}
-            if path.startswith("/api/llm-records/"):
+            if path == "/api/v1/runs/events":
                 return {"events": [{"seq": 1, "event": {"type": "result", "subtype": "success"}}]}
             assert path == "/api/chat/messages"
             return {"messages": self.messages}
@@ -2138,6 +2153,8 @@ class _CostlyApi:
         self.cancelled = False
 
     def post(self, path: str, body: Any) -> Any:
+        if path.startswith("/api/v1/runs/"):
+            return {"status": "ok", "result": self.get(path, **body)}
         if path == "/api/v1/tasks/activity":
             return {"status": "ok", "result": {"activity": []}}
         self.posts.append((path, body))
@@ -2151,7 +2168,7 @@ class _CostlyApi:
                 self.cost += 0.1
             status = "cancelled" if self.cancelled else "running"
             return {"status": status, "phase": "executing", "steps": [], "cost": {"cost_usd": self.cost}}
-        if path == "/api/llm-records":
+        if path == "/api/v1/runs/list":
             return {"records": []}
         return {"events": []}
 
@@ -2170,16 +2187,21 @@ def test_a_task_is_cancelled_when_it_reaches_the_cap_left(tmp_path: Path) -> Non
 
 def test_a_task_the_harness_cannot_follow_is_cancelled_with_its_cost(tmp_path: Path) -> None:
     class _Failing(_CostlyApi):
+        def post(self, path, body):
+            if path.startswith("/api/v1/runs/"):
+                return {"status": "ok", "result": self.get(path, **body)}
+            return super().post(path, body)
+
         def get(self, path: str, **query: Any) -> Any:
-            if path == "/api/llm-records":
-                raise runner.EvalError("GET /api/llm-records answered 500: boom")
+            if path == "/api/v1/runs/list":
+                raise runner.EvalError("POST /api/v1/runs/list answered 500: boom")
             return super().get(path, **query)
 
     api = _Failing()
     api.cancelled = True  # the task ended: the harness fails reading it back
     with pytest.raises(runner.TaskError) as raised:
         runner.run_task(api, _task("a"), tmp_path / "work", timeout=60, poll=0)  # type: ignore[arg-type]
-    assert str(raised.value) == "EvalError: GET /api/llm-records answered 500: boom"
+    assert str(raised.value) == "EvalError: POST /api/v1/runs/list answered 500: boom"
     assert raised.value.cost_usd == pytest.approx(0.0)
     assert [path for path, _ in api.posts] == ["/api/tasks/create", "/api/v1/ops/task_control/start", "/api/v1/ops/task_control/cancel"]
 
@@ -2839,10 +2861,10 @@ class _StopApi:
         metadata = {"user_stop": {"via": via}} if via else {}
         self.record = {"id": 5, "status": status, "error": None, "metadata": metadata}
 
-    def get(self, path: str, **_: Any) -> dict[str, Any]:
+    def post(self, path: str, body: Any) -> dict[str, Any]:
         if path.endswith("/events"):
-            return {"events": [{"seq": 1, "event": {"type": "result", "subtype": "success", "is_error": False}}]}
-        return {"records": [self.record]}
+            return {"status": "ok", "result": {"events": [{"seq": 1, "event": {"type": "result", "subtype": "success", "is_error": False}}]}}
+        return {"status": "ok", "result": {"records": [self.record]}}
 
 
 def test_a_stop_say_accepts_only_a_run_the_web_stop_interrupted() -> None:
@@ -2891,9 +2913,9 @@ def test_the_stop_dialog_flags_only_a_summary_no_read_backs(
     from evals.prompt_regression import dialogs
 
     class Api:
-        def get(self, path: str, **params: Any) -> dict[str, Any]:
-            return {"records": [{"id": 5, "input_text": f"{dialogs.STOPPED_NOTE} ...\n\n刚才停在哪了？",
-                                 "metadata": {}}]}
+        def post(self, path: str, body: Any) -> dict[str, Any]:
+            return {"status": "ok", "result": {"records": [{"id": 5, "input_text": f"{dialogs.STOPPED_NOTE} ...\n\n刚才停在哪了？",
+                                 "metadata": {}}]}}
 
     # The stopped turn's read cannot back this turn's summary.
     trail = [{"id": 1, "tool": "looper_projects", "risk": "read", "status": "ok",
@@ -2945,8 +2967,8 @@ def test_a_withdraw_say_accepts_no_run_or_the_run_the_web_stop_interrupted() -> 
     from evals.prompt_regression import dialogs
 
     class NoRuns:
-        def get(self, path: str, **params: Any) -> dict[str, Any]:
-            return {"records": []}
+        def post(self, path: str, body: Any) -> dict[str, Any]:
+            return {"status": "ok", "result": {"records": []}}
 
     dialogs._check_manager_run(NoRuns(), 0, withdraw=True)  # type: ignore[arg-type]
     dialogs._check_manager_run(_StopApi("interrupted", "web"), 0, withdraw=True)
@@ -2962,8 +2984,8 @@ def test_the_withdraw_dialog_checks_that_the_second_input_starts_with_the_note_a
 
     def look(input_text: str, reply: str, fake: bool = False) -> Any:
         class Api:
-            def get(self, path: str, **params: Any) -> dict[str, Any]:
-                return {"records": [{"id": 5, "input_text": input_text, "metadata": {}}]}
+            def post(self, path: str, body: Any) -> dict[str, Any]:
+                return {"status": "ok", "result": {"records": [{"id": 5, "input_text": input_text, "metadata": {}}]}}
 
         return dialogs.Look(Api(), None, reply, "disposable", 0, frozenset(), fake)  # type: ignore[arg-type]
 
@@ -3052,8 +3074,13 @@ def test_start_no_wait_rejects_a_native_shell_after_the_start(
     from evals.prompt_regression import dialogs
 
     class Api:
+        def post(self, path, body):
+            if path.startswith("/api/v1/runs/"):
+                return {"status": "ok", "result": self.get(path, **body)}
+            raise AssertionError(path)
+
         def get(self, path: str, **_: Any) -> dict[str, Any]:
-            if path == "/api/llm-records":
+            if path == "/api/v1/runs/list":
                 return {"records": [{"id": 7, "metadata": {}}]}
             return {"events": events if _ == {} or _.get("after") == 0 else []}
 

@@ -477,8 +477,7 @@ def _all_activity(api: Api, task_id: str) -> list[dict[str, Any]]:
 def _all_events(api: Api, record_id: int) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     while True:
-        page = api.get(f"/api/llm-records/{record_id}/events", after=events[-1]["seq"] if events else 0,
-                       limit=5000)["events"]
+        page = api.post("/api/v1/runs/events", {"record_id": record_id, "after": events[-1]["seq"] if events else 0, "limit": 5000})["result"]["events"]
         events += page
         if len(page) < 5000:
             return events
@@ -593,7 +592,7 @@ def run_task(
         # The Planner's last turn and the step runs finish their records as the task ends.
         deadline = time.monotonic() + settle
         while True:
-            records = api.get("/api/llm-records", task_id=task_id, limit=500)["records"]
+            records = api.post("/api/v1/runs/list", {"task_id": task_id, "limit": 500})["result"]["records"]
             if all(r.get("status") != "running" for r in records) or time.monotonic() > deadline:
                 break
             time.sleep(poll)
@@ -682,7 +681,7 @@ def answer_gates(api: Api, task: EvalTask, task_id: str, detail: dict[str, Any],
         if now - opened < task.gate_reply_after_s:
             continue
         if done == 0 and task.gate_reply_after_worker_start:
-            records = api.get("/api/llm-records", task_id=task_id, limit=500)["records"]
+            records = api.post("/api/v1/runs/list", {"task_id": task_id, "limit": 500})["result"]["records"]
             if not any(metrics.role(record) == "worker" and
                        metrics.timestamp(record.get("created_at")) is not None and
                        (record.get("finished_at") is None or

@@ -786,12 +786,8 @@ class AgentHTTPServer:
     # --- API routing ---
 
     _RE_TASK_DETAIL = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)$")
-    _RE_TASK_RUNS = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/runs$")
     _RE_ROLE_CONFIG = re.compile(r"^/api/roles/([a-zA-Z0-9_-]+)$")
     _RE_ROLE_CONFIG_RESET = re.compile(r"^/api/roles/([a-zA-Z0-9_-]+)/reset-prompt$")
-    _RE_LLM_RECORD = re.compile(r"^/api/llm-records/(\d+)$")
-    _RE_LLM_RECORD_EVENTS = re.compile(r"^/api/llm-records/(\d+)/events$")
-    _RE_AGENT_USAGE = re.compile(r"^/api/agents/([a-zA-Z0-9_-]+)/usage$")
     _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
     _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
@@ -858,8 +854,6 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_201, lambda: projects.create_task(projects.json_object(body)))
         elif path == "/api/tasks/delete" and method == "POST":
             await self._handle_task_delete(body, writer)
-        elif (m := self._RE_TASK_RUNS.match(path)) and method == "GET":
-            await self._handle_task_runs(m.group(1), writer)
         elif (m := self._RE_TASK_WORKSPACE_DISCARD.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: self._discard_workspace(m.group(1), int(m.group(2))))
         elif (m := self._RE_TASK_DETAIL.match(path)) and method == "GET":
@@ -924,14 +918,6 @@ class AgentHTTPServer:
             await self._handle_reset_role_prompt(m.group(1), writer)
         elif (m := self._RE_ROLE_CONFIG.match(path)) and method == "PUT":
             await self._handle_update_role_config(m.group(1), body, writer)
-        elif path == "/api/llm-records" and method == "GET":
-            await self._handle_list_llm_records(query, writer)
-        elif (m := self._RE_LLM_RECORD.match(path)) and method == "GET":
-            await self._handle_get_llm_record(int(m.group(1)), writer)
-        elif (m := self._RE_LLM_RECORD_EVENTS.match(path)) and method == "GET":
-            await self._handle_llm_record_events(int(m.group(1)), query, writer)
-        elif (m := self._RE_AGENT_USAGE.match(path)) and method == "GET":
-            await self._handle_agent_usage(m.group(1), query, writer)
         elif path == "/api/registry" and method == "GET":
             await self._handle_registry(writer, HTTP_200, lambda: profile_registry.registry_view(
                 server_claude=self._claude_bin))
@@ -1783,15 +1769,6 @@ class AgentHTTPServer:
                                in_worktree: bool = False) -> dict[str, Any] | None:
         return await projects.step_workspaces_view(task_id, steps, in_worktree=in_worktree)
 
-    async def _handle_task_runs(self, task_id: str, writer: asyncio.StreamWriter) -> None:
-        try:
-            from ..db.llm_records import task_run_rows
-            runs = await task_run_rows(task_id)
-        except Exception:
-            runs = []
-        writer.write(_json_response(HTTP_200, {"runs": runs}))
-        await writer.drain()
-
     # --- Role config handlers ---
 
     async def _handle_list_role_configs(self, writer: asyncio.StreamWriter) -> None:
@@ -1955,82 +1932,6 @@ class AgentHTTPServer:
             logger.exception("knowledge request failed")
             status, result = HTTP_500, {"error": "the knowledge request failed; see the server log"}
         writer.write(_json_response(status, _serialize(result)))
-        await writer.drain()
-
-    # --- LLM record handlers ---
-
-    async def _handle_get_llm_record(self, record_id: int, writer: asyncio.StreamWriter) -> None:
-        from ..db.llm_records import get_record
-        try:
-            record = await get_record(record_id)
-        except Exception:
-            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
-            await writer.drain()
-            return
-        if record is None:
-            writer.write(_json_response(HTTP_404, {"error": f"llm record {record_id} not found"}))
-        else:
-            writer.write(_json_response(HTTP_200, {"record": _with_run_role(record)}))
-        await writer.drain()
-
-    async def _handle_llm_record_events(
-        self, record_id: int, query: dict[str, str], writer: asyncio.StreamWriter,
-    ) -> None:
-        """Transcript events after ``after`` (a seq), so a viewer can follow a running agent."""
-        from ..db.llm_records import list_events
-        try:
-            after = int(query.get("after", "0"))
-            limit = min(int(query.get("limit", "1000")), 5000)
-        except ValueError:
-            writer.write(_json_response(HTTP_400, {"error": "after and limit must be integers"}))
-            await writer.drain()
-            return
-        try:
-            events = await list_events(record_id, after_seq=after, limit=limit)
-        except Exception:
-            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
-            await writer.drain()
-            return
-        writer.write(_json_response(HTTP_200, {"events": events}))
-        await writer.drain()
-
-    async def _handle_agent_usage(
-        self, agent_id: str, query: dict[str, str], writer: asyncio.StreamWriter,
-    ) -> None:
-        """An agent's spending (in total, by session, by UTC day) and its context over its latest turns."""
-        from ..db.llm_records import agent_usage
-        try:
-            turns = min(max(int(query.get("turns", "100")), 1), 1000)
-        except ValueError:
-            writer.write(_json_response(HTTP_400, {"error": "turns must be an integer"}))
-            await writer.drain()
-            return
-        try:
-            usage = await agent_usage(agent_id, turns=turns)
-        except Exception:
-            logger.exception("DB unavailable for agent usage %s", agent_id)
-            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
-            await writer.drain()
-            return
-        writer.write(_json_response(HTTP_200, _serialize(usage)))
-        await writer.drain()
-
-    async def _handle_list_llm_records(
-        self, query: dict[str, str], writer: asyncio.StreamWriter,
-    ) -> None:
-        agent_id = query.get("agent_id")
-        task_id = query.get("task_id")
-        role = query.get("role")
-        limit = min(int(query.get("limit", "100")), 500)
-        offset = int(query.get("offset", "0"))
-        try:
-            from ..db.llm_records import list_records
-            records = await list_records(
-                agent_id=agent_id, task_id=task_id, role=role, limit=limit, offset=offset,
-            )
-        except Exception:
-            records = []
-        writer.write(_json_response(HTTP_200, {"records": [_with_run_role(record) for record in records]}))
         await writer.drain()
 
     # --- Configuration export ---

@@ -361,18 +361,18 @@ def _db_rows(database_url: str, sql: str, *args: Any) -> list[dict[str, Any]]:
 
 
 def _latest_record(api: Api, since: int) -> dict[str, Any] | None:
-    for brief in api.get("/api/llm-records", agent_id="manager", limit=20)["records"]:
+    for brief in api.post("/api/v1/runs/list", {"agent_id": "manager", "limit": 20})["result"]["records"]:
         if brief["id"] > since:
-            return api.get(f"/api/llm-records/{brief['id']}")["record"]
+            return api.post("/api/v1/runs/get", {"record_id": brief["id"]})["result"]["record"]
     return None
 
 
 def _record_events(api: Api, since: int) -> list[dict[str, Any]]:
-    brief = next((r for r in api.get("/api/llm-records", agent_id="manager", limit=20)["records"] if r["id"] > since),
+    brief = next((r for r in api.post("/api/v1/runs/list", {"agent_id": "manager", "limit": 20})["result"]["records"] if r["id"] > since),
                  None)
     if brief is None:
         return []
-    return [e.get("event") or {} for e in api.get(f"/api/llm-records/{brief['id']}/events", limit=1000)["events"]]
+    return [e.get("event") or {} for e in api.post("/api/v1/runs/events", {"record_id": brief["id"], "limit": 1000})["result"]["events"]]
 
 
 def tool_calls(events: list[dict[str, Any]], limit: int = 300) -> str:
@@ -403,7 +403,7 @@ def run_cell(api: Api, database_url: str, cell: Cell, rep: int, work: Path, cloc
     session = f"stop-{uuid.uuid4().hex[:10]}"
     pid_file = work / f"pids-{cell.key}-{rep}.txt"
     prompt = cell.prompt.format(file=pid_file)
-    records = api.get("/api/llm-records", agent_id="manager", limit=1)["records"]
+    records = api.post("/api/v1/runs/list", {"agent_id": "manager", "limit": 1})["result"]["records"]
     since = max((r["id"] for r in records), default=0)
     message_id = f"m-{uuid.uuid4().hex[:10]}"
     sent_at = time.monotonic()

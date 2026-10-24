@@ -180,7 +180,7 @@ def test_a_task_carries_on_after_the_server_restarts(tmp_path: Path) -> None:
         (state / "release").touch()
         with running_server(**server, log_path=root / "second.log") as api:
             after = _wait(api, task_id, lambda d: d["status"] in ("completed", "failed", "stopped"))
-            records = api.get("/api/llm-records", task_id=task_id, limit=500)["records"]
+            records = api.post("/api/v1/runs/list", {"task_id": task_id, "limit": 500})["result"]["records"]
 
     assert after["status"] == "completed", (after.get("error"), (root / "second.log").read_text()[-3000:])
     assert after["result_summary"].startswith("## Delivered\nall four steps done\n\n## How to use\nrun d")

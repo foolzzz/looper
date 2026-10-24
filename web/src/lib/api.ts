@@ -2390,7 +2390,7 @@ export async function fetchTaskConversation(
   return { events: data.rows, hasMore: data.has_more };
 }
 
-/** One run of a task as `GET /api/tasks/<id>/runs` answers: no prompts, metadata body or events. */
+/** One run of a task as `runs.for_task` answers: no prompts, metadata body or events. */
 export interface TaskRunRow {
   id: number;
   role: TaskRole;
@@ -2408,10 +2408,9 @@ export interface TaskRunRow {
 
 /** A task's Planner, Worker and Reviewer runs, oldest first, in one compact request. */
 export async function fetchTaskRuns(taskId: string, signal?: AbortSignal): Promise<TaskRunRow[]> {
-  const res = await fetch(`${API_BASE}/tasks/${taskId}/runs`, { signal });
-  if (!res.ok) throw new Error(`runs ${res.status}`);
-  const data = await res.json();
-  return data.runs ?? [];
+  const result = await callV1<{ runs: TaskRunRow[] }>("/api/v1/runs/for_task", { task_id: taskId }, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.runs;
 }
 
 export function streamTaskActivity(
@@ -2643,9 +2642,9 @@ export interface AgentUsage {
 }
 
 export async function fetchAgentUsage(agentId: string, turns = 100, signal?: AbortSignal): Promise<AgentUsage> {
-  const res = await fetch(`${API_BASE}/agents/${encodeURIComponent(agentId)}/usage?turns=${turns}`, { signal });
-  if (!res.ok) throw new Error(`agent usage ${res.status}`);
-  return res.json();
+  const result = await callV1<AgentUsage>("/api/v1/runs/usage", { agent_id: agentId, turns }, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** One stream-json event of a run, in order. */
@@ -2698,29 +2697,22 @@ export async function fetchLlmRecords(params: {
   limit?: number;
   offset?: number;
 }): Promise<LlmRecord[]> {
-  const qs = new URLSearchParams();
-  if (params.agent_id) qs.set("agent_id", params.agent_id);
-  if (params.role) qs.set("role", params.role);
-  if (params.task_id) qs.set("task_id", params.task_id);
-  if (params.limit) qs.set("limit", String(params.limit));
-  if (params.offset) qs.set("offset", String(params.offset));
-  const res = await fetch(`${API_BASE}/llm-records?${qs}`);
-  if (!res.ok) throw new Error(`llm-records ${res.status}`);
-  const data = await res.json();
-  return data.records ?? [];
+  const result = await callV1<{ records: LlmRecord[] }>("/api/v1/runs/list", params);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.records;
 }
 
 export async function fetchLlmRecord(recordId: number): Promise<LlmRecord> {
-  const res = await fetch(`${API_BASE}/llm-records/${recordId}`);
-  if (!res.ok) throw new Error(`llm-record ${res.status}`);
-  return (await res.json()).record;
+  const result = await callV1<{ record: LlmRecord }>("/api/v1/runs/get", { record_id: recordId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.record;
 }
 
 /** Events with seq greater than `after`, so a viewer can follow a running agent. */
 export async function fetchLlmRecordEvents(recordId: number, after = 0): Promise<LlmRecordEvent[]> {
-  const res = await fetch(`${API_BASE}/llm-records/${recordId}/events?after=${after}`);
-  if (!res.ok) throw new Error(`llm-record events ${res.status}`);
-  return (await res.json()).events ?? [];
+  const result = await callV1<{ events: LlmRecordEvent[] }>("/api/v1/runs/events", { record_id: recordId, after });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.events;
 }
 
 // --- The registry: runtimes, LLM providers and the Agent Profiles made of them ---

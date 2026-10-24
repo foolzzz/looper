@@ -243,10 +243,10 @@ def test_real_launch_applies_and_records_the_role_mode_in_history(
             seen = json.loads(out.read_text())
         flag = "--system-prompt-file" if used == "replace" else "--append-system-prompt-file"
         assert flag in seen["argv"]
-        records = (await _ok("GET", "/api/llm-records"))["records"]
+        records = (await _ok("POST", "/api/v1/runs/list", {}))["records"]
         record = next(row for row in records if row["agent_id"] == ("manager" if role == "manager" else "worker-x"))
         assert record["status"] == "completed" and record["metadata"]["system_prompt_mode"] == used
-        detail = await _ok("GET", f"/api/llm-records/{record['id']}")
+        detail = await _ok("POST", "/api/v1/runs/get", {"record_id": record["id"]})
         assert detail["record"]["metadata"]["system_prompt_mode"] == used
 
     run_db(run, monkeypatch)

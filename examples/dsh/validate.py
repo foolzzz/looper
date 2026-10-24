@@ -617,7 +617,7 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
 
                     def check_budget():
                         # Result events carry observed spend even when full cost is unknown.
-                        for record in api.get("/api/llm-records", limit=200)["records"]:
+                        for record in api.post("/api/v1/runs/list", {"limit": 200})["result"]["records"]:
                             if record["id"] in observed:
                                 continue
                             events = runner._all_events(api, record["id"])
@@ -658,7 +658,7 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
                             check_budget=check_budget)
                         if detail["status"] != "completed":
                             activity = api.post("/api/v1/tasks/activity", {"task_id": task, "limit": 40})["result"].get("activity") or []
-                            records = api.get("/api/llm-records", limit=20).get("records") or []
+                            records = api.post("/api/v1/runs/list", {"limit": 20})["result"].get("records") or []
                             ARTIFACTS.mkdir(parents=True, exist_ok=True, mode=0o700)
                             (ARTIFACTS / "task-diag.json").write_text(json.dumps({
                                 "status": detail.get("status"),
@@ -675,8 +675,8 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
                         summary["stage"] = "tasks"
                     summary["stage"] = "api_readback"
                     homes = {}
-                    for row in api.get("/api/llm-records", limit=200)["records"]:
-                        record = api.get(f"/api/llm-records/{row['id']}")["record"]
+                    for row in api.post("/api/v1/runs/list", {"limit": 200})["result"]["records"]:
+                        record = api.post("/api/v1/runs/get", {"record_id": row["id"]})["result"]["record"]
                         _require(record["status"] == "completed" and record["session_id"])
                         _require(record["model"] == "deepseek-flash")
                         metadata = record["metadata"]
