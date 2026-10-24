@@ -98,14 +98,7 @@ def test_a_task_names_its_workspace_and_is_told_what_it_will_run_in(
 
 
 async def _check(server: Any, query: dict[str, str]) -> tuple[int, Any]:
-    import json
-
-    from tests.test_usage_api_db import _Writer
-
-    writer = _Writer()
-    await server._route_api("GET", "/api/workspaces/check", query, b"", writer)
-    head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload)
+    return await _call(server, "POST", "/api/v1/workspaces/check", query)
 
 
 def test_a_worktree_tasks_row_its_page_and_its_deletion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -140,7 +133,7 @@ def test_a_worktree_tasks_row_its_page_and_its_deletion(tmp_path: Path, monkeypa
                                                          "Merge it into the branch you have checked out"]
 
         (Path(work_dir) / "wip.txt").write_text("work in progress\n")
-        status, body = await _call(server, "POST", "/api/tasks/delete", {"task_id": "task-w"})
+        status, body = await _call(server, "POST", "/api/v1/tasks/delete", {"task_id": "task-w"})
         assert status == 200 and not Path(work_dir).exists()
         assert git(workspace, "show", "looper/task-w/task:wip.txt") == "work in progress"  # the branch stays
         assert await tasks.get_task("task-w", pool=pool) is None and await task_worktrees.get("task-w") is None

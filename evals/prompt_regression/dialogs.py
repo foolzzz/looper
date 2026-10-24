@@ -1160,18 +1160,18 @@ def _exported_without_keys(look: Look) -> str | None:
 
 def _make_capped_schedule(api: Api, project_id: str) -> None:
     """SCHEDULE, enabled, with a daily cap of $1, for the dialog that changes it."""
-    created = api.post(f"/api/projects/{project_id}/schedules", {
+    created = api.post("/api/v1/schedule_admin/create", {"project_id": project_id, "fields": {
         "name": SCHEDULE, "cron": "0 3 * * *", "timezone": "America/Los_Angeles", "daily_budget_usd": 1,
-        "requirement": "Check the dependencies for updates."})
-    api.put(f"/api/schedules/{created['schedule']['schedule_id']}", {"enabled": True})
+        "requirement": "Check the dependencies for updates."}})["result"]
+    api.post("/api/v1/schedule_admin/update", {"schedule_id": created['schedule']['schedule_id'], "fields": {"enabled": True}})["result"]
 
 
 def _make_gated_schedule(api: Api, project_id: str) -> None:
     """SCHEDULE with a gate that finds nothing new, so running it now starts no task and costs nothing."""
-    created = api.post(f"/api/projects/{project_id}/schedules", {
+    created = api.post("/api/v1/schedule_admin/create", {"project_id": project_id, "fields": {
         "name": SCHEDULE, "cron": "0 3 * * *", "gate_command": "true",
-        "requirement": "Handle the new alerts the gate prints."})
-    api.put(f"/api/schedules/{created['schedule']['schedule_id']}", {"enabled": True})
+        "requirement": "Handle the new alerts the gate prints."}})["result"]
+    api.post("/api/v1/schedule_admin/update", {"schedule_id": created['schedule']['schedule_id'], "fields": {"enabled": True}})["result"]
 
 
 def _make_two_projects_schedules(api: Api, project_id: str) -> None:
@@ -1994,9 +1994,9 @@ def _make_cost_task(database_url: str, project_id: str) -> str:
 
 def _make_schedule(api: Api, project_id: str) -> None:
     """The schedules dialog's schedule, enabled, as the project's Schedules tab makes one."""
-    created = api.post(f"/api/projects/{project_id}/schedules", {
-        "name": SCHEDULE, "cron": "0 3 * * *", "requirement": "Check the dependencies for updates."})
-    api.put(f"/api/schedules/{created['schedule']['schedule_id']}", {"enabled": True})
+    created = api.post("/api/v1/schedule_admin/create", {"project_id": project_id, "fields": {
+        "name": SCHEDULE, "cron": "0 3 * * *", "requirement": "Check the dependencies for updates."}})["result"]
+    api.post("/api/v1/schedule_admin/update", {"schedule_id": created['schedule']['schedule_id'], "fields": {"enabled": True}})["result"]
 
 
 def _stop_leftovers(api: Api) -> None:

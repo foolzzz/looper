@@ -114,8 +114,8 @@ def test_reset_revokes_write_through_but_preserves_the_inflight_tasks_session(
         sid = (await env.schedule(overlap=overlap))["schedule_id"]
         await _task(env, sid, "task-old")
         agent = await _plan(env, "task-old", claude)
-        assert await schedules.reset_planner_session(sid) is True
-        assert await schedules.reset_planner_session(sid) is False
+        assert await env.ok("POST", "/api/v1/schedule_admin/reset_planner_session", {"schedule_id": sid}) == {"cleared": True}
+        assert await env.ok("POST", "/api/v1/schedule_admin/reset_planner_session", {"schedule_id": sid}) == {"cleared": False}
         agent._plan.session_totals = Usage(cost_usd=9)
         await agent._save_session(agent._plan)
         own = await agent_sessions.get_session(agent.agent_id)
@@ -148,7 +148,7 @@ def test_parallel_runs_neither_copy_nor_write_the_stored_conversation(
         await _task(env, sid, "task-before")
         await schedules.claim_planner_session("task-before")
         await _store("task-before", "stored-before-parallel")
-        await env.ok("PUT", f"/api/schedules/{sid}", {"overlap": "parallel"})
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"overlap": "parallel"}})
         before = await _row(env, sid)
         for task_id, claude in (("task-parallel-a", first), ("task-parallel-b", second)):
             await _task(env, sid, task_id)
@@ -298,8 +298,8 @@ def test_active_holder_is_not_stolen_and_handoff_replacement_survives_edits_and_
         agent._plan.session_id = "replacement-session"
         await agent._save_session(agent._plan)
         before = await _row(env, sid)
-        await env.ok("PUT", f"/api/schedules/{sid}", {
-            "requirement": "New requirement", "cron": "*/10 * * * *", "gate_command": "echo input"})
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {
+            "requirement": "New requirement", "cron": "*/10 * * * *", "gate_command": "echo input"}})
         after = await _row(env, sid)
         assert {k: v for k, v in before.items() if k.startswith("planner_session_")} == \
             {k: v for k, v in after.items() if k.startswith("planner_session_")}
