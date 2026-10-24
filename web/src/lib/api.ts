@@ -749,14 +749,11 @@ export async function startReadyTask(taskId: string): Promise<void> {
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
 }
 
-/** Raise the project's task spend cap above what a task that failed at it spent, and continue the task. */
+/** Raise the task's own cap, or its project's per-task cap, above its spend and continue the budget-failed task. */
 export async function continueTaskAtCap(taskId: string, taskBudgetUsd: number): Promise<void> {
-  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/continue`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ task_budget_usd: taskBudgetUsd }),
-  });
-  if (!res.ok) await failed(res, "continue");
+  const result = await callV1<{ task_id: string; project_id: string; task_budget_usd: number;
+    spent_usd: number; continued: string }>("/api/v1/tasks/continue", { task_id: taskId, task_budget_usd: taskBudgetUsd });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
 }
 
 /** Drop a step worktree a task that is not running keeps: its directory and branch are deleted. */
@@ -870,13 +867,9 @@ export async function setTaskProject(
   taskId: string,
   projectId: string,
 ): Promise<{ task_id: string; project_id: string; project_name: string }> {
-  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/project`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ project_id: projectId }),
-  });
-  if (!res.ok) await failed(res, "move task");
-  const data = await res.json();
+  const data = await callV1<{ task_id: string; project_id: string; project_name: string }>(
+    "/api/v1/tasks/move", { task_id: taskId, project_id: projectId });
+  if ("status" in data) throw new V1Error(202, "unavailable", data.impact);
   notifyProjectsChanged();
   return data;
 }
@@ -1540,11 +1533,7 @@ export interface NewProjectSkill {
   description: string;
   /** The SKILL.md body, without frontmatter. */
   content: string;
-}
-
-function skillsUrl(projectId: string, skillId?: string) {
-  const base = `${API_BASE}/projects/${encodeURIComponent(projectId)}/skills`;
-  return skillId ? `${base}/${encodeURIComponent(skillId)}` : base;
+  enabled?: boolean;
 }
 
 /**
@@ -1556,13 +1545,10 @@ export async function addProjectSkill(
   projectId: string,
   skill: NewProjectSkill,
 ): Promise<ProjectInstalls & { skill: ProjectSkill }> {
-  const res = await fetch(skillsUrl(projectId), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(skill),
-  });
-  if (!res.ok) await failed(res, "add skill");
-  return res.json();
+  const result = await callV1<ProjectInstalls & { skill: ProjectSkill }>(
+    "/api/v1/project_skills/add", { project_id: projectId, skill });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** One skill the project wrote and its SKILL.md body. */
@@ -1572,24 +1558,22 @@ export interface ProjectSkillBody {
 }
 
 export async function fetchProjectSkill(projectId: string, skillId: string): Promise<ProjectSkillBody> {
-  const res = await fetch(skillsUrl(projectId, skillId));
-  if (!res.ok) await failed(res, "skill");
-  return res.json();
+  const result = await callV1<ProjectSkillBody>(
+    "/api/v1/project_skills/get", { project_id: projectId, skill_id: skillId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Change a skill's name, description or body; a bad field is 400, a taken name 409. Switch it with its install. */
 export async function updateProjectSkill(
   projectId: string,
   skillId: string,
-  fields: Partial<NewProjectSkill>,
+  fields: Partial<Omit<NewProjectSkill, "enabled">>,
 ): Promise<ProjectInstalls & { skill: ProjectSkill }> {
-  const res = await fetch(skillsUrl(projectId, skillId), {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-  });
-  if (!res.ok) await failed(res, "update skill");
-  return res.json();
+  const result = await callV1<ProjectInstalls & { skill: ProjectSkill }>(
+    "/api/v1/project_skills/update", { project_id: projectId, skill_id: skillId, fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Delete a skill the project wrote: from the catalog and from every project it is installed in. */
@@ -1597,21 +1581,19 @@ export async function deleteProjectSkill(
   projectId: string,
   skillId: string,
 ): Promise<ProjectInstalls & { deleted: string }> {
-  const res = await fetch(skillsUrl(projectId, skillId), { method: "DELETE" });
-  if (!res.ok) await failed(res, "delete skill");
-  return res.json();
+  const result = await callV1<ProjectInstalls & { deleted: string }>(
+    "/api/v1/project_skills/delete", { project_id: projectId, skill_id: skillId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function updateTaskConfig(
   taskId: string,
   fields: { requirement?: string; work_dir?: string; config?: Record<string, unknown> },
 ): Promise<void> {
-  const res = await fetch(`${API_BASE}/tasks/${taskId}/config`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-  });
-  if (!res.ok) await failed(res, "update task config");
+  const result = await callV1<{ task_id: string; requirement: string; work_dir: string; status: string;
+    config: Record<string, unknown> }>("/api/v1/tasks/configure", { task_id: taskId, ...fields });
+  if ("impact" in result) throw new V1Error(202, "unavailable", result.impact);
 }
 
 /** One text a task's requirement has had (version 1 is the text it was created with). */
@@ -1722,13 +1704,9 @@ export async function setTaskAgents(
   taskId: string,
   changes: TaskAgentsUpdate,
 ): Promise<{ agents: TaskAgents; note?: string }> {
-  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/agents`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(changes),
-  });
-  if (!res.ok) await failed(res, "change agents");
-  const data = await res.json();
+  const data = await callV1<{ task_id: string; agents: TaskAgents; note?: string }>(
+    "/api/v1/tasks/agents", { task_id: taskId, ...changes });
+  if ("status" in data) throw new V1Error(202, "unavailable", data.impact);
   return { agents: data.agents, note: data.note };
 }
 
@@ -1922,17 +1900,33 @@ export interface RoomView extends RoomSummary {
   messages: RoomMessage[];
   /** Older messages than these are not in it (with `after`: more newer ones than `limit`). */
   more: boolean;
+  consults: {
+    total: number;
+    answered: number;
+    by_reason: Record<string, number>;
+    cost_usd: number;
+    list: {
+      seat: string;
+      questions: number[];
+      state: "queued" | "running" | "answered" | "fallback" | "failed";
+      reason: string | null;
+      read_only: "runtime" | "snapshot" | null;
+      denied_writes: number;
+      cost_usd: number | null;
+      at: string | null;
+    }[];
+  };
 }
 
 /** The task's room: its seats, its numbers and its messages; with `after` (a message id) only the newer ones. */
 export async function fetchTaskRoom(
   taskId: string,
-  { after = 0, signal }: { after?: number; signal?: AbortSignal } = {},
+  { signal, ...filters }: { kind?: RoomMessageKind; from?: string; unanswered?: boolean; after?: number;
+    limit?: number; signal?: AbortSignal } = {},
 ): Promise<RoomView> {
-  const query = after > 0 ? `?after=${after}` : "";
-  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/room${query}`, { signal });
-  if (!res.ok) await failed(res, "room");
-  return res.json();
+  const result = await callV1<RoomView>("/api/v1/tasks/room_view", { task_id: taskId, ...filters }, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Where a user gate stands: "pending" until its dependencies are done, "open" (waiting for the user's first word),
@@ -1965,9 +1959,9 @@ export interface TaskWait {
 }
 
 async function moveWait(taskId: string, step: string, action: "resume" | "cancel"): Promise<TaskWait> {
-  const result = await scheduleCall<{ task_id: string; wait: TaskWait }>(
-    "POST", `${API_BASE}/tasks/${encodeURIComponent(taskId)}/waits/${encodeURIComponent(step)}/${action}`, `${action} wait`,
-  );
+  const result = await callV1<{ task_id: string; wait: TaskWait }>(
+    `/api/v1/waits/${action}`, { task_id: taskId, step });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result.wait;
 }
 
@@ -2095,11 +2089,10 @@ export async function fetchGateThread(
   step: string,
   signal?: AbortSignal,
 ): Promise<{ task_id: string; gate: UserGate; messages: GateMessage[] }> {
-  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/gates/${encodeURIComponent(step)}/messages`, {
-    signal,
-  });
-  if (!res.ok) await failed(res, "gate discussion");
-  return res.json();
+  const result = await callV1<{ task_id: string; gate: UserGate; messages: GateMessage[] }>(
+    "/api/v1/ops/gates/messages", { task_id: taskId, gate: step }, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** What the server did with a message in a gate: "queued" for the Planner's next turn, or "kept" because the task is
@@ -2112,13 +2105,10 @@ export interface GatePosted {
 }
 
 async function postGate(taskId: string, step: string, action: "messages" | "end", body: object): Promise<GatePosted> {
-  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/gates/${encodeURIComponent(step)}/${action}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) await failed(res, action === "end" ? "end discussion" : "send");
-  return res.json();
+  const result = await callV1<GatePosted>(
+    `/api/v1/ops/gates/${action === "messages" ? "reply" : "end"}`, { task_id: taskId, gate: step, ...body });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** The user's message in a gate that waits for them; an option button sends its option as the text, with the
@@ -2216,12 +2206,15 @@ export interface TaskRoleEdit {
 
 /** Write `fields` as a new version of the task's role `key`, by the user; its Planner hears of it. Fails for a
  * completed task, or a definition that changes nothing. */
-export function editTaskRole(
+export async function editTaskRole(
   taskId: string,
   key: string,
   fields: TaskRoleEdit,
 ): Promise<{ id: string; version: number; changed: string[] }> {
-  return putJson(`/tasks/${encodeURIComponent(taskId)}/roles/${encodeURIComponent(key)}`, fields, "edit role");
+  const result = await callV1<{ task_id: string; id: string; kind: "work" | "review"; version: number;
+    via: "user"; changed: string[] }>("/api/v1/tasks/role_update", { task_id: taskId, key, ...fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** What a task journal entry records; code writes each when its event happens. */
@@ -3526,42 +3519,38 @@ export interface RunProjectSkills {
 }
 
 export async function fetchCatalog(): Promise<Catalog> {
-  const res = await fetch(`${API_BASE}/catalog`);
-  if (!res.ok) await failed(res, "catalog");
-  return res.json();
+  const result = await callV1<Catalog>("/api/v1/catalog_items/list", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function fetchCatalogItem(itemId: string): Promise<CatalogItemDetail> {
-  const res = await fetch(`${API_BASE}/catalog/${encodeURIComponent(itemId)}`);
-  if (!res.ok) await failed(res, "catalog item");
-  return res.json();
+  const result = await callV1<CatalogItemDetail>("/api/v1/catalog_items/get", { item_id: itemId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Import (or re-import) this machine's enabled Claude Code plugins and personal skills; new items are installed nowhere. */
 export async function importCatalog(): Promise<Catalog> {
-  const res = await fetch(`${API_BASE}/catalog/import`, { method: "POST" });
-  if (!res.ok) await failed(res, "import");
-  return res.json();
+  const result = await callV1<Catalog>("/api/v1/catalog_sources/import_machine", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Import (or re-import) this machine's user-level MCP servers (~/.claude.json); new ones are installed nowhere. */
 export async function importMcpServers(): Promise<Catalog> {
-  const res = await fetch(`${API_BASE}/catalog/mcp/import`, { method: "POST" });
-  if (!res.ok) await failed(res, "MCP import");
-  return res.json();
+  const result = await callV1<Catalog>("/api/v1/catalog_sources/import_mcp", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Add an MCP server to the catalog, installed nowhere. 409 when its name is taken. */
 export async function createMcpServer(server: { name: string; description?: string } & Partial<McpConfig>): Promise<{
   item: CatalogItem;
 }> {
-  const res = await fetch(`${API_BASE}/catalog/mcp`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(server),
-  });
-  if (!res.ok) await failed(res, "add MCP server");
-  return res.json();
+  const result = await callV1<{ item: CatalogItem }>("/api/v1/catalog_sources/create_mcp", server);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Change an MCP server; a field left out stays, and the mask as a value keeps the stored one. */
@@ -3569,19 +3558,15 @@ export async function updateMcpServer(
   itemId: string,
   change: { name?: string; description?: string } & Partial<McpConfig>,
 ): Promise<{ item: CatalogItem }> {
-  const res = await fetch(`${API_BASE}/catalog/${encodeURIComponent(itemId)}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(change),
-  });
-  if (!res.ok) await failed(res, "update MCP server");
-  return res.json();
+  const result = await callV1<{ item: CatalogItem }>("/api/v1/catalog_items/update", { item_id: itemId, fields: change });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Remove an item from the catalog with its installs (not a project's own skill). */
 export async function deleteCatalogItem(itemId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/catalog/${encodeURIComponent(itemId)}`, { method: "DELETE" });
-  if (!res.ok) await failed(res, "delete");
+  const result = await callV1<{ deleted: string }>("/api/v1/catalog_items/delete", { item_id: itemId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
 }
 
 /** Install an item globally or in one project; roles default to every role the scope allows. 409 when it is there. */
@@ -3592,54 +3577,37 @@ export async function installItem(install: {
   roles?: InstallRole[];
   enabled?: boolean;
 }): Promise<InstallChange> {
-  const res = await fetch(`${API_BASE}/installs`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(install),
-  });
-  if (!res.ok) await failed(res, "install");
-  return res.json();
+  const result = await callV1<InstallChange>("/api/v1/installs/create", install);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function updateInstall(
   installId: string,
   fields: { roles?: InstallRole[]; enabled?: boolean },
 ): Promise<InstallChange> {
-  const res = await fetch(`${API_BASE}/installs/${encodeURIComponent(installId)}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-  });
-  if (!res.ok) await failed(res, "update install");
-  return res.json();
+  const result = await callV1<InstallChange>("/api/v1/installs/update", { install_id: installId, ...fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Uninstall; the item stays in the catalog. */
 export async function uninstall(installId: string): Promise<{ deleted: string; item: CatalogItem }> {
-  const res = await fetch(`${API_BASE}/installs/${encodeURIComponent(installId)}`, { method: "DELETE" });
-  if (!res.ok) await failed(res, "uninstall");
-  return res.json();
-}
-
-/** Send JSON to a catalog endpoint; a refusal throws the server's reason. */
-async function catalogRequest<T>(method: string, path: string, label: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE}/catalog${path}`, {
-    method,
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!res.ok) await failed(res, label);
-  return res.json();
+  const result = await callV1<{ deleted: string; item: CatalogItem }>("/api/v1/installs/delete", { install_id: installId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Upload a SKILL.md or a zip of a skill or plugin directory; `name` renames it. Installed nowhere; 409 when the
  * name is taken. `skipped` lists the binary files left out. */
-export function uploadCatalogItem(upload: {
+export async function uploadCatalogItem(upload: {
   filename: string;
   content_base64: string;
   name?: string;
 }): Promise<{ item: CatalogItem; skipped: LibrarySkipped[] }> {
-  return catalogRequest("POST", "/upload", "upload", upload);
+  const result = await callV1<{ item: CatalogItem; skipped: LibrarySkipped[] }>("/api/v1/catalog_sources/upload", upload);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export interface GitSource {
@@ -3689,32 +3657,40 @@ export interface GitImport {
 }
 
 /** Clone a repository and list its plugins and skills; nothing is added. */
-export function previewGitRepo(source: GitSource): Promise<GitPreview> {
-  return catalogRequest("POST", "/git/preview", "git preview", source);
+export async function previewGitRepo(source: GitSource): Promise<GitPreview> {
+  const result = await callV1<GitPreview>("/api/v1/catalog_sources/git_preview", source);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Import the chosen items of a previewed repository; 409 when a name is taken or the ref moved since `commit`. */
-export function importGitRepo(
+export async function importGitRepo(
   source: GitSource & { commit: string; items: { path: string; name?: string }[] },
 ): Promise<GitImport> {
-  return catalogRequest("POST", "/git/import", "git import", source);
+  const result = await callV1<GitImport>("/api/v1/catalog_sources/git_import", source);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Write a skill in Settings (origin "ui"); installed nowhere. */
-export function createCatalogSkill(skill: NewProjectSkill): Promise<{ item: CatalogItem }> {
-  return catalogRequest("POST", "/skills", "new skill", skill);
+export async function createCatalogSkill(skill: NewProjectSkill): Promise<{ item: CatalogItem }> {
+  const result = await callV1<{ item: CatalogItem }>("/api/v1/catalog_sources/create_skill", skill);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Change a Settings, uploaded or git skill; an uploaded or git one is marked modified. */
-export function updateCatalogItem(itemId: string, fields: Partial<NewProjectSkill>): Promise<{ item: CatalogItem }> {
-  return catalogRequest("PUT", `/${encodeURIComponent(itemId)}`, "edit", fields);
+export async function updateCatalogItem(itemId: string, fields: Partial<NewProjectSkill>): Promise<{ item: CatalogItem }> {
+  const result = await callV1<{ item: CatalogItem }>("/api/v1/catalog_items/update", { item_id: itemId, fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** What applies to a project: its own installs and the inherited global ones. */
 export async function fetchProjectInstalls(projectId: string): Promise<ProjectInstalls> {
-  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/installs`);
-  if (!res.ok) await failed(res, "installs");
-  return res.json();
+  const result = await callV1<ProjectInstalls>("/api/v1/installs/project", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 // --- Channel configs ---
@@ -3739,7 +3715,7 @@ export interface ChannelConfig {
   updated_at: string;
 }
 
-/** A Lark channel's saved settings (`GET /api/channels/{lark|lark_bot}/status`). */
+/** A Lark channel's saved settings (`channels.status`). */
 export interface LarkStatus {
   /** The channel's bot; profile is empty for lark_bot, and bot is null when unavailable (see `problem`). */
   bot: { name: string; app_id: string; open_id: string; profile: string } | null;
@@ -3762,24 +3738,18 @@ export interface LarkPerson {
   department: string;
 }
 
-/** The query for an added bot's row; the built-in rows stay unqualified. */
-function channelIdQuery(channelType: string, channelId?: string): string {
-  return channelId && channelId !== `channel-${channelType}` ? `channel_id=${encodeURIComponent(channelId)}` : "";
-}
-
 export async function fetchLarkStatus(channelType = "lark", channelId?: string): Promise<LarkStatus> {
-  const query = channelIdQuery(channelType, channelId);
-  const res = await fetch(`${API_BASE}/channels/${channelType}/status${query ? `?${query}` : ""}`);
-  if (!res.ok) await failed(res, "lark status");
-  return res.json();
+  const result = await callV1<LarkStatus>("/api/v1/channels/status", { channel_type: channelType, ...(channelId ? { channel_id: channelId } : {}) });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function searchLarkPeople(query: string, channelType = "lark", channelId?: string): Promise<{ people: LarkPerson[]; complete: boolean }> {
-  const extra = channelIdQuery(channelType, channelId);
-  const res = await fetch(`${API_BASE}/channels/${channelType}/people?q=${encodeURIComponent(query)}${extra ? `&${extra}` : ""}`);
-  if (!res.ok) await failed(res, "lark people");
-  const data = await res.json();
-  return { people: data.people ?? [], complete: data.complete ?? true };
+  const result = await callV1<{ people: LarkPerson[]; complete: boolean }>("/api/v1/channels/people", {
+    channel_type: channelType, ...(channelId ? { channel_id: channelId } : {}), q: query,
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function fetchChannelConfigs(): Promise<ChannelConfig[]> {
@@ -3852,20 +3822,16 @@ export interface GateSettings {
 }
 
 export async function fetchGateSettings(): Promise<GateSettings> {
-  const res = await fetch(`${API_BASE}/gate-settings`);
-  if (!res.ok) await failed(res, "gate settings");
-  return res.json();
+  const result = await callV1<GateSettings>("/api/v1/gate_settings/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Store the dashboard tasks' gate target; 400 for a chat that is not one of `targets`. */
 export async function updateGateSettings(dashboardTarget: GateTarget | null): Promise<GateSettings> {
-  const res = await fetch(`${API_BASE}/gate-settings`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ dashboard_target: dashboardTarget }),
-  });
-  if (!res.ok) await failed(res, "save gate settings");
-  return res.json();
+  const result = await callV1<GateSettings>("/api/v1/gate_settings/update", { dashboard_target: dashboardTarget });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export interface VaultSettings {
@@ -3954,10 +3920,10 @@ export function streamSSE(
   return () => abortController.abort();
 }
 
-/** Which gates `GET /api/gates` lists: waiting ones, closed ones (passed, cancelled, skipped) or all. */
+/** Which gates `gates.list` lists: waiting ones, closed ones (passed, cancelled, skipped) or all. */
 export type GateListState = "open" | "closed" | "all";
 
-/** One row of `GET /api/gates`: a gate, its task, and what the list shows beside it. */
+/** One row of `gates.list`: a gate, its task, and what the list shows beside it. */
 export interface GateListRow {
   task: {
     task_id: string;
@@ -3997,18 +3963,63 @@ export async function fetchGates(
     through?: string;
   } = {},
 ): Promise<GateList> {
-  const params = new URLSearchParams();
-  if (filters.state && filters.state !== "open") params.set("state", filters.state);
-  if (filters.waitingOn) params.set("waiting_on", filters.waitingOn);
-  if (filters.projectId) params.set("project_id", filters.projectId);
-  if (filters.limit) params.set("limit", String(filters.limit));
-  if (filters.offset) params.set("offset", String(filters.offset));
-  if (filters.cursor) params.set("cursor", filters.cursor);
-  if (filters.through) params.set("through", filters.through);
-  const qs = params.toString();
-  const res = await fetch(`${API_BASE}/gates${qs ? `?${qs}` : ""}`);
-  if (!res.ok) await failed(res, "gates");
-  return res.json();
+  const limit = filters.limit ?? 50;
+  const offset = filters.offset ?? 0;
+  if (filters.cursor && offset) throw new Error("cursor and offset cannot be combined");
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200 || !Number.isInteger(offset) || offset < 0)
+    throw new Error("Invalid gate list limit or offset");
+  const request = async (at: number): Promise<GateList> => {
+    const result = await callV1<GateList>("/api/v1/ops/gates/list", {
+      ...(filters.state ? { state: filters.state } : {}),
+      ...(filters.waitingOn ? { waiting_on: filters.waitingOn } : {}),
+      ...(filters.projectId ? { project_id: filters.projectId } : {}), limit: 200, offset: at,
+    });
+    if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+    return result;
+  };
+  // The Tool accepts offsets only. Read its complete ordered list and keep opaque boundaries for dashboard refreshes;
+  // using the server's order also preserves PostgreSQL's collation when opened_at timestamps tie.
+  const list = await request(0);
+  const rows = [...list.gates];
+  let page = list;
+  while (page.has_more) {
+    if (page.gates.length === 0 || rows.length >= list.total)
+      throw new Error("The gate list changed while loading. Retry the request.");
+    page = await request(rows.length);
+    if (page.total !== list.total) throw new Error("The gate list changed while loading. Retry the request.");
+    rows.push(...page.gates);
+  }
+  const keys = rows.map((row) => JSON.stringify([row.task.task_id, row.gate.step]));
+  if (rows.length !== list.total || new Set(keys).size !== keys.length)
+    throw new Error("The gate list changed while loading. Retry the request.");
+  const positions = new Map(keys.map((key, index) => [key, index]));
+  const boundary = (raw: string, side: "after" | "through"): number => {
+    let saved: { keys: string[]; end: number };
+    try { saved = JSON.parse(raw); } catch { throw new Error("Invalid gate list cursor"); }
+    if (!saved || !Array.isArray(saved.keys) || !saved.keys.every((key) => typeof key === "string")
+      || !Number.isInteger(saved.end) || saved.end < 0 || saved.end > saved.keys.length)
+      throw new Error("Invalid gate list cursor");
+    const known = side === "after" ? saved.keys.slice(0, saved.end).reverse() : saved.keys.slice(saved.end);
+    for (const key of known) {
+      const index = positions.get(key);
+      if (index !== undefined) return side === "after" ? index + 1 : index;
+    }
+    const opposite = side === "after" ? saved.keys.slice(saved.end) : saved.keys.slice(0, saved.end).reverse();
+    for (const key of opposite) {
+      const index = positions.get(key);
+      if (index !== undefined) return side === "after" ? index : index + 1;
+    }
+    if (rows.length === 0) return 0;
+    // With no surviving boundary, a refresh starts over with the current list.
+    if (side === "through") return rows.length;
+    throw new Error("The gate list changed while loading. Retry the request.");
+  };
+  const start = filters.cursor ? boundary(filters.cursor, "after") : offset;
+  const stop = filters.through ? boundary(filters.through, "through") : rows.length;
+  const gates = rows.slice(start, Math.max(start, Math.min(start + limit, stop)));
+  const end = start + gates.length;
+  return { ...list, gates, limit, offset, has_more: end < stop,
+    next_cursor: gates.length ? JSON.stringify({ keys, end }) : null };
 }
 
 // --- Managers: each with its own duty, tools, task visibility and task templates ---
@@ -4056,6 +4067,9 @@ export interface ManagerInfo {
   profile_id: string | null;
   profile_name: string | null;
   templates: TaskTemplate[];
+  revision: number;
+  created_at: string;
+  updated_at: string;
   state: { running: boolean; busy: boolean; healthy: boolean; sync: "ok" | "pending"; sync_error?: string };
   spend: { today_usd: number; last_7d_usd: number; runs_today: number };
 }
@@ -4071,8 +4085,6 @@ export interface ManagerFields {
   task_policy?: TaskPolicy;
   enabled?: boolean;
 }
-
-const managerPath = (id: string) => `${API_BASE}/managers/${encodeURIComponent(id)}`;
 
 async function managerJson<T>(url: string, method: string, body: unknown | undefined, label: string): Promise<T> {
   const res = await fetch(url, {
@@ -4106,27 +4118,41 @@ export async function revokeApiClient(id: string): Promise<void> {
   await managerJson(`${API_BASE}/clients/${encodeURIComponent(id)}`, "DELETE", undefined, "revoke API client");
 }
 
+type ManagerView = Omit<ManagerInfo, "state" | "spend"> & Partial<Pick<ManagerInfo, "state" | "spend">>;
+type ManagersSnapshot = { managers: ManagerView[]; max_enabled: number };
+
 export async function fetchManagers(): Promise<ManagerInfo[]> {
-  const data = await managerJson<{ managers?: ManagerInfo[] }>(`${API_BASE}/managers`, "GET", undefined, "managers");
-  return data.managers ?? [];
+  const result = await callV1<{ managers: ManagerInfo[]; max_enabled: number }>("/api/v1/managers/list", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.managers;
 }
 
-export function createManager(body: ManagerFields): Promise<ManagerInfo> {
-  return managerJson(`${API_BASE}/managers`, "POST", body, "create manager");
+export async function createManager(body: ManagerFields): Promise<{ manager: ManagerView }> {
+  const result = await callV1<{ manager: ManagerView }>("/api/v1/managers/create", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
-export function updateManager(id: string, body: ManagerFields): Promise<ManagerInfo> {
-  return managerJson(managerPath(id), "PUT", body, "update manager");
+export async function updateManager(id: string, body: ManagerFields): Promise<{ manager: ManagerView }> {
+  const result = await callV1<{ manager: ManagerView }>("/api/v1/managers/update", { manager_id: id, fields: body });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
-export async function deleteManager(id: string): Promise<void> {
-  await managerJson(managerPath(id), "DELETE", undefined, "delete manager");
+export async function deleteManager(id: string): Promise<ManagersSnapshot> {
+  const result = await callV1<ManagersSnapshot>("/api/v1/managers/delete", { manager_id: id });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
-export function putManagerTemplate(id: string, key: string, body: TaskTemplateFields): Promise<ManagerInfo> {
-  return managerJson(`${managerPath(id)}/templates/${encodeURIComponent(key)}`, "PUT", body, "save template");
+export async function putManagerTemplate(id: string, key: string, body: TaskTemplateFields): Promise<ManagersSnapshot> {
+  const result = await callV1<ManagersSnapshot>("/api/v1/manager_templates/put", { manager_id: id, key, ...body });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
-export function deleteManagerTemplate(id: string, key: string): Promise<ManagerInfo> {
-  return managerJson(`${managerPath(id)}/templates/${encodeURIComponent(key)}`, "DELETE", undefined, "delete template");
+export async function deleteManagerTemplate(id: string, key: string): Promise<ManagersSnapshot> {
+  const result = await callV1<ManagersSnapshot>("/api/v1/manager_templates/delete", { manager_id: id, key });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }

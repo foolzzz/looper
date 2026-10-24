@@ -185,9 +185,10 @@ REVIEW_EXAMPLE = Path(__file__).resolve().parents[2] / "docs" / "examples" / "ma
 def _seed_review_manager(api: Api, project_id: str) -> None:
     """The example Manager and its pr_review template (bound to the dialog's project), through the API."""
     example = json.loads(REVIEW_EXAMPLE.read_text(encoding="utf-8"))
-    api.post("/api/managers", example["manager"])
-    api.put(f"/api/managers/manager-{example['manager']['key']}/templates/pr_review",
-            {**example["templates"]["pr_review"], "project_id": project_id})
+    api.post("/api/v1/managers/create", example["manager"])
+    api.post("/api/v1/manager_templates/put",
+             {"manager_id": f"manager-{example['manager']['key']}", "key": "pr_review",
+              **example["templates"]["pr_review"], "project_id": project_id})
 
 
 def _writes(look: Look, *, status: str | None = None, tool: str | None = None) -> list[dict[str, Any]]:
@@ -1186,7 +1187,7 @@ def _make_two_projects_schedules(api: Api, project_id: str) -> None:
 _CREATE = ("looper_task_create", {"requirement": SLOW_TASK, "title": "hello 脚本", "project": PROJECT})
 def _gate_messages(look: Look) -> list[dict[str, Any]]:
     """The user's messages in the running task's gate."""
-    thread = look.api.get(f"/api/tasks/{look.task}/gates/{GATE_LABEL}/messages")["messages"]
+    thread = look.api.post("/api/v1/ops/gates/messages", {"task_id": look.task, "gate": GATE_LABEL})["result"]["messages"]
     return [m for m in thread if m["role"] == "user"]
 
 

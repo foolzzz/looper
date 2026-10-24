@@ -20,6 +20,8 @@ from unittest.mock import AsyncMock
 import asyncpg
 import pytest
 
+from looper.agents import api_v1
+from looper.agents.ops.clients import ClientOps
 from looper.agents.http_server import AgentHTTPServer
 from looper.agents.tiers.task import Task, TaskRouter
 from looper.db import connection as db_connection, llm_records as db_llm_records, projects as db_projects, tasks as db_tasks
@@ -259,13 +261,11 @@ def _call(method: str, path: str, body: Any = None, *, query: dict[str, str] | N
     writer = _Writer()
     server = server or _server()
     if path.startswith("/api/v1/"):
-        from looper.agents.api_v1 import OPERATOR
-        from looper.agents.ops.clients import ClientOps
         from looper.agents.ops.service import Platform
 
         server._client_ops = ClientOps(Platform(bus=getattr(server._supervisor, "bus", None),
                                                 task_router=server._task_router))
-        asyncio.run(server._handle_v1(method, path, query or {}, {}, raw, writer, OPERATOR))
+        asyncio.run(server._handle_v1(method, path, query or {}, {}, raw, writer, api_v1.OPERATOR))
     else:
         asyncio.run(server._route_api(method, path, query or {}, raw, writer))
     head, _, payload = writer.data.partition(b"\r\n\r\n")
@@ -514,7 +514,7 @@ class TestTaskProject:
         live = Task(task_id="task-1", requirement="r", goal_id="", work_dir="/w", project_id="proj-a", status="running")
         router._tasks = {"task-1": live}
 
-        status, body = _call("PUT", "/api/tasks/task-1/project", {"project_id": "proj-b"}, server=_server(router))
+        status, body = _call("POST", "/api/v1/tasks/move", {"task_id": "task-1", "project_id": "proj-b"}, server=_server(router))
 
         assert (status, body) == (200, {"task_id": "task-1", "project_id": "proj-b", "project_name": "notes"})
         assert store.tasks["task-1"]["project_id"] == "proj-b"
@@ -524,7 +524,7 @@ class TestTaskProject:
         store.add_project("proj-a", "tetris")
         store.add_project("proj-b", "notes")
         store.add_task("task-1", "proj-a", "completed")
-        assert _call("PUT", "/api/tasks/task-1/project", {"project_id": "proj-b"})[0] == 200
+        assert _call("POST", "/api/v1/tasks/move", {"task_id": "task-1", "project_id": "proj-b"})[0] == 200
         assert store.tasks["task-1"]["project_id"] == "proj-b"
 
     @pytest.mark.parametrize(("task_id", "body", "status"), [
@@ -538,7 +538,7 @@ class TestTaskProject:
         store.add_project("proj-a", "tetris")
         store.add_project("proj-b", "notes")
         store.add_task("task-1", "proj-a")
-        assert _call("PUT", f"/api/tasks/{task_id}/project", body)[0] == status
+        assert _call("POST", "/api/v1/tasks/move", (body if isinstance(body, bytes) else {"task_id": task_id, **body}))[0] == status
         assert store.tasks["task-1"]["project_id"] == "proj-a"
 
 
@@ -703,7 +703,7 @@ class TestEditRequirement:
     def test_a_requirement_too_long_to_keep_whole_is_refused_where_it_comes_in(self, store: _Store) -> None:
         store.add_project("proj-a", "tetris")
         store.add_task("task-1", "proj-a", "init")
-        status, body = _call("PUT", "/api/tasks/task-1/config", {"requirement": "x" * 32_001})
+        status, body = _call("POST", "/api/v1/tasks/configure", {"task_id": "task-1", "requirement": "x" * 32_001})
         assert status == 400 and body["error"] == "the requirement has 32001 characters; at most 32000 are allowed"
         status, body = _call("POST", "/api/tasks/create", {"requirement": "x" * 32_001, "project_id": "proj-a",
                                                            "work_dir": "/tmp/t"})
@@ -716,7 +716,7 @@ class TestEditRequirement:
     def test_the_task_pages_edit_of_a_task_not_started_is_kept_as_a_version_too(self, store: _Store) -> None:
         store.add_project("proj-a", "tetris")
         store.add_task("task-1", "proj-a", "init")
-        status, body = _call("PUT", "/api/tasks/task-1/config", {"requirement": "r2"})
+        status, body = _call("POST", "/api/v1/tasks/configure", {"task_id": "task-1", "requirement": "r2"})
         assert (status, body["requirement"]) == (200, "r2")
         assert [(v["version"], v["text"], v["via"]) for v in store.versions["task-1"]] == [
             (1, "r", "created"), (2, "r2", "task_page")]

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "looper"
-version = "2.13.58"
+version = "2.13.68"
 description = "A self-hosted three-tier multi-agent system that runs Claude Code on your tasks, with a real-time web dashboard."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -14,6 +14,7 @@ authors = [{ name = "Looper contributors" }, { name = "LoopX contributors" }]
 dependencies = [
   "asyncpg>=0.29,<1",
   "httpx>=0.27,<1",
+  "openai>=3.37,<4",
   "python-telegram-bot>=22,<23",
   "websockets>=15,<16",
 ]

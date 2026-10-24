@@ -650,7 +650,7 @@ def resume_waits(api: Api, task: EvalTask, task_id: str, detail: dict[str, Any],
                 or now - opened < task.wait_resume_after_s):
             continue
         try:
-            api.post(f"/api/tasks/{task_id}/waits/{label}/resume", {})
+            api.post("/api/v1/waits/resume", {"task_id": task_id, "step": label})
         except EvalError:
             continue  # it may have stopped waiting meanwhile; read back at the next poll
         resumed[label] = now
@@ -690,9 +690,9 @@ def answer_gates(api: Api, task: EvalTask, task_id: str, detail: dict[str, Any],
         entry = script[done] if done < len(script) else END_DISCUSSION
         try:
             if entry == END_DISCUSSION:
-                api.post(f"/api/tasks/{task_id}/gates/{label}/end", {})
+                api.post("/api/v1/ops/gates/end", {"task_id": task_id, "gate": label})
             else:
-                api.post(f"/api/tasks/{task_id}/gates/{label}/messages", {"text": entry})
+                api.post("/api/v1/ops/gates/reply", {"task_id": task_id, "gate": label, "text": entry})
         except EvalError:
             continue  # it stopped waiting meanwhile; look again at the next poll
         answered[label] = done + 1

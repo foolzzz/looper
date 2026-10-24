@@ -720,9 +720,9 @@ def _serve_smoke_stand_in(mode):
                     "source_record": state["records"][-4]["id"], "consult_run": "consult-" + task})
                 if mode == "task":
                     status = 500
-            elif path.endswith("/room"):
-                result = {"consults": {"answered": 0 if mode == "consult" else 1,
-                                      "list": [{"state": "failed" if mode == "consult" else "answered"}]}}
+            elif path == "/api/v1/tasks/room_view":
+                result = {"status": "ok", "result": {"consults": {"answered": 0 if mode == "consult" else 1,
+                                      "list": [{"state": "failed" if mode == "consult" else "answered"}]}}}
             elif path.startswith("/api/tasks/"):
                 result = {"status": "running" if mode == "task-timeout" else "completed"}
             elif path == "/api/llm-records":

@@ -73,7 +73,7 @@ lark-cli 用的是用户身份的 `contact +search-user`；机器人的租户 to
 ## 3. 入口
 
 - 设置页 Settings → Channels：新增卡片（app_id、domain、app secret、白名单、按姓名添加、被拒发送者）；
-- 接口：`GET /api/channels/lark_bot/status`、`GET /api/channels/lark_bot/people?q=`，配置读写走现有 `/api/channels/{id}`；
+- 接口：`POST /api/v1/channels/status`、`POST /api/v1/channels/people`（请求体 `channel_type: "lark_bot"`，人员搜索另带 `q`），配置读写走现有 `/api/channels/{id}`；
 - 聊天页的渠道列表、定时任务通知对象、闸门设置的聊天选项里都会出现这个渠道；
 - Telegram、CLI 无需改动。
 

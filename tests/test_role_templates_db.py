@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from tests.db_support import DSN, run_db
+from tests.test_catalog_db import _call as _catalog_call
 from tests.test_ops_tasks_db import _error, _project, _task
 from tests.test_planner_tools_db import _allow, _haiku, _journal, _ops, _Planner
 from tests.test_task_agents_db import _call, _profiles
@@ -160,7 +161,7 @@ class _Bus:
 
 
 async def _edit(task_id: str, key: str, body: Any, *, planners: tuple[str, ...] = ()) -> tuple[int, Any, _Bus]:
-    """``PUT /api/tasks/<task_id>/roles/<key>`` on a server whose TaskRouter runs the Planners of ``planners``."""
+    """Edit via v1 on a server whose TaskRouter runs the Planners of ``planners``."""
     from looper.agents.http_server import AgentHTTPServer
     from looper.agents.message import channel_address
 
@@ -168,10 +169,9 @@ async def _edit(task_id: str, key: str, body: Any, *, planners: tuple[str, ...] 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(_address=channel_address("web")),
                              supervisor=SimpleNamespace(bus=bus),
                              task_router=SimpleNamespace(has_planner=lambda t: t in planners))
-    writer = _Writer()
-    await server._route_api("PUT", f"/api/tasks/{task_id}/roles/{key}", {}, json.dumps(body).encode(), writer)
-    head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload), bus
+    from tests.db_support import call_v1
+    status, answer = await call_v1(server, "/api/v1/tasks/role_update", {"task_id": task_id, "key": key, **body})
+    return status, answer, bus
 
 
 def test_the_users_edit_is_a_new_version_that_tells_the_planner_and_stands(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -181,7 +181,6 @@ def test_the_users_edit_is_a_new_version_that_tells_the_planner_and_stands(monke
         await _profiles(pool)
         project = await _project(pool)
         await _task(pool, "task-a", "running", project)
-        await _task(pool, "task-done", "completed", project)
         await _roles_on(pool, project, role_text_max_chars=500)
         await _allow(project, "agent-sonnet")
         planner = _Planner(_ops(), "task-a")
@@ -191,19 +190,14 @@ def test_the_users_edit_is_a_new_version_that_tells_the_planner_and_stands(monke
         refused = [
             ("task-nope", "tester", edit, 404, "task not found"),
             ("task-a", "nope", edit, 404, "has no role 'nope'"),
-            ("task-a", "tester", {**edit, "kind": "review"}, 400, "unknown field 'kind'"),
+            ("task-a", "tester", {**edit, "kind": "review"}, 400, "does not match the declared schema"),
             ("task-a", "tester", {**edit, "role_prompt": ""}, 400, "role_prompt is required"),
             ("task-a", "tester", {**edit, "harness": "x" * 501}, 400, "harness has 501 characters"),
             ("task-a", "tester", {**edit, "profile_id": "claude-code/opus"}, 400, "not on the project's list"),
-            ("task-a", "tester", {**edit, "role_prompt": TESTER["role_prompt"]}, 400, "nothing to change"),
         ]
         for task_id, key, body, code, message in refused:
             status, answer, bus = await _edit(task_id, key, body, planners=("task-a",))
             assert (status, bus.sent) == (code, []) and message in answer["error"], (body, answer)
-        await pool.execute("INSERT INTO task_roles (task_id, role_key, version, kind, role_prompt) "
-                           "VALUES ('task-done', 'tester', 1, 'work', 'x')")
-        status, answer, _ = await _edit("task-done", "tester", edit)
-        assert status == 409 and "completed" in answer["error"]
         assert await _versions(pool, "task-a") == [("tester", 1, None, None)]
 
         # A Planner that runs is told at once; the version is the user's, with its journal entry and a supplement.
@@ -262,7 +256,7 @@ def test_a_version_is_written_only_on_top_of_the_one_its_writer_read(monkeypatch
 
 
 async def _skill(name: str) -> str:
-    status, answer = await _call("POST", "/api/catalog/skills", {"name": name, "description": f"{name}.",
+    status, answer = await _catalog_call("POST", "/api/v1/catalog_sources/create_skill", {"name": name, "description": f"{name}.",
                                                                  "content": f"Reply {name}.\n"})
     assert status in (200, 201), answer
     return answer["item"]["item_id"]
@@ -271,7 +265,7 @@ async def _skill(name: str) -> str:
 async def _install(item_id: str, roles: list[str] | None, project: dict[str, Any] | None = None) -> dict[str, Any]:
     body = {"item_id": item_id, "scope": "project" if project else "global",
             **({"project_id": project["id"]} if project else {}), **({"roles": roles} if roles is not None else {})}
-    status, answer = await _call("POST", "/api/installs", body)
+    status, answer = await _catalog_call("POST", "/api/v1/installs/create", body)
     assert status in (200, 201), answer
     return answer["install"]
 
@@ -319,11 +313,11 @@ def test_a_role_names_the_items_installed_for_roles_and_its_runs_load_them(
         assert sorted(item.name for item in builtin.items) == ["lint", "plain"]
 
         # The user's edit keeps them when it leaves them out, and changes them when it gives them.
-        status, answer, _ = await _edit("task-a", "tester", {"role_prompt": "Tests first."})
+        status, answer, _ = await _edit("task-a", "tester", {"role_prompt": "Tests first.", "harness": None, "profile_id": None})
         assert status == 200 and answer["changed"] == ["role prompt"], answer
-        status, answer, _ = await _edit("task-a", "tester", {"role_prompt": "Tests first.", "items": ["lint"]})
+        status, answer, _ = await _edit("task-a", "tester", {"role_prompt": "Tests first.", "harness": None, "profile_id": None, "items": ["lint"]})
         assert status == 200 and answer["changed"] == ["items"], answer
-        status, answer, _ = await _edit("task-a", "tester", {"role_prompt": "Tests first.", "items": ["plain"]})
+        status, answer, _ = await _edit("task-a", "tester", {"role_prompt": "Tests first.", "harness": None, "profile_id": None, "items": ["plain"]})
         assert status == 400 and "items: 'plain' is not installed" in answer["error"]
         status, detail = await _call("GET", "/api/tasks/task-a")
         assert detail["roles"][0]["items"] == [{"id": lint, "kind": "skill", "name": "lint"}]

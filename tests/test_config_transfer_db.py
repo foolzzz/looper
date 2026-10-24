@@ -177,7 +177,7 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
     await _ok("PUT", "/api/channel-configs/channel-telegram", {"enabled": True, "config": {
         "bot_token_env": "MY_TG_TOKEN", "allowed_user_ids": ["123456789"], "webhook_secret": SECRET}})
 
-    skill = (await _ok("POST", "/api/catalog/skills", {"name": "release-notes", "description": "Drafts notes.",
+    skill = (await _ok("POST", "/api/v1/catalog_sources/create_skill", {"name": "release-notes", "description": "Drafts notes.",
                                                        "content": "Reply NOTES-OK.\n"}))["item"]
     async with pool.acquire() as conn, conn.transaction():
         files = [{"path": "plugin.json", "content": '{"name": "kit"}\n'},
@@ -186,15 +186,15 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
     # Imported from this machine: its source is a local path, which the file leaves out.
     await db_library.replace_snapshot([{**_item("skill", "local-only", [{"path": "SKILL.md", "content": "x\n"}]),
                                         "source": "/opt/claude/skills/local-only"}], pool=pool)
-    mcp = (await _ok("POST", "/api/catalog/mcp", {"name": "search", "transport": "stdio", "command": "python3",
+    mcp = (await _ok("POST", "/api/v1/catalog_sources/create_mcp", {"name": "search", "transport": "stdio", "command": "python3",
                                                   "args": ["server.py"], "env": {"API_KEY": SECRET}}))["item"]
-    web = (await _ok("POST", "/api/catalog/mcp", {"name": "web", "transport": "http",
+    web = (await _ok("POST", "/api/v1/catalog_sources/create_mcp", {"name": "web", "transport": "http",
                                                   "url": "https://mcp.example.test/mcp",
                                                   "headers": {"Authorization": f"Bearer {SECRET}"}}))["item"]
-    await _ok("POST", "/api/installs", {"item_id": skill["item_id"], "scope": "global", "roles": ["worker"]})
-    await _ok("POST", "/api/installs", {"item_id": mcp["item_id"], "scope": "global", "roles": ["manager", "planner"]})
-    install = await _ok("POST", "/api/installs", {"item_id": plugin["id"], "scope": "global", "roles": ["reviewer"]})
-    await _ok("PUT", f"/api/installs/{install['install']['install_id']}", {"enabled": False})
+    await _ok("POST", "/api/v1/installs/create", {"item_id": skill["item_id"], "scope": "global", "roles": ["worker"]})
+    await _ok("POST", "/api/v1/installs/create", {"item_id": mcp["item_id"], "scope": "global", "roles": ["manager", "planner"]})
+    install = await _ok("POST", "/api/v1/installs/create", {"item_id": plugin["id"], "scope": "global", "roles": ["reviewer"]})
+    await _ok("POST", "/api/v1/installs/update", {"install_id": install['install']['install_id'], "enabled": False})
 
     (work_dir / "docs").mkdir(parents=True)
     (work_dir / "docs" / "guide.md").write_text("# Guide\n")
@@ -211,11 +211,11 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
                               "content": "Short lines.\n"}, runtime_root)
     await add_document(calc, {"source_kind": "path", "title": "Guide", "summary": "The guide.",
                               "path": "docs/guide.md"}, runtime_root)
-    own_id = (await _ok("POST", f"/api/projects/{calc}/skills", {
-        "name": "deploy-check", "description": "Before a deploy.", "content": "Reply DEPLOY-OK.\n"}))["skill"]["skill_id"]
-    await _ok("POST", "/api/installs", {"item_id": own_id, "scope": "project", "project_id": docs,
+    own_id = (await _ok("POST", "/api/v1/project_skills/add", {"project_id": calc, "skill": {
+        "name": "deploy-check", "description": "Before a deploy.", "content": "Reply DEPLOY-OK.\n"}}))["skill"]["skill_id"]
+    await _ok("POST", "/api/v1/installs/create", {"item_id": own_id, "scope": "project", "project_id": docs,
                                         "roles": ["worker"]})
-    await _ok("POST", "/api/installs", {"item_id": web["item_id"], "scope": "project", "project_id": calc,
+    await _ok("POST", "/api/v1/installs/create", {"item_id": web["item_id"], "scope": "project", "project_id": calc,
                                         "roles": ["planner", "reviewer", "task_role"]})
     await _ok("PUT", f"/api/projects/{calc}/allowed-profiles", {"profile_ids": [sonnet]})
     await _ok("PUT", f"/api/projects/{calc}/role-templates/security", {
@@ -499,7 +499,7 @@ def test_secrets_are_placeholders_by_default_and_never_replace_stored_ones(
 
             # The target holds its own value for one of them, and a stale one in the file is not applied over it.
             _serve(monkeypatch, target)
-            await _ok("POST", "/api/catalog/mcp", {"name": "search", "transport": "stdio", "command": "python3",
+            await _ok("POST", "/api/v1/catalog_sources/create_mcp", {"name": "search", "transport": "stdio", "command": "python3",
                                                    "args": ["server.py"], "env": {"API_KEY": "target-own"}})
             code, out, _ = await _transfer_file(target_url, "import", str(exported), apply=True, json_output=True)
             assert code == 0
@@ -538,10 +538,10 @@ def test_an_entry_with_the_same_key_is_updated_in_place_and_nothing_else_is_remo
             # The target already has a skill of the same name (other content, installed for the planner), a
             # project of the same name, and things the file does not mention.
             _serve(monkeypatch, target)
-            mine = (await _ok("POST", "/api/catalog/skills", {"name": "release-notes", "description": "Mine.",
+            mine = (await _ok("POST", "/api/v1/catalog_sources/create_skill", {"name": "release-notes", "description": "Mine.",
                                                               "content": "Reply MINE.\n"}))["item"]
-            await _ok("POST", "/api/installs", {"item_id": mine["item_id"], "scope": "global", "roles": ["planner"]})
-            other = (await _ok("POST", "/api/catalog/skills", {"name": "keep-me", "description": "Only here.",
+            await _ok("POST", "/api/v1/installs/create", {"item_id": mine["item_id"], "scope": "global", "roles": ["planner"]})
+            other = (await _ok("POST", "/api/v1/catalog_sources/create_skill", {"name": "keep-me", "description": "Only here.",
                                                                "content": "Stay.\n"}))["item"]
             calc = (await _ok("POST", "/api/projects", {"name": "CALC", "work_dir": str(tmp_path),
                                                         "background": "Old."}))["project_id"]
@@ -557,7 +557,7 @@ def test_an_entry_with_the_same_key_is_updated_in_place_and_nothing_else_is_remo
             assert items[("skill", "release-notes")]["id"] == mine["item_id"]
             assert items[("skill", "release-notes")]["description"] == "Drafts notes."
             assert ("skill", "keep-me") in items and items[("skill", "keep-me")]["id"] == other["item_id"]
-            _, installs = await _call("GET", f"/api/catalog/{mine['item_id']}")
+            _, installs = await _call("POST", "/api/v1/catalog_items/get", {"item_id": mine['item_id']})
             assert [(i["scope"], i["roles"]) for i in installs["item"]["installs"]] == [("global", ["worker"])]
             _, project = await _call("GET", f"/api/projects/{calc}/agent-settings")
             state = await _state(target)

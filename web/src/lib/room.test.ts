@@ -9,6 +9,7 @@ const message = (id: number, extra: Partial<RoomMessage> = {}): RoomMessage => (
 
 const room = (messages: RoomMessage[], extra: Partial<RoomView> = {}): RoomView => ({
   enabled: true, seats: [], messages, more: false,
+  consults: { total: 0, answered: 0, by_reason: {}, cost_usd: 0, list: [] },
   counts: { messages: messages.length, by_kind: {}, questions: 0, unanswered: 0 }, by_step: {}, ...extra,
 });
 

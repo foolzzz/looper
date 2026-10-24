@@ -183,18 +183,18 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             seen["waiting"] = _until(lambda: (d := detail("pass"))["gates"] and d["gates"][0]["state"] == "open"
                                      and d["status"] == "waiting_user" and d, "the pass gate to open")
             seen["needs_you"] = [t["task_id"] for t in api.get("/api/tasks", group="needs_you")["tasks"]]
-            seen["answered"] = api.post(f"/api/tasks/{ids['pass']}/gates/g1/messages", {
-                "text": "PostgreSQL", "agenda_item": "q1", "option": "PostgreSQL"})
+            seen["answered"] = api.post("/api/v1/ops/gates/reply", {"task_id": ids["pass"], "gate": "g1",
+                "text": "PostgreSQL", "agenda_item": "q1", "option": "PostgreSQL"})["result"]
             first = {v: _until(lambda v=v: (d := detail(v))["status"] in ENDED and d, f"{v} to end") for v in VARIANTS}
             # restart: the user writes in the gate of the failed task, which keeps the message for the restart.
-            seen["kept"] = api.post(f"/api/tasks/{ids['restart']}/gates/g1/messages", {"text": "PostgreSQL please"})
+            seen["kept"] = api.post("/api/v1/ops/gates/reply", {"task_id": ids["restart"], "gate": "g1", "text": "PostgreSQL please"})["result"]
             seen["before_restart"] = detail("restart")["gates"]
             api.post("/api/v1/ops/task_control/restart", {"task_id": ids["restart"]})
             api.post("/api/v1/ops/task_control/start_over", {"task_id": ids["startover"]})
             time.sleep(0.5)
             again = {v: _until(lambda v=v: (d := detail(v))["status"] in ENDED and d, f"{v} to end again")
                      for v in ("restart", "startover")}
-            threads = {v: api.get(f"/api/tasks/{ids[v]}/gates/g1/messages") for v in ("pass", "restart")}
+            threads = {v: api.post("/api/v1/ops/gates/messages", {"task_id": ids[v], "gate": "g1"})["result"] for v in ("pass", "restart")}
     return {"first": first, "again": again, "ids": ids, "state": state, "seen": seen, "threads": threads,
             "log": (root / "serve.log").read_text()}
 

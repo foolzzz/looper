@@ -168,7 +168,7 @@ def test_a_roles_profile_comes_from_the_projects_list_and_yields_to_the_users_ch
             "claude-code/sonnet": ["work", "review"], "one-off/opus": ["work", "review"]}
 
         # The user chose the task's Workers' profile: a work role takes no profile of its own any more.
-        status, _ = await _call("PUT", "/api/tasks/task-a/agents", {"profiles": {"worker": "claude-code/haiku"}})
+        status, _ = await _call("POST", "/api/v1/tasks/agents", {"task_id": "task-a", "profiles": {"worker": "claude-code/haiku"}})
         assert status == 200
         answer = await planner("looper_task_role_set", {**TESTER, "id": "doc", "profile_id": "claude-code/sonnet"})
         assert _error(answer) == "forbidden" and "their choice stands" in answer["error"]["message"]
@@ -224,7 +224,7 @@ def test_a_run_of_a_role_gets_its_profile_under_the_users_choice_and_over_the_pl
         await _allow(project, "agent-sonnet", "agent-haiku", "agent-claude-code-opus")
 
         # The user's choice for the task wins over every other.
-        status, _ = await _call("PUT", "/api/tasks/task-a/agents", {"profiles": {"worker": "claude-code/opus"}})
+        status, _ = await _call("POST", "/api/v1/tasks/agents", {"task_id": "task-a", "profiles": {"worker": "claude-code/opus"}})
         assert status == 200
         assert await runs_on("task-a", project, "worker", ("tester", 1)) == ("claude-code/opus", "task")
 

@@ -39,13 +39,14 @@ it uses changes (``check_pairing``):
 Where a profile is selected (a layer, or a task's choice for one of its roles),
 its runtime must have what each of those roles needs (``check_roles``,
 ``runtimes.ROLE_CAPABILITIES``): a resident session and resume for the
-Manager and the Planner, a run for the Workers and Reviewers. Every runtime is
-meant to run every role; one that cannot yet is refused with the reason.
+Manager and the Planner, a run for the Workers and Reviewers. An adapter may
+further restrict its roles; a profile that cannot run a role is refused with the reason.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import re
 from collections.abc import Iterable, Mapping
@@ -726,12 +727,16 @@ def _custom_prompt(raw: Any) -> str:
 
 
 def check_roles(profile: AgentProfile | LegacyAgentProfile, roles: Iterable[str]) -> None:
-    """Refuse ``profile`` for a role its runtime lacks a capability for."""
+    """Refuse ``profile`` for a role its runtime lacks capabilities for or explicitly excludes."""
     adapter = runtimes.ADAPTERS.get(profile.runtime.type)
     for role in roles:
         needs = runtimes.ROLE_CAPABILITIES[role]
-        if missing := needs - profile.runtime.capabilities:
-            label = adapter.label if adapter else profile.runtime.type
+        missing = needs - profile.runtime.capabilities
+        label = adapter.label if adapter else profile.runtime.type
+        if adapter is not None and adapter.roles is not None and role not in adapter.roles:
+            raise RegistryError(f"Agent Profile {profile.name!r} cannot run the {role}: the {label} runtime "
+                                f"runs only the {', '.join(sorted(adapter.roles))}")
+        if missing:
             raise RegistryError(
                 f"Agent Profile {profile.name!r} cannot run the {role}: its runtime {profile.runtime.name!r} "
                 f"({label}) lacks {_listed(missing)}, which a {role} needs ({_listed(needs)})")
@@ -786,10 +791,14 @@ def provider_spec(row: Mapping[str, Any]) -> ProviderSpec:
                         builtin=bool(row.get("builtin")))
 
 
-def servable_roles(capabilities: Iterable[Any]) -> list[str]:
+def servable_roles(capabilities: Iterable[Any], runtime_type: str | None = None) -> list[str]:
     """The roles a runtime with ``capabilities`` (``Capability`` members or their values) can run, in order."""
     have = {getattr(c, "value", c) for c in capabilities}
-    return [role for role, needs in runtimes.ROLE_CAPABILITIES.items() if {c.value for c in needs} <= have]
+    roles = [role for role, needs in runtimes.ROLE_CAPABILITIES.items() if {c.value for c in needs} <= have]
+    adapter = runtimes.ADAPTERS.get(runtime_type)
+    if adapter is not None and adapter.roles is not None:
+        roles = [role for role in roles if role in adapter.roles]
+    return roles
 
 
 def type_view(adapter: runtimes.RuntimeAdapter) -> dict[str, Any]:
@@ -797,7 +806,7 @@ def type_view(adapter: runtimes.RuntimeAdapter) -> dict[str, Any]:
             "runtime_id": builtin_runtime_id(adapter),
             "protocols": sorted(p.value for p in adapter.protocols),
             "capabilities": sorted(c.value for c in adapter.capabilities),
-            "roles": servable_roles(adapter.capabilities),
+            "roles": servable_roles(adapter.capabilities, adapter.type), "in_process": adapter.in_process,
             "supported_models": sorted(adapter.supported_models) if adapter.supported_models is not None else None,
             "effort_levels": list(adapter.effort_levels) if adapter.effort_levels is not None else None,
             "can_replace_system_prompt": adapter.can_replace_system_prompt,
@@ -829,10 +838,11 @@ def runtime_view(row: Mapping[str, Any], *, server_claude: str = "claude") -> di
         "runtime_id": row["id"], "name": row["name"], "type": row["type"],
         "type_label": adapter.label if adapter else row["type"], "executable": row["executable"],
         "default_executable": adapter.default_executable if adapter else None,
-        "path": runtime_path(row["type"], row["executable"], server_claude),
+        "path": None if adapter and adapter.in_process else runtime_path(row["type"], row["executable"], server_claude),
+        "in_process": adapter.in_process if adapter else False,
         "protocols": sorted(p.value for p in adapter.protocols) if adapter else [],
         "version": row["version"], "capabilities": list(row["capabilities"] or ()),
-        "roles": servable_roles(row["capabilities"] or ()), "probed_at": row["probed_at"],
+        "roles": servable_roles(row["capabilities"] or (), row["type"]), "probed_at": row["probed_at"],
         "probe_error": row["probe_error"], "builtin": row["builtin"], "profile_count": row.get("profile_count", 0),
         "created_at": row["created_at"], "updated_at": row["updated_at"],
     }
@@ -1035,7 +1045,7 @@ def profile_view(row: Mapping[str, Any], used_by: Mapping[str, Any] = NOT_USED,
         "provider": {"provider_id": provider["id"], "name": provider["name"],
                      "vendor_type": provider["vendor_type"], "auth": provider["auth"]},
         "agent_teams": spec.agent_teams, "custom_prompt": spec.custom_prompt,
-        "roles": servable_roles(spec.runtime.capabilities), "used_by": dict(used_by),
+        "roles": servable_roles(spec.runtime.capabilities, spec.runtime.type), "used_by": dict(used_by),
         "cost": cost_basis(cost_profile), "warnings": profile_warnings(cost_profile),
     }
 
@@ -1103,6 +1113,9 @@ async def registry_view(*, server_claude: str = "claude", manager_id: str | None
 
 def _probe_executable(runtime_type: str, executable: str, server_claude: str) -> str:
     """What a probe runs: the runtime's executable, else its type's default (the server's for Claude Code)."""
+    adapter = runtimes.ADAPTERS.get(runtime_type)
+    if adapter is not None and adapter.in_process:
+        return ""
     if executable:
         return executable
     adapter = runtimes.adapter(runtime_type)
@@ -1118,16 +1131,20 @@ async def _probe(runtime_type: str, executable: str, server_claude: str) -> dict
 
 async def _detect(adapter: runtimes.RuntimeAdapter) -> bool:
     """Register the built-in runtime of ``adapter``'s type (``rt-<type>``, named after its type), probed once,
-    when its default executable is on PATH and neither it nor a runtime of its name exists; whether it did."""
+    when its executable is on PATH (or an in-process probe succeeds) and neither it nor a runtime of its name
+    exists; whether it did."""
     import shutil
 
     from ..db import profile_registry as db
 
-    if shutil.which(adapter.default_executable) is None:
+    if not adapter.in_process and shutil.which(adapter.default_executable) is None:
         return False
     if await db.get_runtime(builtin_runtime_id(adapter)) is not None:
         return False
     probe = await _probe(adapter.type, "", adapter.default_executable)
+    if adapter.in_process and probe["probe_error"]:
+        logging.getLogger(__name__).info("%s not registered: %s", adapter.label, probe["probe_error"])
+        return False
     return await db.insert_builtin_runtime(builtin_runtime_id(adapter), {
         "name": adapter.type, "type": adapter.type, "executable": "", **probe})
 
@@ -1171,7 +1188,11 @@ async def probe_runtime(runtime_id: str, *, server_claude: str = "claude") -> di
         if not await _detect(adapter):
             import shutil
 
-            if shutil.which(adapter.default_executable) is None:
+            if adapter.in_process:
+                probe = await _probe(adapter.type, "", server_claude)
+                if probe["probe_error"]:
+                    raise RegistryNotFound(probe["probe_error"])
+            elif shutil.which(adapter.default_executable) is None:
                 raise RegistryNotFound(f"{adapter.label} ({adapter.default_executable}) is not on the server's PATH")
             raise RegistryConflict(f"a runtime named {adapter.type!r} exists already, so the built-in "
                                    f"{adapter.label} runtime cannot be added")

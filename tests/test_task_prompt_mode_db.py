@@ -37,20 +37,19 @@ def test_task_modes_are_read_written_reset_and_validated(monkeypatch: pytest.Mon
         assert all(v["runtime_type"] == "claude-code" for v in view["roles"].values())
         # The role layer applies to every task; the task's own choice wins over it, per role.
         await _ok("PUT", "/api/agent-settings/roles/worker", {"system_prompt_mode": "replace"})
-        body = await _ok("PUT", f"/api/tasks/{task}/agents", {"system_prompt_modes": {"planner": "append",
+        body = await _ok("POST", "/api/v1/tasks/agents", {"task_id": task, "system_prompt_modes": {"planner": "append",
                                                                                       "worker": "append"}})
         assert _modes(body["agents"]) == {"planner": ("append", "task"), "worker": ("append", "task"),
                                           "reviewer": ("append", "builtin")}
         other = await _task(tmp_path / "other", "other")
         assert _modes(await _agents(other)) == {**builtin, "worker": ("replace", "role")}
-        body = await _ok("PUT", f"/api/tasks/{task}/agents", {"system_prompt_modes": {"worker": None}})
+        body = await _ok("POST", "/api/v1/tasks/agents", {"task_id": task, "system_prompt_modes": {"worker": None}})
         assert _modes(body["agents"])["worker"] == ("replace", "role")
         assert await pool.fetchval("SELECT count(*) FROM task_system_prompt_modes WHERE task_id = $1", task) == 1
         # Bad input fails fast and changes nothing.
-        for bad, text in (({"manager": "append"}, "not 'manager'"), ({"planner": "auto"}, "must be"),
-                          ({"planner": 1}, "must be"), ("append", "must be an object")):
-            status, error = await _call("PUT", f"/api/tasks/{task}/agents", {"system_prompt_modes": bad})
-            assert status == 400 and text in error["error"], bad
+        for bad in ({"manager": "append"}, {"planner": "auto"}, {"planner": 1}, "append"):
+            status, error = await _call("POST", "/api/v1/tasks/agents", {"task_id": task, "system_prompt_modes": bad})
+            assert status == 400 and "declared schema" in error["error"], bad
         assert await pool.fetchval("SELECT count(*) FROM task_system_prompt_modes WHERE task_id = $1", task) == 1
         # Its rows go with the task.
         await pool.execute("DELETE FROM tasks WHERE id = $1", task)
@@ -68,7 +67,7 @@ def test_task_mode_shows_the_runtime_type_so_the_ui_hides_it_off_claude_code(
             "name": "cdx", "runtime_id": "rt-codex",
             "model_id": await _model_id("prov-codex-login", "gpt-5", "openai-responses")}))["profile"]
         task = await _task(tmp_path)
-        body = await _ok("PUT", f"/api/tasks/{task}/agents", {"profiles": {"worker": profile["profile_id"]},
+        body = await _ok("POST", "/api/v1/tasks/agents", {"task_id": task, "profiles": {"worker": profile["profile_id"]},
                                                               "system_prompt_modes": {"worker": "replace"}})
         roles = body["agents"]["roles"]
         assert roles["worker"]["runtime_type"] == "codex" and roles["planner"]["runtime_type"] == "claude-code"
@@ -85,7 +84,7 @@ def test_a_real_claude_code_launch_follows_the_task_then_the_role_then_the_built
         task = await _task(tmp_path)
         await _ok("PUT", f"/api/agent-settings/roles/{role}", {"system_prompt_mode": "replace" if role == "worker" else "append"})
         if choice:
-            await _ok("PUT", f"/api/tasks/{task}/agents", {"system_prompt_modes": {role: choice}})
+            await _ok("POST", "/api/v1/tasks/agents", {"task_id": task, "system_prompt_modes": {role: choice}})
         used = choice or ("replace" if role == "worker" else "append")
         seen = await _launch(role, task, tmp_path / "work", tmp_path)
         flag = "--system-prompt-file" if used == "replace" else "--append-system-prompt-file"
@@ -101,9 +100,9 @@ def test_a_falsy_system_prompt_modes_is_refused_not_skipped(
 ) -> None:
     async def run(pool: Any) -> None:
         task = await _task(tmp_path)
-        status, body = await _call("PUT", f"/api/tasks/{task}/agents",
-                                   {"concurrency": {"worker": 3}, "system_prompt_modes": falsy})
-        assert status == 400 and "system_prompt_modes must be an object" in body["error"]
+        status, body = await _call("POST", "/api/v1/tasks/agents",
+                                   {"task_id": task, "concurrency": {"worker": 3}, "system_prompt_modes": falsy})
+        assert status == 400 and "declared schema" in body["error"]
         assert await pool.fetchval("SELECT count(*) FROM task_concurrency_limits WHERE task_id = $1", task) == 0
 
     run_db(run, monkeypatch)

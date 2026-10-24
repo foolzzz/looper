@@ -23,8 +23,8 @@ SECRET = "sk-test-0123456789"
 async def _server(name: str, **fields: Any) -> dict[str, Any]:
     stdio = {"transport": "stdio", "command": "python3", "args": ["server.py"]}
     body = {"name": name, **(stdio if fields.get("transport", "stdio") == "stdio" else {}), **fields}
-    status, created = await _call("POST", "/api/catalog/mcp", body)
-    assert status == 201, created
+    status, created = await _call("POST", "/api/v1/catalog_sources/create_mcp", body)
+    assert status == 200, created
     return created["item"]
 
 
@@ -60,9 +60,9 @@ def test_a_server_reaches_only_the_roles_and_projects_it_is_installed_for(
             assert await _mounted(root, role, calc) == ([], None)  # added, installed nowhere
 
         # A global worker-only server reaches Workers, not the Planner, the Reviewer or the Manager.
-        status, _ = await _call("POST", "/api/installs", {"item_id": marker["item_id"], "scope": "global",
+        status, _ = await _call("POST", "/api/v1/installs/create", {"item_id": marker["item_id"], "scope": "global",
                                                           "roles": ["worker"]})
-        assert status == 201
+        assert status == 200
         argv, servers = await _mounted(root, "worker", docs)
         assert argv[-2] == "--mcp-config" and servers == {"marker": {
             "type": "stdio", "command": "python3", "args": ["server.py"], "env": {"MARKER": SECRET}}}
@@ -71,8 +71,8 @@ def test_a_server_reaches_only_the_roles_and_projects_it_is_installed_for(
             assert await _mounted(root, role, docs) == ([], None)
 
         # A project install reaches only that project's task agents.
-        assert (await _call("POST", "/api/installs", {"item_id": search["item_id"], "scope": "project",
-                                                      "project_id": calc, "roles": ["planner", "reviewer"]}))[0] == 201
+        assert (await _call("POST", "/api/v1/installs/create", {"item_id": search["item_id"], "scope": "project",
+                                                      "project_id": calc, "roles": ["planner", "reviewer"]}))[0] == 200
         assert sorted((await _mounted(root, "planner", calc))[1] or {}) == ["search"]
         assert (await _mounted(root, "planner", calc))[1]["search"] == {
             "type": "http", "url": "https://mcp.example.test/mcp", "headers": {"Authorization": f"Bearer {SECRET}"}}
@@ -87,10 +87,10 @@ def test_a_server_reaches_only_the_roles_and_projects_it_is_installed_for(
         record = (await load_installed(root, "reviewer", calc)).record()
         assert record is not None and record["mcp_servers"] == ["search"]
         _no_secret(record)
-        _, project = await _call("GET", f"/api/projects/{calc}/installs")
+        _, project = await _call("POST", "/api/v1/installs/project", {"project_id": calc})
         install = next(e for e in project["installs"] if e["item"]["name"] == "search")
         _no_secret(project)
-        assert (await _call("DELETE", f"/api/installs/{install['install_id']}"))[0] == 200
+        assert (await _call("POST", "/api/v1/installs/delete", {"install_id": install['install_id']}))[0] == 200
         assert await _mounted(root, "planner", calc) == ([], None)
 
     run_db(_test, monkeypatch)
@@ -104,33 +104,33 @@ def test_the_api_masks_the_values_and_sending_the_mask_back_keeps_them(
         assert item["mcp"] == {"transport": "stdio", "command": "python3", "args": ["server.py"],
                                "env": {"MARKER": "***", "MODE": "***"}, "url": "", "headers": {}}
         item_id, version = item["item_id"], item["sha256"]
-        await _call("POST", "/api/installs", {"item_id": item_id, "scope": "global", "roles": ["worker"]})
-        for path in ("/api/catalog", f"/api/catalog/{item_id}"):
-            status, body = await _call("GET", path)
+        await _call("POST", "/api/v1/installs/create", {"item_id": item_id, "scope": "global", "roles": ["worker"]})
+        for operation, fields in (("list", {}), ("get", {"item_id": item_id})):
+            status, body = await _call("POST", f"/api/v1/catalog_items/{operation}", fields)
             assert status == 200
             _no_secret(body)
 
         # The mask sent back keeps the stored value; a new value or a removed name is a new version.
-        status, body = await _call("PUT", f"/api/catalog/{item_id}", {
-            "args": ["server.py", "--quiet"], "env": {"MARKER": "***", "MODE": "***"}})
+        status, body = await _call("POST", "/api/v1/catalog_items/update", {"item_id": item_id, "fields": {
+            "args": ["server.py", "--quiet"], "env": {"MARKER": "***", "MODE": "***"}}})
         assert status == 200 and body["item"]["mcp"]["env"] == {"MARKER": "***", "MODE": "***"}
         _no_secret(body)
         servers = (await _mounted(tmp_path, "worker"))[1]
         assert servers == {"marker": {"type": "stdio", "command": "python3", "args": ["server.py", "--quiet"],
                                       "env": {"MARKER": SECRET, "MODE": "fast"}}}
         assert body["item"]["sha256"] != version
-        status, body = await _call("PUT", f"/api/catalog/{item_id}", {"description": "Still a marker."})
+        status, body = await _call("POST", "/api/v1/catalog_items/update", {"item_id": item_id, "fields": {"description": "Still a marker."}})
         assert status == 200 and (await _mounted(tmp_path, "worker"))[1] == servers  # only the description
-        status, body = await _call("PUT", f"/api/catalog/{item_id}", {"env": {"MARKER": "rotated"}})
+        status, body = await _call("POST", "/api/v1/catalog_items/update", {"item_id": item_id, "fields": {"env": {"MARKER": "rotated"}}})
         assert status == 200 and body["item"]["mcp"]["env"] == {"MARKER": "***"}
         assert (await _mounted(tmp_path, "worker"))[1]["marker"]["env"] == {"MARKER": "rotated"}
 
         # The mask stands only for a stored value.
-        status, body = await _call("PUT", f"/api/catalog/{item_id}", {"env": {"TOKEN": "***"}})
-        assert status == 400 and "TOKEN" in body["error"]
+        status, body = await _call("POST", "/api/v1/catalog_items/update", {"item_id": item_id, "fields": {"env": {"TOKEN": "***"}}})
+        assert status == 400 and body["error"] == "invalid credential request"
         # Deleting the server takes it out of the catalog and the next run.
-        assert (await _call("DELETE", f"/api/catalog/{item_id}"))[0] == 200
-        assert (await _call("GET", f"/api/catalog/{item_id}"))[0] == 404
+        assert (await _call("POST", "/api/v1/catalog_items/delete", {"item_id": item_id}))[0] == 200
+        assert (await _call("POST", "/api/v1/catalog_items/get", {"item_id": item_id}))[0] == 404
         assert await _mounted(tmp_path, "worker") == ([], None)
 
     run_db(_test, monkeypatch)
@@ -155,8 +155,8 @@ def test_adding_a_server_refuses_what_it_cannot_be(
 ) -> None:
     async def _test(pool: Any) -> None:
         await _server("taken")
-        got, answer = await _call("POST", "/api/catalog/mcp", body)
-        assert got == status and reason in answer["error"], answer
+        got, answer = await _call("POST", "/api/v1/catalog_sources/create_mcp", body)
+        assert got == status and answer["error"] == "invalid credential request", answer
 
     run_db(_test, monkeypatch)
 
@@ -194,7 +194,7 @@ def test_importing_from_this_machine_reads_its_user_mcp_servers(
         assert report["added"] == ["mcp:docs", "mcp:marker", "mcp:plain"] and report["servers"] == 3
         assert {(s["item"], s["path"]) for s in report["skipped"]} == {
             ("bad name", ""), ("broken", ""), ("docs", "headersHelper"), ("mine", "")}
-        await _call("POST", "/api/installs", {"item_id": by_name["marker"]["item_id"], "scope": "global",
+        await _call("POST", "/api/v1/installs/create", {"item_id": by_name["marker"]["item_id"], "scope": "global",
                                               "roles": ["worker"]})
         assert (await _mounted(tmp_path / "rt", "worker"))[1]["marker"]["env"] == {"MARKER": SECRET}
 
@@ -212,7 +212,7 @@ def test_importing_from_this_machine_reads_its_user_mcp_servers(
         from looper.db import library as db_library
 
         await db_library.replace_snapshot([], pool=pool)
-        assert sorted(i["name"] for i in (await _call("GET", "/api/catalog"))[1]["items"]) == [
+        assert sorted(i["name"] for i in (await _call("POST", "/api/v1/catalog_items/list", {}))[1]["items"]) == [
             "marker", "mine", "plain"]
 
     run_db(_test, monkeypatch)
