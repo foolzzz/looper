@@ -85,7 +85,6 @@ HTTP_405 = "405 Method Not Allowed"
 HTTP_409 = "409 Conflict"
 HTTP_413 = "413 Content Too Large"
 HTTP_500 = "500 Internal Server Error"
-HTTP_502 = "502 Bad Gateway"
 HTTP_429 = "429 Too Many Requests"
 HTTP_503 = "503 Service Unavailable"
 # same-origin, not no-referrer: under no-referrer a browser sends `Origin: null` with the form's POST,
@@ -1120,15 +1119,6 @@ class AgentHTTPServer:
             await self._handle_catalog(writer, HTTP_201, lambda: mcp.create(projects.json_object(body)))
         elif path == "/api/catalog/mcp/import" and method == "POST":
             await self._handle_catalog(writer, HTTP_200, mcp.import_from_machine)
-        elif path == "/api/channels/lark/status" and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: self._lark_status(query.get("channel_id")))
-        elif path == "/api/channels/lark/people" and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: self._lark_people(query.get("q", ""), query.get("channel_id")))
-        elif path == "/api/channels/lark_bot/status" and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: self._lark_bot_status(query.get("channel_id")))
-        elif path == "/api/channels/lark_bot/people" and method == "GET":
-            await self._answer(writer, HTTP_200,
-                               lambda: self._lark_bot_people(query.get("q", ""), query.get("channel_id")))
         elif path == "/api/scheduler-settings" and method == "GET":
             await self._answer(writer, HTTP_200, schedules.scheduler_settings)
         elif path == "/api/scheduler-settings" and method == "PUT":
@@ -1138,10 +1128,6 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_200, self._chat_settings)
         elif path == "/api/chat-settings" and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: self._update_chat_settings(body))
-        elif path == "/api/gate-settings" and method == "GET":
-            await self._answer(writer, HTTP_200, gate_service.gate_settings)
-        elif path == "/api/gate-settings" and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: gate_service.update_gate_settings(projects.json_object(body)))
         elif path == "/api/wait-settings" and method == "GET":
             await self._answer(writer, HTTP_200, wait_service.settings_view)
         elif path == "/api/wait-settings" and method == "PUT":
@@ -2556,51 +2542,6 @@ class AgentHTTPServer:
         await writer.drain()
 
     # --- Channel config handlers ---
-
-    @staticmethod
-    def _not_found(exc: LookupError) -> projects.RequestError:
-        return projects.RequestError(HTTP_404, str(exc))
-
-    async def _lark_status(self, channel_id: str | None) -> dict[str, Any]:
-        from .channels import lark_settings
-
-        try:
-            return await lark_settings.status(channel_id or lark_settings.CHANNEL_ID)
-        except LookupError as exc:
-            raise self._not_found(exc) from None
-
-    async def _lark_people(self, q: str, channel_id: str | None) -> dict[str, Any]:
-        from .channels import lark_cli, lark_settings
-
-        try:
-            return await lark_settings.people(q, channel_id or lark_settings.CHANNEL_ID)
-        except ValueError as exc:
-            raise projects.RequestError(HTTP_400, str(exc)) from None
-        except LookupError as exc:
-            raise self._not_found(exc) from None
-        except lark_cli.LarkCliError as exc:
-            raise projects.RequestError(HTTP_502, f"lark-cli could not search: {exc}") from None
-
-    async def _lark_bot_status(self, channel_id: str | None) -> dict[str, Any]:
-        from .channels import lark_bot_settings
-
-        try:
-            return await lark_bot_settings.status(channel_id or lark_bot_settings.CHANNEL_ID)
-        except LookupError as exc:
-            raise self._not_found(exc) from None
-
-    async def _lark_bot_people(self, q: str, channel_id: str | None) -> dict[str, Any]:
-        from .channels import lark_bot_settings
-        from .channels.lark_api import LarkApiError
-
-        try:
-            return await lark_bot_settings.people(q, channel_id or lark_bot_settings.CHANNEL_ID)
-        except ValueError as exc:
-            raise projects.RequestError(HTTP_400, str(exc)) from None
-        except LookupError as exc:
-            raise self._not_found(exc) from None
-        except LarkApiError as exc:
-            raise projects.RequestError(HTTP_502, f"the Lark platform could not search: {exc}") from None
 
     async def _handle_list_channel_configs(self, writer: asyncio.StreamWriter) -> None:
         from .channels.allowlist import channel_view

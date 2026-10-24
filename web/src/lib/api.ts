@@ -3737,7 +3737,7 @@ export interface ChannelConfig {
   updated_at: string;
 }
 
-/** A Lark channel's saved settings (`GET /api/channels/{lark|lark_bot}/status`). */
+/** A Lark channel's saved settings (`channels.status`). */
 export interface LarkStatus {
   /** The channel's bot; profile is empty for lark_bot, and bot is null when unavailable (see `problem`). */
   bot: { name: string; app_id: string; open_id: string; profile: string } | null;
@@ -3760,24 +3760,18 @@ export interface LarkPerson {
   department: string;
 }
 
-/** The query for an added bot's row; the built-in rows stay unqualified. */
-function channelIdQuery(channelType: string, channelId?: string): string {
-  return channelId && channelId !== `channel-${channelType}` ? `channel_id=${encodeURIComponent(channelId)}` : "";
-}
-
 export async function fetchLarkStatus(channelType = "lark", channelId?: string): Promise<LarkStatus> {
-  const query = channelIdQuery(channelType, channelId);
-  const res = await fetch(`${API_BASE}/channels/${channelType}/status${query ? `?${query}` : ""}`);
-  if (!res.ok) await failed(res, "lark status");
-  return res.json();
+  const result = await callV1<LarkStatus>("/api/v1/channels/status", { channel_type: channelType, ...(channelId ? { channel_id: channelId } : {}) });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function searchLarkPeople(query: string, channelType = "lark", channelId?: string): Promise<{ people: LarkPerson[]; complete: boolean }> {
-  const extra = channelIdQuery(channelType, channelId);
-  const res = await fetch(`${API_BASE}/channels/${channelType}/people?q=${encodeURIComponent(query)}${extra ? `&${extra}` : ""}`);
-  if (!res.ok) await failed(res, "lark people");
-  const data = await res.json();
-  return { people: data.people ?? [], complete: data.complete ?? true };
+  const result = await callV1<{ people: LarkPerson[]; complete: boolean }>("/api/v1/channels/people", {
+    channel_type: channelType, ...(channelId ? { channel_id: channelId } : {}), q: query,
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function fetchChannelConfigs(): Promise<ChannelConfig[]> {
@@ -3850,20 +3844,16 @@ export interface GateSettings {
 }
 
 export async function fetchGateSettings(): Promise<GateSettings> {
-  const res = await fetch(`${API_BASE}/gate-settings`);
-  if (!res.ok) await failed(res, "gate settings");
-  return res.json();
+  const result = await callV1<GateSettings>("/api/v1/gate_settings/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Store the dashboard tasks' gate target; 400 for a chat that is not one of `targets`. */
 export async function updateGateSettings(dashboardTarget: GateTarget | null): Promise<GateSettings> {
-  const res = await fetch(`${API_BASE}/gate-settings`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ dashboard_target: dashboardTarget }),
-  });
-  if (!res.ok) await failed(res, "save gate settings");
-  return res.json();
+  const result = await callV1<GateSettings>("/api/v1/gate_settings/update", { dashboard_target: dashboardTarget });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export interface VaultSettings {

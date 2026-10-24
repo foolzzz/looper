@@ -82,11 +82,14 @@ def test_seed_and_secret_api_contract(monkeypatch: pytest.MonkeyPatch, platform:
         assert status == 200 and row["has_bot_token"] is True
         assert row["config"]["allowlist_app_id"] == CONFIG["app_id"]
         assert await get_bot_token("channel-lark_bot") == SECRET
-        for path in ("/api/channel-configs/channel-lark_bot", "/api/channel-configs", "/api/channels/lark_bot/status"):
-            status, answer = await _call("GET", path)
+        for path in ("/api/channel-configs/channel-lark_bot", "/api/channel-configs", "/api/v1/channels/status"):
+            if path.startswith("/api/v1/"):
+                status, answer = await _call("POST", path, {"channel_type": "lark_bot"})
+            else:
+                status, answer = await _call("GET", path)
             assert status == 200, answer
             assert SECRET not in json.dumps(answer)
-            if path != "/api/channels/lark_bot/status":
+            if path != "/api/v1/channels/status":
                 rows = answer["configs"] if path.endswith("configs") else [answer]
                 for item in rows:
                     assert "bot_token" not in item and "bot_token" not in item["config"]
@@ -132,7 +135,7 @@ def test_allowlist_binding_status_names_and_people(monkeypatch: pytest.MonkeyPat
         await record_rejected("channel-lark_bot", OTHER, chat_id="oc_team")
         await record_rejected("channel-lark_bot", OTHER, chat_id="oc_team")
         await record_rejected("channel-lark_bot", OPEN_ID)
-        status, view = await _call("GET", "/api/channels/lark_bot/status")
+        status, view = await _call("POST", "/api/v1/channels/status", {"channel_type": "lark_bot"})
         assert status == 200 and view["problem"] is None
         assert view["bot"] == {"name": "HelperBot", "app_id": "cli_main", "open_id": "ou_bot00000001", "profile": ""}
         assert view["names"] == {OPEN_ID: "Ada Lovelace", OTHER: "Alan Turing"}
@@ -144,7 +147,7 @@ def test_allowlist_binding_status_names_and_people(monkeypatch: pytest.MonkeyPat
         status, saved = await _call("PUT", "/api/channel-configs/channel-lark_bot", {
             "config": {**saved["config"], "app_id": "cli_other", "allowlist_app_id": "forged"}})
         assert status == 200 and saved["config"]["allowlist_app_id"] == "cli_main"
-        _, view = await _call("GET", "/api/channels/lark_bot/status")
+        _, view = await _call("POST", "/api/v1/channels/status", {"channel_type": "lark_bot"})
         assert "allowlist was made for app cli_main" in view["problem"]
         status, saved = await _call("PUT", "/api/channel-configs/channel-lark_bot", {
             "config": {**saved["config"], "allowed_open_ids": [OTHER]}})
@@ -153,18 +156,19 @@ def test_allowlist_binding_status_names_and_people(monkeypatch: pytest.MonkeyPat
             "config": {**saved["config"], "allowed_open_ids": []}})
         assert status == 200 and "allowlist_app_id" not in saved["config"]
 
-        status, found = await _call("GET", "/api/channels/lark_bot/people", query={"q": " alan "})
+        status, found = await _call("POST", "/api/v1/channels/people", {"channel_type": "lark_bot", "q": " alan "})
         assert status == 200 and found["complete"] is False and found["people"][0]["open_id"] == OTHER
         for query in ("", "a" * 51):
-            assert (await _call("GET", "/api/channels/lark_bot/people", query={"q": query}))[0] == 400
+            assert (await _call("POST", "/api/v1/channels/people", {"channel_type": "lark_bot", "q": query}))[0] == 400
         platform.failure = "permission denied"
-        status, answer = await _call("GET", "/api/channels/lark_bot/people", query={"q": "alan"})
-        assert status == 502 and "the Lark platform could not search: permission denied" in answer["error"]
+        status, answer = await _call("POST", "/api/v1/channels/people", {"channel_type": "lark_bot", "q": "alan"})
+        assert status == 503 and answer["error"]["code"] == "unavailable"
+        assert "permission denied" in answer["error"]["message"]
         assert all(api.base_url == "https://open.feishu.cn" for api in platform.instances)
         platform.failure = None
         await _call("PUT", "/api/channel-configs/channel-lark_bot", {"config": {**CONFIG, "domain": "lark"}})
-        await _call("GET", "/api/channels/lark_bot/status")
-        await _call("GET", "/api/channels/lark_bot/people", query={"q": "alan"})
+        await _call("POST", "/api/v1/channels/status", {"channel_type": "lark_bot"})
+        await _call("POST", "/api/v1/channels/people", {"channel_type": "lark_bot", "q": "alan"})
         assert all(api.base_url == "https://open.larksuite.com" for api in platform.instances[-3:])
 
     run_with_channel_configs(test, monkeypatch)
@@ -326,15 +330,16 @@ def test_stored_config_defaults_and_allowlist_binding() -> None:
 @requires_db
 def test_status_and_people_without_credentials(monkeypatch: pytest.MonkeyPatch, platform: Any) -> None:
     async def test(pool: Any) -> None:
-        status, view = await _call("GET", "/api/channels/lark_bot/status")
+        status, view = await _call("POST", "/api/v1/channels/status", {"channel_type": "lark_bot"})
         assert status == 200 and view["bot"] is None and "app_id" in view["problem"]
-        status, answer = await _call("GET", "/api/channels/lark_bot/people", query={"q": "alan"})
-        assert status == 502 and "app_id" in answer["error"]
+        status, answer = await _call("POST", "/api/v1/channels/people", {"channel_type": "lark_bot", "q": "alan"})
+        assert status == 503 and answer["error"]["code"] == "unavailable" and "app_id" in answer["error"]["message"]
         await _call("PUT", "/api/channel-configs/channel-lark_bot", {"config": CONFIG})
-        status, view = await _call("GET", "/api/channels/lark_bot/status")
+        status, view = await _call("POST", "/api/v1/channels/status", {"channel_type": "lark_bot"})
         assert status == 200 and view["bot"] is None and "app secret" in view["problem"]
-        status, answer = await _call("GET", "/api/channels/lark_bot/people", query={"q": "alan"})
-        assert status == 502 and "app secret" in answer["error"]
+        status, answer = await _call("POST", "/api/v1/channels/people", {"channel_type": "lark_bot", "q": "alan"})
+        assert status == 503 and answer["error"]["code"] == "unavailable"
+        assert "app secret" in answer["error"]["message"]
         assert platform.instances == []
 
     run_with_channel_configs(test, monkeypatch)
@@ -345,7 +350,7 @@ def test_status_keeps_working_when_name_lookup_fails(monkeypatch: pytest.MonkeyP
     async def test(pool: Any) -> None:
         await _call("PUT", "/api/channel-configs/channel-lark_bot", {"config": CONFIG, "bot_token": SECRET})
         platform.names_failure = True
-        status, view = await _call("GET", "/api/channels/lark_bot/status")
+        status, view = await _call("POST", "/api/v1/channels/status", {"channel_type": "lark_bot"})
         assert status == 200 and view["bot"] is not None and view["names"] == {} and view["problem"] is None
 
     run_with_channel_configs(test, monkeypatch)
