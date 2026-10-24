@@ -1385,26 +1385,17 @@ export type NewKnowledgeDocument = { title: string; summary: string } & (
   | { source_kind: "path"; path: string }
 );
 
-function knowledgeUrl(projectId: string, documentId?: string) {
-  const base = `${API_BASE}/projects/${encodeURIComponent(projectId)}/knowledge`;
-  return documentId ? `${base}/${encodeURIComponent(documentId)}` : base;
-}
-
 export async function fetchKnowledge(projectId: string): Promise<ProjectKnowledge> {
-  const res = await fetch(knowledgeUrl(projectId));
-  if (!res.ok) await failed(res, "knowledge");
-  return res.json();
+  const result = await callV1<ProjectKnowledge>("/api/v1/project_knowledge/list", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result;
 }
 
 /** Add a document; the server refuses one over a cap with the reason (400). */
 export async function addKnowledgeDocument(projectId: string, document: NewKnowledgeDocument): Promise<ProjectKnowledge> {
-  const res = await fetch(knowledgeUrl(projectId), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(document),
-  });
-  if (!res.ok) await failed(res, "add document");
-  return res.json();
+  const result = await callV1<ProjectKnowledge>("/api/v1/project_knowledge/add", { project_id: projectId, document });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result;
 }
 
 /** One document and its body: stored for text and upload, the file as it is now for a path document. */
@@ -1416,13 +1407,14 @@ export interface KnowledgeDocumentBody {
 }
 
 export async function fetchKnowledgeDocument(projectId: string, documentId: string): Promise<KnowledgeDocumentBody> {
-  const res = await fetch(knowledgeUrl(projectId, documentId));
-  if (!res.ok) await failed(res, "document");
-  return res.json();
+  const result = await callV1<KnowledgeDocumentBody>("/api/v1/project_knowledge/get", { project_id: projectId, document_id: documentId });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result;
 }
 
 /** A document's changes: title, summary and its source's fields (its kind stays). */
 export type KnowledgeDocumentUpdate = {
+  source_kind?: KnowledgeSourceKind;
   title?: string;
   summary?: string;
   content?: string;
@@ -1437,19 +1429,15 @@ export async function updateKnowledgeDocument(
   documentId: string,
   fields: KnowledgeDocumentUpdate,
 ): Promise<ProjectKnowledge> {
-  const res = await fetch(knowledgeUrl(projectId, documentId), {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-  });
-  if (!res.ok) await failed(res, "update document");
-  return res.json();
+  const result = await callV1<ProjectKnowledge>("/api/v1/project_knowledge/update", { project_id: projectId, document_id: documentId, fields });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result;
 }
 
 export async function deleteKnowledgeDocument(projectId: string, documentId: string): Promise<ProjectKnowledge> {
-  const res = await fetch(knowledgeUrl(projectId, documentId), { method: "DELETE" });
-  if (!res.ok) await failed(res, "delete document");
-  return res.json();
+  const result = await callV1<ProjectKnowledge>("/api/v1/project_knowledge/delete", { project_id: projectId, document_id: documentId });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result;
 }
 
 /** A text document waiting for the user: the lessons a task's Planner wrote ("draft" mode). Agents do not see it. */
@@ -1470,14 +1458,10 @@ export interface KnowledgeDrafts {
   count: number;
 }
 
-function draftsUrl(projectId: string, draftId?: string) {
-  return `${knowledgeUrl(projectId)}/drafts${draftId ? `/${encodeURIComponent(draftId)}` : ""}`;
-}
-
 export async function fetchKnowledgeDrafts(projectId: string): Promise<KnowledgeDrafts> {
-  const res = await fetch(draftsUrl(projectId));
-  if (!res.ok) await failed(res, "drafts");
-  return res.json();
+  const result = await callV1<KnowledgeDrafts>("/api/v1/project_knowledge/drafts", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result;
 }
 
 /** Make a draft a text document, with any changed title, summary or content; answers with the knowledge. */
@@ -1486,20 +1470,16 @@ export async function confirmKnowledgeDraft(
   draftId: string,
   fields: { title?: string; summary?: string; content?: string } = {},
 ): Promise<ProjectKnowledge> {
-  const res = await fetch(`${draftsUrl(projectId, draftId)}/confirm`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-  });
-  if (!res.ok) await failed(res, "confirm draft");
-  return res.json();
+  const result = await callV1<ProjectKnowledge>("/api/v1/project_knowledge/confirm_draft", { project_id: projectId, draft_id: draftId, fields });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result;
 }
 
 /** Remove a draft; answers with the remaining drafts. */
 export async function discardKnowledgeDraft(projectId: string, draftId: string): Promise<KnowledgeDrafts> {
-  const res = await fetch(draftsUrl(projectId, draftId), { method: "DELETE" });
-  if (!res.ok) await failed(res, "discard draft");
-  return res.json();
+  const result = await callV1<KnowledgeDrafts>("/api/v1/project_knowledge/discard_draft", { project_id: projectId, draft_id: draftId });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result;
 }
 
 // --- A project's own skills: catalog items the project writes, installed in it for its task roles ---

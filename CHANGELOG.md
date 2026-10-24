@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.85] - 2026-10-24
+
+### Changed
+
+- **Project knowledge and lesson drafts go through v1.** Listing a project's reference documents, adding, reading, updating and deleting one, and listing, confirming and discarding lesson drafts are the `project_knowledge` operations `list`, `get`, `drafts` (risk `read`), `add`, `update`, `confirm_draft` (risk `write`), `delete` and `discard_draft` (risk `high`), as `POST /api/v1/project_knowledge/<action>`. Their result schemas are published in the OpenAPI document. The two destructive operations remove only the selected item, and a client token needs a session confirmation first. Manager prompts and tools are unchanged. ([#534](https://github.com/foolzzz/looper/pull/534))
+
+### Removed
+
+- **The eight `/api/projects/<id>/knowledge` routes** (`GET` and `POST` on the collection, `GET`, `PUT` and `DELETE` on a document, `GET` on `drafts`, `POST` on a draft's `confirm`, `DELETE` on a draft). Use the `project_knowledge` operations. ([#534](https://github.com/foolzzz/looper/pull/534))
+
 ## [2.13.84] - 2026-10-24
 
 ### Changed

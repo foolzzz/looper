@@ -121,12 +121,15 @@ def test_accepted_steps_are_journaled_fed_back_and_distilled_into_knowledge(
                                                       "project_id": project["project_id"]})["result"]["task_id"]
             api.post("/api/v1/ops/task_control/start", {"task_id": task_id})
             done = _wait(api, task_id, lambda d: d["status"] in ("completed", "failed", "stopped"))
-            base = f"/api/projects/{project['project_id']}/knowledge"
-            knowledge = api.get(base)
-            documents = [api.get(f"{base}/{doc['document_id']}") for doc in knowledge["documents"]]
-            drafts = api.get(f"{base}/drafts")["drafts"]
+            base = "/api/v1/project_knowledge/"
+            project_args = {"project_id": project["project_id"]}
+            knowledge = api.post(base + "list", project_args)["result"]
+            documents = [api.post(base + "get", {**project_args, "document_id": doc["document_id"]})["result"]
+                         for doc in knowledge["documents"]]
+            drafts = api.post(base + "drafts", project_args)["result"]["drafts"]
             # Confirming the draft makes it a document of the knowledge, in the index agents get.
-            confirmed = api.post(f"{base}/drafts/{drafts[0]['draft_id']}/confirm", {}) if drafts else None
+            confirmed = api.post(base + "confirm_draft", {**project_args, "draft_id": drafts[0]["draft_id"]})["result"] if drafts else None
+
 
     assert done["status"] == "completed", (done.get("error"), (root / "serve.log").read_text()[-3000:])
     # An accepted step writes a journal entry with its summary and learnings, in the order accepted.
