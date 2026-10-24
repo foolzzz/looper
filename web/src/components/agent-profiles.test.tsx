@@ -75,9 +75,9 @@ describe("Agent Profiles", () => {
         return Response.json({ status: "ok", result: { checks: [] } });
       }
       if (url === "/api/v1/registry/view") return Response.json({ status: "ok", result: registry });
-      if (init?.body) requests.push({ url, body: JSON.parse(String(init.body)) });
+      if (init?.body) requests.push({ url, body: (JSON.parse(String(init.body)).fields ?? JSON.parse(String(init.body))) });
       const answer = { profile: PROFILE, warnings: [] };
-      return new Response(JSON.stringify(answer), { status: 200 });
+      return new Response(JSON.stringify({ status: "ok", result: answer }), { status: 200 });
     }));
     container = document.createElement("div");
     document.body.append(container);
@@ -224,7 +224,7 @@ describe("Agent Profiles", () => {
     await choose("Model *", "provider-deepseek-v4-pro[1m]");
     await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
     expect(requests).toHaveLength(1);
-    expect(requests[0].url).toBe("/api/agent-profiles/p");
+    expect(requests[0].url).toBe("/api/v1/profiles/update");
     expect(requests[0].body).toMatchObject({ runtime_id: "rt-dsh", model_id: "provider-deepseek-v4-pro[1m]", agent_teams: false });
     expect(container.textContent).toContain("the DSH runtime cannot replace its default system prompt");
   });
@@ -407,9 +407,9 @@ describe("Agent Profiles", () => {
     vi.stubGlobal("fetch", vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
       if (String(request) === "/api/v1/registry/view") return Response.json({ status: "ok", result: registry });
       if (init?.method === "POST") {
-        requests.push({ url: String(request), body: JSON.parse(String(init.body)) });
+        requests.push({ url: String(request), body: (JSON.parse(String(init.body)).fields ?? JSON.parse(String(init.body))) });
         registry = { ...REGISTRY, profiles: [...REGISTRY.profiles, saved] };
-        return new Response(JSON.stringify({ profile: saved, warnings: [] }));
+        return new Response(JSON.stringify({ status: "ok", result: { profile: saved, warnings: [] } }));
       }
       return new Response(JSON.stringify(String(request).endsWith("/status") ? { checks: [] } : registry));
     }));
@@ -454,7 +454,7 @@ describe("Agent Profiles", () => {
   it("keeps the draft and displays the server error when saving fails", async () => {
     const done = vi.fn();
     vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => init?.body
-      ? Response.json({ error: "Model is no longer available" }, { status: 409 })
+      ? Response.json({ status: "error", error: { code: "conflict", message: "Model is no longer available" } }, { status: 409 })
       : Response.json(String(url).endsWith("/status") ? { checks: [] } : REGISTRY)));
     await act(async () => root.render(<AgentProfileForm profile={PROFILE} registry={REGISTRY} onDone={done} />));
     await submit();
@@ -466,7 +466,7 @@ describe("Agent Profiles", () => {
   it("keeps a saved warning visible until acknowledged", async () => {
     const done = vi.fn();
     vi.stubGlobal("fetch", vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => Response.json(init?.body
-      ? { profile: PROFILE, warnings: ["No price for model"] } : { checks: [] })));
+      ? { status: "ok", result: { profile: PROFILE, warnings: ["No price for model"] } } : { checks: [] })));
     await act(async () => root.render(<AgentProfileForm profile={PROFILE} registry={REGISTRY} onDone={done} />));
     await submit();
     expect(container.querySelector('[role="status"]')!.textContent).toContain("No price for model");
@@ -512,26 +512,26 @@ describe("Agent Profiles", () => {
   it("loads a selected role's preview and renders blocks in order with ownership and notes", async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      return new Response(JSON.stringify(url.includes("prompt-preview") ? {
+      return new Response(JSON.stringify(url.includes("prompt_preview") ? { status: "ok", result: {
         profile: { id: "p", name: "Profile" }, role: "reviewer", runtime: "claude-code", system_prompt_mode: "append",
         custom_prompt_set: true, looper_prompt_sha256: "hash", prompt_layers: { custom_prompt: { sha256: "hash" } },
         blocks: [
           { name: "Default prompt", owner: "runtime", text: null, note: "Claude Code's default prompt (not shown)" },
           { name: "Looper prompt", owner: "looper", text: "Speak briefly.\n\nHarness", note: "Appended to the main block" },
         ], notes: ["the Task section is filled in at launch"],
-      } : { status: "ok", result: { ...REGISTRY, profiles: [{ ...PROFILE, roles: ["worker", "reviewer"] }] } }), { status: 200 });
+      } } : { status: "ok", result: { ...REGISTRY, profiles: [{ ...PROFILE, roles: ["worker", "reviewer"] }] } }), { status: 200 });
     });
     vi.stubGlobal("fetch", fetcher);
     await act(async () => root.render(<AgentProfilesSection />));
     const details = container.querySelector("details")!;
     expect(details.open).toBe(false);
     expect(details.querySelector("summary")!.textContent).toBe("Preview system prompt");
-    expect(fetcher.mock.calls.some(([url]) => String(url).includes("prompt-preview"))).toBe(false);
+    expect(fetcher.mock.calls.some(([url]) => String(url).includes("prompt_preview"))).toBe(false);
     details.open = true;
     await choose("Role", "reviewer");
     const load = [...container.querySelectorAll("button")].find((button) => button.textContent === "Load")!;
     await act(async () => load.click());
-    expect(fetcher.mock.calls.at(-1)![0]).toBe("/api/agent-profiles/p/prompt-preview?role=reviewer");
+    expect(fetcher.mock.calls.at(-1)![0]).toBe("/api/v1/profiles/prompt_preview");
     expect(details.textContent!.indexOf("Default prompt")).toBeLessThan(details.textContent!.indexOf("Looper prompt"));
     expect(details.textContent).toContain("Runtime");
     expect(details.textContent).toContain("Looper");
@@ -546,8 +546,8 @@ describe("Agent Profiles", () => {
   });
 
   it("shows preview errors without claiming the prompt loaded", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => String(input).includes("prompt-preview")
-      ? new Response(JSON.stringify({ error: "Profile cannot run this role" }), { status: 400 })
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => String(input).includes("prompt_preview")
+      ? new Response(JSON.stringify({ status: "error", error: { code: "invalid", message: "Profile cannot run this role" } }), { status: 400 })
       : Response.json({ status: "ok", result: REGISTRY })));
     await act(async () => root.render(<AgentProfilesSection />));
     const load = [...container.querySelectorAll("button")].find((button) => button.textContent === "Load")!;
@@ -556,9 +556,11 @@ describe("Agent Profiles", () => {
     expect(container.querySelector("details textarea")).toBeNull();
   });
 
-  it("includes and encodes the optional project in preview requests", async () => {
+  it("preserves special characters in profile and project preview parameters", async () => {
     await fetchPromptPreview("p/1", "planner", "project /?");
-    expect(fetch).toHaveBeenCalledWith("/api/agent-profiles/p%2F1/prompt-preview?role=planner&project_id=project+%2F%3F");
+    expect(fetch).toHaveBeenCalledWith("/api/v1/profiles/prompt_preview", expect.objectContaining({
+      method: "POST", body: JSON.stringify({ profile_id: "p/1", role: "planner", project_id: "project /?" }),
+    }));
   });
 });
 
@@ -622,9 +624,9 @@ describe("pi Agent Profiles", () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/v1/registry/view") return Response.json({ status: "ok", result: PI_REGISTRY });
-      if (init?.body) requests.push({ url, body: JSON.parse(String(init.body)) });
+      if (init?.body) requests.push({ url, body: (JSON.parse(String(init.body)).fields ?? JSON.parse(String(init.body))) });
       const answer = { profile: PI_PROFILE, warnings: [] };
-      return new Response(JSON.stringify(answer), { status: 200 });
+      return new Response(JSON.stringify({ status: "ok", result: answer }), { status: 200 });
     }));
     container = document.createElement("div");
     document.body.append(container);

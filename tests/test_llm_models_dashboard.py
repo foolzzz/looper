@@ -306,11 +306,11 @@ def test_incompatible_protocol_cannot_create_profile(dashboard_server, runtime, 
     before = _registry_state(dashboard_server)
     assert before["profiles"]  # Positive control for the DB readback.
     with pytest.raises(EvalError, match=r"answered 400:.*protocol"):
-        api.post("/api/agent-profiles", {"name": "Rejected profile", "runtime_id": f"rt-{runtime}",
-                                        "model_id": models[incompatible]["model_id"]})
+        api.post("/api/v1/profiles/create", {"name": "Rejected profile", "runtime_id": f"rt-{runtime}",
+                                        "model_id": models[incompatible]["model_id"]})["result"]
     assert _registry_state(dashboard_server) == before
-    profile = api.post("/api/agent-profiles", {"name": "Compatible profile", "runtime_id": f"rt-{runtime}",
-                                              "model_id": models[compatible]["model_id"]})["profile"]
+    profile = api.post("/api/v1/profiles/create", {"name": "Compatible profile", "runtime_id": f"rt-{runtime}",
+                                              "model_id": models[compatible]["model_id"]})["result"]["profile"]
     assert profile["model_id"] == models[compatible]["model_id"]
     assert next(p for p in _registry_state(dashboard_server)["profiles"]
                 if p["id"] == profile["profile_id"])["model_id"] == profile["model_id"]
@@ -431,13 +431,21 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     summary.focus()
     summary.press("Enter")
     profile_row.get_by_label("Role", exact=True).select_option("worker")
-    with page.expect_response(lambda r: "/prompt-preview?" in r.url) as preview:
+    with page.expect_response(lambda r: "/api/v1/profiles/prompt_preview" in r.url) as preview:
         profile_row.get_by_role("button", name="Load", exact=True).click()
     assert preview.value.status == 200
-    blocks = preview.value.json()["blocks"]
+    blocks = preview.value.json()["result"]["blocks"]
     assert any("Public smoke preview marker" in (b["text"] or "") for b in blocks)
     expect(profile_row.get_by_role("list", name="System prompt blocks")).to_be_visible()
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+    profile_row.get_by_role("button", name="Edit Agent Profile Smoke profile", exact=True).click()
+    profile_edit = page.get_by_role("form", name="Edit Agent Profile Smoke profile", exact=True)
+    profile_edit.get_by_label("Effort", exact=True).select_option("low")
+    profile_edit.get_by_label("Custom prompt", exact=True).fill("Updated public smoke preview marker")
+    _finish_form(profile_edit, "Save")
+    updated = next(p for p in _registry_state(server)["profiles"] if p["id"] == profile_id)
+    assert (updated["effort"], updated["custom_prompt"]) == ("low", "Updated public smoke preview marker")
 
     _settings(page, server, "roles/worker")
     role = page.locator("#roles-worker-panel")
@@ -449,6 +457,9 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     nested.get_by_label("Provider", exact=True).select_option(pid)
     nested.get_by_label("Model *", exact=True).select_option(mid)
     _finish_form(nested, "Add Agent Profile")
+    embedded = next(p for p in server.api.post("/api/v1/registry/view", {})["result"]["profiles"]
+                    if p["name"] == "Embedded smoke profile")
+    expect(selection.locator(f'option[value="{embedded["profile_id"]}"]')).to_have_count(1)
     expect(selection).to_have_value(before or "")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     # Registering an embedded profile must not silently persist a role selection.
@@ -462,6 +473,15 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
 
     _settings(page, server, "profiles")
     expect(_row(page, "Smoke profile").get_by_role("button", name=re.compile("Delete Agent Profile"))).to_be_disabled()
+    page.once("dialog", lambda dialog: dialog.accept())
+    with page.expect_response(lambda r: r.url.endswith("/api/v1/profiles/delete")) as deleted:
+        _row(page, "Embedded smoke profile").get_by_role(
+            "button", name="Delete Agent Profile Embedded smoke profile", exact=True).click()
+    assert deleted.value.status == 200
+    assert deleted.value.json()["result"] == {"deleted": embedded["profile_id"]}
+    expect(page.get_by_role("listitem").filter(has=page.get_by_text("Embedded smoke profile", exact=True))).to_have_count(0)
+    assert not any(p["id"] == embedded["profile_id"] for p in _registry_state(server)["profiles"])
+    page.screenshot(path=str(tmp_path / f"profiles-{width}.png"), full_page=True)
     _settings(page, server, "providers")
     account = _row(page, ACCOUNT)
     page.on("dialog", lambda dialog: dialog.accept())

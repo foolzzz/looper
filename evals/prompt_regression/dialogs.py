@@ -796,8 +796,8 @@ def _seed_price_model(api: Api, project_id: str) -> None:
     registry = api.post("/api/v1/registry/view", {})["result"]
     model = next(m for m in registry["models"] if m["name"] == DUAL_MODEL
                  and m["protocol"] == "anthropic-messages")
-    api.post("/api/agent-profiles", {"name": DUAL_PROFILE, "runtime_id": "rt-claude-code",
-                                     "model_id": model["model_id"]})
+    api.post("/api/v1/profiles/create", {"name": DUAL_PROFILE, "runtime_id": "rt-claude-code",
+                                     "model_id": model["model_id"]})["result"]
 
 
 def _seed_missing_endpoint(api: Api, project_id: str) -> None:

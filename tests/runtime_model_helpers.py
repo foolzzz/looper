@@ -45,3 +45,23 @@ def with_model_name(profile: ResolvedAgentProfile, name: str) -> ResolvedAgentPr
     model = replace(resolved.model, id=f"model-{name}", name=name)
     return replace(profile, model_id=model.id, resolved_model=ResolvedModel(model, resolved.provider,
                                                                              resolved.endpoint))
+
+
+def profile_request(method: str, path: str, body: Any) -> tuple[str, str, Any]:
+    """Translate older fixture descriptions before issuing the current profile operation."""
+    from urllib.parse import parse_qsl, urlsplit
+
+    parsed = urlsplit(path)
+    if parsed.path == "/api/agent-profiles" and method == "POST":
+        return "POST", "/api/v1/profiles/create", body
+    if parsed.path.startswith("/api/agent-profiles/"):
+        profile_id = parsed.path.split("/")[3]
+        if method == "PUT":
+            return "POST", "/api/v1/profiles/update", {"profile_id": profile_id, "fields": body}
+        if method == "DELETE":
+            return "POST", "/api/v1/profiles/delete", {"profile_id": profile_id}
+        if method == "GET" and parsed.path.endswith("/prompt-preview"):
+            query = dict(parse_qsl(parsed.query))
+            return "POST", "/api/v1/profiles/prompt_preview", {"profile_id": profile_id,
+                **{key: query[key] for key in ("role", "project_id") if key in query}}
+    return method, path, body

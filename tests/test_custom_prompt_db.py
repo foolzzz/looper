@@ -42,7 +42,8 @@ def test_custom_prompt_bad_values_return_400(monkeypatch: pytest.MonkeyPatch, va
             ("PUT", f"/api/agent-profiles/{profile['profile_id']}", {}),
         ]:
             status, payload = await _call(method, path, {**fields, "custom_prompt": value})
-            assert status == 400 and "custom_prompt" in payload["error"]
+            expected = "custom_prompt" if isinstance(value, str) else "declared schema"
+            assert status == 400 and expected in payload["error"]
             if isinstance(value, str):
                 assert str(HARNESS_MAX_CHARS) in payload["error"]
 

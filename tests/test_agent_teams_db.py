@@ -66,7 +66,7 @@ def test_agent_teams_are_on_by_default_for_claude_code_and_only_claude_code_take
         assert (back["runtime_type"], back["agent_teams"]) == ("claude-code", True)
         for value in ("yes", 1, None):
             status, payload = await _profile("cc/bad", agent_teams=value)
-            assert status == 400 and "agent_teams must be true or false" in payload["error"]
+            assert status == 400 and "declared schema" in payload["error"]
 
     run_db(_test, monkeypatch)
 

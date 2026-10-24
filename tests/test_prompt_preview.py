@@ -17,6 +17,15 @@ from tests.test_agent_settings import _row
 from tests.test_catalog_db import _Writer
 
 
+async def _preview_request(server, profile_id, fields, writer):
+    from looper.agents.api_v1 import OPERATOR
+    from looper.agents.ops.clients import ClientOps
+
+    server._client_ops = ClientOps(SimpleNamespace())
+    await server._handle_v1("POST", "/api/v1/profiles/prompt_preview", {}, {},
+                           json.dumps({"profile_id": profile_id, **fields}).encode(), writer, OPERATOR)
+
+
 def _dependencies(monkeypatch, runtime="claude-code", mode="append", role="worker"):
     from looper.agents import prompt_preview as module
     from looper.db import agent_setting_layers
@@ -236,12 +245,11 @@ def test_preview_endpoint(monkeypatch, role, status):
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=SimpleNamespace())
     writer = _Writer()
-    asyncio.run(server._route_api("GET", f"/api/agent-profiles/{profile.id}/prompt-preview",
-                                  {} if role is None else {"role": role}, b"", writer))
+    asyncio.run(_preview_request(server, profile.id, {} if role is None else {"role": role}, writer))
     head, _, data = writer.data.partition(b"\r\n\r\n")
     assert int(head.split()[1]) == status
     if status == 200:
-        result = json.loads(data)
+        result = json.loads(data)["result"]
         assert result["prompt_layers"] and result["blocks"]
         assert any(b["text"] is None for b in result["blocks"])
 
@@ -253,8 +261,7 @@ def test_preview_endpoint_unknown_profile_is_404(monkeypatch):
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=SimpleNamespace())
     writer = _Writer()
-    asyncio.run(server._route_api("GET", "/api/agent-profiles/agent-missing/prompt-preview",
-                                  {"role": "worker"}, b"", writer))
+    asyncio.run(_preview_request(server, "agent-missing", {"role": "worker"}, writer))
     assert int(writer.data.split()[1]) == 404
 
 
@@ -274,11 +281,10 @@ def test_preview_endpoint_refuses_ineligible_profile_with_real_settings(monkeypa
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=SimpleNamespace())
     writer = _Writer()
-    asyncio.run(server._route_api("GET", f"/api/agent-profiles/{profile.id}/prompt-preview",
-                                  {"role": "planner"}, b"", writer))
+    asyncio.run(_preview_request(server, profile.id, {"role": "planner"}, writer))
     head, _, data = writer.data.partition(b"\r\n\r\n")
     assert int(head.split()[1]) == 400
-    assert reason in json.loads(data)["error"]
+    assert reason in json.loads(data)["error"]["message"]
     assert layers.await_args.args == (None,)
 
 
