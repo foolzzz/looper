@@ -248,8 +248,8 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
                     api.put(f"/api/projects/{project['project_id']}", {"planner_roles": "on"})
                     api.put(f"/api/projects/{project['project_id']}/allowed-profiles",
                             {"profile_ids": [sonnet["profile"]["profile_id"]]})
-                ids[variant] = api.post("/api/tasks/create", {"requirement": f"build calc variant={variant}",
-                                                              "project_id": project["project_id"]})["task_id"]
+                ids[variant] = api.post("/api/v1/tasks/create", {"requirement": f"build calc variant={variant}",
+                                                              "project_id": project["project_id"]})["result"]["task_id"]
                 api.post("/api/v1/ops/task_control/start", {"task_id": ids[variant]})
             first = _wait(api, ids, VARIANTS, ("completed", "failed", "stopped", "cancelled"))
             before = {variant: first[variant]["roles"] for variant in ("restart", "startover")}

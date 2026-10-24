@@ -170,8 +170,8 @@ def test_a_task_carries_on_after_the_server_restarts(tmp_path: Path) -> None:
         server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home,
                   "env": {"PATH": f"{bin_dir}{os.pathsep}{os.defpath}"}}
         with running_server(**server, log_path=root / "first.log") as api:
-            created = api.post("/api/tasks/create", {"requirement": "build calc",
-                                                      "project": {"name": "calc", "work_dir": str(work)}})
+            created = api.post("/api/v1/tasks/create", {"requirement": "build calc",
+                                                      "project": {"name": "calc", "work_dir": str(work)}})["result"]
             task_id = created["task_id"]
             api.post("/api/v1/ops/task_control/start", {"task_id": task_id})
             before = _wait(api, task_id, lambda d: {k: s["status"] for k, s in _steps(d).items()} == cut_off
@@ -229,7 +229,7 @@ def test_a_task_failed_at_its_cap_continues_from_the_database_after_a_restart(tm
         with running_server(**server, log_path=root / "first.log") as api:
             # The plan turn ($0.001) leaves room for both Workers; their $0.002 each crosses the cap.
             project = api.post("/api/projects", {"name": "capped", "work_dir": str(work), "task_budget_usd": 0.0015})
-            task_id = api.post("/api/tasks/create", {"requirement": "capped calc", "project_id": project["project_id"]})[
+            task_id = api.post("/api/v1/tasks/create", {"requirement": "capped calc", "project_id": project["project_id"]})["result"][
                 "task_id"]
             api.post("/api/v1/ops/task_control/start", {"task_id": task_id})
             failed = _wait(api, task_id, lambda d: d["status"] == "failed")
@@ -259,8 +259,8 @@ def test_a_ready_task_stays_ready_through_a_restart_until_it_is_started(tmp_path
         server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home,
                   "env": {"PATH": f"{bin_dir}{os.pathsep}{os.defpath}"}}
         with running_server(**server, log_path=root / "first.log") as api:
-            task_id = api.post("/api/tasks/create", {"requirement": "build calc",
-                                                      "project": {"name": "calc", "work_dir": str(work)}})["task_id"]
+            task_id = api.post("/api/v1/tasks/create", {"requirement": "build calc",
+                                                      "project": {"name": "calc", "work_dir": str(work)}})["result"]["task_id"]
         with running_server(**server, log_path=root / "second.log") as api:
             time.sleep(1)  # time for a resumed task to start its Planner
             ready, planned = api.get(f"/api/tasks/{task_id}")["status"], _log(state, "planner_argv.jsonl")

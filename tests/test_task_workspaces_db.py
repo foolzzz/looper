@@ -75,9 +75,9 @@ def test_a_task_names_its_workspace_and_is_told_what_it_will_run_in(
         status, here = await _check(server, {"project_id": project["id"], "mode": "worktree"})
         assert status == 200 and here["mode"] == "in_place" and here["default_mode"] == "in_place"  # not in git
 
-        status, body = await _call(server, "POST", "/api/tasks/create", {
+        status, body = await _call(server, "POST", "/api/v1/tasks/create", {
             "requirement": "build it", "project_id": project["id"], "work_dir": str(workspace), "base": "main"})
-        assert status == 201 and body["workspace"]["mode"] == "worktree"
+        assert status == 200 and body["workspace"]["mode"] == "worktree"
         row = await tasks.get_task(body["task_id"], pool=pool)
         assert (row["workspace_dir"], row["workspace_mode"], row["workspace_base"], row["work_dir"]) == (
             str(workspace), "worktree", "main", str(workspace))
@@ -85,9 +85,9 @@ def test_a_task_names_its_workspace_and_is_told_what_it_will_run_in(
         assert detail["task_workspace"] == {"workspace_dir": str(workspace), "mode": "worktree", "base": "main",
                                             "worktree": None}
 
-        for bad, says in (({"base": "nope"}, "'nope' is not a branch"), ({"workspace_mode": "copy"}, "one of"),
+        for bad, says in (({"base": "nope"}, "'nope' is not a branch"), ({"workspace_mode": "copy"}, "declared schema"),
                           ({"base": "main", "workspace_mode": "in_place"}, "give it with workspace_mode worktree")):
-            status, refused = await _call(server, "POST", "/api/tasks/create", {
+            status, refused = await _call(server, "POST", "/api/v1/tasks/create", {
                 "requirement": "x", "project_id": project["id"], "work_dir": str(workspace), **bad})
             assert status == 400 and says in refused["error"], refused
         # A new project's tasks run in worktrees; one made before keeps running in place.
