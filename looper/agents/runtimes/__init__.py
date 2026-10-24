@@ -53,7 +53,7 @@ Planner's session by resuming it on every turn (``per_turn.PerTurnSession``);
 Grok keeps one process for it over ACP (``grok_acp``), per turn when it cannot.
 
 The types: ``claude-code`` (``claude_code``), ``codex`` (``codex``), ``omp``
-(``omp``), ``grok`` (``grok``), ``dsh`` (``dsh``) and ``pi`` (``pi``).
+(``omp``), ``grok`` (``grok``), ``dsh`` (``dsh``), ``pi`` (``pi``) and ``api`` (``api``).
 """
 
 from __future__ import annotations
@@ -285,6 +285,10 @@ class RuntimeAdapter(ABC):
     label: ClassVar[str]  # how the dashboard names the type
     default_executable: ClassVar[str]
     capabilities: ClassVar[frozenset[Capability]]
+    # The only roles allowed; None leaves ROLE_CAPABILITIES to decide.
+    roles: ClassVar[frozenset[str] | None] = None
+    # Runs and calls tools inside looper serve, with no executable to find or probe.
+    in_process: ClassVar[bool] = False
     protocols: ClassVar[frozenset[ApiProtocol]]
     # The provider auth kinds it can be started with now; OAUTH is the type's own login.
     auth_kinds: ClassVar[frozenset[AuthKind]]
