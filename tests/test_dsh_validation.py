@@ -706,10 +706,10 @@ def _serve_smoke_stand_in(mode):
                 project = "project-" + str(len(projects) + 1)
                 projects[project] = body
                 result = {"project_id": project}
-            elif path == "/api/tasks/create":
+            elif path == "/api/v1/tasks/create":
                 task = "task-" + str(len(tasks) + 1)
                 tasks[task] = body
-                result = {"task_id": task}
+                result = {"status": "ok", "result": {"task_id": task}}
             elif path == "/api/v1/ops/task_control/start":
                 task = body["task_id"]
                 result = {"status": "ok", "result": {"task_id": task, "started": True}}

@@ -131,7 +131,18 @@ def _serve(monkeypatch: pytest.MonkeyPatch, pool: Any) -> None:
 
 
 async def _ok(method: str, path: str, body: Any = None) -> Any:
-    status, payload = await _call(method, path, body)
+    if path.startswith("/api/v1/role_templates/"):
+        from types import SimpleNamespace
+
+        from looper.agents.ops.clients import ClientOps
+        from tests.db_support import call_v1
+        from tests.test_task_agents_db import _server
+
+        server = _server()
+        server._client_ops = ClientOps(SimpleNamespace())
+        status, payload = await call_v1(server, path, body)
+    else:
+        status, payload = await _call(method, path, body)
     assert status in (200, 201), (path, payload)
     return payload
 
@@ -218,10 +229,12 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
     await _ok("POST", "/api/v1/installs/create", {"item_id": web["item_id"], "scope": "project", "project_id": calc,
                                         "roles": ["planner", "reviewer", "task_role"]})
     await _ok("PUT", f"/api/projects/{calc}/allowed-profiles", {"profile_ids": [sonnet]})
-    await _ok("PUT", f"/api/projects/{calc}/role-templates/security", {
+    await _ok("POST", "/api/v1/role_templates/put", {"project_id": calc, "key": "security",
         "kind": "review", "description": "Steps that touch auth.", "role_prompt": "Check for security problems.",
         "harness": "## How you work\nRead first.", "profile_id": sonnet, "items": [web["item_id"]]})
-    await _ok("PUT", f"/api/projects/{calc}/role-templates/tester", {"kind": "work", "role_prompt": "Write tests."})
+    await _ok("POST", "/api/v1/role_templates/put", {"project_id": calc, "key": "tester",
+                "kind": "work", "role_prompt": "Write tests.", "description": "", "harness": None,
+                "profile_id": None, "items": []})
     # Schedules: an enabled one with every setting, a directory of its own and a chat the allowlist lets in; a
     # disabled one on the defaults.
     nightly = (await _ok("POST", f"/api/projects/{calc}/schedules", {
@@ -943,8 +956,12 @@ def test_a_projects_role_templates_import_checked_and_the_ones_the_file_does_not
         async with _installation() as (target, target_url):
             _serve(monkeypatch, target)
             calc = (await _ok("POST", "/api/projects", {"name": "calc"}))["project_id"]
-            await _ok("PUT", f"/api/projects/{calc}/role-templates/mine", {"kind": "work", "role_prompt": "Mine."})
-            await _ok("PUT", f"/api/projects/{calc}/role-templates/tester", {"kind": "work", "role_prompt": "Old."})
+            await _ok("POST", "/api/v1/role_templates/put", {"project_id": calc, "key": "mine",
+                "kind": "work", "role_prompt": "Mine.", "description": "", "harness": None,
+                "profile_id": None, "items": []})
+            await _ok("POST", "/api/v1/role_templates/put", {"project_id": calc, "key": "tester",
+                "kind": "work", "role_prompt": "Old.", "description": "", "harness": None,
+                "profile_id": None, "items": []})
             path = tmp_path / "config.json"
             good = {"kind": "review", "description": "Auth steps.", "role_prompt": "Check security."}
             path.write_text(json.dumps({"format": "looper-config/v2", "projects": [

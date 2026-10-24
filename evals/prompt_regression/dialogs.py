@@ -1911,7 +1911,7 @@ def _start_slow_task(api: Api, project_id: str, *, timeout: float,
     """A task of the dialogs' project, started and under way (its plan made)."""
     if check_budget is not None:
         check_budget()
-    task_id = api.post("/api/tasks/create", {"requirement": SLOW_TASK, "project_id": project_id})["task_id"]
+    task_id = api.post("/api/v1/tasks/create", {"requirement": SLOW_TASK, "project_id": project_id})["result"]["task_id"]
     api.post("/api/v1/ops/task_control/start", {"task_id": task_id})
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -2055,7 +2055,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
         if dialog.id == "task_cost":
             task = _make_cost_task(database_url, project_id)
         elif dialog.ready_task:
-            task = api.post("/api/tasks/create", {"requirement": SLOW_TASK, "project_id": project_id})["task_id"]
+            task = api.post("/api/v1/tasks/create", {"requirement": SLOW_TASK, "project_id": project_id})["result"]["task_id"]
         else:
             task = _start_slow_task(api, project_id, timeout=timeout, **budget_args) if dialog.running_task else None
         if dialog.gate and task is not None:

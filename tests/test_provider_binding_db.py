@@ -89,7 +89,7 @@ def test_provider_saves_warn_about_context_suffixes_without_anthropic_messages(
 
 async def _task(tmp_path: Path) -> str:
     project = (await _ok("POST", "/api/projects", {"name": "calc"}))["project_id"]
-    return (await _ok("POST", "/api/tasks/create", {"requirement": "r", "project_id": project,
+    return (await _ok("POST", "/api/v1/tasks/create", {"requirement": "r", "project_id": project,
                                                     "work_dir": str(tmp_path / "w")}))["task_id"]
 
 

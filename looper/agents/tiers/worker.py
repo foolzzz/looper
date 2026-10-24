@@ -971,6 +971,8 @@ class WorkerPool:
             except (BrokenPipeError, ConnectionResetError):
                 # Claude exited before reading; its output decides the outcome.
                 logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
+            if (ready := self._input_ready.get(worker_id)) is not None:
+                ready.set()
 
             input_ended = False
 

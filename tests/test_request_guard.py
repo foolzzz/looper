@@ -84,9 +84,9 @@ def _serve(*requests: str) -> list[tuple[str, str]]:
 def test_server_refuses_cross_site_requests_and_sends_no_cors_headers() -> None:
     body = '{"requirement": "x", "project_id": "proj-0", "work_dir": "/tmp"}'
     (cross_post, _), (preflight, _), (same, page) = _serve(
-        "POST /api/tasks/create HTTP/1.1\r\nHost: 127.0.0.1:8767\r\n"
+        "POST /api/v1/tasks/create HTTP/1.1\r\nHost: 127.0.0.1:8767\r\n"
         f"Origin: {ATTACKER}\r\nContent-Type: text/plain\r\nContent-Length: {len(body)}\r\n\r\n{body}",
-        "OPTIONS /api/tasks/create HTTP/1.1\r\nHost: 127.0.0.1:8767\r\n"
+        "OPTIONS /api/v1/tasks/create HTTP/1.1\r\nHost: 127.0.0.1:8767\r\n"
         f"Origin: {ATTACKER}\r\nAccess-Control-Request-Method: POST\r\n\r\n",
         "GET / HTTP/1.1\r\nHost: 127.0.0.1:8767\r\nOrigin: http://127.0.0.1:8767\r\n\r\n",
     )

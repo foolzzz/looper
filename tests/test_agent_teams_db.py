@@ -127,7 +127,7 @@ def test_the_manager_workers_and_reviewers_start_with_agent_teams_only_when_thei
         on = (await _profile("cc/default"))[1]["profile"]["profile_id"]  # on by default
         off = (await _profile("cc/off", agent_teams=False))[1]["profile"]["profile_id"]
         project = (await _ok("POST", "/api/projects", {"name": "calc"}))["project_id"]
-        task = (await _ok("POST", "/api/tasks/create", {"requirement": "r", "project_id": project,
+        task = (await _ok("POST", "/api/v1/tasks/create", {"requirement": "r", "project_id": project,
                                                         "work_dir": str(tmp_path / "w")}))["task_id"]
         roles = ("manager", "planner", "worker", "reviewer")
 
