@@ -435,7 +435,7 @@ def test_http_provider_model_profile_flow(monkeypatch, tmp_path):
         assert profile["roles"] and profile["used_by"] == dict(service.NOT_USED)
         assert profile["cost"]["source"] == "provider_price"
         assert not {"mode", "system_prompt_mode", "role_system_prompt_mode", "system_prompt_modes"} & profile.keys()
-        registry = await client.ok("GET", "/api/registry")
+        registry = await client.ok("POST", "/api/v1/registry/view", {})
         assert next(p for p in registry["profiles"] if p["profile_id"] == aid) == profile
         assert next(m for m in registry["models"] if m["model_id"] == mid)["profile_count"] == 1
         for path in (f"/api/models/{mid}", f"/api/providers/{pid}"):

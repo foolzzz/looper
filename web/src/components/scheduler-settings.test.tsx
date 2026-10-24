@@ -109,11 +109,11 @@ describe("Settings → Scheduler", () => {
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url === "/api/registry") return Response.json({ profiles: [{
+      if (url === "/api/v1/registry/view") return Response.json({ status: "ok", result: { profiles: [{
         profile_id: "p", name: "Schedule profile", effort: "high", runtime_name: "Runtime",
         provider: { provider_id: "v", name: "Schedule account", auth: "api_key", vendor_type: "custom" },
         model: { model_id: "m", provider_id: "v", name: "Exact model", protocol: "openai-responses" },
-      }] });
+      }] } });
       if (url === "/api/v1/schedule_admin/get") return Response.json({ status: "ok", result: { schedule } });
       if (url === "/api/v1/schedule_admin/runs") return Response.json({ status: "ok", result: {
         runs: [], next_before: null, routine_skips: { skipped_gate: 0, skipped_overlap: 0 },

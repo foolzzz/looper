@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.84] - 2026-10-24
+
+### Changed
+
+- **The complete runtime registry and runtime probing go through v1.** `registry.view` (risk `read`, operator-only) returns the full registry snapshot, with provider API keys masked and provider environment values unchanged, and `runtimes.probe` (risk `write`) re-detects one runtime, as `POST /api/v1/registry/view` and `POST /api/v1/runtimes/probe`. The result schemas are published in the OpenAPI document. Manager prompts and tools are unchanged. ([#530](https://github.com/foolzzz/looper/pull/530))
+
+### Removed
+
+- **`GET /api/registry` and `POST /api/runtimes/<id>/probe`.** Use the `registry` and `runtimes` operations. ([#530](https://github.com/foolzzz/looper/pull/530))
+
 ## [2.13.83] - 2026-10-24
 
 ### Changed

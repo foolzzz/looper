@@ -420,7 +420,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     profile_form.get_by_label("Effort", exact=True).select_option("high")
     profile_form.get_by_label("Custom prompt", exact=True).fill("Public smoke preview marker")
     _finish_form(profile_form, "Add Agent Profile")
-    profile = next(p for p in server.api.get("/api/registry")["profiles"] if p["name"] == "Smoke profile")
+    profile = next(p for p in server.api.post("/api/v1/registry/view", {})["result"]["profiles"] if p["name"] == "Smoke profile")
     profile_id = profile["profile_id"]
     assert profile["model_id"] == mid and profile["provider"]["provider_id"] == pid
     assert next(p for p in server.api.get("/api/providers")["providers"] if p["provider_id"] == pid)["api_key"] is None
@@ -549,7 +549,7 @@ def test_vendor_suggestions_are_explicit_and_invalid_inputs_do_not_write(dashboa
     form = page.get_by_role("form", name="Add a provider", exact=True)
     form.get_by_label("Vendor", exact=True).select_option("deepseek")
     form.get_by_label("Name *", exact=True).fill("Smoke vendor account")
-    vendor = next(v for v in server.api.get("/api/registry")["vendor_types"] if v["vendor_type"] == "deepseek")
+    vendor = next(v for v in server.api.post("/api/v1/registry/view", {})["result"]["vendor_types"] if v["vendor_type"] == "deepseek")
     for endpoint in vendor["endpoints"]:
         expect(form.get_by_label(f'{endpoint["protocol"]} URL', exact=True)).to_have_value(endpoint["base_url"])
     _finish_form(form, "Add provider")
@@ -675,7 +675,7 @@ def test_pi_and_dsh_profile_choices_match_their_typed_runtime_contract(dashboard
     effort.select_option("max")
     form.get_by_label("Custom prompt", exact=True).fill("Typed runtime public marker")
     _finish_form(form, "Add Agent Profile")
-    profile = next(p for p in server.api.get("/api/registry")["profiles"] if p["name"] == "Typed runtime smoke")
+    profile = next(p for p in server.api.post("/api/v1/registry/view", {})["result"]["profiles"] if p["name"] == "Typed runtime smoke")
     assert (profile["runtime_id"], profile["model_id"], profile["effort"], profile["agent_teams"],
             profile["custom_prompt"]) == ("rt-dsh", selected["model_id"], "max", False, "Typed runtime public marker")
     persisted = next(p for p in _registry_state(server)["profiles"] if p["id"] == profile["profile_id"])
