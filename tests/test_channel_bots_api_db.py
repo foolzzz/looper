@@ -17,6 +17,7 @@ import pytest
 from tests.db_support import DSN, run_with_channel_configs
 from tests.test_lark_bot_settings_db import platform  # noqa: F401 (the fixture)
 from tests.test_lark_channel_db import _call as _call_query
+from tests.test_api_v1_managers_templates import _call as _manager_call
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -113,7 +114,7 @@ def test_refused_adds_write_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         manager = await _manager(pool)
         await _manager(pool, "gone")
-        assert (await _call("DELETE", "/api/managers/manager-gone"))[0] == 200
+        assert (await _manager_call("managers.delete", {"manager_id": "manager-gone"}))[0] == 200
         before = await pool.fetchval("SELECT count(*) FROM channel_configs")
         assert (await _telegram(manager, None))[0] == 400
         status, body = await _telegram(manager, TOKEN, config={**ALLOW, "bot_token_env": "X"})
@@ -351,7 +352,7 @@ def test_delete_removes_an_added_bot_and_its_secret(monkeypatch: pytest.MonkeyPa
         assert status == 400 and "built-in telegram channel cannot be removed" in body["error"]
         assert (await _call("GET", "/api/channel-configs/channel-telegram"))[0] == 200
 
-        status, body = await _call("DELETE", f"/api/managers/{manager}")
+        status, body = await _manager_call("managers.delete", {"manager_id": manager})
         assert status == 409 and "remove them in Settings → Channels" in body["error"]
 
         status, body = await _call("DELETE", "/api/channel-configs/channel-telegram-2")
@@ -360,7 +361,7 @@ def test_delete_removes_an_added_bot_and_its_secret(monkeypatch: pytest.MonkeyPa
         assert "channel-telegram-2" not in ids
         assert await pool.fetchval("SELECT count(*) FROM channel_secrets WHERE channel_id = 'channel-telegram-2'") == 0
         assert (await _call("DELETE", "/api/channel-configs/channel-telegram-2"))[0] == 404
-        assert (await _call("DELETE", f"/api/managers/{manager}"))[0] == 200
+        assert (await _manager_call("managers.delete", {"manager_id": manager}))[0] == 200
 
     run_with_channel_configs(test, monkeypatch)
 

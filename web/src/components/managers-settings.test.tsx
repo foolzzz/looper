@@ -27,7 +27,7 @@ function manager(patch: Partial<api.ManagerInfo> = {}): api.ManagerInfo {
   return {
     id: "manager-review", name: "Review", description: "", builtin: false, enabled: true, tools: "tasks",
     task_scope: "own", task_policy: "free", system_prompt: "Review things.", profile_id: null, profile_name: null,
-    templates: [],
+    templates: [], revision: 0, created_at: "2026-10-24T00:00:00Z", updated_at: "2026-10-24T00:00:00Z",
     state: { running: false, busy: false, healthy: true, sync: "ok" },
     spend: { today_usd: 0, last_7d_usd: 0, runs_today: 0 },
     ...patch,
@@ -63,8 +63,8 @@ describe("Managers settings", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     m.fetchManagers.mockResolvedValue([DEFAULT]);
-    m.createManager.mockResolvedValue(manager());
-    m.updateManager.mockResolvedValue(manager());
+    m.createManager.mockResolvedValue({ manager: manager() });
+    m.updateManager.mockResolvedValue({ manager: manager() });
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -161,7 +161,7 @@ describe("Managers settings", () => {
 
   it("adds and removes input rows and sends inputs in order", async () => {
     m.fetchManagers.mockResolvedValue([DEFAULT, manager()]);
-    m.putManagerTemplate.mockResolvedValue(manager());
+    m.putManagerTemplate.mockResolvedValue({ managers: [manager()], max_enabled: 8 });
     await render();
     await click(button("Add template"));
     await type(field("Key"), "t1");

@@ -37,10 +37,10 @@ describe("Managers' bots in Settings → Channels", () => {
       if (url === "/api/channel-configs" && method === "GET") return Response.json({ configs });
       if (url === "/api/channel-configs" && method === "POST") return postResponse();
       if (url.startsWith("/api/channel-configs/") && method === "DELETE") return new Response(null, { status: 204 });
-      if (url === "/api/managers") return Response.json({ managers: [
+      if (url === "/api/v1/managers/list") return Response.json({ status: "ok", result: { managers: [
         { id: "manager", name: "Manager", enabled: true },
         { id: "manager-review", name: "Code review", enabled: true },
-      ], max_enabled: 8 });
+      ], max_enabled: 8 } });
       if (url === "/api/v1/channels/status") return Response.json({ status: "ok", result: { bot: null, problem: null, names: {}, rejected: [] } });
       if (url === "/api/v1/gate_settings/get") return Response.json({ status: "ok", result: { targets: [], dashboard_target: null } });
       throw new Error(`Unexpected request: ${url}`);
