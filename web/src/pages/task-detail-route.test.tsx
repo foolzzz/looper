@@ -72,9 +72,9 @@ describe("TaskDetailRoute", () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/tasks/task-a") return Response.json({ ...detail("task-a"), status });
-      if (url === "/api/tasks/start") {
+      if (url === "/api/v1/ops/task_control/restart") {
         status = "running";
-        return Response.json({});
+        return Response.json({ status: "ok", result: { task_id: "task-a", restarted: true, note: "Started." } });
       }
       if (url === "/api/v1/tasks/activity") return Response.json({
         status: "ok", result: { activity: [activity(7)], has_more: false },
