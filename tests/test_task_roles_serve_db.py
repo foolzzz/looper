@@ -254,7 +254,7 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             first = _wait(api, ids, VARIANTS, ("completed", "failed", "stopped", "cancelled"))
             before = {variant: first[variant]["roles"] for variant in ("restart", "startover")}
             # Where the dashboard lists runs: the Runs page and a History page (their records), and the Chat page.
-            listed = {"records": {variant: api.get("/api/llm-records", task_id=ids[variant], limit=500)["records"]
+            listed = {"records": {variant: api.post("/api/v1/runs/list", {"task_id": ids[variant], "limit": 500})["result"]["records"]
                                   for variant in ("roles", "off")},
                       "targets": api.post("/api/v1/operator_chat/targets", {})["result"]["targets"]}
             api.post("/api/v1/ops/task_control/restart", {"task_id": ids["restart"]})

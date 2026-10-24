@@ -245,8 +245,8 @@ def session_smoke(base, token, root, work, output, provider, *, helper, installe
                 raise TimeoutError(description)
             time.sleep(0.05)
 
-    def records(query=""):
-        rows = request(base, "/api/llm-records?limit=500" + query, token)["records"]
+    def records(**filters):
+        rows = request(base, "/api/v1/runs/list", token, "POST", {"limit": 500, **filters})["result"]["records"]
         # The list endpoint filters by role but returns the persisted agent id.
         return [{**row, "role": next(role for role in ROLES if row["agent_id"] == role or
                                      row["agent_id"].startswith(role + "-"))} for row in rows]
@@ -254,7 +254,7 @@ def session_smoke(base, token, root, work, output, provider, *, helper, installe
     def snapshot_role(role, selected):
         tool_names = []
         for record in selected:
-            events = request(base, f"/api/llm-records/{record['id']}/events?limit=5000", token)["events"]
+            events = request(base, "/api/v1/runs/events", token, "POST", {"record_id": record["id"], "limit": 5000})["result"]["events"]
             for row in events:
                 event = row["event"]
                 if event.get("type") == "assistant":
@@ -291,11 +291,11 @@ def session_smoke(base, token, root, work, output, provider, *, helper, installe
         evidence["boundaries"]["wrong-token"] = True
         for turn in (1, 2):
             send(f"SMOKE_MANAGER_TURN_{turn}: list projects")
-            wait(lambda: len([r for r in records("&agent_id=manager") if r["status"] == "completed"]) >= turn,
+            wait(lambda: len([r for r in records(agent_id="manager") if r["status"] == "completed"]) >= turn,
                  "Manager turn did not complete")
         wait(lambda: "SMOKE_MANAGER_DONE" in json.dumps(request(base, "/api/v1/operator_chat/messages", token, "POST", {"session_id": "smoke-manager"})["result"]),
              "Manager reply was not persisted in chat")
-        snapshot_role("manager", records("&agent_id=manager"))
+        snapshot_role("manager", records(agent_id="manager"))
         project_work = work / "project"
         project_work.mkdir()
         (project_work / "AGENTS.md").write_text(PROJECT_SENTINEL)
@@ -309,8 +309,8 @@ def session_smoke(base, token, root, work, output, provider, *, helper, installe
                               in ("completed", "failed", "cancelled", "stopped") else None), "task did not finish")
         assert detail["status"] == "completed", detail["status"]
         # Capture completed records before the cancellation task adds any more.
-        wait(lambda: all(r["status"] != "running" for r in records("&task_id=" + task_id)), "task left active runs")
-        completed = records("&task_id=" + task_id)
+        wait(lambda: all(r["status"] != "running" for r in records(task_id=task_id)), "task left active runs")
+        completed = records(task_id=task_id)
         for role in ("planner", "worker", "reviewer"):
             selected = [r for r in completed if r["role"] == role]
             snapshot_role(role, selected)
@@ -322,9 +322,9 @@ def session_smoke(base, token, root, work, output, provider, *, helper, installe
         def tool_started():
             if not tool_child.is_file():
                 return False
-            for run in records("&task_id=" + cancelled):
+            for run in records(task_id=cancelled):
                 if run["role"] == "worker" and run["status"] == "running":
-                    events = request(base, f"/api/llm-records/{run['id']}/events", token)["events"]
+                    events = request(base, "/api/v1/runs/events", token, "POST", {"record_id": run["id"]})["result"]["events"]
                     if any(block.get("type") == "tool_use" and block.get("name") == "bash"
                            for row in events for block in row["event"].get("message", {}).get("content", [])
                            if isinstance(block, dict)):

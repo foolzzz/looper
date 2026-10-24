@@ -1,4 +1,4 @@
-"""The Manager session's profile over HTTP: GET /api/manager/session, PUT /api/manager/session/profile, and
+"""The Manager session's profile over HTTP: v1 session get/select_profile, and
 ``new_session_profile_id`` on POST /api/chat/send. The Manager is a stub, so no database is needed."""
 
 from __future__ import annotations
@@ -12,15 +12,15 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from looper.agents import operator_auth, profile_registry
+from looper.agents import api_v1, profile_registry
+from looper.agents.ops.clients import ClientOps
 from looper.agents.http_server import AgentHTTPServer
 from looper.agents.message import MANAGER_ADDRESS
-from looper.agents.operator_auth import Access
 from looper.agents.tiers.task import TaskRouter
 
 VIEW = {"session": {"active": True, "runtime": "claude-code", "profile_id": "agent-a"},
-        "selected": {"profile_id": "agent-a", "name": "A"}, "effective": {"profile": {}, "source": "session"},
-        "problem": None, "choices": []}
+        "selected": {"profile_id": "agent-a", "name": "A"}, "effective": {"profile": None, "source": "session"},
+        "problem": None, "follow_settings": None, "choices": []}
 ORIGIN = {"channel": "web", "chat": None, "sender": "dashboard", "group": False}
 
 
@@ -50,34 +50,44 @@ def _call(method: str, path: str, body: Any, tmp_path: Path, manager: Any = None
                              task_router=router, manager=manager)
     writer = _Writer()
     raw = body if isinstance(body, bytes) else json.dumps(body).encode()
-    asyncio.run(server._route_api(method, path, {}, raw, writer))
+    if path.startswith("/api/v1/"):
+        server._client_ops = ClientOps(SimpleNamespace())
+        asyncio.run(server._handle_v1(method, path, {}, {}, raw, writer, api_v1.OPERATOR))
+    else:
+        asyncio.run(server._route_api(method, path, {}, raw, writer))
     head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload)
+    answer = json.loads(payload)
+    if path.startswith("/api/v1/") and answer.get("status") == "ok":
+        answer = answer["result"]
+        api_v1.validate_arguments(api_v1.find(method, path).result, answer)
+    return int(head.split()[1]), answer
 
 
 def test_get_returns_the_view(tmp_path: Path) -> None:
-    assert _call("GET", "/api/manager/session", b"", tmp_path, _manager()) == (200, VIEW)
+    assert _call("POST", "/api/v1/manager_session/get", b"", tmp_path, _manager()) == (200, VIEW)
 
 
 def test_put_selects_and_returns_the_effect(tmp_path: Path) -> None:
     manager = _manager()
-    status, body = _call("PUT", "/api/manager/session/profile", {"profile_id": "agent-a"}, tmp_path, manager)
+    status, body = _call("POST", "/api/v1/manager_session/select_profile", {"profile_id": "agent-a"}, tmp_path, manager)
     assert status == 200
     assert body == {**VIEW, "effect": "resumes", "text": "done"}
-    manager.select_session_profile.assert_awaited_once_with("agent-a", origin=ORIGIN, via="api")
+    manager.select_session_profile.assert_awaited_once_with("agent-a", origin=ORIGIN, via="api",
+                                                           input_text="POST /api/v1/manager_session/select_profile")
 
 
 def test_put_null_follows_the_settings(tmp_path: Path) -> None:
     manager = _manager()
-    status, _ = _call("PUT", "/api/manager/session/profile", {"profile_id": None}, tmp_path, manager)
+    status, _ = _call("POST", "/api/v1/manager_session/select_profile", {"profile_id": None}, tmp_path, manager)
     assert status == 200
-    manager.select_session_profile.assert_awaited_once_with(None, origin=ORIGIN, via="api")
+    manager.select_session_profile.assert_awaited_once_with(None, origin=ORIGIN, via="api",
+                                                           input_text="POST /api/v1/manager_session/select_profile")
 
 
 @pytest.mark.parametrize("body", [{}, b"{nope", {"profile_id": 3}])
 def test_put_refuses_a_bad_body(tmp_path: Path, body: Any) -> None:
     manager = _manager()
-    status, payload = _call("PUT", "/api/manager/session/profile", body, tmp_path, manager)
+    status, payload = _call("POST", "/api/v1/manager_session/select_profile", body, tmp_path, manager)
     assert status == 400 and payload["error"]
     manager.select_session_profile.assert_not_awaited()
 
@@ -85,14 +95,24 @@ def test_put_refuses_a_bad_body(tmp_path: Path, body: Any) -> None:
 def test_put_refused_selection_is_400(tmp_path: Path) -> None:
     manager = _manager()
     manager.select_session_profile.side_effect = profile_registry.RegistryError("no such profile")
-    assert _call("PUT", "/api/manager/session/profile", {"profile_id": "x"}, tmp_path, manager) == (
-        400, {"error": "no such profile"})
+    assert _call("POST", "/api/v1/manager_session/select_profile", {"profile_id": "x"}, tmp_path, manager) == (
+        400, {"status": "error", "error": {"code": "invalid", "message": "no such profile"}})
 
 
 def test_no_manager_is_503(tmp_path: Path) -> None:
-    expected = (503, {"error": "the Manager is not running"})
-    assert _call("GET", "/api/manager/session", b"", tmp_path) == expected
-    assert _call("PUT", "/api/manager/session/profile", {"profile_id": None}, tmp_path) == expected
+    expected = (503, {"status": "error", "error": {"code": "unavailable", "message": "the Manager is not running"}})
+    assert _call("POST", "/api/v1/manager_session/get", b"", tmp_path) == expected
+    assert _call("POST", "/api/v1/manager_session/select_profile", {"profile_id": None}, tmp_path) == expected
+
+
+@pytest.mark.parametrize("action,body", [("get", {}), ("select_profile", {"profile_id": None})])
+def test_an_explicit_unknown_manager_cannot_fall_back_to_default(tmp_path, action, body):
+    manager = _manager()
+    status, answer = _call("POST", "/api/v1/manager_session/" + action,
+                           {**body, "manager": "manager-other"}, tmp_path, manager)
+    assert status == 404 and answer["error"]["code"] == "not_found"
+    manager.session_view.assert_not_awaited()
+    manager.select_session_profile.assert_not_awaited()
 
 
 def _send(tmp_path: Path, body: dict[str, Any], monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> tuple[
@@ -140,6 +160,6 @@ def test_send_refused_profile_is_400(tmp_path: Path, monkeypatch: pytest.MonkeyP
     adapter.handle_user_message.assert_not_awaited()
 
 
-def test_the_paths_are_operator_only() -> None:
-    assert operator_auth.access("/api/manager/session") is Access.OPERATOR
-    assert operator_auth.access("/api/manager/session/profile") is Access.OPERATOR
+def test_manager_session_operations_accept_clients() -> None:
+    for action in ("get", "select_profile"):
+        assert not api_v1.find("POST", "/api/v1/manager_session/" + action).operator_only

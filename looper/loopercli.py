@@ -403,8 +403,8 @@ def _print_error(message: str) -> None:
 class Parser(argparse.ArgumentParser):
     def error(self, message: str) -> Any:  # type: ignore[override]
         # An argument the user mistook for an option's value may be a token; do not echo it.
-        if self.prog.startswith("loopercli auth"):
-            raise UsageError("invalid auth arguments; tokens and passwords are read privately, never as arguments",
+        if self.prog.startswith(("loopercli auth", "loopercli clients")):
+            raise UsageError("invalid credential arguments; tokens and passwords are read privately, never as arguments",
                              self.format_usage())
         raise UsageError(re.sub(rf"{TOKEN_PREFIX}[A-Za-z0-9_-]+", f"{TOKEN_PREFIX}…", message), self.format_usage())
 
@@ -467,18 +467,22 @@ def _online_operation(ctx: Context, name: str) -> Generated:
     raise UsageError(f"this Looper version has no {name} operation; upgrade the service")
 
 
+def _operator_arguments(parser: Parser) -> None:
+    parser.add_argument("--url", default=DEFAULT_URL, help="the running service's loopback address")
+    parser.add_argument("--operator-token-file", default="-", metavar="PATH",
+                        help="operator token file (0600); default '-' reads one line from stdin")
+
+
 def _auth_arguments(parser: Parser) -> None:
     commands = parser.add_subparsers(dest="auth_command", required=True)
     for name in ("set-password", "clear-password"):
         sub = commands.add_parser(name)
-        sub.add_argument("--url", default=DEFAULT_URL, help="the running service's loopback address")
-        sub.add_argument("--operator-token-file", default="-", metavar="PATH",
-                         help="operator token file (0600); default '-' reads one line from stdin")
+        _operator_arguments(sub)
         if name == "set-password":
             sub.add_argument("--user", default="admin")
 
 
-def _auth(args: argparse.Namespace, ctx: Context) -> int:
+def _use_operator(args: argparse.Namespace, ctx: Context) -> None:
     url = check_url(args.url)
     if args.operator_token_file == "-":
         token = (getpass.getpass("Operator token: ") if sys.stdin.isatty() else sys.stdin.readline()).strip()
@@ -488,9 +492,13 @@ def _auth(args: argparse.Namespace, ctx: Context) -> int:
         except UnicodeError:
             raise ClientError("the operator token file is not UTF-8") from None
     if not token or token.startswith(TOKEN_PREFIX) or any(char.isspace() for char in token):
-        raise UsageError("an operator token is required; an API client token cannot manage passwords")
+        raise UsageError("an operator token is required; an API client token cannot manage credentials")
     # This Context lives only for this invocation; never write operator credentials to client.json.
     ctx._api = Api(url, token, ctx.session)
+
+
+def _auth(args: argparse.Namespace, ctx: Context) -> int:
+    _use_operator(args, ctx)
     body = {}
     if args.auth_command == "set-password":
         try:
@@ -505,6 +513,23 @@ def _auth(args: argparse.Namespace, ctx: Context) -> int:
     op = _online_operation(ctx, "auth." + args.auth_command.replace("-", "_"))
     status, answer = ctx.api().call(op.method, op.path, body)
     return finish(status, answer, ctx.as_json, ctx.session)
+
+
+def _clients_arguments(parser: Parser) -> None:
+    commands = parser.add_subparsers(dest="clients_command", required=True)
+    for action, field_name in (("list", None), ("create", "name"), ("revoke", "client_id")):
+        sub = commands.add_parser(action)
+        _operator_arguments(sub)
+        sub.add_argument("--body", metavar="PATH", default=argparse.SUPPRESS,
+                         help="a JSON object (file, or '-' for stdin) used as the base; options override its keys")
+        if field_name:
+            _add_property(sub, field_name, {"type": "string"})
+
+
+def _clients(args: argparse.Namespace, ctx: Context) -> int:
+    _use_operator(args, ctx)
+    args._generated = _online_operation(ctx, "clients." + args.clients_command)
+    return _run_generated(args, ctx)
 
 
 def _doctor_arguments(parser: Parser) -> None:
@@ -916,6 +941,7 @@ def _skill(args: argparse.Namespace, ctx: Context) -> int:
 
 HAND_COMMANDS: dict[str, HandCommand] = {command.name: command for command in (
     HandCommand("auth", "Manage the password using a transient operator token", _auth_arguments, _auth),
+    HandCommand("clients", "Manage API clients using a transient operator token", _clients_arguments, _clients),
     HandCommand("doctor", "Run the service's self checks, including pg_dump", _doctor_arguments, _doctor),
     HandCommand("config", "Export or preview and apply configuration through the running service",
                 _config_arguments, _config),
@@ -1206,8 +1232,8 @@ def _run(opts: argparse.Namespace, rest: list[str]) -> int:
     try:
         args = build_parser(document).parse_args(rest)
     except UsageError:
-        if rest and rest[0] == "auth":
-            raise UsageError("invalid auth arguments; tokens and passwords are read privately, never as arguments") from None
+        if rest and rest[0] in ("auth", "clients"):
+            raise UsageError("invalid credential arguments; tokens and passwords are read privately, never as arguments") from None
         raise
     return args._run(args, ctx)
 
