@@ -704,8 +704,9 @@ def _serve_smoke_stand_in(mode):
                 if mode != "manager-timeout":
                     messages.append({"message_id": body["message_id"] + ":reply", "role": "assistant",
                                      "content": "private transcript /synthetic/private/project"})
-            elif path == "/api/chat/messages":
-                result = {"messages": messages}
+            elif path == "/api/v1/operator_chat/messages":
+                assert method == "POST" and body == {"session_id": "smoke"}
+                result = {"status": "ok", "result": {"messages": messages}}
             elif path == "/api/projects":
                 project = "project-" + str(len(projects) + 1)
                 projects[project] = body

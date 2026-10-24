@@ -291,7 +291,7 @@ The main route groups:
 | Agent settings | `/api/agent-settings/...`, `/api/projects/:id/agent-settings/...`, `/api/roles/...` | The settings layers, each field with its effective value and source; each role's prompt and limits |
 | Registry | `GET /api/registry`, `/api/runtimes/:id/probe`, `/api/providers/...`, `/api/agent-profiles/...` | Runtime types and the built-in runtimes (Re-detect probes one); register, edit and delete providers (API keys masked) and Agent Profiles, each with where it is used |
 | Configuration transfer | `GET /api/config/export`, `/api/config/imports/...` | Download the configuration file; upload one, preview it, then apply or cancel |
-| Chat | `/api/chat/send`, `/api/chat/targets`, `/api/chat/sessions`, `/api/chat/messages`, `/api/chat/events` | Talk to the Manager or a running task's Planner; the Manager's conversations by channel; history and SSE stream |
+| Chat | `/api/chat/send`, `/api/v1/operator_chat/{targets,sessions,messages,save_message}`, `/api/chat/events` | Talk to the Manager or a running task's Planner; the Manager's conversations by channel; history and SSE stream |
 | Runs | `POST /api/v1/runs/{list,get,events,for_task,usage}` | Every agent run with its launch command, usage, cost and events; one agent's spending and context |
 | Channels | `/api/channel-configs/...`, `/api/channels/lark/...` | Telegram and Lark settings, the Telegram bot token (never returned) and sender allowlists; the Lark bot's status, refused senders and people search |
 

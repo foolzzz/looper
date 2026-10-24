@@ -32,7 +32,7 @@ from . import (
     schedules, self_check, vault, wait_service,
 )
 from .broadcast import Broadcaster
-from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
+from .chat_targets import ChatTargetError, resolve_chat_target
 from .message import AgentAddress
 from .channels import bot_api
 from .channels.web import WebChannelAdapter
@@ -830,14 +830,6 @@ class AgentHTTPServer:
             await self._handle_list_tasks(query, writer)
         elif path == "/api/chat/send" and method == "POST":
             await self._handle_chat_send(body, writer)
-        elif path == "/api/chat/targets" and method == "GET":
-            await self._handle_chat_targets(writer)
-        elif path == "/api/chat/sessions" and method == "GET":
-            await self._handle_chat_sessions(query, writer)
-        elif path == "/api/chat/messages" and method == "GET":
-            await self._handle_chat_messages(query, writer)
-        elif path == "/api/chat/messages" and method == "POST":
-            await self._handle_chat_save_message(body, writer)
         elif path == "/api/chat/events" and method == "GET":
             await self._handle_sse_events(query, writer)
         elif path == "/api/tasks/delete" and method == "POST":
@@ -1319,13 +1311,17 @@ class AgentHTTPServer:
 
     async def _foreign_thread(self, owner: str) -> bytes:
         """The 409 for a thread of Manager ``owner`` asked for under another Manager: whose it is, by name."""
+        error = await self._foreign_thread_error(owner)
+        return _json_response(HTTP_409, {"error": str(error), "manager_id": owner})
+
+    async def _foreign_thread_error(self, owner: str) -> OpError:
         from ..db import managers as db_managers
         running = self._managers.get(owner) if self._managers is not None else None
         row = None if running is not None else await db_managers.get_manager(owner, include_deleted=True)
         name = running.name if running is not None else row["name"] if row and row.get("deleted_at") is None else None
         error = (f"this conversation belongs to Manager {name}: open it there or start a new one" if name is not None
                  else "this conversation belongs to a deleted Manager: start a new one")
-        return _json_response(HTTP_409, {"error": error, "manager_id": owner})
+        return OpError(ErrorCode.CONFLICT, error, details={"manager_id": owner})
 
     async def _thread_owner_elsewhere(self, session_id: str, manager_id: str) -> str | None:
         """The Manager other than ``manager_id`` that thread ``session_id`` belongs to (an old thread, with messages
@@ -1345,90 +1341,6 @@ class AgentHTTPServer:
             owner = await db_chat.claim_thread(
                 session_id, "manager" if await db_chat.has_messages(session_id) else wanted)
         return owner
-
-    async def _handle_chat_targets(self, writer: asyncio.StreamWriter) -> None:
-        """The Manager, then each recent task's Planner and step agents (finished ones too)."""
-        managers = None if self._managers is None else [
-            {"id": a.agent_id, "name": a.name} for a in self._managers.agents()]
-        targets = await list_chat_targets(self._task_router, managers=managers)
-        writer.write(_json_response(HTTP_200, {"targets": _serialize(targets)}))
-        await writer.drain()
-
-    async def _handle_chat_sessions(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
-        """The Manager's conversations on every channel, newest first, for the Chat page's conversation list (with
-        ``session_id``, only that one, however old, so a link to it opens it, and a 409 naming its Manager when it is
-        another Manager's; none for a new thread); a failed read is a 500, so the page shows it rather than an empty
-        list."""
-        manager_id = query.get("manager") or "manager"
-        try:
-            from ..db.chat import list_sessions
-            if manager_id != "manager":
-                from ..db import managers as db_managers
-                if await db_managers.get_manager(manager_id) is None:
-                    writer.write(_json_response(HTTP_404, {"error": f"no Manager '{manager_id}'"}))
-                    await writer.drain()
-                    return
-            if query.get("session_id") and (
-                    owner := await self._thread_owner_elsewhere(query["session_id"], manager_id)):
-                writer.write(await self._foreign_thread(owner))
-                await writer.drain()
-                return
-            sessions = await list_sessions(session_id=query.get("session_id") or None, manager_id=manager_id)
-            writer.write(_json_response(HTTP_200, {"sessions": _serialize(sessions)}))
-        except Exception as exc:
-            logger.warning("failed to list chat sessions", exc_info=True)
-            error = f"the database could not be read ({type(exc).__name__})"
-            writer.write(_json_response(HTTP_500, {"error": error}))
-        await writer.drain()
-
-    async def _handle_chat_messages(
-        self, query: dict[str, str], writer: asyncio.StreamWriter,
-    ) -> None:
-        session_id = query.get("session_id", "")
-        if not session_id:
-            writer.write(_json_response(HTTP_400, {"error": "session_id is required"}))
-            await writer.drain()
-            return
-        try:
-            # A thread of another Manager is a 409 naming it, never its messages; no ``manager`` is the default one.
-            if owner := await self._thread_owner_elsewhere(session_id, query.get("manager") or "manager"):
-                writer.write(await self._foreign_thread(owner))
-                await writer.drain()
-                return
-            from ..db.chat import list_messages
-            messages = await list_messages(session_id)
-            writer.write(_json_response(HTTP_200, {"messages": _serialize(messages)}))
-        except Exception:
-            writer.write(_json_response(HTTP_200, {"messages": []}))
-        await writer.drain()
-
-    async def _handle_chat_save_message(
-        self, body: bytes, writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            writer.write(_json_response(HTTP_400, {"error": "invalid JSON"}))
-            await writer.drain()
-            return
-        session_id = data.get("session_id", "")
-        message_id = data.get("message_id", "")
-        role = data.get("role", "")
-        content = data.get("content", "")
-        if not all([session_id, message_id, role]):
-            writer.write(_json_response(HTTP_400, {"error": "session_id, message_id, role required"}))
-            await writer.drain()
-            return
-        try:
-            from ..db.chat import save_message
-            await save_message(
-                session_id=session_id, message_id=message_id,
-                role=role, content=content,
-            )
-        except Exception:
-            logger.debug("failed to save chat message", exc_info=True)
-        writer.write(_json_response(HTTP_200, {"ok": True}))
-        await writer.drain()
 
     async def _handle_sse_events(
         self,

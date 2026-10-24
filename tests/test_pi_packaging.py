@@ -212,7 +212,9 @@ def build_wheel(work: Path) -> tuple[Path, dict[str, str]]:
         env["UV_OFFLINE"] = os.environ["UV_OFFLINE"]
     (work / "home").mkdir()
     src = work / "source"
-    names = _run(["git", "ls-files", "-z"], cwd=ROOT, env=env).stdout.split("\0")
+    # Build the current worktree, including new source files not yet staged.
+    names = _run(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+                 cwd=ROOT, env=env).stdout.split("\0")
     for name in names:
         if name and (name.startswith("looper/") or name in
                      {"pyproject.toml", "README.md", "LICENSE", "NOTICE", "LICENSE-MIT"}):
@@ -232,6 +234,14 @@ def test_wheel_contains_the_tool_bridge(tmp_path: Path) -> None:
     wheel, _ = build_wheel(tmp_path)
     with zipfile.ZipFile(wheel) as archive:
         assert RESOURCE in archive.namelist(), "the wheel must carry the tool bridge explicitly"
+
+
+def test_wheel_contains_every_v1_domain(tmp_path: Path) -> None:
+    wheel, _ = build_wheel(tmp_path)
+    with zipfile.ZipFile(wheel) as archive:
+        domains = {path.relative_to(ROOT).as_posix()
+                   for path in (ROOT / "looper/agents/v1_domains").glob("*.py")}
+        assert domains and domains <= set(archive.namelist()), "the wheel must carry every v1 domain"
 
 
 def install_wheel(work: Path) -> tuple[Path, Path, dict[str, str]]:
