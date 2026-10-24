@@ -512,11 +512,14 @@ class AgentHTTPServer:
             data = self._v1_body(body)
             if data is None:
                 raise OpError(ErrorCode.INVALID, "the body must be a JSON object")
-            if writer is not None or operation.credential_write or operation.risk in (None, "read"):
+            # Only explicitly declared dashboard operations bypass the operator action trail.
+            if ((principal.kind == "operator" and not operation.audit_operator)
+                    or writer is not None or operation.credential_write
+                    or operation.risk in (None, "read")):
                 arguments = api_v1.validate_arguments(operation.request or {}, data)
                 if writer is not None:
                     return await invoke(domain.stream, arguments, writer)
-                return api_v1.OK, {"status": "ok", "result": await invoke(domain.run, arguments)}
+                return api_v1.OK, {"status": "ok", "result": _serialize(await invoke(domain.run, arguments))}
             if self._client_ops is None:
                 raise OpError(ErrorCode.UNAVAILABLE, "the API is not ready")
 
@@ -854,8 +857,6 @@ class AgentHTTPServer:
             await self._handle_chat_turn(query, writer)
         elif path == "/api/chat/events" and method == "GET":
             await self._handle_sse_events(query, writer)
-        elif path == "/api/tasks/create" and method == "POST":
-            await self._answer(writer, HTTP_201, lambda: projects.create_task(projects.json_object(body)))
         elif path == "/api/tasks/delete" and method == "POST":
             await self._handle_task_delete(body, writer)
         elif (m := self._RE_TASK_RUNS.match(path)) and method == "GET":
