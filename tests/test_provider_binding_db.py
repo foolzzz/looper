@@ -42,16 +42,16 @@ async def _provider(name: str = "glm", *, base_url: str = THIRD_PARTY, api_key: 
         await get_pool().execute("UPDATE llm_provider_endpoints SET base_url = '', use_runtime_default = true "
                                  "WHERE provider_id = $1 AND protocol = $2", provider_id, protocol)
     for model in models or []:
-        await _ok("POST", "/api/models", {"provider_id": provider_id, "protocol": protocol, **model})
+        await _ok("POST", "/api/v1/ops/models/create", {"provider": provider_id, "protocol": protocol, **model})
     return provider_id
 
 
 async def _model(provider_id: str, name: str, protocol: str = "anthropic-messages") -> dict[str, Any]:
-    models = (await _ok("GET", f"/api/models?provider_id={provider_id}"))["models"]
+    models = (await _ok("POST", "/api/v1/ops/models/list", {"provider": provider_id}))["models"]
     found = next((m for m in models if m["provider_id"] == provider_id
                   and m["name"] == name and m["protocol"] == protocol), None)
-    return found or (await _ok("POST", "/api/models", {
-        "provider_id": provider_id, "name": name, "protocol": protocol}))["model"]
+    return found or (await _ok("POST", "/api/v1/ops/models/create", {
+        "provider": provider_id, "name": name, "protocol": protocol}))["model"]
 
 
 async def _profile(provider_id: str, model: str, name: str | None = None, *,
@@ -297,7 +297,7 @@ def test_the_deepseek_preset_serves_responses_and_chat_at_one_url_and_prices_eac
                       for m in preset["suggested_models"] if m["protocol"] == protocol]
             provider = await _provider(f"deepseek-{protocol}", protocol=protocol, base_url=api["base_url"],
                                        models=models, env=preset["env"] if anthropic else [])
-            saved = (await _ok("GET", f"/api/models?provider_id={provider}"))["models"]
+            saved = (await _ok("POST", "/api/v1/ops/models/list", {"provider": provider}))["models"]
             assert [model["name"] for model in saved] == [model["name"] for model in models]
             runtime = "rt-claude-code" if anthropic else codex
             for model in models:
@@ -327,7 +327,7 @@ def test_a_profile_whose_models_have_no_price_is_registered_with_a_warning(monke
         priced = [{"name": "mystery-1", "input_usd_per_mtok": 1, "output_usd_per_mtok": 2,
                    "cache_read_usd_per_mtok": 0.1, "cache_write_usd_per_mtok": 1}]
         model_id = answer["profile"]["model_id"]
-        await _ok("PUT", f"/api/models/{model_id}", {
+        await _ok("POST", "/api/v1/ops/models/update", {"model": model_id,
             **{k: v for k, v in priced[0].items() if k != "name"}, "background_model": None})
         again = await _ok("PUT", f"/api/agent-profiles/{answer['profile']['profile_id']}", {"name": "mystery"})
         assert again["warnings"] == []

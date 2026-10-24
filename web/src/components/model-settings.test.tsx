@@ -3,10 +3,16 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ProvidersSection } from "@/components/provider-settings";
+import { createModel, updateModel, deleteModel, REGISTRY_CHANGED_EVENT } from "@/lib/api";
 import type { AgentProfile, Model, PriceField, Provider, Registry } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const PRICE_FIELDS: PriceField[] = ["input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok", "cache_write_usd_per_mtok"];
+const NUMERIC_FIELDS = [
+  ["context_window", "Context window"], ["input_usd_per_mtok", "Input price"],
+  ["output_usd_per_mtok", "Output price"], ["cache_read_usd_per_mtok", "Cache read price"],
+  ["cache_write_usd_per_mtok", "Cache write price"],
+] as const;
 const endpoint = (protocol: Model["protocol"]) => ({ protocol, base_url: "https://example.invalid/v1", use_runtime_default: false });
 const provider = (changes: Partial<Provider> = {}): Provider => ({
   provider_id: "provider-1", name: "Account", vendor_type: "deepseek", auth: "api_key", oauth_runtime_type: null,
@@ -27,8 +33,9 @@ let container: HTMLDivElement;
 let writes: { url: string; method: string; body: Record<string, unknown> }[];
 let failure: string;
 let warnings: string[];
+let registryReads: number;
 beforeEach(() => {
-  writes = []; failure = ""; warnings = [];
+  writes = []; failure = ""; warnings = []; registryReads = 0;
   data = {
     runtime_types: [], runtimes: [], providers: [provider()], models: [], profiles: [],
     vendor_types: [{ vendor_type: "deepseek", auth: "api_key", oauth_runtime_type: null,
@@ -41,25 +48,26 @@ beforeEach(() => {
       effort_levels: ["low", "high"], role_capabilities: { manager: [], planner: [], worker: [], reviewer: [] },
       secret_mask: "***", provider_env_owned: [] },
   };
-  vi.stubGlobal("confirm", () => true);
+  vi.stubGlobal("confirm", vi.fn(() => true));
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
-    if (url === "/api/v1/registry/view") return Response.json({ status: "ok", result: data });
+    if (url === "/api/v1/registry/view") { registryReads++; return Response.json({ status: "ok", result: data }); }
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     writes.push({ url, method: init!.method!, body });
-    if (!url.startsWith("/api/models")) throw new Error(`Unexpected write: ${url}`);
-    if (failure) return Response.json({ error: failure }, { status: init?.method === "DELETE" ? 409 : 400 });
-    const id = decodeURIComponent(url.split("/").at(-1)!);
-    if (init?.method === "DELETE") {
+    if (!/^\/api\/v1\/ops\/models\/(create|update|delete)$/.test(url)) throw new Error(`Unexpected write: ${url}`);
+    if (failure) return Response.json({ status: "error", error: { code: "invalid", message: failure } }, { status: 400 });
+    const { model: id, provider: providerId, ...fields } = body;
+    if (url.endsWith("/delete")) {
       data = { ...data, models: data.models.filter((m) => m.model_id !== id) };
-      return Response.json({ deleted: id });
+      return Response.json({ status: "ok", result: { deleted: id } });
     }
     const existing = data.models.find((m) => m.model_id === id);
-    const saved = model({ model_id: `model-${data.models.length + 1}`, ...existing, ...body });
+    const saved = model({ model_id: `model-${data.models.length + 1}`, ...existing,
+      ...(providerId ? { provider_id: providerId } : {}), ...fields });
     saved.prices = Object.fromEntries(PRICE_FIELDS.map((key) => [key, { override: saved[key], effective: saved[key],
       source: saved[key] === null ? "unknown" : "override" }])) as Model["prices"];
     data = { ...data, models: [...data.models.filter((m) => m.model_id !== saved.model_id), saved] };
-    return Response.json({ model: saved, warnings });
+    return Response.json({ status: "ok", result: { model: saved, warnings } });
   }));
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
@@ -99,18 +107,22 @@ it("places models only inside the expanded provider and scopes them to that acco
 it("creates and edits identical exact names independently for two protocols using only model APIs", async () => {
   await open(); await add(); await submit();
   await add("anthropic-messages"); await submit();
-  expect(writes.slice(0, 2).map((w) => [w.url, w.method, w.body.provider_id, w.body.name, w.body.protocol])).toEqual([
-    ["/api/models", "POST", "provider-1", "exact[1m]", "openai-chat"],
-    ["/api/models", "POST", "provider-1", "exact[1m]", "anthropic-messages"],
+  expect(writes.slice(0, 2).map((w) => [w.url, w.method, w.body.provider, w.body.name, w.body.protocol])).toEqual([
+    ["/api/v1/ops/models/create", "POST", "provider-1", "exact[1m]", "openai-chat"],
+    ["/api/v1/ops/models/create", "POST", "provider-1", "exact[1m]", "anthropic-messages"],
   ]);
+  for (const write of writes) expect(write.body).not.toHaveProperty("provider_id");
   for (const protocol of ["openai-chat", "anthropic-messages"]) {
     await edit(protocol);
     expect(field("Protocol *").disabled).toBe(true); expect(field("Exact model name *").disabled).toBe(true);
     await fill("Background model", `small-${protocol}`); await submit();
     const body = writes.at(-1)!.body;
-    expect(body).not.toHaveProperty("provider_id"); expect(body).not.toHaveProperty("name"); expect(body).not.toHaveProperty("protocol");
+    expect(body).not.toHaveProperty("provider"); expect(body).not.toHaveProperty("provider_id");
+    expect(body).not.toHaveProperty("name"); expect(body).not.toHaveProperty("protocol");
   }
-  expect(writes.slice(2).map((w) => [w.url, w.method])).toEqual([["/api/models/model-1", "PUT"], ["/api/models/model-2", "PUT"]]);
+  expect(writes.slice(2).map((w) => [w.url, w.method, w.body.model])).toEqual([
+    ["/api/v1/ops/models/update", "POST", "model-1"], ["/api/v1/ops/models/update", "POST", "model-2"],
+  ]);
   expect(data.models.map((m) => m.background_model)).toEqual(["small-openai-chat", "small-anthropic-messages"]);
   expect(container.textContent).toContain("small-openai-chat"); expect(container.textContent).toContain("small-anthropic-messages");
 });
@@ -163,6 +175,47 @@ it.each(PRICE_FIELDS)("preserves zero and explicitly clears the %s override with
   await edit(); await fill(label, ""); await submit(); expect(writes[1].body[key]).toBeNull();
 });
 
+it("normalizes numeric text at the v1 API boundary and preserves null and registry events", async () => {
+  warnings = ["Partial price data"];
+  const changed = vi.fn(); window.addEventListener(REGISTRY_CHANGED_EVENT, changed);
+  try {
+    const answer = await createModel({ provider_id: "provider-1", name: "exact[1m]", protocol: "openai-chat",
+      context_window: " 200000 ", input_usd_per_mtok: "0", output_usd_per_mtok: "1.25",
+      cache_read_usd_per_mtok: "0.1", cache_write_usd_per_mtok: "2e-1" });
+    expect(writes[0].body).toEqual({ provider: "provider-1", name: "exact[1m]", protocol: "openai-chat",
+      context_window: 200000, input_usd_per_mtok: 0, output_usd_per_mtok: 1.25,
+      cache_read_usd_per_mtok: 0.1, cache_write_usd_per_mtok: 0.2 });
+    expect(answer.warnings).toEqual(warnings); expect(changed).toHaveBeenCalledTimes(1);
+    await updateModel(answer.model.model_id, { context_window: null, input_usd_per_mtok: null,
+      output_usd_per_mtok: null, cache_read_usd_per_mtok: null, cache_write_usd_per_mtok: null });
+    expect(writes[1].body).toEqual({ model: answer.model.model_id, context_window: null,
+      input_usd_per_mtok: null, output_usd_per_mtok: null, cache_read_usd_per_mtok: null, cache_write_usd_per_mtok: null });
+    expect(changed).toHaveBeenCalledTimes(2);
+  } finally { window.removeEventListener(REGISTRY_CHANGED_EVENT, changed); }
+});
+
+it.each(NUMERIC_FIELDS)("keeps invalid %s text visible as a server validation error", async (key, label) => {
+  data.models = [model()]; await open(); await edit(); await fill(label, "not-a-number");
+  failure = `${key} must be a number or null`; const reads = registryReads;
+  await submit();
+  expect(writes[0].body[key]).toBe("not-a-number");
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(failure);
+  expect(field(label).value).toBe("not-a-number"); expect(data.models[0][key]).toBeNull();
+  expect(registryReads).toBe(reads);
+});
+
+it.each(["create", "update", "delete"])("does not report a pending %s as completed", async (action) => {
+  vi.mocked(fetch).mockResolvedValue(Response.json({ status: "needs_confirmation", confirmation_id: "pending",
+    expires_in_seconds: 600, impact: "Review this change" }, { status: 202 }));
+  const changed = vi.fn(); window.addEventListener(REGISTRY_CHANGED_EVENT, changed);
+  try {
+    const request = action === "create" ? createModel({ provider_id: "provider-1", name: "exact", protocol: "openai-chat" })
+      : action === "update" ? updateModel("model-1", { context_window: 100 }) : deleteModel("model-1");
+    await expect(request).rejects.toThrow("Review this change");
+    expect(fetch).toHaveBeenCalledTimes(1); expect(changed).not.toHaveBeenCalled();
+  } finally { window.removeEventListener(REGISTRY_CHANGED_EVENT, changed); }
+});
+
 it.each([{ efforts: null }, { efforts: [] }, { efforts: ["low", "high"] }])("round trips $efforts without conflating unknown and none", async ({ efforts }) => {
   data.models = [model({ efforts })]; await open(); await edit(); await submit(); expect(writes[0].body.efforts).toEqual(efforts);
   await edit(); await fill("Effort support", efforts === null ? "none" : "unknown"); await submit();
@@ -201,7 +254,7 @@ it.each(["missing endpoint", "referenced delete", "incompatible edit"])("keeps s
   } else if (operation === "referenced delete") {
     failure = "this model still has Agent Profile references: remove or repoint them first";
     await click("Delete model exact[1m] (openai-chat)");
-    expect(writes[0]).toMatchObject({ url: "/api/models/model-1", method: "DELETE" });
+    expect(writes[0]).toMatchObject({ url: "/api/v1/ops/models/delete", method: "POST", body: { model: "model-1" } });
   } else {
     await edit(); failure = "Agent Profile 'worker' uses this model: incompatible context"; await submit();
     expect(container.querySelector("form")).toBeTruthy();
@@ -210,13 +263,26 @@ it.each(["missing endpoint", "referenced delete", "incompatible edit"])("keeps s
 });
 
 it("deletes through the model API and reloads the list", async () => {
-  data.models = [model({ model_id: "model/a b" })]; await open(); await click("Delete model exact[1m] (openai-chat)");
-  expect(writes[0]).toMatchObject({ url: "/api/models/model%2Fa%20b", method: "DELETE" });
+  data.models = [model({ model_id: "model/a b" })]; await open(); const reads = registryReads;
+  await click("Delete model exact[1m] (openai-chat)");
+  expect(confirm).toHaveBeenCalledWith('Delete model "exact[1m]" (openai-chat) from Account?');
+  expect(writes).toEqual([{ url: "/api/v1/ops/models/delete", method: "POST", body: { model: "model/a b" } }]);
+  expect(registryReads).toBeGreaterThan(reads);
   expect(container.textContent).not.toContain("exact[1m]");
 });
 
-it("keeps successful save warnings until acknowledged", async () => {
-  warnings = ["No full price: spend caps may not apply."]; await open(); await add(); await submit();
+it("does not request deletion until the existing confirmation is accepted", async () => {
+  vi.mocked(confirm).mockReturnValue(false);
+  data.models = [model()]; await open(); const reads = registryReads;
+  await click("Delete model exact[1m] (openai-chat)");
+  expect(confirm).toHaveBeenCalledOnce(); expect(writes).toHaveLength(0);
+  expect(registryReads).toBe(reads); expect(container.textContent).toContain("exact[1m]");
+});
+
+it.each(["create", "update"])("keeps successful %s warnings until acknowledged", async (operation) => {
+  warnings = ["No full price: spend caps may not apply."];
+  if (operation === "update") data.models = [model()];
+  await open(); if (operation === "update") await edit(); else await add(); await submit();
   expect(container.querySelector('[role="status"]')?.textContent).toContain(warnings[0]);
   await click("OK"); expect(container.querySelector("form")).toBeNull(); expect(container.textContent).toContain("exact[1m]");
 });

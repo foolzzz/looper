@@ -29,7 +29,7 @@ class Client:
         self.server = server
 
     async def call(self, method, path, body=None, *, token=TOKEN, raw=None, length=None):
-        if method == "POST" and path == "/api/v1/agent_settings/update_role":
+        if method == "POST" and (path == "/api/v1/agent_settings/update_role" or path.startswith(("/api/v1/ops/models/", "/api/v1/models/"))):
             from looper.agents.ops.clients import ClientOps
             self.server._client_ops = ClientOps(SimpleNamespace())
         payload = raw if raw is not None else b"" if body is None else json.dumps(body).encode()
@@ -61,7 +61,7 @@ class Client:
     async def ok(self, method, path, body=None, *, status=200):
         actual, answer = await self.call(method, path, body)
         assert actual == status, answer
-        return answer["result"] if path == "/api/v1/registry/view" else answer
+        return answer["result"] if path == "/api/v1/registry/view" or path.startswith(("/api/v1/ops/models/", "/api/v1/models/")) else answer
 
 
 def _run(test, monkeypatch, tmp_path, *, database=True):
@@ -83,6 +83,8 @@ def _run(test, monkeypatch, tmp_path, *, database=True):
                 monkeypatch.setattr(connection, "_pool", pool)
                 await serve(pool)
         else:
+            from looper.db import manager_actions
+            monkeypatch.setattr(manager_actions, "record", AsyncMock())
             await serve(None)
 
     asyncio.run(asyncio.wait_for(run(), timeout=45))
@@ -130,12 +132,12 @@ def test_vendor_creation_registry_models_and_saved_defaults(monkeypatch, tmp_pat
         assert [{k: e[k] for k in ("protocol", "base_url", "use_runtime_default")}
                 for e in account["endpoints"]] == deepseek["endpoints"]
         assert not {"models", "protocols", "base_url"} & account.keys()
-        assert (await client.ok("GET", f"/api/models?provider_id={pid}"))["models"] == []
+        assert (await client.ok("POST", "/api/v1/ops/models/list", {"provider": pid}))["models"] == []
         # Positive control: a stored model must appear, rather than an always-empty response.
         protocol = account["endpoints"][0]["protocol"]
         await pool.execute("INSERT INTO llm_models (id, provider_id, name, protocol) VALUES "
                            "('model-http', $1, 'exact-http-model', $2)", pid, protocol)
-        models = (await client.ok("GET", f"/api/models?provider_id={pid}"))["models"]
+        models = (await client.ok("POST", "/api/v1/ops/models/list", {"provider": pid}))["models"]
         assert [m["model_id"] for m in models] == ["model-http"]
         assert models[0]["protocol"] == protocol and models[0]["profile_count"] == 0
         registry = await client.ok("POST", "/api/v1/registry/view", {})
@@ -246,7 +248,7 @@ def test_model_profile_counts_and_reference_deletion_conflicts(monkeypatch, tmp_
         for method, path in (("POST", "/api/v1/registry/view"), ("GET", "/api/providers")):
             account = next(p for p in (await client.ok(method, path, {}))["providers"] if p["provider_id"] == pid)
             assert (account["model_count"], account["profile_count"]) == (1, 1)
-        models = (await client.ok("GET", f"/api/models?provider_id={pid}&runtime_id=rt-claude-code"))["models"]
+        models = (await client.ok("POST", "/api/v1/ops/models/list", {"provider": pid, "runtime": 'rt-claude-code'}))["models"]
         assert len(models) == 1 and models[0]["profile_count"] == 1
         for method, body in (("DELETE", None), ("PUT", {"endpoints": []})):
             status, answer = await client.call(method, f"/api/providers/{pid}", body)
@@ -259,7 +261,7 @@ def test_model_profile_counts_and_reference_deletion_conflicts(monkeypatch, tmp_
 
 
 @pytest.mark.parametrize("method,path", [
-    ("POST", "/api/v1/registry/view"), ("GET", "/api/providers"), ("GET", "/api/models"),
+    ("POST", "/api/v1/registry/view"), ("GET", "/api/providers"), ("POST", "/api/v1/ops/models/list"),
     ("POST", "/api/providers"), ("PUT", "/api/providers/prov-codex-login"),
     ("DELETE", "/api/providers/prov-codex-login"),
     ("DELETE", "/api/providers/prov-codex-login/login-problem"),
@@ -269,7 +271,7 @@ def test_operator_authentication_is_required(monkeypatch, tmp_path, method, path
         for token in (None, "wrong-token"):
             status, answer = await client.call(method, path, _account(api_key=SECRET), token=token)
             assert status == 401
-            if path == "/api/v1/registry/view":
+            if path.startswith("/api/v1/"):
                 assert answer["status"] == "error" and answer["error"]["code"] == "unauthorized"
             else:
                 assert set(answer) == {"error"}

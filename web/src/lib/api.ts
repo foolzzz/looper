@@ -2962,16 +2962,40 @@ export function deleteProvider(providerId: string): Promise<{ deleted: string }>
   return registryCall("DELETE", `/providers/${encodeURIComponent(providerId)}`, undefined, "delete provider");
 }
 
-export function createModel(fields: CreateModelFields): Promise<{ model: Model; warnings: string[] }> {
-  return registryCall("POST", "/models", fields, "add model");
+function modelSettings(fields: ModelFields): ModelFields {
+  const settings = { ...fields };
+  for (const key of ["context_window", "input_usd_per_mtok", "output_usd_per_mtok",
+    "cache_read_usd_per_mtok", "cache_write_usd_per_mtok"] as const) {
+    const value = settings[key];
+    if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) {
+      settings[key] = Number(value);
+    }
+  }
+  return settings;
 }
 
-export function updateModel(modelId: string, fields: ModelFields): Promise<{ model: Model; warnings: string[] }> {
-  return registryCall("PUT", `/models/${encodeURIComponent(modelId)}`, fields, "update model");
+export async function createModel(fields: CreateModelFields): Promise<{ model: Model; warnings: string[] }> {
+  const { provider_id, ...settings } = fields;
+  const result = await callV1<{ model: Model; warnings: string[] }>("/api/v1/ops/models/create",
+    { provider: provider_id, ...modelSettings(settings) });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
-export function deleteModel(modelId: string): Promise<{ deleted: string }> {
-  return registryCall("DELETE", `/models/${encodeURIComponent(modelId)}`, undefined, "delete model");
+export async function updateModel(modelId: string, fields: ModelFields): Promise<{ model: Model; warnings: string[] }> {
+  const result = await callV1<{ model: Model; warnings: string[] }>("/api/v1/ops/models/update",
+    { model: modelId, ...modelSettings(fields) });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
+}
+
+export async function deleteModel(modelId: string): Promise<{ deleted: string }> {
+  const result = await callV1<{ deleted: string }>("/api/v1/ops/models/delete", { model: modelId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
 /** After checking a runtime's own login on the machine (Codex's, Grok's): let runs use it again after a run found it

@@ -787,8 +787,8 @@ def _seed_dual_models(api: Api, project_id: str) -> None:
     # Put the incompatible homonym first: selecting by name or catalog order
     # alone must fail the check even though the profile's name looks right.
     for protocol, price in (("openai-chat", 9), ("anthropic-messages", 1)):
-        api.post("/api/models", {"provider_id": provider["provider_id"], "name": DUAL_MODEL,
-            "protocol": protocol, "input_usd_per_mtok": price, "output_usd_per_mtok": 3})
+        api.post("/api/v1/ops/models/create", {"provider": provider["provider_id"], "name": DUAL_MODEL,
+            "protocol": protocol, "input_usd_per_mtok": price, "output_usd_per_mtok": 3})["result"]
 
 
 def _seed_price_model(api: Api, project_id: str) -> None:

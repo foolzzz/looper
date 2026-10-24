@@ -661,7 +661,7 @@ def test_a_project_with_schedules_is_not_deleted_and_a_deleted_schedule_keeps_it
 
 def test_a_profile_a_schedule_chose_is_not_deleted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(env: ScheduleEnv) -> None:
-        models = (await env.call("GET", "/api/models", query={"provider_id": "prov-claude-subscription"}))[1]["models"]
+        models = (await env.ok("POST", "/api/v1/ops/models/list", {"provider": "prov-claude-subscription"}))["models"]
         created = await env.ok("POST", "/api/agent-profiles", {
             "name": "cheap", "runtime_id": "rt-claude-code",
             "model_id": next(m["model_id"] for m in models if m["name"] == "haiku")})

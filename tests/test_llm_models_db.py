@@ -400,6 +400,10 @@ def test_model_delete_waits_for_profile_creation_and_preserves_reference(monkeyp
 # Exercise the authenticated production HTTP parser and registry together.
 
 
+def _request_body(**changes):
+    return {"provider" if k == "provider_id" else k: v for k, v in _body(**changes).items()}
+
+
 @needs_db
 def test_http_provider_model_profile_flow(monkeypatch, tmp_path):
     async def test(client, pool):
@@ -407,23 +411,23 @@ def test_http_provider_model_profile_flow(monkeypatch, tmp_path):
             {"protocol": protocol, "base_url": f"https://{protocol}.example.invalid"}
             for protocol in ("anthropic-messages", "openai-chat")]), status=201))["provider"]
         pid = account["provider_id"]
-        body = _body(provider_id=pid, name="claude-haiku-4-5", context_window=100000,
+        body = _request_body(provider_id=pid, name="claude-haiku-4-5", context_window=100000,
                      efforts=["high"], input_usd_per_mtok=0, output_usd_per_mtok=0)
-        model = (await client.ok("POST", "/api/models", body, status=201))["model"]
+        model = (await client.ok("POST", "/api/v1/ops/models/create", body, status=200))["model"]
         mid = model["model_id"]
         assert mid.startswith("model-") and model["provider_id"] == pid
-        chat = (await client.ok("POST", "/api/models", {**body, "protocol": "openai-chat"}, status=201))["model"]
+        chat = (await client.ok("POST", "/api/v1/ops/models/create", {**body, "protocol": "openai-chat"}, status=200))["model"]
         assert mid != chat["model_id"]
-        listed = (await client.ok("GET", f"/api/models?provider_id={pid}&runtime_id=rt-claude-code"))["models"]
+        listed = (await client.ok("POST", "/api/v1/ops/models/list", {"provider": pid, "runtime": 'rt-claude-code'}))["models"]
         assert [m["model_id"] for m in listed] == [mid]
-        assert len((await client.ok("GET", f"/api/models?provider_id={pid}"))["models"]) == 2
-        assert (await client.ok("GET", f"/api/models/{mid}"))["model"] == model
-        changed = (await client.ok("PUT", f"/api/models/{mid}", {
+        assert len((await client.ok("POST", "/api/v1/ops/models/list", {"provider": pid}))["models"]) == 2
+        assert (await client.ok("POST", "/api/v1/models/get", {"model": mid}))["model"] == model
+        changed = (await client.ok("POST", "/api/v1/ops/models/update", {"model": mid,
             "context_window": None, "efforts": [], "input_usd_per_mtok": None}))["model"]
         assert changed["context_window"] is None and changed["efforts"] == []
         assert changed["output_usd_per_mtok"] == 0
         assert changed["prices"]["input_usd_per_mtok"] == {"override": None, "effective": 1, "source": "builtin"}
-        changed = (await client.ok("PUT", f"/api/models/{mid}", {"efforts": None}))["model"]
+        changed = (await client.ok("POST", "/api/v1/ops/models/update", {"model": mid, "efforts": None}))["model"]
         assert changed["efforts"] is None and changed["output_usd_per_mtok"] == 0
         profile = (await client.ok("POST", "/api/agent-profiles", {
             "name": "HTTP profile", "runtime_id": "rt-claude-code", "model_id": mid,
@@ -438,14 +442,15 @@ def test_http_provider_model_profile_flow(monkeypatch, tmp_path):
         registry = await client.ok("POST", "/api/v1/registry/view", {})
         assert next(p for p in registry["profiles"] if p["profile_id"] == aid) == profile
         assert next(m for m in registry["models"] if m["model_id"] == mid)["profile_count"] == 1
-        for path in (f"/api/models/{mid}", f"/api/providers/{pid}"):
-            status, error = await client.call("DELETE", path)
-            assert status == 409 and set(error) == {"error"}
+        status, error = await client.call("POST", "/api/v1/ops/models/delete", {"model": mid})
+        assert status == 409 and error["error"]["code"] == "conflict"
+        status, error = await client.call("DELETE", f"/api/providers/{pid}")
+        assert status == 409 and set(error) == {"error"}
         profile = (await client.ok("PUT", f"/api/agent-profiles/{aid}", {"effort": None}))["profile"]
         assert profile["effort"] is None and profile["custom_prompt"] == "HTTP instructions"
         await client.ok("DELETE", f"/api/agent-profiles/{aid}")
         for model_id in (mid, chat["model_id"]):
-            assert await client.ok("DELETE", f"/api/models/{model_id}") == {"deleted": model_id}
+            assert await client.ok("POST", "/api/v1/ops/models/delete", {"model": model_id}) == {"deleted": model_id}
         await client.ok("DELETE", f"/api/providers/{pid}")
         assert await db.get_provider(pid) is None and await db.get_model(mid) is None
     _run_http(test, monkeypatch, tmp_path)
@@ -455,26 +460,26 @@ def test_http_provider_model_profile_flow(monkeypatch, tmp_path):
 def test_http_model_errors_and_concurrent_deletion(monkeypatch, tmp_path):
     async def test(client, pool):
         pid = (await client.ok("POST", "/api/providers", _account(), status=201))["provider"]["provider_id"]
-        body = _body(provider_id=pid)
-        mid = (await client.ok("POST", "/api/models", body, status=201))["model"]["model_id"]
+        body = _request_body(provider_id=pid)
+        mid = (await client.ok("POST", "/api/v1/ops/models/create", body, status=200))["model"]["model_id"]
         cases = [
-            ("POST", "/api/models", body, 409),
-            ("POST", "/api/models", {**body, "protocol": "openai-chat"}, 400),
-            ("POST", "/api/models", {**body, "provider_id": "prov-missing"}, 404),
-            ("PUT", f"/api/models/{mid}", {"name": "renamed"}, 400),
-            ("PUT", f"/api/models/{mid}", {"context_window": True}, 400),
-            ("GET", "/api/models?runtime_id=rt-missing", None, 404),
+            ("/api/v1/ops/models/create", body, 409),
+            ("/api/v1/ops/models/create", {**body, "protocol": "openai-chat"}, 400),
+            ("/api/v1/ops/models/create", {**body, "provider": "prov-missing"}, 404),
+            ("/api/v1/ops/models/update", {"model": mid, "name": "renamed"}, 400),
+            ("/api/v1/ops/models/update", {"model": mid, "context_window": True}, 400),
+            ("/api/v1/ops/models/list", {"runtime": "rt-missing"}, 404),
         ]
-        for method in ("GET", "PUT", "DELETE"):
-            cases.append((method, "/api/models/model-missing", {"efforts": None} if method == "PUT" else None, 404))
+        for path in ("/api/v1/models/get", "/api/v1/ops/models/update", "/api/v1/ops/models/delete"):
+            cases.append((path, {"model": "model-missing", **({"efforts": None} if path.endswith("update") else {})}, 404))
         builtin = await pool.fetchval("SELECT id FROM llm_models WHERE builtin LIMIT 1")
-        cases += [("PUT", f"/api/models/{builtin}", {"efforts": []}, 400),
-                  ("DELETE", f"/api/models/{builtin}", None, 400)]
-        for method, path, value, expected in cases:
-            status, error = await client.call(method, path, value)
-            assert status == expected and set(error) == {"error"}, (method, path, error)
-        results = await asyncio.gather(client.call("DELETE", f"/api/models/{mid}"),
-                                       client.call("DELETE", f"/api/models/{mid}"))
+        cases += [("/api/v1/ops/models/update", {"model": builtin, "efforts": []}, 400),
+                  ("/api/v1/ops/models/delete", {"model": builtin}, 400)]
+        for path, value, expected in cases:
+            status, error = await client.call("POST", path, value)
+            assert status == expected and error["status"] == "error", (path, error)
+        results = await asyncio.gather(client.call("POST", "/api/v1/ops/models/delete", {"model": mid}),
+                                       client.call("POST", "/api/v1/ops/models/delete", {"model": mid}))
         assert sorted(status for status, _ in results) == [200, 404]
         assert await db.get_model(mid) is None
     _run_http(test, monkeypatch, tmp_path)
@@ -492,43 +497,46 @@ def test_http_profile_rejects_old_body_and_mode_fields(monkeypatch, tmp_path, fi
     _run_http(test, monkeypatch, tmp_path, database=False)
 
 
-@pytest.mark.parametrize("method,path", [("GET", "/api/models"), ("POST", "/api/models"),
-    ("GET", "/api/models/model-test"), ("PUT", "/api/models/model-test"), ("DELETE", "/api/models/model-test")])
-def test_http_model_routes_require_authentication(monkeypatch, tmp_path, method, path):
+@pytest.mark.parametrize("path", ["/api/v1/ops/models/list", "/api/v1/ops/models/create",
+    "/api/v1/models/get", "/api/v1/ops/models/update", "/api/v1/ops/models/delete"])
+def test_http_model_routes_require_authentication(monkeypatch, tmp_path, path):
     async def test(client, pool):
-        status, error = await client.call(method, path, _body(), token=None)
-        assert status == 401 and set(error) == {"error"}
+        status, error = await client.call("POST", path, _request_body(), token=None)
+        assert status == 401 and error["error"]["code"] == "unauthorized"
     _run_http(test, monkeypatch, tmp_path, database=False)
 
 
-@pytest.mark.parametrize("method,path,body", [
-    ("POST", "/api/models", {"provider_id": None, "name": "m", "protocol": "anthropic-messages"}),
-    ("POST", "/api/models", {"provider_id": "prov-test", "name": "m", "protocol": ["openai-chat"]}),
-    ("PUT", "/api/models/model-test", {"name": "immutable"}),
-    ("PUT", "/api/models/model-test", {}),
+@pytest.mark.parametrize("path,body", [
+    ("/api/v1/ops/models/create", {"provider": None, "name": "m", "protocol": "anthropic-messages"}),
+    ("/api/v1/ops/models/create", {"provider": "prov-test", "name": "m", "protocol": ["openai-chat"]}),
+    ("/api/v1/ops/models/update", {"model": "model-test", "name": "immutable"}),
+    ("/api/v1/ops/models/update", {"model": "model-test"}),
 ])
-def test_http_model_validation_uses_shared_registry(monkeypatch, tmp_path, method, path, body):
+def test_http_model_validation_uses_shared_registry(monkeypatch, tmp_path, path, body):
+    monkeypatch.setattr(db, "get_model", AsyncMock(return_value=_row()))
     async def test(client, pool):
-        status, error = await client.call(method, path, body)
-        assert status == 400 and set(error) == {"error"}
+        status, error = await client.call("POST", path, body)
+        assert status == 400 and error["error"]["code"] == "invalid"
     _run_http(test, monkeypatch, tmp_path, database=False)
 
 
-@pytest.mark.parametrize("resource", ["models", "agent-profiles"])
+@pytest.mark.parametrize("path", ["/api/v1/ops/models/create", "/api/agent-profiles"])
 @pytest.mark.parametrize("raw", [b"{", b"[]", b"null", b'"text"', b"\xff"])
-def test_http_registry_rejects_malformed_or_nonobject_bodies(monkeypatch, tmp_path, resource, raw):
+def test_http_registry_rejects_malformed_or_nonobject_bodies(monkeypatch, tmp_path, path, raw):
     async def test(client, pool):
-        status, answer = await client.call("POST", f"/api/{resource}", raw=raw)
-        assert status == 400 and set(answer) == {"error"}
+        status, answer = await client.call("POST", path, raw=raw)
+        assert status == 400
+        assert answer["error"]["code"] == "invalid" if path.startswith("/api/v1/") else set(answer) == {"error"}
     _run_http(test, monkeypatch, tmp_path, database=False)
 
 
 @pytest.mark.parametrize("model_id", ["prov-test", "agent-test", "model-test/extra", "model_test"])
-@pytest.mark.parametrize("method", ["GET", "PUT", "DELETE"])
-def test_http_model_routes_accept_only_model_ids(monkeypatch, tmp_path, method, model_id):
+@pytest.mark.parametrize("action", ["update", "delete"])
+def test_http_model_mutations_require_an_exact_model_reference(monkeypatch, tmp_path, action, model_id):
     async def test(client, pool):
-        status, answer = await client.call(method, f"/api/models/{model_id}", {"efforts": None})
-        assert status == 404 and set(answer) == {"error"}
+        status, answer = await client.call("POST", f"/api/v1/ops/models/{action}",
+                                          {"model": model_id, **({"efforts": None} if action == "update" else {})})
+        assert status == 400 and answer["error"]["code"] == "invalid"
     _run_http(test, monkeypatch, tmp_path, database=False)
 
 
@@ -538,9 +546,11 @@ def test_http_model_routes_accept_only_model_ids(monkeypatch, tmp_path, method, 
     {"cache_write_usd_per_mtok": 10001}, {"efforts": ["bad value"]}, {"background_model": "bad name"},
 ])
 def test_http_model_creation_rejects_invalid_settings(monkeypatch, tmp_path, changes):
+    monkeypatch.setattr(service, "list_providers", AsyncMock(return_value={"providers": [
+        {"provider_id": "prov-test", "name": "Test account"}]}))
     async def test(client, pool):
-        status, answer = await client.call("POST", "/api/models", _body(**changes))
-        assert status == 400 and set(answer) == {"error"}
+        status, answer = await client.call("POST", "/api/v1/ops/models/create", _request_body(**changes))
+        assert status == 400 and answer["error"]["code"] == "invalid"
     _run_http(test, monkeypatch, tmp_path, database=False)
 
 
@@ -584,7 +594,7 @@ def test_http_profile_preview_uses_saved_binding_role_project_and_mode_source(mo
         from looper.agents import prompt_preview
 
         pid = (await client.ok("POST", "/api/providers", _account(), status=201))["provider"]["provider_id"]
-        mid = (await client.ok("POST", "/api/models", _body(provider_id=pid), status=201))["model"]["model_id"]
+        mid = (await client.ok("POST", "/api/v1/ops/models/create", _request_body(provider_id=pid), status=200))["model"]["model_id"]
         aid = (await client.ok("POST", "/api/agent-profiles", {
             "name": "Preview profile", "runtime_id": "rt-claude-code", "model_id": mid,
             "custom_prompt": "Preview identity"}, status=201))["profile"]["profile_id"]
@@ -616,15 +626,19 @@ def test_http_model_filters_and_readback_use_registry_views(monkeypatch, tmp_pat
     row = _row(name="claude-haiku-4-5", input_usd_per_mtok=0)
     other_protocol = _row(protocol="openai-chat")
     models = AsyncMock(return_value=[row, other_protocol])
+    monkeypatch.setattr(service, "list_providers", AsyncMock(return_value={"providers": [
+        {"provider_id": "prov-test", "name": "Test account"}]}))
+    monkeypatch.setattr(db, "list_runtimes", AsyncMock(return_value=[
+        {"id": "rt-test", "name": "Test runtime", "type": "claude-code"}]))
     monkeypatch.setattr(db, "list_models", models)
     monkeypatch.setattr(db, "get_model", AsyncMock(return_value=row))
     monkeypatch.setattr(db, "get_runtime", AsyncMock(return_value={
         "id": "rt-test", "name": "Test runtime", "type": "claude-code", "executable": "", "capabilities": []}))
     async def test(client, pool):
-        listed = await client.ok("GET", "/api/models?provider_id=prov-test&runtime_id=rt-test")
+        listed = await client.ok("POST", "/api/v1/ops/models/list", {"provider": 'prov-test', "runtime": 'rt-test'})
         assert [m["protocol"] for m in listed["models"]] == ["anthropic-messages"]
         assert models.await_args.kwargs == {"provider_id": "prov-test"}
-        saved = (await client.ok("GET", "/api/models/model-test"))["model"]
+        saved = (await client.ok("POST", "/api/v1/models/get", {"model": 'model-test'}))["model"]
         assert saved == listed["models"][0]
         assert saved["prices"]["input_usd_per_mtok"] == {"override": 0, "effective": 0, "source": "override"}
         assert "api_key" not in repr(saved)
