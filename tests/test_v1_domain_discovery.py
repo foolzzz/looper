@@ -33,7 +33,11 @@ schedule_admin.list schedule_admin.project_list schedule_admin.get schedule_admi
 schedule_admin.runs schedule_admin.notifications
 schedule_admin.create schedule_admin.update schedule_admin.delete schedule_admin.reset_planner_session
 schedule_admin.run
+manager_session.get manager_session.select_profile operator_chat.turn operator_chat.stop
+chat_settings.get chat_settings.update
+clients.list clients.create clients.revoke
 project_roles.stats role_templates.list role_templates.put role_templates.delete
+runs.for_task runs.list runs.get runs.events runs.usage
 """.split()
 
 
