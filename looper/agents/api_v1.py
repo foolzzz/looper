@@ -476,6 +476,7 @@ def _document(ops: Sequence[Operation]) -> dict[str, Any]:
         "components": {
             "securitySchemes": {"bearer": {"type": "http", "scheme": "bearer"}},
             "schemas": {
+                **{name: schema for domain in domains() for name, schema in getattr(domain, "SCHEMAS", {}).items()},
                 "ErrorCode": {"type": "string", "enum": [code.value for code in ErrorCode]},
                 "OpError": _object({"status": {"const": "error"}, "error": _object({
                     "code": {"$ref": "#/components/schemas/ErrorCode"}, "message": _STR,

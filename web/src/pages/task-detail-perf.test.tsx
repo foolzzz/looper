@@ -55,7 +55,7 @@ function layout(el: HTMLElement, rowHeight = 50) {
 describe("Sessions tab window", () => {
   it("reads the latest window, streams after its newest seq and scrolls to the bottom", async () => {
     vi.mocked(fetchTaskActivityWindow).mockResolvedValue({ events: range(501, 1500), hasMore: true });
-    await act(async () => root.render(<SessionsTab taskId="task-a" />));
+    await act(async () => root.render(<SessionsTab taskId="task-a" status="running" />));
     await settle();
     expect(fetchTaskActivityWindow).toHaveBeenCalledTimes(1);
     expect(vi.mocked(fetchTaskActivityWindow).mock.calls[0][1]).toBeUndefined();
@@ -68,7 +68,7 @@ describe("Sessions tab window", () => {
     vi.mocked(fetchTaskActivityWindow)
       .mockResolvedValueOnce({ events: range(101, 200), hasMore: true })
       .mockResolvedValueOnce({ events: range(1, 100), hasMore: false });
-    await act(async () => root.render(<SessionsTab taskId="task-a" />));
+    await act(async () => root.render(<SessionsTab taskId="task-a" status="running" />));
     await settle();
     const scroller = container.querySelector<HTMLElement>(".overflow-y-auto")!;
     layout(scroller);
@@ -91,7 +91,7 @@ describe("Sessions tab window", () => {
     vi.mocked(fetchTaskActivityWindow)
       .mockResolvedValueOnce({ events: range(11, 20), hasMore: true })
       .mockReturnValueOnce(new Promise((resolve) => { release = resolve; }));
-    await act(async () => root.render(<SessionsTab taskId="task-a" />));
+    await act(async () => root.render(<SessionsTab taskId="task-a" status="running" />));
     await settle();
     const scroller = container.querySelector<HTMLElement>(".overflow-y-auto")!;
     layout(scroller);
@@ -110,7 +110,7 @@ describe("Sessions tab window", () => {
 
   it("follows new events only while at the bottom", async () => {
     vi.mocked(fetchTaskActivityWindow).mockResolvedValue({ events: range(1, 20), hasMore: false });
-    await act(async () => root.render(<SessionsTab taskId="task-a" />));
+    await act(async () => root.render(<SessionsTab taskId="task-a" status="running" />));
     await settle();
     const scroller = container.querySelector<HTMLElement>(".overflow-y-auto")!;
     layout(scroller);

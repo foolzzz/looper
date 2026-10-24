@@ -6,17 +6,17 @@ const TOP_EDGE = 120;
 /** How near the bottom (px) still counts as being at the bottom. */
 const BOTTOM_EDGE = 40;
 
-const bySeq = (a: ActivityEvent, b: ActivityEvent) => a.seq - b.seq;
+const bySeq = (a: { seq: number }, b: { seq: number }) => a.seq - b.seq;
 
 /** A task's events as a window on their tail: the latest page is read at once, the page before the oldest loaded
  * one when the scroll nears the top (its place anchored, so the reading does not jump). The view follows new events
  * only while it is at the bottom. `latestSeq` is the newest loaded seq once the first page is read (0 when it could
  * not be), null before: where a stream should start. */
-export function useEventWindow(
+export function useEventWindow<T extends { seq: number } = ActivityEvent>(
   key: string,
-  fetchPage: (before: number | undefined, signal: AbortSignal) => Promise<EventWindow>,
+  fetchPage: (before: number | undefined, signal: AbortSignal) => Promise<EventWindow<T>>,
 ) {
-  const [events, setEvents] = useState<ActivityEvent[]>([]);
+  const [events, setEvents] = useState<T[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [latestSeq, setLatestSeq] = useState<number | null>(null);
@@ -82,7 +82,7 @@ export function useEventWindow(
     );
   }, []);
 
-  const append = useCallback((event: ActivityEvent) => {
+  const append = useCallback((event: T) => {
     setEvents((prev) => (prev.some((e) => e.seq === event.seq) ? prev : [...prev, event]));
   }, []);
 

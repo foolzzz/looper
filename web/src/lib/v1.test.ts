@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { callV1, confirmV1, streamV1, V1Error, type V1PendingConfirmation } from "@/lib/v1";
-import { fetchStatus, updateTaskConfig, setTaskProject, setTaskAgents, continueTaskAtCap, PROJECTS_CHANGED_EVENT } from "@/lib/api";
+import { fetchStatus, updateTaskConfig, setTaskProject, setTaskAgents, continueTaskAtCap, fetchTaskActivity, fetchTaskActivityWindow, fetchTaskConversation, streamTaskActivity, PROJECTS_CHANGED_EVENT } from "@/lib/api";
 import { installSessionGuard, resetSessionGuard, SessionEndedError } from "@/lib/session";
 
 beforeEach(() => resetSessionGuard());
@@ -182,4 +182,51 @@ it.each(taskWrites)("task $action stops after the operator session ends", async 
   await expect(run()).rejects.toBeInstanceOf(SessionEndedError);
   await expect(run()).rejects.toBeInstanceOf(SessionEndedError);
   expect(fetcher).toHaveBeenCalledOnce();
+});
+
+
+it("reads task activity and thin conversation windows through v1 POST with the paging cursor", async () => {
+  const event = { seq: 7, worker: null, kind: "text", summary: "Public progress", created_at: "2026-10-24T00:00:00Z" };
+  const activity = { ...event, task_id: "task-a", metadata: null, input_tokens: null, output_tokens: null };
+  const fetcher = vi.fn(async (url: string) => Response.json({ status: "ok", result: url.endsWith("/conversation")
+    ? { rows: [event], has_more: true, oldest_seq: 7, latest_seq: 7 }
+    : { activity: [activity], has_more: true, oldest_seq: 7, latest_seq: 7 } }));
+  vi.stubGlobal("fetch", fetcher);
+  const signal = new AbortController().signal;
+  expect((await fetchTaskActivity("task-a", 6, 200)).activity).toEqual([activity]);
+  expect(await fetchTaskActivityWindow("task-a", 8, signal)).toEqual({ events: [activity], hasMore: true });
+  expect(await fetchTaskConversation("task-a", 8, signal)).toEqual({ events: [event], hasMore: true });
+  expect(fetcher.mock.calls.map(([url]) => url)).toEqual(["/api/v1/tasks/activity", "/api/v1/tasks/activity", "/api/v1/tasks/conversation"]);
+  expect(fetcher).toHaveBeenNthCalledWith(1, "/api/v1/tasks/activity", expect.objectContaining({ method: "POST",
+    body: JSON.stringify({ task_id: "task-a", since: 6, limit: 200 }) }));
+  expect(fetcher).toHaveBeenNthCalledWith(2, "/api/v1/tasks/activity", expect.objectContaining({ signal,
+    body: JSON.stringify({ task_id: "task-a", before: 8 }) }));
+});
+
+it("reconnects task activity after its last seq and emits each activity once before done", async () => {
+  const frame = (seq: number) => `id: ${seq}\nevent: activity\ndata: ${JSON.stringify({ seq })}\n\n`;
+  const fetcher = vi.fn().mockResolvedValueOnce(new Response(frame(7), { headers: eventHeaders }))
+    .mockResolvedValueOnce(new Response(frame(7) + frame(8) + "event: done\ndata: {}\n\n", { headers: eventHeaders }));
+  vi.stubGlobal("fetch", fetcher);
+  const onEvent = vi.fn(), onDone = vi.fn();
+  const stop = streamTaskActivity("task-a", 6, onEvent, onDone);
+  try {
+    await vi.waitFor(() => expect(onDone).toHaveBeenCalledOnce(), { timeout: 2500 });
+    expect(onEvent.mock.calls.map(([event]) => event.seq)).toEqual([7, 8]);
+    expect(fetcher).toHaveBeenNthCalledWith(2, "/api/v1/tasks/activity_stream", expect.objectContaining({ method: "POST",
+      body: JSON.stringify({ task_id: "task-a", since: 7 }) }));
+  } finally { stop(); }
+});
+
+it("aborts task activity without reconnecting or delivering late events", async () => {
+  const cancel = vi.fn(), onDone = vi.fn(), onEvent = vi.fn();
+  const fetcher = vi.fn(async () => new Response(new ReadableStream({ cancel }), { headers: eventHeaders }));
+  vi.stubGlobal("fetch", fetcher);
+  const stop = streamTaskActivity("task-a", 0, onEvent, onDone);
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+  stop();
+  await vi.waitFor(() => expect(onDone).toHaveBeenCalledOnce());
+  expect(cancel).toHaveBeenCalledOnce();
+  expect(fetcher).toHaveBeenCalledOnce();
+  expect(onEvent).not.toHaveBeenCalled();
 });
