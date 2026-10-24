@@ -38,6 +38,11 @@ async def _call(method: str, path: str, body: Any = None, *, claude: str = "clau
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())), claude_bin=claude)
     method, path, body = _global_settings_request(method, path, body)
+    if path.startswith(("/api/v1/project_agent_settings/", "/api/v1/allowed_profiles/")):
+        from tests.db_support import call_v1
+
+        server._client_ops = ClientOps(SimpleNamespace())
+        return await call_v1(server, path, body)
     if path == "/api/v1/tasks/create":
         from tests.test_api_v1_ops_db import _v1
 

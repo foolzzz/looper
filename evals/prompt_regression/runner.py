@@ -541,7 +541,8 @@ def run_task(
         if task.planner_may_choose:
             if chosen_profile_id is None:
                 raise EvalError(f"{task.id} needs the profile its Planner may choose")
-            api.put(f"/api/projects/{created['project_id']}/allowed-profiles", {"profile_ids": [chosen_profile_id]})
+            api.post("/api/v1/allowed_profiles/replace",
+                     {"project_id": created["project_id"], "profile_ids": [chosen_profile_id]})
         if task.roles_on:
             api.put(f"/api/projects/{created['project_id']}", {"planner_roles": "on"})
         for template in task.role_templates:

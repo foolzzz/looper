@@ -27,7 +27,7 @@ from ..db import api_clients as db_api_clients
 from ..db.tasks import TaskGroup
 from ..ops_config import OpsConfig
 from . import (
-    agent_settings, api_v1, chat_settings, config_imports, config_transfer, gate_service, knowledge,
+    api_v1, chat_settings, config_imports, config_transfer, gate_service, knowledge,
     operator_auth, overview, profile_registry, projects, prompt_preview, request_guard, role_api,
     schedules, self_check, vault, wait_service,
 )
@@ -827,9 +827,6 @@ class AgentHTTPServer:
     _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
     _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
-    _RE_PROJECT_AGENT_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings$")
-    _RE_PROJECT_ROLE_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings/roles/([a-zA-Z0-9_-]+)$")
-    _RE_PROJECT_ALLOWED_PROFILES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/allowed-profiles$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
     _RE_PROVIDER_LOGIN_PROBLEM = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)/login-problem$")
     _RE_PROFILE_PROMPT_PREVIEW = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)/prompt-preview$")
@@ -880,19 +877,6 @@ class AgentHTTPServer:
                 m.group(1), projects.json_object(body)))
         elif (m := self._RE_PROFILE.match(path)) and method == "DELETE":
             await self._handle_registry(writer, HTTP_200, lambda: profile_registry.delete_profile(m.group(1)))
-        elif (m := self._RE_PROJECT_AGENT_SETTINGS.match(path)) and method == "GET":
-            await self._handle_agent_settings(writer, lambda: agent_settings.project_settings_view(m.group(1)))
-        elif (m := self._RE_PROJECT_AGENT_SETTINGS.match(path)) and method == "PUT":
-            await self._handle_agent_settings(writer, lambda: agent_settings.update_project(
-                m.group(1), projects.json_object(body)))
-        elif (m := self._RE_PROJECT_ALLOWED_PROFILES.match(path)) and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: projects.allowed_profiles_view(m.group(1)))
-        elif (m := self._RE_PROJECT_ALLOWED_PROFILES.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: projects.set_allowed_profiles(
-                m.group(1), projects.json_object(body)))
-        elif (m := self._RE_PROJECT_ROLE_SETTINGS.match(path)) and method == "PUT":
-            await self._handle_agent_settings(writer, lambda: self._write_layer(
-                body, lambda data: agent_settings.update_project(m.group(1), data, role=m.group(2))))
         elif path == "/api/scheduler-settings" and method == "GET":
             await self._answer(writer, HTTP_200, schedules.scheduler_settings)
         elif path == "/api/scheduler-settings" and method == "PUT":
@@ -1294,16 +1278,6 @@ class AgentHTTPServer:
 
     # --- Agent settings (the defaults every agent inherits) ---
 
-    async def _write_layer(
-        self, body: bytes, update: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
-    ) -> dict[str, Any]:
-        """``update`` a role's layer with the body; when it set a concurrency limit, start what it lets start."""
-        data = projects.json_object(body)
-        result = await update(data)
-        if "max_concurrency" in data:
-            await self._recheck_concurrency()
-        return result
-
     async def _apply_import(self, imports: config_imports.ConfigImports, import_id: str, *,
                             owner: str | None = None) -> Any:
         """Apply an import; its layers may raise a concurrency limit."""
@@ -1314,25 +1288,6 @@ class AgentHTTPServer:
     async def _recheck_concurrency(self) -> None:
         """Start the runs that wait for room a raised limit now gives; a lowered limit stops nothing."""
         await recheck_limits(self._worker_pool)
-
-    async def _handle_agent_settings(
-        self, writer: asyncio.StreamWriter, request: Callable[[], Awaitable[dict[str, Any]]],
-    ) -> None:
-        """Answer with the agent settings ``request()`` returns; a refused value is 400, an unknown role or
-        project 404."""
-        try:
-            result = await request()
-        except (agent_settings.SettingsError, projects.RequestError) as exc:
-            status, result = getattr(exc, "status", HTTP_400), {"error": str(exc)}
-        except agent_settings.SettingsNotFound as exc:
-            status, result = HTTP_404, {"error": str(exc)}
-        except Exception as exc:
-            logger.exception("agent settings request failed")
-            status, result = HTTP_500, {"error": str(exc)}
-        else:
-            status = HTTP_200
-        writer.write(_json_response(status, _serialize(result)))
-        await writer.drain()
 
     async def _handle_registry(
         self, writer: asyncio.StreamWriter, status: str, request: Callable[[], Awaitable[Any]],

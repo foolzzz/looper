@@ -445,7 +445,7 @@ def _call(method: str, path: str, body: Any = None, *, router: Any = None, pool:
     method, path, body = _global_settings_request(method, path, body)
     raw = body if isinstance(body, bytes) else (b"" if body is None else json.dumps(body).encode())
     writer = _Writer()
-    v1 = path.startswith(("/api/v1/roles/", "/api/v1/agent_settings/"))
+    v1 = path.startswith(("/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/project_agent_settings/"))
     if v1:
         server._client_ops = ClientOps(SimpleNamespace())
         asyncio.run(server._handle_v1(method, path, {}, {}, raw, writer, OPERATOR))
@@ -527,7 +527,7 @@ class TestSettingsApi:
         ("/api/agent-settings/system", {"effort": "high"}, 400, "declared schema"),
         ("/api/agent-settings/roles/worker", {"effort": None}, 400, "declared schema"),
         ("/api/projects/proj-a/agent-settings/roles/worker", {"effort": "low"}, 400,
-         "effort is part of the Agent Profile"),
+         "declared schema"),
         ("/api/agent-settings/system", {"env": [{"key": "GITHUB_TOKEN", "value": "x"}]}, 400, "secrets"),
         ("/api/agent-settings/system", {"env": [{"key": "TZ", "value": None}]}, 400, "at most 4000"),
         ("/api/agent-settings/system", {"run_budget_usd": 0}, 400, "more than 0"),
@@ -536,7 +536,7 @@ class TestSettingsApi:
         ("/api/agent-settings/system", {}, 400, "at least one"),
         ("/api/agent-settings/system", b"not json", 400, "body must be a JSON object"),
         ("/api/agent-settings/roles/boss", {"profile_id": "agent-sonnet"}, 400, "declared schema"),
-        ("/api/projects/proj-a/agent-settings/roles/manager", {"profile_id": "agent-sonnet"}, 400, "spans every project"),
+        ("/api/projects/proj-a/agent-settings/roles/manager", {"profile_id": "agent-sonnet"}, 400, "declared schema"),
         ("/api/projects/proj-zzz/agent-settings", {"profile_id": "agent-sonnet"}, 404, "not found"),
         # Concurrency is per task: only the Workers' and the Reviewers' role layers take a limit, the default for
         # every task; a project, a role in a project and the Planner have none.

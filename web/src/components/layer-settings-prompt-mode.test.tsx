@@ -69,9 +69,9 @@ describe("the role layer's system prompt mode", () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       const result = url === "/api/v1/registry/view" ? SUMMARY_REGISTRY
-        : url.endsWith("/allowed-profiles") ? { profiles: [], choosable: [] }
+        : url === "/api/v1/allowed_profiles/get" ? { profiles: [], choosable: [] }
         : url.endsWith("/roles/list") ? { configs: [{ role: "planner", display_name: "Planner", enabled: true }] }
-        : url.includes("/projects/") ? { limits: LIMITS, project: { values: VALUES }, roles }
+        : url === "/api/v1/project_agent_settings/get" ? { limits: LIMITS, project: { values: VALUES }, roles }
         : { limits: LIMITS, system: state, roles };
       // Roles and agent settings are v1 operations. callV1 accepts only { status: "ok", result }.
       return Response.json(url.startsWith("/api/v1/") ? { status: "ok", result } : result);

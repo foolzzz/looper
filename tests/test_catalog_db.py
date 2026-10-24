@@ -34,7 +34,7 @@ class _Writer:
 
 
 def _global_settings_request(method: str, path: str, body: Any) -> tuple[str, str, Any]:
-    """Keep existing service-contract fixtures on the global settings v1 transport."""
+    """Keep existing service-contract fixtures on the settings v1 transport."""
     parts = path.split("/")
     operation, data = None, body
     if method == "GET" and path == "/api/roles":
@@ -50,6 +50,17 @@ def _global_settings_request(method: str, path: str, body: Any) -> tuple[str, st
         operation, data = "agent_settings/update_system", {"values": body}
     elif method == "PUT" and len(parts) == 5 and parts[1:4] == ["api", "agent-settings", "roles"]:
         operation, data = "agent_settings/update_role", {"role": parts[4], "values": body}
+    elif len(parts) >= 5 and parts[1:3] == ["api", "projects"]:
+        project_id = parts[3]
+        if len(parts) == 5 and parts[4] == "agent-settings" and method in ("GET", "PUT"):
+            operation = "project_agent_settings/get" if method == "GET" else "project_agent_settings/update"
+            data = {"project_id": project_id, **({"values": body} if method == "PUT" else {})}
+        elif len(parts) == 7 and parts[4:6] == ["agent-settings", "roles"] and method == "PUT":
+            operation, data = "project_agent_settings/update_role", {
+                "project_id": project_id, "role": parts[6], "values": body}
+        elif len(parts) == 5 and parts[4] == "allowed-profiles" and method in ("GET", "PUT"):
+            operation = "allowed_profiles/get" if method == "GET" else "allowed_profiles/replace"
+            data = {"project_id": project_id, **(body if method == "PUT" else {})}
     if operation:
         return "POST", f"/api/v1/{operation}", body if isinstance(body, bytes) else data
     return method, path, body
@@ -62,6 +73,12 @@ async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
     method, path, body = _global_settings_request(method, path, body)
+    if path.startswith(("/api/v1/project_agent_settings/", "/api/v1/allowed_profiles/")):
+        from looper.agents.ops.clients import ClientOps
+        from tests.db_support import call_v1
+
+        server._client_ops = ClientOps(SimpleNamespace())
+        return await call_v1(server, path, body)
     writer = _Writer()
     raw = b"" if body is None else json.dumps(body).encode()
     if (method == "POST" and path in ("/api/v1/registry/view", "/api/v1/runtimes/probe")) or path.startswith(
