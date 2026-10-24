@@ -1,4 +1,4 @@
-"""Domain discovery and the operation order preserved from main."""
+"""Domain discovery and the expected OpenAPI operation order."""
 
 import importlib
 import pkgutil
@@ -9,7 +9,7 @@ import pytest
 from looper.agents import api_v1, v1_domains
 
 
-_MAIN_OPERATION_IDS = """
+_EXPECTED_OPERATION_IDS = """
 overview tasks.list tasks.get tasks.room task_create task_control.start task_control.stop task_control.restart
 task_control.start_over task_control.cancel task_instruct task_update concurrency projects.list projects.get
 projects.create projects.update projects.delete agent_profiles.list agent_profiles.create
@@ -19,7 +19,7 @@ config_export costs settings.view settings.set settings.allowed_profiles setting
 settings.knowledge_vault schedules.list schedules.get schedules.create schedules.update schedules.enable
 schedules.disable schedules.run schedules.delete schedules.reset_planner_session task_pipeline gates.list
 gates.messages gates.reply gates.end chat.send chat.messages chat.conversations confirm openapi whoami
-auth.set_password auth.clear_password system.check config.export config.import_preview config.import_cancel
+auth.set_password auth.clear_password system.check config.export config.import_preview
 config.import_apply system.status system.overview tasks.requirement_update tasks.configure tasks.move
 tasks.agents tasks.continue catalog_items.list catalog_items.get catalog_items.update catalog_items.delete
 installs.create installs.update installs.delete installs.project catalog_sources.import_machine
@@ -34,8 +34,10 @@ schedule_admin.runs schedule_admin.notifications
 manager_session.get manager_session.select_profile operator_chat.turn operator_chat.stop
 chat_settings.get chat_settings.update
 clients.list clients.create clients.revoke
+config.import_upload config.import_cancel
 project_roles.stats role_templates.list role_templates.put role_templates.delete
 runs.for_task runs.list runs.get runs.events runs.usage
+tasks.create
 """.split()
 
 
@@ -50,7 +52,7 @@ def test_discovery_finds_every_current_domain():
 
 def test_openapi_operations_keep_main_order():
     assert [op["operationId"] for item in api_v1.document()["paths"].values()
-            for op in item.values()] == [*_MAIN_OPERATION_IDS, "tasks.create"]
+            for op in item.values()] == _EXPECTED_OPERATION_IDS
 
 
 @pytest.fixture
