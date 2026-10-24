@@ -413,7 +413,7 @@ class Parser(argparse.ArgumentParser):
 class HandCommand:
     name: str
     help: str
-    add: Callable[[Parser], None]
+    add: Callable[[Parser], Any]
     run: Callable[[argparse.Namespace, Context], int]
 
 
@@ -546,7 +546,7 @@ def _doctor(args: argparse.Namespace, ctx: Context) -> int:
     return code
 
 
-def _config_arguments(parser: Parser) -> None:
+def _config_arguments(parser: Parser) -> Any:
     commands = parser.add_subparsers(dest="config_command", required=True)
     export = commands.add_parser("export")
     export.add_argument("file", help="destination JSON file ('-' writes stdout)")
@@ -557,6 +557,7 @@ def _config_arguments(parser: Parser) -> None:
     actions = import_.add_mutually_exclusive_group()
     actions.add_argument("--apply", metavar="IMPORT_ID", help="request confirmation to apply a staged import")
     actions.add_argument("--cancel", metavar="IMPORT_ID", help="cancel a staged import")
+    return commands  # OpenAPI may add subcommands while export/import keep their existing parsers.
 
 
 def _config(args: argparse.Namespace, ctx: Context) -> int:
@@ -1173,15 +1174,23 @@ def build_parser(document: Mapping[str, Any] | None) -> Parser:
                            "(run loopercli confirm ID), 4 Looper unreachable or the client file unusable, "
                            "6 wait timed out.")
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
+    hand_groups: dict[str, Any] = {}
     for hand in HAND_COMMANDS.values():
         sub = commands.add_parser(hand.name, help=_escape(hand.help), description=hand.help)
-        hand.add(sub)
+        children = hand.add(sub)
+        if children is not None:
+            hand_groups[hand.name] = children
         sub.set_defaults(_run=hand.run)
     parents: dict[str, Any] = {}
     found: dict[tuple[str, str], Generated] = {}
     summaries: dict[tuple[str, str], str] = {}
     for head, tail, summary, description, operation in generated_operations(document or {"paths": {}}):
         if head in HAND_COMMANDS:
+            children = hand_groups.get(head)
+            if children is not None and tail and tail not in children.choices:
+                sub = children.add_parser(tail, help=_escape(summary), description=description)
+                _add_operation(sub, operation)
+                sub.set_defaults(_run=_run_generated)
             continue
         found[head, tail], summaries[head, tail] = operation, summary
         if not tail:
