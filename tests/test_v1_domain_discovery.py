@@ -32,6 +32,9 @@ channels.status channels.people gate_settings.get gate_settings.update managers.
 managers.update managers.delete manager_templates.put manager_templates.delete
 schedule_admin.list schedule_admin.project_list schedule_admin.get schedule_admin.preview
 schedule_admin.runs schedule_admin.notifications
+schedule_admin.create schedule_admin.update schedule_admin.delete schedule_admin.reset_planner_session
+schedule_admin.run
+channel_configs.list channel_configs.get channel_configs.create channel_configs.update channel_configs.delete
 manager_session.get manager_session.select_profile operator_chat.turn operator_chat.stop
 chat_settings.get chat_settings.update
 clients.list clients.create clients.revoke
@@ -39,7 +42,7 @@ config.import_upload config.import_cancel
 operator_chat.targets operator_chat.sessions operator_chat.messages operator_chat.save_message
 project_roles.stats role_templates.list role_templates.put role_templates.delete
 runs.for_task runs.list runs.get runs.events runs.usage
-tasks.create
+tasks.create tasks.delete workspaces.check workspaces.discard
 """.split()
 
 
