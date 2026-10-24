@@ -335,10 +335,12 @@ class RunsApi:
     def get(self, path, **query):
         if path == "/api/v1/runs/list":
             return {"records": list(reversed(self.records))}
-        if path == "/api/manager/session":
-            return {"selected": self.selected}
         assert path == "/api/registry"
         return {"profiles": [{"profile_id": "agent-1", "name": dialogs.SWITCH}]}
+
+    def post(self, path, body):
+        assert path == "/api/v1/manager_session/get"
+        return {"result": {"selected": self.selected}}
 
 
 def runs_look(records, *, selected=None, reply="ok", fake=False):
@@ -418,8 +420,6 @@ class RecordingApi:
         self.gets.append((path, query))
         if path == "/api/v1/runs/list":
             return {"records": []}
-        if path == "/api/chat/turn":
-            return {"turn": None}
         if path == "/api/chat/messages":
             return {"messages": [{"message_id": self.posts[-1][1]["message_id"] + ":reply", "content": "ok"}]}
         raise AssertionError(path)
@@ -428,7 +428,7 @@ class RecordingApi:
         if path.startswith("/api/v1/runs/"):
             return {"status": "ok", "result": self.get(path, **body)}
         self.posts.append((path, body))
-        return {}
+        return {"result": {"turn": None}} if path == "/api/v1/operator_chat/turn" else {}
 
 
 def _ask_once(manager):

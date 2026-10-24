@@ -100,8 +100,8 @@ def _request(port: int, line: str, headers: dict[str, str] | None = None, body: 
         ("GET /api/nothing-here", "agent", 401),
         ("GET /api/nothing-here", "agent_and_cookie", 404),
         ("GET /api/nothing-here", "mixed_case_bearer", 404),
-        ("POST /api/chat/stop", "agent", 401),
-        ("GET /api/chat/turn", "agent", 401),
+        ("POST /api/v1/operator_chat/stop", "agent", 401),
+        ("POST /api/v1/operator_chat/turn", "agent", 401),
         ("POST /api/v1/ops/gates/list", None, 401),
         ("POST /api/v1/ops/gates/list", "agent", 401),
         ("POST /api/v1/tasks/role_update", None, 401),
@@ -1085,9 +1085,10 @@ def test_nonlocal_navigation_requires_password(tmp_path: Path, transport: str, h
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("path", ["/api/chat/stop", "/api/chat/turn"])
-def test_chat_stop_paths_are_operator(path: str) -> None:
-    assert operator_auth.access(path) is operator_auth.Access.OPERATOR
+@pytest.mark.parametrize("action", ["stop", "turn"])
+def test_chat_stop_paths_are_operator(action: str) -> None:
+    from looper.agents import api_v1
+    assert api_v1.find("POST", "/api/v1/operator_chat/" + action).operator_only
 
 
 @pytest.mark.parametrize("path", ["/login/", "/logout/", "/login/extra", "/api/login"])

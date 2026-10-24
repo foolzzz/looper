@@ -79,7 +79,7 @@ describe("session ended screen and sign out", () => {
       if (url === "/api/v1/system/status") return status.clone();
       if (url === "/login") return new Response("{}", { status: 401 });
       if (url === "/api/v1/system/overview") return Response.json({ status: "ok", result: OVERVIEW });
-      if (url === "/api/manager/session") return Response.json(MANAGER_SESSION);
+      if (url === "/api/v1/manager_session/get") return Response.json({ status: "ok", result: MANAGER_SESSION });
       return Response.json({});
     }));
     container = document.createElement("div");
