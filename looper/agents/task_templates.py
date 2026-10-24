@@ -19,6 +19,7 @@ from looper.agents.system_prompt import TASK_REQUIREMENT_LIMIT
 from looper.agents.task_roles import RoleError, role_key
 
 PATTERN_TIMEOUT_SEC = 2.0
+PATTERN_STARTUP_TIMEOUT_SEC = 10.0
 PATTERN_PROBE = "a" * 64 + "!"
 KEY_PATTERN = r"^[a-z][a-z0-9_-]{0,31}$"
 INPUT_KEY_PATTERN = r"^[a-z][a-z0-9_]{0,31}$"
@@ -37,6 +38,8 @@ _INPUT_FIELDS = ("key", "label", "kind", "required", "pattern", "hint")
 # Reads [[pattern, value], ...] from stdin; answers one JSON line per pair: true, false, or the compile error.
 _MATCHER = (
     "import json, re, sys\n"
+    "sys.stdout.write('ready\\n')\n"
+    "sys.stdout.flush()\n"
     "for pattern, value in json.load(sys.stdin):\n"
     "    try:\n"
     "        out = re.fullmatch(pattern, value) is not None\n"
@@ -234,6 +237,14 @@ async def match_patterns(checks: Sequence[tuple[str, str]], *,
             answers.append(json.loads(line))
 
     try:
+        # Interpreter startup can be slow under load; only matching consumes the pattern's budget.
+        try:
+            ready = await asyncio.wait_for(proc.stdout.readline(), PATTERN_STARTUP_TIMEOUT_SEC)
+        except (asyncio.TimeoutError, OSError):
+            raise TemplateError(
+                "Looper could not check the input's pattern now; tell the user and try again later") from None
+        if ready != b"ready\n":
+            raise TemplateError("Looper could not check the input's pattern now; tell the user and try again later")
         try:
             await asyncio.wait_for(run(), timeout)
         except asyncio.TimeoutError:

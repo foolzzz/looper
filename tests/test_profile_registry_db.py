@@ -52,16 +52,18 @@ async def _call(method: str, path: str, body: Any = None, *, claude: str = "clau
     writer = _Writer()
     parsed = urlsplit(path)
     raw = b"" if body is None else json.dumps(body).encode()
-    if parsed.path == "/api/v1/tasks/agents" or parsed.path.startswith(
-            ("/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/runs/")):
+    if (method == "POST" and parsed.path in ("/api/v1/registry/view", "/api/v1/runtimes/probe")) or (
+            parsed.path == "/api/v1/tasks/agents" or parsed.path.startswith(
+                ("/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/runs/"))):
         server._client_ops = ClientOps(SimpleNamespace())
         await server._handle_v1(method, parsed.path, dict(parse_qsl(parsed.query)), {}, raw, writer, api_v1.OPERATOR)
     else:
         await server._route_api(method, parsed.path, dict(parse_qsl(parsed.query)), raw, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
     answer = json.loads(payload)
-    if parsed.path == "/api/v1/tasks/agents" or parsed.path.startswith(
-            ("/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/runs/")):
+    if (method == "POST" and parsed.path in ("/api/v1/registry/view", "/api/v1/runtimes/probe")) or (
+            parsed.path == "/api/v1/tasks/agents" or parsed.path.startswith(
+                ("/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/runs/"))):
         answer = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
     return int(head.split()[1]), answer
 
@@ -103,7 +105,7 @@ def stand_in(monkeypatch: pytest.MonkeyPatch) -> str:
 
 
 async def _registry() -> dict[str, Any]:
-    return await _ok("GET", "/api/registry")
+    return await _ok("POST", "/api/v1/registry/view", {})
 
 
 async def _runtime(runtime_type: str, *, name: str | None = None, builtin: bool = True, executable: str = "",
@@ -345,19 +347,19 @@ def test_re_detect_probes_a_runtime_and_adds_a_type_found_on_path_since(
 
     async def _test(_pool: Any) -> None:
         # The built-in Claude Code runtime probes the server's claude, and says where it is.
-        builtin = (await _ok("POST", "/api/runtimes/rt-claude-code/probe", claude=claude))["runtime"]
+        builtin = (await _ok("POST", "/api/v1/runtimes/probe", {"runtime_id": "rt-claude-code"}, claude=claude))["runtime"]
         assert (builtin["version"], builtin["probe_error"]) == ("2.1.285 (Claude Code)", None)
         assert builtin["probed_at"] and set(builtin["capabilities"]) == {c.value for c in CLAUDE_CODE.capabilities}
         assert builtin["roles"] == ["manager", "planner", "worker", "reviewer"]
-        assert (await _call("GET", "/api/registry", claude=claude))[1]["runtimes"][0]["path"] == claude
+        assert (await _call("POST", "/api/v1/registry/view", {}, claude=claude))[1]["runtimes"][0]["path"] == claude
 
         # A type not on PATH has no runtime, and Re-detect says why; once it is on PATH, Re-detect adds it.
         monkeypatch.setenv("PATH", str(bin_dir))
-        status, payload = await _call("POST", "/api/runtimes/rt-codex/probe")
+        status, payload = await _call("POST", "/api/v1/runtimes/probe", {"runtime_id": "rt-codex"})
         assert status == 404 and "Codex (codex) is not on the server's PATH" in payload["error"]
         assert [r["runtime_id"] for r in (await _registry())["runtimes"]] == ["rt-claude-code"]
         _version_codex(bin_dir / "codex")
-        codex = (await _ok("POST", "/api/runtimes/rt-codex/probe"))["runtime"]
+        codex = (await _ok("POST", "/api/v1/runtimes/probe", {"runtime_id": "rt-codex"}))["runtime"]
         assert (codex["builtin"], codex["executable"], codex["version"], codex["path"]) == (
             True, "", "codex-cli 0.162.0", str(bin_dir / "codex"))
         types = {t["type"]: t for t in (await _registry())["runtime_types"]}
@@ -367,10 +369,10 @@ def test_re_detect_probes_a_runtime_and_adds_a_type_found_on_path_since(
         # One registered by hand before runtimes were built in probes its own executable.
         legacy = await _runtime("claude-code", name="claude-beta", builtin=False,
                                 executable=str(tmp_path / "absent"))
-        missing = (await _ok("POST", f"/api/runtimes/{legacy}/probe"))["runtime"]
+        missing = (await _ok("POST", "/api/v1/runtimes/probe", {"runtime_id": legacy}))["runtime"]
         assert (missing["builtin"], missing["version"], missing["path"]) == (False, None, None)
         assert "was not found" in missing["probe_error"]
-        assert (await _call("POST", "/api/runtimes/rt-nowhere/probe"))[0] == 404
+        assert (await _call("POST", "/api/v1/runtimes/probe", {"runtime_id": "rt-nowhere"}))[0] == 404
 
     run_db(_test, monkeypatch)
 
@@ -577,7 +579,7 @@ def test_codex_pairs_with_its_own_login_or_an_api_key_provider_of_openai_respons
     monkeypatch.setenv("PATH", str(tmp_path))
 
     async def _test(_pool: Any) -> None:
-        runtime = (await _ok("POST", "/api/runtimes/rt-codex/probe"))["runtime"]
+        runtime = (await _ok("POST", "/api/v1/runtimes/probe", {"runtime_id": "rt-codex"}))["runtime"]
         assert (runtime["version"], runtime["type_label"], runtime["protocols"]) == (
             "codex-cli 0.162.0", "Codex", ["openai-responses"])
         cpa = await _provider({
@@ -625,7 +627,7 @@ def test_the_codex_login_pairs_only_with_codex_runtimes(monkeypatch: pytest.Monk
     monkeypatch.setenv("PATH", str(tmp_path))
 
     async def _test(_pool: Any) -> None:
-        omp = (await _ok("POST", "/api/runtimes/rt-omp/probe"))["runtime"]["runtime_id"]
+        omp = (await _ok("POST", "/api/v1/runtimes/probe", {"runtime_id": "rt-omp"}))["runtime"]["runtime_id"]
         for runtime_id in ("rt-claude-code", omp):
             status, payload = await _call("POST", "/api/agent-profiles", {
                 "name": f"{runtime_id}-login", "runtime_id": runtime_id,
@@ -675,7 +677,7 @@ def test_omp_pairs_with_an_api_key_provider_of_any_of_its_apis_and_runs_every_ro
     monkeypatch.setenv("PATH", str(tmp_path))
 
     async def _test(_pool: Any) -> None:
-        runtime = (await _ok("POST", "/api/runtimes/rt-omp/probe"))["runtime"]
+        runtime = (await _ok("POST", "/api/v1/runtimes/probe", {"runtime_id": "rt-omp"}))["runtime"]
         assert (runtime["version"], runtime["type_label"], runtime["protocols"]) == (
             "omp/18.4.3", "OMP", ["anthropic-messages", "openai-chat", "openai-responses"])
         providers = [
@@ -763,7 +765,7 @@ def test_dsh_path_registration_is_once_and_redetect_updates_the_persisted_probe(
     monkeypatch.setenv("PATH", str(tmp_path))
 
     async def _test(pool: Any) -> None:
-        status, payload = await _call("POST", "/api/runtimes/rt-dsh/probe")
+        status, payload = await _call("POST", "/api/v1/runtimes/probe", {"runtime_id": "rt-dsh"})
         assert status == 404 and "DSH (dsh) is not on the server's PATH" in payload["error"]
         assert await register_found_runtimes() == []
         _version_dsh(tmp_path / "dsh")
@@ -779,20 +781,20 @@ def test_dsh_path_registration_is_once_and_redetect_updates_the_persisted_probe(
         assert await db.get_runtime("rt-dsh") == original
 
         _version_dsh(tmp_path / "dsh", "0.1.0")
-        unsupported = (await _ok("POST", "/api/runtimes/rt-dsh/probe"))["runtime"]
+        unsupported = (await _ok("POST", "/api/v1/runtimes/probe", {"runtime_id": "rt-dsh"}))["runtime"]
         assert unsupported["version"] == "0.1.0"
         assert "Unsupported DSH version" in unsupported["probe_error"]
         assert unsupported["capabilities"] == [] and unsupported["roles"] == []
         assert (await db.get_runtime("rt-dsh"))["version"] == "0.1.0"
 
         (tmp_path / "dsh").unlink()
-        missing = (await _ok("POST", "/api/runtimes/rt-dsh/probe"))["runtime"]
+        missing = (await _ok("POST", "/api/v1/runtimes/probe", {"runtime_id": "rt-dsh"}))["runtime"]
         assert missing["version"] is None and missing["path"] is None
         assert "was not found" in missing["probe_error"]
         assert missing["capabilities"] == [] and missing["roles"] == []
 
         _version_dsh(tmp_path / "dsh")
-        restored = (await _ok("POST", "/api/runtimes/rt-dsh/probe"))["runtime"]
+        restored = (await _ok("POST", "/api/v1/runtimes/probe", {"runtime_id": "rt-dsh"}))["runtime"]
         assert restored["version"] == SUPPORTED_VERSION and restored["probe_error"] is None
         assert restored["roles"] == runtime["roles"]
         assert await pool.fetchval("SELECT count(*) FROM agent_runtimes WHERE type = 'dsh'") == 1
@@ -810,7 +812,7 @@ def test_dsh_profile_and_all_four_role_selections_round_trip_through_api_and_dat
     monkeypatch.setenv("PATH", str(tmp_path))
 
     async def _test(pool: Any) -> None:
-        await _ok("POST", "/api/runtimes/rt-dsh/probe")
+        await _ok("POST", "/api/v1/runtimes/probe", {"runtime_id": "rt-dsh"})
         provider_id = await _provider({"name": "DeepSeek", "vendor_type": "deepseek", "api_key": SECRET,
                                        "endpoints": [{"protocol": "anthropic-messages",
                                                       "base_url": "https://api.deepseek.com/anthropic"}]})
@@ -858,7 +860,7 @@ def test_dsh_provider_cannot_remove_the_endpoint_needed_by_its_profile(
     monkeypatch.setenv("PATH", str(tmp_path))
 
     async def _test(_pool: Any) -> None:
-        await _ok("POST", "/api/runtimes/rt-dsh/probe")
+        await _ok("POST", "/api/v1/runtimes/probe", {"runtime_id": "rt-dsh"})
         provider_id = await _provider({"name": "DeepSeek", "vendor_type": "deepseek", "api_key": SECRET,
                                        "endpoints": [{"protocol": "anthropic-messages",
                                                       "base_url": "https://api.deepseek.com/anthropic"}]})

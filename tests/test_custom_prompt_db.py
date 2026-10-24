@@ -23,7 +23,7 @@ def test_custom_prompt_registry_keeps_omitted_updates_and_strips_text(monkeypatc
         profile_id = profile["profile_id"]
         updated = await _ok("PUT", f"/api/agent-profiles/{profile_id}", {"model_id": await _model_id("prov-claude-subscription", "opus")})
         assert updated["profile"]["custom_prompt"] == "CUSTOM"
-        registry = await _ok("GET", "/api/registry")
+        registry = await _ok("POST", "/api/v1/registry/view", {})
         assert next(p for p in registry["profiles"] if p["profile_id"] == profile_id)["custom_prompt"] == "CUSTOM"
         assert await pool.fetchval("SELECT custom_prompt FROM agent_profiles WHERE id = $1", profile_id) == "CUSTOM"
         cleared = await _ok("PUT", f"/api/agent-profiles/{profile_id}", {"custom_prompt": " \n "})

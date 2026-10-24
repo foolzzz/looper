@@ -2719,10 +2719,10 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
             assert not api.base_url.endswith(":8767")
             channels = api.post("/api/v1/channel_configs/list", {})["result"]["configs"]
             assert channels and all(not channel["enabled"] for channel in channels)
-            registry = api.get("/api/registry")
+            registry = api.post("/api/v1/registry/view", {})["result"]
             detected = [row for row in registry["runtimes"] if row["type"] == "dsh"]
             assert len(detected) == 1 and detected[0]["version"] == "0.2.1-rc.2"
-            api.post("/api/runtimes/rt-dsh/probe", {})
+            api.post("/api/v1/runtimes/probe", {"runtime_id": "rt-dsh"})["result"]
             provider = api.post("/api/providers", {
                 "name": "disposable-messages", "vendor_type": "custom",
                 "endpoints": [{"protocol": "anthropic-messages",
@@ -2743,7 +2743,7 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
 
             # Two Manager turns exercise actual per-turn process resume and its platform bridge.
             for number in (1, 2):
-                api.post("/api/chat/send", {"text": f"read disposable status {number}",
+                api.post("/api/v1/operator_chat/send", {"text": f"read disposable status {number}",
                                            "session_id": "disposable-chat", "message_id": f"message-{number}"})
                 wait_for(lambda: api.post("/api/v1/operator_chat/messages", {"session_id": "disposable-chat"})["result"]["messages"],
                          lambda rows: sum(row["role"] == "assistant" for row in rows) >= number)

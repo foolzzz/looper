@@ -675,9 +675,9 @@ def _serve_smoke_stand_in(mode):
                 result = {"status": "ok", "result": {"status": "running"}}
             elif path == "/api/v1/channel_configs/list":
                 result = {"status": "ok", "result": {"configs": [{"enabled": mode == "channels"}]}}
-            elif path == "/api/registry":
-                result = {"runtimes": [{"name": "DSH", "type": "dsh", "builtin": True, "runtime_id": "rt-dsh"}],
-                          "providers": [], "models": []}
+            elif method == "POST" and path == "/api/v1/registry/view":
+                result = {"status": "ok", "result": {"runtimes": [{"name": "DSH", "type": "dsh", "builtin": True, "runtime_id": "rt-dsh"}],
+                          "providers": [], "models": []}}
             elif path == "/api/providers":
                 assert body["api_key"] == "<memory-only>"
                 assert body["endpoints"] == [{"protocol": "anthropic-messages",
@@ -700,7 +700,7 @@ def _serve_smoke_stand_in(mode):
                 result = {"status": "ok", "result": {"roles": roles}}
             elif path == "/api/v1/agent_settings/get":
                 result = {"status": "ok", "result": {"roles": roles}}
-            elif path == "/api/chat/send":
+            elif path == "/api/v1/operator_chat/send":
                 record("manager")
                 if mode != "manager-timeout":
                     messages.append({"message_id": body["message_id"] + ":reply", "role": "assistant",

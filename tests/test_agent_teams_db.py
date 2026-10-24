@@ -45,7 +45,7 @@ def test_agent_teams_are_on_by_default_for_claude_code_and_only_claude_code_take
             for name, runtime, fields in [("cc/default", "rt-claude-code", {}),
                                           ("cc/off", "rt-claude-code", {"agent_teams": False}),
                                           ("si/default", other, {})]}
-        listed = {p["name"]: p["agent_teams"] for p in (await _ok("GET", "/api/registry"))["profiles"]}
+        listed = {p["name"]: p["agent_teams"] for p in (await _ok("POST", "/api/v1/registry/view", {}))["profiles"]}
         assert listed == {"claude-code/opus": True, "cc/default": True, "cc/off": False, "si/default": False}
 
         off = created["cc/off"]["profile_id"]

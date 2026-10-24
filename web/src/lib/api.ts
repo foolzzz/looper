@@ -197,7 +197,6 @@ export interface Project extends ProjectExecution {
 
 export interface ChatSendResponse {
   correlation_id: string;
-  events_url: string;
 }
 
 export interface SSEEvent {
@@ -430,19 +429,12 @@ export async function sendChat(
   target: ChatTarget = { kind: "manager" },
   options?: { newSessionProfileId?: string },
 ): Promise<ChatSendResponse> {
-  const res = await fetch(`${API_BASE}/chat/send`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      text, session_id: sessionId, message_id: messageId, target,
-      ...(options?.newSessionProfileId ? { new_session_profile_id: options.newSessionProfileId } : {}),
-    }),
+  const result = await callV1<ChatSendResponse>("/api/v1/operator_chat/send", {
+    text, session_id: sessionId, message_id: messageId, target,
+    ...(options?.newSessionProfileId ? { new_session_profile_id: options.newSessionProfileId } : {}),
   });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `chat send ${res.status}`);
-  }
-  return res.json();
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** How a Manager reply ended (the `outcome` of `answer.final`). */
@@ -663,19 +655,19 @@ export function watchChat(
   onMessage: (message: DbChatMessage) => void,
   managerId?: string,
 ): () => void {
-  const owner = managerId ? `&manager=${encodeURIComponent(managerId)}` : "";
   let stopped = false;
   let stop = () => {};
   let retry: ReturnType<typeof setTimeout> | undefined;
   const connect = () => {
-    stop = streamSSE(
-      `${API_BASE}/chat/events?session=${encodeURIComponent(sessionId)}${owner}`,
+    stop = streamChatThread(
+      sessionId,
       (event) => {
         if (event.kind === "chat.message") onMessage(event.payload as unknown as DbChatMessage);
       },
       () => {
         if (!stopped && !isSessionEnded()) retry = setTimeout(connect, CHAT_WATCH_RETRY_MS);
       },
+      managerId,
     );
   };
   connect();
@@ -2948,15 +2940,18 @@ async function registryCall<T>(method: string, path: string, body: unknown, labe
 }
 
 export async function fetchRegistry(): Promise<Registry> {
-  const res = await fetch(`${API_BASE}/registry`);
-  if (!res.ok) await failed(res, "registry");
-  return res.json();
+  const result = await callV1<Registry>("/api/v1/registry/view", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Re-detect: run `<executable> --version` again and record its version or error; for a type's built-in runtime
  * not found yet (rt-<type>), look for it on the server's PATH again (404 when it is not there). */
-export function probeRuntime(runtimeId: string): Promise<{ runtime: Runtime }> {
-  return registryCall("POST", `/runtimes/${encodeURIComponent(runtimeId)}/probe`, undefined, "re-detect runtime");
+export async function probeRuntime(runtimeId: string): Promise<{ runtime: Runtime }> {
+  const result = await callV1<{ runtime: Runtime }>("/api/v1/runtimes/probe", { runtime_id: runtimeId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
 export function createProvider(fields: ProviderFields): Promise<{ provider: Provider; warnings: string[] }> {
@@ -3796,60 +3791,48 @@ export async function updateVaultSettings(body: {
   return res.json();
 }
 
-export function streamSSE(
-  eventsUrl: string,
+/** Follow one dashboard send by its correlation id; cancelling releases its reply queue. */
+export function streamChatReply(
+  correlationId: string,
+  onEvent: (event: SSEEvent) => void,
+  onDone?: () => void,
+): () => void {
+  return streamChat("reply_events", { correlation_id: correlationId }, onEvent, onDone);
+}
+
+/** Follow autonomous messages on a Manager-owned dashboard thread. */
+export function streamChatThread(
+  sessionId: string,
+  onEvent: (event: SSEEvent) => void,
+  onDone?: () => void,
+  managerId?: string,
+): () => void {
+  return streamChat("thread_events", {
+    session_id: sessionId, ...(managerId ? { manager: managerId } : {}),
+  }, onEvent, onDone);
+}
+
+function streamChat(
+  operation: "reply_events" | "thread_events",
+  body: { correlation_id: string } | { session_id: string; manager?: string },
   onEvent: (event: SSEEvent) => void,
   onDone?: () => void,
 ): () => void {
   const abortController = new AbortController();
-
   (async () => {
     try {
-      const res = await fetch(eventsUrl, { signal: abortController.signal });
-      if (!res.ok || !res.body) return;
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done || abortController.signal.aborted) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        let eventType = "";
-        let eventData = "";
-
-        for (const line of lines) {
-          if (abortController.signal.aborted) break;
-          if (line.startsWith("event: ")) {
-            eventType = line.slice(7).trim();
-          } else if (line.startsWith("data: ")) {
-            eventData = line.slice(6);
-          } else if (line === "" && eventData) {
-            try {
-              const parsed = JSON.parse(eventData);
-              onEvent({ kind: eventType || parsed.kind || "unknown", payload: parsed.payload || parsed });
-            } catch {
-              // skip non-JSON
-            }
-            eventType = "";
-            eventData = "";
-          }
-        }
-      }
-    } catch (e) {
-      if ((e as Error).name !== "AbortError" && !(e instanceof SessionEndedError)) {
-        console.error("SSE error:", e);
-      }
+      const pending = await streamV1<Record<string, unknown>>(
+        `/api/v1/operator_chat/${operation}`, body,
+        ({ event, data }) => onEvent({ kind: event, payload: data }),
+        { signal: abortController.signal },
+      );
+      if (pending) throw new V1Error(202, "unavailable", pending.impact);
+    } catch (error) {
+      if (!abortController.signal.aborted && !(error instanceof SessionEndedError)) console.error("Chat SSE error:", error);
     } finally {
       onDone?.();
     }
   })();
-
   return () => abortController.abort();
 }
 

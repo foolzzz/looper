@@ -2,7 +2,7 @@
 
 Pure stdlib asyncio — zero external dependencies. Serves:
   - REST API endpoints (/api/*)
-  - SSE streaming (/api/chat/events: a message's stream by ?cid=, an open chat's by ?session=)
+  - Dashboard chat reply and thread SSE streams (operator_chat operations)
   - Static files from web/dist/ with SPA fallback
 """
 
@@ -44,7 +44,7 @@ from .ops.planner import PlannerOps
 from .ops.room import RoomOps
 from .managers import ManagerFleet
 from .ops.service import ManagerOps
-from .tiers.manager import ManagerAgent, is_new_session_command
+from .tiers.manager import ManagerAgent
 from .tiers.task import TaskRouter
 from .tiers.worker import recheck_limits
 from .tiers.worker import WorkerPool
@@ -350,7 +350,8 @@ class AgentHTTPServer:
             elif area is operator_auth.Access.AGENT:
                 await self._handle_agent_api(method, path, headers, body, writer)
             elif area is operator_auth.Access.CLIENT:
-                if method == "POST" and path == "/api/v1/tasks/activity_stream":
+                if method == "POST" and path in ("/api/v1/tasks/activity_stream",
+                        "/api/v1/operator_chat/reply_events", "/api/v1/operator_chat/thread_events"):
                     stream = asyncio.create_task(self._handle_v1(method, path, query, headers, body, writer, principal))
                     disconnected = asyncio.create_task(reader.read())
                     try:
@@ -800,7 +801,6 @@ class AgentHTTPServer:
     _RE_PROJECT_AGENT_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings$")
     _RE_PROJECT_ROLE_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_PROJECT_ALLOWED_PROFILES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/allowed-profiles$")
-    _RE_RUNTIME_PROBE = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)/probe$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
     _RE_MODEL = re.compile(r"^/api/models/(model-[a-zA-Z0-9-]+)$")
     _RE_PROVIDER_LOGIN_PROBLEM = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)/login-problem$")
@@ -820,10 +820,6 @@ class AgentHTTPServer:
     ) -> None:
         if path == "/api/tasks" and method == "GET":
             await self._handle_list_tasks(query, writer)
-        elif path == "/api/chat/send" and method == "POST":
-            await self._handle_chat_send(body, writer)
-        elif path == "/api/chat/events" and method == "GET":
-            await self._handle_sse_events(query, writer)
         elif (m := self._RE_TASK_DETAIL.match(path)) and method == "GET":
             await self._handle_task_detail(m.group(1), writer)
         elif (m := self._RE_PROJECT_KNOWLEDGE.match(path)) and method == "GET":
@@ -849,12 +845,6 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_DRAFT.match(path)) and method == "DELETE":
             await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.discard_draft(
                 m.group(1), m.group(2)))
-        elif path == "/api/registry" and method == "GET":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.registry_view(
-                server_claude=self._claude_bin))
-        elif (m := self._RE_RUNTIME_PROBE.match(path)) and method == "POST":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.probe_runtime(
-                m.group(1), server_claude=self._claude_bin))
         elif path == "/api/providers" and method == "GET":
             await self._handle_registry(writer, HTTP_200, profile_registry.list_providers)
         elif path == "/api/providers" and method == "POST":
@@ -1143,58 +1133,6 @@ class AgentHTTPServer:
             return self._manager
         return self._managers.get(manager_id or "manager")
 
-    async def _handle_chat_send(
-        self, body: bytes, writer: asyncio.StreamWriter
-    ) -> None:
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
-            await writer.drain()
-            return
-
-        text = data.get("text", "").strip()
-        if not text:
-            writer.write(_json_response(HTTP_400, {"error": "text is required"}))
-            await writer.drain()
-            return
-
-        try:
-            target = await resolve_chat_target(data.get("target"), self._task_router, self._managers)
-        except ChatTargetError as exc:
-            writer.write(_json_response(exc.status, {"error": str(exc)}))
-            await writer.drain()
-            return
-
-        new_session_profile_id = data.get("new_session_profile_id")
-        if new_session_profile_id is not None:
-            if target.agent_type != "manager" or not is_new_session_command(text):
-                writer.write(_json_response(
-                    HTTP_400, {"error": "new_session_profile_id goes only with /new to the Manager"}))
-                await writer.drain()
-                return
-            try:
-                await profile_registry.check_selection(new_session_profile_id, ["manager"])
-            except profile_registry.RegistryError as exc:
-                writer.write(_json_response(HTTP_400, {"error": str(exc)}))
-                await writer.drain()
-                return
-
-        session_id = data.get("session_id", "")
-        message_id = data.get("message_id", "")
-        if target.agent_type == "manager" and session_id and self._managers is not None:
-            owner = await self._thread_owner_for_send(session_id, target.agent_id)
-            if owner != target.agent_id:
-                writer.write(await self._foreign_thread(owner))
-                await writer.drain()
-                return
-        result = await self._deliver_chat(
-            text=text, target=target, session_id=session_id or data.get("session_id"), message_id=message_id,
-            language=data.get("language", "zh"), goal_id=data.get("goal_id"), attachments=data.get("attachments"),
-            new_session_profile_id=new_session_profile_id)
-        writer.write(_json_response(HTTP_200, result))
-        await writer.drain()
-
     async def _deliver_chat(
         self, *, text: str, target: AgentAddress, session_id: str | None, message_id: str | None,
         language: str = "zh", goal_id: Any = None, attachments: Any = None,
@@ -1233,11 +1171,6 @@ class AgentHTTPServer:
                 wake=deliver, best_effort=True)
         return await deliver(None)
 
-    async def _foreign_thread(self, owner: str) -> bytes:
-        """The 409 for a thread of Manager ``owner`` asked for under another Manager: whose it is, by name."""
-        error = await self._foreign_thread_error(owner)
-        return _json_response(HTTP_409, {"error": str(error), "manager_id": owner})
-
     async def _foreign_thread_error(self, owner: str) -> OpError:
         from ..db import managers as db_managers
         running = self._managers.get(owner) if self._managers is not None else None
@@ -1265,66 +1198,6 @@ class AgentHTTPServer:
             owner = await db_chat.claim_thread(
                 session_id, "manager" if await db_chat.has_messages(session_id) else wanted)
         return owner
-
-    async def _handle_sse_events(
-        self,
-        query: dict[str, str],
-        writer: asyncio.StreamWriter,
-    ) -> None:
-        cid = query.get("cid", "")
-        if not cid and query.get("session"):
-            if owner := await self._thread_owner_elsewhere(query["session"], query.get("manager") or "manager"):
-                writer.write(await self._foreign_thread(owner))
-                await writer.drain()
-                return
-            await self._handle_chat_session_events(query["session"], writer)
-            return
-        if not cid:
-            writer.write(_json_response(HTTP_400, {"error": "cid or session is required"}))
-            await writer.drain()
-            return
-
-        sse_headers = (
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/event-stream\r\n"
-            "Cache-Control: no-cache\r\n"
-            "Connection: keep-alive\r\n"
-            "\r\n"
-        )
-        writer.write(sse_headers.encode("utf-8"))
-        await writer.drain()
-
-        try:
-            async for event in self._web_adapter.iter_sse_events(cid):
-                kind = event.get("kind", "message")
-                payload = json.dumps(event.get("payload", {}), ensure_ascii=False)
-                sse_data = f"event: {kind}\ndata: {payload}\n\n"
-                writer.write(sse_data.encode("utf-8"))
-                await writer.drain()
-        except (ConnectionError, BrokenPipeError):
-            self._web_adapter.close_sse_stream(cid)
-
-    async def _handle_chat_session_events(self, session_id: str, writer: asyncio.StreamWriter) -> None:
-        """SSE stream of what reaches an open chat outside any message's stream, until the page leaves."""
-        events = self._web_adapter.iter_chat_events(session_id)
-        writer.write((
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/event-stream\r\n"
-            "Cache-Control: no-cache\r\n"
-            "Connection: keep-alive\r\n"
-            "X-Accel-Buffering: no\r\n"
-            "\r\n"
-        ).encode("utf-8"))
-        try:
-            await writer.drain()
-            async for event in events:
-                payload = json.dumps(event.get("payload", {}), ensure_ascii=False)
-                writer.write(f"event: {event.get('kind', 'message')}\ndata: {payload}\n\n".encode("utf-8"))
-                await writer.drain()
-        except (ConnectionError, BrokenPipeError):
-            pass
-        finally:
-            await events.aclose()
 
     async def _task_config_result(self, task_id: str, data: dict[str, Any]) -> dict[str, Any]:
         """Edit an unstarted task's configuration and retain requirement history; no HTTP writer."""

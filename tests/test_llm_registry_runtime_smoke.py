@@ -221,7 +221,7 @@ def test_inventory_distinguishes_credentials_and_missing_cli(monkeypatch, tmp_pa
 def test_migrated_service_manager_creates_dashboard_reads(migrated, tmp_path):
     with server(tmp_path, migrated) as running:
         api = running.api
-        registry = api.get("/api/registry")
+        registry = api.post("/api/v1/registry/view", {})["result"]
         assert len(registry["profiles"]) == 20
         profile = next(p for p in registry["profiles"] if p["profile_id"] == "agent-seed-dual-claude")
         assert profile["model"]["name"] == "seed-dual"
@@ -356,7 +356,7 @@ def test_selected_real_runtime_request_and_continuation(runtime, tmp_path):
 def _real_continuation(case, url, item, status, rows, evidence):
     with server(case, url, real=item) as running:
         api = running.api
-        profile = next(p for p in api.get("/api/registry")["profiles"] if p["profile_id"] == "agent-smoke-real")
+        profile = next(p for p in api.post("/api/v1/registry/view", {})["result"]["profiles"] if p["profile_id"] == "agent-smoke-real")
         assert profile["model"]["name"] == item["model"]
         assert profile["model"]["protocol"] == item["protocol"]
         api.post("/api/v1/agent_settings/update_role", {"role": "manager", "values": {"profile_id": profile["profile_id"]}})

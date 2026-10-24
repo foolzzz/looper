@@ -31,7 +31,8 @@ SECRET = "sk-test-0123456789"
 
 
 async def _ok(method: str, path: str, body: Any = None) -> Any:
-    call = _catalog_call if path.startswith(("/api/v1/installs/", "/api/v1/catalog_sources/")) else _call
+    call = _catalog_call if path == "/api/v1/registry/view" or path.startswith(
+        ("/api/v1/installs/", "/api/v1/catalog_sources/")) else _call
     status, answer = await call(method, path, body)
     assert status in (200, 201), (status, answer)
     return answer
@@ -174,7 +175,7 @@ def test_agent_profiles_are_created_changed_and_read_back(monkeypatch: pytest.Mo
         assert changed["profile"]["effort"] is None
         assert changed["profile"]["model_id"] == opus["model_id"]
         assert changed["profile"]["custom_prompt"] == "Be concise." and changed["profile"]["agent_teams"] is False
-        registered = next(p for p in (await _ok("GET", "/api/registry"))["profiles"] if p["name"] == "fast")
+        registered = next(p for p in (await _ok("POST", "/api/v1/registry/view", {}))["profiles"] if p["name"] == "fast")
         assert (registered["profile_id"], registered["model_id"], registered["effort"]) == (
             profile["profile_id"], opus["model_id"], None)
         await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": profile["profile_id"]})
@@ -247,7 +248,7 @@ def test_pi_and_dsh_manager_models_profiles_and_config_import_share_pairing_rule
             plan = await transfer.run_import(conn, data, apply=True)
         change = next(c for c in plan.changes if c.section == "profiles")
         assert change.action == transfer.Action.ADDED
-        imported = next(p for p in (await _ok("GET", "/api/registry"))["profiles"] if p["name"] == "imported")
+        imported = next(p for p in (await _ok("POST", "/api/v1/registry/view", {}))["profiles"] if p["name"] == "imported")
         assert (imported["runtime_id"], imported["model_id"], imported["effort"], imported["agent_teams"],
                 imported["custom_prompt"]) == (runtime_id, model["model_id"], effort, False, "Keep this instruction.")
         assert (await _ok("GET", f"/api/models/{model['model_id']}"))["model"]["input_usd_per_mtok"] == 2.5
@@ -274,7 +275,7 @@ def test_deleting_an_agent_profile_asks_first_and_one_in_use_is_refused(
         assert await pool.fetchval("SELECT count(*) FROM agent_profiles WHERE id = 'agent-sonnet'") == 1
         (done,) = await chat.say("确认", ("looper_confirm", {"confirmation_id": asked["confirmation_id"]}))
         assert done["result"] == {"deleted": "claude-code/sonnet"}
-        assert [p["name"] for p in (await _ok("GET", "/api/registry"))["profiles"]] == ["claude-code/opus"]
+        assert [p["name"] for p in (await _ok("POST", "/api/v1/registry/view", {}))["profiles"]] == ["claude-code/opus"]
 
     run_db(test, monkeypatch)
 
@@ -290,7 +291,7 @@ def test_a_provider_is_registered_without_a_key_and_the_user_told_where_to_enter
         assert "Settings → LLM Providers → deepseek → API key" in answer["note"]
         model = await _tool(chat, "looper_models", action="create", provider=provider["provider_id"],
                             name="deepseek-flash", protocol="anthropic-messages")
-        stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"] if p["name"] == "deepseek")
+        stored = next(p for p in (await _ok("POST", "/api/v1/registry/view", {}))["providers"] if p["name"] == "deepseek")
         assert stored["api_key"] is None and stored["model_count"] == 1
         assert {e["protocol"]: e["base_url"] for e in stored["endpoints"]}["anthropic-messages"] == \
             "https://api.deepseek.com/anthropic"
@@ -323,7 +324,7 @@ def test_registering_a_vendor_and_its_suggested_models_reads_back_defaults(monke
             await _tool(chat, "looper_models", action="create", provider=provider["provider_id"], name=model.name,
                         protocol=model.protocol.value, context_window=model.context_window,
                         background_model=model.background_model)
-        stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"] if p["name"] == vendor.value)
+        stored = next(p for p in (await _ok("POST", "/api/v1/registry/view", {}))["providers"] if p["name"] == vendor.value)
         expected = fields.get("endpoints", [{"protocol": e.protocol.value, "base_url": e.base_url}
                                             for e in defaults.endpoints])
         assert {e["protocol"]: e["base_url"] for e in stored["endpoints"]} == {e["protocol"]: e["base_url"] for e in expected}
@@ -344,7 +345,7 @@ def test_provider_explicit_overrides_win(monkeypatch, tmp_path):
             env=[{"key": "API_TIMEOUT_MS", "value": "1234"}]))["provider"]
         model = (await _tool(chat, "looper_models", action="create", provider="custom", name="custom-model",
                              protocol="openai-chat"))["model"]
-        stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"] if p["name"] == "custom")
+        stored = next(p for p in (await _ok("POST", "/api/v1/registry/view", {}))["providers"] if p["name"] == "custom")
         assert stored["endpoints"] == [{"provider_id": provider["provider_id"], "protocol": "openai-chat",
                                         "base_url": "https://example.com/v1", "use_runtime_default": False}]
         assert stored["env"] == [{"key": "API_TIMEOUT_MS", "value": "1234"}]
@@ -370,7 +371,7 @@ def test_invalid_provider_registration_is_refused_without_registering(monkeypatc
 def test_provider_list_includes_vendor_suggestions(monkeypatch, tmp_path):
     async def test(pool):
         answer = await _tool(_Chat(tmp_path), "looper_providers", action="list")
-        assert answer["vendors"] == (await _ok("GET", "/api/registry"))["vendor_types"]
+        assert answer["vendors"] == (await _ok("POST", "/api/v1/registry/view", {}))["vendor_types"]
         deepseek = next(v for v in answer["vendors"] if v["vendor_type"] == "deepseek")
         assert {e["protocol"] for e in deepseek["endpoints"]} == {"anthropic-messages", "openai-chat", "openai-responses"}
         assert {m["name"] for m in deepseek["suggested_models"]} == {"deepseek-flash[1m]", "deepseek-v4-pro[1m]",
@@ -394,7 +395,7 @@ def test_provider_update_changes_dashboard_and_preserves_models_and_key(monkeypa
                              name="renamed", endpoints=endpoints, env=[], max_concurrency=None)
         assert answer["provider"]["name"] == "renamed"
         assert answer["provider"]["api_key"] == "set" and answer["warnings"] == []
-        stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"]
+        stored = next(p for p in (await _ok("POST", "/api/v1/registry/view", {}))["providers"]
                       if p["provider_id"] == provider["provider_id"])
         assert {e["protocol"]: e["base_url"] for e in stored["endpoints"]} == {
             e["protocol"]: e["base_url"] for e in endpoints}
@@ -405,7 +406,7 @@ def test_provider_update_changes_dashboard_and_preserves_models_and_key(monkeypa
                 **model["endpoint"], "base_url": "https://example.invalid/anthropic-messages"}}
         await _tool(chat, "looper_providers", action="update", provider=provider["provider_id"],
                     env=[{"key": "API_TIMEOUT_MS", "value": "1234"}])
-        stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"]
+        stored = next(p for p in (await _ok("POST", "/api/v1/registry/view", {}))["providers"]
                       if p["provider_id"] == provider["provider_id"])
         assert stored["env"] == [{"key": "API_TIMEOUT_MS", "value": "1234"}]
         assert {e["protocol"]: e["base_url"] for e in stored["endpoints"]} == {
@@ -430,14 +431,14 @@ def test_provider_update_uses_dashboard_validation_and_rolls_back(monkeypatch, t
         provider = (await _ok("POST", "/api/providers", {"name": "deepseek", "vendor_type": "deepseek",
             "api_key": SECRET}))["provider"]
         await _model("deepseek-flash", provider["provider_id"])
-        before = await _ok("GET", "/api/registry")
+        before = await _ok("POST", "/api/v1/registry/view", {})
         status, expected = await _call("PUT", f"/api/providers/{provider['provider_id']}", fields)
         assert status == 400, expected
         (answer,) = await _Chat(tmp_path).say("修改账户", ("looper_providers", {
             "action": "update", "provider": provider["provider_id"], **fields}))
         assert _error(answer) == "invalid", answer
         assert answer["error"]["message"] == expected["error"]
-        assert await _ok("GET", "/api/registry") == before
+        assert await _ok("POST", "/api/v1/registry/view", {}) == before
         assert await pool.fetchval("SELECT api_key FROM llm_provider_secrets WHERE provider_id = $1",
                                    provider["provider_id"]) == SECRET
     run_db(test, monkeypatch)
@@ -449,14 +450,14 @@ def test_rejected_provider_env_credentials_are_masked_in_audit(monkeypatch, tmp_
     async def test(pool):
         provider = (await _ok("POST", "/api/providers", {
             "name": "deepseek", "vendor_type": "deepseek"}))["provider"]
-        before = await _ok("GET", "/api/registry")
+        before = await _ok("POST", "/api/v1/registry/view", {})
         fields = {"name": "new-account", "vendor_type": "deepseek"} if action == "register" else {
             "provider": provider["provider_id"]}
         env = [{"key": "API_TIMEOUT_MS", "value": "1234"}, {"key": name, "value": SECRET}]
         (answer,) = await _Chat(tmp_path).say("配置账户", ("looper_providers", {
             "action": action, **fields, "env": env}))
         assert _error(answer) == "invalid", answer
-        assert await _ok("GET", "/api/registry") == before
+        assert await _ok("POST", "/api/v1/registry/view", {}) == before
         (row,) = await pool.fetch("SELECT arguments, result, status, error_code FROM manager_actions")
         assert (row["status"], row["error_code"]) == ("error", "invalid")
         assert SECRET not in row["arguments"] + row["result"]

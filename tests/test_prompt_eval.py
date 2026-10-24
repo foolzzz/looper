@@ -234,14 +234,6 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
             return next(event["result"] for event in events if event["type"] == "result")
 
         def get(self, path: str, **_: Any) -> dict[str, Any]:
-            if path == "/api/registry":
-                return {"runtimes": [{"runtime_id": "rt-claude-code", "name": "claude-code",
-                                      "type": "claude-code", "builtin": True},
-                                     {"runtime_id": "rt-pi", "name": "pi", "type": "pi", "builtin": True}],
-                        "providers": [], "profiles": self.profiles,
-                        "models": [{"model_id": resolved.model.id, "provider_id": resolved.provider.id,
-                                    "name": resolved.model.name, "protocol": resolved.model.protocol.value}
-                                   for resolved in self.models.values()]}
             if path == "/api/tasks":
                 return {"tasks": []}
             if path == "/api/tasks/task-eval":
@@ -253,6 +245,15 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
             raise AssertionError(path)
 
         def post(self, path: str, body: Any) -> dict[str, Any]:
+            if path == "/api/v1/registry/view":
+                return {"status": "ok", "result": {
+                    "runtimes": [{"runtime_id": "rt-claude-code", "name": "claude-code",
+                                  "type": "claude-code", "builtin": True},
+                                 {"runtime_id": "rt-pi", "name": "pi", "type": "pi", "builtin": True}],
+                    "providers": [], "profiles": self.profiles,
+                    "models": [{"model_id": resolved.model.id, "provider_id": resolved.provider.id,
+                                "name": resolved.model.name, "protocol": resolved.model.protocol.value}
+                               for resolved in self.models.values()]}}
             if path == "/api/v1/agent_settings/update_system":
                 body = body["values"]
                 profile = next(p for p in self.profiles if p["profile_id"] == body["profile_id"])
@@ -303,7 +304,7 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
                 for role in ("planner", "worker", "reviewer"):
                     self.launch(role)
                 return {}
-            assert path == "/api/chat/send", path
+            assert path == "/api/v1/operator_chat/send", path
             self.messages.append({"message_id": f"{body['message_id']}:reply", "content": self.launch("manager")})
             return {}
 
@@ -354,9 +355,11 @@ def test_pi_eval_specs_register_without_exposing_the_key(
 def test_registering_pi_without_its_runtime_does_not_fall_back_to_claude(
     monkeypatch: pytest.MonkeyPatch, eval_registry: Any,
 ) -> None:
-    registry = eval_registry.get("/api/registry")
+    registry = eval_registry.post("/api/v1/registry/view", {})["result"]
     registry["runtimes"] = [runtime for runtime in registry["runtimes"] if runtime["type"] != "pi"]
-    monkeypatch.setattr(eval_registry, "get", lambda _: registry)
+    original_post = eval_registry.post
+    monkeypatch.setattr(eval_registry, "post", lambda path, body: {"status": "ok", "result": registry}
+                        if path == "/api/v1/registry/view" else original_post(path, body))
     spec = json.loads((runner.REPO_ROOT / "evals/agents/pi-cpa.example.json").read_text(encoding="utf-8"))
     with pytest.raises(runner.EvalError, match="no 'pi' runtime"):
         runner.register_agent(eval_registry, spec)
@@ -1951,7 +1954,7 @@ def test_dialog_checks_the_final_manager_run_before_scoring_a_reply(
                 return {"status": "ok", "result": {"messages": [
                     {"message_id": self.sent["message_id"] + ":reply",
                      "content": "该配对不兼容，已保持所有配置不变。"}]}}
-            assert path == "/api/chat/send"
+            assert path == "/api/v1/operator_chat/send"
             self.sent = data
             return {}
 
@@ -2028,7 +2031,7 @@ def test_dialogs_use_the_reserved_case_budget_only_in_parallel_mode(
                 return {"status": "ok", "result": {"messages": self.messages}}
             if path == "/api/v1/project_admin/create":
                 return {"status": "ok", "result": {"project": {"project_id": "project-a"}}}
-            assert path == "/api/chat/send"
+            assert path == "/api/v1/operator_chat/send"
             if not self.messages:
                 gate.wait()
             self.cost += 0.2

@@ -137,7 +137,7 @@ def test_supplement_storage_failure_keeps_each_entrys_delivery_contract(
         monkeypatch.setattr(task_changes, "add_supplement", fail)
         queue = bus.get_queue("planner-task-a")
         if entry == "console":
-            status, result = await _post(server, "/api/chat/send", {
+            status, result = await _post(server, "/api/v1/operator_chat/send", {
                 "text": "Use CSV", "target": {"kind": "planner", "task_id": "task-a"}})
             assert status == 200, result
             message = queue.get_nowait()
@@ -166,7 +166,7 @@ def test_each_supplement_entry_stores_once_and_wakes_once(
                                 project_id=project["id"], work_dir=str(tmp_path), pool=pool)
         server, bus, router = _server(tmp_path)
         if entry == "console":
-            status, result = await _post(server, "/api/chat/send", {
+            status, result = await _post(server, "/api/v1/operator_chat/send", {
                 "text": "Use CSV", "target": {"kind": "planner", "task_id": "task-a"},
                 "session_id": "task-thread", "message_id": "message-1"})
             assert status == 200, result
@@ -189,7 +189,7 @@ def test_each_supplement_entry_stores_once_and_wakes_once(
             assert message.payload["text"] == "Use CSV"
             assert message.payload["channel_context"]["session_id"] == "task-thread"
             assert result["correlation_id"] == message.correlation_id
-            assert result["events_url"] == f"/api/chat/events?cid={message.correlation_id}"
+            assert "events_url" not in result
         else:
             assert message.message_type is MessageType.TASK_CHANGE
             assert message.payload == {"task_id": "task-a"}

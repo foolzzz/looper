@@ -579,7 +579,7 @@ def run_task(
                 pass  # the user answered a gate; look again at the next poll
             elif chat_pending and detail.get("steps") and detail.get("phase") in ("executing", "verifying"):
                 try:
-                    api.post("/api/chat/send", {"text": task.chat, "target": {"kind": "planner", "task_id": task_id}})
+                    api.post("/api/v1/operator_chat/send", {"text": task.chat, "target": {"kind": "planner", "task_id": task_id}})
                     chat_pending = False
                 except EvalError:
                     pass  # the Planner is not live yet; try again at the next poll
@@ -1133,7 +1133,7 @@ def register_agent(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
     runtime options. Older specs with agent.model use the shared legacy converter.
     Credentials come exclusively from provider.api_key_env and never alter spec.
     """
-    registry = api.get("/api/registry")
+    registry = api.post("/api/v1/registry/view", {})["result"]
     wanted = spec["runtime"]
     runtime = next((r for r in registry["runtimes"] if r["name"] == wanted.get("name")), None) or next(
         (r for r in registry["runtimes"] if r["builtin"] and r["type"] == wanted.get("type")), None)
@@ -1186,7 +1186,7 @@ class ProviderChoice:
 
 def register_provider_agent(api: Api, choice: ProviderChoice) -> dict[str, Any]:
     """Register ``choice``'s provider and a Claude Code agent of it; returns the agent."""
-    registry = api.get("/api/registry")
+    registry = api.post("/api/v1/registry/view", {})["result"]
     preset = next((p for p in registry["provider_presets"] if p["preset_id"] == choice.preset), None)
     if preset is None:
         raise EvalError(f"no provider preset {choice.preset!r}; the presets are "
@@ -1228,7 +1228,7 @@ def select_agent(api: Api, *, agent: str | None, model: str | None, provider: Pr
     """Make ``agent`` (a registered agent's name), else Claude Code with ``provider``, else Claude Code with
     ``model``, every role's agent (the system layer); returns it. Without any, every role keeps the built-in
     agent. With ``provider``, the system layer also caps each run at ``run_budget_usd``."""
-    registry = api.get("/api/registry")
+    registry = api.post("/api/v1/registry/view", {})["result"]
     agents = {a["name"]: a for a in registry["profiles"]}
     if agent is not None:
         if agent not in agents:

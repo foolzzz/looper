@@ -319,7 +319,9 @@ def test_the_dashboard_send_has_no_client(monkeypatch: pytest.MonkeyPatch) -> No
                                  task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
         writer = _Writer()
         body = {"text": "hello", "session_id": "s1", "message_id": "m1"}
-        await server._route_api("POST", "/api/chat/send", {}, json.dumps(body).encode(), writer)
+        from looper.agents.ops.clients import ClientOps
+        server._client_ops = ClientOps(SimpleNamespace())
+        await server._handle_v1("POST", "/api/v1/operator_chat/send", {}, {}, json.dumps(body).encode(), writer, OPERATOR)
         assert writer.data.startswith(b"HTTP/1.1 200") and len(web.sent) == 1
         assert "client" not in web.sent[0] and web.sent[0]["session_id"] == "s1"
 
