@@ -1,4 +1,4 @@
-"""Domain discovery and the operation order captured from main (284892a11)."""
+"""Domain discovery and the operation order preserved from main."""
 
 import importlib
 import pkgutil
@@ -29,6 +29,8 @@ project_skills.update project_skills.delete waits.resume waits.cancel tasks.role
 tasks.activity tasks.activity_detail tasks.conversation tasks.activity_stream
 channels.status channels.people gate_settings.get gate_settings.update managers.list managers.create
 managers.update managers.delete manager_templates.put manager_templates.delete
+schedule_admin.list schedule_admin.project_list schedule_admin.get schedule_admin.preview
+schedule_admin.runs schedule_admin.notifications
 """.split()
 
 

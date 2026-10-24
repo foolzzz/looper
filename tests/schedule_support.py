@@ -71,9 +71,16 @@ class ScheduleEnv(SimpleNamespace):
                                  scheduler=self.scheduler)
         writer = _Writer()
         raw = b"" if body is None else json.dumps(body).encode()
-        await server._route_api(method, path, query or {}, raw, writer)
+        if path.startswith("/api/v1/schedule_admin/"):
+            from looper.agents.api_v1 import OPERATOR
+            await server._handle_v1(method, path, query or {}, {}, raw, writer, OPERATOR)
+        else:
+            await server._route_api(method, path, query or {}, raw, writer)
         head, _, payload = writer.data.partition(b"\r\n\r\n")
-        return int(head.split()[1]), json.loads(payload)
+        answer = json.loads(payload)
+        if path.startswith("/api/v1/schedule_admin/") and answer.get("status") == "ok":
+            answer = answer["result"]
+        return int(head.split()[1]), answer
 
     async def ok(self, method: str, path: str, body: Any = None) -> Any:
         status, payload = await self.call(method, path, body)
@@ -98,7 +105,7 @@ class ScheduleEnv(SimpleNamespace):
         self.clock.now = latest + timedelta(seconds=10)
 
     async def runs(self, schedule_id: str) -> list[dict[str, Any]]:
-        return (await self.ok("GET", f"/api/schedules/{schedule_id}/runs"))["runs"]
+        return (await self.ok("POST", "/api/v1/schedule_admin/runs", {"schedule_id": schedule_id}))["runs"]
 
     async def end_task(self, task_id: str, status: str, *, summary: str = "", cost: float = 0.0) -> None:
         await self.pool.execute(

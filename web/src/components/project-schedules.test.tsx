@@ -49,8 +49,11 @@ describe("schedule Planner session", () => {
   });
 
   it("asks before reset, leaves a cancelled reset alone, and refreshes after confirming", async () => {
-    const fetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) =>
-      Response.json(init?.method === "POST" ? { cleared: true } : { schedule: schedule(false) }));
+    const fetch = vi.fn(async (url: RequestInfo | URL, _init?: RequestInit) => {
+      if (url === "/api/schedules/sched%2Fa/reset-planner-session") return Response.json({ cleared: true });
+      if (url === "/api/v1/schedule_admin/get") return Response.json({ status: "ok", result: { schedule: schedule(false) } });
+      throw new Error(`Unexpected request: ${url}`);
+    });
     vi.stubGlobal("fetch", fetch);
     const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
     vi.stubGlobal("confirm", confirm);
@@ -64,6 +67,10 @@ describe("schedule Planner session", () => {
     expect(confirm.mock.calls[0][0]).toContain("will not write it back");
     expect(fetch.mock.calls[0][0]).toBe("/api/schedules/sched%2Fa/reset-planner-session");
     expect(fetch.mock.calls[0][1]?.method).toBe("POST");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.mock.calls[1]).toEqual(["/api/v1/schedule_admin/get", expect.objectContaining({
+      method: "POST", body: JSON.stringify({ schedule_id: "sched/a" }),
+    })]);
     expect(onReset).toHaveBeenCalledWith(schedule(false));
   });
 
