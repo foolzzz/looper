@@ -37,6 +37,101 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _assert_planner_read_scope(
+    cwd: Path, roots: set[Path], *, add_dirs: tuple[str, ...] = (),
+) -> None:
+    from looper.agents.claude_cli import read_only_args
+    from looper.agents.library import AgentLibrary
+
+    args = read_only_args(AgentLibrary(), cwd=cwd, add_dirs=add_dirs)
+    allowed = set(args[args.index("--allowedTools") + 1].split(","))
+    # Compare permissions as a set, including literal-path escaping, not CLI argument order.
+    escapes = str.maketrans({char: "\\" + char for char in "\\*?[]{}()"})
+    paths = {root.as_posix().translate(escapes) for root in roots}
+    assert allowed == {
+        *(f"{tool}(/{path}/**)" for path in paths for tool in ("Read", "Glob", "Grep")),
+        "Skill", "WebFetch", "WebSearch",
+    }
+    assert "--dangerously-skip-permissions" not in args
+    assert args[args.index("--permission-mode") + 1] == "manual"
+    assert args[args.index("--permission-prompts") + 1] == "none"
+    assert {"Bash", "Edit", "Write", "NotebookEdit", "EnterWorktree"} <= set(
+        args[args.index("--disallowedTools") + 1].split(","))
+
+
+def test_planner_symlink_to_non_repository_never_grants_the_outer_repository(tmp_path: Path) -> None:
+    outer, scratch = tmp_path / "outer", tmp_path / "scratch"
+    (outer / ".git").mkdir(parents=True)
+    scratch.mkdir()
+    private = outer / "private.env"
+    private.write_text("SYNTHETIC_PRIVATE=outside-read-scope\n")
+    (scratch / "allowed.md").write_text("Synthetic scratch document\n")
+    jump = outer / "jump"
+    jump.symlink_to(scratch, target_is_directory=True)
+
+    # Both spellings can inspect scratch; neither permission may cover outer/private.env.
+    assert (jump / "allowed.md").read_text() == (scratch / "allowed.md").read_text()
+    assert not private.is_relative_to(jump) and not private.is_relative_to(scratch.resolve())
+    _assert_planner_read_scope(jump, {scratch.resolve(), jump.absolute()})
+
+
+@pytest.mark.parametrize("layout", ["ordinary", "repo-alias", "internal-link", "external-repo"])
+def test_planner_keeps_reads_above_cwd_inside_the_actual_repository(tmp_path: Path, layout: str) -> None:
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    subdir = repo / "src"
+    subdir.mkdir()
+    (repo / "DESIGN.md").write_text("Synthetic repository design\n")
+    cwd, roots = subdir, {repo.resolve(), repo.absolute()}
+    if layout == "repo-alias":
+        alias = tmp_path / "alias"
+        alias.symlink_to(repo, target_is_directory=True)
+        cwd, roots = alias / "src", {repo.resolve(), alias.absolute()}
+    elif layout == "internal-link":
+        cwd = repo / "jump"
+        cwd.symlink_to(subdir, target_is_directory=True)
+    elif layout == "external-repo":
+        outer = tmp_path / "outer"
+        (outer / ".git").mkdir(parents=True)
+        cwd = outer / "jump"
+        # The link enters a subdirectory, so its lexical parent finds an unrelated .git.
+        cwd.symlink_to(subdir, target_is_directory=True)
+        roots = {repo.resolve(), cwd.absolute()}
+    assert (cwd.resolve().parent / "DESIGN.md").is_file()
+    _assert_planner_read_scope(cwd, roots)
+
+
+def test_planner_read_permissions_escape_literal_special_path_characters(tmp_path: Path) -> None:
+    repo = tmp_path / "repo [1]*?{docs}(draft)\\name"
+    (repo / ".git").mkdir(parents=True)
+    cwd = repo / "src"
+    cwd.mkdir()
+    alias = tmp_path / "alias [2]*?{notes}(copy)\\name"
+    alias.symlink_to(repo, target_is_directory=True)
+    _assert_planner_read_scope(alias / "src", {repo.resolve(), alias.absolute()})
+
+
+def test_planner_explicit_add_dirs_stay_exact_without_repository_expansion(tmp_path: Path) -> None:
+    scratch, docs_repo = tmp_path / "scratch", tmp_path / "docs-repo"
+    scratch.mkdir()
+    (docs_repo / ".git").mkdir(parents=True)
+    docs = docs_repo / "docs"
+    docs.mkdir()
+    alias = tmp_path / "docs-alias"
+    alias.symlink_to(docs, target_is_directory=True)
+    _assert_planner_read_scope(
+        scratch, {scratch.resolve(), scratch.absolute(), docs.resolve(), alias.absolute()},
+        add_dirs=(str(alias),),
+    )
+    # An explicit request for the outer repository still grants exactly that directory.
+    jump = docs_repo / "jump"
+    jump.symlink_to(scratch, target_is_directory=True)
+    _assert_planner_read_scope(
+        jump, {scratch.resolve(), jump.absolute(), docs_repo.resolve(), docs_repo.absolute()},
+        add_dirs=(str(docs_repo),),
+    )
+
+
 @pytest.mark.parametrize("background", ["", "  \n\n \t"])
 def test_without_a_background_there_is_no_project_section(background: str) -> None:
     prompt = compose_system_prompt("You plan.", project_name="calc", background=background, contract="CONTRACT")
