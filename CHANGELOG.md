@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.101] - 2026-10-25
+
+### Fixed
+
+- **The Planner's read-only inspection guidance now fits each runtime.** The default Planner prompt names the runtime's own reading tools (Read, Glob and Grep in Claude Code, equivalents elsewhere) and, where the runtime exposes a shell for reading as Codex does, allows read-only inspection such as `cat`, `ls` and `rg` under the existing sandbox, without seeking broader permissions; builds, tests and state-changing commands stay with Workers. The Planner turn now builds its system prompt after the launch is resolved, and a saved custom role prompt is still loaded unchanged. No write access is added. Model-visible: the default Planner system prompt text changed. ([#577](https://github.com/foolzzz/looper/pull/577))
+
 ## [2.13.100] - 2026-10-25
 
 ### Fixed
