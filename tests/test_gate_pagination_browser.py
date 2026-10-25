@@ -124,13 +124,43 @@ def refresh(page):
     page.clock.fast_forward(10000)
 
 
+@pytest.mark.parametrize("insert", [False, True])
+def test_closed_loaded_window_retains_unread_gates_and_later_draft(dashboard, insert):
+    page, model, expect = open_gates(dashboard)
+    model["rows"] = ([gate_row("new")] if insert else []) + model["rows"][50:]
+    refresh(page)
+    expect(page.locator("main li")).to_have_count(int(insert))
+    if insert:
+        expect(page.locator('main a[href="#tasks/tnew"]')).to_have_count(1)
+        screenshot = ROOT / "output/playwright/gate-unread-boundary.png"
+        screenshot.parent.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(screenshot))
+    # A second refresh must retain even an empty loaded window's unread cutoff.
+    refresh(page)
+    expect(page.locator("main li")).to_have_count(int(insert))
+    more = page.get_by_role("button", name="Show more", exact=True)
+    more.click()
+    expect(page.locator("main li")).to_have_count(50 + int(insert))
+    expect(page.locator('main a[href="#tasks/t50"]')).to_have_count(1)
+    draft_on(page, 90)
+    model["rows"].insert(0, gate_row("newer"))
+    refresh(page)
+    expect(page.locator("main li")).to_have_count(51 + int(insert))
+    expect(page.get_by_role("textbox")).to_have_value("Keep this later draft")
+    more.click()
+    expect(page.locator("main li")).to_have_count(71 + int(insert))
+    expect(more).to_have_count(0)
+    expect(page.get_by_role("textbox")).to_have_value("Keep this later draft")
+    expect(page.get_by_role("alert")).to_have_count(0)
+
+
 def test_badge_and_initial_page_read_only_the_requested_window(dashboard):
     dashboard[1]["rows"] = [gate_row(n) for n in range(700)]
     page, model, expect = open_gates(dashboard)
     badge = [r for r in model["requests"] if r.get("waiting_on") == "user"]
     initial = [r for r in model["requests"] if "waiting_on" not in r]
-    assert badge == [{"state": "open", "waiting_on": "user", "limit": 1, "offset": 0}]
-    assert initial == [{"state": "open", "limit": 50, "offset": 0}]
+    assert badge == [{"state": "open", "waiting_on": "user", "limit": 2, "offset": 0}]
+    assert initial == [{"state": "open", "limit": 51, "offset": 0}]
     expect(page.get_by_text("700 open · 697 waiting for you", exact=True)).to_be_visible()
     expect(page.get_by_role("button", name="Show more", exact=True)).to_be_visible()
 
