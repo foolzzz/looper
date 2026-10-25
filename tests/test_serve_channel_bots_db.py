@@ -76,6 +76,9 @@ class _Registry:
     def __init__(self) -> None:
         self.adapters: list[Any] = []
 
+    def resolve_chat(self, channel_id: str, chat_id: str):
+        raise AssertionError("this construction-only registry does not receive ingress")
+
     async def register(self, adapter: Any) -> None:
         self.adapters.append(adapter)
 
@@ -107,7 +110,11 @@ async def _pass(types: tuple[str, ...], tmp_path: Path, running: Any = lambda ma
 
     registry = _Registry()
     rows = await serve._enabled_bot_rows()
-    await serve._register_bots(registry, rows, tmp_path, running, types)  # type: ignore[arg-type]
+    async def stop(*args, **kwargs):
+        pass
+
+    await serve._register_bots(registry, rows, tmp_path, running, types, stop_chat=stop)  # type: ignore[arg-type]
+    assert all(a._resolve_chat == registry.resolve_chat and a._stop_chat is stop for a in registry.adapters)
     return registry.adapters
 
 

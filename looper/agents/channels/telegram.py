@@ -33,6 +33,7 @@ from ..message import (
     MessageEnvelope,
     MessageType,
     channel_address,
+    channel_thread_id,
     manager_address,
     parse_channel_id,
 )
@@ -41,6 +42,7 @@ from .allowlist import SenderAllowlist
 from .. import chat_commands, chat_settings
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
 from .chat_history import record_reply
+from .chat_routing import ChatResolver, RouteAction, RouteDecision, observe_chat
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
 
 logger = logging.getLogger(__name__)
@@ -77,6 +79,8 @@ class TelegramChannelAdapter(ChannelAdapter):
         channel_id: str | None = None,
         manager_id: str = "manager",
         manager_running: Callable[[str], bool] | None = None,
+        resolve_chat: ChatResolver | None = None,
+        stop_chat: Callable[..., Awaitable[Any]] | None = None,
     ) -> None:
         if channel_id is not None:
             parsed = parse_channel_id(channel_id)
@@ -85,6 +89,8 @@ class TelegramChannelAdapter(ChannelAdapter):
         self._channel_id = channel_id or "channel-telegram"
         self._manager_id = manager_id
         self._manager_running = manager_running
+        self._resolve_chat = resolve_chat
+        self._stop_chat = stop_chat
         # Only the built-in row falls back to the environment; an added bot has its own token.
         self._bot_token = bot_token or (env.get("LOOPER_TELEGRAM_BOT_TOKEN", "") if channel_id is None else "")
         self._allowlist = allowlist  # Telegram user ids, as strings
@@ -302,23 +308,29 @@ class TelegramChannelAdapter(ChannelAdapter):
     async def _react(self, chat_id: str, message_id: str) -> None:
         await self._app.bot.set_message_reaction(chat_id=int(chat_id), message_id=int(message_id), reaction="👀")
 
-    async def _turned_off(self, chat_id: int) -> bool:
-        """Whether this bot's Manager is turned off; then the chat is told so and the message goes nowhere."""
-        if self._manager_id == "manager" or self._manager_running is None:
+    async def _turned_off(self, chat_id: int, route: RouteDecision, text: str) -> bool:
+        """Refuse an unavailable destination, while allowing fleet stop to reach its older turns."""
+        if route.manager_id == "manager" and not route.explicit:
             return False
         try:
-            running = self._manager_running(self._manager_id)
+            running = self._manager_running(route.manager_id) if self._manager_running is not None else not route.explicit
+            if running:
+                return False
         except Exception:
-            logger.warning("%s: cannot tell whether %s is running", self._channel_id, self._manager_id, exc_info=True)
-            return False
-        if running:
-            return False
+            logger.warning("%s: cannot tell whether %s is running", self._channel_id, route.manager_id, exc_info=True)
+            if not route.explicit:
+                return False
         from ..tiers.manager import TURNED_OFF_REPLY
 
-        receipt = await self._send_answer(chat_id, TURNED_OFF_REPLY)
+        reply = TURNED_OFF_REPLY
+        if text.strip().lower() == "/stop" and self._stop_chat is not None:
+            from ..managers import chat_stop_reply
+
+            reply = chat_stop_reply(await self._stop_chat(self.channel_id, str(chat_id), via="telegram"))
+        receipt = await self._send_answer(chat_id, reply)
         if not receipt.success:
-            logger.warning("%s: could not tell chat %s that %s is turned off", self._channel_id, chat_id,
-                           self._manager_id)
+            logger.warning("%s: could not tell chat %s that %s is unavailable", self._channel_id, chat_id,
+                           route.manager_id)
         return True
 
     async def _send_answer(self, chat_id: int, text: str) -> DeliveryReceipt:
@@ -381,8 +393,21 @@ class TelegramChannelAdapter(ChannelAdapter):
 
     # --- Telegram handlers ---
 
-    async def _cmd_start(self, update: Any, context: Any) -> None:
+    async def _admitted(self, update: Any, *, text_required: bool = False) -> RouteDecision | None:
         if not self._admits(update):
+            return None
+        if text_required and (not update.message or not update.message.text):
+            return None
+        chat_id = update.effective_chat.id
+        route = (self._resolve_chat(self.channel_id, str(chat_id)) if self._resolve_chat is not None
+                 else RouteDecision(RouteAction.ADMIT, self._manager_id))
+        if self._resolve_chat is not None:
+            await observe_chat(self.channel_id, str(chat_id), suppressed=route.action is RouteAction.SILENT)
+        return route if route.action is RouteAction.ADMIT else None
+
+    async def _cmd_start(self, update: Any, context: Any) -> None:
+        route = await self._admitted(update)
+        if route is None or (route.explicit and await self._turned_off(update.effective_chat.id, route, "/start")):
             return
         await update.message.reply_text(
             "Looper Agent 已就绪。直接发消息给我，或使用:\n"
@@ -394,48 +419,22 @@ class TelegramChannelAdapter(ChannelAdapter):
         )
 
     async def _cmd_status(self, update: Any, context: Any) -> None:
-        if not self._admits(update):
-            return
-        assert self._bus is not None
-        import uuid as _uuid
-
-        if await self._turned_off(update.effective_chat.id):
-            return
-        self._acknowledge(update)
-        correlation_id = str(_uuid.uuid4())
-        chat_id = update.effective_chat.id
-        self._remember(correlation_id, chat_id)
-
-        envelope = MessageEnvelope.create(
-            source=self._address,
-            target=manager_address(self._manager_id),
-            message_type=MessageType.USER_MESSAGE,
-            payload={
-                "text": "当前任务进度怎么样？",
-                "language": "zh",
-                "channel_context": {"chat_id": chat_id},
-            },
-            correlation_id=correlation_id,
-            metadata={"origin_channel_id": self.channel_id},
-        )
-        await self._bus.publish(envelope)
+        await self._forward(update, "当前任务进度怎么样？", status=True)
 
     async def _cmd_help(self, update: Any, context: Any) -> None:
-        if not self._admits(update):
+        route = await self._admitted(update)
+        if route is None or (route.explicit and await self._turned_off(update.effective_chat.id, route, "/help")):
             return
         await update.message.reply_text(chat_commands.help_text())
 
     async def _cmd_new(self, update: Any, context: Any) -> None:
         """/new goes to the Manager as the text ``/new``, which it answers itself by starting a new session."""
-        if not self._admits(update):
-            return
         await self._forward(update, "/new")
 
     async def _cmd_stop(self, update: Any, context: Any) -> None:
-        """/stop goes to the Manager as the text ``/stop``, which it answers itself, outside its queue."""
-        if not self._admits(update):
-            return
+        """/stop goes to the selected Manager as text, which it answers itself, outside its queue."""
         await self._forward(update, "/stop")
+
     async def _cmd_gates(self, update: Any, context: Any) -> None:
         """/gates goes to the Manager as typed; it lists the gates and answers itself."""
         await self._forward_command(update)
@@ -445,62 +444,53 @@ class TelegramChannelAdapter(ChannelAdapter):
         await self._forward_command(update)
 
     async def _forward_command(self, update: Any) -> None:
-        if not self._admits(update):
-            return
-        if not update.message or not update.message.text:
-            return
-        await self._forward(update, update.message.text)
+        await self._forward(update, None)
 
     async def _cmd_profile(self, update: Any, context: Any) -> None:
         """/profile [choice] goes to the Manager as text, which it answers itself; ``CommandHandler`` has already
         dropped any ``@<bot>`` suffix, so the text is rebuilt from the parsed arguments."""
-        if not self._admits(update):
-            return
         args = getattr(context, "args", None) or []
         await self._forward(update, "/profile" + (" " + " ".join(args) if args else ""))
 
     async def _on_message(self, update: Any, context: Any) -> None:
-        if not self._admits(update):
-            return
-        if not update.message or not update.message.text:
-            return
-        await self._forward(update, update.message.text)
+        await self._forward_command(update)
 
-    async def _forward(self, update: Any, text: str) -> None:
-        """Send ``text`` from the update's sender to the Manager; its replies go back to the update's chat."""
+    async def _forward(self, update: Any, text: str | None, *, status: bool = False) -> None:
+        """Pin admission once before observation or any visible side effect."""
+        route = await self._admitted(update, text_required=text is None)
+        if route is None:
+            return
+        text = update.message.text if text is None else text
         assert self._bus is not None
         import uuid as _uuid
 
-        if await self._turned_off(update.effective_chat.id):
+        if await self._turned_off(update.effective_chat.id, route, text):
             return
         self._acknowledge(update)
         chat_id = update.effective_chat.id
         correlation_id = str(_uuid.uuid4())
         self._remember(correlation_id, chat_id)
 
-        context: dict[str, Any] = {
-            "chat_id": chat_id,
-            "user_id": update.effective_user.id,
-            "username": update.effective_user.username or "",
-        }
-        if update.message is not None:  # None for an edited /new
-            # The message's own id and the one it replies to, so a reply to a gate's message reaches its gate.
-            context["message_id"] = str(update.message.message_id)
-            replied = getattr(update.message, "reply_to_message", None)
-            if replied is not None:
-                context["reply_to_message_id"] = str(replied.message_id)
-
+        context: dict[str, Any] = {"chat_id": chat_id}
+        if not status:
+            context.update(user_id=update.effective_user.id, username=update.effective_user.username or "")
+            if update.message is not None:  # None for an edited /new
+                context["message_id"] = str(update.message.message_id)
+                replied = getattr(update.message, "reply_to_message", None)
+                if replied is not None:
+                    context["reply_to_message_id"] = str(replied.message_id)
+        metadata = {"origin_channel_id": self.channel_id}
+        if self._resolve_chat is not None:
+            metadata["channel_manager_id"] = self._manager_id
+            metadata["channel_thread_id"] = channel_thread_id(self.channel_id, str(chat_id), route.manager_id,
+                                                              self._manager_id)
         envelope = MessageEnvelope.create(
             source=self._address,
-            target=manager_address(self._manager_id),
+            target=manager_address(route.manager_id),
             message_type=MessageType.USER_MESSAGE,
-            payload={
-                "text": text,
-                "language": "zh",
-                "channel_context": context,
-            },
+            payload={"text": text, "language": "zh", "channel_context": context},
             correlation_id=correlation_id,
-            metadata={"origin_channel_id": self.channel_id},
+            metadata=metadata,
         )
         await self._bus.publish(envelope)
 

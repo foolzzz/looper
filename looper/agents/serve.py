@@ -42,6 +42,7 @@ from .channels.base import ChannelAdapter
 from .channels.bots import BOT_TYPES, builtin_env_token, clashes, lark_app_id
 from .channels.lark import LarkChannelAdapter
 from .channels.registry import ChannelRegistry
+from .channels.chat_routing import ChatResolver, ChatStop
 from .channels.telegram import TelegramChannelAdapter
 from .channels.web import WebChannelAdapter
 from . import self_check
@@ -361,6 +362,7 @@ def _sender_allowlist(channel_id: str, channel_type: str, config: dict[str, Any]
 def _telegram_adapter_from_config(
     config: dict[str, Any], bot_token: str = "", *, channel_id: str = "channel-telegram",
     manager_id: str = "manager", manager_running: Callable[[str], bool] | None = None,
+    resolve_chat: ChatResolver | None = None, stop_chat: ChatStop | None = None,
 ) -> TelegramChannelAdapter | None:
     """Build the Telegram adapter from its Settings-page config; None when its allowlist keeps it from starting.
 
@@ -375,13 +377,16 @@ def _telegram_adapter_from_config(
     if not token and channel_id == "channel-telegram":
         token = builtin_env_token(config)
     return TelegramChannelAdapter(bot_token=token, allowlist=allowlist, channel_id=channel_id,
-                                  manager_id=manager_id, manager_running=manager_running)
+                                  manager_id=manager_id, manager_running=manager_running,
+                                  resolve_chat=resolve_chat, stop_chat=stop_chat)
 
 
 def _lark_adapter_from_config(config: dict[str, Any], runtime_root: Path, *,
                               bot_open_id: str = "", channel_id: str = "channel-lark",
                               manager_id: str = "manager",
-                              manager_running: Callable[[str], bool] | None = None) -> LarkChannelAdapter | None:
+                              manager_running: Callable[[str], bool] | None = None,
+                              resolve_chat: ChatResolver | None = None,
+                              stop_chat: ChatStop | None = None) -> LarkChannelAdapter | None:
     """Build the Lark adapter from its Settings-page config; None when its allowlist keeps it from starting.
     ``bot_open_id`` is the bot's own open_id, which tells a group message that @-mentions it."""
     allowlist = _sender_allowlist(channel_id, "lark", config)
@@ -394,13 +399,15 @@ def _lark_adapter_from_config(config: dict[str, Any], runtime_root: Path, *,
 
     return LarkChannelAdapter(profile=config.get("profile") or "", runtime_root=runtime_root, allowlist=allowlist,
                               on_rejected=rejected, bot_open_id=bot_open_id, channel_id=channel_id,
-                              manager_id=manager_id, manager_running=manager_running)
+                              manager_id=manager_id, manager_running=manager_running,
+                              resolve_chat=resolve_chat, stop_chat=stop_chat)
 
 
 async def _lark_adapter(config: dict[str, Any], runtime_root: Path, *, channel_id: str = "channel-lark",
                         manager_id: str = "manager",
                         manager_running: Callable[[str], bool] | None = None,
-                        same_bot_as: Callable[[str], str | None] | None = None) -> LarkChannelAdapter | None:
+                        same_bot_as: Callable[[str], str | None] | None = None,
+                        resolve_chat: ChatResolver | None = None, stop_chat: ChatStop | None = None) -> LarkChannelAdapter | None:
     """The Lark adapter, once lark-cli acts as the bot under the channel's profile and the allowlist was made for
     that app, and ``same_bot_as`` (given the app it acts as) names no running channel of that app; None (logged)
     otherwise."""
@@ -417,12 +424,14 @@ async def _lark_adapter(config: dict[str, Any], runtime_root: Path, *, channel_i
         return None
     logger.info("%s: bot %s (app %s, lark-cli profile %s)", channel_id, bot.bot_name, bot.app_id, bot.profile)
     return _lark_adapter_from_config(config, runtime_root, bot_open_id=bot.bot_open_id, channel_id=channel_id,
-                                     manager_id=manager_id, manager_running=manager_running)
+                                     manager_id=manager_id, manager_running=manager_running,
+                                     resolve_chat=resolve_chat, stop_chat=stop_chat)
 
 
 async def _lark_bot_adapter(config: dict[str, Any], secret: str, runtime_root: Path, *,
                             channel_id: str = "channel-lark_bot", manager_id: str = "manager",
-                            manager_running: Callable[[str], bool] | None = None) -> LarkChannelAdapter | None:
+                            manager_running: Callable[[str], bool] | None = None,
+                            resolve_chat: ChatResolver | None = None, stop_chat: ChatStop | None = None) -> LarkChannelAdapter | None:
     """Start the bot-token channel only with a valid allowlist and matching app credentials."""
     from ..db.channel_configs import record_rejected
     from .channels import lark_bot_settings
@@ -444,7 +453,8 @@ async def _lark_bot_adapter(config: dict[str, Any], secret: str, runtime_root: P
 
     return make_adapter(config, secret, runtime_root=runtime_root, allowlist=allowlist,
                         on_rejected=rejected, bot_open_id=bot.open_id, channel_id=channel_id,
-                        manager_id=manager_id, manager_running=manager_running)
+                        manager_id=manager_id, manager_running=manager_running,
+                        resolve_chat=resolve_chat, stop_chat=stop_chat)
 
 
 async def _enabled_bot_rows() -> list[dict[str, Any]]:
@@ -463,7 +473,8 @@ async def _enabled_bot_rows() -> list[dict[str, Any]]:
 
 
 async def _register_bots(registry: ChannelRegistry, rows: list[dict[str, Any]], runtime_root: Path,
-                         manager_running: Callable[[str], bool], channel_types: tuple[str, ...]) -> None:
+                         manager_running: Callable[[str], bool], channel_types: tuple[str, ...],
+                         *, stop_chat: ChatStop | None = None) -> None:
     """Build and register the adapter of each row of ``channel_types``; one that fails to start leaves the rest.
 
     A lark-cli row's app is known for sure only once its adapter asks lark-cli (``_enabled_bot_rows`` may not have
@@ -477,7 +488,8 @@ async def _register_bots(registry: ChannelRegistry, rows: list[dict[str, Any]], 
         if row["channel_type"] not in channel_types:
             continue
         kwargs: dict[str, Any] = {"channel_id": row["channel_id"], "manager_id": row.get("manager_id") or "manager",
-                                  "manager_running": manager_running}
+                                  "manager_running": manager_running, "resolve_chat": registry.resolve_chat,
+                                  "stop_chat": stop_chat}
         adapter: ChannelAdapter | None
         found: list[str] = []
         if row["channel_type"] == "lark":
@@ -918,8 +930,8 @@ async def _run_agent_system(
     task_router.manager_running = fleet.is_running
     await fleet.load()
     # Start receiving only once every enabled Manager is known, so backlog is not lost or sent to a disabled one.
-    await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("telegram",))
-    await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("lark", "lark_bot"))
+    await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("telegram",), stop_chat=fleet.stop_chat)
+    await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("lark", "lark_bot"), stop_chat=fleet.stop_chat)
 
     # Poll before the advisory checks: Telegram drops pending updates when polling starts, so messages sent
     # during a slow check must already be received. Problems only warn here and on /api/v1/system/status.

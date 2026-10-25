@@ -12,6 +12,7 @@ import pytest
 
 from looper.agents.bus import MessageBus
 from looper.agents.channels.allowlist import SenderAllowlist
+from looper.agents.channels.chat_routing import RoutingSnapshot
 from looper.agents.channels.registry import ChannelRegistry
 from looper.agents.channels.telegram import TelegramChannelAdapter
 from looper.agents.serve import _register_optional_channel
@@ -205,6 +206,8 @@ def test_partial_start_releases_resources(
         app.initialize = initialize
         try:
             if optional:
+                snapshot = RoutingSnapshot(adapter.channel_id, "manager", False, {})
+                monkeypatch.setattr("looper.agents.channels.registry.load_snapshot", AsyncMock(return_value=snapshot))
                 assert await _register_optional_channel(registry, adapter) is (failure is None)
             elif failure:
                 with pytest.raises(RuntimeError) as caught:
