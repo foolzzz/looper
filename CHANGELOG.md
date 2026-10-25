@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.105] - 2026-10-25
+
+### Fixed
+
+- **The Gates page and its badge read only the rows they show, and a refresh no longer drops a loaded draft.** `fetchGates` used to read the server's whole ordered gate list even for a one-row badge. Ordinary reads (no saved cursor or `through` boundary) now request only the window `offset + limit` and check that the rows read match `min(window, total)`; saved boundaries still rebuild the full list so the server's ordering is kept. "Show more" now follows the server's `has_more` instead of comparing the loaded rows with the total, so an empty page no longer clears the saved cursor. A refresh across several windows rejects a changed `total` or a duplicated row with "Retry" and keeps the rows and any draft answer already on the page. Not model-visible; dashboard only. ([#586](https://github.com/foolzzz/looper/pull/586))
+
 ## [2.13.104] - 2026-10-25
 
 ### Fixed
