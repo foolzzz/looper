@@ -224,7 +224,11 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
       {error && (
         <div role="alert" className="flex flex-wrap items-center gap-3 text-sm text-destructive [overflow-wrap:anywhere]">
           <span>Cannot load gates ({error})</span>
-          <Button type="button" variant="outline" size="sm" className="min-h-11" onClick={() => void read("refresh", true)}>
+          <Button type="button" variant="outline" size="sm" className="min-h-11" onClick={() => {
+            // Explicit recovery starts a fresh window; polling retains the saved boundary.
+            cursor.current = null;
+            void read("refresh", true);
+          }}>
             Retry
           </Button>
         </div>

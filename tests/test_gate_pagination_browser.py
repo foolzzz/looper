@@ -64,6 +64,10 @@ def dashboard(static_dashboard):
             body = route.request.post_data_json
             if path == "/api/v1/ops/gates/list":
                 model["requests"].append(body)
+                if model["fault"] == "unavailable":
+                    route.fulfill(status=503, json={"status": "error", "error": {
+                        "code": "unavailable", "message": "Gates temporarily unavailable"}})
+                    return
                 rows = model["rows"]
                 counts = {"open": len(rows), "waiting_user": max(0, len(rows) - 3),
                           "waiting_planner": min(3, len(rows)), "closed": 7, "all": len(rows) + 7}
@@ -79,6 +83,10 @@ def dashboard(static_dashboard):
                         result["total"] += 1
                     else:
                         result["gates"] = []
+                if model.get("defer_gate") and "waiting_on" not in body:
+                    model["defer_gate"] = False
+                    model["pending_gate"] = (route, result)
+                    return
             elif path == "/api/v1/project_admin/list":
                 result = {"projects": []}
             elif path in ("/api/v1/system/overview", "/api/v1/system/status"):
@@ -100,6 +108,9 @@ def dashboard(static_dashboard):
         try:
             yield page, model, pw.expect, static_dashboard
         finally:
+            pending = model.pop("pending_gate", None)
+            if pending:
+                pending[0].abort()
             context.close()
             browser.close()
         assert not unexpected
@@ -222,7 +233,7 @@ def test_inconsistent_snapshot_keeps_rows_and_draft_until_retry(dashboard, fault
     page, model, expect = open_gates(dashboard)
     page.get_by_role("button", name="Show more", exact=True).click()
     expect(page.locator("main li")).to_have_count(100)
-    draft_on(page, 90)
+    draft_on(page, 0)
     model["fault"] = fault
     refresh(page)
     expect(page.get_by_role("alert")).to_contain_text("Retry")
@@ -231,5 +242,65 @@ def test_inconsistent_snapshot_keeps_rows_and_draft_until_retry(dashboard, fault
     model["fault"] = None
     page.get_by_role("button", name="Retry", exact=True).click()
     expect(page.get_by_role("alert")).to_have_count(0)
+    expect(page.locator("main li")).to_have_count(50)
+    expect(page.get_by_role("textbox")).to_have_value("Keep this later draft")
+    page.get_by_role("button", name="Show more", exact=True).click()
     expect(page.locator("main li")).to_have_count(100)
     expect(page.get_by_role("textbox")).to_have_value("Keep this later draft")
+
+
+def test_retry_replaces_expired_boundary_and_ignores_older_refresh(dashboard):
+    page, model, expect = open_gates(dashboard)
+    # The saved first page also includes t50, the successor introduced for unread gates.
+    model["rows"] = [gate_row("new"), *model["rows"][51:]]
+    refresh(page)
+    expect(page.get_by_role("alert")).to_contain_text("Retry")
+    expect(page.locator("main li")).to_have_count(50)
+    expect(page.locator('main a[href="#tasks/t0"]')).to_have_count(1)
+    expect(page.get_by_text("120 open · 117 waiting for you", exact=True)).to_be_visible()
+
+    # Polling still uses the saved boundary. Hold that request until after Retry succeeds.
+    model["defer_gate"] = True
+    with page.expect_request(lambda r: urlsplit(r.url).path == "/api/v1/ops/gates/list"
+                             and "waiting_on" not in r.post_data_json):
+        refresh(page)
+    before_retry = len(model["requests"])
+    model["fault"] = "unavailable"
+    page.get_by_role("button", name="Retry", exact=True).click()
+    expect(page.get_by_role("alert")).to_contain_text("Gates temporarily unavailable")
+    expect(page.locator('main a[href="#tasks/t0"]')).to_have_count(1)
+    expect(page.get_by_text("120 open · 117 waiting for you", exact=True)).to_be_visible()
+    expect(page.get_by_role("button", name="Show more", exact=True)).to_be_visible()
+    model["fault"] = None
+    page.get_by_role("button", name="Retry", exact=True).click()
+    expect(page.get_by_role("alert")).to_have_count(0)
+    expect(page.locator("main li")).to_have_count(50)
+    expect(page.locator('main a[href="#tasks/tnew"]')).to_have_count(1)
+    expect(page.locator('main a[href="#tasks/t0"]')).to_have_count(0)
+    expect(page.get_by_text("70 open · 67 waiting for you", exact=True)).to_be_visible()
+    # The real API adapter requests only the fresh 50-row window plus its successor.
+    assert model["requests"][before_retry:] == [{"state": "open", "limit": 51, "offset": 0}] * 2
+
+    pending, result = model["pending_gate"]
+    assert pending.request.post_data_json == {"state": "open", "limit": 200, "offset": 0}
+    with page.expect_request_finished(lambda r: r == pending.request):
+        pending.fulfill(json={"status": "ok", "result": result})
+    model.pop("pending_gate")
+    refresh(page)
+    expect(page.get_by_role("alert")).to_have_count(0)
+    more = page.get_by_role("button", name="Show more", exact=True)
+    more.click()
+    expect(page.locator("main li")).to_have_count(70)
+    links = page.locator("main li > div > a").evaluate_all("links => links.map(a => a.hash)")
+    assert len(set(links)) == len(links) == 70
+    expect(page.locator('main a[href="#tasks/t119"]')).to_have_count(1)
+    expect(more).to_have_count(0)
+
+    for width in (1440, 390):
+        page.set_viewport_size({"width": width, "height": 900})
+        page.get_by_role("heading", name="User Gates").scroll_into_view_if_needed()
+        expect(page.locator('main a[href="#tasks/tnew"]')).to_be_visible()
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    screenshot = ROOT / "output/playwright/gate-retry.png"
+    screenshot.parent.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(screenshot))
