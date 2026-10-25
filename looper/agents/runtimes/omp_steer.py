@@ -32,6 +32,7 @@ class OmpChannel:
         self._prompt = ""
         self._setup_acked: set[str] = set()  # the setup requests acknowledged so far; the prompt needs both
         self._prompt_acknowledged = False
+        self._ready = asyncio.Event()
         self._ended = False
         self._result_seen = False
 
@@ -100,6 +101,7 @@ class OmpChannel:
                                     self._startup[request_id] = "prompt"
                         elif command == "prompt":
                             self._prompt_acknowledged = True
+                            self._ready.set()
                     continue
                 if raw.get("type") == "prompt_result":
                     error = raw.get("error")
@@ -129,6 +131,7 @@ class OmpChannel:
                 yield self._failure("the process ended before acknowledging the prompt")
         finally:
             self._ended = True
+            self._ready.set()
             for future in self._pending.values():
                 if not future.done():
                     future.set_exception(ConnectionResetError("the OMP rpc connection ended"))
@@ -143,9 +146,19 @@ class OmpChannel:
                 "type": "result", "subtype": "error_during_execution", "is_error": True, "result": "",
                 "errors": [safe_error(f"OMP rpc: {message}", secrets=self._stream.secrets, limit=None)]}
 
+    @property
+    def send_timeout(self) -> float:
+        return _STEER_TIMEOUT_SEC
+
+    async def wait_input_ready(self) -> None:
+        await self._ready.wait()
+        assert self._process.stdin is not None
+        if self._ended or self._result_seen or self._process.stdin.is_closing():
+            raise RuntimeError("the OMP run has ended")
+
     async def send(self, text: str, *, uuid: str | None = None) -> None:
         try:
-            response = await asyncio.wait_for(self._steer(text), _STEER_TIMEOUT_SEC)
+            response = await asyncio.wait_for(self._steer(text), self.send_timeout)
         except TimeoutError:
             raise RuntimeError("OMP did not accept the steer in time") from None
         if not response.get("success"):

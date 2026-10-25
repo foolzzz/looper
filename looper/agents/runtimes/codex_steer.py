@@ -243,16 +243,26 @@ class CodexChannel:
         if self._ended or self._process.stdin.is_closing():
             raise RuntimeError("the Codex run has ended")
 
+    @property
+    def send_timeout(self) -> float:
+        return _REQUEST_TIMEOUT_SEC
+
+    async def wait_input_ready(self) -> None:
+        self._check_open()
+        await self._turn_ready.wait()
+        self._check_open()
+        if self._turn_id is None:
+            raise RuntimeError("no active turn")
+
     async def send(self, text: str, *, uuid: str | None = None) -> None:
         try:
-            await asyncio.wait_for(self._steer(text), _REQUEST_TIMEOUT_SEC)
+            await asyncio.wait_for(self._steer(text), self.send_timeout)
         except TimeoutError:
             raise RuntimeError("Codex app-server did not accept the steer in time") from None
 
     async def _steer(self, text: str) -> None:
         """Readiness, lock, write and acknowledgement under the caller's one deadline."""
-        self._check_open()
-        await self._turn_ready.wait()
+        await self.wait_input_ready()
         async with self._lock:
             self._check_open()
             if self._turn_id is None:
