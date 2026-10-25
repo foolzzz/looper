@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.125] - 2026-10-25
+
+### Added
+
+- **Durable storage for Manager chat bindings and observed chats.** A new column `channel_configs.bound_chats_only` and the tables `manager_chat_bindings`, `channel_seen_chats` and `channel_unbound_chats`, with the storage module `looper/db/chat_bindings.py`. Nothing calls the module yet and no message routing is enabled; channel views report `bound_chats_only` as false. ([#646](https://github.com/foolzzz/looper/pull/646))
+
+### Changed
+
+- **Deleting a Manager with chat bindings is refused.** `delete_manager` returns `has_bindings` and the API answers 409 asking to unbind first. No binding can be created yet. ([#646](https://github.com/foolzzz/looper/pull/646))
+
 ## [2.13.124] - 2026-10-25
 
 ### Changed
