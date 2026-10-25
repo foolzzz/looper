@@ -108,7 +108,10 @@ async def _save(request, *, creating=False):
         }
         if exc.status in public:
             raise PublicOpError(*public[exc.status]) from None
-        # Wrapped service failures (notably 500 with raw exception text) stay private.
+        # Preserve the service failure class without exposing raw exception text.
+        # The transport's RequestError fallback would turn an unmapped 500 into 400.
+        if exc.status.startswith("5"):
+            raise PublicOpError(ErrorCode.UNAVAILABLE, "invalid credential request") from None
         raise
 
 

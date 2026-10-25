@@ -143,7 +143,8 @@ def test_fixed_channel_validation_reasons_are_public(tmp_path, monkeypatch, acti
 @pytest.mark.parametrize("failure,expected,message", [
     ("400 Bad Request", 400, "invalid channel configuration; check the sender allowlist and bot settings"),
     ("409 Conflict", 409, "this bot is already added; update the existing bot instead"),
-    ("500 Internal Server Error", 400, "invalid credential request"),
+    ("500 Internal Server Error", 503, "invalid credential request"),
+    ("503 Service Unavailable", 503, "invalid credential request"),
     (None, 503, "invalid credential request"),
 ])
 def test_channel_save_never_publishes_service_exception_text(
