@@ -283,6 +283,46 @@ def test_stopping_a_resident_claude_ends_its_tree(tmp_path: Path, trees: list[di
     assert _running(list(tree.values())) == []
 
 
+@pytest.mark.parametrize("how", ["cancel", "kill"])
+def test_hurrying_a_resident_stop_waits_for_its_tree(
+    tmp_path: Path, trees: list[dict[str, int]], monkeypatch: pytest.MonkeyPatch, how: str,
+) -> None:
+    monkeypatch.setattr(claude_cli, "STOP_GRACE_SEC", 30)
+    claude = fake_claude(tmp_path / "claude", _RESIDENT_AGENT + "time.sleep(60)\n")
+
+    async def _run() -> None:
+        session = ResidentClaude(label="planner")
+        await session.start([claude], cwd=str(tmp_path), signature=None)
+
+        async def on_event(event: dict[str, Any]) -> None:
+            pass
+
+        await session.run_turn("hello", on_event)
+        tree = await _started(tmp_path, trees)
+        assert session._tree is not None
+        begin_end = session._tree.begin_end
+        grace = asyncio.Event()
+
+        async def observed_begin_end() -> None:
+            await begin_end()
+            grace.set()
+
+        monkeypatch.setattr(session._tree, "begin_end", observed_begin_end)
+        stopping = asyncio.create_task(session.stop())
+        await asyncio.wait_for(grace.wait(), 3)
+        if how == "cancel":
+            stopping.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(stopping, 3)
+        else:
+            await asyncio.wait_for(session.stop(kill=True), 3)
+            await asyncio.wait_for(stopping, 3)
+        assert not session._ending
+        assert _running(list(tree.values()), settle=0) == []
+
+    asyncio.run(_run())
+
+
 # A Codex turn that starts its tree and runs on until it is stopped.
 _PER_TURN_AGENT = _SPAWN_TREE + "sys.stdin.read()\ntime.sleep(60)\n"
 

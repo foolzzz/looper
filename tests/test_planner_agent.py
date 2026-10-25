@@ -1862,11 +1862,23 @@ class TestTaskEnd:
 
         assert asyncio.run(_run())
 
-    def test_server_stop_during_a_teardown_still_reaps_claude(self, planner_claude: Any) -> None:
+    def test_server_stop_during_a_teardown_still_reaps_claude(
+        self, planner_claude: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Stopping the router while it ends a Planner neither hangs nor leaves Claude running."""
         claude = planner_claude(plan(step("s1")), decide("accept"), linger=True)  # outlives its stdin
 
         async def _run() -> tuple[float, bool]:
+            from looper.agents.claude_cli import ResidentClaude
+
+            ending = asyncio.Event()
+            stop_process = ResidentClaude._stop_process
+
+            async def observed_stop(session: Any, *args: Any, **kwargs: Any) -> None:
+                ending.set()
+                await stop_process(session, *args, **kwargs)
+
+            monkeypatch.setattr(ResidentClaude, "_stop_process", observed_stop)
             with tempfile.TemporaryDirectory() as tmp:
                 h = Harness(Path(tmp), claude, always(WORK_OK))
                 router = TaskRouter(runtime_root=Path(tmp), claude_bin=claude.bin)
@@ -1883,6 +1895,8 @@ class TestTaskEnd:
                 # The task has ended and its teardown waits for the lingering Claude to exit.
                 await h.until(lambda: router._tasks and not router._planners and claude.pids()
                               and next(iter(router._tasks.values())).status == "completed")
+                # Cancel after resident cleanup has started; an earlier cancel takes the immediate-kill path.
+                await asyncio.wait_for(ending.wait(), 5)
                 assert _alive(claude.pids()[0])
                 started = asyncio.get_event_loop().time()
                 await asyncio.wait_for(router.stop(), 4)
