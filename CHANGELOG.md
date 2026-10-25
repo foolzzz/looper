@@ -18,6 +18,30 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.122] - 2026-10-25
+
+### Changed
+
+- **Tests pin the per-conversation chat draft handling.** A new browser test and a new component test check that an unsent draft stays with its own Manager and conversation across switching, transcript links, going back and a reload, and that nothing is sent. Two existing browser tests now wait for the restored session's history to render before sending. Tests only: no shipped code, route, stored data format, Manager tool declaration or prompt changed. ([#638](https://github.com/foolzzz/looper/pull/638))
+
+## [2.13.121] - 2026-10-25
+
+### Fixed
+
+- **A failed Retry on the Gates list keeps the loaded pages and their paging boundary.** The list's cursor is now committed with its rows, so a Retry that fails leaves the rows, the boundary and the error message unchanged and the next "Show more" continues from the earlier boundary; a successful Retry replaces rows and boundary together. Dashboard only: no route, stored data format, Manager tool declaration or prompt changed. ([#636](https://github.com/foolzzz/looper/pull/636))
+
+## [2.13.120] - 2026-10-25
+
+### Fixed
+
+- **A chat send stays bound to its writable conversation while a read-only or unresolved link is open.** Opening a transcript or an unresolved conversation link no longer cancels the pending send, its reply stream or its queued messages; only adopting a different writable Manager or session does. The unsent draft is now kept per Manager and session in the browser's session storage, so it survives switching and reloading, and queued text whose composer is hidden stays in its thread's queue instead of being pulled into the wrong draft. Dashboard only: no route, stored data format, Manager tool declaration or prompt changed. ([#625](https://github.com/foolzzz/looper/pull/625))
+
+## [2.13.119] - 2026-10-25
+
+### Fixed
+
+- **`loopercli config --help` lists the handwritten `export` and `import` commands with descriptions.** They were named only in the usage line, while the commands generated from the API were listed with descriptions; each now has a help line (`export`: export configuration as JSON to a file or stdout; `import`: preview configuration, request confirmation to apply, or cancel). Help text only: no route, option, stored data format, Manager tool declaration or prompt changed. ([#630](https://github.com/foolzzz/looper/pull/630))
+
 ## [2.13.118] - 2026-10-25
 
 ### Fixed

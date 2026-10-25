@@ -548,11 +548,13 @@ def _doctor(args: argparse.Namespace, ctx: Context) -> int:
 
 def _config_arguments(parser: Parser) -> Any:
     commands = parser.add_subparsers(dest="config_command", required=True)
-    export = commands.add_parser("export")
+    export = commands.add_parser(
+        "export", help="Export configuration as JSON to a file or stdout")
     export.add_argument("file", help="destination JSON file ('-' writes stdout)")
     export.add_argument("--include-projects", action="store_true")
     export.add_argument("--include-secrets", action="store_true")
-    import_ = commands.add_parser("import")
+    import_ = commands.add_parser(
+        "import", help="Preview configuration; request confirmation to apply, or cancel")
     import_.add_argument("file", nargs="?", help="configuration JSON file ('-' reads stdin); preview only")
     actions = import_.add_mutually_exclusive_group()
     actions.add_argument("--apply", metavar="IMPORT_ID", help="request confirmation to apply a staged import")

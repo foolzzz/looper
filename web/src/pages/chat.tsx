@@ -70,6 +70,7 @@ const LEGACY_SESSION_KEY = "loopx-chat-session-id";
 const legacyMessagesKey = (sessionId: string) => `loopx-chat-messages-${sessionId}`;
 
 const stagedKey = (sessionId: string) => `looper-chat-staged-${sessionId}`;
+const draftKey = (managerId: string, sessionId: string) => `looper-chat-draft:${managerId}:${sessionId}`;
 // The server's running turn is asked again this often while the page waits for it to end.
 const TURN_POLL_MS = 3000;
 const STOP_DISABLED_NOTICE = "Stopping a reply is off (Settings → Chat).";
@@ -91,6 +92,14 @@ function writeStaged(sessionId: string, staged: string[]) {
     else sessionStorage.setItem(stagedKey(sessionId), JSON.stringify(staged));
   } catch {
     // Storage full or blocked: the queue still works for this page's life.
+  }
+}
+
+function readDraft(managerId: string, sessionId: string): string {
+  try {
+    return sessionStorage.getItem(draftKey(managerId, sessionId)) ?? "";
+  } catch {
+    return "";
   }
 }
 
@@ -315,7 +324,8 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const wantConversation = urlParams.get("conversation") || "";
   const [sessionId, setSessionId] = useState(getOrCreateSessionId);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState("");
+  const [input, setInputState] = useState(() => readDraft(MANAGER_TARGET.id, sessionId));
+  const inputRef = useRef(input);
   const [notice, setNotice] = useState("");
   const [staged, setStagedState] = useState<string[]>([]);
   const [sending, setSending] = useState(false);
@@ -335,14 +345,8 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const scrollRef = useRef<HTMLDivElement>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const turnRef = useRef(0); // the send in flight; an older stream must not touch a newer turn's state
-  // Invalidate even a send whose HTTP response has not arrived, including navigation to a read-only or missing thread.
-  useEffect(() => {
-    // Sidebar navigation clears the query, then pins this same thread again; neither changes the send's owner.
-    if (wantTarget === target.id && (!wantConversation || wantConversation === sessionId)) return;
-    cleanupRef.current?.();
-    setSending(false);
-    setPhase("");
-  }, [wantTarget, wantConversation, target.id, sessionId]);
+  // A send belongs to the adopted target/session, even while a read-only or unresolved link hides its composer.
+  // switchWebSession and applyTarget cancel it only when a different writable owner is actually adopted.
   // Leaving the page (the session ended, for one) stops the reply stream.
   useEffect(() => () => cleanupRef.current?.(), []);
 
@@ -391,6 +395,21 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   // The Manager and session shown now; a late answer is applied only when it was asked for these.
   const currentRef = useRef({ managerId: target.id, sessionId });
   currentRef.current = { managerId: target.id, sessionId };
+  // Persist under the writable owner even when a transcript hides its composer. Write synchronously so switching
+  // owners or reloading cannot discard a recovered draft before React applies its state update.
+  const setInput = (next: string | ((draft: string) => string)) => {
+    const draft = typeof next === "function" ? next(inputRef.current) : next;
+    inputRef.current = draft;
+    const { managerId, sessionId: sid } = currentRef.current;
+    try {
+      const key = draftKey(managerId, sid);
+      if (draft === "") sessionStorage.removeItem(key);
+      else sessionStorage.setItem(key, draft);
+    } catch {
+      // Storage full or blocked: the current draft still works for this page's life.
+    }
+    setInputState(draft);
+  };
   const localThreads = useRef(new Map<string, Set<string>>());
   const localThreadsFor = (managerId: string) => {
     let local = localThreads.current.get(managerId);
@@ -459,7 +478,6 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const groups = useMemo(() => groupByTask(targets), [targets]);
   // The selected agent as last listed: its status and whether it takes messages.
   const current = targets.find((t) => t.id === target.id) ?? target;
-  canSendRef.current = current.can_send;
   const taskGroup = groups.find((g) => g.planner.task_id === current.task_id);
   const isTaskOpen = (g: TaskGroup) =>
     taskOpen[g.planner.task_id ?? ""] ?? (g.planner.can_send || g.planner.task_id === current.task_id);
@@ -587,6 +605,9 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const conversationUnread =
     target.kind === "manager" && !!wantConversation && wantConversation !== sessionId &&
     (!targetSettled || !knownConversation && (!openedHere || !!openedHere.error || !!openedHere.owner));
+  const canSend = current.can_send && !viewing && !conversationUnread;
+  // Queue draining must honor the same guards as sending, or hidden composers lose their queued text.
+  canSendRef.current = canSend;
   const conversationError = conversationUnread ? openedHere?.error ?? "" : "";
   const conversationOwner = conversationUnread ? openedHere?.owner ?? null : null;
   const viewingId = viewing?.session_id;
@@ -620,6 +641,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     localStorage.setItem(sessionKey(managerId), id);
     currentRef.current = { managerId, sessionId: id };
     setSessionId(id);
+    setInput(readDraft(managerId, id));
     setMessages([]);
     setSending(false);
     setPhase("");
@@ -677,6 +699,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     }
     const nextSession = sessionFor(next);
     currentRef.current = { managerId: next.id, sessionId: nextSession };
+    setInput(readDraft(next.id, nextSession));
     setTarget(next);
     setSessionId(nextSession);
   };
@@ -799,8 +822,13 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const pullStagedToDraft = (extra: string[] = []) => {
     const list = [...extra, ...stagedRef.current];
     if (list.length === 0) return;
-    setStaged([]);
+    // A hidden composer cannot receive the text yet. Keep it in its owning thread's queue across switches/reloads.
+    if (!canSendRef.current) {
+      if (extra.length > 0) setStaged(list);
+      return;
+    }
     setInput((draft) => pullBack(list, draft));
+    setStaged([]);
   };
 
   const stopPoll = () => {
@@ -873,7 +901,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const syncTurnRef = useRef(syncTurn);
   syncTurnRef.current = syncTurn;
 
-  // Opening a read-only or unresolved conversation leaves sessionId unchanged, but cancels this thread's stream.
+  // Returning to the writable thread resumes polling if no live send/stream is already following its turn.
   const threadOpen = !viewing && !conversationUnread && (!wantConversation || wantConversation === sessionId);
   useEffect(() => {
     stagedRef.current = readStaged(sessionId);
@@ -977,7 +1005,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   };
 
   const handleSend = async (text: string, newSessionProfileId?: string) => {
-    if (!text.trim() || !current.can_send || viewing || conversationUnread) return;
+    if (!text.trim() || !canSend) return;
 
     const sid = sessionId;
     const managerId = target.id;
@@ -1065,10 +1093,11 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
               if (changesProfile) setProfileRefresh((n) => n + 1);
               const list = stagedRef.current;
               if (list.length > 0) {
-                // Cleared first, so the batch can never go out twice.
-                setStaged([]);
-                if (outcome === "answered" && canSendRef.current) void sendRef.current(joinStaged(list));
-                else setInput((draft) => pullBack(list, draft));
+                if (outcome === "answered" && canSendRef.current) {
+                  // Cleared first, so the batch can never go out twice.
+                  setStaged([]);
+                  void sendRef.current(joinStaged(list));
+                } else pullStagedToDraft();
               }
               break;
             }

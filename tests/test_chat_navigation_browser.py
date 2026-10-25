@@ -54,6 +54,7 @@ def dashboard(dashboard_url):
         calls, held, cancelled = [], [], []
         page.on("requestfailed", lambda request: cancelled.append(request.url))
         rows = [session("session-a"), session("session-b"), session("lark:known", "lark"),
+                session("telegram:known", "telegram"),
                 session("planner-known")]
         state = {"hold": True, "calls": calls, "held": held, "cancelled": cancelled, "rows": rows}
 
@@ -62,7 +63,8 @@ def dashboard(dashboard_url):
             body = route.request.post_data_json or {}
             calls.append((path, body))
             if path == "operator_chat/targets":
-                result = {"targets": [{"kind": "manager", "id": "manager", "can_send": True}]}
+                result = {"targets": [{"kind": "manager", "id": "manager", "can_send": True},
+                                      {"kind": "manager", "id": "manager-other", "name": "Other Manager", "can_send": True}]}
             elif path == "operator_chat/sessions":
                 result = {"sessions": [r for r in rows if not r["session_id"].startswith("planner-") and
                           (not body.get("session_id") or r["session_id"] == body["session_id"])]}
@@ -159,6 +161,312 @@ def test_returning_to_same_thread_keeps_send_and_queue(dashboard, stage, via_tas
     assert [body["session_id"] for body in sends] == ["session-b", "session-b"]
 
 
+def open_chat_link(page, conversation):
+    # Follow an ordinary link, so Back restores the original history entry.
+    page.evaluate("""id => {
+        const link = document.createElement('a');
+        link.href = '#chat?conversation=' + encodeURIComponent(id);
+        link.textContent = 'Open linked conversation';
+        document.body.append(link);
+    }""", conversation)
+    page.get_by_role("link", name="Open linked conversation", exact=True).click()
+    page.get_by_role("link", name="Open linked conversation", exact=True).evaluate("e => e.remove()")
+
+
+@pytest.mark.parametrize("destination", ["lark:known", "telegram:known", "unknown-web-id"])
+def test_unsent_drafts_belong_to_each_conversation_and_manager(dashboard, destination):
+    from playwright.sync_api import expect
+
+    page, base, state = dashboard
+    page.goto(f"{base}/#chat?conversation=session-a")
+    composer = page.get_by_role("textbox")
+    composer.fill("Draft for A")
+    page.locator('aside button[title="session-b"]').click()
+    expect(composer).to_have_value("")
+    composer.fill("Draft for B")
+    page.locator('aside button[title="session-a"]').click()
+    expect(composer).to_have_value("Draft for A")
+    page.locator('aside button[title="session-b"]').click()
+    expect(composer).to_have_value("Draft for B")
+
+    open_chat_link(page, destination)
+    if destination == "unknown-web-id":
+        expect(page.get_by_role("alert")).to_contain_text("not found")
+    else:
+        expect(page.locator(f'[data-viewing="{destination}"]')).to_be_visible()
+    expect(composer).to_have_count(0)
+    page.go_back()
+    expect(composer).to_have_value("Draft for B")
+
+    page.evaluate("location.hash = '#chat?target=manager-other'")
+    page.wait_for_function("""() => localStorage.getItem('looper-chat-session-id:manager-other') &&
+        location.hash.startsWith('#chat?target=manager-other&conversation=')""")
+    expect(composer).to_have_value("")
+    composer.fill("Other Manager's draft")
+    page.evaluate("location.hash = '#chat?conversation=session-a'")
+    expect(composer).to_have_value("Draft for A")
+    page.locator('aside button[title="session-b"]').click()
+    expect(composer).to_have_value("Draft for B")
+    page.evaluate("location.hash = '#chat?target=manager-other'")
+    expect(composer).to_have_value("Other Manager's draft")
+    page.reload()
+    expect(composer).to_have_value("Other Manager's draft")
+    page.evaluate("location.hash = '#chat?conversation=session-a'")
+    expect(composer).to_have_value("Draft for A")
+    composer.fill("")
+    page.locator('aside button[title="session-b"]').click()
+    expect(composer).to_have_value("Draft for B")
+    page.locator('aside button[title="session-a"]').click()
+    expect(composer).to_have_value("")
+    assert not any(path == "operator_chat/send" for path, _ in state["calls"])
+
+
+@pytest.mark.parametrize("destination", ["lark:known", "unknown-web-id"])
+@pytest.mark.parametrize("stage", ["send", "accepted", "rejected"])
+def test_pending_submission_survives_transcript_navigation(dashboard, destination, stage):
+    from playwright.sync_api import expect
+
+    page, base, state = dashboard
+    state["hold_reply"] = True
+    page.goto(f"{base}/#chat?conversation=session-b")
+    text = "Synthetic pending submission"
+    page.get_by_role("textbox").fill(text)
+    with page.expect_request(lambda r: r.url.endswith("/operator_chat/send")):
+        page.get_by_role("textbox").press("Enter")
+    pending = next(r for r in state["held"] if r.request.url.endswith("/send"))
+    if stage == "accepted":
+        with page.expect_request(lambda r: r.url.endswith("/operator_chat/reply_events")):
+            pending.fulfill(json={"status": "ok", "result": {"correlation_id": "reply-a"}})
+    if stage == "rejected":
+        page.get_by_role("textbox").fill("Synthetic queued followup")
+        page.get_by_role("textbox").press("Enter")
+        page.get_by_role("textbox").fill("Newer draft")
+    open_chat_link(page, destination)
+    if destination == "lark:known":
+        expect(page.locator('[data-viewing="lark:known"]')).to_be_visible()
+    else:
+        expect(page.get_by_role("alert")).to_contain_text("not found")
+    expect(page.get_by_role("textbox")).to_have_count(0)
+    assert page.evaluate("localStorage.getItem('looper-chat-session-id')") == "session-b"
+    assert not any(url.endswith(("/operator_chat/send", "/operator_chat/reply_events"))
+                   for url in state["cancelled"])
+    if stage == "rejected":
+        pending.fulfill(status=409, json={"status": "error", "error": {
+            "code": "conflict", "message": "Synthetic request was not accepted"}})
+    elif stage == "accepted":
+        reply = next(r for r in state["held"] if r.request.url.endswith("/reply_events"))
+        reply.fulfill(content_type="text/event-stream", body=
+                      'event: answer.final\ndata: {"text":"Synthetic answer","outcome":"answered"}\n\n')
+    page.go_back()
+    expect(page).to_have_url(f"{base}/#chat?conversation=session-b")
+    expect(page.get_by_role("textbox")).to_be_visible()
+    if stage == "send":
+        state["hold_reply"] = False
+        pending.fulfill(json={"status": "ok", "result": {"correlation_id": "reply-a"}})
+    if stage == "rejected":
+        expect(page.get_by_role("textbox")).to_have_value(
+            f"{text}\n\nSynthetic queued followup\n\nNewer draft")
+        expect(page.get_by_text(text, exact=True)).to_have_count(0)
+        expect(page.get_by_role("button", name="Remove queued message")).to_have_count(0)
+        cached = page.evaluate("JSON.parse(localStorage.getItem('looper-chat-messages-session-b'))")
+        assert [m["role"] for m in cached] == ["user"]  # Only the original history, no empty assistant.
+    else:
+        expect(page.get_by_text("Late A reply" if stage == "send" else "Synthetic answer", exact=True)).to_have_count(1)
+        expect(page.get_by_text(text, exact=True)).to_have_count(1)
+        expect(page.get_by_role("textbox")).to_have_value("")
+    # Repeated navigation must neither resend nor restore the text a second time.
+    page.go_forward()
+    expect(page.get_by_role("textbox")).to_have_count(0)
+    page.go_back()
+    expect(page.get_by_role("textbox")).to_be_visible()
+    if stage == "rejected":
+        expect(page.get_by_role("textbox")).to_have_value(f"{text}\n\nSynthetic queued followup\n\nNewer draft")
+        page.locator('aside button[title="session-a"]').click()
+        expect(page.get_by_role("textbox")).to_have_value("")
+    assert sum(path == "operator_chat/send" for path, _ in state["calls"]) == 1
+    if destination == "lark:known" and stage == "send":
+        for width in (1280, 390):
+            page.set_viewport_size({"width": width, "height": 800})
+            expect(page.get_by_role("textbox")).to_be_visible()
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        shot = ROOT / "output/playwright/chat-pending-navigation.png"
+        shot.parent.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(shot))
+
+
+@pytest.mark.parametrize("destination", ["lark:known", "telegram:known", "unknown-web-id"])
+def test_answered_while_hidden_restores_queue_to_original_draft(dashboard, destination):
+    from playwright.sync_api import expect
+
+    page, base, state = dashboard
+    state["hold"] = False
+    state["hold_reply"] = True
+    page.goto(f"{base}/#chat?conversation=session-b")
+    page.get_by_role("textbox").fill("Synthetic original turn")
+    with page.expect_request(lambda r: r.url.endswith("/operator_chat/reply_events")):
+        page.get_by_role("textbox").press("Enter")
+    for text in ("Synthetic queued first", "Synthetic queued second"):
+        page.get_by_role("textbox").fill(text)
+        page.get_by_role("textbox").press("Enter")
+    expect(page.get_by_role("button", name="Remove queued message")).to_have_count(2)
+    page.get_by_role("textbox").fill("Newer draft")
+    open_chat_link(page, destination)
+    if destination == "unknown-web-id":
+        expect(page.get_by_role("alert")).to_contain_text("not found")
+    else:
+        expect(page.locator(f'[data-viewing="{destination}"]')).to_be_visible()
+    expect(page.get_by_role("textbox")).to_have_count(0)
+    reply = next(r for r in state["held"] if r.request.url.endswith("/reply_events"))
+    reply.fulfill(content_type="text/event-stream", body=
+                  'event: answer.final\ndata: {"text":"Synthetic completed answer","outcome":"answered"}\n\n')
+    # Wait for the final answer to be applied while the original composer is still hidden.
+    page.wait_for_function("""() => JSON.parse(localStorage.getItem('looper-chat-messages-session-b'))
+        .some(m => m.content === 'Synthetic completed answer')""")
+    assert sum(path == "operator_chat/send" for path, _ in state["calls"]) == 1
+    restored = "Synthetic queued first\n\nSynthetic queued second\n\nNewer draft"
+    page.go_back()
+    expect(page).to_have_url(f"{base}/#chat?conversation=session-b")
+    expect(page.get_by_role("textbox")).to_have_value(restored)
+    expect(page.get_by_role("button", name="Remove queued message")).to_have_count(0)
+    assert page.evaluate("sessionStorage.getItem('looper-chat-staged-session-b')") is None
+    expect(page.get_by_text("Synthetic completed answer", exact=True)).to_be_visible()
+    page.go_forward()
+    expect(page.get_by_role("textbox")).to_have_count(0)
+    page.go_back()
+    expect(page.get_by_role("textbox")).to_have_value(restored)
+    page.locator('aside button[title="session-a"]').click()
+    expect(page.get_by_role("textbox")).to_have_value("")
+    page.get_by_role("textbox").fill("Other conversation's draft")
+    page.locator('aside button[title="session-b"]').click()
+    expect(page.get_by_role("textbox")).to_have_value(restored)
+    # The draft is restored before the history request finishes; send only after that read is applied.
+    expect(page.locator("p.whitespace-pre-wrap").filter(has_text="History of session-b")).to_be_visible()
+    state["hold_reply"] = False
+    page.get_by_role("textbox").press("Enter")
+    expect(page.get_by_text("Current B reply", exact=True)).to_be_visible()
+    sends = [body for path, body in state["calls"] if path == "operator_chat/send"]
+    assert [body["session_id"] for body in sends] == ["session-b", "session-b"]
+    assert sends[1]["text"] == restored
+
+
+@pytest.mark.parametrize("destination", ["lark:known", "telegram:known", "unknown-web-id"])
+@pytest.mark.parametrize("outcome", ["answered", "rejected"])
+@pytest.mark.parametrize("detour", ["restored-session", "restored-manager", "hidden-session", "hidden-manager", "reload"])
+def test_unsent_text_survives_hidden_completion_and_writable_detour(dashboard, destination, outcome, detour):
+    from playwright.sync_api import expect
+
+    page, base, state = dashboard
+    state["hold"] = outcome == "rejected"
+    state["hold_reply"] = True
+    page.goto(f"{base}/#chat?conversation=session-b")
+    page.get_by_role("textbox").fill("Synthetic original turn")
+    endpoint = "/send" if outcome == "rejected" else "/reply_events"
+    with page.expect_request(lambda r: r.url.endswith(f"/operator_chat{endpoint}")):
+        page.get_by_role("textbox").press("Enter")
+    queued = ["Synthetic queued first", "Synthetic queued second"]
+    for text in queued:
+        page.get_by_role("textbox").fill(text)
+        page.get_by_role("textbox").press("Enter")
+    expect(page.get_by_role("button", name="Remove queued message")).to_have_count(2)
+    page.get_by_role("textbox").fill("Newer draft")
+    open_chat_link(page, destination)
+    if destination == "unknown-web-id":
+        expect(page.get_by_role("alert")).to_contain_text("not found")
+    else:
+        expect(page.locator(f'[data-viewing="{destination}"]')).to_be_visible()
+    expect(page.get_by_role("textbox")).to_have_count(0)
+    pending = next(r for r in state["held"] if r.request.url.endswith(endpoint))
+    if outcome == "rejected":
+        pending.fulfill(status=409, json={"status": "error", "error": {
+            "code": "conflict", "message": "Synthetic request was not accepted"}})
+        page.wait_for_function("""() => !JSON.parse(localStorage.getItem('looper-chat-messages-session-b'))
+            .some(m => m.content === 'Synthetic original turn')""")
+        queued.insert(0, "Synthetic original turn")
+    else:
+        pending.fulfill(content_type="text/event-stream", body=
+                        'event: answer.final\ndata: {"text":"Synthetic completed answer","outcome":"answered"}\n\n')
+        page.wait_for_function("""() => JSON.parse(localStorage.getItem('looper-chat-messages-session-b'))
+            .some(m => m.content === 'Synthetic completed answer')""")
+    restored = "\n\n".join([*queued, "Newer draft"])
+    # Completion on a hidden thread must keep its unsent queue durable until its composer is shown.
+    assert page.evaluate("JSON.parse(sessionStorage.getItem('looper-chat-staged-session-b'))") == queued
+    if detour.startswith("restored-"):
+        page.locator('aside button[title="session-b"]').click()
+        expect(page.get_by_role("textbox")).to_have_value(restored)
+        assert page.evaluate("sessionStorage.getItem('looper-chat-staged-session-b')") is None
+    if detour == "reload":
+        page.reload()
+        expect(page.get_by_role("textbox")).to_have_count(0)
+    elif detour.endswith("manager"):
+        page.evaluate("location.hash = '#chat?target=manager-other'")
+        page.wait_for_function("""() => localStorage.getItem('looper-chat-session-id:manager-other') &&
+            location.hash.startsWith('#chat?target=manager-other&conversation=')""")
+        expect(page.get_by_role("textbox")).to_have_value("")
+        page.get_by_role("textbox").fill("Other owner's draft")
+    else:
+        page.locator('aside button[title="session-a"]').click()
+        expect(page.locator('aside button[title="session-a"]')).to_have_attribute("aria-current", "true")
+        expect(page.get_by_role("textbox")).to_have_value("")
+        page.get_by_role("textbox").fill("Other owner's draft")
+    page.evaluate("location.hash = '#chat?conversation=session-b'")
+    expect(page.get_by_role("textbox")).to_have_value(restored)
+    expect(page.get_by_role("button", name="Remove queued message")).to_have_count(0)
+    assert page.evaluate("sessionStorage.getItem('looper-chat-staged-session-b')") is None
+    assert sum(path == "operator_chat/send" for path, _ in state["calls"]) == 1
+    # A second visit and reload must preserve the same text without appending the queue twice.
+    open_chat_link(page, destination)
+    expect(page.get_by_role("textbox")).to_have_count(0)
+    page.reload()
+    page.locator('aside button[title="session-b"]').click()
+    expect(page.get_by_role("textbox")).to_have_value(restored)
+    expect(page.locator("p.whitespace-pre-wrap").filter(has_text="History of session-b")).to_be_visible()
+    state["hold"] = state["hold_reply"] = False
+    page.get_by_role("textbox").press("Enter")
+    expect(page.get_by_text("Current B reply", exact=True)).to_be_visible()
+    sends = [body for path, body in state["calls"] if path == "operator_chat/send"]
+    assert [body["session_id"] for body in sends] == ["session-b", "session-b"]
+    assert sends[1]["text"] == restored
+    page.reload()
+    expect(page.get_by_role("textbox")).to_have_value("")
+
+
+def test_only_validated_writable_adoption_cancels_pending_send(dashboard):
+    from playwright.sync_api import expect
+
+    page, base, state = dashboard
+    checks = []
+
+    def validate(route):
+        if route.request.post_data_json.get("session_id") == "session-a":
+            checks.append(route)
+        else:
+            route.fallback()
+
+    page.route("**/api/v1/operator_chat/sessions", validate)
+    page.goto(f"{base}/#chat?conversation=session-b")
+    page.get_by_role("textbox").fill("Synthetic old owner submission")
+    with page.expect_request(lambda r: r.url.endswith("/operator_chat/send")):
+        page.get_by_role("textbox").press("Enter")
+    pending = next(r for r in state["held"] if r.request.url.endswith("/send"))
+    open_chat_link(page, "unknown-web-id")
+    expect(page.get_by_role("alert")).to_contain_text("not found")
+    with page.expect_request(lambda r: r.url.endswith("/operator_chat/sessions") and
+                             r.post_data_json.get("session_id") == "session-a"):
+        open_chat_link(page, "session-a")
+    expect(page.get_by_role("textbox")).to_have_count(0)
+    assert page.evaluate("localStorage.getItem('looper-chat-session-id')") == "session-b"
+    assert not any(url.endswith("/operator_chat/send") for url in state["cancelled"])
+    checks[0].fulfill(json={"status": "ok", "result": {"sessions": [session("session-a")]}})
+    expect(page.get_by_role("textbox")).to_be_visible()
+    page.get_by_role("textbox").fill("New owner's draft")
+    pending.fulfill(json={"status": "ok", "result": {"correlation_id": "reply-a"}})
+    page.clock.run_for(3100)
+    assert any(url.endswith("/operator_chat/send") for url in state["cancelled"])
+    expect(page.get_by_role("textbox")).to_have_value("New owner's draft")
+    expect(page.get_by_text("Synthetic old owner submission", exact=True)).to_have_count(0)
+    assert not any(path == "operator_chat/reply_events" for path, _ in state["calls"])
+
+
 @pytest.mark.parametrize("finished_while_away", [False, True])
 def test_return_from_readonly_resyncs_turn_and_recovers_queue(dashboard, finished_while_away):
     from playwright.sync_api import expect
@@ -183,6 +491,9 @@ def test_return_from_readonly_resyncs_turn_and_recovers_queue(dashboard, finishe
     expect(page.locator('[data-viewing="lark:known"]')).to_be_visible()
     expect(page.get_by_role("textbox")).to_have_count(0)
     assert page.evaluate("localStorage.getItem('looper-chat-session-id')") == "session-b"
+    # A stream that actually ends without a final answer still needs the existing turn/queue recovery.
+    reply = next(r for r in state["held"] if r.request.url.endswith("/reply_events"))
+    reply.fulfill(content_type="text/event-stream", body="")
     if finished_while_away:
         state["turn"] = None
     page.locator('aside button[title="session-b"]').click()
@@ -191,12 +502,12 @@ def test_return_from_readonly_resyncs_turn_and_recovers_queue(dashboard, finishe
         expect(page.get_by_role("button", name="Queue message", exact=True)).to_be_visible()
         state["turn"] = None
         page.clock.run_for(3100)
-    # A cancelled stream has no final outcome: the existing recovery contract returns the queue to the draft.
+    # An ended stream has no final outcome: the existing recovery contract returns the queue to the draft.
     expect(page.get_by_role("textbox")).to_have_value("Synthetic queued followup")
     expect(page.get_by_role("button", name="Remove queued message")).to_have_count(0)
     assert page.evaluate("sessionStorage.getItem('looper-chat-staged-session-b')") is None
     assert sum(path == "operator_chat/send" for path, _ in state["calls"]) == 1
-    assert any(url.endswith("/operator_chat/reply_events") for url in state["cancelled"])
+    assert not any(url.endswith("/operator_chat/reply_events") for url in state["cancelled"])
     state["hold"] = state["hold_reply"] = False
     page.get_by_role("textbox").press("Enter")
     expect(page.get_by_text("Current B reply", exact=True)).to_be_visible()

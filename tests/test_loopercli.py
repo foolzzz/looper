@@ -7,6 +7,7 @@ import builtins
 import io
 import json
 import os
+import re
 import socket
 import stat
 import subprocess
@@ -167,9 +168,25 @@ def closed_port() -> int:
 def test_config_group_help_discovers_generated_children(cli: Run, looper: FakeLooper, flag: str) -> None:
     code, out, err = cli("config", flag)
     assert code == 0 and err == ""
-    children = out.replace("{", " ").replace("}", " ").replace(",", " ").split()
-    for child in ("export", "import", "import-cancel", "import-upload", "import-apply", "import-preview"):
-        assert child in children
+    # A name in the usage braces does not make it a discoverable, descriptive row.
+    descriptions = {}
+    for child in (
+        "export",
+        "import",
+        "import-cancel",
+        "import-upload",
+        "import-apply",
+        "import-preview",
+    ):
+        rows = re.findall(rf"^\s+{re.escape(child)}[ \t]+(\S[^\n]*)$", out, re.MULTILINE)
+        assert len(rows) == 1, f"expected one descriptive help row for {child}"
+        descriptions[child] = rows[0].lower()
+    assert "export" in descriptions["export"]
+    assert "configuration" in descriptions["export"]
+    assert "json" in descriptions["export"]
+    assert "preview" in descriptions["import"]
+    assert "confirmation" in descriptions["import"]
+    assert TOKEN not in out + err
     assert [(r[0], r[1]) for r in looper.requests] == [("GET", "/api/v1/openapi.json")]
 
 
@@ -187,6 +204,8 @@ def test_config_group_help_falls_back_when_discovery_fails(
     assert "usage: loopercli config" in out
     children = out.replace("{", " ").replace("}", " ").replace(",", " ").split()
     assert "export" in children and "import" in children
+    for child in ("export", "import"):
+        assert re.search(rf"^\s+{child}[ \t]+\S[^\n]*$", out, re.MULTILINE)
     assert "confirm" not in children
     assert "the commands made from Looper's API are not shown" in out
     assert {"http": "HTTP 500", "connection": "is looper serve running?", "client": "loopercli login"}[failure] in out
