@@ -18,6 +18,13 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.100] - 2026-10-25
+
+### Fixed
+
+- **Saving or importing a Lark bot channel is refused when its app identity is ambiguous.** `refuse_same_bot` resolves the candidate's app through `_admission_app_id`: a lark-cli channel whose profile does not resolve to an app, or any stored lark-cli row that does not, is refused with HTTP 409 and a message that names no CLI error or profile. `update_bot` re-checks every Lark update under the bots lock, config import takes the same lock and refuses an unknown identity without partial writes, and the two built-in Lark rows that share an app on purpose (`builtin_lark_pair`) are not compared with each other. Behavior change for users: a Lark channel with an unresolvable lark-cli profile can no longer be saved or imported until the profile is fixed. Model-visible: none. ([#562](https://github.com/foolzzz/looper/pull/562))
+- **The task-detail gate schema now matches the gate projection.** In `task_views.py`, a gate's `summary` is a nullable object of `decisions`, `assumptions` and `open` string arrays, `plan_change` a nullable object of `added`, `dropped` and `stopped` string arrays, and agenda `options` an array of strings; they were nullable strings and `{id, label}` objects. Declared schema only; response data and persisted gates are unchanged. Model-visible: none. ([#573](https://github.com/foolzzz/looper/pull/573))
+
 ## [2.13.99] - 2026-10-24
 
 ### Fixed
