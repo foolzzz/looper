@@ -4,9 +4,12 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatPage } from "@/pages/chat";
 
+let navigate: (query: string) => void;
+
 /** Holds the address query the way the app does, so choosing an agent takes effect. */
 function ChatWithQuery() {
   const [query, setQuery] = useState("");
+  navigate = setQuery;
   return <ChatPage query={query} onQuery={setQuery} />;
 }
 
@@ -14,6 +17,7 @@ type Handler = (e: { kind: string; payload: Record<string, unknown> }) => void;
 
 const api = vi.hoisted(() => ({
   sendChat: vi.fn(),
+  saveChatMessage: vi.fn(),
   streamChatReply: vi.fn(),
   fetchChatMessages: vi.fn(),
   fetchChatTurn: vi.fn(),
@@ -34,7 +38,6 @@ vi.mock("@/lib/api", async (importOriginal) => {
     fetchTaskActivity: async () => ({ activity: [] }),
     fetchTaskDetail: async () => ({ group: "running", gates: [] }),
     fetchLlmRecords: async () => [],
-    saveChatMessage: async () => {},
     watchChat: (sid: string, cb: (m: unknown) => void) => api.watchChat(sid, cb),
   };
 });
@@ -115,6 +118,105 @@ describe("chat composer flow", () => {
     act(() => root.unmount());
     container.remove();
     vi.useRealTimers();
+  });
+
+  const go = async (query: string) => {
+    act(() => navigate(query));
+    await flush();
+  };
+  const otherManager = { ...MANAGER, id: "manager-other", name: "Other" };
+  const destinations = ["conversation", "manager"] as const;
+  const leave = async (destination: typeof destinations[number]) => {
+    if (destination === "manager") {
+      localStorage.setItem("looper-chat-session-id:manager-other", SID);
+      await go(`target=manager-other&conversation=${SID}`);
+    } else await go("conversation=session-b");
+  };
+
+  it.each(destinations)("drops a deferred send after navigation to another %s", async (destination) => {
+    api.fetchChatTargets.mockResolvedValue([MANAGER, otherManager]);
+    api.fetchChatSession.mockImplementation(async (id: string) => ({ session_id: id, channel: "web" }));
+    let resolve!: (value: { correlation_id: string }) => void;
+    api.sendChat.mockReturnValueOnce(new Promise((r) => { resolve = r; }));
+    await mount();
+    await say("from A");
+    const signal = api.sendChat.mock.calls[0][4]?.signal;
+    await leave(destination);
+    expect(signal?.aborted).toBe(true);
+    expect(input().value).toBe("");
+    const closeB = vi.fn();
+    api.streamChatReply.mockReturnValueOnce(closeB);
+    await say("from B");
+    await act(async () => resolve({ correlation_id: "late-A" }));
+    await flush();
+    expect(api.streamChatReply).toHaveBeenCalledTimes(1);
+    expect(api.streamChatReply.mock.calls[0][0]).toBe("reply-correlation");
+    expect(stopButton()).not.toBeNull();
+    await go("conversation=session-c");
+    expect(closeB).toHaveBeenCalledOnce();
+  });
+
+  it("drops a deferred error after switching Managers with the same session spelling", async () => {
+    api.fetchChatTargets.mockResolvedValue([MANAGER, otherManager]);
+    let reject!: (error: Error) => void;
+    api.sendChat.mockReturnValueOnce(new Promise((_r, fail) => { reject = fail; }));
+    await mount();
+    await say("from A");
+    await leave("manager");
+    await act(async () => reject(new Error("old failure")));
+    await flush();
+    expect(input().value).toBe("");
+    expect(container.textContent).not.toContain("old failure");
+  });
+
+  it.each(destinations)("ignores callbacks queued at close after switching %s and preserves the next cleanup", async (destination) => {
+    api.fetchChatTargets.mockResolvedValue([MANAGER, otherManager]);
+    api.fetchChatSession.mockImplementation(async (id: string) => ({ session_id: id, channel: "web" }));
+    const close = vi.fn();
+    api.streamChatReply.mockImplementation((_id: string, event: Handler, end: () => void) => {
+      emit = event;
+      done = end;
+      return close;
+    });
+    await mount();
+    await say("from A");
+    const oldEvent = emit, oldDone = done!;
+    api.fetchChatMessages.mockResolvedValue([
+      { message_id: "b-history", role: "user", content: "B history", created_at: "2026-01-01T00:00:00Z" },
+    ]);
+    await leave(destination);
+    expect(container.textContent).not.toContain("from A");
+    expect(close).toHaveBeenCalledTimes(1);
+    await say("from B");
+    const newEvent = emit;
+    api.fetchChatTurn.mockClear();
+    await act(async () => {
+      oldEvent({ kind: "agent.phase", payload: { label: "stale phase" } });
+      oldEvent({ kind: "answer.delta", payload: { text: "stale text" } });
+      oldEvent({ kind: "turn.completed", payload: {} });
+      oldEvent({ kind: "turn.failed", payload: {} });
+      oldDone();
+      oldEvent({ kind: "answer.final", payload: { text: "stale final" } });
+    });
+    await flush();
+    expect(container.textContent).not.toContain("stale");
+    expect(stopButton()).not.toBeNull();
+    expect(api.saveChatMessage).not.toHaveBeenCalled();
+    expect(api.fetchChatTurn).not.toHaveBeenCalled();
+    act(() => newEvent({ kind: "answer.final", payload: { text: "B answer" } }));
+    await flush();
+    expect(container.textContent).toContain("B answer");
+    await go("conversation=missing");
+    expect(close).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves reply persistence to the server when terminal events arrive", async () => {
+    await mount();
+    await say("first");
+    await fire("answer.delta", { text: "Saved by the server" });
+    await fire("turn.completed");
+    expect(container.textContent).toContain("Saved by the server");
+    expect(api.saveChatMessage).not.toHaveBeenCalled();
   });
 
   it("sends the messages typed during a reply once, joined, after an answered turn", async () => {
