@@ -210,6 +210,25 @@ def test_delete_is_soft_and_refused_while_the_manager_has_tasks(monkeypatch: pyt
     run_db(test, monkeypatch)
 
 
+def test_delete_requires_unbinding_chats_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.serve import seed_channel_configs
+    from looper.db import chat_bindings
+
+    async def test(pool: Any) -> None:
+        await seed_channel_configs(pool)
+        assert (await _create("review"))[0] == 200
+        async with pool.acquire() as conn, conn.transaction():
+            await chat_bindings.put_binding("channel-telegram", "42", "manager-review", conn=conn)
+        status, answer = await _call("managers.delete", {"manager_id": "manager-review"})
+        assert status == 409 and "unbind" in answer["error"]
+        assert await pool.fetchval("SELECT deleted_at IS NULL FROM managers WHERE id = 'manager-review'")
+        async with pool.acquire() as conn, conn.transaction():
+            await chat_bindings.delete_binding("channel-telegram", "42", conn=conn)
+        assert (await _call("managers.delete", {"manager_id": "manager-review"}))[0] == 200
+
+    run_db(test, monkeypatch, timeout=30)
+
+
 def test_a_task_created_while_the_delete_runs_keeps_the_manager(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.db import managers, tasks
 

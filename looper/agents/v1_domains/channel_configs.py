@@ -25,7 +25,7 @@ CONFIGS = {
 }
 CHANNEL_CONFIG_VALUES = {"type": "object", "anyOf": list(CONFIGS.values())}
 _VIEW_FIELDS = {
-    "channel_id": _STR, "channel_type": _TYPE, "display_name": _STR, "enabled": _BOOL,
+    "channel_id": _STR, "channel_type": _TYPE, "display_name": _STR, "enabled": _BOOL, "bound_chats_only": _BOOL,
     "config": CHANNEL_CONFIG_VALUES, "manager_id": _STR, "manager_name": _NULL_STR,
     "builtin": _BOOL, "start_problem": _NULL_STR, "created_at": _STR, "updated_at": _STR,
 }
