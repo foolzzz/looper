@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.113] - 2026-10-25
+
+### Added
+
+- **Browser probes for the delayed configuration-download failure.** New `tests/test_configuration_download_browser.py` builds the dashboard and drives the configuration export in headless Chromium against synthetic API fixtures, comparing the saved bytes with the exported document for small and 5000-entry catalogs, immediate and delayed (activation expired) responses, and for cancelled, failed and invalid responses. Tests only, marked `installed` and skipped without Playwright or Chromium; they are reproduction probes, not evidence of a fixed defect. No production code changed. ([#614](https://github.com/foolzzz/looper/pull/614))
+
 ## [2.13.112] - 2026-10-25
 
 ### Fixed
