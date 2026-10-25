@@ -29,7 +29,11 @@ class Client:
         self.server = server
 
     async def call(self, method, path, body=None, *, token=TOKEN, raw=None, length=None):
-        if method == "POST" and (path == "/api/v1/agent_settings/update_role" or path.startswith(("/api/v1/ops/models/", "/api/v1/models/"))):
+        from tests.runtime_model_helpers import profile_request
+
+        legacy_profile = path.startswith("/api/agent-profiles")
+        method, path, body = profile_request(method, path, body)
+        if method == "POST" and (path == "/api/v1/agent_settings/update_role" or path.startswith(("/api/v1/profiles/", "/api/v1/ops/models/", "/api/v1/models/"))):
             from looper.agents.ops.clients import ClientOps
             self.server._client_ops = ClientOps(SimpleNamespace())
         payload = raw if raw is not None else b"" if body is None else json.dumps(body).encode()
@@ -56,7 +60,13 @@ class Client:
             await serving
         head, _, data = response.partition(b"\r\n\r\n")
         assert SECRET.encode() not in data, data
-        return int(head.split()[1]), json.loads(data)
+        status, answer = int(head.split()[1]), json.loads(data)
+        if legacy_profile:
+            answer = answer["result"] if answer.get("status") == "ok" else {"error": answer["error"]["message"]}
+            # Existing fixture callers assert the former creation status, while HTTP uses v1's 200.
+            if path.endswith("/create") and status == 200:
+                status = 201
+        return status, answer
 
     async def ok(self, method, path, body=None, *, status=200):
         actual, answer = await self.call(method, path, body)

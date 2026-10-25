@@ -53,7 +53,7 @@ class RegistryApi:
             model = {**body, "model_id": f"model-{len(self.registry['models'])}"}
             self.registry["models"].append(model)
             return {"status": "ok", "result": {"model": deepcopy(model), "warnings": []}}
-        assert path == "/api/agent-profiles"
+        assert path == "/api/v1/profiles/create"
         assert set(body) <= {"name", "runtime_id", "model_id", "effort", "agent_teams", "custom_prompt"}
         model = next(m for m in self.registry["models"] if m["model_id"] == body["model_id"])
         profile = {**body, "profile_id": f"agent-{len(self.registry['profiles'])}", "builtin": False,
@@ -61,7 +61,7 @@ class RegistryApi:
                    "provider_id": model["provider_id"],
                    "cost": {"source": "provider_price", "equivalent": False, "unpriced": []}}
         self.registry["profiles"].append(profile)
-        return {"profile": deepcopy(profile)}
+        return {"status": "ok", "result": {"profile": deepcopy(profile), "warnings": []}}
 
 
 def explicit_spec():
@@ -86,7 +86,7 @@ def test_four_layer_registration_and_readback_keep_model_settings_and_secrets_se
     original = deepcopy(spec)
     profile = runner.register_agent(api, spec)
     assert spec == original
-    assert [path for path, _ in api.posts] == ["/api/providers", "/api/v1/ops/models/create", "/api/agent-profiles"]
+    assert [path for path, _ in api.posts] == ["/api/providers", "/api/v1/ops/models/create", "/api/v1/profiles/create"]
     assert api.posts[0][1]["api_key"] == "synthetic-eval-secret"
     saved = api.post("/api/v1/registry/view", {})["result"]
     assert saved["models"][0] == {**spec["model"], "provider_id": "prov-1", "model_id": profile["model_id"]}
@@ -111,7 +111,7 @@ def test_saved_model_references_do_not_create_or_copy_models(api, reference):
     api.posts.clear()
     second = runner.register_agent(api, spec)
     assert second["model_id"] == first["model_id"]
-    assert [path for path, _ in api.posts] == ["/api/agent-profiles"]
+    assert [path for path, _ in api.posts] == ["/api/v1/profiles/create"]
 
 
 @pytest.mark.parametrize("reference", [{"model_id": "missing"},
@@ -192,7 +192,7 @@ def test_legacy_spec_can_reference_saved_login_account(api):
         "agent": {"name": "legacy login", "model": "sonnet", "effort": "high"}})
     assert profile["model"]["name"] == "sonnet"
     assert profile["model"]["protocol"] == "anthropic-messages"
-    assert [path for path, _ in api.posts] == ["/api/v1/ops/models/create", "/api/agent-profiles"]
+    assert [path for path, _ in api.posts] == ["/api/v1/ops/models/create", "/api/v1/profiles/create"]
 
 
 def test_missing_key_fails_without_writing_or_mutating_spec(api, monkeypatch):
@@ -274,7 +274,7 @@ def test_model_option_creates_subscription_model_once_and_reuses_profile(api):
     assert first == second
     assert first["model"]["protocol"] == "anthropic-messages"
     assert first["provider_id"] == "prov-claude-subscription"
-    assert [path for path, _ in api.posts] == ["/api/v1/ops/models/create", "/api/agent-profiles"]
+    assert [path for path, _ in api.posts] == ["/api/v1/ops/models/create", "/api/v1/profiles/create"]
 
 
 def test_run_copies_only_model_reference_and_reports_identity_and_cost(api, monkeypatch, tmp_path):

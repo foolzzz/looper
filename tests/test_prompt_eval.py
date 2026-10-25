@@ -287,7 +287,7 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
                 self.models[model.id] = resolved
                 return {"status": "ok", "result": {"model": {"model_id": model.id, "provider_id": model.provider_id,
                                   "name": model.name, "protocol": model.protocol.value}, "warnings": []}}
-            if path == "/api/agent-profiles":
+            if path == "/api/v1/profiles/create":
                 assert body["runtime_id"] == self.runtime.id
                 resolved = self.models[body["model_id"]]
                 resolved.check_runtime(self.runtime, body.get("effort"))
@@ -295,7 +295,7 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
                            "model": {"model_id": resolved.model.id, "provider_id": resolved.provider.id,
                                      "name": resolved.model.name, "protocol": resolved.model.protocol.value}}
                 self.profiles.append(profile)
-                return {"profile": profile}
+                return {"status": "ok", "result": {"profile": profile, "warnings": []}}
             if path == "/api/projects":
                 self.work = Path(body["work_dir"])
                 return {"project_id": "project-eval"}

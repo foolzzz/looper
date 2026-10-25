@@ -18,6 +18,26 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.88] - 2026-10-24
+
+### Changed
+
+- **Agent Profile management and prompt previews in the dashboard go through v1.** Creating, editing and deleting a profile and previewing its prompt call the new `profiles.create`, `profiles.update`, `profiles.delete` (risk `high`, confirmed with the deletion impact) and `profiles.prompt_preview` (risk `read`) operations (`POST /api/v1/profiles/...`), which use the same registry checks as before. The compact `agent_profiles.*` results are typed in the OpenAPI document. Manager prompts and tools are unchanged. ([#540](https://github.com/foolzzz/looper/pull/540))
+
+### Removed
+
+- **The legacy profile routes:** `POST /api/agent-profiles`, `PUT /api/agent-profiles/<id>`, `DELETE /api/agent-profiles/<id>` and `GET /api/agent-profiles/<id>/prompt-preview`. Use the `profiles` operations. ([#540](https://github.com/foolzzz/looper/pull/540))
+
+## [2.13.87] - 2026-10-24
+
+### Changed
+
+- **Model management in the dashboard goes through v1.** Adding, editing and deleting a saved model call the existing `models.create`, `models.update` and `models.delete` operations (`/api/v1/ops/models/...`; the provider is passed as `provider`), and a new `models.get` operation (`POST /api/v1/models/get`, risk `read`) reads one saved model with its settings, prices, usage and warnings. Model results are typed in the OpenAPI document. Manager prompts and tools are unchanged. ([#537](https://github.com/foolzzz/looper/pull/537))
+
+### Removed
+
+- **The legacy model routes:** `GET /api/models`, `POST /api/models`, `GET /api/models/<id>`, `PUT /api/models/<id>` and `DELETE /api/models/<id>`. Use the `models` operations. ([#537](https://github.com/foolzzz/looper/pull/537))
+
 ## [2.13.86] - 2026-10-24
 
 ### Changed

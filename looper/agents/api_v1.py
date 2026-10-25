@@ -187,8 +187,6 @@ RESULTS: dict[str, dict[str, Any]] = {
     "gates.messages": _object({**_TASK_ID_ONLY, "gate": _OBJ, "messages": _array()}),
     "gates.reply": _object(_GATE_ANSWER),
     "gates.end": _object(_GATE_ANSWER),
-    "agent_profiles.list": _object({
-        "profiles": _array(), "runtimes": _array(), "runtime_types": _array(), "models": _array()}),
     "overview": _object({
         "tasks": _OBJ, "running_tasks": _array(), "step_runs": _array(), "projects": _array(),
         "waiting_gates": _INT, "spend_today": _OBJ, "unhealthy": _array()}),

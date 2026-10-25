@@ -3029,28 +3029,36 @@ export function clearLoginProblem(providerId: string): Promise<{ provider: Provi
 }
 
 /** Register an Agent Profile; refused (400) when its runtime cannot use the selected model and its derived account. */
-export function createAgentProfile(fields: ProfileFields): Promise<{ profile: AgentProfile; warnings: string[] }> {
-  return registryCall("POST", "/agent-profiles", fields, "add Agent Profile");
+export async function createAgentProfile(fields: ProfileFields): Promise<{ profile: AgentProfile; warnings: string[] }> {
+  const result = await callV1<{ profile: AgentProfile; warnings: string[] }>("/api/v1/profiles/create", fields);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
-export function updateAgentProfile(
+export async function updateAgentProfile(
   profileId: string,
   fields: ProfileFields,
 ): Promise<{ profile: AgentProfile; warnings: string[] }> {
-  return registryCall("PUT", `/agent-profiles/${encodeURIComponent(profileId)}`, fields, "update Agent Profile");
+  const result = await callV1<{ profile: AgentProfile; warnings: string[] }>("/api/v1/profiles/update",
+    { profile_id: profileId, fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
 export async function fetchPromptPreview(profileId: string, role: AgentRole, projectId?: string): Promise<PromptPreview> {
-  const query = new URLSearchParams({ role });
-  if (projectId !== undefined) query.set("project_id", projectId);
-  const res = await fetch(`${API_BASE}/agent-profiles/${encodeURIComponent(profileId)}/prompt-preview?${query}`);
-  if (!res.ok) await failed(res, "preview system prompt");
-  return res.json();
+  const result = await callV1<PromptPreview>("/api/v1/profiles/prompt_preview",
+    { profile_id: profileId, role, ...(projectId === undefined ? {} : { project_id: projectId }) });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
-export function deleteAgentProfile(profileId: string): Promise<{ deleted: string }> {
-  return registryCall("DELETE", `/agent-profiles/${encodeURIComponent(profileId)}`, undefined,
-    "delete Agent Profile");
+export async function deleteAgentProfile(profileId: string): Promise<{ deleted: string }> {
+  const result = await callV1<{ deleted: string }>("/api/v1/profiles/delete", { profile_id: profileId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
 // --- Agent settings: harness, Agent Profile (with its effort), environment and per-run cap, by layer ---

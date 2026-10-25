@@ -487,13 +487,13 @@ def test_http_model_errors_and_concurrent_deletion(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("field", ["provider_id", "model", "system_prompt_mode", "mode", "protocol", "efforts",
                                  "role_system_prompt_mode", "system_prompt_modes"])
-@pytest.mark.parametrize("method,path", [("POST", "/api/agent-profiles"),
-                                         ("PUT", "/api/agent-profiles/agent-test")])
-def test_http_profile_rejects_old_body_and_mode_fields(monkeypatch, tmp_path, field, method, path):
+@pytest.mark.parametrize("action", ["create", "update"])
+def test_http_profile_rejects_old_body_and_mode_fields(monkeypatch, tmp_path, field, action):
     async def test(client, pool):
-        status, error = await client.call(method, path, {
-            "name": "Rejected", "runtime_id": "rt-claude-code", "model_id": "model-test", field: "legacy"})
-        assert status == 400 and set(error) == {"error"} and field in error["error"]
+        fields = {"name": "Rejected", "runtime_id": "rt-claude-code", "model_id": "model-test", field: "legacy"}
+        body = fields if action == "create" else {"profile_id": "agent-test", "fields": fields}
+        status, error = await client.call("POST", f"/api/v1/profiles/{action}", body)
+        assert status == 400 and error["error"]["code"] == "invalid"
     _run_http(test, monkeypatch, tmp_path, database=False)
 
 

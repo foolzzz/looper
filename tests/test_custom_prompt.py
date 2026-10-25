@@ -86,11 +86,16 @@ def test_custom_prompt_nul_is_refused_before_create_or_update(monkeypatch, value
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=SimpleNamespace())
     writer = _Writer()
-    path = "/api/agent-profiles" + (f"/{profile.id}" if method == "PUT" else "")
-    asyncio.run(server._route_api(method, path, {}, json.dumps(fields).encode(), writer))
+    from looper.agents.api_v1 import OPERATOR
+    from looper.agents.ops.clients import ClientOps
+
+    server._client_ops = ClientOps(SimpleNamespace())
+    path = "/api/v1/profiles/create" if method == "POST" else "/api/v1/profiles/update"
+    body = fields if method == "POST" else {"profile_id": profile.id, "fields": fields}
+    asyncio.run(server._handle_v1("POST", path, {}, {}, json.dumps(body).encode(), writer, OPERATOR))
     head, _, data = writer.data.partition(b"\r\n\r\n")
     assert int(head.split()[1]) == 400
-    assert "NUL" in json.loads(data)["error"]
+    assert "NUL" in json.loads(data)["error"]["message"]
     insert.assert_not_awaited()
     update.assert_not_awaited()
 
