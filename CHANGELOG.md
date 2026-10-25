@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.102] - 2026-10-25
+
+### Changed
+
+- **Task-creation confirmation for a new project now lists the project's execution settings.** When a client creates a task in a new project, the confirmation impact text, after the existing line about the new project and its working directory, lists every project execution control in schema order, including defaults and disabled controls. Examples are the per-task budget and its action, step review, step workspaces, whether wait steps may run shell commands, vault and operator-notes access, agent room and its limits. Each line names the field, its meaning and the effective value; a value the request did not set is marked as the default. The submitted arguments, validation and the same-session confirmation are unchanged and no row is written before confirmation. Model-visible: the impact text returned to the client changed. ([#581](https://github.com/foolzzz/looper/pull/581))
+
 ## [2.13.101] - 2026-10-25
 
 ### Fixed
