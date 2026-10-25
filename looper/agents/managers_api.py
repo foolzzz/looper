@@ -388,7 +388,7 @@ async def put_template(manager_id: str, key: str, data: Mapping[str, Any]) -> di
         name, description = task_templates.check_template_fields(
             name=data.get("name"), description=_text(data, "description"), planner_instructions=instructions,
             workspace_mode=workspace_mode, role_templates=role_templates, project_id=project_id)
-        inputs = task_templates.parse_inputs(data.get("inputs"))
+        inputs = task_templates.parse_inputs(data.get("inputs", []))
         task_templates.check_requirement(requirement, inputs)
         await task_templates.check_patterns(inputs)
     except task_templates.TemplateError as exc:
