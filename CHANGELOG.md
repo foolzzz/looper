@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.99] - 2026-10-24
+
+### Fixed
+
+- **Saving a Manager template without `inputs` now stores an empty input list.** `put_template` in `looper/agents/managers_api.py` defaults an omitted `inputs` field to `[]`, so a template whose requirement names no placeholder can be created or replaced without declaring inputs, and a replace no longer keeps the old inputs. An explicit `null`, and any other non-list value or malformed item, is still refused, and a requirement with an unresolved placeholder is still refused. Model-visible: none. ([#576](https://github.com/foolzzz/looper/pull/576))
+
 ## [2.13.98] - 2026-10-24
 
 ### Fixed
