@@ -84,6 +84,9 @@ from ...db import projects as db_projects
 logger = logging.getLogger(__name__)
 
 DEFAULT_RUN_TIMEOUT_SEC = 86400
+# Readiness and runtime acceptance share this budget. The Planner leaves another
+# second for the pool's WORKER_INPUT_RESULT acknowledgement on the local bus.
+WORKER_INPUT_DELIVERY_TIMEOUT = 4.0
 
 # The Worker's role prompt when the ``worker`` config row has none; serve
 # seeds it as the row's recommended prompt. It describes the role only: the
@@ -378,6 +381,7 @@ class WorkerPool:
         # The Planner exposes a dispatched step before its run has an input channel.
         # Corrections in that window must wait for startup rather than look like a finished run.
         self._input_ready: dict[str, asyncio.Event] = {}
+        self._input_deliveries: set[asyncio.Task[None]] = set()
         # The agent room's tools for the runs (``ops.room.RoomOps``); without them a run has no room.
         self.room_ops: Any = None
         # Each running Claude's room reminders: the one waiting for a tool call to run, the uuids written, when.
@@ -405,6 +409,11 @@ class WorkerPool:
                 await self._listener_task
             except asyncio.CancelledError:
                 pass
+
+        deliveries = list(self._input_deliveries)
+        for task in deliveries:
+            task.cancel()
+        await asyncio.gather(*deliveries, return_exceptions=True)
 
         for task in list(self._tasks.values()):
             task.cancel()
@@ -457,7 +466,9 @@ class WorkerPool:
     def _on_worker_input_topic(self, envelope: MessageEnvelope) -> bool:
         if not self._running:
             return False
-        asyncio.get_event_loop().create_task(self._deliver_input(envelope))
+        task = asyncio.get_event_loop().create_task(self._deliver_input(envelope))
+        self._input_deliveries.add(task)
+        task.add_done_callback(self._input_deliveries.discard)
         return True
 
     def _on_kill_work_topic(self, envelope: MessageEnvelope) -> bool:
@@ -501,31 +512,42 @@ class WorkerPool:
     async def _deliver_input(self, envelope: MessageEnvelope) -> None:
         """Pass a user turn to a running worker and tell the sender whether it landed."""
         assert self._bus is not None
-        delivered = await self.send_input(envelope.target.agent_id, str(envelope.payload.get("text", "")))
-        await self._bus.publish(MessageEnvelope.create(
-            source=envelope.target,
-            target=envelope.source,
-            message_type=MessageType.WORKER_INPUT_RESULT,
-            payload={"delivered": delivered},
-            correlation_id=envelope.correlation_id,
-            reply_to=envelope.message_id,
-        ))
+        delivered = False
+        try:
+            delivered = await self.send_input(envelope.target.agent_id, str(envelope.payload.get("text", "")))
+        finally:
+            await self._bus.publish(MessageEnvelope.create(
+                source=envelope.target,
+                target=envelope.source,
+                message_type=MessageType.WORKER_INPUT_RESULT,
+                payload={"delivered": delivered},
+                correlation_id=envelope.correlation_id,
+                reply_to=envelope.message_id,
+            ))
 
     def accepts_input(self, worker_id: str) -> bool:
         """True while the worker's Claude run still reads user turns."""
         return worker_id in self._inputs
 
     async def send_input(self, worker_id: str, text: str) -> bool:
-        """Add a user turn once a dispatched worker's input channel is ready; False if the run ended first."""
+        """Wait for readiness and acceptance within one deadline; never queue a late send.
+
+        Timeout cancels the wait/send inline before returning False. Caller cancellation
+        propagates after the same cleanup; no detached send can outlive this operation.
+        """
         if not text.strip():
             return False
-        if ready := self._input_ready.get(worker_id):
-            await ready.wait()
-        channel = self._inputs.get(worker_id)
-        if channel is None:
-            return False
         try:
-            await channel.send(text)
+            async with asyncio.timeout(WORKER_INPUT_DELIVERY_TIMEOUT):
+                if ready := self._input_ready.get(worker_id):
+                    await ready.wait()
+                channel = self._inputs.get(worker_id)
+                if channel is None:
+                    return False
+                await channel.send(text)
+        except TimeoutError:
+            logger.warning("worker %s input delivery timed out before acknowledgement", worker_id)
+            return False
         except (BrokenPipeError, ConnectionResetError, RuntimeError):
             self._inputs.pop(worker_id, None)
             return False
