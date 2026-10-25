@@ -44,6 +44,7 @@ describe("TaskDetailRoute", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -61,8 +62,11 @@ describe("TaskDetailRoute", () => {
     await settle();
   };
 
-  it.each(["stopped", "failed", "cancelled"])("resumes Sessions activity after starting a %s task", async (initialStatus) => {
-    let status = initialStatus;
+  it.each(["stopped", "failed", "cancelled"])("resumes Sessions after stale %s reads, even if the new run ends immediately", async (initialStatus) => {
+    let started = false;
+    let polls = 0;
+    let starts = 0;
+    const resumed = () => started && polls > 1;
     let liveStream: ReadableStreamDefaultController<Uint8Array> | undefined;
     const activity = (seq: number) => ({
       seq, task_id: "task-a", worker: "worker-1", kind: "text", summary: `activity ${seq}`,
@@ -70,17 +74,25 @@ describe("TaskDetailRoute", () => {
     });
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/v1/tasks/detail") return Response.json({ status: "ok", result: { ...detail("task-a"), status } });
+      if (url === "/api/v1/tasks/detail") {
+        if (started) polls++;
+        return Response.json({ status: "ok", result: { ...detail("task-a"), status: initialStatus,
+          completed_at: resumed() ? "2026-10-24T00:00:00Z" : detail("task-a").completed_at } });
+      }
       if (url === "/api/v1/ops/task_control/restart") {
-        status = "running";
+        starts++;
+        started = true;
         return Response.json({ status: "ok", result: { task_id: "task-a", restarted: true, note: "Started." } });
       }
       if (url === "/api/v1/tasks/activity") return Response.json({
         status: "ok", result: { activity: [activity(7)], has_more: false },
       });
       if (url === "/api/v1/tasks/activity_stream") return new Response(
-        status === "running"
-          ? new ReadableStream<Uint8Array>({ start(controller) { liveStream = controller; } })
+        resumed()
+          ? new ReadableStream<Uint8Array>({ start(controller) {
+              liveStream = controller;
+              init?.signal?.addEventListener("abort", () => controller.close(), { once: true });
+            } })
           : "event: done\ndata: {}\n\n",
         { headers: { "Content-Type": "text/event-stream" } },
       );
@@ -92,18 +104,64 @@ describe("TaskDetailRoute", () => {
     expect(container.textContent).toContain("activity 7");
     expect(container.textContent).not.toContain("Live"); // The terminal stream has delivered done.
 
-    await openTab("Start"); // Stay on Sessions while the task starts again.
+    vi.useFakeTimers();
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    expect(fetcher.mock.calls.filter(([url]) => String(url) === "/api/v1/tasks/detail")).toHaveLength(1);
+    const start = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Start")!;
+    await act(async () => { start.click(); start.click(); });
+    expect(starts).toBe(1);
+    expect(polls).toBe(1);
+    expect(liveStream).toBeUndefined(); // An unchanged old terminal read does not acknowledge the restart.
+    await act(async () => start.click());
+    expect(starts).toBe(1); // The accepted Start still waits for its run.
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
     expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Sessions");
     expect(liveStream).toBeDefined();
     expect(container.textContent).toContain("Live");
     await act(async () => {
       liveStream!.enqueue(new TextEncoder().encode(`event: activity\ndata: ${JSON.stringify(activity(8))}\n\n`));
     });
-    await settle();
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    expect(polls).toBe(2); // The acknowledged terminal run stops polling again.
+    expect(fetcher.mock.calls.filter(([url]) => String(url) === "/api/v1/tasks/activity_stream")).toHaveLength(2);
     expect(container.textContent).toContain("activity 7");
     expect(container.textContent).toContain("activity 8");
     expect(container.textContent).toContain("2 events");
     expect(fetcher.mock.calls.filter(([url]) => String(url) === "/api/v1/tasks/activity")).toHaveLength(1);
+  });
+
+  it.each(["request", "poll"])("cleans up when the route changes during the restart %s", async (stage) => {
+    let started = false;
+    let release = () => {};
+    const signals: AbortSignal[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/restart")) {
+        started = true;
+        const response = Response.json({ status: "ok", result: { restarted: true } });
+        if (stage === "request") return new Promise<Response>((resolve) => { release = () => resolve(response); });
+        return response;
+      }
+      if (url.endsWith("/activity_stream")) {
+        signals.push(init!.signal!);
+        return new Response("event: done\ndata: {}\n\n");
+      }
+      if (url.endsWith("/detail") && started && JSON.parse(String(init?.body)).task_id === "task-a") {
+        signals.push(init!.signal!);
+        return new Promise<Response>((resolve) => { release = () => resolve(Response.json(answer(url, init))); });
+      }
+      return Response.json(answer(url, init));
+    }));
+    await show("task-a");
+    await openTab("Sessions");
+    await openTab("Start");
+    await show("task-b");
+    expect(signals).toHaveLength(stage === "poll" ? 2 : 1);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    await act(async () => release());
+    await settle();
+    expect(container.textContent).toContain("Write the B docs.");
+    expect(container.textContent).not.toContain("Build the A parser.");
   });
 
   it.each([false, true])("shows the schedule session note only after a confirmed continuation (%s)", async (continues) => {
