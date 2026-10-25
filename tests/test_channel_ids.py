@@ -6,11 +6,13 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 from looper.agents.bus import MessageBus
 from looper.agents.channels.base import ChannelAdapter, DeliveryReceipt, PostReceipt
+from looper.agents.channels.chat_routing import RoutingSnapshot
 from looper.agents.channels.registry import ChannelRegistry
 from looper.agents.message import (
     MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, builtin_channel_id, parse_channel_id,
@@ -101,7 +103,10 @@ class _Stub(ChannelAdapter):
         return PostReceipt(True, external_ids=["m1"])
 
 
-def test_the_registry_addresses_a_bot_by_its_channel_id(tmp_path: Path) -> None:
+def test_the_registry_addresses_a_bot_by_its_channel_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    snapshot = RoutingSnapshot("channel-telegram-2", "manager", False, {})
+    monkeypatch.setattr("looper.agents.channels.registry.load_snapshot", AsyncMock(return_value=snapshot))
+
     async def main() -> None:
         bus = MessageBus(runtime_root=tmp_path)
         registry = ChannelRegistry(bus)
