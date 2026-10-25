@@ -1063,7 +1063,7 @@ def run(
 def _register_eval_provider(api: Api, provider: dict[str, Any]) -> dict[str, Any]:
     """Keep a failed provider write from echoing its credential into an eval report."""
     try:
-        return api.post("/api/providers", provider)["provider"]
+        return api.post("/api/v1/provider_accounts/create", provider)["result"]["provider"]
     except EvalError:
         if provider.get("api_key"):
             # Api.request clips HTTP errors: even a partial key must stay private.
