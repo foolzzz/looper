@@ -34,6 +34,7 @@ from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, resolve_chat_target
 from .message import AgentAddress
 from .channels.web import WebChannelAdapter
+from .channels.registry import ChannelRegistry
 from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
 from .task_roles import record_role
@@ -159,6 +160,7 @@ class AgentHTTPServer:
         room_ops: RoomOps | None = None,
         client_ops: ClientOps | None = None,
         ops_config: OpsConfig | None = None,
+        channels: ChannelRegistry | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -185,6 +187,7 @@ class AgentHTTPServer:
         # The startup self-check (self_check.Check.to_dict), reported on /api/v1/system/status.
         self._self_checks = self_checks or []
         self._ops_config = ops_config
+        self._channels = channels
         # The Claude Code the server runs: what a Claude Code runtime without an executable of its own probes.
         self._claude_bin = claude_bin
         # What "Run now" on a schedule fires through.

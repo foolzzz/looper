@@ -996,6 +996,7 @@ async def _run_agent_system(
         room_ops=room_ops,
         client_ops=client_ops,
         ops_config=ops,
+        channels=registry,
     )
     await http_server.start()
     # Its first pass handles the fires missed while the server was down.

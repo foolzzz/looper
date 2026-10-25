@@ -68,7 +68,7 @@ def test_document_generates_cli_requests(family, action, options, body, capsys, 
     args = loopercli.build_parser(document).parse_args([family, action, *options])
     calls = []
     api = SimpleNamespace(call=lambda *parts: (calls.append(parts) or (200, {"status": "ok", "result": {}})))
-    assert args._run(args, SimpleNamespace(api=lambda: api, as_json=True, session="registry")) == 0
+    assert args._run(args, SimpleNamespace(api=lambda: api, as_json=True, session="registry", operator=True)) == 0
     assert calls == [("POST", f"/api/v1/{family}/{action}", body)]
     # A fresh CLI process consumes only the document: server imports must remain unnecessary.
     path = tmp_path / "openapi.json"

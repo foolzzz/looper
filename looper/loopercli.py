@@ -387,6 +387,7 @@ class Context:
     session: str | None
     as_json: bool
     _api: Api | None = field(default=None, repr=False)
+    operator: bool = False
 
     def api(self) -> Api:
         if self._api is None:
@@ -495,6 +496,7 @@ def _use_operator(args: argparse.Namespace, ctx: Context) -> None:
         raise UsageError("an operator token is required; an API client token cannot manage credentials")
     # This Context lives only for this invocation; never write operator credentials to client.json.
     ctx._api = Api(url, token, ctx.session)
+    ctx.operator = True
 
 
 def _auth(args: argparse.Namespace, ctx: Context) -> int:
@@ -968,6 +970,7 @@ class Generated:
     properties: Mapping[str, Mapping[str, Any]]
     has_body: bool
     response_media_type: str = "application/json"
+    operator_only: bool = False
 
 
 def generated_operations(document: Mapping[str, Any]) -> list[tuple[str, str, str, str, Generated]]:
@@ -989,7 +992,8 @@ def generated_operations(document: Mapping[str, Any]) -> list[tuple[str, str, st
                 iter(media_types), "application/json")
             found.append((head.replace("_", "-"), tail.replace("_", "-"), operation.get("summary") or "",
                           operation.get("description") or "",
-                          Generated(method.upper(), prefix + path, properties or {}, schema is not None, media_type)))
+                          Generated(method.upper(), prefix + path, properties or {}, schema is not None, media_type,
+                                    operation.get("x-looper-operator-only") is True)))
     return found
 
 
@@ -1028,6 +1032,14 @@ def _add_property(parser: Parser, name: str, schema: Mapping[str, Any]) -> None:
 
 def _add_operation(parser: Parser, operation: Generated) -> None:
     parser.set_defaults(_generated=operation)
+    if operation.operator_only:
+        if "url" in operation.properties:
+            parser.add_argument("--server-url", dest="_operator_url", default=DEFAULT_URL,
+                                help="the running service's loopback address")
+            parser.add_argument("--operator-token-file", default="-", metavar="PATH",
+                                help="operator token file (0600); default '-' reads one line from stdin")
+        else:
+            _operator_arguments(parser)
     if operation.method == "GET" or not operation.has_body:
         return
     parser.add_argument("--body", metavar="PATH", default=argparse.SUPPRESS,
@@ -1073,6 +1085,8 @@ def request_body(args: argparse.Namespace, operation: Generated) -> dict[str, An
 
 def _run_generated(args: argparse.Namespace, ctx: Context) -> int:
     operation: Generated = args._generated
+    if operation.operator_only and not ctx.operator:
+        raise UsageError("an operator token is required; use --url and --operator-token-file")
     body = request_body(args, operation) if operation.method == "POST" else None
     if operation.response_media_type == "text/event-stream":
         with contextlib.ExitStack() as cleanup:
@@ -1242,6 +1256,16 @@ def _run(opts: argparse.Namespace, rest: list[str]) -> int:
     ctx = Context(client_file(opts.client_file), opts.session, opts.json)
     document = None
     if _needs_document(rest):
+        # Discover generated operator commands with a transient token, before a client file is needed.
+        # A bare --url may be an operation's request field, so only the credential flag selects this mode.
+        if any(part == "--operator-token-file" or part.startswith("--operator-token-file=") for part in rest):
+            bootstrap = Parser(add_help=False, allow_abbrev=False)
+            _operator_arguments(bootstrap)
+            bootstrap.add_argument("--server-url", dest="_operator_url")
+            operator_args, _ = bootstrap.parse_known_args(rest)
+            if operator_args._operator_url is not None:
+                operator_args.url = operator_args._operator_url
+            _use_operator(operator_args, ctx)
         try:
             document = _fetch_document(ctx)
         except CliError as exc:

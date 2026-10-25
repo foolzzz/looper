@@ -16,7 +16,7 @@ from looper.db import chat
 from looper.db import manager_actions
 from tests.test_api_v1_auth import CLIENT_TOKEN, _bearer, _send, _send_raw, _serving, clients
 from tests.test_operator_auth import TOKEN, _request
-from tests.test_loopercli import Server, _send as cli_send, write_client_file
+from tests.test_loopercli import Server, _send as cli_send
 
 PREFIX = "/api/v1/operator_chat/"
 
@@ -210,10 +210,12 @@ def test_generated_cli_send_issues_the_declared_json_request(tmp_path, capsys):
     server = Server(lambda handler, request: cli_send(handler, 200, api_v1.document()
         if request[1].endswith("openapi.json") else {"status": "ok", "result": {"correlation_id": "reply"}}))
     try:
-        client = tmp_path / "client.json"
-        write_client_file(client, server.url)
-        assert loopercli.main(["--client-file", str(client), "--json", "operator-chat", "send", "--text", "hello",
-                              "--session-id", "thread", "--target", '{"kind":"manager"}']) == 0
+        token = tmp_path / "operator-token"
+        token.write_text(TOKEN + "\n")
+        token.chmod(0o600)
+        assert loopercli.main(["--client-file", str(tmp_path / "missing-client.json"), "--json", "operator-chat", "send",
+                              "--text", "hello", "--session-id", "thread", "--target", '{"kind":"manager"}',
+                              "--url", server.url, "--operator-token-file", str(token)]) == 0
         method, path, _, body = server.requests[-1]
         assert (method, path, body) == ("POST", PREFIX + "send", {"text": "hello", "session_id": "thread", "target": {"kind": "manager"}})
     finally:
