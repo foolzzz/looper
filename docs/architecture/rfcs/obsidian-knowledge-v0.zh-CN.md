@@ -55,9 +55,9 @@
   `/`，不重复；空列表即只读；
 - `rules_file` 同样是知识库里的相对路径，存在、是普通文件，解析后仍在知识库里。
 
-`GET /api/knowledge-vault` 回 `{configured, path, writable, rules_file, git, problem}`：`git` 是知识库是否在 git 仓库里，
+`POST /api/v1/knowledge_vault/get {}` 的 `OpOk.result` 回 `{configured, path, writable, rules_file, git, problem}`：`git` 是知识库是否在 git 仓库里，
 `problem` 是已保存的配置现在不成立的原因（如目录被删），这时工具一律拒绝并给出这条原因。
-`PUT /api/knowledge-vault` 收上面的对象，`{"path": null}` 清除配置；回 GET 的内容。
+`POST /api/v1/knowledge_vault/update` 收 `{path, writable?, rules_file?}`，`{"path": null}` 清除配置；回 get 的完整内容；operator 单次执行，client token 先确认再执行。
 
 **项目开关**：`projects.vault`（`CHECK (vault IN ('off','on'))`，NULL 为关），在 `EXECUTION_COLUMNS` 里，和其他执行设置
 一样由项目接口读写。

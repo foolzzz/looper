@@ -168,7 +168,7 @@ for line in sys.stdin:
 
 def _builtin_model(api: Any, name: str) -> str:
     """The id of the built-in Claude Code login's model ``name``."""
-    models = api.get("/api/models", provider_id="prov-claude-subscription")["models"]
+    models = api.post("/api/v1/ops/models/list", {"provider": "prov-claude-subscription"})["result"]["models"]
     return next(m["model_id"] for m in models if m["name"] == name)
 
 
@@ -194,7 +194,7 @@ def _log(state: Path, name: str, variant: str) -> list[dict[str, Any]]:
 def _wait(api: Any, ids: dict[str, str], variants: tuple[str, ...], ended: tuple[str, ...]) -> dict[str, Any]:
     deadline = time.monotonic() + 120
     while True:
-        details = {variant: api.get(f"/api/tasks/{ids[variant]}") for variant in variants}
+        details = {variant: api.post("/api/v1/tasks/detail", {"task_id": ids[variant]})["result"] for variant in variants}
         if all(d["status"] in ended for d in details.values()):
             return details
         assert time.monotonic() < deadline, {v: d["status"] for v, d in details.items()}
@@ -203,7 +203,7 @@ def _wait(api: Any, ids: dict[str, str], variants: tuple[str, ...], ended: tuple
 
 def _wait_left(api: Any, ids: dict[str, str], variants: tuple[str, ...], status: str) -> None:
     deadline = time.monotonic() + 60
-    while any(api.get(f"/api/tasks/{ids[variant]}")["status"] == status for variant in variants):
+    while any(api.post("/api/v1/tasks/detail", {"task_id": ids[variant]})["result"]["status"] == status for variant in variants):
         assert time.monotonic() < deadline, f"{variants} stayed {status}"
         time.sleep(0.05)
 
@@ -232,8 +232,8 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     with fresh_database(str(DSN)) as (database_url, _):
         server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home}
         with running_server(**server, log_path=root / "serve.log") as api:
-            sonnet = api.post("/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
-                                                      "model_id": _builtin_model(api, "sonnet")})
+            sonnet = api.post("/api/v1/profiles/create", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
+                                                      "model_id": _builtin_model(api, "sonnet")})["result"]
             # A skill installed for the roles a Planner defines only: it loads for a run of a role naming it.
             notes = api.post("/api/v1/catalog_sources/create_skill", {"name": "role-notes", "description": "Notes for roles.",
                                                      "content": "Reply ROLE-NOTES.\n"})["result"]["item"]
@@ -246,8 +246,8 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
                 project = api.post("/api/v1/project_admin/create", {"name": f"calc-{variant}", "work_dir": str(work)})["result"]["project"]
                 if variant != "off":
                     api.post("/api/v1/project_admin/update", {"project_id": project['project_id'], "fields": {"planner_roles": "on"}})["result"]["project"]
-                    api.put(f"/api/projects/{project['project_id']}/allowed-profiles",
-                            {"profile_ids": [sonnet["profile"]["profile_id"]]})
+                    api.post("/api/v1/allowed_profiles/replace",
+                             {"project_id": project["project_id"], "profile_ids": [sonnet["profile"]["profile_id"]]})
                 ids[variant] = api.post("/api/v1/tasks/create", {"requirement": f"build calc variant={variant}",
                                                               "project_id": project["project_id"]})["result"]["task_id"]
                 api.post("/api/v1/ops/task_control/start", {"task_id": ids[variant]})

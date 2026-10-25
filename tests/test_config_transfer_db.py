@@ -161,11 +161,11 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
     await pool.execute("INSERT INTO agent_runtimes (id, name, type, executable, capabilities) "
                        "VALUES ($1, 'claude-beta', 'claude-code', 'claude-beta', $2)", beta,
                        ["resident_session", "resume", "run"])
-    await _ok("POST", "/api/providers", {"name": "anthropic-key", "vendor_type": "custom",
+    await _ok("POST", "/api/v1/provider_accounts/create", {"name": "anthropic-key", "vendor_type": "custom",
                                          "api_key": SECRET, "endpoints": [
                                              {"protocol": "anthropic-messages", "base_url": "https://api.example.test"}]})
     provider = await pool.fetchval("SELECT id FROM llm_providers WHERE name = 'anthropic-key'")
-    await _ok("POST", "/api/models", {"provider_id": provider, "name": "claude-sonnet-4-5",
+    await _ok("POST", "/api/v1/ops/models/create", {"provider": provider, "name": "claude-sonnet-4-5",
                                      "protocol": "anthropic-messages", "input_usd_per_mtok": 3,
                                      "output_usd_per_mtok": 15})
     # Login suggestions are seeded models; profiles select their existing ids.

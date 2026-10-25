@@ -147,7 +147,7 @@ else:
 
 def _builtin_model(api: Any, name: str) -> str:
     """The id of the built-in Claude Code login's model ``name``."""
-    models = api.get("/api/models", provider_id="prov-claude-subscription")["models"]
+    models = api.post("/api/v1/ops/models/list", {"provider": "prov-claude-subscription"})["result"]["models"]
     return next(m["model_id"] for m in models if m["name"] == name)
 
 
@@ -174,7 +174,7 @@ def _wait(api: Api, task_ids: dict[str, str], done: Callable[[str, dict[str, Any
           timeout: float = 90.0) -> dict[str, dict[str, Any]]:
     deadline = time.monotonic() + timeout
     while True:
-        details = {variant: api.get(f"/api/tasks/{task_id}") for variant, task_id in task_ids.items()}
+        details = {variant: api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"] for variant, task_id in task_ids.items()}
         if all(done(variant, detail) for variant, detail in details.items()):
             return details
         if time.monotonic() > deadline:
@@ -242,8 +242,8 @@ def restarted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             merged_a = _git(work["worktree"], "log", "--format=%H", "--grep=^looper: merge step a")
             (state / "release-plan").touch()
             # The failed task's Workers run on another profile, and one at a time, from its restart on.
-            api.post("/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
-                                             "model_id": _builtin_model(api, "sonnet")})
+            api.post("/api/v1/profiles/create", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
+                                             "model_id": _builtin_model(api, "sonnet")})["result"]
             agents = api.post("/api/v1/tasks/agents", {"task_id": ids['agents'], "profiles": {"worker": "claude-code/sonnet"},
                                                                      "concurrency": {"worker": 1}})["result"]["agents"]
 

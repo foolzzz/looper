@@ -15,11 +15,15 @@ HAND = {"chat.send", "chat.messages", "chat.conversations", "confirm", "openapi"
 TYPED_TOOL_OPERATIONS = {
     "tasks.list", "tasks.get", "tasks.room", "task_pipeline", "task_create", "task_control.start", "task_control.stop",
     "task_control.restart", "task_control.start_over", "task_control.cancel", "task_update", "task_instruct",
-    "gates.list", "gates.messages", "gates.reply", "gates.end", "agent_profiles.list", "overview", "config_export",
-    "settings.set", "concurrency", "schedules.list", "schedules.get", "schedules.create", "schedules.update",
+    "gates.list", "gates.messages", "gates.reply", "gates.end", "agent_profiles.list", "agent_profiles.create",
+    "agent_profiles.update", "agent_profiles.delete", "overview", "config_export",
+    "settings.scheduler", "settings.waits", "settings.knowledge_vault", "settings.view",
+    "settings.set", "settings.allowed_profiles", "concurrency", "schedules.list", "schedules.get", "schedules.create", "schedules.update",
     "schedules.enable", "schedules.disable", "schedules.run", "schedules.delete", "schedules.reset_planner_session",
     "catalog.list", "catalog.install", "catalog.update", "catalog.uninstall",
-    "costs", "projects.list", "projects.get", "projects.create", "projects.update", "projects.delete"}
+    "models.list", "models.create", "models.update", "models.delete", "costs",
+    "providers.list", "providers.register", "providers.update",
+    "projects.list", "projects.get", "projects.create", "projects.update", "projects.delete"}
 
 
 def _actions(tool) -> list[str] | None:

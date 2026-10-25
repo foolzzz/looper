@@ -376,17 +376,16 @@ export async function fetchTasks(
     limit?: number;
   } = {},
 ): Promise<TasksPage> {
-  const params = new URLSearchParams();
-  if (filters.projectId) params.set("project_id", filters.projectId);
-  if (filters.group) params.set("group", filters.group);
-  if (filters.scheduleId) params.set("schedule_id", filters.scheduleId);
-  if (filters.status) params.set("status", filters.status);
-  if (filters.before) params.set("before", filters.before);
-  if (filters.limit) params.set("limit", String(filters.limit));
-  const qs = params.toString();
-  const res = await fetch(`${API_BASE}/tasks${qs ? `?${qs}` : ""}`);
-  if (!res.ok) await failed(res, "tasks");
-  return res.json();
+  const result = await callV1<TasksPage>("/api/v1/tasks/page", {
+    ...(filters.projectId ? { project_id: filters.projectId } : {}),
+    ...(filters.group ? { group: filters.group } : {}),
+    ...(filters.scheduleId ? { schedule_id: filters.scheduleId } : {}),
+    ...(filters.status ? { status: filters.status } : {}),
+    ...(filters.before ? { before: filters.before } : {}),
+    ...(filters.limit ? { limit: filters.limit } : {}),
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Who a chat message goes to: the global Manager or a running task's Planner. */
@@ -1191,22 +1190,15 @@ export interface SchedulerSettings {
 export type SchedulerSettingsUpdate = Partial<Record<keyof SchedulerSettings, number | null>>;
 
 export async function fetchSchedulerSettings(): Promise<SchedulerSettings> {
-  return scheduleCall<SchedulerSettings>("GET", `${API_BASE}/scheduler-settings`, "scheduler settings");
+  const result = await callV1<SchedulerSettings>("/api/v1/scheduler_settings/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function updateSchedulerSettings(body: SchedulerSettingsUpdate): Promise<SchedulerSettings> {
-  return scheduleCall<SchedulerSettings>("PUT", `${API_BASE}/scheduler-settings`, "scheduler settings", body);
-}
-
-/** Send JSON (or nothing) to a schedule endpoint; a refusal throws the server's reason. */
-async function scheduleCall<T>(method: string, url: string, label: string, body?: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method,
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!res.ok) await failed(res, label);
-  return res.json();
+  const result = await callV1<SchedulerSettings>("/api/v1/scheduler_settings/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Every project's schedules, the disabled ones too, by project name and then name (the Schedules page). */
@@ -1949,12 +1941,16 @@ export interface WaitSettings {
 
 export type WaitSettingsUpdate = Partial<Record<keyof WaitSettings, number | null>>;
 
-export function getWaitSettings(): Promise<WaitSettings> {
-  return scheduleCall("GET", `${API_BASE}/wait-settings`, "wait settings");
+export async function getWaitSettings(): Promise<WaitSettings> {
+  const result = await callV1<WaitSettings>("/api/v1/wait_settings/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
-export function updateWaitSettings(body: WaitSettingsUpdate): Promise<WaitSettings> {
-  return scheduleCall("PUT", `${API_BASE}/wait-settings`, "wait settings", body);
+export async function updateWaitSettings(body: WaitSettingsUpdate): Promise<WaitSettings> {
+  const result = await callV1<WaitSettings>("/api/v1/wait_settings/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** One question a gate asks the user; code numbers them q1, q2, ... */
@@ -2307,9 +2303,14 @@ export class TaskDetailError extends Error {
 }
 
 export async function fetchTaskDetail(taskId: string, signal?: AbortSignal): Promise<TaskDetail> {
-  const res = await fetch(`${API_BASE}/tasks/${taskId}`, { signal });
-  if (!res.ok) throw new TaskDetailError(res.status);
-  return res.json();
+  try {
+    const result = await callV1<TaskDetail>("/api/v1/tasks/detail", { task_id: taskId }, { signal });
+    if (result.status === "needs_confirmation" && "confirmation_id" in result) throw new TaskDetailError(202);
+    return result as TaskDetail;
+  } catch (error) {
+    if (error instanceof V1Error) throw new TaskDetailError(error.status);
+    throw error;
+  }
 }
 
 export async function fetchTaskActivity(
@@ -2884,6 +2885,8 @@ export interface ProviderFields {
   api_key?: string | null;
 }
 
+export type CreateProviderFields = ProviderFields & Pick<Provider, "name" | "vendor_type">;
+
 export interface ProfileFields {
   name?: string;
   runtime_id?: string;
@@ -2926,7 +2929,7 @@ export interface PromptPreview {
 /** Window event fired after this dashboard changes the registry, so profile selectors reload at once. */
 export const REGISTRY_CHANGED_EVENT = "looper:registry-changed";
 
-async function registryCall<T>(method: string, path: string, body: unknown, label: string): Promise<T> {
+export async function registryCall<T>(method: string, path: string, body: unknown, label: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
@@ -2953,63 +2956,108 @@ export async function probeRuntime(runtimeId: string): Promise<{ runtime: Runtim
   return result;
 }
 
-export function createProvider(fields: ProviderFields): Promise<{ provider: Provider; warnings: string[] }> {
-  return registryCall("POST", "/providers", fields, "add provider");
+export async function createProvider(fields: CreateProviderFields): Promise<{ provider: Provider; warnings: string[] }> {
+  const result = await callV1<{ provider: Provider; warnings: string[] }>("/api/v1/provider_accounts/create", fields);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
-export function updateProvider(
+export async function updateProvider(
   providerId: string,
   fields: ProviderFields,
 ): Promise<{ provider: Provider; warnings: string[] }> {
-  return registryCall("PUT", `/providers/${encodeURIComponent(providerId)}`, fields, "update provider");
+  const result = await callV1<{ provider: Provider; warnings: string[] }>("/api/v1/provider_accounts/update",
+    { provider_id: providerId, fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
-export function deleteProvider(providerId: string): Promise<{ deleted: string }> {
-  return registryCall("DELETE", `/providers/${encodeURIComponent(providerId)}`, undefined, "delete provider");
+export async function deleteProvider(providerId: string): Promise<{ deleted: string }> {
+  const result = await callV1<{ deleted: string }>("/api/v1/provider_accounts/delete", { provider_id: providerId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
-export function createModel(fields: CreateModelFields): Promise<{ model: Model; warnings: string[] }> {
-  return registryCall("POST", "/models", fields, "add model");
+function modelSettings(fields: ModelFields): ModelFields {
+  const settings = { ...fields };
+  for (const key of ["context_window", "input_usd_per_mtok", "output_usd_per_mtok",
+    "cache_read_usd_per_mtok", "cache_write_usd_per_mtok"] as const) {
+    const value = settings[key];
+    if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) {
+      settings[key] = Number(value);
+    }
+  }
+  return settings;
 }
 
-export function updateModel(modelId: string, fields: ModelFields): Promise<{ model: Model; warnings: string[] }> {
-  return registryCall("PUT", `/models/${encodeURIComponent(modelId)}`, fields, "update model");
+export async function createModel(fields: CreateModelFields): Promise<{ model: Model; warnings: string[] }> {
+  const { provider_id, ...settings } = fields;
+  const result = await callV1<{ model: Model; warnings: string[] }>("/api/v1/ops/models/create",
+    { provider: provider_id, ...modelSettings(settings) });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
-export function deleteModel(modelId: string): Promise<{ deleted: string }> {
-  return registryCall("DELETE", `/models/${encodeURIComponent(modelId)}`, undefined, "delete model");
+export async function updateModel(modelId: string, fields: ModelFields): Promise<{ model: Model; warnings: string[] }> {
+  const result = await callV1<{ model: Model; warnings: string[] }>("/api/v1/ops/models/update",
+    { model: modelId, ...modelSettings(fields) });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
+}
+
+export async function deleteModel(modelId: string): Promise<{ deleted: string }> {
+  const result = await callV1<{ deleted: string }>("/api/v1/ops/models/delete", { model: modelId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
 /** After checking a runtime's own login on the machine (Codex's, Grok's): let runs use it again after a run found it
  * forked. */
-export function clearLoginProblem(providerId: string): Promise<{ provider: Provider }> {
-  return registryCall("DELETE", `/providers/${encodeURIComponent(providerId)}/login-problem`, undefined,
-    "use the login again");
+export async function clearLoginProblem(providerId: string): Promise<{ provider: Provider; warnings?: string[] }> {
+  const result = await callV1<{ provider: Provider; warnings?: string[] }>("/api/v1/provider_accounts/clear_login_problem",
+    { provider_id: providerId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
 /** Register an Agent Profile; refused (400) when its runtime cannot use the selected model and its derived account. */
-export function createAgentProfile(fields: ProfileFields): Promise<{ profile: AgentProfile; warnings: string[] }> {
-  return registryCall("POST", "/agent-profiles", fields, "add Agent Profile");
+export async function createAgentProfile(fields: ProfileFields): Promise<{ profile: AgentProfile; warnings: string[] }> {
+  const result = await callV1<{ profile: AgentProfile; warnings: string[] }>("/api/v1/profiles/create", fields);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
-export function updateAgentProfile(
+export async function updateAgentProfile(
   profileId: string,
   fields: ProfileFields,
 ): Promise<{ profile: AgentProfile; warnings: string[] }> {
-  return registryCall("PUT", `/agent-profiles/${encodeURIComponent(profileId)}`, fields, "update Agent Profile");
+  const result = await callV1<{ profile: AgentProfile; warnings: string[] }>("/api/v1/profiles/update",
+    { profile_id: profileId, fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
 export async function fetchPromptPreview(profileId: string, role: AgentRole, projectId?: string): Promise<PromptPreview> {
-  const query = new URLSearchParams({ role });
-  if (projectId !== undefined) query.set("project_id", projectId);
-  const res = await fetch(`${API_BASE}/agent-profiles/${encodeURIComponent(profileId)}/prompt-preview?${query}`);
-  if (!res.ok) await failed(res, "preview system prompt");
-  return res.json();
+  const result = await callV1<PromptPreview>("/api/v1/profiles/prompt_preview",
+    { profile_id: profileId, role, ...(projectId === undefined ? {} : { project_id: projectId }) });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
-export function deleteAgentProfile(profileId: string): Promise<{ deleted: string }> {
-  return registryCall("DELETE", `/agent-profiles/${encodeURIComponent(profileId)}`, undefined,
-    "delete Agent Profile");
+export async function deleteAgentProfile(profileId: string): Promise<{ deleted: string }> {
+  const result = await callV1<{ deleted: string }>("/api/v1/profiles/delete", { profile_id: profileId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
 // --- Agent settings: harness, Agent Profile (with its effort), environment and per-run cap, by layer ---
@@ -3121,7 +3169,7 @@ export interface ProjectAgentSettings {
  * sent as typed, so the server's 400 explains it. */
 export type LayerUpdate = { [K in keyof LayerValues]?: LayerValues[K] | string };
 
-async function putJson<T>(path: string, body: unknown, label: string): Promise<T> {
+export async function putJson<T>(path: string, body: unknown, label: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -3152,27 +3200,27 @@ export async function updateRoleSettings(role: AgentRole, fields: LayerUpdate): 
 }
 
 export async function fetchProjectAgentSettings(projectId: string): Promise<ProjectAgentSettings> {
-  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/agent-settings`);
-  if (!res.ok) await failed(res, "project agent settings");
-  return res.json();
+  const result = await callV1<ProjectAgentSettings>("/api/v1/project_agent_settings/get", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", "Project settings unexpectedly need confirmation.");
+  return result;
 }
 
 /** A project's layer: all its agents. */
-export function updateProjectLayer(projectId: string, fields: LayerUpdate): Promise<ProjectAgentSettings> {
-  return putJson(`/projects/${encodeURIComponent(projectId)}/agent-settings`, fields, "update project agent settings");
+export async function updateProjectLayer(projectId: string, fields: LayerUpdate): Promise<ProjectAgentSettings> {
+  const result = await callV1<ProjectAgentSettings>("/api/v1/project_agent_settings/update", { project_id: projectId, values: fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", "Project settings update needs explicit confirmation.");
+  return result;
 }
 
 /** One role's layer in a project. */
-export function updateProjectRoleSettings(
+export async function updateProjectRoleSettings(
   projectId: string,
   role: ProjectRole,
   fields: LayerUpdate,
 ): Promise<ProjectAgentSettings> {
-  return putJson(
-    `/projects/${encodeURIComponent(projectId)}/agent-settings/roles/${encodeURIComponent(role)}`,
-    fields,
-    "update project agent settings",
-  );
+  const result = await callV1<ProjectAgentSettings>("/api/v1/project_agent_settings/update_role", { project_id: projectId, role, values: fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", "Project settings update needs explicit confirmation.");
+  return result;
 }
 
 /** An Agent Profile a project's Planners may choose for their task's Workers or Reviewers. */
@@ -3199,19 +3247,17 @@ export interface AllowedProfiles {
 }
 
 export async function fetchAllowedProfiles(projectId: string): Promise<AllowedProfiles> {
-  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/allowed-profiles`);
-  if (!res.ok) await failed(res, "allowed profiles");
-  return res.json();
+  const result = await callV1<AllowedProfiles>("/api/v1/allowed_profiles/get", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", "Allowed profiles unexpectedly need confirmation.");
+  return result;
 }
 
 /** Make `profileIds` the whole list ([] lifts the restriction); a profile it drops takes the Planners' choices of it along.
  * Resolves to the list as saved. */
-export function setAllowedProfiles(projectId: string, profileIds: string[]): Promise<AllowedProfiles> {
-  return putJson(
-    `/projects/${encodeURIComponent(projectId)}/allowed-profiles`,
-    { profile_ids: profileIds },
-    "update allowed profiles",
-  );
+export async function setAllowedProfiles(projectId: string, profileIds: string[]): Promise<AllowedProfiles> {
+  const result = await callV1<AllowedProfiles>("/api/v1/allowed_profiles/replace", { project_id: projectId, profile_ids: profileIds });
+  if ("status" in result) throw new V1Error(202, "unavailable", "Allowed profiles update needs explicit confirmation.");
+  return result;
 }
 
 /** A role a project keeps for its tasks' Planners to copy: checked as a task role is, whether or not the project's
@@ -3771,9 +3817,9 @@ export interface VaultSettings {
 }
 
 export async function fetchVaultSettings(): Promise<VaultSettings> {
-  const res = await fetch(`${API_BASE}/knowledge-vault`);
-  if (!res.ok) await failed(res, "knowledge vault settings");
-  return res.json();
+  const result = await callV1<VaultSettings>("/api/v1/knowledge_vault/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function updateVaultSettings(body: {
@@ -3781,13 +3827,9 @@ export async function updateVaultSettings(body: {
   writable?: string[];
   rules_file?: string | null;
 }): Promise<VaultSettings> {
-  const res = await fetch(`${API_BASE}/knowledge-vault`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) await failed(res, "save knowledge vault settings");
-  return res.json();
+  const result = await callV1<VaultSettings>("/api/v1/knowledge_vault/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Follow one dashboard send by its correlation id; cancelling releases its reply queue. */

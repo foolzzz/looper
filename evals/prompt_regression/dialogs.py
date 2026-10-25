@@ -127,11 +127,11 @@ class Look:
         return _trail(self.database_url, max(self.since, self.turn_since), self.manager_id)
 
     def detail(self, task_id: str | None = None) -> dict[str, Any]:
-        return self.api.get(f"/api/tasks/{task_id or self.task}")
+        return self.api.post("/api/v1/tasks/detail", {"task_id": task_id or self.task})["result"]
 
     def new_tasks(self) -> list[dict[str, Any]]:
         """The tasks created since the dialog's first message, newest first."""
-        return [t for t in self.api.get("/api/tasks")["tasks"] if t["task_id"] not in self.known]
+        return [t for t in self.api.post("/api/v1/tasks/page", {})["result"]["tasks"] if t["task_id"] not in self.known]
 
     def until(self, problem: Callable[[], str | None], seconds: float) -> str | None:
         """``problem()`` once it is None, else its last answer after ``seconds``."""
@@ -574,7 +574,8 @@ def _profiles_listed(look: Look) -> str | None:
 
 def _reviewer_set_in_project(look: Look) -> str | None:
     project = _project(look, PROJECT)
-    reviewer = look.api.get(f"/api/projects/{project['project_id']}/agent-settings")["roles"]["reviewer"]
+    settings = look.api.post("/api/v1/project_agent_settings/get", {"project_id": project["project_id"]})["result"]
+    reviewer = settings["roles"]["reviewer"]
     chosen = reviewer["effective"]["profile"]
     if (chosen["value"]["name"], chosen["source"]) != (OPUS, "role_project"):
         return f"{PROJECT}'s Reviewer runs {chosen['value']['name']} from {chosen['source']}, not {OPUS} of its own"
@@ -584,7 +585,8 @@ def _reviewer_set_in_project(look: Look) -> str | None:
 
 def _opus_allowed(look: Look) -> str | None:
     project = _project(look, PROJECT)
-    allowed = [p["name"] for p in look.api.get(f"/api/projects/{project['project_id']}/allowed-profiles")["profiles"]]
+    profiles = look.api.post("/api/v1/allowed_profiles/get", {"project_id": project["project_id"]})["result"]["profiles"]
+    allowed = [p["name"] for p in profiles]
     return None if set(allowed) == {LIGHT, OPUS} else f"{PROJECT}'s allowed list is {allowed}, not [{LIGHT}, {OPUS}]"
 
 
@@ -781,14 +783,14 @@ def _model_refused(look: Look) -> str | None:
 
 
 def _seed_dual_models(api: Api, project_id: str) -> None:
-    provider = api.post("/api/providers", {"name": DUAL_ACCOUNT, "vendor_type": "custom", "endpoints": [
+    provider = api.post("/api/v1/provider_accounts/create", {"name": DUAL_ACCOUNT, "vendor_type": "custom", "endpoints": [
         {"protocol": "openai-chat", "base_url": "https://dual.example.invalid/chat"},
-        {"protocol": "anthropic-messages", "base_url": DUAL_URL}]})["provider"]
+        {"protocol": "anthropic-messages", "base_url": DUAL_URL}]})["result"]["provider"]
     # Put the incompatible homonym first: selecting by name or catalog order
     # alone must fail the check even though the profile's name looks right.
     for protocol, price in (("openai-chat", 9), ("anthropic-messages", 1)):
-        api.post("/api/models", {"provider_id": provider["provider_id"], "name": DUAL_MODEL,
-            "protocol": protocol, "input_usd_per_mtok": price, "output_usd_per_mtok": 3})
+        api.post("/api/v1/ops/models/create", {"provider": provider["provider_id"], "name": DUAL_MODEL,
+            "protocol": protocol, "input_usd_per_mtok": price, "output_usd_per_mtok": 3})["result"]
 
 
 def _seed_price_model(api: Api, project_id: str) -> None:
@@ -796,13 +798,13 @@ def _seed_price_model(api: Api, project_id: str) -> None:
     registry = api.post("/api/v1/registry/view", {})["result"]
     model = next(m for m in registry["models"] if m["name"] == DUAL_MODEL
                  and m["protocol"] == "anthropic-messages")
-    api.post("/api/agent-profiles", {"name": DUAL_PROFILE, "runtime_id": "rt-claude-code",
-                                     "model_id": model["model_id"]})
+    api.post("/api/v1/profiles/create", {"name": DUAL_PROFILE, "runtime_id": "rt-claude-code",
+                                     "model_id": model["model_id"]})["result"]
 
 
 def _seed_missing_endpoint(api: Api, project_id: str) -> None:
-    api.post("/api/providers", {"name": "eval-no-messages", "vendor_type": "custom", "endpoints": [
-        {"protocol": "openai-chat", "base_url": "https://chat.example.invalid/v1"}]})
+    api.post("/api/v1/provider_accounts/create", {"name": "eval-no-messages", "vendor_type": "custom", "endpoints": [
+        {"protocol": "openai-chat", "base_url": "https://chat.example.invalid/v1"}]})["result"]
 
 
 def _seed_login_runtime(database_url: str) -> None:
@@ -967,7 +969,7 @@ def _restrict_planner_choices(api: Api, project_id: str) -> None:
     """The project's Planners may choose LIGHT only: an empty list allows every profile, so adding to it would
     restrict the choice instead of widening it."""
     _make_light_profile(api, project_id)
-    api.put(f"/api/projects/{project_id}/allowed-profiles", {"profile_ids": [LIGHT]})
+    api.post("/api/v1/allowed_profiles/replace", {"project_id": project_id, "profile_ids": [LIGHT]})
 
 
 def _schedule_with_a_cheaper_planner(look: Look) -> str | None:
@@ -1024,7 +1026,7 @@ def _schedule_stays_disabled(look: Look) -> str | None:
 
 
 def _run_timeout_default(look: Look) -> dict[str, Any]:
-    return look.api.get("/api/scheduler-settings")["run_timeout_seconds"]
+    return look.api.post("/api/v1/scheduler_settings/get", {})["result"]["run_timeout_seconds"]
 
 
 def _default_timeout_change_asked(look: Look) -> str | None:
@@ -1273,8 +1275,8 @@ def _make_switch_profile(api: Api, project_id: str, *, fake: bool = True, spec: 
     if spec is not None:
         register_agent(api, {**spec, "agent": {**spec["agent"], "name": SWITCH}})
     elif fake:
-        provider = api.post("/api/providers", {"name": "eval-switch", "vendor_type": "custom", "api_key": FAKE_KEY,
-            "endpoints": [{"protocol": "anthropic-messages", "base_url": "https://switch.example.invalid"}]})["provider"]
+        provider = api.post("/api/v1/provider_accounts/create", {"name": "eval-switch", "vendor_type": "custom", "api_key": FAKE_KEY,
+            "endpoints": [{"protocol": "anthropic-messages", "base_url": "https://switch.example.invalid"}]})["result"]["provider"]
         register_agent(api, {"runtime": {"type": "claude-code"}, "provider": {"provider_id": provider["provider_id"]},
             "model": {"name": "haiku", "protocol": "anthropic-messages"}, "agent": {"name": SWITCH}})
     else:
@@ -1919,7 +1921,7 @@ def _start_slow_task(api: Api, project_id: str, *, timeout: float,
             raise EvalError("the run was interrupted")
         if check_budget is not None:
             check_budget()
-        detail = api.get(f"/api/tasks/{task_id}")
+        detail = api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"]
         if detail.get("steps") and detail.get("phase") in ("executing", "verifying"):
             return task_id
         if detail.get("status") not in (*ACTIVE, "init"):
@@ -2005,7 +2007,7 @@ def _stop_leftovers(api: Api) -> None:
     """Stop the dialog's tasks still running, as the operator would before the server stops; best effort, as the
     server may be gone after an error."""
     try:
-        for task in api.get("/api/tasks")["tasks"]:
+        for task in api.post("/api/v1/tasks/page", {})["result"]["tasks"]:
             if task.get("status") in ACTIVE:
                 api.post("/api/v1/ops/task_control/stop", {"task_id": task["task_id"]})
     except Exception:
@@ -2082,7 +2084,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             created = api.post("/api/v1/clients/create", {"name": f"eval-{uuid.uuid4().hex[:6]}"})["result"]
             client_id = created["client"]["id"]
             client_api = Api(api.base_url, token=created["token"], timeout=api.timeout)
-        known = frozenset(t["task_id"] for t in api.get("/api/tasks")["tasks"])
+        known = frozenset(t["task_id"] for t in api.post("/api/v1/tasks/page", {})["result"]["tasks"])
         # Setup uses audited operator operations too; only the dialog's actions belong to its checks.
         since = _last_action(database_url)
         previous: Look | None = None

@@ -24,12 +24,11 @@ from pathlib import Path
 from typing import Any
 
 from ..db import api_clients as db_api_clients
-from ..db.tasks import TaskGroup
 from ..ops_config import OpsConfig
 from . import (
-    agent_settings, api_v1, chat_settings, config_imports, config_transfer, gate_service, knowledge,
-    operator_auth, overview, profile_registry, projects, prompt_preview, request_guard, role_api,
-    schedules, self_check, vault, wait_service,
+    api_v1, chat_settings, config_imports, config_transfer, gate_service, knowledge,
+    operator_auth, overview, projects, request_guard, role_api,
+    self_check,
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, resolve_chat_target
@@ -107,9 +106,6 @@ _RE_AGENT_OP = re.compile(r"^/api/agent/v1/ops/([a-z_]{1,64})$")
 # exception is a configuration import (/api/v1/config/import_upload), which streams its
 # body to a file and takes up to config_imports.UPLOAD_MAX_BYTES.
 REQUEST_BODY_MAX_BYTES = 4 * knowledge.DOCUMENT_MAX_BYTES
-# The Tasks list's page: how many tasks GET /api/tasks returns by default, and at most.
-TASKS_PAGE = 50
-TASKS_PAGE_MAX = 200
 
 
 def _json_response(status: str, body: Any, *, headers: Mapping[str, str] | None = None) -> bytes:
@@ -823,17 +819,8 @@ class AgentHTTPServer:
 
     # --- API routing ---
 
-    _RE_TASK_DETAIL = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)$")
     _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
     _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
-    _RE_PROJECT_AGENT_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings$")
-    _RE_PROJECT_ROLE_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings/roles/([a-zA-Z0-9_-]+)$")
-    _RE_PROJECT_ALLOWED_PROFILES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/allowed-profiles$")
-    _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
-    _RE_MODEL = re.compile(r"^/api/models/(model-[a-zA-Z0-9-]+)$")
-    _RE_PROVIDER_LOGIN_PROBLEM = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)/login-problem$")
-    _RE_PROFILE_PROMPT_PREVIEW = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)/prompt-preview$")
-    _RE_PROFILE = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)$")
 
     async def _route_api(
         self,
@@ -844,75 +831,8 @@ class AgentHTTPServer:
         writer: asyncio.StreamWriter,
         headers: Mapping[str, str] | None = None,
     ) -> None:
-        if path == "/api/tasks" and method == "GET":
-            await self._handle_list_tasks(query, writer)
-        elif (m := self._RE_TASK_DETAIL.match(path)) and method == "GET":
-            await self._handle_task_detail(m.group(1), writer)
-        elif path == "/api/providers" and method == "GET":
-            await self._handle_registry(writer, HTTP_200, profile_registry.list_providers)
-        elif path == "/api/providers" and method == "POST":
-            await self._handle_registry(writer, HTTP_201, lambda: profile_registry.create_provider(
-                projects.json_object(body)))
-        elif (m := self._RE_PROVIDER.match(path)) and method == "PUT":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.update_provider(
-                m.group(1), projects.json_object(body)))
-        elif (m := self._RE_PROVIDER.match(path)) and method == "DELETE":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.delete_provider(m.group(1)))
-        elif (m := self._RE_PROVIDER_LOGIN_PROBLEM.match(path)) and method == "DELETE":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.clear_login_problem(m.group(1)))
-        elif path == "/api/models" and method == "GET":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.list_models(
-                provider_id=query.get("provider_id") or None, runtime_id=query.get("runtime_id") or None))
-        elif path == "/api/models" and method == "POST":
-            await self._handle_registry(writer, HTTP_201, lambda: profile_registry.create_model(
-                projects.json_object(body)))
-        elif (m := self._RE_MODEL.match(path)) and method == "GET":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.get_model(m.group(1)))
-        elif (m := self._RE_MODEL.match(path)) and method == "PUT":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.update_model(
-                m.group(1), projects.json_object(body)))
-        elif (m := self._RE_MODEL.match(path)) and method == "DELETE":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.delete_model(m.group(1)))
-        elif (m := self._RE_PROFILE_PROMPT_PREVIEW.match(path)) and method == "GET":
-            await self._handle_registry(writer, HTTP_200, lambda: prompt_preview.preview(
-                m.group(1), query.get("role", ""), query.get("project_id") or None))
-        elif path == "/api/agent-profiles" and method == "POST":
-            await self._handle_registry(writer, HTTP_201, lambda: profile_registry.create_profile(
-                projects.json_object(body)))
-        elif (m := self._RE_PROFILE.match(path)) and method == "PUT":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.update_profile(
-                m.group(1), projects.json_object(body)))
-        elif (m := self._RE_PROFILE.match(path)) and method == "DELETE":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.delete_profile(m.group(1)))
-        elif (m := self._RE_PROJECT_AGENT_SETTINGS.match(path)) and method == "GET":
-            await self._handle_agent_settings(writer, lambda: agent_settings.project_settings_view(m.group(1)))
-        elif (m := self._RE_PROJECT_AGENT_SETTINGS.match(path)) and method == "PUT":
-            await self._handle_agent_settings(writer, lambda: agent_settings.update_project(
-                m.group(1), projects.json_object(body)))
-        elif (m := self._RE_PROJECT_ALLOWED_PROFILES.match(path)) and method == "GET":
-            await self._answer(writer, HTTP_200, lambda: projects.allowed_profiles_view(m.group(1)))
-        elif (m := self._RE_PROJECT_ALLOWED_PROFILES.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: projects.set_allowed_profiles(
-                m.group(1), projects.json_object(body)))
-        elif (m := self._RE_PROJECT_ROLE_SETTINGS.match(path)) and method == "PUT":
-            await self._handle_agent_settings(writer, lambda: self._write_layer(
-                body, lambda data: agent_settings.update_project(m.group(1), data, role=m.group(2))))
-        elif path == "/api/scheduler-settings" and method == "GET":
-            await self._answer(writer, HTTP_200, schedules.scheduler_settings)
-        elif path == "/api/scheduler-settings" and method == "PUT":
-            await self._answer(writer, HTTP_200,
-                               lambda: schedules.update_scheduler_settings(projects.json_object(body)))
-        elif path == "/api/wait-settings" and method == "GET":
-            await self._answer(writer, HTTP_200, wait_service.settings_view)
-        elif path == "/api/wait-settings" and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: wait_service.update_settings(projects.json_object(body)))
-        elif path == "/api/knowledge-vault" and method == "GET":
-            await self._answer(writer, HTTP_200, vault.settings_view)
-        elif path == "/api/knowledge-vault" and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: vault.update_settings(projects.json_object(body)))
-        else:
-            writer.write(_json_response(HTTP_404, {"error": "not found"}))
-            await writer.drain()
+        writer.write(_json_response(HTTP_404, {"error": "not found"}))
+        await writer.drain()
 
     # --- API handlers ---
 
@@ -1076,46 +996,6 @@ class AgentHTTPServer:
             status["turn_binding"] = self._manager_ops.binding_report()
         return status
 
-    async def _handle_list_tasks(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
-        """A page of tasks, newest first, filtered by project, schedule, group and status: ``limit`` of them
-        (``TASKS_PAGE`` by default, at most ``TASKS_PAGE_MAX``) older than the task ``before``; ``next_before``
-        continues the list (null at its end) and ``counts`` has how many tasks each status holds under the other
-        filters."""
-        from ..db import tasks as db_tasks
-
-        async def refuse(error: str) -> None:
-            writer.write(_json_response(HTTP_400, {"error": error}))
-            await writer.drain()
-
-        try:
-            group = TaskGroup(query["group"]) if query.get("group") else None
-        except ValueError:
-            await refuse(f"group must be one of {', '.join(g.value for g in TaskGroup)}")
-            return
-        status = query.get("status") or None
-        if status is not None and status not in db_tasks.STATUS_GROUPS:
-            await refuse(f"status must be one of {', '.join(db_tasks.STATUS_GROUPS)}")
-            return
-        raw = query.get("limit") or str(TASKS_PAGE)
-        if not raw.isdigit() or not 1 <= int(raw) <= TASKS_PAGE_MAX:
-            await refuse(f"limit must be a whole number from 1 to {TASKS_PAGE_MAX}")
-            return
-        limit, before = int(raw), query.get("before") or None
-        filters = {"project_id": query.get("project_id") or None, "group": group,
-                   "schedule_id": query.get("schedule_id") or None}
-        try:
-            result = await projects.list_tasks_page(limit=limit, status=status, before=before, **filters)
-        except projects.RequestError as exc:
-            await refuse(str(exc))
-            return
-        except Exception:
-            logger.exception("DB unavailable for list_tasks")
-            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
-            await writer.drain()
-            return
-        writer.write(_json_response(HTTP_200, _serialize(result)))
-        await writer.drain()
-
     def _stop_agent(self, message_id: str) -> Any:
         """The Manager whose turn answers ``message_id`` (the default one when none does)."""
         if self._managers is None:
@@ -1262,20 +1142,6 @@ class AgentHTTPServer:
 
     # --- Task detail handlers ---
 
-    async def _handle_task_detail(
-        self, task_id: str, writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            result = await projects.task_detail(task_id)
-        except projects.RequestError as exc:
-            writer.write(_json_response(exc.status, {"error": str(exc)}))
-        except Exception:
-            logger.exception("DB unavailable for task_detail %s", task_id)
-            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
-        else:
-            writer.write(_json_response(HTTP_200, _serialize(result)))
-        await writer.drain()
-
     @staticmethod
     async def _task_workspace(task: dict[str, Any]) -> dict[str, Any]:
         return await projects.task_workspace_view(task)
@@ -1287,16 +1153,6 @@ class AgentHTTPServer:
 
     # --- Agent settings (the defaults every agent inherits) ---
 
-    async def _write_layer(
-        self, body: bytes, update: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
-    ) -> dict[str, Any]:
-        """``update`` a role's layer with the body; when it set a concurrency limit, start what it lets start."""
-        data = projects.json_object(body)
-        result = await update(data)
-        if "max_concurrency" in data:
-            await self._recheck_concurrency()
-        return result
-
     async def _apply_import(self, imports: config_imports.ConfigImports, import_id: str, *,
                             owner: str | None = None) -> Any:
         """Apply an import; its layers may raise a concurrency limit."""
@@ -1307,44 +1163,6 @@ class AgentHTTPServer:
     async def _recheck_concurrency(self) -> None:
         """Start the runs that wait for room a raised limit now gives; a lowered limit stops nothing."""
         await recheck_limits(self._worker_pool)
-
-    async def _handle_agent_settings(
-        self, writer: asyncio.StreamWriter, request: Callable[[], Awaitable[dict[str, Any]]],
-    ) -> None:
-        """Answer with the agent settings ``request()`` returns; a refused value is 400, an unknown role or
-        project 404."""
-        try:
-            result = await request()
-        except (agent_settings.SettingsError, projects.RequestError) as exc:
-            status, result = getattr(exc, "status", HTTP_400), {"error": str(exc)}
-        except agent_settings.SettingsNotFound as exc:
-            status, result = HTTP_404, {"error": str(exc)}
-        except Exception as exc:
-            logger.exception("agent settings request failed")
-            status, result = HTTP_500, {"error": str(exc)}
-        else:
-            status = HTTP_200
-        writer.write(_json_response(status, _serialize(result)))
-        await writer.drain()
-
-    async def _handle_registry(
-        self, writer: asyncio.StreamWriter, status: str, request: Callable[[], Awaitable[Any]],
-    ) -> None:
-        """Answer with ``request()``'s result; a refused request is 400, an unknown runtime, provider or Agent
-        Profile 404, and a name in use or a row still referred to 409."""
-        try:
-            result = await request()
-        except (profile_registry.RegistryError, projects.RequestError) as exc:
-            status, result = getattr(exc, "status", HTTP_400), {"error": str(exc)}
-        except profile_registry.RegistryNotFound as exc:
-            status, result = HTTP_404, {"error": str(exc)}
-        except profile_registry.RegistryConflict as exc:
-            status, result = HTTP_409, {"error": str(exc)}
-        except Exception:
-            logger.exception("registry request failed")
-            status, result = HTTP_500, {"error": "the request failed; see the server log"}
-        writer.write(_json_response(status, _serialize(result)))
-        await writer.drain()
 
     # --- Configuration export ---
 

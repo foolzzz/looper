@@ -121,7 +121,7 @@ for line in sys.stdin:
 
 def _builtin_model(api: Any, name: str) -> str:
     """The id of the built-in Claude Code login's model ``name``."""
-    models = api.get("/api/models", provider_id="prov-claude-subscription")["models"]
+    models = api.post("/api/v1/ops/models/list", {"provider": "prov-claude-subscription"})["result"]["models"]
     return next(m["model_id"] for m in models if m["name"] == name)
 
 
@@ -164,22 +164,22 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     with fresh_database(str(DSN)) as (database_url, _):
         server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home}
         with running_server(**server, log_path=root / "serve.log") as api:
-            sonnet = api.post("/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
-                                                      "model_id": _builtin_model(api, "sonnet")})
+            sonnet = api.post("/api/v1/profiles/create", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
+                                                      "model_id": _builtin_model(api, "sonnet")})["result"]
             ids: dict[str, str] = {}
             for variant in VARIANTS:
                 work = root / f"work-{variant}"
                 work.mkdir()
                 project = api.post("/api/v1/project_admin/create", {"name": f"calc-{variant}", "work_dir": str(work)})["result"]["project"]
                 if variant == "profile":
-                    api.put(f"/api/projects/{project['project_id']}/allowed-profiles",
-                            {"profile_ids": [sonnet["profile"]["profile_id"]]})
+                    api.post("/api/v1/allowed_profiles/replace",
+                             {"project_id": project["project_id"], "profile_ids": [sonnet["profile"]["profile_id"]]})
                 ids[variant] = api.post("/api/v1/tasks/create", {"requirement": f"build calc variant={variant}",
                                                               "project_id": project["project_id"]})["result"]["task_id"]
                 api.post("/api/v1/ops/task_control/start", {"task_id": ids[variant]})
             deadline = time.monotonic() + 90
             while True:
-                details = {variant: api.get(f"/api/tasks/{task_id}") for variant, task_id in ids.items()}
+                details = {variant: api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"] for variant, task_id in ids.items()}
                 if all(d["status"] in ("completed", "failed", "stopped", "cancelled") for d in details.values()):
                     break
                 assert time.monotonic() < deadline, {v: d["status"] for v, d in details.items()}

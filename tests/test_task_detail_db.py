@@ -28,7 +28,7 @@ def test_the_task_detail_gives_each_steps_result_as_an_object_or_null(monkeypatc
         result = {"status": "completed", "summary": "Wrote greet.py.", "changed_files": {"greet.py": "written"}}
         await pool.execute("UPDATE task_steps SET result = $1::jsonb WHERE id = 'step-s1'", json.dumps(result))
 
-        status, detail = await _call("GET", "/api/tasks/task-a")
+        status, detail = await _call("POST", "/api/v1/tasks/detail", {"task_id": "task-a"})
         assert status == 200, detail
         assert [(s["step_key"], s["result"]) for s in detail["steps"]] == [("s1", result), ("s2", None)]
         # The same step as the plan reads it.
@@ -68,7 +68,7 @@ def test_console_and_manager_share_task_detail_without_changing_the_compact_view
         assert compact["latest_progress"] == "making progress"
         assert compact["result"] == clip("r" * 1_020, 1_000)
 
-        status, detail = await _call("GET", "/api/tasks/task-a")
+        status, detail = await _call("POST", "/api/v1/tasks/detail", {"task_id": "task-a"})
         assert status == 200, detail
         assert detail["task_id"] == compact["task_id"]
         assert detail["steps"][0]["instruction"] == "i" * 220

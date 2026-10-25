@@ -653,7 +653,7 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
                             "consult answer, then finish."})["result"]["task_id"]
                         tasks.append(task)
                         api.post("/api/v1/ops/task_control/start", {"task_id": task})
-                        detail = _wait(lambda: api.get(f"/api/tasks/{task}"),
+                        detail = _wait(lambda: api.post("/api/v1/tasks/detail", {"task_id": task})["result"],
                             lambda r: r["status"] in ("completed", "failed", "stopped", "cancelled"),
                             check_budget=check_budget)
                         if detail["status"] != "completed":

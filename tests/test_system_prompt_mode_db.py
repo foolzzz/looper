@@ -67,7 +67,7 @@ def test_mode_is_set_only_on_a_role_layer_and_a_profile_has_none(monkeypatch: py
         status, body = await _call("POST", "/api/agent-profiles", {
             "name": "p", "runtime_id": "rt-claude-code",
             "model_id": await _model_id("prov-claude-subscription", "sonnet"), "system_prompt_mode": "replace"})
-        assert status == 400 and "unknown field 'system_prompt_mode'" in body["error"]
+        assert status == 400 and "declared schema" in body["error"]
         profile = await _profile("q")
         assert "system_prompt_mode" not in profile
 

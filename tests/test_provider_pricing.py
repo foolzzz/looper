@@ -126,17 +126,17 @@ def test_provider_api_saves_return_context_suffix_warnings(
     monkeypatch.setattr(db, "list_models", AsyncMock(side_effect=lambda **_kw: list(models)))
 
     async def save() -> None:
-        answer = await _ok("POST", "/api/providers", {"name": "test", "vendor_type": "custom",
+        answer = await _ok("POST", "/api/v1/provider_accounts/create", {"name": "test", "vendor_type": "custom",
             "endpoints": [{"protocol": protocol, "base_url": "https://example.invalid"}]})
         expected = 0 if protocol == "anthropic-messages" else 1
         assert len(answer["warnings"]) == expected
         assert models[0]["name"] == "glm-5.3[1m]"
-        answer = await _ok("PUT", "/api/providers/prov-test", {"name": "renamed"})
+        answer = await _ok("POST", "/api/v1/provider_accounts/update", {"provider_id": 'prov-test', "fields": {"name": "renamed"}})
         assert len(answer["warnings"]) == expected
         if expected:
             assert "glm-5.3-flash[1m]" in answer["warnings"][0]
         models[:] = [{"name": "glm-5.3", "background_model": None}]
-        answer = await _ok("PUT", "/api/providers/prov-test", {"name": "renamed again"})
+        answer = await _ok("POST", "/api/v1/provider_accounts/update", {"provider_id": 'prov-test', "fields": {"name": "renamed again"}})
         assert answer["warnings"] == []
 
     asyncio.run(save())

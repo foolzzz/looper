@@ -236,7 +236,7 @@ def test_a_schedules_task_limits_are_replaced_whole_and_given_to_each_task_it_fi
             "SELECT role, max_concurrency FROM task_concurrency_limits WHERE task_id = $1", run["task_id"])} == {
             "worker": 8, "reviewer": 3}
         # They are the task's own, as if set on its Agents tab.
-        status, task = await env.call("GET", f"/api/tasks/{run['task_id']}")
+        status, task = await env.call("POST", "/api/v1/tasks/detail", {"task_id": run['task_id']})
         assert status == 200 and task["agents"]["roles"]["worker"]["concurrency"] == {
             "value": 8, "source": "task", "task": 8, "default": {"value": 16, "source": "builtin"}}
 
@@ -274,10 +274,10 @@ def test_a_due_schedule_fires_a_started_task_with_its_settings_and_run_context(m
         # Named by the schedule and the fire time in its zone, not by the requirement's first line.
         when = due_at.astimezone(ZoneInfo("America/Los_Angeles")).strftime("%m-%d %H:%M")
         assert task["title"] == f"Alert triage · {when}"
-        listed = await env.ok("GET", "/api/tasks", None)
+        listed = await env.ok("POST", "/api/v1/tasks/page", {})
         assert listed["tasks"][0]["schedule_id"] == sid and listed["tasks"][0]["schedule_name"] == "Alert triage"
         assert listed["tasks"][0]["name"] == f"Alert triage · {when}"
-        status, filtered = await env.call("GET", "/api/tasks", query={"schedule_id": "sched-000000000000"})
+        status, filtered = await env.call("POST", "/api/v1/tasks/page", {"schedule_id": "sched-000000000000"})
         assert status == 200 and filtered["tasks"] == []
 
         # The next tick has nothing due.
@@ -661,7 +661,7 @@ def test_a_project_with_schedules_is_not_deleted_and_a_deleted_schedule_keeps_it
 
 def test_a_profile_a_schedule_chose_is_not_deleted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(env: ScheduleEnv) -> None:
-        models = (await env.call("GET", "/api/models", query={"provider_id": "prov-claude-subscription"}))[1]["models"]
+        models = (await env.ok("POST", "/api/v1/ops/models/list", {"provider": "prov-claude-subscription"}))["models"]
         created = await env.ok("POST", "/api/agent-profiles", {
             "name": "cheap", "runtime_id": "rt-claude-code",
             "model_id": next(m["model_id"] for m in models if m["name"] == "haiku")})

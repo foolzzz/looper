@@ -37,7 +37,7 @@ def test_light_and_manager_seeds_register_model_references_once():
     second = dialogs._manager_profile(api, "sonnet", "high")
     assert first == second
     assert len(api.registry["models"]) == 2
-    assert [path for path, _ in api.posts] == ["/api/models", "/api/agent-profiles"] * 2
+    assert [path for path, _ in api.posts] == ["/api/v1/ops/models/create", "/api/v1/profiles/create"] * 2
     assert api.settings[-1] == ("/api/v1/agent_settings/update_role", {"role": "manager", "values": {"profile_id": first["profile_id"]}})
 
 
@@ -49,7 +49,7 @@ def test_light_and_manager_profiles_share_an_existing_model_without_copying_it()
     dialogs._make_light_profile(api, "project-test")
     manager = dialogs._manager_profile(api, "haiku", "high")
     assert manager["model_id"] == model_id
-    assert [path for path, _ in api.posts] == ["/api/agent-profiles"]
+    assert [path for path, _ in api.posts] == ["/api/v1/profiles/create"]
 
 
 def test_model_dialog_fake_scripts_use_the_registered_tool_schemas():
@@ -193,8 +193,11 @@ def test_fake_dialog_outcome_uses_observations_instead_of_success_words(monkeypa
         actions.append(action("looper_settings", "set"))
     # Keep the real run_dialog/check path; only replace HTTP and DB I/O.
     class Api(ObservedApi):
-        def get(self, path):
-            return {"tasks": []} if path == "/api/tasks" else super().get(path)
+        def post(self, path, body):
+            if path == "/api/v1/tasks/page":
+                assert body == {}
+                return {"status": "ok", "result": {"tasks": [], "counts": {}, "next_before": None}}
+            return super().post(path, body)
 
     monkeypatch.setattr(dialogs, "_last_action", lambda *_: 0)
     monkeypatch.setattr(dialogs, "_trail", lambda *_: deepcopy(actions))
@@ -298,7 +301,7 @@ def test_targeted_model_dialogs_run_through_fake_manager_and_database(tmp_path, 
 def test_switch_profile_seed_registers_a_keyed_provider_and_one_profile_in_fake_mode():
     api = SeedApi()
     dialogs._make_switch_profile(api, "project-test")
-    providers = [body for path, body in api.posts if path == "/api/providers"]
+    providers = [body for path, body in api.posts if path == "/api/v1/provider_accounts/create"]
     assert len(providers) == 1 and providers[0]["name"] == "eval-switch"
     assert providers[0]["api_key"] == dialogs.FAKE_KEY
     assert providers[0]["endpoints"] == [{"protocol": "anthropic-messages",
@@ -318,7 +321,7 @@ def test_switch_profile_seed_registers_a_spec_as_eval_switch(monkeypatch):
 def test_switch_profile_seed_uses_the_login_provider_in_real_mode():
     api = SeedApi()
     dialogs._make_switch_profile(api, "project-test", fake=False)
-    assert [p for p, _ in api.posts if p == "/api/providers"] == []
+    assert [p for p, _ in api.posts if p == "/api/v1/provider_accounts/create"] == []
     assert api.registry["profiles"][0]["name"] == dialogs.SWITCH
 
 
@@ -484,9 +487,9 @@ def test_review_seed_creates_the_manager_and_its_template_in_the_project():
 
 
 class TemplateApi:
-    def get(self, path, **query):
-        assert path == "/api/tasks"
-        return {"tasks": []}
+    def post(self, path, body):
+        assert path == "/api/v1/tasks/page" and body == {}
+        return {"status": "ok", "result": {"tasks": [], "counts": {}, "next_before": None}}
 
 
 def template_look(reply, monkeypatch, fake=False):
@@ -672,8 +675,8 @@ class ClientRunApi(Api):
         self.calls.append((method, path, body))
         if path == "/api/v1/clients/create" and method == "POST":
             return {"status": "ok", "result": {"client": {"id": "client-0123456789ab"}, "token": "lpc_secret"}}
-        if path == "/api/tasks":
-            return {"tasks": []}
+        if path == "/api/v1/tasks/page" and method == "POST":
+            return {"status": "ok", "result": {"tasks": [], "counts": {}, "next_before": None}}
         return {}
 
 
@@ -723,8 +726,9 @@ def test_a_failed_revoke_is_logged_without_the_token_and_ignored(monkeypatch, ca
 
 def client_look(monkeypatch, actions, tasks, owners, conversation="cli-1"):
     class Tasks:
-        def get(self, path, **query):
-            return {"tasks": [{"task_id": t} for t in tasks]}
+        def post(self, path, body):
+            assert path == "/api/v1/tasks/page" and body == {}
+            return {"status": "ok", "result": {"tasks": [{"task_id": t} for t in tasks], "counts": {}, "next_before": None}}
 
     monkeypatch.setattr(dialogs, "_trail", lambda *a, **k: actions)
     monkeypatch.setattr(dialogs, "_task_owners", lambda url, ids: {i: owners[i] for i in ids if i in owners})

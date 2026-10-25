@@ -31,12 +31,15 @@ class _Writer:
         pass
 
 
-async def _get(path: str, query: dict[str, str] | None = None) -> tuple[int, Any]:
+async def _get(path: str, query: dict[str, Any] | None = None) -> tuple[int, Any]:
     from looper.agents.http_server import AgentHTTPServer
     from looper.agents.tiers.task import TaskRouter
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
+    if path in {"/api/v1/tasks/detail", "/api/v1/tasks/page"}:
+        from tests.db_support import call_v1
+        return await call_v1(server, path, query or {})
     writer = _Writer()
     await server._route_api("GET", path, query or {}, b"", writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
@@ -73,7 +76,7 @@ def test_the_task_detail_and_list_carry_the_tasks_cost(monkeypatch: pytest.Monke
             await _run_record(pool, agent_id, task_id="task-a", cost=cost)
         await _run_record(pool, "manager", task_id="task-a", cost=7.0)
 
-        status, detail = await _get("/api/tasks/task-a")
+        status, detail = await _get("/api/v1/tasks/detail", {"task_id": "task-a"})
         assert status == 200
         cost = detail["cost"]
         assert len(cost["manager_by_model"]) == 1
@@ -90,7 +93,7 @@ def test_the_task_detail_and_list_carry_the_tasks_cost(monkeypatch: pytest.Monke
             "planner": (0.15, 2), "worker": (0.65, 2), "reviewer": (0.05, 1)}
         assert (cost["running"], cost["unpriced_runs"]) == (0, 0)
 
-        status, listed = await _get("/api/tasks")
+        status, listed = await _get("/api/v1/tasks/page", {})
         assert status == 200
         by_id = {task["task_id"]: task for task in listed["tasks"]}
         assert by_id["task-a"]["cost"] == cost

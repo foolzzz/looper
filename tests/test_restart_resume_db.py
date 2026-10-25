@@ -145,7 +145,7 @@ def _log(state: Path, name: str) -> list[Any]:
 def _wait(api: Api, task_id: str, done: Any, timeout: float = 60.0) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while True:
-        detail = api.get(f"/api/tasks/{task_id}")
+        detail = api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"]
         if done(detail):
             return detail
         if time.monotonic() > deadline:
@@ -234,7 +234,7 @@ def test_a_task_failed_at_its_cap_continues_from_the_database_after_a_restart(tm
             api.post("/api/v1/ops/task_control/start", {"task_id": task_id})
             failed = _wait(api, task_id, lambda d: d["status"] == "failed")
         with running_server(**server, log_path=root / "second.log") as api:
-            assert api.get(f"/api/tasks/{task_id}")["status"] == "failed"  # a failed task is not resumed
+            assert api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"]["status"] == "failed"  # a failed task is not resumed
             api.post("/api/v1/tasks/continue", {"task_id": task_id, "task_budget_usd": 1})
             done = _wait(api, task_id, lambda d: d["status"] == "completed")
 
@@ -263,7 +263,7 @@ def test_a_ready_task_stays_ready_through_a_restart_until_it_is_started(tmp_path
                                                       "project": {"name": "calc", "work_dir": str(work)}})["result"]["task_id"]
         with running_server(**server, log_path=root / "second.log") as api:
             time.sleep(1)  # time for a resumed task to start its Planner
-            ready, planned = api.get(f"/api/tasks/{task_id}")["status"], _log(state, "planner_argv.jsonl")
+            ready, planned = api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"]["status"], _log(state, "planner_argv.jsonl")
             api.post("/api/v1/ops/task_control/start", {"task_id": task_id})
             done = _wait(api, task_id, lambda d: d["status"] in ("completed", "failed", "stopped"))
             with pytest.raises(EvalError, match="answered 409"):

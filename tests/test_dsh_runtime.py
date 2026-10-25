@@ -1811,7 +1811,9 @@ def test_dsh_channel_timeout_or_cancel_reaps_process(tmp_path, cancel):
 
         task = asyncio.create_task(read())
         try:
-            await asyncio.wait_for(ready.wait(), 3)
+            # Startup is setup, not the channel timeout under test. The outer
+            # watchdog bounds startup and cleanup, including on a loaded host.
+            await ready.wait()
             if cancel:
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
@@ -1825,7 +1827,7 @@ def test_dsh_channel_timeout_or_cancel_reaps_process(tmp_path, cancel):
             await asyncio.gather(task, return_exceptions=True)
             await proc_tree.end(process, label="test DSH")
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), 15))
 
 
 @pytest.mark.parametrize("version,code,help_code", [("0.2.1-rc.2", 0, 0), ("0.2.1-rc.3", 0, 0),
@@ -2723,18 +2725,18 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
             detected = [row for row in registry["runtimes"] if row["type"] == "dsh"]
             assert len(detected) == 1 and detected[0]["version"] == "0.2.1-rc.2"
             api.post("/api/v1/runtimes/probe", {"runtime_id": "rt-dsh"})["result"]
-            provider = api.post("/api/providers", {
+            provider = api.post("/api/v1/provider_accounts/create", {
                 "name": "disposable-messages", "vendor_type": "custom",
                 "endpoints": [{"protocol": "anthropic-messages",
                                "base_url": "https://deepseek.example.invalid/anthropic"}],
                 "api_key": "synthetic-dsh-key",
-            })["provider"]["provider_id"]
-            model = api.post("/api/models", {
-                "provider_id": provider, "name": "deepseek-flash", "protocol": "anthropic-messages",
-            })["model"]["model_id"]
-            profile = api.post("/api/agent-profiles", {
+            })["result"]["provider"]["provider_id"]
+            model = api.post("/api/v1/ops/models/create", {
+                "provider": provider, "name": "deepseek-flash", "protocol": "anthropic-messages",
+            })["result"]["model"]["model_id"]
+            profile = api.post("/api/v1/profiles/create", {
                 "name": "disposable-dsh", "runtime_id": "rt-dsh", "model_id": model, "effort": "high",
-            })["profile"]["profile_id"]
+            })["result"]["profile"]["profile_id"]
             for role in ("manager", "planner", "worker", "reviewer"):
                 api.post("/api/v1/agent_settings/update_role", {"role": role, "values": {"profile_id": profile}})
             settings = api.post("/api/v1/agent_settings/get", {})["result"]
@@ -2758,7 +2760,7 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
                 tasks.append((task, work))
                 api.post("/api/v1/ops/task_control/start", {"task_id": task})
             for task, work in tasks:
-                detail = wait_for(lambda: api.get(f"/api/tasks/{task}"),
+                detail = wait_for(lambda: api.post("/api/v1/tasks/detail", {"task_id": task})["result"],
                                   lambda row: row["status"] in ("completed", "failed", "stopped", "cancelled"))
                 if detail["status"] != "completed":
                     (tmp_path / "task-detail.json").write_text(json.dumps(detail, default=str))

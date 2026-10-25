@@ -678,20 +678,21 @@ def _serve_smoke_stand_in(mode):
             elif method == "POST" and path == "/api/v1/registry/view":
                 result = {"status": "ok", "result": {"runtimes": [{"name": "DSH", "type": "dsh", "builtin": True, "runtime_id": "rt-dsh"}],
                           "providers": [], "models": []}}
-            elif path == "/api/providers":
+            elif path == "/api/v1/provider_accounts/create":
                 assert body["api_key"] == "<memory-only>"
                 assert body["endpoints"] == [{"protocol": "anthropic-messages",
                                               "base_url": "https://api.deepseek.com/anthropic"}]
-                result = {"provider": {"provider_id": "provider"}}
-            elif path == "/api/models":
-                assert body["provider_id"] == "provider"
+                result = {"status": "ok", "result": {"provider": {"provider_id": "provider"}, "warnings": []}}
+            elif path == "/api/v1/ops/models/create":
+                assert body["provider"] == "provider"
                 assert (body["name"], body["protocol"]) == ("deepseek-flash", "anthropic-messages")
-                result = {"model": {**body, "model_id": "model"}}
-            elif path == "/api/agent-profiles":
+                model = {"provider_id" if k == "provider" else k: v for k, v in body.items()}
+                result = {"status": "ok", "result": {"model": {**model, "model_id": "model"}, "warnings": []}}
+            elif path == "/api/v1/profiles/create":
                 assert body["runtime_id"] == "rt-dsh"
                 assert body["model_id"] == "model"
                 profiles.update(body, profile_id="profile", provider_id="provider")
-                result = {"profile": profiles}
+                result = {"status": "ok", "result": {"profile": profiles, "warnings": []}}
                 if mode == "profile":
                     status = 500
             elif path == "/api/v1/agent_settings/update_role":
@@ -730,8 +731,8 @@ def _serve_smoke_stand_in(mode):
             elif path == "/api/v1/tasks/room_view":
                 result = {"status": "ok", "result": {"consults": {"answered": 0 if mode == "consult" else 1,
                                       "list": [{"state": "failed" if mode == "consult" else "answered"}]}}}
-            elif path.startswith("/api/tasks/"):
-                result = {"status": "running" if mode == "task-timeout" else "completed"}
+            elif path == "/api/v1/tasks/detail":
+                result = {"status": "ok", "result": {"status": "running" if mode == "task-timeout" else "completed"}}
             elif path == "/api/v1/runs/list":
                 result = {"records": [{"id": r["id"]} for r in state["records"]]}
             elif path == "/api/v1/runs/events":
@@ -814,23 +815,23 @@ def smoke_peer(tmp_path, monkeypatch):
         root = tmp_path / "workflow"
         root.mkdir()
 
-        class ProcessApi:
+        class ProcessApi(runner.Api):
             def __init__(self, base_url):
-                self.base_url, self.token, self.timeout = base_url, None, 2
+                super().__init__(base_url)
                 self.number = 0
 
             def request(self, method, path, body=None, **query):
                 number = self.number
                 self.number += 1
                 peer = root / "runtime" / "ipc"
-                deadline = time.monotonic() + 2
+                deadline = time.monotonic() + self.timeout
                 while not peer.exists():
                     if time.monotonic() > deadline:
                         raise runner.EvalError("synthetic peer did not start")
                     time.sleep(.005)
                 # Exercise credential registration in memory; the process peer
                 # receives only a marker, never a credential in an IPC file.
-                if path == "/api/providers":
+                if path == "/api/v1/provider_accounts/create":
                     assert body["api_key"] == "synthetic-private-key"
                     body = {**body, "api_key": "<memory-only>"}
                 request = peer / f"request-{number}.json"

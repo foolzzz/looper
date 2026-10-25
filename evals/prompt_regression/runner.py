@@ -541,7 +541,8 @@ def run_task(
         if task.planner_may_choose:
             if chosen_profile_id is None:
                 raise EvalError(f"{task.id} needs the profile its Planner may choose")
-            api.put(f"/api/projects/{created['project_id']}/allowed-profiles", {"profile_ids": [chosen_profile_id]})
+            api.post("/api/v1/allowed_profiles/replace",
+                     {"project_id": created["project_id"], "profile_ids": [chosen_profile_id]})
         if task.roles_on:
             api.post("/api/v1/project_admin/update", {"project_id": created['project_id'], "fields": {"planner_roles": "on"}})["result"]["project"]
         for template in task.role_templates:
@@ -560,7 +561,7 @@ def run_task(
         while True:
             if INTERRUPTED.is_set():
                 raise EvalError("the run was interrupted")
-            detail = api.get(f"/api/tasks/{task_id}")
+            detail = api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"]
             status = detail.get("status")
             if status in metrics.TERMINAL_STATUSES:
                 break
@@ -596,7 +597,7 @@ def run_task(
             if all(r.get("status") != "running" for r in records) or time.monotonic() > deadline:
                 break
             time.sleep(poll)
-        detail = api.get(f"/api/tasks/{task_id}")
+        detail = api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"]
         records = sorted(records, key=lambda r: int(r["id"]))
         events = {int(r["id"]): _all_events(api, int(r["id"])) for r in records if metrics.role(r) != "other"}
         result = metrics.task_metrics(
@@ -708,7 +709,7 @@ def _cancel_after_error(api: Api, task_id: str) -> float:
     except Exception:  # it may have ended, or the server may be gone
         pass
     try:
-        return float((api.get(f"/api/tasks/{task_id}").get("cost") or {}).get("cost_usd") or 0.0)
+        return float((api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"].get("cost") or {}).get("cost_usd") or 0.0)
     except Exception:
         return 0.0
 
@@ -997,9 +998,9 @@ def run(
             gh_diffs={pr: diff for task in tasks for pr, diff in task.gh_pr_diffs.items()},
         ) as api:
             if any(task.gh_pr_fix_files for task in tasks):
-                api.put("/api/wait-settings", {"min_check_seconds": 10})
+                api.post("/api/v1/wait_settings/update", {"min_check_seconds": 10})
             if vault_dir is not None:
-                api.put("/api/knowledge-vault", {"path": str(vault_dir), "writable": ["codex-mem"],
+                api.post("/api/v1/knowledge_vault/update", {"path": str(vault_dir), "writable": ["codex-mem"],
                                                   "rules_file": "codex-mem/AGENTS.md"})
             if register is not None:
                 agent = register_agent(api, register)["name"]
@@ -1009,9 +1010,9 @@ def run(
                     "profile_id": chosen["profile_id"], "run_budget_usd": max_budget_usd}})["result"]
             chosen_profile_id = None
             if any(task.planner_may_choose for task in tasks):
-                chosen_profile_id = api.post("/api/agent-profiles", {
+                chosen_profile_id = api.post("/api/v1/profiles/create", {
                     "name": CHOSEN_PROFILE,
-                    **{key: chosen[key] for key in ("runtime_id", "model_id", "effort")}})["profile"]["profile_id"]
+                    **{key: chosen[key] for key in ("runtime_id", "model_id", "effort")}})["result"]["profile"]["profile_id"]
             _, stopped = run_suite(
                 tasks,
                 lambda task, rep, cap_left: run_task(api, task, work_dirs[task.id, rep], timeout=timeout, poll=poll,
@@ -1063,7 +1064,7 @@ def run(
 def _register_eval_provider(api: Api, provider: dict[str, Any]) -> dict[str, Any]:
     """Keep a failed provider write from echoing its credential into an eval report."""
     try:
-        return api.post("/api/providers", provider)["provider"]
+        return api.post("/api/v1/provider_accounts/create", provider)["result"]["provider"]
     except EvalError:
         if provider.get("api_key"):
             # Api.request clips HTTP errors: even a partial key must stay private.
@@ -1085,7 +1086,7 @@ def _eval_model(api: Api, registry: dict[str, Any], provider_id: str, wanted: An
         model = next((m for m in registry["models"] if m["provider_id"] == provider_id
                       and m["name"] == wanted["name"] and m["protocol"] == wanted["protocol"]), None)
         if model is None and "provider_id" not in wanted:
-            return api.post("/api/models", {**wanted, "provider_id": provider_id})["model"]
+            return api.post("/api/v1/ops/models/create", {**wanted, "provider": provider_id})["result"]["model"]
     if model is None:
         raise EvalError("no saved model matches the eval model reference")
     if model["provider_id"] != provider_id:
@@ -1166,8 +1167,8 @@ def register_agent(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
         if saved not in registry["models"]:
             registry["models"].append(saved)
     saved = _eval_model(api, registry, provider_id, model)
-    return api.post("/api/agent-profiles", {**agent, "runtime_id": runtime["runtime_id"],
-                                            "model_id": saved["model_id"]})["profile"]
+    return api.post("/api/v1/profiles/create", {**agent, "runtime_id": runtime["runtime_id"],
+                                            "model_id": saved["model_id"]})["result"]["profile"]
 
 
 # The API key of a provider an eval registers (``--provider-preset``): read from the environment, never a file.
@@ -1211,13 +1212,13 @@ def register_provider_agent(api: Api, choice: ProviderChoice) -> dict[str, Any]:
     for entry in preset["apis"]:
         for protocol in entry["protocols"]:
             for model in api_models(preset, entry):
-                saved = api.post("/api/models", {**model, "provider_id": provider["provider_id"],
-                                                 "protocol": protocol})["model"]
+                saved = api.post("/api/v1/ops/models/create", {**model, "provider": provider["provider_id"],
+                                                 "protocol": protocol})["result"]["model"]
                 if protocol == "anthropic-messages" and model["name"] == name:
                     selected = saved
     assert selected is not None
-    answer = api.post("/api/agent-profiles", {"name": f"claude-code/{preset['name']}/{name}",
-                                              "runtime_id": "rt-claude-code", "model_id": selected["model_id"]})
+    answer = api.post("/api/v1/profiles/create", {"name": f"claude-code/{preset['name']}/{name}",
+                                              "runtime_id": "rt-claude-code", "model_id": selected["model_id"]})["result"]
     for warning in answer.get("warnings") or []:
         print(f"warning: {warning}", file=sys.stderr)
     return answer["profile"]

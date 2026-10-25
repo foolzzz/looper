@@ -86,7 +86,7 @@ def test_detail_waits_are_in_plan_order_with_all_fields(monkeypatch: pytest.Monk
         await pool.execute("UPDATE task_waits SET resolution = 'Keep waiting', notice = 'dashboard'")
         await plans.save("task-a", steps=[{"id": "step-w0", "index": 0, "key": "w0", "kind": "wait",
                                            "instruction": "earlier"}], waits=[_wait("step-w0")], pool=pool)
-        status, detail, _ = await _api("GET", "/api/tasks/task-a")
+        status, detail, _ = await _api("POST", "/api/v1/tasks/detail", json.dumps({"task_id": "task-a"}).encode())
         assert status == 200, detail
         before, row = detail["waits"]
         assert before == {"step": "w0", "step_id": "step-w0", "state": "pending", "outcome": None,
@@ -185,7 +185,7 @@ def test_refused_moves_leave_no_activity_or_wakeup(
 
 
 @pytest.mark.parametrize(("method", "path"), [
-    ("POST", "/api/v1/waits/resume"), ("GET", "/api/wait-settings"), ("PUT", "/api/wait-settings"),
+    ("POST", "/api/v1/waits/resume"), ("POST", "/api/v1/wait_settings/get"), ("POST", "/api/v1/wait_settings/update"),
 ])
 def test_wait_routes_use_operator_auth_and_request_guard(
     monkeypatch: pytest.MonkeyPatch, method: str, path: str,
@@ -202,8 +202,9 @@ def test_wait_routes_use_operator_auth_and_request_guard(
         assert (await db_waits.get("task-a", "w1"))["state"] == "waiting"
         assert not await activity.list_activity("task-a")
         # An authorized request reaches the same handler, rather than being refused unconditionally.
-        status, _, _ = await _api(method, path, b'{"task_id":"task-a","step":"w1"}'
-                                   if path.startswith("/api/v1/") else b'{"max_wait_seconds": 3600}')
+        body = (b'{"task_id":"task-a","step":"w1"}' if path == "/api/v1/waits/resume" else
+                b"{}" if path.endswith("/get") else b'{"max_wait_seconds": 3600}')
+        status, _, _ = await _api(method, path, body)
         assert status == (404 if "/gates/" in path else 200)
 
     run_db(test, monkeypatch)
@@ -215,23 +216,23 @@ def test_settings_values_defaults_sources_reset_and_validation(monkeypatch: pyte
 
     async def test(pool: Any) -> None:
         await waits.load()
-        status, initial, _ = await _api("GET", "/api/wait-settings")
+        status, initial, _ = await _api("POST", "/api/v1/wait_settings/get", b"{}")
         assert status == 200
         assert initial == {
             "max_wait_seconds": {"value": waits.DEFAULT_MAX_WAIT_SECONDS, "default": waits.DEFAULT_MAX_WAIT_SECONDS,
                                  "min": 60, "max": 30 * 86400, "source": "built-in"},
             "min_check_seconds": {"value": 300, "default": 300, "min": 10, "max": 86400, "source": "built-in"}}
-        status, changed, _ = await _api("PUT", "/api/wait-settings",
+        status, changed, _ = await _api("POST", "/api/v1/wait_settings/update",
                                        b'{"max_wait_seconds": 600, "min_check_seconds": 60}')
         assert status == 200
         assert changed == {name: {**initial[name], "value": value, "source": "setting"}
                            for name, value in (("max_wait_seconds", 600), ("min_check_seconds", 60))}
         for body in (b"[]", b"invalid", b'{"unknown": 1}', b'{"max_wait_seconds": 59}',
                      b'{"max_wait_seconds": 60, "min_check_seconds": 61}'):
-            status, answer, _ = await _api("PUT", "/api/wait-settings", body)
+            status, answer, _ = await _api("POST", "/api/v1/wait_settings/update", body)
             assert status == 400 and answer["error"], (body, answer)
-            assert (await _api("GET", "/api/wait-settings"))[1] == changed
-        status, reset, _ = await _api("PUT", "/api/wait-settings",
+            assert (await _api("POST", "/api/v1/wait_settings/get", b"{}"))[1] == changed
+        status, reset, _ = await _api("POST", "/api/v1/wait_settings/update",
                                      b'{"max_wait_seconds": null, "min_check_seconds": null}')
         assert status == 200 and reset == initial
         await waits.load()
@@ -248,7 +249,7 @@ def test_manager_reads_changes_and_resets_wait_limits_only_after_confirmation(
 
     async def test(pool: Any) -> None:
         chat = _Chat(tmp_path)
-        initial = (await _api("GET", "/api/wait-settings"))[1]
+        initial = (await _api("POST", "/api/v1/wait_settings/get", b"{}"))[1]
         (view,) = await chat.say("查看设置", ("looper_settings", {"action": "view"}))
         assert view["status"] == "ok", view
         assert view["result"]["waits"] == initial
@@ -269,7 +270,7 @@ def test_manager_reads_changes_and_resets_wait_limits_only_after_confirmation(
             assert {change["setting"] for change in answer["result"]["changes"]} == set(values)
             await waits.load()
             assert (waits.limits().max_wait_seconds, waits.limits().min_check_seconds) == expected
-            assert (await _api("GET", "/api/wait-settings"))[1] == await waits.settings_view()
+            assert (await _api("POST", "/api/v1/wait_settings/get", b"{}"))[1] == await waits.settings_view()
 
     run_db(test, monkeypatch)
 
@@ -306,7 +307,7 @@ def test_manager_task_detail_includes_wait_conditions_states_and_step_kinds(
         assert answer["status"] == "ok", answer
         detail = answer["result"]
         assert [(step["step"], step["kind"]) for step in detail["steps"]] == [("s1", "work"), ("w1", "wait")]
-        expected = (await _api("GET", "/api/tasks/task-a"))[1]["waits"]
+        expected = (await _api("POST", "/api/v1/tasks/detail", json.dumps({"task_id": "task-a"}).encode()))[1]["waits"]
         assert detail["waits"] == expected
         assert detail["waits"][0]["check"] == check
         assert detail["waits"][0]["state"] == "waiting"

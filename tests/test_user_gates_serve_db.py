@@ -177,12 +177,12 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
                 api.post("/api/v1/ops/task_control/start", {"task_id": ids[variant]})
 
             def detail(variant: str) -> dict[str, Any]:
-                return api.get(f"/api/tasks/{ids[variant]}")
+                return api.post("/api/v1/tasks/detail", {"task_id": ids[variant]})["result"]
 
             # pass: the gate waits for the user while s1 runs; the task needs the user.
             seen["waiting"] = _until(lambda: (d := detail("pass"))["gates"] and d["gates"][0]["state"] == "open"
                                      and d["status"] == "waiting_user" and d, "the pass gate to open")
-            seen["needs_you"] = [t["task_id"] for t in api.get("/api/tasks", group="needs_you")["tasks"]]
+            seen["needs_you"] = [t["task_id"] for t in api.post("/api/v1/tasks/page", {"group": "needs_you"})["result"]["tasks"]]
             seen["answered"] = api.post("/api/v1/ops/gates/reply", {"task_id": ids["pass"], "gate": "g1",
                 "text": "PostgreSQL", "agenda_item": "q1", "option": "PostgreSQL"})["result"]
             first = {v: _until(lambda v=v: (d := detail(v))["status"] in ENDED and d, f"{v} to end") for v in VARIANTS}

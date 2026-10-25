@@ -299,7 +299,7 @@ def test_deleting_a_schedule_asks_first_and_runs_only_on_the_next_messages_confi
             "deleted": "nightly", "schedule_id": sid, "project": "calc",
             "note": "the tasks it created stay; its run history was deleted with it"}}
         assert (await _call("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))[0] == 404
-        task = await _ok("GET", "/api/tasks/task-run")
+        task = await _ok("POST", "/api/v1/tasks/detail", {"task_id": "task-run"})
         assert (task["status"], task["schedule_id"]) == ("running", None)
         assert await pool.fetchval("SELECT count(*) FROM schedule_runs") == 0
         assert await _trail(pool) == [(TOOL, "high", "needs_confirmation"), ("looper_confirm", "high", "error"),

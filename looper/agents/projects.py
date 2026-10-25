@@ -10,7 +10,7 @@ Workers, Reviewers), read afresh when each prompt is built. Its execution
 settings (``project_execution``) are top-level fields of the project too,
 ``null`` to inherit. Its agent settings (harness, Agent Profile with its model and
 effort, environment, per-run cap) are layers of their own (``agent_settings``,
-``/api/projects/<id>/agent-settings``). A task that can still run (any but a
+``POST /api/v1/project_agent_settings/update``). A task that can still run (any but a
 completed one: a restart runs a failed, stopped or cancelled task again) may
 change its own choices per role (``set_task_agents``): the Agent Profile of its
 roles, and how many of its Workers or Reviewers run at once.
@@ -51,6 +51,8 @@ NAME_MAX_CHARS = 80
 BACKGROUND_MAX_CHARS = 10000
 NO_WORK_DIR = "a work directory is required: set one on the task or on its project"
 BASE_MAX_CHARS = 200
+TASKS_PAGE = 50
+TASKS_PAGE_MAX = 200
 # The roles a task may choose the Agent Profile of; the Manager spans every task.
 TASK_PROFILE_ROLES = ("planner", "worker", "reviewer")
 # Fields a project used to hold that are agent settings now (its layer and its roles' layers).
@@ -136,8 +138,9 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
 def _project_fields(data: dict[str, Any], *, update: bool) -> dict[str, Any]:
     """The project fields in ``data``, validated; a new project needs a name."""
     if moved := [name for name in MOVED_FIELDS if name in data]:
-        raise RequestError(HTTP_400, f"{moved[0]} is an agent setting now: use settings.set "
-                                     "with project and, for one role in it, role")
+        raise RequestError(HTTP_400, f"{moved[0]} is an agent setting now: set it with POST "
+                                     "/api/v1/project_agent_settings/update (the project) or "
+                                     "/api/v1/project_agent_settings/update_role (one role in the project)")
     fields: dict[str, Any] = {}
     try:
         if not update or "name" in data:
@@ -429,7 +432,7 @@ def task_listed(task: Mapping[str, Any]) -> dict[str, Any]:
 
 
 async def list_tasks_page(
-    *, limit: int = 50, project_id: str | None = None, status: str | None = None,
+    *, limit: int = TASKS_PAGE, project_id: str | None = None, status: str | None = None,
     group: db_tasks.TaskGroup | None = None, schedule_id: str | None = None, before: str | None = None,
     manager_id: str | None = None, query: str = "", compact: bool = False, search_limit: int = 200,
 ) -> dict[str, Any]:
@@ -441,8 +444,9 @@ async def list_tasks_page(
         raise RequestError(HTTP_400, f"before must be a task id; {before!r} is not one")
     filters = {"project_id": project_id, "group": group, "schedule_id": schedule_id}
     fetch_limit = (search_limit if query else limit) if compact else limit + 1
+    search = {"query": query} if query and not compact else {}
     page = await db_tasks.list_tasks(limit=fetch_limit, status=status, before=before,
-                                     manager_id=manager_id, **filters)
+                                     manager_id=manager_id, **filters, **search)
     if compact:
         if query:
             page = [t for t in page if query in " ".join(
@@ -450,7 +454,7 @@ async def list_tasks_page(
         return {"tasks": [task_listed(task) for task in page[:limit]], "more": len(page) > limit}
 
     tasks = page[:limit]
-    counts = await db_tasks.count_by_status(**filters)
+    counts = await db_tasks.count_by_status(**filters, **search)
     costs = await task_costs([t["id"] for t in tasks])
     from ..db import managers as db_managers
     manager_names = {m["id"]: m["name"] for m in await db_managers.list_managers(include_deleted=True)}

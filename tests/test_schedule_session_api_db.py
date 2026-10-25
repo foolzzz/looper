@@ -78,9 +78,9 @@ def test_task_api_exposes_whether_its_planner_continued_the_schedule_session(
             await _task(pool, task_id, "running", project)
             if continues:
                 await pool.execute("UPDATE tasks SET continues_schedule_session = true WHERE id = $1", task_id)
-            status, body = await _call("GET", f"/api/tasks/{task_id}")
+            status, body = await _call("POST", "/api/v1/tasks/detail", {"task_id": task_id})
             assert status == 200 and body["continues_schedule_session"] is continues
-        status, body = await _call("GET", "/api/tasks")
+        status, body = await _call("POST", "/api/v1/tasks/page", {})
         assert status == 200
         assert {task["task_id"]: task["continues_schedule_session"] for task in body["tasks"]} == {
             "task-fresh": False, "task-continued": True}

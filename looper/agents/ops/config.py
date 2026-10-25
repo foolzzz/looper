@@ -246,6 +246,11 @@ async def _deleting_profile(call: Call) -> str | None:
     _required(call.arguments, "delete", "profile")
     profile = _profile(await _registry(call), call.arguments["profile"])
     row = await _unshared(call, profile_registry.deletable_profile(profile["profile_id"]), profile)
+    return profile_deletion_impact(row)
+
+
+def profile_deletion_impact(row: Mapping[str, Any]) -> str:
+    """The same deletion impact for Manager tools and the full profile API."""
     effort = f" · effort {row['effort']}" if row.get("effort") else ""
     return (f"要删除 Agent Profile「{row['name']}」（{row['runtime_name']} · {row['provider']['name']} · "
             f"{row['model']['name']} · {row['model']['protocol']}"

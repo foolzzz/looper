@@ -234,8 +234,8 @@ API 只响应操作者：在这台机器的浏览器中打开控制台会自动�
 | 任务 | `/api/tasks`、`/api/tasks/create`、`/api/tasks/:id/...`、`/api/tasks/{start,stop,cancel,delete}` | 列出和创建任务（属于某个项目，可带 `profile_overrides`）、查看、开始、停止、取消、删除；活动及其 SSE 流 |
 | 定时任务 | `POST /api/v1/schedule_admin/<action>` | 创建、修改、启用和删除项目的定时任务；列出所有项目的定时任务；立即运行；运行历史和通知；时间规则接下来的触发时刻 |
 | 能力目录与安装 | `/api/catalog/...`、`/api/installs/...`、`/api/projects/:id/installs`、`/api/projects/:id/skills/...` | 插件、skill 和 MCP 服务器：导入、上传、git、编写、修改、删除；全局安装或装到项目 |
-| Agent 设置 | `/api/agent-settings/...`、`/api/projects/:id/agent-settings/...`、`/api/roles/...` | 各设置层，每个字段的生效值及其来源；每个角色的 prompt 和限制 |
-| 注册表 | `GET /api/registry`、`/api/runtimes/:id/probe`、`/api/providers/...`、`/api/agent-profiles/...` | 运行时类型和内置运行时（Re-detect 重新探测）；注册、修改和删除提供方（API key 打码）和 Agent Profile，并写明各自被谁使用 |
+| Agent 设置 | `/api/agent-settings/...`、`POST /api/v1/project_agent_settings/{get,update,update_role}`、`/api/roles/...` | 各设置层，每个字段的生效值及其来源；每个角色的 prompt 和限制 |
+| 注册表 | `GET /api/registry`、`/api/runtimes/:id/probe`、`POST /api/v1/provider_accounts/...`、`/api/agent-profiles/...` | 运行时类型和内置运行时（Re-detect 重新探测）；注册、修改和删除提供方（API key 打码）和 Agent Profile，并写明各自被谁使用 |
 | 配置迁移 | `POST /api/v1/config/export`、`/api/v1/config/import_upload`、`/api/v1/config/import_apply`、`/api/v1/config/import_cancel` | 下载配置文件；上传配置文件、预览，再应用或取消 |
 | 对话 | `/api/v1/operator_chat/{send,targets,sessions,messages,save_message,reply_events,thread_events}` | 与 Manager 或运行中任务的 Planner 对话；按渠道列出 Manager 的对话；历史和 SSE 流 |
 | 运行记录 | `POST /api/v1/runs/{list,get,events,for_task,usage}` | 每次 agent 运行的启动命令、用量、花费和事件；单个 agent 的花费和上下文 |

@@ -558,19 +558,19 @@ class TestTaskReads:
         store.add_project("proj-b", "notes")
         store.add_task("task-1", "proj-a")
         store.add_task("task-2", "proj-b")
-        status, body = _call("GET", "/api/tasks", query={"project_id": "proj-b"})
+        status, body = _call("POST", "/api/v1/tasks/page", {"project_id": "proj-b"})
         assert status == 200
         assert store.list_calls == [{"limit": 51, "project_id": "proj-b"}]  # one more: is there a next page?
         (task,) = body["tasks"]
         assert (task["task_id"], task["project_id"], task["project_name"], task["work_dir"]) == (
             "task-2", "proj-b", "notes", "/w")
-        assert len(_call("GET", "/api/tasks")[1]["tasks"]) == 2  # without a filter, every project's
+        assert len(_call("POST", "/api/v1/tasks/page", {})[1]["tasks"]) == 2  # without a filter, every project's
         assert store.list_calls[-1] == {"limit": 51, "project_id": None}
 
     def test_detail_shows_the_project(self, store: _Store) -> None:
         store.add_project("proj-a", "tetris")
         store.add_task("task-1", "proj-a")
-        status, body = _call("GET", "/api/tasks/task-1")
+        status, body = _call("POST", "/api/v1/tasks/detail", {"task_id": "task-1"})
         assert status == 200 and (body["project_id"], body["project_name"]) == ("proj-a", "tetris")
 
 

@@ -25,7 +25,7 @@ def _modes(view: dict[str, Any]) -> dict[str, tuple[str, str]]:
 
 
 async def _agents(task_id: str) -> dict[str, Any]:
-    return (await _ok("GET", f"/api/tasks/{task_id}"))["agents"]
+    return (await _ok("POST", "/api/v1/tasks/detail", {"task_id": task_id}))["agents"]
 
 
 def test_task_modes_are_read_written_reset_and_validated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

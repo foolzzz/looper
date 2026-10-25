@@ -297,20 +297,20 @@ def test_incompatible_protocol_cannot_create_profile(dashboard_server, runtime, 
     api = dashboard_server.api
     if runtime != "claude-code":
         _register_dashboard_runtimes(dashboard_server)
-    provider = api.post("/api/providers", {"name": ACCOUNT, "vendor_type": "custom", "endpoints": [
+    provider = api.post("/api/v1/provider_accounts/create", {"name": ACCOUNT, "vendor_type": "custom", "endpoints": [
         {"protocol": protocol, "base_url": "https://example.invalid/v1"}
-        for protocol in (compatible, incompatible)]})["provider"]
-    models = {protocol: api.post("/api/models", {
-        "provider_id": provider["provider_id"], "name": exact_model, "protocol": protocol,
-    })["model"] for protocol in (compatible, incompatible)}
+        for protocol in (compatible, incompatible)]})["result"]["provider"]
+    models = {protocol: api.post("/api/v1/ops/models/create", {
+        "provider": provider["provider_id"], "name": exact_model, "protocol": protocol,
+    })["result"]["model"] for protocol in (compatible, incompatible)}
     before = _registry_state(dashboard_server)
     assert before["profiles"]  # Positive control for the DB readback.
     with pytest.raises(EvalError, match=r"answered 400:.*protocol"):
-        api.post("/api/agent-profiles", {"name": "Rejected profile", "runtime_id": f"rt-{runtime}",
-                                        "model_id": models[incompatible]["model_id"]})
+        api.post("/api/v1/profiles/create", {"name": "Rejected profile", "runtime_id": f"rt-{runtime}",
+                                        "model_id": models[incompatible]["model_id"]})["result"]
     assert _registry_state(dashboard_server) == before
-    profile = api.post("/api/agent-profiles", {"name": "Compatible profile", "runtime_id": f"rt-{runtime}",
-                                              "model_id": models[compatible]["model_id"]})["profile"]
+    profile = api.post("/api/v1/profiles/create", {"name": "Compatible profile", "runtime_id": f"rt-{runtime}",
+                                              "model_id": models[compatible]["model_id"]})["result"]["profile"]
     assert profile["model_id"] == models[compatible]["model_id"]
     assert next(p for p in _registry_state(dashboard_server)["profiles"]
                 if p["id"] == profile["profile_id"])["model_id"] == profile["model_id"]
@@ -332,10 +332,73 @@ def _finish_form(form, submit):
     assert response.value.status in (200, 201), response.value.text()
     # Warning acknowledgements are part of the save flow, not evidence of failure.
     ok = form.get_by_role("button", name="OK", exact=True)
-    if response.value.json().get("warnings"):
+    answer = response.value.json()
+    if answer.get("result", answer).get("warnings"):
         expect(ok).to_be_visible()
         ok.click()
     expect(form).not_to_be_visible()
+
+
+@pytest.mark.installed
+@pytest.mark.parametrize("width", [1280, 768])
+def test_provider_account_actions_preserve_mask_and_refresh(dashboard_page, dashboard_server, width):
+    expect = pytest.importorskip("playwright.sync_api").expect
+    page, server = dashboard_page, dashboard_server
+    page.set_viewport_size({"width": width, "height": 900})
+    _settings(page, server, "providers/new")
+    form = page.get_by_role("form", name="Add a provider")
+    form.get_by_label("Name *", exact=True).fill(ACCOUNT)
+    form.get_by_role("checkbox", name="openai-chat", exact=True).check()
+    form.get_by_label("openai-chat URL", exact=True).fill("https://example.invalid/v1")
+    form.get_by_label("API key", exact=True).fill(SECRET)
+    _finish_form(form, "Add provider")
+    account = _row(page, ACCOUNT)
+    expect(account).to_contain_text("API key: ***")
+    provider = next(p for p in server.api.post("/api/v1/provider_accounts/list", {})["result"]["providers"]
+                    if p["name"] == ACCOUNT)
+    account.get_by_role("button", name=f"Edit provider {ACCOUNT}", exact=True).click()
+    edit = page.get_by_role("form", name=f"Edit provider {ACCOUNT}")
+    expect(edit.get_by_label("API key", exact=True)).to_have_value("")
+    edit.get_by_label("Max concurrent runs", exact=True).fill("4")
+    _finish_form(edit, "Save")
+    saved = next(p for p in _registry_state(server)["providers"] if p["id"] == provider["provider_id"])
+    assert saved["synthetic_key"]
+    expect(account).to_contain_text("at most 4 runs")
+    assert SECRET not in page.content()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    screenshot = os.environ.get("LOOPER_DASHBOARD_SMOKE_SCREENSHOT")
+    if screenshot:
+        destination = Path(screenshot).resolve()
+        assert destination.is_relative_to(REPO_ROOT / ".local")
+        account.screenshot(path=str(destination.with_stem(f"{destination.stem}-{width}")))
+    page.once("dialog", lambda dialog: dialog.accept())
+    with page.expect_response(lambda r: r.url.endswith("/api/v1/provider_accounts/delete")) as deleted:
+        account.get_by_role("button", name=f"Delete provider {ACCOUNT}", exact=True).click()
+    assert deleted.value.status == 200
+    expect(account).to_have_count(0)
+
+    async def record_problem():
+        import asyncpg
+
+        conn = await asyncpg.connect(server.database_url, timeout=5)
+        try:
+            await conn.execute("INSERT INTO system_settings (key, value) VALUES ($1, $2) "
+                               "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                               "codex_login_fork", json.dumps({"detail": "Isolated login warning", "at": ""}))
+        finally:
+            await conn.close()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(lambda: asyncio.run(record_problem())).result(timeout=10)
+    page.reload(wait_until="domcontentloaded")
+    codex = _row(page, "codex-login")
+    expect(codex).to_contain_text("Isolated login warning")
+    page.once("dialog", lambda dialog: dialog.accept())
+    with page.expect_response(lambda r: r.url.endswith("/api/v1/provider_accounts/clear_login_problem")) as cleared:
+        codex.get_by_role("button", name="Use the login again", exact=True).click()
+    assert cleared.value.status == 200
+    expect(codex).not_to_contain_text("Isolated login warning")
+    expect(codex.get_by_role("button", name="Use the login again", exact=True)).to_have_count(0)
 
 
 @pytest.mark.installed
@@ -364,7 +427,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
         form.get_by_label(f"{protocol} URL", exact=True).fill(f"https://example.invalid/{protocol}")
     # An invalid endpoint is surfaced by the real HTTP handler; no account is saved.
     form.get_by_label("openai-chat URL", exact=True).fill("not-a-url")
-    with page.expect_response(lambda r: r.url.endswith("/api/providers") and r.request.method == "POST") as failed:
+    with page.expect_response(lambda r: r.url.endswith("/api/v1/provider_accounts/create") and r.request.method == "POST") as failed:
         form.get_by_role("button", name="Add provider", exact=True).click()
     assert failed.value.status == 400
     expect(form.get_by_role("alert")).to_be_visible()
@@ -373,7 +436,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     _finish_form(form, "Add provider")
     account = _row(page, ACCOUNT)
     expect(account).to_contain_text("API key: not set")
-    provider = next(p for p in server.api.get("/api/providers")["providers"] if p["name"] == ACCOUNT)
+    provider = next(p for p in server.api.post("/api/v1/provider_accounts/list", {})["result"]["providers"] if p["name"] == ACCOUNT)
     pid = provider["provider_id"]
     assert provider["api_key"] is None and provider["model_count"] == 0
     assert not next(p for p in _registry_state(server)["providers"] if p["id"] == pid)["key_set"]
@@ -382,7 +445,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
                 (protocol, f"https://example.invalid/{protocol}") for protocol in ("anthropic-messages", "openai-chat")}
     account.get_by_role("button", name=f"Models for provider {ACCOUNT}", exact=True).click()
     expect(account).to_contain_text("No models registered")
-    assert server.api.get("/api/models", provider_id=pid)["models"] == []
+    assert server.api.post("/api/v1/ops/models/list", {"provider": pid})["result"]["models"] == []
 
     for protocol in ("anthropic-messages", "openai-chat"):
         account.get_by_role("button", name="Add model", exact=True).click()
@@ -396,7 +459,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
         model_form.get_by_label("Effort support", exact=True).select_option("supported")
         model_form.get_by_label("Supported efforts", exact=True).fill("low, high")
         _finish_form(model_form, "Add model")
-    models = server.api.get("/api/models", provider_id=pid)["models"]
+    models = server.api.post("/api/v1/ops/models/list", {"provider": pid})["result"]["models"]
     assert len(models) == 2 and {m["name"] for m in models} == {MODEL_NAME}
     by_protocol = {m["protocol"]: m for m in models}
     mid = by_protocol["anthropic-messages"]["model_id"]
@@ -423,7 +486,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     profile = next(p for p in server.api.post("/api/v1/registry/view", {})["result"]["profiles"] if p["name"] == "Smoke profile")
     profile_id = profile["profile_id"]
     assert profile["model_id"] == mid and profile["provider"]["provider_id"] == pid
-    assert next(p for p in server.api.get("/api/providers")["providers"] if p["provider_id"] == pid)["api_key"] is None
+    assert next(p for p in server.api.post("/api/v1/provider_accounts/list", {})["result"]["providers"] if p["provider_id"] == pid)["api_key"] is None
     saved = next(p for p in _registry_state(server)["profiles"] if p["id"] == profile_id)
     assert (saved["model_id"], saved["effort"], saved["custom_prompt"]) == (mid, "high", "Public smoke preview marker")
     profile_row = _row(page, "Smoke profile")
@@ -431,13 +494,21 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     summary.focus()
     summary.press("Enter")
     profile_row.get_by_label("Role", exact=True).select_option("worker")
-    with page.expect_response(lambda r: "/prompt-preview?" in r.url) as preview:
+    with page.expect_response(lambda r: "/api/v1/profiles/prompt_preview" in r.url) as preview:
         profile_row.get_by_role("button", name="Load", exact=True).click()
     assert preview.value.status == 200
-    blocks = preview.value.json()["blocks"]
+    blocks = preview.value.json()["result"]["blocks"]
     assert any("Public smoke preview marker" in (b["text"] or "") for b in blocks)
     expect(profile_row.get_by_role("list", name="System prompt blocks")).to_be_visible()
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+    profile_row.get_by_role("button", name="Edit Agent Profile Smoke profile", exact=True).click()
+    profile_edit = page.get_by_role("form", name="Edit Agent Profile Smoke profile", exact=True)
+    profile_edit.get_by_label("Effort", exact=True).select_option("low")
+    profile_edit.get_by_label("Custom prompt", exact=True).fill("Updated public smoke preview marker")
+    _finish_form(profile_edit, "Save")
+    updated = next(p for p in _registry_state(server)["profiles"] if p["id"] == profile_id)
+    assert (updated["effort"], updated["custom_prompt"]) == ("low", "Updated public smoke preview marker")
 
     _settings(page, server, "roles/worker")
     role = page.locator("#roles-worker-panel")
@@ -449,6 +520,9 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     nested.get_by_label("Provider", exact=True).select_option(pid)
     nested.get_by_label("Model *", exact=True).select_option(mid)
     _finish_form(nested, "Add Agent Profile")
+    embedded = next(p for p in server.api.post("/api/v1/registry/view", {})["result"]["profiles"]
+                    if p["name"] == "Embedded smoke profile")
+    expect(selection.locator(f'option[value="{embedded["profile_id"]}"]')).to_have_count(1)
     expect(selection).to_have_value(before or "")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     # Registering an embedded profile must not silently persist a role selection.
@@ -462,6 +536,15 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
 
     _settings(page, server, "profiles")
     expect(_row(page, "Smoke profile").get_by_role("button", name=re.compile("Delete Agent Profile"))).to_be_disabled()
+    page.once("dialog", lambda dialog: dialog.accept())
+    with page.expect_response(lambda r: r.url.endswith("/api/v1/profiles/delete")) as deleted:
+        _row(page, "Embedded smoke profile").get_by_role(
+            "button", name="Delete Agent Profile Embedded smoke profile", exact=True).click()
+    assert deleted.value.status == 200
+    assert deleted.value.json()["result"] == {"deleted": embedded["profile_id"]}
+    expect(page.get_by_role("listitem").filter(has=page.get_by_text("Embedded smoke profile", exact=True))).to_have_count(0)
+    assert not any(p["id"] == embedded["profile_id"] for p in _registry_state(server)["profiles"])
+    page.screenshot(path=str(tmp_path / f"profiles-{width}.png"), full_page=True)
     _settings(page, server, "providers")
     account = _row(page, ACCOUNT)
     page.on("dialog", lambda dialog: dialog.accept())
@@ -472,13 +555,13 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
         "button", name=f"Delete model {MODEL_NAME} (anthropic-messages)", exact=True))
     model_row.get_by_role("button", name=f"Delete model {MODEL_NAME} (anthropic-messages)", exact=True).click()
     expect(model_row.get_by_role("alert")).to_be_visible()
-    assert next(m for m in server.api.get("/api/models", provider_id=pid)["models"] if m["model_id"] == mid)
+    assert next(m for m in server.api.post("/api/v1/ops/models/list", {"provider": pid})["result"]["models"] if m["model_id"] == mid)
     account.get_by_role("button", name=f"Edit provider {ACCOUNT}", exact=True).click()
     edit = page.get_by_role("form", name=f"Edit provider {ACCOUNT}", exact=True)
     edit.get_by_label("API key", exact=True).fill(SECRET)
     _finish_form(edit, "Save")
     assert SECRET not in page.content()
-    assert next(p for p in server.api.get("/api/providers")["providers"] if p["provider_id"] == pid)["api_key"] == "***"
+    assert next(p for p in server.api.post("/api/v1/provider_accounts/list", {})["result"]["providers"] if p["provider_id"] == pid)["api_key"] == "***"
 
     _settings(page, server, "transfer")
     with page.expect_download() as download:
@@ -534,10 +617,12 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     assert not errors
     # One opt-in local artifact, containing only synthetic public UI data.
     screenshot = os.environ.get("LOOPER_DASHBOARD_SMOKE_SCREENSHOT")
-    if screenshot and width == 1280:
+    if screenshot:
         destination = Path(screenshot).resolve()
         assert destination.is_relative_to(REPO_ROOT / ".local")
-        page.screenshot(path=str(destination))
+        _settings(page, server, "providers")
+        _row(page, "Smoke account").get_by_role("button", name="Models for provider Smoke account", exact=True).click()
+        _row(page, "Smoke account").screenshot(path=str(destination.with_stem(f"{destination.stem}-{width}")))
 
 
 @pytest.mark.installed
@@ -553,7 +638,7 @@ def test_vendor_suggestions_are_explicit_and_invalid_inputs_do_not_write(dashboa
     for endpoint in vendor["endpoints"]:
         expect(form.get_by_label(f'{endpoint["protocol"]} URL', exact=True)).to_have_value(endpoint["base_url"])
     _finish_form(form, "Add provider")
-    provider = next(p for p in server.api.get("/api/providers")["providers"] if p["name"] == "Smoke vendor account")
+    provider = next(p for p in server.api.post("/api/v1/provider_accounts/list", {})["result"]["providers"] if p["name"] == "Smoke vendor account")
     assert provider["model_count"] == 0
     account = _row(page, "Smoke vendor account")
     account.get_by_role("button", name="Models for provider Smoke vendor account", exact=True).click()
@@ -566,17 +651,19 @@ def test_vendor_suggestions_are_explicit_and_invalid_inputs_do_not_write(dashboa
         s["name"] for s in vendor["suggested_models"] if s["protocol"] == suggestion["protocol"]]
     suggestions.select_option(suggestion["name"])
     expect(form.get_by_label("Exact model name *", exact=True)).to_have_value(suggestion["name"])
-    assert server.api.get("/api/models", provider_id=provider["provider_id"])["models"] == []
+    assert server.api.post("/api/v1/ops/models/list", {"provider": provider["provider_id"]})["result"]["models"] == []
     before = _registry_state(server)
-    form.get_by_label("Context window", exact=True).fill("-1")
-    with page.expect_response(lambda r: r.url.endswith("/api/models") and r.request.method == "POST") as invalid:
-        form.get_by_role("button", name="Add model", exact=True).click()
-    assert invalid.value.status == 400
-    expect(form.get_by_role("alert")).to_be_visible()
-    assert _registry_state(server) == before
+    for value in ("-1", "not-a-number"):
+        form.get_by_label("Context window", exact=True).fill(value)
+        with page.expect_response(lambda r: r.url.endswith("/api/v1/ops/models/create") and r.request.method == "POST") as invalid:
+            form.get_by_role("button", name="Add model", exact=True).click()
+        assert invalid.value.status == 400
+        expect(form.get_by_role("alert")).to_be_visible()
+        expect(form.get_by_label("Context window", exact=True)).to_have_value(value)
+        assert _registry_state(server) == before
     form.get_by_label("Context window", exact=True).fill("32000")
     _finish_form(form, "Add model")
-    [model] = server.api.get("/api/models", provider_id=provider["provider_id"])["models"]
+    [model] = server.api.post("/api/v1/ops/models/list", {"provider": provider["provider_id"]})["result"]["models"]
     assert (model["name"], model["protocol"], model["context_window"]) == (suggestion["name"], suggestion["protocol"], 32000)
     assert next(m for m in _registry_state(server)["models"] if m["id"] == model["model_id"])["context_window"] == 32000
 
@@ -629,16 +716,16 @@ def test_pi_and_dsh_profile_choices_match_their_typed_runtime_contract(dashboard
     page, server = dashboard_page, dashboard_server
     page.set_viewport_size({"width": width, "height": 900})
     _register_dashboard_runtimes(server)
-    provider = server.api.post("/api/providers", {
+    provider = server.api.post("/api/v1/provider_accounts/create", {
         "name": "Runtime API account", "vendor_type": "custom", "endpoints": [
             {"protocol": protocol, "base_url": f"https://example.invalid/{protocol}"}
             for protocol in ("openai-responses", "openai-chat", "anthropic-messages")],
-    })["provider"]
+    })["result"]["provider"]
     pid = provider["provider_id"]
     supported = ("deepseek-flash", "deepseek-flash[1m]", "deepseek-v4-pro", "deepseek-v4-pro[1m]")
-    models = [server.api.post("/api/models", {"provider_id": pid, "protocol": protocol, "name": name,
+    models = [server.api.post("/api/v1/ops/models/create", {"provider": pid, "protocol": protocol, "name": name,
                                             "input_usd_per_mtok": 0, "output_usd_per_mtok": 0,
-                                            "cache_read_usd_per_mtok": 0, "cache_write_usd_per_mtok": 0})["model"]
+                                            "cache_read_usd_per_mtok": 0, "cache_write_usd_per_mtok": 0})["result"]["model"]
               for protocol in ("openai-responses", "openai-chat", "anthropic-messages")
               for name in (*supported, "unrestricted-model")]
     _settings(page, server, "profiles/new")

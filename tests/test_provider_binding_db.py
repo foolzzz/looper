@@ -34,7 +34,7 @@ async def _provider(name: str = "glm", *, base_url: str = THIRD_PARTY, api_key: 
                                            "base_url": base_url or "https://api.anthropic.com"}], "env": env or []}
     if api_key is not None:
         body["api_key"] = api_key
-    provider_id = (await _ok("POST", "/api/providers", body))["provider"]["provider_id"]
+    provider_id = (await _ok("POST", "/api/v1/provider_accounts/create", body))["provider"]["provider_id"]
     if not base_url:
         # Only migrated accounts can retain an omitted runtime-default endpoint.
         from looper.db.connection import get_pool
@@ -42,16 +42,16 @@ async def _provider(name: str = "glm", *, base_url: str = THIRD_PARTY, api_key: 
         await get_pool().execute("UPDATE llm_provider_endpoints SET base_url = '', use_runtime_default = true "
                                  "WHERE provider_id = $1 AND protocol = $2", provider_id, protocol)
     for model in models or []:
-        await _ok("POST", "/api/models", {"provider_id": provider_id, "protocol": protocol, **model})
+        await _ok("POST", "/api/v1/ops/models/create", {"provider": provider_id, "protocol": protocol, **model})
     return provider_id
 
 
 async def _model(provider_id: str, name: str, protocol: str = "anthropic-messages") -> dict[str, Any]:
-    models = (await _ok("GET", f"/api/models?provider_id={provider_id}"))["models"]
+    models = (await _ok("POST", "/api/v1/ops/models/list", {"provider": provider_id}))["models"]
     found = next((m for m in models if m["provider_id"] == provider_id
                   and m["name"] == name and m["protocol"] == protocol), None)
-    return found or (await _ok("POST", "/api/models", {
-        "provider_id": provider_id, "name": name, "protocol": protocol}))["model"]
+    return found or (await _ok("POST", "/api/v1/ops/models/create", {
+        "provider": provider_id, "name": name, "protocol": protocol}))["model"]
 
 
 async def _profile(provider_id: str, model: str, name: str | None = None, *,
@@ -71,16 +71,16 @@ def test_provider_saves_warn_about_context_suffixes_without_anthropic_messages(
     async def _test(_pool: Any) -> None:
         provider_id = await _provider("suffix-test", protocol="openai-chat",
                                        base_url="https://example.invalid/v1", models=models)
-        answer = await _ok("PUT", f"/api/providers/{provider_id}", {"name": "suffix-test"})
+        answer = await _ok("POST", "/api/v1/provider_accounts/update", {"provider_id": provider_id, "fields": {"name": "suffix-test"}})
         assert len(answer["warnings"]) == 1
         assert "Claude Code convention" in answer["warnings"][0] and "verbatim" in answer["warnings"][0]
-        saved = (await _ok("PUT", f"/api/providers/{provider_id}", {"name": "renamed"}))
+        saved = (await _ok("POST", "/api/v1/provider_accounts/update", {"provider_id": provider_id, "fields": {"name": "renamed"}}))
         assert saved["warnings"] == answer["warnings"]
         saved_model = await _model(provider_id, models[0]["name"], "openai-chat")
         assert saved_model["name"] == models[0]["name"]
         assert saved_model["background_model"] == models[0]["background_model"]
-        anthropic = await _ok("PUT", f"/api/providers/{provider_id}", {"endpoints": [
-            *saved["provider"]["endpoints"], {"protocol": "anthropic-messages", "base_url": THIRD_PARTY}]})
+        anthropic = await _ok("POST", "/api/v1/provider_accounts/update", {"provider_id": provider_id, "fields": {"endpoints": [
+            *saved["provider"]["endpoints"], {"protocol": "anthropic-messages", "base_url": THIRD_PARTY}]}})
         assert anthropic["warnings"] == []
         assert (await _profile(provider_id, models[0]["name"]))["warnings"] == []
 
@@ -297,7 +297,7 @@ def test_the_deepseek_preset_serves_responses_and_chat_at_one_url_and_prices_eac
                       for m in preset["suggested_models"] if m["protocol"] == protocol]
             provider = await _provider(f"deepseek-{protocol}", protocol=protocol, base_url=api["base_url"],
                                        models=models, env=preset["env"] if anthropic else [])
-            saved = (await _ok("GET", f"/api/models?provider_id={provider}"))["models"]
+            saved = (await _ok("POST", "/api/v1/ops/models/list", {"provider": provider}))["models"]
             assert [model["name"] for model in saved] == [model["name"] for model in models]
             runtime = "rt-claude-code" if anthropic else codex
             for model in models:
@@ -327,7 +327,7 @@ def test_a_profile_whose_models_have_no_price_is_registered_with_a_warning(monke
         priced = [{"name": "mystery-1", "input_usd_per_mtok": 1, "output_usd_per_mtok": 2,
                    "cache_read_usd_per_mtok": 0.1, "cache_write_usd_per_mtok": 1}]
         model_id = answer["profile"]["model_id"]
-        await _ok("PUT", f"/api/models/{model_id}", {
+        await _ok("POST", "/api/v1/ops/models/update", {"model": model_id,
             **{k: v for k, v in priced[0].items() if k != "name"}, "background_model": None})
         again = await _ok("PUT", f"/api/agent-profiles/{answer['profile']['profile_id']}", {"name": "mystery"})
         assert again["warnings"] == []
@@ -351,9 +351,9 @@ def test_a_providers_own_env_cannot_set_what_the_binding_owns_or_hold_a_secret(
     monkeypatch: pytest.MonkeyPatch, env: list[dict[str, str]], error: str,
 ) -> None:
     async def _test(_pool: Any) -> None:
-        status, payload = await _call("POST", "/api/providers", {"name": "p", "vendor_type": "custom",
+        status, payload = await _call("POST", "/api/v1/provider_accounts/create", {"name": "p", "vendor_type": "custom",
             "endpoints": [{"protocol": "anthropic-messages", "base_url": THIRD_PARTY}], "env": env})
-        assert status == 400 and error in payload["error"], payload
+        assert status == 400 and payload["error"] == "invalid credential request"
 
     run_db(_test, monkeypatch)
 
@@ -432,7 +432,7 @@ def test_a_run_is_priced_from_each_models_tokens_cache_included(
         # glm-5.3-flash (built-in prices 0.15 input, 0.50 output): 10000 * 0.15 + 1000 * 0.5 = 2000 = $0.002.
         assert dict(row) == {"cost_usd": pytest.approx(0.040), "cost_source": "provider_price", "input_tokens": 11_000,
                              "output_tokens": 3_000, "cache_read_tokens": 30_000, "cache_creation_tokens": 4_000}
-        cost = (await _ok("GET", f"/api/tasks/{task}"))["cost"]
+        cost = (await _ok("POST", "/api/v1/tasks/detail", {"task_id": task}))["cost"]
         assert (cost["cost_usd"], cost["provider_price_runs"], cost["equivalent_runs"]) == \
             (pytest.approx(0.040), 1, 0)
 

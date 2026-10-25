@@ -92,7 +92,7 @@ def test_accounts_register_list_and_http_readback(monkeypatch, tmp_path):
         assert provider["vendor_type"] == "deepseek" and provider["api_key"].startswith("missing")
         assert "Settings → LLM Providers" in created["note"]
         assert (await db.get_provider(provider["provider_id"]))["api_key_set"] is False
-        status, readback = await _call("GET", "/api/providers")
+        status, readback = await _call("POST", "/api/v1/provider_accounts/list", {})
         assert status == 200
         saved = next(p for p in readback["providers"] if p["provider_id"] == provider["provider_id"])
         assert saved["model_count"] == 0 and saved["endpoints"] == provider["endpoints"]
@@ -143,7 +143,7 @@ def test_model_crud_filters_and_exact_reference_readback(monkeypatch, tmp_path):
         assert len((await _ok(chat, "looper_models", action="list", provider="prov-test"))["models"]) == 2
         updated = (await _ok(chat, "looper_models", action="update", model={"provider": "Test account", "name": "same",
             "protocol": "openai-chat"}, context_window=42, efforts=[], background_model="helper"))["model"]
-        status, readback = await _call("GET", f"/api/models/{updated['model_id']}")
+        status, readback = await _call("POST", "/api/v1/models/get", {"model": updated['model_id']})
         assert status == 200 and readback["model"]["context_window"] == 42
         cleared = (await _ok(chat, "looper_models", action="update", model=first["model_id"],
             context_window=None, efforts=None, input_usd_per_mtok=None))["model"]
@@ -172,7 +172,7 @@ def test_model_errors_match_http_and_keep_saved_state(monkeypatch, tmp_path):
         for fields in ({"protocol": "openai-responses"}, {"context_window": 0}, {"input_usd_per_mtok": -1}):
             body = {"provider": "prov-test", "name": "invalid", "protocol": "anthropic-messages", **fields}
             (answer,) = await chat.say("创建模型", ("looper_models", {"action": "create", **body}))
-            status, http = await _call("POST", "/api/models", {"provider_id": body.pop("provider"), **body})
+            status, http = await _call("POST", "/api/v1/ops/models/create", body)
             assert answer["error"]["code"] == "invalid" and status == 400, (answer, http)
             assert answer["error"]["message"] == http["error"]
         assert await db.list_models(provider_id="prov-test") == []

@@ -58,6 +58,9 @@ async def _call(server: AgentHTTPServer, method: str, path: str, body: Any = Non
         status, answer = await _v1(method, path, body, ops=ClientOps(SimpleNamespace()))
         result = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
         return status, result.get("project", result)
+    if path in {"/api/v1/tasks/detail", "/api/v1/tasks/page"}:
+        from tests.db_support import call_v1
+        return await call_v1(server, path, body or {})
     if path == "/api/v1/tasks/create":
         from tests.test_api_v1_ops_db import _v1
 
@@ -99,7 +102,7 @@ def test_a_task_that_failed_at_its_cap_continues_from_its_plan_with_a_higher_cap
         server, router, published = _setup()
         project_id = await _failed_task(pool, router, "task_budget")
 
-        status, detail = await _call(server, "GET", "/api/tasks/task-a")
+        status, detail = await _call(server, "POST", "/api/v1/tasks/detail", {"task_id": "task-a"})
         assert status == 200
         assert (detail["status"], detail["fail_kind"], detail["task_budget_usd"]) == ("failed", "task_budget", 0.4)
         assert detail["cost"]["cost_usd"] == pytest.approx(0.5)
