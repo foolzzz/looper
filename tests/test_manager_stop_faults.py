@@ -961,10 +961,12 @@ def test_a_queued_stopped_message_replies_when_its_save_never_finishes(
         queue = bus.get_queue(source.agent_id)
         envelope = MessageEnvelope.create(
             source=source, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
-            payload={"text": "withdraw this", "channel_context": {"chat_id": "99", "user_id": "7"}},
+            payload={"text": "withdraw this", "channel_context": {
+                "chat_id": "99" if channel == "telegram" else "oc_99", "user_id": "7",
+            }},
         )
         database = _Unreachable()
-        original_save = manager_module.db_chat.save_message
+        original_save = manager_module.db_chat.save_channel_message
 
         async def save(**kwargs: Any) -> None:
             if kwargs["message_id"] == envelope.message_id:
@@ -972,7 +974,7 @@ def test_a_queued_stopped_message_replies_when_its_save_never_finishes(
             else:
                 await original_save(**kwargs)
 
-        monkeypatch.setattr(manager_module.db_chat, "save_message", save)
+        monkeypatch.setattr(manager_module.db_chat, "save_channel_message", save)
         token = manager._register_turn(envelope)
         assert await manager.stop_turn(token.message_id, via=channel) is StopResult.STOPPING
         handling = asyncio.create_task(manager._handle(envelope))

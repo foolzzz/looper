@@ -160,7 +160,9 @@ def test_stop_only_takes_its_bots_running_and_queued_turns(agent_db: Any, channe
             def message(text: str, source: Any) -> MessageEnvelope:
                 return MessageEnvelope.create(
                     source=source, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
-                    payload={"text": text, "channel_context": {"chat_id": 99, "user_id": 7}},
+                    payload={"text": text, "channel_context": {
+                        "chat_id": 99 if channel == "telegram" else "oc_99", "user_id": 7,
+                    }},
                 )
 
             first = message("写一篇很长的文章", bot_a)
@@ -238,11 +240,12 @@ def test_stop_queued_before_manager_start_is_owned_by_code(
         stop_source = channel_address(channel, f"channel-{channel}-2") if mode == "other_bot" else source
 
         def message(text: str, *, stop: bool = False) -> MessageEnvelope:
+            chat_id = "100" if stop and mode == "other_chat" else "99"
             return MessageEnvelope.create(
                 source=stop_source if stop else source, target=MANAGER_ADDRESS,
                 message_type=MessageType.USER_MESSAGE,
                 payload={"text": text, "channel_context": {
-                    "chat_id": "other" if stop and mode == "other_chat" else "99", "user_id": "7",
+                    "chat_id": chat_id if channel == "telegram" else f"oc_{chat_id}", "user_id": "7",
                 }},
             )
 
@@ -292,7 +295,9 @@ def test_startup_stop_preserves_later_messages(
         def message(text: str) -> MessageEnvelope:
             return MessageEnvelope.create(
                 source=source, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
-                payload={"text": text, "channel_context": {"chat_id": "99", "user_id": "7"}},
+                payload={"text": text, "channel_context": {
+                    "chat_id": "99" if channel == "telegram" else "oc_99", "user_id": "7",
+                }},
             )
 
         earlier = [message(f"earlier request {i}") for i in range(queued_before_stop)]
