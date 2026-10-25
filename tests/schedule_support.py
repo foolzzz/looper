@@ -73,6 +73,9 @@ class ScheduleEnv(SimpleNamespace):
 
         method, path, body = profile_request(method, path, body)
         writer = _Writer()
+        if path in {"/api/v1/tasks/detail", "/api/v1/tasks/page"}:
+            from tests.db_support import call_v1
+            return await call_v1(server, path, body or {})
         raw = b"" if body is None else json.dumps(body).encode()
         if path.startswith(("/api/v1/profiles/", "/api/v1/schedule_admin/", "/api/v1/ops/models/")):
             from looper.agents.api_v1 import OPERATOR

@@ -364,7 +364,7 @@ def test_the_dashboard_writes_in_a_gate_that_waits_and_its_planner_is_woken(monk
         assert status == 200 and answer["delivered"] == "kept" and answer["message"]["kind"] == "end"
         assert bus.published == []
 
-        status, detail, _ = await _api("GET", "/api/tasks/task-a")
+        status, detail, _ = await _api("POST", "/api/v1/tasks/detail", {"task_id": "task-a"})
         (gate,) = detail["gates"]
         assert (gate["step"], gate["state"], gate["topic"], gate["agenda"][0]["id"]) == ("g1", "discussing",
                                                                                           "storage", "q1")
@@ -427,7 +427,7 @@ def test_a_task_whose_gate_waits_needs_the_user_and_stays_active(monkeypatch: py
         assert [t["id"] for t in await tasks.list_tasks(group=tasks.TaskGroup.NEEDS_YOU, pool=pool)] == ["task-a"]
         assert [t["id"] for t in await tasks.list_tasks(group=tasks.TaskGroup.IN_PROGRESS, pool=pool)] == ["task-b"]
         assert "waiting_user" in tasks.ACTIVE_STATUSES
-        status, listing, _ = await _api("GET", "/api/tasks", query={"group": "needs_you"})
+        status, listing, _ = await _api("POST", "/api/v1/tasks/page", {"group": "needs_you"})
         assert status == 200 and [(t["task_id"], t["group"]) for t in listing["tasks"]] == [("task-a", "needs_you")]
 
     run_db(test, monkeypatch)

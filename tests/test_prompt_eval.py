@@ -234,9 +234,9 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
             return next(event["result"] for event in events if event["type"] == "result")
 
         def get(self, path: str, **_: Any) -> dict[str, Any]:
-            if path == "/api/tasks":
-                return {"tasks": []}
-            if path == "/api/tasks/task-eval":
+            if path == "/api/v1/tasks/page":
+                return {"tasks": [], "counts": {}, "next_before": None}
+            if path == "/api/v1/tasks/detail":
                 return {"status": "completed", "steps": [{"id": "s1"}]}
             if path == "/api/v1/runs/list":
                 return {"records": self.records}
@@ -262,7 +262,7 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
                 profile_registry.check_roles(chosen, [role.value for role in agent_settings.AgentType])
                 self.layers[agent_settings.Layer.SYSTEM, None] = agent_settings.LayerValues(profile=chosen)
                 return {"status": "ok", "result": {}}
-            if path.startswith("/api/v1/runs/"):
+            if path.startswith("/api/v1/runs/") or path in {"/api/v1/tasks/page", "/api/v1/tasks/detail"}:
                 return {"status": "ok", "result": self.get(path, **body)}
             if path == "/api/v1/operator_chat/messages":
                 return {"status": "ok", "result": {"messages": self.messages}}
@@ -899,7 +899,7 @@ def test_vault_tasks_enable_the_project_and_read_back_their_commits(
     logs: list[Path] = []
 
     def post(path: str, body: Any) -> dict[str, Any]:
-        if path.startswith("/api/v1/runs/"):
+        if path.startswith("/api/v1/runs/") or path == "/api/v1/tasks/detail":
             return {"status": "ok", "result": get(path, **body)}
         if path == "/api/v1/tasks/activity":
             return {"status": "ok", "result": {"activity": [{"kind": "phase", "summary": "Vault closeout: done"}]}}
@@ -910,7 +910,7 @@ def test_vault_tasks_enable_the_project_and_read_back_their_commits(
         return {"status": "ok", "result": {"task_id": "task-1"}} if path == "/api/v1/tasks/create" else {}
 
     def get(path: str, **_: Any) -> dict[str, Any]:
-        if path == "/api/tasks/task-1":
+        if path == "/api/v1/tasks/detail":
             return {"status": "completed", "steps": [{}]}
         if path == "/api/v1/runs/list":
             return {"records": []}
@@ -1068,7 +1068,7 @@ def test_comparison_of_repeated_runs_counts_the_scored_reps_and_keeps_errors_apa
                                *_reps("dependent_steps", _PASS, _FAIL, _TIMEOUT),
                                *_reps("interface_first", _PASS, {"skipped": "the spending cap was reached"},
                                       {"outcome": "error", "success": False, "error_class": "harness",
-                                       "error": "EvalError: GET /api/tasks/t answered 500"})]}
+                                       "error": "EvalError: POST /api/v1/tasks/detail answered 500"})]}
     lines = compare.markdown(new, base).splitlines()
     assert lines[0] == "Prompt eval: real/haiku @ abcdef123 (1 rep) → real/haiku @ abcdef123 (3 reps)"
     assert "| single_step | 1/1 → **3/3** | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – | 0.0200 |" in lines
@@ -1088,7 +1088,7 @@ def test_comparison_of_repeated_runs_counts_the_scored_reps_and_keeps_errors_apa
     assert "- in the base, not in the new run: chat_correction" in lines
     assert "- dependent_steps (rep 2): sum.txt is missing" in lines
     assert "- dependent_steps (rep 3): error (timeout): cancelled after 900 s" in lines
-    assert "- interface_first (rep 3): error (harness): EvalError: GET /api/tasks/t answered 500" in lines
+    assert "- interface_first (rep 3): error (harness): EvalError: POST /api/v1/tasks/detail answered 500" in lines
 
 
 def test_against_a_base_of_more_tasks_the_total_is_over_the_shared_ones() -> None:
@@ -1522,7 +1522,7 @@ def test_run_task_pushes_fixes_without_resuming_the_pr_wait(
     posted: list[tuple[str, Any]] = []
 
     def post(path: str, body: Any) -> dict[str, Any]:
-        if path.startswith("/api/v1/runs/"):
+        if path.startswith("/api/v1/runs/") or path == "/api/v1/tasks/detail":
             return {"status": "ok", "result": get(path, **body)}
         if path == "/api/v1/tasks/activity":
             return {"status": "ok", "result": {"activity": []}}
@@ -1530,7 +1530,7 @@ def test_run_task_pushes_fixes_without_resuming_the_pr_wait(
         return {"status": "ok", "result": {"task_id": "t1", "project_id": "p1"}} if path == "/api/v1/tasks/create" else {}
 
     def get(path: str, **_: Any) -> dict[str, Any]:
-        if path == "/api/tasks/t1":
+        if path == "/api/v1/tasks/detail":
             return next(details)
         if path == "/api/v1/runs/list":
             return {"records": records}
@@ -1837,7 +1837,7 @@ def test_the_run_stops_at_the_total_cap() -> None:
 def test_a_case_that_raises_is_a_harness_error_and_the_run_goes_on() -> None:
     def run_one(task: EvalTask, rep: int, _cap_left: float | None) -> dict[str, Any]:
         if (task.id, rep) == ("a", 1):
-            raise runner.TaskError("EvalError: GET /api/tasks/t answered 500", cost_usd=0.4)
+            raise runner.TaskError("EvalError: POST /api/v1/tasks/detail answered 500", cost_usd=0.4)
         if (task.id, rep) == ("b", 1):
             raise ConnectionRefusedError("the server is gone")
         return {"id": task.id, "outcome": "pass", "success": True, "cost_usd": 0.1}
@@ -1949,7 +1949,7 @@ def test_dialog_checks_the_final_manager_run_before_scoring_a_reply(
             self.event_offsets: list[int] = []
 
         def post(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
-            if path.startswith("/api/v1/runs/"):
+            if path.startswith("/api/v1/runs/") or path == "/api/v1/tasks/page":
                 return {"status": "ok", "result": self.get(path, **data)}
             if path == "/api/v1/operator_chat/messages":
                 assert self.sent is not None
@@ -1961,8 +1961,8 @@ def test_dialog_checks_the_final_manager_run_before_scoring_a_reply(
             return {}
 
         def get(self, path: str, **query: Any) -> dict[str, Any]:
-            if path == "/api/tasks":
-                return {"tasks": []}
+            if path == "/api/v1/tasks/page":
+                return {"tasks": [], "counts": {}, "next_before": None}
             if path == "/api/v1/runs/list":
                 assert query["agent_id"] == "manager"
                 rows = [{"id": 1, "status": "failed", "error": "old turn failed"}]
@@ -2027,7 +2027,7 @@ def test_dialogs_use_the_reserved_case_budget_only_in_parallel_mode(
             self.messages: list[dict[str, Any]] = []
 
         def post(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
-            if path.startswith("/api/v1/runs/"):
+            if path.startswith("/api/v1/runs/") or path == "/api/v1/tasks/page":
                 return {"status": "ok", "result": self.get(path, **data)}
             if path == "/api/v1/operator_chat/messages":
                 return {"status": "ok", "result": {"messages": self.messages}}
@@ -2041,8 +2041,8 @@ def test_dialogs_use_the_reserved_case_budget_only_in_parallel_mode(
             return {}
 
         def get(self, path: str, **_: Any) -> dict[str, Any]:
-            if path == "/api/tasks":
-                return {"tasks": []}
+            if path == "/api/v1/tasks/page":
+                return {"tasks": [], "counts": {}, "next_before": None}
             if path == "/api/v1/runs/list":
                 return {"records": [{"id": i + 1, "status": "completed", "error": None}
                                     for i in reversed(range(len(self.messages)))]}
@@ -2161,7 +2161,7 @@ class _CostlyApi:
         self.cancelled = False
 
     def post(self, path: str, body: Any) -> Any:
-        if path.startswith("/api/v1/runs/"):
+        if path.startswith("/api/v1/runs/") or path == "/api/v1/tasks/detail":
             return {"status": "ok", "result": self.get(path, **body)}
         if path == "/api/v1/tasks/activity":
             return {"status": "ok", "result": {"activity": []}}
@@ -2171,7 +2171,7 @@ class _CostlyApi:
         return {"status": "ok", "result": {"task_id": "task-1"}} if path == "/api/v1/tasks/create" else {}
 
     def get(self, path: str, **_query: Any) -> Any:
-        if path == "/api/tasks/task-1":
+        if path == "/api/v1/tasks/detail":
             if not self.cancelled:
                 self.cost += 0.1
             status = "cancelled" if self.cancelled else "running"
@@ -2646,9 +2646,9 @@ def test_task_cost_dialog_seeds_without_starting_an_agent(
         return "task-fixed"
 
     class Api:
-        def get(self, path: str) -> dict[str, Any]:
-            assert path == "/api/tasks"
-            return {"tasks": [{"task_id": "task-fixed"}]}
+        def post(self, path: str, body: Any) -> dict[str, Any]:
+            assert path == "/api/v1/tasks/page" and body == {}
+            return {"status": "ok", "result": {"tasks": [{"task_id": "task-fixed"}], "counts": {}, "next_before": None}}
 
     scenarios = tmp_path / "scenarios.json"
     scenarios.write_text("{}", encoding="utf-8")
@@ -2715,7 +2715,7 @@ def _isolated(dialog: Any) -> Any:
     from evals.prompt_regression import dialogs
 
     def alone(look: dialogs.Look) -> str | None:
-        found = look.api.get("/api/tasks")["tasks"]
+        found = look.api.post("/api/v1/tasks/page", {})["result"]["tasks"]
         return f"the dialog's server has {len(found)} tasks, not its own one" if len(found) != 1 else None
 
     if dialog.id == "provider_key":
@@ -2989,8 +2989,9 @@ def test_a_dialog_check_sees_the_calls_of_its_own_turn(monkeypatch: pytest.Monke
     dialog = dialogs.Dialog("two_turns", (dialogs.Say("一", check), dialogs.Say("二", check)))
 
     class Api:
-        def get(self, path: str, **params: Any) -> dict[str, Any]:
-            return {"tasks": []}
+        def post(self, path: str, body: Any) -> dict[str, Any]:
+            assert path == "/api/v1/tasks/page" and body == {}
+            return {"status": "ok", "result": {"tasks": [], "counts": {}, "next_before": None}}
 
     row = dialogs.run_dialog(Api(), dialog, database_url="disposable", project_id="project-a",  # type: ignore[arg-type]
                              scenarios=scenarios, mode="fake", timeout=1)

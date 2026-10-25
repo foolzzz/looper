@@ -174,7 +174,7 @@ def _wait(api: Api, task_ids: dict[str, str], done: Callable[[str, dict[str, Any
           timeout: float = 90.0) -> dict[str, dict[str, Any]]:
     deadline = time.monotonic() + timeout
     while True:
-        details = {variant: api.get(f"/api/tasks/{task_id}") for variant, task_id in task_ids.items()}
+        details = {variant: api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"] for variant, task_id in task_ids.items()}
         if all(done(variant, detail) for variant, detail in details.items()):
             return details
         if time.monotonic() > deadline:

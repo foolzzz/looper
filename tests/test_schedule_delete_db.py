@@ -46,7 +46,7 @@ def test_a_schedule_deleted_while_its_task_runs_lets_the_task_end_and_says_nothi
         caplog.clear()
 
         assert await env.ok("POST", "/api/v1/schedule_admin/delete", {"schedule_id": sid}) == {"deleted": sid}
-        task = await env.ok("GET", f"/api/tasks/{task_id}")
+        task = await env.ok("POST", "/api/v1/tasks/detail", {"task_id": task_id})
         assert (task["status"], task["schedule_id"]) == ("running", None)
         await env.scheduler.tick()  # the run's timeout or its task's end are no longer the scheduler's
         env.clock.now += timedelta(seconds=120)
@@ -56,7 +56,7 @@ def test_a_schedule_deleted_while_its_task_runs_lets_the_task_end_and_says_nothi
         await env.end_task(task_id, "completed", summary="done", cost=0.25)
         await env.scheduler.tick()
         await env.scheduler.idle()
-        assert (await env.ok("GET", f"/api/tasks/{task_id}"))["status"] == "completed"
+        assert (await env.ok("POST", "/api/v1/tasks/detail", {"task_id": task_id}))["status"] == "completed"
         await _gone(env, sid)
         assert sender.sent == []
         assert _errors(caplog) == []

@@ -193,8 +193,11 @@ def test_fake_dialog_outcome_uses_observations_instead_of_success_words(monkeypa
         actions.append(action("looper_settings", "set"))
     # Keep the real run_dialog/check path; only replace HTTP and DB I/O.
     class Api(ObservedApi):
-        def get(self, path):
-            return {"tasks": []} if path == "/api/tasks" else super().get(path)
+        def post(self, path, body):
+            if path == "/api/v1/tasks/page":
+                assert body == {}
+                return {"status": "ok", "result": {"tasks": [], "counts": {}, "next_before": None}}
+            return super().post(path, body)
 
     monkeypatch.setattr(dialogs, "_last_action", lambda *_: 0)
     monkeypatch.setattr(dialogs, "_trail", lambda *_: deepcopy(actions))
@@ -484,9 +487,9 @@ def test_review_seed_creates_the_manager_and_its_template_in_the_project():
 
 
 class TemplateApi:
-    def get(self, path, **query):
-        assert path == "/api/tasks"
-        return {"tasks": []}
+    def post(self, path, body):
+        assert path == "/api/v1/tasks/page" and body == {}
+        return {"status": "ok", "result": {"tasks": [], "counts": {}, "next_before": None}}
 
 
 def template_look(reply, monkeypatch, fake=False):
@@ -672,8 +675,8 @@ class ClientRunApi(Api):
         self.calls.append((method, path, body))
         if path == "/api/v1/clients/create" and method == "POST":
             return {"status": "ok", "result": {"client": {"id": "client-0123456789ab"}, "token": "lpc_secret"}}
-        if path == "/api/tasks":
-            return {"tasks": []}
+        if path == "/api/v1/tasks/page" and method == "POST":
+            return {"status": "ok", "result": {"tasks": [], "counts": {}, "next_before": None}}
         return {}
 
 
@@ -723,8 +726,9 @@ def test_a_failed_revoke_is_logged_without_the_token_and_ignored(monkeypatch, ca
 
 def client_look(monkeypatch, actions, tasks, owners, conversation="cli-1"):
     class Tasks:
-        def get(self, path, **query):
-            return {"tasks": [{"task_id": t} for t in tasks]}
+        def post(self, path, body):
+            assert path == "/api/v1/tasks/page" and body == {}
+            return {"status": "ok", "result": {"tasks": [{"task_id": t} for t in tasks], "counts": {}, "next_before": None}}
 
     monkeypatch.setattr(dialogs, "_trail", lambda *a, **k: actions)
     monkeypatch.setattr(dialogs, "_task_owners", lambda url, ids: {i: owners[i] for i in ids if i in owners})

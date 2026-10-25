@@ -27,17 +27,17 @@ def test_task_detail_and_list_name_the_manager_and_template(monkeypatch: pytest.
                                 manager_id="manager-review", template=TEMPLATE, pool=pool)
         await tasks.create_task(task_id="task-b", requirement="y", project_id=project["id"], pool=pool)
 
-        status, detail = await _call("GET", "/api/tasks/task-a")
+        status, detail = await _call("POST", "/api/v1/tasks/detail", {"task_id": "task-a"})
         assert status == 200
         assert (detail["manager_id"], detail["manager_name"]) == ("manager-review", "Code review")
         assert detail["template"] == TEMPLATE
 
-        status, default = await _call("GET", "/api/tasks/task-b")
+        status, default = await _call("POST", "/api/v1/tasks/detail", {"task_id": "task-b"})
         assert status == 200
         assert default["manager_id"] == "manager" and default["template"] is None
         assert default["manager_name"]
 
-        status, listed = await _call("GET", "/api/tasks")
+        status, listed = await _call("POST", "/api/v1/tasks/page", {})
         assert status == 200
         rows = {t["task_id"]: t for t in listed["tasks"]}
         assert (rows["task-a"]["manager_id"], rows["task-a"]["manager_name"]) == ("manager-review", "Code review")

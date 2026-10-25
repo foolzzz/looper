@@ -179,7 +179,7 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
                 api.post("/api/v1/ops/task_control/start", {"task_id": ids[variant]})
             deadline = time.monotonic() + 90
             while True:
-                details = {variant: api.get(f"/api/tasks/{task_id}") for variant, task_id in ids.items()}
+                details = {variant: api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"] for variant, task_id in ids.items()}
                 if all(d["status"] in ("completed", "failed", "stopped", "cancelled") for d in details.values()):
                     break
                 assert time.monotonic() < deadline, {v: d["status"] for v, d in details.items()}

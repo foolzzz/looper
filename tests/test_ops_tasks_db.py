@@ -123,7 +123,7 @@ def test_a_task_is_created_ready_in_its_project_and_its_configuration_shown(
         assert (trail["tool"], trail["risk"], trail["status"], trail["channel"]) == (
             "looper_task_create", "write", "ok", "lark")
         # The task page shows what the Manager did.
-        status, detail = await _get(f"/api/tasks/{task_id}")
+        status, detail = await _get("/api/v1/tasks/detail", {"task_id": task_id})
         assert status == 200
         assert [(a["tool"], a["status"]) for a in detail["manager_actions"]] == [("looper_task_create", "ok")]
 

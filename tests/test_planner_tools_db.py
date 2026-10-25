@@ -357,12 +357,12 @@ def test_each_choice_is_journaled_and_the_task_shows_it(monkeypatch: pytest.Monk
             ("step-s1", "Reviewers of step s1: claude-code/sonnet"),
             ("", "Workers of the rest of the task: the Planner's choice (claude-code/sonnet) cleared"),
         ]
-        status, task = await _call("GET", "/api/tasks/task-a")
+        status, task = await _call("POST", "/api/v1/tasks/detail", {"task_id": "task-a"})
         shown = [(e["kind"], e["step_key"]) for e in task["journal"]]
         assert shown == [("profile_choice", ""), ("profile_choice", "s1"), ("profile_choice", "")]
         assert task["agents"]["roles"]["worker"]["profile"]["source"] == "builtin"
         await planner("looper_task_profile_set", {"role": "worker", "profile_id": "agent-sonnet"})
-        status, task = await _call("GET", "/api/tasks/task-a")
+        status, task = await _call("POST", "/api/v1/tasks/detail", {"task_id": "task-a"})
         assert task["agents"]["roles"]["worker"]["profile"]["source"] == "planner_task"
         activity = [r["summary"] for r in await pool.fetch(
             "SELECT summary FROM activity WHERE task_id = 'task-a' ORDER BY seq")]

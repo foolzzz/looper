@@ -930,11 +930,11 @@ def test_a_tasks_cost_is_the_task_pages(monkeypatch: pytest.MonkeyPatch, tmp_pat
         await _task(pool, "task-a", "completed", await _project(pool))
         for agent_id, cost in (("planner-task-a", 0.12), ("worker-1", 0.4), ("reviewer-2", 0.05)):
             await _run_record(pool, agent_id, task_id="task-a", cost=cost)
-        before = (await _ok("GET", "/api/tasks/task-a"))["cost"]["cost_usd"]
+        before = (await _ok("POST", "/api/v1/tasks/detail", {"task_id": "task-a"}))["cost"]["cost_usd"]
         record_id = await _run_record(pool, "manager", cost=7.0)
         await llm_records.link_task(record_id, "task-a", pool=pool)
         (answer,) = await _Chat(tmp_path).say("task-a 花了多少", ("looper_costs", {"task_id": "task-a"}))
-        page = await _ok("GET", "/api/tasks/task-a")
+        page = await _ok("POST", "/api/v1/tasks/detail", {"task_id": "task-a"})
         assert page["cost"]["cost_usd"] == before
         assert answer["result"]["cost"] == page["cost"]
         assert answer["result"]["cost"]["by_model"] == page["cost"]["by_model"]
@@ -975,7 +975,7 @@ def test_spend_by_project_and_time_range_counts_the_runs_started_in_it(
         # All time, the run of 40 days ago counts too; a project's total is the sum of its tasks' costs.
         (calc_all,) = await chat.say("calc 一共花了多少", ("looper_costs", {"project": "calc"}))
         total = calc_all["result"]["total"]
-        task_costs = [(await _ok("GET", f"/api/tasks/{t}"))["cost"]["cost_usd"] for t in ("task-a", "task-b")]
+        task_costs = [(await _ok("POST", "/api/v1/tasks/detail", {"task_id": t}))["cost"]["cost_usd"] for t in ("task-a", "task-b")]
         assert total["provider_priced_usd"] + total["equivalent_usd"] == pytest.approx(sum(task_costs)) == \
             pytest.approx(5.5)
 

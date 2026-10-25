@@ -432,7 +432,7 @@ def test_a_run_is_priced_from_each_models_tokens_cache_included(
         # glm-5.3-flash (built-in prices 0.15 input, 0.50 output): 10000 * 0.15 + 1000 * 0.5 = 2000 = $0.002.
         assert dict(row) == {"cost_usd": pytest.approx(0.040), "cost_source": "provider_price", "input_tokens": 11_000,
                              "output_tokens": 3_000, "cache_read_tokens": 30_000, "cache_creation_tokens": 4_000}
-        cost = (await _ok("GET", f"/api/tasks/{task}"))["cost"]
+        cost = (await _ok("POST", "/api/v1/tasks/detail", {"task_id": task}))["cost"]
         assert (cost["cost_usd"], cost["provider_price_runs"], cost["equivalent_runs"]) == \
             (pytest.approx(0.040), 1, 0)
 

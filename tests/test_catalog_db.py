@@ -76,6 +76,10 @@ async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
 
     method, path, body = profile_request(method, path, body)
     method, path, body = _global_settings_request(method, path, body)
+    if path in {"/api/v1/tasks/detail", "/api/v1/tasks/page"}:
+        from tests.db_support import call_v1
+        return await call_v1(server, path, body or {})
+
     if path.startswith(("/api/v1/project_agent_settings/", "/api/v1/allowed_profiles/")):
         from looper.agents.ops.clients import ClientOps
         from tests.db_support import call_v1

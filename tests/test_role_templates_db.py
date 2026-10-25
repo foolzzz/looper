@@ -238,7 +238,7 @@ def test_the_users_edit_is_a_new_version_that_tells_the_planner_and_stands(monke
         assert (status, answer["version"], bus.sent) == (200, 3, [])
 
         # The task page names who wrote each version.
-        status, detail = await _call("GET", "/api/tasks/task-a")
+        status, detail = await _call("POST", "/api/v1/tasks/detail", {"task_id": "task-a"})
         tester = next(r for r in detail["roles"] if r["id"] == "tester")
         assert (tester["via"], [v["via"] for v in tester["versions"]]) == ("user", ["planner", "user", "user"])
 
@@ -329,7 +329,7 @@ def test_a_role_names_the_items_installed_for_roles_and_its_runs_load_them(
         assert status == 200 and answer["changed"] == ["items"], answer
         status, answer, _ = await _edit("task-a", "tester", {"role_prompt": "Tests first.", "harness": None, "profile_id": None, "items": ["plain"]})
         assert status == 400 and "items: 'plain' is not installed" in answer["error"]
-        status, detail = await _call("GET", "/api/tasks/task-a")
+        status, detail = await _call("POST", "/api/v1/tasks/detail", {"task_id": "task-a"})
         assert detail["roles"][0]["items"] == [{"id": lint, "kind": "skill", "name": "lint"}]
 
         # A template names them too; a copy leaves out one that is no longer installed for roles.

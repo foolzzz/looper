@@ -21,12 +21,10 @@ const planner = (id: string) => ({ kind: "planner", id: `planner-${id}`, can_sen
 const web = (id: string) => ({ session_id: id, channel: "web", message_count: 1, first_message_at: "", last_message_at: "", last_role: "user", last_content: "hi" });
 const lark = (id: string) => ({ ...web(id), channel: "lark", last_content: "from lark" });
 
-let requests: string[] = [];
 let chatReads: { path: string; session_id?: string }[] = [];
 function answer(url: string, payload: Record<string, string>): unknown {
-  requests.push(url);
-  if (/\/api\/tasks\/task-a$/.test(url)) return task;
-  if (/\/api\/tasks(\?|$)/.test(url)) return { tasks: [], counts: { failed: 2 }, next_before: null };
+  if (url === "/api/v1/tasks/detail") return { status: "ok", result: task };
+  if (url === "/api/v1/tasks/page") return { status: "ok", result: { tasks: [], counts: { failed: 2 }, next_before: null } };
   if (url === "/api/v1/operator_chat/targets") return { status: "ok", result: { targets: [{ kind: "manager", id: "manager", can_send: true }, planner("task-a")] } };
   if (url === "/api/v1/operator_chat/sessions") {
     const asked = payload.session_id;
@@ -56,7 +54,6 @@ describe("the dashboard keeps its place in the URL", () => {
   let root: Root;
 
   beforeEach(() => {
-    requests = [];
     chatReads = [];
     window.location.hash = "";
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -148,7 +145,9 @@ describe("the dashboard keeps its place in the URL", () => {
   describe("the tasks list", () => {
     it("opens the status filter from the hash and asks the server for it", async () => {
       await open("#tasks?status=failed");
-      expect(requests.some((u) => u.includes("/api/tasks?") && u.includes("status=failed"))).toBe(true);
+      expect(vi.mocked(fetch).mock.calls).toContainEqual(["/api/v1/tasks/page", expect.objectContaining({
+        method: "POST", body: JSON.stringify({ status: "failed" }),
+      })]);
     });
 
     it("writes the chosen status, keeps the other filters, and writes no default", async () => {
@@ -162,7 +161,9 @@ describe("the dashboard keeps its place in the URL", () => {
 
     it("lists every task for an unknown status", async () => {
       await open("#tasks?status=bogus");
-      expect(requests.filter((u) => u.includes("/api/tasks?")).every((u) => !u.includes("status="))).toBe(true);
+      const pages = vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/v1/tasks/page");
+      expect(pages.length).toBeGreaterThan(0);
+      expect(pages.every(([, options]) => !("status" in JSON.parse(String(options?.body))))).toBe(true);
     });
 
     it("returns from a task to the list it was opened from, status included", async () => {

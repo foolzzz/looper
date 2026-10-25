@@ -561,7 +561,7 @@ def run_task(
         while True:
             if INTERRUPTED.is_set():
                 raise EvalError("the run was interrupted")
-            detail = api.get(f"/api/tasks/{task_id}")
+            detail = api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"]
             status = detail.get("status")
             if status in metrics.TERMINAL_STATUSES:
                 break
@@ -597,7 +597,7 @@ def run_task(
             if all(r.get("status") != "running" for r in records) or time.monotonic() > deadline:
                 break
             time.sleep(poll)
-        detail = api.get(f"/api/tasks/{task_id}")
+        detail = api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"]
         records = sorted(records, key=lambda r: int(r["id"]))
         events = {int(r["id"]): _all_events(api, int(r["id"])) for r in records if metrics.role(r) != "other"}
         result = metrics.task_metrics(
@@ -709,7 +709,7 @@ def _cancel_after_error(api: Api, task_id: str) -> float:
     except Exception:  # it may have ended, or the server may be gone
         pass
     try:
-        return float((api.get(f"/api/tasks/{task_id}").get("cost") or {}).get("cost_usd") or 0.0)
+        return float((api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"].get("cost") or {}).get("cost_usd") or 0.0)
     except Exception:
         return 0.0
 

@@ -469,7 +469,7 @@ def test_the_task_page_reads_the_room(monkeypatch: pytest.MonkeyPatch) -> None:
                                  task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())), worker_pool=workers)
 
         async def get(path: str, query: dict[str, Any]) -> tuple[int, Any]:
-            if path == "/api/v1/tasks/room_view":
+            if path in {"/api/v1/tasks/room_view", "/api/v1/tasks/detail"}:
                 from tests.db_support import call_v1
                 body = {"task_id": "task-r", **query}
                 return await call_v1(server, path, body)
@@ -487,7 +487,7 @@ def test_the_task_page_reads_the_room(monkeypatch: pytest.MonkeyPatch) -> None:
         assert [m["kind"] for m in after["messages"]] == ["answer"]
         status, _ = await get("/api/v1/tasks/room_view", {"after": "x"})
         assert status == 400
-        status, detail = await get("/api/tasks/task-r", {})
+        status, detail = await get("/api/v1/tasks/detail", {"task_id": "task-r"})
         assert detail["room"]["counts"]["messages"] == 2
         # A message between two seats of one step counts once for it.
         await room.post("task-r", REVIEWER, kind="question", body="where are the tests?", to=["backend_rd@s1"])

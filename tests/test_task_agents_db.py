@@ -73,6 +73,10 @@ async def _call(method: str, path: str, body: Any = None, *, worker_pool: Any = 
     writer = _Writer()
     raw = b"" if body is None else json.dumps(body).encode()
     server = _server(worker_pool)
+    if path in {"/api/v1/tasks/detail", "/api/v1/tasks/page"}:
+        from tests.db_support import call_v1
+        return await call_v1(server, path, body or {})
+
     if path.startswith(("/api/v1/project_agent_settings/", "/api/v1/allowed_profiles/")):
         from tests.db_support import call_v1
 
@@ -351,7 +355,7 @@ def test_the_task_shows_each_roles_profile_and_limit_with_their_sources(monkeypa
     from looper.agents.agent_settings import Layer, load_agent_settings
 
     async def agents(task_id: str) -> dict[str, Any]:
-        status, task = await _call("GET", f"/api/tasks/{task_id}")
+        status, task = await _call("POST", "/api/v1/tasks/detail", {"task_id": task_id})
         assert status == 200
         return task["agents"]
 
@@ -395,7 +399,7 @@ def test_the_task_shows_each_roles_profile_and_limit_with_their_sources(monkeypa
         assert (roles["worker"]["concurrency"]["task"], roles["reviewer"]["concurrency"]["task"]) == (1, 4)
         settings = await load_agent_settings("worker", project["id"], "task-a")
         assert (settings.profile.id, settings.profile_source) == ("agent-sonnet", Layer.TASK)
-        assert set((await _call("GET", "/api/tasks/task-a"))[1]["profile_overrides"]) == {"worker", "planner"}
+        assert set((await _call("POST", "/api/v1/tasks/detail", {"task_id": "task-a"}))[1]["profile_overrides"]) == {"worker", "planner"}
         # Dropping the task's profile leaves its limit, and the other way round.
         await _call("POST", "/api/v1/tasks/agents", {"task_id": "task-a", "profiles": {"worker": None}})
         roles = (await agents("task-a"))["roles"]

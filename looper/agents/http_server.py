@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Any
 
 from ..db import api_clients as db_api_clients
-from ..db.tasks import TaskGroup
 from ..ops_config import OpsConfig
 from . import (
     api_v1, chat_settings, config_imports, config_transfer, gate_service, knowledge,
@@ -107,9 +106,6 @@ _RE_AGENT_OP = re.compile(r"^/api/agent/v1/ops/([a-z_]{1,64})$")
 # exception is a configuration import (/api/v1/config/import_upload), which streams its
 # body to a file and takes up to config_imports.UPLOAD_MAX_BYTES.
 REQUEST_BODY_MAX_BYTES = 4 * knowledge.DOCUMENT_MAX_BYTES
-# The Tasks list's page: how many tasks GET /api/tasks returns by default, and at most.
-TASKS_PAGE = 50
-TASKS_PAGE_MAX = 200
 
 
 def _json_response(status: str, body: Any, *, headers: Mapping[str, str] | None = None) -> bytes:
@@ -823,7 +819,6 @@ class AgentHTTPServer:
 
     # --- API routing ---
 
-    _RE_TASK_DETAIL = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)$")
     _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
     _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
@@ -837,11 +832,7 @@ class AgentHTTPServer:
         writer: asyncio.StreamWriter,
         headers: Mapping[str, str] | None = None,
     ) -> None:
-        if path == "/api/tasks" and method == "GET":
-            await self._handle_list_tasks(query, writer)
-        elif (m := self._RE_TASK_DETAIL.match(path)) and method == "GET":
-            await self._handle_task_detail(m.group(1), writer)
-        elif path == "/api/projects" and method == "GET":
+        if path == "/api/projects" and method == "GET":
             await self._handle_list_projects(writer)
         elif path == "/api/projects" and method == "POST":
             await self._answer(writer, HTTP_201, lambda: projects.create_project(projects.json_object(body)))
@@ -1040,46 +1031,6 @@ class AgentHTTPServer:
             status["turn_binding"] = self._manager_ops.binding_report()
         return status
 
-    async def _handle_list_tasks(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
-        """A page of tasks, newest first, filtered by project, schedule, group and status: ``limit`` of them
-        (``TASKS_PAGE`` by default, at most ``TASKS_PAGE_MAX``) older than the task ``before``; ``next_before``
-        continues the list (null at its end) and ``counts`` has how many tasks each status holds under the other
-        filters."""
-        from ..db import tasks as db_tasks
-
-        async def refuse(error: str) -> None:
-            writer.write(_json_response(HTTP_400, {"error": error}))
-            await writer.drain()
-
-        try:
-            group = TaskGroup(query["group"]) if query.get("group") else None
-        except ValueError:
-            await refuse(f"group must be one of {', '.join(g.value for g in TaskGroup)}")
-            return
-        status = query.get("status") or None
-        if status is not None and status not in db_tasks.STATUS_GROUPS:
-            await refuse(f"status must be one of {', '.join(db_tasks.STATUS_GROUPS)}")
-            return
-        raw = query.get("limit") or str(TASKS_PAGE)
-        if not raw.isdigit() or not 1 <= int(raw) <= TASKS_PAGE_MAX:
-            await refuse(f"limit must be a whole number from 1 to {TASKS_PAGE_MAX}")
-            return
-        limit, before = int(raw), query.get("before") or None
-        filters = {"project_id": query.get("project_id") or None, "group": group,
-                   "schedule_id": query.get("schedule_id") or None}
-        try:
-            result = await projects.list_tasks_page(limit=limit, status=status, before=before, **filters)
-        except projects.RequestError as exc:
-            await refuse(str(exc))
-            return
-        except Exception:
-            logger.exception("DB unavailable for list_tasks")
-            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
-            await writer.drain()
-            return
-        writer.write(_json_response(HTTP_200, _serialize(result)))
-        await writer.drain()
-
     def _stop_agent(self, message_id: str) -> Any:
         """The Manager whose turn answers ``message_id`` (the default one when none does)."""
         if self._managers is None:
@@ -1225,20 +1176,6 @@ class AgentHTTPServer:
         return {"deleted": task_id}
 
     # --- Task detail handlers ---
-
-    async def _handle_task_detail(
-        self, task_id: str, writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            result = await projects.task_detail(task_id)
-        except projects.RequestError as exc:
-            writer.write(_json_response(exc.status, {"error": str(exc)}))
-        except Exception:
-            logger.exception("DB unavailable for task_detail %s", task_id)
-            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
-        else:
-            writer.write(_json_response(HTTP_200, _serialize(result)))
-        await writer.drain()
 
     @staticmethod
     async def _task_workspace(task: dict[str, Any]) -> dict[str, Any]:

@@ -22,9 +22,8 @@ function detail(id: string) {
   };
 }
 
-function answer(url: string): unknown {
-  const task = url.match(/\/api\/tasks\/(task-[a-z]+)$/);
-  if (task) return detail(task[1]);
+function answer(url: string, init?: RequestInit): unknown {
+  if (url === "/api/v1/tasks/detail") return { status: "ok", result: detail(JSON.parse(String(init?.body)).task_id) };
   if (url === "/api/v1/tasks/activity") return { status: "ok", result: { activity: [] } };
   if (url === "/api/v1/tasks/conversation") return { status: "ok", result: { rows: [], has_more: false } };
   if (url.endsWith("/projects")) return { projects: [] };
@@ -36,8 +35,8 @@ describe("TaskDetailRoute", () => {
   let root: Root;
 
   beforeEach(() => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
-      new Response(JSON.stringify(answer(String(input))), { status: 200, headers: { "Content-Type": "application/json" } })));
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
+      new Response(JSON.stringify(answer(String(input), init)), { status: 200, headers: { "Content-Type": "application/json" } })));
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -69,9 +68,9 @@ describe("TaskDetailRoute", () => {
       seq, task_id: "task-a", worker: "worker-1", kind: "text", summary: `activity ${seq}`,
       metadata: null, input_tokens: null, output_tokens: null, created_at: "2026-10-24T00:00:00Z",
     });
-    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/tasks/task-a") return Response.json({ ...detail("task-a"), status });
+      if (url === "/api/v1/tasks/detail") return Response.json({ status: "ok", result: { ...detail("task-a"), status } });
       if (url === "/api/v1/ops/task_control/restart") {
         status = "running";
         return Response.json({ status: "ok", result: { task_id: "task-a", restarted: true, note: "Started." } });
@@ -85,7 +84,7 @@ describe("TaskDetailRoute", () => {
           : "event: done\ndata: {}\n\n",
         { headers: { "Content-Type": "text/event-stream" } },
       );
-      return Response.json(answer(url));
+      return Response.json(answer(url, init));
     });
     vi.stubGlobal("fetch", fetcher);
     await act(async () => root.render(<TaskDetailRoute taskId="task-a" tab="sessions" onTab={() => {}} onBack={() => {}} />));
@@ -108,11 +107,11 @@ describe("TaskDetailRoute", () => {
   });
 
   it.each([false, true])("shows the schedule session note only after a confirmed continuation (%s)", async (continues) => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      const data = url.endsWith("/tasks/task-a")
-        ? { ...detail("task-a"), schedule_id: "sched-a", schedule_name: "Daily check", continues_schedule_session: continues }
-        : answer(url);
+      const data = url === "/api/v1/tasks/detail"
+        ? { status: "ok", result: { ...detail("task-a"), schedule_id: "sched-a", schedule_name: "Daily check", continues_schedule_session: continues } }
+        : answer(url, init);
       return Response.json(data);
     }));
     await show("task-a");
@@ -144,10 +143,10 @@ describe("TaskDetailRoute", () => {
     }] : [],
   });
   const stubTask = (body: ReturnType<typeof taskWith>) => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/tasks/task-a")) return Response.json(body);
-      return Response.json(answer(url));
+      if (url === "/api/v1/tasks/detail") return Response.json({ status: "ok", result: body });
+      return Response.json(answer(url, init));
     }));
   };
 
@@ -174,12 +173,12 @@ describe("TaskDetailRoute", () => {
   });
 
   it("renders a wait step with its own badge in the steps list", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
-      if (String(input) === "/api/tasks/task-a") return Response.json({ ...detail("task-a"), steps: [{
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/api/v1/tasks/detail") return Response.json({ status: "ok", result: { ...detail("task-a"), steps: [{
         id: "step-w1", task_id: "task-a", step_key: "w1", step_index: 0, kind: "wait", status: "pending",
         instruction: "Wait for a revision", depends_on: [], acceptance_criteria: [], target_files: [], review_roles: [],
-      }] });
-      return Response.json(answer(String(input)));
+      }] } });
+      return Response.json(answer(String(input), init));
     }));
     await show("task-a");
     const row = container.querySelector("#step-step-w1");
@@ -191,8 +190,8 @@ describe("TaskDetailRoute", () => {
   it("does not show the previous task's data while the next one loads", async () => {
     await show("task-a");
     let release = () => {};
-    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => new Promise<Response>((resolve) => {
-      release = () => resolve(new Response(JSON.stringify(answer(String(input))), { status: 200 }));
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((resolve) => {
+      release = () => resolve(new Response(JSON.stringify(answer(String(input), init)), { status: 200 }));
     })));
     await act(async () => root.render(<TaskDetailRoute taskId="task-b" onBack={() => {}} />));
     expect(container.textContent).not.toContain("Build the A parser.");
@@ -206,14 +205,14 @@ describe("TaskDetailRoute", () => {
       agenda: [], summary: { decisions: [], assumptions: [], open: [] }, plan_change: null,
       channel_posts: null, closed_at: null,
     });
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/tasks/task-a")) return Response.json({ ...detail("task-a"),
+      if (url === "/api/v1/tasks/detail") return Response.json({ status: "ok", result: { ...detail("task-a"),
         gates: [closed("choice"), closed("later")],
         steps: [{ id: "choice", step_key: "choice", kind: "gate", step_index: 0, status: "verified", instruction: "Decide", depends_on: [] }],
-      });
-      if (url === "/api/tasks") return Response.json({ tasks: [], counts: {}, next_before: null });
-      return Response.json(answer(url));
+      } });
+      if (url === "/api/v1/tasks/page") return Response.json({ status: "ok", result: { tasks: [], counts: {}, next_before: null } });
+      return Response.json(answer(url, init));
     }));
     try {
       await act(async () => root.render(<TasksPage sub="task-a?gate=choice" />));
@@ -252,10 +251,10 @@ describe("TaskDetailRoute", () => {
           releaseRoom = () => resolve(response({ status: "ok", result: room(1, "Restarted run's message") }));
         });
       }
-      if (url.endsWith("/tasks/task-a") && restarted) {
-        return response({ ...detail("task-a"), status: "running", group: "in_progress" });
+      if (url === "/api/v1/tasks/detail" && restarted) {
+        return response({ status: "ok", result: { ...detail("task-a"), status: "running", group: "in_progress" } });
       }
-      return response(answer(url));
+      return response(answer(url, init));
     }));
     await show("task-a");
     await openTab("Room");

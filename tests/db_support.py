@@ -123,7 +123,7 @@ async def call_v1(server, path, body):
     from looper.agents.ops.service import Platform
 
     if server._client_ops is None:
-        server._client_ops = ClientOps(Platform(bus=server._supervisor.bus, task_router=server._task_router))
+        server._client_ops = ClientOps(Platform(bus=getattr(server._supervisor, "bus", None), task_router=server._task_router))
     status, answer = await server._answer_v1("POST", path, api_v1.find("POST", path), {},
                                              json.dumps(body).encode(), api_v1.OPERATOR)
     return int(status.split()[0]), answer.get("result", {"error": answer.get("error", {}).get("message", "")})
