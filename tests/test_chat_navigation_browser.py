@@ -48,12 +48,14 @@ def dashboard(dashboard_url):
         page = context.new_page()
         page.set_default_timeout(5000)
         page.clock.install()
-        page.add_init_script("localStorage.setItem('looper-chat-session-id', 'session-b')")
+        page.add_init_script("""if (localStorage.getItem('looper-chat-session-id') === null) {
+            localStorage.setItem('looper-chat-session-id', 'session-b');
+        }""")
         calls, held, cancelled = [], [], []
         page.on("requestfailed", lambda request: cancelled.append(request.url))
         rows = [session("session-a"), session("session-b"), session("lark:known", "lark"),
                 session("planner-known")]
-        state = {"hold": True, "calls": calls, "held": held, "cancelled": cancelled}
+        state = {"hold": True, "calls": calls, "held": held, "cancelled": cancelled, "rows": rows}
 
         def api(route):
             path = route.request.url.split("/api/v1/")[-1]
@@ -143,6 +145,45 @@ def test_back_during_deferred_send_keeps_the_restored_conversation(dashboard):
     expect(page.get_by_text("Current B reply", exact=True)).to_be_visible()
     sends = [body for path, body in state["calls"] if path == "operator_chat/send"]
     assert [body["session_id"] for body in sends] == ["session-a", "session-b"]
+
+
+@pytest.mark.parametrize("source", ["generated", "stored", "new"])
+def test_empty_thread_survives_back_and_reload_and_can_send(dashboard, source):
+    from playwright.sync_api import expect
+
+    page, base, state = dashboard
+    if source == "generated":
+        page.add_init_script("localStorage.setItem('looper-chat-session-id', '')")
+    elif source == "stored":
+        state["rows"][:] = [row for row in state["rows"] if row["session_id"] != "session-b"]
+    with page.expect_response(lambda r: r.url.endswith("/operator_chat/sessions") and
+                              bool(r.request.post_data_json.get("session_id"))) as initial:
+        page.goto(f"{base}/#chat")
+    expect(page.get_by_role("textbox")).to_be_visible()
+    confirmed = initial.value
+    if source == "new":
+        with page.expect_response(lambda r: r.url.endswith("/operator_chat/sessions") and
+                                  r.request.post_data_json.get("session_id", "session-b") != "session-b") as fresh:
+            page.get_by_title("New conversation:", exact=False).click()
+        confirmed = fresh.value
+    empty = page.evaluate("localStorage.getItem('looper-chat-session-id')")
+    expect(page).to_have_url(f"{base}/#chat?conversation={empty}")
+    assert confirmed.json()["result"]["sessions"] == []
+    for reload in (False, True):
+        page.locator('aside button[title="session-a"]').click()
+        expect(page.locator('aside button[title="session-a"]')).to_have_attribute("aria-current", "true")
+        if reload:
+            page.reload()
+            expect(page.get_by_role("textbox")).to_be_visible()
+        page.go_back()
+        expect(page).to_have_url(f"{base}/#chat?conversation={empty}")
+        expect(page.get_by_role("textbox")).to_be_visible()
+        assert page.evaluate("localStorage.getItem('looper-chat-session-id')") == empty
+    state["hold"] = False
+    page.get_by_role("textbox").fill("Synthetic restored empty thread")
+    page.get_by_role("textbox").press("Enter")
+    expect(page.get_by_text("Current B reply", exact=True)).to_be_visible()
+    assert [body["session_id"] for path, body in state["calls"] if path == "operator_chat/send"] == [empty]
 
 
 def test_missing_link_keeps_owner_and_valid_local_and_readonly_threads_work(dashboard):

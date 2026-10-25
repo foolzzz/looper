@@ -261,6 +261,7 @@ function truncate(text: string, max: number): string {
 // The default Manager keeps the original key; every other Manager has a pointer of its own.
 const sessionKey = (managerId: string) =>
   managerId === "manager" ? STORAGE_SESSION_KEY : `${STORAGE_SESSION_KEY}:${managerId}`;
+const localThreadsKey = (managerId: string) => `looper-chat-local-threads:${managerId}`;
 
 function getOrCreateSessionId(managerId = "manager"): string {
   const key = sessionKey(managerId);
@@ -389,6 +390,29 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const currentRef = useRef({ managerId: target.id, sessionId });
   currentRef.current = { managerId: target.id, sessionId };
   const localThreads = useRef(new Map<string, Set<string>>());
+  const localThreadsFor = (managerId: string) => {
+    let local = localThreads.current.get(managerId);
+    if (!local) {
+      let ids: unknown;
+      try {
+        ids = JSON.parse(localStorage.getItem(localThreadsKey(managerId)) ?? "[]");
+      } catch {
+        // Storage blocked or corrupt: keep this page's local threads in memory.
+      }
+      local = new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : []);
+      localThreads.current.set(managerId, local);
+    }
+    return local;
+  };
+  const rememberLocalThread = (managerId: string, id: string) => {
+    const local = localThreadsFor(managerId);
+    local.add(id);
+    try {
+      localStorage.setItem(localThreadsKey(managerId), JSON.stringify([...local]));
+    } catch {
+      // Storage full or blocked: Back still works for this page's life.
+    }
+  };
   const isCurrentManager = (managerId: string) => managerId === currentRef.current.managerId;
   const currentManagerId = target.kind === "manager" ? target.id : "";
   // The web thread the Manager-scoped history read confirmed as this Manager's (its own or a new one): until then two
@@ -519,12 +543,18 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     const fresh = () => alive && isCurrentManager(managerId);
     const load = () =>
       fetchChatSession(wantConversation, managerId, controller.signal).then(
-        (session) => fresh() && setOpened({
-          managerId, id: wantConversation, session,
-          error: !session && (wantConversation.startsWith("planner-") || wantConversation.includes(":") ||
-            wantConversation !== currentRef.current.sessionId && !localThreads.current.get(managerId)?.has(wantConversation))
-            ? "Conversation not found." : "",
-        }),
+        (session) => {
+          if (!fresh()) return;
+          const nonWeb = wantConversation.startsWith("planner-") || wantConversation.includes(":");
+          if (!session && !nonWeb && wantConversation === currentRef.current.sessionId) {
+            rememberLocalThread(managerId, wantConversation);
+          }
+          setOpened({
+            managerId, id: wantConversation, session,
+            error: !session && (nonWeb || !localThreadsFor(managerId).has(wantConversation))
+              ? "Conversation not found." : "",
+          });
+        },
         (err) =>
           fresh() &&
           !(err instanceof Error && err.name === "AbortError") &&
@@ -902,10 +932,8 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
 
   const handleNewChat = () => {
     const newId = newSessionId();
-    const local = localThreads.current.get(target.id) ?? new Set<string>();
-    if (threadOwned && messages.length === 0) local.add(sessionId);
-    local.add(newId);
-    localThreads.current.set(target.id, local);
+    if (threadOwned && messages.length === 0) rememberLocalThread(target.id, sessionId);
+    rememberLocalThread(target.id, newId);
     appliedConversation.current = newId;
     onQuery?.(chatQuery(target.id, newId));
     switchWebSession(newId);
