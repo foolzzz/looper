@@ -1061,7 +1061,7 @@ restarts one that is not, for as long as the server runs: it never gives up.
 - **Crash-looping.** Restarted 3 times in a row (`CRASH_LOOP_RESTARTS`), an
   agent is `crash_looping` until it is stable again (`AgentState`).
 - **Visibility.** Every crash is logged with its restarts in a row and the
-  next delay. The agent's state is in `/api/status` and in the overview's
+  next delay. The agent's state is in `POST /api/v1/system/status` and in the overview's
   `health.unhealthy`, which the Dashboard shows. The Manager gets an
   `AGENT_LIFECYCLE` event at each `started`, `start_failed` and `crashed`,
   once at `crash_looping`, and `recovered` when the agent is stable again;
@@ -1568,7 +1568,7 @@ again.
 
 **System prompt mode.** The mode is `append` (Looper's prompt is added to the runtime's default one) or `replace`
 (it takes the default prompt's place). On **every runtime** (Claude Code, Codex, Grok, OMP and Pi) it is a role's setting,
-`system_prompt_mode` on the role layer (`PUT /api/agent-settings/roles/<role>`; a null or empty value unsets it). The
+`system_prompt_mode` on the role layer (`POST /api/v1/agent_settings/update_role` with `{role, values: {system_prompt_mode}}`; a null or empty value unsets it). The
 built-in values are `replace` for the Manager and the Planner and `append` for every other launch: Workers, Reviewers,
 the seats of Planner-defined roles, consults and a launch with no role (`agent_settings.BUILTIN_SYSTEM_PROMPT_MODE`). The
 settings view shows the effective value of every role (`effective.system_prompt_mode`). A task may set its own per role
@@ -2323,7 +2323,7 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   worktree drops only its own record in the repository (`git worktree remove
   --force`, never `prune`, which would drop the user's stale ones too).
 - **`looper doctor`** warns when git is missing or older than 2.40 (`looper
-  serve` too, in `/api/status`'s `checks`), and checks the default directory
+  serve` too, in `POST /api/v1/system/status`'s `checks`), and checks the default directory
   of each project set to `worktree` as the Planner would, with the paths it
   links.
 
@@ -3239,7 +3239,7 @@ role; a non-empty list restricts the choice to it. One function decides
 a stored choice, `projects.profile_allowed_sql`); a task without a project
 behaves like an empty list. The maintainer edits the list on the project's
 Agent Profiles tab (row "Profiles the Planner may choose", empty: "Any
-profile (no restriction)"; `GET`/`PUT /api/projects/:id/allowed-profiles`). A
+profile (no restriction)"; `POST /api/v1/allowed_profiles/{get,replace}`, with `project_id` in the body). A
 pricier profile needs no confirmation: the setting is the consent, and the run
 budget caps still hold. A profile on a list cannot be deleted (its usage names
 the project); a profile a Planner chose in a task that has not ended cannot
@@ -3283,8 +3283,9 @@ refused with that reason.
   other tools.
 - **Templates.** A project keeps role templates (`project_role_templates`:
   `{key, kind, description, role_prompt, harness?, profile_id?}`), written on
-  its Roles tab (`GET /api/projects/:id/role-templates`, `PUT` and `DELETE
-  /api/projects/:id/role-templates/:key`) and checked as a task role is
+  its Roles tab (`POST /api/v1/role_templates/{list,put,delete}` with `project_id`,
+  and `key` for put/delete). Put supplies the full definition, including nullable
+  `harness`/`profile_id`, `description` and `items`; definitions are checked as a task role is
   (`check_definition`, `allowed_profile`), whatever the switch. With the
   switch on, its tasks' [PLAN] and [RESTART] messages list them, one line
   each (`key (kind): description`), under a line that a template is no
@@ -3299,8 +3300,8 @@ refused with that reason.
   ones the file does not give, skips an invalid one with the reason, and
   leaves out a profile that is not here, with a note.
 - **The user's edit.** On the task page, the user edits a role while the task
-  has not completed (`PUT /api/tasks/:id/roles/:key`, `{role_prompt,
-  harness, profile_id}`: the whole definition; the kind stays; a profile
+  has not completed (`POST /api/v1/tasks/role_update`, `{task_id, key, role_prompt,
+  harness, profile_id, items?}`: the whole definition; the kind stays; a profile
   from the project's list). It adds a version by the user (`via` `user`) with
   its `role_defined` entry and a supplement (via `task_page`) that tells the
   Planner, in one transaction; a Planner that runs gets it in a turn at once
@@ -3395,8 +3396,8 @@ refused with that reason.
   which template it came from, and Edit opens the user's edit), a step's
   roles in Steps and the Pipeline, and `role_defined` entries in Findings;
   the project's Execution tab has the switch and the limit, and its Roles
-  tab the templates and the roles across its tasks (`GET
-  /api/projects/:id/role-stats[?since=YYYY-MM-DD]`: each role id's numbers
+  tab the templates and the roles across its tasks (`POST /api/v1/project_roles/stats`
+  with `{project_id, since?}` (`since` is YYYY-MM-DD): each role id's numbers
   summed over the project's tasks with roles, with how many tasks it is in
   and the templates it came from, one id possibly another definition in each
   task; and the built-in Worker's and Reviewer's in the same tasks). The
@@ -3476,7 +3477,8 @@ refused with the reason and what to do instead.
   its session, and a new session's resume brief carries each waiting gate's
   discussion so far.
 - **The discussion.** The user's messages (`task_user_gate_messages`, from
-  the dashboard: `POST /api/tasks/:id/gates/:step/messages`, or `/end` to end
+  the dashboard: `POST /api/v1/ops/gates/reply` with `{task_id, gate, text, agenda_item?, option?}`,
+  or `POST /api/v1/ops/gates/end` with `{task_id, gate, text?}` to end
   the discussion) are stored first; `GATE_MESSAGE` only wakes the Planner,
   which gives a gate's undelivered ones (after its `delivered_through`)
   together in one `[GATE]` turn after the event it is in. The reply lists
@@ -3751,8 +3753,8 @@ before.
   when the task is planned anew or deleted, and when the server starts after
   it ended a week ago (`RUN_SESSIONS_KEPT_DAYS`). Claude Code keeps every
   run's session itself.
-- **Reading it.** `GET /api/tasks/:id/room` (`kind`, `from`, `unanswered`,
-  `after`, `limit`) gives the seats with their presence, the messages oldest
+- **Reading it.** `POST /api/v1/tasks/room_view` (`task_id` required; optional `kind`, `from`, `unanswered`,
+  `after`, `limit` in the JSON body) gives the seats with their presence, the messages oldest
   first (with `answered` and `cc_planner`), the counts and each step's (sent,
   received, unanswered, each message once per step); `GET /api/tasks/:id` has
   the counts as `room`. The task page's Room tab shows them; a Pipeline step
@@ -4257,7 +4259,7 @@ does not imply HTTP compatibility.
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/status` | GET | System health: `agents`, each supervisor component's `healthy`, `state` (`running`, `restarting`, `crash_looping`), `up`, `restart_count` (restarts in a row), `last_crash_at`, `next_restart_at` and `agent_type`; `checks`: the startup self-check (`looper doctor`'s), the `codex_login` one read on each request; `tasks` counts every task: `total`, `running` (in progress), `completed`; `can_sign_out`: true for a browser signed in with the password and without a token cookie, which the dashboard's Sign out control (`POST /logout`) ends, false for the local browser's auto-login or a Bearer token |
+| `/api/v1/system/status` | POST | `{}` returns system health in `OpOk.result`: `agents` (each supervisor component's `healthy`, `state`, `up`, `restart_count`, `last_crash_at`, `next_restart_at`, `agent_type`), `checks` (startup self-check and per-request `codex_login`), `tasks` (`total`, `running`, `completed`), `channels` and `can_sign_out` (true only for a password browser session, ended by `POST /logout`; false for auto-login and Bearer tokens) |
 | `/login` | GET | Login form, or no-password instructions; 303 to `/` for a signed-in browser or local auto-login |
 | `/login` | POST | Same-origin password sign-in; 303 to `/` with a session cookie on success; 401 for wrong credentials or no password, 429 when locked, 503 for an unusable password file |
 | `/logout` | POST | Requires same-origin `Origin`; ends the session, clears both cookies and returns 303 to `/login` |
@@ -4265,18 +4267,21 @@ does not imply HTTP compatibility.
 | `/api/projects` | GET | Projects ordered by name ignoring case, each with `task_count`, `active_count` and `schedule_count` |
 | `/api/projects` | POST | Create a project from `name` (trimmed, 1–80 characters), optional `description`, `work_dir` (absolute), `background` (stored without the blank lines around it; 400 over 10000 characters) and execution settings; 409 when the name exists ignoring case; 400 naming the agent-settings endpoint for `planner_harness_prompt`, `worker_harness_prompt`, `model` or `run_budget_usd` |
 | `/api/projects/:id` | PUT | Update any of `name`, `description`, `work_dir`, `background` (`""` clears it) and the execution settings; 400 (as for POST), 404, 409 |
-| `/api/projects/:id/agent-settings` | GET/PUT | GET: `project.values` (the project layer), `roles` (`planner`, `worker`, `reviewer`, each with `values`, its role-in-project layer, and `effective`: every field's `value` and `source` layer, the harness with `from_role` when a Reviewer takes the Workers'), and `limits`. PUT sets the project layer; 404 for an unknown project |
-| `/api/projects/:id/agent-settings/roles/:role` | PUT | Set one role's layer in the project (`planner`, `worker` or `reviewer`; 400 for `manager`) |
-| `/api/projects/:id/allowed-profiles` | GET/PUT | The Agent Profiles the project's Planners may choose for their tasks' Workers and Reviewers, by name: `{project_id, restricted, profiles: [{profile_id, name, runtime, model, effort, roles, usd_per_million_tokens: {input, output}}], choosable: [same]}`: `profiles` is the list, empty by default, which lets the Planners choose any profile; `choosable` is what they may choose now. PUT `{"profile_ids": [...]}` (ids or names) makes it the whole list (`[]` lifts the restriction and keeps their choices) and drops the project's Planners' choices of a profile a non-empty list leaves out; 400 for an unknown profile or one that can run neither the worker nor the reviewer, and nothing changes; 404 for an unknown project. The Manager's `looper_settings` `allowed_profiles` sets it with the same code |
-| `/api/projects/:id/role-templates` | GET | The project's role templates by key (each `{key, kind, description, role_prompt, harness, profile, items, updated_at}`, `profile` `{profile_id, name, allowed}` or null, `items` each `{id, kind, name}`), its `role_text_max_chars` and `role_items` (the catalog items installed for roles here, which a role or a template may name); 404 for an unknown project |
-| `/api/projects/:id/role-templates/:key` | PUT/DELETE | PUT creates the template or replaces it whole with `{kind, role_prompt, description?, harness?, profile_id?, items?}`, checked as a task role is (a profile from the project's list, items installed for roles); DELETE removes it (task roles copied from it keep their versions). Both answer the project's templates. 400 for a definition a task role would be refused or an unknown field, 404 for an unknown project or template |
+| `/api/v1/project_agent_settings/get` | POST | `{project_id}` returns `project_id`, `project.values` (the project layer), `roles` (`planner`, `worker`, `reviewer`, each with its role-in-project `values` and `effective` fields with `value` and `source`), and `limits`; 404 for an unknown project |
+| `/api/v1/project_agent_settings/update` | POST | `{project_id, values}` patches the project layer and returns the same view; layer validation and client confirmation rules are below |
+| `/api/v1/project_agent_settings/update_role` | POST | `{project_id, role, values}` patches a role-in-project layer; role is `planner`, `worker` or `reviewer` (400 for `manager`); same result view |
+| `/api/v1/allowed_profiles/get` | POST | `{project_id}` returns `{project_id, restricted, profiles, choosable}`. Each profile has `{profile_id, name, runtime, model, effort, roles, usd_per_million_tokens: {input, output}}`; `profiles` is the saved list, `choosable` what Planners may choose now; 404 for an unknown project |
+| `/api/v1/allowed_profiles/replace` | POST | `{project_id, profile_ids}` (ids or names) replaces the whole list. `[]` lifts the restriction and keeps Planner choices; a non-empty list prunes choices it excludes. Same result as get; 400 for an unknown profile or one that can run neither worker nor reviewer, with nothing changed; 404 for an unknown project. The Manager's `looper_settings` `allowed_profiles` shares this core |
+| `/api/v1/role_templates/list` | POST | `{project_id}` returns `{project_id, templates, role_text_max_chars, role_items}`. Each template has `{key, kind, description, role_prompt, harness, profile, items, updated_at}`; `profile` is `{profile_id, name, allowed}` or null; items have `{id, kind, name}`. 404 for an unknown project |
+| `/api/v1/role_templates/put` | POST | `{project_id, key, kind, description, role_prompt, harness, profile_id, items}` creates or replaces a whole template. All fields are required: use `""` for no description, null for no harness/profile, `[]` for no items; kind is `work` or `review`. Profiles must be allowed and items installed for roles. Returns the templates view; 400 for an invalid definition or unknown field, 404 for an unknown project |
+| `/api/v1/role_templates/delete` | POST | `{project_id, key}` removes a template and returns the templates view; copied task roles keep their versions. 404 for an unknown project/template; clients confirm before deletion |
 | `/api/projects/:id/knowledge` | GET | The project's knowledge: `documents` (`document_id`, `title`, `summary`, `source_kind`, `filename`, `path`, `read_path`, `missing`, `size_bytes`, `sha256`, timestamps; no content), `count`, `stored_bytes`, the `index` agents get and its `index_chars`, and `caps`; 404 for an unknown project |
 | `/api/projects/:id/knowledge` | POST | Add a document: `source_kind`, `title`, `summary`, then `content` (text), `filename` and `content_base64` (upload) or `path` (path). Answers 201 with the new `document` and the knowledge view; 400 with the reason for a bad field, a binary file, a path outside the project's default directory, or a cap; 404 for an unknown project |
 | `/api/projects/:id/knowledge/:doc_id` | GET | One document: `document` (as in the list) and its `content`: stored for text and upload, the file as it is now for a path document; `content` is `null` with a `content_error` when that file is missing or not text; 404 for an unknown project or a document of another project |
 | `/api/projects/:id/knowledge/:doc_id` | PUT | Change `title`, `summary` or the source's own fields; the kind cannot change. Answers with the `document` and the view; 400 as above, 404 |
 | `/api/projects/:id/knowledge/:doc_id` | DELETE | Delete a document; answers with `deleted` and the view; 404 |
 | `/api/projects/:id/installs` | GET | What applies to the project: `installs`, its own installs then the global ones that reach its task roles, each an install (`install_id`, `scope`, `project_id`, `project_name`, `roles`, `enabled`) with `inherited` and its `item` (as in the catalog); `owned_count` (skills written in it), `task_roles` and `skill_caps`; 404 for an unknown project |
-| `/api/projects/:id/role-stats` | GET | The roles the project's Planners defined, summed by id across its tasks with roles (`since`: those created on or after a day, YYYY-MM-DD): `tasks`, `roles` (each `{id, kinds, tasks, templates, stats}`, `stats` as a task's role has) and `builtin` (`worker`, `reviewer`) in the same tasks; 400 for a `since` that is no day, 404 for an unknown project |
+| `/api/v1/project_roles/stats` | POST | `{project_id, since?}` (`since`: YYYY-MM-DD) returns `{project_id, tasks, roles, builtin}` for tasks with roles created since that day. Each role has `{id, kinds, tasks, templates, stats}`; `builtin` has worker/reviewer stats in the same tasks. 400 for an invalid day, 404 for an unknown project |
 | `/api/projects/:id/skills` | POST | Write a skill: `name`, `description`, `content`, optionally `enabled` (default true): a catalog item installed in the project for the Planner, Workers and Reviewers. Answers 201 with the new `skill` (`skill_id`, `name`, `qualified_name` (`project:<name>`), `description`, `size_bytes`, timestamps) and the project's installs view; 400 with the reason for a bad field or the count cap, 409 for a name the project already has or that another project skill installed there has, 404 for an unknown project |
 | `/api/projects/:id/skills/:skill_id` | GET | One skill the project wrote: `skill` and its `content`, the `SKILL.md` body; 404 for an unknown project or a skill another project wrote |
 | `/api/projects/:id/skills/:skill_id` | PUT | Change any of `name`, `description` and `content` (its switch is on the install: `PUT /api/installs/:id`); answers with the `skill` and the installs view; 400 and 409 as above (a new name must be free in every project the skill is installed in), 404 for an unknown project or a skill another project wrote |
@@ -4304,12 +4309,12 @@ does not imply HTTP compatibility.
 | `/api/agent/v1/ops/:tool` | POST | Call one of the Manager's tools with the JSON body as its arguments, in the Manager's current turn; answers the tool's `status` object with 200, refusals included; only with the Manager's token. With a Planner's token, one of that Planner's tools, for its own task ([A task's Planner's tools](#a-tasks-planners-tools)) |
 | `/api/tasks/:id/title` | PUT | Rename a task, in any status, to `{title}` (normalised to one line of at most 60 characters); answers `{task_id, title}` and notes the change in the task's history as a delivered supplement (`via` `task_page`), which its Planner needs no turn for. Lists, the task page and later notices show the new name; notices already sent are not resent. 400 for a missing, non-string or empty title, 404 for an unknown task |
 | `/api/tasks/:id/requirement` | PUT | Edit the requirement of a task that has not ended to `{requirement}`, kept as a new version (`{task_id, version, requirement}`); a running task's Planner gets it in a `[CHAT]` turn. 400 for an empty or unchanged text or one over 32,000 characters, 404 for an unknown task, 409 for one that ended |
-| `/api/tasks/:id/gates/:step/messages` | GET | A user gate's discussion, oldest first: `{task_id, gate, messages}` (each `{id, role, kind, text, author, via, agenda_item, option, created_at}`); 404 for no such gate |
-| `/api/tasks/:id/gates/:step/messages` | POST | The user writes `{text, agenda_item?, option?}` in the gate (an option of an agenda item, with the item's id), only while it waits for the user: an open gate becomes `discussing`, and the task's Planner is woken. Answers `{task_id, gate, message, delivered}`: `queued` (its Planner takes it next) or `kept` (the task is not running; going on from its plan gives it). 400 for an empty text or one over 8,000 characters, or an option the item does not have; 404 for no such task or gate; 409 for a gate that does not wait for the user or a completed task |
-| `/api/tasks/:id/gates/:step/end` | POST | The user ends the gate's discussion (`{text?}`): the next `[GATE]` turn closes it with the current conclusions. As the POST above |
-| `/api/gates` | GET | The user gates of all tasks, newest opened first: `?state=open` (default: waiting, in a task not completed or cancelled) / `closed` / `all`, `waiting_on=user\|planner` (with `open` only), `project_id`, `limit` (1–200, 50), `offset`; `cursor=<next_cursor>` continues after the previous page (cannot combine with a nonzero `offset`), and `through=<next_cursor>` refreshes through the previously loaded last row, even if that row has closed. `{gates, total, counts: {open, waiting_user, waiting_planner, closed, all}, limit, offset, next_cursor, has_more}` (`next_cursor` is an opaque boundary; `has_more` applies within `through` when given) (`counts` apply `project_id` only); each gate is `{task: {task_id, name, status, group, project_id, project_name}, gate, agenda_open, last_message}`, `gate.waiting_on` as the task page shows it (`user` while the task does not run) |
+| `/api/v1/ops/gates/messages` | POST | `{task_id, gate}` (`gate` is the step label) returns `{task_id, gate, messages}`, oldest first. Each message has `{id, role, kind, text, author, via, agenda_item, option, created_at}`; 404 for an unknown task/gate |
+| `/api/v1/ops/gates/reply` | POST | `{task_id, gate, text, agenda_item?, option?}` writes the user's answer while the gate waits for the user; an open gate becomes `discussing` and wakes its Planner. Returns `{task_id, gate, message, delivered}` (`queued` for a running Planner, else `kept`). 400 for empty/over-8,000-character text or an invalid option; 404 for an unknown task/gate; 409 for a gate not waiting or a completed task |
+| `/api/v1/ops/gates/end` | POST | `{task_id, gate, text?}` ends discussion: the next gate turn closes it with current conclusions. Optional text must be nonempty when supplied. Same result and refusal rules as reply |
+| `/api/v1/ops/gates/list` | POST | `{state?, waiting_on?, project_id?, limit?, offset?}` lists gates newest opened first. `state`: `open` (default, waiting in a task not completed/cancelled), `closed`, `all`; `waiting_on`: `user` or `planner` (open only); limit 1–200 (default 50), offset nonnegative. Returns `{gates, total, counts: {open, waiting_user, waiting_planner, closed, all}, limit, offset}`; counts apply `project_id` only. Each row has `{task: {task_id, name, status, group, project_id, project_name}, gate, agenda_open, last_message}`. No `action`, `cursor` or `through` request fields |
 | `/api/tasks/:id/agents` | PUT | Change the task's own choices per role, together: `profiles` (an Agent Profile by id or name for its `planner`, `worker` or `reviewer`), `concurrency` (how many of its Workers or Reviewers run at once, 1–64) and `system_prompt_modes` (`append` or `replace` for its `planner`, `worker` or `reviewer`; 400 for another role or value), `null` dropping the task's choice of that role; e.g. `{"profiles": {"worker": "claude-code/sonnet"}, "concurrency": {"worker": 2}}`. The same check and write as the Manager's `looper_task_update` and `looper_concurrency` (`projects.set_task_agents`), in one transaction. Answers `{task_id, agents}` (as `GET /api/tasks/:id`), with a `note` on when a new profile applies; a limit it sets lets waiting runs check again. 400 for an unknown field, role, profile or a profile that cannot run its role, a limit other than a whole number from 1 to 64, a `planner` limit (one Planner runs a task, and nothing limits how many tasks run) or an empty body, and nothing is stored then; 404 for an unknown task; 409 for a completed task (a failed, stopped or cancelled one changes, and its restart runs with the new choices) |
-| `/api/tasks/:id/roles/:key` | PUT | The user's edit of a role of the task: `{role_prompt, harness, profile_id, items?}`, the whole definition (the kind stays; `items` left out keeps the current ones), written as a new version by the user with a supplement that tells the Planner (a running one gets it at once); afterwards the Planner cannot change that role. Answers `{task_id, id, kind, version, via, changed}`. 400 for a definition a task role would be refused or one that changes nothing, 404 for an unknown task or role, 409 for a completed task or a role that changed meanwhile |
+| `/api/v1/tasks/role_update` | POST | `{task_id, key, role_prompt, harness, profile_id, items?}` edits a task role as a new user version; kind stays and omitted items keep the current ones. `harness` and `profile_id` are required but nullable. A supplement tells its Planner; afterwards the Planner cannot change that role. Returns `{task_id, id, kind, version, via, changed}`. 400 for an invalid/unchanged definition, 404 for an unknown task/role, 409 for a completed task or concurrent edit |
 | `/api/tasks/:id/start` | POST | Start a ready task (`TASK_START`); it gets its Planner at once, like any start. Answers `{started, project_id}`; 400 unless the task is ready, 404 for an unknown task |
 | `/api/tasks/:id/workspaces/:wid/discard` | POST | Discard a step worktree the task keeps (`active`, `unmerged`, or `discarded` with its branch kept): its directory and branch are deleted, and the activity says so. Answers `{workspace}` (as in `GET /api/tasks/:id`'s `step_workspaces`); 404 for no such worktree in the task, 409 while the task is running or for one that is merging, merged or gone ([Step workspaces](#step-workspaces)) |
 | `/api/tasks/delete` | POST | Delete task (must be stopped first) |
@@ -4323,8 +4328,9 @@ does not imply HTTP compatibility.
 | `/api/managers` | GET / POST | GET: `{managers, max_enabled}`, each Manager with `id`, `name`, `description`, `builtin`, `enabled`, `tools`, `task_scope`, `task_policy`, `system_prompt` (null for the default Manager), `profile_id`, `profile_name`, `templates`, `state` (`running`, `busy`, `healthy`, `sync`: `ok` or `pending` with `sync_error`) and `spend` (`today_usd`, `last_7d_usd`). POST `{key, name, description?, system_prompt, profile_id?, tools?, task_scope?, task_policy?, enabled?}` creates one (201; `tools` defaults to `tasks`, `task_scope` to `own`); 400 for a bad field, 409 when 8 are already enabled or the key was used by a deleted Manager |
 | `/api/managers/:id` | PUT / DELETE | PUT: a partial update (`key` cannot change; the default Manager changes only `name` and `description`, anything else is 400); changing `tools`, `task_scope`, `task_policy` or `enabled` bumps `revision` and applies to the running Manager; `enabled: true` is counted against the limit of 8 (409). DELETE: 409 for the default Manager or one that has tasks (disable it instead), otherwise a soft delete (the row stays so its threads keep their owner) that stops it; a deleted id is 404 |
 | `/api/managers/:id/templates/:key` | PUT / DELETE | Create or replace, or remove, one task template ([Task templates](#task-templates)); 400 names the field that fails, and refuses the default Manager (its task tool takes no template); 404 for a deleted Manager |
-| `/api/clients` | GET / POST | The operator only (a client token is refused). GET: `{clients}` (active ones, newest first), each `{id, name, created_at, last_used_at, revoked_at}`, never the token. POST `{name}` creates an API client and answers 201 with `client` and its `token` (`lpc_…`), shown once; only a hash is stored. 400 for an invalid name, 409 for a taken one; the answer is `Cache-Control: no-store` |
-| `/api/clients/:id` | DELETE | The operator only: revoke the client (`{revoked}`); its token stops working at once. 404 for an unknown or already revoked id |
+| `/api/v1/clients/list` | POST | Operator only; `{}` returns `{clients}` (active, newest first), each `{id, name, created_at, last_used_at}`; no token, hash or `revoked_at`. All client-management responses use `Cache-Control: no-store`; a client token gets 403 `forbidden` |
+| `/api/v1/clients/create` | POST | Operator only; `{name}` (trimmed, 1–40 characters) returns `{client, token}`. The token is shown once; only its hash is stored. 200 `OpOk`, never 201; 400 `invalid` for a bad name, 409 `conflict` for an active name already taken |
+| `/api/v1/clients/revoke` | POST | Operator only; `{client_id}` returns `{revoked}` (the id); its token stops working immediately. 404 `not_found` for an unknown or already revoked id |
 | `/api/v1/openapi.json` | GET | The OpenAPI document of the public API, generated from the ops catalog ([The public API (v1)](#the-public-api-v1)) |
 | `/api/v1/whoami` | GET | Who the token calls as (`operator` or the client) and the Looper version |
 | `/api/v1/ops/<tool>/<action>` | POST | One operation per ops tool action (a tool without actions: `/api/v1/ops/<tool>`); the body is the tool's arguments. Answers 200, 202 or a typed error |
@@ -4332,15 +4338,16 @@ does not imply HTTP compatibility.
 | `/api/v1/chat/send` | POST | `{text, conversation_id?, manager_id?, language?}`: talk to the Manager; the answer is a server-sent event stream |
 | `/api/v1/chat/messages` | POST | `{conversation_id, after?, limit?}`: read one conversation of this client, oldest first, by cursor |
 | `/api/v1/chat/conversations` | POST | List this client's conversations |
-| `manager` parameters of the chat and session routes | | Without one every route is the default Manager's, as before. `GET /api/manager/session?manager=<id>` and `PUT /api/manager/session/profile` (body `manager`) act on that Manager's session; `POST /api/v1/operator_chat/sessions` (body `manager`) lists its threads (404 for an unknown or deleted Manager); `POST /api/v1/operator_chat/send` takes `target` `{"kind": "manager", "id": "<id>"}` (409 when the thread belongs to another Manager) and `new_session_profile_id` for any Manager's `/new`; `GET /api/chat/turn` finds the Manager from the thread's owner and `POST /api/chat/stop` looks for the `message_id` in every Manager; `POST /api/v1/operator_chat/targets` lists the Managers first, each with its `name`; `GET /api/tasks` and `/api/tasks/:id` add `manager_id`, `manager_name` and `template`; `GET /api/status` adds `managers` (`id`, `healthy`, `busy`, `turn_binding`) |
+| `manager` parameters of the chat and session routes | | Without one every route is the default Manager's, as before. `GET /api/manager/session?manager=<id>` and `PUT /api/manager/session/profile` (body `manager`) act on that Manager's session; `POST /api/v1/operator_chat/sessions` (body `manager`) lists its threads (404 for an unknown or deleted Manager); `POST /api/v1/operator_chat/send` takes `target` `{"kind": "manager", "id": "<id>"}` (409 when the thread belongs to another Manager) and `new_session_profile_id` for any Manager's `/new`; `GET /api/chat/turn` finds the Manager from the thread's owner and `POST /api/chat/stop` looks for the `message_id` in every Manager; `POST /api/v1/operator_chat/targets` lists the Managers first, each with its `name`; `GET /api/tasks` and `/api/tasks/:id` add `manager_id`, `manager_name` and `template`; `POST /api/v1/system/status` adds `managers` (`id`, `healthy`, `busy`, `turn_binding`) |
 | `/api/v1/operator_chat/targets` | POST | The Manager, then per recent task its Planner and step Workers/Reviewers, with `can_send` (and `task_role` for one that ran as a role) |
 | `/api/v1/operator_chat/sessions` | POST | The Manager's conversations on every channel (Planner threads left out), the 50 most recently active first; body `session_id` reads only that conversation, however old (an empty list when absent, 409 naming its Manager when it belongs to another). Each has `session_id` (`<channel>:<chat id>` for Lark and Telegram), `channel`, `message_count`, `first_message_at`, `last_message_at`, `last_role` and the first 200 characters of the last message (`last_content`); typed `unavailable` when they cannot be read |
 | `/api/v1/operator_chat/messages`, `/api/v1/operator_chat/save_message` | POST | Operator-only chat history, with typed v1 result/error envelopes. `messages` takes `session_id` and optional `manager`, and returns the session's newest 200 messages, oldest first, each with its `channel`; a foreign thread returns 409 with `error.details.manager_id`. `save_message` takes `session_id`, `message_id`, `role` and `content`, and is idempotent per message id. Persistence failure now returns typed `unavailable` instead of claiming success. The server saves both sides of a web chat: the message when it is sent, and its answer when it comes (`<message_id>:reply`), whether or not a page still reads its stream; the answer is also pushed to the chat's open pages (`chat.message`), so a page opened again before it came shows it |
-| `/api/roles` | GET | List the role configs: `configs`, one per role, each keyed by `role` |
-| `/api/roles/:role` | GET/PUT | One role's config; PUT changes the fields given. `harness_prompt`, `model` and `max_concurrency` are agent settings (400 naming the role's endpoint); `runtime` and `llm_profile_id` were removed (400); 404 for an unknown role |
-| `/api/roles/:role/reset-prompt` | POST | Reset the role prompt to the recommended one |
-| `/api/agent-settings` | GET | The agent settings outside projects: `system` and `roles` (all four), each with `values` (that layer's own: `harness_prompt`, `profile_id` (an Agent Profile's id), `env` as `[{key, value}]`, `run_budget_usd`, `max_concurrency`; `null` = not set) and `effective` (what applies, each field with its `source` layer; the profile as `profile`: `{profile_id, name, model, effort, runtime, provider}`; `effort` is the profile's, source `profile`, or `builtin` (null) when it has none; the Workers and Reviewers also `max_concurrency`, the default for every task, source `role` or `builtin`), and `limits` (with `builtin_profile`: `{profile_id, name}`, and `concurrency_max`) |
-| `/api/agent-settings/system` | PUT | Set the system layer. Each layer's PUT changes the fields given (`null` or `""` unsets one; `env` replaces the layer's list, a `null` value unsetting a variable outside the system layer; the built-in harness text unsets the system harness) and answers with the GET view. 400 for an unknown field, `model` (part of the Agent Profile), `effort` (part of the Agent Profile: "choose or create a profile with the effort you want"), an unknown profile or one that cannot run the layer's roles, a harness over 20000 characters, a bad cap, a bad, credential-like or 51st variable, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` (each Agent Profile's agent teams switch owns it), or a `max_concurrency` that is not a whole number from 1 to 64 or is on a layer other than the Worker's or the Reviewer's role layer (concurrency is per task: a project, a role in a project and the Planner have none); nothing is stored then. A role's PUT that sets `max_concurrency` then has the WorkerPool start what the new limit lets start |
+| `/api/v1/roles/list` | POST | `{}` returns `{configs}`, one global role config per role |
+| `/api/v1/roles/get` | POST | `{role}` returns one global role config (`manager`, `planner`, `worker`, `reviewer`) |
+| `/api/v1/roles/update` | POST | `{role, fields}` patches `display_name`, `enabled`, `system_prompt`, `max_turns`, `timeout_seconds`, `extra_args` or `metadata`; returns the role config. Read-only/unknown fields, removed `runtime`/`llm_profile_id` and misplaced `harness_prompt`/`model`/`max_concurrency` return 400. Use agent settings and select model through `profile_id` |
+| `/api/v1/roles/reset_prompt` | POST | `{role}` restores its recommended prompt and returns the role config; 404 if no config or recommended prompt exists |
+| `/api/v1/agent_settings/get` | POST | `{}` returns `system`, `roles` (all four) and `limits`. Each layer has its own `values` (`harness_prompt`, `profile_id`, `env`, `run_budget_usd`, `max_concurrency`, `boundaries`, optional `system_prompt_mode`; null means unset) and `effective` fields with value/source. Effective profile has `{profile_id, name, model, effort, runtime, provider}`; effort comes from the profile. Worker/reviewer effective concurrency is a per-task default. Limits include `builtin_profile` and `concurrency_max` |
+| `/api/v1/agent_settings/update_system` | POST | `{values}` patches shared defaults and returns the settings view; client confirmation required. `values` contains only the changed layer fields; see layer rules below |
 | `/api/registry` | GET | `runtime_types` (each with `can_interrupt`: whether its Manager or Planner session ends a turn on request), `vendor_types`, saved `runtimes`, `providers`, `models`, `profiles`, built-in `prices` and `limits`. Providers expose endpoints/counts and a masked key, models expose price override/effective/source, profiles expose `model_id`, structured `model`, derived provider, roles, usage and cost warnings |
 | `/api/runtimes/:id/probe` | POST | Re-detect: probe again and record the version, capabilities or error; for `rt-<type>` of a type not found yet, look for it on the server's PATH and add its built-in runtime (404 when it is not there). Runtimes are built in: there is no route to register, change or delete one |
 | `/api/v1/provider_accounts/list`, `/api/v1/provider_accounts/create` | POST | Operator only. `list {}` returns `{providers}`. `create {name, vendor_type, endpoints?: [{protocol, base_url}], env?, max_concurrency?, api_key?}` returns `{provider, warnings}` (custom/self-hosted vendors require explicit endpoints; others may use vendor defaults). Unknown fields and invalid endpoints return 400; duplicate name 409. Results use the v1 `result` envelope; credentials never enter the audit trail, and credential errors omit request details |
@@ -4348,9 +4355,11 @@ does not imply HTTP compatibility.
 | `/api/models` | GET/POST | GET `{models}` filtered by `provider_id` and/or `runtime_id`. POST `{provider_id, name, protocol, context_window?, input_usd_per_mtok?, output_usd_per_mtok?, cache_read_usd_per_mtok?, cache_write_usd_per_mtok?, efforts?, background_model?}`; 201 `{model, warnings}`. Exact endpoint required; duplicate identity 409 |
 | `/api/models/:id` | GET/PUT/DELETE | GET `{model}`; PUT changes model settings, not provider/name/protocol, and revalidates referencing profiles; DELETE 409 while referenced. Built-in writes 400; missing model 404 |
 | `/api/v1/provider_accounts/clear_login_problem` | POST | Operator only, `{provider_id}`. After checking login status, clear the selected account’s recorded login problem; answers with `{provider}` in the v1 `result` envelope. Returns 400 when the account has no supported login |
-| `/api/agent-profiles` | POST | `{name, runtime_id, model_id, effort?, agent_teams?, custom_prompt?}`; 201 `{profile, warnings}`. Runtime/protocol/auth/login ownership must match; provider and string model input are rejected, as is profile `system_prompt_mode` |
-| `/api/agent-profiles/:id` | PUT/DELETE | Change a profile (checked like a new one, and for every role it is selected for; answers with `profile` and `warnings`); delete (409 while a layer or a task selects it, naming where). 400 for the built-in one |
-| `/api/agent-settings/roles/:role` | PUT | Set one role's layer (`manager`, `planner`, `worker`, `reviewer`; 404 for another) |
+| `/api/v1/profiles/create` | POST | `{name, runtime_id, model_id, effort?, agent_teams?, custom_prompt?}` returns `{profile, warnings}` in 200 `OpOk`. Runtime/protocol/auth/login ownership must match; provider and string model input and profile `system_prompt_mode` are rejected (400); duplicate name 409 |
+| `/api/v1/profiles/update` | POST | `{profile_id, fields}` patches name, runtime_id, model_id, effort, agent_teams or custom_prompt; fields must be nonempty. Checked as create and for each selected role; returns `{profile, warnings}`. Built-in writes 400; unknown profile 404 |
+| `/api/v1/profiles/delete` | POST | `{profile_id}` returns `{deleted}`. Built-in writes 400; missing profile 404; 409 while selected by a layer, task or allowlist, naming where. Clients confirm; usage is checked again at execution |
+| `/api/v1/profiles/prompt_preview` | POST | `{profile_id, role, project_id?}` returns the profile/role/runtime, prompt modes and sources, custom-prompt flag, prompt hash, layers, blocks and notes; no runtime starts and no files are written. Unknown profile/project 404, invalid role/body 400 |
+| `/api/v1/agent_settings/update_role` | POST | `{role, values}` patches a global role layer and returns the settings view. Roles are `manager`, `planner`, `worker`, `reviewer`; an invalid role is 400. Setting worker/reviewer `max_concurrency` rechecks waiting runs; client confirmation rules are below |
 | `/api/catalog` | GET | The catalog: `items` (`item_id`, `kind`, `name`, `qualified_name` (how agents name it), `origin`, `owner_project_id`, `owner_project_name`, `description`, `source`, `version`, `sha256`, `size_bytes`, `file_count`, timestamps and `installs`), `installed_count`, `total_bytes`, `last_import` (counts, `added`, `updated`, `removed`, `unchanged`, `skipped`), `roles`, `task_roles` (the roles an install may name, each ending with `task_role`) and `caps` |
 | `/api/catalog/:id` | GET | One item: `item` (as in the list), `files` (`path`, `size_bytes`, `executable`; no content) and, for a skill, `skill_md`; 404 for an unknown item |
 | `/api/catalog/import` | POST | Import or re-import this machine's enabled plugins and personal skills (read-only towards `~/.claude`); new items are installed nowhere. Answers with the catalog. 400 without a Claude Code configuration, with an unreadable `settings.json` or over the 128 MiB cap (nothing changes then) |
@@ -4377,8 +4386,9 @@ ops/services; these dashboard read projections add no model-facing tools.
 | `/api/v1/scheduler_settings/get`, `/api/v1/scheduler_settings/update` | POST | The scheduler's system settings: `{min_interval_seconds, run_timeout_seconds}`, each `{value, source, built_in, minimum, ...}` with `source` `setting`, `env` (the deprecated variable, for the minimum interval) or `built-in`; the first also has `gated_value`, the second `maximum`. Update takes either or both as a whole number of seconds (the timeout at most 30 days), or `null` to restore the fallback (the deprecated minimum-interval variable, else the built-in); 400 with the reason for anything else, nothing changed. The configuration export carries the stored values as `settings.scheduler`, and the Manager's `looper_settings` has the action `scheduler` (the user confirms). Get takes `{}`. Results use `OpOk.result`; updates execute once for operators, require confirmation for clients, and revalidate before execution. |
 | `/api/v1/knowledge_vault/get`, `/api/v1/knowledge_vault/update` | POST | The knowledge vault: `{configured, path, writable, rules_file, git, problem}`. Update takes `{path, writable, rules_file}` (checked as [The knowledge vault](#the-knowledge-vault-the-operators-notes-read-and-written-through-looper) says; 400 with the reason), or `{path: null}` to turn it off. Get takes `{}`. Results use `OpOk.result`; updates execute once for operators, require confirmation for clients, and revalidate before execution. |
 | `/api/v1/gate_settings/get`, `/api/v1/gate_settings/update` | POST | Where the user gates of a task asked for on the dashboard or in the web chat go besides the task page: `{dashboard_target: {channel, chat} \| null, targets}`, `targets` the chats a channel's sender allowlist lets in (as a schedule's notify target), and `dashboard_target_problem` when the saved chat no longer is one (the gates then go to the task page only). The get body is `{}`; update takes `{dashboard_target}` (null clears it), executes once for operators and requires same-session confirmation for clients, and rechecks the target at execution. Results use `OpOk.result`; typed 400 for a chat that is not one of them, or on a channel that is off ([User gates](#user-gates)) |
-| `/api/tasks/:id/waits/:step/resume` | POST | Ignore the body; move a `waiting` step to `ready`, outcome `resumed`, record activity and wake its Planner when running. Returns `{task_id, wait}`; 404 for an unknown task or wait, 409 for a completed/cancelled task, a non-waiting row or a concurrent move |
-| `/api/tasks/:id/waits/:step/cancel` | POST | Ignore the body; move a `waiting` step to `cancel_requested`, record activity and wake its Planner to decide what follows. Same response and refusal rules as resume; `timed_out` and `cancel_requested` explain that the Planner decides next |
+| `/api/v1/waits/resume` | POST | `{task_id, step}` moves a waiting step to ready, outcome resumed, records activity and wakes its running Planner. Returns `{task_id, wait}`; 404 for an unknown task/wait, 409 for a completed/cancelled task, non-waiting row or concurrent move |
+| `/api/v1/waits/cancel` | POST | `{task_id, step}` moves a waiting step to cancel_requested, records activity and wakes its Planner to decide what follows. Same result and refusal rules as resume |
+| `/api/v1/tasks/room_view` | POST | `{task_id, kind?, from?, unanswered?, after?, limit?}` returns `{enabled, counts, by_step, seats, messages, more, consults}`. Messages are oldest first with `answered` and `cc_planner`; `after` is a nonnegative message id, `limit` 1–500 (default 500). 400 for invalid filters, 404 for an unknown task |
 | `/api/v1/wait_settings/get`, `/api/v1/wait_settings/update` | POST | `{max_wait_seconds, min_check_seconds}`, each `{value, default, min, max, source}` (`setting` or `built-in`). Update takes one or both whole numbers of seconds, or `null` to restore the built-in; 400 for an invalid range or a minimum check interval above the maximum wait, with no changes stored. Get takes `{}`. Results use `OpOk.result`; updates execute once for operators, require confirmation for clients, and revalidate before execution. |
 | `/api/v1/channel_configs/list` | POST | List channels, each with `start_problem`: why it does not start as configured (an empty or invalid sender allowlist), else null, and `manager_id`, `manager_name` and `builtin` (true for the three built-in rows) |
 | `/api/v1/channel_configs/create` | POST | Add a bot for a Manager: `channel_type`, `manager_id`, `bot_token`, `config`, `enabled` (default false) and `display_name`; the row is `channel-<type>-<n>` (`channel_bot_seq`), returned as get shows it. Create/update are operator-only credential operations. All results use `OpOk.result`; delete executes once for the operator and requires same-session confirmation for clients. 409 when the same bot is already added, 400 for a bad body (a Telegram or bot-token bot needs its token, a lark-cli bot its `profile`, a bot-token bot its `app_id`), 404 for an unknown Manager |
@@ -4387,16 +4397,85 @@ ops/services; these dashboard read projections add no model-facing tools.
 | `/api/v1/channels/people` | POST | `{channel_type: "lark" \| "lark_bot", channel_id?, q}` searches a name or email (1–50 characters). `OpOk.result` has `people` (`open_id`, `name`, `email`, `department`) and `complete` (true when lark-cli omits it; false when the bot-token directory scan stops early). Typed 400 for invalid queries, 404 for unknown or wrong-type channels and 503 `unavailable` when lookup fails |
 | `/api/v1/channel_configs/get`, `/api/v1/channel_configs/update` | POST | Channel config. Get takes `{channel_id}`; update takes `{channel_id, fields}` and validates the sender allowlist (`allowed_user_ids` for Telegram, `allowed_open_ids` for Lark) and stores it as a list; typed 400 for invalid input, without credential details or partial writes; 404 for an unknown channel. A `manager_id` in `fields` must equal the stored one (400 otherwise): a bot's Manager cannot change |
 
+### Migrated settings and interaction requests
+
+The v1 rows above take JSON bodies, including reads (`{}` when no fields are needed).
+Their successful projections are inside 200 `OpOk.result`, never bare objects or 201 creates.
+Failures use `OpError`: 400 `invalid`, 403 `forbidden`, 404 `not_found`, 409 `conflict`,
+or 503 `unavailable` when execution is unavailable; authentication failures are 401 `unauthorized`.
+The generated OpenAPI document is authoritative for required fields and result schemas.
+
+For global and project setting updates, put layer fields inside `values`; role-config and profile
+patches instead use `fields`. Layer patches change only supplied fields. Null or an empty string unsets
+a layer field; `env` replaces the list of `{key, value}` entries (a null value unsets a variable outside
+the system layer). The built-in harness text unsets the system harness. A profile's model and effort
+are selected through `profile_id`, never written directly to a layer. Invalid fields/profiles, a harness
+over 20,000 characters, invalid spend caps, credential-like variables, more than 50 variables or
+`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` return 400 without partial writes. Concurrency is 1–64 and
+belongs only to global worker/reviewer role layers, not project layers or manager/planner layers.
+
+Operators execute these writes in one call, using the dashboard's existing dialogs. Clients receive
+202 `needs_confirmation` for shared-default updates, concurrency updates, raised/lifted effective spend
+caps, profile deletion and role-template deletion; confirm with `POST /api/v1/confirm` in the same
+client/session. Gate replies/end and wait controls execute directly. Client management is operator-only,
+with `Cache-Control: no-store` on responses; never log its one-time create token.
+
+The following request bodies illustrate the field nesting. Identifiers are placeholders for existing
+resources, not credentials; these are schema examples, not records of executed HTTP requests.
+
+`POST /api/v1/roles/update`:
+
+```json
+{"role": "worker", "fields": {"timeout_seconds": 600}}
+```
+
+`POST /api/v1/agent_settings/update_role`:
+
+```json
+{"role": "worker", "values": {"system_prompt_mode": "append"}}
+```
+
+`POST /api/v1/project_agent_settings/update_role`:
+
+```json
+{"project_id": "project-example", "role": "worker", "values": {"run_budget_usd": 2}}
+```
+
+`POST /api/v1/role_templates/put`:
+
+```json
+{"project_id": "project-example", "key": "tester", "kind": "work", "description": "", "role_prompt": "Check the requested behavior.", "harness": null, "profile_id": null, "items": []}
+```
+
+`POST /api/v1/ops/gates/reply`:
+
+```json
+{"task_id": "task-example", "gate": "approval", "text": "Proceed with the proposed change."}
+```
+
+`POST /api/v1/profiles/update`:
+
+```json
+{"profile_id": "profile-example", "fields": {"custom_prompt": "Explain verification results."}}
+```
+
+`POST /api/v1/clients/revoke`:
+
+```json
+{"client_id": "client-example"}
+```
+
 ### The public API (v1)
 
 `GET /api/v1/openapi.json` is the one description of what a program may do with Looper. It is generated from the ops
 catalog ([The Manager's platform tools](#the-managers-platform-tools)), so a new ops tool becomes an operation without
 other code; a tool with several actions is split into one operation per action, each with its own request and answer
 schema. The document also includes typed operations for `auth.set_password`,
-`auth.clear_password`, `system.check` and `config.export` / `config.import_preview` / `config.import_apply`
-(stage 2a). Other dashboard routes have not yet been migrated to v1.
+`auth.clear_password`, `system.check`, configuration transfer and migrated dashboard domains, including
+status, global/project settings, profiles, role templates, task interactions and operator-only client management.
+The table above also lists legacy domains that have not yet migrated; the generated document covers only v1.
 
-- **Answers.** 200 is the result. 202 means the operation needs a confirmation (`status: needs_confirmation` with a
+- **Answers.** 200 is `{status: "ok", result: ...}` (`OpOk`), with optional `notes`. 202 means the operation needs a confirmation (`status: needs_confirmation` with a
   `confirmation_id`) or was accepted and continues. A failure is a typed error, `{status: "error", error: {code,
   message}}`, with the HTTP status of its code: `invalid` 400, `unauthorized` 401, `forbidden` 403, `not_found` 404,
   `conflict` 409, `expired` 410, `rate_limited` 429, `unavailable` 503.
@@ -4406,7 +4485,7 @@ schema. The document also includes typed operations for `auth.set_password`,
   when the server restarts.
 - **Credentials are the operator's.** `auth.set_password` and `auth.clear_password` accept only an operator token,
   cookie or password session; a client token gets 403 `forbidden`, without any credential change. API client
-  management (`/api/clients`) is also operator-only. A client token never yields an operator session or a cookie.
+  management (`POST /api/v1/clients/{list,create,revoke}`) is also operator-only. A client token never yields an operator session or a cookie.
 - **Local operations over v1.** `system.check` returns the self-check results, including pg_dump. Configuration
   export and import share their implementation with the existing routes and `looper_config_export`;
   `config.import_preview` stages a document and returns an import id, and `config.import_apply` requires a
@@ -4434,7 +4513,11 @@ the token only to that URL and never follows a redirect.
 - **Commands.** Each operation of `/api/v1/openapi.json` becomes a command at run time, so a new operation needs no
   command-line code; `loopercli --help` lists them. Hand-written are `login`, `confirm`, `chat`, `wait` and `skill`, and
   the aliases `list`, `status`, `pipeline`, `start` and `stop` for the common task operations; stage 2a adds
-  `auth set-password` / `clear-password`, `doctor` and `config export` / `import`. Output is a table;
+  `auth set-password` / `clear-password`, `doctor` and `config export` / `import`. Generated client-management
+  commands are `loopercli clients list`, `loopercli clients create --name NAME` and
+  `loopercli clients revoke --client-id ID`. They require operator authentication via `--url URL` and
+  `--operator-token-file PATH` (default stdin), never save that token, and create prints the new client token once.
+  Output is a table;
   `--json` prints the answer for scripts. `--session` (or `$LOOPER_SESSION`) sets `X-Looper-Session`.
 - **Exit codes.** 0 done, 1 error, 2 usage, 3 needs confirmation (the pending id is printed; run `loopercli confirm ID`),
   4 Looper unreachable or the client file unusable, 6 `wait` timed out.

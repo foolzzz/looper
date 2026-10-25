@@ -129,7 +129,7 @@ Settings does both too, under "Move to another machine".
 
 ```bash
 uv run looper service install     # --port, --runtime-root, --config, --label, --env NAME
-uv run looper service status      # installed, running, PID, last exit, log, GET /api/status
+uv run looper service status      # installed, running, PID, last exit, log, POST /api/v1/system/status
 uv run looper service restart     # e.g. after pulling new code
 uv run looper service uninstall
 ```
@@ -276,20 +276,22 @@ release wheel serves the copy packaged with it.
 
 ### HTTP API
 
-The API answers only the operator: the dashboard signs in when opened in a browser
-on this machine (a browser elsewhere signs in with the user name and password set by `looper auth set-password`); other clients send
-the token from `<runtime root>/operator-token`.
+The dashboard uses operator authentication: a local browser signs in automatically; a remote browser uses the
+user name and password set by `looper auth set-password`. Programs use an operator Bearer token or an API client
+token; client management is operator-only. Migrated v1 operations below use POST with a JSON body and return
+200 `{status: "ok", result: ...}` (`OpOk`), or a typed error; see the reference for client confirmations.
 The main route groups:
 
 | Group | Endpoints | Purpose |
 |---|---|---|
-| Status | `GET /api/status`, `GET /api/overview` | System health and the startup self-check (`checks`); the Dashboard's overview of what is happening now |
+| Status | `POST /api/v1/system/status`, `GET /api/overview` | System health and the startup self-check (`checks`); the Dashboard's overview of what is happening now |
 | Projects | `/api/projects`, `/api/projects/:id`, `/api/projects/:id/knowledge/...` | Create, edit and delete projects; their knowledge documents and drafts |
 | Tasks | `/api/tasks`, `/api/tasks/create`, `/api/tasks/:id/...`, `/api/tasks/{start,stop,cancel,delete}` | List and create tasks (in a project, with optional `profile_overrides`), read one, start, stop, cancel, delete; activity and its SSE stream |
 | Schedules | `POST /api/v1/schedule_admin/<action>` | Create, edit, enable and delete a project's schedules; list every project's; run one now; its run history and messages; a rule's next fire times |
 | Catalog and installs | `/api/catalog/...`, `/api/installs/...`, `/api/projects/:id/installs`, `/api/projects/:id/skills/...` | Plugins, skills and MCP servers: import, upload, git, write, edit, delete; install them globally or in a project |
-| Agent settings | `/api/agent-settings/...`, `POST /api/v1/project_agent_settings/{get,update,update_role}`, `/api/roles/...` | The settings layers, each field with its effective value and source; each role's prompt and limits |
-| Registry | `GET /api/registry`, `/api/runtimes/:id/probe`, `POST /api/v1/provider_accounts/...`, `/api/agent-profiles/...` | Runtime types and the built-in runtimes (Re-detect probes one); register, edit and delete providers (API keys masked) and Agent Profiles, each with where it is used |
+| Agent settings | `POST /api/v1/agent_settings/{get,update_system,update_role}`, `POST /api/v1/project_agent_settings/{get,update,update_role}`, `POST /api/v1/roles/{list,get,update,reset_prompt}` | The settings layers, each field with its effective value and source; each role's prompt and limits |
+| Allowed profiles | `POST /api/v1/allowed_profiles/{get,replace}` | Read or replace a project's Planner profile allowlist; an empty list is unrestricted |
+| Registry | `GET /api/registry`, `/api/runtimes/:id/probe`, `POST /api/v1/provider_accounts/...`, `POST /api/v1/profiles/{create,update,delete,prompt_preview}` | Runtime types and the built-in runtimes (Re-detect probes one); register, edit and delete providers (API keys masked) and Agent Profiles, each with where it is used |
 | Configuration transfer | `POST /api/v1/config/export`, `/api/v1/config/import_upload`, `/api/v1/config/import_apply`, `/api/v1/config/import_cancel` | Download the configuration file; upload one, preview it, then apply or cancel |
 | Chat | `/api/v1/operator_chat/{send,targets,sessions,messages,save_message,reply_events,thread_events}` | Talk to the Manager or a running task's Planner; the Manager's conversations by channel; history and SSE stream |
 | Runs | `POST /api/v1/runs/{list,get,events,for_task,usage}` | Every agent run with its launch command, usage, cost and events; one agent's spending and context |
