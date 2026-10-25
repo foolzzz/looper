@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.95] - 2026-10-24
+
+### Fixed
+
+- **The Manager keeps ownership of a user turn through startup and shutdown.** Messages queued before the Manager's consumer exists (channel messages, journal replay) now get turn tokens when it starts, and a `/stop` among them is handled by code and never reaches the model; later messages from the same chat are registered after it. A `/stop` that reaches the message loop takes the same code path. A bridge write while the turn's events drain no longer clears the binding early: it is cleared when the turn is drained or boundedly abandoned, even if closing the run record is cancelled. When the message task is cancelled mid-turn, the turn is settled and its event handling abandoned, and the resident process is left to `ManagerAgent.stop` instead of being forgotten by repeated cancels. Behavior change for users: a queued or cancelled-turn `/stop` is honoured reliably. Model-visible: none. ([#557](https://github.com/foolzzz/looper/pull/557))
+
 ## [2.13.94] - 2026-10-24
 
 ### Fixed
