@@ -8,8 +8,7 @@
 # PI_EVAL_RESPONSES_TASKS_JSON / PI_EVAL_RESPONSES_DIALOGS_JSON
 # PI_EVAL_DEEPSEEK_TASKS_JSON / PI_EVAL_DEEPSEEK_DIALOGS_JSON
 # Paths must be in this checkout's ignored .local/ or evals/runs/ directories.
-# Launch in the background, e.g. bash examples/pi/eval-prompt-comparison.sh \
-#   > .local/pi-prompt-comparison.log 2>&1 &
+# Run in the foreground: bash examples/pi/eval-prompt-comparison.sh
 # One shared deadline (default/max 1500 seconds) and spending cap cover all tiers.
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -44,6 +43,15 @@ started = time.monotonic()
 tasks = "single_step,dependent_steps,reviewed_step,room_interface,room_consult,operator_notes,planner_plan_file,vault_closeout_keeps,vault_closeout_nothing"
 planner = "dependent_steps,room_interface,room_consult,operator_notes,planner_plan_file,vault_closeout_keeps,vault_closeout_nothing"
 dialogs = "status,confirm_create_start,config_tools,cancel_confirmation"
+tiers = (
+    ("tasks-sonnet", "tasks", tasks, "sonnet", 2, [], "real-sonnet.json"),
+    ("planner-opus", "tasks", planner, "opus", 1, [], "real-opus.json"),
+    ("dialogs-sonnet", "dialogs", dialogs, "sonnet", 2, [], "dialogs-real-sonnet.json"),
+    ("manager-opus", "dialogs", dialogs, "sonnet", 1,
+     ["--manager-model", "opus", "--manager-effort", "xhigh"], "dialogs-real-opus.json"),
+)
+total = sum(len(ids.split(",")) * reps for _, _, ids, _, reps, _, _ in tiers)
+distinct = len(set(tasks.split(",")) | set(planner.split(",")) | set(dialogs.split(",")))
 
 
 def note(text):
@@ -51,7 +59,7 @@ def note(text):
         handle.write(text + "\n")
 
 
-note("定向对照：13 个不同 case；四档共 48 个 case/rep；未执行项均为 unverified。")
+note(f"定向对照：{distinct} 个不同 case；四档共 {total} 个 case/rep；未执行项均为 unverified。")
 note("范围：runtime_notes/pi.py 最终答复契约 → single_step,reviewed_step；context/_prompt_text → operator_notes,vault_closeout_*；schema/工具桥 → dependent_steps,room_*,planner_plan_file；Manager 工具 → status,confirm_create_start,config_tools,cancel_confirmation。")
 note("依据：RFC §6；evals/README.md Which tier to run / compare。共享 runner 不写入新档位。")
 note("共享模型可见变化审查：unverified，需对照基线 commit 的共享 prompt/contract；pi 专属说明仍需独立真实 profile 评测。")
@@ -79,7 +87,7 @@ def money(name):
 
 
 if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
-    fail("ANTHROPIC_API_KEY missing; Claude CLI 对照 0/48，真实通过 0、失败 0、未验证 48")
+    fail(f"ANTHROPIC_API_KEY missing; Claude CLI 对照 0/{total}，真实通过 0、失败 0、未验证 {total}")
 remaining = money("PI_EVAL_TOTAL_CAP_USD")
 case_budget = money("PI_EVAL_CASE_BUDGET_USD")
 if case_budget > remaining:
@@ -138,35 +146,35 @@ def bounded(argv, log):
         return asyncio.run(run())
 
 
-def read_report(path, phase, ids, *, model=None):
+def read_report(path, phase, ids, reps, *, model=None):
     data = json.loads(path.read_text(encoding="utf-8"))
     rows = data.get(phase, [])
-    expected = {(case, rep) for case in ids.split(",") for rep in (1, 2)}
-    found = [(row["id"], row.get("rep", 1)) for row in rows]
-    if data.get("mode") != "real" or data.get("aborted"):
+    expected = {(case, rep) for case in ids.split(",") for rep in range(1, reps + 1)}
+    found = [(row["id"], row["rep"]) for row in rows]
+    if data.get("mode") != "real" or data.get("aborted") or data.get("stopped_by_cap"):
         raise ValueError("not a completed real report")
     if not expected.issubset(set(found)) or len(found) != len(set(found)):
         raise ValueError("missing or duplicate selected case/reps")
+    if model and set(found) != expected:
+        raise ValueError("unexpected Claude case/reps")
     if model and (data.get("model") != model or data.get("agent") != "claude-code/" + model):
         raise ValueError("unexpected Claude model")
     if not model and not str(data.get("agent", "")).startswith("pi/"):
         raise ValueError("not an independent pi profile report")
-    return data, [row for row in rows if (row["id"], row.get("rep", 1)) in expected]
+    selected = [row for row in rows if (row["id"], row["rep"]) in expected]
+    if any(row.get("skipped") for row in selected):
+        raise ValueError("skipped selected case/reps")
+    return data, selected
 
 
 status = 0
-for label, phase, ids, model, extra, baseline in (
-    ("tasks-haiku", "tasks", tasks, "haiku", [], "real-haiku.json"),
-    ("planner-opus", "tasks", planner, "opus", [], "real-opus.json"),
-    ("dialogs-haiku", "dialogs", dialogs, "haiku", [], "dialogs-real-haiku.json"),
-    ("manager-opus", "dialogs", dialogs, "haiku", ["--manager-model", "opus", "--manager-effort", "xhigh"], "dialogs-real-opus.json"),
-):
+for label, phase, ids, model, reps, extra, baseline in tiers:
     if remaining < case_budget:
         fail("remaining budget below case reservation; remaining tiers 未验证")
     output = run / label
     output.mkdir()
     argv = command + ["run" if phase == "tasks" else "dialogs", "--mode", "real", "--model", model,
-        "--reps", "2", "--jobs", "4", "--case-budget-usd", str(case_budget),
+        "--reps", str(reps), "--jobs", "4", "--case-budget-usd", str(case_budget),
         "--max-budget-usd", str(case_budget), "--total-cap-usd", str(remaining), "--pg-url", pg,
         "--out-dir", str(output), "--tasks" if phase == "tasks" else "--dialogs", ids,
         "--task-timeout" if phase == "tasks" else "--timeout", "180", *extra]
@@ -177,8 +185,8 @@ for label, phase, ids, model, extra, baseline in (
         if len(paths) != 1:
             raise ValueError("missing or ambiguous fresh report")
         report = paths[0]
-        data, rows = read_report(report, phase, ids, model=model)
-        if phase == "dialogs" and (data.get("manager_model") or model) != ("opus" if extra else model):
+        data, rows = read_report(report, phase, ids, reps, model=model)
+        if phase == "dialogs" and data.get("manager_model") != ("opus" if extra else model):
             raise ValueError("unexpected Manager tier")
         cost = Decimal(str(data["total_cost_usd"]))
         costs = [Decimal(str(row["cost_usd"])) for row in data[phase]]
@@ -197,8 +205,17 @@ for label, phase, ids, model, extra, baseline in (
              + " ".join(f"{key}={row.get(key, 'unverified')}" for key in (
                  "error_class", "planner_denials", "planner_modified_files", "planner_edit_tool_paths", "planner_changed_files")))
     base = root / "evals/prompt_regression/baselines" / baseline
-    if bounded(command + ["compare", str(report), str(base)], output / "baseline-compare.txt"):
-        fail(label + " baseline compare failed")
+    if not base.exists():
+        note(label + " baseline: unverified（missing " + baseline + "）")
+    else:
+        base_data = json.loads(base.read_text(encoding="utf-8"))
+        # Legacy baseline rows without an explicit rep cannot establish coverage.
+        base_pairs = {(row["id"], row["rep"]) for row in base_data.get(phase, []) if "rep" in row}
+        missing = {(row["id"], row["rep"]) for row in rows} - base_pairs
+        if missing:
+            note(f"{label} baseline: unverified（{baseline} missing {len(missing)} selected case/reps; partial comparison only）")
+        if bounded(command + ["compare", str(report), str(base)], output / "baseline-compare.txt"):
+            fail(label + " baseline compare failed")
     for provider, env_prefix, agent_name in (("Responses", "RESPONSES", "pi/cpa/gpt-6.1-sol"),
                                               ("DeepSeek", "DEEPSEEK", "pi/deepseek/deepseek-flash")):
         name = "PI_EVAL_" + env_prefix + "_" + phase.upper() + "_JSON"
@@ -210,7 +227,7 @@ for label, phase, ids, model, extra, baseline in (
             path = Path(source).resolve()
             if not any(path.is_relative_to(root / p) for p in (".local", "evals/runs")):
                 raise ValueError("report outside ignored checkout results")
-            pi_data, pi_rows = read_report(path, phase, ids)
+            pi_data, pi_rows = read_report(path, phase, ids, reps)
             if pi_data.get("agent") != agent_name:
                 raise ValueError("wrong provider/profile")
             pi_counts = Counter(row.get("outcome", "unverified") for row in pi_rows)

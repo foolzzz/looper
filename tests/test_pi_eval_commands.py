@@ -452,18 +452,40 @@ if "compare" not in args and os.environ.get("PI_EVAL_FAKE_NO_RESULT") != "1":
     flag = "--dialogs" if phase == "dialogs" else "--tasks"
     ids = args[args.index(flag) + 1].split(",")
     model = args[args.index("--model") + 1]
+    reps = int(args[args.index("--reps") + 1])
     body = {"mode": "real", "model": model, "agent": "claude-code/" + model,
             "total_cost_usd": 0.1, phase: [
-                {"id": case, "rep": rep, "outcome": "pass", "cost_usd": 0.1 / (len(ids) * 2),
+                {"id": case, "rep": rep, "outcome": "pass", "cost_usd": 0.1 / (len(ids) * reps),
                  "planner_denials": 0, "planner_modified_files": 0,
                  "planner_edit_tool_paths": [], "planner_changed_files": [],
                  "tokens": {"input": 11, "output": 3}}
-                for case in ids for rep in (1, 2)]}
+                for case in ids for rep in range(1, reps + 1)]}
     if phase == "dialogs":
         body["manager_model"] = args[args.index("--manager-model") + 1] if "--manager-model" in args else model
     override = os.environ.get("PI_EVAL_FAKE_COMPARISON_OVERRIDE")
     if override:
         body.update(json.loads(override))
+    fault = os.environ.get("PI_EVAL_FAKE_REPORT_FAULT")
+    tier = Path(args[args.index("--out-dir") + 1]).name
+    if fault and tier == os.environ.get("PI_EVAL_FAKE_FAULT_TIER", "planner-opus"):
+        if fault == "missing":
+            body[phase].pop()
+        elif fault == "duplicate":
+            body[phase].append(body[phase][0])
+        elif fault == "extra_rep":
+            body[phase].append({**body[phase][0], "rep": reps + 1})
+        elif fault == "no_rep":
+            del body[phase][0]["rep"]
+        elif fault == "skipped":
+            body[phase][0]["skipped"] = True
+        elif fault == "wrong_model":
+            body["model"] = "haiku"
+        elif fault == "wrong_agent":
+            body["agent"] = "claude-code/haiku"
+        elif fault == "missing_manager":
+            del body["manager_model"]
+        elif fault == "wrong_manager":
+            body["manager_model"] = "haiku"
     out = Path(args[args.index("--out-dir") + 1])
     out.mkdir(parents=True, exist_ok=True)
     (out / "result.json").write_text(json.dumps(body))
@@ -483,14 +505,14 @@ def test_comparison_runs_only_affected_cases_at_documented_tiers(tmp_path: Path,
     invocations = _invocations(tmp_path)
     runs = [r["argv"] for r in invocations if "compare" not in r["argv"]]
     assert len(runs) == 4
-    assert [_flag(r, "--model") for r in runs] == ["haiku", "opus", "haiku", "haiku"]
+    assert [_flag(r, "--model") for r in runs] == ["sonnet", "opus", "sonnet", "sonnet"]
     assert [_flag(r, "--tasks") for r in runs[:2]] == [TASKS, PLANNER_TASKS]
     assert [_flag(r, "--dialogs") for r in runs[2:]] == [DIALOGS, DIALOGS]
     assert _flag(runs[3], "--manager-model") == "opus"
     assert _flag(runs[3], "--manager-effort") == "xhigh"
     for index, argv in enumerate(runs):
         assert _flag(argv, "--mode") == "real"
-        assert _flag(argv, "--reps") == "2"
+        assert _flag(argv, "--reps") == str((2, 1, 2, 1)[index])
         assert _flag(argv, "--jobs") == "4"
         assert float(_flag(argv, "--total-cap-usd")) == pytest.approx(float(TOTAL) - index * 0.1)
         assert _flag(argv, "--case-budget-usd") == CASE
@@ -501,13 +523,18 @@ def test_comparison_runs_only_affected_cases_at_documented_tiers(tmp_path: Path,
         assert KEY not in " ".join(argv)
         assert Path(_flag(argv, "--out-dir")).is_relative_to(COMPARISON_STATE)
     comparisons = [r["argv"] for r in invocations if "compare" in r["argv"]]
-    assert len(comparisons) == 4
+    assert len(comparisons) == 3  # The missing Sonnet dialog baseline is a disclosed gap.
     assert {Path(r[-1]).name for r in comparisons} == {
-        "real-haiku.json", "real-opus.json", "dialogs-real-haiku.json", "dialogs-real-opus.json"}
+        "real-sonnet.json", "real-opus.json", "dialogs-real-opus.json"}
     ledger = (COMPARISON_STATE / "latest" / "ledger.txt").read_text()
-    for term in ("48", "planner_denials", "planner_modified_files", "positive control", "unverified",
+    total = len(TASKS.split(",")) * 2 + len(PLANNER_TASKS.split(",")) + len(DIALOGS.split(",")) * 3
+    readme = (REPO / "evals/README.md").read_text()
+    assert f"{total} case/reps" in readme and "48 case/reps" not in readme
+    for term in (f"{total} 个 case/rep", "planner_denials", "planner_modified_files", "positive control", "unverified",
                  "Responses", "DeepSeek", "runtime_notes", "context", "schema", "fake"):
         assert term in ledger
+    assert "dialogs-sonnet baseline: unverified" in ledger
+    assert "tasks-sonnet baseline: unverified" in ledger
     assert all(r["telegram"] == "" for r in invocations)
     assert before == {p.name: p.read_bytes() for p in baselines.glob("*.json")}
     subprocess.run(["bash", "-n", str(COMPARISON_SCRIPT)], check=True, timeout=5)
@@ -539,8 +566,11 @@ def test_comparison_preflight_records_unverified_without_uv(tmp_path: Path, comp
 
 
 @pytest.mark.parametrize("override", [None, {"mode": "fake"}, {"total_cost_usd": None},
-                                       {"total_cost_usd": 2.5}, {"tasks": []}])
+                                       {"total_cost_usd": 2.5}, {"tasks": []},
+                                       {"aborted": "spending cap"}, {"stopped_by_cap": True}])
 def test_comparison_missing_fake_or_exhausted_readback_stops_next_tier(tmp_path: Path, comparison_env, override) -> None:
+    baselines = REPO / "evals/prompt_regression/baselines"
+    before = {p.name: p.read_bytes() for p in baselines.glob("*.json")}
     if override is None:
         comparison_env["PI_EVAL_FAKE_NO_RESULT"] = "1"
     else:
@@ -550,6 +580,44 @@ def test_comparison_missing_fake_or_exhausted_readback_stops_next_tier(tmp_path:
     runs = [r for r in _invocations(tmp_path) if "compare" not in r["argv"]]
     assert len(runs) == 1
     assert "unverified" in (COMPARISON_STATE / "latest" / "ledger.txt").read_text()
+    assert before == {p.name: p.read_bytes() for p in baselines.glob("*.json")}
+
+
+@pytest.mark.parametrize("fault", ["missing", "duplicate", "extra_rep", "no_rep", "skipped", "wrong_model", "wrong_agent"])
+def test_comparison_rejects_invalid_one_rep_opus_report(tmp_path: Path, comparison_env, fault: str) -> None:
+    comparison_env["PI_EVAL_FAKE_REPORT_FAULT"] = fault
+    completed = _run(tmp_path, comparison_env, script=COMPARISON_SCRIPT)
+    assert completed.returncode == 2, completed.stderr
+    runs = [r["argv"] for r in _invocations(tmp_path) if "compare" not in r["argv"]]
+    assert len(runs) == 2
+    assert "planner-opus: readback unverified" in (COMPARISON_STATE / "latest/ledger.txt").read_text()
+
+
+def test_comparison_does_not_reset_case_reservations_between_tiers(tmp_path: Path, comparison_env) -> None:
+    comparison_env["PI_EVAL_TOTAL_CAP_USD"] = "0.55"
+    completed = _run(tmp_path, comparison_env, script=COMPARISON_SCRIPT)
+    assert completed.returncode == 2, completed.stderr
+    runs = [r["argv"] for r in _invocations(tmp_path) if "compare" not in r["argv"]]
+    assert [float(_flag(r, "--total-cap-usd")) for r in runs] == [0.55, 0.45]
+    assert "remaining budget below case reservation" in (COMPARISON_STATE / "latest/ledger.txt").read_text()
+
+
+@pytest.mark.parametrize("fault", ["missing_manager", "wrong_manager"])
+def test_comparison_rejects_manager_model_fallback(tmp_path: Path, comparison_env, fault: str) -> None:
+    comparison_env.update(PI_EVAL_FAKE_REPORT_FAULT=fault, PI_EVAL_FAKE_FAULT_TIER="manager-opus")
+    completed = _run(tmp_path, comparison_env, script=COMPARISON_SCRIPT)
+    assert completed.returncode == 2, completed.stderr
+    assert "manager-opus: readback unverified (unexpected Manager tier)" in (
+        COMPARISON_STATE / "latest/ledger.txt").read_text()
+
+
+def test_comparison_deadline_is_shared_across_tiers_and_compares(tmp_path: Path, comparison_env) -> None:
+    comparison_env.update(PI_EVAL_DEADLINE_SECONDS="3", PI_EVAL_FAKE_UV_SLEEP="0.8")
+    started = time.monotonic()
+    completed = _run(tmp_path, comparison_env, script=COMPARISON_SCRIPT, timeout=20)
+    assert completed.returncode == 124, completed.stderr
+    assert time.monotonic() - started < 10
+    assert 1 < len(_invocations(tmp_path)) < 7
 
 
 def test_comparison_deadline_kills_process_group(tmp_path: Path, comparison_env) -> None:
@@ -579,7 +647,7 @@ def test_comparison_keeps_independent_pi_profiles_and_same_case_reps(tmp_path: P
     completed = _run(tmp_path, comparison_env, script=COMPARISON_SCRIPT)
     assert completed.returncode == 0, completed.stderr
     comparisons = [r["argv"] for r in _invocations(tmp_path) if "compare" in r["argv"]]
-    assert len(comparisons) == 12
+    assert len(comparisons) == 11
     pi_pairs = [argv for argv in comparisons if "-selected.json" in argv[-2]]
     assert len(pi_pairs) == 8
     for argv in pi_pairs:
@@ -601,8 +669,34 @@ def test_comparison_rejects_fake_or_wrong_provider_input(tmp_path: Path, compari
     comparison_env["PI_EVAL_DEEPSEEK_TASKS_JSON"] = str(path)
     completed = _run(tmp_path, comparison_env, script=COMPARISON_SCRIPT)
     assert completed.returncode == 0, completed.stderr
-    assert len([r for r in _invocations(tmp_path) if "compare" in r["argv"]]) == 4
+    assert len([r for r in _invocations(tmp_path) if "compare" in r["argv"]]) == 3
     assert "DeepSeek: unverified" in (COMPARISON_STATE / "latest/ledger.txt").read_text()
+
+
+@pytest.mark.parametrize("fault", ["missing_second_rep", "duplicate", "no_rep", "capped"])
+def test_comparison_validates_pi_reps_before_filtering(tmp_path: Path, comparison_env, fault: str) -> None:
+    path = COMPARISON_STATE / "prior.json"
+    _pi_comparison_report(path, DEEPSEEK_AGENT, "tasks")
+    body = json.loads(path.read_text())
+    if fault == "missing_second_rep":
+        body["tasks"] = [row for row in body["tasks"] if row["rep"] == 1]
+    elif fault == "duplicate":
+        body["tasks"].append(body["tasks"][0])
+    elif fault == "no_rep":
+        del body["tasks"][0]["rep"]
+    else:
+        body["stopped_by_cap"] = True
+    path.write_text(json.dumps(body))
+    comparison_env["PI_EVAL_DEEPSEEK_TASKS_JSON"] = str(path)
+    completed = _run(tmp_path, comparison_env, script=COMPARISON_SCRIPT)
+    assert completed.returncode == 0, completed.stderr
+    pairs = [r["argv"] for r in _invocations(tmp_path) if "compare" in r["argv"]
+             and "-selected.json" in r["argv"][-2]]
+    # A one-rep provider report can still compare against the one-rep Opus tier.
+    assert len(pairs) == (1 if fault == "missing_second_rep" else 0)
+    if pairs:
+        assert Path(pairs[0][-1]).parent.name == "planner-opus"
+    assert "tasks-sonnet / DeepSeek: unverified" in (COMPARISON_STATE / "latest/ledger.txt").read_text()
 
 
 @pytest.mark.parametrize("tool", ["write", "edit"])
