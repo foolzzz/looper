@@ -15,7 +15,7 @@ from ...db.channel_configs import BUILTIN_CHANNEL_IDS
 from .. import log_redaction, projects
 from ..profile_registry import SECRET_MASK
 from .allowlist import AllowlistError, channel_view, normalized_config
-from .bots import BOT_TYPES, SAME_BOT_TYPES, bot_keys, builtin_env_token, lark_app_id
+from .bots import BOT_TYPES, SAME_BOT_TYPES, bot_keys, builtin_env_token, builtin_lark_pair, lark_app_id
 
 HTTP_500 = "500 Internal Server Error"
 TYPE_WORDS = {"telegram": "Telegram", "lark": "Lark (lark-cli)", "lark_bot": "Lark (bot token)"}
@@ -53,6 +53,15 @@ async def _bound(channel_type: str, current: Mapping[str, Any], config: Any) -> 
     return stored
 
 
+async def _admission_app_id(channel_type: str, config: Mapping[str, Any]) -> str | None:
+    app_id = await lark_app_id(channel_type, config)
+    if channel_type == "lark" and not app_id:
+        # Never include a CLI error or profile value: either may contain credentials or machine paths.
+        raise projects.RequestError(projects.HTTP_409, "cannot verify Lark app identity; check the configured "
+                                    "lark-cli profiles and authentication, then retry saving or importing")
+    return app_id
+
+
 async def refuse_same_bot(conn: asyncpg.Connection, channel_type: str, config: Mapping[str, Any],
                           secret: str | None, *, env_token: str = "", exclude: str | None = None,
                           configs: Mapping[str, Mapping[str, Any]] | None = None) -> None:
@@ -60,22 +69,23 @@ async def refuse_same_bot(conn: asyncpg.Connection, channel_type: str, config: M
     described (``bots.bot_keys``: for Lark, the app each row acts as, across both Lark types). ``configs`` holds
     the config other rows will have once a transaction not yet written (a config import's preview) is: by
     channel_id, in place of the stored one. ``exclude`` is the row described, when it is stored (an update, an
-    import): a built-in Lark row is not the same bot as the other built-in one. Never names a token."""
+    import): a built-in Lark row is not the same bot as the other built-in one. An unresolved candidate or competing
+    lark-cli identity refuses admission: different profile names cannot prove uniqueness. Never names a token."""
     await conn.execute(_LOCK)
     keys = bot_keys(channel_type, config, secret, env_token=env_token,
-                    app_id=await lark_app_id(channel_type, config), channel_id=exclude)
+                    app_id=await _admission_app_id(channel_type, config), channel_id=exclude)
     if not keys:
         return
     for other_type in SAME_BOT_TYPES[channel_type]:
         for row in await db_channel_configs.bot_keys(other_type, conn=conn):
-            if row["channel_id"] == exclude:
+            if row["channel_id"] == exclude or builtin_lark_pair(exclude, row["channel_id"]):
                 continue
             stored = row["secret"]
             other = (configs or {}).get(row["channel_id"], row["config"] or {})
             env = builtin_env_token(other) if (
                 other_type == "telegram" and row["channel_id"] in BUILTIN_CHANNEL_IDS and not stored) else ""
             if keys & bot_keys(other_type, other, stored, env_token=env,
-                               app_id=await lark_app_id(other_type, other), channel_id=row["channel_id"]):
+                               app_id=await _admission_app_id(other_type, other), channel_id=row["channel_id"]):
                 name = await conn.fetchval(
                     "SELECT display_name FROM channel_configs WHERE channel_id = $1", row["channel_id"])
                 raise projects.RequestError(
@@ -180,7 +190,7 @@ async def update_bot(channel_id: str, data: dict[str, Any]) -> dict[str, Any]:
 
         from ...db.connection import get_pool
         async with get_pool().acquire() as conn, conn.transaction():
-            if token != SECRET_MASK or "config" in data:
+            if kind in ("lark", "lark_bot") or token != SECRET_MASK or "config" in data:
                 # Under the bots lock, against the row as it is now: a concurrent change of its token or config may
                 # have landed since it was read above, and this write keeps the other half of what says which bot
                 # it is (its token, or with none the built-in Telegram row's bot_token_env; its lark-cli profile,
@@ -193,7 +203,8 @@ async def update_bot(channel_id: str, data: dict[str, Any]) -> dict[str, Any]:
                 now_config = now.get("config") or {}
                 final = config if "config" in data else now_config
                 secret = None if removing else token if changing_token else stored
-                if secret != stored or any(
+                # Profiles can change identity outside Looper even when this request only changes metadata.
+                if kind in ("lark", "lark_bot") or secret != stored or any(
                         final.get(key) != now_config.get(key) for key in ("profile", "app_id", "bot_token_env")):
                     env = builtin_env_token(final) if (
                         kind == "telegram" and channel_id in BUILTIN_CHANNEL_IDS and not secret) else ""

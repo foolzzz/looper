@@ -1,13 +1,17 @@
 """Full v1 task reads, filter/cursor parity and saved configuration readback."""
 
 import json
+from copy import deepcopy
+from datetime import datetime, timezone
 
 import pytest
 
 from looper.agents import api_v1, projects
+from looper.agents.ops import OpError
 from looper.agents.task_workspaces import TaskWorktree
 from looper.agents.ops.service import _plain
-from looper.db import journal, task_changes, task_worktrees, step_workspaces
+from looper.agents.user_gates import AgendaItem, AgendaStatus, Gate, GateState, GateSummary
+from looper.db import journal, task_changes, task_worktrees, step_workspaces, user_gates
 from tests.db_support import DSN, run_db
 from tests.test_api_v1_auth import _bearer, _send, _serving
 from tests.test_api_v1_auth import clients as clients
@@ -50,7 +54,9 @@ def test_page_filters_counts_and_cursor_keep_full_page_semantics(tmp_path, monke
     run_db(run, monkeypatch, timeout=30)
 
 
-def test_full_detail_retains_history_ownership_workspaces_and_saved_core_fields(tmp_path, monkeypatch, clients):
+@pytest.mark.parametrize("gate_state", [GateState.PENDING, GateState.OPEN, GateState.PASSED])
+def test_full_detail_retains_history_ownership_workspaces_and_saved_core_fields(
+        tmp_path, monkeypatch, clients, gate_state):
     async def run(pool):
         await _task(pool, "task-a", "init", await _project(pool))
         await pool.execute("UPDATE tasks SET template=$1::jsonb WHERE id='task-a'", json.dumps(TEMPLATE))
@@ -68,6 +74,21 @@ def test_full_detail_retains_history_ownership_workspaces_and_saved_core_fields(
                 "profiles": {"worker": "profile-choice"}, "concurrency": {"worker": 2}})
             assert status == 200, body
             await _steps(pool, "task-a", s1="verified", s2="pending")
+            gate = Gate("Delivery format", (AgendaItem(
+                "q1", "Which format?", () if gate_state is GateState.PENDING else ("JSON", "CSV"),
+                AgendaStatus.RESOLVED if gate_state.closed else AgendaStatus.OPEN,
+                "JSON" if gate_state.closed else ""),), state=gate_state)
+            if gate_state is not GateState.PENDING:
+                gate.opened_at = datetime.now(timezone.utc)
+            if gate_state.closed:
+                gate.summary = GateSummary(("Use JSON",), ("No legacy reader",), ("Confirm retention",))
+                gate.plan_change = {"added": ["export"], "dropped": ["csv"], "stopped": ["legacy"]}
+                gate.closed_at = datetime.now(timezone.utc)
+            await pool.execute("UPDATE task_steps SET kind='gate', status=$1 WHERE id='step-s2'",
+                               gate_state.step_status)
+            async with pool.acquire() as conn:
+                await user_gates.write(conn, "task-a", [gate.row("step-s2")])
+            saved_gate = await user_gates.get("task-a", "s2")
             await task_changes.add_supplement("task-a", "s" * 320, via="chat", pool=pool)
             await journal.insert(pool, "task-a", [{"step_id": "step-s1", "kind": "step_accepted", "summary": "Built"},
                 {"step_id": "", "kind": "progress", "summary": json.dumps({"done": "Built", "now": "Tests",
@@ -80,13 +101,69 @@ def test_full_detail_retains_history_ownership_workspaces_and_saved_core_fields(
                 "base_commit": "a" * 40, "checkpoint": False, "state": "active", "detail": "",
                 "links": [], "merge_files": []})
             views = []
-            for operator in (False, True):
-                status, answer = await _post(server, "tasks/detail", {"task_id": "task-a"}, operator=operator)
-                assert status == 200, answer
-                views.append(api_v1.validate_arguments(api_v1.find("POST", "/api/v1/tasks/detail").result,
-                                                       answer["result"]))
+            schema = api_v1.find("POST", "/api/v1/tasks/detail").result
+            # Listen on an ephemeral loopback port: read the real HTTP envelope and DB projection.
+            await server.start()
+            try:
+                status, _, document = await _send(server, "GET /api/v1/openapi.json", _bearer(TOKEN))
+                assert status == 200
+                assert document["components"]["schemas"]["TaskDetail"] == schema
+                envelope_schema = document["components"]["schemas"]["OpOk"]
+                for operator in (False, True):
+                    status, answer = await _post(server, "tasks/detail", {"task_id": "task-a"}, operator=operator)
+                    assert status == 200 and answer["status"] == "ok", answer
+                    api_v1.validate_arguments(envelope_schema, answer)
+                    views.append(api_v1.validate_arguments(schema, answer["result"]))
+                status, compact = await _post(server, "ops/tasks/get", {"task_id": "task-a"})
+            finally:
+                await server.stop()
             detail = views[0]
             assert views[0] == views[1]  # Read attribution does not change the task projection.
+            assert len(detail["gates"]) == 1
+            projected_gate = detail["gates"][0]
+            assert projected_gate["state"] == gate_state.value
+            assert projected_gate["agenda"] == [item.view() for item in gate.agenda]
+            assert projected_gate["summary"] == (gate.summary.view() if gate.summary else None)
+            assert projected_gate["plan_change"] == gate.plan_change
+            assert projected_gate["waiting_on"] == ("user" if gate_state.waiting else None)
+            assert projected_gate["channel_posts"] is None
+            for field in ("opened_at", "first_reply_at", "closed_at", "retry_at"):
+                value = getattr(gate, field) if field != "retry_at" else gate.retry_at()
+                assert projected_gate[field] == (value.isoformat() if value else None)
+            assert await user_gates.get("task-a", "s2") == saved_gate
+            if gate_state.closed:
+                # Both objects remain independently nullable and accept empty string arrays.
+                for field in ("summary", "plan_change"):
+                    for value in (None, {key: [] for key in projected_gate[field]}):
+                        valid = deepcopy(detail)
+                        valid["gates"][0][field] = value
+                        assert api_v1.validate_arguments(schema, valid) == valid
+                # Reject bad types in copies of the actual response, without changing saved gates.
+                invalid_fields = [
+                    (("agenda", 0, "options"), [{"id": "json", "label": "JSON"}]),
+                    (("agenda", 0, "options"), [1]),
+                    (("agenda", 0, "options"), [None]),
+                    (("agenda", 0, "options"), None),
+                    (("summary",), "Use JSON"),
+                    (("summary",), []),
+                    (("plan_change",), "added export"),
+                    (("plan_change",), []),
+                    (("state",), 1),
+                ]
+                for field in ("summary", "plan_change"):
+                    for name in projected_gate[field]:
+                        invalid_fields.extend([((field, name), "not an array"), ((field, name), [1])])
+                    incomplete = dict(projected_gate[field])
+                    incomplete.pop(next(iter(incomplete)))
+                    invalid_fields.append(((field,), incomplete))
+                for path, value in invalid_fields:
+                    invalid = deepcopy(detail)
+                    parent = invalid["gates"][0]
+                    for key in path[:-1]:
+                        parent = parent[key]
+                    parent[path[-1]] = value
+                    with pytest.raises(OpError, match="declared schema"):
+                        api_v1.validate_arguments(schema, invalid)
             assert detail["config"] == config and detail["work_dir"] == str(tmp_path)
             assert detail["requirement"] == "Build calculator and tests"
             assert detail["requirement_versions"][-1]["text"] == detail["requirement"]
@@ -99,7 +176,6 @@ def test_full_detail_retains_history_ownership_workspaces_and_saved_core_fields(
             assert set(detail) == set(api_v1.find("POST", "/api/v1/tasks/detail").result["required"])
             assert detail["task_workspace"]["worktree"]["commands"]
             assert detail["step_workspaces"]["workspaces"][0]["step_key"] == "s1"
-            status, compact = await _post(server, "ops/tasks/get", {"task_id": "task-a"})
             assert status == 200 and compact["result"] == _plain(await projects.task_detail("task-a", compact=True))
             assert "config" not in compact["result"] and "task_workspace" not in compact["result"]
             assert len(compact["result"]["supplements"][0]["text"]) < len(detail["supplements"][0]["text"])
