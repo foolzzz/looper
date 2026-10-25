@@ -75,7 +75,10 @@ def test_a_bad_id_is_refused_and_nothing_changes(monkeypatch: pytest.MonkeyPatch
             assert body["error"]
         status, body = await _call("PUT", "channel-lark",
                                    {"config": {"allowed_open_ids": ["on_7dab8a3d3cdcc9da365777c7ad535d62"]}})
-        assert status == 400 and body["error"] == "invalid credential request"
+        assert status == 400 and body["error"] == (
+            "invalid sender allowlist: use the sender's open_id for this app, which starts with ou_ "
+            "(a union_id starts with on_, and a user_id has no prefix)"
+        )
         _, telegram = await _call("GET", "channel-telegram")
         assert telegram["enabled"] is False and telegram["config"] == {"allowed_user_ids": ["7"]}
 
