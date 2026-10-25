@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.128] - 2026-10-25
+
+### Changed
+
+- **Native Telegram and Lark bot chats are routed to their bound Managers from a live snapshot, without a restart.** Each registered bot loads a routing snapshot (owner Manager, bound-chats-only policy, per-chat bindings) and the adapter resolves every incoming chat against it. A chat that is not bound while the policy is bound-chats-only is dropped silently; accepted messages carry a pinned channel thread identity, and the stop command still reaches the fleet when the bound Manager is off. The Manager accepts an unsuffixed thread identity only for the bot's own owner Manager. ([#652](https://github.com/foolzzz/looper/pull/652))
+
 ## [2.13.127] - 2026-10-25
 
 ### Changed
