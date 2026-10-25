@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.131] - 2026-10-25
+
+### Fixed
+
+- **The Channels chat bindings view stays in step with the server.** Page boundaries are rebuilt from each read, every write (even a refused one) is followed by a full re-read that keeps the write's error, and the unbind option reads "Leave unbound (silent)" when Only bound chats is on. ([#661](https://github.com/foolzzz/looper/pull/661))
+
 ## [2.13.130] - 2026-10-25
 
 ### Added
