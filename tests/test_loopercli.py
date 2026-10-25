@@ -163,6 +163,54 @@ def closed_port() -> int:
         return sock.getsockname()[1]
 
 
+@pytest.mark.parametrize("flag", ["-h", "--help"])
+def test_config_group_help_discovers_generated_children(cli: Run, looper: FakeLooper, flag: str) -> None:
+    code, out, err = cli("config", flag)
+    assert code == 0 and err == ""
+    children = out.replace("{", " ").replace("}", " ").replace(",", " ").split()
+    for child in ("export", "import", "import-cancel", "import-upload", "import-apply", "import-preview"):
+        assert child in children
+    assert [(r[0], r[1]) for r in looper.requests] == [("GET", "/api/v1/openapi.json")]
+
+
+@pytest.mark.parametrize("flag", ["-h", "--help"])
+@pytest.mark.parametrize("failure", ["http", "connection", "client"])
+def test_config_group_help_falls_back_when_discovery_fails(
+        cli: Run, looper: FakeLooper, client: Path, flag: str, failure: str) -> None:
+    looper.document_status = 500
+    if failure == "connection":
+        write_client_file(client, f"http://127.0.0.1:{closed_port()}")
+    elif failure == "client":
+        client.unlink()
+    code, out, err = cli("config", flag)
+    assert code == 0 and err == ""
+    assert "usage: loopercli config" in out
+    children = out.replace("{", " ").replace("}", " ").replace(",", " ").split()
+    assert "export" in children and "import" in children
+    assert "confirm" not in children
+    assert "the commands made from Looper's API are not shown" in out
+    assert {"http": "HTTP 500", "connection": "is looper serve running?", "client": "loopercli login"}[failure] in out
+    assert TOKEN not in out
+    assert [(r[0], r[1]) for r in looper.requests] == (
+        [("GET", "/api/v1/openapi.json")] if failure == "http" else [])
+
+
+@pytest.mark.parametrize(("argv", "code", "option"), [
+    (["config", "export", "-h"], 0, "--include-projects"),
+    (["config", "import", "--help"], 0, "--apply"),
+    (["confirm", "--help"], 0, "ID"),
+    (["chat", "-h"], 0, "--file"),
+    (["config", "--unknown"], 2, "usage:"),
+    (["chat", "--file"], 2, "--file"),
+])
+def test_handwritten_children_and_flags_do_not_discover_openapi(
+        cli: Run, looper: FakeLooper, argv: list[str], code: int, option: str) -> None:
+    looper.document_status = 500
+    actual, out, err = cli(*argv)
+    assert actual == code and option in out + err
+    assert looper.requests == []
+
+
 @pytest.mark.parametrize(("action", "flags", "body"), [
     ("import-cancel", ["--import-id", "cfgimp-example"], {"import_id": "cfgimp-example"}),
     ("import-upload", ["--format", "looper-config/v3", "--catalog", "[]"],

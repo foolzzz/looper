@@ -2059,6 +2059,9 @@ interface TaskDetailPageProps {
   onBack: () => void;
 }
 
+type Restart = { phase: "requesting"; controller: AbortController } |
+  { phase: "accepted"; controller: AbortController; before: TaskDetail; terminal?: string };
+
 /** A task's page, new for each task: when the hash moves to another task, its page opens as a fresh load opens it,
  * on its Overview, without the previous task's data, tab, start error or open confirmation. */
 export function TaskDetailRoute(props: TaskDetailPageProps) {
@@ -2077,10 +2080,11 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
   const setTab = useCallback((next: Tab) => (onTab ? onTab(next) : setLocalTab(next)), [onTab]);
   // Bumped when the task runs again, so the page polls it again.
   const [runs, setRuns] = useState(0);
-  // Start is asynchronous: its old terminal snapshot cannot acknowledge a new run.
-  const restart = useRef<TaskDetail | null>(null);
+  // The ref locks synchronous clicks; state also keeps every restart control disabled.
+  const restart = useRef<Restart | null>(null);
+  const [restartPending, setRestartPending] = useState(false);
   const [activityGeneration, setActivityGeneration] = useState(0);
-  useEffect(() => () => { restart.current = null; }, [taskId]);
+  useEffect(() => () => { restart.current?.controller.abort(); restart.current = null; }, [taskId]);
   // The gate step a Pipeline node asked to show on the Overview tab, until it is shown.
   const [gateFocus, setGateFocus] = useState<TaskStep | null>(null);
   const openGate = useCallback((step: TaskStep) => {
@@ -2100,23 +2104,31 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
   useEffect(() => {
     let stopped = false;
     const stop = startPolling(async (signal) => {
+      const request = restart.current;
       try {
         const t = await fetchTaskDetail(taskId, signal);
         if (stopped) return;
-        setTask(t);
+        if (restart.current !== request || request?.phase === "requesting") return false;
         setError("");
         const terminal = ["completed", "failed", "cancelled", "stopped", "init"].includes(t.status);
-        const before = restart.current;
-        if (before) {
-          // A fast run may already have the same terminal status. Completion and run counts survive that race;
-          // updated_at alone also changes on edits, and the Planner id is reused across runs.
-          const observed = !terminal || t.completed_at !== before.completed_at ||
+        if (request?.phase === "accepted") {
+          const before = request.before;
+          // Detail reads are not atomic: a run count can be new while the task row is still terminal.
+          // Require the same changed terminal snapshot twice; a running task acknowledges immediately.
+          const changed = t.status !== before.status || t.completed_at !== before.completed_at ||
             (t.cost != null && before.cost != null && t.cost.runs > before.cost.runs);
-          if (!observed) return false;
+          const settled = !t.cost?.running;
+          const snapshot = JSON.stringify([t.status, t.completed_at, t.cost?.runs]);
+          if (terminal && (!changed || !settled || request.terminal !== snapshot)) {
+            request.terminal = changed && settled ? snapshot : undefined;
+            return false;
+          }
           restart.current = null;
+          setRestartPending(false);
           setActivityGeneration((n) => n + 1);
           if (t.status === "failed") setActionError(t.error || t.result_summary || "The task failed to start.");
         }
+        setTask(t);
         return terminal;
       } catch (e) {
         if (!stopped) setError(e instanceof Error ? e.message : String(e));
@@ -2126,21 +2138,28 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
   }, [taskId, runs]);
 
   // A ready task is started; a stopped, failed or cancelled one goes on from its saved plan, or is planned anew.
-  const start = (startOver: boolean) => {
+  const start = async (startOver: boolean) => {
     if (!task || restart.current) return;
-    const before = task;
-    restart.current = before;
-    return (task.status === READY_STATUS ? startReadyTask(taskId) : startTask(taskId, { startOver })).then(
-      () => {
-        if (restart.current !== before) return;
-        setActionError(""); setConfirmStartOver(false); setRuns((n) => n + 1);
-      },
-      (err) => {
-        if (restart.current !== before) return;
-        restart.current = null;
-        setActionError(err instanceof Error ? err.message : String(err));
-      },
-    );
+    const request: Restart = { phase: "requesting", controller: new AbortController() };
+    restart.current = request;
+    setRestartPending(true);
+    setActionError("");
+    try {
+      // Polling stopped at the old terminal row. Read again before Start so late Stop writes are not
+      // mistaken for the requested run, including a run that finishes before its first detail read.
+      const before = await fetchTaskDetail(taskId, request.controller.signal);
+      if (restart.current !== request) return;
+      await (before.status === READY_STATUS ? startReadyTask(taskId) : startTask(taskId, { startOver }));
+      if (restart.current !== request) return;
+      restart.current = { phase: "accepted", controller: request.controller, before };
+      setConfirmStartOver(false); setRuns((n) => n + 1);
+    } catch (err) {
+      if (restart.current !== request) return;
+      restart.current = null;
+      setRestartPending(false);
+      setConfirmStartOver(false);
+      setActionError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
@@ -2210,8 +2229,9 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
               <button
                 type="button"
                 onClick={() => start(true)}
+                disabled={restartPending}
                 title="Delete the task's steps, plan and Planner session, then plan it anew from its requirement"
-                className="rounded-md px-3 py-1.5 text-xs font-medium bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+                className="rounded-md px-3 py-1.5 text-xs font-medium bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors disabled:opacity-50"
               >
                 Start over
               </button>
@@ -2229,8 +2249,9 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
               <button
                 type="button"
                 onClick={() => start(false)}
+                disabled={restartPending}
                 title={task.status === READY_STATUS ? undefined : "Continue from the saved plan: accepted steps are kept"}
-                className="flex items-center gap-1.5 rounded-md border border-success/50 px-3 py-1.5 text-xs font-medium text-success hover:bg-success/10 transition-colors"
+                className="flex items-center gap-1.5 rounded-md border border-success/50 px-3 py-1.5 text-xs font-medium text-success hover:bg-success/10 transition-colors disabled:opacity-50"
               >
                 <Play className="h-3.5 w-3.5" />
                 Start
@@ -2239,9 +2260,10 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
                 <button
                   type="button"
                   onClick={() => setConfirmStartOver(true)}
+                  disabled={restartPending}
                   aria-label="Start over"
                   title="Start over: delete its steps and plan it anew"
-                  className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                  className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors disabled:opacity-50"
                 >
                   <RotateCcw className="h-3.5 w-3.5" />
                   <span className="hidden sm:inline">Start over</span>
