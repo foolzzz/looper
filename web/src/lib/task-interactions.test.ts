@@ -24,7 +24,6 @@ it.each(["anchor", "prefix", "suffix", "unchanged"])("preserves server order and
   let rows = [row("z"), row("A"), row("a"), row("Z")];
   mockList(() => rows);
   const initial = (await fetchGates({ limit: 2 })).next_cursor!;
-  // A boundary refresh reconstructs the full snapshot, including the unread suffix.
   const through = (await fetchGates({ limit: 2, through: initial })).next_cursor!;
   if (removed === "anchor") rows.splice(1, 1);
   if (removed === "prefix") rows.splice(0, 2);
@@ -37,18 +36,84 @@ it.each(["anchor", "prefix", "suffix", "unchanged"])("preserves server order and
   await expect(fetchGates({ cursor: through })).rejects.toThrow("The gate list changed");
 });
 
-it("bounds the initial read and restarts refresh when its entire known prefix disappears", async () => {
+it.each([false, true])("retains the first unread gate when the loaded prefix disappears (new prefix: %s)", async (insert) => {
   let rows = [row("z"), row("A"), row("a"), row("Z")];
   const fetcher = mockList(() => rows);
   const first = await fetchGates({ limit: 2 });
   expect(first).toMatchObject({ gates: rows.slice(0, 2), total: 4, limit: 2, offset: 0, has_more: true });
-  expect(fetcher.mock.calls.map(([, init]) => JSON.parse(String(init?.body)))).toEqual([{ limit: 2, offset: 0 }]);
-  // The bounded read has no saved suffix to recover this boundary from.
-  rows = [row("new"), ...rows.slice(2)];
+  const requests = fetcher.mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
+  expect(JSON.parse(first.next_cursor!)).toMatchObject({ end: 2 });
+  rows = [...(insert ? [row("new")] : []), ...rows.slice(2)];
   const refresh = await fetchGates({ limit: 200, through: first.next_cursor! });
-  expect(refresh.gates.map(r => r.gate.step)).toEqual(["new", "a", "Z"]);
-  expect(refresh.has_more).toBe(false);
-  await expect(fetchGates({ cursor: first.next_cursor! })).rejects.toThrow("The gate list changed");
+  expect(refresh.gates.map(r => r.gate.step)).toEqual(insert ? ["new"] : []);
+  expect(refresh.has_more).toBe(true);
+  expect(requests).toEqual([{ limit: 3, offset: 0 }]);
+  for (const cursor of [first.next_cursor!, refresh.next_cursor!]) {
+    expect(cursor).toBeTruthy();
+    expect((await fetchGates({ limit: 2, cursor })).gates.map(r => r.gate.step)).toEqual(["a", "Z"]);
+  }
+});
+
+it.each(["no successor", "all removed", "reduced total"])("refreshes a closed window with %s", async (change) => {
+  let rows = [row("z"), row("A"), ...(change === "no successor" ? [] : [row("a"), row("Z")])];
+  mockList(() => rows);
+  const first = await fetchGates({ limit: 2 });
+  rows = change === "all removed" ? [] : change === "reduced total" ? [row("new"), rows[2]] : [row("new")];
+  const refresh = await fetchGates({ limit: 2, through: first.next_cursor! });
+  expect(refresh.gates.map(r => r.gate.step)).toEqual(change === "all removed" ? [] : ["new"]);
+  expect(refresh.total).toBe(rows.length);
+  expect(refresh.has_more).toBe(change === "reduced total");
+  if (refresh.has_more) {
+    const more = await fetchGates({ limit: 2, cursor: refresh.next_cursor! });
+    expect(more.gates.map(r => r.gate.step)).toEqual(["a"]);
+    expect(more.has_more).toBe(false);
+  }
+});
+
+it("reports more when the successor exhausts the server response", async () => {
+  const rows = [row("z"), row("A"), row("a")];
+  mockList(() => rows);
+  const first = await fetchGates({ limit: 2 });
+  expect(first).toMatchObject({ gates: rows.slice(0, 2), total: 3, counts: { open: 3 }, has_more: true });
+  expect((await fetchGates({ cursor: first.next_cursor! })).gates).toEqual(rows.slice(2));
+});
+
+it.each(["cursor", "through"] as const)("fails closed when every saved identity disappears during %s", async (mode) => {
+  let rows = [row("z"), row("A"), row("a"), row("Z")];
+  mockList(() => rows);
+  const first = await fetchGates({ limit: 2 });
+  // The unobserved tail cannot identify where the old window ended.
+  rows = [row("new"), rows[3]];
+  await expect(fetchGates({ [mode]: first.next_cursor! })).rejects.toThrow("The gate list changed");
+});
+
+it("keeps a surviving loaded boundary ahead of insertions in the unread suffix", async () => {
+  let rows = [row("z"), row("A"), row("a"), row("Z")];
+  mockList(() => rows);
+  const first = await fetchGates({ limit: 2 });
+  rows.splice(2, 0, row("inserted"));
+  const refresh = await fetchGates({ limit: 200, through: first.next_cursor! });
+  expect(refresh.gates.map(r => r.gate.step)).toEqual(["z", "A"]);
+  const more = await fetchGates({ limit: 200, cursor: refresh.next_cursor! });
+  expect(more.gates.map(r => r.gate.step)).toEqual(["inserted", "a", "Z"]);
+});
+
+it("retains an unread boundary across the 200-row server page and simultaneous insertions", async () => {
+  let rows = Array.from({ length: 405 }, (_, n) => row(String(n)));
+  const fetcher = mockList(() => rows);
+  const first = await fetchGates({ limit: 2, offset: 199 });
+  expect(first.gates).toEqual(rows.slice(199, 201));
+  expect(fetcher.mock.calls.map(([, init]) => JSON.parse(String(init?.body))))
+    .toEqual([{ limit: 200, offset: 0 }, { limit: 2, offset: 200 }]);
+  rows = [row("new"), row("newer"), ...rows.slice(201)];
+  const refresh = await fetchGates({ limit: 200, through: first.next_cursor! });
+  expect(refresh.gates.map(r => r.gate.step)).toEqual(["new", "newer"]);
+  const more = await fetchGates({ limit: 200, cursor: refresh.next_cursor! });
+  expect(more.gates).toEqual(rows.slice(2, 202));
+  const last = await fetchGates({ limit: 200, cursor: more.next_cursor! });
+  expect(last.gates).toEqual(rows.slice(202));
+  expect(last.has_more).toBe(false);
+  expect(new Set([...refresh.gates, ...more.gates, ...last.gates].map(r => r.gate.step)).size).toBe(rows.length);
 });
 
 it("reads multiple offset pages and retains the dashboard offset wrapper", async () => {

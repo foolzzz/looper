@@ -596,7 +596,7 @@ class _Output:
         self._own_open = False  # a turn of Claude's own is running
         self._own: AutonomousTurn | None = None  # its owner's handler, if any
         self._capped = False  # a user turn was ended at its soft cap: the rest of the output belongs to no turn
-        self.discard = False  # Claude was killed for the user's stop: what it writes as it dies belongs to no turn
+        self.discard = False  # Claude was killed mid-turn: what it writes as it dies belongs to no turn
 
     def read(self) -> None:
         """Start reading, once."""
@@ -757,7 +757,8 @@ class ResidentClaude:
         self._cancel: TurnCancel | None = None  # its cancel (what ``interrupt`` requests)
         self._interrupting: asyncio.Task[StopMethod] | None = None  # the stop of the running turn, once asked
         self._tree: proc_tree.TurnTree | None = None  # the process's tree, followed while it runs
-        self._ending: dict[asyncio.Task[None], asyncio.Event] = {}  # cleanup owners and requests to skip their grace
+        # Cleanup owners and the signal that skips their remaining stdin-close grace.
+        self._ending: dict[asyncio.Task[None], asyncio.Event] = {}
         self._price: Price | None = None  # prices the totals at the provider's prices, if Looper prices them
 
     @property
@@ -897,6 +898,9 @@ class ResidentClaude:
             method = await self._stopped_by_user()
         except BaseException:
             self._user_turn, self._cancel, self._interrupting = None, None, None
+            if output.turn is turn:
+                # Its unread events still belong to the abandoned user turn, even after stop drops it.
+                output.discard = True
             await self.stop(kill=True)
             raise
         finally:
@@ -1060,10 +1064,11 @@ class ResidentClaude:
                 exited = asyncio.create_task(process.wait())
                 hurried = asyncio.create_task(hurry.wait())
                 try:
-                    await asyncio.wait((exited, hurried), timeout=STOP_GRACE_SEC, return_when=asyncio.FIRST_COMPLETED)
+                    await asyncio.wait({exited, hurried}, timeout=STOP_GRACE_SEC,
+                                       return_when=asyncio.FIRST_COMPLETED)
                 finally:
-                    exited.cancel()
-                    hurried.cancel()
+                    for waiter in (exited, hurried):
+                        waiter.cancel()
                     await asyncio.gather(exited, hurried, return_exceptions=True)
         finally:
             # From the snapshot followed while Claude ran: what it started is re-parented once it exits.

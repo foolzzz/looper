@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.115] - 2026-10-25
+
+### Fixed
+
+- **The Gates list keeps its unread boundary across bounded refreshes, and a cancelled Planner stop no longer leaves Claude cleanup running.** The dashboard's gate list now asks the server for one row beyond its loaded window, so closed rows cannot erase the first unread gate's identity. When a saved boundary has no surviving row, the list restarts from the current rows only if the saved window had been exhausted; otherwise it fails with "The gate list changed while loading. Retry the request." instead of guessing. A page with no rows but more to load now still returns a continuation cursor. In the Planner, cancelling a stop while the resident Claude process is being cleaned up now hurries that cleanup (a kill skips the remaining stdin-close grace) and waits for it before returning, and the token files are removed in every case. No route, stored data format, Manager tool declaration or prompt changed. ([#618](https://github.com/foolzzz/looper/pull/618))
+
+## [2.13.114] - 2026-10-25
+
+### Fixed
+
+- **Worker input delivery now tells a refusal from an unknown outcome, and unknown input is never replayed.** A run channel's `send` returns a `DeliveryResult` (`ACCEPTED`, `REJECTED` or `UNKNOWN`) instead of a bool-like success or an exception. Rejected means the runtime refused the input or nothing was written; unknown means bytes may have been written but no acknowledgement arrived (write-time timeout, broken pipe after writing, or a missing or malformed acknowledgement from OMP, Pi or Codex). The `delivered` field of the Worker input result message is now `true`, `false` or `null`. In the Planner, only a rejection keeps the user's message or steer for the Planner's next decision (`missed_messages`); an unknown outcome is reported to the user as unconfirmed and is not resent or kept. A timed-out Worker room reminder is no longer retried, and its UUID stays registered so a late echo is still suppressed and event reading continues. Also, a Claude turn abandoned by cancellation now discards the output the dying process still writes, so it is not attributed to a later turn. Planner chat replies for a forward changed: accepted keeps the reply, unknown says acceptance is unconfirmed and is not resent, rejected says the Worker did not accept it. No route, stored data format, Manager tool declaration or prompt changed. ([#607](https://github.com/foolzzz/looper/pull/607))
+
 ## [2.13.113] - 2026-10-25
 
 ### Added

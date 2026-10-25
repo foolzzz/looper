@@ -268,7 +268,11 @@ describe("GatesPage", () => {
     expect(result).toMatchObject({ gates: rows.slice(199, 202), total: 500, limit: 3, offset: 199, has_more: true, counts: list([]).counts });
     expect(fetcher.mock.calls.map(([, init]) => JSON.parse(String(init?.body)))).toEqual([
       { state: "closed", waiting_on: "planner", project_id: "p1", limit: 200, offset: 0 },
-      { state: "closed", waiting_on: "planner", project_id: "p1", limit: 2, offset: 200 },
+      { state: "closed", waiting_on: "planner", project_id: "p1", limit: 3, offset: 200 },
     ]);
+    expect(JSON.parse(result.next_cursor!)).toEqual({
+      keys: rows.slice(0, 203).map(({ task, gate }) => JSON.stringify([task.task_id, gate.step])),
+      end: 202,
+    });
   });
 });

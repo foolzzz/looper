@@ -3896,7 +3896,8 @@ export async function fetchGates(
   if (!Number.isInteger(limit) || limit < 1 || limit > 200 || !Number.isInteger(offset) || offset < 0)
     throw new Error("Invalid gate list limit or offset");
   const bounded = !filters.cursor && !filters.through;
-  const window = offset + limit;
+  // Keep the first unread identity after the loaded window so closed rows cannot erase its boundary.
+  const window = offset + limit + 1;
   const request = async (at: number): Promise<GateList> => {
     const result = await callV1<GateList>("/api/v1/ops/gates/list", {
       ...(filters.state ? { state: filters.state } : {}),
@@ -3907,7 +3908,7 @@ export async function fetchGates(
     if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
     return result;
   };
-  // Ordinary reads need only their window (including the badge's single row). Reconstruct the complete
+  // Ordinary reads need only their window and one successor (also bounded for the badge). Reconstruct the complete
   // ordered list only for saved boundaries; the server owns collation when opened_at timestamps tie.
   const list = await request(0);
   const rows = [...list.gates];
@@ -3930,19 +3931,17 @@ export async function fetchGates(
     if (!saved || !Array.isArray(saved.keys) || !saved.keys.every((key) => typeof key === "string")
       || !Number.isInteger(saved.end) || saved.end < 0 || saved.end > saved.keys.length)
       throw new Error("Invalid gate list cursor");
-    const known = side === "after" ? saved.keys.slice(0, saved.end).reverse() : saved.keys.slice(saved.end);
-    for (const key of known) {
+    for (const key of saved.keys.slice(0, saved.end).reverse()) {
       const index = positions.get(key);
-      if (index !== undefined) return side === "after" ? index + 1 : index;
+      if (index !== undefined) return index + 1;
     }
-    const opposite = side === "after" ? saved.keys.slice(saved.end) : saved.keys.slice(0, saved.end).reverse();
-    for (const key of opposite) {
+    for (const key of saved.keys.slice(saved.end)) {
       const index = positions.get(key);
-      if (index !== undefined) return side === "after" ? index : index + 1;
+      if (index !== undefined) return index;
     }
     if (rows.length === 0) return 0;
-    // With no surviving boundary, a refresh starts over with the current list.
-    if (side === "through") return rows.length;
+    // Only a previously exhausted window may restart without a surviving boundary. Otherwise fail closed.
+    if (side === "through" && saved.end === saved.keys.length) return rows.length;
     throw new Error("The gate list changed while loading. Retry the request.");
   };
   const start = filters.cursor ? boundary(filters.cursor, "after") : offset;
@@ -3950,7 +3949,7 @@ export async function fetchGates(
   const gates = rows.slice(start, Math.max(start, Math.min(start + limit, stop)));
   const end = start + gates.length;
   return { ...list, gates, limit, offset, has_more: end < list.total,
-    next_cursor: gates.length ? JSON.stringify({ keys, end }) : null };
+    next_cursor: gates.length || end < list.total ? JSON.stringify({ keys, end }) : null };
 }
 
 // --- Managers: each with its own duty, tools, task visibility and task templates ---

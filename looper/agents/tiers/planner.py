@@ -220,6 +220,7 @@ from .planner_protocol import (
 )
 
 from .worker import WORKER_INPUT_DELIVERY_TIMEOUT
+from ..runtimes.channel import DeliveryResult
 
 logger = logging.getLogger(__name__)
 
@@ -969,8 +970,14 @@ class PlannerAgent:
                 finally:
                     # A turn the loop was in has already killed Claude; an idle one
                     # ends when its stdin closes. Never leave it running.
-                    await self._claude.stop(kill=kill)
-                    self._remove_token_files()  # and one a turn wrote meanwhile
+                    try:
+                        await self._claude.stop(kill=kill)
+                    except asyncio.CancelledError:
+                        # Resident cleanup outlives its cancelled caller; hurry it and join it before returning.
+                        await self._claude.stop(kill=True)
+                        raise
+                    finally:
+                        self._remove_token_files()  # and one a turn wrote meanwhile
 
             # Run to its end even when this stop is cancelled again: a second cancellation only hurries it (Claude
             # ended at once rather than after its grace).
@@ -2925,14 +2932,18 @@ class PlannerAgent:
         if reply.action is ChatAction.FORWARD:
             step = next(s for s in plan.steps if s.label == reply.step and s.status == "dispatched")
             correlation = envelope.correlation_id if envelope is not None else plan.correlation_id
-            if await self._forward_to_worker(step, reply.text, correlation):
+            result = await self._forward_to_worker(step, reply.text, correlation)
+            if result is DeliveryResult.ACCEPTED:
                 return reply.reply
-            # The Worker ended first; its result's decision turn gets the text instead.
+            if result is DeliveryResult.UNKNOWN:
+                await self._activity("phase", f"User message acceptance unknown for {step.worker_id}; not replaying")
+                return "消息是否被 Worker 接受尚未确认；它可能已开始处理，因此不会自动重发。"
+            # Definite refusal: its result's decision turn gets the text instead.
             step.missed_messages.append(reply.text)
             await self._save(plan, step)
-            await self._activity("phase", f"User message for step {step.index + 1} ({step.label}) arrived after "
-                                          f"{step.worker_id} finished or was not confirmed; kept for the Planner's decision")
-            return f"{reply.reply}\n\n（消息送达未确认，{step.worker_id} 可能已经按它行动；处理它的结果时我会考虑这条消息。）"
+            await self._activity("phase", f"User message for step {step.index + 1} ({step.label}) was rejected before "
+                                          f"{step.worker_id} could accept it; kept for the Planner's decision")
+            return f"消息未被 {step.worker_id} 接受；处理它的结果时我会考虑这条消息。"
         if reply.action is ChatAction.ADD_STEPS:
             steps = self._add_steps(plan, reply.steps)
             await self._save(plan, *steps, entries=[self._added_entry(plan, steps, reply, at)])
@@ -2977,21 +2988,22 @@ class PlannerAgent:
         await self._report_progress(plan)
         await self._dispatch_ready(plan)
 
-    async def _forward_to_worker(self, step: PlanStep, text: str, correlation_id: str) -> bool:
+    async def _forward_to_worker(self, step: PlanStep, text: str, correlation_id: str) -> DeliveryResult:
         """Ask the worker pool to add a user message as the running worker's next turn."""
         message = (
             "A message from the user, passed on by the Planner while you work on this step. "
             "Take it into account, then continue:\n\n" + text
         )
-        if not await self._send_worker_input(step, message, correlation_id):
-            return False
+        result = await self._send_worker_input(step, message, correlation_id)
+        if result is not DeliveryResult.ACCEPTED:
+            return result
         await self._activity(
             "phase", f"User message passed to {step.worker_id} (step {step.index + 1}): {text[:80]}",
         )
-        return True
+        return result
 
-    async def _send_worker_input(self, step: PlanStep, text: str, correlation_id: str) -> bool:
-        """Add ``text`` as the running worker's next user turn; True if it landed."""
+    async def _send_worker_input(self, step: PlanStep, text: str, correlation_id: str) -> DeliveryResult:
+        """Preserve runtime acceptance, including an acknowledgement that never arrives."""
         assert self._bus is not None and step.worker_id is not None
         try:
             ack = await self._bus.request(MessageEnvelope.create(
@@ -3002,8 +3014,8 @@ class PlannerAgent:
                 correlation_id=correlation_id,
             ), timeout=WORKER_INPUT_TIMEOUT)
         except asyncio.TimeoutError:
-            return False
-        return bool(ack.payload.get("delivered"))
+            return DeliveryResult.UNKNOWN
+        return DeliveryResult(ack.payload.get("delivered"))
 
     async def _handle_system_event(self, envelope: MessageEnvelope) -> None:
         event_type = envelope.payload.get("type", "")
@@ -3095,16 +3107,19 @@ class PlannerAgent:
             "A course correction from the Planner while you work on this step. "
             "Take it into account, then continue:\n\n" + text
         )
-        if await self._send_worker_input(step, message, plan.correlation_id):
+        result = await self._send_worker_input(step, message, plan.correlation_id)
+        if result is DeliveryResult.ACCEPTED:
             await self._activity(
                 "phase", f"Planner steered step {step.index + 1} ({step.label}): {text[:80]}", worker=step.worker_id,
             )
+        elif result is DeliveryResult.UNKNOWN:
+            await self._activity("phase", f"Planner steer acceptance unknown for {step.worker_id}; not replaying")
         else:
             step.missed_messages.append(text)
             await self._save(plan, step)
             await self._activity(
-                "phase", f"Planner steer for step {step.index + 1} ({step.label}) arrived after "
-                         f"{step.worker_id} finished or was not confirmed; kept for its decision",
+                "phase", f"Planner steer for step {step.index + 1} ({step.label}) was rejected by "
+                         f"{step.worker_id}; kept for its decision",
             )
 
     async def _kill_and_decide(self, plan: TaskPlan, step: PlanStep, reason: str) -> None:

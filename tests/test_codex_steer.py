@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from looper.agents.runtimes.channel import DeliveryResult
+
 from fake_claude import fake_claude
 from looper import child_env
 from looper.agents.agent_settings import AgentSettings, Launch
@@ -607,8 +609,7 @@ def test_pending_steer_fails_when_stdout_closes(app_server: tuple[str, Path], tm
         async with _channel(executable, tmp_path) as (channel, _):
             await channel.start("prompt")
             reading = asyncio.create_task(_collect(channel))
-            with pytest.raises(ConnectionResetError):
-                await channel.send("crash before acknowledgement")
+            assert await channel.send("crash before acknowledgement") is DeliveryResult.UNKNOWN
             assert not any(e["type"] == "result" for e in await asyncio.wait_for(reading, 3))
 
     asyncio.run(run())
@@ -633,8 +634,8 @@ def test_send_has_bounded_handshake_and_ack_waits(app_server: tuple[str, Path], 
             if mode == "stall_steer":
                 await _wait_request(log, "turn/start")
                 await asyncio.sleep(0.01)
-            with pytest.raises(RuntimeError, match=message):
-                await channel.send("do not hang")
+            expected = DeliveryResult.REJECTED if mode == "stall_initialize" else DeliveryResult.UNKNOWN
+            assert await channel.send("do not hang") is expected
             channel.end_input()
             await asyncio.wait_for(reading, 3)
 
@@ -734,8 +735,7 @@ def test_a_stalled_writer_cannot_outlast_the_one_steer_deadline(monkeypatch: pyt
         channel._turn_ready.set()
         channel._turn_id, channel._thread_id = "t", "th"
         started = asyncio.get_running_loop().time()
-        with pytest.raises(RuntimeError, match="in time"):
-            await channel.send("x")
+        assert await channel.send("x") is DeliveryResult.UNKNOWN
         assert asyncio.get_running_loop().time() - started < 0.6
         assert channel._pending == {}
 
