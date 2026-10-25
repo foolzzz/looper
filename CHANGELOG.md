@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.119] - 2026-10-25
+
+### Fixed
+
+- **`loopercli config --help` lists the handwritten `export` and `import` commands with descriptions.** They were named only in the usage line, while the commands generated from the API were listed with descriptions; each now has a help line (`export`: export configuration as JSON to a file or stdout; `import`: preview configuration, request confirmation to apply, or cancel). Help text only: no route, option, stored data format, Manager tool declaration or prompt changed. ([#630](https://github.com/foolzzz/looper/pull/630))
+
 ## [2.13.118] - 2026-10-25
 
 ### Fixed
