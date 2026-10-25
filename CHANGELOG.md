@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.94] - 2026-10-24
+
+### Fixed
+
+- **The prompt-regression "start without waiting" check ignores subagent calls.** It pairs every start with its audit outcome, then anchors and counts only the Manager's own successful starts, so a subagent's failed or successful start no longer hides the Manager's start, and a subagent's native tools no longer count as the Manager waiting. Eval harness and tests only; behavior change for the product: none. Model-visible: none. ([#553](https://github.com/foolzzz/looper/pull/553))
+
 ## [2.13.93] - 2026-10-24
 
 ### Changed
