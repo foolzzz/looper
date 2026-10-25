@@ -247,6 +247,13 @@ class CodexChannel:
     def send_timeout(self) -> float:
         return _REQUEST_TIMEOUT_SEC
 
+    async def wait_input_ready(self) -> None:
+        self._check_open()
+        await self._turn_ready.wait()
+        self._check_open()
+        if self._turn_id is None:
+            raise RuntimeError("no active turn")
+
     async def send(self, text: str, *, uuid: str | None = None) -> None:
         try:
             await asyncio.wait_for(self._steer(text), self.send_timeout)
@@ -255,8 +262,7 @@ class CodexChannel:
 
     async def _steer(self, text: str) -> None:
         """Readiness, lock, write and acknowledgement under the caller's one deadline."""
-        self._check_open()
-        await self._turn_ready.wait()
+        await self.wait_input_ready()
         async with self._lock:
             self._check_open()
             if self._turn_id is None:

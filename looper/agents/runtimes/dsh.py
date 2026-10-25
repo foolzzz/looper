@@ -690,6 +690,9 @@ class DshChannel:
     async def send(self, text: str, *, uuid: str | None = None) -> None:
         raise RuntimeError("DSH cannot accept a user turn while a run is active")
 
+    async def wait_input_ready(self) -> None:
+        raise RuntimeError("DSH cannot accept a user turn while a run is active")
+
     def end_input(self) -> None:
         if self._process.stdin is not None and not self._process.stdin.is_closing():
             self._process.stdin.close()

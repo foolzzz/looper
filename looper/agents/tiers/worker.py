@@ -532,7 +532,7 @@ class WorkerPool:
     async def send_input(self, worker_id: str, text: str) -> bool:
         """Reserve the channel's full acceptance timeout before writing a user turn.
 
-        Only readiness is cancelled by the pool's deadline. Once sending starts,
+        Readiness includes the runtime handshake and is bounded by the pool's deadline. Once sending starts,
         wait for the channel's own acceptance result without shortening its timeout.
         """
         if not text.strip():
@@ -543,9 +543,10 @@ class WorkerPool:
             async with asyncio.timeout_at(deadline):
                 if ready := self._input_ready.get(worker_id):
                     await ready.wait()
-            channel = self._inputs.get(worker_id)
-            if channel is None:
-                return False
+                channel = self._inputs.get(worker_id)
+                if channel is None:
+                    return False
+                await channel.wait_input_ready()
             if deadline - loop.time() < channel.send_timeout:
                 logger.warning("worker %s has insufficient time to accept input before acknowledgement", worker_id)
                 return False
