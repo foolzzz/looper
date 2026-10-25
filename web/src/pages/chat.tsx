@@ -19,7 +19,6 @@ import { ChannelBadge, ConversationList } from "@/components/chat-conversations"
 import { channelLabel, undeliveredText } from "@/lib/chat-channels";
 import {
   sendChat,
-  saveChatMessage,
   fetchChatMessages,
   fetchChatSettings,
   fetchChatTurn,
@@ -262,6 +261,7 @@ function truncate(text: string, max: number): string {
 // The default Manager keeps the original key; every other Manager has a pointer of its own.
 const sessionKey = (managerId: string) =>
   managerId === "manager" ? STORAGE_SESSION_KEY : `${STORAGE_SESSION_KEY}:${managerId}`;
+const localThreadsKey = (managerId: string) => `looper-chat-local-threads:${managerId}`;
 
 function getOrCreateSessionId(managerId = "manager"): string {
   const key = sessionKey(managerId);
@@ -335,6 +335,14 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const scrollRef = useRef<HTMLDivElement>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const turnRef = useRef(0); // the send in flight; an older stream must not touch a newer turn's state
+  // Invalidate even a send whose HTTP response has not arrived, including navigation to a read-only or missing thread.
+  useEffect(() => {
+    // Sidebar navigation clears the query, then pins this same thread again; neither changes the send's owner.
+    if (wantTarget === target.id && (!wantConversation || wantConversation === sessionId)) return;
+    cleanupRef.current?.();
+    setSending(false);
+    setPhase("");
+  }, [wantTarget, wantConversation, target.id, sessionId]);
   // Leaving the page (the session ended, for one) stops the reply stream.
   useEffect(() => () => cleanupRef.current?.(), []);
 
@@ -383,6 +391,30 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   // The Manager and session shown now; a late answer is applied only when it was asked for these.
   const currentRef = useRef({ managerId: target.id, sessionId });
   currentRef.current = { managerId: target.id, sessionId };
+  const localThreads = useRef(new Map<string, Set<string>>());
+  const localThreadsFor = (managerId: string) => {
+    let local = localThreads.current.get(managerId);
+    if (!local) {
+      let ids: unknown;
+      try {
+        ids = JSON.parse(localStorage.getItem(localThreadsKey(managerId)) ?? "[]");
+      } catch {
+        // Storage blocked or corrupt: keep this page's local threads in memory.
+      }
+      local = new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : []);
+      localThreads.current.set(managerId, local);
+    }
+    return local;
+  };
+  const rememberLocalThread = (managerId: string, id: string) => {
+    const local = localThreadsFor(managerId);
+    local.add(id);
+    try {
+      localStorage.setItem(localThreadsKey(managerId), JSON.stringify([...local]));
+    } catch {
+      // Storage full or blocked: Back still works for this page's life.
+    }
+  };
   const isCurrentManager = (managerId: string) => managerId === currentRef.current.managerId;
   const currentManagerId = target.kind === "manager" ? target.id : "";
   // The web thread the Manager-scoped history read confirmed as this Manager's (its own or a new one): until then two
@@ -513,11 +545,18 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     const fresh = () => alive && isCurrentManager(managerId);
     const load = () =>
       fetchChatSession(wantConversation, managerId, controller.signal).then(
-        (session) => fresh() && setOpened({
-          managerId, id: wantConversation, session,
-          error: !session && (wantConversation.startsWith("planner-") || wantConversation.includes(":"))
-            ? "Conversation not found." : "",
-        }),
+        (session) => {
+          if (!fresh()) return;
+          const nonWeb = wantConversation.startsWith("planner-") || wantConversation.includes(":");
+          if (!session && !nonWeb && wantConversation === currentRef.current.sessionId) {
+            rememberLocalThread(managerId, wantConversation);
+          }
+          setOpened({
+            managerId, id: wantConversation, session,
+            error: !session && (nonWeb || !localThreadsFor(managerId).has(wantConversation))
+              ? "Conversation not found." : "",
+          });
+        },
         (err) =>
           fresh() &&
           !(err instanceof Error && err.name === "AbortError") &&
@@ -541,7 +580,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const openedHere = opened?.id === wantConversation && opened.managerId === currentManagerId ? opened : null;
   const knownConversation =
     target.kind === "manager" && wantConversation && targetSettled
-      ? shownConversations?.find((c) => c.session_id === wantConversation) ?? openedHere?.session ?? null
+      ? openedHere?.session ?? null
       : null;
   const viewing = knownConversation && knownConversation.channel !== "web" ? knownConversation : null;
   // Named by the address but not read yet: loading, the read failed (and it is tried again), or another Manager's.
@@ -596,12 +635,10 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     // A click queued on a row of the Manager shown before a switch does nothing.
     if (fromManagerId !== undefined && fromManagerId !== currentRef.current.managerId) return;
     setListOpen(false);
-    if (session.channel === "web") appliedConversation.current = session.session_id;
     onQuery?.(chatQuery(target.id, session.session_id));
-    if (session.channel === "web" && session.session_id !== sessionId) switchWebSession(session.session_id);
   };
-  // A web thread the address names (a link, Back, a refresh) once it is known not to be a channel conversation; an id
-  // with no messages yet is a new web thread only outside Planner and channel namespaces.
+  // Adopt an existing web thread, or return to an unsaved thread created here (Back/Forward). Empty arbitrary ids
+  // cannot take over the stored composer owner.
   useEffect(() => {
     if (!wantConversation) appliedConversation.current = "";
     if (target.kind !== "manager" || !wantConversation || appliedConversation.current === wantConversation) return;
@@ -809,8 +846,8 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     poll.timer = setTimeout(tick, TURN_POLL_MS);
   };
 
-  // On mount, a thread change and a return to the tab: is the Manager still answering this thread?
-  const syncTurn = async (sid: string) => {
+  // On mount, a thread change and a return to the tab or web conversation: is the Manager still answering it?
+  const syncTurn = async (sid: string, isCurrent: () => boolean) => {
     if (sendingRef.current) return;
     if (target.kind !== "manager") {
       pullStagedToDraft();
@@ -823,7 +860,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     } catch {
       return;
     }
-    if (sid !== sessionIdRef.current || managerId !== currentRef.current.managerId || sendingRef.current) return;
+    if (!isCurrent() || sid !== sessionIdRef.current || managerId !== currentRef.current.managerId || sendingRef.current) return;
     if (turn) {
       readInterrupt(turn);
       followTurn(sid, turn.client_message_id ? [turn.message_id, turn.client_message_id] : [turn.message_id]);
@@ -836,6 +873,8 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const syncTurnRef = useRef(syncTurn);
   syncTurnRef.current = syncTurn;
 
+  // Opening a read-only or unresolved conversation leaves sessionId unchanged, but cancels this thread's stream.
+  const threadOpen = !viewing && !conversationUnread && (!wantConversation || wantConversation === sessionId);
   useEffect(() => {
     stagedRef.current = readStaged(sessionId);
     setStagedState(stagedRef.current);
@@ -843,14 +882,19 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     stopPoll();
     setServerTurn(null);
     // A Manager's turn is followed only on a thread confirmed as its own.
-    if (!threadOwned) return;
-    void syncTurnRef.current(sessionId);
+    if (!threadOwned || !threadOpen) return;
+    let alive = true;
+    const isCurrent = () => alive;
+    void syncTurnRef.current(sessionId, isCurrent);
     const onVisible = () => {
-      if (document.visibilityState === "visible") void syncTurnRef.current(sessionId);
+      if (document.visibilityState === "visible") void syncTurnRef.current(sessionId, isCurrent);
     };
     document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [sessionId, target.kind, target.id, threadOwned]);
+    return () => {
+      alive = false;
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [sessionId, target.kind, target.id, threadOwned, threadOpen]);
 
   const serverTurnHere = serverTurn && serverTurn.sid === sessionId ? serverTurn : null;
   const replying = sending || serverTurnHere !== null;
@@ -897,6 +941,8 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
 
   const handleNewChat = () => {
     const newId = newSessionId();
+    if (threadOwned && messages.length === 0) rememberLocalThread(target.id, sessionId);
+    rememberLocalThread(target.id, newId);
     appliedConversation.current = newId;
     onQuery?.(chatQuery(target.id, newId));
     switchWebSession(newId);
@@ -931,11 +977,23 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   };
 
   const handleSend = async (text: string, newSessionProfileId?: string) => {
-    if (!text.trim() || !current.can_send) return;
+    if (!text.trim() || !current.can_send || viewing || conversationUnread) return;
 
     const sid = sessionId;
+    const managerId = target.id;
+    cleanupRef.current?.();
     const turn = ++turnRef.current;
-    const current_ = () => turn === turnRef.current;
+    const controller = new AbortController();
+    const current_ = () => turn === turnRef.current && !controller.signal.aborted &&
+      managerId === currentRef.current.managerId && sid === currentRef.current.sessionId;
+    let close: (() => void) | undefined;
+    const cancel = () => {
+      controller.abort();
+      close?.();
+      if (cleanupRef.current === cancel) cleanupRef.current = null;
+    };
+    // Installed before awaiting sendChat: navigation owns cancellation throughout the send's lifetime.
+    cleanupRef.current = cancel;
     stopPoll();
     setServerTurn(null);
     setNotice("");
@@ -943,7 +1001,6 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     const changesProfile = text.toLowerCase() === NEW_SESSION_COMMAND || /^\/profile(\s|$)/i.test(text);
     setPhase("");
     let finalSeen = false;
-    let aborted = false;
 
     const userMsg: ChatMessage = {
       id: randomId(),
@@ -967,11 +1024,16 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     setMessages((prev) => [...prev, assistantMsg]);
 
     try {
-      const { correlation_id } = await sendChat(text, sessionId, userMsg.id, sendTargetOf(target), { newSessionProfileId });
+      const { correlation_id } = await sendChat(text, sid, userMsg.id, sendTargetOf(target), {
+        newSessionProfileId, signal: controller.signal,
+      });
+      localThreads.current.get(managerId)?.delete(sid); // A successful send makes this a persisted thread.
+      if (!current_()) return;
 
-      const close = streamChatReply(
+      close = streamChatReply(
         correlation_id,
         (event: SSEEvent) => {
+          if (!current_()) return;
           switch (event.kind) {
             case "answer.delta":
               setMessages((prev) =>
@@ -998,12 +1060,9 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
                     : m
                 )
               );
-              if (current_()) {
-                setSending(false);
-                setPhase("");
-                if (changesProfile) setProfileRefresh((n) => n + 1);
-              }
-              if (sid !== sessionIdRef.current) break;
+              setSending(false);
+              setPhase("");
+              if (changesProfile) setProfileRefresh((n) => n + 1);
               const list = stagedRef.current;
               if (list.length > 0) {
                 // Cleared first, so the batch can never go out twice.
@@ -1018,52 +1077,38 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
               break;
             case "turn.completed":
             case "turn.failed":
-              setMessages((prev) => {
-                const msg = prev.find((m) => m.id === assistantId);
-                if (msg && msg.content) {
-                  saveChatMessage({
-                    session_id: sessionIdRef.current,
-                    message_id: assistantId,
-                    role: "assistant",
-                    content: msg.content,
-                  });
-                }
-                return prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m));
-              });
-              if (current_()) {
-                setSending(false);
-                setPhase("");
-              }
+              // WebChannelAdapter saves the reply to the captured send session, including after navigation.
+              setMessages((prev) => current_()
+                ? prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)) : prev);
+              setSending(false);
+              setPhase("");
               break;
           }
         },
         () => {
-          if (current_()) {
-            setSending(false);
-            setPhase("");
-          }
+          if (!current_()) return;
+          setSending(false);
+          setPhase("");
           setMessages((prev) =>
             prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m))
           );
-          if (finalSeen || aborted || sid !== sessionIdRef.current) return;
+          if (finalSeen) return;
           // The stream ended with no final answer (its deadline, say): the turn may still run on the server.
           if (target.kind === "manager") followTurn(sid, [userMsg.id]);
           else pullStagedToDraft();
         }
       );
-      cleanupRef.current = () => {
-        aborted = true;
-        close();
-      };
+      // A synchronous stream callback can already have started the next staged send.
+      if (!current_()) close();
     } catch (err) {
+      if (!current_()) return;
       // fetch() rejects with a TypeError when the server is unreachable; other
       // errors carry the server's reason, e.g. the task's Planner has stopped.
       const reason =
         err instanceof TypeError || !(err instanceof Error)
           ? "Failed to connect. Is the server running?"
           : err.message;
-      if (current_()) setSending(false);
-      if (sid !== sessionIdRef.current) return;
+      setSending(false);
       if (text.toLowerCase() === NEW_SESSION_COMMAND) {
         setMessages((prev) =>
           prev.map((m) => (m.id === assistantId ? { ...m, content: reason, streaming: false } : m)),

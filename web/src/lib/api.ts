@@ -424,12 +424,12 @@ export async function sendChat(
   sessionId?: string,
   messageId?: string,
   target: ChatTarget = { kind: "manager" },
-  options?: { newSessionProfileId?: string },
+  options?: { newSessionProfileId?: string; signal?: AbortSignal },
 ): Promise<ChatSendResponse> {
   const result = await callV1<ChatSendResponse>("/api/v1/operator_chat/send", {
     text, session_id: sessionId, message_id: messageId, target,
     ...(options?.newSessionProfileId ? { new_session_profile_id: options.newSessionProfileId } : {}),
-  });
+  }, { signal: options?.signal });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
 }
@@ -621,7 +621,7 @@ export async function fetchChatSessions(managerId = "manager", signal?: AbortSig
   return result.sessions;
 }
 
-/** One conversation by its id, however long ago it was active (null when it has no messages: a new one): the list holds
+/** One conversation by its id, however long ago it was active (null when no row exists): the list holds
  * only the newest. Another Manager's is a `ForeignConversationError`. */
 export async function fetchChatSession(
   sessionId: string,

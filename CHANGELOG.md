@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.109] - 2026-10-25
+
+### Fixed
+
+- **Channel saves keep their error class, and an unchanged Lark bot can be disabled without authentication.** Fixed validation messages for new or updated channel bots (missing Telegram token, Lark `app_id` or app secret, lark-cli profile, Manager reassignment) now reach the caller as `invalid` with that fixed text, never built from the request. A wrapped service failure with a 5xx status is returned as `unavailable` (`invalid credential request`) instead of being turned into a 400, and a channel lookup before a config update goes through the same error mapping, so a missing channel answers the same 404 with or without `config`. An update that only sets `enabled` to false on a Lark bot whose profile, `app_id`, token, `bot_token_env` and domain are unchanged no longer re-checks the Lark identity, so a bot with broken authentication can be turned off; every other Lark save still revalidates. Model-visible only as API error codes and messages of channel saves; no Manager tool declaration or prompt changed. ([#600](https://github.com/foolzzz/looper/pull/600))
+
 ## [2.13.108] - 2026-10-25
 
 ### Fixed
