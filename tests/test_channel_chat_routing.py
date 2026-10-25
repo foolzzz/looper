@@ -307,7 +307,8 @@ def test_lark_bot_factory_propagates_live_routing(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("suppressed", [False, True])
-def test_observation_failure_preserves_admission_and_silence(tmp_path, monkeypatch, suppressed):
+@pytest.mark.parametrize("failure", ["observation", "logging"])
+def test_observation_or_logging_failure_preserves_admission_and_silence(tmp_path, monkeypatch, suppressed, failure):
     from looper.agents.channels import chat_routing
     async def main():
         action = RouteAction.SILENT if suppressed else RouteAction.ADMIT
@@ -315,8 +316,52 @@ def test_observation_failure_preserves_admission_and_silence(tmp_path, monkeypat
             resolve_chat=lambda *_: RouteDecision(action, "manager"))
         monkeypatch.setattr("looper.agents.channels.telegram.observe_chat", chat_routing.observe_chat)
         monkeypatch.setattr(chat_routing.storage, "record_seen", AsyncMock(side_effect=OSError("unavailable")))
+        if failure == "logging":
+            monkeypatch.setattr(chat_routing.logger, "info", Mock(side_effect=OSError("logging unavailable")))
+            monkeypatch.setattr("looper.agents.channels.telegram.logger.info", chat_routing.logger.info)
         await adapter._on_message(_tg_update(7), None)
         assert len(bus.take_queue("manager")) == (0 if suppressed else 1)
         assert not bot.sent and not adapter._status._open
         await bus.shutdown()
     asyncio.run(main())
+
+
+@pytest.mark.parametrize("kind", ["telegram", "lark", "lark_bot"])
+@pytest.mark.parametrize("explicit,silent,running,reason,outcome", [
+    (True, False, True, "explicit_binding", "admitted"),
+    (False, False, True, "bot_manager", "admitted"),
+    (False, True, True, "only_bound_chats", "silenced"),
+    (True, False, False, "disabled_target", "answered"),
+])
+def test_native_routing_boundary_log(tmp_path, monkeypatch, caplog, lark_observations,
+                                     kind, explicit, silent, running, reason, outcome):
+    caplog.set_level("INFO")
+    body, token = "sentinel-private-message", "sentinel-private-token"
+    async def run():
+        route = RouteDecision(RouteAction.SILENT if silent else RouteAction.ADMIT, "manager-review", explicit)
+        options = dict(resolve_chat=lambda *_: route, manager_running=lambda _: running)
+        if kind == "telegram":
+            adapter, bus, _, _ = telegram(tmp_path, monkeypatch, **options)
+            adapter._bot_token = token
+            await adapter._on_message(_tg_update(7, body), None)
+            chat = "99"
+        else:
+            bus = MessageBus(runtime_root=tmp_path)
+            transport = StubTransport()
+            transport.token = token
+            adapter = _lark(tmp_path, bus, transport, channel_type=kind, **options)
+            await adapter._handle_lark_event(_lark_event(OPEN_ID, body))
+            chat = "oc_1"
+        records = [r for r in caplog.records if r.msg.startswith("chat_route")]
+        assert len(records) == 1
+        record = records[0]
+        assert record.levelname == "INFO"
+        assert (record.channel_id, record.chat_id, record.manager_id) == (
+            adapter.channel_id, chat, None if silent else "manager-review")
+        assert (record.action, record.reason, record.outcome) == (
+            "silent" if silent else "admit", reason, outcome)
+        assert all(body not in str(r.__dict__) and token not in str(r.__dict__) for r in caplog.records)
+        if kind != "telegram":
+            await adapter.stop()
+        await bus.shutdown()
+    asyncio.run(run())

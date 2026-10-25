@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 from ..db import managers as db_managers
 from . import chat_settings
+from .channels.chat_routing import boundary_log
 from .bus import MessageBus
 from .managers_api import DEFAULT_MANAGER_ID, MAX_ENABLED_MANAGERS, ManagerDefinition
 from .message import MANAGER_ADDRESS, MessageEnvelope, MessageType, manager_address
@@ -179,6 +180,8 @@ class ManagerFleet:
     async def stop_chat(self, channel_id: str, chat_id: str, *, via: str) -> ChatStopSummary:
         """Stop this bot/chat's live turns, including queued turns, in every owning Manager."""
         if not chat_settings.stop_enabled():
+            boundary_log(logger, "chat_stop", channel_id=channel_id, chat_id=chat_id, owners=[],
+                         stopped=0, cannot_interrupt=0, failed=0, action="stop", outcome="disabled")
             return ChatStopSummary(state="disabled")
         # Snapshot every owner and its tokens before the first await: a turn may settle or the fleet change.
         snapshot = [(agent, agent.live_for_chat(channel_id, chat_id)) for agent in self.agents()]
@@ -198,6 +201,10 @@ class ManagerFleet:
                     summary.already_stopping += 1
                 elif result is StopResult.CANNOT_INTERRUPT:
                     summary.unsupported += 1
+        boundary_log(logger, "chat_stop", channel_id=channel_id, chat_id=chat_id,
+                     owners=[agent.agent_id for agent, tokens in snapshot if tokens],
+                     stopped=summary.stopping + summary.already_stopping, cannot_interrupt=summary.unsupported,
+                     failed=len(summary.failures), action="stop", outcome="partial" if summary.failures or summary.unsupported else "completed")
         return summary
 
     def binding_report(self) -> dict[str, Any]:

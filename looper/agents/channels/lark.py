@@ -31,7 +31,7 @@ from ..task_notice import Notice, NotifyTarget, TargetKind
 from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
 from .chat_history import record_reply
-from .chat_routing import ChatResolver, RouteAction, observe_chat
+from .chat_routing import ChatResolver, RouteAction, RouteDecision, observe_chat, log_route
 from .lark_cli import MESSAGE_GONE_CODES, RECEIVE_EVENT, LarkCliError, mention
 from .lark_transport import CliTransport, LarkTransport
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
@@ -243,14 +243,18 @@ class LarkChannelAdapter(ChannelAdapter):
             from ..managers import chat_stop_reply
 
             text = chat_stop_reply(await self._stop_chat(self.channel_id, chat_id, via=self.channel_type))
+        outcome = "answered"
         try:
             if group_message:
                 await self._transport.reply(group_message, text=text)
             else:
                 await self._transport.send(chat_id=chat_id, text=text)
         except Exception as exc:
+            outcome = "answer_failed"
             logger.warning("%s: could not tell chat %s that %s is turned off: %s", self.channel_id, chat_id,
                            manager_id, exc)
+        log_route(logger, self.channel_id, chat_id, RouteDecision(RouteAction.ADMIT, manager_id, explicit),
+                  reason="disabled_target", outcome=outcome)
         return True
 
     async def _send_message(self, chat_id: str, text: str) -> DeliveryReceipt:
@@ -417,12 +421,14 @@ class LarkChannelAdapter(ChannelAdapter):
                 metadata["channel_manager_id"] = self._manager_id
             await observe_chat(self.channel_id, chat_id, suppressed=silent)
             if silent:
+                log_route(logger, self.channel_id, chat_id, decision)
                 return
         from ..tiers.manager import is_stop_command
 
         if await self._turned_off(chat_id, message_id if group else None, manager_id=manager_id,
                                   explicit=explicit, stop=is_stop_command(text)):
             return
+        log_route(logger, self.channel_id, chat_id, RouteDecision(RouteAction.ADMIT, manager_id, explicit))
         self._reactions.add(chat_id, message_id)  # the bot saw it; in the background, the Manager gets it now
         correlation_id = str(_uuid.uuid4())
         self._correlation_chat[correlation_id] = chat_id

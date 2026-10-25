@@ -557,3 +557,37 @@ def test_invalid_native_ids_and_cursor_are_rejected_without_changing_routing(tmp
             assert await pool.fetch("SELECT * FROM manager_chat_bindings ORDER BY channel_id, chat_id") == stored
             assert registry._routing == snapshots
     _run(run, monkeypatch)
+
+
+@pytest.mark.parametrize("operation,body,old,new", [
+    ("manager_chat_bindings.put", _binding(manager=OTHER), TARGET, OTHER),
+    ("manager_chat_bindings.delete", {"channel_id": BOT, "chat_id": "7"}, TARGET, None),
+    ("channel_chats.set_policy", {"channel_id": BOT, "bound_chats_only": True}, False, True),
+])
+def test_routing_write_boundary_log(tmp_path, monkeypatch, caplog, operation, body, old, new):
+    caplog.set_level("INFO")
+    async def run(pool):
+        async with _api(tmp_path, pool) as (call, registry, _):
+            assert (await call("manager_chat_bindings.put", _binding()))[0] == 200
+            await pool.execute("UPDATE channel_configs SET config = $2::jsonb WHERE channel_id = $1",
+                               BOT, json.dumps({"description": "sentinel-private-token"}))
+            await chat_bindings.record_seen(BOT, "7", "sentinel-private-message", suppressed=False, pool=pool)
+            registry._routing.clear()  # Stopped bots still need accurate old values.
+            caplog.clear()
+            assert (await call(operation, body))[0] == 200
+            [record] = [r for r in caplog.records if r.msg.startswith("chat_routing_write")]
+            assert record.levelname == "INFO"
+            assert (record.channel_id, record.chat_id, record.action, record.principal_kind, record.outcome) == (
+                BOT, body.get("chat_id"), operation, "operator", "committed")
+            field = "manager_id" if "bindings" in operation else "bound_chats_only"
+            assert (getattr(record, "old_" + field), getattr(record, "new_" + field)) == (old, new)
+            # Read through another connection: the log accompanies committed state, not a pending write.
+            stored = await routing.load_snapshot(BOT, pool=pool)
+            assert stored == registry._routing[BOT]
+            assert all("sentinel-private-message" not in str(r.__dict__) and "sentinel-private-token" not in str(r.__dict__)
+                       and TOKEN not in str(r.__dict__)
+                       for r in caplog.records)
+            monkeypatch.setattr(routing.logger, "info", Mock(side_effect=RuntimeError("logging unavailable")))
+            assert (await call(operation, body))[0] == 200
+            assert await routing.load_snapshot(BOT, pool=pool) == registry._routing[BOT]
+    _run(run, monkeypatch)

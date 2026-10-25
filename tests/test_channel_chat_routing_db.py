@@ -101,7 +101,8 @@ def test_concurrent_services_publish_complete_serialized_snapshots(monkeypatch):
     run_db(run, monkeypatch, setup=seed, timeout=20)
 
 
-def test_repeated_cancellation_drains_commit_and_publication_before_unlock(monkeypatch):
+def test_repeated_cancellation_drains_commit_and_publication_before_unlock(monkeypatch, caplog):
+    caplog.set_level("INFO")
     async def run(pool):
         registry = ChannelRegistry(None)
         await registry.register(Adapter())
@@ -124,12 +125,14 @@ def test_repeated_cancellation_drains_commit_and_publication_before_unlock(monke
         await asyncio.sleep(0)
         assert not caller.done() and not follower.done() and registry.mutation_lock(BOT).locked()
         assert not registry._routing[BOT].bindings
+        assert not any(r.msg.startswith("chat_routing_write") for r in caplog.records)
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await caller
         await follower
         assert registry._routing[BOT] == await routing.load_snapshot(BOT)
         assert registry._routing[BOT].bindings == {"7": TARGET}
+        assert len([r for r in caplog.records if r.msg.startswith("chat_routing_write")]) == 2
         assert not registry.mutation_lock(BOT).locked()
         assert not any(t.get_coro().__qualname__.endswith("_commit_publish.<locals>.finish")
                        for t in asyncio.all_tasks())

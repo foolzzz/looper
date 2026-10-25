@@ -42,7 +42,7 @@ from .allowlist import SenderAllowlist
 from .. import chat_commands, chat_settings
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
 from .chat_history import record_reply
-from .chat_routing import ChatResolver, RouteAction, RouteDecision, observe_chat
+from .chat_routing import ChatResolver, RouteAction, RouteDecision, observe_chat, log_route
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
 
 logger = logging.getLogger(__name__)
@@ -331,6 +331,8 @@ class TelegramChannelAdapter(ChannelAdapter):
         if not receipt.success:
             logger.warning("%s: could not tell chat %s that %s is unavailable", self._channel_id, chat_id,
                            route.manager_id)
+        log_route(logger, self.channel_id, str(chat_id), route, reason="disabled_target",
+                  outcome="answered" if receipt.success else "answer_failed")
         return True
 
     async def _send_answer(self, chat_id: int, text: str) -> DeliveryReceipt:
@@ -403,12 +405,15 @@ class TelegramChannelAdapter(ChannelAdapter):
                  else RouteDecision(RouteAction.ADMIT, self._manager_id))
         if self._resolve_chat is not None:
             await observe_chat(self.channel_id, str(chat_id), suppressed=route.action is RouteAction.SILENT)
+        if route.action is RouteAction.SILENT:
+            log_route(logger, self.channel_id, str(chat_id), route)
         return route if route.action is RouteAction.ADMIT else None
 
     async def _cmd_start(self, update: Any, context: Any) -> None:
         route = await self._admitted(update)
         if route is None or (route.explicit and await self._turned_off(update.effective_chat.id, route, "/start")):
             return
+        log_route(logger, self.channel_id, str(update.effective_chat.id), route)
         await update.message.reply_text(
             "Looper Agent 已就绪。直接发消息给我，或使用:\n"
             "/status — 查看当前任务进度\n"
@@ -425,6 +430,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         route = await self._admitted(update)
         if route is None or (route.explicit and await self._turned_off(update.effective_chat.id, route, "/help")):
             return
+        log_route(logger, self.channel_id, str(update.effective_chat.id), route)
         await update.message.reply_text(chat_commands.help_text())
 
     async def _cmd_new(self, update: Any, context: Any) -> None:
@@ -466,6 +472,7 @@ class TelegramChannelAdapter(ChannelAdapter):
 
         if await self._turned_off(update.effective_chat.id, route, text):
             return
+        log_route(logger, self.channel_id, str(update.effective_chat.id), route)
         self._acknowledge(update)
         chat_id = update.effective_chat.id
         correlation_id = str(_uuid.uuid4())
