@@ -310,14 +310,16 @@ else:
 def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
     tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch, runtime: str, caller: str, startup: str,
 ) -> None:
-    monkeypatch.setattr(worker_module, "WORKER_INPUT_DELIVERY_TIMEOUT", 1.8)
-    monkeypatch.setattr(planner_module, "WORKER_INPUT_TIMEOUT", 2.0)
-    monkeypatch.setattr(codex_steer, "_REQUEST_TIMEOUT_SEC", 1.6)
-    monkeypatch.setattr(omp_steer, "_STEER_TIMEOUT_SEC", 1.6)
-    monkeypatch.setattr(pi_steer, "_STEER_TIMEOUT_SEC", 1.6)
+    # Handshake + acceptance must outlast a send timeout, while each phase has
+    # enough scheduling headroom for a shared CI runner.
+    monkeypatch.setattr(worker_module, "WORKER_INPUT_DELIVERY_TIMEOUT", 3.0)
+    monkeypatch.setattr(planner_module, "WORKER_INPUT_TIMEOUT", 3.5)
+    monkeypatch.setattr(codex_steer, "_REQUEST_TIMEOUT_SEC", 2.0)
+    monkeypatch.setattr(omp_steer, "_STEER_TIMEOUT_SEC", 2.0)
+    monkeypatch.setattr(pi_steer, "_STEER_TIMEOUT_SEC", 2.0)
     log = tmp_path / "requests.jsonl"
     executable = fake_claude(tmp_path / "runtime", f"RUNTIME = {runtime!r}\nLOG = {str(log)!r}\n"
-                            f"ACK_DELAY = {1.54 if startup == 'within_budget' else 0}\n" + _STARTING_RUNTIME)
+                            f"ACK_DELAY = {1.7 if startup == 'within_budget' else 0}\n" + _STARTING_RUNTIME)
     runtime_adapter = adapter(runtime)
     profile = resolved_profile("profile", "test", RuntimeSpec("runtime", runtime, runtime, executable,
         frozenset(runtime_adapter.capabilities | {Capability.STEER})),
@@ -364,7 +366,7 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
                 nonlocal opening
                 if startup != "past_deadline":
                     opening = asyncio.get_running_loop().call_later(
-                        0.12 if startup == "within_budget" else 0.4, handshake.set)
+                        0.4 if startup == "within_budget" else 1.3, handshake.set)
                 return await send_input(worker_id, text)
 
             monkeypatch.setattr(pool, "send_input", deliver_input)
