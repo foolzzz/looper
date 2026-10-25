@@ -5,7 +5,7 @@ from .. import projects
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
 from ..ops.config import answered
-from ..project_execution import ROOM_LIMITS, ProjectExecution
+from ..project_execution import FIELDS, ROOM_LIMITS, ProjectExecution, format_usd
 
 WORKSPACE_MODE = {"type": "string", "enum": ["in_place", "worktree"]}
 WORKSPACE_WARNING = _object({
@@ -78,10 +78,57 @@ async def _impact(arguments):
     await answered(projects._profile_overrides(arguments.get("profile_overrides")))
     default_dir = fields.get("work_dir", "")
     work_dir = projects._task_work_dir(arguments.get("work_dir"), default_dir)
+    execution = ProjectExecution.from_row(fields.get("execution"))
     await answered(projects.task_workspace(
         arguments, work_dir=work_dir, named=bool(arguments.get("work_dir", "").strip()), project_dir=default_dir,
-        project_mode=ProjectExecution.from_row(fields.get("execution")).task_mode))
-    return f"新建项目「{fields['name']}」（默认目录 {default_dir or '无'}），并在里面创建任务（工作目录 {work_dir}）。"
+        project_mode=execution.task_mode))
+    effect = f"新建项目「{fields['name']}」（默认目录 {default_dir or '无'}），并在里面创建任务（工作目录 {work_dir}）。"
+    return effect + "\n" + _execution_impact(execution, arguments["project"])
+
+
+def _execution_impact(execution: ProjectExecution, submitted: dict) -> str:
+    """Disclose effective controls in schema order, without resolving dynamic agent settings."""
+    values = {
+        "task_budget_usd": ("每任务花费上限，USD", "无上限" if execution.task_budget_usd is None
+                            else format_usd(execution.task_budget_usd)),
+        "task_budget_action": ("到达上限后的动作", "wrap_up（Planner 总结一轮后结束）"
+                               if execution.on_task_budget.value == "wrap_up" else "fail（立即失败）"),
+        "supervise_interval_seconds": ("监督间隔秒，0 为关闭", execution.supervise_interval_seconds
+                                       if execution.supervise_interval_seconds is not None else "继承 Planner 配置"),
+        "review_policy": ("步骤评审", "all（每步须通过评审）" if execution.review_all else "planner（由 Planner 决定）"),
+        "distill_lessons": ("经验沉淀", execution.distill_lessons.value),
+        "step_workspaces": ("并行步骤工作区", "worktree" if execution.isolate_steps else "shared"),
+        "workspace_links": ("worktree 链接回原目录的相对路径", ", ".join(execution.link_paths) or "无"),
+        "max_step_retries": ("每步重试次数", execution.step_retries),
+        "planner_roles": ("Planner 定义步骤角色", execution.roles_on),
+        "wait_commands": ("等待步骤以服务端用户身份执行 shell 命令", execution.wait_commands_on),
+        "role_text_max_chars": ("角色提示词及 harness 各自的字符上限", execution.role_text_limit),
+        "user_gates": ("Planner 向用户发起决策门", execution.gates_on),
+        "gate_reminder_hours": ("用户门提醒间隔小时，0 为关闭", execution.gate_reminder_interval_hours),
+        "agent_room": ("agent 互发消息与咨询", execution.room_on),
+        "task_workspaces": ("项目任务工作区", execution.task_mode.value),
+        "operator_notes": ("只读访问操作者目录笔记", execution.notes_on),
+        "vault": ("知识库工具访问", execution.vault_on),
+    }
+    room_labels = {
+        "room_post_per_minute": "每个 run 每分钟消息数", "room_broadcasts_per_run": "每个 run 广播次数",
+        "room_message_max_chars": "每条消息字符上限", "room_messages_per_task": "每任务房间消息上限",
+        "room_ping_pong_rounds": "双席位互发消息后通知 Planner 的轮数", "room_wait_max_seconds": "收件箱最长等待秒数",
+        "room_consult_budget_usd": "每次咨询花费上限，USD", "room_consult_timeout_seconds": "每次咨询超时秒数",
+        "room_consults_per_task": "每任务咨询次数，0 为转交 Planner",
+    }
+    limits = execution.room_limits
+    for field, label in room_labels.items():
+        value = getattr(limits, field.removeprefix("room_"))
+        values[field] = (label, format_usd(value) if field == "room_consult_budget_usd" else value)
+    lines = []
+    for field in FIELDS:
+        label, value = values[field]
+        if isinstance(value, bool):
+            value = "on" if value else "off"
+        default = "（默认）" if submitted.get(field) in (None, "") and field != "supervise_interval_seconds" else ""
+        lines.append(f"- {field}（{label}）：{value}{default}")
+    return "\n".join(lines)
 
 
 async def run(server, operation, arguments, principal, headers):
