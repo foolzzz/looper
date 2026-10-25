@@ -95,6 +95,7 @@ describe("chat Manager picker", () => {
 
   beforeEach(() => {
     localStorage.clear();
+    sessionStorage.clear();
     localStorage.setItem("looper-chat-session-id", SID);
     for (const fn of Object.values(api)) fn.mockReset();
     api.sendChat.mockResolvedValue({ correlation_id: "reply-correlation" });
@@ -157,6 +158,34 @@ describe("chat Manager picker", () => {
     await pick("Code review");
     await click(byText(/New session/i));
     expect(api.fetchManagerSession).toHaveBeenCalledWith("manager-review", expect.anything());
+  });
+
+  it("keeps each Manager's unsent draft separate", async () => {
+    localStorage.setItem(KEY_REVIEW, SID);
+    await mount();
+    const typeDraft = (text: string) => act(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+      setter.call(input(), text);
+      input().dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    typeDraft("Default Manager draft");
+    await pick("Code review");
+    expect(input().value).toBe("");
+    typeDraft("Review Manager draft");
+    await pick("Manager");
+    expect(input().value).toBe("Default Manager draft");
+    await pick("Code review");
+    expect(input().value).toBe("Review Manager draft");
+    const reviewSid = localStorage.getItem(KEY_REVIEW)!;
+    expect(sessionStorage.getItem(`looper-chat-draft:manager:${SID}`)).toBe("Default Manager draft");
+    expect(sessionStorage.getItem(`looper-chat-draft:manager-review:${reviewSid}`)).toBe("Review Manager draft");
+    typeDraft("");
+    await pick("Manager");
+    expect(input().value).toBe("Default Manager draft");
+    await pick("Code review");
+    expect(input().value).toBe("");
+    expect(localStorage.getItem("looper-chat-session-id")).toBe(SID);
+    expect(api.sendChat).not.toHaveBeenCalled();
   });
 
   it.each(["send", "stream", "rejected"])("keeps a pending %s for a transcript, but cancels it for another Manager", async (stage) => {
