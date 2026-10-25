@@ -18,6 +18,13 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.112] - 2026-10-25
+
+### Fixed
+
+- **A Manager cancelled mid-turn keeps its run record and text, and its Claude cleanup is finished.** When the message task is cancelled, the run record is now closed with the assistant text already handled, otherwise the deltas already shown, instead of no output; this also holds when the cancellation arrives during cleanup after a read failure or a stop. `ClaudeRunRecorder.end_left_open` gains an optional `output_text`. `ResidentClaude` runs the stop of a Claude process as its own tracked task: cancelling the caller does not cancel it, a turn or later `stop()` waits for it even after the process was forgotten, and a failing cleanup is logged. Manager and Claude CLI behavior only; no route, stored data format, Manager tool declaration or prompt changed. ([#612](https://github.com/foolzzz/looper/pull/612))
+- **Selected Pi comparisons recompute their cost and repetitions.** `examples/pi/eval-prompt-comparison.sh` now sets `total_cost_usd` and `reps` of the subset it compares from the selected rows, not from the whole Pi run. Example script only; the package is unchanged. ([#610](https://github.com/foolzzz/looper/pull/610))
+
 ## [2.13.111] - 2026-10-25
 
 ### Fixed
