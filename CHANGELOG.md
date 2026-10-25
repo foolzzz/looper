@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.118] - 2026-10-25
+
+### Fixed
+
+- **The Gates page Retry button recovers pagination when the saved boundary has expired.** After a failed load, Retry now requests the first page without the saved pagination boundary and replaces the rows with the result only on success; a failed Retry keeps the saved boundary and the rows already shown. An older refresh that finishes after a Retry is ignored. A gate whose answer editor is open stays mounted when a recovered page omits it, and rows merged from a further page replace same-key rows instead of duplicating them. Dashboard only: no route, stored data format, Manager tool declaration or prompt changed. ([#626](https://github.com/foolzzz/looper/pull/626))
+
 ## [2.13.117] - 2026-10-25
 
 ### Fixed
