@@ -283,6 +283,46 @@ def test_failed_retry_retains_saved_pagination_boundary(dashboard, follow_up):
     expect(page.get_by_role("alert")).to_have_count(0)
 
 
+def test_failed_retry_keeps_loaded_pages_then_success_replaces_boundary(dashboard):
+    page, model, expect = open_gates(dashboard)
+    more = page.get_by_role("button", name="Show more", exact=True)
+    more.click()
+    expect(page.locator("main li")).to_have_count(100)
+    links = page.locator("main li > div > a")
+    original = links.evaluate_all("links => links.map(a => a.hash)")
+    model["rows"].insert(0, gate_row("new"))
+    model["fault"] = "unavailable"
+    refresh(page)
+    alert = page.get_by_role("alert")
+    expect(alert).to_contain_text("Gates temporarily unavailable")
+    feedback = alert.text_content()
+    with page.expect_response(lambda r: urlsplit(r.url).path == "/api/v1/ops/gates/list"):
+        page.get_by_role("button", name="Retry", exact=True).click()
+    expect(alert).to_have_text(feedback)
+    assert links.evaluate_all("links => links.map(a => a.hash)") == original
+
+    model["fault"] = None
+    more.click()
+    expect(page.locator("main li")).to_have_count(120)
+    continued = links.evaluate_all("links => links.map(a => a.hash)")
+    assert continued == [f"#tasks/t{n}" for n in range(120)]
+    assert len(set(continued)) == len(continued)
+    # A later failed refresh offers the second explicit Retry after Show more cleared the error.
+    model["fault"] = "unavailable"
+    refresh(page)
+    expect(alert).to_be_visible()
+    model["fault"] = None
+    page.get_by_role("button", name="Retry", exact=True).click()
+    expect(alert).to_have_count(0)
+    expect(page.locator("main li")).to_have_count(50)
+    assert links.evaluate_all("links => links.map(a => a.hash)") == [
+        "#tasks/tnew", *[f"#tasks/t{n}" for n in range(49)]]
+    more.click()
+    expect(page.locator("main li")).to_have_count(100)
+    assert links.evaluate_all("links => links.map(a => a.hash)") == [
+        "#tasks/tnew", *[f"#tasks/t{n}" for n in range(99)]]
+
+
 def test_retry_replaces_expired_boundary_and_ignores_older_refresh(dashboard):
     page, model, expect = open_gates(dashboard)
     # The saved first page also includes t50, the successor introduced for unread gates.
