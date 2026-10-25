@@ -458,7 +458,7 @@ class TurnTree:
             if not force and time.monotonic() - self._refreshed < _REFRESH_MIN_SEC:
                 return
             table = await asyncio.to_thread(_snapshot)
-            skip = skip | await self._reused()
+            skip = skip | await self._reused(table)
             self._groups = {pid: pgid for pid, pgid in self._groups.items()
                             if pid in table and pid not in skip and pgid not in skip}
             self._merge(_tree(self.process, table, self._groups, skip=skip))
@@ -488,7 +488,7 @@ class TurnTree:
             ticker.cancel()
             await asyncio.gather(ticker, return_exceptions=True)
 
-    async def _reused(self) -> frozenset[int]:
+    async def _reused(self, table: Table | None = None) -> frozenset[int]:
         """Reject reused identities durably, and unread identities for this observation. Never replace a
         missing initial identity with a later process's start time just because its pid is still present."""
         known = {pid: started for pid, started in self.seen.items() if started is not None}
@@ -496,7 +496,15 @@ class TurnTree:
         if current is None:
             return frozenset(self.seen) | self._excluded | {self.process.pid}
         self._excluded.update(pid for pid, started in known.items() if pid in current and current[pid] != started)
-        return frozenset(self._excluded | {pid for pid in self.seen if pid not in current}
+        missing = self.seen.keys() - current.keys()
+        root = self.process.pid
+        if root in known and self.process.returncode is not None and root not in current:
+            if table is None:
+                table = await asyncio.to_thread(_snapshot)
+            if root not in table:
+                # A reaped root still owns its surviving group; an unread live pid does not prove ownership.
+                missing.discard(root)
+        return frozenset(self._excluded | missing
                          | ({self.process.pid} if self.seen.get(self.process.pid) is None else set()))
 
     async def begin_end(self) -> None:

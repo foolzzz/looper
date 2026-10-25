@@ -652,6 +652,41 @@ async def _wait_file(path: Path) -> str:
     raise AssertionError(f"{path} was not written")
 
 
+def test_turn_tree_follows_the_original_group_after_the_agent_exits(
+    tmp_path: Path, trees: list[dict[str, int]],
+) -> None:
+    code = ("import subprocess, sys\n"
+            "sys.stdin.read()\n"
+            "child = subprocess.Popen(['/bin/sleep', '60'], stdin=subprocess.DEVNULL,\n"
+            "                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "open('child.pid', 'w').write(str(child.pid))\n")
+
+    async def _run() -> None:
+        process = await _spawn_python(tmp_path, code)
+        pids = {"agent": process.pid}
+        trees.append(pids)
+        try:
+            tree = proc_tree.track(process)
+            assert tree.seen[process.pid] is not None
+            assert process.stdin is not None
+            process.stdin.close()
+            await asyncio.wait_for(process.wait(), 5)
+            assert process.returncode == 0
+            child = pids["child"] = int(await _wait_file(tmp_path / "child.pid"))
+            assert child not in tree.seen
+            assert _running([child], settle=0) == [child]
+            await tree.refresh(force=True)
+            assert child in tree.seen
+            await tree.end()
+            assert _running([child]) == []
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+
+    asyncio.run(_run())
+
+
 def test_turn_tree_ends_a_detached_grandchild_whose_parent_is_gone(tmp_path: Path) -> None:
     code = ("import subprocess, sys, time\n"
             "child = subprocess.Popen([sys.executable, '-c', " + repr(_DETACHED_CHILD) + "])\n"
