@@ -222,7 +222,12 @@ class _Channel(ChannelAdapter):
         return PostReceipt(True, external_ids=("om_1",))
 
 
-def test_the_registry_posts_through_the_running_channel_or_says_it_is_not_running() -> None:
+def test_the_registry_posts_through_the_running_channel_or_says_it_is_not_running(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+    from looper.agents.channels.chat_routing import RoutingSnapshot
+
+    snapshot = RoutingSnapshot("channel-lark", "manager", True, {})
+    monkeypatch.setattr("looper.agents.channels.registry.load_snapshot", AsyncMock(return_value=snapshot))
     async def main() -> tuple[PostReceipt, PostReceipt, list[Any]]:
         registry = ChannelRegistry(bus=SimpleNamespace())
         channel = _Channel()

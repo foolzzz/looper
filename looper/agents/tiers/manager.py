@@ -517,10 +517,12 @@ def _session_key(envelope: MessageEnvelope) -> str | None:
         pinned = envelope.metadata.get("channel_thread_id")
         if "channel_thread_id" in envelope.metadata:
             parsed = parse_channel_thread_id(pinned) if isinstance(pinned, str) else None
+            # An unsuffixed identity belongs only to the immutable bot owner set by the native adapter.
+            pinned_manager = (parsed.manager_id or envelope.metadata.get("channel_manager_id")) if parsed else None
             if (parsed is None or parsed.channel_id != origin["channel_id"]
                     or parsed.channel_type != origin["channel"] or parsed.chat_id != origin["chat"]
                     or envelope.source.agent_type != "channel" or envelope.target.agent_type != "manager"
-                    or parsed.manager_id != envelope.target.agent_id):
+                    or pinned_manager != envelope.target.agent_id):
                 raise ValueError("channel thread identity does not match its envelope")
             return pinned
         if parse_channel_id(origin["channel_id"]) is not None:

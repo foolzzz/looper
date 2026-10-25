@@ -100,14 +100,36 @@ def test_numeric_chat_ids_keep_their_historical_spelling(raw: str) -> None:
 
 
 def _message(*, pinned=None, channel="telegram", channel_id="channel-telegram-2", chat_id="42",
-             target="manager-review", session_id=None):
+             target="manager-review", session_id=None, owner=None):
     from looper.agents.message import MessageEnvelope, MessageType, channel_address, manager_address
 
+    metadata = {"channel_thread_id": pinned} if pinned is not None else {}
+    if owner is not None:
+        metadata["channel_manager_id"] = owner
     return MessageEnvelope.create(
         source=channel_address(channel, channel_id), target=manager_address(target),
         message_type=MessageType.USER_MESSAGE,
         payload={"text": "hello", "channel_context": {"chat_id": chat_id, "session_id": session_id}},
-        metadata={"channel_thread_id": pinned} if pinned is not None else {})
+        metadata=metadata)
+
+
+@pytest.mark.parametrize("destination", ["manager", "manager-review"])
+def test_formatted_pin_accepts_the_bot_owner_and_a_bound_manager(destination):
+    from looper.agents.tiers.manager import _session_key
+
+    pinned = channel_thread_id("channel-telegram-2", "42", destination, "manager")
+    assert _session_key(_message(pinned=pinned, target=destination, owner="manager")) == pinned
+
+
+@pytest.mark.parametrize("destination,target", [
+    ("manager", "manager-review"), ("manager-review", "manager"),
+])
+def test_formatted_pin_rejects_an_owner_or_bound_manager_destination_mismatch(destination, target):
+    from looper.agents.tiers.manager import _session_key
+
+    pinned = channel_thread_id("channel-telegram-2", "42", destination, "manager")
+    with pytest.raises(ValueError, match="does not match"):
+        _session_key(_message(pinned=pinned, target=target, owner="manager"))
 
 
 def test_pinned_identity_survives_envelope_round_trip_without_changing_channel_context():

@@ -7,6 +7,7 @@ them a second time.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -14,6 +15,7 @@ from ..bus import MessageBus
 from ..message import parse_channel_id
 from ..task_notice import NotifyTarget
 from .base import ChannelAdapter, PostReceipt
+from .chat_routing import RouteDecision, RoutingSnapshot, load_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +26,29 @@ class ChannelRegistry:
     def __init__(self, bus: MessageBus) -> None:
         self._bus = bus
         self._channels: dict[str, ChannelAdapter] = {}
+        self._routing: dict[str, RoutingSnapshot] = {}
+        self._mutation_locks: dict[str, asyncio.Lock] = {}
+
+    def mutation_lock(self, channel_id: str) -> asyncio.Lock:
+        return self._mutation_locks.setdefault(channel_id, asyncio.Lock())
+
+    def bindings_changed(self, channel_id: str, snapshot: RoutingSnapshot) -> None:
+        """Total, synchronous publication: no I/O, callbacks or adapter dependency."""
+        self._routing[channel_id] = snapshot
+
+    def resolve_chat(self, channel_id: str, chat_id: str) -> RouteDecision:
+        return self._routing[channel_id].resolve(chat_id)
 
     async def register(self, adapter: ChannelAdapter) -> None:
+        if parse_channel_id(adapter.channel_id) is not None:
+            async with self.mutation_lock(adapter.channel_id):
+                try:
+                    snapshot = await load_snapshot(adapter.channel_id)
+                except Exception:
+                    logger.exception("%s not started: cannot load chat routing", adapter.channel_id)
+                    raise
+                self.bindings_changed(adapter.channel_id, snapshot)
+                adapter._resolve_chat = self.resolve_chat
         self._channels[adapter.channel_id] = adapter
         await adapter.start(self._bus)
         logger.info("channel %s (%s) registered", adapter.channel_id, adapter.channel_type)
