@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import json
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,27 +25,19 @@ def _sha(data: str) -> str:
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
-class _Writer:
-    def __init__(self) -> None:
-        self.data = b""
-
-    def write(self, data: bytes) -> None:
-        self.data += data
-
-    async def drain(self) -> None:
-        pass
-
-
-async def _call(root: Path, method: str, path: str, body: Any = None) -> tuple[int, Any]:
+async def _call(root: Path, action: str, project_id: str, body: Any = None, **ids) -> tuple[int, Any]:
     from looper.agents.http_server import AgentHTTPServer
     from looper.agents.tiers.task import TaskRouter
+    from tests.db_support import call_v1
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), task_router=TaskRouter(runtime_root=root),
-                             supervisor=SimpleNamespace(), runtime_root=root)
-    writer = _Writer()
-    await server._route_api(method, path, {}, b"" if body is None else json.dumps(body).encode(), writer)
-    head, _, payload = writer.data.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload)
+                             supervisor=SimpleNamespace(bus=None), runtime_root=root)
+    data = {"project_id": project_id, **ids}
+    if action == "add":
+        data["document"] = body
+    elif action in ("update", "confirm_draft") and body is not None:
+        data["fields"] = body
+    return await call_v1(server, "/api/v1/project_knowledge/" + action, data)
 
 
 @pytest.fixture
@@ -101,19 +92,19 @@ def test_the_api_adds_lists_changes_and_deletes_documents(
 
     async def _test(pool: Any) -> None:
         project = await projects.create_project(name="calc", work_dir=str(project_dir), pool=pool)
-        base = f"/api/projects/{project['id']}/knowledge"
-        status, text = await _call(tmp_path, "POST", base, {
+        project_id = project["id"]
+        status, text = await _call(tmp_path, "add", project_id, {
             "source_kind": "text", "title": "Glossary", "summary": "Terms", "content": "MARKER-ALPHA · 中文"})
-        assert status == 201
-        status, upload = await _call(tmp_path, "POST", base, {
+        assert status == 200
+        status, upload = await _call(tmp_path, "add", project_id, {
             "source_kind": "upload", "title": "Schema", "summary": "Tables", "filename": "schema.sql",
             "content_base64": base64.b64encode(b"CREATE TABLE t();\n").decode()})
-        assert status == 201
-        status, path = await _call(tmp_path, "POST", base, {
+        assert status == 200
+        status, path = await _call(tmp_path, "add", project_id, {
             "source_kind": "path", "title": "Runbook", "summary": "Deploys", "path": "./docs/runbook.md"})
-        assert status == 201
+        assert status == 200
 
-        status, view = await _call(tmp_path, "GET", base)
+        status, view = await _call(tmp_path, "list", project_id)
         assert status == 200
         assert [(d["title"], d["source_kind"]) for d in view["documents"]] == [
             ("Glossary", "text"), ("Schema", "upload"), ("Runbook", "path")]
@@ -125,23 +116,23 @@ def test_the_api_adds_lists_changes_and_deletes_documents(
         assert (rows["Runbook"]["content"], rows["Runbook"]["path"]) == (None, "docs/runbook.md")
 
         # Refused: a path out of the project, a binary upload; nothing is written.
-        assert (await _call(tmp_path, "POST", base, {
+        assert (await _call(tmp_path, "add", project_id, {
             "source_kind": "path", "title": "x", "summary": "y", "path": "../secret.txt"}))[0] == 400
-        assert (await _call(tmp_path, "POST", base, {
+        assert (await _call(tmp_path, "add", project_id, {
             "source_kind": "upload", "title": "x", "summary": "y", "filename": "a.bin",
             "content_base64": base64.b64encode(b"\x00\x01\x02").decode()}))[0] == 400
         assert await pool.fetchval("SELECT count(*) FROM project_documents") == 3
 
         doc_id = text["document"]["document_id"]
-        status, changed = await _call(tmp_path, "PUT", f"{base}/{doc_id}", {"content": "MARKER-GAMMA"})
+        status, changed = await _call(tmp_path, "update", project_id, {"content": "MARKER-GAMMA"}, document_id=doc_id)
         assert status == 200 and changed["document"]["sha256"] == _sha("MARKER-GAMMA")
         row = await pool.fetchrow("SELECT content, size_bytes, updated_at, created_at FROM project_documents "
                                   "WHERE id = $1", doc_id)
         assert (row["content"], row["size_bytes"]) == ("MARKER-GAMMA", 12) and row["updated_at"] > row["created_at"]
 
-        status, after = await _call(tmp_path, "DELETE", f"{base}/{upload['document']['document_id']}")
+        status, after = await _call(tmp_path, "delete", project_id, document_id=upload["document"]["document_id"])
         assert status == 200 and after["count"] == 2
-        assert (await _call(tmp_path, "DELETE", f"{base}/{upload['document']['document_id']}"))[0] == 404
+        assert (await _call(tmp_path, "delete", project_id, document_id=upload["document"]["document_id"]))[0] == 404
         assert path["document"]["read_path"] == str(project_dir / "docs" / "runbook.md")
 
     run_db(_test, monkeypatch)
@@ -155,27 +146,27 @@ def test_the_api_shows_one_document_with_its_body(
     async def _test(pool: Any) -> None:
         project = await projects.create_project(name="calc", work_dir=str(project_dir), pool=pool)
         other = await projects.create_project(name="other", pool=pool)
-        base = f"/api/projects/{project['id']}/knowledge"
-        _, text = await _call(tmp_path, "POST", base, {
+        project_id = project["id"]
+        _, text = await _call(tmp_path, "add", project_id, {
             "source_kind": "text", "title": "Glossary", "summary": "Terms", "content": "MARKER-ALPHA · 中文"})
-        _, path = await _call(tmp_path, "POST", base, {
+        _, path = await _call(tmp_path, "add", project_id, {
             "source_kind": "path", "title": "Runbook", "summary": "Deploys", "path": "docs/runbook.md"})
         text_id, path_id = text["document"]["document_id"], path["document"]["document_id"]
 
-        status, shown = await _call(tmp_path, "GET", f"{base}/{text_id}")
+        status, shown = await _call(tmp_path, "get", project_id, document_id=text_id)
         assert status == 200
         assert (shown["document"]["title"], shown["content"]) == ("Glossary", "MARKER-ALPHA · 中文")
         # A path document shows its file as it is now.
         (project_dir / "docs" / "runbook.md").write_text("Deploy with MARKER-DELTA.\n", encoding="utf-8")
-        status, shown = await _call(tmp_path, "GET", f"{base}/{path_id}")
+        status, shown = await _call(tmp_path, "get", project_id, document_id=path_id)
         assert (status, shown["content"]) == (200, "Deploy with MARKER-DELTA.\n")
         (project_dir / "docs" / "runbook.md").unlink()
-        status, shown = await _call(tmp_path, "GET", f"{base}/{path_id}")
+        status, shown = await _call(tmp_path, "get", project_id, document_id=path_id)
         assert status == 200 and shown["content"] is None and shown["document"]["missing"]
         assert "missing" in shown["content_error"]
 
-        assert (await _call(tmp_path, "GET", f"{base}/doc-nope"))[0] == 404
-        assert (await _call(tmp_path, "GET", f"/api/projects/{other['id']}/knowledge/{text_id}"))[0] == 404
+        assert (await _call(tmp_path, "get", project_id, document_id="doc-nope"))[0] == 404
+        assert (await _call(tmp_path, "get", other["id"], document_id=text_id))[0] == 404
 
     run_db(_test, monkeypatch)
 
@@ -241,26 +232,26 @@ def test_a_draft_stays_out_of_runs_until_it_is_confirmed(
     async def _test(pool: Any) -> None:
         project = await projects.create_project(name="calc", work_dir=str(project_dir), pool=pool)
         await tasks.create_task(task_id="task-1", requirement="r", work_dir="/w", project_id=project["id"], pool=pool)
-        base = f"/api/projects/{project['id']}/knowledge/drafts"
+        project_id = project["id"]
         lessons = await knowledge.add_draft(project["id"], task_id="task-1", title="Lessons: calc",
                                             summary="What task-1 learned", content="- MARKER-LESSON")
         other = await knowledge.add_draft(project["id"], task_id=None, title="Lessons: other", summary="s",
                                           content="- other")
 
         assert await knowledge.load_knowledge(tmp_path, project, str(project_dir)) == knowledge.EMPTY_KNOWLEDGE
-        status, listed = await _call(tmp_path, "GET", base)
+        status, listed = await _call(tmp_path, "drafts", project_id)
         assert status == 200 and [(d["title"], d["task_id"], d["content"]) for d in listed["drafts"]] == [
             ("Lessons: calc", "task-1", "- MARKER-LESSON"), ("Lessons: other", None, "- other")]
 
         # Confirmed with an edited title and content.
-        status, confirmed = await _call(tmp_path, "POST", f"{base}/{lessons['draft_id']}/confirm",
-                                        {"title": "Lessons: build", "content": "- MARKER-EDITED"})
+        status, confirmed = await _call(tmp_path, "confirm_draft", project_id,
+                                        {"title": "Lessons: build", "content": "- MARKER-EDITED"}, draft_id=lessons["draft_id"])
         assert status == 200 and confirmed["document"]["source_kind"] == "text"
         loaded = await knowledge.load_knowledge(tmp_path, project, str(project_dir))
         assert "- Lessons: build: What task-1 learned (Lessons-build.md)" in loaded.index.splitlines()
         assert (Path(loaded.add_dirs[0]) / "Lessons-build.md").read_text() == "- MARKER-EDITED"
 
-        status, discarded = await _call(tmp_path, "DELETE", f"{base}/{other['draft_id']}")
+        status, discarded = await _call(tmp_path, "discard_draft", project_id, draft_id=other["draft_id"])
         assert status == 200 and discarded["drafts"] == []
         view = await knowledge.knowledge_view(project["id"], tmp_path)
         assert [d["title"] for d in view["documents"]] == ["Lessons: build"]
@@ -277,23 +268,24 @@ def test_a_refused_confirm_or_discard_leaves_the_draft(monkeypatch: pytest.Monke
         other = await projects.create_project(name="other", pool=pool)
         draft = (await knowledge.add_draft(project["id"], task_id=None, title="Lessons: calc", summary="s",
                                            content="- c"))["draft_id"]
-        base, elsewhere = (f"/api/projects/{p['id']}/knowledge/drafts" for p in (project, other))
-        for method, path, body, status, says in [
-            ("POST", f"{base}/{draft}/confirm", {"title": "two\nlines"}, 400, "one line"),
-            ("POST", f"{base}/{draft}/confirm", {"content": "  "}, 400, "needs its content"),
-            ("POST", f"{base}/{draft}/confirm", {"path": "a.md"}, 400, "unknown field 'path'"),
-            ("POST", f"{base}/{draft}/confirm", [], 400, "JSON object"),
-            ("POST", f"{base}/draft-nope/confirm", {}, 404, "no draft"),
-            ("DELETE", f"{base}/draft-nope", None, 404, "no draft"),
-            ("POST", f"{elsewhere}/{draft}/confirm", {}, 404, "no draft"),
-            ("DELETE", f"{elsewhere}/{draft}", None, 404, "no draft"),
-            ("GET", "/api/projects/proj-nope/knowledge/drafts", None, 404, "not found"),
+        project_id = project["id"]
+        for action, target_project, target_draft, body, status, says in [
+            ("confirm_draft", project_id, draft, {"title": "two\nlines"}, 400, "one line"),
+            ("confirm_draft", project_id, draft, {"content": "  "}, 400, "needs its content"),
+            ("confirm_draft", project_id, draft, {"path": "a.md"}, 400, "declared schema"),
+            ("confirm_draft", project_id, draft, [], 400, "declared schema"),
+            ("confirm_draft", project_id, "draft-nope", {}, 404, "no draft"),
+            ("discard_draft", project_id, "draft-nope", None, 404, "no draft"),
+            ("confirm_draft", other["id"], draft, {}, 404, "no draft"),
+            ("discard_draft", other["id"], draft, None, 404, "no draft"),
+            ("drafts", "proj-nope", None, None, 404, "not found"),
         ]:
-            answer = await _call(tmp_path, method, path, body)
-            assert answer[0] == status and says in answer[1]["error"], (method, path, answer)
+            ids = {"draft_id": target_draft} if target_draft is not None else {}
+            answer = await _call(tmp_path, action, target_project, body, **ids)
+            assert answer[0] == status and says in answer[1]["error"], (action, answer)
         # A confirm over a project cap is refused too.
         monkeypatch.setattr(knowledge, "PROJECT_MAX_DOCUMENTS", 0)
-        status, refused = await _call(tmp_path, "POST", f"{base}/{draft}/confirm", {})
+        status, refused = await _call(tmp_path, "confirm_draft", project_id, {}, draft_id=draft)
         assert status == 400 and "at most 0 documents" in refused["error"]
 
         assert [d["draft_id"] for d in (await knowledge.drafts_view(project["id"]))["drafts"]] == [draft]

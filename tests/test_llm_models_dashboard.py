@@ -300,9 +300,9 @@ def test_incompatible_protocol_cannot_create_profile(dashboard_server, runtime, 
     provider = api.post("/api/providers", {"name": ACCOUNT, "vendor_type": "custom", "endpoints": [
         {"protocol": protocol, "base_url": "https://example.invalid/v1"}
         for protocol in (compatible, incompatible)]})["provider"]
-    models = {protocol: api.post("/api/models", {
-        "provider_id": provider["provider_id"], "name": exact_model, "protocol": protocol,
-    })["model"] for protocol in (compatible, incompatible)}
+    models = {protocol: api.post("/api/v1/ops/models/create", {
+        "provider": provider["provider_id"], "name": exact_model, "protocol": protocol,
+    })["result"]["model"] for protocol in (compatible, incompatible)}
     before = _registry_state(dashboard_server)
     assert before["profiles"]  # Positive control for the DB readback.
     with pytest.raises(EvalError, match=r"answered 400:.*protocol"):
@@ -382,7 +382,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
                 (protocol, f"https://example.invalid/{protocol}") for protocol in ("anthropic-messages", "openai-chat")}
     account.get_by_role("button", name=f"Models for provider {ACCOUNT}", exact=True).click()
     expect(account).to_contain_text("No models registered")
-    assert server.api.get("/api/models", provider_id=pid)["models"] == []
+    assert server.api.post("/api/v1/ops/models/list", {"provider": pid})["result"]["models"] == []
 
     for protocol in ("anthropic-messages", "openai-chat"):
         account.get_by_role("button", name="Add model", exact=True).click()
@@ -396,7 +396,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
         model_form.get_by_label("Effort support", exact=True).select_option("supported")
         model_form.get_by_label("Supported efforts", exact=True).fill("low, high")
         _finish_form(model_form, "Add model")
-    models = server.api.get("/api/models", provider_id=pid)["models"]
+    models = server.api.post("/api/v1/ops/models/list", {"provider": pid})["result"]["models"]
     assert len(models) == 2 and {m["name"] for m in models} == {MODEL_NAME}
     by_protocol = {m["protocol"]: m for m in models}
     mid = by_protocol["anthropic-messages"]["model_id"]
@@ -472,7 +472,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
         "button", name=f"Delete model {MODEL_NAME} (anthropic-messages)", exact=True))
     model_row.get_by_role("button", name=f"Delete model {MODEL_NAME} (anthropic-messages)", exact=True).click()
     expect(model_row.get_by_role("alert")).to_be_visible()
-    assert next(m for m in server.api.get("/api/models", provider_id=pid)["models"] if m["model_id"] == mid)
+    assert next(m for m in server.api.post("/api/v1/ops/models/list", {"provider": pid})["result"]["models"] if m["model_id"] == mid)
     account.get_by_role("button", name=f"Edit provider {ACCOUNT}", exact=True).click()
     edit = page.get_by_role("form", name=f"Edit provider {ACCOUNT}", exact=True)
     edit.get_by_label("API key", exact=True).fill(SECRET)
@@ -491,18 +491,33 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     assert len([m for m in data["models"] if m["provider"] == ACCOUNT]) == 2
     assert next(p for p in data["profiles"] if p["name"] == "Smoke profile")["model"] == {
         "provider": ACCOUNT, "name": MODEL_NAME, "protocol": "anthropic-messages"}
+    page.get_by_role("switch", name="Include secrets", exact=True).click()
+    with page.expect_download() as secret_download:
+        page.get_by_role("button", name="Export configuration", exact=True).click()
+    secret_file = tmp_path / "private-config.json"
+    secret_download.value.save_as(secret_file)
+    private = json.loads(secret_file.read_text())
+    assert private["secrets"] == "included"
+    assert next(p for p in private["providers"] if p["name"] == ACCOUNT)["api_key"] == SECRET
+    page.get_by_role("switch", name="Include secrets", exact=True).click()
+    assert SECRET not in page.content()
     # A real exported file with one edit proves preview/apply, rather than a no-op import.
     next(m for m in data["models"] if m["provider"] == ACCOUNT and m["protocol"] == "anthropic-messages")["context_window"] = 96000
     exported.write_text(json.dumps(data))
     before_import = _registry_state(server)
     with page.expect_file_chooser() as chooser:
         page.get_by_role("button", name="Choose file", exact=True).click()
-    with page.expect_response(lambda r: "/api/config/imports" in r.url and r.request.method == "POST") as upload:
+    with page.expect_response(lambda r: r.url.endswith("/api/v1/config/import_upload") and r.request.method == "POST") as upload:
         chooser.value.set_files(exported)
     assert upload.value.status in (200, 201)
     expect(page.get_by_text(re.compile("nothing written yet"))).to_be_visible()
     assert _registry_state(server) == before_import
-    with page.expect_response(lambda r: r.url.endswith("/apply")) as applied:
+    with page.expect_response(lambda r: r.url.endswith("/api/v1/config/import_cancel")) as cancelled:
+        page.get_by_role("button", name="Cancel", exact=True).click()
+    assert cancelled.value.status == 200 and _registry_state(server) == before_import
+    page.locator('input[type="file"]').set_input_files(exported)
+    expect(page.get_by_text(re.compile("nothing written yet"))).to_be_visible()
+    with page.expect_response(lambda r: r.url.endswith("/api/v1/config/import_apply")) as applied:
         page.get_by_role("button", name=re.compile(r"^Apply \d+ changes?$")).click()
     assert applied.value.status == 200
     expect(page.get_by_role("status").filter(has_text="Applied smoke-config.json")).to_be_visible()
@@ -519,10 +534,12 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     assert not errors
     # One opt-in local artifact, containing only synthetic public UI data.
     screenshot = os.environ.get("LOOPER_DASHBOARD_SMOKE_SCREENSHOT")
-    if screenshot and width == 1280:
+    if screenshot:
         destination = Path(screenshot).resolve()
         assert destination.is_relative_to(REPO_ROOT / ".local")
-        page.screenshot(path=str(destination))
+        _settings(page, server, "providers")
+        _row(page, "Smoke account").get_by_role("button", name="Models for provider Smoke account", exact=True).click()
+        _row(page, "Smoke account").screenshot(path=str(destination.with_stem(f"{destination.stem}-{width}")))
 
 
 @pytest.mark.installed
@@ -551,17 +568,19 @@ def test_vendor_suggestions_are_explicit_and_invalid_inputs_do_not_write(dashboa
         s["name"] for s in vendor["suggested_models"] if s["protocol"] == suggestion["protocol"]]
     suggestions.select_option(suggestion["name"])
     expect(form.get_by_label("Exact model name *", exact=True)).to_have_value(suggestion["name"])
-    assert server.api.get("/api/models", provider_id=provider["provider_id"])["models"] == []
+    assert server.api.post("/api/v1/ops/models/list", {"provider": provider["provider_id"]})["result"]["models"] == []
     before = _registry_state(server)
-    form.get_by_label("Context window", exact=True).fill("-1")
-    with page.expect_response(lambda r: r.url.endswith("/api/models") and r.request.method == "POST") as invalid:
-        form.get_by_role("button", name="Add model", exact=True).click()
-    assert invalid.value.status == 400
-    expect(form.get_by_role("alert")).to_be_visible()
-    assert _registry_state(server) == before
+    for value in ("-1", "not-a-number"):
+        form.get_by_label("Context window", exact=True).fill(value)
+        with page.expect_response(lambda r: r.url.endswith("/api/v1/ops/models/create") and r.request.method == "POST") as invalid:
+            form.get_by_role("button", name="Add model", exact=True).click()
+        assert invalid.value.status == 400
+        expect(form.get_by_role("alert")).to_be_visible()
+        expect(form.get_by_label("Context window", exact=True)).to_have_value(value)
+        assert _registry_state(server) == before
     form.get_by_label("Context window", exact=True).fill("32000")
     _finish_form(form, "Add model")
-    [model] = server.api.get("/api/models", provider_id=provider["provider_id"])["models"]
+    [model] = server.api.post("/api/v1/ops/models/list", {"provider": provider["provider_id"]})["result"]["models"]
     assert (model["name"], model["protocol"], model["context_window"]) == (suggestion["name"], suggestion["protocol"], 32000)
     assert next(m for m in _registry_state(server)["models"] if m["id"] == model["model_id"])["context_window"] == 32000
 
@@ -576,7 +595,7 @@ def test_invalid_import_displays_server_error_without_writing(dashboard_page, da
     assert before["models"] and before["profiles"]
     with page.expect_file_chooser() as chooser:
         page.get_by_role("button", name="Choose file", exact=True).click()
-    with page.expect_response(lambda r: "/api/config/imports" in r.url and r.request.method == "POST") as invalid:
+    with page.expect_response(lambda r: r.url.endswith("/api/v1/config/import_upload") and r.request.method == "POST") as invalid:
         chooser.value.set_files({"name": "invalid.json", "mimeType": "application/json", "buffer": b"{broken"})
     assert invalid.value.status == 400
     expect(page.get_by_role("alert").filter(has_text="invalid.json")).to_be_visible()
@@ -621,9 +640,9 @@ def test_pi_and_dsh_profile_choices_match_their_typed_runtime_contract(dashboard
     })["provider"]
     pid = provider["provider_id"]
     supported = ("deepseek-flash", "deepseek-flash[1m]", "deepseek-v4-pro", "deepseek-v4-pro[1m]")
-    models = [server.api.post("/api/models", {"provider_id": pid, "protocol": protocol, "name": name,
+    models = [server.api.post("/api/v1/ops/models/create", {"provider": pid, "protocol": protocol, "name": name,
                                             "input_usd_per_mtok": 0, "output_usd_per_mtok": 0,
-                                            "cache_read_usd_per_mtok": 0, "cache_write_usd_per_mtok": 0})["model"]
+                                            "cache_read_usd_per_mtok": 0, "cache_write_usd_per_mtok": 0})["result"]["model"]
               for protocol in ("openai-responses", "openai-chat", "anthropic-messages")
               for name in (*supported, "unrestricted-model")]
     _settings(page, server, "profiles/new")

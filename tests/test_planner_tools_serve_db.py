@@ -121,7 +121,7 @@ for line in sys.stdin:
 
 def _builtin_model(api: Any, name: str) -> str:
     """The id of the built-in Claude Code login's model ``name``."""
-    models = api.get("/api/models", provider_id="prov-claude-subscription")["models"]
+    models = api.post("/api/v1/ops/models/list", {"provider": "prov-claude-subscription"})["result"]["models"]
     return next(m["model_id"] for m in models if m["name"] == name)
 
 

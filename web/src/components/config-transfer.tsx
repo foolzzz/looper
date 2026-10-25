@@ -5,7 +5,7 @@ import { Switch } from "@/components/ui/switch";
 import {
   applyConfigImport,
   cancelConfigImport,
-  configExportUrl,
+  downloadConfigExport,
   CONFIG_IMPORT_MAX_BYTES,
   uploadConfigImport,
   type ConfigImportAction,
@@ -375,6 +375,23 @@ function ImportPanel({ onApplied }: { onApplied: () => void }) {
 export function ConfigTransferCard({ onImported }: { onImported?: () => void }) {
   const [projects, setProjects] = useState(false);
   const [secrets, setSecrets] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
+  const exportRequest = useRef<AbortController | null>(null);
+  useEffect(() => () => exportRequest.current?.abort(), []);
+  const download = async () => {
+    const request = new AbortController();
+    exportRequest.current = request;
+    setExporting(true);
+    setExportError("");
+    try {
+      await downloadConfigExport({ projects, secrets }, request.signal);
+    } catch (err) {
+      if (!request.signal.aborted) setExportError(errorText(err));
+    } finally {
+      if (!request.signal.aborted) setExporting(false);
+    }
+  };
 
   return (
     <div className="space-y-4 rounded-lg border border-border bg-card px-5 py-4">
@@ -406,10 +423,11 @@ export function ConfigTransferCard({ onImported }: { onImported?: () => void }) 
           </div>
         )}
       </div>
-      <Button size="sm" onClick={() => window.location.assign(configExportUrl({ projects, secrets }))}>
-        <Download className="h-3.5 w-3.5" />
+      <Button size="sm" disabled={exporting} onClick={() => void download()}>
+        {exporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
         Export configuration
       </Button>
+      {exportError && <p role="alert" className="text-xs text-destructive">{exportError}</p>}
       <ImportPanel onApplied={() => onImported?.()} />
       <div className="border-t border-border pt-3 text-xs text-muted-foreground">
         Or import from a shell: <code className="text-foreground">looper config import &lt;file&gt;</code> previews,

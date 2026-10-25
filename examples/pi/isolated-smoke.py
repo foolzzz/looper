@@ -515,10 +515,10 @@ asyncio.run(check())
             "endpoints": [{"protocol": "openai-chat" if provider_state else "openai-responses",
                            "base_url": provider_url + "/v1"}], "api_key": "local-key",
         })["provider"]
-        model = request(base, "/api/models", token, "POST", {
-            "provider_id": provider["provider_id"], "name": "selected",
+        model = request(base, "/api/v1/ops/models/create", token, "POST", {
+            "provider": provider["provider_id"], "name": "selected",
             "protocol": "openai-chat" if provider_state else "openai-responses",
-        })["model"]
+        })["result"]["model"]
         profile = request(base, "/api/agent-profiles", token, "POST", {
             "name": "isolated-smoke", "runtime_id": "rt-pi", "model_id": model["model_id"],
             "agent_teams": False,

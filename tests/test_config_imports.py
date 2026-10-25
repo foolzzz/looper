@@ -21,12 +21,16 @@ import pytest
 
 from looper import __version__
 from looper.agents import config_imports
-from looper.agents.http_server import CONFIG_IMPORTS_PATH, REQUEST_BODY_MAX_BYTES, AgentHTTPServer
+from looper.agents.bus import MessageBus
+from looper.agents.http_server import REQUEST_BODY_MAX_BYTES, AgentHTTPServer
+from looper.agents.ops.clients import ClientOps
+from looper.agents.ops.service import Platform
 from tests.db_support import DSN
 
 needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 TOKEN = "operator-test-token"
 UNKNOWN = "cfgimp-0123456789abcdef"
+UPLOAD_PATH = "/api/v1/config/import_upload"
 
 
 @pytest.fixture(autouse=True)
@@ -40,6 +44,8 @@ def _isolated_registry_logins(monkeypatch: pytest.MonkeyPatch) -> None:
 async def _server(runtime_root: Path) -> AsyncIterator[int]:
     server = AgentHTTPServer(port=0, operator_token=TOKEN, web_adapter=SimpleNamespace(), task_router=SimpleNamespace(),
                              supervisor=SimpleNamespace(), static_dir=runtime_root, runtime_root=runtime_root)
+    server._client_ops = ClientOps(Platform(bus=MessageBus(runtime_root=runtime_root),
+                                           task_router=server._task_router, runtime_root=runtime_root))
     await server.start()
     try:
         yield server._server.sockets[0].getsockname()[1]
@@ -66,7 +72,13 @@ async def _request(port: int, method: str, path: str, body: bytes | Path = b"", 
     raw = await asyncio.wait_for(reader.read(), timeout=60)
     writer.close()
     head, _, payload = raw.partition(b"\r\n\r\n")
-    return int(head.split()[1]), json.loads(payload)
+    answer = json.loads(payload)
+    return int(head.split()[1]), answer["result"] if answer.get("status") == "ok" else answer
+
+
+async def _import_action(port: int, action: str, import_id: str) -> tuple[int, dict[str, Any]]:
+    return await _request(port, "POST", f"/api/v1/config/import_{action}",
+                          json.dumps({"import_id": import_id}).encode())
 
 
 def _left(runtime_root: Path) -> list[str]:
@@ -82,10 +94,11 @@ def test_only_the_import_route_takes_more_than_the_request_cap(tmp_path: Path) -
         async with _server(tmp_path) as port:
             # Only the headers: each answer comes without the server waiting for the body.
             other = await _request(port, "POST", "/api/v1/catalog_sources/upload", length=REQUEST_BODY_MAX_BYTES + 1)
-            over = await _request(port, "POST", CONFIG_IMPORTS_PATH, length=config_imports.UPLOAD_MAX_BYTES + 1)
+            over = await _request(port, "POST", UPLOAD_PATH, length=config_imports.UPLOAD_MAX_BYTES + 1)
         assert other[0] == 413 and "the server takes at most 8 MiB" in other[1]["error"]
         assert config_imports.UPLOAD_MAX_BYTES == 256 * 1024 * 1024
-        assert over[0] == 413 and "a configuration import takes at most 256 MiB" in over[1]["error"]
+        assert over[0] == 413 and over[1]["error"]["code"] == "invalid"
+        assert "a configuration import takes at most 256 MiB" in over[1]["error"]["message"]
         assert _left(tmp_path) == []
 
     asyncio.run(_test())
@@ -94,9 +107,9 @@ def test_only_the_import_route_takes_more_than_the_request_cap(tmp_path: Path) -
 def test_another_site_cannot_upload(tmp_path: Path) -> None:
     async def _test() -> None:
         async with _server(tmp_path) as port:
-            status, answer = await _request(port, "POST", CONFIG_IMPORTS_PATH, length=REQUEST_BODY_MAX_BYTES * 2,
+            status, answer = await _request(port, "POST", UPLOAD_PATH, length=REQUEST_BODY_MAX_BYTES * 2,
                                             headers="Origin: https://attacker.example\r\n")
-        assert status == 403 and "cross-origin" in answer["error"]
+        assert status == 403 and "cross-origin" in answer["error"]["message"]
         assert _left(tmp_path) == []
 
     asyncio.run(_test())
@@ -116,22 +129,21 @@ def test_a_file_that_is_not_a_configuration_file_is_refused_and_removed(
 ) -> None:
     async def _test() -> None:
         async with _server(tmp_path) as port:
-            status, answer = await _request(port, "POST", CONFIG_IMPORTS_PATH, body)
+            status, answer = await _request(port, "POST", UPLOAD_PATH, body)
             assert _left(tmp_path) == []
-        assert status == 400 and error in answer["error"], answer
-        assert str(tmp_path) not in answer["error"]
+        assert status == 400 and error in answer["error"]["message"], answer
+        assert str(tmp_path) not in answer["error"]["message"]
 
     asyncio.run(_test())
 
 
-@pytest.mark.parametrize(("method", "path"), [
-    ("POST", f"{CONFIG_IMPORTS_PATH}/{UNKNOWN}/apply"), ("DELETE", f"{CONFIG_IMPORTS_PATH}/{UNKNOWN}"),
-    ("POST", f"{CONFIG_IMPORTS_PATH}/not-an-id/apply"),
+@pytest.mark.parametrize(("action", "import_id"), [
+    ("apply", UNKNOWN), ("cancel", UNKNOWN), ("apply", "not-an-id"),
 ])
-def test_an_unknown_import_is_not_found(tmp_path: Path, method: str, path: str) -> None:
+def test_an_unknown_import_is_not_found(tmp_path: Path, action: str, import_id: str) -> None:
     async def _test() -> tuple[int, dict[str, Any]]:
         async with _server(tmp_path) as port:
-            return await _request(port, method, path)
+            return await _import_action(port, action, import_id)
 
     assert asyncio.run(_test())[0] == 404
 
@@ -195,9 +207,9 @@ def test_a_file_over_the_request_cap_is_previewed_without_writing(
         async with _installation() as (target, _), _serving(monkeypatch, target, runtime_root) as port:
             before = await _rows(target)
 
-            status, answer = await _request(port, "POST", CONFIG_IMPORTS_PATH, exported)
+            status, answer = await _request(port, "POST", UPLOAD_PATH, exported)
 
-            assert status == 201, answer
+            assert status == 200, answer
             assert answer["bytes"] == exported.stat().st_size
             assert answer["file"] == {"format": "looper-config/v3", "looper_version": __version__,
                                       "exported_at": answer["file"]["exported_at"], "secrets": "omitted"}
@@ -228,15 +240,15 @@ def test_applying_writes_what_the_transfer_core_writes_and_removes_the_file(
         runtime_root = tmp_path / "runtime"
         async with _installation() as (by_api, _), _installation() as (by_core, core_url):
             async with _serving(monkeypatch, by_api, runtime_root) as port:
-                status, uploaded = await _request(port, "POST", CONFIG_IMPORTS_PATH, exported)
-                assert status == 201, uploaded
+                status, uploaded = await _request(port, "POST", UPLOAD_PATH, exported)
+                assert status == 200, uploaded
 
-                status, applied = await _request(port, "POST", f"{CONFIG_IMPORTS_PATH}/{uploaded['import_id']}/apply")
+                status, applied = await _import_action(port, "apply", uploaded["import_id"])
 
                 assert status == 200, applied
                 assert _left(runtime_root) == []
-                again = await _request(port, "POST", f"{CONFIG_IMPORTS_PATH}/{uploaded['import_id']}/apply")
-                assert again[0] == 404 and "upload the file again" in again[1]["error"]
+                again = await _import_action(port, "apply", uploaded["import_id"])
+                assert again[0] == 404 and "upload the file again" in again[1]["error"]["message"]
 
             code, out, err = await _transfer_file(core_url, "import", str(exported), apply=True, json_output=True)
             assert code == 0, err
@@ -274,9 +286,9 @@ def test_a_file_exported_before_the_rename_is_previewed_with_its_version(
                                        {"scope": "system", "harness_prompt": "Be brief.", "agent": None,
                                         "effort": None, "env": [], "run_budget_usd": None}]}}))
         async with _installation() as (target, _), _serving(monkeypatch, target, tmp_path / "runtime") as port:
-            status, answer = await _request(port, "POST", CONFIG_IMPORTS_PATH, old)
+            status, answer = await _request(port, "POST", UPLOAD_PATH, old)
 
-        assert status == 201, answer
+        assert status == 200, answer
         assert answer["file"] == {"format": "loopx-config/v1", "looper_version": "2.5.0", "secrets": "omitted"}
         assert [(c["section"], c["key"], c["action"]) for c in answer["plan"]["changes"]] == [
             ("settings.layers", "system", "added")]
@@ -300,18 +312,18 @@ def test_an_import_not_applied_expires_or_is_cancelled_and_its_file_goes(
         monkeypatch.setattr(config_imports, "PENDING_MAX", 2)
         async with _installation() as (target, _), _serving(monkeypatch, target, runtime_root) as port:
             before = await _rows(target)
-            expiring = (await _request(port, "POST", CONFIG_IMPORTS_PATH, small))[1]["import_id"]
-            cancelled = (await _request(port, "POST", CONFIG_IMPORTS_PATH, small))[1]["import_id"]
-            status, answer = await _request(port, "POST", CONFIG_IMPORTS_PATH, small)
-            assert status == 409 and "2 imports are pending" in answer["error"]
+            expiring = (await _request(port, "POST", UPLOAD_PATH, small))[1]["import_id"]
+            cancelled = (await _request(port, "POST", UPLOAD_PATH, small))[1]["import_id"]
+            status, answer = await _request(port, "POST", UPLOAD_PATH, small)
+            assert status == 409 and "2 imports are pending" in answer["error"]["message"]
             assert len(_left(runtime_root)) == 2
 
-            assert (await _request(port, "DELETE", f"{CONFIG_IMPORTS_PATH}/{cancelled}"))[0] == 200
+            assert (await _import_action(port, "cancel", cancelled))[0] == 200
             assert _left(runtime_root) == [f"{expiring}.json"]
             await asyncio.sleep(0.6)
             assert _left(runtime_root) == []  # removed when it expired, with no request asking
             for import_id in (expiring, cancelled):
-                assert (await _request(port, "POST", f"{CONFIG_IMPORTS_PATH}/{import_id}/apply"))[0] == 404
+                assert (await _import_action(port, "apply", import_id))[0] == 404
             assert await _rows(target) == before
 
     asyncio.run(_test())
@@ -332,15 +344,15 @@ def test_v3_preview_merge_apply_and_readback_share_the_core_contract(
         path.write_text(json.dumps(data))
         async with _installation() as (target, url), _serving(monkeypatch, target, tmp_path / "runtime") as port:
             before = await _rows(target)
-            status, uploaded = await _request(port, "POST", CONFIG_IMPORTS_PATH, path)
-            assert status == 201, uploaded
+            status, uploaded = await _request(port, "POST", UPLOAD_PATH, path)
+            assert status == 200, uploaded
             plan = uploaded["plan"]
             assert plan["counts"]["models"] == {"added": 1, "changed": 0, "unchanged": 0, "skipped": 0}
             code, out, err = await _transfer_file(url, "import", str(path), json_output=True)
             assert code == 0, err
             assert _plan(out) == plan
             assert await _rows(target) == before
-            status, applied = await _request(port, "POST", f"{CONFIG_IMPORTS_PATH}/{uploaded['import_id']}/apply")
+            status, applied = await _import_action(port, "apply", uploaded["import_id"])
             assert status == 200, applied
             need = applied["plan"]["need_secret"]
             assert need == [{"section": "providers", "key": "account", "names": ["api_key"],
@@ -348,7 +360,6 @@ def test_v3_preview_merge_apply_and_readback_share_the_core_contract(
                                  "SELECT id FROM llm_providers WHERE name = 'account'")}}]
             status, registry = await _request(port, "POST", "/api/v1/registry/view", b"{}")
             assert status == 200, registry
-            registry = registry["result"]
             model = next(m for m in registry["models"] if m["name"] == "exact")
             profile = next(p for p in registry["profiles"] if p["name"] == "imported")
             assert profile["model_id"] == model["model_id"]
@@ -356,7 +367,8 @@ def test_v3_preview_merge_apply_and_readback_share_the_core_contract(
             status, saved = await _request(port, "PUT", f"/api/providers/{need[0]['target']['id']}",
                                            json.dumps({"api_key": "sk-test-import-key"}).encode())
             assert status == 200, saved
-            status, exported = await _request(port, "GET", "/api/config/export")
+            status, exported = await _request(port, "POST", "/api/v1/config/export")
+            exported = exported["document"]
             assert status == 200 and exported["format"] == "looper-config/v3"
             assert exported["providers"][0]["api_key"] == {"secret": "omitted"}
             core_path = tmp_path / "core.json"
@@ -375,18 +387,17 @@ def test_v3_preview_merge_apply_and_readback_share_the_core_contract(
             changed["profiles"][0]["model"]["name"] = "missing"
             path.write_text(json.dumps(changed))
             before = await _rows(target)
-            status, merged = await _request(port, "POST", CONFIG_IMPORTS_PATH, path)
-            assert status == 201, merged
+            status, merged = await _request(port, "POST", UPLOAD_PATH, path)
+            assert status == 200, merged
             assert merged["plan"]["counts"]["models"] == {
                 "added": 1, "changed": 1, "unchanged": 0, "skipped": 0}
             assert merged["plan"]["counts"]["profiles"]["skipped"] == 1
             assert next(c for c in merged["plan"]["changes"] if c["section"] == "profiles")["reason"]
             assert await _rows(target) == before
-            status, answer = await _request(port, "POST", f"{CONFIG_IMPORTS_PATH}/{merged['import_id']}/apply")
+            status, answer = await _import_action(port, "apply", merged["import_id"])
             assert status == 200, answer
             status, registry = await _request(port, "POST", "/api/v1/registry/view", b"{}")
             assert status == 200
-            registry = registry["result"]
             updated = next(m for m in registry["models"] if m["name"] == "exact")
             assert updated["model_id"] == model["model_id"] and updated["input_usd_per_mtok"] == 4
             retained = next(p for p in registry["profiles"] if p["name"] == "imported")
@@ -398,10 +409,10 @@ def test_v3_preview_merge_apply_and_readback_share_the_core_contract(
             changed["providers"][0]["endpoints"]["anthropic-messages"]["base_url"] = "https://conflict.invalid"
             path.write_text(json.dumps(changed))
             before = await _rows(target)
-            status, conflict = await _request(port, "POST", CONFIG_IMPORTS_PATH, path)
-            assert status == 201, conflict
+            status, conflict = await _request(port, "POST", UPLOAD_PATH, path)
+            assert status == 200, conflict
             assert all(c["action"] == "skipped" and c["reason"] for c in conflict["plan"]["changes"])
-            status, answer = await _request(port, "POST", f"{CONFIG_IMPORTS_PATH}/{conflict['import_id']}/apply")
+            status, answer = await _import_action(port, "apply", conflict["import_id"])
             assert status == 200, answer
             assert await _rows(target) == before
 
@@ -409,12 +420,12 @@ def test_v3_preview_merge_apply_and_readback_share_the_core_contract(
             # writer has already made the previewed change.
             data["models"][0]["input_usd_per_mtok"] = 9
             path.write_text(json.dumps(data))
-            status, pending = await _request(port, "POST", CONFIG_IMPORTS_PATH, path)
-            assert status == 201, pending
+            status, pending = await _request(port, "POST", UPLOAD_PATH, path)
+            assert status == 200, pending
             assert pending["plan"]["counts"]["models"]["changed"] == 1
             await target.execute("UPDATE llm_models SET input_usd_per_mtok = 9 WHERE id = $1", model["model_id"])
             before = await _rows(target)
-            status, answer = await _request(port, "POST", f"{CONFIG_IMPORTS_PATH}/{pending['import_id']}/apply")
+            status, answer = await _import_action(port, "apply", pending["import_id"])
             assert status == 200, answer
             assert answer["plan"]["counts"]["models"] == {
                 "added": 0, "changed": 0, "unchanged": 1, "skipped": 0}
@@ -427,17 +438,13 @@ def test_apply_refuses_client_supplied_plan(monkeypatch: pytest.MonkeyPatch, tmp
     from unittest.mock import AsyncMock
 
     async def _test() -> None:
-        from tests.test_catalog_db import _Writer
-
         apply = AsyncMock(return_value={})
         monkeypatch.setattr(config_imports.ConfigImports, "apply", apply)
-        server = AgentHTTPServer(port=0, operator_token=TOKEN, web_adapter=SimpleNamespace(),
-                                 task_router=SimpleNamespace(), supervisor=SimpleNamespace(), runtime_root=tmp_path)
-        writer = _Writer()
-        await server._route_api("POST", f"{CONFIG_IMPORTS_PATH}/{UNKNOWN}/apply", {},
-                                b'{"models": {"untrusted": "model-id"}, "plan": {"applied": true}}', writer)
-        head, _, payload = writer.data.partition(b"\r\n\r\n")
-        assert int(head.split()[1]) == 400 and "body" in json.loads(payload)["error"]
+        async with _server(tmp_path) as port:
+            status, answer = await _request(port, "POST", "/api/v1/config/import_apply", json.dumps({
+                "import_id": UNKNOWN, "models": {"untrusted": "model-id"}, "plan": {"applied": True},
+            }).encode())
+        assert status == 400 and answer["error"]["code"] == "invalid"
         apply.assert_not_awaited()
 
     asyncio.run(_test())
@@ -491,7 +498,7 @@ def test_unauthorized_v3_upload_creates_no_pending_file(tmp_path: Path, token: s
         server = AgentHTTPServer(port=0, operator_token=TOKEN, web_adapter=SimpleNamespace(),
                                  task_router=SimpleNamespace(), supervisor=SimpleNamespace(), runtime_root=tmp_path)
         try:
-            status, _ = await Client(server).call("POST", CONFIG_IMPORTS_PATH, {"format": "looper-config/v3"},
+            status, _ = await Client(server).call("POST", UPLOAD_PATH, {"format": "looper-config/v3"},
                                                   token=token)
             assert status == 401
             assert _left(tmp_path) == []

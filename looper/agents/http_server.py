@@ -103,10 +103,9 @@ _RE_AGENT_OP = re.compile(r"^/api/agent/v1/ops/([a-z_]{1,64})$")
 # knowledge upload: a document of at most knowledge.DOCUMENT_MAX_BYTES (2 MiB)
 # as base64 in JSON is about 2.7 MiB, and as JSON-escaped text up to twice its
 # size; 8 MiB leaves room for both. A larger body is refused unread. The one
-# exception is a configuration import (CONFIG_IMPORTS_PATH), which streams its
+# exception is a configuration import (/api/v1/config/import_upload), which streams its
 # body to a file and takes up to config_imports.UPLOAD_MAX_BYTES.
 REQUEST_BODY_MAX_BYTES = 4 * knowledge.DOCUMENT_MAX_BYTES
-CONFIG_IMPORTS_PATH = "/api/config/imports"
 
 
 def _json_response(status: str, body: Any, *, headers: Mapping[str, str] | None = None) -> bytes:
@@ -248,6 +247,7 @@ class AgentHTTPServer:
             headers = await self._read_headers(reader)
             parsed = urllib.parse.urlparse(raw_path)
             path = parsed.path
+            streamed = method == "POST" and path == "/api/v1/config/import_upload"
 
             area = operator_auth.access(path)
             sign_in_headers = SIGN_IN_HEADERS if area is operator_auth.Access.SIGN_IN else None
@@ -256,7 +256,9 @@ class AgentHTTPServer:
             refused = request_guard.refusal(headers, bind_host=self._host)
             if refused:
                 logger.warning("refused %s %s: %s", method, path, refused)
-                writer.write(_json_response(HTTP_403, {"error": refused}, headers=sign_in_headers))
+                status, answer = (api_v1.error(ErrorCode.FORBIDDEN, refused) if streamed
+                                  else (HTTP_403, {"error": refused}))
+                writer.write(_json_response(status, answer, headers=sign_in_headers))
                 await writer.drain()
                 writer.close()
                 return
@@ -301,7 +303,6 @@ class AgentHTTPServer:
 
             query = dict(urllib.parse.parse_qsl(
                 parsed.query, keep_blank_values=area is operator_auth.Access.DASHBOARD))
-            streamed = method == "POST" and path == CONFIG_IMPORTS_PATH
             cap = (config_imports.UPLOAD_MAX_BYTES if streamed or path == "/api/v1/config/import_preview"
                    else REQUEST_BODY_MAX_BYTES)
             if area is operator_auth.Access.SIGN_IN:
@@ -312,23 +313,26 @@ class AgentHTTPServer:
             except ValueError:
                 content_length = -1
             if content_length < 0:
-                writer.write(_json_response(HTTP_400, {"error": "bad Content-Length"}, headers=sign_in_headers))
+                status, answer = (api_v1.error(ErrorCode.INVALID, "bad Content-Length") if streamed
+                                  else (HTTP_400, {"error": "bad Content-Length"}))
+                writer.write(_json_response(status, answer, headers=V1_HEADERS if streamed else sign_in_headers))
                 await writer.drain()
                 return
             if content_length > cap:
-                writer.write(_json_response(HTTP_413, {
-                    "error": f"the request body has {content_length} bytes; "
-                             f"{'a configuration import' if streamed else 'the server'} takes at most "
-                             f"{cap // (1024 * 1024)} MiB ({cap} bytes)",
-                }, headers=sign_in_headers))
+                message = (f"the request body has {content_length} bytes; "
+                           f"{'a configuration import' if streamed else 'the server'} takes at most "
+                           f"{cap // (1024 * 1024)} MiB ({cap} bytes)")
+                status, answer = (api_v1.error(ErrorCode.INVALID, message, status=HTTP_413) if streamed
+                                  else (HTTP_413, {"error": message}))
+                writer.write(_json_response(status, answer, headers=V1_HEADERS if streamed else sign_in_headers))
                 await writer.drain()
                 return
             if streamed:
                 if headers.get("expect", "").lower() == "100-continue":
                     writer.write(b"HTTP/1.1 100 Continue\r\n\r\n")
                     await writer.drain()
-                await self._handle_config_import(
-                    writer, HTTP_201, lambda imports: imports.receive(reader, content_length))
+                await self._handle_v1(method, path, query, headers, b"", writer, principal,
+                                      upload=(reader, content_length))
                 return
             if content_length > 0:
                 body = await asyncio.wait_for(
@@ -401,11 +405,42 @@ class AgentHTTPServer:
         return api_v1.Principal("client", client["id"], client["name"])
 
     async def _handle_v1(self, method: str, path: str, query: dict[str, str], headers: Mapping[str, str],
-                         body: bytes, writer: asyncio.StreamWriter, principal: api_v1.Principal) -> None:
+                         body: bytes, writer: asyncio.StreamWriter, principal: api_v1.Principal, *,
+                         upload: tuple[asyncio.StreamReader, int] | None = None) -> None:
         started = time.monotonic()
         operation = api_v1.find(method, path)
         refused: tuple[str, dict[str, Any]] | None = None
-        if operation is not None and operation.operator_only and principal.kind != "operator":
+        json_started = False
+
+        async def export_json(arguments: dict[str, Any]) -> dict[str, Any]:
+            # Keep the snapshot and chunks on the writer path; no second full document in memory.
+            from ..db.connection import get_pool
+            nonlocal json_started
+            async with get_pool().acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
+                chunks = config_transfer.export_chunks(conn,
+                    include_projects=bool(arguments.get("include_projects")),
+                    include_secrets=bool(arguments.get("include_secrets")))
+                try:
+                    first = await anext(chunks)  # pre-header failures still get a typed JSON refusal
+                    writer.write((f"HTTP/1.1 {HTTP_200}\r\nContent-Type: application/json; charset=utf-8\r\n"
+                                  "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
+                                  '{"status":"ok","result":{"document":').encode() + first.encode("utf-8"))
+                    json_started = True
+                    await writer.drain()
+                    async for chunk in chunks:
+                        writer.write(chunk.encode("utf-8"))
+                        await writer.drain()
+                finally:
+                    await chunks.aclose()
+            # Only close the envelope after the snapshot exits successfully. A failed download is invalid JSON.
+            writer.write(b"}}")
+            await writer.drain()
+            return {}
+
+        if upload is not None:
+            domain = api_v1.domain_for(operation)
+            status, answer = await domain.receive(self, *upload, principal, headers)
+        elif operation is not None and operation.operator_only and principal.kind != "operator":
             status, answer = api_v1.error(ErrorCode.FORBIDDEN, "operator identity is required")
         elif operation is not None and operation.stream and api_v1.domain_for(operation) is not None:
             refused = await self._v1_domain(operation, headers, body, principal, writer=writer)
@@ -413,6 +448,8 @@ class AgentHTTPServer:
         elif operation is not None and operation.operation_id == "chat.send":
             refused = await self._v1_chat_send(body, principal, writer)
             status, answer = refused or (api_v1.OK, {"status": "ok"})
+        elif operation is not None and operation.operation_id == "config.export":
+            status, answer = await self._v1_online(operation, headers, body, principal, json_export=export_json)
         else:
             status, answer = await self._answer_v1(method, path, operation, headers, body, principal)
         if operation is not None and operation.operation_id != "openapi":
@@ -420,6 +457,8 @@ class AgentHTTPServer:
                        else f"error:{answer['error']['code']}")
             logger.info("api client=%s op=%s status=%s ms=%d", principal.key, operation.operation_id, outcome,
                         (time.monotonic() - started) * 1000)
+        if json_started:
+            return  # errors after headers leave a visibly truncated JSON response, never a second response
         if operation is not None and operation.stream and refused is None and answer.get("status") == "ok":
             return  # the stream is written
         writer.write(_json_response(status, answer, headers=V1_HEADERS))
@@ -540,7 +579,8 @@ class AgentHTTPServer:
                                 details=None if operation.credential_write else exc.details)
 
     async def _v1_online(self, operation: api_v1.Operation, headers: Mapping[str, str], body: bytes,
-                         principal: api_v1.Principal) -> tuple[str, dict[str, Any]]:
+                         principal: api_v1.Principal, *, json_export: Callable[..., Awaitable[Any]] | None = None
+                         ) -> tuple[str, dict[str, Any]]:
         name = operation.operation_id
         # Refuse before validating arguments: credential requests never enter the ops argument audit trail.
         if operation.operator_only and principal.kind != "operator":
@@ -586,13 +626,9 @@ class AgentHTTPServer:
             async def run(call: Call) -> dict[str, Any]:
                 try:
                     if name == "config.export":
-                        from ..db.connection import get_pool
-                        async with get_pool().acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
-                            chunks = config_transfer.export_chunks(conn,
-                                include_projects=bool(call.arguments.get("include_projects")),
-                                include_secrets=bool(call.arguments.get("include_secrets")))
-                            document = json.loads("".join([chunk async for chunk in chunks]))
-                        return {"document": document}
+                        if json_export is None:
+                            raise OpError(ErrorCode.UNAVAILABLE, "configuration export requires the JSON writer")
+                        return await json_export(call.arguments)
                     if self._config_imports is None:
                         raise OpError(ErrorCode.UNAVAILABLE, "the server has no runtime root")
                     if name == "config.import_preview":
@@ -601,8 +637,6 @@ class AgentHTTPServer:
                         reader.feed_data(raw)
                         reader.feed_eof()
                         return await self._config_imports.receive(reader, len(raw), owner=principal.key)
-                    if name == "config.import_cancel":
-                        return await self._config_imports.cancel(call.arguments["import_id"], owner=principal.key)
                     return await self._apply_import(self._config_imports, call.arguments["import_id"],
                                                     owner=principal.key)
                 except config_transfer.ConfigFileError as exc:
@@ -788,22 +822,13 @@ class AgentHTTPServer:
     _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
     _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
-    _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
-    _RE_PROJECT_DOCUMENT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/(doc-[a-zA-Z0-9]+)$")
-    _RE_PROJECT_DRAFTS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/drafts$")
-    _RE_PROJECT_DRAFT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/drafts/(draft-[a-zA-Z0-9]+)$")
-    _RE_PROJECT_DRAFT_CONFIRM = re.compile(
-        r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/drafts/(draft-[a-zA-Z0-9]+)/confirm$")
     _RE_PROJECT_AGENT_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings$")
     _RE_PROJECT_ROLE_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_PROJECT_ALLOWED_PROFILES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/allowed-profiles$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
-    _RE_MODEL = re.compile(r"^/api/models/(model-[a-zA-Z0-9-]+)$")
     _RE_PROVIDER_LOGIN_PROBLEM = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)/login-problem$")
     _RE_PROFILE_PROMPT_PREVIEW = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)/prompt-preview$")
     _RE_PROFILE = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)$")
-    _RE_CONFIG_IMPORT = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})$")
-    _RE_CONFIG_IMPORT_APPLY = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})/apply$")
 
     async def _route_api(
         self,
@@ -823,29 +848,6 @@ class AgentHTTPServer:
                 m.group(1), projects.json_object(body)))
         elif (m := self._RE_PROJECT.match(path)) and method == "DELETE":
             await self._answer(writer, HTTP_200, lambda: projects.delete_project(m.group(1)))
-        elif (m := self._RE_PROJECT_KNOWLEDGE.match(path)) and method == "GET":
-            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.knowledge_view(m.group(1), root))
-        elif (m := self._RE_PROJECT_KNOWLEDGE.match(path)) and method == "POST":
-            await self._handle_knowledge(writer, HTTP_201, lambda root: knowledge.add_document(
-                m.group(1), projects.json_object(body), root))
-        elif (m := self._RE_PROJECT_DOCUMENT.match(path)) and method == "GET":
-            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.get_document(
-                m.group(1), m.group(2), root))
-        elif (m := self._RE_PROJECT_DOCUMENT.match(path)) and method == "PUT":
-            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.update_document(
-                m.group(1), m.group(2), projects.json_object(body), root))
-        elif (m := self._RE_PROJECT_DOCUMENT.match(path)) and method == "DELETE":
-            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.delete_document(
-                m.group(1), m.group(2), root))
-        elif (m := self._RE_PROJECT_DRAFTS.match(path)) and method == "GET":
-            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.drafts_view(m.group(1)))
-        elif (m := self._RE_PROJECT_DRAFT_CONFIRM.match(path)) and method == "POST":
-            # The body is optional: the title, summary or content to confirm the draft with.
-            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.confirm_draft(
-                m.group(1), m.group(2), projects.json_object(body) if body.strip() else {}, root))
-        elif (m := self._RE_PROJECT_DRAFT.match(path)) and method == "DELETE":
-            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.discard_draft(
-                m.group(1), m.group(2)))
         elif path == "/api/providers" and method == "GET":
             await self._handle_registry(writer, HTTP_200, profile_registry.list_providers)
         elif path == "/api/providers" and method == "POST":
@@ -858,19 +860,6 @@ class AgentHTTPServer:
             await self._handle_registry(writer, HTTP_200, lambda: profile_registry.delete_provider(m.group(1)))
         elif (m := self._RE_PROVIDER_LOGIN_PROBLEM.match(path)) and method == "DELETE":
             await self._handle_registry(writer, HTTP_200, lambda: profile_registry.clear_login_problem(m.group(1)))
-        elif path == "/api/models" and method == "GET":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.list_models(
-                provider_id=query.get("provider_id") or None, runtime_id=query.get("runtime_id") or None))
-        elif path == "/api/models" and method == "POST":
-            await self._handle_registry(writer, HTTP_201, lambda: profile_registry.create_model(
-                projects.json_object(body)))
-        elif (m := self._RE_MODEL.match(path)) and method == "GET":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.get_model(m.group(1)))
-        elif (m := self._RE_MODEL.match(path)) and method == "PUT":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.update_model(
-                m.group(1), projects.json_object(body)))
-        elif (m := self._RE_MODEL.match(path)) and method == "DELETE":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.delete_model(m.group(1)))
         elif (m := self._RE_PROFILE_PROMPT_PREVIEW.match(path)) and method == "GET":
             await self._handle_registry(writer, HTTP_200, lambda: prompt_preview.preview(
                 m.group(1), query.get("role", ""), query.get("project_id") or None))
@@ -895,13 +884,6 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_ROLE_SETTINGS.match(path)) and method == "PUT":
             await self._handle_agent_settings(writer, lambda: self._write_layer(
                 body, lambda data: agent_settings.update_project(m.group(1), data, role=m.group(2))))
-        elif path == "/api/config/export" and method == "GET":
-            await self._handle_config_export(query, writer)
-        elif (m := self._RE_CONFIG_IMPORT_APPLY.match(path)) and method == "POST":
-            await self._handle_config_import(writer, HTTP_200,
-                                             lambda imports: self._apply_import(imports, m.group(1), body))
-        elif (m := self._RE_CONFIG_IMPORT.match(path)) and method == "DELETE":
-            await self._handle_config_import(writer, HTTP_200, lambda imports: imports.cancel(m.group(1)))
         elif path == "/api/scheduler-settings" and method == "GET":
             await self._answer(writer, HTTP_200, schedules.scheduler_settings)
         elif path == "/api/scheduler-settings" and method == "PUT":
@@ -1259,11 +1241,9 @@ class AgentHTTPServer:
             await self._recheck_concurrency()
         return result
 
-    async def _apply_import(self, imports: config_imports.ConfigImports, import_id: str, body: bytes = b"", *,
+    async def _apply_import(self, imports: config_imports.ConfigImports, import_id: str, *,
                             owner: str | None = None) -> Any:
         """Apply an import; its layers may raise a concurrency limit."""
-        if body:
-            raise config_transfer.ConfigFileError("apply takes no request body; the server recomputes the import plan")
         result = await imports.apply(import_id, owner=owner)
         await self._recheck_concurrency()
         return result
@@ -1307,27 +1287,6 @@ class AgentHTTPServer:
         except Exception:
             logger.exception("registry request failed")
             status, result = HTTP_500, {"error": "the request failed; see the server log"}
-        writer.write(_json_response(status, _serialize(result)))
-        await writer.drain()
-
-    # --- A project's knowledge (the documents its task agents read on demand) ---
-
-    async def _handle_knowledge(
-        self, writer: asyncio.StreamWriter, status: str, request: Callable[[Path], Awaitable[Any]],
-    ) -> None:
-        """Answer with ``request(runtime_root)``'s result; a refused request is 400, an unknown project or
-        document 404."""
-        try:
-            if self._runtime_root is None:
-                raise RuntimeError("the server was started without a runtime root")
-            result = await request(self._runtime_root)
-        except (knowledge.KnowledgeError, projects.RequestError) as exc:
-            status, result = getattr(exc, "status", HTTP_400), {"error": str(exc)}
-        except knowledge.KnowledgeNotFound as exc:
-            status, result = HTTP_404, {"error": str(exc)}
-        except Exception:
-            logger.exception("knowledge request failed")
-            status, result = HTTP_500, {"error": "the knowledge request failed; see the server log"}
         writer.write(_json_response(status, _serialize(result)))
         await writer.drain()
 

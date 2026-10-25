@@ -852,9 +852,19 @@ export async function setTaskProject(
  * Window event fired after this dashboard creates, edits or deletes a project,
  * or creates, moves or deletes a task, so project lists and counts reload at once.
  */
-/** The download of the whole configuration (``looper config export``'s --include-projects and --include-secrets). */
-export function configExportUrl({ projects, secrets }: { projects: boolean; secrets: boolean }): string {
-  return `${API_BASE}/config/export?projects=${projects ? 1 : 0}&secrets=${secrets ? 1 : 0}`;
+/** Download the portable document from the v1 JSON envelope. */
+export async function downloadConfigExport({ projects, secrets }: { projects: boolean; secrets: boolean }, signal?: AbortSignal): Promise<void> {
+  const result = await callV1<{ document: Record<string, unknown> }>("/api/v1/config/export",
+    { include_projects: projects, include_secrets: secrets }, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  if (isSessionEnded()) throw new SessionEndedError();
+  signal?.throwIfAborted();
+  const url = URL.createObjectURL(new Blob([JSON.stringify(result.document)], { type: "application/json" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `looper-config-${new Date().toISOString().slice(0, 10)}.json`;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 /** The largest configuration file the dashboard can import (the server's config_imports.UPLOAD_MAX_BYTES). */
@@ -886,29 +896,38 @@ export interface ConfigImportUpload {
 
 /** Upload a configuration file (streamed to the server) and preview importing it; nothing is written. */
 export async function uploadConfigImport(file: File): Promise<ConfigImportUpload> {
-  const res = await fetch(`${API_BASE}/config/imports`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+  if (isSessionEnded()) throw new SessionEndedError();
+  const res = await fetch("/api/v1/config/import_upload", {
+    method: "POST", credentials: "same-origin",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: file,
   });
-  if (!res.ok) await failed(res, "upload");
-  return res.json();
+  if (isSessionEnded()) throw new SessionEndedError();
+  const answer = await res.json();
+  if (isSessionEnded()) throw new SessionEndedError();
+  if (res.ok && res.status !== 202 && answer.status === "ok") return answer.result;
+  throw new V1Error(res.status, answer.error?.code ?? "unavailable", answer.error?.message ?? "The upload failed.");
 }
 
-/** Write an uploaded file in one transaction, like `looper config import --apply`; the server deletes the file. */
+/** Apply from the dashboard's existing confirmation dialog; operator calls execute once. */
 export async function applyConfigImport(importId: string): Promise<{ import_id: string; plan: ConfigImportPlan }> {
-  const res = await fetch(`${API_BASE}/config/imports/${encodeURIComponent(importId)}/apply`, { method: "POST" });
-  if (!res.ok) await failed(res, "apply");
-  const data = await res.json();
+  const data = await callV1<{ import_id: string; plan: ConfigImportPlan }>(
+    "/api/v1/config/import_apply", { import_id: importId });
+  if ("status" in data) throw new V1Error(202, "unavailable", data.impact);
+  if (!data.plan.applied) throw new V1Error(200, "unavailable", "The import was not applied.");
   notifyProjectsChanged();
   window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
   return data;
 }
 
-/** Drop an uploaded file without applying it. */
+/** Drop an uploaded file without applying it; already gone is harmless. */
 export async function cancelConfigImport(importId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/config/imports/${encodeURIComponent(importId)}`, { method: "DELETE" });
-  if (!res.ok && res.status !== 404) await failed(res, "cancel");
+  try {
+    const data = await callV1<{ deleted: string }>("/api/v1/config/import_cancel", { import_id: importId });
+    if ("status" in data) throw new V1Error(202, "unavailable", data.impact);
+  } catch (err) {
+    if (!(err instanceof V1Error) || err.status !== 404) throw err;
+  }
 }
 
 export const PROJECTS_CHANGED_EVENT = "looper:projects-changed";
@@ -1365,26 +1384,17 @@ export type NewKnowledgeDocument = { title: string; summary: string } & (
   | { source_kind: "path"; path: string }
 );
 
-function knowledgeUrl(projectId: string, documentId?: string) {
-  const base = `${API_BASE}/projects/${encodeURIComponent(projectId)}/knowledge`;
-  return documentId ? `${base}/${encodeURIComponent(documentId)}` : base;
-}
-
 export async function fetchKnowledge(projectId: string): Promise<ProjectKnowledge> {
-  const res = await fetch(knowledgeUrl(projectId));
-  if (!res.ok) await failed(res, "knowledge");
-  return res.json();
+  const result = await callV1<ProjectKnowledge>("/api/v1/project_knowledge/list", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result;
 }
 
 /** Add a document; the server refuses one over a cap with the reason (400). */
 export async function addKnowledgeDocument(projectId: string, document: NewKnowledgeDocument): Promise<ProjectKnowledge> {
-  const res = await fetch(knowledgeUrl(projectId), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(document),
-  });
-  if (!res.ok) await failed(res, "add document");
-  return res.json();
+  const result = await callV1<ProjectKnowledge>("/api/v1/project_knowledge/add", { project_id: projectId, document });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result;
 }
 
 /** One document and its body: stored for text and upload, the file as it is now for a path document. */
@@ -1396,13 +1406,14 @@ export interface KnowledgeDocumentBody {
 }
 
 export async function fetchKnowledgeDocument(projectId: string, documentId: string): Promise<KnowledgeDocumentBody> {
-  const res = await fetch(knowledgeUrl(projectId, documentId));
-  if (!res.ok) await failed(res, "document");
-  return res.json();
+  const result = await callV1<KnowledgeDocumentBody>("/api/v1/project_knowledge/get", { project_id: projectId, document_id: documentId });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result;
 }
 
 /** A document's changes: title, summary and its source's fields (its kind stays). */
 export type KnowledgeDocumentUpdate = {
+  source_kind?: KnowledgeSourceKind;
   title?: string;
   summary?: string;
   content?: string;
@@ -1417,19 +1428,15 @@ export async function updateKnowledgeDocument(
   documentId: string,
   fields: KnowledgeDocumentUpdate,
 ): Promise<ProjectKnowledge> {
-  const res = await fetch(knowledgeUrl(projectId, documentId), {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-  });
-  if (!res.ok) await failed(res, "update document");
-  return res.json();
+  const result = await callV1<ProjectKnowledge>("/api/v1/project_knowledge/update", { project_id: projectId, document_id: documentId, fields });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result;
 }
 
 export async function deleteKnowledgeDocument(projectId: string, documentId: string): Promise<ProjectKnowledge> {
-  const res = await fetch(knowledgeUrl(projectId, documentId), { method: "DELETE" });
-  if (!res.ok) await failed(res, "delete document");
-  return res.json();
+  const result = await callV1<ProjectKnowledge>("/api/v1/project_knowledge/delete", { project_id: projectId, document_id: documentId });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result;
 }
 
 /** A text document waiting for the user: the lessons a task's Planner wrote ("draft" mode). Agents do not see it. */
@@ -1450,14 +1457,10 @@ export interface KnowledgeDrafts {
   count: number;
 }
 
-function draftsUrl(projectId: string, draftId?: string) {
-  return `${knowledgeUrl(projectId)}/drafts${draftId ? `/${encodeURIComponent(draftId)}` : ""}`;
-}
-
 export async function fetchKnowledgeDrafts(projectId: string): Promise<KnowledgeDrafts> {
-  const res = await fetch(draftsUrl(projectId));
-  if (!res.ok) await failed(res, "drafts");
-  return res.json();
+  const result = await callV1<KnowledgeDrafts>("/api/v1/project_knowledge/drafts", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result;
 }
 
 /** Make a draft a text document, with any changed title, summary or content; answers with the knowledge. */
@@ -1466,20 +1469,16 @@ export async function confirmKnowledgeDraft(
   draftId: string,
   fields: { title?: string; summary?: string; content?: string } = {},
 ): Promise<ProjectKnowledge> {
-  const res = await fetch(`${draftsUrl(projectId, draftId)}/confirm`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-  });
-  if (!res.ok) await failed(res, "confirm draft");
-  return res.json();
+  const result = await callV1<ProjectKnowledge>("/api/v1/project_knowledge/confirm_draft", { project_id: projectId, draft_id: draftId, fields });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result;
 }
 
 /** Remove a draft; answers with the remaining drafts. */
 export async function discardKnowledgeDraft(projectId: string, draftId: string): Promise<KnowledgeDrafts> {
-  const res = await fetch(draftsUrl(projectId, draftId), { method: "DELETE" });
-  if (!res.ok) await failed(res, "discard draft");
-  return res.json();
+  const result = await callV1<KnowledgeDrafts>("/api/v1/project_knowledge/discard_draft", { project_id: projectId, draft_id: draftId });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
+  return result;
 }
 
 // --- A project's own skills: catalog items the project writes, installed in it for its task roles ---
@@ -2986,16 +2985,40 @@ export function deleteProvider(providerId: string): Promise<{ deleted: string }>
   return registryCall("DELETE", `/providers/${encodeURIComponent(providerId)}`, undefined, "delete provider");
 }
 
-export function createModel(fields: CreateModelFields): Promise<{ model: Model; warnings: string[] }> {
-  return registryCall("POST", "/models", fields, "add model");
+function modelSettings(fields: ModelFields): ModelFields {
+  const settings = { ...fields };
+  for (const key of ["context_window", "input_usd_per_mtok", "output_usd_per_mtok",
+    "cache_read_usd_per_mtok", "cache_write_usd_per_mtok"] as const) {
+    const value = settings[key];
+    if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) {
+      settings[key] = Number(value);
+    }
+  }
+  return settings;
 }
 
-export function updateModel(modelId: string, fields: ModelFields): Promise<{ model: Model; warnings: string[] }> {
-  return registryCall("PUT", `/models/${encodeURIComponent(modelId)}`, fields, "update model");
+export async function createModel(fields: CreateModelFields): Promise<{ model: Model; warnings: string[] }> {
+  const { provider_id, ...settings } = fields;
+  const result = await callV1<{ model: Model; warnings: string[] }>("/api/v1/ops/models/create",
+    { provider: provider_id, ...modelSettings(settings) });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
-export function deleteModel(modelId: string): Promise<{ deleted: string }> {
-  return registryCall("DELETE", `/models/${encodeURIComponent(modelId)}`, undefined, "delete model");
+export async function updateModel(modelId: string, fields: ModelFields): Promise<{ model: Model; warnings: string[] }> {
+  const result = await callV1<{ model: Model; warnings: string[] }>("/api/v1/ops/models/update",
+    { model: modelId, ...modelSettings(fields) });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
+}
+
+export async function deleteModel(modelId: string): Promise<{ deleted: string }> {
+  const result = await callV1<{ deleted: string }>("/api/v1/ops/models/delete", { model: modelId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
 /** After checking a runtime's own login on the machine (Codex's, Grok's): let runs use it again after a run found it

@@ -278,13 +278,15 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
                     endpoint = profile_registry.Endpoint(account.id, ApiProtocol(entry["protocol"]), entry["base_url"])
                     self.endpoints[account.id, endpoint.protocol] = endpoint
                 return {"provider": {"provider_id": account.id}}
-            if path == "/api/models":
-                model = profile_registry.ModelSpec.from_entry({**body, "id": f"model-{len(self.models)}"})
+            if path == "/api/v1/ops/models/create":
+                assert "provider" in body and "provider_id" not in body
+                fields = {"provider_id" if k == "provider" else k: v for k, v in body.items()}
+                model = profile_registry.ModelSpec.from_entry({**fields, "id": f"model-{len(self.models)}"})
                 resolved = profile_registry.ResolvedModel(model, self.providers[model.provider_id],
                                                           self.endpoints[model.provider_id, model.protocol])
                 self.models[model.id] = resolved
-                return {"model": {"model_id": model.id, "provider_id": model.provider_id,
-                                  "name": model.name, "protocol": model.protocol.value}}
+                return {"status": "ok", "result": {"model": {"model_id": model.id, "provider_id": model.provider_id,
+                                  "name": model.name, "protocol": model.protocol.value}, "warnings": []}}
             if path == "/api/agent-profiles":
                 assert body["runtime_id"] == self.runtime.id
                 resolved = self.models[body["model_id"]]

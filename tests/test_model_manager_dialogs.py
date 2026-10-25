@@ -37,7 +37,7 @@ def test_light_and_manager_seeds_register_model_references_once():
     second = dialogs._manager_profile(api, "sonnet", "high")
     assert first == second
     assert len(api.registry["models"]) == 2
-    assert [path for path, _ in api.posts] == ["/api/models", "/api/agent-profiles"] * 2
+    assert [path for path, _ in api.posts] == ["/api/v1/ops/models/create", "/api/agent-profiles"] * 2
     assert api.settings[-1] == ("/api/v1/agent_settings/update_role", {"role": "manager", "values": {"profile_id": first["profile_id"]}})
 
 
