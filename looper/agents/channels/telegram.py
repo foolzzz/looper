@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from ... import env
 from ..bus import MessageBus
@@ -91,6 +91,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         self._bus: MessageBus | None = None
         self._address = channel_address("telegram", self._channel_id)
         self._app: Any = None
+        self._requests: tuple[Any, ...] = ()
         self._outbound_task: asyncio.Task[Any] | None = None
         self._running = False
         # correlation_id → telegram chat_id for reply routing (bounded, oldest evicted first)
@@ -130,16 +131,19 @@ class TelegramChannelAdapter(ChannelAdapter):
             MessageHandler,
             filters,
         )
+        from telegram.request import HTTPXRequest
 
         self._bus = bus
         self._running = True
 
         add_secret(self._bot_token)  # python-telegram-bot puts it in every request URL and in the Bot's repr
-        self._app = (
-            Application.builder()
-            .token(self._bot_token)
-            .build()
-        )
+        # Own both transports: Application.shutdown is a no-op if initialize failed.
+        # Match ApplicationBuilder's default pool sizes for polling and other calls.
+        self._requests = (HTTPXRequest(connection_pool_size=1), HTTPXRequest(connection_pool_size=256))
+        builder = Application.builder().token(self._bot_token)
+        builder.get_updates_request(self._requests[0])
+        builder.request(self._requests[1])
+        self._app = builder.build()
 
         self._app.add_handler(CommandHandler("start", self._cmd_start))
         self._app.add_handler(CommandHandler("status", self._cmd_status))
@@ -157,32 +161,52 @@ class TelegramChannelAdapter(ChannelAdapter):
 
         self._outbound_task = asyncio.create_task(self._outbound_loop())
 
-        await self._app.initialize()
         try:
-            from telegram import BotCommand
+            await self._app.initialize()
+            try:
+                from telegram import BotCommand
 
-            await self._app.bot.set_my_commands(
-                [BotCommand(name, desc) for name, desc in bot_commands()]
-            )
-        except Exception:
-            logger.warning("telegram set_my_commands failed", exc_info=True)
-        await self._app.start()
-        await self._app.updater.start_polling(drop_pending_updates=True)  # type: ignore[union-attr]
+                await self._app.bot.set_my_commands(
+                    [BotCommand(name, desc) for name, desc in bot_commands()]
+                )
+            except Exception:
+                logger.warning("telegram set_my_commands failed", exc_info=True)
+            await self._app.start()
+            await self._app.updater.start_polling(drop_pending_updates=True)  # type: ignore[union-attr]
+        except BaseException:
+            await self.stop()
+            raise
         logger.info("telegram channel adapter started")
 
     async def stop(self) -> None:
         self._running = False
-        if self._outbound_task:
-            self._outbound_task.cancel()
+
+        async def cleanup(stage: str, action: Callable[[], Awaitable[Any]]) -> None:
             try:
-                await self._outbound_task
+                await action()
             except asyncio.CancelledError:
                 pass
+            except Exception:
+                logger.warning("%s: telegram %s cleanup failed", self._channel_id, stage, exc_info=True)
+
+        if self._outbound_task:
+            task = self._outbound_task
+            task.cancel()
+            await cleanup("outbound", lambda: task)
+        await cleanup("reactions", self._reactions.stop)
         if self._app:
-            await self._app.updater.stop()  # type: ignore[union-attr]
-            await self._app.stop()
-            await self._app.shutdown()
-        await self._reactions.stop()
+            updater = self._app.updater
+            if updater is not None and updater.running:
+                await cleanup("updater.stop", updater.stop)
+            if self._app.running:
+                await cleanup("stop", self._app.stop)
+            await cleanup("shutdown", self._app.shutdown)
+        for request in self._requests:
+            await cleanup("request.shutdown", request.shutdown)
+        self._app = None
+        self._requests = ()
+        self._outbound_task = None
+        self._bus = None
         logger.info("telegram channel adapter stopped")
 
     async def notify(self, chat: str, text: str) -> DeliveryReceipt:
