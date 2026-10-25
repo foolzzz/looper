@@ -1224,10 +1224,20 @@ def _fetch_document(ctx: Context) -> dict[str, Any]:
     return document
 
 
+def _needs_document(rest: list[str]) -> bool:
+    hand = HAND_COMMANDS.get(rest[0]) if rest else None
+    if hand is None:
+        return True
+    children = hand.add(Parser(add_help=False))
+    # Keep registered hand-written children offline; discover other children from OpenAPI.
+    return (children is not None and len(rest) > 1 and not rest[1].startswith("-")
+            and rest[1] not in children.choices)
+
+
 def _run(opts: argparse.Namespace, rest: list[str]) -> int:
     ctx = Context(client_file(opts.client_file), opts.session, opts.json)
     document = None
-    if not (rest and rest[0] in HAND_COMMANDS):
+    if _needs_document(rest):
         try:
             document = _fetch_document(ctx)
         except CliError as exc:

@@ -163,6 +163,64 @@ def closed_port() -> int:
         return sock.getsockname()[1]
 
 
+@pytest.mark.parametrize(("action", "flags", "body"), [
+    ("import-cancel", ["--import-id", "cfgimp-example"], {"import_id": "cfgimp-example"}),
+    ("import-upload", ["--format", "looper-config/v3", "--catalog", "[]"],
+     {"format": "looper-config/v3", "catalog": []}),
+    ("import-apply", ["--import-id", "cfgimp-example"], {"import_id": "cfgimp-example"}),
+    ("import-preview", ["--document", '{"format":"looper-config/v3"}'],
+     {"document": {"format": "looper-config/v3"}}),
+])
+def test_generated_config_children_discover_the_document_from_main(cli: Run, looper: FakeLooper,
+                                                                  action: str, flags: list[str], body: Any) -> None:
+    answer = {"status": "ok", "result": {"import_id": "cfgimp-example"}}
+    looper.answers.append((200, answer))
+    code, out, err = cli("config", action, "--session", "config-test", *flags, "--json")
+    assert code == 0 and json.loads(out) == answer and err == ""
+    assert [(r[0], r[1]) for r in looper.requests] == [
+        ("GET", "/api/v1/openapi.json"), ("POST", "/api/v1/config/" + action.replace("-", "_"))]
+    assert looper.calls()[0][3] == body
+    assert looper.calls()[0][2]["x-looper-session"] == "config-test"
+
+
+@pytest.mark.parametrize(("argv", "operation", "body"), [
+    (["export", "-"], "export", {"include_projects": False, "include_secrets": False}),
+    (["import", "-"], "import_preview", {"document": {"format": "looper-config/v3"}}),
+    (["import", "--cancel", "cfgimp-example"], "import_cancel", {"import_id": "cfgimp-example"}),
+])
+def test_handwritten_config_commands_keep_their_parsers(cli: Run, looper: FakeLooper,
+                                                       argv: list[str], operation: str, body: Any) -> None:
+    document = {"format": "looper-config/v3"}
+    answer = {"status": "ok", "result": {"document": document}}
+    looper.answers.append((200, answer))
+    code, out, err = cli("--json", "config", *argv, stdin=json.dumps(document))
+    assert code == 0 and json.loads(out) == (document if operation == "export" else answer) and err == ""
+    assert [r[1] for r in looper.requests] == ["/api/v1/openapi.json", "/api/v1/config/" + operation]
+    assert looper.calls()[0][3] == body
+
+
+@pytest.mark.parametrize("argv", [
+    ["lpc_ab-cd_ef-gh"],
+    ["import-cancel", "--import-id"],
+    ["import-cancel", "--unknown", "lpc_ab-cd_ef-gh"],
+    ["import-upload", "--catalog", "lpc_ab-cd_ef-gh"],
+    ["import", "--cancel"],
+])
+def test_config_usage_errors_do_not_send_operations_or_leak_tokens(cli: Run, looper: FakeLooper,
+                                                                  argv: list[str]) -> None:
+    code, out, err = cli("config", *argv)
+    assert code == 2 and "usage:" in err
+    assert "lpc_ab-cd_ef-gh" not in out + err and "cd_ef" not in out + err
+    assert looper.calls() == []
+    assert [r[1] for r in looper.requests] == ([] if argv[0] == "import" else ["/api/v1/openapi.json"])
+
+
+def test_generated_config_child_with_an_unreachable_api_exits_4(cli: Run, client: Path) -> None:
+    write_client_file(client, f"http://127.0.0.1:{closed_port()}")
+    code, out, err = cli("config", "import-cancel", "--import-id", "cfgimp-example")
+    assert code == 4 and "is looper serve running?" in err and TOKEN not in out + err
+
+
 # --- imports ---
 
 
