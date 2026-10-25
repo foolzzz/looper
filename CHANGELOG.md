@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.98] - 2026-10-24
+
+### Fixed
+
+- **A Worker's user-input delivery settles before the Planner stops waiting.** `WorkerPool.send_input` now bounds the input-channel wait and runtime handshake with one 4.5-second deadline, refuses without writing when the time left is below the channel's `send_timeout`, and never shortens the channel's own acceptance timeout. `RunChannel` gains `wait_input_ready()` and `send_timeout`; `_deliver_input` always publishes `WORKER_INPUT_RESULT`; the pool cancels and awaits its delivery tasks on stop. The Planner's `WORKER_INPUT_TIMEOUT` stays 5.0 seconds. Behavior change for users: a correction refused as late is no longer written afterwards. Model-visible: none. ([#554](https://github.com/foolzzz/looper/pull/554))
+
+### Changed
+
+- **Release evaluation tiers and the Pi comparison now match the 43-dialog selection.** The README uses explicitly authorized `*_DIALOG_CAP_USD` ceilings instead of caps measured on 24 dialogs. `eval-prompt-comparison.sh` runs Sonnet tasks and dialogs at two reps and the Opus tiers at one (37 case/reps), shares one cap and deadline, rejects incomplete, capped, skipped or mismatched reports, and records missing or partial baselines as unverified. Model-visible: none. ([#568](https://github.com/foolzzz/looper/pull/568))
+
 ## [2.13.97] - 2026-10-24
 
 ### Fixed

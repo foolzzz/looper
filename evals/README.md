@@ -435,14 +435,32 @@ Once before a release, on the release candidate (`main` after every merge):
 - opus on the 24 Planner tasks: `run --mode real --model opus --reps 3
   --tasks planner --jobs 4 --max-budget-usd 3.0 --case-budget-usd 6.0
   --total-cap-usd 40` (the earlier baseline cost about $27.73);
-- haiku on all 22 dialogs: `dialogs --mode real --reps 3 --jobs 4
-  --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd 8` (about $4.36);
-- sonnet on all dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
-  --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd 16`, refreshing
+- haiku on all 43 dialogs: `dialogs --mode real --reps 3 --jobs 4
+  --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd $HAIKU_DIALOG_CAP_USD`;
+- sonnet on all 43 dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
+  --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd $SONNET_DIALOG_CAP_USD`, refreshing
   `baselines/dialogs-real-sonnet.json`;
-- the opus xhigh Manager on all dialogs: `dialogs --mode real --reps 3 --jobs 4
+- the opus xhigh Manager on all 43 dialogs: `dialogs --mode real --reps 3 --jobs 4
   --manager-model opus --manager-effort xhigh --max-budget-usd 3.0
-  --case-budget-usd 3.0 --total-cap-usd 12` (about $7.91).
+  --case-budget-usd 3.0 --total-cap-usd $OPUS_DIALOG_CAP_USD`.
+
+Omitting `--dialogs` selects every dialog in `dialogs.select(None)`: currently
+43, or 129 case/reps per three-rep tier. A complete 43-dialog cost measurement is blocked
+pending evaluation credentials, a fresh disposable database/runtime root and
+an authorized budget. Set the three `*_DIALOG_CAP_USD` variables to explicitly
+authorized candidate measurement ceilings before running these commands;
+they are not measured release caps. No numeric full-dialog cap is recommended
+until each tier completes. Do not extrapolate from the committed 24-dialog
+reports: at clean commit `c9ac42d5c562306259203790cb23766d9abed34f`,
+`dialogs-real-haiku.json` covers 72 rows / $4.226970 and
+`dialogs-real-opus.json` covers 72 rows / $8.426588 (other roles on haiku).
+Neither measures the current 43-dialog selection; no Sonnet dialog report exists.
+After each full real candidate run, verify all 43 IDs at reps 1–3, no cap stop,
+skipped or error rows, and reconcile row costs with the report total. Record
+the candidate commit, models/Manager effort, selected IDs/count, repetitions,
+row count and measured total here before deriving numeric caps with headroom.
+Keep the full output in ignored local eval results; baseline artifact refresh
+remains the release workflow rather than part of this tooling change.
 
 `--jobs` above 1 under a total cap needs `--case-budget-usd`. Refresh each
 model's baseline from the JSON named by that command's `Run written to`
@@ -473,14 +491,21 @@ converter above; new specs should declare provider endpoints and a separate
 model with an explicit protocol. The selected model fixes the endpoint, whose
 `base_url` is passed through. The entry scripts are `examples/pi/eval-responses.sh`,
 `examples/pi/eval-deepseek.sh` and `examples/pi/eval-prompt-comparison.sh`.
-They follow the tiers above. The comparison script scopes 13 distinct cases
-across 4 tiers, 48 case/reps, and exits before `uv` when `ANTHROPIC_API_KEY`
-is absent.
+The provider scripts collect their independent target subsets at two reps.
+The comparison script follows the PR tiers above: Sonnet tasks at two reps,
+Opus Planner tasks at one, Sonnet dialogs at two, and Sonnet with an Opus xhigh
+Manager at one. Its selectors cover 13 distinct cases across 4 tiers:
+9*2 + 7 + 4*2 + 4 = 37 case/reps. The script derives its totals from those
+selectors and reps, filters each provider report to the same case/reps, and
+shares one spending cap and deadline across all tiers and comparisons.
+Per-case reservations still apply. It exits before `uv` when
+`ANTHROPIC_API_KEY` is absent. Missing baselines and partial baseline coverage
+are reported as unverified; comparisons of matched cases do not close the gap.
 
 This change did not run those real tiers. The Claude CLI comparison is 0
-passed, 0 failed and 48 unverified because the API key was absent. The two
+passed, 0 failed and 37 unverified because the API key was absent. The two
 provider scripts were not run against a live Responses or Chat provider.
-Tests of the scripts with a fake `uv` (83 passed) check command, budget and
+Tests of the scripts with a fake `uv` check command, budget and
 gap boundaries only. A syntax pass stays short of acceptance, and a pytest
 skip when no disposable database is available stays unverified. Baselines
 stay as they are. The scripts also leave unverified: steering, worker session
@@ -581,24 +606,25 @@ no reply within `--timeout` (`timeout`) or the eval itself failed (`harness`,
 such as the slow task not getting under way); after an error its remaining
 turns are not sent and the run goes on with the next dialog. Fake mode plays
 the Manager with the stand-in, which makes each message's scripted calls over
-MCP; it takes about two minutes. Real mode with haiku cost $4.23 for all
-24 dialogs at `--reps 3 --jobs 4` in about 9 minutes (about $1.41 a rep,
-measured at `c9ac42d5c`, the committed baseline), so the default
-`--total-cap-usd` (0.50) stops it before the first rep ends: give it one that
-covers all the reps, such as 8, and `--case-budget-usd 1.0` with `--jobs 4`:
+MCP; it takes about two minutes. Real mode now selects all 43 dialogs by
+default. The committed cost references cover only 24 dialogs (see the release
+tiers above), so neither they nor the default `--total-cap-usd` (0.50)
+establish a sufficient cap. Use an explicitly authorized measurement ceiling
+until full-run costs are available, with a reservation for each parallel case:
 
 ```bash
 uv run --extra test python -m evals.prompt_regression dialogs --mode real \
+  --reps 3 --jobs 4 --max-budget-usd 1.0 --case-budget-usd 1.0 \
+  --total-cap-usd "$HAIKU_DIALOG_CAP_USD" \
   --pg-url postgresql://postgres:postgres@127.0.0.1:5432/postgres
 ```
 
 Options: `--dialogs status,ask_project`, `--model`, `--agent`,
 `--manager-model opus --manager-effort xhigh` (the Manager alone on that
-model, the other roles on `--model`; all 24 dialogs at `--reps 3 --jobs 4`
-cost $8.43 at `c9ac42d5c` (the committed baseline), about $2.81 a rep, the
-costliest single dialog `task_cost` at about $0.46; give it
+model, the other roles on `--model`; the historical 24-dialog Opus report
+does not establish a cap for the current 43 dialogs; give it
 `--max-budget-usd 3.0`, `--case-budget-usd 3.0` with `--jobs 4` and a
-`--total-cap-usd` such as 12),
+`--total-cap-usd "$OPUS_DIALOG_CAP_USD"` authorized for candidate measurement),
 `--switch-agent SPEC.json` (`session_profile_switch`: register that spec as the profile `eval/switch`, while the
 other roles keep `--model` / `--agent`; without it, fake mode uses Claude Code on a provider of its own, which makes
 the switch start a new session, and real mode Claude Code with haiku on the login provider, which resumes),
