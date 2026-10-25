@@ -39,7 +39,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from ..broadcast import Broadcaster
@@ -96,6 +96,7 @@ from ..message import (
 )
 
 if TYPE_CHECKING:
+    from ..managers import ChatStopSummary
     from ..ops.service import ManagerOps
 
 logger = logging.getLogger(__name__)
@@ -644,6 +645,7 @@ class ManagerAgent:
         self._turned_off_told = False
         self._has_templates = False  # from the last read of the Manager's task templates
         self.on_turned_off: Callable[[str], None] | None = None
+        self.stop_chat: Callable[..., Awaitable[ChatStopSummary]] | None = None
         self._config = config
         self._runtime_root = runtime_root
         self._broadcaster = broadcaster
@@ -830,6 +832,16 @@ class ManagerAgent:
         try:
             origin = _message_origin(envelope)
             channel, chat = origin["channel"], origin["chat"]
+            if self.stop_chat is not None:
+                from ..managers import chat_stop_reply
+
+                summary = await self.stop_chat(origin["channel_id"] or channel or "", chat or "", via=channel or "")
+                reply = chat_stop_reply(summary)
+                # Only an empty fleet lookup falls back to the receiving runtime's legacy idle answer.
+                if summary.state == "enabled" and not summary.matched and not self.can_interrupt:
+                    reply = STOP_UNSUPPORTED_REPLY
+                await self._send_reply(envelope, reply, persist=False)
+                return
             if not chat_settings.stop_enabled():
                 await self._send_reply(envelope, chat_settings.STOP_DISABLED_REPLY, persist=False)
                 return
@@ -1277,6 +1289,10 @@ class ManagerAgent:
     def turn_for(self, message_id: str) -> TurnToken | None:
         """The live turn of a message, by the envelope's id or the web page's own."""
         return self._turns.find(message_id)
+
+    def live_for_chat(self, channel_id: str, chat_id: str) -> list[TurnToken]:
+        """Snapshot this bot/chat's live turns using its full channel identity."""
+        return self._turns.live_for(channel_id, chat_id)
 
     def current_turn_for(self, channel: str, chat: str) -> TurnToken | None:
         """The oldest live user turn of ``chat`` on ``channel``: the one being answered, else the first queued."""
