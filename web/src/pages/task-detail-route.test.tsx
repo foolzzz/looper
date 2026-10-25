@@ -132,7 +132,7 @@ describe("TaskDetailRoute", () => {
     expect(fetcher.mock.calls.filter(([url]) => String(url) === "/api/v1/tasks/activity")).toHaveLength(1);
   });
 
-  it.each(["mixed runs", "before request", "fast completion", "unstable terminal", "terminal status", "terminal with live runs"])("confirms restart across reads: %s", async (scenario) => {
+  it.each(["mixed runs", "cleared completion", "before request", "fast completion", "unstable terminal", "terminal status", "terminal with live runs"])("confirms restart across reads: %s", async (scenario) => {
     let starts = 0;
     let reads = 0;
     let polls = 0;
@@ -146,10 +146,13 @@ describe("TaskDetailRoute", () => {
     const changed = terminal(2, "2026-10-24T00:01:00Z");
     const mixed = { ...old, cost: { ...old.cost, runs: 2, running: 1 } };
     const running = { ...changed, status: "running", group: "in_progress", completed_at: null };
-    const sequence = scenario === "mixed runs" ? [{ ...old, cost: { ...old.cost, runs: 2 } }, running]
+    const mixedSettled = { ...old, cost: { ...old.cost, runs: 2, cost_usd: 1 } };
+    const cleared = { ...old, completed_at: null };
+    const sequence = scenario === "mixed runs" ? [mixedSettled, mixedSettled, running]
+      : scenario === "cleared completion" ? [cleared, cleared, running]
       : scenario === "terminal with live runs" ? [mixed, mixed, running]
       : scenario === "before request" ? [changed, changed, running]
-      : scenario === "unstable terminal" ? [changed, terminal(3), terminal(3)]
+      : scenario === "unstable terminal" ? [changed, terminal(3, changed.completed_at), terminal(3, changed.completed_at)]
       : scenario === "terminal status" ? [{ ...changed, status: "completed" }, { ...changed, status: "completed" }] : [changed, changed];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -190,6 +193,70 @@ describe("TaskDetailRoute", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
       expect(polls).toBe(sequence.length);
     }
+  });
+
+  it.each(["stopped", "failed"])("confirms a new %s completion despite a historical running audit row", async (status) => {
+    let starts = 0;
+    let polls = 0;
+    let streams = 0;
+    const before = { ...detail("task-a"), status: "stopped", error: null,
+      cost: { runs: 1, running: 1, cost_usd: 0, unpriced_runs: 0, by_model: [], manager_by_model: [],
+        by_role: { planner: { runs: 1, cost_usd: 0 }, worker: { runs: 0, cost_usd: 0 }, reviewer: { runs: 0, cost_usd: 0 } } } };
+    const completed = { ...before, status, completed_at: "2026-10-24T00:01:00Z",
+      error: status === "failed" ? "Workspace could not start" : null };
+    // Even without a new audit row, the task's new completion marker is authoritative.
+    // An intervening old read invalidates the first terminal observation.
+    const sequence = [completed, before, completed, completed];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/detail")) return Response.json({ status: "ok",
+        result: starts ? sequence[Math.min(polls++, sequence.length - 1)] : before });
+      if (url.endsWith("/restart")) {
+        starts++;
+        return Response.json({ status: "ok", result: { restarted: true } });
+      }
+      if (url.endsWith("/activity_stream")) {
+        streams++;
+        const event = { seq: 8, task_id: "task-a", worker: "planner", kind: "text",
+          summary: "Recovered activity", created_at: "2026-10-24T00:01:00Z" };
+        const body = starts ? `event: activity\ndata: ${JSON.stringify(event)}\n\n` : "";
+        return new Response(body + "event: done\ndata: {}\n\n", { headers: { "Content-Type": "text/event-stream" } });
+      }
+      return Response.json(answer(url, init));
+    }));
+    await show("task-a");
+    await openTab("Sessions");
+    expect(streams).toBe(1);
+    vi.useFakeTimers();
+    const button = (name: string) => [...container.querySelectorAll("button")].find((b) => b.textContent?.trim() === name)!;
+    await act(async () => { button("Start").click(); button("Start").click(); });
+    expect(polls).toBe(1);
+    for (let i = 1; i < sequence.length; i++) {
+      expect(streams).toBe(1);
+      expect(button("Start").disabled).toBe(true);
+      expect(button("Start over").disabled).toBe(true);
+      await act(async () => button("Start over").click());
+      expect(container.textContent).not.toContain("Delete its steps?");
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    }
+    expect(streams).toBe(2);
+    expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Sessions");
+    expect(container.textContent).toContain("Recovered activity");
+    expect(button("Start").disabled).toBe(false);
+    expect(button("Start over").disabled).toBe(false);
+    expect(container.querySelector('[role="alert"]')?.textContent ?? "").toBe(completed.error ?? "");
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    expect(polls).toBe(4);
+    expect(streams).toBe(2); // One activity generation for this owned request.
+    expect(starts).toBe(1);
+    await act(async () => button("Start over").click());
+    expect(container.textContent).toContain("Delete its steps?");
+    await act(async () => button("No").click());
+    // A subsequent Start must acquire ownership again, rather than finding the old request.
+    await act(async () => button("Start").click());
+    expect(starts).toBe(2);
+    expect(button("Start").disabled).toBe(true);
+    expect(button("Start over").disabled).toBe(true);
   });
 
   it.each(["request", "baseline"])("releases restart controls after a failed %s", async (failure) => {

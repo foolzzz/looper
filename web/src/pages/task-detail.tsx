@@ -2115,9 +2115,11 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
           const before = request.before;
           // Detail reads are not atomic: a run count can be new while the task row is still terminal.
           // Require the same changed terminal snapshot twice; a running task acknowledges immediately.
-          const changed = t.status !== before.status || t.completed_at !== before.completed_at ||
-            (t.cost != null && before.cost != null && t.cost.runs > before.cost.runs);
-          const settled = !t.cost?.running;
+          const completionChanged = t.completed_at != null && t.completed_at !== before.completed_at;
+          const changed = t.status !== before.status || completionChanged;
+          // A new completion belongs to this attempt; lifetime audit rows may still say running
+          // after a failed terminal write. Aggregate counts alone cannot identify a new attempt.
+          const settled = completionChanged || !t.cost?.running;
           const snapshot = JSON.stringify([t.status, t.completed_at, t.cost?.runs]);
           if (terminal && (!changed || !settled || request.terminal !== snapshot)) {
             request.terminal = changed && settled ? snapshot : undefined;
