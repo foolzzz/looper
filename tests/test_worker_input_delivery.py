@@ -18,6 +18,7 @@ from looper.agents.message import MessageEnvelope, MessageType, planner_address,
 from looper.agents.profile_registry import LegacyProviderSpec, RuntimeSpec
 from looper.agents.runtimes import ApiProtocol, AuthKind, Capability, adapter
 from looper.agents.runtimes import codex_steer, omp_steer, pi_steer
+from looper.agents.runtimes.channel import DeliveryResult, delivery_attempt
 from looper.agents.tiers import planner as planner_module, worker as worker_module
 from looper.agents.tiers.planner import PlanStep, PlannerAgent, TaskPlan
 from looper.agents.tiers.planner_protocol import ChatAction, ChatReply
@@ -42,15 +43,17 @@ class Channel:
     async def wait_input_ready(self) -> None:
         pass
 
-    async def send(self, text: str) -> None:
+    async def send(self, text: str) -> DeliveryResult:
         self.started.set()
         try:
-            self.written.append(text)
-            async with asyncio.timeout(self.send_timeout):
+            async with delivery_attempt(self.send_timeout) as attempt:
+                if self.error:
+                    raise self.error
+                attempt.writing = True
+                self.written.append(text)
                 await self.release.wait()
-            if self.error:
-                raise self.error
-            self.sent.append(text)
+                self.sent.append(text)
+            return attempt.result
         finally:
             self.settled.set()
 
@@ -82,16 +85,16 @@ async def delivery(tmp_path: Path):
         await bus.shutdown()
 
 
-async def correct(planner: PlannerAgent, plan: TaskPlan, step: PlanStep, caller: str) -> None:
+async def correct(planner: PlannerAgent, plan: TaskPlan, step: PlanStep, caller: str) -> str | None:
     if caller == "chat":
-        await planner._apply_chat(plan, ChatReply("Passing it on.", ChatAction.FORWARD, step.label, "use blue", ()), None)
+        return await planner._apply_chat(plan, ChatReply("Passing it on.", ChatAction.FORWARD, step.label, "use blue", ()), None)
     else:
         await planner._nudge_worker(plan, step, "use blue")
 
 
 @pytest.mark.parametrize("caller", ["chat", "supervise"])
 @pytest.mark.parametrize("blocked_at", ["readiness", "send"])
-def test_expired_input_is_acknowledged_and_never_delivered_later(
+def test_expired_input_only_replays_when_rejected_before_write(
     tmp_path: Path, agent_db: Any, caller: str, blocked_at: str,
 ) -> None:
     async def run() -> None:
@@ -99,10 +102,11 @@ def test_expired_input_is_acknowledged_and_never_delivered_later(
             if blocked_at == "send":
                 ready.set()
             before = asyncio.all_tasks()
+            await planner._save(plan, step)
             await correct(planner, plan, step, caller)
-            assert [ack.payload for ack in acks] == [{"delivered": False}]
-            assert step.missed_messages == ["use blue"]
-            assert agent_db.store.steps["t1"]["s1"]["missed_messages"] == ["use blue"]
+            assert [ack.payload for ack in acks] == [{"delivered": False if blocked_at == "readiness" else None}]
+            assert step.missed_messages == (["use blue"] if blocked_at == "readiness" else [])
+            assert agent_db.store.steps["t1"]["s1"]["missed_messages"] == step.missed_messages
             if blocked_at == "send":
                 assert channel.started.is_set() and channel.settled.is_set()
             ready.set()
@@ -176,8 +180,8 @@ def test_readiness_and_send_share_one_budget(tmp_path: Path, monkeypatch: pytest
             opening = loop.call_later(0.04, ready.set)
             accepting = loop.call_later(0.08, channel.release.set)
             try:
-                assert not await planner._send_worker_input(step, "use blue", "corr")
-                assert [ack.payload for ack in acks] == [{"delivered": False}]
+                assert await planner._send_worker_input(step, "use blue", "corr") is DeliveryResult.UNKNOWN
+                assert [ack.payload for ack in acks] == [{"delivered": None}]
                 assert channel.sent == []
             finally:
                 opening.cancel()
@@ -212,8 +216,8 @@ def test_pool_stop_settles_pending_bus_delivery(tmp_path: Path) -> None:
             request = asyncio.create_task(planner._send_worker_input(step, "use blue", "corr"))
             await channel.started.wait()
             await pool.stop()
-            assert not await request
-            assert [ack.payload for ack in acks] == [{"delivered": False}]
+            assert await request is DeliveryResult.UNKNOWN
+            assert [ack.payload for ack in acks] == [{"delivered": None}]
             assert channel.settled.is_set() and not pool._input_deliveries
             channel.release.set()
             await asyncio.sleep(0)
@@ -306,7 +310,7 @@ else:
 
 @pytest.mark.parametrize("runtime", ["codex", "omp", "pi"])
 @pytest.mark.parametrize("caller", ["chat", "supervise"])
-@pytest.mark.parametrize("startup", ["within_budget", "insufficient_budget", "past_deadline"])
+@pytest.mark.parametrize("startup", ["within_budget", "insufficient_budget", "past_deadline", "late_ack"])
 def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
     tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch, runtime: str, caller: str, startup: str,
 ) -> None:
@@ -319,7 +323,7 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
     monkeypatch.setattr(pi_steer, "_STEER_TIMEOUT_SEC", 2.0)
     log = tmp_path / "requests.jsonl"
     executable = fake_claude(tmp_path / "runtime", f"RUNTIME = {runtime!r}\nLOG = {str(log)!r}\n"
-                            f"ACK_DELAY = {1.7 if startup == 'within_budget' else 0}\n" + _STARTING_RUNTIME)
+                            f"ACK_DELAY = {2.2 if startup == 'late_ack' else 1.7 if startup == 'within_budget' else 0}\n" + _STARTING_RUNTIME)
     runtime_adapter = adapter(runtime)
     profile = resolved_profile("profile", "test", RuntimeSpec("runtime", runtime, runtime, executable,
         frozenset(runtime_adapter.capabilities | {Capability.STEER})),
@@ -362,19 +366,19 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
             opening = None
             send_input = pool.send_input
 
-            async def deliver_input(worker_id: str, text: str) -> bool:
+            async def deliver_input(worker_id: str, text: str) -> DeliveryResult:
                 nonlocal opening
                 if startup != "past_deadline":
                     opening = asyncio.get_running_loop().call_later(
-                        0.4 if startup == "within_budget" else 1.3, handshake.set)
+                        0.4 if startup in ("within_budget", "late_ack") else 1.3, handshake.set)
                 return await send_input(worker_id, text)
 
             monkeypatch.setattr(pool, "send_input", deliver_input)
             try:
                 await correct(planner, plan, step, caller)
-                delivered = startup == "within_budget"
+                delivered = None if startup == "late_ack" else startup == "within_budget"
                 assert [ack.payload for ack in acks] == [{"delivered": delivered}]
-                assert step.missed_messages == ([] if delivered else ["use blue"])
+                assert step.missed_messages == (["use blue"] if delivered is False else [])
                 assert agent_db.store.steps["t1"]["s1"]["missed_messages"] == step.missed_messages
                 # Complete the original turn and read back what the process actually accepted,
                 # including after a refused correction's handshake eventually finishes.
@@ -385,13 +389,13 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
                 result = await asyncio.wait_for(results.get(), 3)
                 assert result.payload["status"] == "completed", result.payload
                 accepted = json.loads(result.payload["summary"])
-                assert len(accepted) == int(delivered)
-                if delivered:
+                assert len(accepted) == int(delivered is not False)
+                if delivered is not False:
                     assert accepted[0].endswith("use blue")
                 requests = [json.loads(line) for line in log.read_text().splitlines()]
                 writes = [r for r in requests if r.get("method", r.get("type")) in ("turn/steer", "steer")]
-                assert len(writes) == int(delivered)
-                if delivered:
+                assert len(writes) == int(delivered is not False)
+                if delivered is not False:
                     commands = [r.get("method", r.get("type")) for r in requests]
                     assert commands.index("turn/start" if runtime == "codex" else "prompt") < commands.index(
                         "turn/steer" if runtime == "codex" else "steer")
@@ -402,3 +406,29 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
                     opening.cancel()
 
     asyncio.run(asyncio.wait_for(run(), 8))
+
+
+@pytest.mark.parametrize("caller", ["chat", "supervise"])
+def test_missing_bus_ack_is_unknown_and_late_acceptance_is_not_replayed(
+    tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch, caller: str,
+) -> None:
+    monkeypatch.setattr(worker_module, "WORKER_INPUT_DELIVERY_TIMEOUT", .2)
+    monkeypatch.setattr(planner_module, "WORKER_INPUT_TIMEOUT", .01)
+
+    async def run() -> None:
+        async with delivery(tmp_path) as (_, planner, plan, step, channel, ready, acks):
+            channel.send_timeout = .1
+            ready.set()
+            await planner._save(plan, step)
+            answer = await correct(planner, plan, step, caller)
+            assert not acks and step.missed_messages == []
+            if caller == "chat":
+                assert "未确认" in answer and "Passing it on" not in answer
+            channel.release.set()
+            await channel.settled.wait()
+            await asyncio.sleep(0)
+            assert [ack.payload for ack in acks] == [{"delivered": True}]
+            assert len(channel.written) == 1 and channel.sent == channel.written
+            assert agent_db.store.steps["t1"]["s1"]["missed_messages"] == []
+
+    asyncio.run(asyncio.wait_for(run(), 2))

@@ -58,6 +58,7 @@ from ..operator_notes import notes_note
 from ..project_execution import ProjectExecution
 from ..library import items_label, load_installed
 from ..runtimes import RunChannel, RuntimeUnsupported
+from ..runtimes.channel import DeliveryResult
 from ..task_roles import TaskRole, run_role
 from ..room import room_section, run_seat, run_session_dir
 from ..message import (
@@ -512,15 +513,15 @@ class WorkerPool:
     async def _deliver_input(self, envelope: MessageEnvelope) -> None:
         """Pass a user turn to a running worker and tell the sender whether it landed."""
         assert self._bus is not None
-        delivered = False
+        result = DeliveryResult.UNKNOWN
         try:
-            delivered = await self.send_input(envelope.target.agent_id, str(envelope.payload.get("text", "")))
+            result = await self.send_input(envelope.target.agent_id, str(envelope.payload.get("text", "")))
         finally:
             await self._bus.publish(MessageEnvelope.create(
                 source=envelope.target,
                 target=envelope.source,
                 message_type=MessageType.WORKER_INPUT_RESULT,
-                payload={"delivered": delivered},
+                payload={"delivered": result.value},
                 correlation_id=envelope.correlation_id,
                 reply_to=envelope.message_id,
             ))
@@ -529,14 +530,14 @@ class WorkerPool:
         """True while the worker's Claude run still reads user turns."""
         return worker_id in self._inputs
 
-    async def send_input(self, worker_id: str, text: str) -> bool:
+    async def send_input(self, worker_id: str, text: str) -> DeliveryResult:
         """Reserve the channel's full acceptance timeout before writing a user turn.
 
         Readiness includes the runtime handshake and is bounded by the pool's deadline. Once sending starts,
         wait for the channel's own acceptance result without shortening its timeout.
         """
         if not text.strip():
-            return False
+            return DeliveryResult.REJECTED
         loop = asyncio.get_running_loop()
         deadline = loop.time() + WORKER_INPUT_DELIVERY_TIMEOUT
         try:
@@ -545,20 +546,20 @@ class WorkerPool:
                     await ready.wait()
                 channel = self._inputs.get(worker_id)
                 if channel is None:
-                    return False
+                    return DeliveryResult.REJECTED
                 await channel.wait_input_ready()
             if deadline - loop.time() < channel.send_timeout:
                 logger.warning("worker %s has insufficient time to accept input before acknowledgement", worker_id)
-                return False
-            await channel.send(text)
+                return DeliveryResult.REJECTED
+            result = await channel.send(text)
         except TimeoutError:
             logger.warning("worker %s input delivery timed out before acknowledgement", worker_id)
-            return False
+            return DeliveryResult.REJECTED
         except (BrokenPipeError, ConnectionResetError, RuntimeError):
             self._inputs.pop(worker_id, None)
-            return False
-        logger.info("worker %s received a user turn (%d chars)", worker_id, len(text))
-        return True
+            return DeliveryResult.REJECTED
+        logger.info("worker %s input acceptance %s (%d chars)", worker_id, result.name.lower(), len(text))
+        return result
 
     def room_runs(self, task_id: str) -> dict[str, tuple[str, datetime]]:
         """The runs of ``task_id``'s steps this pool has, waiting (``pending``) or ``running``, and since when: who is
@@ -585,12 +586,18 @@ class WorkerPool:
         if time.monotonic() - state.last_at < REMINDER_INTERVAL_SEC:
             return False
         reminder = f"looper-reminder-{uuid.uuid4().hex[:12]}"
+        state.uuids.add(reminder)  # An echo may arrive while the send is still awaiting acceptance.
         try:
-            await channel.send(state.pending, uuid=reminder)
+            result = await channel.send(state.pending, uuid=reminder)
         except (BrokenPipeError, ConnectionResetError, RuntimeError):
+            result = DeliveryResult.REJECTED
+        if result is DeliveryResult.REJECTED:
+            state.uuids.discard(reminder)
             return False
-        state.uuids.add(reminder)
         state.pending, state.last_at = None, time.monotonic()
+        if result is DeliveryResult.UNKNOWN:
+            logger.warning("worker %s room reminder acceptance unknown; not retrying", worker_id)
+            return False
         state.sent += 1
         wp = self._active.get(worker_id)
         if wp is not None and wp.parent_task_id:

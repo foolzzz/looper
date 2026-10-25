@@ -9,6 +9,7 @@ from enum import Enum, auto
 from typing import Any
 
 from ..claude_cli import iter_lines
+from .channel import DeliveryResult, delivery_attempt
 from .pi import PiStream
 
 _SETUP_TIMEOUT_SEC = 10.0
@@ -205,35 +206,41 @@ class PiChannel:
         if self._phase is _Phase.FINISHED or self._process.stdin.is_closing():
             raise RuntimeError("the Pi run has ended")
 
-    async def send(self, text: str, *, uuid: str | None = None) -> None:
+    async def send(self, text: str, *, uuid: str | None = None) -> DeliveryResult:
         """Only a queued ACK means acceptance; neither timeout nor rejection is retried."""
         assert self._process.stdin is not None
         request_id: str | None = None
         try:
-            # One deadline covers lock contention, pipe backpressure and the response.
-            async with asyncio.timeout(self.send_timeout):
+            async with delivery_attempt(self.send_timeout) as attempt:
                 await self.wait_input_ready()
                 async with self._lock:
                     if self._phase is _Phase.FINISHED or self._process.stdin.is_closing():
                         raise RuntimeError("the Pi run has ended")
+                    attempt.writing = True
                     request_id, future = await self._write("steer", message=text)
                     assert future is not None
                 response = await future
-        except TimeoutError:
-            raise RuntimeError("Pi did not accept the steer in time; acceptance is unknown") from None
+            if attempt.result is not DeliveryResult.ACCEPTED:
+                return attempt.result
         finally:
             if request_id is not None:
                 self._pending.pop(request_id, None)
                 if (pending := self._steers.pop(request_id, None)) is not None:
                     pending.cancel()
-        if response.get("command") != "steer" or response.get("success") is not True:
-            raise RuntimeError("Pi rejected the steer or returned an invalid acknowledgement")
+        if response.get("command") != "steer":
+            return DeliveryResult.UNKNOWN
+        if response.get("success") is False:
+            raise RuntimeError("Pi rejected the steer")
+        if response.get("success") is not True:
+            return DeliveryResult.UNKNOWN
         data = response.get("data")
         disposition = data.get("disposition") if isinstance(data, dict) else None
         if disposition != "queued":
             if disposition == "handled":
                 raise RuntimeError("Pi handled the steer; it was not queued")
-            raise RuntimeError("Pi returned an invalid steer disposition; expected queued")
+            return DeliveryResult.UNKNOWN
+
+        return DeliveryResult.ACCEPTED
 
     def end_input(self) -> None:
         assert self._process.stdin is not None

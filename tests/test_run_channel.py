@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import signal
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from looper.agents.message import MessageEnvelope, MessageType, planner_address,
 from looper.agents.profile_registry import CatalogModel
 from looper.agents.runtimes import ADAPTERS, CLAUDE_CODE, Capability, RuntimeUnsupported, StreamChannel, adapter
 from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+from looper.agents.runtimes.channel import DeliveryResult
 from looper.agents.runtimes.pi import PiRuntime
 from looper.agents.runtimes.pi_steer import PiChannel
 from looper.agents.tiers import worker
@@ -153,7 +155,7 @@ def test_input_sent_while_a_worker_starts(
                 assert await pool.kill("w1")
             else:
                 release.set()
-            assert await asyncio.wait_for(delivery, 5) is (outcome == "started")
+            assert (await asyncio.wait_for(delivery, 5)).value is (outcome == "started")
             if outcome == "started":
                 queue = bus.get_queue("planner-t1")
                 result = await asyncio.wait_for(queue.get(), 20)
@@ -188,9 +190,9 @@ def test_worker_uses_its_run_channel_over_the_bus(
             await super().start(prompt)
             ready.set()
 
-        async def send(self, text: str, *, uuid: str | None = None) -> None:
+        async def send(self, text: str, *, uuid: str | None = None) -> DeliveryResult:
             sent.append((text, uuid))
-            await super().send(text, uuid=uuid)
+            return await super().send(text, uuid=uuid)
 
         def end_input(self) -> None:
             ended.append(True)
@@ -469,7 +471,7 @@ def test_pi_worker_stops_its_process_tree_and_clears_unacknowledged_input(
                 else:
                     assert 'per-run spend cap' in result.payload['error']
             response = await asyncio.wait_for(reply, 5)
-            assert response.payload['delivered'] is False
+            assert response.payload['delivered'] is None
             assert not pool.accepts_input('w1')
             assert channel._pending == {} and channel._steers == {}
             await _pi_worker_tree_ended(tree)
@@ -490,3 +492,62 @@ def test_pi_worker_stops_its_process_tree_and_clears_unacknowledged_input(
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def test_buffered_pipe_input_survives_a_drain_timeout(tmp_path: Path) -> None:
+    async def run() -> None:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-c",
+            "import sys,time; time.sleep(.2); sys.stdout.buffer.write(sys.stdin.buffer.readline()); sys.stdout.flush()",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        )
+        channel = StreamChannel(CLAUDE_CODE, process, model=None)
+        channel.send_timeout = .02
+        try:
+            result = await channel.send("correction" * 32768)
+            assert result.value is None  # cancelling drain cannot retract these buffered bytes
+            assert process.stdin.transport.get_write_buffer_size() > 0
+            channel.end_input()
+            received = json.loads(await process.stdout.read())
+            assert received["message"]["content"] == "correction" * 32768
+            await process.wait()
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+
+    asyncio.run(asyncio.wait_for(run(), 3))
+
+
+def test_reminder_timeout_keeps_reading_and_suppresses_its_echo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+) -> None:
+    body = r'''
+sys.stdin.readline()
+def emit(event):
+    print(json.dumps(event), flush=True)
+tool = {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "id": "t", "input": {}}]}}
+emit(tool)
+time.sleep(.2)
+reminder = json.loads(sys.stdin.readline())
+emit(tool)
+emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "reader still alive"}]}})
+emit({"type": "result", "subtype": "success", "result": json.dumps({"status": "completed", "summary": "original report"})})
+emit({"type": "result", "subtype": "success", "user_message_uuids": [reminder["uuid"]],
+      "result": json.dumps({"status": "completed", "summary": "reminder echo"})})
+assert sys.stdin.read() == "", "uncertain reminder was retransmitted"
+'''
+
+    async def run() -> None:
+        pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(tmp_path, body)), runtime_root=tmp_path)
+        pool._reminders["w1"] = state = worker._Reminders(pending="room reminder" * 32768)
+        monkeypatch.setattr(StreamChannel, "send_timeout", .02)
+        item = _work_item(tmp_path)
+        item.payload["parent_task_id"] = "t1"
+        result = await pool._execute(item)
+        assert result["status"] == "completed" and result["summary"] == "original report", result
+        assert state.pending is None and len(state.uuids) == 1 and state.sent == 0
+        assert any(call.kwargs.get("summary") == "reader still alive"
+                   for call in agent_db.insert_activity.await_args_list)
+
+    asyncio.run(asyncio.wait_for(run(), 5))
