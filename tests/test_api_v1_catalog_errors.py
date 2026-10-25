@@ -55,6 +55,8 @@ def test_skill_errors_and_successful_readback(tmp_path, monkeypatch, fields, sta
      profile_registry, "create_provider"),
     ("channel_configs.create", {"channel_type": "telegram", "manager_id": "manager", "bot_token": SECRET},
      bot_api, "add_bot"),
+    ("channel_configs.update", {"channel_id": "channel-example", "fields": {"bot_token": SECRET}},
+     bot_api, "update_bot"),
     ("catalog_items.update", {"item_id": "mcp-example", "fields": {"env": {"API_KEY": SECRET}}},
      catalog, "update_item"),
     ("catalog_items.update", {"item_id": "skill-example", "fields": {"description": "Changed"}},
@@ -84,8 +86,12 @@ def test_credential_failures_are_private_and_unaudited(
             status, headers, answer = await _send(server, "POST /api/v1/" + operation.replace(".", "/"),
                                                   _bearer(TOKEN), payload)
             expected = 200 if failure == "ok" else 503 if (
-                failure == "unexpected" or (failure == "mcp" and kind == "skill")) else 400
+                failure == "unexpected" or (failure == "mcp" and kind == "skill")
+                # Channel saves preserve wrapped service failures as unavailable.
+                or (failure == "wrapped" and module is bot_api)) else 400
             assert status == expected, answer
+            if failure != "ok":
+                assert answer["error"]["code"] == ("unavailable" if expected == 503 else "invalid")
             assert headers["cache-control"] == "no-store" and SECRET not in json.dumps(answer)
             assert "details" not in answer.get("error", {})
             assert work.await_count == (0 if failure in ("parser", "schema") else 1)

@@ -54,6 +54,10 @@ async def _telegram(manager: str, token: str | None = TOKEN, **extra: Any) -> tu
     ("lark", "move", "candidate"), ("lark", "update", "existing"),
     ("lark_bot", "update", "existing"), ("lark_bot", "update_config", "existing"),
     ("lark", "metadata", "candidate"),
+    ("lark_bot", "metadata", "existing"),
+    ("lark", "disable_identity", "candidate"), ("lark_bot", "disable_identity", "existing"),
+    ("lark_bot", "disable_token", "existing"), ("lark_bot", "remove_token", "existing"),
+    ("lark_bot", "disable_domain", "existing"),
 ])
 def test_unknown_lark_identity_refuses_writes_until_recovery(
     monkeypatch: pytest.MonkeyPatch, kind: str, operation: str, unavailable: str,
@@ -70,6 +74,8 @@ def test_unknown_lark_identity_refuses_writes_until_recovery(
                 return lark_cli.Identity(profile, "", "Bot", "ou_bot")
             raise lark_cli.LarkCliError(f"failed with {SECRET} at /private/profile")
         app = "cli_shared" if profile != "existing" or duplicate else "cli_existing"
+        if kind == "lark_bot" and operation == "disable_identity" and duplicate:
+            app = "cli_changed"
         return lark_cli.Identity(profile or "", app, "Bot", "ou_bot")
 
     monkeypatch.setattr(lark_cli, "identity", identity)
@@ -93,6 +99,14 @@ def test_unknown_lark_identity_refuses_writes_until_recovery(
                 body = {"enabled": True, "display_name": "Changed"}
             elif operation == "update_config":
                 body["config"] = {"app_id": "cli_shared", "description": "changed"}
+            elif operation == "disable_identity":
+                body = {"enabled": False, "config": (
+                    {"profile": "alias"} if kind == "lark" else {"app_id": "cli_changed"})}
+            elif operation in ("disable_token", "remove_token"):
+                body = {"enabled": False, "bot_token": (
+                    None if operation == "remove_token" else "synthetic-replacement-secret")}
+            elif operation == "disable_domain":
+                body = {"enabled": False, "config": {"app_id": "cli_shared", "domain": "lark"}}
 
         async def state() -> Any:
             return [await pool.fetch(f"SELECT * FROM {table} ORDER BY channel_id")
@@ -119,9 +133,118 @@ def test_unknown_lark_identity_refuses_writes_until_recovery(
         assert status == 200 and readback["config"] == saved["config"]
         assert readback["enabled"] == saved["enabled"]
         if kind == "lark_bot":
-            expected = SECRET if operation == "add" else "synthetic-replacement-secret"
+            expected = (None if operation == "remove_token" else "synthetic-replacement-secret"
+                        if operation in ("update", "update_config", "disable_token") else SECRET)
             assert await pool.fetchval("SELECT bot_token FROM channel_secrets WHERE channel_id = $1",
                                        saved["channel_id"]) == expected
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("kind,fields", [
+    ("lark", {"enabled": False}),
+    ("lark", {"enabled": False, "full_config": True}),
+    ("lark_bot", {"enabled": False}),
+    ("lark_bot", {"enabled": False, "full_config": True, "bot_token": "***"}),
+    ("lark_bot", {"enabled": False, "full_config": True, "bot_token": SECRET}),
+    ("lark", {"enabled": False, "builtin": True, "full_config": True}),
+])
+def test_unchanged_lark_bot_can_be_disabled_without_authentication(monkeypatch, kind, fields):
+    from looper.agents.channels import lark_cli
+
+    broken = False
+
+    async def identity(profile=None, *, fresh=False):
+        assert fresh
+        if broken:
+            raise lark_cli.LarkCliError(f"authentication failed: {SECRET}")
+        return lark_cli.Identity(profile or "", "cli_added" if profile else "cli_builtin", "Bot", "ou_bot")
+
+    monkeypatch.setattr(lark_cli, "identity", identity)
+
+    async def test(pool):
+        config = ({"profile": "candidate"} if kind == "lark" else {"app_id": "cli_added", "domain": "feishu"})
+        config.update(allowed_open_ids=["ou_sender0000001"], description="Saved")
+        body = {"channel_type": kind, "manager_id": await _manager(pool), "config": config, "enabled": True}
+        if kind == "lark_bot":
+            body["bot_token"] = SECRET
+        request = dict(fields)
+        if request.pop("builtin", False):
+            body["config"]["profile"] = ""
+            status, saved = await _call("PUT", "channel-lark", {"enabled": True, "config": body["config"]})
+        else:
+            status, saved = await _call("POST", "channel_configs", body)
+        assert status == 200 and saved["enabled"] is True, saved
+        if request.pop("full_config", False):
+            request.update(config=saved["config"], display_name=saved["display_name"], manager_id=saved["manager_id"])
+        nonlocal broken
+        broken = True
+        status, answer = await _call("PUT", saved["channel_id"], request)
+        assert status == 200 and answer["enabled"] is False, answer
+        status, readback = await _call("GET", saved["channel_id"])
+        assert status == 200 and readback == answer
+        assert readback["config"] == saved["config"] and readback["manager_id"] == saved["manager_id"]
+        assert await pool.fetchval("SELECT enabled FROM channel_configs WHERE channel_id = $1",
+                                   saved["channel_id"]) is False
+        assert await pool.fetchval("SELECT bot_token FROM channel_secrets WHERE channel_id = $1",
+                                   saved["channel_id"]) == (SECRET if kind == "lark_bot" else None)
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("changed", ["profile", "token"])
+def test_lark_disable_admission_uses_identity_and_token_read_under_lock(monkeypatch, changed):
+    from looper.agents.channels import bot_api, lark_cli
+
+    broken = False
+
+    async def identity(profile=None, *, fresh=False):
+        if broken:
+            raise lark_cli.LarkCliError("authentication failed")
+        return lark_cli.Identity(profile or "", "cli_" + (profile or "builtin"), "Bot", "ou_bot")
+
+    monkeypatch.setattr(lark_cli, "identity", identity)
+
+    async def test(pool):
+        kind = "lark" if changed == "profile" else "lark_bot"
+        body = {"channel_type": kind, "manager_id": await _manager(pool), "enabled": True,
+                "config": {"profile": "candidate"} if kind == "lark" else {"app_id": "cli_added"}}
+        if kind == "lark_bot":
+            body["bot_token"] = SECRET
+        status, saved = await _call("POST", "channel_configs", body)
+        assert status == 200, saved
+        real = bot_api.db_channel_configs.get_config
+        raced = []
+        reads = []
+
+        async def get_config(channel_id, **kwargs):
+            row = await real(channel_id, **kwargs)
+            if not kwargs:
+                reads.append(channel_id)
+            # A full-config request first reads in the v1 validator, then in update_bot.
+            # Change the persisted identity after update_bot's initial read, before its lock.
+            if not raced and not kwargs and len(reads) == 2:
+                raced.append(True)
+                fields = {"config": {"profile": "replacement"}} if changed == "profile" else {
+                    "bot_token": "synthetic-replacement-secret"}
+                status, answer = await _call("PUT", channel_id, fields)
+                assert status == 200, answer
+                nonlocal broken
+                broken = True
+            return row
+
+        monkeypatch.setattr(bot_api.db_channel_configs, "get_config", get_config)
+        fields = {"enabled": False, "config": saved["config"]}
+        if kind == "lark_bot":
+            fields["bot_token"] = SECRET
+        status, answer = await _call("PUT", saved["channel_id"], fields)
+        assert raced and status == 409 and "cannot verify Lark app identity" in answer["error"], answer
+        readback = await real(saved["channel_id"])
+        assert readback["enabled"] is True
+        assert readback["config"] == ({"profile": "replacement"}
+                                      if changed == "profile" else saved["config"])
+        assert await pool.fetchval("SELECT bot_token FROM channel_secrets WHERE channel_id = $1",
+                                   saved["channel_id"]) == (None if changed == "profile" else "synthetic-replacement-secret")
 
     run_with_channel_configs(test, monkeypatch)
 
@@ -269,7 +392,7 @@ def test_lark_cli_bots_name_their_profile(monkeypatch: pytest.MonkeyPatch, lark_
         body = {"channel_type": "lark", "manager_id": manager}
         status, answer = await _call("POST", "channel_configs", {**body, "config": {"profile": ""}})
         assert status == 400 and answer["error"] == (
-            "invalid channel configuration; check the sender allowlist and bot settings")
+            "name the lark-cli profile of this bot: the active profile belongs to the built-in Lark channel")
         status, answer = await _call("POST", "channel_configs", {**body, "config": {"profile": "other"}})
         assert status == 200, answer
         lark_id = answer["channel_id"]
@@ -318,7 +441,7 @@ def test_an_added_lark_cli_bot_keeps_naming_its_profile(monkeypatch: pytest.Monk
         assert status == 200, answer
         status, answer = await _call("PUT", f"{lark_id}", {"config": {"profile": ""}})
         assert status == 400 and answer["error"] == (
-            "invalid channel configuration; check the sender allowlist and bot settings"), answer
+            "name the lark-cli profile of this bot: the active profile belongs to the built-in Lark channel"), answer
         status, answer = await _call("GET", f"{lark_id}")
         assert answer["config"]["profile"] == "other"
         # The built-in row may still use lark-cli's active profile.
@@ -470,7 +593,7 @@ def test_put_keeps_the_manager_and_checks_a_new_token(monkeypatch: pytest.Monkey
         path = "channel-telegram-2"
         status, body = await _call("PUT", path, {"manager_id": "manager", "display_name": "changed"})
         assert status == 400 and body["error"] == (
-            "invalid channel configuration; check the sender allowlist and bot settings")
+            "a bot's Manager cannot change: add a new bot for the other Manager and remove this one")
         assert (await _call("GET", path))[1]["display_name"] == "Telegram · Review"
         status, body = await _call("PUT", path, {"manager_id": manager, "display_name": "Mine"})
         assert status == 200 and body["display_name"] == "Mine" and body["manager_id"] == manager
