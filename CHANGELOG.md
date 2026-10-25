@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.117] - 2026-10-25
+
+### Fixed
+
+- **Disabling a Lark bot no longer skips admission when the same save changes its allowed senders, and a Telegram stop drains updates before stopping reactions.** An explicit disable skips the same-bot check only when the identity and, for a Lark save with a `config`, the set of `allowed_open_ids` and the `allowlist_app_id` are unchanged; otherwise it is admitted like any other Lark save. The sender lists are compared as sets, so a reordered list keeps the stored app binding. The Telegram adapter now stops its reactions worker after the updater and application have stopped, since `Application.stop` drains updates whose handlers can still add reactions. No route, stored data format, Manager tool declaration or prompt changed. ([#627](https://github.com/foolzzz/looper/pull/627))
+
 ## [2.13.116] - 2026-10-25
 
 ### Fixed
