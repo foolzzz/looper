@@ -19,6 +19,11 @@ _TELEGRAM_BOT_ID = re.compile(r"^(\d+):")
 _BUILTIN_LARK_IDS = {"channel-lark": "lark", "channel-lark_bot": "lark_bot"}
 
 
+def builtin_lark_pair(channel_id: str | None, other_id: str) -> bool:
+    """These two built-ins intentionally share an app, so neither competes for the other's app identity."""
+    return channel_id in _BUILTIN_LARK_IDS and other_id in _BUILTIN_LARK_IDS and channel_id != other_id
+
+
 def bot_key(channel_type: str, config: Mapping[str, Any], secret: str | None, *, env_token: str = "") -> str | None:
     """What makes two rows the same bot (RFC §9.1): Telegram, the bot id that starts its token ("<bot id>:<secret>",
     digits before the colon; the built-in row with no stored token uses ``env_token``); lark-cli, its profile ("" is

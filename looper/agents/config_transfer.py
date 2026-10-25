@@ -1682,14 +1682,16 @@ class _Importer:
         built-in channel as this import leaves it: the server would not start the later row (``bots.clashes``)."""
         from ..db import channel_configs as db_channel_configs
         from . import projects
-        from .channels.bot_api import refuse_same_bot
+        from .channels.bot_api import _LOCK, _admission_app_id, refuse_same_bot
         from .channels.bots import builtin_env_token
 
-        if await self.conn.fetchval("SELECT to_regclass('channel_secrets')") is None:
-            return  # a preview on a database without the schema yet: it holds no other bot
-        secret = await db_channel_configs.get_bot_token(channel_id, pool=self.conn)
-        env = builtin_env_token(config) if kind == "telegram" and not secret else ""
         try:
+            if await self.conn.fetchval("SELECT to_regclass('channel_secrets')") is None:
+                await _admission_app_id(kind, config)
+                return  # no competing rows yet, but the candidate still needs a known identity
+            await self.conn.execute(_LOCK)
+            secret = await db_channel_configs.get_bot_token(channel_id, pool=self.conn)
+            env = builtin_env_token(config) if kind == "telegram" and not secret else ""
             await refuse_same_bot(self.conn, kind, config, secret, env_token=env, exclude=channel_id,
                                   configs=self.bot_configs)
         except projects.RequestError as exc:
