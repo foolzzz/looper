@@ -379,6 +379,7 @@ def _without_time(path: Path) -> dict[str, Any]:
     return data
 
 
+@pytest.mark.usefixtures("lark_cli_stand_in")
 def test_a_round_trip_into_a_new_database_reproduces_the_configuration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -426,6 +427,7 @@ def test_a_round_trip_into_a_new_database_reproduces_the_configuration(
     asyncio.run(_test())
 
 
+@pytest.mark.usefixtures("lark_cli_stand_in")
 def test_importing_the_same_file_again_changes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def _test() -> None:
         async with _installation() as (source, source_url), _installation() as (target, target_url):
