@@ -211,8 +211,8 @@ def test_the_projects_list_is_set_whole_by_id_or_name_and_read_back(monkeypatch:
         for body, status, message in [
             ({"profile_ids": ["agent-haiku", "nope"]}, 400, "no Agent Profile 'nope'; registered: "),
             ({"profile_ids": ["resident/opus"]}, 400, "'resident/opus' can run neither the worker nor the reviewer"),
-            ({"profile_ids": "agent-haiku"}, 400, "profile_ids must be a list"),
-            ({"profiles": []}, 400, '{"profile_ids": [...]}'),
+            ({"profile_ids": "agent-haiku"}, 400, "declared schema"),
+            ({"profiles": []}, 400, "declared schema"),
         ]:
             got, refused = await _call("PUT", path, body)
             assert got == status and message in refused["error"], refused

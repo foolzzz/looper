@@ -3185,7 +3185,7 @@ export interface ProjectAgentSettings {
  * sent as typed, so the server's 400 explains it. */
 export type LayerUpdate = { [K in keyof LayerValues]?: LayerValues[K] | string };
 
-async function putJson<T>(path: string, body: unknown, label: string): Promise<T> {
+export async function putJson<T>(path: string, body: unknown, label: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -3216,27 +3216,27 @@ export async function updateRoleSettings(role: AgentRole, fields: LayerUpdate): 
 }
 
 export async function fetchProjectAgentSettings(projectId: string): Promise<ProjectAgentSettings> {
-  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/agent-settings`);
-  if (!res.ok) await failed(res, "project agent settings");
-  return res.json();
+  const result = await callV1<ProjectAgentSettings>("/api/v1/project_agent_settings/get", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", "Project settings unexpectedly need confirmation.");
+  return result;
 }
 
 /** A project's layer: all its agents. */
-export function updateProjectLayer(projectId: string, fields: LayerUpdate): Promise<ProjectAgentSettings> {
-  return putJson(`/projects/${encodeURIComponent(projectId)}/agent-settings`, fields, "update project agent settings");
+export async function updateProjectLayer(projectId: string, fields: LayerUpdate): Promise<ProjectAgentSettings> {
+  const result = await callV1<ProjectAgentSettings>("/api/v1/project_agent_settings/update", { project_id: projectId, values: fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", "Project settings update needs explicit confirmation.");
+  return result;
 }
 
 /** One role's layer in a project. */
-export function updateProjectRoleSettings(
+export async function updateProjectRoleSettings(
   projectId: string,
   role: ProjectRole,
   fields: LayerUpdate,
 ): Promise<ProjectAgentSettings> {
-  return putJson(
-    `/projects/${encodeURIComponent(projectId)}/agent-settings/roles/${encodeURIComponent(role)}`,
-    fields,
-    "update project agent settings",
-  );
+  const result = await callV1<ProjectAgentSettings>("/api/v1/project_agent_settings/update_role", { project_id: projectId, role, values: fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", "Project settings update needs explicit confirmation.");
+  return result;
 }
 
 /** An Agent Profile a project's Planners may choose for their task's Workers or Reviewers. */
@@ -3263,19 +3263,17 @@ export interface AllowedProfiles {
 }
 
 export async function fetchAllowedProfiles(projectId: string): Promise<AllowedProfiles> {
-  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/allowed-profiles`);
-  if (!res.ok) await failed(res, "allowed profiles");
-  return res.json();
+  const result = await callV1<AllowedProfiles>("/api/v1/allowed_profiles/get", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", "Allowed profiles unexpectedly need confirmation.");
+  return result;
 }
 
 /** Make `profileIds` the whole list ([] lifts the restriction); a profile it drops takes the Planners' choices of it along.
  * Resolves to the list as saved. */
-export function setAllowedProfiles(projectId: string, profileIds: string[]): Promise<AllowedProfiles> {
-  return putJson(
-    `/projects/${encodeURIComponent(projectId)}/allowed-profiles`,
-    { profile_ids: profileIds },
-    "update allowed profiles",
-  );
+export async function setAllowedProfiles(projectId: string, profileIds: string[]): Promise<AllowedProfiles> {
+  const result = await callV1<AllowedProfiles>("/api/v1/allowed_profiles/replace", { project_id: projectId, profile_ids: profileIds });
+  if ("status" in result) throw new V1Error(202, "unavailable", "Allowed profiles update needs explicit confirmation.");
+  return result;
 }
 
 /** A role a project keeps for its tasks' Planners to copy: checked as a task role is, whether or not the project's

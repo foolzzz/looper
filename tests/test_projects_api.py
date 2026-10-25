@@ -414,7 +414,7 @@ class TestMovedProjectFields:
     @pytest.mark.parametrize("field", ["planner_harness_prompt", "worker_harness_prompt", "model", "run_budget_usd"])
     def test_create_update_and_a_new_project_with_a_task_refuse_them(self, store: _Store, field: str) -> None:
         status, body = _call("POST", "/api/projects", {"name": "calc", field: "x"})
-        assert status == 400 and "agent-settings" in body["error"] and store.projects == {}
+        assert status == 400 and "project_agent_settings/update" in body["error"] and store.projects == {}
         store.add_project("proj-c", "c")
         assert _call("PUT", "/api/projects/proj-c", {"name": "renamed", field: "x"})[0] == 400
         assert store.projects["proj-c"]["name"] == "c"

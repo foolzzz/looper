@@ -76,6 +76,12 @@ async def _call(method: str, path: str, body: Any = None, *, worker_pool: Any = 
     if path in {"/api/v1/tasks/detail", "/api/v1/tasks/page"}:
         from tests.db_support import call_v1
         return await call_v1(server, path, body or {})
+
+    if path.startswith(("/api/v1/project_agent_settings/", "/api/v1/allowed_profiles/")):
+        from tests.db_support import call_v1
+
+        server._client_ops = ClientOps(SimpleNamespace())
+        return await call_v1(server, path, body)
     if path == "/api/v1/tasks/agents" or path.startswith(("/api/v1/provider_accounts/", "/api/v1/profiles/", "/api/v1/roles/", "/api/v1/agent_settings/")):
         server._client_ops = ClientOps(SimpleNamespace())
         await server._handle_v1(method, path, {}, {}, raw, writer, api_v1.OPERATOR)

@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.90] - 2026-10-24
+
+### Changed
+
+- **Project setting layers and allowed profiles go through v1.** Reading and updating a project's settings (or one role's layer in it) and reading and replacing the profiles its Planners may choose call the new `project_agent_settings.get`, `.update`, `.update_role` and `allowed_profiles.get`, `.replace` operations (`POST /api/v1/...`), which use the same checks as before. An update that changes a concurrency limit or raises the spend cap asks for confirmation. The dashboard uses them. Manager prompts and tools are unchanged. ([#544](https://github.com/foolzzz/looper/pull/544))
+
+### Removed
+
+- **The legacy project routes:** `GET` and `PUT /api/projects/<id>/agent-settings`, `PUT /api/projects/<id>/agent-settings/roles/<role>` and `GET` and `PUT /api/projects/<id>/allowed-profiles`. Use the `project_agent_settings` and `allowed_profiles` operations. ([#544](https://github.com/foolzzz/looper/pull/544))
+
 ## [2.13.89] - 2026-10-24
 
 ### Changed

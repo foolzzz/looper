@@ -172,8 +172,8 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
                 work.mkdir()
                 project = api.post("/api/projects", {"name": f"calc-{variant}", "work_dir": str(work)})
                 if variant == "profile":
-                    api.put(f"/api/projects/{project['project_id']}/allowed-profiles",
-                            {"profile_ids": [sonnet["profile"]["profile_id"]]})
+                    api.post("/api/v1/allowed_profiles/replace",
+                             {"project_id": project["project_id"], "profile_ids": [sonnet["profile"]["profile_id"]]})
                 ids[variant] = api.post("/api/v1/tasks/create", {"requirement": f"build calc variant={variant}",
                                                               "project_id": project["project_id"]})["result"]["task_id"]
                 api.post("/api/v1/ops/task_control/start", {"task_id": ids[variant]})

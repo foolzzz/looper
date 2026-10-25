@@ -41,7 +41,7 @@ function answer(url: string, payload: Record<string, string>): unknown {
   if (url.endsWith("/projects")) return { projects: [{ project_id: "p1", name: "Proj", description: "", work_dir: "", task_count: 1, active_count: 0 }] };
   if (url.includes("/manager/session")) return { effective: { profile: null }, choices: [], session: null };
   if (url.includes("/api/v1/ops/gates/list")) return { status: "ok", result: { gates: [], total: 0, limit: 50, offset: 0, next_cursor: null, has_more: false, counts: { open: 0, waiting_user: 0, waiting_planner: 0, closed: 0, all: 0 } } };
-  if (url.includes("/agent-settings")) return undefined; // a 404: the card says it could not load
+  if (url === "/api/v1/project_agent_settings/get") return undefined; // a 404: the card says it could not load
   if (url === "/api/v1/project_knowledge/list") return { status: "ok", result: { project_id: "p1", documents: [], count: 0, stored_bytes: 0, index: "", index_chars: 0, caps: { document_max_bytes: 2097152, project_max_documents: 100, project_max_bytes: 52428800, index_max_chars: 4000 } } };
   if (url === "/api/v1/project_knowledge/drafts") return { status: "ok", result: { project_id: "p1", drafts: [], count: 0 } };
   if (url === "/api/v1/schedule_admin/list" || url === "/api/v1/schedule_admin/project_list") return { status: "ok", result: { schedules: [] } };
