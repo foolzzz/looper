@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.104] - 2026-10-25
+
+### Fixed
+
+- **The task page resumes Sessions activity after an asynchronous Start.** Start returns before the new run is visible, so the page could read the old terminal task, take it as the end of the new run and leave the Sessions stream closed. After a Start is accepted the page keeps polling the task until it sees the new run: a non-terminal status, a changed `completed_at`, or a higher run count (`cost.runs`). It then reopens the activity stream once, without mixing task ids or leaking subscriptions when the route changes during the request or the poll. A second click on Start while one is pending is ignored; a refused Start clears the pending state and shows its error; a run that ends as `failed` shows the task's error. Not model-visible; dashboard only. ([#590](https://github.com/foolzzz/looper/pull/590))
+
 ## [2.13.103] - 2026-10-25
 
 ### Fixed
