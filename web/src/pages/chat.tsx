@@ -337,10 +337,12 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const turnRef = useRef(0); // the send in flight; an older stream must not touch a newer turn's state
   // Invalidate even a send whose HTTP response has not arrived, including navigation to a read-only or missing thread.
   useEffect(() => {
+    // Sidebar navigation clears the query, then pins this same thread again; neither changes the send's owner.
+    if (wantTarget === target.id && (!wantConversation || wantConversation === sessionId)) return;
     cleanupRef.current?.();
     setSending(false);
     setPhase("");
-  }, [wantTarget, wantConversation]);
+  }, [wantTarget, wantConversation, target.id, sessionId]);
   // Leaving the page (the session ended, for one) stops the reply stream.
   useEffect(() => () => cleanupRef.current?.(), []);
 

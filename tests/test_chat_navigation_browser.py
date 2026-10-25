@@ -84,6 +84,9 @@ def dashboard(dashboard_url):
                     return
                 result = {"correlation_id": "reply-b"}
             elif path == "operator_chat/reply_events":
+                if state.get("hold_reply"):
+                    held.append(route)
+                    return
                 text = "Late A reply" if body["correlation_id"] == "reply-a" else "Current B reply"
                 events = [("agent.phase", {"label": text}), ("answer.delta", {"text": text}),
                           ("turn.completed", {}), ("answer.final", {"text": text, "outcome": "answered"})]
@@ -112,6 +115,48 @@ def dashboard(dashboard_url):
                     pass  # Already fulfilled or cancelled by navigation.
             context.close()
             browser.close()
+
+
+@pytest.mark.parametrize("stage", ["send", "reply"])
+@pytest.mark.parametrize("via_tasks", [False, True])
+def test_returning_to_same_thread_keeps_send_and_queue(dashboard, stage, via_tasks):
+    from playwright.sync_api import expect
+
+    page, base, state = dashboard
+    state["hold_reply"] = True
+    page.goto(f"{base}/#chat?conversation=session-b")
+    page.get_by_role("textbox").fill("Synthetic original turn")
+    with page.expect_request(lambda r: r.url.endswith("/operator_chat/send")):
+        page.get_by_role("textbox").press("Enter")
+    expect(page.get_by_text("Synthetic original turn", exact=True)).to_be_visible()
+    pending = next(r for r in state["held"] if r.request.url.endswith("/send"))
+    if stage == "reply":
+        with page.expect_request(lambda r: r.url.endswith("/operator_chat/reply_events")):
+            pending.fulfill(json={"status": "ok", "result": {"correlation_id": "reply-a"}})
+    navigation = page.get_by_role("complementary", name="Navigation")
+    if via_tasks:
+        navigation.get_by_role("button", name="Tasks", exact=True).click()
+        expect(page).to_have_url(f"{base}/#tasks")
+    navigation.get_by_role("button", name="Chat", exact=True).click()
+    expect(page).to_have_url(f"{base}/#chat?conversation=session-b")
+    page.get_by_role("textbox").fill("Synthetic queued turn")
+    expect(page.get_by_role("button", name="Queue message", exact=True)).to_be_visible()
+    page.get_by_role("textbox").press("Enter")
+    expect(page.get_by_text("Queued · sent when the reply ends", exact=True)).to_be_visible()
+    assert sum(path == "operator_chat/send" for path, _ in state["calls"]) == 1
+    assert not any(url.endswith(("/operator_chat/send", "/operator_chat/reply_events"))
+                   for url in state["cancelled"])
+    state["hold"] = state["hold_reply"] = False
+    if stage == "send":
+        pending.fulfill(json={"status": "ok", "result": {"correlation_id": "reply-a"}})
+    else:
+        pending = next(r for r in state["held"] if r.request.url.endswith("/reply_events"))
+        pending.fulfill(content_type="text/event-stream", body=
+                        'event: answer.final\ndata: {"text":"Late A reply","outcome":"answered"}\n\n')
+    expect(page.get_by_text("Late A reply", exact=True)).to_be_visible()
+    expect(page.get_by_text("Current B reply", exact=True)).to_be_visible()
+    sends = [body for path, body in state["calls"] if path == "operator_chat/send"]
+    assert [body["session_id"] for body in sends] == ["session-b", "session-b"]
 
 
 def test_back_during_deferred_send_keeps_the_restored_conversation(dashboard):
