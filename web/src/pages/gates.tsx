@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -112,12 +112,17 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
   const filters = readFilters(query);
   const { state, waiting, project } = filters;
   const { projects } = useProjects();
-  const [{ rows, answering }, setView] = useState<{ rows: GateListRow[]; answering: string }>({ rows: [], answering: "" });
+  const [{ rows, answering, cursor: savedCursor }, setView] = useState<{
+    rows: GateListRow[]; answering: string; cursor: string | null;
+  }>({ rows: [], answering: "", cursor: null });
   const [data, setData] = useState<Pick<GateList, "total" | "counts" | "has_more"> | null>(null);
   const [error, setError] = useState("");
   const latest = useRef(0);
   const loading = useRef(false);
   const cursor = useRef<string | null>(null);
+
+  // Timer reads follow the committed rows' boundary without restarting the refresh effect.
+  useLayoutEffect(() => { cursor.current = savedCursor; }, [savedCursor]);
 
   const read = useCallback(
     (mode: "refresh" | "more" | "retry", force: boolean) => {
@@ -157,9 +162,8 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
               ? [...current.rows.filter((row) => !keys.has(rowKey(row))), ...list.gates]
               : [...list.gates];
             if (editing && !rows.some((row) => rowKey(row) === current.answering)) rows.push(editing);
-            return { ...current, rows };
+            return { ...current, rows, cursor: more && !list.gates.length ? current.cursor : list.next_cursor };
           });
-          if (!more || list.gates.length) cursor.current = list.next_cursor;
           setData({ total: list.total, counts: list.counts, has_more: list.has_more });
           setError("");
         })
@@ -175,7 +179,7 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
   useEffect(() => {
     // A new filter starts over: the rows of the old one are not shown.
     cursor.current = null;
-    setView({ rows: [], answering: "" });
+    setView({ rows: [], answering: "", cursor: null });
     setData(null);
     void read("refresh", true);
     const timer = setInterval(() => void read("refresh", false), REFRESH_MS);

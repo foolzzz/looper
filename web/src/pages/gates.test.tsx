@@ -233,6 +233,46 @@ describe("GatesPage", () => {
     expect(vi.mocked(fetchGates).mock.calls.length).toBe(calls + 1);
   });
 
+  it("keeps loaded rows and cursor after failed Retry, replacing both only on success", async () => {
+    const first = row("first", gate("first"));
+    const second = row("second", gate("second"));
+    vi.mocked(fetchGates).mockResolvedValueOnce(list([first], { has_more: true, next_cursor: "page1" }));
+    await show();
+    vi.mocked(fetchGates).mockResolvedValueOnce(list([second], { has_more: true, next_cursor: "page2" }));
+    await click(button("Show more"));
+    vi.mocked(fetchGates).mockRejectedValueOnce(new Error("Unavailable"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    const feedback = container.querySelector("[role=alert]")!.textContent;
+    vi.mocked(fetchGates).mockRejectedValueOnce(new Error("Unavailable"));
+    await click(button("Retry"));
+    expect(fetchGates).toHaveBeenLastCalledWith({ state: "open", limit: 50 });
+    expect(container.querySelector("[role=alert]")?.textContent).toBe(feedback);
+    expect(container.querySelectorAll("li")).toHaveLength(2);
+    expect(container.querySelector("a[href='#tasks/second']")).not.toBeNull();
+    vi.mocked(fetchGates).mockResolvedValueOnce(list([row("third", gate("third"))], { next_cursor: "page3" }));
+    await click(button("Show more"));
+    expect(fetchGates).toHaveBeenLastCalledWith({ state: "open", limit: 50, cursor: "page2" });
+    expect(container.querySelectorAll("li")).toHaveLength(3);
+
+    vi.mocked(fetchGates).mockRejectedValueOnce(new Error("Unavailable"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    let finish!: (value: GateList) => void;
+    vi.mocked(fetchGates).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    await click(button("Retry"));
+    expect(fetchGates).toHaveBeenLastCalledWith({ state: "open", limit: 50 });
+    expect(container.querySelectorAll("li")).toHaveLength(3);
+    expect(container.querySelector("[role=alert]")).not.toBeNull();
+    await act(async () => finish(list([row("new", gate("new"))], { has_more: true, next_cursor: "fresh" })));
+    expect(container.querySelectorAll("li")).toHaveLength(1);
+    expect(container.querySelector("a[href='#tasks/new']")).not.toBeNull();
+    expect(container.querySelector("[role=alert]")).toBeNull();
+    vi.mocked(fetchGates).mockResolvedValueOnce(list([row("tail", gate("tail"))]));
+    await click(button("Show more"));
+    expect(fetchGates).toHaveBeenLastCalledWith({ state: "open", limit: 50, cursor: "fresh" });
+    expect(container.querySelectorAll("li")).toHaveLength(2);
+    expect(container.querySelector("a[href='#tasks/tail']")).not.toBeNull();
+  });
+
   it.each(["success", "failure"])("Retry resets pagination and ignores an older refresh %s", async (stale) => {
     const old = list([row("old", gate("old"))], { total: 80, has_more: true, next_cursor: "expired" });
     vi.mocked(fetchGates).mockResolvedValueOnce(old);
