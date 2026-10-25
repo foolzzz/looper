@@ -83,7 +83,6 @@ def whoami(principal: Principal) -> dict[str, Any]:
 
 PREFIX = "/api/v1"
 SESSION_PATTERN = "^[A-Za-z0-9._:-]{1,64}$"
-UNTYPED: dict[str, Any] = {"type": "object", "x-looper-result-typed": False}
 _CONFIRMATION_NOTE = " Some calls answer needs_confirmation first; POST /api/v1/confirm runs them."
 
 
@@ -199,9 +198,9 @@ RESULTS: dict[str, dict[str, Any]] = {
     "chat.conversations": _object({"conversations": _array(_object({
         "conversation_id": _STR, "manager_id": _STR, "created_at": _STR, "last_message_at": _NULL_STR,
         "last_content": _NULL_STR}))}),
-    "confirm": {"type": "object", "description": "The result of the operation that was confirmed.",
-                "additionalProperties": True},
-    "openapi": {"type": "object", "description": "The OpenAPI document itself, not wrapped in OpOk."},
+    "openapi": _object({"openapi": {"const": "3.1.0"}, "info": _object({
+        "title": _STR, "version": _STR, "description": _STR}), "servers": _array(_object({"url": _STR})),
+        "security": _array(), "paths": _OBJ, "components": _OBJ}),
     "whoami": _object({
         "principal": {"type": "string", "enum": ["client", "operator"]},
         "client": _object({"id": _STR, "name": _STR}) | {"type": ["object", "null"]},
@@ -227,7 +226,7 @@ def tool_operations(tools: Sequence[Tool]) -> list[Operation]:
             operations.append(Operation(
                 operation_id=base, method="POST", path=f"{PREFIX}/ops/{base}", summary=_summary(description),
                 description=description, request=copy.deepcopy(dict(tool.schema)),
-                result=results.get(base, UNTYPED), tool=tool.name, risk=tool.risk.value,
+                result=results[base], tool=tool.name, risk=tool.risk.value,
                 confirms=tool.risk.value != "read" or tool.escalate is not None))
             continue
         for action in actions:
@@ -243,7 +242,7 @@ def tool_operations(tools: Sequence[Tool]) -> list[Operation]:
             operations.append(Operation(
                 operation_id=operation_id, method="POST", path=f"{PREFIX}/ops/{base}/{action}",
                 summary=_summary(description), description=description, request=request,
-                result=results.get(operation_id, UNTYPED), tool=tool.name, action=action, risk=risk,
+                result=results[operation_id], tool=tool.name, action=action, risk=risk,
                 confirms=risk != "read" or tool.escalate is not None))
     return operations
 
@@ -252,7 +251,7 @@ def _hand(operation_id: str, method: str, path: str, description: str, request: 
           stream: bool = False, hand: bool = True, operator_only: bool = False) -> Operation:
     return Operation(operation_id=operation_id, method=method, path=f"{PREFIX}{path}",
                      summary=_summary(description), description=description, request=request,
-                     result=RESULTS.get(operation_id, UNTYPED), hand=hand, stream=stream, operator_only=operator_only)
+                     result=RESULTS[operation_id], hand=hand, stream=stream, operator_only=operator_only)
 
 
 HAND_OPERATIONS: tuple[Operation, ...] = (
@@ -271,10 +270,6 @@ HAND_OPERATIONS: tuple[Operation, ...] = (
     _hand("chat.conversations", "POST", "/chat/conversations",
           "List this client's conversations, the most recently active first.",
           {"type": "object", "additionalProperties": False, "properties": {}}),
-    _hand("confirm", "POST", "/confirm",
-          "Run the operation this client was asked to confirm in this session.",
-          {"type": "object", "additionalProperties": False, "required": ["confirmation_id"],
-           "properties": {"confirmation_id": {"type": "string", "minLength": 1}}}),
     _hand("openapi", "GET", "/openapi.json", "This document.", None),
 )
 WHOAMI = _hand("whoami", "GET", "/whoami", "Who the token calls as, and the Looper version.", None, hand=False)
@@ -309,12 +304,21 @@ def operations(tools: Sequence[Tool] | None = None) -> list[Operation]:
         tools = CLIENT_TOOLS
     registered = [*tool_operations(tools), *HAND_OPERATIONS, WHOAMI, *ONLINE_OPERATIONS]
     registered.extend(op for domain in domains() for op in domain.OPERATIONS)
+    description = "Run the operation this client was asked to confirm in this session."
+    registered.append(Operation("confirm", "POST", f"{PREFIX}/confirm", description, description,
+        _object({"confirmation_id": {"type": "string", "minLength": 1}}, closed=True),
+        {"description": "The result of the confirmed operation; compatible result shapes may overlap.",
+         "anyOf": [dict(op.result) for op in registered if op.confirms]}, hand=True))
     ids, paths = set(), set()
     for op in registered:
         if op.operation_id in ids or (op.method, op.path) in paths:
             raise ValueError(f"duplicate operation id or route: {op.operation_id}")
         ids.add(op.operation_id)
         paths.add((op.method, op.path))
+        if (op.result.get("x-looper-result-typed") is False or not (
+                any(op.result.get(key) for key in ("properties", "$ref", "oneOf", "anyOf"))
+                or (op.stream and op.result == {"type": "string"}))):
+            raise ValueError(f"missing concrete result schema: {op.operation_id}")
         domain = domain_for(op)
         if domain is not None and op.stream and op.risk not in (None, "read"):
             raise ValueError(f"domain streams must be read-only: {op.operation_id}")
@@ -396,18 +400,23 @@ def validate_arguments(schema: Mapping[str, Any], arguments: Any) -> dict[str, A
 
 
 _STREAM_EVENTS = ("Events, in order: accepted {conversation_id, message_id, manager_id}; delta {text} and status "
-                  "{label}, any number; final {text, outcome}; heartbeat every 15 seconds without an event; timeout "
+                  "{label}, any number; final {text, outcome}; heartbeat {} every 15 seconds; timeout "
                   "{message} when the stream ran out of time (the reply is still written to the conversation).")
+_CLIENT_CHAT_EVENTS = {"type": "string", "x-looper-events": {
+    name: {"data": _object(dict.fromkeys(fields, _STR), closed=True)} for name, fields in (
+        ("accepted", ("conversation_id", "message_id", "manager_id")), ("delta", ("text",)),
+        ("status", ("label",)), ("final", ("text", "outcome")), ("heartbeat", ()), ("timeout", ("message",)))}}
+_CLIENT_CHAT_EVENTS["x-looper-events"]["system.event"] = {"data": _object({"type": _STR})}
 
 
 def _responses(operation: Operation) -> dict[str, Any]:
     ok: dict[str, Any]
     if operation.operation_id == "openapi":
-        ok = {"description": "The OpenAPI document.", "content": {"application/json": {"schema": _OBJ}}}
+        ok = {"description": "The OpenAPI document.", "content": {"application/json": {"schema": operation.result}}}
     elif operation.stream:
         ok = {"description": operation.stream_description or (
             _STREAM_EVENTS if operation.operation_id == "chat.send" else operation.description),
-              "content": {"text/event-stream": {"schema": operation.stream_events or {"type": "string"}}}}
+              "content": {"text/event-stream": {"schema": operation.stream_events or _CLIENT_CHAT_EVENTS}}}
     else:
         ok = {"description": "ok", "content": {"application/json": {"schema": {"allOf": [
             {"$ref": "#/components/schemas/OpOk"}, {"type": "object", "properties": {"result": dict(operation.result)}}]}}}}
@@ -463,8 +472,10 @@ def _document(ops: Sequence[Operation]) -> dict[str, Any]:
     return {
         "openapi": "3.1.0",
         "info": {"title": "Looper API", "version": looper.__version__, "x-looper-api": API_VERSION,
-                 "description": "The operations of /api/v1 only: the ops tools an API client may use, the chat, "
-                                "confirm, whoami and migrated dashboard domains. Remaining legacy /api routes are not described."},
+                 "description": "Complete public v1 dashboard and client operations. The retained private "
+                                "/api/agent/v1 transport uses separate Manager, Planner and run tokens; "
+                                "it is not a dashboard or client API. /login, /logout and static delivery "
+                                "remain browser authentication and document routes."},
         "servers": [{"url": PREFIX}],
         "security": [{"bearer": []}],
         "paths": paths,

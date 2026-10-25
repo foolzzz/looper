@@ -201,7 +201,8 @@ def domain(monkeypatch, tmp_path):
         return "Replace stored values"
     async def record(**fields):
         audit.append(fields)
-    module = SimpleNamespace(OPERATIONS=(op,), RESULTS={}, run=run, impact=impact)
+    results = {name: schema for registered in api_v1.domains() for name, schema in registered.RESULTS.items()}
+    module = SimpleNamespace(OPERATIONS=(op,), RESULTS=results, run=run, impact=impact)
     monkeypatch.setattr(api_v1, "domains", lambda: (module,))
     monkeypatch.setattr(manager_actions, "record", record)
     return SimpleNamespace(module=module, op=op, audit=audit, callbacks=callbacks, output=output)
@@ -229,7 +230,7 @@ def test_domain_registration_is_unique_discoverable_and_documented(domain, varia
             api_v1.operations()
         return
     if variant == "typed_result":
-        domain.module.RESULTS = {"projects.list": {"type": "object", "properties": {"projects": {"type": "array"}}}}
+        domain.module.RESULTS["projects.list"] = {"type": "object", "properties": {"projects": {"type": "array"}}}
     operation = api_v1.find("POST", domain.op.path)
     assert operation == domain.op and api_v1.domain_for(operation) is domain.module
     document = api_v1.document()

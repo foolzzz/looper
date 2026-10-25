@@ -1,8 +1,6 @@
 import { isSessionEnded, SessionEndedError } from "@/lib/session";
 import { callV1, streamV1, V1Error } from "@/lib/v1";
 
-const API_BASE = "/api";
-
 export interface SystemStatus {
   status: "running";
   agents: Record<string, AgentStatus>;
@@ -702,12 +700,6 @@ export async function deleteTask(taskId: string): Promise<void> {
 export async function stopTask(taskId: string): Promise<void> {
   const result = await callV1<{ task_id: string; stopped: boolean }>("/api/v1/ops/task_control/stop", { task_id: taskId });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
-}
-
-/** Throw with the server's reason when it gives one. */
-async function failed(res: Response, label: string): Promise<never> {
-  const data = await res.json().catch(() => ({}));
-  throw new Error(data.error || `${label} ${res.status}`);
 }
 
 /** Run a stopped, failed or cancelled task again: from its saved plan, or, with `startOver`, planned anew (its steps,
@@ -2929,18 +2921,6 @@ export interface PromptPreview {
 /** Window event fired after this dashboard changes the registry, so profile selectors reload at once. */
 export const REGISTRY_CHANGED_EVENT = "looper:registry-changed";
 
-export async function registryCall<T>(method: string, path: string, body: unknown, label: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!res.ok) await failed(res, label);
-  const data = await res.json();
-  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
-  return data;
-}
-
 export async function fetchRegistry(): Promise<Registry> {
   const result = await callV1<Registry>("/api/v1/registry/view", {});
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
@@ -3168,16 +3148,6 @@ export interface ProjectAgentSettings {
 /** The fields to change; null (or "") inherits again, `env` replaces the layer's whole list. A number field may be
  * sent as typed, so the server's 400 explains it. */
 export type LayerUpdate = { [K in keyof LayerValues]?: LayerValues[K] | string };
-
-export async function putJson<T>(path: string, body: unknown, label: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) await failed(res, label);
-  return res.json();
-}
 
 export async function fetchAgentSettings(): Promise<AgentSettings> {
   const result = await callV1<AgentSettings>("/api/v1/agent_settings/get", {});

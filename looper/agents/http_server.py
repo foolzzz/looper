@@ -26,8 +26,8 @@ from typing import Any
 from ..db import api_clients as db_api_clients
 from ..ops_config import OpsConfig
 from . import (
-    api_v1, chat_settings, config_imports, config_transfer, gate_service, knowledge,
-    operator_auth, overview, projects, request_guard, role_api,
+    api_v1, config_imports, config_transfer, knowledge,
+    operator_auth, overview, projects, request_guard,
     self_check,
 )
 from .broadcast import Broadcaster
@@ -819,9 +819,6 @@ class AgentHTTPServer:
 
     # --- API routing ---
 
-    _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
-    _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
-
     async def _route_api(
         self,
         method: str,
@@ -916,21 +913,6 @@ class AgentHTTPServer:
         else:
             writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
         await writer.drain()
-
-    async def _answer(
-        self,
-        writer: asyncio.StreamWriter,
-        status: str,
-        request: Callable[[], Awaitable[Any]],
-    ) -> None:
-        """Answer with ``request()``'s result, or with the ``RequestError`` it raised."""
-        try:
-            result = await request()
-        except projects.RequestError as exc:
-            status, result = exc.status, {"error": str(exc)}
-        writer.write(_json_response(status, _serialize(result)))
-        await writer.drain()
-
 
     async def _discard_workspace(self, task_id: str, workspace_id: int) -> dict[str, Any]:
         """The user drops a step worktree a task that is not running keeps: its directory and branch go. The task's
@@ -1163,64 +1145,6 @@ class AgentHTTPServer:
     async def _recheck_concurrency(self) -> None:
         """Start the runs that wait for room a raised limit now gives; a lowered limit stops nothing."""
         await recheck_limits(self._worker_pool)
-
-    # --- Configuration export ---
-
-    async def _handle_config_export(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
-        """Stream the configuration file as a download, piece by piece from one read-only snapshot.
-
-        ``projects=1`` and ``secrets=1`` are ``looper config export``'s
-        ``--include-projects`` and ``--include-secrets``. The status line is
-        sent before the first piece, so a failure after it ends the download
-        early, which leaves a file that is not valid JSON.
-        """
-        import datetime
-
-        from ..db.connection import get_pool
-        from .config_transfer import export_chunks
-
-        include_projects, include_secrets = query.get("projects") == "1", query.get("secrets") == "1"
-        name = f"looper-config-{datetime.date.today().isoformat()}.json"
-        async with get_pool().acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
-            chunks = export_chunks(conn, include_projects=include_projects, include_secrets=include_secrets)
-            first = await anext(chunks)
-            writer.write(
-                f"HTTP/1.1 {HTTP_200}\r\n"
-                "Content-Type: application/json; charset=utf-8\r\n"
-                f'Content-Disposition: attachment; filename="{name}"\r\n'
-                "Cache-Control: no-store\r\n"
-                "Connection: close\r\n"
-                "\r\n".encode() + first.encode("utf-8")
-            )
-            async for chunk in chunks:
-                writer.write(chunk.encode("utf-8"))
-                await writer.drain()
-        await writer.drain()
-
-    async def _handle_config_import(
-        self, writer: asyncio.StreamWriter, status: str,
-        request: Callable[[config_imports.ConfigImports], Awaitable[Any]],
-    ) -> None:
-        """Answer with ``request(imports)``'s result: a file that is not a usable configuration file is 400, an
-        unknown or expired import 404, and too many pending, one being applied or a schema awaiting
-        ``looper serve``'s migration 409."""
-        try:
-            if self._config_imports is None:
-                raise RuntimeError("the server was started without a runtime root")
-            result = await request(self._config_imports)
-        except config_transfer.ConfigFileError as exc:
-            status, result = HTTP_400, {"error": str(exc)}
-        except config_imports.ImportNotFound as exc:
-            status, result = HTTP_404, {"error": str(exc)}
-        except (config_imports.ImportConflict, config_transfer.SchemaChangePending) as exc:
-            status, result = HTTP_409, {"error": str(exc)}
-        except (asyncio.TimeoutError, ConnectionError, asyncio.IncompleteReadError):
-            raise  # the client stopped sending; there is no one to answer
-        except Exception:
-            logger.exception("config import request failed")
-            status, result = HTTP_500, {"error": "the import failed; see the server log"}
-        writer.write(_json_response(status, _serialize(result)))
-        await writer.drain()
 
     def _password_record(self) -> operator_auth.PasswordRecord | None:
         if self._runtime_root is None:

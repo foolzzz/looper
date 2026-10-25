@@ -745,34 +745,34 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
     - **阶段 2**（✅ 已交付，looper #NNN）：每个管家可以有自己的飞书 / Telegram 机器人：`channel_configs.manager_id`，一种渠道多行（`channel-<type>-<n>`），凭据只在控制台录入，一个机器人一个运行器，添加时不调用 `getMe`；投递按渠道 id 而不是类型（任务结束通知、等待与并发通知、关卡消息），定时任务的通知仍走内置的三行；新机器人的线程 id 为 `<channel_id>:<chat_id>`（RFC 第 9.1 节）。
     - **阶段 3**（待做）：按聊天绑定：`manager_chat_bindings(channel_id, chat_id, manager_id)`，未绑定聊天归机器人所属的管家，机器人可设「只接已绑定的聊天」（未绑定的只记录、不回复，Settings 一键绑定），绑定立即生效，`/stop` 停这个聊天在所有管家里的轮；Settings 的 Managers、Channels 页配置绑定（RFC 第 9.2 节）。
     - 阶段 1 之后的待办：不再支持降级到阶段 2 之前的版本后，删掉 `task_user_gate_posts` 按类型的唯一约束；闲置的场景管家自动停进程；管家和模板进配置导出、导入；定时任务属于一个场景管家并能用它的模板；按管家分插件和 skill 的安装；任务列表按管家筛选。
-22. **一个 OpenAPI 接口、`loopercli` 与 `looper-skill`**（2026-10-22 维护者定方向，设计见[RFC](../architecture/rfcs/looper-client-skill.zh-CN.md)，阶段 1、2a 已交付，阶段 2 的任务操作共享核心已实现）：别的 agent 会话经 skill 把讨论好的活交给 Looper 并跟进。只在本机、客户端令牌全部权限（Settings 里建、吊销，只存哈希）、客户端 high 两步确认（按客户端和会话），操作者 high 单次执行并保留控制台既有弹窗；和 Looper 的一切交互走 `/api/v1/` 的 OpenAPI（从 ops 工具的 schema 生成），新程序 `loopercli` 是它的纯客户端（子命令运行时生成，几个手写别名），主路径是 `loopercli chat` 和管家对话。分三个阶段，阶段 2 按独立交付的子阶段拆 PR：
+22. **一个 OpenAPI 接口、`loopercli` 与 `looper-skill`**（2026-10-22 维护者定方向，设计见[RFC](../architecture/rfcs/looper-client-skill.zh-CN.md)，阶段 1、2a、2 已交付并通过最终覆盖审计）：别的 agent 会话经 skill 把讨论好的活交给 Looper 并跟进。只在本机、客户端令牌全部权限（Settings 里建、吊销，只存哈希）、客户端 high 两步确认（按客户端和会话），操作者 high 单次执行并保留控制台既有弹窗；和 Looper 的一切交互走 `/api/v1/` 的 OpenAPI（从 ops 工具的 schema 生成），新程序 `loopercli` 是它的纯客户端（子命令运行时生成，几个手写别名），主路径是 `loopercli chat` 和管家对话。分三个阶段，阶段 2 按独立交付的子阶段拆 PR：
     - **阶段 1**（✅ 已交付，looper #NNN）：客户端令牌、v1 文档与操作（客户端目录、聊天、确认）、管家的 loopercli 渠道行与对话回报、`loopercli`、`looper-skill` 和 Claude Code 插件、两个管家对话评测（sonnet）；对话里回报任务的接受和结束，关卡和进度用 `loopercli wait` 跟进。
-    - **阶段 2a**（✅ 已交付）：只认操作者的 `auth.set_password` / `auth.clear_password`、`system.check` 和配置导出、导入预览、应用进入同一 v1 文档，结果类型化；`loopercli` 的对应命令；客户端应用配置需两步确认；配置操作与旧路由、工具共用实现。`looper config export/import` 已删除，替代命令需要运行服务；`doctor` 和密码重设留在 `looper` 作离线救援。
+    - **阶段 2a**（✅ 已交付）：只认操作者的 `auth.set_password` / `auth.clear_password`、`system.check` 和配置导出、导入预览、应用进入同一 v1 文档，结果类型化；`loopercli` 的对应命令；客户端应用配置需两步确认；配置操作与控制台、工具共用实现。`looper config export/import` 已删除，替代命令需要运行服务；`doctor` 和密码重设留在 `looper` 作离线救援。
     - **阶段 2 的任务操作共享核心**（已实现）：任务列表、创建、详情、控制与 Planner 补充说明已共用 `projects` 核心，保留控制台配置和工具结果，非法控制返回 409 并在界面展示；任务操作合并状态见 RFC 第 5.4 节。
-    - **阶段 2 其余部分**（待做）：其余 HTTP 路由成为 v1 操作并全部类型化；只认操作者的客户端令牌管理；HTTP 路由与 ops 工具其余重复实现合并；控制台改用 v1。
+    - **阶段 2 各领域**（✅ 已交付）：完整公开 dashboard/client 操作已纳入 v1，结果类型化；客户端凭据只认操作者；HTTP 与 ops 共用领域核心，控制台使用 v1。202 个操作、151 个旧方法/路径及全部调用方完成审计；内部 agent capability 协议及 task/run/turn 令牌边界保留。
     - **阶段 3**（待做）：可选的任务附件（上传、随任务存储、Planner 和 Worker 当文件读）。
     - 阶段 1 之后的待办：控制台聊天列表标出客户端的线程；没有 shell 的客户端需要时在同一 API 上包 MCP。
 
 | 领域 | 阶段 2 状态 |
 |---|---|
 | 状态与 transport | 已验证：HTTP/文档 112 项、web 26 项；隔离 serve 与 1280/390 浏览器通过，完整套件留给 CI |
-| 任务创建 | 创建已迁移：`tasks.create` 复用 [#429](https://github.com/foolzzz/looper/pull/429) 完整参数核心，控制台改用 v1，旧创建路由已删除；定向测试、隔离 serve 与 1280/390 浏览器通过，完整套件留给 CI；其余任务操作待迁移 |
-| 任务交互（关卡、等待、角色与办公台） | 关卡列表和讨论、等待、任务角色与办公台已迁移 v1：完整 DTO、`tasks.room` 紧凑结果类型化，列明的八个旧方法删除，既有 Tool schema 不变。本轮后端定向 416 项、真实 serve 关卡流程 4 项、评测及发布脚本回归 13 项、前端 96 项与构建通过，隔离 serve 和 1440/390px 浏览器验收通过；完整套件留 CI，其余任务操作待迁移。共享任务核心 [#429](https://github.com/foolzzz/looper/pull/429) 单独跟踪 |
-| 任务配置、归属、Agent 与预算续跑 | 配置、归属、Agent 选择与预算续跑已迁入 v1；领域/OpenAPI 140 项、web 30 项、隔离 serve 与桌面/窄屏验证通过；历史回归 3 项首轮失败、隔离重跑通过，最终失败 0；完整套件未跑，留给 CI；其余任务入口待迁移，共享任务核心 [#429](https://github.com/foolzzz/looper/pull/429) 单独跟踪 |
-| 任务控制、标题与需求 | 总览、开始/停止/取消/重启/从头开始、标题和需求全文已迁移 v1，七个旧方法删除；本域 HTTP/DB 31 项、文档/transport 122 项、web 39 项通过，隔离 serve、1280/390 浏览器、安装包 smoke 与需求编辑替身评测通过；评测准备操作审计边界与并行关卡脚本竞态已修复并复测；本次广泛回归仍有 DSH 启动检查超时，未计为通过；其余任务路由待迁移，完整套件留给 CI；共享任务核心 [#429](https://github.com/foolzzz/looper/pull/429) 单独跟踪 |
-| 聊天 | 待迁移 |
-| 项目与知识 | 待迁移 |
+| 任务创建 | 创建已迁移：`tasks.create` 复用 [#429](https://github.com/foolzzz/looper/pull/429) 完整参数核心，控制台改用 v1，旧创建路由已删除；定向测试、隔离 serve 与 1280/390 浏览器通过，完整套件留给 CI |
+| 任务交互（关卡、等待、角色与办公台） | 关卡列表和讨论、等待、任务角色与办公台已迁移 v1：完整 DTO、`tasks.room` 紧凑结果类型化，列明的八个旧方法删除，既有 Tool schema 不变。本轮后端定向 416 项、真实 serve 关卡流程 4 项、评测及发布脚本回归 13 项、前端 96 项与构建通过，隔离 serve 和 1440/390px 浏览器验收通过；完整套件留 CI，其余任务操作亦已迁移。共享任务核心见 [#429](https://github.com/foolzzz/looper/pull/429) |
+| 任务配置、归属、Agent 与预算续跑 | 配置、归属、Agent 选择与预算续跑已迁入 v1；领域/OpenAPI 140 项、web 30 项、隔离 serve 与桌面/窄屏验证通过；历史回归 3 项首轮失败、隔离重跑通过，最终失败 0；完整套件未跑，留给 CI，共享任务核心见 [#429](https://github.com/foolzzz/looper/pull/429) |
+| 任务控制、标题与需求 | 总览、开始/停止/取消/重启/从头开始、标题和需求全文已迁移 v1，七个旧方法删除；本域 HTTP/DB 31 项、文档/transport 122 项、web 39 项通过，隔离 serve、1280/390 浏览器、安装包 smoke 与需求编辑替身评测通过；评测准备操作审计边界与并行关卡脚本竞态已修复并复测；本次广泛回归仍有 DSH 启动检查超时，未计为通过，完整套件留给 CI；共享任务核心见 [#429](https://github.com/foolzzz/looper/pull/429) |
+| 聊天 | `POST /api/chat/send` → `WebChannelAdapter.handle_user_message`，回复在 `/api/chat/events?cid=` 流式返回，并存进 `chat_messages`；管家在每条消息前加 `Channel: the Looper dashboard chat`（`tiers/manager.channel_line`） | 管家分不出「人经自己的 agent 在说」；线程不记客户端 |
+| 项目与知识 | 已迁移：project_admin、project_knowledge、项目设置、角色模板与可选 Profile；保留知识正文、草稿与归属校验；最终集成审计已通过 |
 | 能力目录 | 目录条目与安装已迁移：完整 DTO 与 compact Tool 结果类型化，控制台改走 v1，八个旧方法删除。此前目录与安装的 249 项定向测试、隔离 serve 与桌面/390px 验收通过（其 session-ended/abort 未单独实测）；项目自有 skill 四个操作已迁移，沿用默认启用、核心限制及事务，删除列明跨项目安装影响并重验引用。本次相关定向 pytest 218 项及前端构建通过，隔离 serve 与 1280/390px 浏览器增改、开关、删除、错误、abort、session-ended 验收通过，旧 skill 路由请求为 0；独立 Vitest 专项因 worker 启动超时未取得有效通过结果，完整套件留给 CI；目录获取来源七操作与控制台同步迁移，七个旧 POST 删除，凭据入口只认操作者并脱敏，客户端 Git 导入统一 high 确认且固定预览 commit。此轮验证通过：相关定向 pytest 386 项（分批执行，初轮失败修复后对应重跑通过）、前端 30 项、构建与隔离 serve 的 1440/390px 浏览器流程（含错误、空态、abort、session-ended）；最终失败 0、跳过 0；完整套件未跑，留给 CI |
-| Agent 与 Profile | 待迁移 |
+| Agent 与 Profile | 已迁移：registry、runtime probe、provider_accounts、profiles 与 models，包含无前端直调的 models.get/list 与 providers.list；最终集成审计已通过 |
 | 管家与模板 | 已迁移六个普通 v1 操作、完整 Manager/模板 DTO、控制台与生成 CLI，六个旧方法删除；定义与模板写统一 ClientOps，操作者单次执行、客户端 high 确认并在执行时重验引用，权限与默认管家限制沿用核心。定向 pytest 315 项、前端 66 项与构建通过；隔离真实 serve 的 1280/390px CRUD、停用目标筛选及错误/空态/abort/session-ended 验证通过，截图保留在本地验证产物。最终失败 0、跳过 0；完整套件未跑，留 CI，阶段 3 仍待做 |
-| 定时任务读取 | 已迁移：六个完整只读投影、compact list/get 类型化与旧读方法删除，控制台及评测读回走 v1。通过：305 项 pytest（含三个 fake Manager 对话）、20 项前端测试、构建与隔离真实 serve 和 1280/390px 浏览器；失败：无；未验证：全量 CI、真实浏览器 session 失效/abort 竞态（session guard 已有前端定向覆盖）。写接口及 settings 保留 |
-| 渠道 | Lark 身份/人员发现与 dashboard 关卡通知设置已迁移：四个普通 v1 操作、完整 DTO、六个旧方法删除，控制台与生成 CLI 同步；操作者单次执行，客户端 high 同会话确认并在执行时重验目标。新增契约、文档及既有调用方的 202 项定向 pytest 与 web 39 项（含共享 v1 传输）、TypeScript 检查通过；隔离全应用 serve 的 29 个 HTTP 请求通过。渠道配置等其余部分待迁移，1280/768px 浏览器以假适配器验收身份问题、搜索结果/空/错误、目标保存/清空及 abort/session-ended 通过（无消息发送）；完整套件留给 CI |
-| 文件与 Git | 待迁移 |
-| 设置 | 全局角色与设置层、控制台及既有 smoke 调用已迁入 v1，七个旧方法删除；通过：领域/认证/CLI/OpenAPI 163 项、web 30 项、隔离服务与桌面/窄屏浏览器，既有调用方定向回归及替身运行链路。最终失败 0；完整套件与未重跑的集成/installed 分支未测，详见 RFC 第 21 节；其余设置页仍待迁移 |
-| 运行记录与活动流 | 活动、detail、对话和 SSE 已迁入 v1，四个旧 GET 删除；控制台与生成式 CLI 已迁移。通过：733 项 pytest、89 项前端测试、构建及隔离 serve 桌面/390px 浏览器分页和重连；最终失败 0；98 项跳过不计通过，完整套件留 CI，运行列表待迁移 |
+| 定时任务读取 | 已迁移：六个完整只读投影、compact list/get 类型化与旧读方法删除，控制台及评测读回走 v1。通过：305 项 pytest（含三个 fake Manager 对话）、20 项前端测试、构建与隔离真实 serve 和 1280/390px 浏览器；失败：无；未验证：全量 CI、真实浏览器 session 失效/abort 竞态（session guard 已有前端定向覆盖）。写操作与 scheduler_settings 亦已迁移 |
+| 渠道 | Lark 身份/人员发现与 dashboard 关卡通知设置已迁移：四个普通 v1 操作、完整 DTO、六个旧方法删除，控制台与生成 CLI 同步；操作者单次执行，客户端 high 同会话确认并在执行时重验目标。新增契约、文档及既有调用方的 202 项定向 pytest 与 web 39 项（含共享 v1 传输）、TypeScript 检查通过；隔离全应用 serve 的 29 个 HTTP 请求通过。channel_configs 其余操作亦已迁移，1280/768px 浏览器以假适配器验收身份问题、搜索结果/空/错误、目标保存/清空及 abort/session-ended 通过（无消息发送）；完整套件留给 CI |
+| 文件与 Git | 已迁移：配置 JSON 流式上传/导出、目录上传与 Git 来源、任务工作区检查/丢弃/删除；最终集成审计已通过 |
+| 设置 | 全局角色与设置层、控制台及既有 smoke 调用已迁入 v1，七个旧方法删除；通过：领域/认证/CLI/OpenAPI 163 项、web 30 项、隔离服务与桌面/窄屏浏览器，既有调用方定向回归及替身运行链路。最终失败 0；完整套件与未重跑的集成/installed 分支未测，详见 RFC 第 21 节；其余设置页亦已迁移 |
+| 运行记录与活动流 | 活动、detail、对话和 SSE 已迁入 v1，四个旧 GET 删除；控制台与生成式 CLI 已迁移。通过：733 项 pytest、89 项前端测试、构建及隔离 serve 桌面/390px 浏览器分页和重连；最终失败 0；98 项跳过不计通过，完整套件留 CI；runs 的五个完整读取操作亦已迁移 |
 | 客户端凭据 | 已验证：`clients.list/create/revoke` 只认操作者，完整 DTO、控制台及生成 CLI 已迁移，三个旧方法删除；保留一次显示、复制与吊销刷新。229 项定向 pytest、25 项 web 测试及构建通过；新数据库隔离 serve、1280/390px 浏览器创建/复制/隐藏/吊销及立即 401 通过，截图无可用令牌。模型可见内容未改，未跑真实模型评测；完整套件留给 CI |
 
-阶段 2a 保持已交付；共享任务核心独立跟踪，阶段 3 仍待做。整体完成由最终审计确认。
+阶段 2 已完成；阶段 2a 与共享任务核心保持独立交付，阶段 3 任务附件仍待做。最终验证通过：定向 451 项、旧路由/v1 对照 154 项、成本/并发/办公台与内部令牌 70 项、注册/发现 54 项、CLI 边界 10 项、前端 81 项及构建；新库隔离 serve 的 OpenAPI、生成 CLI、显式确认，以及 1280/390px 浏览器 37 项检查（145 个 API 请求全为 v1）。最终功能测试失败 0、跳过 0。完整套件未测、留 CI；较大批次在 497 项通过后主动中止、扩展 CLI 批次超时，均不计完整通过；既有两处 E731 未扩改。未改模型可见内容，真实模型评测不适用。详细边界见 RFC 第 21 节。
 
 23. **API 运行时：管家直连模型 API**（2026-10-24 维护者定方向并批准，设计见[API 运行时 RFC](../architecture/rfcs/api-runtime-v0.zh-CN.md)，阶段 1 第 ① 步本分支已实现，其余待做）：新运行时类型 `api` 在 `looper serve` 进程内用官方 SDK 跑管家的循环，平台工具在进程内调用。分步见 RFC 第 12.1 节：
     - **阶段 1**（`openai` SDK、Responses，在 CPA 上验证）：① 运行时类型与 Profile、provider 接线（本分支已实现：仅管家角色、SDK 包版本检测、API key 绑定与私有提示文件；尚未加入 `ADAPTERS`，用户入口不变）；② 协议无关的循环与 Responses 编解码器（假服务，依赖 ①）；③ 管家跑在 `api` 上，进程内平台工具与确认、留痕一致（依赖 ①②）；④ 会话表、跨重启续接与上下文换会话（依赖 ③）；⑤ 停止与用量记录（依赖 ③）；⑥ 控制台、Telegram、飞书、CLI 入口（依赖 ⑤）；⑦ CPA 真实验证与全部对话评测（依赖 ④⑤⑥）。

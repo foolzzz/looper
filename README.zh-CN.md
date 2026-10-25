@@ -229,18 +229,18 @@ PostgreSQL 是启动的硬性依赖；`looper serve` 每次启动都会应用 `l
 
 | 分组 | 接口 | 用途 |
 |---|---|---|
-| 状态 | `POST /api/v1/system/status`、`GET /api/overview` | 系统健康状态和启动自检（`checks`）；Dashboard 的“此刻在发生什么”总览 |
-| 项目 | `/api/projects`、`/api/projects/:id`、`/api/projects/:id/knowledge/...` | 创建、修改和删除项目；项目的知识文档和草稿 |
-| 任务 | `/api/tasks`、`/api/tasks/create`、`/api/tasks/:id/...`、`/api/tasks/{start,stop,cancel,delete}` | 列出和创建任务（属于某个项目，可带 `profile_overrides`）、查看、开始、停止、取消、删除；活动及其 SSE 流 |
+| 状态 | `POST /api/v1/system/{status,overview}` | 系统健康状态和启动自检（`checks`）；Dashboard 的“此刻在发生什么”总览 |
+| 项目 | `POST /api/v1/project_admin/{list,create,update,delete}`、`POST /api/v1/project_knowledge/{list,add,get,update,delete,drafts,confirm_draft,discard_draft}` | 创建、修改和删除项目；项目的知识文档和草稿 |
+| 任务 | `POST /api/v1/tasks/{page,create,detail,delete,...}`、`POST /api/v1/ops/task_control/{start,stop,cancel,restart,start_over}` | 列出和创建任务（属于某个项目，可带 `profile_overrides`）、查看、开始、停止、取消、删除；活动及其 SSE 流 |
 | 定时任务 | `POST /api/v1/schedule_admin/<action>` | 创建、修改、启用和删除项目的定时任务；列出所有项目的定时任务；立即运行；运行历史和通知；时间规则接下来的触发时刻 |
-| 能力目录与安装 | `/api/catalog/...`、`/api/installs/...`、`/api/projects/:id/installs`、`/api/projects/:id/skills/...` | 插件、skill 和 MCP 服务器：导入、上传、git、编写、修改、删除；全局安装或装到项目 |
+| 能力目录与安装 | `POST /api/v1/catalog_items/...`、`POST /api/v1/catalog_sources/...`、`POST /api/v1/installs/...`、`POST /api/v1/project_skills/...` | 插件、skill 和 MCP 服务器：导入、上传、git、编写、修改、删除；全局安装或装到项目 |
 | Agent 设置 | `POST /api/v1/agent_settings/{get,update_system,update_role}`、`POST /api/v1/project_agent_settings/{get,update,update_role}`、`POST /api/v1/roles/{list,get,update,reset_prompt}` | 各设置层，每个字段的生效值及其来源；每个角色的 prompt 和限制 |
 | 允许的 Profile | `POST /api/v1/allowed_profiles/{get,replace}` | 读取或替换项目 Planner 的 Profile 白名单；空列表表示不限制 |
-| 注册表 | `GET /api/registry`、`/api/runtimes/:id/probe`、`POST /api/v1/provider_accounts/...`、`POST /api/v1/profiles/{create,update,delete,prompt_preview}` | 运行时类型和内置运行时（Re-detect 重新探测）；注册、修改和删除提供方（API key 打码）和 Agent Profile，并写明各自被谁使用 |
-| 配置迁移 | `POST /api/v1/config/export`、`/api/v1/config/import_upload`、`/api/v1/config/import_apply`、`/api/v1/config/import_cancel` | 下载配置文件；上传配置文件、预览，再应用或取消 |
-| 对话 | `/api/v1/operator_chat/{send,targets,sessions,messages,save_message,reply_events,thread_events}` | 与 Manager 或运行中任务的 Planner 对话；按渠道列出 Manager 的对话；历史和 SSE 流 |
+| 注册表 | `POST /api/v1/registry/view`、`POST /api/v1/runtimes/probe`、`POST /api/v1/provider_accounts/...`、`POST /api/v1/profiles/{create,update,delete,prompt_preview}`、`POST /api/v1/ops/models/...`、`POST /api/v1/models/get` | 运行时类型和内置运行时（Re-detect 重新探测）；注册、修改和删除提供方（API key 打码）和 Agent Profile，并写明各自被谁使用 |
+| 配置迁移 | `POST /api/v1/config/export`、`POST /api/v1/config/import_upload`、`POST /api/v1/config/import_apply`、`POST /api/v1/config/import_cancel` | 下载配置文件；上传配置文件、预览，再应用或取消 |
+| 对话 | `POST /api/v1/operator_chat/{send,targets,sessions,messages,save_message,reply_events,thread_events,turn,stop}` | 与 Manager 或运行中任务的 Planner 对话；按渠道列出 Manager 的对话；历史和 SSE 流 |
 | 运行记录 | `POST /api/v1/runs/{list,get,events,for_task,usage}` | 每次 agent 运行的启动命令、用量、花费和事件；单个 agent 的花费和上下文 |
-| 渠道 | `/api/v1/channel_configs/...`、`/api/channels/lark/...` | Telegram 和飞书的设置、Telegram bot token（接口不返回）和发送者名单；飞书机器人的状态、被拒的发送者和按人搜索 |
+| 渠道 | `POST /api/v1/channel_configs/...`、`POST /api/v1/channels/{status,people}` | Telegram 和飞书的设置、Telegram bot token（接口不返回）和发送者名单；飞书机器人的状态、被拒的发送者和按人搜索 |
 
 各接口的字段和错误说明见 [HTTP API 参考](docs/architecture/agent-system.md#http-api)。
 
