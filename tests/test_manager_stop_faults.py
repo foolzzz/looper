@@ -607,9 +607,9 @@ def test_a_stop_while_a_preparation_read_finds_the_database_unreachable_still_re
 
 
 @pytest.mark.parametrize("closure", ["disable", "shutdown"])
-@pytest.mark.parametrize("runtime_cancelled", [False, True], ids=["result", "cancelled"])
+@pytest.mark.parametrize("runtime_exit", ["running", "result", "cancelled", "read_error"])
 def test_closing_the_manager_while_events_drain_ends_the_handling(
-    closure: str, runtime_cancelled: bool, tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+    closure: str, runtime_exit: str, tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from looper.agents import chat_settings
     from looper.agents.managers import ManagerFleet
@@ -619,11 +619,14 @@ def test_closing_the_manager_while_events_drain_ends_the_handling(
     monkeypatch.setattr(cancel_module, "ABANDON_SEC", 0.1)
     monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.1)
     monkeypatch.setattr("looper.agents.claude_cli.STOP_GRACE_SEC", 0.02)
-    claude = fake_claude(tmp_path / "claude", """
+    claude = fake_claude(tmp_path / "claude", f"emit_result = {runtime_exit != 'running'}\n" + """
 import json, sys, time
 sys.stdin.readline()
 print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'sess-1'}), flush=True)
-print(json.dumps({'type': 'result', 'subtype': 'success', 'result': 'ok'}), flush=True)
+if emit_result:
+    print(json.dumps({'type': 'assistant', 'message': {'content': [
+        {'type': 'text', 'text': 'handled before read failure'}]}}), flush=True)
+    print(json.dumps({'type': 'result', 'subtype': 'success', 'result': 'ok'}), flush=True)
 time.sleep(30)
 """)
 
@@ -641,14 +644,21 @@ time.sleep(30)
                                               runtime_root=tmp_path), supervisor=supervisor, runtime_root=tmp_path,
                              url="http://127.0.0.1:1", config=manager._config, broadcaster=None)
         fleet._agents[manager.agent_id] = manager
-        persisting, release, returned, cleaned = (asyncio.Event() for _ in range(4))
+        turn_file = tmp_path / "turn.json"
+        manager.ops = ManagerOps(Platform(bus=bus, task_router=None, manager=manager),
+                                 url="http://127.0.0.1:1", tools=(), turn_file=turn_file)
+        manager.ops._working_at = manager.ops._clock()
+        persisting, release, returned, cleaned, ending, end_release = (asyncio.Event() for _ in range(6))
         event_task: asyncio.Task[Any] | None = None
         original_run = session.run_turn
 
         async def run_turn(*args: Any, **kwargs: Any) -> Any:
             turn = await original_run(*args, **kwargs)
+            if runtime_exit == "read_error":
+                await returned.wait()
+                raise OSError("resident read failed")
             returned.set()
-            if runtime_cancelled:
+            if runtime_exit == "cancelled":
                 kwargs["cancel"].request()
                 raise TurnCancelled()
             return turn
@@ -656,6 +666,8 @@ time.sleep(30)
         async def persist(self: Any, payload: dict[str, Any]) -> None:
             nonlocal event_task
             event_task = asyncio.current_task()
+            if runtime_exit == "read_error" and payload["type"] != "result":
+                return
             persisting.set()
             await release.wait()
 
@@ -667,39 +679,64 @@ time.sleep(30)
         monkeypatch.setattr(manager_module, "cancel_and_wait", cancel_again)
         await manager.start(bus)
         envelope = dataclasses.replace(_web("hello"), target=manager.agent_address)
-        process = None
+        process = closing = None
         try:
             await bus.publish(envelope)
             await asyncio.wait_for(persisting.wait(), 5)
-            await asyncio.wait_for(returned.wait(), 5)
+            if runtime_exit not in ("read_error", "running"):
+                await asyncio.wait_for(returned.wait(), 5)
             process, tree = session._process, session._tree
             assert process is not None and tree is not None
             real_end = tree.end
 
             async def slow_end() -> None:
                 # The resident forgets _process before this await; its owner must survive the recancel interval.
-                await asyncio.sleep(0.15)
+                ending.set()
+                await end_release.wait()
                 await real_end()
                 cleaned.set()
 
             monkeypatch.setattr(tree, "end", slow_end)
-            await asyncio.sleep(0)  # both runtime exits are now draining the shielded event task
+            returned.set()
+            if runtime_exit == "read_error":
+                await asyncio.wait_for(ending.wait(), 5)
+            await asyncio.sleep(0)
+            message_task = manager._task
             if closure == "disable":
                 row["enabled"] = False
-                await asyncio.wait_for(fleet.apply(manager.agent_id), 5)
-                assert fleet.get(manager.agent_id) is None
+                closing = asyncio.create_task(fleet.apply(manager.agent_id))
             else:
-                await asyncio.wait_for(supervisor.stop_all(), 5)
+                closing = asyncio.create_task(supervisor.stop_all())
+            await asyncio.wait_for(ending.wait(), 5)
+            if runtime_exit in ("read_error", "running"):
+                # Disable/shutdown cancels the message owner repeatedly while tree.end is held.
+                assert message_task is not None
+                await until(lambda: message_task.cancelling() >= 3 or message_task.done(), timeout=2)
+            assert not closing.done(), "closure must join resident teardown"
+            end_release.set()
+            await asyncio.wait_for(closing, 5)
+            if closure == "disable":
+                assert fleet.get(manager.agent_id) is None
             assert cleaned.is_set() and process.returncode is not None
-            assert not _alive(process.pid) and not session.started
+            assert not _alive(process.pid) and not session.started and not session._ending
             assert event_task is not None and event_task.done()
-            assert manager._task is None and not manager.busy
+            assert manager._task is None and not manager.busy and manager._lock_owner is None
+            assert manager.turn_for(envelope.message_id) is None
+            if runtime_exit == "read_error":
+                (finish,) = agent_db.finish_record.await_args_list
+                assert finish.kwargs["status"] == "interrupted"
+                assert finish.kwargs["output_text"] == "handled before read failure"
+            assert manager.ops._turn is None and json.loads(turn_file.read_text())["turn"] is None
             writes, sent = agent_db.save_session.await_count, queue.qsize()
             release.set()
             await asyncio.sleep(0)
             assert agent_db.save_session.await_count == writes and queue.qsize() == sent
         finally:
+            returned.set()
             release.set()
+            end_release.set()
+            if closing is not None:
+                await asyncio.gather(closing, return_exceptions=True)
             await manager.stop()
             # Also reap the test-owned process when the regression interrupts the resident after forgetting it.
             if process is not None and process.returncode is None:
@@ -792,19 +829,27 @@ def test_a_stopped_reply_keeps_the_deltas_shown_before_persistence_blocked(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("phase", ["running", "recording"])
-def test_disabling_a_manager_keeps_the_text_it_already_showed(
-    phase: str, tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("closure", ["disable", "shutdown"])
+@pytest.mark.parametrize("phase", ["running", "persisting", "unreachable", "recording"])
+def test_closing_a_manager_keeps_the_text_it_already_handled_or_showed(
+    closure: str, phase: str, tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from looper.agents import chat_settings
     from looper.agents.managers import ManagerFleet
     from looper.agents.ops.service import Platform
-    from looper.agents.supervisor import AgentSupervisor
+    from looper.agents.supervisor import AgentSupervisor, cancel_and_wait
 
     monkeypatch.setattr(chat_settings, "_stop_enabled", False)
 
+    monkeypatch.setattr(cancel_module, "ABANDON_SEC", 0.1)
+
+    async def cancel_again(task: asyncio.Task[Any]) -> None:
+        await cancel_and_wait(task, again_after=0.02)
+
+    monkeypatch.setattr(manager_module, "cancel_and_wait", cancel_again)
+
     async def run() -> None:
-        session = _Session(hold=phase == "running")
+        session = _Session(hold=phase != "recording")
         manager, bus, queue = _manager(tmp_path, session)
         manager._definition = dataclasses.replace(manager._definition, id="manager-review",
                                                   system_prompt=manager._system_prompt)
@@ -816,12 +861,43 @@ def test_disabling_a_manager_keeps_the_text_it_already_showed(
         fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=tmp_path,
                              url="http://127.0.0.1:1", config=manager._config, broadcaster=None)
         fleet._agents[manager.agent_id] = manager
-        recording, release = asyncio.Event(), asyncio.Event()
+        recording, release, handled, persisting = (asyncio.Event() for _ in range(4))
+        stored: dict[str, Any] = {}
+        database = _Unreachable()
+        original_run, original_persist = session.run_turn, manager_module.ClaudeRunRecorder.persist
+        event_task: asyncio.Task[Any] | None = None
+        prefix, answer = "半截回复", "半截回复，已处理的答案"
+
+        async def run_turn(text: str, on_event: Any, **kwargs: Any) -> Any:
+            async def event(payload: dict[str, Any]) -> None:
+                if payload["type"] == "assistant":
+                    payload["message"]["content"] = [{"type": "text", "text": answer}]
+                await on_event(payload)
+                if payload["type"] == "assistant":
+                    await on_event({"type": "system", "subtype": "handled"})
+            return await original_run(text, event, **kwargs)
+
+        async def persist(self: Any, payload: dict[str, Any]) -> None:
+            nonlocal event_task
+            event_task = asyncio.current_task()
+            if phase in ("persisting", "unreachable") and payload["type"] == "assistant":
+                persisting.set()
+                if phase == "unreachable":
+                    await database()
+                else:
+                    await release.wait()
+            await original_persist(self, payload)
+            if payload.get("subtype") == "handled":
+                handled.set()
+
+        monkeypatch.setattr(session, "run_turn", run_turn)
+        monkeypatch.setattr(manager_module.ClaudeRunRecorder, "persist", persist)
 
         async def finish(*args: Any, **kwargs: Any) -> None:
             if phase == "recording":
                 recording.set()
                 await release.wait()
+            stored.update(kwargs)
 
         agent_db.finish_record.side_effect = finish
         await manager.start(bus)
@@ -832,14 +908,38 @@ def test_disabling_a_manager_keeps_the_text_it_already_showed(
             if phase == "recording":
                 await asyncio.wait_for(recording.wait(), 5)
                 assert manager.turn_for(envelope.message_id) is None  # already settled, still writing its record
-            row["enabled"] = False
-            await asyncio.wait_for(fleet.apply(manager.agent_id), 2)
-            (reply,) = _replies(queue)
-            assert reply["outcome"] == "stopped" and reply["text"].startswith("半截回复")
-            assert fleet.get(manager.agent_id) is None
+            else:
+                await asyncio.wait_for((handled if phase == "running" else persisting).wait(), 5)
+            message_task = manager._task
+            if closure == "disable":
+                row["enabled"] = False
+                await asyncio.wait_for(fleet.apply(manager.agent_id), 2)
+                assert fleet.get(manager.agent_id) is None
+            else:
+                await asyncio.wait_for(supervisor.stop_all(), 2)
+            replies = _replies(queue)
+            if closure == "disable":
+                (reply,) = replies
+                assert reply["outcome"] == "stopped" and reply["text"] == f"{prefix}\n\n（已停止）"
+            else:
+                assert replies == []  # The supervisor alone sends no final channel reply.
+            if phase != "recording":
+                assert stored["status"] == "interrupted"
+                assert stored["output_text"] == (answer if phase == "running" else prefix)
+            assert event_task is not None
+            if phase == "unreachable":
+                assert message_task is not None and message_task.cancelling() >= 3
+                assert database.cancelled >= 1 and not event_task.done()
+                database.restore()
+                await asyncio.gather(event_task, return_exceptions=True)
+            assert event_task.done()
+            assert not manager.busy and manager._lock_owner is None
         finally:
+            database.restore()
             release.set()
             await manager.stop()
+            if event_task is not None:
+                await asyncio.gather(event_task, return_exceptions=True)
             await bus.shutdown()
 
     asyncio.run(run())
