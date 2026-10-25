@@ -134,11 +134,15 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   `lark-cli` refused it) and the channel's error (`delivery_error`, up to 500
   characters). An answer with no record is not stored: a code answer about a
   user gate, whose discussion keeps it, and a Telegram group's. Each is
-  stored under the session `<channel>:<chat_id>` with its `channel`. Every
-  chat is stored but a Telegram group's (`_stored_chat`): a Telegram chat
+  stored under the bot/chat's stable thread with its `channel` type: built-in
+  bots use `<type>:<chat_id>`, added bots `<channel_id>:<chat_id>`, and a
+  destination other than the bot's owner adds `#<manager_id>`. Rebinding uses
+  the destination's own thread; returning reuses it. Stored owners and history
+  never move. Every chat is stored but a Telegram group's (`_stored_chat`):
+  a Telegram chat
   whose id is negative is a group or a channel, and nothing from it is
-  stored. A Lark group chat is stored under `lark:<chat_id>`: only the
-  messages that @-mention the bot, and the replies to them, come in from one.
+  stored. A Lark group chat uses the same thread rule: only the messages
+  that @-mention the bot, and the replies to them, come in from one.
   A failed store is logged and never blocks the reply, nor stops the channel
 - `/new`, a chat message that is exactly that (trimmed, any case) from the web
   chat, Lark or Telegram (the sender allowlists apply), is answered by Looper,
@@ -165,17 +169,16 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   Esc only restores a browsed draft; Telegram's command menu (set at startup)
   leaves `/stop` out. The staging queue and the history do not depend on it
 - `/stop` (the same matching as `/new`: trimmed, any case, so `/stop now` and
-  `/stopx` are messages for Claude) stops the user turn the Manager is
-  answering for that chat. Unlike `/new` it does not wait in the Manager's
-  queue behind the turn it stops: the Manager takes it off the bus as soon as it
-  arrives (`subscribe_topic(USER_MESSAGE, ..., consumes=True)`, so the message
-  loop never sees it) and answers it itself, never through Claude: the
-  confirmation says the reply is being stopped, or that nothing is running
-  for this chat; on a runtime without an interrupt it says
-  `当前运行时不能中断回复，回复会照常完成。` and stops nothing. It is not stored
-  in the chat history. The web chat's Esc and
-  Stop button call `POST /api/chat/stop` instead, which reaches the same
-  `ManagerAgent.stop_turn`
+  `/stopx` are ordinary messages) is consumed outside the Manager queue and
+  answered by code, never stored in history. On Telegram and either Lark
+  transport, `ManagerFleet.stop_chat` snapshots all live turns (including
+  queued turns) for the exact `(channel_id, chat_id)` across all Managers and
+  requests each once. A different bot with the same native chat id is separate.
+  It reaches old owners even when the current target is off; unsupported
+  runtimes or failed peers are reported without claiming complete success.
+  Bound-only unbound chats remain silent, including `/stop`. The dashboard's
+  Esc and Stop button use `operator_chat.stop` to stop the specified message;
+  the underlying `ManagerAgent.stop_turn` results below stay unchanged
 - A user turn can be stopped (`ManagerAgent.stop_turn(message_id, via=…)`
   returns a `StopResult`: `stopping`, `already_stopping`, `not_running` when
   no turn runs, `other_message` when the running turn answers another
@@ -3949,10 +3952,10 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_requirement_versions` | Every version of an edited task requirement: `task_id`, `version` (1 is the text the task was created with, written at its first edit), `text`, `via` (`created`, `task_page`, or the Manager's), `created_at` and `delivered_at` (when the Planner had it in a turn; `tasks.requirement` is the newest) |
 | `managers` | The default Manager (`manager`) and the operator's scenario Managers (`manager-<key>`): `name`, `description`, `system_prompt` (null for the default), `profile_id`, `tools`, `task_scope`, `task_policy` (`free` / `templates_only`), `enabled`, `revision` (bumped by every change to what it may do), `deleted_at` (a soft delete: the row and its id stay) |
 | `manager_task_templates` | A Manager's task templates ([Task templates](#task-templates)), keyed by `manager_id` and `key`: `name`, `description`, `project_id`, `work_dir`, `workspace_mode`, `requirement`, `planner_instructions`, the three role Profile ids, `role_templates` and `inputs` (JSON) |
-| `chat_threads` | The Manager a web chat thread (`session_id`) belongs to, for good; a thread without a row (Lark's, Telegram's, from before) is the default Manager's |
+| `chat_threads` | The permanent Manager owner of a web or native channel thread (`session_id`); rebinding creates/reuses the destination's thread without changing prior owners; a legacy thread without a row is the default Manager's |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
-| `chat_messages` | Chat conversation history of every channel: `session_id` (the web chat's session, or `<channel>:<chat_id>` for Telegram and Lark; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram` or `lark`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
+| `chat_messages` | Chat conversation history of every channel: `session_id` (the web session or stable bot/chat/Manager thread described above; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram`, `lark` or `lark_bot`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
 | `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task) and `system_prompt_mode` (`append` or `replace`, the `role` layers only, enforced by a CHECK; null: the role's built-in value); one row per layer and place |
@@ -3978,8 +3981,11 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `library_files` | Each catalog item's files: relative path, UTF-8 content, sha256, executable bit |
 | `library_installs` | Where an item loads: `scope` (`global` or `project`), `project_id`, `roles` (a non-empty subset of `manager`, `planner`, `worker`, `reviewer`; never `manager` in a project), `enabled`; one per item and place, going with its item and its project |
 | `project_documents` | A project's knowledge: title, one-line summary, `source_kind` (`text`, `upload` or `path`), `filename` and `content` (text and upload) or `path` (relative to the project's default directory), `size_bytes`, `sha256`; a CHECK keeps each kind's columns consistent and the rows go with their project |
-| `channel_configs` | Telegram/Lark settings, one row per bot (`manager_id`, fixed when the bot is added; the built-in rows belong to the default Manager; a trigger refuses to delete a Manager that has bots; `channel_bot_seq` numbers the added `channel-<type>-<n>` rows; enabled flag, Telegram's token env var name, Lark's lark-cli `profile`, the sender allowlist, and for Lark the app it was made for) |
+| `channel_configs` | Telegram/Lark settings, one row per bot (top-level `bound_chats_only BOOLEAN NOT NULL DEFAULT false`, separate from JSON settings and preserved by ordinary config import; `manager_id`, fixed when the bot is added; the built-in rows belong to the default Manager; a trigger refuses to delete a Manager that has bots; `channel_bot_seq` numbers the added `channel-<type>-<n>` rows; enabled flag, Telegram's token env var name, Lark's lark-cli `profile`, the sender allowlist, and for Lark the app it was made for) |
 | `task_user_gate_posts`, `task_user_gate_messages` | Each also has `channel_id`, the bot a gate message was posted through or received from; the type-keyed unique constraint of `task_user_gate_posts` stays so a downgrade still works |
+| `manager_chat_bindings` | Explicit `(channel_id, chat_id)` → `manager_id` bindings with `created_at`; bot deletion cascades, Manager deletion requires unbinding under the same Manager row lock; off but nondeleted targets are allowed |
+| `channel_seen_chats` | Eligible allowlisted native-message metadata observed since upgrade: nullable `name`, `count`, `last_at`, retained until bot deletion; no transcript backfill or extra account/name lookup; paginated catalog unions explicit bindings |
+| `channel_unbound_chats` | Historical newest 20 bound-only suppressed chat identities per bot, with nullable name, count and last time; binding does not clear them or the complete seen catalog |
 | `channel_rejected_senders` | The latest senders a channel's allowlist refused (the Lark channel records them): `sender_id`, `count`, `last_at` and `chat_id` (the group chat of the latest one; NULL for a direct message), never what they wrote; the 20 newest per channel |
 
 Plans and sessions used to be files (`.local/planner/planner-<task_id>/*.json`,
@@ -4284,6 +4290,8 @@ The OpenAPI document is authoritative for fields, authentication and errors. Pro
 | `/api/v1/manager_templates/{put,delete}` | POST | `manager_templates.{put,delete}` |
 | `/api/v1/schedule_admin/{list,project_list,get,preview,runs,notifications,create,update,delete,reset_planner_session,run}` | POST | `schedule_admin.{list,project_list,get,preview,runs,notifications,create,update,delete,reset_planner_session,run}` |
 | `/api/v1/channel_configs/{list,get,create,update,delete}` | POST | `channel_configs.{list,get,create,update,delete}` |
+| `/api/v1/manager_chat_bindings/{list,put,delete}` | POST | `manager_chat_bindings.{list,put,delete}` (operator-only) |
+| `/api/v1/channel_chats/{list,set_policy}` | POST | `channel_chats.{list,set_policy}` (operator-only) |
 | `/api/v1/manager_session/{get,select_profile}` | POST | `manager_session.{get,select_profile}` |
 | `/api/v1/operator_chat/{turn,stop,targets,sessions,messages,save_message,send,reply_events,thread_events}` | POST | `operator_chat.{turn,stop,targets,sessions,messages,save_message,send,reply_events,thread_events}` |
 | `/api/v1/chat_settings/{get,update}` | POST | `chat_settings.{get,update}` |
@@ -4342,6 +4350,14 @@ Their successful projections are inside 200 `OpOk.result`, never bare objects or
 Failures use `OpError`: 400 `invalid`, 403 `forbidden`, 404 `not_found`, 409 `conflict`,
 or 503 `unavailable` when execution is unavailable; authentication failures are 401 `unauthorized`.
 The generated OpenAPI document is authoritative for required fields and result schemas.
+For the five native chat binding/policy operations above, refer to each generated
+operation's `requestBody` and 200 response schema, plus `components.schemas.Binding`,
+`SeenChat` and `UnboundChat` in `GET /api/v1/openapi.json`. Operator tokens, cookies
+or password sessions may call them; client tokens get `403 forbidden` and cannot
+confirm their way into operator access. Discovery generates
+`loopercli manager-chat-bindings {list,put,delete}` and
+`loopercli channel-chats {list,set-policy}`, using `--url URL` and
+`--operator-token-file PATH`. These operations add no Manager tools or capability scope.
 
 For global and project setting updates, put layer fields inside `values`; role-config and profile
 patches instead use `fields`. Layer patches change only supplied fields. Null or an empty string unsets
@@ -4521,8 +4537,9 @@ seeded default from before the recommendation was tracked get the current one.
 
 The Web channel is always on. Telegram and Lark are built in; `looper serve`
 takes no flags for them. At startup it reads `channel_configs`, which
-Settings → Channels edits, and starts each enabled channel. Changes apply after a
-restart.
+Settings → Channels edits, and starts each enabled channel. Bot credentials and
+runner configuration require a restart; explicit chat bindings and the top-level
+`bound_chats_only` policy update the running registry immediately after commit.
 
 **A bot per Manager** (stage 2 of the
 [scenario Managers RFC](rfcs/scenario-managers.zh-CN.md)). Each Telegram or
@@ -4534,12 +4551,39 @@ Manager's. Settings → Channels → Add a bot (`POST /api/v1/channel_configs/cr
 `channel_secrets` and masked in logs; an added bot never reads the environment,
 and a lark-cli bot names its profile. The same bot cannot be added twice
 (Telegram by the bot id in its token, lark-cli by profile, bot token by app id;
-409). A bot's thread id is `<channel_id>:<chat_id>` (the built-in rows keep
-`<type>:<chat_id>`) and belongs to its Manager. A disabled Manager's bot answers
-that it is turned off, and a Manager with bots cannot be deleted. Delivery (task
-end notices, wait and concurrency notices, gate posts) goes by channel id, the
+409). Its owner remains fixed; chat bindings can choose another Manager with
+that Manager's own stable thread (above). A disabled destination answers that it
+is turned off, without fallback. A Manager with bots or explicit bindings cannot
+be deleted. Delivery (task end notices, wait and concurrency notices, gate posts) goes by channel id, the
 bot the task came through; schedules' notices and the dashboard tasks' gate chat
-use the built-in rows only. Bot changes take effect after a restart.
+use the built-in rows only. Bot runner changes take effect after a restart.
+
+**Chat bindings and admission** (stage 3). Settings → Channels lists the complete
+paginated seen/bound catalog and historical newest 20 suppressed chats; Settings →
+Managers lists explicit bindings for rebind/unbind. Names can be null and fall back
+to native ids. Observation starts after upgrade, only for eligible allowlisted
+messages; it stores metadata, never message bodies. The exact bot/chat pair is the
+routing key. An explicit binding wins; without one the bot owner receives messages,
+unless `bound_chats_only` is true (default false). Then new unbound ingress, including
+Telegram local commands and native `/stop`, causes no turn, reply, reaction or
+status. Explicitly binding to the owner admits it using the unsuffixed identity.
+Bindings and policy share a committed registry snapshot; ordinary text never falls
+back to another Manager. Already admitted turns retain their destination, thread
+and correlation, and existing tasks retain their Manager and stored bot/chat for
+acceptance, progress and end delivery, even after unbind or policy changes.
+
+Binding/seen/suppression state is not configuration export/import; ordinary config
+import preserves the top-level policy. Previous binaries ignore these bindings and
+policy and may process chats this version silences: before downgrading, the operator
+must disable the affected bot runners or accept the previous behavior. There is no
+destructive down migration, history rename or deletion. With no bindings and a false
+policy, defaults are exactly unchanged for the dashboard, Telegram, both Lark
+transports and loopercli. Existing capability boundaries stay intact. Relevant
+routing/control diagnostics must identify channel/chat/destination and action/outcome,
+never message bodies or credentials; no new metrics system is introduced (RFC §13).
+Binding/policy mutations and successful/suppressed native ingress currently lack that
+diagnostic coverage; final acceptance remains pending in the RFC until the prerequisite
+implementation supplies it and is retested.
 
 - **Sender allowlist** (`looper/agents/channels/allowlist.py`, RFC decision 8):
   the Manager runs any command it is asked to, so Telegram and Lark pass on
@@ -4603,8 +4647,8 @@ use the built-in rows only. Bot changes take effect after a restart.
   comma-separated string from before is still read.
   `LOOPX_TELEGRAM_ALLOWED_USERS` no longer applies. `/new` (without
   arguments) goes to the Manager as `/new`, and `/stop` as `/stop`, which the
-  Manager answers outside its queue and which stops the reply under way for
-  that chat. `/profile [n|name|id|0]` goes to it as the text `/profile` plus
+  fleet answers outside its queues and which requests all live replies for
+  that exact bot/chat. `/profile [n|name|id|0]` goes to it as text `/profile` plus
   the arguments (`_cmd_profile`), which the Manager answers itself
   ([Manager](#manager-looperagentstiersmanagerpy)). `/start`, `/status`,
   `/new`, `/stop`, `/profile` and `/help` from an unlisted sender get no

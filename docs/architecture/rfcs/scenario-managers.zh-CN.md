@@ -1,6 +1,6 @@
 # RFC：场景管家（几个管家，各有各的职责，v0）
 
-- **状态：** 阶段 1、2 已实现（looper #NNN）；阶段 3 待做。以下为批准前的草案记录：草案，待维护者批准。第 1 节的四条是维护者 2026-10-21 定下的方向；D11（每轮的任务列表只列自己建的）和 D13（任务可见范围 `task_scope` 是独立于工具范围的设置）是维护者同日定下的；其余决定按本文建议写成。标「需要验证」的几处在实现或实跑时核实。阶段 1 的实现卡片在本仓库之外（`.lead/scnmgr/cards/`）。2026-10-21 按对照代码的评审修订：删除改为软删除、`/gates` 按管家、工具范围原子切换并在确认时复查、任务派生数据全部按归属过滤、工作区冲突匿名、聊天页丢弃过期响应、模板 pattern 在子进程里限时匹配、降级不再失败、启用上限在一个加锁事务里检查。同日按第二轮评审再修订：聊天页切换管家时清掉上一个管家已加载的列表和会话、停用时把正在处理的消息也记为已投递、每个 `enabled: true` 都加锁并在锁内重读、建任务和删除管家锁同一行、模板角色经 `start_over` 恢复、模板与调用合并成一份有效配置再走放置、软删除清空 `profile_id`、模板的 Profile 进使用检查和建任务时的全量 `check_selection`、机器人所属的管家建了不改。同日按第三轮评审再修订：停用时在取消循环**之前**记下正在处理的消息、排队和正在处理的任务汇报转交默认管家而不是丢掉、定义带修订号且每次工具调用按修订号复查（同步失败时拒绝而不沿用旧范围，并由管家组重试）、模板写入锁住管家行、web 任务的汇报经来源线程的聊天记录和会话订阅送达、模板的角色模板 key 不能重复；并写入维护者的两个决定：D11 定为「每个管家每轮的 `Ready tasks`、`Open gates` 和 `/gates` 只列自己建的任务」，任务可见范围拆成独立的 `managers.task_scope`（`all` / `own`，D13），原来 D5 里「`tasks` 管家只看自己的任务」改由 `task_scope = own` 决定，`tools` 只决定有哪些工具。
+- **状态：** 阶段 1、2 已实现（[looper #388](https://github.com/foolzzz/looper/pull/388)、[#403](https://github.com/foolzzz/looper/pull/403)）；阶段 3 的存储、线程、停止、路由、API 与 Settings 已合入（[#646](https://github.com/foolzzz/looper/pull/646)、[#645](https://github.com/foolzzz/looper/pull/645)、[#650](https://github.com/foolzzz/looper/pull/650)、[#652](https://github.com/foolzzz/looper/pull/652)、[#655](https://github.com/foolzzz/looper/pull/655)、[#657](https://github.com/foolzzz/looper/pull/657)、[#658](https://github.com/foolzzz/looper/pull/658)），合成链路验收通过；路由边界日志、隔离 Codex 真实模型烟测与下述七项语义的维护者确认仍待完成，不标记阶段 3 已实现。以下为批准前的草案记录：草案，待维护者批准。第 1 节的四条是维护者 2026-10-21 定下的方向；D11（每轮的任务列表只列自己建的）和 D13（任务可见范围 `task_scope` 是独立于工具范围的设置）是维护者同日定下的；其余决定按本文建议写成。标「需要验证」的几处在实现或实跑时核实。阶段 1 的实现卡片在本仓库之外（`.lead/scnmgr/cards/`）。2026-10-21 按对照代码的评审修订：删除改为软删除、`/gates` 按管家、工具范围原子切换并在确认时复查、任务派生数据全部按归属过滤、工作区冲突匿名、聊天页丢弃过期响应、模板 pattern 在子进程里限时匹配、降级不再失败、启用上限在一个加锁事务里检查。同日按第二轮评审再修订：聊天页切换管家时清掉上一个管家已加载的列表和会话、停用时把正在处理的消息也记为已投递、每个 `enabled: true` 都加锁并在锁内重读、建任务和删除管家锁同一行、模板角色经 `start_over` 恢复、模板与调用合并成一份有效配置再走放置、软删除清空 `profile_id`、模板的 Profile 进使用检查和建任务时的全量 `check_selection`、机器人所属的管家建了不改。同日按第三轮评审再修订：停用时在取消循环**之前**记下正在处理的消息、排队和正在处理的任务汇报转交默认管家而不是丢掉、定义带修订号且每次工具调用按修订号复查（同步失败时拒绝而不沿用旧范围，并由管家组重试）、模板写入锁住管家行、web 任务的汇报经来源线程的聊天记录和会话订阅送达、模板的角色模板 key 不能重复；并写入维护者的两个决定：D11 定为「每个管家每轮的 `Ready tasks`、`Open gates` 和 `/gates` 只列自己建的任务」，任务可见范围拆成独立的 `managers.task_scope`（`all` / `own`，D13），原来 D5 里「`tasks` 管家只看自己的任务」改由 `task_scope = own` 决定，`tools` 只决定有哪些工具。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.0 节第 21 项。
 - **相关：** [管家会话的 Agent Profile](manager-session-profile-v0.zh-CN.md)（一条全局会话、`/profile`）、[管家平台工具](manager-platform-tools-v0.zh-CN.md)、[停止管家的回复 v2](chat-stop-v2.zh-CN.md)（整轮令牌、工具调用归属）、[规划者定义的角色](planner-defined-roles-v0.zh-CN.md)（项目的角色模板）、[用户关卡](user-gate-v0.zh-CN.md)、[飞书机器人 token 渠道](lark-bot-token-channel-v0.zh-CN.md)。
 - **代码基线：** v2.13.22（`a3c7a6f60`）。另一条分支正在改 Stop v2 的代码（轮的绑定、进程树、`tiers/manager.py`），本文按 `main` 设计，交汇处见第 15 节。
@@ -202,7 +202,7 @@ CREATE TABLE IF NOT EXISTS chat_threads (
 | 会话层 Profile | `db.agent_setting_layers.list_layers(manager_session=<id>)`：合成的 `session` 行取 `agent_sessions WHERE agent_id = $id`；`load_agent_settings(..., manager_id=)`，`tiers/manager.py` 里**每一处**调用都传 `manager_id=self.agent_id`，包括 `manager_session=False` 的两处（`settings_profile_name`，`:1459`；`select_session_profile` 清除选择时的候选，`:1525`），否则场景管家的 `/profile 0` 会显示、校验默认管家的配置；`db.profile_registry.profile_usage` 和 `profile_registry._selected_roles` 看所有管家的会话 |
 | 运行记录 | `ClaudeRunRecorder(agent_id=self.agent_id)`（`:954`、`:1617`、`:1747`），`start_record(agent_id=self.agent_id)` 已是 |
 | 花费 | `db.llm_records._ROLE_FILTERS["manager"]` 和 `task_costs` 的 `CASE` 改成 `agent_id = 'manager' OR agent_id LIKE 'manager-%'`；新增按管家汇总（第 13 节） |
-| Stop v2 | 每个实例自己的 `TurnRegistry`（不变）；`/api/chat/stop` 按 `message_id` 在所有管家里找（`ManagerFleet.turn_for`）；`/api/chat/turn?session_id=` 用线程的归属找管家；`/stop` 只停收到它的那个管家里这个聊天的轮 |
+| Stop v2 | 每个实例自己的 `TurnRegistry`（不变）；`/api/chat/stop` 按 `message_id` 在所有管家里找（`ManagerFleet.turn_for`）；`/api/chat/turn?session_id=` 用线程的归属找管家；阶段 3 的原生 `/stop` 经 `ManagerFleet.stop_chat` 停同一 `(channel_id, chat_id)` 在所有管家里的活轮（含排队轮），详见 9.2；控制台仍按 message id 停指定轮 |
 | 工具调用的绑定 | 每个管家一个绑定文件：`.local/<agent_id>-turn.json`（默认管家仍是 `.local/manager-turn.json`）；每个 `ManagerOps` 自己的令牌，端点按令牌找到管家（`ManagerFleet.ops_for(authorization)`，逐个 `hmac.compare_digest`） |
 | 待确认操作 | 在各自的 `ManagerOps` 里（`chat_key` 不跨管家）；`/new` 的 `forget_confirmations` 只清自己的 |
 | 聊天队列（composer） | 只在浏览器里，按线程 id 存（`sessionStorage`）；线程属于一个管家，所以自然分开 |
@@ -354,11 +354,17 @@ Template instructions (follow them; they are the operator's):
 
 ### 9.2 阶段 3：按聊天绑定
 
-- 新表 `manager_chat_bindings(channel_id, chat_id, manager_id, created_at, PRIMARY KEY (channel_id, chat_id))`。一个聊天（飞书群或私聊、Telegram 聊天）绑定到一个管家。
-- 来消息时：白名单先查（不变）；有绑定就投给绑定的管家；没有绑定就投给机器人所属的管家。机器人可以设 `bound_chats_only`：未绑定聊天的消息不进任何管家，不回复、不加表情，只记进 `channel_unbound_chats`（像 `channel_rejected_senders`：聊天 id、名称、次数、最后时间，留最新 20 个），Settings 里一键绑定。
-- **线程 id 按（聊天，管家）分：** `chat_threads` 的归属一经写下不变（D10），所以绑定变更不能沿用同一个线程 id。机器人所属的管家不变（9.1），所以「机器人所属管家的线程」始终是同一个管家的。一个聊天发给机器人所属管家时线程 id 照第 9.1 节（`<channel>:<chat_id>` 或 `<channel_id>:<chat_id>`）；发给绑定的别的管家时是 `<那个 id>#<manager_id>`。改绑后新消息进新管家的线程，旧管家的线程和记录留在旧管家名下（它的会话列表、`[RESUME]` 仍只看到自己的那段）；再绑回去就回到原来那条线程。一个聊天在每个管家下至多一条线程，不需要「绑定代次」。从线程 id 反解渠道和聊天的地方（例如聊天记录的渠道读取）在阶段 3 一起认 `#<manager_id>` 后缀。
-- 绑定改了立即生效（适配器从注册表读缓存，API 写完通知）。进行中的轮由原管家答完；已建的任务仍回报给建它的管家和来源聊天（`tasks.manager_id`、来源列），不跟着绑定走。`/stop` 停这个聊天在**所有**管家里的活令牌（`ManagerFleet.stop_chat`）。
-- Settings：Managers 页每个管家一张「聊天」列表；Channels 页每个机器人列出见过的聊天，每个带「绑定到」下拉。
+以下记录已合入的行为现状；停用目标、seen 留存、策略热更新、最近 20 条历史、混合运行时停止、聊天身份和 Manager 工具范围这七项推荐语义尚待维护者确认，不能据实现反推批准。最终状态见本文首行，失败或未测路径继续保持待验收。
+
+- **身份与准入：** `manager_chat_bindings` 的主键是 `(channel_id, chat_id)`，同一原生 chat id 在两个机器人下互不影响；发送者白名单、Lark 群 @ 和消息资格先查。有显式绑定就投给目标；否则归机器人所属管家。目标可以是未删除但停用的管家，新消息答「已停用」、绝不回落；已删除的目标拒绝绑定，有绑定的管家必须先解绑才能删除，绑定与删除锁同一管家行。Telegram 负数 chat id 继续原有转发，仍不存记录、不加表情。
+- **只接绑定聊天：** `channel_configs.bound_chats_only` 是顶层列，默认 `false`；开启后未显式绑定的合格消息不进总线、不回复、不加表情或状态，Telegram 本地命令和 `/stop` 也静默。显式绑到机器人所属管家与「未绑定」不同：前者可准入，且沿用不带后缀的身份。绑定、解绑及策略提交后通知运行中 registry，按同一快照立即作用于新入站；凭据及其他机器人启动配置仍需重启。
+- **可见聊天：** `channel_seen_chats` 从升级后的合格白名单消息开始累计元数据，保存至删除机器人，不回填旧记录、不读取旧消息体、不增加账号权限或名称查询。名称可空，界面回退 chat id；完整目录和显式绑定取并集，按 chat id 文本顺序分页。`channel_unbound_chats` 只保留最近 20 个被策略抑制聊天的名称、次数和最后时间；绑定不清除该历史，界面同时显示当前绑定状态，它不是完整目录。
+- **线程归属固定：** 机器人所属管家的线程仍为 `<type>:<chat_id>`（内置机器人）或 `<channel_id>:<chat_id>`；其他管家的线程为 `<那个 id>#<manager_id>`。改绑只让下一条消息进入新管家的线程，不迁移、重命名或删除历史；再绑回去复用原线程，列表、读取与续接简报只按存储的 owner。历史深链接经 `URLSearchParams` 编码，`#` 后缀必须作为参数值保留。
+- **已接受的工作不改目的地：** 进行中的轮由原管家答完，回复和记录使用准入时保存的线程、机器人与聊天；已建任务的接受、进度与结束沿用 `tasks.manager_id` 和来源列。解绑或开启策略不追溯过滤这些出站投递，阶段 2 的历史、任务与 capability 行为不变。
+- **停止是聊天控制：** 原生 `/stop` 经 `ManagerFleet.stop_chat` 对该机器人、该聊天的所有 owner 活轮各请求一次，即使最新目标已停用；别的机器人、别的聊天不受影响。每个 owner 都尝试，混合运行时的不支持或失败须明确报告，不能声称全部停止；Codex 的 `cannot_interrupt` 与既有开关契约保持不变。普通文字仍只去当前目标，未绑定且只接绑定聊天时 `/stop` 也不产生输出。
+- **管理入口：** Settings → Managers 列出该管家的显式绑定并支持改绑、解绑；Channels 列出完整聊天目录和最近抑制记录，支持绑定及策略。五个类型化 `operationId` 是 `manager_chat_bindings.list`、`manager_chat_bindings.put`、`manager_chat_bindings.delete`、`channel_chats.list`、`channel_chats.set_policy`（对应 `/api/v1/manager_chat_bindings/{list,put,delete}`、`/api/v1/channel_chats/{list,set_policy}`）；请求、200 `OpOk` 结果和 `Binding` / `SeenChat` / `UnboundChat` schema 以生成的 `GET /api/v1/openapi.json` 为准。只允许 operator 认证，client token 不能直接或经确认调用；生成的 `loopercli manager-chat-bindings {list,put,delete}`、`loopercli channel-chats {list,set-policy}` 使用 operator token。`ManagerOps`、`MANAGER_TOOLS`、`scope_for`、工具描述与注入上下文均不增加绑定能力，包括只读能力。
+- **配置与降级：** 绑定、seen 目录和抑制记录不随配置导出、导入；普通配置导入保留顶层 `bound_chats_only`。旧二进制忽略新绑定和策略，可能处理新版静默的聊天：降级前必须由操作者停用受影响的机器人运行器，或接受旧行为；不做破坏性降迁移，不动已有历史。
+- **观测与验收：** 沿用第 13 节日志，不新增指标系统；相关准入、路由、配置与停止边界应包含 channel/chat/destination、action/outcome，绝不记录消息体或凭据，当前绑定、解绑、策略更新和原生准入成功/静默边界缺少这些字段，日志验收不满足，须回到前置实现补齐后重测。已通过实际 API/生成 CLI、三种合成原生 transport、真实 Ops 任务写库、稳定历史、任务汇报、fleet stop、两张 Settings 页和隔离服务重启；Codex Profile 烟测使用现有 CLI 替身，缺隔离凭据的真实 Codex 模型烟测未运行，完整套件留 CI。模型可见字节未变，真实 prompt eval 不适用，parity 断言不变。
 
 ## 10. HTTP API（阶段 1）
 
@@ -480,7 +486,7 @@ as for any task. When no template fits, say so[ and do not create a task].
 
 ## 17. 阶段
 
-每个阶段一个 PR，各自交付能用的结果。
+阶段 1、2 各自交付；阶段 3 按存储、线程身份、fleet stop、原生路由、类型化 API、两张 Settings 页和最终集成验收拆成有界 PR 链，每项可独立评审与回滚，只有最终验收卡更新整体状态。
 
 1. **阶段 1：管家 + 控制台选择 + 模板 + 任务归属。** 第 5–8、10–13 节。完成标准：能在控制台建一个场景管家和模板、在聊天页选它对话、用模板建任务、任务回报给它；默认管家和渠道行为不变。渠道（飞书、Telegram）不涉及：它们只到默认管家，PR 里写明。
 2. **阶段 2：每个管家一个机器人。** 第 9.1 节。
