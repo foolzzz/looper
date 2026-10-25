@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.123] - 2026-10-25
+
+### Fixed
+
+- **Restarting a task is confirmed even when old run records look stale.** The dashboard's task page decided a restart had taken effect by comparing the task's status, its completion time and its lifetime run count. A stale historical run record, or a restart that was stopped before completing, could leave that comparison unable to tell a new attempt from the old one. A new `tasks.attempt_ended_at` column now marks the end of the current attempt, including Stop, and is cleared on restart. `task_detail` returns it and the page confirms the restart from it. Tasks that ended before the upgrade keep it empty (unknown). ([#633](https://github.com/foolzzz/looper/pull/633))
+
 ## [2.13.122] - 2026-10-25
 
 ### Changed
