@@ -151,22 +151,31 @@ def test_starting_worker_acceptance_after_four_seconds_is_acknowledged_once(
 
 @pytest.mark.parametrize("startup_delay, acceptance_timeout", [(0, 0.04), (0.02, 0.02)])
 def test_insufficient_acceptance_budget_refuses_before_writing(
-    tmp_path: Path, agent_db: Any, startup_delay: float, acceptance_timeout: float,
+    tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+    startup_delay: float, acceptance_timeout: float,
 ) -> None:
     async def run() -> None:
         async with delivery(tmp_path) as (_, planner, plan, step, channel, ready, acks):
             channel.send_timeout = acceptance_timeout
-            opening = asyncio.get_running_loop().call_later(startup_delay, ready.set)
-            try:
+            channel.release.set()  # An accidental send must fail the assertions, not wait on the frozen clock.
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+
+            async def become_ready() -> None:
+                nonlocal now
+                now += startup_delay
+                ready.set()
+
+            # Readiness consumes the startup budget without depending on runner scheduling.
+            with monkeypatch.context() as clock:
+                clock.setattr(loop, "time", lambda: now)
+                clock.setattr(ready, "wait", become_ready)
                 await correct(planner, plan, step, "chat")
                 assert [ack.payload for ack in acks] == [{"delivered": False}]
                 assert step.missed_messages == ["use blue"]
+                assert ready.is_set()
                 assert not channel.started.is_set() and channel.written == []
-                channel.release.set()
-                await asyncio.sleep(0)
                 assert channel.sent == []
-            finally:
-                opening.cancel()
 
     asyncio.run(asyncio.wait_for(run(), 2))
 
