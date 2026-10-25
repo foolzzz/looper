@@ -21,6 +21,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 @pytest.mark.parametrize("outcome", ["stopped", "completed", "failed", "cancelled", "orphaned"])
 @pytest.mark.parametrize("keep_steps", [False, True])
 def test_task_detail_identifies_each_attempts_end(monkeypatch, outcome, keep_steps) -> None:
+    from looper.agents import api_v1
     from looper.db import tasks
 
     async def test(pool: Any) -> None:
@@ -30,6 +31,7 @@ def test_task_detail_identifies_each_attempts_end(monkeypatch, outcome, keep_ste
         async def detail():
             status, row = await _call("POST", "/api/v1/tasks/detail", {"task_id": "task-a"})
             assert status == 200, row
+            api_v1.validate_arguments(api_v1.find("POST", "/api/v1/tasks/detail").result, row)
             return row
 
         async def end():

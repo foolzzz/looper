@@ -75,6 +75,7 @@ _PROFILE = _object({"profile_id": _STR, "name": _STR, "model_id": _STR, "effort"
     "cost": _OBJ, "warnings": _array(_STR)})
 TASK_DETAIL = _object({
     **TASK_INFO["properties"], "title": _STR, "updated_at": _STR,
+    "attempt_ended_at": _NULL_STR,
     "config": _OBJ, "origin_channel_id": _STR,
     **dict.fromkeys(("result_summary", "error", "fail_kind"), _NULL_STR),
     "task_budget_usd": _NULL_NUMBER, "own_budget_usd": _NULL_NUMBER,
