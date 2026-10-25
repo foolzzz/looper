@@ -125,6 +125,8 @@ async def _assert_readback(conn, old, conversion, before, history):
     tasks = [json.loads(r[0]) for r in after[1]["tasks"]]
     assert all((row.pop("manager_id"), row.pop("template"), row.pop("origin_thread"), row.pop("client_id"))
                == ("manager", None, None, None) for row in tasks)
+    # Historical attempt end times are unknown; startup must not invent them.
+    assert all(row.pop("attempt_ended_at") is None for row in tasks)
     assert tasks == [json.loads(r[0]) for r in before[1]["tasks"]]
     layers = [json.loads(r[0]) for r in before[1]["agent_setting_layers"]]
     # The already-completed effort migration left this obsolete column NULL;

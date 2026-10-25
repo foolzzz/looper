@@ -54,8 +54,9 @@ NEW_COLUMNS = {"tasks": ("schedule_id", "budget_usd", "chat_id", "original_user_
                              "room_messages_per_task", "room_ping_pong_rounds", "room_wait_max_seconds",
                              "room_consult_budget_usd", "room_consult_timeout_seconds", "room_consults_per_task",
                              "task_workspaces", "operator_notes", "vault")}
-# Columns a later migration adds with a value for the rows from before: every old task is the default Manager's.
-DEFAULTED_COLUMNS = {"tasks": {"manager_id": "manager"}}
+# Exact values for columns added later: old tasks belong to the default Manager;
+# their historical attempt end times remain unknown.
+DEFAULTED_COLUMNS = {"tasks": {"manager_id": "manager", "attempt_ended_at": None}}
 # What the effort's upgrade, a later migration of main, changes: each layer's effort moved onto the profiles its
 # roles ran with it, so these layers and task choices select another profile (by name here; it changes their
 # updated_at), and the profiles they take are added (EFFORT_PROFILES: model, effort).
