@@ -574,7 +574,8 @@ def _profiles_listed(look: Look) -> str | None:
 
 def _reviewer_set_in_project(look: Look) -> str | None:
     project = _project(look, PROJECT)
-    reviewer = look.api.get(f"/api/projects/{project['project_id']}/agent-settings")["roles"]["reviewer"]
+    settings = look.api.post("/api/v1/project_agent_settings/get", {"project_id": project["project_id"]})["result"]
+    reviewer = settings["roles"]["reviewer"]
     chosen = reviewer["effective"]["profile"]
     if (chosen["value"]["name"], chosen["source"]) != (OPUS, "role_project"):
         return f"{PROJECT}'s Reviewer runs {chosen['value']['name']} from {chosen['source']}, not {OPUS} of its own"
@@ -584,7 +585,8 @@ def _reviewer_set_in_project(look: Look) -> str | None:
 
 def _opus_allowed(look: Look) -> str | None:
     project = _project(look, PROJECT)
-    allowed = [p["name"] for p in look.api.get(f"/api/projects/{project['project_id']}/allowed-profiles")["profiles"]]
+    profiles = look.api.post("/api/v1/allowed_profiles/get", {"project_id": project["project_id"]})["result"]["profiles"]
+    allowed = [p["name"] for p in profiles]
     return None if set(allowed) == {LIGHT, OPUS} else f"{PROJECT}'s allowed list is {allowed}, not [{LIGHT}, {OPUS}]"
 
 
@@ -967,7 +969,7 @@ def _restrict_planner_choices(api: Api, project_id: str) -> None:
     """The project's Planners may choose LIGHT only: an empty list allows every profile, so adding to it would
     restrict the choice instead of widening it."""
     _make_light_profile(api, project_id)
-    api.put(f"/api/projects/{project_id}/allowed-profiles", {"profile_ids": [LIGHT]})
+    api.post("/api/v1/allowed_profiles/replace", {"project_id": project_id, "profile_ids": [LIGHT]})
 
 
 def _schedule_with_a_cheaper_planner(look: Look) -> str | None:

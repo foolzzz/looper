@@ -10,7 +10,7 @@ Workers, Reviewers), read afresh when each prompt is built. Its execution
 settings (``project_execution``) are top-level fields of the project too,
 ``null`` to inherit. Its agent settings (harness, Agent Profile with its model and
 effort, environment, per-run cap) are layers of their own (``agent_settings``,
-``/api/projects/<id>/agent-settings``). A task that can still run (any but a
+``POST /api/v1/project_agent_settings/update``). A task that can still run (any but a
 completed one: a restart runs a failed, stopped or cancelled task again) may
 change its own choices per role (``set_task_agents``): the Agent Profile of its
 roles, and how many of its Workers or Reviewers run at once.
@@ -136,9 +136,9 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
 def _project_fields(data: dict[str, Any], *, update: bool) -> dict[str, Any]:
     """The project fields in ``data``, validated; a new project needs a name."""
     if moved := [name for name in MOVED_FIELDS if name in data]:
-        raise RequestError(HTTP_400, f"{moved[0]} is an agent setting now: set it with PUT "
-                                     "/api/projects/<id>/agent-settings (the project) or "
-                                     ".../agent-settings/roles/<role> (one role in the project)")
+        raise RequestError(HTTP_400, f"{moved[0]} is an agent setting now: set it with POST "
+                                     "/api/v1/project_agent_settings/update (the project) or "
+                                     "/api/v1/project_agent_settings/update_role (one role in the project)")
     fields: dict[str, Any] = {}
     try:
         if not update or "name" in data:
