@@ -425,14 +425,15 @@ class TurnTree:
     """The tree of one turn's agent process, snapshotted when the turn starts and refreshed while it runs, so a
     stop can end every process the turn ever started, even those whose parent has exited since.
 
-    ``seen`` maps each pid of the tree to its start time (None until a refresh has read it); ``end`` leaves a
-    pid whose start time has changed alone, since the pid was reused."""
+    ``seen`` maps each observed pid to its start time (None if it could not be read). Every refresh checks
+    these identities before expanding the tree; a reused pid stays excluded for the rest of the turn."""
 
     def __init__(self, process: Any, label: str) -> None:
         self.process = process
         self.label = label
         self.seen: dict[int, str | None] = {}
         self._groups: Tree = {}
+        self._excluded: set[int] = set()
         self._refreshed = float("-inf")
         self._lock = asyncio.Lock()
         self._ticker: asyncio.Task[None] | None = None
@@ -441,6 +442,7 @@ class TurnTree:
     def track(cls, process: Any, *, label: str) -> TurnTree:
         tree = cls(process, label)
         tree._merge(_tree(process, _snapshot(), {}))
+        tree.seen.update(_start_times(tree.seen) or {})
         return tree
 
     def _merge(self, tree: Tree) -> list[int]:
@@ -456,9 +458,11 @@ class TurnTree:
             if not force and time.monotonic() - self._refreshed < _REFRESH_MIN_SEC:
                 return
             table = await asyncio.to_thread(_snapshot)
-            self._groups = {pid: pgid for pid, pgid in self._groups.items() if pid in table}
+            skip = skip | await self._reused()
+            self._groups = {pid: pgid for pid, pgid in self._groups.items()
+                            if pid in table and pid not in skip and pgid not in skip}
             self._merge(_tree(self.process, table, self._groups, skip=skip))
-            unread = [pid for pid, started in self.seen.items() if started is None]
+            unread = [pid for pid, started in self.seen.items() if started is None and pid not in skip]
             if unread:
                 starts = await asyncio.to_thread(_start_times, unread) or {}
                 for pid in unread:
@@ -485,11 +489,15 @@ class TurnTree:
             await asyncio.gather(ticker, return_exceptions=True)
 
     async def _reused(self) -> frozenset[int]:
+        """Reject reused identities durably, and unread identities for this observation. Never replace a
+        missing initial identity with a later process's start time just because its pid is still present."""
         known = {pid: started for pid, started in self.seen.items() if started is not None}
         current = await asyncio.to_thread(_start_times, known)
         if current is None:
-            return frozenset()
-        return frozenset(pid for pid, started in known.items() if pid in current and current[pid] != started)
+            return frozenset(self.seen) | self._excluded | {self.process.pid}
+        self._excluded.update(pid for pid, started in known.items() if pid in current and current[pid] != started)
+        return frozenset(self._excluded | {pid for pid in self.seen if pid not in current}
+                         | ({self.process.pid} if self.seen.get(self.process.pid) is None else set()))
 
     async def begin_end(self) -> None:
         """Refresh and record the tree before the agent is asked to exit on its own: its record (what the next
@@ -510,22 +518,37 @@ class TurnTree:
 
     async def _end_all(self, exclude: frozenset[int]) -> None:
         """End the tree, and beside it (not delaying its first signal) the seen processes it no longer reaches."""
+        async def end_agent() -> None:
+            # With no identity, only the live subprocess handle is safe: never infer a group from its pid.
+            if (self.process.pid in exclude and self.process.pid not in self._excluded
+                    and self.process.returncode is None):
+                try:
+                    self.process.send_signal(signal.SIGTERM)
+                    await asyncio.wait_for(self.process.wait(), TERM_GRACE_SEC)
+                except (asyncio.TimeoutError, ProcessLookupError, PermissionError):
+                    pass
+                finally:
+                    if self.process.returncode is None:
+                        try:
+                            self.process.send_signal(signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError):
+                            pass
+
         async def end_strays() -> None:
             strays = await self._strays(exclude)
             await asyncio.gather(*(_end(stray, label=f"{self.label} (left the tree)", known={}, exclude=exclude)
                                    for stray in strays))
 
         await asyncio.gather(_end(self.process, label=self.label, known=dict(self._groups), exclude=exclude),
-                             end_strays())
+                             end_strays(), end_agent())
 
     async def end(self) -> None:
         """End every process of the tree seen so far and of the tree now, then reap the agent."""
         try:
             try:
                 await self.stop_ticker()
-                # Exclude reused leaders before a refresh can remember their unrelated children.
+                await self.refresh(force=True)
                 exclude = await self._reused()
-                await self.refresh(force=True, skip=exclude)
             except asyncio.CancelledError:
                 # begin_end may already own the exited agent's record. Finish cleanup even when preparation
                 # is cancelled, checking identities again before signalling anything from the saved tree.

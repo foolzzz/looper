@@ -70,8 +70,10 @@ def trees() -> Iterator[list[dict[str, int]]]:
     """The trees the stand-ins started; whatever a failing test leaves of them is killed afterwards."""
     started: list[dict[str, int]] = []
     yield started
-    for pid in _running([pid for tree in started for pid in tree.values()], settle=0):
+    pids = [pid for tree in started for pid in tree.values()]
+    for pid in _running(pids, settle=0):
         os.kill(pid, signal.SIGKILL)
+    assert _running(pids) == []
 
 
 @pytest.fixture(autouse=True)
@@ -698,8 +700,9 @@ def test_turn_tree_leaves_a_reused_pid_alone(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("root_reused", [False, True], ids=["seen_leader", "root"])
+@pytest.mark.parametrize("entry", ["refresh", "ticker", "begin_end", "end"])
 def test_turn_tree_leaves_a_reused_leaders_new_tree_alone(
-    monkeypatch: pytest.MonkeyPatch, root_reused: bool,
+    monkeypatch: pytest.MonkeyPatch, root_reused: bool, entry: str,
 ) -> None:
     class Agent:
         pid = 101
@@ -708,28 +711,105 @@ def test_turn_tree_leaves_a_reused_leaders_new_tree_alone(
         async def wait(self) -> int:
             return 0
 
-    table = {101: (1, 101), 102: (101, 102), 105: (102, 105)}
-    starts = {101: "agent", 102: "child", 105: "survivor"}
+    reused = 101 if root_reused else 102
+    table = {101: (1, 101), 102: (101, 102), 105: (102, 105), 106: (102, reused)}
+    starts = {101: "agent", 102: "child", 105: "survivor", 106: "owned member"}
     signalled: set[int] = set()
     monkeypatch.setattr(proc_tree, "_snapshot", lambda: dict(table))
     monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {pid: starts[pid] for pid in pids if pid in starts})
+    monkeypatch.setattr(proc_tree, "_start_time", lambda pid: starts.get(pid))
     monkeypatch.setattr(proc_tree.os, "kill", lambda pid, sig: signalled.add(pid))
     monkeypatch.setattr(proc_tree.os, "killpg", lambda pgid, sig: signalled.update(
         pid for pid, (_, group) in table.items() if group == pgid))
     monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0)
 
-    async def _run() -> None:
+    async def _run() -> proc_tree.TurnTree:
         tree = proc_tree.TurnTree.track(Agent(), label="turn")
         await tree.refresh(force=True)
-        reused = 101 if root_reused else 102
         # The old leader exited; an unrelated leader now owns its pid and has a new child and group member.
         table.clear()
-        table.update({reused: (1, reused), 103: (reused, 103), 104: (1, reused), 105: (1, 105)})
+        table.update({reused: (1, reused), 103: (reused, 103), 104: (1, reused),
+                      105: (1, 105), 106: (1, reused)})
         starts.update({reused: "replacement", 103: "new child", 104: "new member"})
+        if entry == "ticker":
+            refreshed = asyncio.Event()
+            original = tree.refresh
+
+            async def refresh(**kwargs: Any) -> None:
+                await original(force=True)
+                refreshed.set()
+
+            monkeypatch.setattr(tree, "refresh", refresh)
+            tree.start_ticker()
+            try:
+                await asyncio.wait_for(refreshed.wait(), 1)
+            finally:
+                await tree.stop_ticker()
+        elif entry == "refresh":
+            await tree.refresh(force=True)
+        elif entry == "begin_end":
+            await tree.begin_end()
+        if entry != "end":
+            # A later missing identity must not undo a previous rejection.
+            monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {
+                pid: starts[pid] for pid in pids if pid in starts and pid != reused})
+            await tree.refresh(force=True)
+            # Even if a later reading resembles the original identity, a confirmed reuse stays rejected.
+            starts[reused] = "agent" if root_reused else "child"
+            monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {
+                pid: starts[pid] for pid in pids if pid in starts})
         await tree.end()
+        return tree
+
+    tree = asyncio.run(_run())
+    assert signalled == {105, 106}  # end owned survivors individually without signalling the reused group
+    assert not {103, 104} & tree.seen.keys()
+
+
+@pytest.mark.parametrize("lookup", ["failed", "missing", "stable"])
+def test_turn_tree_checks_identity_before_expanding_an_observed_tree(
+    monkeypatch: pytest.MonkeyPatch, lookup: str,
+) -> None:
+    class Agent:
+        pid = 101
+        returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+    table = {101: (1, 101), 102: (101, 101)}
+    starts = {101: "agent", 102: "detached"}
+    signalled: set[int] = set()
+    monkeypatch.setattr(proc_tree, "_snapshot", lambda: dict(table))
+    monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {pid: starts[pid] for pid in pids if pid in starts})
+    monkeypatch.setattr(proc_tree, "_start_time", lambda pid: starts.get(pid))
+    monkeypatch.setattr(proc_tree.os, "kill", lambda pid, sig: signalled.add(pid))
+    monkeypatch.setattr(proc_tree.os, "killpg", lambda group, sig: signalled.update(
+        pid for pid, (_, pgid) in table.items() if pgid == group))
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0)
+
+    async def _run() -> None:
+        tree = proc_tree.track(Agent())
+        await tree.refresh(force=True)
+        # The observed child leaves its group; a new child and group member appear at the root.
+        table.update({102: (1, 102), 103: (101, 103), 104: (1, 101)})
+        starts.update({103: "new child", 104: "new member"})
+        if lookup == "failed":
+            monkeypatch.setattr(proc_tree, "_start_times", lambda pids: None)
+        elif lookup == "missing":
+            starts.pop(101)
+        await tree.refresh(force=True)
+        assert ({103, 104} <= tree.seen.keys()) == (lookup == "stable")
+        assert tree.seen[102] == "detached"
+        # Restore lookup for the detached child only. An unknown root must not be expanded by end.
+        if lookup == "failed":
+            starts.pop(101)
+            monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {
+                pid: starts[pid] for pid in pids if pid in starts})
+        await asyncio.wait_for(tree.end(), 1)
 
     asyncio.run(_run())
-    assert signalled == {105}  # the original turn's surviving descendant is still ended
+    assert signalled == ({101, 102, 103, 104} if lookup == "stable" else {102})
 
 
 def test_turn_tree_forgets_groups_missing_from_a_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -747,6 +827,81 @@ def test_turn_tree_forgets_groups_missing_from_a_refresh(monkeypatch: pytest.Mon
         assert 103 not in tree.seen
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("lookup", [None, {}], ids=["failed", "missing"])
+def test_turn_tree_never_recovers_ownership_from_an_unread_initial_identity(
+    monkeypatch: pytest.MonkeyPatch, lookup: dict[int, str] | None,
+) -> None:
+    class Agent:
+        pid = 101
+        returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+    table = {101: (1, 101)}
+    signalled: list[int] = []
+    monkeypatch.setattr(proc_tree, "_snapshot", lambda: dict(table))
+    monkeypatch.setattr(proc_tree, "_start_times", lambda pids: lookup)
+    monkeypatch.setattr(proc_tree.os, "kill", lambda pid, sig: signalled.append(pid))
+    monkeypatch.setattr(proc_tree.os, "killpg", lambda pgid, sig: signalled.append(pgid))
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0)
+
+    async def _run() -> None:
+        tree = proc_tree.track(Agent())
+        # The first identity was never established. A later readable pid cannot prove ownership.
+        table.update({102: (101, 102), 103: (1, 101)})
+        monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {pid: "replacement" for pid in pids})
+        await tree.refresh(force=True)
+        await tree.begin_end()
+        await tree.end()
+        assert tree.seen == {101: None}
+
+    asyncio.run(_run())
+    assert signalled == []
+
+
+@pytest.mark.parametrize("stubborn", [False, True], ids=["term", "kill"])
+def test_turn_tree_with_unavailable_identity_ends_only_its_live_handle(
+    monkeypatch: pytest.MonkeyPatch, stubborn: bool,
+) -> None:
+    signals: list[int] = []
+    table = {101: (1, 101), 102: (101, 102)}
+
+    class Agent:
+        pid = 101
+        returncode: int | None = None
+
+        def send_signal(self, sig: int) -> None:
+            signals.append(sig)
+            if sig == signal.SIGKILL or not stubborn:
+                self.returncode = -sig
+
+        async def wait(self) -> int:
+            if self.returncode is None:
+                await asyncio.Event().wait()
+            assert self.returncode is not None
+            return self.returncode
+
+    monkeypatch.setattr(proc_tree, "_snapshot", lambda: dict(table))
+    monkeypatch.setattr(proc_tree, "_start_times", lambda pids: None)
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.01)
+
+    def unexpected_signal(target: int, sig: int) -> None:
+        pytest.fail(f"unknown ownership must not signal pid/group {target}")
+
+    monkeypatch.setattr(proc_tree.os, "kill", unexpected_signal)
+    monkeypatch.setattr(proc_tree.os, "killpg", unexpected_signal)
+
+    async def _run() -> None:
+        agent = Agent()
+        tree = proc_tree.track(agent)
+        await asyncio.wait_for(tree.end(), 1)
+        assert agent.returncode is not None
+
+    asyncio.run(_run())
+    assert signals == [signal.SIGTERM, *([signal.SIGKILL] if stubborn else [])]
 
 
 def test_turn_tree_ticker_picks_up_a_child_started_between_events(tmp_path: Path) -> None:
