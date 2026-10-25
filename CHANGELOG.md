@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.103] - 2026-10-25
+
+### Fixed
+
+- **Generated `looper config` subcommands are reachable from the command line.** `config import-upload`, `import-preview`, `import-apply` and `import-cancel` are generated from the service's OpenAPI document, but `config` is also a hand-written command, so the command line never loaded the document for it. It now loads the document when the word after `config` is not a registered hand-written child. The hand-written `config export` and `config import` keep their parsers; usage errors exit with code 2, send no operation and do not echo the argument, and an unreachable API still exits with code 4. Not model-visible. ([#583](https://github.com/foolzzz/looper/pull/583))
+
 ## [2.13.102] - 2026-10-25
 
 ### Changed
