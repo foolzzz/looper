@@ -745,6 +745,14 @@ class ManagerAgent:
             await self._load_session_state()
 
         bus.subscribe_topic(MessageType.USER_MESSAGE.value, self._receive, consumes=True)
+        # Channels (and journal replay) can queue messages before this consumer exists. Give those messages
+        # the same tokens and code-owned stops before the message loop can send the first one to the model.
+        queue = bus.get_queue(self.agent_id)
+        for envelope in bus.take_queue(self.agent_id):
+            if envelope.message_type == MessageType.USER_MESSAGE and self._receive(envelope):
+                bus.settle(envelope.message_id)
+            else:
+                queue.put_nowait(envelope)
         self._task = asyncio.create_task(self._message_loop())
         logger.info(
             "%s agent started (session=%s)", self._log,
@@ -886,6 +894,9 @@ class ManagerAgent:
 
     async def _handle_user_message(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
+        if is_stop_command(envelope.payload.get("text", "")):
+            await self._stop_from_chat(envelope)
+            return
         token = self._turns.find(envelope.message_id) or self._register_turn(envelope)
         try:
             try:
@@ -1217,9 +1228,11 @@ class ManagerAgent:
             failure = exc
             raise
         finally:
-            if prepared.run.recorder is not None:
-                await prepared.run.recorder.end_left_open(failure)
-            self._publish_binding(None)  # whatever way it ended, the turn's runtime is done (killed, if it failed)
+            try:
+                if prepared.run.recorder is not None:
+                    await prepared.run.recorder.end_left_open(failure)
+            finally:
+                self._publish_binding(None)  # drained or boundedly abandoned, even if closing the record is cancelled
 
     async def stop_turn(self, message_id: str, *, via: str) -> StopResult:
         """Ask the user turn of ``message_id`` (the envelope's id or the web page's own), in any phase, to stop.
@@ -1595,7 +1608,6 @@ class ManagerAgent:
             try:
                 turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope,
                                                    stop=lambda: recorder.cap_stop, cancel=token.cancel)
-                self._publish_binding(None)  # its result was read, or the cancel's cleanup ran: the bridge is quiet
             except TurnCancelled:
                 # A runtime that lets the turn's cancel escape was stopped by the user: not a failure.
                 token.settle(ReplyOutcome.STOPPED)
@@ -1608,6 +1620,12 @@ class ManagerAgent:
             # The turn's events still being handled are still reaching the chat: the turn is not over for the user
             # until they have, and a stop meanwhile is not too late.
             await handled()
+        except asyncio.CancelledError:
+            self._settle()
+            await abandon_handling()
+            # ManagerAgent.stop owns resident shutdown on closure, outside the message task that the supervisor
+            # cancels repeatedly. Stopping here could forget the process and lose its cleanup to the next cancel.
+            raise
         except BaseException as exc:
             if not isinstance(exc, TurnStopped):
                 self._settle()  # the turn failed: a stop that comes while it is cleaned up is too late

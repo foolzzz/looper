@@ -8,18 +8,22 @@ import asyncio
 import contextlib
 import dataclasses
 import inspect
+import json
 import os
 import signal
 import tempfile
 import textwrap
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 from fake_claude import fake_claude
 from looper.agents import proc_tree
 from looper.agents.claude_cli import ResidentClaude, ResidentTurn, user_stop_result
+from looper.agents.ops import Call, Risk, Tool
+from looper.agents.ops.service import ManagerOps, Platform
 from looper.agents.runtimes import StopMethod
 from looper.agents.runtimes import cancel as cancel_module
 from looper.agents.runtimes.cancel import TurnCancelled
@@ -190,6 +194,93 @@ sys.stdin.read()
             await session.stop(kill=True)
             if child is not None and _alive(child):
                 os.kill(child, signal.SIGKILL)
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("ending", ["answer", "stop", "error", "close_cancel"])
+def test_a_bridge_write_during_event_drain_keeps_the_user_turn_until_finalization(
+    ending: str, tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        session = _Session(hold=False)
+        manager, bus, queue = _manager(tmp_path, session)
+        turn_file = tmp_path / "turn.json"
+        ran: list[Call] = []
+
+        async def write(call: Call) -> dict[str, Any]:
+            ran.append(call)
+            return {"written": True}
+
+        tool = Tool("t_write", "write", {"type": "object", "properties": {}}, Risk.WRITE, write)
+        ops = ManagerOps(Platform(bus=bus, task_router=None, manager=manager), url="http://127.0.0.1:1",
+                         tools=(tool,), turn_file=turn_file)
+        ops._working_at = ops._clock()
+        manager.ops = ops
+        records = AsyncMock()
+        monkeypatch.setattr("looper.agents.ops.service.db_actions.record", records)
+        persisting, release, returned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        closing = asyncio.Event()
+        original_run = session.run_turn
+        original_close = manager_module.ClaudeRunRecorder.end_left_open
+
+        async def close(self: Any, failure: BaseException | None = None) -> None:
+            await original_close(self, failure)
+            if ending == "close_cancel":
+                closing.set()
+                await asyncio.Event().wait()
+
+        async def run_turn(text: str, on_event: Any, **kwargs: Any) -> Any:
+            await on_event({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "write-1", "name": "mcp__looper__t_write", "input": {}},
+            ]}})
+            turn = await original_run(text, on_event, **kwargs)
+            returned.set()
+            if ending == "error":
+                await persisting.wait()
+                raise OSError("resident read failed")
+            return turn
+
+        async def persist(self: Any, payload: dict[str, Any]) -> None:
+            persisting.set()
+            await release.wait()
+
+        monkeypatch.setattr(session, "run_turn", run_turn)
+        monkeypatch.setattr(manager_module.ClaudeRunRecorder, "persist", persist)
+        monkeypatch.setattr(manager_module.ClaudeRunRecorder, "end_left_open", close)
+        envelope = _web("write this")
+        handling = asyncio.create_task(manager._handle(envelope))
+        try:
+            await asyncio.wait_for(returned.wait(), 5)
+            await asyncio.wait_for(persisting.wait(), 5)
+            if ending != "error":
+                binding = json.loads(turn_file.read_text())["turn"]  # exactly what the MCP bridge reads
+                result = await ops.call("t_write", {}, binding=binding, call_id="write-1")
+                assert result["status"] == "ok", result
+                assert ran[0].turn.message_id == envelope.message_id
+                assert records.call_args.kwargs["message_id"] == envelope.message_id
+                if ending == "stop":
+                    assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+            release.set()
+            if ending == "close_cancel":
+                await asyncio.wait_for(closing.wait(), 5)
+                assert json.loads(turn_file.read_text())["turn"] == binding
+                handling.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await handling
+            else:
+                await asyncio.wait_for(handling, 5)
+            assert json.loads(turn_file.read_text())["turn"] is None
+            if ending != "close_cancel":
+                (reply,) = _replies(queue)
+                assert reply["outcome"] == {"answer": "answered", "stop": "stopped", "error": "failed"}[ending]
+            assert session.started is (ending != "error")
+        finally:
+            release.set()
+            handling.cancel()
+            await asyncio.gather(handling, return_exceptions=True)
+            await session.stop()
             await bus.shutdown()
 
     asyncio.run(run())
@@ -515,19 +606,42 @@ def test_a_stop_while_a_preparation_read_finds_the_database_unreachable_still_re
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("closure", ["disable", "shutdown"])
 @pytest.mark.parametrize("runtime_cancelled", [False, True], ids=["result", "cancelled"])
 def test_closing_the_manager_while_events_drain_ends_the_handling(
-    runtime_cancelled: bool, tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+    closure: str, runtime_cancelled: bool, tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from looper.agents import chat_settings
+    from looper.agents.managers import ManagerFleet
+    from looper.agents.supervisor import AgentSupervisor, cancel_and_wait
 
     monkeypatch.setattr(chat_settings, "_stop_enabled", False)
     monkeypatch.setattr(cancel_module, "ABANDON_SEC", 0.1)
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.1)
+    monkeypatch.setattr("looper.agents.claude_cli.STOP_GRACE_SEC", 0.02)
+    claude = fake_claude(tmp_path / "claude", """
+import json, sys, time
+sys.stdin.readline()
+print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'sess-1'}), flush=True)
+print(json.dumps({'type': 'result', 'subtype': 'success', 'result': 'ok'}), flush=True)
+time.sleep(30)
+""")
 
     async def run() -> None:
-        session = _Session(hold=False)
-        manager, bus, queue = _manager(tmp_path, session)
-        persisting, release, returned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        session = ResidentClaude(label="manager")
+        manager, bus, queue = _manager(tmp_path, session)  # type: ignore[arg-type]
+        manager._config.claude_bin = claude
+        manager._definition = dataclasses.replace(manager._definition, id="manager-review",
+                                                  system_prompt=manager._system_prompt)
+        row = dataclasses.asdict(manager._definition)
+        agent_db.get_manager.return_value = row
+        supervisor = AgentSupervisor(bus, tmp_path)
+        supervisor.register(manager)
+        fleet = ManagerFleet(platform=Platform(bus=bus, task_router=None, supervisor=supervisor,
+                                              runtime_root=tmp_path), supervisor=supervisor, runtime_root=tmp_path,
+                             url="http://127.0.0.1:1", config=manager._config, broadcaster=None)
+        fleet._agents[manager.agent_id] = manager
+        persisting, release, returned, cleaned = (asyncio.Event() for _ in range(4))
         event_task: asyncio.Task[Any] | None = None
         original_run = session.run_turn
 
@@ -545,26 +659,96 @@ def test_closing_the_manager_while_events_drain_ends_the_handling(
             persisting.set()
             await release.wait()
 
+        async def cancel_again(task: asyncio.Task[Any]) -> None:
+            await cancel_and_wait(task, again_after=0.05)
+
         monkeypatch.setattr(session, "run_turn", run_turn)
         monkeypatch.setattr(manager_module.ClaudeRunRecorder, "persist", persist)
-        manager._task = asyncio.create_task(manager._handle(_web("hello")))
+        monkeypatch.setattr(manager_module, "cancel_and_wait", cancel_again)
+        await manager.start(bus)
+        envelope = dataclasses.replace(_web("hello"), target=manager.agent_address)
+        process = None
         try:
+            await bus.publish(envelope)
             await asyncio.wait_for(persisting.wait(), 5)
             await asyncio.wait_for(returned.wait(), 5)
+            process, tree = session._process, session._tree
+            assert process is not None and tree is not None
+            real_end = tree.end
+
+            async def slow_end() -> None:
+                # The resident forgets _process before this await; its owner must survive the recancel interval.
+                await asyncio.sleep(0.15)
+                await real_end()
+                cleaned.set()
+
+            monkeypatch.setattr(tree, "end", slow_end)
             await asyncio.sleep(0)  # both runtime exits are now draining the shielded event task
-            await asyncio.wait_for(manager.stop(), 1)
+            if closure == "disable":
+                row["enabled"] = False
+                await asyncio.wait_for(fleet.apply(manager.agent_id), 5)
+                assert fleet.get(manager.agent_id) is None
+            else:
+                await asyncio.wait_for(supervisor.stop_all(), 5)
+            assert cleaned.is_set() and process.returncode is not None
+            assert not _alive(process.pid) and not session.started
             assert event_task is not None and event_task.done()
+            assert manager._task is None and not manager.busy
             writes, sent = agent_db.save_session.await_count, queue.qsize()
             release.set()
             await asyncio.sleep(0)
             assert agent_db.save_session.await_count == writes and queue.qsize() == sent
         finally:
             release.set()
-            if manager._task is not None:
-                manager._task.cancel()
-                await asyncio.gather(manager._task, return_exceptions=True)
+            await manager.stop()
+            # Also reap the test-owned process when the regression interrupts the resident after forgetting it.
+            if process is not None and process.returncode is None:
+                await proc_tree.end(process, label="test cleanup")
             if event_task is not None:
                 await asyncio.gather(event_task, return_exceptions=True)
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_resident_read_failure_still_ends_the_process(
+    tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.1)
+    claude = fake_claude(tmp_path / "claude", """
+import json, sys, time
+sys.stdin.readline()
+print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'sess-1'}), flush=True)
+print(json.dumps({'type': 'result', 'subtype': 'success', 'result': 'ok'}), flush=True)
+time.sleep(30)
+""")
+
+    async def run() -> None:
+        session = ResidentClaude(label="manager")
+        manager, bus, queue = _manager(tmp_path, session)  # type: ignore[arg-type]
+        manager._config.claude_bin = claude
+        original_run = session.run_turn
+        process = None
+
+        async def broken(*args: Any, **kwargs: Any) -> Any:
+            nonlocal process
+            await original_run(*args, **kwargs)
+            process = session._process
+            raise OSError("resident read failed")
+
+        monkeypatch.setattr(session, "run_turn", broken)
+        try:
+            await asyncio.wait_for(manager._handle(_web("hello")), 5)
+            assert process is not None and process.returncode is not None and not _alive(process.pid)
+            assert not session.started and not manager.busy
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "failed" and "resident read failed" in reply["error"]
+            (finish,) = agent_db.finish_record.await_args_list
+            assert finish.kwargs["status"] == "failed"
+        finally:
+            await session.stop(kill=True)
+            if process is not None and process.returncode is None:
+                await proc_tree.end(process, label="test cleanup")
             await bus.shutdown()
 
     asyncio.run(run())

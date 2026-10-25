@@ -214,3 +214,85 @@ def test_stop_says_a_runtime_without_an_interrupt_cannot_stop_the_reply(agent_db
             await bus.shutdown()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("channel", ["telegram", "lark", "lark_bot"])
+@pytest.mark.parametrize(("mode", "expected"), [
+    ("stop", "已停止当前回复。"),
+    ("idle", "现在没有正在进行的回复。"),
+    ("other_chat", "现在没有正在进行的回复。"),
+    ("other_bot", "现在没有正在进行的回复。"),
+    ("disabled", "停止功能暂未开放"),
+    ("unsupported", "当前运行时不能中断回复，回复会照常完成。"),
+])
+def test_stop_queued_before_manager_start_is_owned_by_code(
+    channel: str, mode: str, expected: str, tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(chat_settings, "_stop_enabled", mode != "disabled")
+
+    async def run() -> None:
+        session = _Session(hold=False)
+        session.can_interrupt = mode != "unsupported"
+        manager, bus, _ = _manager(tmp_path, session)
+        source = channel_address(channel, f"channel-{channel}-1")
+        stop_source = channel_address(channel, f"channel-{channel}-2") if mode == "other_bot" else source
+
+        def message(text: str, *, stop: bool = False) -> MessageEnvelope:
+            return MessageEnvelope.create(
+                source=stop_source if stop else source, target=MANAGER_ADDRESS,
+                message_type=MessageType.USER_MESSAGE,
+                payload={"text": text, "channel_context": {
+                    "chat_id": "other" if stop and mode == "other_chat" else "99", "user_id": "7",
+                }},
+            )
+
+        first, stop = message("ordinary message"), message(" /STOP ", stop=True)
+        if mode != "idle":
+            await bus.publish(first)
+        await bus.publish(stop)  # adapters received these before the Manager subscribed
+        await bus.start()
+        replies: list[MessageEnvelope] = []
+        bus.subscribe_topic(MessageType.AGENT_REPLY.value, replies.append)
+        await manager.start(bus)
+        try:
+            await until(lambda: any(e.reply_to == stop.message_id for e in replies), timeout=5)
+            stop_replies = [e.payload["text"] for e in replies if e.reply_to == stop.message_id]
+            assert stop_replies == [expected]
+            if mode != "idle":
+                await until(lambda: any(e.reply_to == first.message_id for e in replies), timeout=5)
+            if mode == "stop":
+                assert session.turns == []  # startup Stop withdraws the message before the model can act
+                assert next(e.payload["outcome"] for e in replies if e.reply_to == first.message_id) == "stopped"
+            elif mode == "idle":
+                assert session.turns == []
+            else:
+                assert len(session.turns) == 1 and "ordinary message" in session.turns[0]
+                assert next(e.payload["outcome"] for e in replies if e.reply_to == first.message_id) == "answered"
+            assert all("/STOP" not in text for text in session.turns)
+            await until(lambda: stop.message_id not in {e.message_id for e in bus.journal.undelivered()}, timeout=2)
+            assert not manager._turns.live()
+        finally:
+            await manager.stop()
+            await asyncio.gather(*manager._stop_tasks, return_exceptions=True)
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_reaching_the_message_loop_still_uses_the_code_path(tmp_path: Path, agent_db: Any) -> None:
+    async def run() -> None:
+        session = _Session(hold=False)
+        manager, bus, _ = _manager(tmp_path, session)
+        await manager.start(bus)
+        chat = bus.get_queue(TELEGRAM.agent_id)
+        try:
+            # A queued envelope has bypassed the live consumer (for example, journal recovery).
+            bus.get_queue(manager.agent_id).put_nowait(_tg("/stop"))
+            await until(lambda: not chat.empty(), timeout=5)
+            assert _texts(chat) == ["现在没有正在进行的回复。"]
+            assert session.turns == [] and not manager._turns.live()
+        finally:
+            await manager.stop()
+            await bus.shutdown()
+
+    asyncio.run(run())
