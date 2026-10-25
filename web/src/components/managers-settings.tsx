@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Loader2, Plus, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -33,6 +33,8 @@ import {
   type TaskTemplateFields,
   type TemplateInput,
 } from "@/lib/api";
+import { ManagerChatBindings, useManagerChatBindings } from "@/components/manager-chat-bindings";
+import type { Binding } from "@/lib/chat-bindings-api";
 import { MANAGER_EXAMPLE } from "@/lib/manager-example";
 import { settingsHref } from "@/lib/settings-pages";
 import { errorText, useAction } from "@/lib/use-action";
@@ -535,7 +537,10 @@ function ProjectName({ id }: { id: string }) {
 
 // --- The list ---
 
-function ManagerRow({ manager, reload }: { manager: ManagerInfo; reload: Reload }) {
+function ManagerRow({ manager, managers, bindings, snapshot, reload }: {
+  manager: ManagerInfo; managers: ManagerInfo[]; bindings: Binding[];
+  snapshot: Omit<ReturnType<typeof useManagerChatBindings>, "bindings">; reload: Reload;
+}) {
   const [editing, setEditing] = useState(false);
   const action = useAction();
   const remove = () => {
@@ -591,6 +596,7 @@ function ManagerRow({ manager, reload }: { manager: ManagerInfo; reload: Reload 
               {manager.templates.map((t) => <TemplateRow key={t.key} manager={manager} template={t} reload={reload} />)}
             </RegistryList>
           )}
+          <ManagerChatBindings manager={manager} managers={managers} bindings={bindings} snapshot={snapshot} reload={reload} />
         </>
       }
     >
@@ -612,27 +618,25 @@ function ManagerRow({ manager, reload }: { manager: ManagerInfo; reload: Reload 
 export function ManagersSection() {
   const [managers, setManagers] = useState<ManagerInfo[] | null>(null);
   const [error, setError] = useState("");
-  const [attempt, setAttempt] = useState(0);
   const [example, setExample] = useState(0);
-
+  const snapshot = useManagerChatBindings();
+  const { bindings: chatBindings, ...chatState } = snapshot;
+  const { refresh: refreshChats } = chatState;
+  const managerVersion = useRef(0);
   const load = useCallback(async () => {
-    try {
-      setManagers(await fetchManagers());
-      setError("");
-    } catch (err) {
-      setError(errorText(err));
-    }
-  }, []);
+    const version = ++managerVersion.current;
+    const definitions = fetchManagers().then((list) => {
+      if (version === managerVersion.current) { setManagers(list); setError(""); }
+    }).catch((err: unknown) => {
+      if (version === managerVersion.current) setError(errorText(err));
+    });
+    await Promise.all([definitions, refreshChats()]);
+  }, [refreshChats]);
 
   useEffect(() => {
-    let alive = true;
-    fetchManagers().then((list) => {
-      if (alive) setManagers(list);
-    }).catch((err: unknown) => {
-      if (alive) setError(errorText(err));
-    });
-    return () => { alive = false; };
-  }, [attempt]);
+    void load();
+    return () => { managerVersion.current++; };
+  }, [load]);
 
   const anyPending = !!managers?.some((m) => m.state.sync === "pending");
   useEffect(() => {
@@ -645,7 +649,7 @@ export function ManagersSection() {
     return error ? (
       <div className="space-y-3">
         <p role="alert" className="break-words text-sm text-destructive">{error}</p>
-        <Button variant="outline" onClick={() => { setError(""); setAttempt((n) => n + 1); }}>Retry</Button>
+        <Button variant="outline" onClick={() => void load()}>Retry</Button>
       </div>
     ) : (
       <div className="flex h-32 items-center justify-center">
@@ -653,15 +657,29 @@ export function ManagersSection() {
       </div>
     );
   }
+  const grouped = new Map<string, Binding[]>();
+  for (const binding of chatBindings ?? []) {
+    const group = grouped.get(binding.manager_id) ?? [];
+    group.push(binding);
+    grouped.set(binding.manager_id, group);
+  }
   return (
     <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" variant="outline" disabled={snapshot.busy} onClick={() => void snapshot.refresh()}>
+          {snapshot.error ? "Retry chats" : "Refresh chats"}
+        </Button>
+        {snapshot.loading && <span role="status" className="text-xs text-muted-foreground">Loading chats…</span>}
+        {snapshot.error && <p role="alert" className="break-words text-xs text-destructive">{snapshot.error}</p>}
+      </div>
       <RegistryList
         title="Managers"
         hint="Each Manager has its own prompt, tools and task visibility."
         addLabel="Add Manager"
         form={(close) => <ManagerForm manager={null} reload={load} onDone={close} />}
       >
-        {managers.map((m) => <ManagerRow key={m.id} manager={m} reload={load} />)}
+        {managers.map((m) => <ManagerRow key={m.id} manager={m} managers={managers}
+          bindings={grouped.get(m.id) ?? []} snapshot={chatState} reload={load} />)}
       </RegistryList>
       <ExampleManager reload={load} key={`example-${example}`} onDone={() => setExample((n) => n + 1)} />
       {error && <p role="alert" className="text-xs text-destructive">{error}</p>}

@@ -21,6 +21,8 @@ vi.mock("@/lib/api", async (importOriginal) => ({
   fetchRegistry: vi.fn(async () => ({ profiles: [] })),
 }));
 
+vi.mock("@/lib/chat-bindings-api", () => ({ fetchChatBindings: vi.fn(async () => []) }));
+
 const m = vi.mocked(api);
 
 function manager(patch: Partial<api.ManagerInfo> = {}): api.ManagerInfo {
