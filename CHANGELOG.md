@@ -18,6 +18,17 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.130] - 2026-10-25
+
+### Added
+
+- **Managers settings lists each Manager's chat bindings and can move or unbind them.** Unbinding first explains what happens to the chat, and the list is re-read from the server after each write. ([#657](https://github.com/foolzzz/looper/pull/657))
+- **Channels settings binds observed bot chats and saves the Only bound chats switch.** Each Telegram or Lark card lists observed chats with their effective Manager; changes apply to future messages at once. ([#658](https://github.com/foolzzz/looper/pull/658))
+
+### Changed
+
+- **The channel card and Channels page now say that only bot connection, credential and allowlist changes need a restart.** The saved badge reads "Saved — restart to apply bot settings". ([#658](https://github.com/foolzzz/looper/pull/658))
+
 ## [2.13.129] - 2026-10-25
 
 ### Added
