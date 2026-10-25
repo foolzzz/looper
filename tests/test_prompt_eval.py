@@ -3105,8 +3105,17 @@ def _tool_use(name: str, **arguments: Any) -> dict[str, Any]:
           {"type": "tool_use", "name": "looper__looper_task_control", "input": "not a dict"}]}}}], ("ok",), None),
 ])
 def test_start_no_wait_rejects_a_native_shell_after_the_start(
-    monkeypatch: pytest.MonkeyPatch, events: list[dict[str, Any]], start_statuses: tuple[str, ...], problem: str | None,
+    start_no_wait_look: Any, events: list[dict[str, Any]], start_statuses: tuple[str, ...], problem: str | None,
 ) -> None:
+    from evals.prompt_regression import dialogs
+
+    trail = [{"tool": "looper_task_control", "status": status, "risk": "write",
+              "arguments": {"action": "start", "task_id": "t"}} for status in start_statuses]
+    assert dialogs._started_without_waiting(start_no_wait_look(events, trail)) == problem
+
+
+@pytest.fixture
+def start_no_wait_look(monkeypatch: pytest.MonkeyPatch) -> Any:
     from evals.prompt_regression import dialogs
 
     class Api:
@@ -3118,10 +3127,78 @@ def test_start_no_wait_rejects_a_native_shell_after_the_start(
         def get(self, path: str, **_: Any) -> dict[str, Any]:
             if path == "/api/v1/runs/list":
                 return {"records": [{"id": 7, "metadata": {}}]}
-            return {"events": events if _ == {} or _.get("after") == 0 else []}
+            return {"events": self.events if _ == {} or _.get("after") == 0 else []}
 
-    trail = [{"tool": "looper_task_control", "status": status, "risk": "write",
-              "arguments": {"action": "start", "task_id": "t"}} for status in start_statuses]
-    monkeypatch.setattr(dialogs, "_trail", lambda *_: trail)
-    look = dialogs.Look(Api(), "t", "", "", 0, frozenset(), True)  # type: ignore[arg-type]
-    assert dialogs._started_without_waiting(look) == problem
+    def look(events: list[dict[str, Any]], trail: list[dict[str, Any]]) -> Any:
+        api = Api()
+        api.events = events
+        monkeypatch.setattr(dialogs, "_trail", lambda *_: trail)
+        return dialogs.Look(api, "t", "", "", 0, frozenset(), True)  # type: ignore[arg-type]
+
+    return look
+
+
+@pytest.mark.parametrize("calls,problem", [
+    pytest.param([
+        ("child", "start", "error"), (None, "start", "ok"), (None, "Bash", None),
+    ], "the Manager ran ['Bash'] after starting the task", id="child-failure-before-parent"),
+    pytest.param([
+        (None, "start", "ok"), ("child", "start", "error"), (None, "Bash", None),
+    ], "the Manager ran ['Bash'] after starting the task", id="child-failure-after-parent"),
+    pytest.param([
+        ("child", "start", "error"), (None, "Bash", None), (None, "start", "ok"),
+    ], None, id="parent-shell-before-success"),
+    pytest.param([
+        ("child", "start", "error"), (None, "start", "ok"),
+        ("child", "Bash", None), ("child", "run_terminal_command", None),
+    ], None, id="child-native-tools"),
+    pytest.param([
+        ("child", "start", "error"), (None, "start", "error"), (None, "Bash", None),
+    ], "looper_task_control start ran 0 times, not once", id="all-starts-failed"),
+    pytest.param([
+        ("child", "start", "error"), (None, "start", "ok"),
+        (None, "start", "ok"), (None, "Bash", None),
+    ], "looper_task_control start ran 2 times, not once", id="repeated-success"),
+    pytest.param([
+        ("child", "start", "error"), (None, "start", "error"), (None, "Bash", None),
+        (None, "start", "ok"), (None, "Bash", None),
+    ], "the Manager ran ['Bash'] after starting the task", id="parent-retry"),
+    pytest.param([
+        ("child", "start", "error"), (None, "start", "ok"), (None, "get", "ok"),
+    ], None, id="one-parent-status-read"),
+    pytest.param([
+        ("child", "start", "error"), (None, "start", "ok"),
+        (None, "get", "ok"), (None, "get", "ok"),
+    ], "the Manager made 2 calls after starting the task, polling instead of ending the reply",
+       id="parent-status-polling"),
+    pytest.param([
+        ("child", "start", "error"), (None, "wrapped_start", "ok"),
+        (None, "run_terminal_command", None),
+    ], "the Manager ran ['run_terminal_command'] after starting the task", id="wrapped-parent-start"),
+    pytest.param([
+        ("child", "wrapped_start", "error"), (None, "start", "ok"), (None, "Bash", None),
+    ], "the Manager ran ['Bash'] after starting the task", id="wrapped-child-start"),
+])
+def test_start_no_wait_matches_child_and_parent_audit_outcomes(
+    start_no_wait_look: Any, calls: list[tuple[str | None, str, str | None]], problem: str | None,
+) -> None:
+    from evals.prompt_regression import dialogs
+
+    events, trail = [], []
+    for seq, (parent, tool, status) in enumerate(calls, 1):
+        if tool in {"start", "wrapped_start", "get"}:
+            is_start = tool != "get"
+            name = "looper_task_control" if is_start else "looper_task_info"
+            arguments = {"task_id": "t", "action": "start" if is_start else "get"}
+            event = (_tool_use("use_tool", tool_name="looper__" + name, tool_input=json.dumps(arguments))
+                     if tool == "wrapped_start" else _tool_use("mcp__looper__" + name, **arguments))
+            trail.append({"tool": "looper_task_control" if is_start else "looper_task_info",
+                          "arguments": arguments,
+                          "status": status, "risk": "write" if is_start else "read"})
+        else:
+            event = _tool_use(tool, command="sleep 60")
+        event["seq"] = seq
+        event["event"]["parent_tool_use_id"] = parent
+        events.append(event)
+
+    assert dialogs._started_without_waiting(start_no_wait_look(events, trail)) == problem

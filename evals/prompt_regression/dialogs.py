@@ -1219,24 +1219,27 @@ def _native_calls_after_start(look: Look) -> list[str]:
     runs = [r for r in records if not (r.get("metadata") or {}).get("autonomous")]
     if not runs:
         return []
-    called: list[tuple[str, dict[str, Any]]] = []
+    called: list[tuple[str, dict[str, Any], bool]] = []
     for row in _all_events(look.api, max(runs, key=lambda r: r["id"])["id"]):
         event = row["event"]
-        if event.get("type") != "assistant" or event.get("parent_tool_use_id") is not None:
+        if event.get("type") != "assistant":
             continue
-        called += [_looper_call(b.get("name"), b.get("input")) for b in (event.get("message") or {}).get("content") or []
+        parent = event.get("parent_tool_use_id") is None
+        called += [(*_looper_call(b.get("name"), b.get("input")), parent)
+                   for b in (event.get("message") or {}).get("content") or []
                    if isinstance(b, dict) and b.get("type") == "tool_use"]
-    starts = [i for i, (name, args) in enumerate(called)
+    starts = [i for i, (name, args, _) in enumerate(called)
               if name == "looper_task_control" and args.get("action") == "start"]
     if not starts:
         return []
     actions = [a for a in look.turn_actions() if a["tool"] == "looper_task_control"
                and a["arguments"].get("action") == "start"]
-    # Match the start attempts to their outcomes; a refused retry must not move the anchor.
-    first = next((i for i, action in zip(starts, actions) if action["status"] == "ok"), None)
+    # The audit has no stream call ids and includes child calls: pair all starts in that same scope,
+    # then anchor only on the Manager's first successful start. A refused retry must not move it.
+    first = next((i for i, action in zip(starts, actions) if called[i][2] and action["status"] == "ok"), None)
     if first is None:
         return []
-    return [name for name, _ in called[first + 1:] if not name.startswith("looper_")]
+    return [name for name, _, parent in called[first + 1:] if parent and not name.startswith("looper_")]
 
 
 def _started_without_waiting(look: Look) -> str | None:
