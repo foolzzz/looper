@@ -143,9 +143,13 @@ class OmpChannel:
                 "type": "result", "subtype": "error_during_execution", "is_error": True, "result": "",
                 "errors": [safe_error(f"OMP rpc: {message}", secrets=self._stream.secrets, limit=None)]}
 
+    @property
+    def send_timeout(self) -> float:
+        return _STEER_TIMEOUT_SEC
+
     async def send(self, text: str, *, uuid: str | None = None) -> None:
         try:
-            response = await asyncio.wait_for(self._steer(text), _STEER_TIMEOUT_SEC)
+            response = await asyncio.wait_for(self._steer(text), self.send_timeout)
         except TimeoutError:
             raise RuntimeError("OMP did not accept the steer in time") from None
         if not response.get("success"):

@@ -17,18 +17,26 @@ from looper.agents.tiers.planner_protocol import ChatAction, ChatReply
 from looper.agents.tiers.worker import WorkerConfig, WorkerPool
 
 
+_DEFAULT_DELIVERY_TIMEOUT = worker_module.WORKER_INPUT_DELIVERY_TIMEOUT
+
+
 class Channel:
+    send_timeout = 0.01
+
     def __init__(self) -> None:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self.settled = asyncio.Event()
         self.sent: list[str] = []
+        self.written: list[str] = []
         self.error: Exception | None = None
 
     async def send(self, text: str) -> None:
         self.started.set()
         try:
-            await self.release.wait()
+            self.written.append(text)
+            async with asyncio.timeout(self.send_timeout):
+                await self.release.wait()
             if self.error:
                 raise self.error
             self.sent.append(text)
@@ -92,6 +100,58 @@ def test_expired_input_is_acknowledged_and_never_delivered_later(
             assert channel.sent == []
             assert not (asyncio.all_tasks() - before), "the bus delivery task survived refusal"
             assert not planner._bus._reply_futures
+
+    asyncio.run(asyncio.wait_for(run(), 2))
+
+
+@pytest.mark.parametrize("caller", ["chat", "supervise"])
+def test_starting_worker_acceptance_after_four_seconds_is_acknowledged_once(
+    tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch, caller: str,
+) -> None:
+    # Scale the production deadline and a runtime's 4s acceptance timeout together.
+    monkeypatch.setattr(worker_module, "WORKER_INPUT_DELIVERY_TIMEOUT", _DEFAULT_DELIVERY_TIMEOUT / 5)
+    monkeypatch.setattr(planner_module, "WORKER_INPUT_TIMEOUT", 5 / 5)
+
+    async def run() -> None:
+        async with delivery(tmp_path) as (_, planner, plan, step, channel, ready, acks):
+            channel.send_timeout = 4 / 5
+            loop = asyncio.get_running_loop()
+            opening = loop.call_later(0.05, ready.set)
+            accepting = loop.call_later(0.83, channel.release.set)
+            try:
+                await planner._save(plan, step)
+                await correct(planner, plan, step, caller)
+                assert [ack.payload for ack in acks] == [{"delivered": True}]
+                assert len(channel.written) == 1 and channel.sent == channel.written
+                assert channel.sent[0].endswith("use blue")
+                assert step.missed_messages == []
+                assert agent_db.store.steps["t1"]["s1"]["missed_messages"] == []
+                assert not planner._bus._reply_futures
+            finally:
+                opening.cancel()
+                accepting.cancel()
+
+    asyncio.run(asyncio.wait_for(run(), 2))
+
+
+@pytest.mark.parametrize("startup_delay, acceptance_timeout", [(0, 0.04), (0.02, 0.02)])
+def test_insufficient_acceptance_budget_refuses_before_writing(
+    tmp_path: Path, agent_db: Any, startup_delay: float, acceptance_timeout: float,
+) -> None:
+    async def run() -> None:
+        async with delivery(tmp_path) as (_, planner, plan, step, channel, ready, acks):
+            channel.send_timeout = acceptance_timeout
+            opening = asyncio.get_running_loop().call_later(startup_delay, ready.set)
+            try:
+                await correct(planner, plan, step, "chat")
+                assert [ack.payload for ack in acks] == [{"delivered": False}]
+                assert step.missed_messages == ["use blue"]
+                assert not channel.started.is_set() and channel.written == []
+                channel.release.set()
+                await asyncio.sleep(0)
+                assert channel.sent == []
+            finally:
+                opening.cancel()
 
     asyncio.run(asyncio.wait_for(run(), 2))
 

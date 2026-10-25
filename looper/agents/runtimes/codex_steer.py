@@ -243,9 +243,13 @@ class CodexChannel:
         if self._ended or self._process.stdin.is_closing():
             raise RuntimeError("the Codex run has ended")
 
+    @property
+    def send_timeout(self) -> float:
+        return _REQUEST_TIMEOUT_SEC
+
     async def send(self, text: str, *, uuid: str | None = None) -> None:
         try:
-            await asyncio.wait_for(self._steer(text), _REQUEST_TIMEOUT_SEC)
+            await asyncio.wait_for(self._steer(text), self.send_timeout)
         except TimeoutError:
             raise RuntimeError("Codex app-server did not accept the steer in time") from None
 

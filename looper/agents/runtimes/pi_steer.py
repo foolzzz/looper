@@ -193,13 +193,17 @@ class PiChannel:
         self._finish()
         return self._stream.failure(f"Pi RPC: {message}")
 
+    @property
+    def send_timeout(self) -> float:
+        return _STEER_TIMEOUT_SEC
+
     async def send(self, text: str, *, uuid: str | None = None) -> None:
         """Only a queued ACK means acceptance; neither timeout nor rejection is retried."""
         assert self._process.stdin is not None
         request_id: str | None = None
         try:
             # One deadline covers lock contention, pipe backpressure and the response.
-            async with asyncio.timeout(_STEER_TIMEOUT_SEC):
+            async with asyncio.timeout(self.send_timeout):
                 if self._phase is _Phase.NEW:
                     raise RuntimeError("Pi cannot steer before the run has started")
                 # Worker registers inputs just after start(), before events() has read setup ACKs.

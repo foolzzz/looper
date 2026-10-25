@@ -657,6 +657,8 @@ class ResidentDsh(PerTurnSession):
 class DshChannel:
     """A headless run publishes success only after EOF and exit; its owner can still timeout or cancel it."""
 
+    send_timeout = 0.0  # Active runs reject further input immediately.
+
     def __init__(self, runtime: DshRuntime, process: asyncio.subprocess.Process, *, launch: Launch) -> None:
         self._runtime, self._process = runtime, process
         self._stream = DshStream(model=launch.model, root_only=_root_only_consult(launch))

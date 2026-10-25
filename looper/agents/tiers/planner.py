@@ -234,9 +234,9 @@ from ...db import room as db_room
 from ...db.task_changes import TaskChanges
 from ...db.tasks import FailKind, update_task_phase
 
-# The pool bounds readiness + send at four seconds; reserve one more for its
+# The pool reserves the channel's acceptance timeout; leave half a second for its
 # acknowledgement so refusal settles before this request expires.
-WORKER_INPUT_TIMEOUT = WORKER_INPUT_DELIVERY_TIMEOUT + 1.0
+WORKER_INPUT_TIMEOUT = WORKER_INPUT_DELIVERY_TIMEOUT + 0.5
 # A schedule run's requirement, repeated in its PLAN user message. The Task section is not part of the
 # session transcript, so a later run that continues the conversation would not see what this run was asked,
 # including the gate output. Clipped with the Task section's limit and marker.

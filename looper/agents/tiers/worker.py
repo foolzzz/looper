@@ -84,9 +84,9 @@ from ...db import projects as db_projects
 logger = logging.getLogger(__name__)
 
 DEFAULT_RUN_TIMEOUT_SEC = 86400
-# Readiness and runtime acceptance share this budget. The Planner leaves another
-# second for the pool's WORKER_INPUT_RESULT acknowledgement on the local bus.
-WORKER_INPUT_DELIVERY_TIMEOUT = 4.0
+# Readiness and runtime acceptance share this budget. The Planner leaves an extra
+# half second for the pool's WORKER_INPUT_RESULT acknowledgement on the local bus.
+WORKER_INPUT_DELIVERY_TIMEOUT = 4.5
 
 # The Worker's role prompt when the ``worker`` config row has none; serve
 # seeds it as the row's recommended prompt. It describes the role only: the
@@ -530,21 +530,26 @@ class WorkerPool:
         return worker_id in self._inputs
 
     async def send_input(self, worker_id: str, text: str) -> bool:
-        """Wait for readiness and acceptance within one deadline; never queue a late send.
+        """Reserve the channel's full acceptance timeout before writing a user turn.
 
-        Timeout cancels the wait/send inline before returning False. Caller cancellation
-        propagates after the same cleanup; no detached send can outlive this operation.
+        Only readiness is cancelled by the pool's deadline. Once sending starts,
+        wait for the channel's own acceptance result without shortening its timeout.
         """
         if not text.strip():
             return False
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + WORKER_INPUT_DELIVERY_TIMEOUT
         try:
-            async with asyncio.timeout(WORKER_INPUT_DELIVERY_TIMEOUT):
+            async with asyncio.timeout_at(deadline):
                 if ready := self._input_ready.get(worker_id):
                     await ready.wait()
-                channel = self._inputs.get(worker_id)
-                if channel is None:
-                    return False
-                await channel.send(text)
+            channel = self._inputs.get(worker_id)
+            if channel is None:
+                return False
+            if deadline - loop.time() < channel.send_timeout:
+                logger.warning("worker %s has insufficient time to accept input before acknowledgement", worker_id)
+                return False
+            await channel.send(text)
         except TimeoutError:
             logger.warning("worker %s input delivery timed out before acknowledgement", worker_id)
             return False

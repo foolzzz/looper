@@ -108,7 +108,7 @@ def test_a_runtime_without_steering_rejects_a_steered_command(tmp_path: Path) ->
 def test_a_rejected_turn_stops_accepting_input(tmp_path: Path, error: type[Exception]) -> None:
     async def run() -> None:
         pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
-        channel = SimpleNamespace(send=AsyncMock(side_effect=error))
+        channel = SimpleNamespace(send_timeout=4.0, send=AsyncMock(side_effect=error))
         pool._inputs["w1"] = channel
         assert pool.accepts_input("w1")
         assert not await pool.send_input("w1", "  ")

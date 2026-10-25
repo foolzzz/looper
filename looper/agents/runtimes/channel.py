@@ -14,9 +14,12 @@ class RunChannel(Protocol):
     """A run's first turn, ordered output until EOF, further turns and idempotent input close.
 
     ``send`` returns once the runtime accepts the turn; a run that cannot accept it raises ``RuntimeError``.
+    ``send_timeout`` bounds that entire operation, including readiness, writes and acceptance.
     ``start`` and ``send`` may raise ``BrokenPipeError`` or ``ConnectionResetError`` if input has closed.
     """
 
+    @property
+    def send_timeout(self) -> float: ...
     async def start(self, prompt: str) -> None: ...
     def events(self) -> AsyncIterator[dict[str, Any]]: ...
     async def send(self, text: str, *, uuid: str | None = None) -> None: ...
@@ -25,6 +28,8 @@ class RunChannel(Protocol):
 
 class StreamChannel:
     """The runtime's existing stdin turns and stdout events, without a protocol of its own."""
+
+    send_timeout = 4.0
 
     def __init__(self, runtime: RuntimeAdapter, process: asyncio.subprocess.Process, *, model: str | None) -> None:
         self._runtime = runtime
@@ -41,7 +46,8 @@ class StreamChannel:
 
     async def send(self, text: str, *, uuid: str | None = None) -> None:
         assert self._process.stdin is not None
-        await self._runtime.write_turn(self._process.stdin, text, uuid=uuid)
+        async with asyncio.timeout(self.send_timeout):
+            await self._runtime.write_turn(self._process.stdin, text, uuid=uuid)
 
     def end_input(self) -> None:
         assert self._process.stdin is not None
