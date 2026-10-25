@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.122] - 2026-10-25
+
+### Changed
+
+- **Tests pin the per-conversation chat draft handling.** A new browser test and a new component test check that an unsent draft stays with its own Manager and conversation across switching, transcript links, going back and a reload, and that nothing is sent. Two existing browser tests now wait for the restored session's history to render before sending. Tests only: no shipped code, route, stored data format, Manager tool declaration or prompt changed. ([#638](https://github.com/foolzzz/looper/pull/638))
+
 ## [2.13.121] - 2026-10-25
 
 ### Fixed
