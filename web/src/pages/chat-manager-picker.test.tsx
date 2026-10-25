@@ -159,6 +159,46 @@ describe("chat Manager picker", () => {
     expect(api.fetchManagerSession).toHaveBeenCalledWith("manager-review", expect.anything());
   });
 
+  it.each(["send", "stream", "rejected"])("keeps a pending %s for a transcript, but cancels it for another Manager", async (stage) => {
+    const pending = deferred<{ correlation_id: string }>();
+    const transcript = { ...row("lark:known"), channel: "lark" };
+    api.fetchChatSessions.mockResolvedValue([transcript]);
+    api.fetchChatSession.mockImplementation(async (sid: string) => sid === transcript.session_id ? transcript : null);
+    api.sendChat.mockReturnValue(pending.promise);
+    const close = vi.fn();
+    api.streamChatReply.mockReturnValue(close);
+    await mount();
+    await say("Original Manager submission");
+    const signal = api.sendChat.mock.calls[0][4].signal as AbortSignal;
+    if (stage === "stream") {
+      await act(async () => pending.resolve({ correlation_id: "old-reply" }));
+    }
+    await click(buttons().find((b) => b.title === transcript.session_id));
+    expect(input()).toBeNull();
+    expect(signal.aborted).toBe(false);
+    expect(close).not.toHaveBeenCalled();
+    if (stage === "rejected") {
+      await act(async () => pending.reject(new Error("Request was not accepted")));
+    }
+    await pick("Code review");
+    expect(signal.aborted).toBe(true);
+    if (stage === "send") {
+      await act(async () => pending.resolve({ correlation_id: "old-reply" }));
+      expect(api.streamChatReply).not.toHaveBeenCalled();
+    } else if (stage === "stream") {
+      expect(close).toHaveBeenCalledOnce();
+      const [, event, done] = api.streamChatReply.mock.calls[0];
+      act(() => {
+        event({ kind: "answer.final", payload: { text: "Old Manager reply", outcome: "answered" } });
+        done();
+      });
+    }
+    expect(container.textContent).not.toContain("Old Manager reply");
+    expect(container.textContent).not.toContain("Original Manager submission");
+    expect(input().value).toBe("");
+    expect(api.sendChat).toHaveBeenCalledOnce();
+  });
+
   it("closes the New session panel when the Manager changes", async () => {
     await mount();
     await pick("Code review");

@@ -335,14 +335,8 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const scrollRef = useRef<HTMLDivElement>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const turnRef = useRef(0); // the send in flight; an older stream must not touch a newer turn's state
-  // Invalidate even a send whose HTTP response has not arrived, including navigation to a read-only or missing thread.
-  useEffect(() => {
-    // Sidebar navigation clears the query, then pins this same thread again; neither changes the send's owner.
-    if (wantTarget === target.id && (!wantConversation || wantConversation === sessionId)) return;
-    cleanupRef.current?.();
-    setSending(false);
-    setPhase("");
-  }, [wantTarget, wantConversation, target.id, sessionId]);
+  // A send belongs to the adopted target/session, even while a read-only or unresolved link hides its composer.
+  // switchWebSession and applyTarget cancel it only when a different writable owner is actually adopted.
   // Leaving the page (the session ended, for one) stops the reply stream.
   useEffect(() => () => cleanupRef.current?.(), []);
 
@@ -620,6 +614,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     localStorage.setItem(sessionKey(managerId), id);
     currentRef.current = { managerId, sessionId: id };
     setSessionId(id);
+    setInput("");
     setMessages([]);
     setSending(false);
     setPhase("");
@@ -664,6 +659,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     setServerTurn(null);
     setSending(false);
     setPhase("");
+    setInput("");
     setMessages([]);
     if (next.id !== target.id) {
       setConversations(null);
@@ -873,7 +869,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const syncTurnRef = useRef(syncTurn);
   syncTurnRef.current = syncTurn;
 
-  // Opening a read-only or unresolved conversation leaves sessionId unchanged, but cancels this thread's stream.
+  // Returning to the writable thread resumes polling if no live send/stream is already following its turn.
   const threadOpen = !viewing && !conversationUnread && (!wantConversation || wantConversation === sessionId);
   useEffect(() => {
     stagedRef.current = readStaged(sessionId);
