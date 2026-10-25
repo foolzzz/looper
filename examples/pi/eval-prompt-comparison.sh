@@ -237,7 +237,11 @@ for label, phase, ids, model, reps, extra, baseline in tiers:
                      + " ".join(f"{key}={row.get(key, 'unverified')}" for key in (
                          "planner_denials", "planner_modified_files", "planner_edit_tool_paths", "planner_changed_files")))
             # Compare the very same case/reps; do not fold other pi cases into totals.
-            selected = {**pi_data, phase: pi_rows}
+            selected = {
+                **pi_data, phase: pi_rows,
+                "total_cost_usd": round(sum(float(row["cost_usd"]) for row in pi_rows), 6),
+                "reps": len({row["rep"] for row in pi_rows}),
+            }
             subset = output / (env_prefix.lower() + "-selected.json")
             subset.write_text(json.dumps(selected, indent=2) + "\n", encoding="utf-8")
             if bounded(command + ["compare", str(subset), str(report)], output / (env_prefix.lower() + "-compare.txt")):
