@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, expectTypeOf, it, vi } from "vitest";
 import { ProvidersSection } from "@/components/provider-settings";
-import { createProvider, updateProvider, type AgentProfile, type ProfileFields, type ProviderFields, type Provider, type Registry, type VendorType } from "@/lib/api";
+import { createProvider, updateProvider, type AgentProfile, type CreateProviderFields, type ProfileFields, type ProviderFields, type Provider, type Registry, type VendorType } from "@/lib/api";
 
 import { useRegistry } from "@/lib/use-registry";
 
@@ -45,16 +45,32 @@ let root: Root;
 let bodies: Record<string, unknown>[];
 let failure: string;
 let warnings: string[];
+let requests: { path: string; body: Record<string, unknown> }[];
+let registryReads: number;
 beforeEach(() => {
-  data = registry(); bodies = []; failure = ""; warnings = [];
+  data = registry(); bodies = []; failure = ""; warnings = []; requests = []; registryReads = 0;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (String(input) === "/api/v1/registry/view") return Response.json({ status: "ok", result: data });
+    if (String(input) === "/api/v1/registry/view") {
+      registryReads++;
+      return Response.json({ status: "ok", result: data });
+    }
+    const path = String(input);
+    expect(init?.method).toBe("POST");
+    expect(path).toMatch(/^\/api\/v1\/provider_accounts\/(create|update|delete|clear_login_problem)$/);
     const body = init?.body ? JSON.parse(String(init.body)) : {};
-    bodies.push(body);
-    if (failure) return Response.json({ error: failure }, { status: 409 });
-    const saved = account({ ...body, api_key: body.api_key === null ? null : "***" } as Partial<Provider>);
+    requests.push({ path, body });
+    const fields = path.endsWith("/update") ? body.fields : body;
+    bodies.push(fields);
+    if (failure) return Response.json({ status: "error", error: { code: "conflict", message: failure } }, { status: 409 });
+    if (path.endsWith("/delete")) {
+      data = { ...data, providers: data.providers.filter((provider) => provider.provider_id !== body.provider_id) };
+      return Response.json({ status: "ok", result: { deleted: body.provider_id } });
+    }
+    const saved: Provider = path.endsWith("/clear_login_problem")
+      ? { ...data.providers.find((provider) => provider.provider_id === body.provider_id)!, login: { state: "chatgpt", detail: "ChatGPT login" } }
+      : account({ ...fields, api_key: fields.api_key === null ? null : "***" } as Partial<Provider>);
     data = { ...data, providers: [saved] };
-    return Response.json({ provider: saved, warnings });
+    return Response.json({ status: "ok", result: { provider: saved, warnings } });
   }));
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
@@ -101,6 +117,8 @@ it("offers custom and built-in vendors together and starts a blank custom accoun
   await submit();
   expect(bodies[0]).toEqual({ name: "Custom account", vendor_type: "custom", env: [], max_concurrency: null,
     endpoints: [endpoint("openai-chat", "https://custom.invalid/api")] });
+  expect(requests[0].path).toBe("/api/v1/provider_accounts/create");
+  expect(registryReads).toBe(2);
 });
 
 it("prefills all vendor endpoints once, saves their own URLs and never submits suggested models", async () => {
@@ -156,6 +174,9 @@ it.each(["keep", "replace", "remove"])("%s a masked key without putting its mask
   });
   await submit();
   expect(bodies[0].api_key).toBe(mode === "keep" ? "***" : mode === "replace" ? "synthetic-replacement" : null);
+  expect(requests[0]).toEqual({ path: "/api/v1/provider_accounts/update",
+    body: { provider_id: "account-1", fields: bodies[0] } });
+  expect(registryReads).toBe(2);
 });
 
 it("reads saved vendor values after reload without reapplying defaults and keeps the vendor immutable", async () => {
@@ -220,9 +241,41 @@ it("retains server warnings until acknowledged", async () => {
   expect(container.querySelector("form")).toBeNull();
 });
 
+it("clears a login problem through v1 after the existing confirmation and refreshes the registry", async () => {
+  data.providers = [account({ vendor_type: "codex-login", auth: "oauth", oauth_runtime_type: "codex",
+    api_key: null, login: { state: "unavailable", detail: "Check the runtime login" } })];
+  const confirm = vi.fn(() => true); vi.stubGlobal("confirm", confirm);
+  await render(false); await click("Use the login again");
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(requests).toEqual([{ path: "/api/v1/provider_accounts/clear_login_problem", body: { provider_id: "account-1" } }]);
+  expect(container.textContent).toContain("Login: ChatGPT login");
+  expect(registryReads).toBe(2);
+});
+
+it("deletes through v1 after the existing confirmation and refreshes the registry", async () => {
+  data.providers = [account()];
+  const confirm = vi.fn(() => true); vi.stubGlobal("confirm", confirm);
+  await render(false); await click("Delete provider Saved account");
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(requests).toEqual([{ path: "/api/v1/provider_accounts/delete", body: { provider_id: "account-1" } }]);
+  expect(container.textContent).not.toContain("Saved account");
+  expect(registryReads).toBe(2);
+});
+
+it("keeps a pending v1 write visible as an error without refreshing or confirming it", async () => {
+  await render();
+  vi.mocked(fetch).mockResolvedValueOnce(Response.json({ status: "needs_confirmation", confirmation_id: "pending",
+    expires_in_seconds: 60, impact: "This account has active references." }, { status: 202 }));
+  await fill("Name *", "Pending account"); await submit();
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain("active references");
+  expect(container.querySelector("form")).not.toBeNull();
+  expect(registryReads).toBe(1);
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
+
 it("uses the normalized registry contract throughout", () => {
   expectTypeOf<ReturnType<typeof useRegistry>["registry"]>().toEqualTypeOf<Registry | null>();
-  expectTypeOf<Parameters<typeof createProvider>[0]>().toEqualTypeOf<ProviderFields>();
+  expectTypeOf<Parameters<typeof createProvider>[0]>().toEqualTypeOf<CreateProviderFields>();
   expectTypeOf<Parameters<typeof updateProvider>[1]>().toEqualTypeOf<ProviderFields>();
   expectTypeOf<Provider>().not.toHaveProperty("models");
   expectTypeOf<ProviderFields>().not.toHaveProperty("base_url");

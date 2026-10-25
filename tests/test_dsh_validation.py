@@ -678,11 +678,11 @@ def _serve_smoke_stand_in(mode):
             elif method == "POST" and path == "/api/v1/registry/view":
                 result = {"status": "ok", "result": {"runtimes": [{"name": "DSH", "type": "dsh", "builtin": True, "runtime_id": "rt-dsh"}],
                           "providers": [], "models": []}}
-            elif path == "/api/providers":
+            elif path == "/api/v1/provider_accounts/create":
                 assert body["api_key"] == "<memory-only>"
                 assert body["endpoints"] == [{"protocol": "anthropic-messages",
                                               "base_url": "https://api.deepseek.com/anthropic"}]
-                result = {"provider": {"provider_id": "provider"}}
+                result = {"status": "ok", "result": {"provider": {"provider_id": "provider"}, "warnings": []}}
             elif path == "/api/v1/ops/models/create":
                 assert body["provider"] == "provider"
                 assert (body["name"], body["protocol"]) == ("deepseek-flash", "anthropic-messages")
@@ -831,7 +831,7 @@ def smoke_peer(tmp_path, monkeypatch):
                     time.sleep(.005)
                 # Exercise credential registration in memory; the process peer
                 # receives only a marker, never a credential in an IPC file.
-                if path == "/api/providers":
+                if path == "/api/v1/provider_accounts/create":
                     assert body["api_key"] == "synthetic-private-key"
                     body = {**body, "api_key": "<memory-only>"}
                 request = peer / f"request-{number}.json"

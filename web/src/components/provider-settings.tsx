@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { EDIT_BOX, EditDelete, FormFooter, LABEL, RegistryList, Row, RowName, SELECT } from "@/components/registry-ui";
 import {
   clearLoginProblem, createProvider, deleteProvider, updateProvider,
-  type ProviderEndpoint, type ProviderFields, type Provider, type Registry,
+  type ProviderEndpoint, type CreateProviderFields, type Provider, type Registry,
   type VendorKind, type VendorType,
 } from "@/lib/api";
 import { LOGIN_HELP, loginUsable } from "@/lib/runtime-catalog";
@@ -63,8 +63,8 @@ function presetDraft(vendor: VendorType): ProviderDraft {
   };
 }
 
-function providerBody(draft: ProviderDraft, provider: Provider | null, registry: Registry): ProviderFields {
-  const fields: ProviderFields = {
+function providerBody(draft: ProviderDraft, provider: Provider | null, registry: Registry): CreateProviderFields {
+  const fields: CreateProviderFields = {
     name: draft.name.trim(), vendor_type: draft.vendorType,
     endpoints: draft.endpoints.map(({ protocol, base_url, use_runtime_default }) => ({
       protocol, base_url: base_url.trim(), use_runtime_default: base_url.trim() ? false : use_runtime_default,

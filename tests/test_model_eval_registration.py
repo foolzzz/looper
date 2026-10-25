@@ -36,12 +36,12 @@ class RegistryApi:
             self.settings.append(deepcopy(body["values"]))
             return {"status": "ok", "result": {}}
         self.posts.append((path, deepcopy(body)))
-        if path == "/api/providers":
+        if path == "/api/v1/provider_accounts/create":
             assert not {"protocols", "models", "base_url", "api_key_env", "auth"} & body.keys()
             provider = {**body, "provider_id": f"prov-{len(self.registry['providers'])}",
                         "api_key": "***", "auth": "api_key", "oauth_runtime_type": None}
             self.registry["providers"].append(provider)
-            return {"provider": deepcopy(provider)}
+            return {"status": "ok", "result": {"provider": deepcopy(provider), "warnings": []}}
         if path == "/api/v1/ops/models/create":
             assert "provider" in body and "provider_id" not in body
             body = {"provider_id" if k == "provider" else k: v for k, v in body.items()}
@@ -86,7 +86,7 @@ def test_four_layer_registration_and_readback_keep_model_settings_and_secrets_se
     original = deepcopy(spec)
     profile = runner.register_agent(api, spec)
     assert spec == original
-    assert [path for path, _ in api.posts] == ["/api/providers", "/api/v1/ops/models/create", "/api/v1/profiles/create"]
+    assert [path for path, _ in api.posts] == ["/api/v1/provider_accounts/create", "/api/v1/ops/models/create", "/api/v1/profiles/create"]
     assert api.posts[0][1]["api_key"] == "synthetic-eval-secret"
     saved = api.post("/api/v1/registry/view", {})["result"]
     assert saved["models"][0] == {**spec["model"], "provider_id": "prov-1", "model_id": profile["model_id"]}
@@ -220,7 +220,7 @@ def test_provider_registration_errors_never_echo_credentials(api, monkeypatch, t
     def rejected(path, body):
         if path == "/api/v1/registry/view":
             return original_post(path, body)
-        assert path == "/api/providers"
+        assert path == "/api/v1/provider_accounts/create"
         # HTTP errors are clipped by Api.request before the registration helper sees them.
         detail = body["api_key"][:10] if truncated else json.dumps(body)
         raise runner.EvalError(f"bad request: {detail}")

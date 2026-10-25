@@ -32,7 +32,7 @@ SECRET = "sk-test-0123456789"
 
 async def _ok(method: str, path: str, body: Any = None) -> Any:
     call = _catalog_call if path == "/api/v1/registry/view" or path.startswith(
-        ("/api/v1/installs/", "/api/v1/catalog_sources/", "/api/v1/ops/models/", "/api/v1/models/")) else _call
+        ("/api/v1/provider_accounts/", "/api/v1/installs/", "/api/v1/catalog_sources/", "/api/v1/ops/models/", "/api/v1/models/")) else _call
     status, answer = await call(method, path, body)
     assert status in (200, 201), (status, answer)
     return answer
@@ -215,7 +215,7 @@ def test_pi_and_dsh_manager_models_profiles_and_config_import_share_pairing_rule
     async def test(pool):
         runtime_id = await _runtime(runtime)
         chat = _Chat(tmp_path)
-        provider = (await _ok("POST", "/api/providers", {
+        provider = (await _ok("POST", "/api/v1/provider_accounts/create", {
             "name": "gateway", "vendor_type": "custom", "endpoints": [
                 {"protocol": p, "base_url": "https://gateway.example.invalid"}
                 for p in ("anthropic-messages", "openai-chat", "openai-responses")]}))["provider"]
@@ -383,7 +383,7 @@ def test_provider_list_includes_vendor_suggestions(monkeypatch, tmp_path):
 @pytest.mark.parametrize("reference", ["id", "name"])
 def test_provider_update_changes_dashboard_and_preserves_models_and_key(monkeypatch, tmp_path, reference):
     async def test(pool):
-        provider = (await _ok("POST", "/api/providers", {"name": "deepseek", "vendor_type": "deepseek",
+        provider = (await _ok("POST", "/api/v1/provider_accounts/create", {"name": "deepseek", "vendor_type": "deepseek",
             "api_key": SECRET, "env": [{"key": "API_TIMEOUT_MS", "value": "3000000"}],
             "max_concurrency": 2}))["provider"]
         model = await _model("deepseek-flash", provider["provider_id"])
@@ -429,16 +429,16 @@ def test_provider_update_changes_dashboard_and_preserves_models_and_key(monkeypa
 ])
 def test_provider_update_uses_dashboard_validation_and_rolls_back(monkeypatch, tmp_path, fields):
     async def test(pool):
-        provider = (await _ok("POST", "/api/providers", {"name": "deepseek", "vendor_type": "deepseek",
+        provider = (await _ok("POST", "/api/v1/provider_accounts/create", {"name": "deepseek", "vendor_type": "deepseek",
             "api_key": SECRET}))["provider"]
         await _model("deepseek-flash", provider["provider_id"])
         before = await _ok("POST", "/api/v1/registry/view", {})
-        status, expected = await _call("PUT", f"/api/providers/{provider['provider_id']}", fields)
+        status, expected = await _call("POST", "/api/v1/provider_accounts/update", {"provider_id": provider['provider_id'], "fields": fields})
         assert status == 400, expected
         (answer,) = await _Chat(tmp_path).say("修改账户", ("looper_providers", {
             "action": "update", "provider": provider["provider_id"], **fields}))
         assert _error(answer) == "invalid", answer
-        assert answer["error"]["message"] == expected["error"]
+        assert expected["error"] == "invalid credential request"
         assert await _ok("POST", "/api/v1/registry/view", {}) == before
         assert await pool.fetchval("SELECT api_key FROM llm_provider_secrets WHERE provider_id = $1",
                                    provider["provider_id"]) == SECRET
@@ -449,7 +449,7 @@ def test_provider_update_uses_dashboard_validation_and_rolls_back(monkeypatch, t
 @pytest.mark.parametrize("name", ["API_KEY", "OTHER_API_TOKEN", "CLIENT_SECRET", "PASSWORD", "CREDENTIAL"])
 def test_rejected_provider_env_credentials_are_masked_in_audit(monkeypatch, tmp_path, action, name):
     async def test(pool):
-        provider = (await _ok("POST", "/api/providers", {
+        provider = (await _ok("POST", "/api/v1/provider_accounts/create", {
             "name": "deepseek", "vendor_type": "deepseek"}))["provider"]
         before = await _ok("POST", "/api/v1/registry/view", {})
         fields = {"name": "new-account", "vendor_type": "deepseek"} if action == "register" else {
@@ -472,7 +472,7 @@ def test_rejected_provider_env_credentials_are_masked_in_audit(monkeypatch, tmp_
 
 def test_model_update_changes_dashboard_and_preserves_provider_key(monkeypatch, tmp_path):
     async def test(pool):
-        provider = (await _ok("POST", "/api/providers", {"name": "deepseek", "vendor_type": "deepseek",
+        provider = (await _ok("POST", "/api/v1/provider_accounts/create", {"name": "deepseek", "vendor_type": "deepseek",
             "api_key": SECRET, "env": [{"key": "API_TIMEOUT_MS", "value": "3000000"}]}))["provider"]
         model = await _model("deepseek-flash", provider["provider_id"])
         chat = _Chat(tmp_path)
@@ -488,8 +488,8 @@ def test_model_update_changes_dashboard_and_preserves_provider_key(monkeypatch, 
         endpoints = [{"protocol": "anthropic-messages", "base_url": "https://api.deepseek.com/anthropic"},
                      {"protocol": "openai-chat", "base_url": "https://api.deepseek.com"},
                      {"protocol": "openai-responses", "base_url": "https://api.deepseek.com"}]
-        updated = (await _ok("PUT", f"/api/providers/{provider['provider_id']}", {
-            "endpoints": endpoints, "env": []}))["provider"]
+        updated = (await _ok("POST", "/api/v1/provider_accounts/update", {"provider_id": provider['provider_id'], "fields": {
+            "endpoints": endpoints, "env": []}}))["provider"]
         assert {e["protocol"]: e["base_url"] for e in updated["endpoints"]} == {
             e["protocol"]: e["base_url"] for e in endpoints}
         assert updated["env"] == []
@@ -525,7 +525,7 @@ def test_model_update_preserves_other_catalog_metadata(monkeypatch, tmp_path, ch
 @pytest.mark.parametrize("name", ["deepseek-typo", "gpt-6.1-sol"])
 def test_model_writes_report_prices_and_keep_exact_unknown_names(monkeypatch, tmp_path, action, name):
     async def test(pool):
-        provider = (await _ok("POST", "/api/providers", {"name": "deepseek", "vendor_type": "deepseek"}))["provider"]
+        provider = (await _ok("POST", "/api/v1/provider_accounts/create", {"name": "deepseek", "vendor_type": "deepseek"}))["provider"]
         model = await _model(name, provider["provider_id"]) if action == "update" else None
         fields = {"model": model["model_id"], "context_window": 200_000} if model else {
             "provider": "deepseek", "name": name, "protocol": "anthropic-messages"}
@@ -559,7 +559,7 @@ def test_model_update_refuses_with_dashboard_validation_and_rolls_back(monkeypat
 @pytest.mark.parametrize("background_priced", [True, False])
 def test_profile_price_warnings_use_the_catalog_a_launch_prices_with(monkeypatch, tmp_path, background_priced):
     async def test(pool):
-        provider = (await _ok("POST", "/api/providers", {"name": "priced", "vendor_type": "deepseek"}))["provider"]
+        provider = (await _ok("POST", "/api/v1/provider_accounts/create", {"name": "priced", "vendor_type": "deepseek"}))["provider"]
         prices = dict.fromkeys(registry.PRICE_FIELDS, 1.0)
         if background_priced:
             await _model("bg-priced", provider["provider_id"], **prices)
@@ -582,7 +582,7 @@ def test_invalid_profile_changes_preserve_saved_reference(monkeypatch, tmp_path,
         await pool.execute("INSERT INTO agent_runtimes (id, name, type, capabilities) VALUES ('rt-omp', 'omp', 'omp', '{}')")
         fields = dict(changes)
         if fields.get("agent_teams"):
-            account = (await _ok("POST", "/api/providers", {"name": "api", "vendor_type": "custom",
+            account = (await _ok("POST", "/api/v1/provider_accounts/create", {"name": "api", "vendor_type": "custom",
                 "endpoints": [{"protocol": "anthropic-messages", "base_url": "https://example.com"}]}))["provider"]
             fields["model"] = (await _model("api-model", account["provider_id"]))["model_id"]
         before = await pool.fetchrow("SELECT * FROM agent_profiles WHERE id = 'agent-sonnet'")

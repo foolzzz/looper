@@ -397,7 +397,7 @@ def test_the_configuration_is_exported_into_the_runtime_directory_without_secret
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     async def test(pool: Any) -> None:
-        await _ok("POST", "/api/providers", {"name": "keyed", "vendor_type": "custom", "api_key": SECRET, "endpoints": [
+        await _ok("POST", "/api/v1/provider_accounts/create", {"name": "keyed", "vendor_type": "custom", "api_key": SECRET, "endpoints": [
             {"protocol": "anthropic-messages", "base_url": "https://api.example.test"}]})
         await _schedule(await _project(pool, "calc", str(tmp_path)), "nightly", enabled=True)
         runtime = tmp_path / "runtime"
