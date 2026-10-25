@@ -282,10 +282,14 @@ user's messages about it.
 - You plan and decide; Workers do the work. Each step runs in a fresh Claude
   Code session that sees only its step. Do not modify files yourself, not even
   for a small fix: every change to the project goes to a Worker as a step.
-- You run read-only: use Read, Glob and Grep to inspect the project and each
-  step's worktree when that helps you plan a step or judge a result. Leave
-  commands, tests and file changes to Workers. Looper refuses or reports
-  the tool calls that would change files.
+- You run read-only: inspect the project and each step's worktree when that
+  helps you plan a step or judge a result. Use your runtime's available reading
+  tools: Read, Glob and Grep in Claude Code, or the equivalent tools in other
+  runtimes. When your runtime exposes a shell for reading (as Codex does), use
+  read-only shell inspection such as `cat`, `ls` and `rg` under its existing
+  sandbox. Do not seek broader permissions or bypass the sandbox. Leave builds,
+  tests, file changes and other commands that change state to Workers. Looper
+  refuses or reports the tool calls that would change files.
 - Split the work into steps that each deliver one result that can be checked
   on its own. Keep a small piece of work whole when splitting it would only
   add hand-offs.
@@ -3288,7 +3292,6 @@ class PlannerAgent:
             # The shared directory stays unused until this run's own label is stored. A failed write stops
             # the turn; the next one tries again.
             await self._use_own_session_label(stop_turn=True)
-        settings = await load_settings()
         knowledge = await self._load_knowledge(plan)
         library = await self._load_installed(plan)
         if self._ops is not None and self._token is not None:
@@ -3303,11 +3306,14 @@ class PlannerAgent:
         except Exception:
             self._vault = None
             logger.warning("planner %s cannot read the knowledge vault setting", self.agent_id, exc_info=True)
-        system_prompt = self._system_prompt(plan, settings, knowledge, agent_settings.harness,
-                                            custom_prompt=agent_settings.profile.custom_prompt)
         launch = Launch(agent_settings, library, knowledge, role=AgentType.PLANNER,
                         read_dirs=tuple(step.workspace.path for step in plan.steps
                                         if step.isolated and step.workspace is not None))  # never with agent teams
+        # Compose the shared role guidance after resolving the launch; its runtime keeps its reading tools
+        # and read-only controls, and a saved custom role prompt is still loaded unchanged.
+        settings = await load_settings()
+        system_prompt = self._system_prompt(plan, settings, knowledge, launch.settings.harness,
+                                            custom_prompt=launch.profile.custom_prompt)
         await self._note_background(plan.project_background)
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
@@ -3836,7 +3842,7 @@ class PlannerAgent:
         if elsewhere:
             lines.append(elsewhere)
         if step.isolated and step.workspace is not None:
-            # This turn's launch permits reading the isolated worktree without a shell.
+            # This turn's launch permits read-only inspection of the isolated worktree.
             workspace = step.workspace
             lines.append(f"- worktree: {reported_files.prompt_name(workspace.path)}, on branch "
                          f"{reported_files.prompt_name(workspaces.short_branch(workspace.branch))} from "

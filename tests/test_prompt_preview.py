@@ -114,6 +114,35 @@ def test_preview_manager_has_no_project_context(monkeypatch):
     assert result["prompt_layers"]["project"] is None
 
 
+@pytest.mark.parametrize("runtime", ["claude-code", "codex"])
+@pytest.mark.parametrize("custom", [False, True])
+def test_planner_preview_matches_launch_inspection_guidance(monkeypatch, tmp_path, runtime, custom):
+    from looper.agents.knowledge import AgentKnowledge
+    from looper.agents.tiers.planner import DEFAULT_SYSTEM_PROMPT, PlannerAgent, TaskPlan, load_settings
+
+    module, profile, _ = _dependencies(monkeypatch, runtime, role="planner")
+    role = "Custom planner: ask Workers to inspect artifacts." if custom else DEFAULT_SYSTEM_PROMPT
+    monkeypatch.setattr(module.db_roles, "get_config", AsyncMock(return_value={
+        "system_prompt": role, "default_prompt": DEFAULT_SYSTEM_PROMPT}))
+    result = asyncio.run(module.preview(profile.id, "planner"))
+    settings = module.resolve("planner", module.index_layers(
+        asyncio.run(module.agent_setting_layers.list_layers(None)), None), None)
+    agent = PlannerAgent(task_id="preview-inspection", runtime_root=tmp_path)
+    prompt = agent._system_prompt(
+        TaskPlan("plan", "goal", "Inspect artifacts", str(tmp_path)),
+        asyncio.run(load_settings()), AgentKnowledge(), settings.harness,
+        custom_prompt=profile.custom_prompt)
+    assert result["prompt_layers"]["role"] == prompt.layers["role"]
+    shown = "\n".join(block["text"] or "" for block in result["blocks"])
+    assert role in shown and role in prompt.text
+    if not custom:
+        assert "read-only shell" in shown
+        assert "Read, Glob and Grep" in shown
+        assert "leave commands" not in " ".join(shown.lower().split())
+    else:
+        assert DEFAULT_SYSTEM_PROMPT not in shown
+
+
 @pytest.mark.parametrize("mode", ["append", "replace"])
 @pytest.mark.parametrize("runtime", ["omp", "pi"])
 def test_preview_includes_project_instructions_without_writes(monkeypatch, tmp_path, mode, runtime):
