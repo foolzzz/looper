@@ -219,6 +219,8 @@ from .planner_protocol import (
     reply_contract,
 )
 
+from .worker import WORKER_INPUT_DELIVERY_TIMEOUT
+
 logger = logging.getLogger(__name__)
 
 from ...db import activity as db_activity, role_configs as db_role_configs, llm_records as db_llm_records
@@ -232,8 +234,9 @@ from ...db import room as db_room
 from ...db.task_changes import TaskChanges
 from ...db.tasks import FailKind, update_task_phase
 
-# How long to wait for the worker pool to confirm a forwarded user turn.
-WORKER_INPUT_TIMEOUT = 5.0
+# The pool reserves the channel's acceptance timeout; leave half a second for its
+# acknowledgement so refusal settles before this request expires.
+WORKER_INPUT_TIMEOUT = WORKER_INPUT_DELIVERY_TIMEOUT + 0.5
 # A schedule run's requirement, repeated in its PLAN user message. The Task section is not part of the
 # session transcript, so a later run that continues the conversation would not see what this run was asked,
 # including the gate output. Clipped with the Task section's limit and marker.
