@@ -657,6 +657,8 @@ class ResidentDsh(PerTurnSession):
 class DshChannel:
     """A headless run publishes success only after EOF and exit; its owner can still timeout or cancel it."""
 
+    send_timeout = 0.0  # Active runs reject further input immediately.
+
     def __init__(self, runtime: DshRuntime, process: asyncio.subprocess.Process, *, launch: Launch) -> None:
         self._runtime, self._process = runtime, process
         self._stream = DshStream(model=launch.model, root_only=_root_only_consult(launch))
@@ -686,6 +688,9 @@ class DshChannel:
         await self._runtime.write_turn(self._process.stdin, prompt)
 
     async def send(self, text: str, *, uuid: str | None = None) -> None:
+        raise RuntimeError("DSH cannot accept a user turn while a run is active")
+
+    async def wait_input_ready(self) -> None:
         raise RuntimeError("DSH cannot accept a user turn while a run is active")
 
     def end_input(self) -> None:
