@@ -312,6 +312,68 @@ def parse_channel_id(channel_id: str | None) -> ChannelId | None:
     return ChannelId(match.group(1), int(match.group(2)) if match.group(2) else None)
 
 
+_THREAD_MANAGER_ID = re.compile(r"manager(?:-[a-z][a-z0-9-]{1,30})?")
+# Lark also uses open ids for direct chats; only identity separators and whitespace are unsafe.
+_THREAD_CHAT_IDS = {"telegram": re.compile(r"-?[0-9]+"),
+                    "lark": re.compile(r"[^#:\s]+"),
+                    "lark_bot": re.compile(r"[^#:\s]+")}
+
+
+@dataclass(frozen=True)
+class ChannelThreadId:
+    """A bot conversation's immutable identity; ``manager_id`` is only its cross-owner suffix."""
+
+    channel_type: str
+    channel_id: str
+    chat_id: str
+    manager_id: str | None
+
+
+def parse_channel_thread_id(session_id: str | None) -> ChannelThreadId | None:
+    """Recover the bot and raw platform chat id, or None for a non-channel or malformed identity.
+
+    Only a valid terminal ``#manager`` or ``#manager-<key>`` is a suffix. Empty or malformed suffixes are
+    rejected; platform chat ids never contain ``#``. Built-in bots retain ``<type>:<chat>``; added bots use
+    ``<channel_id>:<chat>``. Web, API client and Planner session ids have their own independent grammar.
+    """
+    if not isinstance(session_id, str):
+        return None
+    base, separator, manager_id = session_id.partition("#")
+    if separator and not _THREAD_MANAGER_ID.fullmatch(manager_id):
+        return None
+    prefix, separator, chat_id = base.partition(":")
+    if not separator:
+        return None
+    if prefix in BOT_CHANNEL_TYPES:
+        channel_type, channel_id = prefix, f"channel-{prefix}"
+    else:
+        parsed = parse_channel_id(prefix)
+        if parsed is None or parsed.builtin or str(parsed) != prefix:
+            return None
+        channel_type, channel_id = parsed.channel_type, prefix
+    if not _THREAD_CHAT_IDS[channel_type].fullmatch(chat_id):
+        return None
+    return ChannelThreadId(channel_type, channel_id, chat_id, manager_id or None)
+
+
+def channel_thread_id(channel_id: str, chat_id: str | int, manager_id: str, bot_manager_id: str) -> str:
+    """Name a bot's conversation, adding its destination only when it differs from the bot's immutable owner.
+
+    An explicit binding back to the owner reuses the legacy unsuffixed id. Invalid bot, chat or Manager ids
+    raise ValueError rather than creating an identity the parser cannot round-trip.
+    """
+    parsed = parse_channel_id(channel_id)
+    if parsed is None or str(parsed) != channel_id:
+        raise ValueError(f"not a bot channel id: {channel_id!r}")
+    if not _THREAD_MANAGER_ID.fullmatch(manager_id) or not _THREAD_MANAGER_ID.fullmatch(bot_manager_id):
+        raise ValueError("channel thread destination and bot owner must be Manager ids")
+    if not _THREAD_CHAT_IDS[parsed.channel_type].fullmatch(str(chat_id)):
+        raise ValueError(f"not a {parsed.channel_type} chat id: {chat_id!r}")
+    prefix = parsed.channel_type if parsed.builtin else channel_id
+    suffix = f"#{manager_id}" if manager_id != bot_manager_id else ""
+    return f"{prefix}:{chat_id}{suffix}"
+
+
 def builtin_channel_id(channel_type: str) -> str:
     """The channel id of a type's built-in row."""
     if channel_type not in BOT_CHANNEL_TYPES:

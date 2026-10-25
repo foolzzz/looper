@@ -39,11 +39,14 @@ async def record_reply(channel: str, envelope: MessageEnvelope, receipt: Deliver
     text = str(envelope.payload.get("text") or "")
     if not isinstance(record, dict) or not record.get("session_id") or not record.get("message_id") or not text:
         return
+    if envelope.source.agent_type != "manager":
+        return
     failure = None if receipt.success else receipt.failure or DeliveryFailure.SEND_FAILED
     error = None if receipt.success or not receipt.error else receipt.error[:DELIVERY_ERROR_MAX_CHARS]
     try:
-        await db_chat.save_message(session_id=record["session_id"], message_id=record["message_id"],
-                                   role="assistant", content=text, channel=channel, delivery_failure=failure,
-                                   delivery_error=error)
+        await db_chat.save_channel_message(session_id=record["session_id"], message_id=record["message_id"],
+                                           role="assistant", content=text, channel=channel,
+                                           manager_id=envelope.source.agent_id, delivery_failure=failure,
+                                           delivery_error=error)
     except Exception:
         logger.warning("could not store a %s answer in %s", channel, record["session_id"], exc_info=True)

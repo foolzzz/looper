@@ -415,7 +415,7 @@ def test_a_lark_group_task_is_answered_and_told_in_the_group(
     from looper.agents.tiers import manager as manager_mod
 
     stored = AsyncMock()
-    monkeypatch.setattr(manager_mod.db_chat, "save_message", stored)
+    monkeypatch.setattr(manager_mod.db_chat, "save_channel_message", stored)
     lark = LarkChannelAdapter(runtime_root=tmp_path, allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})),
                               bot_open_id=BOT_OPEN_ID)
 
