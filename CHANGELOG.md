@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.96] - 2026-10-24
+
+### Fixed
+
+- **A bot row whose channel failed to start no longer reserves the bot's identity.** `_register_bots` recorded a row as started before its channel was registered, so when that channel failed, a later row for the same Telegram token or Lark app was refused as a duplicate while nothing served the bot. A row now counts as the owner only after its channel registered; the first row that starts owns the identity and later rows of that bot are still refused. Behavior change for users: with several rows for one bot, a failing row no longer blocks the next. Model-visible: none. ([#565](https://github.com/foolzzz/looper/pull/565))
+
 ## [2.13.95] - 2026-10-24
 
 ### Fixed
