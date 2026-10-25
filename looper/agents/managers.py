@@ -10,18 +10,20 @@ import asyncio
 import dataclasses
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ..db import managers as db_managers
+from . import chat_settings
 from .bus import MessageBus
 from .managers_api import DEFAULT_MANAGER_ID, MAX_ENABLED_MANAGERS, ManagerDefinition
 from .message import MANAGER_ADDRESS, MessageEnvelope, MessageType, manager_address
 from .ops.service import ManagerOps, Platform, scope_for
 from .supervisor import AgentSupervisor
 from .tiers.manager import (
-    TURNED_OFF_REPLY, ManagerAgent, ManagerConfig, ReplyOutcome, default_definition, reply_envelope, stopped_reply,
+    STOP_DONE_REPLY, STOP_IDLE_REPLY, STOP_UNSUPPORTED_REPLY, TURNED_OFF_REPLY, ManagerAgent, ManagerConfig,
+    ReplyOutcome, StopResult, default_definition, reply_envelope, stopped_reply,
 )
 from .tiers.turn_token import TurnToken
 
@@ -38,6 +40,35 @@ _TASK_REPORTS = (MessageType.GOAL_STATUS, MessageType.TASK_ACCEPTED, MessageType
 class SyncState:
     error: str
     attempt: int
+
+
+@dataclass
+class ChatStopSummary:
+    state: Literal["enabled", "disabled"] = "enabled"
+    stopping: int = 0
+    already_stopping: int = 0
+    unsupported: int = 0
+    failures: list[str] = field(default_factory=list)  # owning Manager ids; details stay in the log
+    matched: int = 0  # includes tokens that settled after the snapshot
+    managers: int = 0
+
+
+def chat_stop_reply(summary: ChatStopSummary) -> str:
+    """Code-owned acknowledgement, also usable when the routed Manager does not run."""
+    if summary.state == "disabled":
+        return chat_settings.STOP_DISABLED_REPLY
+    stopped = summary.stopping + summary.already_stopping
+    if summary.failures:
+        return "未能完整停止当前聊天的回复，部分回复可能仍会继续，请重试。"
+    if summary.unsupported:
+        if stopped:
+            return "已请求停止可中断的回复；部分运行时不能中断，相关回复会照常完成。"
+        return STOP_UNSUPPORTED_REPLY
+    if stopped > 1:
+        if summary.managers > 1:
+            return f"已请求停止当前聊天的 {stopped} 条回复。"
+        return f"已停止当前回复，另取消了 {stopped - 1} 条排队的消息。"
+    return STOP_DONE_REPLY if stopped else STOP_IDLE_REPLY
 
 
 class ManagerFleet:
@@ -71,6 +102,7 @@ class ManagerFleet:
                          turn_file=self._runtime_root / ".local" / f"{definition.id}-turn.json")
         agent.ops = ops
         agent.on_turned_off = self._turned_off
+        agent.stop_chat = self.stop_chat
         self._agents[definition.id] = agent
         self._ops[definition.id] = ops
         return agent
@@ -143,6 +175,30 @@ class ManagerFleet:
             if token is not None:
                 return agent, token
         return None
+
+    async def stop_chat(self, channel_id: str, chat_id: str, *, via: str) -> ChatStopSummary:
+        """Stop this bot/chat's live turns, including queued turns, in every owning Manager."""
+        if not chat_settings.stop_enabled():
+            return ChatStopSummary(state="disabled")
+        # Snapshot every owner and its tokens before the first await: a turn may settle or the fleet change.
+        snapshot = [(agent, agent.live_for_chat(channel_id, chat_id)) for agent in self.agents()]
+        summary = ChatStopSummary(matched=sum(len(tokens) for _, tokens in snapshot),
+                                  managers=sum(bool(tokens) for _, tokens in snapshot))
+        for agent, tokens in snapshot:
+            for token in tokens:
+                try:
+                    result = await agent.stop_turn(token.message_id, via=via)
+                except Exception:
+                    logger.exception("Manager %s could not stop chat turn %s", agent.agent_id, token.message_id)
+                    summary.failures.append(agent.agent_id)
+                    continue
+                if result is StopResult.STOPPING:
+                    summary.stopping += 1
+                elif result is StopResult.ALREADY_STOPPING:
+                    summary.already_stopping += 1
+                elif result is StopResult.CANNOT_INTERRUPT:
+                    summary.unsupported += 1
+        return summary
 
     def binding_report(self) -> dict[str, Any]:
         reports = [(agent.agent_id, self._ops[agent.agent_id].binding_report()) for agent in self.agents()
