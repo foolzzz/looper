@@ -1749,17 +1749,23 @@ def test_baseline_comparison_reads_model_names_from_existing_raw_runs(
         assert data == run
 
 
-@pytest.mark.parametrize("command", ["run", "dialogs"])
-def test_release_tier_refreshes_the_sonnet_baseline_for_every_case(command: str) -> None:
+def _release_commands() -> list[tuple[Any, str, str]]:
     readme = (Path(__file__).resolve().parents[1] / "evals" / "README.md").read_text(encoding="utf-8")
     release = readme.split("Once before a release,", 1)[1].split("#### ", 1)[0]
     entries = []
     for entry in release.split("\n- "):
         for text in re.findall(r"`((?:run|dialogs) --[^`]+)`", entry):
-            args = cli._parser().parse_args(shlex.split(text))
-            model = getattr(args, "manager_model", None) or args.model
-            if args.command == command and model == "sonnet":
-                entries.append((args, entry))
+            # Parse operator-supplied ceilings for syntax only; this is no cost observation.
+            expanded = re.sub(r"\$[A-Z_]+", "100", text)
+            args = cli._parser().parse_args(shlex.split(expanded))
+            entries.append((args, entry, text))
+    return entries
+
+
+@pytest.mark.parametrize("command", ["run", "dialogs"])
+def test_release_tier_refreshes_the_sonnet_baseline_for_every_case(command: str) -> None:
+    entries = [(args, entry) for args, entry, _ in _release_commands()
+               if args.command == command and (getattr(args, "manager_model", None) or args.model) == "sonnet"]
     assert len(entries) == 1, f"release tier needs one full Sonnet {command} run"
     args, entry = entries[0]
     assert args.mode == "real"
@@ -1770,6 +1776,27 @@ def test_release_tier_refreshes_the_sonnet_baseline_for_every_case(command: str)
     assert args.total_cap_usd >= args.jobs * args.case_budget_usd
     baseline = runner.baseline_path(mode="real", model="sonnet", dialogs=command == "dialogs")
     assert f"baselines/{baseline.name}" in entry
+
+
+def test_release_dialog_tiers_cover_default_selection_without_unmeasured_caps() -> None:
+    from evals.prompt_regression import dialogs
+
+    tiers = [(args, entry, text) for args, entry, text in _release_commands() if args.command == "dialogs"]
+    assert len(tiers) == 3
+    assert {args.manager_model or args.model for args, _, _ in tiers} == {"haiku", "sonnet", "opus"}
+    for args, entry, text in tiers:
+        selected = dialogs.select(args.dialogs.split(",") if args.dialogs else None)
+        assert args.dialogs is None and args.reps == 3
+        assert f"all {len(selected)} dialogs" in entry
+        model = args.manager_model or args.model
+        assert f"--total-cap-usd ${model.upper()}_DIALOG_CAP_USD" in " ".join(text.split())
+        assert args.case_budget_usd > 0 and args.max_budget_usd > 0
+    readme = (Path(__file__).resolve().parents[1] / "evals/README.md").read_text()
+    assert "complete 43-dialog cost measurement is blocked" in readme
+    assert "Only promote a complete three-rep" in readme
+    assert "If a cap stops a run, raise it and rerun" in readme
+    assert "missing\nSonnet dialog baseline remain a coverage gap" in readme
+    assert "such as 8" not in readme and "such as 12" not in readme
 
 
 def test_the_base_is_the_committed_baseline_unless_another_is_named(tmp_path: Path,

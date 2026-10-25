@@ -18,6 +18,24 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.97] - 2026-10-24
+
+### Fixed
+
+- **A reused process id can no longer be adopted into a turn's process tree.** `TurnTree.refresh` now checks observed process identities (start times) against the fresh process table before it expands the tree, and a pid whose start time changed stays excluded for the rest of the turn; `track` reads start times at turn start. Identities that cannot be proven are excluded for that observation, and a pid without an identity is ended only through the live subprocess handle, never by inferring a group. `end` refreshes before computing exclusions. Behavior change for users: stopping a turn no longer risks signalling an unrelated process that reused a pid mid-turn. Model-visible: none. ([#560](https://github.com/foolzzz/looper/pull/560))
+
+## [2.13.96] - 2026-10-24
+
+### Fixed
+
+- **A bot row whose channel failed to start no longer reserves the bot's identity.** `_register_bots` recorded a row as started before its channel was registered, so when that channel failed, a later row for the same Telegram token or Lark app was refused as a duplicate while nothing served the bot. A row now counts as the owner only after its channel registered; the first row that starts owns the identity and later rows of that bot are still refused. Behavior change for users: with several rows for one bot, a failing row no longer blocks the next. Model-visible: none. ([#565](https://github.com/foolzzz/looper/pull/565))
+
+## [2.13.95] - 2026-10-24
+
+### Fixed
+
+- **The Manager keeps ownership of a user turn through startup and shutdown.** Messages queued before the Manager's consumer exists (channel messages, journal replay) now get turn tokens when it starts, and a `/stop` among them is handled by code and never reaches the model; later messages from the same chat are registered after it. A `/stop` that reaches the message loop takes the same code path. A bridge write while the turn's events drain no longer clears the binding early: it is cleared when the turn is drained or boundedly abandoned, even if closing the run record is cancelled. When the message task is cancelled mid-turn, the turn is settled and its event handling abandoned, and the resident process is left to `ManagerAgent.stop` instead of being forgotten by repeated cancels. Behavior change for users: a queued or cancelled-turn `/stop` is honoured reliably. Model-visible: none. ([#557](https://github.com/foolzzz/looper/pull/557))
+
 ## [2.13.94] - 2026-10-24
 
 ### Fixed
