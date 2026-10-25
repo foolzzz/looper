@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.91] - 2026-10-24
+
+### Changed
+
+- **Task lists and full task details go through v1.** The Tasks list and a task's detail page call the new `tasks.page` and `tasks.detail` operations (`POST /api/v1/tasks/page` and `/detail`, both `read`, so client tokens may call them). The page takes the same filters as before (`project_id`, `schedule_id`, `group`, `status`, `before`, `limit`) plus a `query` that searches a task's id, title, requirement, project name and goal before paging, with status counts that follow it. Manager prompts and tools are unchanged. ([#532](https://github.com/foolzzz/looper/pull/532))
+- **Scheduler, wait and knowledge-vault Settings go through v1.** Reading and saving them call the new `scheduler_settings`, `wait_settings` and `knowledge_vault` `.get` and `.update` operations (`POST /api/v1/...`), which use the same checks as before; the three updates are `high` risk and need confirmation from a client token. The dashboard uses them. Manager prompts and tools are unchanged. ([#549](https://github.com/foolzzz/looper/pull/549))
+
+### Removed
+
+- **The legacy task routes:** `GET /api/tasks` and `GET /api/tasks/<id>`. Use `tasks.page` and `tasks.detail`. ([#532](https://github.com/foolzzz/looper/pull/532))
+- **The legacy settings routes:** `GET` and `PUT /api/scheduler-settings`, `/api/wait-settings` and `/api/knowledge-vault`. Use the `scheduler_settings`, `wait_settings` and `knowledge_vault` operations. ([#549](https://github.com/foolzzz/looper/pull/549))
+
 ## [2.13.90] - 2026-10-24
 
 ### Changed
