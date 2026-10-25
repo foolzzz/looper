@@ -218,7 +218,7 @@ describe("GatesPage", () => {
 
   it("shows more and refreshes on a timer, never while one is pending", async () => {
     vi.mocked(fetchGates).mockResolvedValueOnce(list(
-      Array.from({ length: 50 }, (_, i) => row("t1", gate(`g${i}`))), { total: 80 }));
+      Array.from({ length: 50 }, (_, i) => row("t1", gate(`g${i}`))), { total: 80, has_more: true }));
     vi.mocked(fetchGates).mockResolvedValueOnce(list(
       Array.from({ length: 30 }, (_, i) => row("t1", gate(`g${i + 50}`))), { total: 80 }));
     await show();
@@ -231,5 +231,44 @@ describe("GatesPage", () => {
     expect(vi.mocked(fetchGates).mock.calls.length).toBe(calls + 1);
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(vi.mocked(fetchGates).mock.calls.length).toBe(calls + 1);
+  });
+
+  it.each(["duplicate", "total"])("refuses %s data across refresh windows without losing the draft", async (change) => {
+    const first = row("first", gate("first"));
+    vi.mocked(fetchGates).mockResolvedValue(list([first], { next_cursor: "boundary" }));
+    await show();
+    await click(button("Answer"));
+    const input = container.querySelector("textarea")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "Keep draft");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const window = [first, ...Array.from({ length: 199 }, (_, i) => row(`t${i}`, gate(`g${i}`)))];
+    vi.mocked(fetchGates).mockResolvedValueOnce(list(window, { total: 201, has_more: true, next_cursor: "next" }));
+    vi.mocked(fetchGates).mockResolvedValueOnce(list([change === "duplicate" ? first : row("other", gate("other"))], {
+      total: change === "total" ? 202 : 201, next_cursor: null,
+    }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(container.querySelector("[role=alert]")?.textContent).toContain("Retry");
+    expect(container.querySelectorAll("li")).toHaveLength(1);
+    expect(container.querySelector("textarea")?.value).toBe("Keep draft");
+  });
+
+  it("bounds offset reads and preserves filters, totals and project-wide counts", async () => {
+    const api = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
+    const rows = Array.from({ length: 500 }, (_, i) => row(`t${i}`, gate(`g${i}`)));
+    const fetcher = vi.fn(async (_url: string, init?: RequestInit) => {
+      const { limit, offset } = JSON.parse(String(init?.body));
+      return Response.json({ status: "ok", result: list(rows.slice(offset, offset + limit), {
+        limit, offset, total: 500, has_more: offset + limit < 500,
+      }) });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const result = await api.fetchGates({ state: "closed", waitingOn: "planner", projectId: "p1", offset: 199, limit: 3 });
+    expect(result).toMatchObject({ gates: rows.slice(199, 202), total: 500, limit: 3, offset: 199, has_more: true, counts: list([]).counts });
+    expect(fetcher.mock.calls.map(([, init]) => JSON.parse(String(init?.body)))).toEqual([
+      { state: "closed", waiting_on: "planner", project_id: "p1", limit: 200, offset: 0 },
+      { state: "closed", waiting_on: "planner", project_id: "p1", limit: 2, offset: 200 },
+    ]);
   });
 });

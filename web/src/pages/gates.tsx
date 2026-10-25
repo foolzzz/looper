@@ -113,7 +113,7 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
   const { state, waiting, project } = filters;
   const { projects } = useProjects();
   const [rows, setRows] = useState<GateListRow[]>([]);
-  const [data, setData] = useState<Pick<GateList, "total" | "counts"> | null>(null);
+  const [data, setData] = useState<Pick<GateList, "total" | "counts" | "has_more"> | null>(null);
   const [error, setError] = useState("");
   const [answering, setAnswering] = useState("");
   const latest = useRef(0);
@@ -135,11 +135,15 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
         if (more) return request(PAGE, cursor.current);
         const through = cursor.current ?? undefined;
         let list = await request(through ? MAX_ROWS : PAGE, null, through);
-        while (through && list.has_more && list.next_cursor) {
-          const next = await request(MAX_ROWS, list.next_cursor, through);
+        let next = list;
+        while (through && next.gates.length === MAX_ROWS && next.has_more && next.next_cursor) {
+          next = await request(MAX_ROWS, next.next_cursor, through);
+          if (next.total !== list.total) throw new Error("The gate list changed while loading. Retry the request.");
           if (next.gates.length === 0) break;
           list = { ...next, gates: [...list.gates, ...next.gates] };
         }
+        if (new Set(list.gates.map(rowKey)).size !== list.gates.length)
+          throw new Error("The gate list changed while loading. Retry the request.");
         return list;
       };
       return load()
@@ -147,8 +151,8 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
           if (seq !== latest.current) return;
           loading.current = false;
           setRows((current) => (more ? [...current, ...list.gates] : list.gates));
-          cursor.current = list.next_cursor;
-          setData({ total: list.total, counts: list.counts });
+          if (!more || list.gates.length) cursor.current = list.next_cursor;
+          setData({ total: list.total, counts: list.counts, has_more: list.has_more });
           setError("");
         })
         .catch((err) => {
@@ -251,7 +255,7 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
           </ul>
         </div>
       )}
-      {data && rows.length < data.total && (
+      {data?.has_more && (
         <Button type="button" variant="outline" className="min-h-11" onClick={() => void read("more", true)}>
           Show more
         </Button>
