@@ -173,6 +173,54 @@ def open_chat_link(page, conversation):
     page.get_by_role("link", name="Open linked conversation", exact=True).evaluate("e => e.remove()")
 
 
+@pytest.mark.parametrize("destination", ["lark:known", "telegram:known", "unknown-web-id"])
+def test_unsent_drafts_belong_to_each_conversation_and_manager(dashboard, destination):
+    from playwright.sync_api import expect
+
+    page, base, state = dashboard
+    page.goto(f"{base}/#chat?conversation=session-a")
+    composer = page.get_by_role("textbox")
+    composer.fill("Draft for A")
+    page.locator('aside button[title="session-b"]').click()
+    expect(composer).to_have_value("")
+    composer.fill("Draft for B")
+    page.locator('aside button[title="session-a"]').click()
+    expect(composer).to_have_value("Draft for A")
+    page.locator('aside button[title="session-b"]').click()
+    expect(composer).to_have_value("Draft for B")
+
+    open_chat_link(page, destination)
+    if destination == "unknown-web-id":
+        expect(page.get_by_role("alert")).to_contain_text("not found")
+    else:
+        expect(page.locator(f'[data-viewing="{destination}"]')).to_be_visible()
+    expect(composer).to_have_count(0)
+    page.go_back()
+    expect(composer).to_have_value("Draft for B")
+
+    page.evaluate("location.hash = '#chat?target=manager-other'")
+    page.wait_for_function("""() => localStorage.getItem('looper-chat-session-id:manager-other') &&
+        location.hash.startsWith('#chat?target=manager-other&conversation=')""")
+    expect(composer).to_have_value("")
+    composer.fill("Other Manager's draft")
+    page.evaluate("location.hash = '#chat?conversation=session-a'")
+    expect(composer).to_have_value("Draft for A")
+    page.locator('aside button[title="session-b"]').click()
+    expect(composer).to_have_value("Draft for B")
+    page.evaluate("location.hash = '#chat?target=manager-other'")
+    expect(composer).to_have_value("Other Manager's draft")
+    page.reload()
+    expect(composer).to_have_value("Other Manager's draft")
+    page.evaluate("location.hash = '#chat?conversation=session-a'")
+    expect(composer).to_have_value("Draft for A")
+    composer.fill("")
+    page.locator('aside button[title="session-b"]').click()
+    expect(composer).to_have_value("Draft for B")
+    page.locator('aside button[title="session-a"]').click()
+    expect(composer).to_have_value("")
+    assert not any(path == "operator_chat/send" for path, _ in state["calls"])
+
+
 @pytest.mark.parametrize("destination", ["lark:known", "unknown-web-id"])
 @pytest.mark.parametrize("stage", ["send", "accepted", "rejected"])
 def test_pending_submission_survives_transcript_navigation(dashboard, destination, stage):
@@ -291,6 +339,8 @@ def test_answered_while_hidden_restores_queue_to_original_draft(dashboard, desti
     page.get_by_role("textbox").fill("Other conversation's draft")
     page.locator('aside button[title="session-b"]').click()
     expect(page.get_by_role("textbox")).to_have_value(restored)
+    # The draft is restored before the history request finishes; send only after that read is applied.
+    expect(page.locator("p.whitespace-pre-wrap").filter(has_text="History of session-b")).to_be_visible()
     state["hold_reply"] = False
     page.get_by_role("textbox").press("Enter")
     expect(page.get_by_text("Current B reply", exact=True)).to_be_visible()
@@ -369,6 +419,7 @@ def test_unsent_text_survives_hidden_completion_and_writable_detour(dashboard, d
     page.reload()
     page.locator('aside button[title="session-b"]').click()
     expect(page.get_by_role("textbox")).to_have_value(restored)
+    expect(page.locator("p.whitespace-pre-wrap").filter(has_text="History of session-b")).to_be_visible()
     state["hold"] = state["hold_reply"] = False
     page.get_by_role("textbox").press("Enter")
     expect(page.get_by_text("Current B reply", exact=True)).to_be_visible()
