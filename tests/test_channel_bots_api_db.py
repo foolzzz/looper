@@ -192,7 +192,7 @@ def test_unchanged_lark_bot_can_be_disabled_without_authentication(monkeypatch, 
     run_with_channel_configs(test, monkeypatch)
 
 
-@pytest.mark.parametrize("changed", ["profile", "token"])
+@pytest.mark.parametrize("changed", ["profile", "token", "allowlist", "binding"])
 def test_lark_disable_admission_uses_identity_and_token_read_under_lock(monkeypatch, changed):
     from looper.agents.channels import bot_api, lark_cli
 
@@ -206,9 +206,11 @@ def test_lark_disable_admission_uses_identity_and_token_read_under_lock(monkeypa
     monkeypatch.setattr(lark_cli, "identity", identity)
 
     async def test(pool):
-        kind = "lark" if changed == "profile" else "lark_bot"
+        kind = "lark_bot" if changed == "token" else "lark"
         body = {"channel_type": kind, "manager_id": await _manager(pool), "enabled": True,
                 "config": {"profile": "candidate"} if kind == "lark" else {"app_id": "cli_added"}}
+        if changed in ("allowlist", "binding"):
+            body["config"]["allowed_open_ids"] = ["ou_sender0000001"]
         if kind == "lark_bot":
             body["bot_token"] = SECRET
         status, saved = await _call("POST", "channel_configs", body)
@@ -225,10 +227,16 @@ def test_lark_disable_admission_uses_identity_and_token_read_under_lock(monkeypa
             # Change the persisted identity after update_bot's initial read, before its lock.
             if not raced and not kwargs and len(reads) == 2:
                 raced.append(True)
-                fields = {"config": {"profile": "replacement"}} if changed == "profile" else {
-                    "bot_token": "synthetic-replacement-secret"}
-                status, answer = await _call("PUT", channel_id, fields)
-                assert status == 200, answer
+                if changed == "binding":
+                    await pool.execute("UPDATE channel_configs SET config = config || $1::jsonb "
+                                       "WHERE channel_id = $2",
+                                       json.dumps({"allowlist_app_id": "cli_replacement"}), channel_id)
+                else:
+                    fields = ({"config": {"profile": "replacement"}} if changed == "profile" else
+                              {"config": {**saved["config"], "allowed_open_ids": ["ou_sender0000002"]}}
+                              if changed == "allowlist" else {"bot_token": "synthetic-replacement-secret"})
+                    status, answer = await _call("PUT", channel_id, fields)
+                    assert status == 200, answer
                 nonlocal broken
                 broken = True
             return row
@@ -241,10 +249,102 @@ def test_lark_disable_admission_uses_identity_and_token_read_under_lock(monkeypa
         assert raced and status == 409 and "cannot verify Lark app identity" in answer["error"], answer
         readback = await real(saved["channel_id"])
         assert readback["enabled"] is True
-        assert readback["config"] == ({"profile": "replacement"}
-                                      if changed == "profile" else saved["config"])
+        expected = dict(saved["config"])
+        if changed == "profile":
+            expected = {"profile": "replacement"}
+        elif changed == "allowlist":
+            expected["allowed_open_ids"] = ["ou_sender0000002"]
+        elif changed == "binding":
+            expected["allowlist_app_id"] = "cli_replacement"
+        assert readback["config"] == expected
         assert await pool.fetchval("SELECT bot_token FROM channel_secrets WHERE channel_id = $1",
-                                   saved["channel_id"]) == (None if changed == "profile" else "synthetic-replacement-secret")
+                                   saved["channel_id"]) == ("synthetic-replacement-secret" if changed == "token" else None)
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+@pytest.mark.parametrize("kind,change", [
+    ("lark", "replace"), ("lark", "clear"), ("lark", "normalized"), ("lark", "reorder"),
+    ("lark_bot", "normalized"), ("lark_bot", "replace"),
+])
+def test_full_config_disable_preserves_sender_admission_over_http(monkeypatch, tmp_path, kind, change):
+    from looper.agents.channels import lark_cli
+    from looper.agents.ops.clients import ClientOps
+    from looper.agents.ops.service import Platform
+    from tests.test_api_v1_auth import TOKEN as API_TOKEN, _bearer, _send, _serving
+
+    broken = False
+
+    async def identity(profile=None, *, fresh=False):
+        assert fresh
+        if broken:
+            raise lark_cli.LarkCliError(f"authentication failed: {SECRET}")
+        return lark_cli.Identity(profile or "", "cli_added" if profile else "cli_builtin", "Bot", "ou_bot")
+
+    monkeypatch.setattr(lark_cli, "identity", identity)
+
+    async def test(pool):
+        manager = await _manager(pool)
+        async with _serving(tmp_path, listen=True) as server:
+            server._client_ops = ClientOps(Platform(bus=None, task_router=server._task_router,
+                                                   runtime_root=tmp_path))
+
+            async def call(action, body):
+                status, _, answer = await _send(server, f"POST /api/v1/channel_configs/{action}",
+                                                _bearer(API_TOKEN), json.dumps(body))
+                assert SECRET not in json.dumps(answer)
+                return status, answer
+
+            allowed = ["ou_sender0000001", "ou_sender0000002"]
+            config = {"allowed_open_ids": allowed, "description": "Saved"}
+            config.update({"profile": "candidate"} if kind == "lark" else {"app_id": "cli_added"})
+            body = {"channel_type": kind, "manager_id": manager, "config": config, "enabled": True}
+            if kind == "lark_bot":
+                body["bot_token"] = SECRET
+            status, answer = await call("create", body)
+            assert status == 200, answer
+            saved = answer["result"]
+            assert saved["config"]["allowlist_app_id"] == "cli_added"
+            before = [await pool.fetch(f"SELECT * FROM {table} ORDER BY channel_id")
+                      for table in ("channel_configs", "channel_secrets")]
+            config = {**saved["config"], "allowed_open_ids": {
+                "replace": ["ou_sender0000003"], "clear": [],
+                "normalized": f" {allowed[0]}, {allowed[1]}, {allowed[0]}, ", "reorder": allowed[::-1],
+            }[change]}
+            if change == "normalized":
+                # The server owns the binding; an omitted echo must retain it for the same sender set.
+                config.pop("allowlist_app_id")
+            fields = {"enabled": False, "config": config, "display_name": "Offline", "manager_id": manager}
+            if kind == "lark_bot":
+                fields["bot_token"] = "***"
+            nonlocal broken
+            broken = True
+            status, answer = await call("update", {"channel_id": saved["channel_id"], "fields": fields})
+            refused = kind == "lark" and change in ("replace", "clear")
+            if refused:
+                assert status == 409 and answer["error"]["code"] == "conflict", answer
+                assert "cannot verify Lark app identity" in answer["error"]["message"]
+                assert [await pool.fetch(f"SELECT * FROM {table} ORDER BY channel_id")
+                        for table in ("channel_configs", "channel_secrets")] == before
+            else:
+                assert status == 200 and answer["result"]["enabled"] is False, answer
+                expected_ids = ["ou_sender0000003"] if change == "replace" else allowed
+                assert set(answer["result"]["config"]["allowed_open_ids"]) == set(expected_ids)
+                assert answer["result"]["config"]["allowlist_app_id"] == "cli_added"
+            status, readback = await call("get", {"channel_id": saved["channel_id"]})
+            assert status == 200 and readback["result"] == (saved if refused else answer["result"])
+            assert await pool.fetchval("SELECT bot_token FROM channel_secrets WHERE channel_id = $1",
+                                       saved["channel_id"]) == (SECRET if kind == "lark_bot" else None)
+            if refused:
+                # Prove that admission, rather than malformed input, refused the offline save.
+                broken = False
+                status, recovered = await call("update", {"channel_id": saved["channel_id"], "fields": fields})
+                assert status == 200 and recovered["result"]["enabled"] is False, recovered
+                config = recovered["result"]["config"]
+                assert config["allowed_open_ids"] == (["ou_sender0000003"] if change == "replace" else [])
+                assert config.get("allowlist_app_id") == ("cli_added" if change == "replace" else None)
+                status, readback = await call("get", {"channel_id": saved["channel_id"]})
+                assert status == 200 and readback["result"] == recovered["result"]
 
     run_with_channel_configs(test, monkeypatch)
 

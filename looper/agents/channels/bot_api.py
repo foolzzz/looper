@@ -15,7 +15,7 @@ from ...db import channel_configs as db_channel_configs
 from ...db.channel_configs import BUILTIN_CHANNEL_IDS
 from .. import log_redaction, projects
 from ..profile_registry import SECRET_MASK
-from .allowlist import AllowlistError, channel_view, normalized_config
+from .allowlist import AllowlistError, channel_view, normalized_config, sender_ids
 from .bots import BOT_TYPES, SAME_BOT_TYPES, bot_keys, builtin_env_token, builtin_lark_pair, lark_app_id
 
 HTTP_500 = "500 Internal Server Error"
@@ -233,9 +233,14 @@ async def update_bot(channel_id: str, data: dict[str, Any]) -> dict[str, Any]:
                     (final.get(key) or "") == (now_config.get(key) or "")
                     for key in ("profile", "app_id", "bot_token_env")) and (
                         final.get("domain", "feishu") == now_config.get("domain", "feishu"))
+                same_allowlist = kind != "lark" or "config" not in data or (
+                    set(sender_ids("lark", final.get("allowed_open_ids"))) ==
+                    set(sender_ids("lark", now_config.get("allowed_open_ids"))) and
+                    (final.get("allowlist_app_id") or "") == (now_config.get("allowlist_app_id") or ""))
                 # Explicit disable can work while authentication is broken, including full-config saves.
+                # A changed sender set or dropped app binding still needs admission against the locked row.
                 # Every other Lark save revalidates: profiles can change identity outside Looper.
-                disabling_unchanged = data.get("enabled") is False and same_identity
+                disabling_unchanged = data.get("enabled") is False and same_identity and same_allowlist
                 if (kind in ("lark", "lark_bot") and not disabling_unchanged) or not same_identity:
                     env = builtin_env_token(final) if (
                         kind == "telegram" and channel_id in BUILTIN_CHANNEL_IDS and not secret) else ""

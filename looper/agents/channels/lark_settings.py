@@ -84,7 +84,7 @@ async def bound_config(current: Mapping[str, Any], config: Mapping[str, Any]) ->
     if not allowed:
         stored.pop("allowlist_app_id", None)
         return stored
-    if allowed == _ids(before) and before.get("allowlist_app_id"):
+    if set(allowed) == set(_ids(before)) and before.get("allowlist_app_id"):
         stored["allowlist_app_id"] = before["allowlist_app_id"]
         return stored
     try:

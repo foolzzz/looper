@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -14,6 +15,134 @@ from looper.agents.channels.allowlist import SenderAllowlist
 from looper.agents.channels.registry import ChannelRegistry
 from looper.agents.channels.telegram import TelegramChannelAdapter
 from looper.agents.serve import _register_optional_channel
+
+
+@pytest.mark.parametrize("failure", [None, "updater.stop", "stop", "shutdown"])
+def test_stop_drains_reactions_from_already_queued_messages(tmp_path, monkeypatch, failure):
+    """Use Application's real update queue and handlers, with a synthetic Telegram transport.
+
+    A blocked /help reply keeps an ordinary received message queued until Application.stop drains it.
+    No shutdown hook manufactures a reaction: the normal message handler creates it during that drain.
+    """
+    from telegram import Update
+    from telegram.ext import Application, Updater
+    from telegram.request import HTTPXRequest
+
+    async def run():
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter = TelegramChannelAdapter(
+            bot_token="0:synthetic", allowlist=SenderAllowlist("channel-telegram", frozenset({"7"})))
+        help_started, help_release = asyncio.Event(), asyncio.Event()
+        stop_started, reaction_started, reaction_finished = (asyncio.Event() for _ in range(3))
+        events, reactions, closed, transport_snapshots = [], [], [], []
+        stop_app, shutdown_app = Application.stop, Application.shutdown
+        shutdown_request = HTTPXRequest.shutdown
+
+        async def request(request, url, **kwargs):
+            method = url.rsplit("/", 1)[-1]
+            if method == "getMe":
+                result = {"id": 1, "is_bot": True, "first_name": "Synthetic", "username": "synthetic_bot"}
+            elif method == "sendMessage":
+                help_started.set()
+                await help_release.wait()
+                result = {"message_id": 10, "date": 0, "chat": {"id": 7, "type": "private"}, "text": "help"}
+            elif method == "setMessageReaction":
+                events.append("reaction")
+                reactions.append(asyncio.current_task())
+                reaction_started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    events.append("reaction.finished")
+                    reaction_finished.set()
+            else:
+                assert method == "setMyCommands", method
+                result = True
+            return 200, json.dumps({"ok": True, "result": result}).encode()
+
+        async def start_polling(updater, **kwargs):
+            updater._running = True
+
+        async def stop_polling(updater):
+            events.append("updater.stop")
+            updater._running = False
+            if failure == "updater.stop":
+                raise RuntimeError("synthetic updater stop failure")
+
+        async def stop(application):
+            events.append("stop")
+            stop_started.set()
+            await stop_app(application)
+            await reaction_started.wait()
+            events.append("updates.drained")
+            if failure == "stop":
+                raise RuntimeError("synthetic application stop failure")
+
+        async def shutdown(application):
+            events.append("shutdown")
+            transport_snapshots.append((reaction_finished.is_set(), all(task.done() for task in reactions)))
+            if failure == "shutdown":
+                raise RuntimeError("synthetic application shutdown failure")
+            await shutdown_app(application)
+
+        async def close(request):
+            transport_snapshots.append((reaction_finished.is_set(), all(task.done() for task in reactions)))
+            await shutdown_request(request)
+            closed.append(request)
+
+        monkeypatch.setattr(HTTPXRequest, "do_request", request)
+        monkeypatch.setattr(HTTPXRequest, "shutdown", close)
+        monkeypatch.setattr(Updater, "start_polling", start_polling)
+        monkeypatch.setattr(Updater, "stop", stop_polling)
+        monkeypatch.setattr(Application, "stop", stop)
+        monkeypatch.setattr(Application, "shutdown", shutdown)
+        stopping = None
+        app = None
+        owned = ()
+        try:
+            await adapter.start(bus)
+            app, owned = adapter._app, adapter._requests
+
+            def update(number, text):
+                message = {"message_id": number, "date": 0, "chat": {"id": 7, "type": "private"},
+                           "from": {"id": 7, "is_bot": False, "first_name": "Sender"}, "text": text}
+                if text == "/help":
+                    message["entities"] = [{"type": "bot_command", "offset": 0, "length": 5}]
+                return Update.de_json({"update_id": number, "message": message}, app.bot)
+
+            await app.update_queue.put(update(1, "/help"))
+            await help_started.wait()
+            await app.update_queue.put(update(2, "queued message"))
+            assert app.update_queue.qsize() == 1 and not adapter._reactions._pending
+            stopping = asyncio.create_task(adapter.stop())
+            await stop_started.wait()
+            help_release.set()
+            await stopping
+            assert bus.get_queue("manager").get_nowait().payload["text"] == "queued message"
+            assert reactions and reaction_finished.is_set() and all(task.done() for task in reactions)
+            assert not adapter._reactions._pending
+            assert all(finished and done for finished, done in transport_snapshots)
+            assert events.index("updates.drained") < events.index("reaction.finished") < events.index("shutdown")
+            assert all(request in closed and request._client.is_closed for request in owned)
+            assert adapter._app is None and adapter._bus is None and adapter._outbound_task is None
+            assert not adapter._requests and not adapter.healthcheck()["healthy"]
+            before = list(events)
+            await adapter.stop()
+            assert events == before
+        finally:
+            # A failing-first assertion must not leave real Application tasks or HTTP clients behind.
+            help_release.set()
+            if stopping and not stopping.done():
+                stopping.cancel()
+                await asyncio.gather(stopping, return_exceptions=True)
+            await adapter._reactions.stop()
+            if app and app.running:
+                await stop_app(app)
+            for request in owned:
+                await shutdown_request(request)
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 10))
 
 
 @pytest.mark.parametrize("failure", ["initialize", "start", "deleteWebhook", None])

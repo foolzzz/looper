@@ -193,13 +193,15 @@ class TelegramChannelAdapter(ChannelAdapter):
             task = self._outbound_task
             task.cancel()
             await cleanup("outbound", lambda: task)
-        await cleanup("reactions", self._reactions.stop)
         if self._app:
             updater = self._app.updater
             if updater is not None and updater.running:
                 await cleanup("updater.stop", updater.stop)
             if self._app.running:
                 await cleanup("stop", self._app.stop)
+        # Application.stop drains received updates, whose handlers can still add reactions.
+        await cleanup("reactions", self._reactions.stop)
+        if self._app:
             await cleanup("shutdown", self._app.shutdown)
         for request in self._requests:
             await cleanup("request.shutdown", request.shutdown)
