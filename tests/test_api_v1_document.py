@@ -12,18 +12,6 @@ from looper.agents.ops import ErrorCode, OpError, check_arguments
 from looper.agents.ops.clients import CLIENT_TOOLS
 
 HAND = {"chat.send", "chat.messages", "chat.conversations", "confirm", "openapi"}
-TYPED_TOOL_OPERATIONS = {
-    "tasks.list", "tasks.get", "tasks.room", "task_pipeline", "task_create", "task_control.start", "task_control.stop",
-    "task_control.restart", "task_control.start_over", "task_control.cancel", "task_update", "task_instruct",
-    "gates.list", "gates.messages", "gates.reply", "gates.end", "agent_profiles.list", "agent_profiles.create",
-    "agent_profiles.update", "agent_profiles.delete", "overview", "config_export",
-    "settings.scheduler", "settings.waits", "settings.knowledge_vault", "settings.view",
-    "settings.set", "settings.allowed_profiles", "concurrency", "schedules.list", "schedules.get", "schedules.create", "schedules.update",
-    "schedules.enable", "schedules.disable", "schedules.run", "schedules.delete", "schedules.reset_planner_session",
-    "catalog.list", "catalog.install", "catalog.update", "catalog.uninstall",
-    "models.list", "models.create", "models.update", "models.delete", "costs",
-    "providers.list", "providers.register", "providers.update",
-    "projects.list", "projects.get", "projects.create", "projects.update", "projects.delete"}
 
 
 def _actions(tool) -> list[str] | None:
@@ -80,7 +68,8 @@ def test_the_document_is_shaped_as_openapi() -> None:
     doc = api_v1.document()
     assert doc["openapi"] == "3.1.0"
     assert doc["info"]["version"] == __version__ and doc["info"]["x-looper-api"] == 1
-    assert "Remaining legacy /api routes are not described" in doc["info"]["description"]
+    assert "Complete public v1 dashboard and client operations" in doc["info"]["description"]
+    assert "retained private /api/agent/v1 transport" in doc["info"]["description"]
     assert doc["servers"] == [{"url": "/api/v1"}] and doc["security"] == [{"bearer": []}]
     assert doc["components"]["securitySchemes"] == {"bearer": {"type": "http", "scheme": "bearer"}}
     schemas = doc["components"]["schemas"]
@@ -149,13 +138,23 @@ def test_a_request_schema_checks_arguments_like_the_tool(op: api_v1.Operation) -
         assert check_arguments(op.request, {}) == {}
 
 
-def test_the_untyped_results_are_the_tool_operations_without_a_schema() -> None:
+def test_every_operation_has_a_concrete_result_schema() -> None:
     ops = api_v1.operations()
     untyped = {op.operation_id for op in ops if op.result.get("x-looper-result-typed") is False}
-    tool_ids = {op.operation_id for op in ops if op.tool}
-    assert untyped == tool_ids - TYPED_TOOL_OPERATIONS
-    assert TYPED_TOOL_OPERATIONS <= tool_ids
-    assert not any(op.result.get("x-looper-result-typed") is False for op in ops if not op.tool)
+    assert untyped == set()
+    def concrete(schema, stream):
+        assert schema
+        if "$ref" in schema:
+            concrete(api_v1.document()["components"]["schemas"][schema["$ref"].rsplit("/", 1)[1]], stream)
+        elif "oneOf" in schema or "anyOf" in schema:
+            branches = schema.get("oneOf", schema.get("anyOf"))
+            assert branches
+            for branch in branches:
+                concrete(branch, stream)
+        else:
+            assert schema.get("properties") or (stream and schema == {"type": "string"})
+    for op in ops:
+        concrete(op.result, op.stream)
 
 
 def test_the_hand_operations_declare_their_requests() -> None:
