@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.107] - 2026-10-25
+
+### Fixed
+
+- **The task page confirms a restart before it ends recovery polling.** Start and Start over now read the task once before the request, so a Stop write that lands late is not taken for the requested run. After the request is accepted, a running task acknowledges the restart at once; a terminal task must show a changed status, `completed_at` or run count, with no run still counted as running, in two consecutive reads, because a detail read can show a new run count beside the old terminal row. While the request or the confirmation is pending, Start and Start over stay disabled and the Start over confirmation closes; a refused request re-enables them and shows its error, and leaving the task aborts the pending read. Not model-visible; dashboard only. ([#601](https://github.com/foolzzz/looper/pull/601))
+
 ## [2.13.106] - 2026-10-25
 
 ### Fixed
