@@ -18,6 +18,17 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.93] - 2026-10-24
+
+### Changed
+
+- **Project management goes through v1.** Listing, creating, updating and deleting projects call the new `project_admin.list`, `.create`, `.update` and `.delete` operations (`POST /api/v1/project_admin/...`; the first is `read`, create and update `write`, delete `high` and confirmed by a client token). The compact `projects` operations gain typed result schemas. The dashboard uses them. Manager prompts and tools are unchanged. ([#523](https://github.com/foolzzz/looper/pull/523))
+- **The operator API documentation names the v1 routes.** The READMEs, the agent-system architecture page and the design document list the migrated routes and their `OpOk`/`OpError` shapes; no code changed. ([#555](https://github.com/foolzzz/looper/pull/555))
+
+### Removed
+
+- **The legacy project routes:** `GET` and `POST /api/projects`, `PUT` and `DELETE /api/projects/{id}`. Use the `project_admin` operations. ([#523](https://github.com/foolzzz/looper/pull/523))
+
 ## [2.13.92] - 2026-10-24
 
 ### Fixed
@@ -44,7 +55,7 @@ How the agent system works today is described in
 
 ### Removed
 
-- **The legacy project routes:** `GET` and `PUT /api/projects/<id>/agent-settings`, `PUT /api/projects/<id>/agent-settings/roles/<role>` and `GET` and `PUT /api/projects/<id>/allowed-profiles`. Use the `project_agent_settings` and `allowed_profiles` operations. ([#544](https://github.com/foolzzz/looper/pull/544))
+- **The legacy project routes:** `GET` and `PUT /api/projects/{id}/agent-settings`, `PUT /api/projects/{id}/agent-settings/roles/<role>` and `GET` and `PUT /api/projects/{id}/allowed-profiles`. Use the `project_agent_settings` and `allowed_profiles` operations. ([#544](https://github.com/foolzzz/looper/pull/544))
 
 ## [2.13.89] - 2026-10-24
 
@@ -94,7 +105,7 @@ How the agent system works today is described in
 
 ### Removed
 
-- **The eight `/api/projects/<id>/knowledge` routes** (`GET` and `POST` on the collection, `GET`, `PUT` and `DELETE` on a document, `GET` on `drafts`, `POST` on a draft's `confirm`, `DELETE` on a draft). Use the `project_knowledge` operations. ([#534](https://github.com/foolzzz/looper/pull/534))
+- **The eight `/api/projects/{id}/knowledge` routes** (`GET` and `POST` on the collection, `GET`, `PUT` and `DELETE` on a document, `GET` on `drafts`, `POST` on a draft's `confirm`, `DELETE` on a draft). Use the `project_knowledge` operations. ([#534](https://github.com/foolzzz/looper/pull/534))
 
 ## [2.13.84] - 2026-10-24
 
@@ -2093,8 +2104,8 @@ Covers `v2.5.0` to `v2.6.0`: pull requests #2 and #4 to #70 in
   `system_settings` keys are dropped (a rollback needs a database backup).
   API: `GET /api/agent-settings`, `PUT /api/agent-settings/system`,
   `PUT /api/agent-settings/roles/<role>`, `GET`/`PUT
-  /api/projects/<id>/agent-settings` and `PUT
-  /api/projects/<id>/agent-settings/roles/<role>` replace
+  /api/projects/{id}/agent-settings` and `PUT
+  /api/projects/{id}/agent-settings/roles/<role>` replace
   `/api/settings/agents` and its `reset-harness`; agent configs no longer
   take `harness_prompt` or `model`, and projects no longer take or return
   `planner_harness_prompt`, `worker_harness_prompt`, `model` or
@@ -2147,12 +2158,12 @@ Covers `v2.5.0` to `v2.6.0`: pull requests #2 and #4 to #70 in
   (kind, origin, owning project, where it is installed), `GET
   /api/catalog/<id>` one item with its files; `POST /api/installs`, `PUT` and
   `DELETE /api/installs/<id>` install, change the roles or enabled flag of,
-  and uninstall an item; `GET /api/projects/<id>/installs` shows what applies
+  and uninstall an item; `GET /api/projects/{id}/installs` shows what applies
   to a project: its own installs and the inherited global ones. Settings shows
   the catalog with a global install (role checkboxes) and uninstall per item;
   the project page's Skills tab shows what is installed there, installs from
   the catalog and writes or edits the project's own skills. They replace
-  `/api/settings/library*` and `GET /api/projects/<id>/skills`; each run's
+  `/api/settings/library*` and `GET /api/projects/{id}/skills`; each run's
   `metadata.library` now records its role, project and each item's plugin and
   scope, and `metadata.project_skills` is no longer written.
 
@@ -2178,12 +2189,12 @@ Covers `v2.5.0` to `v2.6.0`: pull requests #2 and #4 to #70 in
   characters). The task page lists the entries under Findings.
 - **Lessons in project knowledge, as drafts or written.** A project's
   `distill_lessons` (`off` by default, `draft` or `write`; Settings tab, or
-  `PUT /api/projects/<id>`) gives the Planner of a task that completes one
+  `PUT /api/projects/{id}`) gives the Planner of a task that completes one
   more turn, whose Markdown summary of the journal becomes the text document
   `Lessons: <requirement>`. `write` saves it to the project's knowledge;
   `draft` keeps it as a draft that no agent sees until the user confirms it,
   optionally edited, or discards it on the project's Knowledge tab
-  (`GET /api/projects/<id>/knowledge/drafts`,
+  (`GET /api/projects/{id}/knowledge/drafts`,
   `POST .../drafts/<draft_id>/confirm`, `DELETE .../drafts/<draft_id>`); the
   task page links to its draft. A project that had the earlier boolean
   switch on is migrated to `write`, off to `off`.
@@ -2203,8 +2214,8 @@ Covers `v2.5.0` to `v2.6.0`: pull requests #2 and #4 to #70 in
   settings that are set. Knowledge documents and project skills can be opened
   to read their body and edited in place; a dropped file adds a document, and
   an uploaded or dropped `SKILL.md` fills a new skill from its frontmatter and
-  body. `GET /api/projects/<id>/knowledge/<doc_id>` and
-  `GET /api/projects/<id>/skills/<skill_id>` return one item with its body.
+  body. `GET /api/projects/{id}/knowledge/<doc_id>` and
+  `GET /api/projects/{id}/skills/<skill_id>` return one item with its body.
   The history page's Plugins & skills lists the project skills a run loaded,
   and the Agents page no longer offers the removed `permission_mode` (the
   codex-cli Sandbox dropdown).
@@ -2265,8 +2276,8 @@ Covers `v2.5.0` to `v2.6.0`: pull requests #2 and #4 to #70 in
     records `metadata.project_skills`: the project, the set's hash and each
     skill's name and `SKILL.md` hash.
   - **API and dashboard.**
-    - `GET`/`POST /api/projects/<id>/skills` and
-      `PUT`/`DELETE /api/projects/<id>/skills/<skill_id>`; `PUT` takes the
+    - `GET`/`POST /api/projects/{id}/skills` and
+      `PUT`/`DELETE /api/projects/{id}/skills/<skill_id>`; `PUT` takes the
       enabled switch and edits.
     - The project editor gains a Skills list below Knowledge: add a skill
       (name, description, instructions), switch one on or off, and delete
@@ -2292,8 +2303,8 @@ Covers `v2.5.0` to `v2.6.0`: pull requests #2 and #4 to #70 in
     resident Planner restarts with `--resume` on its next turn.
     `prompt_layers.project` records the index's `knowledge_sha256` and
     `knowledge_documents`.
-  - **API and dashboard.** `GET`/`POST /api/projects/<id>/knowledge` and
-    `PUT`/`DELETE /api/projects/<id>/knowledge/<doc_id>`; the project editor
+  - **API and dashboard.** `GET`/`POST /api/projects/{id}/knowledge` and
+    `PUT`/`DELETE /api/projects/{id}/knowledge/<doc_id>`; the project editor
     gains a Knowledge list to add text, upload a file, reference a project
     file and delete, with a count, size and index readout.
 - **Cost and context observability (M2).** Every Claude run now records
@@ -2807,7 +2818,7 @@ work link its pull requests.
   [#58](https://github.com/michaelx1993/loopx/pull/58))
 - Every agent task belongs to exactly one project. A project has a name
   (unique ignoring case), a description and an optional default directory.
-  `GET`/`POST /api/projects` and `PUT`/`DELETE /api/projects/<id>` manage
+  `GET`/`POST /api/projects` and `PUT`/`DELETE /api/projects/{id}` manage
   projects and report each one's task and active counts; a taken name is 409,
   and so is deleting a project that still has tasks. `POST /api/tasks/create`
   now requires exactly one of `project_id` and `project` (a new project,
