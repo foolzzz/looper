@@ -233,6 +233,65 @@ describe("GatesPage", () => {
     expect(vi.mocked(fetchGates).mock.calls.length).toBe(calls + 1);
   });
 
+  it.each(["success", "failure"])("Retry resets pagination and ignores an older refresh %s", async (stale) => {
+    const old = list([row("old", gate("old"))], { total: 80, has_more: true, next_cursor: "expired" });
+    vi.mocked(fetchGates).mockResolvedValueOnce(old);
+    await show("waiting=user&project=p1");
+    const filters = { state: "open", waitingOn: "user", projectId: "p1" };
+    vi.mocked(fetchGates).mockRejectedValueOnce(new Error("Boundary expired"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(fetchGates).toHaveBeenLastCalledWith({ ...filters, limit: 200, through: "expired" });
+
+    // A failed fresh read retains both the previous rows and pagination feedback.
+    vi.mocked(fetchGates).mockRejectedValueOnce(new Error("Temporarily unavailable"));
+    await click(button("Retry"));
+    expect(fetchGates).toHaveBeenLastCalledWith({ ...filters, limit: 50 });
+    expect(container.querySelector("[role=alert]")?.textContent).toContain("Temporarily unavailable");
+    expect(container.querySelector("a[href='#tasks/old']")).not.toBeNull();
+    expect(button("Show more")).toBeDefined();
+
+    let resolve!: (value: GateList) => void;
+    let reject!: (reason: Error) => void;
+    vi.mocked(fetchGates).mockReturnValueOnce(new Promise((yes, no) => { resolve = yes; reject = no; }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    const fresh = list([row("new", gate("new"))], {
+      total: 2, has_more: true, next_cursor: "fresh",
+      counts: { open: 2, waiting_user: 2, waiting_planner: 0, closed: 0, all: 2 },
+    });
+    let finishRetry!: (value: GateList) => void;
+    vi.mocked(fetchGates).mockReturnValueOnce(new Promise((done) => { finishRetry = done; }));
+    await click(button("Retry"));
+    // Exact arguments exclude both cursor and through while retaining the active filters.
+    expect(fetchGates).toHaveBeenLastCalledWith({ ...filters, limit: 50 });
+    expect(container.querySelector("a[href='#tasks/old']")).not.toBeNull();
+    expect(container.textContent).toContain("3 open · 2 waiting for you");
+    expect(container.querySelector("[role=alert]")).not.toBeNull();
+    await act(async () => finishRetry(fresh));
+    expect(container.querySelector("[role=alert]")).toBeNull();
+    expect(container.querySelector("a[href='#tasks/old']")).toBeNull();
+    expect(container.querySelector("a[href='#tasks/new']")).not.toBeNull();
+    expect(container.textContent).toContain("2 open · 2 waiting for you");
+
+    await act(async () => {
+      if (stale === "success") resolve(old);
+      else reject(new Error("Stale refresh failed"));
+    });
+    expect(container.querySelector("[role=alert]")).toBeNull();
+    expect(container.querySelector("a[href='#tasks/old']")).toBeNull();
+    expect(container.textContent).toContain("2 open · 2 waiting for you");
+    vi.mocked(fetchGates).mockResolvedValueOnce(fresh);
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(fetchGates).toHaveBeenLastCalledWith({ ...filters, limit: 200, through: "fresh" });
+    vi.mocked(fetchGates).mockResolvedValueOnce(list([row("tail", gate("tail"))], {
+      total: 2, counts: fresh.counts, next_cursor: "tail",
+    }));
+    await click(button("Show more"));
+    expect(fetchGates).toHaveBeenLastCalledWith({ ...filters, limit: 50, cursor: "fresh" });
+    expect(container.querySelectorAll("li")).toHaveLength(2);
+    expect(button("Show more")).toBeUndefined();
+    expect(container.querySelector("a[href='#tasks/tail']")).not.toBeNull();
+  });
+
   it.each(["duplicate", "total"])("refuses %s data across refresh windows without losing the draft", async (change) => {
     const first = row("first", gate("first"));
     vi.mocked(fetchGates).mockResolvedValue(list([first], { next_cursor: "boundary" }));

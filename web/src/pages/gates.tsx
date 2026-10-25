@@ -112,16 +112,15 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
   const filters = readFilters(query);
   const { state, waiting, project } = filters;
   const { projects } = useProjects();
-  const [rows, setRows] = useState<GateListRow[]>([]);
+  const [{ rows, answering }, setView] = useState<{ rows: GateListRow[]; answering: string }>({ rows: [], answering: "" });
   const [data, setData] = useState<Pick<GateList, "total" | "counts" | "has_more"> | null>(null);
   const [error, setError] = useState("");
-  const [answering, setAnswering] = useState("");
   const latest = useRef(0);
   const loading = useRef(false);
   const cursor = useRef<string | null>(null);
 
   const read = useCallback(
-    (mode: "refresh" | "more", force: boolean) => {
+    (mode: "refresh" | "more" | "retry", force: boolean) => {
       if (loading.current && !force) return Promise.resolve();
       const seq = ++latest.current;
       loading.current = true;
@@ -133,7 +132,7 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
       // Keysets survive a gate closing between pages. The old boundary keeps new gates from displacing drafts.
       const load = async (): Promise<GateList> => {
         if (more) return request(PAGE, cursor.current);
-        const through = cursor.current ?? undefined;
+        const through = mode === "retry" ? undefined : cursor.current ?? undefined;
         let list = await request(through ? MAX_ROWS : PAGE, null, through);
         let next = list;
         while (through && next.gates.length === MAX_ROWS && next.has_more && next.next_cursor) {
@@ -150,7 +149,16 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
         .then((list) => {
           if (seq !== latest.current) return;
           loading.current = false;
-          setRows((current) => (more ? [...current, ...list.gates] : list.gates));
+          setView((current) => {
+            const keys = new Set(list.gates.map(rowKey));
+            // A recovered page may omit the editor; keep it mounted until pagination reaches it again.
+            const editing = current.rows.find((row) => rowKey(row) === current.answering);
+            const rows = more
+              ? [...current.rows.filter((row) => !keys.has(rowKey(row))), ...list.gates]
+              : [...list.gates];
+            if (editing && !rows.some((row) => rowKey(row) === current.answering)) rows.push(editing);
+            return { ...current, rows };
+          });
           if (!more || list.gates.length) cursor.current = list.next_cursor;
           setData({ total: list.total, counts: list.counts, has_more: list.has_more });
           setError("");
@@ -167,9 +175,8 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
   useEffect(() => {
     // A new filter starts over: the rows of the old one are not shown.
     cursor.current = null;
-    setRows([]);
+    setView({ rows: [], answering: "" });
     setData(null);
-    setAnswering("");
     void read("refresh", true);
     const timer = setInterval(() => void read("refresh", false), REFRESH_MS);
     return () => {
@@ -224,7 +231,10 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
       {error && (
         <div role="alert" className="flex flex-wrap items-center gap-3 text-sm text-destructive [overflow-wrap:anywhere]">
           <span>Cannot load gates ({error})</span>
-          <Button type="button" variant="outline" size="sm" className="min-h-11" onClick={() => void read("refresh", true)}>
+          <Button type="button" variant="outline" size="sm" className="min-h-11" onClick={() => {
+            // Only this request omits the saved boundary; commit its replacement on success.
+            void read("retry", true);
+          }}>
             Retry
           </Button>
         </div>
@@ -250,7 +260,9 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
           <ul className="space-y-2">
           {rows.map((row) => (
             <GateRow key={rowKey(row)} row={row} answering={answering === rowKey(row)}
-              onAnswer={() => setAnswering((k) => (k === rowKey(row) ? "" : rowKey(row)))} onChanged={onChanged} />
+              onAnswer={() => setView((current) => ({
+                ...current, answering: current.answering === rowKey(row) ? "" : rowKey(row),
+              }))} onChanged={onChanged} />
           ))}
           </ul>
         </div>
