@@ -2125,6 +2125,37 @@ CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_bot ON task_user_gate_posts 
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_messages_bot ON task_user_gate_messages (channel_id, external_id)
     WHERE external_id IS NOT NULL;
 
+-- Durable per-bot chat bindings and metadata (no routing is enabled here).
+ALTER TABLE channel_configs ADD COLUMN IF NOT EXISTS bound_chats_only BOOLEAN NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS manager_chat_bindings (
+    channel_id TEXT NOT NULL REFERENCES channel_configs(channel_id) ON DELETE CASCADE,
+    chat_id TEXT NOT NULL CHECK (btrim(chat_id) <> ''),
+    manager_id TEXT NOT NULL REFERENCES managers(id) ON DELETE RESTRICT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (channel_id, chat_id)
+);
+CREATE INDEX IF NOT EXISTS idx_manager_chat_bindings_manager
+    ON manager_chat_bindings (manager_id, channel_id, chat_id);
+CREATE TABLE IF NOT EXISTS channel_seen_chats (
+    channel_id TEXT NOT NULL REFERENCES channel_configs(channel_id) ON DELETE CASCADE,
+    chat_id TEXT NOT NULL CHECK (btrim(chat_id) <> ''),
+    name TEXT CHECK (char_length(name) <= 200),
+    count BIGINT NOT NULL DEFAULT 1 CHECK (count > 0),
+    last_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (channel_id, chat_id)
+);
+CREATE TABLE IF NOT EXISTS channel_unbound_chats (
+    channel_id TEXT NOT NULL REFERENCES channel_configs(channel_id) ON DELETE CASCADE,
+    chat_id TEXT NOT NULL CHECK (btrim(chat_id) <> ''),
+    name TEXT CHECK (char_length(name) <= 200),
+    count BIGINT NOT NULL DEFAULT 1 CHECK (count > 0),
+    last_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (channel_id, chat_id)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_unbound_chats_latest
+    ON channel_unbound_chats (channel_id, last_at DESC, chat_id ASC);
+-- End durable chat storage.
+
 -- registry-phase: convert
 
 -- Python conversion and launch/pricing comparison have completed. Refuse to

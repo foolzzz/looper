@@ -195,6 +195,28 @@ def test_export_leaves_the_added_bot_out(monkeypatch: pytest.MonkeyPatch, tmp_pa
     asyncio.run(_test())
 
 
+@pytest.mark.parametrize("policy", [False, True])
+def test_channel_import_cannot_set_or_erase_bound_only_policy(monkeypatch: pytest.MonkeyPatch, policy: bool) -> None:
+    from looper.agents.config_transfer import run_import
+    from looper.agents.serve import seed_channel_configs
+    from looper.db import chat_bindings
+
+    async def test(pool: Any) -> None:
+        async with pool.acquire() as conn, conn.transaction():
+            await chat_bindings.set_bound_chats_only("channel-telegram", policy, conn=conn)
+        document = {"format": "looper-config/v3", "channels": [{
+            "channel_type": "telegram", "channel_id": "channel-telegram", "display_name": "Imported bot",
+            "enabled": False, "config": {}, "bound_chats_only": not policy}]}
+        async with pool.acquire() as conn:
+            plan = await run_import(conn, document, apply=True)
+        assert plan.view()["counts"]["channels"]["changed"] == 1
+        row = await pool.fetchrow("SELECT display_name, bound_chats_only FROM channel_configs "
+                                  "WHERE channel_id = 'channel-telegram'")
+        assert row["display_name"] == "Imported bot" and row["bound_chats_only"] is policy
+
+    run_db(test, monkeypatch, setup=seed_channel_configs, timeout=30)
+
+
 def test_import_leaves_the_added_bot_untouched(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def _test() -> None:
         async with _installation() as (pool, url):
