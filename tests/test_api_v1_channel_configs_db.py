@@ -68,6 +68,44 @@ def test_crud_readback_preserves_manager_builtin_rows_and_secret_presence(tmp_pa
     _run(run, monkeypatch)
 
 
+@pytest.mark.parametrize("action", ["create", "update"])
+def test_read_only_database_channel_save_returns_private_service_failure(tmp_path, monkeypatch, action, caplog):
+    import asyncpg
+
+    from looper.db import connection
+
+    async def run(pool):
+        async with _serving(tmp_path, listen=True) as server:
+            async def call(verb, body):
+                return await _send(server, "POST /api/v1/channel_configs/" + verb,
+                                   _bearer(TOKEN), json.dumps(body))
+
+            status, _, created = await call("create", CREATE)
+            assert status == 200, created
+            channel_id = created["result"]["channel_id"]
+            before = await pool.fetch("SELECT * FROM channel_configs ORDER BY channel_id")
+            secrets_before = await pool.fetch("SELECT * FROM channel_secrets ORDER BY channel_id")
+            schema = await pool.fetchval("SELECT current_schema()")
+            async with asyncpg.create_pool(DSN, min_size=1, max_size=1, server_settings={
+                    "search_path": schema, "default_transaction_read_only": "on"}) as readonly_pool:
+                assert await readonly_pool.fetchval("SHOW transaction_read_only") == "on"
+                with monkeypatch.context() as patch:
+                    patch.setattr(connection, "_pool", readonly_pool)
+                    request = ({**CREATE, "bot_token": "8899123:synthetic-readonly-secret"}
+                               if action == "create" else {"channel_id": channel_id,
+                                   "fields": {"bot_token": NEW_SECRET, "display_name": "Changed"}})
+                    status, headers, answer = await call(action, request)
+                assert status == 503 and answer["error"] == {
+                    "code": "unavailable", "message": "invalid credential request"}, answer
+                assert headers["cache-control"] == "no-store"
+            assert await pool.fetch("SELECT * FROM channel_configs ORDER BY channel_id") == before
+            assert await pool.fetch("SELECT * FROM channel_secrets ORDER BY channel_id") == secrets_before
+            assert await pool.fetchval("SELECT count(*) FROM manager_actions") == 0
+            assert all(value not in json.dumps(answer) + caplog.text for value in
+                       (SECRET, NEW_SECRET, "8899123:synthetic-readonly-secret", "read-only transaction"))
+    _run(run, monkeypatch)
+
+
 @pytest.mark.parametrize("fields,expected", [({}, SECRET), ({"bot_token": "***"}, SECRET),
     ({"bot_token": NEW_SECRET}, NEW_SECRET), ({"bot_token": None}, None), ({"bot_token": ""}, None)])
 def test_token_keep_replace_remove_variants_have_database_readback(tmp_path, monkeypatch, fields, expected):

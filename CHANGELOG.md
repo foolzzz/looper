@@ -18,6 +18,31 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.112] - 2026-10-25
+
+### Fixed
+
+- **A Manager cancelled mid-turn keeps its run record and text, and its Claude cleanup is finished.** When the message task is cancelled, the run record is now closed with the assistant text already handled, otherwise the deltas already shown, instead of no output; this also holds when the cancellation arrives during cleanup after a read failure or a stop. `ClaudeRunRecorder.end_left_open` gains an optional `output_text`. `ResidentClaude` runs the stop of a Claude process as its own tracked task: cancelling the caller does not cancel it, a turn or later `stop()` waits for it even after the process was forgotten, and a failing cleanup is logged. Manager and Claude CLI behavior only; no route, stored data format, Manager tool declaration or prompt changed. ([#612](https://github.com/foolzzz/looper/pull/612))
+- **Selected Pi comparisons recompute their cost and repetitions.** `examples/pi/eval-prompt-comparison.sh` now sets `total_cost_usd` and `reps` of the subset it compares from the selected rows, not from the whole Pi run. Example script only; the package is unchanged. ([#610](https://github.com/foolzzz/looper/pull/610))
+
+## [2.13.111] - 2026-10-25
+
+### Fixed
+
+- **A Telegram channel that fails while starting no longer leaks its resources.** If `initialize`, `start` or starting the poller raised (or was cancelled), `start()` now calls `stop()` before re-raising. The adapter builds and owns its two HTTP clients (one for polling, one for other calls, with the pool sizes `ApplicationBuilder` uses by default), because `Application.shutdown` does nothing when `initialize` failed. `stop()` now cancels the outbound task, stops the reaction tracker, stops the updater and application only if they are running, shuts down the application and both clients, and then clears its handles. A failure in one cleanup step is logged and does not skip the later ones. Channel adapter behavior only; no route, stored data, Manager tool declaration or prompt changed. ([#606](https://github.com/foolzzz/looper/pull/606))
+
+## [2.13.110] - 2026-10-25
+
+### Fixed
+
+- **Chat sends and navigation stay bound to their conversation.** A send now belongs to the Manager and conversation it started in: a new send, or navigation to another Manager, a channel conversation or one that is loading, missing or another Manager's, aborts the request and closes the reply stream, even before the HTTP response arrives, and a late response or error is ignored instead of landing in the wrong thread. Sending from a read-only or unresolved view is refused. Choosing a row in the conversation list updates the address and the page adopts the thread from it; unsaved threads created in the page are remembered per Manager in local storage so Back and Forward return to them, while other empty ids show "Conversation not found." The page no longer saves the assistant reply itself, since the server's web channel adapter already saves it to the session the send was made from. Browser behavior only; no route, stored data, Manager tool declaration or prompt changed. ([#598](https://github.com/foolzzz/looper/pull/598))
+
+## [2.13.109] - 2026-10-25
+
+### Fixed
+
+- **Channel saves keep their error class, and an unchanged Lark bot can be disabled without authentication.** Fixed validation messages for new or updated channel bots (missing Telegram token, Lark `app_id` or app secret, lark-cli profile, Manager reassignment) now reach the caller as `invalid` with that fixed text, never built from the request. A wrapped service failure with a 5xx status is returned as `unavailable` (`invalid credential request`) instead of being turned into a 400, and a channel lookup before a config update goes through the same error mapping, so a missing channel answers the same 404 with or without `config`. An update that only sets `enabled` to false on a Lark bot whose profile, `app_id`, token, `bot_token_env` and domain are unchanged no longer re-checks the Lark identity, so a bot with broken authentication can be turned off; every other Lark save still revalidates. Model-visible only as API error codes and messages of channel saves; no Manager tool declaration or prompt changed. ([#600](https://github.com/foolzzz/looper/pull/600))
+
 ## [2.13.108] - 2026-10-25
 
 ### Fixed

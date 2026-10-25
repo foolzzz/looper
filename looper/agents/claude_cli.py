@@ -757,7 +757,7 @@ class ResidentClaude:
         self._cancel: TurnCancel | None = None  # its cancel (what ``interrupt`` requests)
         self._interrupting: asyncio.Task[StopMethod] | None = None  # the stop of the running turn, once asked
         self._tree: proc_tree.TurnTree | None = None  # the process's tree, followed while it runs
-        self._ending: set[asyncio.Event] = set()  # the stops under way, each set once its process tree is gone
+        self._ending: set[asyncio.Task[None]] = set()  # cleanup owners, retained until their process trees are gone
         self._price: Price | None = None  # prices the totals at the provider's prices, if Looper prices them
 
     @property
@@ -893,7 +893,7 @@ class ResidentClaude:
             result_event = await turn.done
             # A stop resolves the turn first; the turn is over only once its process tree is gone.
             while self._ending:
-                await asyncio.gather(*(event.wait() for event in tuple(self._ending)))
+                await asyncio.gather(*(asyncio.shield(task) for task in tuple(self._ending)))
             method = await self._stopped_by_user()
         except BaseException:
             self._user_turn, self._cancel, self._interrupting = None, None, None
@@ -1015,13 +1015,24 @@ class ResidentClaude:
         Claude's own that ends then is handled; one that does not is closed
         without a result. A turn waiting on the stop returns only after that
         reading is over.
+        Cleanup has its own tracked task: cancelling a caller does not cancel it, and a later stop joins it
+        even after the process was forgotten.
         """
         process, output, tree = self._process, self._output, self._tree
         self._process, self._output, self._command, self._signature, self._tree = None, None, [], None, None
-        if process is None:
-            return
-        ended = asyncio.Event()
-        self._ending.add(ended)
+        if process is not None:
+            task = asyncio.create_task(self._stop_process(process, output, tree, kill=kill))
+            self._ending.add(task)
+            task.add_done_callback(self._process_ended)
+        await asyncio.gather(*(asyncio.shield(task) for task in tuple(self._ending)))
+
+    def _process_ended(self, task: asyncio.Task[None]) -> None:
+        self._ending.discard(task)
+        if not task.cancelled() and (problem := task.exception()) is not None:
+            logger.error("%s: resident cleanup failed", self._label, exc_info=problem)
+
+    async def _stop_process(self, process: asyncio.subprocess.Process, output: _Output | None,
+                            tree: proc_tree.TurnTree | None, *, kill: bool) -> None:
         if output is not None:
             output.drop_turn()
         try:
@@ -1038,19 +1049,14 @@ class ResidentClaude:
                 except TimeoutError:
                     pass
         finally:
-            # Also when the wait is cancelled: the process is forgotten already.
-            try:
-                # From the snapshot followed while Claude ran: what it started is re-parented once it exits.
-                if tree is not None:
-                    await tree.end()
-                else:
-                    await proc_tree.end(process, label=self._label)
-                if output is not None:
-                    # Read to its end, or cut off: an event a stopped turn's owner still handles is over with it.
-                    await output.finish()
-            finally:
-                self._ending.discard(ended)
-                ended.set()
+            # From the snapshot followed while Claude ran: what it started is re-parented once it exits.
+            if tree is not None:
+                await tree.end()
+            else:
+                await proc_tree.end(process, label=self._label)
+            if output is not None:
+                # Read to its end, or cut off: an event a stopped turn's owner still handles is over with it.
+                await output.finish()
         logger.info("%s stopped Claude Code (pid=%s, exit code %s)", self._label, process.pid, process.returncode)
 
 
@@ -1421,10 +1427,10 @@ class ClaudeRunRecorder:
         except Exception:
             logger.warning("could not annotate llm record for %s", self._agent_id, exc_info=True)
 
-    async def end_left_open(self, exc: BaseException | None = None) -> None:
+    async def end_left_open(self, exc: BaseException | None = None, *, output_text: str | None = None) -> None:
         """Close the record if the run left it open, ended as ``ended_by(exc)`` says, with what the run's usage
         events added up to, or, for a whole process whose result came, what that result reports; nothing for a
-        record closed already."""
+        record closed already. ``output_text`` retains what the owner handled before being interrupted."""
         ended = "the run had ended with its result; " if self._result is not None else ""
         if isinstance(exc, Exception):
             why = f"{ended}Looper stopped following the run after an error: {type(exc).__name__}: {exc}"
@@ -1438,7 +1444,7 @@ class ClaudeRunRecorder:
         if self._result is not None:
             usage = run_usage(self._result, price=self._launch.price if self._launch is not None else None) \
                 .filled_from(usage)
-        await self._close(ended_by(exc), output_text=None, session_id=(self._result or {}).get("session_id"),
+        await self._close(ended_by(exc), output_text=output_text, session_id=(self._result or {}).get("session_id"),
                           usage=usage, error=why)
 
     async def _close(self, status: RecordStatus, *, output_text: str | None, session_id: str | None, usage: Usage,

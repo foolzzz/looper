@@ -170,6 +170,7 @@ describe("chat Manager picker", () => {
 
   it("watches the open thread under its Manager", async () => {
     api.fetchChatSessions.mockResolvedValue([row("r1")]);
+    api.fetchChatSession.mockResolvedValue(row("r1"));
     api.fetchChatMessages.mockResolvedValue([msg("m1", "hello")]);
     await mount();
     await pick("Code review");
@@ -179,6 +180,7 @@ describe("chat Manager picker", () => {
 
   it("keeps a thread pointer per Manager", async () => {
     api.fetchChatSessions.mockImplementation(async (m: string) => (m === "manager-review" ? [row("r1")] : []));
+    api.fetchChatSession.mockResolvedValue(row("r1"));
     await mount();
     await pick("Code review");
     const before = localStorage.getItem(KEY_REVIEW);
@@ -294,7 +296,8 @@ describe("chat Manager picker", () => {
       expect(api.sendChat).not.toHaveBeenCalled();
     });
 
-    it("opens an id the server answers with an empty list as a new thread of the selected Manager", async () => {
+    it("reopens a locally created empty thread of the selected Manager", async () => {
+      localStorage.setItem("looper-chat-local-threads:manager-review", JSON.stringify(["new-sid"]));
       await mount("target=manager-review&conversation=new-sid");
       expect(asked("sessions", "new-sid")).toEqual([{ session_id: "new-sid", manager: "manager-review" }]);
       expect(localStorage.getItem(KEY_REVIEW)).toBe("new-sid");
@@ -304,6 +307,20 @@ describe("chat Manager picker", () => {
       expect(api.sendChat).toHaveBeenLastCalledWith(
         "hello", "new-sid", expect.any(String), { kind: "manager", id: "manager-review" }, expect.anything(),
       );
+    });
+
+    it("does not adopt a missing web thread registered only under another Manager", async () => {
+      localStorage.setItem(KEY_REVIEW, "review-current");
+      localStorage.setItem("looper-chat-local-threads:manager", JSON.stringify(["new-sid"]));
+      await mount("target=manager-review&conversation=new-sid");
+      expect(asked("sessions", "new-sid")).toEqual([{ session_id: "new-sid", manager: "manager-review" }]);
+      expect(localStorage.getItem(KEY_REVIEW)).toBe("review-current");
+      expect(localStorage.getItem("looper-chat-session-id")).toBe(SID);
+      expect(container.querySelector('[role="alert"]')?.textContent).toMatch(/conversation not found/i);
+      expect(input()).toBeNull();
+      expect(asked("messages", "new-sid")).toEqual([]);
+      expect(api.watchChat).not.toHaveBeenCalledWith("new-sid", expect.any(Function), expect.anything());
+      expect(api.sendChat).not.toHaveBeenCalled();
     });
 
     it("never attaches another Manager's conversation from the address, and says whose it is", async () => {

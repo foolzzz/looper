@@ -1625,20 +1625,29 @@ class ManagerAgent:
             # The turn's events still being handled are still reaching the chat: the turn is not over for the user
             # until they have, and a stop meanwhile is not too late.
             await handled()
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             self._settle()
-            await abandon_handling()
+            try:
+                await abandon_handling()
+            finally:
+                # Handled assistant text wins; when its persistence was abandoned, retain only the deltas
+                # already shown. Close before the generic fallback can replace that output with None.
+                await recorder.end_left_open(exc, output_text="".join(text_parts) or token.partial or None)
             # ManagerAgent.stop owns resident shutdown on closure, outside the message task that the supervisor
-            # cancels repeatedly. Stopping here could forget the process and lose its cleanup to the next cancel.
+            # cancels repeatedly. It also joins any resident cleanup already started by a read failure.
             raise
         except BaseException as exc:
             if not isinstance(exc, TurnStopped):
                 self._settle()  # the turn failed: a stop that comes while it is cleaned up is too late
-            await abandon_handling()
-            if isinstance(exc, TurnStopped):
+            try:
+                await abandon_handling()
+                if isinstance(exc, TurnStopped):
+                    raise
+                # Never leave Claude running once the Manager gives up on it.
+                await self._claude.stop(kill=True)
+            except asyncio.CancelledError as cancelled:
+                await recorder.end_left_open(cancelled, output_text="".join(text_parts) or token.partial or None)
                 raise
-            # Never leave Claude running once the Manager gives up on it.
-            await self._claude.stop(kill=True)
             await recorder.finish(
                 output_text="".join(text_parts) or None, result_event=None,
                 error=f"Manager stopped reading Claude: {type(exc).__name__}: {exc}", status=ended_by(exc),

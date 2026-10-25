@@ -630,19 +630,58 @@ def test_comparison_deadline_kills_process_group(tmp_path: Path, comparison_env)
     assert "deadline" in (COMPARISON_STATE / "latest" / "ledger.txt").read_text()
 
 
-def _pi_comparison_report(path: Path, provider: str, phase: str) -> None:
-    ids = (TASKS + ",operator_notes_stale") if phase == "tasks" else DIALOGS
+def _pi_comparison_report(path: Path, provider: str, phase: str, *, ids: str | None = None) -> None:
+    ids = ids or ((TASKS + ",operator_notes_stale") if phase == "tasks" else DIALOGS)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"mode": "real", "agent": provider, "total_cost_usd": 0.1,
+    path.write_text(json.dumps({"mode": "real", "agent": provider, "model": provider.rsplit("/", 1)[-1],
+        "started_at": "2026-10-25T00:00:00Z", "git": {"commit": "abc123", "dirty": False},
+        "caps": {"total_cap_usd": 2.5}, "total_cost_usd": 0.8, "reps": 2,
         phase: [{"id": case, "rep": rep, "outcome": "pass", "planner_denials": 1,
-                 "planner_modified_files": 0} for case in ids.split(",") for rep in (1, 2)]}))
+                 "planner_modified_files": 0, "cost_usd": 0.4 / len(ids.split(","))}
+                for case in ids.split(",") for rep in (1, 2)]}))
+
+
+@pytest.mark.parametrize("phase,tier,ids,reps", [
+    ("tasks", "planner-opus", PLANNER_TASKS, 1),
+    ("tasks", "tasks-sonnet", TASKS, 2),
+    ("dialogs", "manager-opus", DIALOGS, 1),
+    ("dialogs", "dialogs-sonnet", DIALOGS, 2),
+])
+def test_comparison_selected_cost_and_reps_match_rows(
+    tmp_path: Path, comparison_env, phase: str, tier: str, ids: str, reps: int,
+) -> None:
+    path = COMPARISON_STATE / "prior.json"
+    _pi_comparison_report(path, DEEPSEEK_AGENT, phase, ids=ids)
+    source_bytes = path.read_bytes()
+    source = json.loads(source_bytes)
+    comparison_env[f"PI_EVAL_DEEPSEEK_{phase.upper()}_JSON"] = str(path)
+    completed = _run(tmp_path, comparison_env, script=COMPARISON_SCRIPT)
+    assert completed.returncode == 0, completed.stderr
+    pairs = [r["argv"] for r in _invocations(tmp_path) if "compare" in r["argv"]
+             and Path(r["argv"][-2]).name == "deepseek-selected.json"
+             and Path(r["argv"][-2]).parent.name == tier]
+    assert len(pairs) == 1
+    selected_path, claude_path = map(Path, pairs[0][-2:])
+    selected = json.loads(selected_path.read_text())
+    claude = json.loads(claude_path.read_text())
+    assert {(row["id"], row["rep"]) for row in selected[phase]} == {
+        (case, rep) for case in ids.split(",") for rep in range(1, reps + 1)}
+    assert selected[phase] == [row for row in source[phase] if row["rep"] <= reps]
+    assert selected["total_cost_usd"] == 0.4 * reps
+    assert selected["reps"] == reps
+    assert selected == {**source, phase: selected[phase], "total_cost_usd": 0.4 * reps, "reps": reps}
+    assert {(row["id"], row["rep"]) for row in selected[phase]} == {
+        (row["id"], row["rep"]) for row in claude[phase]}
+    assert path.read_bytes() == source_bytes
 
 
 def test_comparison_keeps_independent_pi_profiles_and_same_case_reps(tmp_path: Path, comparison_env) -> None:
+    sources = {}
     for provider, agent in (("RESPONSES", "pi/cpa/gpt-6.1-sol"), ("DEEPSEEK", DEEPSEEK_AGENT)):
         for phase in ("tasks", "dialogs"):
             path = COMPARISON_STATE / f"{provider}-{phase}.json"
             _pi_comparison_report(path, agent, phase)
+            sources[path] = path.read_bytes()
             comparison_env[f"PI_EVAL_{provider}_{phase.upper()}_JSON"] = str(path)
     completed = _run(tmp_path, comparison_env, script=COMPARISON_SCRIPT)
     assert completed.returncode == 0, completed.stderr
@@ -655,6 +694,13 @@ def test_comparison_keeps_independent_pi_profiles_and_same_case_reps(tmp_path: P
         phase = "dialogs" if "dialogs" in claude else "tasks"
         assert {(r["id"], r["rep"]) for r in pi_run[phase]} == {(r["id"], r["rep"]) for r in claude[phase]}
         assert "operator_notes_stale" not in {r["id"] for r in pi_run[phase]}
+        assert pi_run["total_cost_usd"] == round(sum(row["cost_usd"] for row in pi_run[phase]), 6)
+        assert pi_run["reps"] == len({row["rep"] for row in pi_run[phase]})
+        provider = Path(argv[-2]).name.split("-")[0].upper()
+        source = json.loads(sources[COMPARISON_STATE / f"{provider}-{phase}.json"])
+        assert pi_run == {**source, phase: pi_run[phase],
+                          "total_cost_usd": pi_run["total_cost_usd"], "reps": pi_run["reps"]}
+    assert all(path.read_bytes() == content for path, content in sources.items())
     ledger = (COMPARISON_STATE / "latest/ledger.txt").read_text()
     assert "planner_denials=1" in ledger
 

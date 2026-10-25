@@ -6,6 +6,7 @@ read, and no error text is built from the request body."""
 from __future__ import annotations
 
 from collections.abc import Mapping
+from enum import Enum
 from typing import Any
 
 import asyncpg
@@ -23,8 +24,26 @@ DISPLAY_NAME_MAX = 60
 TOKEN_MAX = 4096
 _POST_KEYS = {"channel_type", "manager_id", "display_name", "enabled", "config", "bot_token"}
 _LOCK = "SELECT pg_advisory_xact_lock(hashtext('looper.channel_bots'))"
-_NAME_THE_PROFILE = ("name the lark-cli profile of this bot: the active profile belongs to the built-in Lark "
-                     "channel")
+
+
+class BotValidationReason(Enum):
+    """Public validation messages selected by the service, never built from input."""
+
+    TELEGRAM_TOKEN = "a new Telegram bot needs its token: paste it from BotFather"
+    LARK_APP_ID = "a new Lark bot needs its app_id"
+    LARK_APP_SECRET = "a new Lark bot needs its app secret"
+    LARK_PROFILE = ("name the lark-cli profile of this bot: the active profile belongs to the built-in Lark "
+                    "channel")
+    MANAGER_REASSIGNMENT = ("a bot's Manager cannot change: add a new bot for the other Manager and remove "
+                            "this one")
+
+
+class BotValidationRefusal(projects.RequestError):
+    """Only a fixed validation reason may cross the credential-write boundary."""
+
+    def __init__(self, reason: BotValidationReason) -> None:
+        self.reason = reason
+        super().__init__(projects.HTTP_400, reason.value)
 
 
 def _bad(message: str) -> projects.RequestError:
@@ -129,19 +148,19 @@ async def add_bot(data: dict[str, Any]) -> dict[str, Any]:
 
     if channel_type == "telegram":
         if not isinstance(token, str) or not token or len(token) > TOKEN_MAX:
-            raise _bad("a new Telegram bot needs its token: paste it from BotFather")
+            raise BotValidationRefusal(BotValidationReason.TELEGRAM_TOKEN)
         if config.get("bot_token_env"):
             raise _bad("a new bot's token is entered here, not read from the environment")
     elif channel_type == "lark":
         if not config.get("profile"):
-            raise _bad(_NAME_THE_PROFILE)
+            raise BotValidationRefusal(BotValidationReason.LARK_PROFILE)
         if token is not None:
             raise _bad("a lark-cli bot has no token: its credentials are in its lark-cli profile")
     else:
         if not config.get("app_id"):
-            raise _bad("a new Lark bot needs its app_id")
+            raise BotValidationRefusal(BotValidationReason.LARK_APP_ID)
         if not isinstance(token, str) or not token or len(token) > TOKEN_MAX:
-            raise _bad("a new Lark bot needs its app secret")
+            raise BotValidationRefusal(BotValidationReason.LARK_APP_SECRET)
 
     try:
         from ...db.connection import get_pool
@@ -183,7 +202,7 @@ async def update_bot(channel_id: str, data: dict[str, Any]) -> dict[str, Any]:
         kind = str(current.get("channel_type") or "")
         if "manager_id" in data:
             if data.pop("manager_id") != current.get("manager_id"):
-                raise _bad("a bot's Manager cannot change: add a new bot for the other Manager and remove this one")
+                raise BotValidationRefusal(BotValidationReason.MANAGER_REASSIGNMENT)
         before = current.get("config") or {}
         config = before
         if "config" in data:
@@ -192,7 +211,7 @@ async def update_bot(channel_id: str, data: dict[str, Any]) -> dict[str, Any]:
             if kind == "telegram" and channel_id not in BUILTIN_CHANNEL_IDS and config.get("bot_token_env"):
                 raise _bad("a bot's token is entered here, not read from the environment")
             if kind == "lark" and channel_id not in BUILTIN_CHANNEL_IDS and not config.get("profile"):
-                raise _bad(_NAME_THE_PROFILE)
+                raise BotValidationRefusal(BotValidationReason.LARK_PROFILE)
             data = {**data, "config": config}
 
         from ...db.connection import get_pool
@@ -210,9 +229,14 @@ async def update_bot(channel_id: str, data: dict[str, Any]) -> dict[str, Any]:
                 now_config = now.get("config") or {}
                 final = config if "config" in data else now_config
                 secret = None if removing else token if changing_token else stored
-                # Profiles can change identity outside Looper even when this request only changes metadata.
-                if kind in ("lark", "lark_bot") or secret != stored or any(
-                        final.get(key) != now_config.get(key) for key in ("profile", "app_id", "bot_token_env")):
+                same_identity = secret == stored and all(
+                    (final.get(key) or "") == (now_config.get(key) or "")
+                    for key in ("profile", "app_id", "bot_token_env")) and (
+                        final.get("domain", "feishu") == now_config.get("domain", "feishu"))
+                # Explicit disable can work while authentication is broken, including full-config saves.
+                # Every other Lark save revalidates: profiles can change identity outside Looper.
+                disabling_unchanged = data.get("enabled") is False and same_identity
+                if (kind in ("lark", "lark_bot") and not disabling_unchanged) or not same_identity:
                     env = builtin_env_token(final) if (
                         kind == "telegram" and channel_id in BUILTIN_CHANNEL_IDS and not secret) else ""
                     await refuse_same_bot(conn, kind, final, secret, env_token=env, exclude=channel_id)

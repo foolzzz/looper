@@ -28,8 +28,10 @@ function answer(url: string, payload: Record<string, string>): unknown {
   if (url === "/api/v1/operator_chat/targets") return { status: "ok", result: { targets: [{ kind: "manager", id: "manager", can_send: true }, planner("task-a")] } };
   if (url === "/api/v1/operator_chat/sessions") {
     const asked = payload.session_id;
+    if (asked === "web-1") return { status: "ok", result: { sessions: [web(asked)] } };
+    if (asked === "lark-1") return { status: "ok", result: { sessions: [lark(asked)] } };
     if (asked === "lark-old") return { status: "ok", result: { sessions: [lark("lark-old")] } }; // past the newest 50: only by its id
-    return { status: "ok", result: { sessions: asked ? [] : [web("web-1"), lark("lark-1")] } };
+    return { status: "ok", result: { sessions: asked ? [] : [web("web-1"), lark("lark-1"), web("deleted-web-id")] } };
   }
   if (url === "/api/v1/operator_chat/messages") {
     chatReads.push({ path: url, session_id: payload.session_id });
@@ -202,6 +204,18 @@ describe("the dashboard keeps its place in the URL", () => {
       expect(heading()).not.toContain("The original conversation");
     });
 
+    it("returns to the initial unsaved local thread with Back", async () => {
+      localStorage.setItem("looper-chat-session-id", "local-empty");
+      await open("#chat");
+      await act(async () => (container.querySelector('button[title^="New conversation"]') as HTMLButtonElement).click());
+      await settle();
+      await act(async () => window.history.back());
+      await settle();
+      expect(localStorage.getItem("looper-chat-session-id")).toBe("local-empty");
+      expect(container.querySelector("textarea")).not.toBeNull();
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+    });
+
     it("opens an agent from the hash, and the Manager when the hash drops it", async () => {
       await open("#chat?target=planner-task-a");
       expect(heading()).toContain("Planner · Task task-a");
@@ -223,6 +237,24 @@ describe("the dashboard keeps its place in the URL", () => {
   });
 
   describe("the chat conversations", () => {
+    it.each(["unknown-web-id", "deleted-web-id", "planner-hidden", "lark:deleted"])(
+      "retains the stored composer owner when %s has no row", async (id) => {
+        localStorage.setItem("looper-chat-session-id", "web-1");
+        if (id === "deleted-web-id") {
+          await open("#chat?conversation=web-1");
+          await act(async () => (container.querySelector('button[title="deleted-web-id"]') as HTMLButtonElement).click());
+          await settle();
+        } else await open(`#chat?conversation=${id}`);
+        expect(localStorage.getItem("looper-chat-session-id")).toBe("web-1");
+        expect(container.querySelector('[role="alert"]')?.textContent).toContain("not found");
+        expect(container.querySelector("textarea")).toBeNull();
+        expect(chatReads.some((r) => r.session_id === id)).toBe(false);
+        await goto("#chat?conversation=web-1");
+        expect(container.querySelector("textarea")).not.toBeNull();
+        expect(container.textContent).toContain("The original conversation");
+      },
+    );
+
     it("opens a conversation older than the list by its id", async () => {
       await open("#chat?conversation=lark-old");
       expect(container.querySelector("[data-viewing]")?.getAttribute("data-viewing")).toBe("lark-old");
