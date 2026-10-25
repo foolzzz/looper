@@ -1041,7 +1041,8 @@ class TestResidentClaude:
 
                 async def claude_exiting_slowly(*, kill: bool = False) -> None:
                     exiting.set()
-                    await asyncio.sleep(60)  # a Claude that takes its time to exit
+                    if not kill:
+                        await asyncio.sleep(60)  # a Claude that takes its time to exit until killed
 
                 planner._claude.stop = claude_exiting_slowly  # type: ignore[method-assign]
                 stopper = asyncio.create_task(planner.stop())
@@ -1881,11 +1882,23 @@ class TestTaskEnd:
 
         assert asyncio.run(_run())
 
-    def test_server_stop_during_a_teardown_still_reaps_claude(self, planner_claude: Any) -> None:
+    def test_server_stop_during_a_teardown_still_reaps_claude(
+        self, planner_claude: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Stopping the router while it ends a Planner neither hangs nor leaves Claude running."""
         claude = planner_claude(plan(step("s1")), decide("accept"), linger=True)  # outlives its stdin
 
         async def _run() -> tuple[float, bool]:
+            from looper.agents.claude_cli import ResidentClaude
+
+            cleanup_started = asyncio.Event()
+            stop_process = ResidentClaude._stop_process
+
+            async def stop_after_signal(resident: Any, *args: Any, **kwargs: Any) -> None:
+                cleanup_started.set()
+                await stop_process(resident, *args, **kwargs)
+
+            monkeypatch.setattr(ResidentClaude, "_stop_process", stop_after_signal)
             with tempfile.TemporaryDirectory() as tmp:
                 h = Harness(Path(tmp), claude, always(WORK_OK))
                 router = TaskRouter(runtime_root=Path(tmp), claude_bin=claude.bin)
@@ -1902,6 +1915,7 @@ class TestTaskEnd:
                 # The task has ended and its teardown waits for the lingering Claude to exit.
                 await h.until(lambda: router._tasks and not router._planners and claude.pids()
                               and next(iter(router._tasks.values())).status == "completed")
+                await asyncio.wait_for(cleanup_started.wait(), 5)
                 assert _alive(claude.pids()[0])
                 started = asyncio.get_event_loop().time()
                 await asyncio.wait_for(router.stop(), 4)

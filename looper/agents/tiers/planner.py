@@ -970,8 +970,14 @@ class PlannerAgent:
                 finally:
                     # A turn the loop was in has already killed Claude; an idle one
                     # ends when its stdin closes. Never leave it running.
-                    await self._claude.stop(kill=kill)
-                    self._remove_token_files()  # and one a turn wrote meanwhile
+                    try:
+                        await self._claude.stop(kill=kill)
+                    except asyncio.CancelledError:
+                        # Resident cleanup outlives its cancelled caller; hurry it and join it before returning.
+                        await self._claude.stop(kill=True)
+                        raise
+                    finally:
+                        self._remove_token_files()  # and one a turn wrote meanwhile
 
             # Run to its end even when this stop is cancelled again: a second cancellation only hurries it (Claude
             # ended at once rather than after its grace).
