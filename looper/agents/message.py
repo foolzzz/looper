@@ -313,9 +313,10 @@ def parse_channel_id(channel_id: str | None) -> ChannelId | None:
 
 
 _THREAD_MANAGER_ID = re.compile(r"manager(?:-[a-z][a-z0-9-]{1,30})?")
+# Lark also uses open ids for direct chats; only identity separators and whitespace are unsafe.
 _THREAD_CHAT_IDS = {"telegram": re.compile(r"-?[0-9]+"),
-                    "lark": re.compile(r"oc_[A-Za-z0-9_-]+"),
-                    "lark_bot": re.compile(r"oc_[A-Za-z0-9_-]+")}
+                    "lark": re.compile(r"[^#:\s]+"),
+                    "lark_bot": re.compile(r"[^#:\s]+")}
 
 
 @dataclass(frozen=True)

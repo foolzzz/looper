@@ -110,7 +110,8 @@ class _World:
                     has_planner=lambda task_id: True)), tools_problem=tools_problem,
                     asks_in=lambda message_id: False, begin_turn=lambda turn, binding=None: "", publish_binding=lambda binding: None, end_turn=lambda turn: None,
                     library_with_server=library_with_server)
-                base = {"chat_id": "ou_me", "chat_type": "p2p", "sender_id": "ou_me", "message_id": "om_9"}
+                base = {"chat_id": "42" if source == TELEGRAM else "ou_me", "chat_type": "p2p",
+                        "sender_id": "ou_me", "message_id": "om_9"}
                 await manager._handle(MessageEnvelope.create(
                     source=source, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
                     payload={"text": text, "channel_context": {**base, **context}}, correlation_id="c-1"))

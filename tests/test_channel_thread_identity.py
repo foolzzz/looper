@@ -9,7 +9,8 @@ from looper.agents.message import channel_thread_id, parse_channel_thread_id
 
 @pytest.mark.parametrize("channel_type,chat_id", [
     ("telegram", "12345"), ("telegram", "-10012345"),
-    ("lark", "oc_dm"), ("lark_bot", "oc_group_1"),
+    ("lark", "oc_dm"), ("lark", "ou_me"),
+    ("lark_bot", "oc_group_1"), ("lark_bot", "ou_me"),
 ])
 @pytest.mark.parametrize("number", [None, 2])
 @pytest.mark.parametrize("destination,owner", [
@@ -46,8 +47,8 @@ def test_parsed_channel_thread_is_immutable() -> None:
     None, "", "session-123", "web:123", "client:123", "planner-task:123",
     "channel-web:123", "channel-telegram:42", "channel-lark:oc_dm", "unknown:42",
     "channel-telegram-0:42", "channel-lark-01:oc_dm", "channel-lark-1000000000:oc_dm",
-    "channel-telegram-2\n:42", "telegram:", "telegram:oc_dm", "telegram:+42", "telegram:1:2",
-    "lark:42", "lark:oc_", "lark:oc_dm value", "lark_bot:oc_dm/other",
+    "channel-telegram-2\n:42", "telegram:", "telegram:oc_dm", "telegram:ou_me", "telegram:+42", "telegram:1:2",
+    "lark:oc_dm value",
     "telegram:42#", "telegram:42#other", "telegram:42#manager-", "telegram:42#manager-a",
     "telegram:42#manager-Aa", "telegram:42#manager-aa_", "telegram:42#manager-aa\n",
     "telegram:42#manager-" + "a" * 32, "telegram:42#manager-review#manager",
@@ -62,7 +63,7 @@ def test_malformed_or_non_channel_thread_is_rejected(session_id: str | None) -> 
     ("channel-web", "42", "manager", "manager"),
     ("channel-telegram-0", "42", "manager", "manager"),
     ("channel-telegram", "42#manager-review", "manager", "manager"),
-    ("channel-lark", "not-a-chat", "manager", "manager"),
+    ("channel-lark", "oc_dm:other", "manager", "manager"),
     ("channel-telegram", "42", "manager-a", "manager"),
     ("channel-telegram", "42", "manager", "planner-task"),
 ])
@@ -70,6 +71,25 @@ def test_formatter_rejects_invalid_identity_inputs(
         channel_id: str, chat_id: str, destination: str, owner: str) -> None:
     with pytest.raises(ValueError):
         channel_thread_id(channel_id, chat_id, destination, owner)
+
+
+@pytest.mark.parametrize("channel_type", ["lark", "lark_bot"])
+@pytest.mark.parametrize("chat_id", ["42", "oc_", "oc_dm/other", "not-a-chat"])
+def test_lark_chat_ids_need_no_platform_prefix(channel_type: str, chat_id: str) -> None:
+    session_id = channel_thread_id(f"channel-{channel_type}", chat_id, "manager", "manager")
+    parsed = parse_channel_thread_id(session_id)
+    assert parsed is not None
+    assert parsed.chat_id == chat_id
+
+
+@pytest.mark.parametrize("channel_type", ["lark", "lark_bot"])
+@pytest.mark.parametrize("chat_id", [
+    "", "oc_dm#manager-review", "oc_dm:other", "oc_dm value", "\toc_dm", "oc_dm\n", "oc_dm\r", "oc_dm\u00a0value",
+])
+def test_lark_chat_ids_reject_empty_ids_separators_and_whitespace(channel_type: str, chat_id: str) -> None:
+    with pytest.raises(ValueError, match=f"not a {channel_type} chat id"):
+        channel_thread_id(f"channel-{channel_type}", chat_id, "manager-review", "manager")
+    assert parse_channel_thread_id(f"{channel_type}:{chat_id}#manager-review") is None
 
 
 @pytest.mark.parametrize("raw", ["0", "00123", "-00123"])
