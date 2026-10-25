@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.92] - 2026-10-24
+
+### Fixed
+
+- **A Planner's read permissions stay inside its own repository.** When the Planner's working directory is a symlink into a tree that is not a repository, the run no longer gets read access to the unrelated repository above the link. The link's own spelling still allows documents reached through it, and reads above the working directory inside the actual repository still work. Model prompts and tool declarations are unchanged. ([#552](https://github.com/foolzzz/looper/pull/552))
+
 ## [2.13.91] - 2026-10-24
 
 ### Changed
