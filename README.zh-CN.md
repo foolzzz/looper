@@ -112,7 +112,7 @@ Settings 页的「Move to another machine」也能导出和导入。
 
 ```bash
 uv run looper service install     # 可选 --port、--runtime-root、--config、--label、--env NAME
-uv run looper service status      # 是否安装、是否运行、PID、上次退出、日志、GET /api/status
+uv run looper service status      # 是否安装、是否运行、PID、上次退出、日志、POST /api/v1/system/status
 uv run looper service restart     # 例如拉取新代码之后
 uv run looper service uninstall
 ```
@@ -225,17 +225,18 @@ PostgreSQL 是启动的硬性依赖；`looper serve` 每次启动都会应用 `l
 
 ### HTTP API
 
-API 只响应操作者：在这台机器的浏览器中打开控制台会自动登录（其他地方的浏览器用 `looper auth set-password` 设置的账号和密码登录），其他客户端需发送 `<runtime root>/operator-token` 中的令牌。主要的路由分组：
+控制台使用操作者认证：本机浏览器自动登录，其他地方的浏览器用 `looper auth set-password` 设置的账号和密码登录。程序使用操作者或 API 客户端的 Bearer token；客户端管理仅限操作者。下列已迁移的 v1 操作用 POST 和 JSON 请求体，成功返回 200 `{status: "ok", result: ...}`（`OpOk`），失败返回类型化错误；客户端确认规则见参考文档。主要的路由分组：
 
 | 分组 | 接口 | 用途 |
 |---|---|---|
-| 状态 | `GET /api/status`、`GET /api/overview` | 系统健康状态和启动自检（`checks`）；Dashboard 的“此刻在发生什么”总览 |
+| 状态 | `POST /api/v1/system/status`、`GET /api/overview` | 系统健康状态和启动自检（`checks`）；Dashboard 的“此刻在发生什么”总览 |
 | 项目 | `/api/projects`、`/api/projects/:id`、`/api/projects/:id/knowledge/...` | 创建、修改和删除项目；项目的知识文档和草稿 |
 | 任务 | `/api/tasks`、`/api/tasks/create`、`/api/tasks/:id/...`、`/api/tasks/{start,stop,cancel,delete}` | 列出和创建任务（属于某个项目，可带 `profile_overrides`）、查看、开始、停止、取消、删除；活动及其 SSE 流 |
 | 定时任务 | `POST /api/v1/schedule_admin/<action>` | 创建、修改、启用和删除项目的定时任务；列出所有项目的定时任务；立即运行；运行历史和通知；时间规则接下来的触发时刻 |
 | 能力目录与安装 | `/api/catalog/...`、`/api/installs/...`、`/api/projects/:id/installs`、`/api/projects/:id/skills/...` | 插件、skill 和 MCP 服务器：导入、上传、git、编写、修改、删除；全局安装或装到项目 |
-| Agent 设置 | `/api/agent-settings/...`、`POST /api/v1/project_agent_settings/{get,update,update_role}`、`/api/roles/...` | 各设置层，每个字段的生效值及其来源；每个角色的 prompt 和限制 |
-| 注册表 | `GET /api/registry`、`/api/runtimes/:id/probe`、`POST /api/v1/provider_accounts/...`、`/api/agent-profiles/...` | 运行时类型和内置运行时（Re-detect 重新探测）；注册、修改和删除提供方（API key 打码）和 Agent Profile，并写明各自被谁使用 |
+| Agent 设置 | `POST /api/v1/agent_settings/{get,update_system,update_role}`、`POST /api/v1/project_agent_settings/{get,update,update_role}`、`POST /api/v1/roles/{list,get,update,reset_prompt}` | 各设置层，每个字段的生效值及其来源；每个角色的 prompt 和限制 |
+| 允许的 Profile | `POST /api/v1/allowed_profiles/{get,replace}` | 读取或替换项目 Planner 的 Profile 白名单；空列表表示不限制 |
+| 注册表 | `GET /api/registry`、`/api/runtimes/:id/probe`、`POST /api/v1/provider_accounts/...`、`POST /api/v1/profiles/{create,update,delete,prompt_preview}` | 运行时类型和内置运行时（Re-detect 重新探测）；注册、修改和删除提供方（API key 打码）和 Agent Profile，并写明各自被谁使用 |
 | 配置迁移 | `POST /api/v1/config/export`、`/api/v1/config/import_upload`、`/api/v1/config/import_apply`、`/api/v1/config/import_cancel` | 下载配置文件；上传配置文件、预览，再应用或取消 |
 | 对话 | `/api/v1/operator_chat/{send,targets,sessions,messages,save_message,reply_events,thread_events}` | 与 Manager 或运行中任务的 Planner 对话；按渠道列出 Manager 的对话；历史和 SSE 流 |
 | 运行记录 | `POST /api/v1/runs/{list,get,events,for_task,usage}` | 每次 agent 运行的启动命令、用量、花费和事件；单个 agent 的花费和上下文 |
