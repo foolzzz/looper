@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.121] - 2026-10-25
+
+### Fixed
+
+- **A failed Retry on the Gates list keeps the loaded pages and their paging boundary.** The list's cursor is now committed with its rows, so a Retry that fails leaves the rows, the boundary and the error message unchanged and the next "Show more" continues from the earlier boundary; a successful Retry replaces rows and boundary together. Dashboard only: no route, stored data format, Manager tool declaration or prompt changed. ([#636](https://github.com/foolzzz/looper/pull/636))
+
 ## [2.13.120] - 2026-10-25
 
 ### Fixed
