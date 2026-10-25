@@ -18,6 +18,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { ChannelChatBindings } from "@/components/channel-chat-bindings";
 import { LABEL, SELECT } from "@/components/registry-ui";
 import {
   createChannelBot,
@@ -384,18 +385,20 @@ function ChannelCard({ channel, onSaved, freshlySaved = false }: { channel: Chan
           />
         )}
 
+        {allowlist && <ChannelChatBindings channelId={channel.channel_id} botManagerId={channel.manager_id} botManagerName={channel.manager_name ?? undefined} />}
+
         <div className="flex items-center justify-between gap-2 pt-2">
           <p className="text-[10px] text-muted-foreground">
             Channel ID: <code className="text-foreground">{channel.channel_id}</code>
             {" · "}Updated: {new Date(channel.updated_at).toLocaleString()}
-            {" · "}Saved changes take effect after the server restarts.
+            {" · "}Bot connection, credentials and allowlist changes take effect after the server restarts. Chat bindings and Only bound chats apply immediately.
           </p>
           <div className="flex items-center gap-2">
             {(error || remove.error) && <p role="alert" className="text-xs text-destructive">{error || remove.error}</p>}
             {justSaved && (
               <span className="flex items-center gap-1 text-xs text-success">
                 <CheckCircle2 className="h-3.5 w-3.5" />
-                Saved — restart to apply
+                Saved — restart to apply bot settings
               </span>
             )}
             <Button type="button" size="sm" onClick={handleSave} disabled={saving || !dirty || invalid}>

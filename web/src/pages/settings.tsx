@@ -37,7 +37,7 @@ const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = 
     "in a project, for the roles that load them.",
   channels:
     "Connect external messaging platforms. Each channel's card says where its credential comes from; saved " +
-    "changes take effect after the server restarts. Each channel passes on only the senders it lists. Each Manager can have its own bots; a bot's Manager is set when it is added.",
+    "bot connection, credential and allowlist changes take effect after the server restarts. Chat bindings and Only bound chats apply immediately. Each channel passes on only the senders it lists. Each Manager can have its own bots; a bot's Manager is set when it is added.",
   chat: "How the chat with the Manager behaves, on the dashboard and on the channels.",
   scheduler:
     "System-wide limits of schedules: how close two fires may be, and the run timeout of schedules that follow the default.",
