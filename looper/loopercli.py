@@ -1229,9 +1229,11 @@ def _needs_document(rest: list[str]) -> bool:
     if hand is None:
         return True
     children = hand.add(Parser(add_help=False))
-    # Keep registered hand-written children offline; discover other children from OpenAPI.
-    return (children is not None and len(rest) > 1 and not rest[1].startswith("-")
-            and rest[1] not in children.choices)
+    if children is None or len(rest) < 2:
+        return False
+    child = rest[1]
+    # Group help discovers API children; known hand-written children and other flags stay offline.
+    return child in ("-h", "--help") or (not child.startswith("-") and child not in children.choices)
 
 
 def _run(opts: argparse.Namespace, rest: list[str]) -> int:
