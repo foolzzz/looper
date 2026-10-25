@@ -34,6 +34,7 @@ from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, resolve_chat_target
 from .message import AgentAddress
 from .channels.web import WebChannelAdapter
+from .channels.chat_routing import log_refusal
 from .channels.registry import ChannelRegistry
 from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
@@ -444,6 +445,7 @@ class AgentHTTPServer:
             domain = api_v1.domain_for(operation)
             status, answer = await domain.receive(self, *upload, principal, headers)
         elif operation is not None and operation.operator_only and principal.kind != "operator":
+            log_refusal(logger, operation, principal, "forbidden")
             status, answer = api_v1.error(ErrorCode.FORBIDDEN, "operator identity is required")
         elif operation is not None and operation.stream and api_v1.domain_for(operation) is not None:
             refused = await self._v1_domain(operation, headers, body, principal, writer=writer)
@@ -485,6 +487,7 @@ class AgentHTTPServer:
                 return api_v1.error(ErrorCode.INVALID, f"use {other}", status=HTTP_405)
             return api_v1.error(ErrorCode.NOT_FOUND, f"no {method} {path}")
         if operation.operator_only and principal.kind != "operator":
+            log_refusal(logger, operation, principal, "forbidden")
             return api_v1.error(ErrorCode.FORBIDDEN, "operator identity is required")
         if api_v1.domain_for(operation) is not None:
             return await self._v1_domain(operation, headers, body, principal)
@@ -528,6 +531,7 @@ class AgentHTTPServer:
                          ) -> tuple[str, dict[str, Any]] | None:
         domain = api_v1.domain_for(operation)
         if operation.operator_only and principal.kind != "operator":
+            log_refusal(logger, operation, principal, "forbidden")
             return api_v1.error(ErrorCode.FORBIDDEN, "operator identity is required")
 
         async def invoke(callback: Any, arguments: dict[str, Any], *extra: Any) -> Any:
@@ -578,8 +582,11 @@ class AgentHTTPServer:
             answer = await self._call_v1(principal, headers.get("x-looper-session") or DEFAULT_SESSION,
                                          tool.name, data, tool=tool,
                                          validator=getattr(domain, "validate_arguments", api_v1.validate_arguments))
+            if answer.get("status") == "error":
+                log_refusal(logger, operation, principal, answer["error"]["code"])
             return api_v1.answer_status(answer), answer
         except OpError as exc:
+            log_refusal(logger, operation, principal, exc.code.value)
             public = not operation.credential_write or isinstance(exc, PublicOpError)
             return api_v1.error(exc.code, str(exc) if public else "invalid credential request",
                                 details=None if operation.credential_write else exc.details)

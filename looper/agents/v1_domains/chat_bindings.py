@@ -120,13 +120,13 @@ async def run(server, operation, arguments, principal, headers):
             bindings = []
             async def readback(conn):
                 bindings.extend(await _bindings(conn, arguments["channel_id"], chat_ids=[arguments["chat_id"]]))
-            await chat_routing.bind_chat(**arguments, registry=server._channels, readback=readback)
+            await chat_routing.bind_chat(**arguments, registry=server._channels, principal_kind=principal.kind, readback=readback)
             return {"binding": bindings[0]}
         if name == "manager_chat_bindings.delete":
-            deleted = await chat_routing.unbind_chat(**arguments, registry=server._channels)
+            deleted = await chat_routing.unbind_chat(**arguments, registry=server._channels, principal_kind=principal.kind)
             return {**arguments, "deleted": deleted}
         if name == "channel_chats.set_policy":
-            await chat_routing.set_chat_policy(arguments["channel_id"], arguments["bound_chats_only"], registry=server._channels)
+            await chat_routing.set_chat_policy(arguments["channel_id"], arguments["bound_chats_only"], registry=server._channels, principal_kind=principal.kind)
             return dict(arguments)
         async with get_pool().acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
             if name == "channel_chats.list":

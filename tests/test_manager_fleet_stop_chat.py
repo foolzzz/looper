@@ -290,3 +290,26 @@ def test_a_token_without_channel_id_uses_only_its_legacy_channel_key(tmp_path: P
             assert summary.stopping == 1 and legacy.stop is not None and full.stop is None
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("channel,chat", [("telegram", "42"), ("lark", "oc_room"), ("lark_bot", "oc_room")])
+@pytest.mark.parametrize("failure", [False, True])
+def test_cross_manager_stop_boundary_log(tmp_path, monkeypatch, caplog, channel, chat, failure):
+    caplog.set_level("INFO")
+    async def run():
+        async with fleet(tmp_path) as r:
+            for agent in (r.a, r.b):
+                agent._register_turn(message(agent, "sentinel-private-message sentinel-private-token", channel=channel, chat=chat))
+            r.a._claude.can_interrupt = False
+            if failure:
+                monkeypatch.setattr(r.b, "stop_turn", AsyncMock(side_effect=RuntimeError("stop unavailable")))
+            summary = await r.fleet.stop_chat("channel-" + channel, chat, via=channel)
+            [record] = [x for x in caplog.records if x.msg.startswith("chat_stop")]
+            assert (record.channel_id, record.chat_id, record.owners) == (
+                "channel-" + channel, chat, [r.a.agent_id, r.b.agent_id])
+            assert record.levelname == "INFO" and record.action == "stop" and record.outcome == "partial"
+            assert (record.stopped, record.cannot_interrupt, record.failed) == (0 if failure else 1, 1, int(failure))
+            assert summary.unsupported == 1 and summary.failures == ([r.b.agent_id] if failure else [])
+            assert all("sentinel-private-message" not in str(x.__dict__) and "sentinel-private-token" not in str(x.__dict__)
+                       for x in caplog.records)
+    asyncio.run(run())

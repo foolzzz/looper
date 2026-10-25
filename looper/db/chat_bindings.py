@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TypedDict
 
@@ -109,7 +110,7 @@ async def list_bindings(channel_id: str | None = None, manager_id: str | None = 
 
 
 async def put_binding(channel_id: str, chat_id: str, manager_id: str, *,
-                      conn: asyncpg.Connection) -> ChatBinding:
+                      conn: asyncpg.Connection, before_write: Callable[[], Awaitable[None]] | None = None) -> ChatBinding:
     """Bind even to the bot's own Manager; rebinding keeps the original creation time.
 
     KEY SHARE conflicts with Manager deletion's FOR UPDATE. Recheck deleted_at
@@ -123,6 +124,8 @@ async def put_binding(channel_id: str, chat_id: str, manager_id: str, *,
     if not live:
         raise LookupError("Manager not found")
     await _channel(channel_id, conn, lock=True)
+    if before_write is not None:
+        await before_write()
     row = await conn.fetchrow(
         "INSERT INTO manager_chat_bindings (channel_id, chat_id, manager_id) VALUES ($1, $2, $3) "
         "ON CONFLICT (channel_id, chat_id) DO UPDATE SET manager_id = EXCLUDED.manager_id "
@@ -130,11 +133,14 @@ async def put_binding(channel_id: str, chat_id: str, manager_id: str, *,
     return ChatBinding(**dict(row))
 
 
-async def delete_binding(channel_id: str, chat_id: str, *, conn: asyncpg.Connection) -> bool:
+async def delete_binding(channel_id: str, chat_id: str, *, conn: asyncpg.Connection,
+                         before_write: Callable[[], Awaitable[None]] | None = None) -> bool:
     """Unbind idempotently. Suppression history and all chat/task ownership stay."""
     _chat_id(channel_id, chat_id)
     _transaction(conn)
     await _channel(channel_id, conn, lock=True)
+    if before_write is not None:
+        await before_write()
     return await conn.fetchval(
         "DELETE FROM manager_chat_bindings WHERE channel_id = $1 AND chat_id = $2 RETURNING true",
         channel_id, chat_id) is True
@@ -149,12 +155,15 @@ async def routing_snapshot(channel_id: str, *, conn: asyncpg.Connection) -> Rout
                            bindings=await list_bindings(channel_id, pool=conn))
 
 
-async def set_bound_chats_only(channel_id: str, enabled: bool, *, conn: asyncpg.Connection) -> RoutingSnapshot:
+async def set_bound_chats_only(channel_id: str, enabled: bool, *, conn: asyncpg.Connection,
+                              before_write: Callable[[], Awaitable[None]] | None = None) -> RoutingSnapshot:
     """Dedicated policy write; ordinary bot config saves must never set this column."""
     if not isinstance(enabled, bool):
         raise ValueError("bound_chats_only must be a boolean")
     _transaction(conn)
     await _channel(channel_id, conn, lock=True)
+    if before_write is not None:
+        await before_write()
     await conn.execute("UPDATE channel_configs SET bound_chats_only = $2, updated_at = now() WHERE channel_id = $1",
                        channel_id, enabled)
     return await routing_snapshot(channel_id, conn=conn)

@@ -297,3 +297,19 @@ def test_generated_operator_bootstrap_preserves_a_business_url_field(tmp_path, c
         assert TOKEN not in capsys.readouterr().out
     finally:
         server.close()
+
+
+@pytest.mark.usefixtures("clients")
+def test_refused_routing_write_logs_no_body(tmp_path, caplog):
+    caplog.set_level("INFO")
+    async def run():
+        async with _serving(tmp_path) as server:
+            status, _, _ = await _send(server, "POST " + _path("manager_chat_bindings.put"),
+                _bearer(CLIENT_TOKEN), json.dumps({"text": "sentinel-private-message", "token": "sentinel-private-token"}))
+            assert status == 403
+            [record] = [r for r in caplog.records if r.msg.startswith("chat_routing_write")]
+            assert (record.action, record.principal_kind, record.outcome, record.reason) == (
+                "manager_chat_bindings.put", "client", "refused", "forbidden")
+            assert all("sentinel-private-message" not in str(r.__dict__) and "sentinel-private-token" not in str(r.__dict__)
+                       and CLIENT_TOKEN not in str(r.__dict__) for r in caplog.records)
+    asyncio.run(run())
