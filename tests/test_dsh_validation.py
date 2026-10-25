@@ -709,10 +709,10 @@ def _serve_smoke_stand_in(mode):
             elif path == "/api/v1/operator_chat/messages":
                 assert method == "POST" and body == {"session_id": "smoke"}
                 result = {"status": "ok", "result": {"messages": messages}}
-            elif path == "/api/projects":
+            elif path == "/api/v1/project_admin/create":
                 project = "project-" + str(len(projects) + 1)
                 projects[project] = body
-                result = {"project_id": project}
+                result = {"status": "ok", "result": {"project": {"project_id": project}}}
             elif path == "/api/v1/tasks/create":
                 task = "task-" + str(len(tasks) + 1)
                 tasks[task] = body

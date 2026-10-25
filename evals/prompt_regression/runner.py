@@ -544,13 +544,13 @@ def run_task(
             api.post("/api/v1/allowed_profiles/replace",
                      {"project_id": created["project_id"], "profile_ids": [chosen_profile_id]})
         if task.roles_on:
-            api.put(f"/api/projects/{created['project_id']}", {"planner_roles": "on"})
+            api.post("/api/v1/project_admin/update", {"project_id": created['project_id'], "fields": {"planner_roles": "on"}})["result"]["project"]
         for template in task.role_templates:
             fields = {"description": "", "harness": None, "profile_id": None, "items": [], **template}
             api.post("/api/v1/role_templates/put", {**fields, "project_id": created["project_id"]})
         gates = _project_user_gates(task, user_gates)
         if gates is not None:
-            api.put(f"/api/projects/{created['project_id']}", {"user_gates": gates})
+            api.post("/api/v1/project_admin/update", {"project_id": created['project_id'], "fields": {"user_gates": gates}})["result"]["project"]
         api.post("/api/v1/ops/task_control/start", {"task_id": task_id})
         answered: dict[str, int] = {}  # each gate's script entries posted so far
         resumed: dict[str, float] = {}  # each wait resumed by the runner, and when (database clock)

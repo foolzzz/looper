@@ -38,7 +38,7 @@ function answer(url: string, payload: Record<string, string>): unknown {
   }
   if (url === "/api/v1/tasks/activity") return { status: "ok", result: { activity: [] } };
   if (url === "/api/v1/tasks/conversation") return { status: "ok", result: { rows: [], has_more: false } };
-  if (url.endsWith("/projects")) return { projects: [{ project_id: "p1", name: "Proj", description: "", work_dir: "", task_count: 1, active_count: 0 }] };
+  if (url === "/api/v1/project_admin/list") return { status: "ok", result: { projects: [{ project_id: "p1", name: "Proj", description: "", work_dir: "", task_count: 1, active_count: 0 }] } };
   if (url.includes("/manager/session")) return { effective: { profile: null }, choices: [], session: null };
   if (url.includes("/api/v1/ops/gates/list")) return { status: "ok", result: { gates: [], total: 0, limit: 50, offset: 0, next_cursor: null, has_more: false, counts: { open: 0, waiting_user: 0, waiting_planner: 0, closed: 0, all: 0 } } };
   if (url === "/api/v1/project_agent_settings/get") return undefined; // a 404: the card says it could not load

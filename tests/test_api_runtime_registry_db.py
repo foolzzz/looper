@@ -123,8 +123,8 @@ def test_api_profile_is_refused_at_other_selection_layers(api, monkeypatch, scop
         elif scope == "role":
             path = f"/api/agent-settings/roles/{role}"
         else:
-            status, project = await _call("POST", "/api/projects", {"name": "API role boundary"})
-            assert status == 201, project
+            status, project = await _call("POST", "/api/v1/project_admin/create", {"name": "API role boundary"})
+            assert status == 200, project
             project_id = project["project_id"]
             path = f"/api/projects/{project_id}/agent-settings"
             if scope == "project-role":
@@ -163,8 +163,8 @@ def test_project_profiles_honor_runtime_roles_over_stored_run_capability(api, mo
         profile = await _profile(api)
         await pool.execute("UPDATE agent_runtimes SET capabilities = array_append(capabilities, 'run') "
                            "WHERE id = 'rt-api'")
-        status, project = await _call("POST", "/api/projects", {"name": "Profile choices"})
-        assert status == 201, project
+        status, project = await _call("POST", "/api/v1/project_admin/create", {"name": "Profile choices"})
+        assert status == 200, project
         project_id = project["project_id"]
         path = f"/api/projects/{project_id}/allowed-profiles"
         if operation == "selection":

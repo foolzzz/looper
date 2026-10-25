@@ -821,7 +821,6 @@ class AgentHTTPServer:
 
     _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
     _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
-    _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
 
     async def _route_api(
         self,
@@ -832,18 +831,8 @@ class AgentHTTPServer:
         writer: asyncio.StreamWriter,
         headers: Mapping[str, str] | None = None,
     ) -> None:
-        if path == "/api/projects" and method == "GET":
-            await self._handle_list_projects(writer)
-        elif path == "/api/projects" and method == "POST":
-            await self._answer(writer, HTTP_201, lambda: projects.create_project(projects.json_object(body)))
-        elif (m := self._RE_PROJECT.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: projects.update_project(
-                m.group(1), projects.json_object(body)))
-        elif (m := self._RE_PROJECT.match(path)) and method == "DELETE":
-            await self._answer(writer, HTTP_200, lambda: projects.delete_project(m.group(1)))
-        else:
-            writer.write(_json_response(HTTP_404, {"error": "not found"}))
-            await writer.drain()
+        writer.write(_json_response(HTTP_404, {"error": "not found"}))
+        await writer.drain()
 
     # --- API handlers ---
 
@@ -967,17 +956,6 @@ class AgentHTTPServer:
             summary=f"Discarded a step worktree from the task page: branch {workspace.branch} and its directory "
                     "removed"[:500])
         return {"workspace": workspace.view()}
-
-    async def _handle_list_projects(self, writer: asyncio.StreamWriter) -> None:
-        try:
-            result = await projects.list_projects()
-        except Exception:
-            logger.exception("DB unavailable for list_projects")
-            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
-            await writer.drain()
-            return
-        writer.write(_json_response(HTTP_200, _serialize(result)))
-        await writer.drain()
 
     async def _checks_now(self) -> list[dict[str, str]]:
         """The startup self-check, with the runtimes' own logins read now: a run may have found one forked since."""

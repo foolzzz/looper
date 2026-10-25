@@ -59,7 +59,7 @@ def test_role_mode_refuses_other_values(monkeypatch: pytest.MonkeyPatch, value: 
 
 def test_mode_is_set_only_on_a_role_layer_and_a_profile_has_none(monkeypatch: pytest.MonkeyPatch) -> None:
     async def run(_pool: Any) -> None:
-        project = (await _ok("POST", "/api/projects", {"name": "calc"}))["project_id"]
+        project = (await _ok("POST", "/api/v1/project_admin/create", {"name": "calc"}))["project_id"]
         for method, path in (("PUT", "/api/agent-settings/system"), ("PUT", f"/api/projects/{project}/agent-settings"),
                              ("PUT", f"/api/projects/{project}/agent-settings/roles/worker")):
             status, body = await _call(method, path, {"system_prompt_mode": "replace"})
@@ -234,7 +234,7 @@ def test_real_launch_applies_and_records_the_role_mode_in_history(
             await _ok("PUT", f"/api/agent-settings/roles/{role}", {"system_prompt_mode": mode})
         used = mode or BUILTIN[role]
         if role == "worker":
-            project = (await _ok("POST", "/api/projects", {"name": "calc"}))["project_id"]
+            project = (await _ok("POST", "/api/v1/project_admin/create", {"name": "calc"}))["project_id"]
             task = (await _ok("POST", "/api/v1/tasks/create", {
                 "requirement": "do it", "project_id": project, "work_dir": str(tmp_path / "work")}))["task_id"]
             seen = await _launch("worker", task, tmp_path / "work", tmp_path)

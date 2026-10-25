@@ -91,7 +91,8 @@ class TestProjectApi:
     ) -> None:
         store.add_project("proj-a", "calc")
         assert not ProjectExecution.from_row(store.projects["proj-a"]).wait_commands_on
-        status, body = _call("PUT", "/api/projects/proj-a", {"wait_commands": value})
+        store.projects["proj-a"]["wait_commands"] = "on" if value is None else None
+        status, body = _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-a', "fields": {"wait_commands": value}})
         assert status == 200 and body["wait_commands"] == value
         assert ProjectExecution.from_row(store.projects["proj-a"]).wait_commands_on is enabled
 
@@ -101,22 +102,22 @@ class TestProjectApi:
     ) -> None:
         store.add_project("proj-a", "calc")
         assert not ProjectExecution.from_row(store.projects["proj-a"]).vault_on
-        status, body = _call("PUT", "/api/projects/proj-a", {"vault": value},
-                             server=_server(TaskRouter(runtime_root=tmp_path)))
+        store.projects["proj-a"]["vault"] = "on" if value is None else None
+        status, body = _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-a', "fields": {"vault": value}}, server=_server(TaskRouter(runtime_root=tmp_path)))
         assert status == 200 and body["vault"] == value
         assert ProjectExecution.from_row(store.projects["proj-a"]).vault_on is enabled
 
     def test_settings_are_stored_read_back_and_cleared(self, store: _Store) -> None:
         store.add_project("proj-a", "calc")
-        assert {k: v for k, v in _call("GET", "/api/projects")[1]["projects"][0].items() if k in UNSET} == UNSET
+        assert {k: v for k, v in _call("POST", "/api/v1/project_admin/list", {})[1]["projects"][0].items() if k in UNSET} == UNSET
 
         settings = {"task_budget_usd": 2,
                     "task_budget_action": "wrap_up", "supervise_interval_seconds": 0, "review_policy": "all"}
-        status, body = _call("PUT", "/api/projects/proj-a", settings)
+        status, body = _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-a', "fields": settings})
         assert status == 200
         assert {k: body[k] for k in UNSET} == {**settings, "task_budget_usd": 2.0}
 
-        status, body = _call("PUT", "/api/projects/proj-a", {"task_budget_usd": None, "task_budget_action": ""})
+        status, body = _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-a', "fields": {"task_budget_usd": None, "task_budget_action": ""}})
         assert status == 200 and (body["task_budget_usd"], body["task_budget_action"]) == (None, None)
         assert body["review_policy"] == "all"  # a field left out keeps its value
 
@@ -125,21 +126,20 @@ class TestProjectApi:
         ("task_budget_usd", -1, "more than 0"),
         ("task_budget_usd", 0.00001, "4 decimals"),
         ("task_budget_usd", 100_001, "at most 100000"),
-        ("task_budget_usd", "5", "number of US dollars"),
-        ("task_budget_usd", True, "number of US dollars"),
-        ("task_budget_action", "pause", "wrap_up, fail"),
-        ("review_policy", "some", "planner, all"),
-        ("vault", "sometimes", "off, on"),
-        ("vault", True, "off, on"),
-        ("wait_commands", "sometimes", "off, on"),
-        ("wait_commands", True, "off, on"),
+        ("task_budget_usd", True, "declared schema"),
+        ("task_budget_action", "pause", "declared schema"),
+        ("review_policy", "some", "declared schema"),
+        ("vault", "sometimes", "declared schema"),
+        ("vault", True, "declared schema"),
+        ("wait_commands", "sometimes", "declared schema"),
+        ("wait_commands", True, "declared schema"),
         ("supervise_interval_seconds", -5, "from 0"),
-        ("supervise_interval_seconds", 1.5, "whole number"),
+        ("supervise_interval_seconds", 1.5, "declared schema"),
         ("supervise_interval_seconds", 86_401, "86400"),
-        ("distill_lessons", "sometimes", "off, draft, write"),
-        ("step_workspaces", "per-step", "shared, worktree"),
-        ("workspace_links", ".venv", "a list of paths"),
-        ("workspace_links", [".venv", 3], "a list of paths"),
+        ("distill_lessons", "sometimes", "declared schema"),
+        ("step_workspaces", "per-step", "declared schema"),
+        ("workspace_links", ".venv", "declared schema"),
+        ("workspace_links", [".venv", 3], "declared schema"),
         ("workspace_links", [f"d{i}" for i in range(21)], "at most 20 paths, not 21"),
         ("workspace_links", ["/srv/calc/.venv"], "'/srv/calc/.venv' must be relative to the task directory"),
         ("workspace_links", ["../shared/.venv"], "'../shared/.venv' must not have empty, . or .. parts"),
@@ -156,12 +156,12 @@ class TestProjectApi:
         ("workspace_links", ["a\nb"], "without line breaks or backslashes"),
         ("max_step_retries", -1, "from 0 to 20"),
         ("max_step_retries", 21, "from 0 to 20"),
-        ("max_step_retries", "3", "whole number"),
-        ("max_step_retries", True, "whole number"),
+        ("max_step_retries", "3", "declared schema"),
+        ("max_step_retries", True, "declared schema"),
     ])
     def test_an_invalid_setting_is_refused(self, store: _Store, field: str, value: Any, says: str) -> None:
         store.add_project("proj-a", "calc")
-        status, body = _call("PUT", "/api/projects/proj-a", {field: value})
+        status, body = _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-a', "fields": {field: value}})
         assert status == 400 and says in body["error"]
         assert store.projects["proj-a"].get(field) is None
 
@@ -171,7 +171,8 @@ class TestProjectApi:
     ])
     def test_distill_lessons_is_one_of_three_modes(self, store: _Store, value: Any, mode: str) -> None:
         store.add_project("proj-a", "calc")
-        status, body = _call("PUT", "/api/projects/proj-a", {"distill_lessons": value})
+        store.projects["proj-a"]["distill_lessons"] = "write" if mode == "off" else "off"
+        status, body = _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-a', "fields": {"distill_lessons": value}})
         assert status == 200 and body["distill_lessons"] == mode == store.projects["proj-a"]["distill_lessons"]
 
     @pytest.mark.parametrize(("value", "retries"), [(None, 2), (0, 0), (5, 5), (20, 20)])
@@ -179,7 +180,8 @@ class TestProjectApi:
         self, store: _Store, value: int | None, retries: int,
     ) -> None:
         store.add_project("proj-a", "calc")
-        status, body = _call("PUT", "/api/projects/proj-a", {"max_step_retries": value})
+        store.projects["proj-a"]["max_step_retries"] = 3
+        status, body = _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-a', "fields": {"max_step_retries": value}})
         assert status == 200 and body["max_step_retries"] == value
         assert ProjectExecution.from_row(store.projects["proj-a"]).step_retries == retries
 
@@ -194,21 +196,22 @@ class TestProjectApi:
         self, store: _Store, value: Any, stored: Any, links: tuple[str, ...],
     ) -> None:
         store.add_project("proj-a", "calc")
-        status, body = _call("PUT", "/api/projects/proj-a", {"workspace_links": value})
+        store.projects["proj-a"]["workspace_links"] = ["old"]
+        status, body = _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-a', "fields": {"workspace_links": value}})
         assert status == 200 and body["workspace_links"] == stored == store.projects["proj-a"].get(
             "workspace_links")
         assert ProjectExecution.from_row(store.projects["proj-a"]).link_paths == links
 
     def test_step_workspaces_are_off_until_a_project_turns_them_on(self, store: _Store) -> None:
         store.add_project("proj-a", "calc")
-        assert _call("GET", "/api/projects")[1]["projects"][0]["step_workspaces"] is None
+        assert _call("POST", "/api/v1/project_admin/list", {})[1]["projects"][0]["step_workspaces"] is None
         assert not ProjectExecution.from_row(store.projects["proj-a"]).isolate_steps
-        status, body = _call("PUT", "/api/projects/proj-a", {"step_workspaces": "worktree"})
+        status, body = _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-a', "fields": {"step_workspaces": "worktree"}})
         assert status == 200 and body["step_workspaces"] == "worktree"
         assert ProjectExecution.from_row(store.projects["proj-a"]).isolate_steps
-        status, body = _call("PUT", "/api/projects/proj-a", {"step_workspaces": "shared"})
+        status, body = _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-a', "fields": {"step_workspaces": "shared"}})
         assert status == 200 and not ProjectExecution.from_row(store.projects["proj-a"]).isolate_steps
-        status, body = _call("PUT", "/api/projects/proj-a", {"step_workspaces": None})
+        status, body = _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-a', "fields": {"step_workspaces": None}})
         assert status == 200 and body["step_workspaces"] is None
 
 

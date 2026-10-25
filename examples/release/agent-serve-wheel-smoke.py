@@ -66,7 +66,8 @@ def serve_check(venv: Path, work: Path, dsn: str) -> None:
         else:
             raise SystemExit("installed looper serve did not come up")
         try:
-            urllib.request.urlopen(f"{base}/api/projects", timeout=5)
+            urllib.request.urlopen(urllib.request.Request(f"{base}/api/v1/project_admin/list",
+                                                         method="POST", data=b"{}"), timeout=5)
             raise SystemExit("installed looper serve answered /api/ without the operator token")
         except urllib.error.HTTPError as error:
             assert error.code == 401, error.code
@@ -74,9 +75,11 @@ def serve_check(venv: Path, work: Path, dsn: str) -> None:
         navigation = {"Sec-Fetch-Site": "none", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}
         page = urllib.request.urlopen(urllib.request.Request(f"{base}/", headers=navigation), timeout=5).read().decode()
         assert "<div id=\"root\">" in page, page[:200]
-        projects = urllib.request.urlopen(urllib.request.Request(f"{base}/api/projects", headers=auth),
-                                          timeout=5).read().decode()
-        assert projects.startswith('{"projects"'), projects[:200]
+        request = urllib.request.Request(f"{base}/api/v1/project_admin/list", headers=auth,
+                                         method="POST", data=b"{}")
+        with urllib.request.urlopen(request, timeout=5) as response:
+            projects = json.load(response)
+        assert projects["status"] == "ok" and isinstance(projects["result"]["projects"], list), projects
         print("PASS installed looper serve answers the dashboard and the API, and refuses /api/ without the token")
     finally:
         proc.terminate()

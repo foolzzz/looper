@@ -69,6 +69,9 @@ class ScheduleEnv(SimpleNamespace):
         server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                                  task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())),
                                  scheduler=self.scheduler)
+        if path.startswith("/api/v1/project_admin/"):
+            from tests.test_catalog_db import _call
+            return await _call(method, path, body or {})
         from tests.runtime_model_helpers import profile_request
 
         method, path, body = profile_request(method, path, body)

@@ -114,7 +114,7 @@ class Look:
     fake: bool
     runtime_root: Path | None = None  # the server's, where a configuration export is written
     registry_before: dict[str, Any] | None = None
-    runs_since: int = 0  # the Manager's newest run record before the dialog (independent of the action trail)
+    runs_since: int = 0  # the Manager's newest run record before the dialog; independent of the action trail
     manager_id: str | None = None  # a scenario Manager's agent id: only its trail rows count
     conversation: str | None = None  # a client dialog's conversation id (the API client's)
     turn_since: int = 0  # the trail's last id before the turn's message (``since`` when it is the dialog's first)
@@ -496,7 +496,7 @@ def _projects_counted(look: Look) -> str | None:
         return _answered_by_reading(look)
     if not look.reply.strip():
         return "no reply"
-    missing = [p["name"] for p in look.api.get("/api/projects")["projects"] if p["name"] not in look.reply]
+    missing = [p["name"] for p in look.api.post("/api/v1/project_admin/list", {})["result"]["projects"] if p["name"] not in look.reply]
     return f"the reply does not name the project(s) {', '.join(missing)}" if missing else None
 
 
@@ -551,7 +551,7 @@ FAKE_KEY = "sk-eval-not-a-real-key-0000"
 
 
 def _project(look: Look, name: str) -> dict[str, Any] | None:
-    return next((p for p in look.api.get("/api/projects")["projects"] if p["name"].casefold() == name.casefold()),
+    return next((p for p in look.api.post("/api/v1/project_admin/list", {})["result"]["projects"] if p["name"].casefold() == name.casefold()),
                 None)
 
 
@@ -1179,8 +1179,8 @@ def _make_gated_schedule(api: Api, project_id: str) -> None:
 
 def _make_two_projects_schedules(api: Api, project_id: str) -> None:
     """SCHEDULE in the dialog's project and in OPS, both gated as in ``_make_gated_schedule``."""
-    work_dir = next(p for p in api.get("/api/projects")["projects"] if p["project_id"] == project_id)["work_dir"]
-    ops = api.post("/api/projects", {"name": OPS, "work_dir": work_dir})["project_id"]
+    work_dir = next(p for p in api.post("/api/v1/project_admin/list", {})["result"]["projects"] if p["project_id"] == project_id)["work_dir"]
+    ops = api.post("/api/v1/project_admin/create", {"name": OPS, "work_dir": work_dir})["result"]["project"]["project_id"]
     for project in (project_id, ops):
         _make_gated_schedule(api, project)
 
@@ -2262,8 +2262,7 @@ def run(
                             "profile_id": picked["profile_id"], "run_budget_usd": max_budget_usd}})["result"]
                     configs[dialog.id, rep] = (picked, _manager_profile(api, manager_model, manager_effort)
                                                if manager_model else picked)
-                    project_id = api.post("/api/projects",
-                                          {"name": PROJECT, "work_dir": str(work_dir)})["project_id"]
+                    project_id = api.post("/api/v1/project_admin/create", {"name": PROJECT, "work_dir": str(work_dir)})["result"]["project"]["project_id"]
                     row = run_dialog(api, dialog, database_url=database_url, project_id=project_id,
                                      scenarios=scenarios, mode=mode, timeout=timeout,
                                      runtime_root=case / "runtime", cap_left=cap_left if jobs > 1 else None,

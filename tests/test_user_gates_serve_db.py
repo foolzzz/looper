@@ -169,9 +169,9 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             for variant in VARIANTS:
                 work = root / f"work-{variant}"
                 work.mkdir()
-                project = api.post("/api/projects", {"name": f"calc-{variant}", "work_dir": str(work)})
+                project = api.post("/api/v1/project_admin/create", {"name": f"calc-{variant}", "work_dir": str(work)})["result"]["project"]
                 # Unset is on: the off variant turns them off.
-                api.put(f"/api/projects/{project['project_id']}", {"user_gates": "off" if variant == "off" else "on"})
+                api.post("/api/v1/project_admin/update", {"project_id": project['project_id'], "fields": {"user_gates": "off" if variant == "off" else "on"}})["result"]["project"]
                 ids[variant] = api.post("/api/v1/tasks/create", {"requirement": f"build calc variant={variant}",
                                                               "project_id": project["project_id"]})["result"]["task_id"]
                 api.post("/api/v1/ops/task_control/start", {"task_id": ids[variant]})
@@ -191,8 +191,10 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             seen["before_restart"] = detail("restart")["gates"]
             api.post("/api/v1/ops/task_control/restart", {"task_id": ids["restart"]})
             api.post("/api/v1/ops/task_control/start_over", {"task_id": ids["startover"]})
-            time.sleep(0.5)
-            again = {v: _until(lambda v=v: (d := detail(v))["status"] in ENDED and d, f"{v} to end again")
+            # Controls queue a message: wait for the new Planner before accepting an ended state, otherwise
+            # the router may not have consumed the restart yet and we would read the first run's failure.
+            again = {v: _until(lambda v=v: len(_log(state, "planner.jsonl", v)) > 1
+                              and (d := detail(v))["status"] in ENDED and d, f"{v} to end again")
                      for v in ("restart", "startover")}
             threads = {v: api.post("/api/v1/ops/gates/messages", {"task_id": ids[v], "gate": "g1"})["result"] for v in ("pass", "restart")}
     return {"first": first, "again": again, "ids": ids, "state": state, "seen": seen, "threads": threads,

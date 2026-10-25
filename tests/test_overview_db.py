@@ -48,7 +48,7 @@ async def _get(server: Any, path: str, query: dict[str, Any] | None = None) -> t
         from tests.db_support import call_v1
         return await call_v1(server, path, query or {})
     writer = _Writer()
-    if path == "/api/v1/system/overview":
+    if path in ("/api/v1/system/overview", "/api/v1/project_admin/list"):
         from looper.agents.api_v1 import OPERATOR
 
         await server._handle_v1("POST", path, {}, {}, b"{}", writer, OPERATOR)
@@ -56,7 +56,7 @@ async def _get(server: Any, path: str, query: dict[str, Any] | None = None) -> t
         await server._route_api("GET", path, query or {}, b"", writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
     answer = json.loads(payload)
-    return int(head.split()[1]), answer["result"] if path == "/api/v1/system/overview" else answer
+    return int(head.split()[1]), answer["result"] if path in ("/api/v1/system/overview", "/api/v1/project_admin/list") else answer
 
 
 async def _tasks(pool: Any, project_id: str, status: str, count: int) -> None:
@@ -295,7 +295,7 @@ def test_a_planning_or_verifying_task_is_active_for_the_sidebar_and_the_delete_g
             await pool.execute("INSERT INTO tasks (id, requirement, project_id, status) VALUES ($1, 'x', $2, $1)",
                                status, project["id"])
 
-        status, body = await _get(_server(), "/api/projects")
+        status, body = await _get(_server(), "/api/v1/project_admin/list")
         assert status == 200
         (listed,) = body["projects"]
         assert (listed["task_count"], listed["active_count"]) == (6, 4)

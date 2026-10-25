@@ -91,7 +91,7 @@ def test_a_task_names_its_workspace_and_is_told_what_it_will_run_in(
                 "requirement": "x", "project_id": project["id"], "work_dir": str(workspace), **bad})
             assert status == 400 and says in refused["error"], refused
         # A new project's tasks run in worktrees; one made before keeps running in place.
-        status, made = await _call(server, "POST", "/api/projects", {"name": "fresh", "work_dir": str(workspace)})
+        status, made = await _call(server, "POST", "/api/v1/project_admin/create", {"name": "fresh", "work_dir": str(workspace)})
         assert made["task_workspaces"] == "worktree" and project.get("task_workspaces") is None
 
     run_db(test, monkeypatch)

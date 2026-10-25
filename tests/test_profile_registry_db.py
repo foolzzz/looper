@@ -37,6 +37,12 @@ async def _call(method: str, path: str, body: Any = None, *, claude: str = "clau
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())), claude_bin=claude)
+    if path.startswith("/api/v1/project_admin/"):
+        from tests.test_api_v1_ops_db import _v1
+
+        status, answer = await _v1(method, path, body, ops=ClientOps(SimpleNamespace()))
+        result = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
+        return status, result.get("project", result)
     from tests.runtime_model_helpers import profile_request
 
     method, path, body = profile_request(method, path, body)
@@ -1139,7 +1145,7 @@ def test_a_layer_selects_a_profile_only_for_roles_its_runtime_can_run(
 ) -> None:
     async def _test(_pool: Any) -> None:
         one_off = await _stand_in_profile(stand_in)
-        project = (await _ok("POST", "/api/projects", {"name": "calc"}))["project_id"]
+        project = (await _ok("POST", "/api/v1/project_admin/create", {"name": "calc"}))["project_id"]
 
         await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": one_off})
         await _ok("PUT", f"/api/projects/{project}/agent-settings/roles/reviewer", {"profile_id": one_off})
@@ -1169,7 +1175,7 @@ def test_where_a_profile_is_selected_is_read_back_and_keeps_it_from_being_delete
     async def _test(_pool: Any) -> None:
         sonnet, haiku = await _profile("claude-code/sonnet"), await _profile("claude-code/haiku")
         one_off = await _stand_in_profile(stand_in)
-        calc = (await _ok("POST", "/api/projects", {"name": "calc", "work_dir": str(tmp_path)}))["project_id"]
+        calc = (await _ok("POST", "/api/v1/project_admin/create", {"name": "calc", "work_dir": str(tmp_path)}))["project_id"]
         await _ok("PUT", "/api/agent-settings/system", {"profile_id": sonnet})
         await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": sonnet})
         await _ok("PUT", f"/api/projects/{calc}/agent-settings", {"profile_id": sonnet})
@@ -1270,7 +1276,7 @@ def test_a_tasks_profile_override_reaches_only_that_tasks_role(
         sonnet, haiku = await _profile("claude-code/sonnet"), await _profile("claude-code/haiku")
         one_off = await _stand_in_profile(stand_in)
         await _ok("PUT", "/api/agent-settings/system", {"profile_id": sonnet})
-        project = (await _ok("POST", "/api/projects", {"name": "calc", "work_dir": str(tmp_path / "w")}))["project_id"]
+        project = (await _ok("POST", "/api/v1/project_admin/create", {"name": "calc", "work_dir": str(tmp_path / "w")}))["project_id"]
         chose = (await _ok("POST", "/api/v1/tasks/create", {"requirement": "r", "project_id": project,
                                                          "profile_overrides": {"worker": haiku}}))
         plain = await _ok("POST", "/api/v1/tasks/create", {"requirement": "r", "project_id": project})
@@ -1310,7 +1316,7 @@ def test_a_profile_that_can_no_longer_run_fails_the_run_instead_of_another_profi
     async def _test(_pool: Any) -> None:
         one_off = await _stand_in_profile(stand_in)
         await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": one_off})
-        project = (await _ok("POST", "/api/projects", {"name": "calc"}))["project_id"]
+        project = (await _ok("POST", "/api/v1/project_admin/create", {"name": "calc"}))["project_id"]
         task = (await _ok("POST", "/api/v1/tasks/create", {"requirement": "r", "project_id": project,
                                                         "work_dir": str(tmp_path / "w")}))["task_id"]
         monkeypatch.delitem(runtimes.ADAPTERS, stand_in)  # a version without that runtime type
