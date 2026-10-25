@@ -54,7 +54,7 @@ async def _call(method: str, path: str, body: Any = None, *, claude: str = "clau
     raw = b"" if body is None else json.dumps(body).encode()
     if (method == "POST" and parsed.path in ("/api/v1/registry/view", "/api/v1/runtimes/probe")) or (
             parsed.path == "/api/v1/tasks/agents" or parsed.path.startswith(
-                ("/api/v1/profiles/", "/api/v1/ops/models/", "/api/v1/models/", "/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/runs/"))):
+                ("/api/v1/provider_accounts/", "/api/v1/profiles/", "/api/v1/ops/models/", "/api/v1/models/", "/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/runs/"))):
         server._client_ops = ClientOps(SimpleNamespace())
         await server._handle_v1(method, parsed.path, dict(parse_qsl(parsed.query)), {}, raw, writer, api_v1.OPERATOR)
     else:
@@ -63,7 +63,7 @@ async def _call(method: str, path: str, body: Any = None, *, claude: str = "clau
     answer = json.loads(payload)
     if (method == "POST" and parsed.path in ("/api/v1/registry/view", "/api/v1/runtimes/probe")) or (
             parsed.path == "/api/v1/tasks/agents" or parsed.path.startswith(
-                ("/api/v1/profiles/", "/api/v1/ops/models/", "/api/v1/models/", "/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/runs/"))):
+                ("/api/v1/provider_accounts/", "/api/v1/profiles/", "/api/v1/ops/models/", "/api/v1/models/", "/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/runs/"))):
         answer = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
     status = int(head.split()[1])
     # Preserve older fixture assertions while the request itself uses v1.
@@ -163,10 +163,10 @@ def test_dsh_policy_profile_create_edit_and_provider_update_need_no_key(
             changed = (await _ok("PUT", f"/api/agent-profiles/{profile_id}", {"effort": effort}))["profile"]
             assert changed["effort"] == effort
         # Explicit gateway URLs survive readback, including an existing /v1 suffix.
-        changed = (await _ok("PUT", f"/api/providers/{provider_id}", {"endpoints": [
+        changed = (await _ok("POST", "/api/v1/provider_accounts/update", {"provider_id": provider_id, "fields": {"endpoints": [
             {"protocol": "anthropic-messages", "base_url": "https://gateway.example/messages/v1/"}],
             "api_key": None,
-        }))["provider"]
+        }}))["provider"]
         assert changed["endpoints"][0]["base_url"] == "https://gateway.example/messages/v1/"
         assert changed["api_key"] is None
         assert (await db.get_profile(profile_id))["model"]["name"] == model
@@ -224,18 +224,18 @@ def test_dsh_policy_refuses_incompatible_endpoints_and_rolls_back_updates(
         profile_id = (await _ok("POST", "/api/agent-profiles", valid))["profile"]["profile_id"]
         before = await db.get_provider(provider_id)
         endpoint = {"protocol": protocol, "base_url": base_url}
-        status, payload = await _call("PUT", f"/api/providers/{provider_id}", {"endpoints": [endpoint]})
+        status, payload = await _call("POST", "/api/v1/provider_accounts/update", {"provider_id": provider_id, "fields": {"endpoints": [endpoint]}})
         assert status == (409 if protocol != "anthropic-messages" else 400), payload
         assert await db.get_provider(provider_id) == before
         assert (await db.get_profile(profile_id))["model"]["provider_id"] == provider_id
 
         # A valid standalone endpoint may still be incompatible with DSH's exact protocol.
-        status, payload = await _call("POST", "/api/providers", {
+        status, payload = await _call("POST", "/api/v1/provider_accounts/create", {
             "name": "other", "vendor_type": "custom", "endpoints": [endpoint]})
         if protocol == "anthropic-messages":
             assert status == 400, payload
             return
-        assert status == 201, payload
+        assert status == 200, payload
         other_model = await _model_id(payload["provider"]["provider_id"], "deepseek-flash", protocol)
         for method, path, body in (
             ("POST", "/api/agent-profiles", {**valid, "name": "invalid", "model_id": other_model}),
@@ -261,8 +261,8 @@ def test_dsh_policy_checks_stored_effort_when_a_provider_changes(
         }))["profile"]["profile_id"]
         # Model a stored profile from an older policy; provider updates must not skip its effort.
         await pool.execute("UPDATE agent_profiles SET effort = 'medium' WHERE id = $1", profile_id)
-        status, payload = await _call("PUT", f"/api/providers/{provider_id}", {"name": "changed"})
-        assert status == 400 and "dsh-profile" in payload["error"]
+        status, payload = await _call("POST", "/api/v1/provider_accounts/update", {"provider_id": provider_id, "fields": {"name": "changed"}})
+        assert status == 400 and payload["error"] == "invalid credential request"
         assert (await db.get_provider(provider_id))["name"] == "gateway"
 
     run_db(_test, monkeypatch)
@@ -306,17 +306,25 @@ def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch
 
 
 @pytest.mark.parametrize(("method", "path", "body"), [
-    ("PUT", "/api/providers/prov-claude-subscription", {"name": "renamed"}),
-    ("DELETE", "/api/providers/prov-claude-subscription", None),
-    ("DELETE", "/api/providers/prov-codex-login", None),
-    ("DELETE", "/api/providers/prov-grok-login", None),
-    ("PUT", "/api/agent-profiles/agent-claude-code-opus", {"effort": "low"}),
-    ("DELETE", "/api/agent-profiles/agent-claude-code-opus", None),
+    ("POST", "/api/v1/provider_accounts/update", {"provider_id": "prov-claude-subscription", "fields": {"name": "renamed"}}),
+    ("POST", "/api/v1/provider_accounts/delete", {"provider_id": "prov-claude-subscription"}),
+    ("POST", "/api/v1/provider_accounts/delete", {"provider_id": "prov-codex-login"}),
+    ("POST", "/api/v1/provider_accounts/delete", {"provider_id": "prov-grok-login"}),
 ])
-def test_the_builtins_are_read_only(monkeypatch: pytest.MonkeyPatch, method: str, path: str, body: Any) -> None:
+def test_the_builtin_providers_are_read_only(monkeypatch: pytest.MonkeyPatch, method: str, path: str, body: Any) -> None:
     async def _test(_pool: Any) -> None:
         status, payload = await _call(method, path, body)
-        assert status == 400 and "built-in" in payload["error"]
+        assert status == 400 and payload["error"] == "invalid credential request"
+
+    run_db(_test, monkeypatch)
+
+
+@pytest.mark.parametrize(("method", "body"), [("PUT", {"effort": "low"}), ("DELETE", None)])
+def test_the_builtin_profile_is_read_only(monkeypatch: pytest.MonkeyPatch, method: str, body: Any) -> None:
+    async def _test(_pool: Any) -> None:
+        status, payload = await _call(method, "/api/agent-profiles/agent-claude-code-opus", body)
+        # Profile operations retain diagnostics; only credential operations redact service errors.
+        assert status == 400 and "built-in profile" in payload["error"]
 
     run_db(_test, monkeypatch)
 
@@ -423,7 +431,7 @@ def test_the_upgrade_drops_custom_runtimes_no_profile_uses_once_and_keeps_the_ot
 
 def test_a_provider_api_key_is_stored_apart_and_never_shown(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _test(pool: Any) -> None:
-        provider = (await _ok("POST", "/api/providers", {
+        provider = (await _ok("POST", "/api/v1/provider_accounts/create", {
             "name": "anthropic-key",
             "api_key": SECRET,
             "vendor_type": "custom",
@@ -438,11 +446,11 @@ def test_a_provider_api_key_is_stored_apart_and_never_shown(monkeypatch: pytest.
                                         default=str)
 
         # *** keeps the stored key; another value replaces it; null removes it.
-        await _ok("PUT", f"/api/providers/{provider_id}", {"api_key": "***"})
+        await _ok("POST", "/api/v1/provider_accounts/update", {"provider_id": provider_id, "fields": {"api_key": "***"}})
         assert await pool.fetchval("SELECT api_key FROM llm_provider_secrets") == SECRET
-        await _ok("PUT", f"/api/providers/{provider_id}", {"api_key": "sk-other"})
+        await _ok("POST", "/api/v1/provider_accounts/update", {"provider_id": provider_id, "fields": {"api_key": "sk-other"}})
         assert await pool.fetchval("SELECT api_key FROM llm_provider_secrets") == "sk-other"
-        cleared = (await _ok("PUT", f"/api/providers/{provider_id}", {"api_key": None}))["provider"]
+        cleared = (await _ok("POST", "/api/v1/provider_accounts/update", {"provider_id": provider_id, "fields": {"api_key": None}}))["provider"]
         assert cleared["api_key"] is None and await pool.fetchval("SELECT count(*) FROM llm_provider_secrets") == 0
 
     run_db(_test, monkeypatch)
@@ -467,8 +475,8 @@ def test_a_provider_that_does_not_validate_is_refused(
     monkeypatch: pytest.MonkeyPatch, body: dict[str, Any], error: str,
 ) -> None:
     async def _test(_pool: Any) -> None:
-        status, payload = await _call("POST", "/api/providers", {"name": "p", **body})
-        assert status == 400 and error in payload["error"], payload
+        status, payload = await _call("POST", "/api/v1/provider_accounts/create", {"name": "p", **body})
+        assert status == 400 and payload["error"] == "invalid credential request"
 
     run_db(_test, monkeypatch)
 
@@ -477,7 +485,7 @@ def test_a_provider_that_does_not_validate_is_refused(
 
 
 async def _provider(body: dict[str, Any]) -> str:
-    return (await _ok("POST", "/api/providers", body))["provider"]["provider_id"]
+    return (await _ok("POST", "/api/v1/provider_accounts/create", body))["provider"]["provider_id"]
 
 
 async def _model_id(provider_id: str, name: str, protocol: str = "anthropic-messages") -> str:
@@ -640,8 +648,8 @@ def test_the_codex_login_pairs_only_with_codex_runtimes(monkeypatch: pytest.Monk
             assert status == 400, payload
             assert "only use its own runtime" in payload["error"] or "exact protocol" in payload["error"]
         # A login problem is cleared only on the Codex login.
-        status, payload = await _call("DELETE", "/api/providers/prov-claude-subscription/login-problem")
-        assert status == 400 and "is not the Codex or Grok login" in payload["error"]
+        status, payload = await _call("POST", "/api/v1/provider_accounts/clear_login_problem", {"provider_id": 'prov-claude-subscription'})
+        assert status == 400 and payload["error"] == "invalid credential request"
 
     run_db(_test, monkeypatch)
 
@@ -722,9 +730,9 @@ def test_omp_pairs_with_an_api_key_provider_of_any_of_its_apis_and_runs_every_ro
         # The Claude subscription is Claude Code's login, and OMP's own logins are not ones Looper uses.
         status, payload = await profile("prov-claude-subscription")
         assert status == 400 and "only use its own runtime" in payload["error"]
-        status, payload = await _call("POST", "/api/providers", {
+        status, payload = await _call("POST", "/api/v1/provider_accounts/create", {
             "name": "omp-login", "vendor_type": "omp-login"})
-        assert status == 400 and "vendor_type must be" in payload["error"]
+        assert status == 400 and payload["error"] == "invalid credential request"
 
     run_db(_test, monkeypatch)
 
@@ -875,11 +883,11 @@ def test_dsh_provider_cannot_remove_the_endpoint_needed_by_its_profile(
         }))["profile"]["profile_id"]
         before_provider, before_profile = await db.get_provider(provider_id), await db.get_profile(profile_id)
         # Endpoints are account settings; removing one would orphan the profile's exact model.
-        status, payload = await _call("PUT", f"/api/providers/{provider_id}", {
+        status, payload = await _call("POST", "/api/v1/provider_accounts/update", {"provider_id": provider_id, "fields": {
             "name": "must-rollback", "api_key": "must-not-replace-the-key",
             "endpoints": [{"protocol": "openai-responses", "base_url": "https://other.example/v1"}],
-        })
-        assert status == 409 and "endpoint" in payload["error"]
+        }})
+        assert status == 409 and payload["error"] == "invalid credential request"
         assert await db.get_provider(provider_id) == before_provider
         assert await db.get_profile(profile_id) == before_profile
         assert await db.get_api_key(provider_id) == SECRET
@@ -1014,9 +1022,9 @@ def test_pi_on_path_is_discovered_once_offers_every_role_and_refuses_other_auth_
                 await _ok("PUT", f"/api/agent-settings/roles/{role}", {"profile_id": profile_id})
 
         # Pi has no login vendor. Its exact model protocol must be supported.
-        status, payload = await _call("POST", "/api/providers", {
+        status, payload = await _call("POST", "/api/v1/provider_accounts/create", {
             "name": "pi-login", "vendor_type": "pi-login", "endpoints": []})
-        assert status == 400 and "vendor_type" in payload["error"]
+        assert status == 400 and payload["error"] == "invalid credential request"
         anthropic = await _provider({"name": "anthropic-key", "vendor_type": "custom", "endpoints": [
             {"protocol": "anthropic-messages", "base_url": "https://messages.example.invalid"}]})
         status, payload = await profile(anthropic)
@@ -1041,9 +1049,9 @@ def test_a_change_that_would_break_a_profile_is_refused_and_one_in_use_is_kept(
                                                              "model_id": await _model_id(provider_id, "sonnet"),
                                                              "effort": "low"}))["profile"]
 
-        status, payload = await _call("PUT", f"/api/providers/{provider_id}", {"endpoints": [
-            {"protocol": "openai-chat", "base_url": "https://llm.example.invalid/v1"}]})
-        assert status == 409 and "models" in payload["error"]
+        status, payload = await _call("POST", "/api/v1/provider_accounts/update", {"provider_id": provider_id, "fields": {"endpoints": [
+            {"protocol": "openai-chat", "base_url": "https://llm.example.invalid/v1"}]}})
+        assert status == 409 and payload["error"] == "invalid credential request"
         status, payload = await _call("PUT", f"/api/agent-profiles/{profile['profile_id']}",
                                       {"model_id": await _model_id("prov-claude-subscription", "sonnet")})
         assert status == 400 and "only use its own runtime" in payload["error"]
@@ -1051,11 +1059,11 @@ def test_a_change_that_would_break_a_profile_is_refused_and_one_in_use_is_kept(
                              {"name": "si-fast", "effort": None}))["profile"]
         assert (renamed["name"], renamed["effort"]) == ("si-fast", None)
 
-        status, payload = await _call("DELETE", f"/api/providers/{provider_id}")
-        assert status == 409 and "first" in payload["error"]
+        status, payload = await _call("POST", "/api/v1/provider_accounts/delete", {"provider_id": provider_id})
+        assert status == 409 and payload["error"] == "invalid credential request"
         await _ok("DELETE", f"/api/agent-profiles/{profile['profile_id']}")
         await _ok("POST", "/api/v1/ops/models/delete", {"model": profile['model_id']})
-        await _ok("DELETE", f"/api/providers/{provider_id}")
+        await _ok("POST", "/api/v1/provider_accounts/delete", {"provider_id": provider_id})
         assert runtime_id in {r["runtime_id"] for r in (await _registry())["runtimes"]}
 
     run_db(_test, monkeypatch)
@@ -1112,7 +1120,7 @@ async def _profile(name: str, runtime_id: str = "rt-claude-code", provider_id: s
 
 async def _stand_in_profile(stand_in: str) -> str:
     runtime_id = await _runtime(stand_in, name="si")
-    provider_id = (await _ok("POST", "/api/providers", {
+    provider_id = (await _ok("POST", "/api/v1/provider_accounts/create", {
         "name": "si-key",
         "vendor_type": "custom",
         "endpoints": [
@@ -1375,7 +1383,7 @@ def test_a_provider_keeps_its_model_catalog_and_concurrency_with_unknowns_as_nul
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _test(_pool: Any) -> None:
-        provider = (await _ok("POST", "/api/providers", {
+        provider = (await _ok("POST", "/api/v1/provider_accounts/create", {
             "name": "glm",
             "max_concurrency": 4,
             "vendor_type": "custom",
@@ -1394,7 +1402,7 @@ def test_a_provider_keeps_its_model_catalog_and_concurrency_with_unknowns_as_nul
         assert all(second[key] is None for key in (
             "context_window", "input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok",
             "cache_write_usd_per_mtok", "efforts", "background_model"))
-        unlimited = (await _ok("PUT", f"/api/providers/{provider['provider_id']}", {"max_concurrency": None}))
+        unlimited = (await _ok("POST", "/api/v1/provider_accounts/update", {"provider_id": provider['provider_id'], "fields": {"max_concurrency": None}}))
         assert unlimited["provider"]["max_concurrency"] is None
         builtins = [p for p in (await _registry())["providers"] if p["builtin"]]
         assert all(b["max_concurrency"] is None and b["model_count"] > 0 for b in builtins)
@@ -1417,7 +1425,7 @@ def test_model_settings_that_do_not_validate_are_refused(
         status, payload = await _call("POST", "/api/v1/ops/models/create", {
             "provider": provider, "name": "m", "protocol": "openai-chat", **change})
         assert status == 400 and error in payload["error"], payload
-        status, payload = await _call("PUT", f"/api/providers/{provider}", {"max_concurrency": 0})
-        assert status == 400 and "max_concurrency must be" in payload["error"]
+        status, payload = await _call("POST", "/api/v1/provider_accounts/update", {"provider_id": provider, "fields": {"max_concurrency": 0}})
+        assert status == 400 and payload["error"] == "invalid credential request"
 
     run_db(_test, monkeypatch)

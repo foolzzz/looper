@@ -269,7 +269,7 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
             if path == "/api/v1/tasks/activity":
                 return {"status": "ok", "result": {"activity": []}}
             self.posts.append((path, body))
-            if path == "/api/providers":
+            if path == "/api/v1/provider_accounts/create":
                 assert "api_key_env" not in body
                 fields, key = profile_registry._provider_fields(body, None)
                 account = profile_registry.provider_spec({**fields, "id": "provider-eval"})
@@ -277,7 +277,7 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
                 for entry in fields["endpoints"]:
                     endpoint = profile_registry.Endpoint(account.id, ApiProtocol(entry["protocol"]), entry["base_url"])
                     self.endpoints[account.id, endpoint.protocol] = endpoint
-                return {"provider": {"provider_id": account.id}}
+                return {"status": "ok", "result": {"provider": {"provider_id": account.id}, "warnings": []}}
             if path == "/api/v1/ops/models/create":
                 assert "provider" in body and "provider_id" not in body
                 fields = {"provider_id" if k == "provider" else k: v for k, v in body.items()}

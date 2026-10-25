@@ -34,7 +34,7 @@ async def _provider(name: str = "glm", *, base_url: str = THIRD_PARTY, api_key: 
                                            "base_url": base_url or "https://api.anthropic.com"}], "env": env or []}
     if api_key is not None:
         body["api_key"] = api_key
-    provider_id = (await _ok("POST", "/api/providers", body))["provider"]["provider_id"]
+    provider_id = (await _ok("POST", "/api/v1/provider_accounts/create", body))["provider"]["provider_id"]
     if not base_url:
         # Only migrated accounts can retain an omitted runtime-default endpoint.
         from looper.db.connection import get_pool
@@ -71,16 +71,16 @@ def test_provider_saves_warn_about_context_suffixes_without_anthropic_messages(
     async def _test(_pool: Any) -> None:
         provider_id = await _provider("suffix-test", protocol="openai-chat",
                                        base_url="https://example.invalid/v1", models=models)
-        answer = await _ok("PUT", f"/api/providers/{provider_id}", {"name": "suffix-test"})
+        answer = await _ok("POST", "/api/v1/provider_accounts/update", {"provider_id": provider_id, "fields": {"name": "suffix-test"}})
         assert len(answer["warnings"]) == 1
         assert "Claude Code convention" in answer["warnings"][0] and "verbatim" in answer["warnings"][0]
-        saved = (await _ok("PUT", f"/api/providers/{provider_id}", {"name": "renamed"}))
+        saved = (await _ok("POST", "/api/v1/provider_accounts/update", {"provider_id": provider_id, "fields": {"name": "renamed"}}))
         assert saved["warnings"] == answer["warnings"]
         saved_model = await _model(provider_id, models[0]["name"], "openai-chat")
         assert saved_model["name"] == models[0]["name"]
         assert saved_model["background_model"] == models[0]["background_model"]
-        anthropic = await _ok("PUT", f"/api/providers/{provider_id}", {"endpoints": [
-            *saved["provider"]["endpoints"], {"protocol": "anthropic-messages", "base_url": THIRD_PARTY}]})
+        anthropic = await _ok("POST", "/api/v1/provider_accounts/update", {"provider_id": provider_id, "fields": {"endpoints": [
+            *saved["provider"]["endpoints"], {"protocol": "anthropic-messages", "base_url": THIRD_PARTY}]}})
         assert anthropic["warnings"] == []
         assert (await _profile(provider_id, models[0]["name"]))["warnings"] == []
 
@@ -351,9 +351,9 @@ def test_a_providers_own_env_cannot_set_what_the_binding_owns_or_hold_a_secret(
     monkeypatch: pytest.MonkeyPatch, env: list[dict[str, str]], error: str,
 ) -> None:
     async def _test(_pool: Any) -> None:
-        status, payload = await _call("POST", "/api/providers", {"name": "p", "vendor_type": "custom",
+        status, payload = await _call("POST", "/api/v1/provider_accounts/create", {"name": "p", "vendor_type": "custom",
             "endpoints": [{"protocol": "anthropic-messages", "base_url": THIRD_PARTY}], "env": env})
-        assert status == 400 and error in payload["error"], payload
+        assert status == 400 and payload["error"] == "invalid credential request"
 
     run_db(_test, monkeypatch)
 

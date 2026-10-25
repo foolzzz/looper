@@ -301,7 +301,7 @@ def test_targeted_model_dialogs_run_through_fake_manager_and_database(tmp_path, 
 def test_switch_profile_seed_registers_a_keyed_provider_and_one_profile_in_fake_mode():
     api = SeedApi()
     dialogs._make_switch_profile(api, "project-test")
-    providers = [body for path, body in api.posts if path == "/api/providers"]
+    providers = [body for path, body in api.posts if path == "/api/v1/provider_accounts/create"]
     assert len(providers) == 1 and providers[0]["name"] == "eval-switch"
     assert providers[0]["api_key"] == dialogs.FAKE_KEY
     assert providers[0]["endpoints"] == [{"protocol": "anthropic-messages",
@@ -321,7 +321,7 @@ def test_switch_profile_seed_registers_a_spec_as_eval_switch(monkeypatch):
 def test_switch_profile_seed_uses_the_login_provider_in_real_mode():
     api = SeedApi()
     dialogs._make_switch_profile(api, "project-test", fake=False)
-    assert [p for p, _ in api.posts if p == "/api/providers"] == []
+    assert [p for p, _ in api.posts if p == "/api/v1/provider_accounts/create"] == []
     assert api.registry["profiles"][0]["name"] == dialogs.SWITCH
 
 

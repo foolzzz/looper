@@ -510,11 +510,11 @@ asyncio.run(check())
         assert all(not c["enabled"] for c in channels if c["channel_type"] in ("telegram", "lark", "lark_bot"))
         probe = request(base, "/api/v1/runtimes/probe", token, "POST", {"runtime_id": "rt-pi"})["result"]
         assert not probe["runtime"]["probe_error"], "pi probe failed"
-        provider = request(base, "/api/providers", token, "POST", {
+        provider = request(base, "/api/v1/provider_accounts/create", token, "POST", {
             "name": "isolated-smoke", "vendor_type": "custom",
             "endpoints": [{"protocol": "openai-chat" if provider_state else "openai-responses",
                            "base_url": provider_url + "/v1"}], "api_key": "local-key",
-        })["provider"]
+        })["result"]["provider"]
         model = request(base, "/api/v1/ops/models/create", token, "POST", {
             "provider": provider["provider_id"], "name": "selected",
             "protocol": "openai-chat" if provider_state else "openai-responses",

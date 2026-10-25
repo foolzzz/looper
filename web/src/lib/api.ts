@@ -2901,6 +2901,8 @@ export interface ProviderFields {
   api_key?: string | null;
 }
 
+export type CreateProviderFields = ProviderFields & Pick<Provider, "name" | "vendor_type">;
+
 export interface ProfileFields {
   name?: string;
   runtime_id?: string;
@@ -2943,7 +2945,7 @@ export interface PromptPreview {
 /** Window event fired after this dashboard changes the registry, so profile selectors reload at once. */
 export const REGISTRY_CHANGED_EVENT = "looper:registry-changed";
 
-async function registryCall<T>(method: string, path: string, body: unknown, label: string): Promise<T> {
+export async function registryCall<T>(method: string, path: string, body: unknown, label: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
@@ -2970,19 +2972,29 @@ export async function probeRuntime(runtimeId: string): Promise<{ runtime: Runtim
   return result;
 }
 
-export function createProvider(fields: ProviderFields): Promise<{ provider: Provider; warnings: string[] }> {
-  return registryCall("POST", "/providers", fields, "add provider");
+export async function createProvider(fields: CreateProviderFields): Promise<{ provider: Provider; warnings: string[] }> {
+  const result = await callV1<{ provider: Provider; warnings: string[] }>("/api/v1/provider_accounts/create", fields);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
-export function updateProvider(
+export async function updateProvider(
   providerId: string,
   fields: ProviderFields,
 ): Promise<{ provider: Provider; warnings: string[] }> {
-  return registryCall("PUT", `/providers/${encodeURIComponent(providerId)}`, fields, "update provider");
+  const result = await callV1<{ provider: Provider; warnings: string[] }>("/api/v1/provider_accounts/update",
+    { provider_id: providerId, fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
-export function deleteProvider(providerId: string): Promise<{ deleted: string }> {
-  return registryCall("DELETE", `/providers/${encodeURIComponent(providerId)}`, undefined, "delete provider");
+export async function deleteProvider(providerId: string): Promise<{ deleted: string }> {
+  const result = await callV1<{ deleted: string }>("/api/v1/provider_accounts/delete", { provider_id: providerId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
 function modelSettings(fields: ModelFields): ModelFields {
@@ -3023,9 +3035,12 @@ export async function deleteModel(modelId: string): Promise<{ deleted: string }>
 
 /** After checking a runtime's own login on the machine (Codex's, Grok's): let runs use it again after a run found it
  * forked. */
-export function clearLoginProblem(providerId: string): Promise<{ provider: Provider }> {
-  return registryCall("DELETE", `/providers/${encodeURIComponent(providerId)}/login-problem`, undefined,
-    "use the login again");
+export async function clearLoginProblem(providerId: string): Promise<{ provider: Provider; warnings?: string[] }> {
+  const result = await callV1<{ provider: Provider; warnings?: string[] }>("/api/v1/provider_accounts/clear_login_problem",
+    { provider_id: providerId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
 }
 
 /** Register an Agent Profile; refused (400) when its runtime cannot use the selected model and its derived account. */

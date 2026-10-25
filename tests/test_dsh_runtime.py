@@ -2725,12 +2725,12 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
             detected = [row for row in registry["runtimes"] if row["type"] == "dsh"]
             assert len(detected) == 1 and detected[0]["version"] == "0.2.1-rc.2"
             api.post("/api/v1/runtimes/probe", {"runtime_id": "rt-dsh"})["result"]
-            provider = api.post("/api/providers", {
+            provider = api.post("/api/v1/provider_accounts/create", {
                 "name": "disposable-messages", "vendor_type": "custom",
                 "endpoints": [{"protocol": "anthropic-messages",
                                "base_url": "https://deepseek.example.invalid/anthropic"}],
                 "api_key": "synthetic-dsh-key",
-            })["provider"]["provider_id"]
+            })["result"]["provider"]["provider_id"]
             model = api.post("/api/v1/ops/models/create", {
                 "provider": provider, "name": "deepseek-flash", "protocol": "anthropic-messages",
             })["result"]["model"]["model_id"]

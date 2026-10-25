@@ -781,9 +781,9 @@ def _model_refused(look: Look) -> str | None:
 
 
 def _seed_dual_models(api: Api, project_id: str) -> None:
-    provider = api.post("/api/providers", {"name": DUAL_ACCOUNT, "vendor_type": "custom", "endpoints": [
+    provider = api.post("/api/v1/provider_accounts/create", {"name": DUAL_ACCOUNT, "vendor_type": "custom", "endpoints": [
         {"protocol": "openai-chat", "base_url": "https://dual.example.invalid/chat"},
-        {"protocol": "anthropic-messages", "base_url": DUAL_URL}]})["provider"]
+        {"protocol": "anthropic-messages", "base_url": DUAL_URL}]})["result"]["provider"]
     # Put the incompatible homonym first: selecting by name or catalog order
     # alone must fail the check even though the profile's name looks right.
     for protocol, price in (("openai-chat", 9), ("anthropic-messages", 1)):
@@ -801,8 +801,8 @@ def _seed_price_model(api: Api, project_id: str) -> None:
 
 
 def _seed_missing_endpoint(api: Api, project_id: str) -> None:
-    api.post("/api/providers", {"name": "eval-no-messages", "vendor_type": "custom", "endpoints": [
-        {"protocol": "openai-chat", "base_url": "https://chat.example.invalid/v1"}]})
+    api.post("/api/v1/provider_accounts/create", {"name": "eval-no-messages", "vendor_type": "custom", "endpoints": [
+        {"protocol": "openai-chat", "base_url": "https://chat.example.invalid/v1"}]})["result"]
 
 
 def _seed_login_runtime(database_url: str) -> None:
@@ -1273,8 +1273,8 @@ def _make_switch_profile(api: Api, project_id: str, *, fake: bool = True, spec: 
     if spec is not None:
         register_agent(api, {**spec, "agent": {**spec["agent"], "name": SWITCH}})
     elif fake:
-        provider = api.post("/api/providers", {"name": "eval-switch", "vendor_type": "custom", "api_key": FAKE_KEY,
-            "endpoints": [{"protocol": "anthropic-messages", "base_url": "https://switch.example.invalid"}]})["provider"]
+        provider = api.post("/api/v1/provider_accounts/create", {"name": "eval-switch", "vendor_type": "custom", "api_key": FAKE_KEY,
+            "endpoints": [{"protocol": "anthropic-messages", "base_url": "https://switch.example.invalid"}]})["result"]["provider"]
         register_agent(api, {"runtime": {"type": "claude-code"}, "provider": {"provider_id": provider["provider_id"]},
             "model": {"name": "haiku", "protocol": "anthropic-messages"}, "agent": {"name": SWITCH}})
     else:

@@ -407,9 +407,9 @@ def _request_body(**changes):
 @needs_db
 def test_http_provider_model_profile_flow(monkeypatch, tmp_path):
     async def test(client, pool):
-        account = (await client.ok("POST", "/api/providers", _account(api_key=SECRET, endpoints=[
+        account = (await client.ok("POST", "/api/v1/provider_accounts/create", _account(api_key=SECRET, endpoints=[
             {"protocol": protocol, "base_url": f"https://{protocol}.example.invalid"}
-            for protocol in ("anthropic-messages", "openai-chat")]), status=201))["provider"]
+            for protocol in ("anthropic-messages", "openai-chat")]), status=200))["provider"]
         pid = account["provider_id"]
         body = _request_body(provider_id=pid, name="claude-haiku-4-5", context_window=100000,
                      efforts=["high"], input_usd_per_mtok=0, output_usd_per_mtok=0)
@@ -444,14 +444,14 @@ def test_http_provider_model_profile_flow(monkeypatch, tmp_path):
         assert next(m for m in registry["models"] if m["model_id"] == mid)["profile_count"] == 1
         status, error = await client.call("POST", "/api/v1/ops/models/delete", {"model": mid})
         assert status == 409 and error["error"]["code"] == "conflict"
-        status, error = await client.call("DELETE", f"/api/providers/{pid}")
+        status, error = await client.call("POST", "/api/v1/provider_accounts/delete", {"provider_id": pid})
         assert status == 409 and set(error) == {"error"}
         profile = (await client.ok("PUT", f"/api/agent-profiles/{aid}", {"effort": None}))["profile"]
         assert profile["effort"] is None and profile["custom_prompt"] == "HTTP instructions"
         await client.ok("DELETE", f"/api/agent-profiles/{aid}")
         for model_id in (mid, chat["model_id"]):
             assert await client.ok("POST", "/api/v1/ops/models/delete", {"model": model_id}) == {"deleted": model_id}
-        await client.ok("DELETE", f"/api/providers/{pid}")
+        await client.ok("POST", "/api/v1/provider_accounts/delete", {"provider_id": pid})
         assert await db.get_provider(pid) is None and await db.get_model(mid) is None
     _run_http(test, monkeypatch, tmp_path)
 
@@ -459,7 +459,7 @@ def test_http_provider_model_profile_flow(monkeypatch, tmp_path):
 @needs_db
 def test_http_model_errors_and_concurrent_deletion(monkeypatch, tmp_path):
     async def test(client, pool):
-        pid = (await client.ok("POST", "/api/providers", _account(), status=201))["provider"]["provider_id"]
+        pid = (await client.ok("POST", "/api/v1/provider_accounts/create", _account(), status=200))["provider"]["provider_id"]
         body = _request_body(provider_id=pid)
         mid = (await client.ok("POST", "/api/v1/ops/models/create", body, status=200))["model"]["model_id"]
         cases = [
@@ -593,7 +593,7 @@ def test_http_profile_preview_uses_saved_binding_role_project_and_mode_source(mo
         from looper.agents.system_prompt import build_system_prompt
         from looper.agents import prompt_preview
 
-        pid = (await client.ok("POST", "/api/providers", _account(), status=201))["provider"]["provider_id"]
+        pid = (await client.ok("POST", "/api/v1/provider_accounts/create", _account(), status=200))["provider"]["provider_id"]
         mid = (await client.ok("POST", "/api/v1/ops/models/create", _request_body(provider_id=pid), status=200))["model"]["model_id"]
         aid = (await client.ok("POST", "/api/agent-profiles", {
             "name": "Preview profile", "runtime_id": "rt-claude-code", "model_id": mid,
