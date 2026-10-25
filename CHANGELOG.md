@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.110] - 2026-10-25
+
+### Fixed
+
+- **Chat sends and navigation stay bound to their conversation.** A send now belongs to the Manager and conversation it started in: a new send, or navigation to another Manager, a channel conversation or one that is loading, missing or another Manager's, aborts the request and closes the reply stream, even before the HTTP response arrives, and a late response or error is ignored instead of landing in the wrong thread. Sending from a read-only or unresolved view is refused. Choosing a row in the conversation list updates the address and the page adopts the thread from it; unsaved threads created in the page are remembered per Manager in local storage so Back and Forward return to them, while other empty ids show "Conversation not found." The page no longer saves the assistant reply itself, since the server's web channel adapter already saves it to the session the send was made from. Browser behavior only; no route, stored data, Manager tool declaration or prompt changed. ([#598](https://github.com/foolzzz/looper/pull/598))
+
 ## [2.13.109] - 2026-10-25
 
 ### Fixed
