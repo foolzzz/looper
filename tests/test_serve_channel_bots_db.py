@@ -412,6 +412,7 @@ def test_first_successful_bot_owns_identity_and_failed_listener_is_stopped(
         incoming: asyncio.Queue[None] = asyncio.Queue()
         consumed: list[str] = []
         attempts: list[Any] = []
+        outbound_tasks: list[asyncio.Task[None]] = []
 
         async def listen(adapter: Any) -> None:
             while True:
@@ -423,6 +424,8 @@ def test_first_successful_bot_owns_identity_and_failed_listener_is_stopped(
             attempts.append(adapter)
             adapter._running = True
             adapter._outbound_task = asyncio.create_task(listen(adapter))
+            # Keep the task for assertions even when stop() clears the adapter's handle.
+            outbound_tasks.append(adapter._outbound_task)
             if first_fails and adapter.channel_id == first:
                 raise RuntimeError("synthetic startup failure after listener allocation")
 
@@ -440,13 +443,14 @@ def test_first_successful_bot_owns_identity_and_failed_listener_is_stopped(
             if first_fails:
                 assert registry.get(first) is None
                 assert not attempts[0]._running
-                assert attempts[0]._outbound_task.cancelled()
+                assert outbound_tasks[0].cancelled()
             await incoming.put(None)
             await asyncio.wait_for(incoming.join(), 1)
             assert consumed == [owner]
         finally:
             await registry.stop_all()
-        assert all(not a._running and a._outbound_task.cancelled() for a in attempts)
+        assert all(not a._running for a in attempts)
+        assert all(task.cancelled() for task in outbound_tasks)
 
     run_with_channel_configs(test, monkeypatch)
 
