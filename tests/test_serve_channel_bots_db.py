@@ -370,11 +370,95 @@ def test_lark_bot_secret_is_masked_in_logs(monkeypatch: pytest.MonkeyPatch, tmp_
 
 
 @requires_db
+@pytest.mark.parametrize("channel_type", ["telegram", "lark", "lark_bot"])
+@pytest.mark.parametrize("first_fails", [True, False])
+def test_first_successful_bot_owns_identity_and_failed_listener_is_stopped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, channel_type: str, first_fails: bool,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from looper.agents import serve
+    from looper.agents.bus import MessageBus
+    from looper.agents.channels import lark_bot_settings, lark_cli
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.channels.registry import ChannelRegistry
+    from looper.agents.channels.telegram import TelegramChannelAdapter
+
+    # Each Lark profile resolves to the same app only during adapter construction.
+    monkeypatch.setattr(lark_cli, "identity", AsyncMock(side_effect=lark_cli.LarkCliError("not ready")))
+    monkeypatch.setattr(lark_cli, "check", AsyncMock(return_value=(None, SimpleNamespace(
+        profile="p1", app_id="cli_x", bot_name="B", bot_open_id="ou_bot00000001"))))
+    monkeypatch.setattr(lark_bot_settings, "check", AsyncMock(return_value=(None, SimpleNamespace(
+        app_name="B", open_id="ou_bot00000001"))))
+
+    async def test(pool: Any) -> None:
+        first = f"channel-{channel_type}"
+        config = {"telegram": {"allowed_user_ids": ["7"]},
+                  "lark": {"allowed_open_ids": [OPEN_ID], "profile": "p1"},
+                  "lark_bot": {"allowed_open_ids": [OPEN_ID], "app_id": "cli_x"}}[channel_type]
+        secret = TOKEN_1 if channel_type == "telegram" else LARK_SECRET if channel_type == "lark_bot" else None
+        await _builtin(pool, first, config, secret)
+        second = await _bot(pool, channel_type, {**config, "profile": "p2"} if channel_type == "lark" else config,
+                            secret)
+        # Also deduplicate a bot-token row against an app learned by lark-cli at startup.
+        third_type = "lark_bot" if channel_type == "lark" else channel_type
+        third_config = {"allowed_open_ids": [OPEN_ID], "app_id": "cli_x"} if channel_type == "lark" else config
+        third = await _bot(pool, third_type, third_config, LARK_SECRET if channel_type == "lark" else secret)
+        rows = await serve._enabled_bot_rows()
+        assert [r["channel_id"] for r in rows] == [first, second, third]
+        if channel_type == "lark":
+            assert all(r["app_id"] is None for r in rows if r["channel_type"] == "lark")
+        registry = ChannelRegistry(MessageBus(runtime_root=tmp_path))
+        incoming: asyncio.Queue[None] = asyncio.Queue()
+        consumed: list[str] = []
+        attempts: list[Any] = []
+
+        async def listen(adapter: Any) -> None:
+            while True:
+                await incoming.get()
+                consumed.append(adapter.channel_id)
+                incoming.task_done()
+
+        async def start(adapter: Any, bus: Any) -> None:
+            attempts.append(adapter)
+            adapter._running = True
+            adapter._outbound_task = asyncio.create_task(listen(adapter))
+            if first_fails and adapter.channel_id == first:
+                raise RuntimeError("synthetic startup failure after listener allocation")
+
+        # The adapters' real stop methods must cancel the partially started listener.
+        adapter_class = TelegramChannelAdapter if channel_type == "telegram" else LarkChannelAdapter
+        monkeypatch.setattr(adapter_class, "start", start)
+        try:
+            types = ("lark", "lark_bot") if channel_type == "lark" else (channel_type,)
+            await serve._register_bots(registry, rows, tmp_path, lambda _: True, types)
+            owner = second if first_fails else first
+            assert [a.channel_id for a in attempts] == ([first, second] if first_fails else [first])
+            assert [row["channel_id"] for row in registry.list_channels()] == [owner]
+            assert registry.get(owner) is attempts[-1]
+            assert registry.get(third) is None
+            if first_fails:
+                assert registry.get(first) is None
+                assert not attempts[0]._running
+                assert attempts[0]._outbound_task.cancelled()
+            await incoming.put(None)
+            await asyncio.wait_for(incoming.join(), 1)
+            assert consumed == [owner]
+        finally:
+            await registry.stop_all()
+        assert all(not a._running and a._outbound_task.cancelled() for a in attempts)
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+@requires_db
 @pytest.mark.parametrize("channel_type", ["telegram", "lark"])
+@pytest.mark.parametrize("first_fails", [False, True])
 @pytest.mark.parametrize(("manager_id", "enabled"), [("manager", True), ("manager-review", False),
                                                      ("manager-review", True)])
 def test_startup_bot_backlog_reaches_only_an_enabled_manager(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, channel_type: str, manager_id: str, enabled: bool,
+    first_fails: bool,
 ) -> None:
     from unittest.mock import AsyncMock, MagicMock
 
@@ -397,6 +481,8 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
             await pool.execute("INSERT INTO managers (id, name, system_prompt, enabled) "
                                "VALUES ('manager-review', 'Review', 'x', $1)", enabled)
         config = {"allowed_user_ids": ["7"]} if channel_type == "telegram" else {"allowed_open_ids": [OPEN_ID]}
+        if first_fails:
+            await _builtin(pool, f"channel-{channel_type}", config, TOKEN_1 if channel_type == "telegram" else None)
         await _bot(pool, channel_type, config, TOKEN_1 if channel_type == "telegram" else None,
                    manager_id=manager_id)
         adapters: list[Any] = []
@@ -431,6 +517,8 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
                 await adapter._handle_lark_event(_lark_event(OPEN_ID, text, message_id=f"om_{len(incoming)}"))
 
         async def start(adapter: Any, bus: Any) -> None:
+            if first_fails and adapter.channel_id == f"channel-{channel_type}":
+                raise RuntimeError("synthetic startup failure")
             if channel_type == "telegram":
                 adapter._acknowledge = lambda update: None
                 await telegram_start(adapter, bus)
@@ -507,6 +595,8 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
                 await asyncio.wait_for(serve._run_agent_system(ops=ops, runtime_root=tmp_path, work_dir=tmp_path,
                                                                skip_backup=True), 10)
             assert adapters and incoming
+            if first_fails:
+                assert all(registry.get(f"channel-{channel_type}") is None for registry in registries)
             assert len(incoming) == 5
             if channel_type == "telegram":
                 assert pending == []
