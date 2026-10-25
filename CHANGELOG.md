@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.116] - 2026-10-25
+
+### Fixed
+
+- **Stopping a process tree now waits for SIGKILLed descendants to exit, and a cancelled stop no longer leaves them behind.** After SIGKILL, ending a tree waits up to `REAP_SEC` (2 s) for the processes it signalled to disappear, without expanding the tree or signalling again, and logs a warning for any still running. A cancelled tree end now waits for its child cleanups before the cancellation propagates, and a cancelled refresh of the tree publishes new pids together with their start identities, so they are not left excluded as unknown. A resident Claude stop that is cancelled now hurries its cleanup (skips the stdin-close grace) and waits for it before re-raising the cancellation. This stabilises the per-turn stop test of the process tree. No route, stored data format, Manager tool declaration or prompt changed. ([#620](https://github.com/foolzzz/looper/pull/620))
+
 ## [2.13.115] - 2026-10-25
 
 ### Fixed
