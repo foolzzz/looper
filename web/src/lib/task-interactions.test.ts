@@ -23,7 +23,9 @@ it.each(["anchor", "prefix", "suffix", "unchanged"])("preserves server order and
   // Identical timestamps and non-lexical keys: the server owns the collation order.
   let rows = [row("z"), row("A"), row("a"), row("Z")];
   mockList(() => rows);
-  const through = (await fetchGates({ limit: 2 })).next_cursor!;
+  const initial = (await fetchGates({ limit: 2 })).next_cursor!;
+  // A boundary refresh reconstructs the full snapshot, including the unread suffix.
+  const through = (await fetchGates({ limit: 2, through: initial })).next_cursor!;
   if (removed === "anchor") rows.splice(1, 1);
   if (removed === "prefix") rows.splice(0, 2);
   if (removed === "suffix") rows.splice(2, 2);
@@ -35,6 +37,20 @@ it.each(["anchor", "prefix", "suffix", "unchanged"])("preserves server order and
   await expect(fetchGates({ cursor: through })).rejects.toThrow("The gate list changed");
 });
 
+it("bounds the initial read and restarts refresh when its entire known prefix disappears", async () => {
+  let rows = [row("z"), row("A"), row("a"), row("Z")];
+  const fetcher = mockList(() => rows);
+  const first = await fetchGates({ limit: 2 });
+  expect(first).toMatchObject({ gates: rows.slice(0, 2), total: 4, limit: 2, offset: 0, has_more: true });
+  expect(fetcher.mock.calls.map(([, init]) => JSON.parse(String(init?.body)))).toEqual([{ limit: 2, offset: 0 }]);
+  // The bounded read has no saved suffix to recover this boundary from.
+  rows = [row("new"), ...rows.slice(2)];
+  const refresh = await fetchGates({ limit: 200, through: first.next_cursor! });
+  expect(refresh.gates.map(r => r.gate.step)).toEqual(["new", "a", "Z"]);
+  expect(refresh.has_more).toBe(false);
+  await expect(fetchGates({ cursor: first.next_cursor! })).rejects.toThrow("The gate list changed");
+});
+
 it("reads multiple offset pages and retains the dashboard offset wrapper", async () => {
   const rows = Array.from({ length: 205 }, (_, n) => row(String(n)));
   const fetcher = mockList(() => rows);
@@ -42,14 +58,22 @@ it("reads multiple offset pages and retains the dashboard offset wrapper", async
   expect(fetcher.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).offset)).toEqual([0, 200]);
 });
 
-it.each(["insert", "duplicate", "empty", "error"])("rejects partial paging after %s", async change => {
+it.each(["insert", "duplicate", "empty", "error"].flatMap(change =>
+  ["offset", "through"].map(mode => ({ change, mode })),
+))("rejects partial $mode paging after $change", async ({ change, mode }) => {
   const rows = Array.from({ length: 201 }, (_, n) => row(String(n)));
   const fetcher = mockList(() => rows), original = fetcher.getMockImplementation()!;
+  const through = (await fetchGates({ limit: 2 })).next_cursor!;
+  fetcher.mockClear();
   fetcher.mockImplementationOnce(original).mockImplementationOnce(async () => Response.json(change === "error"
     ? { status: "error", error: { code: "unavailable", message: "Read failed" } }
-    : { status: "ok", result: { total: change === "insert" ? 202 : 201, gates: change === "empty" ? [] : [rows[0]], has_more: false } },
+    : { status: "ok", result: { total: change === "insert" ? 202 : 201,
+      gates: change === "empty" ? [] : [rows[change === "duplicate" ? 0 : 200]], has_more: false } },
     { status: change === "error" ? 503 : 200 }));
-  await expect(fetchGates({ limit: 2 })).rejects.toThrow(change === "error" ? "Read failed" : "The gate list changed");
+  // Offset 199 crosses the server's 200-row page; saved-boundary reads reconstruct all pages.
+  await expect(fetchGates({ limit: 2, ...(mode === "offset" ? { offset: 199 } : { through }) }))
+    .rejects.toThrow(change === "error" ? "Read failed" : "The gate list changed");
+  expect(fetcher.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).offset)).toEqual([0, 200]);
 });
 
 it("keeps complete room bodies, consults, filters and the cancellation signal", async () => {

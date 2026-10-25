@@ -3925,21 +3925,24 @@ export async function fetchGates(
   if (filters.cursor && offset) throw new Error("cursor and offset cannot be combined");
   if (!Number.isInteger(limit) || limit < 1 || limit > 200 || !Number.isInteger(offset) || offset < 0)
     throw new Error("Invalid gate list limit or offset");
+  const bounded = !filters.cursor && !filters.through;
+  const window = offset + limit;
   const request = async (at: number): Promise<GateList> => {
     const result = await callV1<GateList>("/api/v1/ops/gates/list", {
       ...(filters.state ? { state: filters.state } : {}),
       ...(filters.waitingOn ? { waiting_on: filters.waitingOn } : {}),
-      ...(filters.projectId ? { project_id: filters.projectId } : {}), limit: 200, offset: at,
+      ...(filters.projectId ? { project_id: filters.projectId } : {}),
+      limit: bounded ? Math.min(200, window - at) : 200, offset: at,
     });
     if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
     return result;
   };
-  // The Tool accepts offsets only. Read its complete ordered list and keep opaque boundaries for dashboard refreshes;
-  // using the server's order also preserves PostgreSQL's collation when opened_at timestamps tie.
+  // Ordinary reads need only their window (including the badge's single row). Reconstruct the complete
+  // ordered list only for saved boundaries; the server owns collation when opened_at timestamps tie.
   const list = await request(0);
   const rows = [...list.gates];
   let page = list;
-  while (page.has_more) {
+  while (page.has_more && (!bounded || rows.length < window)) {
     if (page.gates.length === 0 || rows.length >= list.total)
       throw new Error("The gate list changed while loading. Retry the request.");
     page = await request(rows.length);
@@ -3947,7 +3950,8 @@ export async function fetchGates(
     rows.push(...page.gates);
   }
   const keys = rows.map((row) => JSON.stringify([row.task.task_id, row.gate.step]));
-  if (rows.length !== list.total || new Set(keys).size !== keys.length)
+  if (rows.length !== (bounded ? Math.min(window, list.total) : list.total)
+    || (page.has_more && rows.length >= list.total) || new Set(keys).size !== keys.length)
     throw new Error("The gate list changed while loading. Retry the request.");
   const positions = new Map(keys.map((key, index) => [key, index]));
   const boundary = (raw: string, side: "after" | "through"): number => {
@@ -3975,7 +3979,7 @@ export async function fetchGates(
   const stop = filters.through ? boundary(filters.through, "through") : rows.length;
   const gates = rows.slice(start, Math.max(start, Math.min(start + limit, stop)));
   const end = start + gates.length;
-  return { ...list, gates, limit, offset, has_more: end < stop,
+  return { ...list, gates, limit, offset, has_more: end < list.total,
     next_cursor: gates.length ? JSON.stringify({ keys, end }) : null };
 }
 
