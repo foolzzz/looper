@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.133] - 2026-10-25
+
+### Changed
+
+- **Chat binding and routing decisions are logged at their boundaries.** Adapters now log why a chat message was admitted, silenced or answered because its target is off; binding and policy writes, refused operator-only calls and native stop log their outcomes. The published routing snapshot after a write is now derived from the snapshot read under the write lock instead of a second read. No schema, API or prompt changes. ([#665](https://github.com/foolzzz/looper/pull/665))
+
 ## [2.13.132] - 2026-10-25
 
 ### Changed
