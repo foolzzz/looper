@@ -44,6 +44,98 @@ async def _dump(pool: Any) -> dict[str, list[str]]:
             for t in ("channel_configs", "projects", "role_configs")}
 
 
+@pytest.mark.parametrize("apply", [False, True])
+@pytest.mark.parametrize("kind,unavailable", [
+    ("lark", "candidate"), ("lark", "existing"), ("lark", "empty"), ("lark", "schema"),
+    ("lark_bot", "existing"),
+])
+def test_lark_import_refuses_unknown_identity_without_partial_writes(
+    monkeypatch: pytest.MonkeyPatch, apply: bool, kind: str, unavailable: str,
+) -> None:
+    from looper.agents.channels import lark_cli
+
+    broken, duplicate = True, True
+    calls: list[str | None] = []
+    secret = "synthetic-private-identity-secret"
+
+    async def identity(profile: str | None = None, *, fresh: bool = False) -> Any:
+        calls.append(profile)
+        assert fresh
+        if broken and (profile == unavailable or unavailable == "empty" and profile == "candidate"):
+            if unavailable == "empty":
+                return lark_cli.Identity(profile, "", "Bot", "ou_bot")
+            raise lark_cli.LarkCliError(f"{secret} at /private/profile")
+        app = "cli_shared" if duplicate and profile in ("candidate", "existing") else f"cli_{profile}"
+        return lark_cli.Identity(profile or "", app, "Bot", "ou_bot")
+
+    monkeypatch.setattr(lark_cli, "identity", identity)
+
+    async def test(pool: Any) -> None:
+        from looper.agents.config_transfer import run_import
+        from looper.db.channel_configs import create_bot
+
+        await _add_bot(pool)
+        async with pool.acquire() as conn:
+            await create_bot("lark", "manager-review", display_name="Existing", enabled=False,
+                             config={"profile": "existing"}, secret=None, conn=conn)
+        config = {"profile": "candidate"} if kind == "lark" else {"app_id": "cli_shared"}
+        if unavailable == "schema":
+            config["allowed_open_ids"] = ["bad"]
+        document = {"format": "looper-config/v3", "channels": [
+            {"channel_type": kind, "display_name": "Imported", "enabled": True, "config": config}]}
+        before, bot = await _dump(pool), await _bot_state(pool)
+        async with pool.acquire() as conn:
+            plan = await run_import(conn, document, apply=apply)
+        change = next(c for c in plan.view()["changes"] if c["section"] == "channels")
+        assert change["action"] == "skipped", change
+        if unavailable == "schema":
+            assert not calls
+        else:
+            assert "lark-cli" in change["reason"] and "retry" in change["reason"]
+        assert secret not in json.dumps(plan.view()) and "/private/profile" not in json.dumps(plan.view())
+        assert await _dump(pool) == before and await _bot_state(pool) == bot
+        if unavailable != "schema":
+            nonlocal broken, duplicate
+            broken = False
+            async with pool.acquire() as conn:
+                conflict = await run_import(conn, document, apply=apply)
+            assert conflict.view()["counts"]["channels"]["skipped"] == 1
+            assert await _dump(pool) == before and await _bot_state(pool) == bot
+            duplicate = False
+            async with pool.acquire() as conn:
+                recovered = await run_import(conn, document, apply=apply)
+            assert recovered.view()["counts"]["channels"]["changed"] == 1
+            field = "profile" if kind == "lark" else "app_id"
+            saved = await pool.fetchval("SELECT config->>$1 FROM channel_configs WHERE channel_id = $2",
+                                        field, f"channel-{kind}")
+            assert saved == (config[field] if apply else "")
+
+    from looper.agents.serve import seed_channel_configs
+
+    run_db(test, monkeypatch, setup=seed_channel_configs, timeout=30)
+
+
+def test_preview_without_channel_schema_still_requires_lark_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from unittest.mock import AsyncMock
+    from looper.agents.channels import lark_cli
+
+    monkeypatch.setattr(lark_cli, "identity", AsyncMock(side_effect=lark_cli.LarkCliError("unavailable")))
+
+    async def test() -> None:
+        async with _installation(schema=False) as (pool, url):
+            path = tmp_path / "in.json"
+            path.write_text(json.dumps({"format": "looper-config/v3", "channels": [
+                {"channel_type": "lark", "config": {"profile": "candidate"}}]}))
+            code, out, err = await _transfer_file(url, "import", str(path), json_output=True)
+            assert code == 0, err
+            assert _plan(out)["counts"]["channels"]["skipped"] == 1
+            assert await pool.fetchval("SELECT to_regclass('channel_configs')") is None
+
+    asyncio.run(asyncio.wait_for(test(), timeout=30))
+
+
 @pytest.mark.parametrize("command", ["export", "import"])
 def test_export_and_preview_read_channels_before_the_manager_migration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: str,
