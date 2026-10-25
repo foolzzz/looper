@@ -453,7 +453,6 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const groups = useMemo(() => groupByTask(targets), [targets]);
   // The selected agent as last listed: its status and whether it takes messages.
   const current = targets.find((t) => t.id === target.id) ?? target;
-  canSendRef.current = current.can_send;
   const taskGroup = groups.find((g) => g.planner.task_id === current.task_id);
   const isTaskOpen = (g: TaskGroup) =>
     taskOpen[g.planner.task_id ?? ""] ?? (g.planner.can_send || g.planner.task_id === current.task_id);
@@ -581,6 +580,9 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const conversationUnread =
     target.kind === "manager" && !!wantConversation && wantConversation !== sessionId &&
     (!targetSettled || !knownConversation && (!openedHere || !!openedHere.error || !!openedHere.owner));
+  const canSend = current.can_send && !viewing && !conversationUnread;
+  // Queue draining must honor the same guards as sending, or hidden composers lose their queued text.
+  canSendRef.current = canSend;
   const conversationError = conversationUnread ? openedHere?.error ?? "" : "";
   const conversationOwner = conversationUnread ? openedHere?.owner ?? null : null;
   const viewingId = viewing?.session_id;
@@ -973,7 +975,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   };
 
   const handleSend = async (text: string, newSessionProfileId?: string) => {
-    if (!text.trim() || !current.can_send || viewing || conversationUnread) return;
+    if (!text.trim() || !canSend) return;
 
     const sid = sessionId;
     const managerId = target.id;
