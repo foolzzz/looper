@@ -174,17 +174,22 @@ def test_config_group_help_discovers_generated_children(cli: Run, looper: FakeLo
 
 
 @pytest.mark.parametrize("flag", ["-h", "--help"])
-@pytest.mark.parametrize("failure", ["http", "connection"])
+@pytest.mark.parametrize("failure", ["http", "connection", "client"])
 def test_config_group_help_falls_back_when_discovery_fails(
         cli: Run, looper: FakeLooper, client: Path, flag: str, failure: str) -> None:
     looper.document_status = 500
     if failure == "connection":
         write_client_file(client, f"http://127.0.0.1:{closed_port()}")
+    elif failure == "client":
+        client.unlink()
     code, out, err = cli("config", flag)
     assert code == 0 and err == ""
-    assert "usage:" in out and "config" in out and "confirm" in out
+    assert "usage: loopercli config" in out
+    children = out.replace("{", " ").replace("}", " ").replace(",", " ").split()
+    assert "export" in children and "import" in children
+    assert "confirm" not in children
     assert "the commands made from Looper's API are not shown" in out
-    assert ("HTTP 500" if failure == "http" else "is looper serve running?") in out
+    assert {"http": "HTTP 500", "connection": "is looper serve running?", "client": "loopercli login"}[failure] in out
     assert TOKEN not in out
     assert [(r[0], r[1]) for r in looper.requests] == (
         [("GET", "/api/v1/openapi.json")] if failure == "http" else [])

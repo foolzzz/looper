@@ -1245,7 +1245,11 @@ def _run(opts: argparse.Namespace, rest: list[str]) -> int:
         except CliError as exc:
             hands = build_parser(None)
             if "-h" in rest or "--help" in rest:
-                hands.print_help()
+                if rest and rest[0] in HAND_COMMANDS:
+                    with contextlib.suppress(SystemExit):  # argparse exits after printing the group's help.
+                        hands.parse_args([rest[0], "--help"])
+                else:
+                    hands.print_help()
                 print(f"\n(the commands made from Looper's API are not shown: {exc})")
                 return EXIT_OK
             hands.print_help(sys.stderr)
