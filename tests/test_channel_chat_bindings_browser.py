@@ -55,6 +55,14 @@ def channels_dashboard(dashboard_url):  # noqa: F811 - pytest injects the shared
                 chats = ([chat("43", None, None, None)] if after else chats)
                 suppressed = [{"chat_id": "42", "name": "Synthetic room", "count": 2, "last_at": STAMP},
                               {"chat_id": "44", "name": "Suppressed room", "count": 4, "last_at": STAMP}]
+            if "chat_ids" in state:
+                remaining = [chat_id for chat_id in state["chat_ids"] if not after or chat_id > after]
+                chats = [chat(chat_id, f"Room {chat_id}") for chat_id in remaining[:20]]
+                has_more = len(remaining) > len(chats)
+                return {"channel_id": channel_id, "bot_manager_id": owner,
+                        "bound_chats_only": state["policies"].get(channel_id, False), "chats": chats,
+                        "unbound_chats": [], "has_more": has_more,
+                        "next_cursor": chats[-1]["chat_id"] if has_more else None}
             return {"channel_id": channel_id, "bot_manager_id": owner,
                     "bound_chats_only": state["policies"].get(channel_id, False), "chats": chats,
                     "unbound_chats": suppressed, "has_more": bool(state["paged"] and not after),
@@ -263,7 +271,24 @@ def test_paginated_catalog_unions_suppressed_chats_without_duplicate_selectors(c
     assert any(body.get("after") == "42" for body in writes(state, "channel_chats/list"))
 
 
-@pytest.mark.parametrize("width", [1280, 768], ids=["desktop", "narrow"])
+def test_write_reloads_new_page_boundaries_after_load_more(channels_dashboard):
+    from playwright.sync_api import expect
+
+    channels_dashboard[2]["chat_ids"] = [str(i) for i in range(10, 49)]
+    page, state = open_channels(channels_dashboard)
+    section = bindings(page)
+    section.get_by_role("button", name="Load more chats", exact=True).click()
+    expect(section.locator("select")).to_have_count(39)
+    state["chat_ids"].insert(0, "09")
+    section.get_by_label("Bind Room 10 to", exact=True).select_option("manager-review")
+    expect(section.locator("select")).to_have_count(40)
+    expect(section.locator("label")).to_have_text([f"Bind Room {chat_id} to" for chat_id in state["chat_ids"]])
+    boundary = section.get_by_label("Bind Room 29 to", exact=True)
+    boundary.select_option("manager")
+    expect(boundary).to_have_value("manager")
+
+
+@pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "narrow"])
 def test_keyboard_controls_and_layout(channels_dashboard, width):
     from playwright.sync_api import expect
 
@@ -281,13 +306,15 @@ def test_keyboard_controls_and_layout(channels_dashboard, width):
     switch.focus()
     switch.press("Space")
     expect(switch).to_have_attribute("aria-checked", "true")
+    expect(target.locator('option[value=""]')).to_have_text("Leave unbound (silent)")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    output = Path(f"output/playwright/channel-chat-bindings-{width}.png")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    section.screenshot(path=str(output))
     switch.press("Space")
     expect(switch).to_have_attribute("aria-checked", "false")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-    if width == 1280:
-        output = Path("output/playwright/channel-chat-bindings.png")
-        output.parent.mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=str(output), full_page=True)
+    expect(target.locator('option[value=""]')).to_have_text("Use this bot's Manager (no binding)")
     assert writes(state, "manager_chat_bindings/put")[-1]["manager_id"] == "manager"
 
 

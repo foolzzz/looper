@@ -123,7 +123,63 @@ it("keeps a refused policy at its last confirmed value and permits retry", async
   intercept = (path) => path.endsWith("/set_policy") ? refused(503, "unavailable") : undefined;
   await render(); const toggle = host.querySelector('[role="switch"]') as HTMLButtonElement;
   await click(toggle); expect(toggle.getAttribute("aria-checked")).toBe("false"); expect(toggle.disabled).toBe(false);
+  expect(writes("channel_chats/list")).toHaveLength(2);
   intercept = () => undefined; await click(toggle); expect(toggle.getAttribute("aria-checked")).toBe("true");
+});
+it("reads the confirmed policy after a failed binding supersedes its pending readback", async () => {
+  catalogs["channel-telegram"] = [chat(), chat("43", "Another chat")];
+  await render();
+  const stale = { ...snapshot("channel-telegram"), bound_chats_only: false };
+  const hold = deferred<Response>(); let held = false;
+  intercept = (path) => {
+    if (path === "channel_chats/list" && !held) { held = true; return hold.promise; }
+    if (path.endsWith("/put")) return refused();
+  };
+  const toggle = host.querySelector('[role="switch"]') as HTMLElement;
+  await click(toggle);
+  expect(policies["channel-telegram"]).toBe(true);
+  const signal = writes("channel_chats/list").at(-1)?.signal;
+  await change(other.id, 1);
+  expect(signal?.aborted).toBe(true);
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  expect(select(1).value).toBe("");
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain("conflict: Synthetic refusal");
+  await act(async () => hold.resolve(ok(stale)));
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain("conflict: Synthetic refusal");
+});
+it("reads current server state after a refused unbind while keeping its error", async () => {
+  bindings = [binding("channel-telegram", "42", other.id)];
+  await render();
+  intercept = (path) => {
+    if (path.endsWith("/delete")) { policies["channel-telegram"] = true; return refused(); }
+  };
+  await change("");
+  expect(select().value).toBe(other.id);
+  expect(host.querySelector('[role="switch"]')?.getAttribute("aria-checked")).toBe("true");
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain("conflict: Synthetic refusal");
+});
+it.each([false, true])("labels the unbound option by its effect with Only bound chats %s", async (policy) => {
+  policies["channel-telegram"] = policy;
+  await render();
+  expect(select().querySelector('option[value=""]')?.textContent).toBe(
+    policy ? "Leave unbound (silent)" : "Use this bot's Manager (no binding)");
+  expect(select().querySelector(`option[value="${owner.id}"]`)?.textContent).toBe(owner.name);
+});
+it("reloads from fresh page boundaries after a write without losing or duplicating chats", async () => {
+  catalogs["channel-telegram"] = Array.from({ length: 39 }, (_, i) => chat(String(i + 10), `Room ${i + 10}`));
+  pageResult = (channel, after) => {
+    const all = snapshot(channel); const remaining = all.chats.filter((c) => !after || c.chat_id > after);
+    const chats = remaining.slice(0, 20); const has_more = remaining.length > chats.length;
+    return { ...all, chats, has_more, next_cursor: has_more ? chats.at(-1)!.chat_id : null };
+  };
+  await render(); await click(button("Load more chats"));
+  expect(host.querySelectorAll("select")).toHaveLength(39);
+  catalogs["channel-telegram"].unshift(chat("09", "New room"));
+  await change(other.id);
+  expect([...host.querySelectorAll("label")].map((label) => label.textContent)).toEqual(
+    catalogs["channel-telegram"].map((c) => `Bind ${c.name} to`));
+  expect(select(1).value).toBe(other.id);
 });
 it("disables only the pending row while other rows and the policy remain usable", async () => {
   catalogs["channel-telegram"] = [chat(), chat("43", "Another chat")];
