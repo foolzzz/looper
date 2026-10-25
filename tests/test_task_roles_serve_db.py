@@ -232,8 +232,8 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     with fresh_database(str(DSN)) as (database_url, _):
         server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home}
         with running_server(**server, log_path=root / "serve.log") as api:
-            sonnet = api.post("/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
-                                                      "model_id": _builtin_model(api, "sonnet")})
+            sonnet = api.post("/api/v1/profiles/create", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
+                                                      "model_id": _builtin_model(api, "sonnet")})["result"]
             # A skill installed for the roles a Planner defines only: it loads for a run of a role naming it.
             notes = api.post("/api/v1/catalog_sources/create_skill", {"name": "role-notes", "description": "Notes for roles.",
                                                      "content": "Reply ROLE-NOTES.\n"})["result"]["item"]

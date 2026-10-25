@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.88] - 2026-10-24
+
+### Changed
+
+- **Agent Profile management and prompt previews in the dashboard go through v1.** Creating, editing and deleting a profile and previewing its prompt call the new `profiles.create`, `profiles.update`, `profiles.delete` (risk `high`, confirmed with the deletion impact) and `profiles.prompt_preview` (risk `read`) operations (`POST /api/v1/profiles/...`), which use the same registry checks as before. The compact `agent_profiles.*` results are typed in the OpenAPI document. Manager prompts and tools are unchanged. ([#540](https://github.com/foolzzz/looper/pull/540))
+
+### Removed
+
+- **The legacy profile routes:** `POST /api/agent-profiles`, `PUT /api/agent-profiles/<id>`, `DELETE /api/agent-profiles/<id>` and `GET /api/agent-profiles/<id>/prompt-preview`. Use the `profiles` operations. ([#540](https://github.com/foolzzz/looper/pull/540))
+
 ## [2.13.87] - 2026-10-24
 
 ### Changed

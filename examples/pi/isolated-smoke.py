@@ -519,10 +519,10 @@ asyncio.run(check())
             "provider": provider["provider_id"], "name": "selected",
             "protocol": "openai-chat" if provider_state else "openai-responses",
         })["result"]["model"]
-        profile = request(base, "/api/agent-profiles", token, "POST", {
+        profile = request(base, "/api/v1/profiles/create", token, "POST", {
             "name": "isolated-smoke", "runtime_id": "rt-pi", "model_id": model["model_id"],
             "agent_teams": False,
-        })["profile"]
+        })["result"]["profile"]
         profile_id = profile["profile_id"]
         for role in ROLES:
             request(base, "/api/v1/agent_settings/update_role", token, "POST",

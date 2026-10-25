@@ -37,6 +37,9 @@ async def _call(method: str, path: str, body: Any = None, *, claude: str = "clau
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())), claude_bin=claude)
+    from tests.runtime_model_helpers import profile_request
+
+    method, path, body = profile_request(method, path, body)
     method, path, body = _global_settings_request(method, path, body)
     if path.startswith(("/api/v1/project_agent_settings/", "/api/v1/allowed_profiles/")):
         from tests.db_support import call_v1
@@ -53,7 +56,7 @@ async def _call(method: str, path: str, body: Any = None, *, claude: str = "clau
     raw = b"" if body is None else json.dumps(body).encode()
     if (method == "POST" and parsed.path in ("/api/v1/registry/view", "/api/v1/runtimes/probe")) or (
             parsed.path == "/api/v1/tasks/agents" or parsed.path.startswith(
-                ("/api/v1/ops/models/", "/api/v1/models/", "/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/runs/"))):
+                ("/api/v1/profiles/", "/api/v1/ops/models/", "/api/v1/models/", "/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/runs/"))):
         server._client_ops = ClientOps(SimpleNamespace())
         await server._handle_v1(method, parsed.path, dict(parse_qsl(parsed.query)), {}, raw, writer, api_v1.OPERATOR)
     else:
@@ -62,9 +65,13 @@ async def _call(method: str, path: str, body: Any = None, *, claude: str = "clau
     answer = json.loads(payload)
     if (method == "POST" and parsed.path in ("/api/v1/registry/view", "/api/v1/runtimes/probe")) or (
             parsed.path == "/api/v1/tasks/agents" or parsed.path.startswith(
-                ("/api/v1/ops/models/", "/api/v1/models/", "/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/runs/"))):
+                ("/api/v1/profiles/", "/api/v1/ops/models/", "/api/v1/models/", "/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/runs/"))):
         answer = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
-    return int(head.split()[1]), answer
+    status = int(head.split()[1])
+    # Preserve older fixture assertions while the request itself uses v1.
+    if path == "/api/v1/profiles/create" and status == 200:
+        status = 201
+    return status, answer
 
 
 async def _ok(method: str, path: str, body: Any = None, **kwargs: Any) -> Any:
@@ -551,7 +558,8 @@ def test_profile_identity_fields_require_registered_ids(
             path = "/api/agent-profiles"
             body = {**valid, field: invalid}
         status, payload = await _call(method, path, body)
-        assert status == 400 and f"no {field.removesuffix('_id')}" in payload["error"]
+        expected = f"no {field.removesuffix('_id')}" if isinstance(invalid, str) else "declared schema"
+        assert status == 400 and expected in payload["error"]
         profiles = (await _registry())["profiles"]
         if method == "PUT":
             saved = _by_name(profiles, "identity")

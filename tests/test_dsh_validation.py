@@ -688,11 +688,11 @@ def _serve_smoke_stand_in(mode):
                 assert (body["name"], body["protocol"]) == ("deepseek-flash", "anthropic-messages")
                 model = {"provider_id" if k == "provider" else k: v for k, v in body.items()}
                 result = {"status": "ok", "result": {"model": {**model, "model_id": "model"}, "warnings": []}}
-            elif path == "/api/agent-profiles":
+            elif path == "/api/v1/profiles/create":
                 assert body["runtime_id"] == "rt-dsh"
                 assert body["model_id"] == "model"
                 profiles.update(body, profile_id="profile", provider_id="provider")
-                result = {"profile": profiles}
+                result = {"status": "ok", "result": {"profile": profiles, "warnings": []}}
                 if mode == "profile":
                     status = 500
             elif path == "/api/v1/agent_settings/update_role":

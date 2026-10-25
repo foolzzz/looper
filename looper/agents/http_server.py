@@ -28,7 +28,7 @@ from ..db.tasks import TaskGroup
 from ..ops_config import OpsConfig
 from . import (
     api_v1, chat_settings, config_imports, config_transfer, gate_service, knowledge,
-    operator_auth, overview, profile_registry, projects, prompt_preview, request_guard, role_api,
+    operator_auth, overview, profile_registry, projects, request_guard, role_api,
     schedules, self_check, vault, wait_service,
 )
 from .broadcast import Broadcaster
@@ -829,8 +829,6 @@ class AgentHTTPServer:
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
     _RE_PROVIDER_LOGIN_PROBLEM = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)/login-problem$")
-    _RE_PROFILE_PROMPT_PREVIEW = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)/prompt-preview$")
-    _RE_PROFILE = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)$")
 
     async def _route_api(
         self,
@@ -866,17 +864,6 @@ class AgentHTTPServer:
             await self._handle_registry(writer, HTTP_200, lambda: profile_registry.delete_provider(m.group(1)))
         elif (m := self._RE_PROVIDER_LOGIN_PROBLEM.match(path)) and method == "DELETE":
             await self._handle_registry(writer, HTTP_200, lambda: profile_registry.clear_login_problem(m.group(1)))
-        elif (m := self._RE_PROFILE_PROMPT_PREVIEW.match(path)) and method == "GET":
-            await self._handle_registry(writer, HTTP_200, lambda: prompt_preview.preview(
-                m.group(1), query.get("role", ""), query.get("project_id") or None))
-        elif path == "/api/agent-profiles" and method == "POST":
-            await self._handle_registry(writer, HTTP_201, lambda: profile_registry.create_profile(
-                projects.json_object(body)))
-        elif (m := self._RE_PROFILE.match(path)) and method == "PUT":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.update_profile(
-                m.group(1), projects.json_object(body)))
-        elif (m := self._RE_PROFILE.match(path)) and method == "DELETE":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.delete_profile(m.group(1)))
         elif path == "/api/scheduler-settings" and method == "GET":
             await self._answer(writer, HTTP_200, schedules.scheduler_settings)
         elif path == "/api/scheduler-settings" and method == "PUT":

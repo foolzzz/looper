@@ -1010,9 +1010,9 @@ def run(
                     "profile_id": chosen["profile_id"], "run_budget_usd": max_budget_usd}})["result"]
             chosen_profile_id = None
             if any(task.planner_may_choose for task in tasks):
-                chosen_profile_id = api.post("/api/agent-profiles", {
+                chosen_profile_id = api.post("/api/v1/profiles/create", {
                     "name": CHOSEN_PROFILE,
-                    **{key: chosen[key] for key in ("runtime_id", "model_id", "effort")}})["profile"]["profile_id"]
+                    **{key: chosen[key] for key in ("runtime_id", "model_id", "effort")}})["result"]["profile"]["profile_id"]
             _, stopped = run_suite(
                 tasks,
                 lambda task, rep, cap_left: run_task(api, task, work_dirs[task.id, rep], timeout=timeout, poll=poll,
@@ -1167,8 +1167,8 @@ def register_agent(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
         if saved not in registry["models"]:
             registry["models"].append(saved)
     saved = _eval_model(api, registry, provider_id, model)
-    return api.post("/api/agent-profiles", {**agent, "runtime_id": runtime["runtime_id"],
-                                            "model_id": saved["model_id"]})["profile"]
+    return api.post("/api/v1/profiles/create", {**agent, "runtime_id": runtime["runtime_id"],
+                                            "model_id": saved["model_id"]})["result"]["profile"]
 
 
 # The API key of a provider an eval registers (``--provider-preset``): read from the environment, never a file.
@@ -1217,8 +1217,8 @@ def register_provider_agent(api: Api, choice: ProviderChoice) -> dict[str, Any]:
                 if protocol == "anthropic-messages" and model["name"] == name:
                     selected = saved
     assert selected is not None
-    answer = api.post("/api/agent-profiles", {"name": f"claude-code/{preset['name']}/{name}",
-                                              "runtime_id": "rt-claude-code", "model_id": selected["model_id"]})
+    answer = api.post("/api/v1/profiles/create", {"name": f"claude-code/{preset['name']}/{name}",
+                                              "runtime_id": "rt-claude-code", "model_id": selected["model_id"]})["result"]
     for warning in answer.get("warnings") or []:
         print(f"warning: {warning}", file=sys.stderr)
     return answer["profile"]
