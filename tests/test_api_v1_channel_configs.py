@@ -67,6 +67,7 @@ def test_credential_schema_is_write_only_and_outside_audit(action):
     ("allowlist", "update", 400, "invalid sender allowlist: use the sender's numeric Telegram user ID, such as "
      "123456789 (a negative number is a group or channel, not a sender)"),
     ("manager", "create", 404, "Manager not found"),
+    ("profile", "create", 400, "invalid channel configuration; check the sender allowlist and bot settings"),
 ])
 def test_public_channel_refusals_cross_transport(tmp_path, monkeypatch, caplog, case, action, status, message):
     from looper.agents.serve import seed_channel_configs
@@ -95,6 +96,8 @@ def test_public_channel_refusals_cross_transport(tmp_path, monkeypatch, caplog, 
                 fields["bot_token"] = "987654321:synthetic-other"
             if case == "allowlist":
                 fields["config"] = {"allowed_user_ids": [secret]}
+            if case == "profile":
+                fields.update(channel_type="lark", config={"profile": secret})
             request = ({**body, **fields, **({"manager_id": "manager-missing"} if case == "manager" else {})}
                        if action == "create" else {"channel_id": channel_id, "fields": fields})
             code, answer = await call(action, request)
@@ -104,3 +107,85 @@ def test_public_channel_refusals_cross_transport(tmp_path, monkeypatch, caplog, 
             assert await pool.fetchval("SELECT count(*) FROM manager_actions") == 0
     run_db(run, monkeypatch, setup=seed_channel_configs, timeout=30)
     assert secret not in caplog.text
+
+
+@pytest.mark.parametrize("action,payload,message", [
+    ("create", {"channel_type": "telegram", "manager_id": "manager"},
+     "a new Telegram bot needs its token: paste it from BotFather"),
+    ("create", {"channel_type": "lark_bot", "manager_id": "manager", "bot_token": "synthetic-secret"},
+     "a new Lark bot needs its app_id"),
+    ("create", {"channel_type": "lark_bot", "manager_id": "manager", "config": {"app_id": "cli_added"}},
+     "a new Lark bot needs its app secret"),
+    ("create", {"channel_type": "lark", "manager_id": "manager", "config": {"profile": ""}},
+     "name the lark-cli profile of this bot: the active profile belongs to the built-in Lark channel"),
+    ("update", {"channel_id": "channel-telegram", "fields": {
+        "manager_id": "synthetic-secret", "display_name": "Changed"}},
+     "a bot's Manager cannot change: add a new bot for the other Manager and remove this one"),
+])
+def test_fixed_channel_validation_reasons_are_public(tmp_path, monkeypatch, action, payload, message):
+    from looper.agents.serve import seed_channel_configs
+    from tests.db_support import run_db
+
+    async def run(pool):
+        before = await pool.fetch("SELECT * FROM channel_configs ORDER BY channel_id")
+        async with _serving(tmp_path, listen=True) as server:
+            status, headers, answer = await _send(server, "POST /api/v1/channel_configs/" + action,
+                                                _bearer(TOKEN), json.dumps(payload))
+            assert status == 400 and answer["error"] == {"code": "invalid", "message": message}, answer
+            assert headers["cache-control"] == "no-store"
+            assert "synthetic-secret" not in json.dumps(answer)
+        assert await pool.fetch("SELECT * FROM channel_configs ORDER BY channel_id") == before
+        assert await pool.fetchval("SELECT count(*) FROM channel_secrets") == 0
+    run_db(run, monkeypatch, setup=seed_channel_configs, timeout=30)
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
+@pytest.mark.parametrize("failure,expected,message", [
+    ("400 Bad Request", 400, "invalid channel configuration; check the sender allowlist and bot settings"),
+    ("409 Conflict", 409, "this bot is already added; update the existing bot instead"),
+    ("500 Internal Server Error", 400, "invalid credential request"),
+    (None, 503, "invalid credential request"),
+])
+def test_channel_save_never_publishes_service_exception_text(
+        tmp_path, monkeypatch, action, failure, expected, message):
+    from looper.agents.channels import bot_api
+    from looper.agents.projects import RequestError
+
+    secret = "123456789:synthetic-submitted-token"
+    sender = "synthetic-submitted-sender"
+
+    async def refuse(*args, **kwargs):
+        text = f"unexpected private failure: {secret} {sender}"
+        raise RequestError(failure, text) if failure else RuntimeError(text)
+
+    monkeypatch.setattr(bot_api, "add_bot" if action == "create" else "update_bot", refuse)
+
+    async def run():
+        async with _serving(tmp_path, listen=True) as server:
+            request = ({"channel_type": "telegram", "manager_id": sender, "bot_token": secret}
+                       if action == "create" else {"channel_id": sender, "fields": {"bot_token": secret}})
+            status, _, answer = await _send(server, "POST /api/v1/channel_configs/" + action,
+                                           _bearer(TOKEN), json.dumps(request))
+            assert status == expected and answer["error"]["message"] == message, answer
+            assert all(value not in json.dumps(answer) for value in (secret, sender, "unexpected private failure"))
+    asyncio.run(run())
+
+
+def test_missing_channel_update_has_the_same_public_404_with_config(tmp_path, monkeypatch):
+    from looper.agents.serve import seed_channel_configs
+    from tests.db_support import run_db
+
+    async def run(pool):
+        before = await pool.fetch("SELECT * FROM channel_configs ORDER BY channel_id")
+        answers = []
+        async with _serving(tmp_path, listen=True) as server:
+            for fields in ({"enabled": False}, {"enabled": False, "config": {}}):
+                status, _, answer = await _send(server, "POST /api/v1/channel_configs/update", _bearer(TOKEN),
+                    json.dumps({"channel_id": "synthetic-missing-channel", "fields": fields}))
+                assert status == 404 and answer["error"] == {
+                    "code": "not_found", "message": "channel not found"}, answer
+                answers.append(answer)
+        assert answers[0] == answers[1]
+        assert await pool.fetch("SELECT * FROM channel_configs ORDER BY channel_id") == before
+        assert await pool.fetchval("SELECT count(*) FROM channel_secrets") == 0
+    run_db(run, monkeypatch, setup=seed_channel_configs, timeout=30)

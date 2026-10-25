@@ -94,6 +94,8 @@ def _check_allowlist(kind, config):
 async def _save(request, *, creating=False):
     try:
         return await request
+    except bot_api.BotValidationRefusal as exc:
+        raise PublicOpError(ErrorCode.INVALID, exc.reason.value) from None
     except bot_api.BotIdentityUnavailable as exc:
         raise PublicOpError(ErrorCode.CONFLICT, str(exc)) from None
     except RequestError as exc:
@@ -123,7 +125,7 @@ async def run(server, operation, arguments, principal, headers):
         fields = dict(arguments["fields"])
         if "config" in fields:
             from ..api_v1 import validate_arguments
-            row = await _get(arguments["channel_id"])
+            row = await _save(_get(arguments["channel_id"]))
             validate_arguments(_object({"config": CONFIGS[row["channel_type"]]}, closed=True),
                                {"config": fields["config"]})
             _check_allowlist(row["channel_type"], fields["config"])
