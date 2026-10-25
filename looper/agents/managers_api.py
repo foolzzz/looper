@@ -321,7 +321,7 @@ def _has_tasks(row: Mapping[str, Any]) -> RequestError:
 
 async def delete_manager(manager_id: str) -> dict[str, Any]:
     """Delete (soft) a scenario Manager that has no task: its templates go, its id stays taken. 409 for the
-    default Manager or one with tasks, 404 for an unknown or deleted one."""
+    default Manager or one with tasks, bots or chat bindings, 404 for an unknown or deleted one."""
     if manager_id == DEFAULT_MANAGER_ID:
         raise _refuse("the default Manager cannot be deleted", HTTP_409)
     row = await db_managers.get_manager(manager_id)
@@ -334,6 +334,8 @@ async def delete_manager(manager_id: str) -> dict[str, Any]:
         raise _has_tasks(row)
     if result == "has_bots":
         raise _refuse(f"Manager {row['name']} has bots: remove them in Settings → Channels first", HTTP_409)
+    if result == "has_bindings":
+        raise _refuse(f"Manager {row['name']} has chat bindings: unbind them first", HTTP_409)
     if result == "missing":
         raise _refuse(f"no Manager {manager_id!r}", HTTP_404)
     await _on_change(manager_id)

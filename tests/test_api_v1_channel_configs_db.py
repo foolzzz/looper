@@ -69,6 +69,28 @@ def test_crud_readback_preserves_manager_builtin_rows_and_secret_presence(tmp_pa
 
 
 @pytest.mark.parametrize("action", ["create", "update"])
+def test_ordinary_channel_saves_cannot_set_bound_only_policy(tmp_path, monkeypatch, action):
+    from looper.db import chat_bindings
+
+    async def run(pool):
+        async with _api(tmp_path, pool) as call:
+            status, answer = await call("create", CREATE)
+            assert status == 200 and answer["result"]["bound_chats_only"] is False
+            channel_id = answer["result"]["channel_id"]
+            async with pool.acquire() as conn, conn.transaction():
+                await chat_bindings.set_bound_chats_only(channel_id, True, conn=conn)
+            body = ({**CREATE, "bound_chats_only": False} if action == "create" else
+                    {"channel_id": channel_id, "fields": {"bound_chats_only": False}})
+            status, answer = await call(action, body)
+            assert status == 400 and answer["error"]["code"] == "invalid"
+            status, answer = await call("update", {"channel_id": channel_id,
+                "fields": {"display_name": "Renamed", "config": {"allowed_user_ids": ["12345"]}}})
+            assert status == 200 and answer["result"]["bound_chats_only"] is True
+            assert (await channel_configs.get_config(channel_id))["bound_chats_only"] is True
+    _run(run, monkeypatch)
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
 def test_read_only_database_channel_save_returns_private_service_failure(tmp_path, monkeypatch, action, caplog):
     import asyncpg
 
