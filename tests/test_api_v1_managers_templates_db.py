@@ -125,7 +125,64 @@ def test_pending_template_does_not_write_and_confirm_rechecks_references(tmp_pat
     run_db(run, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("input_fields", [{}, {"inputs": []}], ids=["omitted", "empty"])
+@pytest.mark.parametrize("replace", [False, True], ids=["create", "replace"])
+def test_no_input_template_save_and_readback(tmp_path, monkeypatch, input_fields, replace):
+    async def run(pool):
+        await managers_api.create_manager(_body("review"))
+        async with _api(tmp_path, pool) as call:
+            if replace:
+                status, answer = await call("manager_templates.put", {
+                    "manager_id": "manager-review", "key": "pr", **_template()})
+                assert status == 200, answer
+                old = await pool.fetchval(
+                    "SELECT inputs FROM manager_task_templates WHERE manager_id = 'manager-review' AND key = 'pr'")
+                assert json.loads(old)[0]["key"] == "pr_url"
+            body = {"manager_id": "manager-review", "key": "pr", "name": "Repository review",
+                    "requirement": "Review the repository.", **input_fields}
+            status, answer = await call("manager_templates.put", body)
+            assert status == 200, answer
+            saved_manager = next(m for m in answer["result"]["managers"] if m["id"] == "manager-review")
+            (saved_template,) = saved_manager["templates"]
+            assert saved_template["inputs"] == []
+            status, listed = await call("managers.list")
+            assert status == 200, listed
+            manager = next(m for m in listed["result"]["managers"] if m["id"] == "manager-review")
+            (template,) = manager["templates"]
+            assert template["key"] == "pr" and template["name"] == body["name"]
+            assert template["inputs"] == [] and template["requirement"] == body["requirement"]
+            stored = await pool.fetchrow(
+                "SELECT inputs, requirement FROM manager_task_templates "
+                "WHERE manager_id = 'manager-review' AND key = 'pr'")
+            assert json.loads(stored["inputs"]) == [] and stored["requirement"] == body["requirement"]
+    run_db(run, monkeypatch, timeout=30)
+
+
+def test_omitted_inputs_still_refuses_unresolved_placeholder(tmp_path, monkeypatch):
+    async def run(pool):
+        await managers_api.create_manager(_body("review"))
+        async with _api(tmp_path, pool) as call:
+            body = {"manager_id": "manager-review", "key": "pr", **_template()}
+            status, answer = await call("manager_templates.put", body)
+            assert status == 200, answer
+            before = await managers_api.managers_view()
+            del body["inputs"]
+            status, answer = await call("manager_templates.put", body)
+            assert status == 400 and "names no input" in answer["error"]["message"], answer
+            assert await managers_api.managers_view() == before
+    run_db(run, monkeypatch, timeout=30)
+
+
 @pytest.mark.parametrize("fields,message", [
+    ({"inputs": None}, "declared schema"),
+    ({"inputs": ""}, "declared schema"),
+    ({"inputs": {}}, "declared schema"),
+    ({"inputs": False}, "declared schema"),
+    ({"inputs": 1}, "declared schema"),
+    ({"inputs": ["pr_url"]}, "declared schema"),
+    ({"inputs": [{}]}, "declared schema"),
+    ({"inputs": [{"key": "pr_url"}]}, "declared schema"),
+    ({"inputs": [{"key": "pr_url", "label": ""}]}, "label"),
     ({"color": 1}, "declared schema"), ({"key": "Bad"}, "key"),
     ({"requirement": "Review {{nope}}."}, "names no input"),
     ({"inputs": [{"key": "pr_url", "label": "Link", "pattern": "("}]}, "does not compile"),
@@ -151,6 +208,8 @@ def test_template_validation_preserves_the_existing_definition(tmp_path, monkeyp
             assert status == 200, saved
             before = await managers_api.managers_view()
             invalid = {**body, **fields}
+            if "inputs" in fields:
+                invalid["requirement"] = "Review the repository."
             if invalid.get("project_id") == "selected-project":
                 invalid["project_id"] = project["id"]
             status, answer = await call("manager_templates.put", invalid)
