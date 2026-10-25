@@ -10,7 +10,7 @@ from looper import loopercli
 from looper.agents import api_v1
 from looper.db import llm_records
 from tests.test_api_v1_auth import CLIENT_TOKEN, _bearer, _send, _serving, clients
-from tests.test_loopercli import Server, _send as cli_send, write_client_file
+from tests.test_loopercli import Server, _send as cli_send
 from tests.test_operator_auth import TOKEN
 
 READS = [
@@ -112,9 +112,12 @@ def test_generated_cli_sends_the_declared_ordinary_read(tmp_path, capsys, action
                  else {"status": "ok", "result": {"received": True}})
     server = Server(respond)
     try:
-        client = tmp_path / "client.json"
-        write_client_file(client, server.url)
-        assert loopercli.main(["--client-file", str(client), "--json", "runs", action.replace("_", "-"), *args]) == 0
+        token = tmp_path / "operator-token"
+        token.write_text(TOKEN + "\n")
+        token.chmod(0o600)
+        assert loopercli.main(["--client-file", str(tmp_path / "missing-client.json"), "--json", "runs",
+                              action.replace("_", "-"), *args, "--url", server.url,
+                              "--operator-token-file", str(token)]) == 0
         method, path, _, sent = server.requests[-1]
         assert (method, path, sent) == ("POST", f"/api/v1/runs/{action}", body)
         op = api_v1.find(method, path)

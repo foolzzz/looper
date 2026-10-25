@@ -63,7 +63,7 @@ def test_generated_cli_preserves_request_shape_without_server_imports(action, op
     args = loopercli.build_parser(document).parse_args(["provider-accounts", action.replace("_", "-"), *options])
     calls = []
     api = SimpleNamespace(call=lambda *parts: (calls.append(parts) or (200, {"status": "ok", "result": {}})))
-    assert args._run(args, SimpleNamespace(api=lambda: api, as_json=True, session="provider-test")) == 0
+    assert args._run(args, SimpleNamespace(api=lambda: api, as_json=True, session="provider-test", operator=True)) == 0
     assert calls == [("POST", f"/api/v1/provider_accounts/{action}", body)]
     path = tmp_path / "openapi.json"
     path.write_text(json.dumps(document))

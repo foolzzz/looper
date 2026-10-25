@@ -2,7 +2,8 @@
 
 from ...db import channel_configs as db_configs
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _BOOL
-from ..channels import bot_api
+from ..channels import bot_api, chat_routing
+from ...db.connection import get_pool
 from ..channels.allowlist import AllowlistError, SENDER_ID_FORMATS, channel_view, normalized_config
 from ..ops import ErrorCode, OpError, PublicOpError
 from ..projects import RequestError, HTTP_400, HTTP_404, HTTP_409
@@ -77,6 +78,11 @@ async def impact(server, operation, arguments, principal, headers):
     row = await _get(arguments["channel_id"])
     if row["builtin"]:
         raise OpError(ErrorCode.INVALID, "a built-in channel cannot be removed; turn it off instead")
+    if principal.kind == "client" and await get_pool().fetchval(
+            "SELECT bound_chats_only OR EXISTS (SELECT 1 FROM manager_chat_bindings b "
+            "WHERE b.channel_id = c.channel_id) FROM channel_configs c WHERE c.channel_id = $1",
+            arguments["channel_id"]):
+        raise OpError(ErrorCode.FORBIDDEN, "operator-managed chat routing prevents client deletion")
     return (f"Remove bot {row['channel_id']} ({row['display_name']}) from Manager {row['manager_id']}? "
             "Its stored credential and refused senders will be deleted; chat history stays. "
             "Restart Looper to stop its running adapter.")
@@ -135,4 +141,12 @@ async def run(server, operation, arguments, principal, headers):
         return await _save(bot_api.update_bot(arguments["channel_id"], fields))
     # A pending confirmation reserves nothing: re-read the target immediately before deletion.
     await impact(server, operation, arguments, principal, headers)
-    return await bot_api.remove_bot(arguments["channel_id"])
+    result = await chat_routing.remove_bot_with_routing(arguments["channel_id"],
+        principal_kind=principal.kind, registry=server._channels)
+    if result == "has_bindings":
+        raise OpError(ErrorCode.FORBIDDEN, "operator-managed chat routing prevents client deletion")
+    if result == "missing":
+        raise OpError(ErrorCode.NOT_FOUND, "channel not found")
+    if result == "builtin":
+        raise OpError(ErrorCode.INVALID, "a built-in channel cannot be removed; turn it off instead")
+    return {"deleted": arguments["channel_id"], "restart": True}

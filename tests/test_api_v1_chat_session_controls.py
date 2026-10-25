@@ -211,7 +211,7 @@ def test_generated_cli_posts_ordinary_control_operations(operation, options, bod
         family.replace("_", "-"), action.replace("_", "-"), *options])
     calls = []
     api = SimpleNamespace(call=lambda *parts: (calls.append(parts) or (200, {"status": "ok", "result": {}})))
-    assert args._run(args, SimpleNamespace(api=lambda: api, as_json=True, session="controls")) == 0
+    assert args._run(args, SimpleNamespace(api=lambda: api, as_json=True, session="controls", operator=True)) == 0
     assert calls == [("POST", "/api/v1/" + operation.replace(".", "/"), body)]
     assert not api_v1.find("POST", calls[0][1]).hand
 

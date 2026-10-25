@@ -109,40 +109,50 @@ _offline_locks: dict[str, asyncio.Lock] = {}
 
 
 async def _mutate(channel_id: str, change: Callable[..., Awaitable[Any]], *,
-                  registry: ChannelRegistry | None, pool: Any) -> RoutingSnapshot:
+                  registry: ChannelRegistry | None, pool: Any) -> tuple[RoutingSnapshot, Any]:
     lock = registry.mutation_lock(channel_id) if registry is not None else _offline_locks.setdefault(channel_id, asyncio.Lock())
     async with lock, (pool or get_pool()).acquire() as conn:
         transaction = conn.transaction()
         await transaction.start()
         try:
-            await change(conn)
+            result = await change(conn)
             snapshot = RoutingSnapshot.from_storage(await storage.routing_snapshot(channel_id, conn=conn))
         except BaseException:
             await transaction.rollback()
             raise
         await _commit_publish(transaction, registry, snapshot)
-        return snapshot
+        return snapshot, result
 
 
 async def bind_chat(channel_id: str, chat_id: str, manager_id: str, *,
-                    registry: ChannelRegistry | None = None, pool: Any = None) -> RoutingSnapshot:
-    return await _mutate(channel_id, lambda conn: storage.put_binding(channel_id, chat_id, manager_id, conn=conn),
-                         registry=registry, pool=pool)
+                    registry: ChannelRegistry | None = None, pool: Any = None,
+                    readback: Callable[[Any], Awaitable[None]] | None = None) -> RoutingSnapshot:
+    """Capture any response under the same lock as the write, before commit/publication."""
+    async def change(conn: Any) -> None:
+        await storage.put_binding(channel_id, chat_id, manager_id, conn=conn)
+        if readback is not None:
+            await readback(conn)
+
+    snapshot, _ = await _mutate(channel_id, change, registry=registry, pool=pool)
+    return snapshot
 
 
 async def unbind_chat(channel_id: str, chat_id: str, *,
-                      registry: ChannelRegistry | None = None, pool: Any = None) -> RoutingSnapshot:
-    return await _mutate(channel_id, lambda conn: storage.delete_binding(channel_id, chat_id, conn=conn),
-                         registry=registry, pool=pool)
+                      registry: ChannelRegistry | None = None, pool: Any = None) -> bool:
+    _, deleted = await _mutate(channel_id, lambda conn: storage.delete_binding(channel_id, chat_id, conn=conn),
+                               registry=registry, pool=pool)
+    return deleted
 
 
 async def set_chat_policy(channel_id: str, bound_only: bool, *,
                            registry: ChannelRegistry | None = None, pool: Any = None) -> RoutingSnapshot:
-    return await _mutate(channel_id, lambda conn: storage.set_bound_chats_only(channel_id, bound_only, conn=conn),
-                         registry=registry, pool=pool)
+    snapshot, _ = await _mutate(channel_id, lambda conn: storage.set_bound_chats_only(channel_id, bound_only, conn=conn),
+                                registry=registry, pool=pool)
+    return snapshot
 
 
-async def remove_bot_with_routing(channel_id: str, *, refuse_if_routed: bool = False,
+async def remove_bot_with_routing(channel_id: str, *, principal_kind: Literal["client", "operator"] = "operator",
+                                   refuse_if_routed: bool = False,
                                    registry: ChannelRegistry | None = None, pool: Any = None,
                                    ) -> Literal["deleted", "missing", "builtin", "has_bindings"]:
     """Delete under the mutation lock, preserving the running adapter's owner/policy.
@@ -150,6 +160,9 @@ async def remove_bot_with_routing(channel_id: str, *, refuse_if_routed: bool = F
     The optional client guard and cascade delete share the locked bot transaction.
     Correlations and old task delivery remain usable until the adapter restarts.
     """
+    if principal_kind not in ("client", "operator"):
+        raise ValueError("unknown principal kind")
+    refuse_if_routed = refuse_if_routed or principal_kind == "client"
     if channel_id in BUILTIN_CHANNEL_IDS:
         return "builtin"
     lock = registry.mutation_lock(channel_id) if registry is not None else _offline_locks.setdefault(channel_id, asyncio.Lock())
