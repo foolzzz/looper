@@ -19,7 +19,7 @@ async def save_message(
     channel: str = "web",
     delivery_failure: str | None = None,
     delivery_error: str | None = None,
-    pool: asyncpg.Pool | None = None,
+    pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> None:
     """Store a message; a Telegram or Lark answer its channel could not send with why (``delivery_failure``, a
     ``channels.base.DeliveryFailure``) and the channel's error."""
@@ -36,6 +36,34 @@ async def save_message(
         session_id, message_id, role, content, channel,
         datetime.now(timezone.utc), delivery_failure, delivery_error,
     )
+
+
+async def save_channel_message(
+    *,
+    session_id: str,
+    message_id: str,
+    role: str,
+    content: str,
+    manager_id: str,
+    channel: str,
+    delivery_failure: str | None = None,
+    delivery_error: str | None = None,
+    pool: asyncpg.Pool | None = None,
+) -> None:
+    """Claim/check a channel thread and write together; a different owner rejects the entire write.
+
+    Histories predating chat_threads belong to the default Manager. A new thread is claimed by its intended
+    Manager, independently of the spelling of its session id. The unique thread row serializes competing claims.
+    """
+    pool = pool or get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        owner = "manager" if await has_messages(session_id, pool=conn) else manager_id
+        owner = await claim_thread(session_id, owner, pool=conn)
+        if owner != manager_id:
+            raise ValueError(f"chat thread belongs to {owner}")
+        await save_message(session_id=session_id, message_id=message_id, role=role, content=content,
+                           channel=channel, delivery_failure=delivery_failure, delivery_error=delivery_error,
+                           pool=conn)
 
 
 async def list_messages(

@@ -74,7 +74,7 @@ class TestChannelPersistence:
                                    runtime_root=root)
                 mgr._bus = MessageBus(runtime_root=root)
                 with pytest.MonkeyPatch.context() as mp:
-                    mp.setattr(manager_mod.db_chat, "save_message", AsyncMock(side_effect=_save))
+                    mp.setattr(manager_mod.db_chat, "save_channel_message", AsyncMock(side_effect=_save))
                     await mgr._handle(envelope)
                 await mgr.stop()
                 replies = [e for e in await mgr._bus.drain_queue(source.agent_id)
@@ -136,7 +136,7 @@ class TestStoredChats:
                     source=source, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
                     payload={"text": "hello", "channel_context": context}, correlation_id="c1")
                 with pytest.MonkeyPatch.context() as mp:
-                    mp.setattr(manager_mod.db_chat, "save_message", AsyncMock(side_effect=_save))
+                    mp.setattr(manager_mod.db_chat, "save_channel_message", AsyncMock(side_effect=_save))
                     await mgr._handle(envelope)
                     await mgr._send_own_reply(envelope, "done on my own")  # a reply Claude sends on its own
                 await mgr.stop()

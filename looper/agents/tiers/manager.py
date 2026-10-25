@@ -88,9 +88,11 @@ from ..message import (
     MessageEnvelope,
     MessageType,
     channel_address,
+    channel_thread_id,
     is_lark,
     manager_address,
     parse_channel_id,
+    parse_channel_thread_id,
 )
 
 if TYPE_CHECKING:
@@ -500,19 +502,29 @@ def _stored_chat(origin: dict[str, Any]) -> bool:
 
 def _session_key(envelope: MessageEnvelope) -> str | None:
     """The chat_messages session id a turn is stored under: the web chat's ``session_id``, or
-    ``<channel>:<chat_id>`` for Telegram/Lark. None when neither identifies a chat, and for a chat whose turns are
-    not stored (``_stored_chat``)."""
+    the bot's canonical identity for Telegram/Lark, pinned by the original routing envelope across owners.
+    An invalid pin raises ValueError. None when no chat is identified or its turns are not stored (``_stored_chat``).
+    """
     origin = _message_origin(envelope)
     if not _stored_chat(origin):
         return None
     context = envelope.payload.get("channel_context")
     context = context if isinstance(context, dict) else {}
-    if context.get("session_id"):
+    if origin["channel"] == "web" and context.get("session_id"):
         return str(context["session_id"])
     if origin["channel"] and origin["chat"]:
-        parsed = parse_channel_id(origin["channel_id"])
-        prefix = origin["channel_id"] if parsed is not None and not parsed.builtin else origin["channel"]
-        return f"{prefix}:{origin['chat']}"
+        pinned = envelope.metadata.get("channel_thread_id")
+        if "channel_thread_id" in envelope.metadata:
+            parsed = parse_channel_thread_id(pinned) if isinstance(pinned, str) else None
+            if (parsed is None or parsed.channel_id != origin["channel_id"]
+                    or parsed.channel_type != origin["channel"] or parsed.chat_id != origin["chat"]
+                    or envelope.source.agent_type != "channel" or envelope.target.agent_type != "manager"
+                    or parsed.manager_id != envelope.target.agent_id):
+                raise ValueError("channel thread identity does not match its envelope")
+            return pinned
+        if parse_channel_id(origin["channel_id"]) is not None:
+            # Without pinned routing metadata, journaled messages keep their original, unsuffixed identity.
+            return channel_thread_id(origin["channel_id"], origin["chat"], "manager", "manager")
     return None
 
 
@@ -2304,22 +2316,18 @@ class ManagerAgent:
         blocks answering the user.
         """
         channel = _message_origin(env)["channel"]
-        key = _session_key(env)
-        if channel == "web" or not key or not content:
+        if channel == "web" or not content:
             return
         try:
-            await db_chat.save_message(
+            key = _session_key(env)
+            if not key:
+                return
+            await db_chat.save_channel_message(
                 session_id=key, message_id=message_id,
-                role=role, content=content, channel=channel,
+                role=role, content=content, channel=channel, manager_id=self.agent_id,
             )
         except Exception:
             logger.warning("%s: could not persist a %s chat turn", self._log, channel, exc_info=True)
-            return
-        if self.agent_id != "manager":
-            try:
-                await db_chat.claim_thread(key, self.agent_id)
-            except Exception:
-                logger.warning("%s: could not claim the chat thread %s", self._log, key, exc_info=True)
 
     async def _send_reply(self, original: MessageEnvelope, text: str, *, error: str | None = None,
                           persist: bool = True, outcome: ReplyOutcome | None = None,

@@ -37,7 +37,7 @@ def _answer(target: Any, text: str = "ok", *, corr: str = "c1", record: dict[str
 
 
 class _Saved:
-    """``db.chat.save_message``: keeps what it is asked to store; fails the first ``fail`` calls."""
+    """``db.chat.save_channel_message``: keeps what it is asked to store; fails the first ``fail`` calls."""
 
     def __init__(self, fail: int = 0) -> None:
         self.rows: list[dict[str, Any]] = []
@@ -61,11 +61,11 @@ class _Saved:
 def test_an_answer_is_stored_as_its_channel_delivered_it(monkeypatch: pytest.MonkeyPatch, receipt: DeliveryReceipt,
                                                          stored: tuple[Any, Any]) -> None:
     saved = _Saved()
-    monkeypatch.setattr(chat_history.db_chat, "save_message", saved)
+    monkeypatch.setattr(chat_history.db_chat, "save_channel_message", saved)
     asyncio.run(record_reply("telegram", _answer(TELEGRAM), receipt))
     assert saved.rows == [{"session_id": "telegram:12345", "message_id": "m1:reply", "role": "assistant",
                            "content": "ok", "channel": "telegram", "delivery_failure": stored[0],
-                           "delivery_error": stored[1]}]
+                           "delivery_error": stored[1], "manager_id": "manager"}]
 
 
 @pytest.mark.parametrize("envelope", [
@@ -76,14 +76,14 @@ def test_an_answer_is_stored_as_its_channel_delivered_it(monkeypatch: pytest.Mon
 def test_only_an_answer_the_manager_names_a_record_for_is_stored(monkeypatch: pytest.MonkeyPatch,
                                                                  envelope: MessageEnvelope) -> None:
     saved = _Saved()
-    monkeypatch.setattr(chat_history.db_chat, "save_message", saved)
+    monkeypatch.setattr(chat_history.db_chat, "save_channel_message", saved)
     asyncio.run(record_reply("telegram", envelope, DeliveryReceipt(channel="telegram", success=True)))
     assert saved.rows == []
 
 
 def test_a_storage_failure_is_logged_and_never_raised(monkeypatch: pytest.MonkeyPatch,
                                                       caplog: pytest.LogCaptureFixture) -> None:
-    monkeypatch.setattr(chat_history.db_chat, "save_message", _Saved(fail=1))
+    monkeypatch.setattr(chat_history.db_chat, "save_channel_message", _Saved(fail=1))
     with caplog.at_level("WARNING"):
         asyncio.run(record_reply("telegram", _answer(TELEGRAM), DeliveryReceipt(channel="telegram", success=True)))
     assert "could not store a telegram answer in telegram:12345" in caplog.text
@@ -105,7 +105,7 @@ def _through_the_loop(adapter: Any, envelopes: list[MessageEnvelope], saved: _Sa
                 await real(**kwargs)
 
             with pytest.MonkeyPatch.context() as mp:
-                mp.setattr(chat_history.db_chat, "save_message", counting)
+                mp.setattr(chat_history.db_chat, "save_channel_message", counting)
                 loop = asyncio.create_task(adapter._outbound_loop())
                 for envelope in envelopes:
                     await bus.publish(envelope)
