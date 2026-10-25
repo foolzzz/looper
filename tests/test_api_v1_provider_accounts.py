@@ -29,6 +29,7 @@ def test_client_refused_before_validation_service_or_audit(tmp_path, monkeypatch
 
     async def run():
         async with _serving(tmp_path) as server:
+            monkeypatch.setattr(server, "_v1_body", forbidden)
             server._client_ops = SimpleNamespace(call=forbidden)
             status, _, answer = await _send(server, f"POST /api/v1/provider_accounts/{action}",
                                             _bearer(CLIENT_TOKEN), body)
@@ -105,4 +106,50 @@ def test_unexpected_credential_failure_never_logs_raw_exception_or_request(tmp_p
             assert status == 503 and answer["error"]["code"] == "unavailable"
             assert secret not in json.dumps(answer)
     asyncio.run(run())
+    assert secret not in caplog.text
+
+
+@pytest.mark.parametrize("case,status,message", [
+    ("duplicate", 409, "provider account conflict"),
+    ("in-use", 409, "provider account conflict"),
+    ("profile", 409, "provider account conflict"),
+    ("validation", 400, "invalid provider account request"),
+    ("missing", 404, "provider not found"),
+])
+def test_public_provider_refusals_cross_transport(tmp_path, monkeypatch, caplog, case, status, message):
+    from tests.db_support import run_db
+
+    monkeypatch.setattr(profile_registry, "_login_modules", lambda: {})
+    secret = "synthetic-public-error-credential"
+
+    async def run(pool):
+        async with _serving(tmp_path, listen=True) as server:
+            async def call(action, body):
+                code, headers, answer = await _send(server, "POST /api/v1/provider_accounts/" + action,
+                                                   _bearer(TOKEN), json.dumps(body))
+                assert headers["cache-control"] == "no-store"
+                assert secret not in json.dumps(answer)
+                return code, answer
+            body = {"name": "Example", "vendor_type": "custom", "api_key": secret,
+                    "endpoints": [{"protocol": "anthropic-messages", "base_url": "https://example.invalid"}]}
+            code, created = await call("create", body)
+            assert code == 200 and created["result"]["provider"]["api_key"] == "***"
+            pid = created["result"]["provider"]["provider_id"]
+            if case in ("in-use", "profile"):
+                model = await profile_registry.create_model({"provider_id": pid, "name": "example",
+                                                             "protocol": "anthropic-messages"})
+                await profile_registry.create_profile({"name": "Example profile", "runtime_id": "rt-claude-code",
+                                                       "model_id": model["model"]["model_id"]})
+            action, request = {
+                "duplicate": ("create", body), "in-use": ("delete", {"provider_id": pid}),
+                "profile": ("update", {"provider_id": pid, "fields": {"endpoints": []}}),
+                "validation": ("update", {"provider_id": pid, "fields": {"max_concurrency": "invalid"}}),
+                "missing": ("delete", {"provider_id": "prov-missing"}),
+            }[case]
+            code, answer = await call(action, request)
+            assert code == status and answer["error"]["message"] == message, answer
+            code, answer = await call("list", {})
+            assert code == 200 and any(p["provider_id"] == pid for p in answer["result"]["providers"])
+            assert await pool.fetchval("SELECT count(*) FROM manager_actions") == 0
+    run_db(run, monkeypatch, timeout=30)
     assert secret not in caplog.text

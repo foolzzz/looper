@@ -74,7 +74,8 @@ def test_the_same_telegram_bot_is_not_added_twice(monkeypatch: pytest.MonkeyPatc
         assert (await _telegram(first))[0] == 200
         for token in (TOKEN, SAME_BOT_NEW_SECRET):
             status, body = await _telegram(second, token)
-            assert status == 409 and body["error"] == "invalid credential request", body
+            assert status == 409 and body["error"] == (
+                "this bot is already added; update the existing bot instead"), body
             assert token not in json.dumps(body)
         assert await pool.fetchval("SELECT count(*) FROM channel_configs WHERE channel_type = 'telegram'") == 2
         assert (await _telegram(second, OTHER_TOKEN))[0] == 200
@@ -88,7 +89,8 @@ def test_the_built_in_row_reading_the_environment_counts(monkeypatch: pytest.Mon
     async def test(pool: Any) -> None:
         manager = await _manager(pool)
         status, body = await _telegram(manager, TOKEN)
-        assert status == 409 and body["error"] == "invalid credential request"
+        assert status == 409 and body["error"] == (
+            "this bot is already added; update the existing bot instead")
         assert TOKEN not in json.dumps(body) and SAME_BOT_NEW_SECRET not in json.dumps(body)
 
     run_with_channel_configs(test, monkeypatch)
@@ -105,7 +107,8 @@ def test_the_built_in_row_whose_bot_token_env_is_unset_counts_the_standard_varia
                                 {"config": {**ALLOW, "bot_token_env": "UNSET_TELEGRAM_TOKEN"}})
         assert status == 200
         status, body = await _telegram(await _manager(pool), TOKEN)
-        assert status == 409 and body["error"] == "invalid credential request"
+        assert status == 409 and body["error"] == (
+            "this bot is already added; update the existing bot instead")
 
     run_with_channel_configs(test, monkeypatch)
 
@@ -118,7 +121,8 @@ def test_refused_adds_write_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
         before = await pool.fetchval("SELECT count(*) FROM channel_configs")
         assert (await _telegram(manager, None))[0] == 400
         status, body = await _telegram(manager, TOKEN, config={**ALLOW, "bot_token_env": "X"})
-        assert status == 400 and body["error"] == "invalid credential request"
+        assert status == 400 and body["error"] == (
+            "invalid channel configuration; check the sender allowlist and bot settings")
         assert (await _telegram(manager, TOKEN, surprise=1))[0] == 400
         assert (await _telegram(manager, TOKEN, channel_type="slack"))[0] == 400
         assert (await _telegram(manager, TOKEN, config={"allowed_user_ids": ["nope"]}))[0] == 400
@@ -139,13 +143,15 @@ def test_lark_cli_bots_name_their_profile(monkeypatch: pytest.MonkeyPatch, lark_
         manager = await _manager(pool)
         body = {"channel_type": "lark", "manager_id": manager}
         status, answer = await _call("POST", "channel_configs", {**body, "config": {"profile": ""}})
-        assert status == 400 and answer["error"] == "invalid credential request"
+        assert status == 400 and answer["error"] == (
+            "invalid channel configuration; check the sender allowlist and bot settings")
         status, answer = await _call("POST", "channel_configs", {**body, "config": {"profile": "other"}})
         assert status == 200, answer
         lark_id = answer["channel_id"]
         assert lark_id == "channel-lark-2" and answer["display_name"] == "Lark (lark-cli) · Review"
         status, answer = await _call("POST", "channel_configs", {**body, "config": {"profile": "other"}})
-        assert status == 409 and answer["error"] == "invalid credential request"
+        assert status == 409 and answer["error"] == (
+            "this bot is already added; update the existing bot instead")
 
         status, lark = await _call("POST", "/api/v1/channels/status", {"channel_type": "lark", "channel_id": lark_id})
         assert status == 200 and lark["bot"]["name"] == "OtherBot"
@@ -163,7 +169,8 @@ def test_lark_cli_bots_name_their_profile(monkeypatch: pytest.MonkeyPatch, lark_
 
         # Moving the built-in row onto the added bot's profile clashes too.
         status, answer = await _call("PUT", "channel-lark", {"config": {"profile": "other"}})
-        assert status == 409 and answer["error"] == "invalid credential request"
+        assert status == 409 and answer["error"] == (
+            "this bot is already added; update the existing bot instead")
 
     run_with_channel_configs(test, monkeypatch)
 
@@ -180,7 +187,8 @@ def test_an_added_lark_cli_bot_keeps_naming_its_profile(monkeypatch: pytest.Monk
         status, answer = await _call("PUT", "channel-lark", {"config": {"profile": "out"}})
         assert status == 200, answer
         status, answer = await _call("PUT", f"{lark_id}", {"config": {"profile": ""}})
-        assert status == 400 and answer["error"] == "invalid credential request", answer
+        assert status == 400 and answer["error"] == (
+            "invalid channel configuration; check the sender allowlist and bot settings"), answer
         status, answer = await _call("GET", f"{lark_id}")
         assert answer["config"]["profile"] == "other"
         # The built-in row may still use lark-cli's active profile.
@@ -202,7 +210,8 @@ def test_lark_bot_apps_are_added_once(monkeypatch: pytest.MonkeyPatch, platform:
         status, answer = await _call("POST", "channel_configs", body)
         assert status == 200 and answer["has_bot_token"] is True and SECRET not in json.dumps(answer)
         status, again = await _call("POST", "channel_configs", {**body, "bot_token": "another-secret"})
-        assert status == 409 and again["error"] == "invalid credential request" and "another-secret" not in json.dumps(again)
+        assert status == 409 and again["error"] == (
+            "this bot is already added; update the existing bot instead") and "another-secret" not in json.dumps(again)
 
         status, lark = await _call("POST", "/api/v1/channels/status",
                                    {"channel_type": "lark_bot", "channel_id": answer["channel_id"]})
@@ -221,15 +230,19 @@ def test_a_lark_app_is_one_bot_whatever_names_it(monkeypatch: pytest.MonkeyPatch
         lark = {"channel_type": "lark", "manager_id": manager}
         lark_bot = {"channel_type": "lark_bot", "manager_id": manager, "bot_token": SECRET}
         status, answer = await _call("POST", "channel_configs", {**lark, "config": {"profile": "cli_main"}})
-        assert status == 409 and answer["error"] == "invalid credential request", answer
+        assert status == 409 and answer["error"] == (
+            "this bot is already added; update the existing bot instead"), answer
         status, answer = await _call("POST", "channel_configs", {**lark_bot, "config": {"app_id": "cli_main"}})
-        assert status == 409 and answer["error"] == "invalid credential request", answer
+        assert status == 409 and answer["error"] == (
+            "this bot is already added; update the existing bot instead"), answer
         status, added = await _call("POST", "channel_configs", {**lark_bot, "config": {"app_id": "cli_other"}})
         assert status == 200, added
         status, answer = await _call("POST", "channel_configs", {**lark, "config": {"profile": "other"}})
-        assert status == 409 and answer["error"] == "invalid credential request", answer
+        assert status == 409 and answer["error"] == (
+            "this bot is already added; update the existing bot instead"), answer
         status, answer = await _call("PUT", "channel-lark", {"config": {"profile": "other"}})
-        assert status == 409 and answer["error"] == "invalid credential request", answer
+        assert status == 409 and answer["error"] == (
+            "this bot is already added; update the existing bot instead"), answer
         assert await pool.fetchval("SELECT count(*) FROM channel_configs WHERE channel_type LIKE 'lark%'") == 3
 
     run_with_channel_configs(test, monkeypatch)
@@ -250,7 +263,8 @@ def test_the_built_in_lark_bot_row_may_act_as_the_built_in_lark_cli_rows_app(
         manager = await _manager(pool)
         status, answer = await _call("POST", "channel_configs", {
             "channel_type": "lark_bot", "manager_id": manager, "config": {"app_id": "cli_main"}, "bot_token": SECRET})
-        assert status == 409 and answer["error"] == "invalid credential request", answer
+        assert status == 409 and answer["error"] == (
+            "this bot is already added; update the existing bot instead"), answer
 
     run_with_channel_configs(test, monkeypatch)
 
@@ -267,7 +281,8 @@ def test_the_built_in_telegram_row_falling_back_to_the_environment_is_checked(
 
         # Without its stored token the built-in row would read the environment's: the added bot's.
         status, body = await _call("PUT", path, {"bot_token": None})
-        assert status == 409 and body["error"] == "invalid credential request", body
+        assert status == 409 and body["error"] == (
+            "this bot is already added; update the existing bot instead"), body
         assert SAME_BOT_NEW_SECRET not in json.dumps(body) and TOKEN not in json.dumps(body)
         assert await pool.fetchval("SELECT bot_token FROM channel_secrets WHERE channel_id = 'channel-telegram'"
                                    ) == OTHER_TOKEN
@@ -275,7 +290,8 @@ def test_the_built_in_telegram_row_falling_back_to_the_environment_is_checked(
         monkeypatch.setenv("LOOPER_TELEGRAM_BOT_TOKEN", "3333333:AAthird-env-token")
         assert (await _call("PUT", path, {"bot_token": None}))[0] == 200
         status, body = await _call("PUT", path, {"config": {**ALLOW, "bot_token_env": "ALT_TELEGRAM_TOKEN"}})
-        assert status == 409 and body["error"] == "invalid credential request", body
+        assert status == 409 and body["error"] == (
+            "this bot is already added; update the existing bot instead"), body
         assert "bot_token_env" not in ((await _call("GET", path))[1]["config"] or {})
 
     run_with_channel_configs(test, monkeypatch)
@@ -307,7 +323,8 @@ def test_a_token_removal_is_checked_against_a_bot_token_env_changed_meanwhile(
 
         monkeypatch.setattr(bot_api.db_channel_configs, "get_config", get_config)
         status, body = await _call("PUT", path, {"bot_token": None})
-        assert raced and status == 409 and body["error"] == "invalid credential request", body
+        assert raced and status == 409 and body["error"] == (
+            "this bot is already added; update the existing bot instead"), body
         assert await pool.fetchval("SELECT bot_token FROM channel_secrets WHERE channel_id = 'channel-telegram'"
                                    ) == OTHER_TOKEN
 
@@ -321,13 +338,15 @@ def test_put_keeps_the_manager_and_checks_a_new_token(monkeypatch: pytest.Monkey
         assert (await _telegram(other, OTHER_TOKEN))[0] == 200  # channel-telegram-3
         path = "channel-telegram-2"
         status, body = await _call("PUT", path, {"manager_id": "manager", "display_name": "changed"})
-        assert status == 400 and body["error"] == "invalid credential request"
+        assert status == 400 and body["error"] == (
+            "invalid channel configuration; check the sender allowlist and bot settings")
         assert (await _call("GET", path))[1]["display_name"] == "Telegram · Review"
         status, body = await _call("PUT", path, {"manager_id": manager, "display_name": "Mine"})
         assert status == 200 and body["display_name"] == "Mine" and body["manager_id"] == manager
 
         status, body = await _call("PUT", path, {"bot_token": OTHER_TOKEN})
-        assert status == 409 and body["error"] == "invalid credential request" and OTHER_TOKEN not in json.dumps(body)
+        assert status == 409 and body["error"] == (
+            "this bot is already added; update the existing bot instead") and OTHER_TOKEN not in json.dumps(body)
         assert await pool.fetchval("SELECT bot_token FROM channel_secrets WHERE channel_id = 'channel-telegram-2'"
                                    ) == TOKEN
         status, body = await _call("PUT", path, {"bot_token": "1111111:rotated-secret-xx"})
