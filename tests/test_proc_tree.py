@@ -141,6 +141,66 @@ def test_what_ignores_sigterm_is_killed_after_the_grace_period(
     assert _ended_line(caplog).endswith(": 4 found, 3 exited on SIGTERM, 1 killed")
 
 
+@pytest.mark.parametrize("exits", [True, False], ids=["exits", "deadline"])
+@pytest.mark.parametrize("cancelled", [False, True], ids=["grace_elapsed", "cancelled"])
+def test_end_waits_for_killed_descendants_after_the_agent_is_reaped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, exits: bool, cancelled: bool,
+) -> None:
+    class Agent:
+        pid = 101
+        returncode: int | None = None
+
+        async def wait(self) -> int | None:
+            return self.returncode
+
+    agent = Agent()
+    table = {101: (1, 101), 102: (101, 102), 103: (102, 102)}
+    killed = False
+    observations = 0
+    term_sent = asyncio.Event()
+
+    def signal_tree(process: Any, tree: Any, sig: int) -> None:
+        nonlocal killed
+        if sig == signal.SIGTERM:
+            term_sent.set()
+        if sig == signal.SIGKILL:
+            killed = True
+            agent.returncode = -sig
+            table.pop(agent.pid)  # the agent exits before the children the kernel is still terminating
+
+    def snapshot() -> proc_tree.Table:
+        nonlocal observations
+        if killed:
+            observations += 1
+            if exits and observations == 3:
+                table.clear()
+        return dict(table)
+
+    monkeypatch.setattr(proc_tree, "_snapshot", snapshot)
+    monkeypatch.setattr(proc_tree, "_signal", signal_tree)
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 10 if cancelled else 0)
+    monkeypatch.setattr(proc_tree, "REAP_SEC", 1)
+
+    async def _run() -> None:
+        ending = asyncio.create_task(proc_tree.end(agent, label="agent"))
+        if cancelled:
+            await asyncio.wait_for(term_sent.wait(), 3)
+            ending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(ending, 5)
+        else:
+            await asyncio.wait_for(ending, 5)
+
+    asyncio.run(_run())
+    assert agent.returncode == -signal.SIGKILL
+    assert observations >= 3
+    if exits:
+        assert table == {}
+        assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+    else:
+        assert "still running" in caplog.text
+
+
 # What a Worker's Claude does here: starts its tree, reads the first turn, starts its session and waits.
 _LISTENING_AGENT = (
     "if os.environ.get('WARM_UP'):\n    sys.exit()\n"
@@ -223,6 +283,46 @@ def test_stopping_a_resident_claude_ends_its_tree(tmp_path: Path, trees: list[di
     assert _running(list(tree.values())) == []
 
 
+@pytest.mark.parametrize("how", ["cancel", "kill"])
+def test_hurrying_a_resident_stop_waits_for_its_tree(
+    tmp_path: Path, trees: list[dict[str, int]], monkeypatch: pytest.MonkeyPatch, how: str,
+) -> None:
+    monkeypatch.setattr(claude_cli, "STOP_GRACE_SEC", 30)
+    claude = fake_claude(tmp_path / "claude", _RESIDENT_AGENT + "time.sleep(60)\n")
+
+    async def _run() -> None:
+        session = ResidentClaude(label="planner")
+        await session.start([claude], cwd=str(tmp_path), signature=None)
+
+        async def on_event(event: dict[str, Any]) -> None:
+            pass
+
+        await session.run_turn("hello", on_event)
+        tree = await _started(tmp_path, trees)
+        assert session._tree is not None
+        begin_end = session._tree.begin_end
+        grace = asyncio.Event()
+
+        async def observed_begin_end() -> None:
+            await begin_end()
+            grace.set()
+
+        monkeypatch.setattr(session._tree, "begin_end", observed_begin_end)
+        stopping = asyncio.create_task(session.stop())
+        await asyncio.wait_for(grace.wait(), 3)
+        if how == "cancel":
+            stopping.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(stopping, 3)
+        else:
+            await asyncio.wait_for(session.stop(kill=True), 3)
+            await asyncio.wait_for(stopping, 3)
+        assert not session._ending
+        assert _running(list(tree.values()), settle=0) == []
+
+    asyncio.run(_run())
+
+
 # A Codex turn that starts its tree and runs on until it is stopped.
 _PER_TURN_AGENT = _SPAWN_TREE + "sys.stdin.read()\ntime.sleep(60)\n"
 
@@ -260,7 +360,7 @@ def test_stopping_a_per_turn_session_ends_the_running_turns_tree(
         return tree
 
     tree = asyncio.run(_run())
-    assert _running(list(tree.values())) == []
+    assert _running(list(tree.values()), settle=0) == []
 
 
 # --- The sweep at the next start ---
@@ -818,9 +918,19 @@ def test_turn_tree_checks_identity_before_expanding_an_observed_tree(
     monkeypatch.setattr(proc_tree, "_snapshot", lambda: dict(table))
     monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {pid: starts[pid] for pid in pids if pid in starts})
     monkeypatch.setattr(proc_tree, "_start_time", lambda pid: starts.get(pid))
-    monkeypatch.setattr(proc_tree.os, "kill", lambda pid, sig: signalled.add(pid))
-    monkeypatch.setattr(proc_tree.os, "killpg", lambda group, sig: signalled.update(
-        pid for pid, (_, pgid) in table.items() if pgid == group))
+
+    def kill(pid: int, sig: int) -> None:
+        signalled.add(pid)
+        if sig == signal.SIGKILL:
+            table.pop(pid, None)
+
+    def killpg(group: int, sig: int) -> None:
+        for pid, (_, pgid) in list(table.items()):
+            if pgid == group:
+                kill(pid, sig)
+
+    monkeypatch.setattr(proc_tree.os, "kill", kill)
+    monkeypatch.setattr(proc_tree.os, "killpg", killpg)
     monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0)
 
     async def _run() -> None:
@@ -1001,6 +1111,56 @@ def test_turn_tree_ticker_picks_up_a_child_started_between_events(tmp_path: Path
                 os.kill(pid, signal.SIGKILL)
 
     assert asyncio.run(_run())
+
+
+def test_cancelling_a_refresh_does_not_lose_new_descendants(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Agent:
+        pid = 101
+        returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+    table = {101: (1, 101)}
+    starts = {101: "agent", 102: "command", 103: "grandchild"}
+    signalled: set[int] = set()
+    monkeypatch.setattr(proc_tree, "_snapshot", lambda: dict(table))
+    monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {pid: starts[pid] for pid in pids})
+    monkeypatch.setattr(proc_tree, "_start_time", lambda pid: starts.get(pid))
+
+    def killpg(group: int, sig: int) -> None:
+        for pid, (_, pgid) in list(table.items()):
+            if pgid == group:
+                signalled.add(pid)
+                table.pop(pid)
+
+    monkeypatch.setattr(proc_tree.os, "killpg", killpg)
+
+    async def _run() -> None:
+        tree = proc_tree.track(Agent())
+        table.update({102: (101, 102), 103: (102, 102)})
+        reached = asyncio.Event()
+        to_thread = asyncio.to_thread
+
+        async def paused(func: Any, *args: Any, **kwargs: Any) -> Any:
+            if func is proc_tree._start_times and 102 in args[0]:
+                reached.set()
+                await asyncio.Event().wait()
+            return await to_thread(func, *args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "to_thread", paused)
+        refreshing = asyncio.create_task(tree.refresh(force=True))
+        try:
+            await asyncio.wait_for(reached.wait(), 3)
+        finally:
+            refreshing.cancel()
+            await asyncio.gather(refreshing, return_exceptions=True)
+            monkeypatch.setattr(asyncio, "to_thread", to_thread)
+        await asyncio.wait_for(tree.end(), 3)
+
+    asyncio.run(_run())
+    assert signalled == {101, 102, 103}
+    assert table == {}
 
 
 def test_turn_tree_end_returns_within_a_bound_when_the_agent_is_never_reaped() -> None:

@@ -1915,6 +1915,7 @@ class TestTaskEnd:
                 # The task has ended and its teardown waits for the lingering Claude to exit.
                 await h.until(lambda: router._tasks and not router._planners and claude.pids()
                               and next(iter(router._tasks.values())).status == "completed")
+                # Cancel after resident cleanup has started; an earlier cancel takes the immediate-kill path.
                 await asyncio.wait_for(cleanup_started.wait(), 5)
                 assert _alive(claude.pids()[0])
                 started = asyncio.get_event_loop().time()

@@ -1016,20 +1016,32 @@ class ResidentClaude:
         Claude's own that ends then is handled; one that does not is closed
         without a result. A turn waiting on the stop returns only after that
         reading is over.
-        Cleanup has its own tracked task: cancelling a caller does not cancel it, and a later stop joins it
-        even after the process was forgotten.
+        Cleanup has its own tracked task: cancelling a caller skips the stdin grace and waits for cleanup before
+        propagating. A later stop joins it even after the process was forgotten; ``kill`` skips its grace too.
         """
         process, output, tree = self._process, self._output, self._tree
         self._process, self._output, self._command, self._signature, self._tree = None, None, [], None, None
-        if kill:
-            for hurry in self._ending.values():
-                hurry.set()
         if process is not None:
             hurry = asyncio.Event()
-            task = asyncio.create_task(self._stop_process(process, output, tree, kill=kill, hurry=hurry))
+            task = asyncio.create_task(self._stop_process(process, output, tree, hurry=hurry))
             self._ending[task] = hurry
             task.add_done_callback(self._process_ended)
-        await asyncio.gather(*(asyncio.shield(task) for task in tuple(self._ending)))
+        ending = dict(self._ending)
+        if kill:
+            for hurry in ending.values():
+                hurry.set()
+        cancelled = False
+        while any(not task.done() for task in ending):
+            try:
+                await asyncio.wait(ending)
+            except asyncio.CancelledError:
+                cancelled = True
+                for hurry in ending.values():
+                    hurry.set()
+        if cancelled:
+            raise asyncio.CancelledError
+        for task in ending:
+            task.result()
 
     def _process_ended(self, task: asyncio.Task[None]) -> None:
         self._ending.pop(task, None)
@@ -1037,7 +1049,7 @@ class ResidentClaude:
             logger.error("%s: resident cleanup failed", self._label, exc_info=problem)
 
     async def _stop_process(self, process: asyncio.subprocess.Process, output: _Output | None,
-                            tree: proc_tree.TurnTree | None, *, kill: bool, hurry: asyncio.Event) -> None:
+                            tree: proc_tree.TurnTree | None, *, hurry: asyncio.Event) -> None:
         if output is not None:
             output.drop_turn()
         try:
@@ -1045,10 +1057,10 @@ class ResidentClaude:
                 # What Claude started since the last tick, before its stdin closes and it exits; recorded when it
                 # is let exit on its own, so a server that dies meanwhile has the rest ended at its next start.
                 with contextlib.suppress(Exception):
-                    await (tree.refresh(force=True) if kill else tree.begin_end())
+                    await (tree.refresh(force=True) if hurry.is_set() else tree.begin_end())
             if process.stdin is not None and not process.stdin.is_closing():
                 process.stdin.close()
-            if process.returncode is None and not kill:
+            if process.returncode is None and not hurry.is_set():
                 exited = asyncio.create_task(process.wait())
                 hurried = asyncio.create_task(hurry.wait())
                 try:
