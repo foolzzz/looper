@@ -496,6 +496,8 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
             pending.clear()
 
         if channel_type == "telegram":
+            from telegram.ext import ApplicationBuilder
+
             # Exercise the real adapter startup, including the destructive polling bootstrap.
             app = MagicMock()
             app.bot = bot
@@ -504,8 +506,10 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
                 setattr(app, name, AsyncMock())
             app.updater.start_polling = start_polling
             app.updater.stop = AsyncMock()
-            monkeypatch.setattr("telegram.ext.Application.builder", lambda: MagicMock(
-                token=lambda _: SimpleNamespace(build=lambda: app)))
+            builder = MagicMock(spec=ApplicationBuilder)
+            builder.token.return_value = builder
+            builder.build.return_value = app
+            monkeypatch.setattr("telegram.ext.Application.builder", lambda: builder)
         telegram_start = TelegramChannelAdapter.start
 
         async def receive(adapter: Any) -> None:
