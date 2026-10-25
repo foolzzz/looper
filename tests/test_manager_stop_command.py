@@ -279,6 +279,50 @@ def test_stop_queued_before_manager_start_is_owned_by_code(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("channel", ["telegram", "lark", "lark_bot"])
+@pytest.mark.parametrize("queued_before_stop", [0, 2])
+def test_startup_stop_preserves_later_messages(
+    channel: str, queued_before_stop: int, tmp_path: Path, agent_db: Any,
+) -> None:
+    async def run() -> None:
+        session = _Session(hold=False)
+        manager, bus, _ = _manager(tmp_path, session)
+        source = channel_address(channel, f"channel-{channel}-1")
+
+        def message(text: str) -> MessageEnvelope:
+            return MessageEnvelope.create(
+                source=source, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+                payload={"text": text, "channel_context": {"chat_id": "99", "user_id": "7"}},
+            )
+
+        earlier = [message(f"earlier request {i}") for i in range(queued_before_stop)]
+        stop, later = message("/stop"), message("new request after stop")
+        for envelope in (*earlier, stop, later):
+            await bus.publish(envelope)
+        await bus.start()
+        replies: list[MessageEnvelope] = []
+        bus.subscribe_topic(MessageType.AGENT_REPLY.value, replies.append)
+        await manager.start(bus)
+        try:
+            await until(lambda: any(e.reply_to == later.message_id for e in replies), timeout=5)
+            outcomes = {e.reply_to: e.payload.get("outcome") for e in replies}
+            assert outcomes[later.message_id] == "answered"
+            assert all(outcomes[e.message_id] == "stopped" for e in earlier)
+            assert len(session.turns) == 1
+            assert session.turns[0].endswith("\n\n" + later.payload["text"])
+            assert "/stop" not in session.turns[0]
+            assert sum(e.reply_to == stop.message_id for e in replies) == 1
+            assert not manager._turns.live()
+            settled = {e.message_id for e in (*earlier, stop, later)}
+            assert settled.isdisjoint(e.message_id for e in bus.journal.undelivered())
+        finally:
+            await manager.stop()
+            await asyncio.gather(*manager._stop_tasks, return_exceptions=True)
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
 def test_a_stop_reaching_the_message_loop_still_uses_the_code_path(tmp_path: Path, agent_db: Any) -> None:
     async def run() -> None:
         session = _Session(hold=False)

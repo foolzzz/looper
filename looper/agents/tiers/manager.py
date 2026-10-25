@@ -749,10 +749,15 @@ class ManagerAgent:
         # the same tokens and code-owned stops before the message loop can send the first one to the model.
         queue = bus.get_queue(self.agent_id)
         for envelope in bus.take_queue(self.agent_id):
-            if envelope.message_type == MessageType.USER_MESSAGE and self._receive(envelope):
-                bus.settle(envelope.message_id)
-            else:
-                queue.put_nowait(envelope)
+            if envelope.message_type == MessageType.USER_MESSAGE and envelope.target.agent_id == self.agent_id:
+                text = envelope.payload.get("text")
+                if isinstance(text, str) and is_stop_command(text):
+                    # Finish this stop before registering later messages from the same chat.
+                    await self._stop_from_chat(envelope)
+                    bus.settle(envelope.message_id)
+                    continue
+                self._register_turn(envelope)
+            queue.put_nowait(envelope)
         self._task = asyncio.create_task(self._message_loop())
         logger.info(
             "%s agent started (session=%s)", self._log,
