@@ -82,6 +82,7 @@ def test_token_keep_replace_remove_variants_have_database_readback(tmp_path, mon
     _run(run, monkeypatch)
 
 
+@pytest.mark.usefixtures("lark_cli_stand_in")  # Resolve the seeded Lark channel to a distinct app.
 @pytest.mark.parametrize("kind,config", [
     ("telegram", {"allowed_user_ids": ["ou_example123"]}),
     ("lark_bot", {"app_id": "cli_example", "allowed_open_ids": ["on_example123"]}),
@@ -92,7 +93,9 @@ def test_invalid_allowlist_cannot_partially_replace_a_secret(tmp_path, monkeypat
         create = CREATE if kind == "telegram" else {**CREATE, "channel_type": kind,
             "config": {"app_id": "cli_example", "allowed_open_ids": ["ou_example123"]}}
         async with _api(tmp_path, pool) as call:
-            channel_id = (await call("create", create))[1]["result"]["channel_id"]
+            status, answer = await call("create", create)
+            assert status == 200, answer
+            channel_id = answer["result"]["channel_id"]
             before = await channel_configs.get_config(channel_id)
             status, answer = await call("update", {"channel_id": channel_id,
                 "fields": {"bot_token": NEW_SECRET, "config": config}})
