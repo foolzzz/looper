@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.132] - 2026-10-25
+
+### Changed
+
+- **Chat-bound Managers are tested end to end and documented.** New database-backed and browser tests cover rebinding, bound-only silence, the generated operator CLI, native stop and the two Settings pages, and the architecture documents now match the merged behavior. No production code changes. ([#662](https://github.com/foolzzz/looper/pull/662))
+
 ## [2.13.131] - 2026-10-25
 
 ### Fixed
