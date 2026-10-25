@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.108] - 2026-10-25
+
+### Fixed
+
+- **`loopercli` group help lists the commands generated from Looper's API.** `loopercli config --help` (or `-h`) now reads the OpenAPI document, so children such as `import-cancel`, `import-upload`, `import-apply` and `import-preview` appear beside the hand-written ones. Known hand-written children and other flags still make no request. If the document cannot be read, the help of the requested group is printed with a note that the API-made commands are not shown, and the exit code stays 0. Not model-visible; CLI help output only. ([#599](https://github.com/foolzzz/looper/pull/599))
+
 ## [2.13.107] - 2026-10-25
 
 ### Fixed
