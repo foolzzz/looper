@@ -1453,7 +1453,7 @@ function EarlierLine() {
   );
 }
 
-export function SessionsTab({ taskId, status }: { taskId: string; status: TaskDetail["status"] }) {
+export function SessionsTab({ taskId, status, generation = 0 }: { taskId: string; status: TaskDetail["status"]; generation?: number }) {
   const [live, setLive] = useState(true);
   const { events, loadingEarlier, latestSeq, scrollRef, onScroll, append } = useEventWindow(
     taskId,
@@ -1469,7 +1469,7 @@ export function SessionsTab({ taskId, status }: { taskId: string; status: TaskDe
       if (!stopped) setLive(false);
     });
     return () => { stopped = true; stop(); };
-  }, [taskId, status, latestSeq, append]);
+  }, [taskId, status, generation, latestSeq, append]);
 
   const grouped = new Map<string, ActivityEvent[]>();
   for (const ev of events) {
@@ -2077,6 +2077,10 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
   const setTab = useCallback((next: Tab) => (onTab ? onTab(next) : setLocalTab(next)), [onTab]);
   // Bumped when the task runs again, so the page polls it again.
   const [runs, setRuns] = useState(0);
+  // Start is asynchronous: its old terminal snapshot cannot acknowledge a new run.
+  const restart = useRef<TaskDetail | null>(null);
+  const [activityGeneration, setActivityGeneration] = useState(0);
+  useEffect(() => () => { restart.current = null; }, [taskId]);
   // The gate step a Pipeline node asked to show on the Overview tab, until it is shown.
   const [gateFocus, setGateFocus] = useState<TaskStep | null>(null);
   const openGate = useCallback((step: TaskStep) => {
@@ -2101,7 +2105,19 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
         if (stopped) return;
         setTask(t);
         setError("");
-        return ["completed", "failed", "cancelled", "stopped", "init"].includes(t.status);
+        const terminal = ["completed", "failed", "cancelled", "stopped", "init"].includes(t.status);
+        const before = restart.current;
+        if (before) {
+          // A fast run may already have the same terminal status. Completion and run counts survive that race;
+          // updated_at alone also changes on edits, and the Planner id is reused across runs.
+          const observed = !terminal || t.completed_at !== before.completed_at ||
+            (t.cost != null && before.cost != null && t.cost.runs > before.cost.runs);
+          if (!observed) return false;
+          restart.current = null;
+          setActivityGeneration((n) => n + 1);
+          if (t.status === "failed") setActionError(t.error || t.result_summary || "The task failed to start.");
+        }
+        return terminal;
       } catch (e) {
         if (!stopped) setError(e instanceof Error ? e.message : String(e));
       }
@@ -2110,11 +2126,22 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
   }, [taskId, runs]);
 
   // A ready task is started; a stopped, failed or cancelled one goes on from its saved plan, or is planned anew.
-  const start = (startOver: boolean) =>
-    (task?.status === READY_STATUS ? startReadyTask(taskId) : startTask(taskId, { startOver })).then(
-      () => { setActionError(""); setConfirmStartOver(false); setRuns((n) => n + 1); },
-      (err) => setActionError(err instanceof Error ? err.message : String(err)),
+  const start = (startOver: boolean) => {
+    if (!task || restart.current) return;
+    const before = task;
+    restart.current = before;
+    return (task.status === READY_STATUS ? startReadyTask(taskId) : startTask(taskId, { startOver })).then(
+      () => {
+        if (restart.current !== before) return;
+        setActionError(""); setConfirmStartOver(false); setRuns((n) => n + 1);
+      },
+      (err) => {
+        if (restart.current !== before) return;
+        restart.current = null;
+        setActionError(err instanceof Error ? err.message : String(err));
+      },
     );
+  };
 
   const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
     { id: "overview", label: "Overview", icon: Activity },
@@ -2282,7 +2309,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
         {task && tab === "agents" && (
           <TaskAgentsTab task={task} runs={taskRuns.runs} runsError={taskRuns.error} onAgents={(agents) => setTask((t) => (t ? { ...t, agents } : t))} />
         )}
-        {task && tab === "sessions" && <SessionsTab taskId={taskId} status={task.status} />}
+        {task && tab === "sessions" && <SessionsTab taskId={taskId} status={task.status} generation={activityGeneration} />}
         {task && tab === "conversation" && <ConversationTab taskId={taskId} />}
       </div>
     </div>
