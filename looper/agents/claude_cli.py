@@ -324,8 +324,14 @@ def read_only_args(library: AgentLibrary, *, cwd: str | os.PathLike[str], add_di
     servers = [mcp_rule(item.name) for item in library.items if item.kind is ItemKind.MCP]
     # A bare tool allow overrides Claude Code's outside-directory permission ask. Use absolute path rules
     # (the leading // is Claude Code's absolute-path syntax), limited to the repository and supplied directories.
-    # Keep both spellings so a document path through a symlink is allowed too, including above cwd in a repo.
-    roots = dict.fromkeys((repository_root(Path(cwd).resolve()), repository_root(Path(cwd).absolute()),
+    # Keep the lexical repository root only if it names the actual repository. A symlink inside an unrelated
+    # repository must not grant that outer tree; its own spelling still allows documents through the link.
+    real_root = repository_root(Path(cwd).resolve())
+    spelling = Path(cwd).absolute()
+    lexical_root = repository_root(spelling)
+    if lexical_root.resolve() == real_root:
+        spelling = lexical_root
+    roots = dict.fromkeys((real_root, spelling,
                           *(root for path in add_dirs for root in (Path(path).resolve(), Path(path).absolute()))))
     paths = [re.sub(r"([\\*?\[\]{}()])", r"\\\1", root.as_posix().rstrip("/")) for root in roots]
     reads = [f"{tool}(/{path}/**)" for path in paths for tool in CONSULT_TOOLS]
