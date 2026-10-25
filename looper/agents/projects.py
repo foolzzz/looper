@@ -605,6 +605,7 @@ async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
         "created_at": raw.get("created_at"),
         "updated_at": raw.get("updated_at"),
         "completed_at": raw.get("completed_at"),
+        "attempt_ended_at": raw.get("attempt_ended_at"),
         "steps": raw.get("steps", []),
         # The task journal, oldest first: an entry per accepted step with its summary and learnings.
         "journal": raw.get("journal", []),

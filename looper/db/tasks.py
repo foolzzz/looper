@@ -277,6 +277,7 @@ async def update_task_status(
     pool = pool or get_pool()
     now = datetime.now(timezone.utc)
     completed_at = now if status in ("completed", "failed", "cancelled") else None
+    attempt_ended_at = now if status in ("completed", "failed", "cancelled", "stopped") else None
 
     await pool.execute(
         """
@@ -287,11 +288,13 @@ async def update_task_status(
             error = COALESCE($5, error),
             updated_at = $6,
             completed_at = COALESCE($7, completed_at),
-            fail_kind = COALESCE($8, fail_kind)
+            fail_kind = COALESCE($8, fail_kind),
+            attempt_ended_at = COALESCE($9, attempt_ended_at)
         WHERE id = $1
         """,
         task_id, status, planner_id, result_summary, error, now, completed_at,
         FailKind(fail_kind).value if fail_kind else None,
+        attempt_ended_at,
     )
 
 
@@ -444,7 +447,7 @@ async def reset_task_for_restart(
         """
         UPDATE tasks
         SET status = 'pending', phase = 'pending',
-            error = NULL, completed_at = NULL, fail_kind = NULL,
+            error = NULL, completed_at = NULL, attempt_ended_at = NULL, fail_kind = NULL,
             result_summary = NULL, updated_at = now()
         WHERE id = $1
         """,
@@ -485,7 +488,7 @@ async def mark_orphaned_tasks_stopped(
     result = await pool.execute(
         """
         UPDATE tasks
-        SET status = 'stopped', updated_at = now()
+        SET status = 'stopped', updated_at = now(), attempt_ended_at = now()
         WHERE status = ANY($1::text[]) AND completed_at IS NULL AND NOT (id = ANY($2::text[]))
         """,
         list(ACTIVE_STATUSES), list(keep or []),

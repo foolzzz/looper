@@ -1687,6 +1687,8 @@ export interface TaskDetail extends TaskInfo {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  /** The current attempt's end, including Stop; null before it ends or for a legacy task. */
+  attempt_ended_at: string | null;
   steps: TaskStep[];
   /** The task journal, oldest first: what happened in the task that later agents and sessions need. */
   journal?: JournalEntry[];

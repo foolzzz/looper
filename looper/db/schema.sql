@@ -231,6 +231,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT 'pending';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS work_dir TEXT NOT NULL DEFAULT '';
+-- Every ended attempt, including Stop; cleared on restart. Legacy rows remain unknown (NULL).
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS attempt_ended_at TIMESTAMPTZ;
 
 -- A task runs in the directory the user chose (work_dir). project_root was a
 -- second directory field the dashboard never set; fold it in and drop it.
