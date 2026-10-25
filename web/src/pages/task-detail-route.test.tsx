@@ -116,13 +116,15 @@ describe("TaskDetailRoute", () => {
     expect(starts).toBe(1); // The accepted Start still waits for its run.
     await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
     expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Sessions");
+    expect(liveStream).toBeUndefined(); // A changed terminal snapshot still needs confirmation.
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
     expect(liveStream).toBeDefined();
     expect(container.textContent).toContain("Live");
     await act(async () => {
       liveStream!.enqueue(new TextEncoder().encode(`event: activity\ndata: ${JSON.stringify(activity(8))}\n\n`));
     });
     await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
-    expect(polls).toBe(2); // The acknowledged terminal run stops polling again.
+    expect(polls).toBe(3); // The confirmed terminal run stops polling again.
     expect(fetcher.mock.calls.filter(([url]) => String(url) === "/api/v1/tasks/activity_stream")).toHaveLength(2);
     expect(container.textContent).toContain("activity 7");
     expect(container.textContent).toContain("activity 8");
@@ -130,25 +132,123 @@ describe("TaskDetailRoute", () => {
     expect(fetcher.mock.calls.filter(([url]) => String(url) === "/api/v1/tasks/activity")).toHaveLength(1);
   });
 
-  it.each(["request", "poll"])("cleans up when the route changes during the restart %s", async (stage) => {
+  it.each(["mixed runs", "before request", "fast completion", "unstable terminal", "terminal status", "terminal with live runs"])("confirms restart across reads: %s", async (scenario) => {
+    let starts = 0;
+    let reads = 0;
+    let polls = 0;
+    let streams = 0;
+    const terminal = (runs: number, completed = "2026-10-24T00:00:00Z") => ({
+      ...detail("task-a"), completed_at: completed, cost: { runs, running: 0, cost_usd: 0,
+        unpriced_runs: 0, by_model: [], manager_by_model: [],
+        by_role: { planner: { runs, cost_usd: 0 }, worker: { runs: 0, cost_usd: 0 }, reviewer: { runs: 0, cost_usd: 0 } } },
+    });
+    const old = terminal(1);
+    const changed = terminal(2, "2026-10-24T00:01:00Z");
+    const mixed = { ...old, cost: { ...old.cost, runs: 2, running: 1 } };
+    const running = { ...changed, status: "running", group: "in_progress", completed_at: null };
+    const sequence = scenario === "mixed runs" ? [{ ...old, cost: { ...old.cost, runs: 2 } }, running]
+      : scenario === "terminal with live runs" ? [mixed, mixed, running]
+      : scenario === "before request" ? [changed, changed, running]
+      : scenario === "unstable terminal" ? [changed, terminal(3), terminal(3)]
+      : scenario === "terminal status" ? [{ ...changed, status: "completed" }, { ...changed, status: "completed" }] : [changed, changed];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/detail")) {
+        reads++;
+        const result = starts ? sequence[Math.min(polls++, sequence.length - 1)]
+          : scenario === "before request" && reads > 1 ? changed : old;
+        return Response.json({ status: "ok", result });
+      }
+      if (url.endsWith("/restart")) { starts++; return Response.json({ status: "ok", result: { restarted: true } }); }
+      if (url.endsWith("/activity_stream")) {
+        streams++;
+        return new Response("event: done\ndata: {}\n\n", { headers: { "Content-Type": "text/event-stream" } });
+      }
+      return Response.json(answer(url, init));
+    }));
+    await show("task-a");
+    await openTab("Sessions");
+    const initialStreams = streams;
+    expect(initialStreams).toBe(1);
+    vi.useFakeTimers();
+    const button = (name: string) => [...container.querySelectorAll("button")].find((b) => b.textContent?.trim() === name)!;
+    await act(async () => button("Start").click());
+    expect(polls).toBe(1);
+    expect(streams).toBe(initialStreams);
+    expect(button("Start").disabled).toBe(true);
+    expect(button("Start over").disabled).toBe(true);
+    await act(async () => button("Start over").click());
+    expect(container.textContent).not.toContain("Delete its steps?");
+    for (let i = 1; i < sequence.length; i++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      if (i < sequence.length - 1) expect(streams).toBe(initialStreams);
+    }
+    expect(streams).toBe(initialStreams + 1);
+    expect(starts).toBe(1);
+    if (sequence.at(-1)!.status !== "running") {
+      if (sequence.at(-1)!.status === "failed") expect(button("Start").disabled).toBe(false);
+      await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+      expect(polls).toBe(sequence.length);
+    }
+  });
+
+  it.each(["request", "baseline"])("releases restart controls after a failed %s", async (failure) => {
+    let release: (response: Response) => void = () => {};
+    let reads = 0;
+    let starts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/detail")) {
+        reads++;
+        if (failure === "baseline" && reads > 1) return new Promise<Response>((resolve) => { release = resolve; });
+      }
+      if (url.endsWith("/start_over")) {
+        starts++;
+        return new Promise<Response>((resolve) => { release = resolve; });
+      }
+      return Response.json(answer(url, init));
+    }));
+    await show("task-a");
+    await openTab("Start over");
+    const confirm = [...container.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Start over")!;
+    await act(async () => { confirm.click(); confirm.click(); });
+    await settle();
+    expect(confirm.disabled).toBe(true);
+    expect(starts).toBe(failure === "request" ? 1 : 0);
+    await act(async () => release(Response.json({ status: "error", error: { code: "conflict", message: "Start refused" } }, { status: 409 })));
+    await settle();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(failure === "baseline" ? "task detail 409" : "Start refused");
+    expect(container.textContent).not.toContain("Delete its steps?");
+    const controls = [...container.querySelectorAll("button")].filter((b) => ["Start", "Start over"].includes(b.textContent?.trim() || ""));
+    expect(controls).toHaveLength(2);
+    expect(controls.every((b) => !b.disabled)).toBe(true);
+  });
+
+  it.each(["baseline", "request", "rejected request", "poll"])("cleans up when the route changes during the restart %s", async (stage) => {
     let started = false;
+    let reads = 0;
     let release = () => {};
     const signals: AbortSignal[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/restart")) {
         started = true;
-        const response = Response.json({ status: "ok", result: { restarted: true } });
-        if (stage === "request") return new Promise<Response>((resolve) => { release = () => resolve(response); });
+        const response = stage === "rejected request"
+          ? Response.json({ status: "error", error: { code: "conflict", message: "Old task refused" } }, { status: 409 })
+          : Response.json({ status: "ok", result: { restarted: true } });
+        if (stage === "request" || stage === "rejected request") return new Promise<Response>((resolve) => { release = () => resolve(response); });
         return response;
       }
       if (url.endsWith("/activity_stream")) {
         signals.push(init!.signal!);
         return new Response("event: done\ndata: {}\n\n");
       }
-      if (url.endsWith("/detail") && started && JSON.parse(String(init?.body)).task_id === "task-a") {
-        signals.push(init!.signal!);
-        return new Promise<Response>((resolve) => { release = () => resolve(Response.json(answer(url, init))); });
+      if (url.endsWith("/detail") && JSON.parse(String(init?.body)).task_id === "task-a") {
+        reads++;
+        if (started || (stage === "baseline" && reads > 1)) {
+          signals.push(init!.signal!);
+          return new Promise<Response>((resolve) => { release = () => resolve(Response.json(answer(url, init))); });
+        }
       }
       return Response.json(answer(url, init));
     }));
@@ -156,12 +256,14 @@ describe("TaskDetailRoute", () => {
     await openTab("Sessions");
     await openTab("Start");
     await show("task-b");
-    expect(signals).toHaveLength(stage === "poll" ? 2 : 1);
+    expect(signals).toHaveLength(stage === "poll" || stage === "baseline" ? 2 : 1);
     expect(signals.every((signal) => signal.aborted)).toBe(true);
     await act(async () => release());
     await settle();
     expect(container.textContent).toContain("Write the B docs.");
     expect(container.textContent).not.toContain("Build the A parser.");
+    expect(container.textContent).not.toContain("Old task refused");
+    if (stage === "baseline") expect(started).toBe(false);
   });
 
   it.each([false, true])("shows the schedule session note only after a confirmed continuation (%s)", async (continues) => {
