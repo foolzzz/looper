@@ -36,9 +36,9 @@ def test_pending_import_limit_is_per_caller(tmp_path, clients, preview):
             status, _, answer = await _send(server, "POST /api/v1/config/import_preview",
                                            _bearer(TOKEN), json.dumps({"document": DOCUMENT}))
             assert status == 200, answer
-            status, _, answer = await _send(server, "POST /api/config/imports", _bearer(TOKEN),
+            status, _, answer = await _send(server, "POST /api/v1/config/import_upload", _bearer(TOKEN),
                                            json.dumps(DOCUMENT))
-            assert status == 201, answer
+            assert status == 200, answer
 
     asyncio.run(asyncio.wait_for(run(), timeout=10))
 

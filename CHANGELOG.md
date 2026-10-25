@@ -18,6 +18,26 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.86] - 2026-10-24
+
+### Changed
+
+- **Configuration transfer in the dashboard goes through v1.** Exporting the configuration is `POST /api/v1/config/export`; uploading a file to preview an import is `POST /api/v1/config/import_upload` (risk `read`, the raw document streamed as `application/json`, up to the existing import size cap, answered in the v1 envelope); applying is `config.import_apply` and cancelling is the new `config.import_cancel` operation (risk `write`, moved to its own domain), each acting only on the caller's own staged import. The export is written to the response in chunks instead of being built in memory first. The preview, plan and document schemas are published in the OpenAPI document, and `looper config` keeps its export and import commands while generated subcommands can be added to it. Manager prompts and tools are unchanged. ([#513](https://github.com/foolzzz/looper/pull/513))
+
+### Removed
+
+- **The legacy configuration routes:** `GET /api/config/export`, `POST /api/config/imports`, `POST /api/config/imports/<id>/apply` and `DELETE /api/config/imports/<id>`. Use the `config` operations. ([#513](https://github.com/foolzzz/looper/pull/513))
+
+## [2.13.85] - 2026-10-24
+
+### Changed
+
+- **Project knowledge and lesson drafts go through v1.** Listing a project's reference documents, adding, reading, updating and deleting one, and listing, confirming and discarding lesson drafts are the `project_knowledge` operations `list`, `get`, `drafts` (risk `read`), `add`, `update`, `confirm_draft` (risk `write`), `delete` and `discard_draft` (risk `high`), as `POST /api/v1/project_knowledge/<action>`. Their result schemas are published in the OpenAPI document. The two destructive operations remove only the selected item, and a client token needs a session confirmation first. Manager prompts and tools are unchanged. ([#534](https://github.com/foolzzz/looper/pull/534))
+
+### Removed
+
+- **The eight `/api/projects/<id>/knowledge` routes** (`GET` and `POST` on the collection, `GET`, `PUT` and `DELETE` on a document, `GET` on `drafts`, `POST` on a draft's `confirm`, `DELETE` on a draft). Use the `project_knowledge` operations. ([#534](https://github.com/foolzzz/looper/pull/534))
+
 ## [2.13.84] - 2026-10-24
 
 ### Changed

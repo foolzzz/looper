@@ -148,7 +148,7 @@ def test_route_credentials(tmp_path: Path, transport: str, line: str, credential
 def test_upload_is_refused_before_reading_the_body(tmp_path: Path, transport: str) -> None:
     async def run() -> None:
         async with _login_server(tmp_path, transport) as server:
-            status, _, _ = await _send(server, "POST /api/config/imports", {"Content-Length": "1000000"})
+            status, _, _ = await _send(server, "POST /api/v1/config/import_upload", {"Content-Length": "1000000"})
             assert status == 401
 
     asyncio.run(run())

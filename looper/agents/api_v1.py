@@ -142,12 +142,13 @@ _LISTED = {"task_id": _STR, "name": _STR, "status": _STR, "group": _STR, "projec
 _TASK_ID_ONLY = {"task_id": _STR}
 _GATE_ANSWER = {"task_id": _STR, "gate": _OBJ, "message": _OBJ, "delivered": _STR}
 _PLAN = _object({
-    "applied": _BOOL, "counts": _OBJ,
-    "changes": _array(_object({"section": _STR, "key": _STR, "action": _STR,
+    "applied": _BOOL, "counts": {"type": "object", "additionalProperties":
+        _object(dict.fromkeys(("added", "changed", "unchanged", "skipped"), _INT), closed=True)},
+    "changes": _array(_object({"section": _STR, "key": _STR, "action": {"type": "string", "enum": ["added", "changed", "skipped"]},
                                "fields": _array(_STR), "reason": _STR, "code": _STR},
                               ["section", "key", "action"])),
     "need_secret": _array(_object({"section": _STR, "key": _STR, "names": _array(_STR),
-                                   "target": _object({"kind": _STR, "id": _STR})},
+                                   "target": _object({"kind": {"type": "string", "enum": ["provider", "mcp", "channel"]}, "id": _STR})},
                                   ["section", "key", "names"])),
     "notes": _array(_STR)})
 
@@ -296,9 +297,6 @@ ONLINE_OPERATIONS: tuple[Operation, ...] = (
     _hand("config.import_preview", "POST", "/config/import_preview",
           "Stage a configuration document and preview its import without writing configuration.",
           _object({"document": _OBJ}, closed=True), hand=False),
-    _hand("config.import_cancel", "POST", "/config/import_cancel",
-          "Cancel this caller's staged configuration import and remove its file.",
-          _object({"import_id": {"type": "string", "minLength": 1}}, closed=True), hand=False),
     Operation("config.import_apply", "POST", f"{PREFIX}/config/import_apply", "Apply a staged configuration import.",
               "Apply a staged configuration import. Client tokens require confirmation in the same session; operators execute once.",
               _object({"import_id": {"type": "string", "minLength": 1}}, closed=True),

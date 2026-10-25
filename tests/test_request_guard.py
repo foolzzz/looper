@@ -104,7 +104,7 @@ def test_a_body_over_the_cap_is_refused_before_it_is_read() -> None:
             "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n")
     (over, refusal), (at_cap, _) = _serve(
         # Only the headers: the answer comes without the server waiting for the body.
-        "POST /api/projects/proj-0/knowledge HTTP/1.1\r\n" + head.format(REQUEST_BODY_MAX_BYTES + 1),
+        "POST /api/v1/project_knowledge/add HTTP/1.1\r\n" + head.format(REQUEST_BODY_MAX_BYTES + 1),
         "POST /api/nothing-here HTTP/1.1\r\n" + head.format(REQUEST_BODY_MAX_BYTES) + "x" * REQUEST_BODY_MAX_BYTES,
     )
     assert over.startswith("HTTP/1.1 413")
