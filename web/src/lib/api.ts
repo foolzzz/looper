@@ -1203,22 +1203,15 @@ export interface SchedulerSettings {
 export type SchedulerSettingsUpdate = Partial<Record<keyof SchedulerSettings, number | null>>;
 
 export async function fetchSchedulerSettings(): Promise<SchedulerSettings> {
-  return scheduleCall<SchedulerSettings>("GET", `${API_BASE}/scheduler-settings`, "scheduler settings");
+  const result = await callV1<SchedulerSettings>("/api/v1/scheduler_settings/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function updateSchedulerSettings(body: SchedulerSettingsUpdate): Promise<SchedulerSettings> {
-  return scheduleCall<SchedulerSettings>("PUT", `${API_BASE}/scheduler-settings`, "scheduler settings", body);
-}
-
-/** Send JSON (or nothing) to a schedule endpoint; a refusal throws the server's reason. */
-async function scheduleCall<T>(method: string, url: string, label: string, body?: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method,
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!res.ok) await failed(res, label);
-  return res.json();
+  const result = await callV1<SchedulerSettings>("/api/v1/scheduler_settings/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Every project's schedules, the disabled ones too, by project name and then name (the Schedules page). */
@@ -1961,12 +1954,16 @@ export interface WaitSettings {
 
 export type WaitSettingsUpdate = Partial<Record<keyof WaitSettings, number | null>>;
 
-export function getWaitSettings(): Promise<WaitSettings> {
-  return scheduleCall("GET", `${API_BASE}/wait-settings`, "wait settings");
+export async function getWaitSettings(): Promise<WaitSettings> {
+  const result = await callV1<WaitSettings>("/api/v1/wait_settings/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
-export function updateWaitSettings(body: WaitSettingsUpdate): Promise<WaitSettings> {
-  return scheduleCall("PUT", `${API_BASE}/wait-settings`, "wait settings", body);
+export async function updateWaitSettings(body: WaitSettingsUpdate): Promise<WaitSettings> {
+  const result = await callV1<WaitSettings>("/api/v1/wait_settings/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** One question a gate asks the user; code numbers them q1, q2, ... */
@@ -3833,9 +3830,9 @@ export interface VaultSettings {
 }
 
 export async function fetchVaultSettings(): Promise<VaultSettings> {
-  const res = await fetch(`${API_BASE}/knowledge-vault`);
-  if (!res.ok) await failed(res, "knowledge vault settings");
-  return res.json();
+  const result = await callV1<VaultSettings>("/api/v1/knowledge_vault/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 export async function updateVaultSettings(body: {
@@ -3843,13 +3840,9 @@ export async function updateVaultSettings(body: {
   writable?: string[];
   rules_file?: string | null;
 }): Promise<VaultSettings> {
-  const res = await fetch(`${API_BASE}/knowledge-vault`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) await failed(res, "save knowledge vault settings");
-  return res.json();
+  const result = await callV1<VaultSettings>("/api/v1/knowledge_vault/update", body);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
 }
 
 /** Follow one dashboard send by its correlation id; cancelling releases its reply queue. */

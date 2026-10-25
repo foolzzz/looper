@@ -28,7 +28,7 @@ from ..ops_config import OpsConfig
 from . import (
     api_v1, chat_settings, config_imports, config_transfer, gate_service, knowledge,
     operator_auth, overview, projects, request_guard, role_api,
-    schedules, self_check, vault, wait_service,
+    self_check,
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, resolve_chat_target
@@ -841,19 +841,6 @@ class AgentHTTPServer:
                 m.group(1), projects.json_object(body)))
         elif (m := self._RE_PROJECT.match(path)) and method == "DELETE":
             await self._answer(writer, HTTP_200, lambda: projects.delete_project(m.group(1)))
-        elif path == "/api/scheduler-settings" and method == "GET":
-            await self._answer(writer, HTTP_200, schedules.scheduler_settings)
-        elif path == "/api/scheduler-settings" and method == "PUT":
-            await self._answer(writer, HTTP_200,
-                               lambda: schedules.update_scheduler_settings(projects.json_object(body)))
-        elif path == "/api/wait-settings" and method == "GET":
-            await self._answer(writer, HTTP_200, wait_service.settings_view)
-        elif path == "/api/wait-settings" and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: wait_service.update_settings(projects.json_object(body)))
-        elif path == "/api/knowledge-vault" and method == "GET":
-            await self._answer(writer, HTTP_200, vault.settings_view)
-        elif path == "/api/knowledge-vault" and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: vault.update_settings(projects.json_object(body)))
         else:
             writer.write(_json_response(HTTP_404, {"error": "not found"}))
             await writer.drain()

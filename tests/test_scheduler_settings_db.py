@@ -44,7 +44,7 @@ def test_the_stored_minimum_interval_beats_the_deprecated_variable_which_beats_t
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
     async def test(env: ScheduleEnv) -> None:
-        view = await env.ok("GET", "/api/scheduler-settings")
+        view = await env.ok("POST", "/api/v1/scheduler_settings/get", {})
         assert view["min_interval_seconds"]["value"] == 300 and view["min_interval_seconds"]["source"] == "built-in"
         assert view["run_timeout_seconds"]["value"] is None and view["run_timeout_seconds"]["source"] == "built-in"
 
@@ -54,14 +54,14 @@ def test_the_stored_minimum_interval_beats_the_deprecated_variable_which_beats_t
             await scheduler_settings.load()
         warnings = [r.getMessage() for r in caplog.records if "deprecated" in r.getMessage()]
         assert len(warnings) == 1 and ENV in warnings[0] and "123" not in warnings[0], warnings
-        view = await env.ok("GET", "/api/scheduler-settings")
+        view = await env.ok("POST", "/api/v1/scheduler_settings/get", {})
         assert (view["min_interval_seconds"]["value"], view["min_interval_seconds"]["source"]) == (123, "env")
 
         # Saved in the database, the variable is ignored; going back to the built-in hands over to it again.
-        saved = await env.ok("PUT", "/api/scheduler-settings", {"min_interval_seconds": 60})
+        saved = await env.ok("POST", "/api/v1/scheduler_settings/update", {"min_interval_seconds": 60})
         assert (saved["min_interval_seconds"]["value"], saved["min_interval_seconds"]["source"]) == (60, "setting")
         assert scheduler_settings.min_interval_seconds(gated=False) == 60
-        reset = await env.ok("PUT", "/api/scheduler-settings", {"min_interval_seconds": None})
+        reset = await env.ok("POST", "/api/v1/scheduler_settings/update", {"min_interval_seconds": None})
         assert (reset["min_interval_seconds"]["value"], reset["min_interval_seconds"]["source"]) == (123, "env")
 
     run_scheduled(test, monkeypatch, tmp_path)
@@ -87,30 +87,26 @@ def test_a_variable_that_is_not_a_whole_number_refuses_the_start(monkeypatch: py
         with pytest.raises(ValueError, match=f"{ENV} must be a whole number of seconds from 1"):
             await scheduler_settings.load()
         # A stored value makes the variable moot.
-        await env.ok("PUT", "/api/scheduler-settings", {"min_interval_seconds": 90})
+        await env.ok("POST", "/api/v1/scheduler_settings/update", {"min_interval_seconds": 90})
         assert await scheduler_settings.load() == 90
 
     run_scheduled(test, monkeypatch, tmp_path)
 
 
-@pytest.mark.parametrize(("body", "error"), [
-    ({}, "give at least one of"),
-    ({"min_interval": 5}, "unknown setting 'min_interval'"),
-    ({"min_interval_seconds": 0}, "min_interval_seconds must be a whole number of seconds from 1"),
-    ({"min_interval_seconds": 1.5}, "min_interval_seconds must be a whole number"),
-    ({"min_interval_seconds": "60"}, "min_interval_seconds must be a whole number"),
-    ({"min_interval_seconds": True}, "min_interval_seconds must be a whole number"),
-    ({"run_timeout_seconds": 0}, "run_timeout_seconds must be a whole number of seconds from 1 to 2592000"),
-    ({"run_timeout_seconds": 2_592_001}, "from 1 to 2592000"),
-    ({"run_timeout_seconds": 60, "min_interval_seconds": -1}, "min_interval_seconds must be"),
+@pytest.mark.parametrize("body", [
+    {}, {"min_interval": 5}, {"min_interval_seconds": 0}, {"min_interval_seconds": 1.5},
+    {"min_interval_seconds": "60"}, {"min_interval_seconds": True}, {"run_timeout_seconds": 0},
+    {"run_timeout_seconds": 2_592_001}, {"run_timeout_seconds": 60, "min_interval_seconds": -1},
 ])
 def test_a_bad_scheduler_setting_is_refused_and_changes_nothing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: dict[str, Any], error: str,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: dict[str, Any],
 ) -> None:
     async def test(env: ScheduleEnv) -> None:
-        status, payload = await env.call("PUT", "/api/scheduler-settings", body)
-        assert status == 400 and error in payload["error"], payload
-        view = await env.ok("GET", "/api/scheduler-settings")
+        status, payload = await env.call("POST", "/api/v1/scheduler_settings/update", body)
+        assert status == 400 and payload["error"]["code"] == "invalid", payload
+        expected = "scheduler: give min_interval_seconds" if not body else "the request does not match the declared schema"
+        assert expected in payload["error"]["message"], payload
+        view = await env.ok("POST", "/api/v1/scheduler_settings/get", {})
         assert (view["min_interval_seconds"]["source"], view["run_timeout_seconds"]["source"]) == ("built-in",) * 2
 
     run_scheduled(test, monkeypatch, tmp_path)
@@ -123,7 +119,7 @@ def test_the_minimum_interval_setting_decides_which_rules_a_schedule_may_have(
         body = {"name": "often", "cron": "*/2 * * * *", "timezone": "UTC", "requirement": "Look."}
         status, payload = await env.call("POST", "/api/v1/schedule_admin/create", {"project_id": env.project_id, "fields": body})
         assert status == 400 and "fires 2 minutes apart" in payload["error"]["message"]
-        await env.ok("PUT", "/api/scheduler-settings", {"min_interval_seconds": 120})
+        await env.ok("POST", "/api/v1/scheduler_settings/update", {"min_interval_seconds": 120})
         await env.ok("POST", "/api/v1/schedule_admin/create", {"project_id": env.project_id, "fields": body})
         limits = (await env.ok("POST", "/api/v1/schedule_admin/project_list", {"project_id": env.project_id}))["limits"]
         assert (limits["min_interval_seconds"], limits["min_interval_gated_seconds"]) == (120, 60)
@@ -139,7 +135,7 @@ def test_a_schedule_follows_the_default_has_its_own_timeout_or_none(monkeypatch:
     async def test(env: ScheduleEnv) -> None:
         followed = await env.schedule()
         assert (followed["run_timeout_seconds"], followed["run_timeout_effective_seconds"]) == ("default", None)
-        await env.ok("PUT", "/api/scheduler-settings", {"run_timeout_seconds": 900})
+        await env.ok("POST", "/api/v1/scheduler_settings/update", {"run_timeout_seconds": 900})
         sid = followed["schedule_id"]
         view = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
         assert (view["run_timeout_seconds"], view["run_timeout_effective_seconds"]) == ("default", 900)
@@ -178,7 +174,7 @@ def test_a_bad_schedule_timeout_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_
 
 def test_a_run_keeps_the_timeout_it_started_with(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(env: ScheduleEnv) -> None:
-        await env.ok("PUT", "/api/scheduler-settings", {"run_timeout_seconds": 120})
+        await env.ok("POST", "/api/v1/scheduler_settings/update", {"run_timeout_seconds": 120})
         sid = (await env.enabled())["schedule_id"]  # follows the default
         await env.due(sid)
         await env.scheduler.tick()
@@ -188,7 +184,7 @@ def test_a_run_keeps_the_timeout_it_started_with(monkeypatch: pytest.MonkeyPatch
         await env.pool.execute("UPDATE tasks SET status = 'running' WHERE id = $1", run["task_id"])
 
         # Neither the default nor the schedule changing reaches the run in progress.
-        await env.ok("PUT", "/api/scheduler-settings", {"run_timeout_seconds": 3000})
+        await env.ok("POST", "/api/v1/scheduler_settings/update", {"run_timeout_seconds": 3000})
         await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"run_timeout_seconds": None}})
         env.clock.now += timedelta(seconds=119)
         await env.scheduler.tick()
@@ -275,7 +271,7 @@ def test_an_export_carries_the_scheduler_settings_and_each_schedules_timeout_cho
     async def test(env: ScheduleEnv) -> None:
         from looper.agents import config_transfer
 
-        await env.ok("PUT", "/api/scheduler-settings", {"min_interval_seconds": 60, "run_timeout_seconds": 600})
+        await env.ok("POST", "/api/v1/scheduler_settings/update", {"min_interval_seconds": 60, "run_timeout_seconds": 600})
         ids = {name: (await env.schedule(name=name, **fields))["schedule_id"] for name, fields in (
             ("follows", {}), ("numbered", {"run_timeout_seconds": 90}), ("unlimited", {"run_timeout_seconds": None}))}
         path = tmp_path / "config.json"
@@ -289,7 +285,7 @@ def test_an_export_carries_the_scheduler_settings_and_each_schedules_timeout_cho
             "follows": "default", "numbered": 90, "unlimited": None}
 
         # Changed here, the file puts both back; a setting left at the built-in is not carried.
-        await env.ok("PUT", "/api/scheduler-settings", {"min_interval_seconds": 200, "run_timeout_seconds": None})
+        await env.ok("POST", "/api/v1/scheduler_settings/update", {"min_interval_seconds": 200, "run_timeout_seconds": None})
         await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": ids['follows'], "fields": {"run_timeout_seconds": 5}})
         await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": ids['numbered'], "fields": {"run_timeout_seconds": "default"}})
         async with env.pool.acquire() as conn:
@@ -298,7 +294,7 @@ def test_an_export_carries_the_scheduler_settings_and_each_schedules_timeout_cho
         assert scheduler == {"min_interval_seconds": "changed", "run_timeout_seconds": "added"}
         async with env.pool.acquire() as conn:
             await config_transfer.run_import(conn, config_transfer.read_file(path), apply=True)
-        view = await env.ok("GET", "/api/scheduler-settings")
+        view = await env.ok("POST", "/api/v1/scheduler_settings/get", {})
         assert (view["min_interval_seconds"]["value"], view["run_timeout_seconds"]["value"]) == (200, 600)
         got = {s["name"]: s["run_timeout_seconds"] for s in (await env.ok("POST", "/api/v1/schedule_admin/list", {}))["schedules"]}
         assert got == {"follows": "default", "numbered": 90, "unlimited": None}
@@ -333,13 +329,13 @@ def test_the_manager_changes_the_scheduler_settings_after_the_user_confirms(
         assert asked["status"] == "needs_confirmation"
         assert "定时任务的最小间隔：300 秒（内置默认） → 60 秒" in asked["confirmation"]["summary"] \
             if "confirmation" in asked else True
-        assert (await _manager_ok("GET", "/api/scheduler-settings"))["min_interval_seconds"]["value"] == 300
+        assert (await _manager_ok("POST", "/api/v1/scheduler_settings/get", {}))["min_interval_seconds"]["value"] == 300
         done = await _confirm(chat, asked)
         assert done["status"] == "ok", done
         assert done["result"]["changes"] == [
             {"setting": "min_interval_seconds", "before": "300 秒（内置默认）", "after": "60 秒（设置）"},
             {"setting": "run_timeout_seconds", "before": "不限（内置默认）", "after": "1800 秒（设置）"}]
-        view = await _manager_ok("GET", "/api/scheduler-settings")
+        view = await _manager_ok("POST", "/api/v1/scheduler_settings/get", {})
         assert (view["min_interval_seconds"]["value"], view["run_timeout_seconds"]["value"]) == (60, 1800)
         assert await _trail(pool) == [("looper_settings", "read", "ok"), ("looper_settings", "write", "error"),
                                       ("looper_settings", "high", "needs_confirmation"),
@@ -406,16 +402,16 @@ def test_clearing_the_minimum_interval_is_refused_before_anything_changes_when_t
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     async def test(env: ScheduleEnv) -> None:
-        await env.ok("PUT", "/api/scheduler-settings", {"min_interval_seconds": 90})
+        await env.ok("POST", "/api/v1/scheduler_settings/update", {"min_interval_seconds": 90})
         monkeypatch.setenv(ENV, "soon")
-        status, payload = await env.call("PUT", "/api/scheduler-settings", {"min_interval_seconds": None})
-        assert status == 400 and ENV in payload["error"], payload
+        status, payload = await env.call("POST", "/api/v1/scheduler_settings/update", {"min_interval_seconds": None})
+        assert status == 400 and ENV in payload["error"]["message"], payload
         # The row itself, and what a restart would read, not only the cache.
         assert await env.pool.fetchval("SELECT value FROM system_settings WHERE key = $1",
                                        scheduler_settings.MIN_INTERVAL_KEY) == "90"
         monkeypatch.delenv(ENV)
         assert await scheduler_settings.load() == 90 and scheduler_settings._min_source == "setting"
-        view = await env.ok("GET", "/api/scheduler-settings")
+        view = await env.ok("POST", "/api/v1/scheduler_settings/get", {})
         assert (view["min_interval_seconds"]["value"], view["min_interval_seconds"]["source"]) == (90, "setting")
 
     run_scheduled(test, monkeypatch, tmp_path)
@@ -455,7 +451,7 @@ def test_a_launch_reads_the_default_timeout_without_a_second_pool_connection(
             return getattr(self.pool, name)
 
     async def test(env: ScheduleEnv) -> None:
-        await env.ok("PUT", "/api/scheduler-settings", {"run_timeout_seconds": 120})
+        await env.ok("POST", "/api/v1/scheduler_settings/update", {"run_timeout_seconds": 120})
         sid = (await env.enabled())["schedule_id"]  # follows the default
         guarded = GuardedPool(env.pool)
         monkeypatch.setattr(connection, "_pool", guarded)

@@ -998,9 +998,9 @@ def run(
             gh_diffs={pr: diff for task in tasks for pr, diff in task.gh_pr_diffs.items()},
         ) as api:
             if any(task.gh_pr_fix_files for task in tasks):
-                api.put("/api/wait-settings", {"min_check_seconds": 10})
+                api.post("/api/v1/wait_settings/update", {"min_check_seconds": 10})
             if vault_dir is not None:
-                api.put("/api/knowledge-vault", {"path": str(vault_dir), "writable": ["codex-mem"],
+                api.post("/api/v1/knowledge_vault/update", {"path": str(vault_dir), "writable": ["codex-mem"],
                                                   "rules_file": "codex-mem/AGENTS.md"})
             if register is not None:
                 agent = register_agent(api, register)["name"]

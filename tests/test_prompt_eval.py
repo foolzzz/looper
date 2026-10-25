@@ -854,7 +854,7 @@ def test_one_eval_vault_is_configured_before_the_suite_and_shared_by_its_cases(
 
     @contextmanager
     def server(**_: Any) -> Any:
-        yield SimpleNamespace(put=lambda path, body: configured.append(body) if path == "/api/knowledge-vault"
+        yield SimpleNamespace(post=lambda path, body: configured.append(body) if path == "/api/v1/knowledge_vault/update"
                               else pytest.fail(f"unexpected API call: {path}"))
 
     def run_task(_api: Any, task: EvalTask, _work: Path, *, vault_dir: Path | None, **_: Any) -> dict[str, Any]:

@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from looper.agents import projects, vault
+from looper.agents import api_v1, projects, vault
 from looper.agents.ops import Call, ErrorCode, OpError, Turn, check_arguments
 from looper.agents.ops import settings
 from looper.agents.ops.service import CONFIRM, ManagerOps, Platform
@@ -271,19 +271,21 @@ def test_the_global_settings_view_includes_the_vault_without_git(monkeypatch: py
 
 
 def test_the_vault_http_routes_use_the_settings_functions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The domain may already be loaded before services are replaced, as it is in a full test run.
+    api_v1.document()
     view = _view()
     monkeypatch.setattr(vault, "settings_view", AsyncMock(return_value=view))
     update = AsyncMock(return_value=view)
     monkeypatch.setattr(vault, "update_settings", update)
     server = _server(TaskRouter(runtime_root=tmp_path))
-    assert _call("GET", "/api/knowledge-vault", server=server) == (200, view)
-    assert _call("PUT", "/api/knowledge-vault", {"path": None}, server=server) == (200, view)
+    assert _call("POST", "/api/v1/knowledge_vault/get", {}, server=server) == (200, view)
+    assert _call("POST", "/api/v1/knowledge_vault/update", {"path": None}, server=server) == (200, view)
     update.assert_awaited_once_with({"path": None})
 
 
 def test_the_vault_http_route_requires_a_json_object(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     update = AsyncMock()
     monkeypatch.setattr(vault, "update_settings", update)
-    status, body = _call("PUT", "/api/knowledge-vault", [], server=_server(TaskRouter(runtime_root=tmp_path)))
+    status, body = _call("POST", "/api/v1/knowledge_vault/update", [], server=_server(TaskRouter(runtime_root=tmp_path)))
     assert status == 400 and body["error"]
     update.assert_not_awaited()

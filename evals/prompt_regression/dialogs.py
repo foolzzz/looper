@@ -1026,7 +1026,7 @@ def _schedule_stays_disabled(look: Look) -> str | None:
 
 
 def _run_timeout_default(look: Look) -> dict[str, Any]:
-    return look.api.get("/api/scheduler-settings")["run_timeout_seconds"]
+    return look.api.post("/api/v1/scheduler_settings/get", {})["result"]["run_timeout_seconds"]
 
 
 def _default_timeout_change_asked(look: Look) -> str | None:

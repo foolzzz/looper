@@ -77,7 +77,7 @@ class ScheduleEnv(SimpleNamespace):
             from tests.db_support import call_v1
             return await call_v1(server, path, body or {})
         raw = b"" if body is None else json.dumps(body).encode()
-        if path.startswith(("/api/v1/profiles/", "/api/v1/schedule_admin/", "/api/v1/ops/models/")):
+        if path.startswith(("/api/v1/profiles/", "/api/v1/schedule_admin/", "/api/v1/scheduler_settings/", "/api/v1/ops/models/")):
             from looper.agents.api_v1 import OPERATOR
             from looper.agents.ops.clients import ClientOps
             server._client_ops = ClientOps(SimpleNamespace())
@@ -86,7 +86,7 @@ class ScheduleEnv(SimpleNamespace):
             await server._route_api(method, path, query or {}, raw, writer)
         head, _, payload = writer.data.partition(b"\r\n\r\n")
         answer = json.loads(payload)
-        if path.startswith(("/api/v1/profiles/", "/api/v1/schedule_admin/", "/api/v1/ops/models/")) and answer.get("status") == "ok":
+        if path.startswith(("/api/v1/profiles/", "/api/v1/schedule_admin/", "/api/v1/scheduler_settings/", "/api/v1/ops/models/")) and answer.get("status") == "ok":
             answer = answer["result"]
         if path.startswith("/api/v1/profiles/") and "error" in answer:
             answer = {"error": answer["error"]["message"]}
