@@ -253,11 +253,6 @@ async def limits() -> dict[str, Any]:
     }
 
 
-async def scheduler_settings() -> dict[str, Any]:
-    """The scheduler's system settings with their effective values and sources (``scheduler_settings``)."""
-    return await scheduler_settings_module.settings_view()
-
-
 async def update_scheduler_settings(body: Mapping[str, Any]) -> dict[str, Any]:
     """Change the minimum interval and the default run timeout (a number, or null for the built-in); 400 for a bad
     value, with nothing changed."""

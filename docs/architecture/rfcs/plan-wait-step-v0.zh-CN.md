@@ -266,7 +266,7 @@ PLAN 的说明里，关卡说明之后多一段（`{command}` 只在 `wait_comma
 
 - `GET /api/tasks/:id` 多 `waits`：计划顺序，每项 `wait_view`：`step`、`step_id`、`state`、`outcome`、`topic`、`check`、`every_seconds`、`opened_at`、`due_at`、`deadline_at`、`next_check_at`、`last_checked_at`、`checks`、`last_result`、`last_output`、`last_error`、`resolution`、`notice`、`closed_at`、`depends_on`。
 - `POST /api/tasks/:id/waits/:step/resume`、`.../cancel`：404 没有这个任务或等待，409 等待不在 `waiting`（「wait w1 is timed_out: its Planner decides what happens next」）或任务已结束；成功返回 `wait_view`，并唤醒规划者。
-- `GET`、`PUT /api/wait-settings`：`{"max_wait_seconds", "min_check_seconds"}`，各带来源（`setting`、`built-in`）；`PUT` 校验范围和「最短间隔不大于最长等待」，400 时说明。
+- `POST /api/v1/wait_settings/get`（`{}`）、`update`：`{"max_wait_seconds", "min_check_seconds"}`，各带来源（`setting`、`built-in`）；update 校验范围和「最短间隔不大于最长等待」，400 时说明。
 
 ## 13. 数据模型
 

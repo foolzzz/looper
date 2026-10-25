@@ -25,20 +25,21 @@ describe("Settings → Scheduler", () => {
   beforeEach(() => {
     puts = [];
     vi.stubGlobal("fetch", vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
-      if (String(_url).endsWith("/wait-settings")) {
-        if (init?.method !== "PUT") return Response.json(waits());
-        const body = JSON.parse(String(init.body));
+      if (String(_url) === "/api/v1/wait_settings/get") return Response.json({ status: "ok", result: waits() });
+      if (String(_url) === "/api/v1/wait_settings/update") {
+        const body = JSON.parse(String(init?.body));
         puts.push(body);
-        if (body.min_check_seconds === 0) return Response.json({ error: "min_check_seconds must be at least 10" }, { status: 400 });
-        return Response.json(waits(body.max_wait_seconds ?? 604800, body.min_check_seconds ?? 300, "setting"));
+        if (body.min_check_seconds === 0) return Response.json({ status: "error", error: { code: "invalid", message: "min_check_seconds must be at least 10" } }, { status: 400 });
+        return Response.json({ status: "ok", result: waits(body.max_wait_seconds ?? 604800, body.min_check_seconds ?? 300, "setting") });
       }
-      if (init?.method === "PUT") {
-        const body = JSON.parse(String(init.body));
+      if (String(_url) === "/api/v1/scheduler_settings/update") {
+        const body = JSON.parse(String(init?.body));
         puts.push(body);
-        if (body.min_interval_seconds === 0) return Response.json({ error: "bad value" }, { status: 400 });
-        return Response.json(view(body.min_interval_seconds ?? 120, "setting"));
+        if (body.min_interval_seconds === 0) return Response.json({ status: "error", error: { code: "invalid", message: "bad value" } }, { status: 400 });
+        return Response.json({ status: "ok", result: view(body.min_interval_seconds ?? 120, "setting") });
       }
-      return Response.json(view(120, "env"));
+      if (String(_url) === "/api/v1/scheduler_settings/get") return Response.json({ status: "ok", result: view(120, "env") });
+      throw new Error(`Unexpected request: ${_url}`);
     }));
     container = document.createElement("div");
     document.body.append(container);

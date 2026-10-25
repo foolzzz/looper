@@ -130,7 +130,7 @@ def test_task_vault_closeout_is_once_and_preserves_its_result(tmp_path: Path, mo
     with fresh_database(str(DSN)) as (database_url, _):
         with running_server(database_url=database_url, runtime_root=runtime, bin_dir=bin_dir, home=home,
                             log_path=root / "serve.log") as api:
-            api.put("/api/knowledge-vault", {"path": str(vault), "writable": ["codex-mem"],
+            api.post("/api/v1/knowledge_vault/update", {"path": str(vault), "writable": ["codex-mem"],
                                              "rules_file": "codex-mem/AGENTS.md"})
             project = api.post("/api/projects", {"name": "build", "work_dir": str(work), "vault": mode,
                                                  "distill_lessons": "off", "agent_room": "off",

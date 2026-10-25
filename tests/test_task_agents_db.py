@@ -78,7 +78,7 @@ async def _call(method: str, path: str, body: Any = None, *, worker_pool: Any = 
 
         server._client_ops = ClientOps(SimpleNamespace())
         return await call_v1(server, path, body)
-    if path == "/api/v1/tasks/agents" or path.startswith(("/api/v1/provider_accounts/", "/api/v1/profiles/", "/api/v1/roles/", "/api/v1/agent_settings/")):
+    if path == "/api/v1/tasks/agents" or path.startswith(("/api/v1/provider_accounts/", "/api/v1/profiles/", "/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/scheduler_settings/")):
         server._client_ops = ClientOps(SimpleNamespace())
         await server._handle_v1(method, path, {}, {}, raw, writer, api_v1.OPERATOR)
     elif path.startswith("/api/v1/schedule_admin/"):
@@ -88,7 +88,7 @@ async def _call(method: str, path: str, body: Any = None, *, worker_pool: Any = 
         await server._route_api(method, path, {}, raw, writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
     answer = json.loads(payload)
-    if path == "/api/v1/tasks/agents" or path.startswith(("/api/v1/provider_accounts/", "/api/v1/profiles/", "/api/v1/roles/", "/api/v1/agent_settings/")):
+    if path == "/api/v1/tasks/agents" or path.startswith(("/api/v1/provider_accounts/", "/api/v1/profiles/", "/api/v1/roles/", "/api/v1/agent_settings/", "/api/v1/scheduler_settings/")):
         answer = answer["result"] if answer["status"] == "ok" else {"error": answer["error"]["message"]}
     if path.startswith("/api/v1/schedule_admin/") and answer.get("status") == "ok":
         answer = answer["result"]

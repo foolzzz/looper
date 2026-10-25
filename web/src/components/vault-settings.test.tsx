@@ -26,10 +26,12 @@ describe("Knowledge vault settings", () => {
 
   beforeEach(() => {
     settings = { ...EMPTY };
-    put = async () => Response.json(CONFIGURED);
+    put = async () => Response.json({ status: "ok", result: CONFIGURED });
     fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input) !== "/api/knowledge-vault") throw new Error(`Unexpected request: ${input}`);
-      return init?.method === "PUT" ? put(JSON.parse(String(init.body))) : Response.json(settings);
+      if (init?.method !== "POST") throw new Error(`Unexpected method: ${init?.method}`);
+      if (String(input) === "/api/v1/knowledge_vault/update") return put(JSON.parse(String(init.body)));
+      if (String(input) === "/api/v1/knowledge_vault/get") return Response.json({ status: "ok", result: settings });
+      throw new Error(`Unexpected request: ${input}`);
     });
     vi.stubGlobal("fetch", fetchMock);
     container = document.createElement("div");
@@ -62,14 +64,14 @@ describe("Knowledge vault settings", () => {
     });
   };
   const button = (label: string) => [...container.querySelectorAll("button")].find((node) => node.textContent === label)!;
-  const sent = () => fetchMock.mock.calls.find(([, init]) => init?.method === "PUT")![1] as RequestInit;
+  const sent = () => fetchMock.mock.calls.find(([input]) => String(input) === "/api/v1/knowledge_vault/update")![1] as RequestInit;
 
   it("shows loading until the request finishes", async () => {
     let finish!: (value: Response) => void;
     fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => { finish = resolve; }));
     await render();
     expect(container.textContent).toBe("Loading…");
-    await act(async () => finish(Response.json(EMPTY)));
+    await act(async () => finish(Response.json({ status: "ok", result: EMPTY })));
     expect(container.textContent).toContain("Not configured: agents have no vault.");
   });
 
@@ -110,7 +112,7 @@ describe("Knowledge vault settings", () => {
   });
 
   it("retries a failed load", async () => {
-    fetchMock.mockResolvedValueOnce(Response.json({ error: "Settings unavailable" }, { status: 503 }));
+    fetchMock.mockResolvedValueOnce(Response.json({ status: "error", error: { code: "unavailable", message: "Settings unavailable" } }, { status: 503 }));
     await render();
     expect(container.querySelector('[role="alert"]')?.textContent).toBe("Settings unavailable");
     await act(async () => button("Retry").click());
@@ -124,7 +126,7 @@ describe("Knowledge vault settings", () => {
     await edit("Writable folders", "codex-mem, notes,");
     await submit();
     expect(JSON.parse(String(sent().body))).toEqual({ path: "/srv/notes/", writable: ["codex-mem", "notes"], rules_file: null });
-    expect(sent().headers).toEqual({ "Content-Type": "application/json" });
+    expect(sent().headers).toMatchObject({ "Content-Type": "application/json" });
     expect(field("Vault folder").value).toBe(CONFIGURED.path);
     expect(field("Writable folders").value).toBe("codex-mem");
     expect(field("Rules file").value).toBe(CONFIGURED.rules_file);
@@ -141,7 +143,7 @@ describe("Knowledge vault settings", () => {
   });
 
   it("keeps the edited form and shows the server's 400 message", async () => {
-    put = async () => Response.json({ error: "path must be absolute" }, { status: 400 });
+    put = async () => Response.json({ status: "error", error: { code: "invalid", message: "path must be absolute" } }, { status: 400 });
     await render();
     await edit("Vault folder", "relative");
     await edit("Writable folders", "codex-mem, notes,");
@@ -155,7 +157,7 @@ describe("Knowledge vault settings", () => {
 
   it("turns off the vault with only path=null and clears the form", async () => {
     settings = CONFIGURED;
-    put = async () => Response.json(EMPTY);
+    put = async () => Response.json({ status: "ok", result: EMPTY });
     await render();
     await act(async () => button("Turn off").click());
     expect(JSON.parse(String(sent().body))).toEqual({ path: null });
@@ -174,7 +176,7 @@ describe("Knowledge vault settings", () => {
     await submit();
     expect(button("Saving…").disabled).toBe(true);
     expect(button("Turn off").disabled).toBe(true);
-    await act(async () => finish(Response.json(CONFIGURED)));
+    await act(async () => finish(Response.json({ status: "ok", result: CONFIGURED })));
     expect(button("Save").disabled).toBe(false);
     expect(button("Turn off").disabled).toBe(false);
   });
