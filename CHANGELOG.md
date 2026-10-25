@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.124] - 2026-10-25
+
+### Changed
+
+- **Development plan marks the insecure-context dashboard fix as done.** One entry in section 5.1 of the long-horizon agent context plan (`docs/plans/2026-10-13-long-horizon-agent-context.zh-CN.md`) is struck through and points to the fix. Documentation only; no code, schema or behavior changed. ([#643](https://github.com/foolzzz/looper/pull/643))
+
 ## [2.13.123] - 2026-10-25
 
 ### Fixed
