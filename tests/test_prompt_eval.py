@@ -3143,6 +3143,12 @@ def start_no_wait_look(monkeypatch: pytest.MonkeyPatch) -> Any:
         ("child", "start", "error"), (None, "start", "ok"), (None, "Bash", None),
     ], "the Manager ran ['Bash'] after starting the task", id="child-failure-before-parent"),
     pytest.param([
+        ("child", "start", "ok"), (None, "start", "error"), (None, "Bash", None),
+    ], "looper_task_control start ran 0 times, not once", id="child-success-parent-conflict"),
+    pytest.param([
+        ("child", "start", "ok"), (None, "start", "ok"),
+    ], None, id="child-success-parent-success"),
+    pytest.param([
         (None, "start", "ok"), ("child", "start", "error"), (None, "Bash", None),
     ], "the Manager ran ['Bash'] after starting the task", id="child-failure-after-parent"),
     pytest.param([
@@ -3201,4 +3207,6 @@ def test_start_no_wait_matches_child_and_parent_audit_outcomes(
         event["event"]["parent_tool_use_id"] = parent
         events.append(event)
 
-    assert dialogs._started_without_waiting(start_no_wait_look(events, trail)) == problem
+    look = dataclasses.replace(start_no_wait_look(events, trail), fake=False,
+                               reply="任务已启动，后续问题会转给你确认。")
+    assert dialogs._started_without_waiting(look) == problem

@@ -1212,13 +1212,13 @@ def _not_relayed(look: Look) -> str | None:
     return None
 
 
-def _native_calls_after_start(look: Look) -> list[str]:
-    """The native tools (Bash, ...) the newest Manager run called after its start call; the action trail holds
-    only the MCP tools, so a ``sleep`` would not show there."""
+def _manager_starts_and_native_calls(look: Look) -> tuple[list[dict[str, Any]], list[str]]:
+    """Successful parent starts and native tools after the first in the newest Manager run.
+    The action trail holds only the MCP tools, so a ``sleep`` would not show there."""
     records = look.api.post("/api/v1/runs/list", {"agent_id": "manager", "limit": 500})["result"]["records"]
     runs = [r for r in records if not (r.get("metadata") or {}).get("autonomous")]
     if not runs:
-        return []
+        return [], []
     called: list[tuple[str, dict[str, Any], bool]] = []
     for row in _all_events(look.api, max(runs, key=lambda r: r["id"])["id"]):
         event = row["event"]
@@ -1231,26 +1231,27 @@ def _native_calls_after_start(look: Look) -> list[str]:
     starts = [i for i, (name, args, _) in enumerate(called)
               if name == "looper_task_control" and args.get("action") == "start"]
     if not starts:
-        return []
+        return [], []
     actions = [a for a in look.turn_actions() if a["tool"] == "looper_task_control"
                and a["arguments"].get("action") == "start"]
     # The audit has no stream call ids and includes child calls: pair all starts in that same scope,
-    # then anchor only on the Manager's first successful start. A refused retry must not move it.
-    first = next((i for i, action in zip(starts, actions) if called[i][2] and action["status"] == "ok"), None)
-    if first is None:
-        return []
-    return [name for name, _, parent in called[first + 1:] if parent and not name.startswith("looper_")]
+    # then count and anchor only on the Manager's successful starts. A refused retry must not move the anchor.
+    successful = [(i, action) for i, action in zip(starts, actions) if called[i][2] and action["status"] == "ok"]
+    if not successful:
+        return [], []
+    first = successful[0][0]
+    return ([action for _, action in successful],
+            [name for name, _, parent in called[first + 1:] if parent and not name.startswith("looper_")])
 
 
 def _started_without_waiting(look: Look) -> str | None:
     """Started once; no waiting after it: no shell (a sleep) and at most one status read."""
     calls = look.actions()
-    starts = [a for a in calls if a["tool"] == "looper_task_control" and a["arguments"].get("action") == "start"
-              and a["status"] == "ok"]
+    starts, native = _manager_starts_and_native_calls(look)
     if len(starts) != 1:
         return f"looper_task_control start ran {len(starts)} times, not once"
     after = calls[calls.index(starts[0]) + 1:]
-    shell = [a["tool"] for a in after if not a["tool"].startswith("looper_")] + _native_calls_after_start(look)
+    shell = [a["tool"] for a in after if not a["tool"].startswith("looper_")] + native
     if shell:
         return f"the Manager ran {shell} after starting the task"
     if len(after) > 1:
