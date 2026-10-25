@@ -71,7 +71,7 @@ def dashboard(dashboard_url):
                 result = {"messages": [{"message_id": f"{sid}-old", "role": "user",
                           "content": f"History of {sid}", "created_at": "2026-01-01T00:00:00Z"}] if sid in {r["session_id"] for r in rows} else []}
             elif path == "operator_chat/turn":
-                result = {"turn": None}
+                result = {"turn": state.get("turn") if body["session_id"] == "session-b" else None}
             elif path == "roles/list":
                 result = {"configs": []}
             elif path == "project_admin/list":
@@ -157,6 +157,54 @@ def test_returning_to_same_thread_keeps_send_and_queue(dashboard, stage, via_tas
     expect(page.get_by_text("Current B reply", exact=True)).to_be_visible()
     sends = [body for path, body in state["calls"] if path == "operator_chat/send"]
     assert [body["session_id"] for body in sends] == ["session-b", "session-b"]
+
+
+@pytest.mark.parametrize("finished_while_away", [False, True])
+def test_return_from_readonly_resyncs_turn_and_recovers_queue(dashboard, finished_while_away):
+    from playwright.sync_api import expect
+
+    page, base, state = dashboard
+    state["hold_reply"] = True
+    page.goto(f"{base}/#chat?conversation=session-b")
+    page.get_by_role("textbox").fill("Synthetic original turn")
+    page.get_by_role("textbox").press("Enter")
+    expect(page.get_by_text("Synthetic original turn", exact=True)).to_be_visible()
+    pending = next(r for r in state["held"] if r.request.url.endswith("/send"))
+    with page.expect_request(lambda r: r.url.endswith("/operator_chat/reply_events")):
+        pending.fulfill(json={"status": "ok", "result": {"correlation_id": "reply-a"}})
+    original = next(body for path, body in state["calls"] if path == "operator_chat/send")
+    state["turn"] = {"message_id": "envelope-a", "client_message_id": original["message_id"],
+                     "channel": "web", "started_at": "2026-01-01T00:00:00Z", "state": "running",
+                     "method": None, "stopping": False, "can_interrupt": True}
+    page.get_by_role("textbox").fill("Synthetic queued followup")
+    page.get_by_role("textbox").press("Enter")
+    expect(page.get_by_text("Queued · sent when the reply ends", exact=True)).to_be_visible()
+    page.locator('aside button[title="lark:known"]').click()
+    expect(page.locator('[data-viewing="lark:known"]')).to_be_visible()
+    expect(page.get_by_role("textbox")).to_have_count(0)
+    assert page.evaluate("localStorage.getItem('looper-chat-session-id')") == "session-b"
+    if finished_while_away:
+        state["turn"] = None
+    page.locator('aside button[title="session-b"]').click()
+    expect(page.get_by_role("textbox")).to_be_visible()
+    if not finished_while_away:
+        expect(page.get_by_role("button", name="Queue message", exact=True)).to_be_visible()
+        state["turn"] = None
+        page.clock.run_for(3100)
+    # A cancelled stream has no final outcome: the existing recovery contract returns the queue to the draft.
+    expect(page.get_by_role("textbox")).to_have_value("Synthetic queued followup")
+    expect(page.get_by_role("button", name="Remove queued message")).to_have_count(0)
+    assert page.evaluate("sessionStorage.getItem('looper-chat-staged-session-b')") is None
+    assert sum(path == "operator_chat/send" for path, _ in state["calls"]) == 1
+    assert any(url.endswith("/operator_chat/reply_events") for url in state["cancelled"])
+    state["hold"] = state["hold_reply"] = False
+    page.get_by_role("textbox").press("Enter")
+    expect(page.get_by_text("Current B reply", exact=True)).to_be_visible()
+    sends = [body for path, body in state["calls"] if path == "operator_chat/send"]
+    assert [body["session_id"] for body in sends] == ["session-b", "session-b"]
+    shot = ROOT / "output/playwright/chat-readonly-queue-recovery.png"
+    shot.parent.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(shot))
 
 
 def test_back_during_deferred_send_keeps_the_restored_conversation(dashboard):

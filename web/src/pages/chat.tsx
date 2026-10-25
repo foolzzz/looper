@@ -846,8 +846,8 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     poll.timer = setTimeout(tick, TURN_POLL_MS);
   };
 
-  // On mount, a thread change and a return to the tab: is the Manager still answering this thread?
-  const syncTurn = async (sid: string) => {
+  // On mount, a thread change and a return to the tab or web conversation: is the Manager still answering it?
+  const syncTurn = async (sid: string, isCurrent: () => boolean) => {
     if (sendingRef.current) return;
     if (target.kind !== "manager") {
       pullStagedToDraft();
@@ -860,7 +860,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     } catch {
       return;
     }
-    if (sid !== sessionIdRef.current || managerId !== currentRef.current.managerId || sendingRef.current) return;
+    if (!isCurrent() || sid !== sessionIdRef.current || managerId !== currentRef.current.managerId || sendingRef.current) return;
     if (turn) {
       readInterrupt(turn);
       followTurn(sid, turn.client_message_id ? [turn.message_id, turn.client_message_id] : [turn.message_id]);
@@ -873,6 +873,8 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const syncTurnRef = useRef(syncTurn);
   syncTurnRef.current = syncTurn;
 
+  // Opening a read-only or unresolved conversation leaves sessionId unchanged, but cancels this thread's stream.
+  const threadOpen = !viewing && !conversationUnread && (!wantConversation || wantConversation === sessionId);
   useEffect(() => {
     stagedRef.current = readStaged(sessionId);
     setStagedState(stagedRef.current);
@@ -880,14 +882,19 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     stopPoll();
     setServerTurn(null);
     // A Manager's turn is followed only on a thread confirmed as its own.
-    if (!threadOwned) return;
-    void syncTurnRef.current(sessionId);
+    if (!threadOwned || !threadOpen) return;
+    let alive = true;
+    const isCurrent = () => alive;
+    void syncTurnRef.current(sessionId, isCurrent);
     const onVisible = () => {
-      if (document.visibilityState === "visible") void syncTurnRef.current(sessionId);
+      if (document.visibilityState === "visible") void syncTurnRef.current(sessionId, isCurrent);
     };
     document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [sessionId, target.kind, target.id, threadOwned]);
+    return () => {
+      alive = false;
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [sessionId, target.kind, target.id, threadOwned, threadOpen]);
 
   const serverTurnHere = serverTurn && serverTurn.sid === sessionId ? serverTurn : null;
   const replying = sending || serverTurnHere !== null;
