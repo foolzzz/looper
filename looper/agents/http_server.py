@@ -28,7 +28,7 @@ from ..db.tasks import TaskGroup
 from ..ops_config import OpsConfig
 from . import (
     api_v1, chat_settings, config_imports, config_transfer, gate_service, knowledge,
-    operator_auth, overview, profile_registry, projects, request_guard, role_api,
+    operator_auth, overview, projects, request_guard, role_api,
     schedules, self_check, vault, wait_service,
 )
 from .broadcast import Broadcaster
@@ -827,8 +827,6 @@ class AgentHTTPServer:
     _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
     _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
-    _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
-    _RE_PROVIDER_LOGIN_PROBLEM = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)/login-problem$")
 
     async def _route_api(
         self,
@@ -852,18 +850,6 @@ class AgentHTTPServer:
                 m.group(1), projects.json_object(body)))
         elif (m := self._RE_PROJECT.match(path)) and method == "DELETE":
             await self._answer(writer, HTTP_200, lambda: projects.delete_project(m.group(1)))
-        elif path == "/api/providers" and method == "GET":
-            await self._handle_registry(writer, HTTP_200, profile_registry.list_providers)
-        elif path == "/api/providers" and method == "POST":
-            await self._handle_registry(writer, HTTP_201, lambda: profile_registry.create_provider(
-                projects.json_object(body)))
-        elif (m := self._RE_PROVIDER.match(path)) and method == "PUT":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.update_provider(
-                m.group(1), projects.json_object(body)))
-        elif (m := self._RE_PROVIDER.match(path)) and method == "DELETE":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.delete_provider(m.group(1)))
-        elif (m := self._RE_PROVIDER_LOGIN_PROBLEM.match(path)) and method == "DELETE":
-            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.clear_login_problem(m.group(1)))
         elif path == "/api/scheduler-settings" and method == "GET":
             await self._answer(writer, HTTP_200, schedules.scheduler_settings)
         elif path == "/api/scheduler-settings" and method == "PUT":
@@ -1275,25 +1261,6 @@ class AgentHTTPServer:
     async def _recheck_concurrency(self) -> None:
         """Start the runs that wait for room a raised limit now gives; a lowered limit stops nothing."""
         await recheck_limits(self._worker_pool)
-
-    async def _handle_registry(
-        self, writer: asyncio.StreamWriter, status: str, request: Callable[[], Awaitable[Any]],
-    ) -> None:
-        """Answer with ``request()``'s result; a refused request is 400, an unknown runtime, provider or Agent
-        Profile 404, and a name in use or a row still referred to 409."""
-        try:
-            result = await request()
-        except (profile_registry.RegistryError, projects.RequestError) as exc:
-            status, result = getattr(exc, "status", HTTP_400), {"error": str(exc)}
-        except profile_registry.RegistryNotFound as exc:
-            status, result = HTTP_404, {"error": str(exc)}
-        except profile_registry.RegistryConflict as exc:
-            status, result = HTTP_409, {"error": str(exc)}
-        except Exception:
-            logger.exception("registry request failed")
-            status, result = HTTP_500, {"error": "the request failed; see the server log"}
-        writer.write(_json_response(status, _serialize(result)))
-        await writer.drain()
 
     # --- Configuration export ---
 

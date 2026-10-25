@@ -364,8 +364,8 @@ def test_v3_preview_merge_apply_and_readback_share_the_core_contract(
             profile = next(p for p in registry["profiles"] if p["name"] == "imported")
             assert profile["model_id"] == model["model_id"]
             assert model["protocol"] == "anthropic-messages" and model["input_usd_per_mtok"] == 2
-            status, saved = await _request(port, "PUT", f"/api/providers/{need[0]['target']['id']}",
-                                           json.dumps({"api_key": "sk-test-import-key"}).encode())
+            status, saved = await _request(port, "POST", "/api/v1/provider_accounts/update",
+                                           json.dumps({"provider_id": need[0]["target"]["id"], "fields": {"api_key": "sk-test-import-key"}}).encode())
             assert status == 200, saved
             status, exported = await _request(port, "POST", "/api/v1/config/export")
             exported = exported["document"]

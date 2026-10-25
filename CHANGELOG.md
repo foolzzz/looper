@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.89] - 2026-10-24
+
+### Changed
+
+- **Provider account management in the dashboard goes through operator-only v1.** Listing, creating, editing and deleting a provider account and "Use the login again" call the new `provider_accounts.list`, `.create`, `.update`, `.delete` and `.clear_login_problem` operations (`POST /api/v1/provider_accounts/...`), which use the same registry checks as before. They refuse API clients, keep API keys out of the audit trail and answer credential errors without request details. The compact `providers.list`, `providers.register` and `providers.update` results are typed in the OpenAPI document. Manager prompts and tools are unchanged. ([#543](https://github.com/foolzzz/looper/pull/543))
+
+### Removed
+
+- **The legacy provider routes:** `GET` and `POST /api/providers`, `PUT` and `DELETE /api/providers/<id>` and `DELETE /api/providers/<id>/login-problem`. Use the `provider_accounts` operations. ([#543](https://github.com/foolzzz/looper/pull/543))
+
 ## [2.13.88] - 2026-10-24
 
 ### Changed

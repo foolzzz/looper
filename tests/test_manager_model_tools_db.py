@@ -92,7 +92,7 @@ def test_accounts_register_list_and_http_readback(monkeypatch, tmp_path):
         assert provider["vendor_type"] == "deepseek" and provider["api_key"].startswith("missing")
         assert "Settings → LLM Providers" in created["note"]
         assert (await db.get_provider(provider["provider_id"]))["api_key_set"] is False
-        status, readback = await _call("GET", "/api/providers")
+        status, readback = await _call("POST", "/api/v1/provider_accounts/list", {})
         assert status == 200
         saved = next(p for p in readback["providers"] if p["provider_id"] == provider["provider_id"])
         assert saved["model_count"] == 0 and saved["endpoints"] == provider["endpoints"]
