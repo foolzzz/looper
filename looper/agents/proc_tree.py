@@ -459,8 +459,9 @@ class TurnTree:
                 return
             table = await asyncio.to_thread(_snapshot)
             skip = skip | await self._reused(table)
+            # A leader's exit does not invalidate an observed member's own identity.
             self._groups = {pid: pgid for pid, pgid in self._groups.items()
-                            if pid in table and pid not in skip and pgid not in skip}
+                            if pid in table and pid not in skip}
             self._merge(_tree(self.process, table, self._groups, skip=skip))
             unread = [pid for pid, started in self.seen.items() if started is None and pid not in skip]
             if unread:

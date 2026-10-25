@@ -847,6 +847,45 @@ def test_turn_tree_checks_identity_before_expanding_an_observed_tree(
     assert signalled == ({101, 102, 103, 104} if lookup == "stable" else {102})
 
 
+def test_turn_tree_follows_an_observed_member_after_its_group_leader_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Agent:
+        pid = 101
+        returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+    table = {101: (1, 101), 102: (101, 102), 103: (102, 102)}
+    starts = {101: "agent", 102: "leader", 103: "member"}
+    signalled: set[int] = set()
+    monkeypatch.setattr(proc_tree, "_snapshot", lambda: dict(table))
+    monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {pid: starts[pid] for pid in pids if pid in starts})
+    monkeypatch.setattr(proc_tree, "_start_time", lambda pid: starts.get(pid))
+    monkeypatch.setattr(proc_tree.os, "kill", lambda pid, sig: signalled.add(pid))
+    monkeypatch.setattr(proc_tree.os, "killpg", lambda group, sig: signalled.update(
+        pid for pid, (_, pgid) in table.items() if pgid == group))
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0)
+
+    async def _run() -> None:
+        tree = proc_tree.track(Agent())
+        # The non-root leader exits; its observed member survives with the same identity and group.
+        table.pop(102)
+        starts.pop(102)
+        table[103] = (1, 102)
+        await tree.refresh(force=True)
+        # A later child in its own group must still be discovered through that member.
+        table[104] = (103, 104)
+        starts[104] = "new child"
+        await tree.refresh(force=True)
+        assert tree.seen.get(104) == "new child"
+        await tree.end()
+
+    asyncio.run(_run())
+    assert signalled == {101, 103, 104}
+
+
 def test_turn_tree_forgets_groups_missing_from_a_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
     process = proc_tree._Orphan(101)
     table = {101: (1, 101), 102: (101, 102)}
