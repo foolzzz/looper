@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.111] - 2026-10-25
+
+### Fixed
+
+- **A Telegram channel that fails while starting no longer leaks its resources.** If `initialize`, `start` or starting the poller raised (or was cancelled), `start()` now calls `stop()` before re-raising. The adapter builds and owns its two HTTP clients (one for polling, one for other calls, with the pool sizes `ApplicationBuilder` uses by default), because `Application.shutdown` does nothing when `initialize` failed. `stop()` now cancels the outbound task, stops the reaction tracker, stops the updater and application only if they are running, shuts down the application and both clients, and then clears its handles. A failure in one cleanup step is logged and does not skip the later ones. Channel adapter behavior only; no route, stored data, Manager tool declaration or prompt changed. ([#606](https://github.com/foolzzz/looper/pull/606))
+
 ## [2.13.110] - 2026-10-25
 
 ### Fixed
