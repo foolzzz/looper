@@ -792,6 +792,7 @@ class TestResidentClaude:
     ])
     def test_a_turn_ends_its_record_however_the_turn_ends(
         self, planner_claude: Any, agent_db: Any, ends: str, status: str, cost: float | None,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A turn whose Claude is killed mid-turn ends ``failed``; one its task's stop cuts off mid-turn ends
         ``interrupted``; one stopped after Claude answered, while the Planner saves its session, is recorded
@@ -800,6 +801,23 @@ class TestResidentClaude:
 
         claude = planner_claude(plan(step("s1")) if ends == "stopped_while_saving" else "<hang>")
         saving = asyncio.Event()
+        output_waiting, release_output = asyncio.Event(), asyncio.Event()
+        if ends == "stopped_mid_turn":
+            from looper.agents.claude_cli import _Output
+
+            dispatch, drop_turn = _Output._dispatch, _Output.drop_turn
+
+            async def delayed_dispatch(output: Any, event: dict[str, Any]) -> None:
+                output_waiting.set()
+                await release_output.wait()
+                await dispatch(output, event)
+
+            def release_dropped_output(output: Any) -> None:
+                drop_turn(output)
+                release_output.set()
+
+            monkeypatch.setattr(_Output, "_dispatch", delayed_dispatch)
+            monkeypatch.setattr(_Output, "drop_turn", release_dropped_output)
         save = agent_db.save_session.side_effect
 
         async def save_session(agent_id: str, session_id: Any, totals: dict[str, Any], **fields: Any) -> None:
@@ -817,13 +835,14 @@ class TestResidentClaude:
                 os.kill(claude.pids()[0], signal.SIGKILL)
                 await h.until(lambda: agent_db.finish_record.await_count)
             elif ends == "stopped_mid_turn":
-                await h.until(lambda: claude.turns())  # then the task stops
+                await h.until(output_waiting.is_set)  # stop before the reader handles this turn's queued output
             else:
                 await h.until(saving.is_set)  # then the task stops
 
         drive(claude, lambda envelope: None, scenario)
         finishes = agent_db.finish_record.await_args_list
         assert agent_db.start_record.await_count == len(finishes)
+        assert len(finishes) == 1
         assert (finishes[0].kwargs["status"], finishes[0].kwargs["cost_usd"]) == (status, cost)
         if ends == "claude_killed":
             assert "exit code -9" in finishes[0].kwargs["error"]

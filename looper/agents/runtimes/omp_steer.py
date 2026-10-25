@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from ..claude_cli import iter_lines
+from .channel import DeliveryAttempt, DeliveryResult, delivery_attempt
 from .omp import OmpStream, provider_error, safe_error
 
 logger = logging.getLogger(__name__)
@@ -156,20 +157,24 @@ class OmpChannel:
         if self._ended or self._result_seen or self._process.stdin.is_closing():
             raise RuntimeError("the OMP run has ended")
 
-    async def send(self, text: str, *, uuid: str | None = None) -> None:
-        try:
-            response = await asyncio.wait_for(self._steer(text), self.send_timeout)
-        except TimeoutError:
-            raise RuntimeError("OMP did not accept the steer in time") from None
-        if not response.get("success"):
-            raise RuntimeError(response.get("error") or "OMP rejected the steer")
+    async def send(self, text: str, *, uuid: str | None = None) -> DeliveryResult:
+        async with delivery_attempt(self.send_timeout) as attempt:
+            response = await self._steer(text, attempt)
+            if response.get("command") != "steer":
+                return DeliveryResult.UNKNOWN
+            if response.get("success") is False:
+                raise RuntimeError(response.get("error") or "OMP rejected the steer")
+            if response.get("success") is not True:
+                return DeliveryResult.UNKNOWN
+        return attempt.result
 
-    async def _steer(self, text: str) -> dict[str, Any]:
+    async def _steer(self, text: str, attempt: DeliveryAttempt) -> dict[str, Any]:
         """Lock, write and acknowledgement under the caller's one deadline."""
         assert self._process.stdin is not None
         async with self._lock:
             if self._ended or self._result_seen or self._process.stdin.is_closing():
                 raise RuntimeError("the OMP run has ended")
+            attempt.writing = True
             request_id, future = await self._write("steer", message=text)
         try:
             return await future

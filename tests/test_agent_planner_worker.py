@@ -27,6 +27,7 @@ from looper.agents.message import (
     planner_address,
     worker_address,
 )
+from looper.agents.runtimes.channel import DeliveryResult
 from looper.agents.agent_settings import DEFAULT_HARNESS_PROMPT
 from looper.agents.system_prompt import REVIEW_CONTRACT, WORK_CONTRACT
 from looper.agents.tiers.planner import PlannerAgent, PlanStep, TaskPlan
@@ -1242,7 +1243,7 @@ class TestWorkerInput:
                 await release.wait()
                 await take_slot(wp)
 
-            async def capture_input(worker_id: str, text: str) -> bool:
+            async def capture_input(worker_id: str, text: str) -> DeliveryResult:
                 input_attempted.set()
                 return await send_input(worker_id, text)
 
@@ -1290,9 +1291,14 @@ class TestWorkerInput:
 
         asyncio.run(asyncio.wait_for(run(), 25))
 
-    @pytest.mark.parametrize("startup", ["ready", "failed", "cancelled"])
+    @pytest.mark.parametrize(("startup", "expected"), [
+        ("ready", DeliveryResult.ACCEPTED),
+        ("failed", DeliveryResult.REJECTED),
+        ("cancelled", DeliveryResult.REJECTED),
+    ])
     def test_input_during_startup_waits_for_the_channel(self, agent_db: Any, tmp_path: Path,
-                                                      monkeypatch: pytest.MonkeyPatch, startup: str) -> None:
+                                                      monkeypatch: pytest.MonkeyPatch, startup: str,
+                                                      expected: DeliveryResult) -> None:
         async def run() -> None:
             bus = MessageBus(runtime_root=tmp_path)
             pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(tmp_path, _LISTENING_CLAUDE)),
@@ -1308,7 +1314,7 @@ class TestWorkerInput:
                 await release.wait()
                 await take_slot(wp)
 
-            async def capture_input(worker_id: str, text: str) -> bool:
+            async def capture_input(worker_id: str, text: str) -> DeliveryResult:
                 input_attempted.set()
                 return await send_input(worker_id, text)
 
@@ -1331,7 +1337,7 @@ class TestWorkerInput:
                 else:
                     release.set()
                 answer = await request
-                assert answer is (startup == "ready")
+                assert answer is expected
                 if startup != "cancelled":
                     queue = bus.get_queue("planner-t1")
                     while True:

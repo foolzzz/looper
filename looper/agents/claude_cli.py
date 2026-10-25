@@ -596,7 +596,7 @@ class _Output:
         self._own_open = False  # a turn of Claude's own is running
         self._own: AutonomousTurn | None = None  # its owner's handler, if any
         self._capped = False  # a user turn was ended at its soft cap: the rest of the output belongs to no turn
-        self.discard = False  # Claude was killed for the user's stop: what it writes as it dies belongs to no turn
+        self.discard = False  # Claude was killed mid-turn: what it writes as it dies belongs to no turn
 
     def read(self) -> None:
         """Start reading, once."""
@@ -897,6 +897,9 @@ class ResidentClaude:
             method = await self._stopped_by_user()
         except BaseException:
             self._user_turn, self._cancel, self._interrupting = None, None, None
+            if output.turn is turn:
+                # Its unread events still belong to the abandoned user turn, even after stop drops it.
+                output.discard = True
             await self.stop(kill=True)
             raise
         finally:

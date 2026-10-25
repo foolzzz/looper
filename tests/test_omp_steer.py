@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from looper.agents.runtimes.channel import DeliveryResult
+
 from fake_claude import fake_claude
 from looper import child_env
 from looper.agents.bus import MessageBus
@@ -160,6 +162,10 @@ while True:
             sys.exit(1)
         if scenario == 'no_answer':
             continue
+        if scenario == 'missing_success':
+            response.pop('success')
+        if scenario == 'wrong_command':
+            response['command'] = 'prompt'
         time.sleep(0.1)
     emit(response)
     if command == 'prompt':
@@ -308,7 +314,8 @@ def test_steer_ack_waits_for_server_acceptance_and_reaches_result(
 
 
 @pytest.mark.parametrize("scenario,problem", [("fail_steer", "steer rejected"),
-                                             ("no_answer", "OMP did not accept the steer in time")])
+                                             ("no_answer", "OMP did not accept the steer in time"),
+                                             ("missing_success", ""), ("wrong_command", "")])
 def test_steer_failure_and_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                    scenario: str, problem: str) -> None:
     executable = _fake(tmp_path, monkeypatch, scenario)
@@ -321,8 +328,11 @@ def test_steer_failure_and_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         reader = asyncio.create_task(_collect(channel, [], tool=tool))
         try:
             await asyncio.wait_for(tool.wait(), 2)
-            with pytest.raises(RuntimeError, match=problem):
-                await channel.send("hello")
+            if scenario in ("no_answer", "missing_success", "wrong_command"):
+                assert await channel.send("hello") is DeliveryResult.UNKNOWN
+            else:
+                with pytest.raises(RuntimeError, match=problem):
+                    await channel.send("hello")
             assert channel._pending == {}
         finally:
             await _close(process, channel)
@@ -386,8 +396,7 @@ def test_eof_fails_a_pending_steer(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         reader = asyncio.create_task(_collect(channel, events, tool=tool))
         try:
             await asyncio.wait_for(tool.wait(), 2)
-            with pytest.raises(ConnectionResetError):
-                await channel.send("hello")
+            assert await channel.send("hello") is DeliveryResult.UNKNOWN
             await asyncio.wait_for(reader, 2)
             assert not any(e["type"] == "result" for e in events)
         finally:
@@ -647,8 +656,7 @@ def test_a_stalled_writer_cannot_outlast_the_one_steer_deadline(monkeypatch: pyt
     async def run() -> None:
         channel = OmpChannel(SimpleNamespace(stdin=Stalled(), stdout=None), model=None, cwd="/")  # type: ignore[arg-type]
         started = asyncio.get_running_loop().time()
-        with pytest.raises(RuntimeError, match="in time"):
-            await channel.send("x")
+        assert await channel.send("x") is DeliveryResult.UNKNOWN
         assert asyncio.get_running_loop().time() - started < 0.6
         assert channel._pending == {}
 

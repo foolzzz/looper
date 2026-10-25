@@ -12,6 +12,8 @@ from typing import Any
 
 import pytest
 
+from looper.agents.runtimes.channel import DeliveryResult
+
 from looper.agents.runtimes import Capability, RuntimeUnsupported, StreamChannel
 from looper.agents.runtimes import pi_steer
 from looper.agents.runtimes.pi_steer import PiChannel
@@ -403,8 +405,11 @@ def test_worker_input_during_setup_waits_until_prompt_started(tmp_path: Path) ->
 @pytest.mark.parametrize('disposition', ['handled', 'rejected', 'started', 'missing', 'wrong_command'])
 def test_steer_requires_a_matching_queued_ack(tmp_path: Path, disposition: str) -> None:
     async def check(channel: PiChannel, events: list[dict[str, Any]], ended: asyncio.Event) -> None:
-        with pytest.raises(RuntimeError, match='not queued' if disposition == 'handled' else 'steer'):
-            await channel.send('change course')
+        if disposition in ('handled', 'rejected'):
+            with pytest.raises(RuntimeError, match='not queued' if disposition == 'handled' else 'steer'):
+                await channel.send('change course')
+        else:
+            assert await channel.send('change course') is DeliveryResult.UNKNOWN
         assert not ended.is_set()
         assert not channel._pending and not channel._steers
         assert 'SECRET-rejection' not in str(events)
@@ -423,8 +428,8 @@ def test_steer_has_one_deadline_and_never_retries(tmp_path: Path, monkeypatch: p
         elif blocked == 'drain':
             monkeypatch.setattr(channel._process.stdin, 'drain', asyncio.Event().wait)
         try:
-            with pytest.raises(RuntimeError, match='in time'):
-                await channel.send('once')
+            expected = DeliveryResult.REJECTED if blocked == 'lock' else DeliveryResult.UNKNOWN
+            assert await channel.send('once') is expected
         finally:
             if blocked == 'lock':
                 channel._lock.release()
@@ -443,8 +448,7 @@ def test_steer_has_one_deadline_and_never_retries(tmp_path: Path, monkeypatch: p
 @pytest.mark.parametrize('scenario', ['steer_eof', 'steer_settled'])
 def test_pending_steer_fails_at_eof_or_settled_and_late_ack_cannot_accept(tmp_path: Path, scenario: str) -> None:
     async def check(channel: PiChannel, events: list[dict[str, Any]], ended: asyncio.Event) -> None:
-        with pytest.raises((RuntimeError, ConnectionResetError), match='ended'):
-            await channel.send('racing completion')
+        assert await channel.send('racing completion') is DeliveryResult.UNKNOWN
         await ended.wait()
         result, = [event for event in events if event['type'] == 'result']
         assert result['is_error'] is (scenario == 'steer_eof')
@@ -488,8 +492,7 @@ def test_steer_pipe_failure_cleans_the_request(tmp_path: Path, monkeypatch: pyte
             raise error('pipe closed')
 
         monkeypatch.setattr(channel._process.stdin, 'drain', broken)
-        with pytest.raises(error):
-            await channel.send('broken write')
+        assert await channel.send('broken write') is DeliveryResult.UNKNOWN
         assert not channel._pending and not channel._steers
         # The line was written before drain failed. Let the child read it before the run is finished: a child that
         # sees the finish marker first leaves it unread on stdin and fails its closing "stdin is empty" assert.
@@ -513,8 +516,7 @@ def test_cancelled_send_and_end_input_clear_pending(tmp_path: Path) -> None:
             await asyncio.sleep(0.005)
         channel.end_input()
         channel.end_input()
-        with pytest.raises((RuntimeError, ConnectionResetError), match='ended'):
-            await other
+        assert await other is DeliveryResult.UNKNOWN
         assert not channel._pending and not channel._steers
 
     asyncio.run(_steering_run(tmp_path, 'steer_wait', check))
