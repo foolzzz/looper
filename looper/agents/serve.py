@@ -493,9 +493,8 @@ async def _register_bots(registry: ChannelRegistry, rows: list[dict[str, Any]], 
             adapter = _telegram_adapter_from_config(row["config"], row["secret"], **kwargs)
         else:
             adapter = await _lark_bot_adapter(row["config"], row["secret"], runtime_root, **kwargs)
-        if adapter is not None:
+        if adapter is not None and await _register_optional_channel(registry, adapter):
             started.append({**row, "app_id": found[0] if found else row.get("app_id")})
-            await _register_optional_channel(registry, adapter)
 
 
 async def seed_channel_configs(pool: Any = None) -> None:
@@ -615,14 +614,16 @@ async def seed_role_configs(pool: Any = None) -> None:
 
 async def _register_optional_channel(
     registry: ChannelRegistry, adapter: ChannelAdapter
-) -> None:
-    """Start a Settings-enabled channel; a failure leaves the web dashboard up."""
+) -> bool:
+    """Whether a Settings-enabled channel started; a failure leaves the web dashboard up and its bot unclaimed."""
     try:
         await registry.register(adapter)
     except Exception:
         logger.exception("%s failed to start; continuing without it", adapter.channel_id)
         with contextlib.suppress(Exception):
             await registry.unregister(adapter.channel_id)
+        return False
+    return True
 
 
 async def _back_up_before_schema_change(pool: Any, ops: OpsConfig, runtime_root: Path, *, skip_backup: bool) -> None:
