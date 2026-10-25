@@ -1,8 +1,8 @@
 """Full dashboard catalog projections and the existing compact Tool results."""
 
-from .. import catalog
+from .. import catalog, catalog_sources, project_skills
 from ..api_v1 import Operation, STATUS, _array, _object, _STR, _NULL_STR, _INT, _BOOL
-from ..ops import ErrorCode, OpError
+from ..ops import ErrorCode, OpError, PublicOpError
 from ..ops.service import _plain
 from ..projects import RequestError
 
@@ -62,8 +62,9 @@ INSTALL_CHANGE = _object({"install": INSTALL, "item": CATALOG_ITEM})
 PROJECT_INSTALL = _object({**INSTALL["properties"], "inherited": _BOOL, "item": CATALOG_ITEM})
 PROJECT_INSTALLS = _object({"project_id": _STR, "installs": _array(PROJECT_INSTALL), "owned_count": _INT,
                             "task_roles": _array(PROJECT_ROLE), "skill_caps": SKILL_CAPS})
-SKILL_PATCH = {**_object(dict.fromkeys(("name", "description", "content"), _STR), [], closed=True),
-               "minProperties": 1}
+# An empty patch reaches the kind-specific service so a skill save can explain
+# what to enter. Schema/parser failures on this combined route remain private.
+SKILL_PATCH = _object(dict.fromkeys(("name", "description", "content"), _STR), [], closed=True)
 MCP_PATCH = {**_object({"name": _STR, "description": _STR, "transport": MCP_TRANSPORT, "command": _STR,
                         "url": _STR, "args": _STRINGS, "env": _VARIABLES, "headers": _VARIABLES}, [], closed=True),
              "minProperties": 1}
@@ -119,16 +120,17 @@ async def _deletable(item_id):
     return item
 
 
-async def _answer(request, *, credential=False):
+async def _answer(request, *, credential=False, public=False):
     try:
         return _plain(await request)
-    except (catalog.CatalogNotFound, catalog.CatalogConflict, catalog.CatalogError) as exc:
+    except (catalog.CatalogNotFound, catalog.CatalogConflict, catalog.CatalogError,
+            project_skills.ProjectSkillError) as exc:
         code = (ErrorCode.NOT_FOUND if isinstance(exc, catalog.CatalogNotFound) else
                 ErrorCode.CONFLICT if isinstance(exc, catalog.CatalogConflict) else ErrorCode.INVALID)
         if credential:
             # The transport redacts this message while preserving the service's HTTP error code.
             raise RequestError(STATUS[code], "invalid credential request") from None
-        raise OpError(code, str(exc)) from None
+        raise (PublicOpError if public else OpError)(code, str(exc)) from None
 
 
 async def impact(server, operation, arguments, principal, headers):
@@ -146,6 +148,11 @@ async def run(server, operation, arguments, principal, headers):
     if name == "catalog_items.get":
         return await _answer(catalog.item_detail(arguments["item_id"]))
     if name == "catalog_items.update":
+        item = await _answer(catalog._item(arguments["item_id"]), credential=True)
+        if item["kind"] == "skill":
+            # Use the skill service directly: it rechecks the row's kind under
+            # lock and cannot switch to an MCP write after our classification.
+            return await _answer(catalog_sources.update_item(arguments["item_id"], arguments["fields"]), public=True)
         return await _answer(catalog.update_item(arguments["item_id"], arguments["fields"]), credential=True)
     if name == "catalog_items.delete":
         # Confirmation is not a reservation: re-read existence and ownership before deleting.

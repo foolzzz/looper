@@ -37,7 +37,7 @@ from .channels.web import WebChannelAdapter
 from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
 from .task_roles import record_role
-from .ops import Call, ErrorCode, OpError, Risk, Tool, check_arguments
+from .ops import Call, ErrorCode, OpError, PublicOpError, Risk, Tool, check_arguments
 from .ops.clients import DEFAULT_SESSION, ClientOps
 from .ops.planner import PlannerOps
 from .ops.room import RoomOps
@@ -530,6 +530,8 @@ class AgentHTTPServer:
         async def invoke(callback: Any, arguments: dict[str, Any], *extra: Any) -> Any:
             try:
                 return await callback(self, operation, arguments, principal, headers, *extra)
+            except PublicOpError:
+                raise
             except OpError:
                 if not operation.credential_write:
                     raise
@@ -575,7 +577,8 @@ class AgentHTTPServer:
                                          validator=getattr(domain, "validate_arguments", api_v1.validate_arguments))
             return api_v1.answer_status(answer), answer
         except OpError as exc:
-            return api_v1.error(exc.code, "invalid credential request" if operation.credential_write else str(exc),
+            public = not operation.credential_write or isinstance(exc, PublicOpError)
+            return api_v1.error(exc.code, str(exc) if public else "invalid credential request",
                                 details=None if operation.credential_write else exc.details)
 
     async def _v1_online(self, operation: api_v1.Operation, headers: Mapping[str, str], body: bytes,

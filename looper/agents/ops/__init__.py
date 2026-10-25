@@ -70,6 +70,14 @@ class OpError(Exception):
         self.details = details
 
 
+class PublicOpError(OpError):
+    """A domain refusal safe to show even when the operation accepts credentials.
+
+    Only domain code that has checked the message's source may use this type;
+    parser errors and arbitrary service exceptions must remain ``OpError``.
+    """
+
+
 class TurnState(str, Enum):
     """Where a Manager turn is: answering, stopped by the user, or over. Only an answering turn's calls run."""
 

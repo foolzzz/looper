@@ -419,15 +419,15 @@ def test_provider_update_changes_dashboard_and_preserves_models_and_key(monkeypa
     run_db(test, monkeypatch)
 
 
-@pytest.mark.parametrize("fields", [
-    {"vendor_type": "cpa"},
-    {"endpoints": [{"protocol": "openai-chat", "base_url": "file:///tmp/provider"}]},
-    {"endpoints": [{"protocol": "openai-chat", "base_url": "https://example.invalid"}] * 2},
-    {"env": [{"key": "OTHER_API_TOKEN", "value": "x"}]},
-    {"max_concurrency": 0},
-    {},
+@pytest.mark.parametrize("fields,message", [
+    ({"vendor_type": "cpa"}, "vendor_type is immutable"),
+    ({"endpoints": [{"protocol": "openai-chat", "base_url": "file:///tmp/provider"}]}, "base_url"),
+    ({"endpoints": [{"protocol": "openai-chat", "base_url": "https://example.invalid"}] * 2}, "distinct protocols"),
+    ({"env": [{"key": "OTHER_API_TOKEN", "value": "x"}]}, "looks like a credential"),
+    ({"max_concurrency": 0}, "max_concurrency"),
+    ({}, "give at least one"),
 ])
-def test_provider_update_uses_dashboard_validation_and_rolls_back(monkeypatch, tmp_path, fields):
+def test_provider_update_uses_dashboard_validation_and_rolls_back(monkeypatch, tmp_path, fields, message):
     async def test(pool):
         provider = (await _ok("POST", "/api/v1/provider_accounts/create", {"name": "deepseek", "vendor_type": "deepseek",
             "api_key": SECRET}))["provider"]
@@ -437,8 +437,9 @@ def test_provider_update_uses_dashboard_validation_and_rolls_back(monkeypatch, t
         assert status == 400, expected
         (answer,) = await _Chat(tmp_path).say("修改账户", ("looper_providers", {
             "action": "update", "provider": provider["provider_id"], **fields}))
-        assert _error(answer) == "invalid", answer
-        assert expected["error"] == "invalid credential request"
+        assert _error(answer) == "invalid" and message in answer["error"]["message"], answer
+        assert expected["error"] == ("invalid provider account request" if fields else "invalid credential request")
+        assert SECRET not in json.dumps([answer, expected])
         assert await _ok("POST", "/api/v1/registry/view", {}) == before
         assert await pool.fetchval("SELECT api_key FROM llm_provider_secrets WHERE provider_id = $1",
                                    provider["provider_id"]) == SECRET
