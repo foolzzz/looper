@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.129] - 2026-10-25
+
+### Added
+
+- **Operator-only v1 operations manage native chat bindings and the bound-chats-only policy.** `manager_chat_bindings.list/put/delete` and `channel_chats.list/set_policy` work on the live routing snapshot, generated CLI commands for operator-only operations take an operator token, and the dashboard gets a typed client module. ([#655](https://github.com/foolzzz/looper/pull/655))
+
+### Changed
+
+- **An API client can no longer delete a bot that has chat bindings or the bound-chats-only policy.** Bot removal through v1 now goes through the routing-aware delete; operators can still remove such a bot. ([#655](https://github.com/foolzzz/looper/pull/655))
+
 ## [2.13.128] - 2026-10-25
 
 ### Changed
