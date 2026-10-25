@@ -36,7 +36,7 @@ function ChatBindings({ channelId, botManagerId, botManagerName }: Props) {
   const alive = useRef(false);
   const generation = useRef(0);
   const controller = useRef<AbortController | null>(null);
-  const cursors = useRef<(string | undefined)[]>([undefined]);
+  const loadedRows = useRef(0);
   const writes = useRef(new Set<string>());
 
   const invalidate = () => {
@@ -44,7 +44,7 @@ function ChatBindings({ channelId, botManagerId, botManagerName }: Props) {
     controller.current?.abort();
   };
 
-  async function load(after = cursors.current) {
+  async function load(minimumRows = loadedRows.current) {
     invalidate();
     const current = generation.current;
     const abort = new AbortController();
@@ -52,13 +52,27 @@ function ChatBindings({ channelId, botManagerId, botManagerName }: Props) {
     setLoading(true);
     setLoadError("");
     try {
+      // Rebuild page boundaries from this read: newly observed chats can sort
+      // before any previously loaded cursor.
+      const readPages = async () => {
+        const pages: ChannelChats[] = [];
+        let after: string | undefined;
+        let rows = 0;
+        do {
+          const page = await fetchChannelChats(channelId, { limit: 20, ...(after ? { after } : {}) }, abort.signal);
+          pages.push(page);
+          rows += page.chats.length;
+          after = page.has_more ? page.next_cursor ?? undefined : undefined;
+        } while (after && rows < minimumRows && current === generation.current);
+        return pages;
+      };
       const [pages, bindings, managers] = await Promise.all([
-        Promise.all(after.map((cursor) => fetchChannelChats(channelId, { limit: 20, ...(cursor ? { after: cursor } : {}) }, abort.signal))),
+        readPages(),
         fetchChatBindings({ channel_id: channelId }, abort.signal),
         fetchManagers(),
       ]);
       if (!alive.current || current !== generation.current) return;
-      cursors.current = after;
+      loadedRows.current = pages.reduce((rows, page) => rows + page.chats.length, 0);
       setSnapshot({ pages, bindings, managers });
     } catch (error) {
       if (!alive.current || current !== generation.current) return;
@@ -85,22 +99,15 @@ function ChatBindings({ channelId, botManagerId, botManagerName }: Props) {
     setLoading(false);
     try {
       await action();
-      if (alive.current) await load();
     } catch (error) {
       if (!alive.current) return;
       setErrors((old) => ({ ...old, [key]: failure(error) }));
-      // A target may have been deleted since the list was loaded. Refresh the
-      // choices without turning the refused write into a successful selection.
-      if (error && typeof error === "object" && "status" in error && error.status === 404) {
-        const current = generation.current;
-        try {
-          const managers = await fetchManagers();
-          if (alive.current && current === generation.current) setSnapshot((old) => old && ({ ...old, managers }));
-        } catch (refreshError) {
-          if (alive.current && current === generation.current) setLoadError(failure(refreshError));
-        }
-      }
     } finally {
+      if (alive.current) {
+        // Even a refused write may supersede an earlier successful write's
+        // readback. Confirm all server state while preserving the write error.
+        await load();
+      }
       if (alive.current) {
         writes.current.delete(key);
         setPending(new Set(writes.current));
@@ -131,7 +138,7 @@ function ChatBindings({ channelId, botManagerId, botManagerName }: Props) {
     <section aria-label="Chat bindings" className="space-y-3 border-t border-border pt-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h4 className="text-sm font-semibold">Chat bindings</h4>
-        <Button type="button" variant="outline" size="sm" disabled={loading} onClick={() => void load([undefined])}>Refresh chats</Button>
+        <Button type="button" variant="outline" size="sm" disabled={loading} onClick={() => void load(0)}>Refresh chats</Button>
       </div>
       <p className="text-xs text-muted-foreground">
         Chat observation starts after this upgrade; earlier chats may be missing. Bindings and Only bound chats apply immediately,
@@ -175,7 +182,7 @@ function ChatBindings({ channelId, botManagerId, botManagerName }: Props) {
                   const value = event.target.value;
                   void mutate(key, () => value ? putChatBinding(channelId, chat.chat_id, value) : deleteChatBinding(channelId, chat.chat_id));
                 }}>
-                <option value="">Use this bot's Manager (no binding)</option>
+                <option value="">{policy ? "Leave unbound (silent)" : "Use this bot's Manager (no binding)"}</option>
                 {target && !snapshot.managers.some((m) => m.id === target.manager_id) && <option value={target.manager_id} disabled>{target.manager_name} (unavailable)</option>}
                 {snapshot.managers.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}{manager.enabled ? "" : " (off)"}</option>)}
               </select>
@@ -185,7 +192,7 @@ function ChatBindings({ channelId, botManagerId, botManagerName }: Props) {
           })}
         </ul>
         {lastPage?.has_more && lastPage.next_cursor && <Button type="button" variant="outline" size="sm" disabled={loading}
-          onClick={() => void load([...cursors.current, lastPage.next_cursor!])}>Load more chats</Button>}
+          onClick={() => void load(loadedRows.current + 20)}>Load more chats</Button>}
       </>}
     </section>
   );
