@@ -41,6 +41,7 @@ def test_the_seeded_channels_have_empty_allowlists_and_say_why_they_do_not_start
     run_with_channel_configs(_test, monkeypatch)
 
 
+@pytest.mark.usefixtures("lark_cli_stand_in")
 def test_an_allowlist_round_trips_validated(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _test(pool: Any) -> None:
         status, lark = await _call("PUT", "channel-lark", {
@@ -85,6 +86,7 @@ def test_a_bad_id_is_refused_and_nothing_changes(monkeypatch: pytest.MonkeyPatch
     run_with_channel_configs(_test, monkeypatch)
 
 
+@pytest.mark.usefixtures("lark_cli_stand_in")
 def test_an_enabled_channel_with_an_empty_list_is_saved_but_says_it_will_not_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

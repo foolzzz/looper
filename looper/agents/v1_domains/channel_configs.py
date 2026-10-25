@@ -94,6 +94,8 @@ def _check_allowlist(kind, config):
 async def _save(request, *, creating=False):
     try:
         return await request
+    except bot_api.BotIdentityUnavailable as exc:
+        raise PublicOpError(ErrorCode.CONFLICT, str(exc)) from None
     except RequestError as exc:
         # bot_api's 4xx refusals can quote sender IDs, Manager IDs or stored bot
         # names. Use stable explanations without copying any submitted value.

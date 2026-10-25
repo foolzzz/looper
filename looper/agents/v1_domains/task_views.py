@@ -49,10 +49,12 @@ _ROLE = _object({
     "steps": _array(_STR), "stats": _STATS})
 _GATE = _object({
     **dict.fromkeys(("step", "step_id", "state", "topic", "findings", "resolution"), _STR),
-    **dict.fromkeys(("summary", "plan_change", "waiting_on", "retry_at", "opened_at", "first_reply_at", "closed_at"),
-                    _NULL_STR),
+    **dict.fromkeys(("waiting_on", "retry_at", "opened_at", "first_reply_at", "closed_at"), _NULL_STR),
+    # GateSummary.view() and the persisted Planner._plan_change() projection.
+    "summary": _nullable(_object({key: _array(_STR) for key in ("decisions", "assumptions", "open")})),
+    "plan_change": _nullable(_object({key: _array(_STR) for key in ("added", "dropped", "stopped")})),
     "agenda": _array(_object({"id": _STR, "question": _STR, "status": _STR, "answer": _NULL_STR,
-                              "options": _array(_object({"id": _STR, "label": _STR}))},
+                              "options": _array(_STR)},
                              ["id", "question", "status"])),
     "ended_by_user": _BOOL, "depends_on": _array(_STR),
     **dict.fromkeys(("turns", "not_delivered", "reminders"), _INT),

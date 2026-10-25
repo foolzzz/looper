@@ -18,6 +18,47 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.103] - 2026-10-25
+
+### Fixed
+
+- **Generated `looper config` subcommands are reachable from the command line.** `config import-upload`, `import-preview`, `import-apply` and `import-cancel` are generated from the service's OpenAPI document, but `config` is also a hand-written command, so the command line never loaded the document for it. It now loads the document when the word after `config` is not a registered hand-written child. The hand-written `config export` and `config import` keep their parsers; usage errors exit with code 2, send no operation and do not echo the argument, and an unreachable API still exits with code 4. Not model-visible. ([#583](https://github.com/foolzzz/looper/pull/583))
+
+## [2.13.102] - 2026-10-25
+
+### Changed
+
+- **Task-creation confirmation for a new project now lists the project's execution settings.** When a client creates a task in a new project, the confirmation impact text, after the existing line about the new project and its working directory, lists every project execution control in schema order, including defaults and disabled controls. Examples are the per-task budget and its action, step review, step workspaces, whether wait steps may run shell commands, vault and operator-notes access, agent room and its limits. Each line names the field, its meaning and the effective value; a value the request did not set is marked as the default. The submitted arguments, validation and the same-session confirmation are unchanged and no row is written before confirmation. Model-visible: the impact text returned to the client changed. ([#581](https://github.com/foolzzz/looper/pull/581))
+
+## [2.13.101] - 2026-10-25
+
+### Fixed
+
+- **The Planner's read-only inspection guidance now fits each runtime.** The default Planner prompt names the runtime's own reading tools (Read, Glob and Grep in Claude Code, equivalents elsewhere) and, where the runtime exposes a shell for reading as Codex does, allows read-only inspection such as `cat`, `ls` and `rg` under the existing sandbox, without seeking broader permissions; builds, tests and state-changing commands stay with Workers. The Planner turn now builds its system prompt after the launch is resolved, and a saved custom role prompt is still loaded unchanged. No write access is added. Model-visible: the default Planner system prompt text changed. ([#577](https://github.com/foolzzz/looper/pull/577))
+
+## [2.13.100] - 2026-10-25
+
+### Fixed
+
+- **Saving or importing a Lark bot channel is refused when its app identity is ambiguous.** `refuse_same_bot` resolves the candidate's app through `_admission_app_id`: a lark-cli channel whose profile does not resolve to an app, or any stored lark-cli row that does not, is refused with HTTP 409 and a message that names no CLI error or profile. `update_bot` re-checks every Lark update under the bots lock, config import takes the same lock and refuses an unknown identity without partial writes, and the two built-in Lark rows that share an app on purpose (`builtin_lark_pair`) are not compared with each other. Behavior change for users: a Lark channel with an unresolvable lark-cli profile can no longer be saved or imported until the profile is fixed. Model-visible: none. ([#562](https://github.com/foolzzz/looper/pull/562))
+- **The task-detail gate schema now matches the gate projection.** In `task_views.py`, a gate's `summary` is a nullable object of `decisions`, `assumptions` and `open` string arrays, `plan_change` a nullable object of `added`, `dropped` and `stopped` string arrays, and agenda `options` an array of strings; they were nullable strings and `{id, label}` objects. Declared schema only; response data and persisted gates are unchanged. Model-visible: none. ([#573](https://github.com/foolzzz/looper/pull/573))
+
+## [2.13.99] - 2026-10-24
+
+### Fixed
+
+- **Saving a Manager template without `inputs` now stores an empty input list.** `put_template` in `looper/agents/managers_api.py` defaults an omitted `inputs` field to `[]`, so a template whose requirement names no placeholder can be created or replaced without declaring inputs, and a replace no longer keeps the old inputs. An explicit `null`, and any other non-list value or malformed item, is still refused, and a requirement with an unresolved placeholder is still refused. Model-visible: none. ([#576](https://github.com/foolzzz/looper/pull/576))
+
+## [2.13.98] - 2026-10-24
+
+### Fixed
+
+- **A Worker's user-input delivery settles before the Planner stops waiting.** `WorkerPool.send_input` now bounds the input-channel wait and runtime handshake with one 4.5-second deadline, refuses without writing when the time left is below the channel's `send_timeout`, and never shortens the channel's own acceptance timeout. `RunChannel` gains `wait_input_ready()` and `send_timeout`; `_deliver_input` always publishes `WORKER_INPUT_RESULT`; the pool cancels and awaits its delivery tasks on stop. The Planner's `WORKER_INPUT_TIMEOUT` stays 5.0 seconds. Behavior change for users: a correction refused as late is no longer written afterwards. Model-visible: none. ([#554](https://github.com/foolzzz/looper/pull/554))
+
+### Changed
+
+- **Release evaluation tiers and the Pi comparison now match the 43-dialog selection.** The README uses explicitly authorized `*_DIALOG_CAP_USD` ceilings instead of caps measured on 24 dialogs. `eval-prompt-comparison.sh` runs Sonnet tasks and dialogs at two reps and the Opus tiers at one (37 case/reps), shares one cap and deadline, rejects incomplete, capped, skipped or mismatched reports, and records missing or partial baselines as unverified. Model-visible: none. ([#568](https://github.com/foolzzz/looper/pull/568))
+
 ## [2.13.97] - 2026-10-24
 
 ### Fixed

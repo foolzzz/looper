@@ -11,7 +11,7 @@ from looper import loopercli
 from looper.agents import api_v1, config_imports, config_transfer
 from looper.agents.ops.clients import ClientOps
 from looper.db import connection
-from tests.test_api_v1_auth import _Writer, _bearer, _send, _send_raw, _serving
+from tests.test_api_v1_auth import CLIENT_TOKEN, _Writer, _bearer, _send, _send_raw, _serving, clients  # noqa: F401
 from tests.test_operator_auth import TOKEN
 
 
@@ -85,6 +85,9 @@ def test_upload_refusals_are_typed_and_remove_private_files(tmp_path, body, head
     ("import-upload", ["--format", "looper-config/v3", "--catalog", '[{"name":"portable"}]'],
      {"format": "looper-config/v3", "catalog": [{"name": "portable"}]}),
     ("import-cancel", ["--import-id", "cfgimp-example"], {"import_id": "cfgimp-example"}),
+    ("import-apply", ["--import-id", "cfgimp-example"], {"import_id": "cfgimp-example"}),
+    ("import-preview", ["--document", '{"format":"looper-config/v3"}'],
+     {"document": {"format": "looper-config/v3"}}),
 ])
 def test_generated_configuration_commands_use_raw_json(action, flags, body):
     document = api_v1.document()
@@ -95,6 +98,37 @@ def test_generated_configuration_commands_use_raw_json(action, flags, body):
     declared = api_v1.find("POST", operation.path)
     assert not declared.hand and not declared.stream and declared.tool is None
     assert declared.request["additionalProperties"] is False
+
+
+@pytest.mark.usefixtures("clients")
+def test_cli_cancels_its_uploaded_import_over_http(tmp_path, monkeypatch, capsys):
+    async def plan(data, *, apply):
+        return config_transfer.Plan(applied=apply)
+    monkeypatch.setattr(config_imports, "_run", plan)
+
+    async def run():
+        async with _serving(tmp_path, listen=True) as server:
+            server._client_ops = ClientOps(SimpleNamespace())
+            client = tmp_path / "client.json"
+            loopercli.write_client(client, f"http://127.0.0.1:{server._port}", CLIENT_TOKEN)
+            argv = ["--client-file", str(client), "--json", "config"]
+            try:
+                assert await asyncio.to_thread(loopercli.main, [*argv, "import-upload", "--format",
+                                                                "looper-config/v3"]) == 0
+                import_id = json.loads(capsys.readouterr().out)["result"]["import_id"]
+                staged = tmp_path / config_imports.DIRNAME / f"{import_id}.json"
+                assert json.loads(staged.read_text()) == {"format": "looper-config/v3"}
+                cancel = [*argv, "import-cancel", "--import-id", import_id]
+                assert await asyncio.to_thread(loopercli.main, cancel) == 0
+                assert json.loads(capsys.readouterr().out)["result"] == {"deleted": import_id}
+                assert not staged.exists()
+                assert await asyncio.to_thread(loopercli.main, cancel) == 1
+                captured = capsys.readouterr()
+                assert json.loads(captured.out)["error"]["code"] == "not_found"
+                assert CLIENT_TOKEN not in captured.out + captured.err
+            finally:
+                server._config_imports.clear()
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("action", ["upload", "apply", "cancel"])

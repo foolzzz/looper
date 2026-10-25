@@ -48,6 +48,131 @@ async def _telegram(manager: str, token: str | None = TOKEN, **extra: Any) -> tu
     return await _call("POST", "channel_configs", body)
 
 
+@pytest.mark.parametrize("kind,operation,unavailable", [
+    ("lark", "add", "candidate"), ("lark", "add", "empty"), ("lark", "add", "existing"),
+    ("lark_bot", "add", "existing"), ("lark", "update", "candidate"),
+    ("lark", "move", "candidate"), ("lark", "update", "existing"),
+    ("lark_bot", "update", "existing"), ("lark_bot", "update_config", "existing"),
+    ("lark", "metadata", "candidate"),
+])
+def test_unknown_lark_identity_refuses_writes_until_recovery(
+    monkeypatch: pytest.MonkeyPatch, kind: str, operation: str, unavailable: str,
+) -> None:
+    from looper.agents.channels import lark_cli
+
+    broken, duplicate = False, False
+
+    async def identity(profile: str | None = None, *, fresh: bool = False) -> Any:
+        assert fresh
+        profile = "candidate" if profile == "alias" else profile
+        if broken and (profile == unavailable or unavailable == "empty" and profile == "candidate"):
+            if unavailable == "empty":
+                return lark_cli.Identity(profile, "", "Bot", "ou_bot")
+            raise lark_cli.LarkCliError(f"failed with {SECRET} at /private/profile")
+        app = "cli_shared" if profile != "existing" or duplicate else "cli_existing"
+        return lark_cli.Identity(profile or "", app, "Bot", "ou_bot")
+
+    monkeypatch.setattr(lark_cli, "identity", identity)
+
+    async def test(pool: Any) -> None:
+        await pool.execute("UPDATE channel_configs SET config = $1 WHERE channel_id = 'channel-lark'",
+                           json.dumps({"profile": "existing"}))
+        body = {"channel_type": kind, "manager_id": await _manager(pool),
+                "config": {"profile": "candidate"} if kind == "lark" else {"app_id": "cli_shared"}}
+        if kind == "lark_bot":
+            body["bot_token"] = SECRET
+        path, method = "channel_configs", "POST"
+        if operation != "add":
+            status, saved = await _call(method, path, body)
+            assert status == 200, saved
+            path, method = saved["channel_id"], "PUT"
+            body = ({"bot_token": "synthetic-replacement-secret"} if kind == "lark_bot" else
+                    {"config": {"profile": "alias" if operation == "move" else "candidate",
+                                "description": "changed"}})
+            if operation == "metadata":
+                body = {"enabled": True, "display_name": "Changed"}
+            elif operation == "update_config":
+                body["config"] = {"app_id": "cli_shared", "description": "changed"}
+
+        async def state() -> Any:
+            return [await pool.fetch(f"SELECT * FROM {table} ORDER BY channel_id")
+                    for table in ("channel_configs", "channel_secrets")]
+
+        nonlocal broken, duplicate
+        before = await state()
+        broken, duplicate = True, True
+        status, answer = await _call(method, path, body)
+        assert status == 409 and answer["code"] == "conflict", answer
+        assert "cannot verify Lark app identity" in answer["error"], answer
+        assert SECRET not in json.dumps(answer) and "/private/profile" not in json.dumps(answer)
+        assert await state() == before
+        # Once lookup works, the same app is a conflict across profiles and channel types.
+        broken = False
+        status, answer = await _call(method, path, body)
+        assert status == 409 and answer["code"] == "conflict", answer
+        assert "this bot is already added" in answer["error"], answer
+        assert await state() == before
+        duplicate = False
+        status, saved = await _call(method, path, body)
+        assert status == 200, saved
+        status, readback = await _call("GET", saved["channel_id"])
+        assert status == 200 and readback["config"] == saved["config"]
+        assert readback["enabled"] == saved["enabled"]
+        if kind == "lark_bot":
+            expected = SECRET if operation == "add" else "synthetic-replacement-secret"
+            assert await pool.fetchval("SELECT bot_token FROM channel_secrets WHERE channel_id = $1",
+                                       saved["channel_id"]) == expected
+
+    run_with_channel_configs(test, monkeypatch)
+
+
+def test_lark_identity_admission_over_http(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from looper.agents.channels import lark_cli
+    from looper.agents.ops.clients import ClientOps
+    from looper.agents.ops.service import Platform
+    from tests.test_api_v1_auth import TOKEN as API_TOKEN, _bearer, _send, _serving
+
+    broken = True
+
+    async def identity(profile: str | None = None, *, fresh: bool = False) -> Any:
+        if broken:
+            raise lark_cli.LarkCliError(f"{SECRET} at /private/profile")
+        return lark_cli.Identity(profile or "", "cli_main", "Bot", "ou_bot")
+
+    monkeypatch.setattr(lark_cli, "identity", identity)
+
+    async def test(pool: Any) -> None:
+        manager = await _manager(pool)
+        async with _serving(tmp_path, listen=True) as server:
+            server._client_ops = ClientOps(Platform(bus=None, task_router=server._task_router,
+                                                   runtime_root=tmp_path))
+
+            async def call(action: str, body: Any) -> tuple[int, Any]:
+                status, _, answer = await _send(server, f"POST /api/v1/channel_configs/{action}",
+                                                _bearer(API_TOKEN), json.dumps(body))
+                assert SECRET not in json.dumps(answer) and "/private/profile" not in json.dumps(answer)
+                return status, answer
+
+            # The paired built-ins do not compete, even when lark-cli is unconfigured.
+            status, answer = await call("update", {"channel_id": "channel-lark_bot", "fields": {
+                "config": {"app_id": "cli_builtin"}, "bot_token": SECRET}})
+            assert status == 200, answer
+            body = {"channel_type": "lark_bot", "manager_id": manager,
+                    "config": {"app_id": "cli_added"}, "bot_token": SECRET}
+            status, answer = await call("create", body)
+            assert status == 409 and answer["error"]["code"] == "conflict", answer
+            assert "cannot verify Lark app identity" in answer["error"]["message"], answer
+            nonlocal broken
+            broken = False
+            status, answer = await call("create", body)
+            assert status == 200, answer
+            saved = answer["result"]
+            status, answer = await call("get", {"channel_id": saved["channel_id"]})
+            assert status == 200 and answer["result"] == saved
+
+    run_with_channel_configs(test, monkeypatch)
+
+
 def test_add_a_telegram_bot_lists_it_after_the_built_in_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         manager = await _manager(pool)
@@ -177,6 +302,11 @@ def test_lark_cli_bots_name_their_profile(monkeypatch: pytest.MonkeyPatch, lark_
 
 def test_an_added_lark_cli_bot_keeps_naming_its_profile(monkeypatch: pytest.MonkeyPatch,
                                                          lark_cli_stand_in: Path) -> None:
+    world_path = lark_cli_stand_in.with_name("world.json")
+    world = json.loads(world_path.read_text())
+    world["profiles"]["out"]["signed_in"] = True
+    world_path.write_text(json.dumps(world))
+
     async def test(pool: Any) -> None:
         manager = await _manager(pool)
         status, answer = await _call("POST", "channel_configs",
@@ -198,7 +328,8 @@ def test_an_added_lark_cli_bot_keeps_naming_its_profile(monkeypatch: pytest.Monk
     run_with_channel_configs(test, monkeypatch)
 
 
-def test_lark_bot_apps_are_added_once(monkeypatch: pytest.MonkeyPatch, platform: Any) -> None:  # noqa: F811
+def test_lark_bot_apps_are_added_once(monkeypatch: pytest.MonkeyPatch, lark_cli_stand_in: Path,
+                                    platform: Any) -> None:  # noqa: F811
     async def test(pool: Any) -> None:
         manager = await _manager(pool)
         body = {"channel_type": "lark_bot", "manager_id": manager, "config": {"app_id": "cli_second"},

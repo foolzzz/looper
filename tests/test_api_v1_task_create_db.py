@@ -126,9 +126,14 @@ def test_full_configuration_and_workspace_choice_survive_readback(monkeypatch, t
     {"config": "{}"}, {"config": []}, {"config": None},
     {"profile_overrides": {"manager": "choice"}}, {"profile_overrides": {"worker": None}},
     {"profile_overrides": {"worker": "missing"}}, {"project": {"name": "Example", "task_budget_usd": -1}},
+    {"project": {"name": "Example", "task_budget_usd": 0}},
+    {"project": {"name": "Example", "wait_commands": True}},
+    {"project": {"name": "Example", "room_post_per_minute": 0}},
+    {"project": {"name": "Example", "room_consult_budget_usd": 0}},
     {"client_id": "forged"}, {"manager_id": "forged"}, {"principal": "operator"},
 ], ids=["missing-project", "both-projects", "blank", "type", "cap", "config-string", "config-array", "config-null",
-        "unknown-role", "null-profile", "unknown-profile", "execution", "client-id", "manager-id", "principal"])
+        "unknown-role", "null-profile", "unknown-profile", "execution", "zero-budget", "wait-type",
+        "room-range", "consult-budget", "client-id", "manager-id", "principal"])
 def test_invalid_requests_leave_no_project_or_task_rows(monkeypatch, tmp_path, invalid):
     async def test(pool):
         _, token = await api_clients.create("Client", pool=pool)
@@ -166,6 +171,85 @@ def test_new_project_waits_for_matching_client_and_session_and_creates_once(monk
             assert (await post(server, confirm, token=token, path="/api/v1/confirm"))[0] == 404
             assert await pool.fetchval("SELECT count(*) FROM tasks") == 1
             assert await pool.fetchval("SELECT count(*) FROM projects") == 1
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("settings, disclosures", [
+    ({"wait_commands": "on", "vault": "on", "task_budget_usd": 1.25, "task_budget_action": "wrap_up",
+      "review_policy": "all", "step_workspaces": "worktree", "task_workspaces": "worktree",
+      "workspace_links": ["cache"], "distill_lessons": True, "operator_notes": "off",
+      "planner_roles": "on", "user_gates": "on", "agent_room": "on", "max_step_retries": 3,
+      "supervise_interval_seconds": 60, "role_text_max_chars": 900, "gate_reminder_hours": 2,
+      "room_post_per_minute": 2, "room_broadcasts_per_run": 1, "room_message_max_chars": 500,
+      "room_messages_per_task": 20, "room_ping_pong_rounds": 2, "room_wait_max_seconds": 1,
+      "room_consult_timeout_seconds": 30, "room_consults_per_task": 1, "room_consult_budget_usd": 0.125},
+     ["wait_commands（等待步骤以服务端用户身份执行 shell 命令）：on",
+      "vault（知识库工具访问）：on", "task_budget_usd（每任务花费上限，USD）：1.25",
+      "task_budget_action（到达上限后的动作）：wrap_up（Planner 总结一轮后结束）",
+      "review_policy（步骤评审）：all（每步须通过评审）", "distill_lessons（经验沉淀）：write",
+      "workspace_links（worktree 链接回原目录的相对路径）：cache"]),
+    ({"wait_commands": "off", "vault": "off", "agent_room": "off", "planner_roles": "off",
+      "user_gates": "off", "task_workspaces": "in_place", "step_workspaces": "shared",
+      "distill_lessons": False, "workspace_links": [], "max_step_retries": 0,
+      "supervise_interval_seconds": 0, "gate_reminder_hours": 0, "room_broadcasts_per_run": 0,
+      "room_wait_max_seconds": 0, "room_consults_per_task": 0},
+     ["wait_commands（等待步骤以服务端用户身份执行 shell 命令）：off",
+      "vault（知识库工具访问）：off", "agent_room（agent 互发消息与咨询）：off",
+      "max_step_retries（每步重试次数）：0", "supervise_interval_seconds（监督间隔秒，0 为关闭）：0",
+      "gate_reminder_hours（用户门提醒间隔小时，0 为关闭）：0",
+      "workspace_links（worktree 链接回原目录的相对路径）：无"]),
+    ({"wait_commands": None, "vault": "", "task_workspaces": None, "task_budget_usd": "",
+      "review_policy": None, "agent_room": "", "room_consults_per_task": None},
+     ["task_workspaces（项目任务工作区）：in_place（默认）"]),
+    ({}, ["task_workspaces（项目任务工作区）：worktree（默认）"]),
+], ids=["enabled", "off-and-zero", "inherit", "omitted"])
+def test_client_project_impact_discloses_execution_and_preserves_settings(monkeypatch, tmp_path, settings, disclosures):
+    async def test(pool):
+        client, token = await api_clients.create("Client", pool=pool)
+        project = {"name": "Execution", "work_dir": str(tmp_path), **settings}
+        body = {"requirement": "Build", "project": project, "config": {"enabled": False, "limit": 0}}
+        async with _serving(tmp_path, listen=True) as server:
+            server._client_ops = ClientOps(SimpleNamespace())
+            code, asked = await post(server, body, token=token)
+            assert code == 202, asked
+            lines = asked["impact"].splitlines()
+            assert "新建项目「Execution」" in lines[0] and str(tmp_path) in lines[0] and "创建任务" in lines[0]
+            assert all(f"- {text}" in lines for text in disclosures), asked["impact"]
+            # Every accepted control is disclosed, including default and disabled controls.
+            from looper.agents.project_execution import FIELDS
+            assert [line.split("（")[0].removeprefix("- ") for line in lines[1:]] == list(FIELDS)
+            for field, raw in settings.items():
+                if raw is not None and raw != "" and field != "distill_lessons":
+                    line = next(line for line in lines if line.startswith(f"- {field}（"))
+                    value = ", ".join(raw) or "无" if isinstance(raw, list) else str(raw)
+                    assert line.split("：", 1)[1].split("（", 1)[0] == value
+            if not settings or settings.get("task_budget_usd") == "":
+                for text in ["task_budget_usd（每任务花费上限，USD）：无上限（默认）",
+                             "task_budget_action（到达上限后的动作）：fail（立即失败）（默认）",
+                             "review_policy（步骤评审）：planner（由 Planner 决定）（默认）",
+                             "wait_commands（等待步骤以服务端用户身份执行 shell 命令）：off（默认）",
+                             "vault（知识库工具访问）：off（默认）",
+                             "agent_room（agent 互发消息与咨询）：on（默认）",
+                             "room_consults_per_task（每任务咨询次数，0 为转交 Planner）：10（默认）",
+                             "supervise_interval_seconds（监督间隔秒，0 为关闭）：继承 Planner 配置"]:
+                    assert f"- {text}" in lines
+            confirm = {"confirmation_id": asked["confirmation_id"]}
+            assert (await post(server, confirm, token=token, session="other", path="/api/v1/confirm"))[0] == 404
+            assert await pool.fetchval("SELECT count(*) FROM projects") == 0
+            assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
+            code, done = await post(server, confirm, token=token, path="/api/v1/confirm")
+            assert code == 200, done
+            saved = await projects.get_project(done["result"]["project_id"])
+            for field, raw in settings.items():
+                expected = ("write" if raw else "off") if field == "distill_lessons" else (
+                    None if raw is None or raw == "" or raw == [] else raw)
+                assert saved[field] == expected, field
+            row = await tasks.get_task(done["result"]["task_id"])
+            assert row["client_id"] == client["id"] and row["config"] == body["config"]
+            assert row["workspace_mode"] == (settings.get("task_workspaces") or (
+                "in_place" if "task_workspaces" in settings else "worktree"))
+            code, existing = await post(server, {"requirement": "Second", "project_id": saved["id"]}, token=token)
+            assert code == 200 and "impact" not in existing, existing
     run_db(test, monkeypatch, timeout=30)
 
 
