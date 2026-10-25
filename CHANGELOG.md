@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.126] - 2026-10-25
+
+### Changed
+
+- **Telegram and Lark conversation history checks which Manager owns the conversation.** A Manager stores a turn and claims or checks the conversation in one transaction; a turn from a non-owner is rejected and logged. Reply recording only stores answers from a Manager. A web `session_id` no longer names a Telegram or Lark conversation. New helpers in `looper/agents/message.py` define an immutable bot conversation id; nothing builds a suffixed id yet. ([#645](https://github.com/foolzzz/looper/pull/645))
+
 ## [2.13.125] - 2026-10-25
 
 ### Added
