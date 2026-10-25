@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.120] - 2026-10-25
+
+### Fixed
+
+- **A chat send stays bound to its writable conversation while a read-only or unresolved link is open.** Opening a transcript or an unresolved conversation link no longer cancels the pending send, its reply stream or its queued messages; only adopting a different writable Manager or session does. The unsent draft is now kept per Manager and session in the browser's session storage, so it survives switching and reloading, and queued text whose composer is hidden stays in its thread's queue instead of being pulled into the wrong draft. Dashboard only: no route, stored data format, Manager tool declaration or prompt changed. ([#625](https://github.com/foolzzz/looper/pull/625))
+
 ## [2.13.119] - 2026-10-25
 
 ### Fixed
