@@ -15,6 +15,7 @@ function detail(id: string) {
     task_id: id, name: id, requirement: REQUIREMENTS[id], goal_id: "", status: "failed", group: "attention",
     phase: "failed", planner_id: null, correlation_id: "", created_at: "2026-10-17T08:00:00Z",
     updated_at: "2026-10-17T08:01:00Z", completed_at: "2026-10-17T08:01:00Z", project_id: "p1", project_name: "P",
+    attempt_ended_at: "2026-10-17T08:01:00Z",
     work_dir: "/w", cost: null, schedule_id: null, schedule_name: null, continues_schedule_session: false, config: {}, origin_channel_id: "",
     result_summary: null, error: "it failed", fail_kind: null, task_budget_usd: null, own_budget_usd: null,
     steps: [], journal: [], progress: [], gates: [], roles: [], builtin_role_stats: null, agents: null,
@@ -77,7 +78,8 @@ describe("TaskDetailRoute", () => {
       if (url === "/api/v1/tasks/detail") {
         if (started) polls++;
         return Response.json({ status: "ok", result: { ...detail("task-a"), status: initialStatus,
-          completed_at: resumed() ? "2026-10-24T00:00:00Z" : detail("task-a").completed_at } });
+          completed_at: initialStatus === "stopped" ? null : resumed() ? "2026-10-24T00:00:00Z" : detail("task-a").completed_at,
+          attempt_ended_at: resumed() ? "2026-10-24T00:00:00Z" : detail("task-a").attempt_ended_at } });
       }
       if (url === "/api/v1/ops/task_control/restart") {
         starts++;
@@ -138,16 +140,16 @@ describe("TaskDetailRoute", () => {
     let polls = 0;
     let streams = 0;
     const terminal = (runs: number, completed = "2026-10-24T00:00:00Z") => ({
-      ...detail("task-a"), completed_at: completed, cost: { runs, running: 0, cost_usd: 0,
+      ...detail("task-a"), completed_at: completed, attempt_ended_at: completed, cost: { runs, running: 0, cost_usd: 0,
         unpriced_runs: 0, by_model: [], manager_by_model: [],
         by_role: { planner: { runs, cost_usd: 0 }, worker: { runs: 0, cost_usd: 0 }, reviewer: { runs: 0, cost_usd: 0 } } },
     });
     const old = terminal(1);
     const changed = terminal(2, "2026-10-24T00:01:00Z");
     const mixed = { ...old, cost: { ...old.cost, runs: 2, running: 1 } };
-    const running = { ...changed, status: "running", group: "in_progress", completed_at: null };
+    const running = { ...changed, status: "running", group: "in_progress", completed_at: null, attempt_ended_at: null };
     const mixedSettled = { ...old, cost: { ...old.cost, runs: 2, cost_usd: 1 } };
-    const cleared = { ...old, completed_at: null };
+    const cleared = { ...old, completed_at: null, attempt_ended_at: null };
     const sequence = scenario === "mixed runs" ? [mixedSettled, mixedSettled, running]
       : scenario === "cleared completion" ? [cleared, cleared, running]
       : scenario === "terminal with live runs" ? [mixed, mixed, running]
@@ -199,10 +201,11 @@ describe("TaskDetailRoute", () => {
     let starts = 0;
     let polls = 0;
     let streams = 0;
-    const before = { ...detail("task-a"), status: "stopped", error: null,
+    const before = { ...detail("task-a"), status: "stopped", completed_at: null, error: null,
       cost: { runs: 1, running: 1, cost_usd: 0, unpriced_runs: 0, by_model: [], manager_by_model: [],
         by_role: { planner: { runs: 1, cost_usd: 0 }, worker: { runs: 0, cost_usd: 0 }, reviewer: { runs: 0, cost_usd: 0 } } } };
-    const completed = { ...before, status, completed_at: "2026-10-24T00:01:00Z",
+    const completed = { ...before, status, completed_at: status === "stopped" ? null : "2026-10-24T00:01:00Z",
+      attempt_ended_at: "2026-10-24T00:01:00Z",
       error: status === "failed" ? "Workspace could not start" : null };
     // Even without a new audit row, the task's new completion marker is authoritative.
     // An intervening old read invalidates the first terminal observation.

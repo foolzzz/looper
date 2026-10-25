@@ -18,6 +18,45 @@ from tests.test_task_agents_db import _call
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
+@pytest.mark.parametrize("outcome", ["stopped", "completed", "failed", "cancelled", "orphaned"])
+@pytest.mark.parametrize("keep_steps", [False, True])
+def test_task_detail_identifies_each_attempts_end(monkeypatch, outcome, keep_steps) -> None:
+    from looper.db import tasks
+
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        await _task(pool, "task-a", "running", project)
+
+        async def detail():
+            status, row = await _call("POST", "/api/v1/tasks/detail", {"task_id": "task-a"})
+            assert status == 200, row
+            return row
+
+        async def end():
+            if outcome == "orphaned":
+                assert await tasks.mark_orphaned_tasks_stopped(pool=pool) == 1
+            else:
+                await tasks.update_task_status("task-a", outcome, pool=pool)
+            row = await detail()
+            assert row["status"] == ("stopped" if outcome == "orphaned" else outcome)
+            assert row["attempt_ended_at"] is not None
+            if row["status"] == "stopped":
+                assert row["completed_at"] is None
+            else:
+                assert row["completed_at"] == row["attempt_ended_at"]
+            return row["attempt_ended_at"]
+
+        assert (await detail())["attempt_ended_at"] is None
+        first_end = await end()
+        assert await tasks.reset_task_for_restart("task-a", keep_steps=keep_steps, pool=pool)
+        pending = await detail()
+        assert pending["status"] == "pending"
+        assert pending["attempt_ended_at"] is None and pending["completed_at"] is None
+        assert await end() > first_end
+
+    run_db(test, monkeypatch, timeout=30)
+
+
 def test_the_task_detail_gives_each_steps_result_as_an_object_or_null(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.db import plans
 
