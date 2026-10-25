@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.97] - 2026-10-24
+
+### Fixed
+
+- **A reused process id can no longer be adopted into a turn's process tree.** `TurnTree.refresh` now checks observed process identities (start times) against the fresh process table before it expands the tree, and a pid whose start time changed stays excluded for the rest of the turn; `track` reads start times at turn start. Identities that cannot be proven are excluded for that observation, and a pid without an identity is ended only through the live subprocess handle, never by inferring a group. `end` refreshes before computing exclusions. Behavior change for users: stopping a turn no longer risks signalling an unrelated process that reused a pid mid-turn. Model-visible: none. ([#560](https://github.com/foolzzz/looper/pull/560))
+
 ## [2.13.96] - 2026-10-24
 
 ### Fixed
