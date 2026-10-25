@@ -644,8 +644,8 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
                     for number in (1, 2):
                         work = root / f"project-{number}"
                         work.mkdir()
-                        project = api.post("/api/projects", {"name": f"smoke-{number}", "work_dir": str(work),
-                            "task_workspaces": "in_place", "operator_notes": "off", "user_gates": "off"})
+                        project = api.post("/api/v1/project_admin/create", {"name": f"smoke-{number}", "work_dir": str(work),
+                            "task_workspaces": "in_place", "operator_notes": "off", "user_gates": "off"})["result"]["project"]
                         task = api.post("/api/v1/tasks/create", {"project_id": project["project_id"],
                             "requirement": "Write delivery.txt containing exactly 'delivered by disposable DSH' "
                             "and a newline. Have an independent Reviewer read it. Before accepting, ask the "

@@ -114,8 +114,8 @@ def test_accepted_steps_are_journaled_fed_back_and_distilled_into_knowledge(
     with fresh_database(str(DSN)) as (database_url, _):
         with running_server(database_url=database_url, runtime_root=runtime, bin_dir=bin_dir, home=home,
                             log_path=root / "serve.log") as api:
-            project = api.post("/api/projects", {"name": "calc", "work_dir": str(work),
-                                                 "distill_lessons": distill_lessons})
+            project = api.post("/api/v1/project_admin/create", {"name": "calc", "work_dir": str(work),
+                                                 "distill_lessons": distill_lessons})["result"]["project"]
             assert project["distill_lessons"] == distill_lessons
             task_id = api.post("/api/v1/tasks/create", {"requirement": "build the calc package",
                                                       "project_id": project["project_id"]})["result"]["task_id"]

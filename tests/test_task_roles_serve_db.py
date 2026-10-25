@@ -243,9 +243,9 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             for variant in VARIANTS:
                 work = root / f"work-{variant}"
                 work.mkdir()
-                project = api.post("/api/projects", {"name": f"calc-{variant}", "work_dir": str(work)})
+                project = api.post("/api/v1/project_admin/create", {"name": f"calc-{variant}", "work_dir": str(work)})["result"]["project"]
                 if variant != "off":
-                    api.put(f"/api/projects/{project['project_id']}", {"planner_roles": "on"})
+                    api.post("/api/v1/project_admin/update", {"project_id": project['project_id'], "fields": {"planner_roles": "on"}})["result"]["project"]
                     api.post("/api/v1/allowed_profiles/replace",
                              {"project_id": project["project_id"], "profile_ids": [sonnet["profile"]["profile_id"]]})
                 ids[variant] = api.post("/api/v1/tasks/create", {"requirement": f"build calc variant={variant}",

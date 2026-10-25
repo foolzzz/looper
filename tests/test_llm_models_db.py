@@ -598,7 +598,11 @@ def test_http_profile_preview_uses_saved_binding_role_project_and_mode_source(mo
         aid = (await client.ok("POST", "/api/agent-profiles", {
             "name": "Preview profile", "runtime_id": "rt-claude-code", "model_id": mid,
             "custom_prompt": "Preview identity"}, status=201))["profile"]["profile_id"]
-        project = (await client.ok("POST", "/api/projects", {"name": "Preview project"}, status=201))["project_id"]
+        from types import SimpleNamespace
+        from looper.agents.ops.clients import ClientOps
+
+        client.server._client_ops = ClientOps(SimpleNamespace())
+        project = (await client.ok("POST", "/api/v1/project_admin/create", {"name": "Preview project"}))["result"]["project"]["project_id"]
         await client.ok("POST", "/api/v1/agent_settings/update_role", {"role": "worker", "values": {"system_prompt_mode": "replace"}})
         builds = []
         def capture(**kwargs):

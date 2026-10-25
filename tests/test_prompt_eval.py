@@ -296,9 +296,9 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
                                      "name": resolved.model.name, "protocol": resolved.model.protocol.value}}
                 self.profiles.append(profile)
                 return {"status": "ok", "result": {"profile": profile, "warnings": []}}
-            if path == "/api/projects":
+            if path == "/api/v1/project_admin/create":
                 self.work = Path(body["work_dir"])
-                return {"project_id": "project-eval"}
+                return {"status": "ok", "result": {"project": {"project_id": "project-eval"}}}
             if path == "/api/v1/tasks/create":
                 self.work = Path(body["project"]["work_dir"])
                 return {"status": "ok", "result": {"task_id": "task-eval", "project_id": "project-eval"}}
@@ -1695,7 +1695,7 @@ def test_run_metadata_keeps_model_names_with_typed_or_legacy_profiles(
 
     @contextmanager
     def server(**_: Any) -> Any:
-        yield SimpleNamespace(post=lambda *_: {"project_id": "project-test"})
+        yield SimpleNamespace(post=lambda *_: {"status": "ok", "result": {"project": {"project_id": "project-test"}}})
 
     module = runner if suite == "tasks" else dialogs
     monkeypatch.setattr(module, "fresh_database", database)
@@ -2031,8 +2031,8 @@ def test_dialogs_use_the_reserved_case_budget_only_in_parallel_mode(
                 return {"status": "ok", "result": self.get(path, **data)}
             if path == "/api/v1/operator_chat/messages":
                 return {"status": "ok", "result": {"messages": self.messages}}
-            if path == "/api/projects":
-                return {"project_id": "project-a"}
+            if path == "/api/v1/project_admin/create":
+                return {"status": "ok", "result": {"project": {"project_id": "project-a"}}}
             assert path == "/api/v1/operator_chat/send"
             if not self.messages:
                 gate.wait()
@@ -2926,13 +2926,14 @@ def test_the_stop_dialog_flags_only_a_summary_no_read_backs(
                                  "metadata": {}}]}}
 
     # The stopped turn's read cannot back this turn's summary.
-    trail = [{"id": 1, "tool": "looper_projects", "risk": "read", "status": "ok",
+    trail = [{"id": 11, "tool": "looper_projects", "risk": "read", "status": "ok",
               "arguments": {"action": "list"}}] + [
-        {"id": 2 + i, "tool": tool, "risk": "read", "status": "ok", "arguments": arguments}
+        {"id": 12 + i, "tool": tool, "risk": "read", "status": "ok", "arguments": arguments}
         for i, (tool, arguments) in enumerate(reads)]
     monkeypatch.setattr(dialogs, "_trail", lambda _url, since, *_: [a for a in trail if a["id"] > since])
-    look = dialogs.Look(Api(), None, reply, "disposable", 0, frozenset(), False,  # type: ignore[arg-type]
-                        turn_since=1)
+    # Audited setup can have more action rows than there are Manager run records.
+    look = dialogs.Look(Api(), None, reply, "disposable", 10, frozenset(), False,  # type: ignore[arg-type]
+                        runs_since=4, turn_since=11)
     assert dialogs._knows_it_was_stopped(look) == problem
 
 
@@ -3023,7 +3024,8 @@ def test_the_withdraw_dialog_checks_that_the_second_input_starts_with_the_note_a
             def post(self, path: str, body: Any) -> dict[str, Any]:
                 return {"status": "ok", "result": {"records": [{"id": 5, "input_text": input_text, "metadata": {}}]}}
 
-        return dialogs.Look(Api(), None, reply, "disposable", 0, frozenset(), fake)  # type: ignore[arg-type]
+        return dialogs.Look(Api(), None, reply, "disposable", 10, frozenset(), fake,  # type: ignore[arg-type]
+                            runs_since=4)
 
     note = f'{dialogs.WITHDREW_NOTE} a message before you saw it (it began: "..."). Do not act on it.\n\n我刚才让你做什么了？'
     assert dialogs._knows_it_was_withdrawn(look(note, "你撤回了一条消息，我没有看到，所以没有做。")) is None
@@ -3038,9 +3040,9 @@ def test_the_withdraw_dialog_first_turn_may_count_the_projects_from_its_message(
     from evals.prompt_regression import dialogs
 
     class Api:
-        def get(self, path: str, **params: Any) -> dict[str, Any]:
-            assert path == "/api/projects"
-            return {"projects": [{"name": dialogs.PROJECT}]}
+        def post(self, path: str, body: Any) -> dict[str, Any]:
+            assert path == "/api/v1/project_admin/list" and body == {}
+            return {"status": "ok", "result": {"projects": [{"name": dialogs.PROJECT}]}}
 
     def look(reply: str) -> Any:
         return dialogs.Look(Api(), None, reply, "disposable", 0, frozenset(), False)  # type: ignore[arg-type]

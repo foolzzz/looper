@@ -22,7 +22,8 @@ TYPED_TOOL_OPERATIONS = {
     "schedules.enable", "schedules.disable", "schedules.run", "schedules.delete", "schedules.reset_planner_session",
     "catalog.list", "catalog.install", "catalog.update", "catalog.uninstall",
     "models.list", "models.create", "models.update", "models.delete", "costs",
-    "providers.list", "providers.register", "providers.update"}
+    "providers.list", "providers.register", "providers.update",
+    "projects.list", "projects.get", "projects.create", "projects.update", "projects.delete"}
 
 
 def _actions(tool) -> list[str] | None:

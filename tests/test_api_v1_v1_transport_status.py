@@ -177,7 +177,11 @@ def test_smoke_readiness_uses_v1_and_checks_the_response(tmp_path, status_data, 
             else:
                 with pytest.raises(Ready):
                     await asyncio.to_thread(call)
-            assert requests == [("POST", STATUS, "application/json", b"{}")]
+            expected = [("POST", STATUS, "application/json", b"{}")]
+            if response is None and script.startswith("release/"):
+                # Once ready, the release smoke also reads projects through v1.
+                expected.append(("POST", "/api/v1/project_admin/list", "application/json", b"{}"))
+            assert requests == expected
 
     asyncio.run(run())
 
