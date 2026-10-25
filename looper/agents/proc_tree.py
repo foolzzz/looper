@@ -9,7 +9,8 @@ from one ``ps`` snapshot before it sends any signal: the agent, every
 process whose parent is in the tree, and every member of a group the agent
 or one of them leads. It sends SIGTERM to those groups (and to the tree's
 processes outside them), waits up to ``TERM_GRACE_SEC`` for them to exit,
-sends SIGKILL to what is left and reaps the agent. A stop that first lets
+sends SIGKILL to what is left, waits up to ``REAP_SEC`` for those processes
+to exit and reaps the agent. A stop that first lets
 the agent exit on its own records the tree before it asks (``begin_end``) and
 hands it to ``end``.
 
@@ -256,6 +257,19 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
                 logger.warning("%s: pid %s was reused; leaving it alone", label, process.pid)
             else:
                 _signal(process, alive, signal.SIGKILL)
+                # SIGKILL being sent (or the agent being reaped) does not mean its descendants have exited.
+                # Wait for the processes we signalled, without expanding the tree or signalling it again.
+                pending = dict(alive)
+                deadline = time.monotonic() + REAP_SEC
+                while pending and time.monotonic() < deadline:
+                    table = await asyncio.to_thread(_snapshot)
+                    pending = {pid: pgid for pid, pgid in pending.items()
+                               if pid in table and table[pid][1] == pgid}
+                    if pending:
+                        await asyncio.sleep(min(_POLL_SEC, max(0, deadline - time.monotonic())))
+                if pending:
+                    logger.warning("%s: processes still running %.1f s after SIGKILL: %s",
+                                   label, REAP_SEC, sorted(pending))
         logger.info("%s: ended the process tree of pid %s: %d found, %d exited on SIGTERM, %d killed",
                     label, process.pid, len(seen), len(seen) - len(alive), len(alive))
         _ending.discard(process.pid)
@@ -460,15 +474,18 @@ class TurnTree:
             table = await asyncio.to_thread(_snapshot)
             skip = skip | await self._reused(table)
             # A leader's exit does not invalidate an observed member's own identity.
-            self._groups = {pid: pgid for pid, pgid in self._groups.items()
-                            if pid in table and pid not in skip}
-            self._merge(_tree(self.process, table, self._groups, skip=skip))
-            unread = [pid for pid, started in self.seen.items() if started is None and pid not in skip]
-            if unread:
-                starts = await asyncio.to_thread(_start_times, unread) or {}
-                for pid in unread:
-                    if pid in starts:
-                        self.seen[pid] = starts[pid]
+            groups = {pid: pgid for pid, pgid in self._groups.items() if pid in table and pid not in skip}
+            observed = _tree(self.process, table, groups, skip=skip)
+            unread = [pid for pid in self.seen.keys() | observed.keys()
+                      if self.seen.get(pid) is None and pid not in skip]
+            starts = (await asyncio.to_thread(_start_times, unread) or {}) if unread else {}
+            # A stopped ticker can be cancelled at either lookup. Publish new pids with their identities
+            # together, so a cancelled refresh cannot leave them permanently excluded as unknown.
+            self._groups = groups
+            self._merge(observed)
+            for pid in unread:
+                if pid in starts:
+                    self.seen[pid] = starts[pid]
             self._refreshed = time.monotonic()
 
     def start_ticker(self, interval: float = 0.5) -> None:
@@ -548,8 +565,14 @@ class TurnTree:
             await asyncio.gather(*(_end(stray, label=f"{self.label} (left the tree)", known={}, exclude=exclude)
                                    for stray in strays))
 
-        await asyncio.gather(_end(self.process, label=self.label, known=dict(self._groups), exclude=exclude),
-                             end_strays(), end_agent())
+        ending = [asyncio.create_task(coro) for coro in (
+            _end(self.process, label=self.label, known=dict(self._groups), exclude=exclude),
+            end_strays(), end_agent())]
+        try:
+            await asyncio.gather(*ending)
+        finally:
+            # gather propagates cancellation before every child's asynchronous cleanup has finished.
+            await asyncio.gather(*ending, return_exceptions=True)
 
     async def end(self) -> None:
         """End every process of the tree seen so far and of the tree now, then reap the agent."""
