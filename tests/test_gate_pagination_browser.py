@@ -228,12 +228,14 @@ def test_cross_page_refresh_keeps_surviving_loaded_draft(dashboard, change):
 
 
 @pytest.mark.parametrize("fault", ["duplicate", "total", "empty"])
-def test_inconsistent_snapshot_keeps_rows_and_draft_until_retry(dashboard, fault):
+@pytest.mark.parametrize("draft_row", [0, 90])
+def test_inconsistent_snapshot_keeps_rows_and_draft_until_retry(dashboard, fault, draft_row):
     dashboard[1]["rows"] = [gate_row(n) for n in range(250)]
     page, model, expect = open_gates(dashboard)
     page.get_by_role("button", name="Show more", exact=True).click()
     expect(page.locator("main li")).to_have_count(100)
-    draft_on(page, 0)
+    draft_on(page, draft_row)
+    draft = page.get_by_role("textbox").element_handle()
     model["fault"] = fault
     refresh(page)
     expect(page.get_by_role("alert")).to_contain_text("Retry")
@@ -242,11 +244,43 @@ def test_inconsistent_snapshot_keeps_rows_and_draft_until_retry(dashboard, fault
     model["fault"] = None
     page.get_by_role("button", name="Retry", exact=True).click()
     expect(page.get_by_role("alert")).to_have_count(0)
-    expect(page.locator("main li")).to_have_count(50)
+    expect(page.locator("main li")).to_have_count(50 + int(draft_row >= 50))
+    expect(page.get_by_role("textbox")).to_have_value("Keep this later draft")
+    assert draft.evaluate("input => input.isConnected")
+    refresh(page)
+    expect(page.locator("main li")).to_have_count(50 + int(draft_row >= 50))
     expect(page.get_by_role("textbox")).to_have_value("Keep this later draft")
     page.get_by_role("button", name="Show more", exact=True).click()
     expect(page.locator("main li")).to_have_count(100)
     expect(page.get_by_role("textbox")).to_have_value("Keep this later draft")
+    assert draft.evaluate("input => input.isConnected")
+    links = page.locator("main li > div > a").evaluate_all("links => links.map(a => a.hash)")
+    assert len(set(links)) == len(links) == 100
+
+
+@pytest.mark.parametrize("follow_up", ["more", "refresh"])
+def test_failed_retry_retains_saved_pagination_boundary(dashboard, follow_up):
+    page, model, expect = open_gates(dashboard)
+    model["fault"] = "unavailable"
+    refresh(page)
+    expect(page.get_by_role("alert")).to_contain_text("Retry")
+    page.get_by_role("button", name="Retry", exact=True).click()
+    expect(page.get_by_role("alert")).to_contain_text("Gates temporarily unavailable")
+    expect(page.locator("main li")).to_have_count(50)
+
+    model["fault"] = None
+    if follow_up == "more":
+        page.get_by_role("button", name="Show more", exact=True).click()
+        expect(page.locator('main a[href="#tasks/t99"]')).to_have_count(1)
+        expect(page.locator("main li")).to_have_count(100)
+        links = page.locator("main li > div > a").evaluate_all("links => links.map(a => a.hash)")
+        assert len(set(links)) == len(links) == 100
+    else:
+        model["rows"].insert(0, gate_row("new"))
+        refresh(page)
+        expect(page.locator("main li")).to_have_count(51)
+        expect(page.locator('main a[href="#tasks/t49"]')).to_have_count(1)
+    expect(page.get_by_role("alert")).to_have_count(0)
 
 
 def test_retry_replaces_expired_boundary_and_ignores_older_refresh(dashboard):
