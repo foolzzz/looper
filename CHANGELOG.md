@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.127] - 2026-10-25
+
+### Changed
+
+- **The stop command of a Telegram or Lark chat stops that chat's replies in every running Manager.** The fleet snapshots each Manager's live and queued turns for the bot and chat, stops them, and answers with a code-owned acknowledgement that reports partial or failed stops. The experimental stop switch and the runtime interruption contract are unchanged. ([#650](https://github.com/foolzzz/looper/pull/650))
+
 ## [2.13.126] - 2026-10-25
 
 ### Changed
