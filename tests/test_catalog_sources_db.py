@@ -533,10 +533,17 @@ def test_a_skill_written_in_settings_is_created_edited_and_deleted(monkeypatch: 
         assert detail["content"] == "New.\n" and detail["skill_md"].startswith("---\nname: notes\n")
         assert (await _call("POST", "/api/v1/catalog_sources/create_skill", {"name": "notes", "description": "d",
                                                              "content": "c"}))[0] == 409
-        for fields in ({"name": "Bad Name"}, {"description": "two\nlines"},
-                       {"content": "---\nname: x\n---\n"}, {}, {"enabled": True}):
+        for fields, message in (
+            ({"name": "Bad Name"}, "skill name 'Bad Name' must be lowercase letters, digits and hyphens, "
+             "such as deploy-check (no spaces, no hyphen at either end or twice in a row)"),
+            ({"description": "two\nlines"}, "a skill's description is one line"),
+            ({"content": "---\nname: x\n---\n"}, "give the content without frontmatter: "
+             "the name and description fields make it"),
+            ({}, "give at least one of content, description, name"),
+            ({"enabled": True}, "invalid credential request"),
+        ):
             status, answer = await _call("POST", "/api/v1/catalog_items/update", {"item_id": item['item_id'], "fields": fields})
-            assert status == 400 and answer["error"] == "invalid credential request", answer
+            assert status == 400 and answer["error"] == message, answer
         status, body = await _call("POST", "/api/v1/catalog_items/delete", {"item_id": item['item_id']})
         assert (status, body) == (200, {"deleted": item["item_id"]})
         assert await _items() == [] and await pool.fetchval("SELECT count(*) FROM library_installs") == 0
@@ -565,15 +572,16 @@ def test_editing_an_uploaded_skill_keeps_its_other_files_and_marks_it_modified_a
         assert sorted(f["path"] for f in detail["files"]) == ["SKILL.md", "scripts/go.sh"]
         plugin = (await _upload("p.zip", _zip({".claude-plugin/plugin.json": '{"name": "p"}'})))[1]["item"]
         refusals = [
-            (ids["mine"], "PUT", "not edited here: they follow its Claude Code configuration"),
-            (own["skill"]["skill_id"], "PUT", "edited in its project's Skills tab"),
-            (own["skill"]["skill_id"], "DELETE", "deleted from its project's Skills tab"),
-            (plugin["item_id"], "PUT", "a plugin is not edited here"),
+            (ids["mine"], "PUT", "items imported from this machine are not edited here: "
+             "they follow its Claude Code configuration and change on the next re-import"),
+            (own["skill"]["skill_id"], "PUT", "a project's own skill is edited in its project's Skills tab"),
+            (own["skill"]["skill_id"], "DELETE", "a project's own skill is deleted from its project's Skills tab"),
+            (plugin["item_id"], "PUT", "invalid credential request"),
         ]
         for item_id, method, reason in refusals:
             status, answer = await _call("POST", "/api/v1/catalog_items/update" if method == "PUT" else "/api/v1/catalog_items/delete",
                                          {"item_id": item_id, **({"fields": {"content": "x"}} if method == "PUT" else {})})
-            assert status == 400 and ("invalid credential request" if method == "PUT" else reason) in answer["error"], answer
+            assert status == 400 and answer["error"] == reason, answer
         assert (await _call("POST", "/api/v1/catalog_items/update", {"item_id": tool['item_id'], "fields": {"name": "mine"}}))[0] == 409
         assert (await _call("POST", "/api/v1/catalog_items/delete", {"item_id": plugin['item_id']}))[0] == 200
 

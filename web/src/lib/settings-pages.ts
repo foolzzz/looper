@@ -1,7 +1,7 @@
 import { ArrowLeftRight, Bot, CalendarClock, Cloud, MessageSquare, Cpu, KeyRound, Library, MessageCircle, Puzzle, Users, UserCog, type LucideIcon } from "lucide-react";
 
 /**
- * An Agent Profile: a row of `agent_profiles` (the API's `/api/agent-profiles`), a runtime, an LLM provider and a
+ * An Agent Profile: a row of `agent_profiles` (the API's `/api/v1/profiles/*`), a runtime, an LLM provider and a
  * model with an effort. Its name, plural, route and help text live here only.
  */
 export const AGENT_PROFILE = {

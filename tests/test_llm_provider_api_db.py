@@ -243,7 +243,7 @@ def test_login_ownership_and_problem_clear(monkeypatch, tmp_path):
             for action, fields in (("update", {"name": "Changed"}), ("delete", None)):
                 body = {"provider_id": pid, **({"fields": fields} if fields is not None else {})}
                 status, answer = await client.call("POST", f"/api/v1/provider_accounts/{action}", body)
-                assert status == 400 and answer["error"] == "invalid credential request"
+                assert status == 400 and answer["error"] == "invalid provider account request"
         pid = (await client.ok("POST", "/api/v1/provider_accounts/create", _account(), status=200))["provider"]["provider_id"]
         status, answer = await client.call("POST", "/api/v1/provider_accounts/clear_login_problem", {"provider_id": pid})
         assert status == 400 and set(answer) == {"error"}

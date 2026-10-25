@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -351,9 +352,20 @@ def test_a_providers_own_env_cannot_set_what_the_binding_owns_or_hold_a_secret(
     monkeypatch: pytest.MonkeyPatch, env: list[dict[str, str]], error: str,
 ) -> None:
     async def _test(_pool: Any) -> None:
-        status, payload = await _call("POST", "/api/v1/provider_accounts/create", {"name": "p", "vendor_type": "custom",
-            "endpoints": [{"protocol": "anthropic-messages", "base_url": THIRD_PARTY}], "env": env})
-        assert status == 400 and payload["error"] == "invalid credential request"
+        from looper.agents import profile_registry
+
+        body = {"name": "p", "vendor_type": "custom", "api_key": KEY,
+                "endpoints": [{"protocol": "anthropic-messages", "base_url": THIRD_PARTY}], "env": env}
+        before = await _pool.fetchval("SELECT count(*) FROM llm_providers")
+        status, payload = await _call("POST", "/api/v1/provider_accounts/create", body)
+        assert status == 400 and payload["error"] == "invalid provider account request"
+        assert KEY not in json.dumps(payload)
+        # The service still diagnoses the specific refusal; the credential transport must not echo its inputs.
+        with pytest.raises(profile_registry.RegistryError, match=re.escape(error)):
+            await profile_registry.create_provider(body)
+        assert await _pool.fetchval("SELECT count(*) FROM llm_providers") == before
+        body["env"] = [{"key": "API_TIMEOUT_MS", "value": "1234"}]
+        assert (await _call("POST", "/api/v1/provider_accounts/create", body))[0] == 200
 
     run_db(_test, monkeypatch)
 

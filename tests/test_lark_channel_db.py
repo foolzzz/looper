@@ -137,7 +137,8 @@ def test_saving_binds_the_allowlist_and_the_status_names_people(monkeypatch: pyt
         assert (await _call("POST", "/api/v1/channels/people", {"channel_type": "lark", "q": ""}))[0] == 400
         status, payload = await _call("PUT", "channel-lark", {
             "config": {"profile": "bad profile", "allowed_open_ids": [OPEN_ID]}})
-        assert status == 400 and payload["error"] == "invalid credential request"
+        assert status == 400 and payload["code"] == "invalid", payload
+        assert payload["error"] == "invalid channel configuration; check the sender allowlist and bot settings"
 
     run_db(test, monkeypatch)
 

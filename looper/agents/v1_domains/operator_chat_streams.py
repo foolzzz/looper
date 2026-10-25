@@ -33,7 +33,7 @@ RESULTS = {}
 
 def _stream(action, fields, required, description, kinds):
     return Operation("operator_chat." + action, "POST", "/api/v1/operator_chat/" + action,
-        description, description, _object(fields, required, closed=True), {}, risk="read", operator_only=True,
+        description, description, _object(fields, required, closed=True), _STR, risk="read", operator_only=True,
         stream=True, stream_description=description + " Named events carry their original dashboard payloads; "
         "heartbeat carries {}. Errors before headers use OpError. Disconnect closes the subscription.",
         stream_events={"type": "string", "x-looper-events": {kind: _EVENTS[kind] for kind in kinds}})

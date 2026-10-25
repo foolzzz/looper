@@ -3,9 +3,9 @@
 from ...db import channel_configs as db_configs
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _BOOL
 from ..channels import bot_api
-from ..channels.allowlist import channel_view
-from ..ops import ErrorCode, OpError
-from ..projects import RequestError, HTTP_404
+from ..channels.allowlist import AllowlistError, SENDER_ID_FORMATS, channel_view, normalized_config
+from ..ops import ErrorCode, OpError, PublicOpError
+from ..projects import RequestError, HTTP_400, HTTP_404, HTTP_409
 
 _ID = {"type": "string", "minLength": 1}
 _TYPE = {"type": "string", "enum": ["telegram", "lark", "lark_bot"]}
@@ -82,6 +82,34 @@ async def impact(server, operation, arguments, principal, headers):
             "Restart Looper to stop its running adapter.")
 
 
+def _check_allowlist(kind, config):
+    try:
+        normalized_config(kind, config)
+    except AllowlistError:
+        # The service's error quotes the first bad entry, which may be a pasted
+        # token. Keep its format hint, never the submitted entry.
+        raise PublicOpError(ErrorCode.INVALID, "invalid sender allowlist: " + SENDER_ID_FORMATS[kind].hint) from None
+
+
+async def _save(request, *, creating=False):
+    try:
+        return await request
+    except bot_api.BotIdentityUnavailable as exc:
+        raise PublicOpError(ErrorCode.CONFLICT, str(exc)) from None
+    except RequestError as exc:
+        # bot_api's 4xx refusals can quote sender IDs, Manager IDs or stored bot
+        # names. Use stable explanations without copying any submitted value.
+        public = {
+            HTTP_400: (ErrorCode.INVALID, "invalid channel configuration; check the sender allowlist and bot settings"),
+            HTTP_404: (ErrorCode.NOT_FOUND, "Manager not found" if creating else "channel not found"),
+            HTTP_409: (ErrorCode.CONFLICT, "this bot is already added; update the existing bot instead"),
+        }
+        if exc.status in public:
+            raise PublicOpError(*public[exc.status]) from None
+        # Wrapped service failures (notably 500 with raw exception text) stay private.
+        raise
+
+
 async def run(server, operation, arguments, principal, headers):
     action = operation.operation_id.rsplit(".", 1)[1]
     if action == "list":
@@ -89,7 +117,8 @@ async def run(server, operation, arguments, principal, headers):
     if action == "get":
         return await _get(arguments["channel_id"])
     if action == "create":
-        return await bot_api.add_bot(arguments)
+        _check_allowlist(arguments["channel_type"], arguments.get("config", {}))
+        return await _save(bot_api.add_bot(arguments), creating=True)
     if action == "update":
         fields = dict(arguments["fields"])
         if "config" in fields:
@@ -97,7 +126,8 @@ async def run(server, operation, arguments, principal, headers):
             row = await _get(arguments["channel_id"])
             validate_arguments(_object({"config": CONFIGS[row["channel_type"]]}, closed=True),
                                {"config": fields["config"]})
-        return await bot_api.update_bot(arguments["channel_id"], fields)
+            _check_allowlist(row["channel_type"], fields["config"])
+        return await _save(bot_api.update_bot(arguments["channel_id"], fields))
     # A pending confirmation reserves nothing: re-read the target immediately before deletion.
     await impact(server, operation, arguments, principal, headers)
     return await bot_api.remove_bot(arguments["channel_id"])

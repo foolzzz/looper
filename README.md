@@ -284,18 +284,18 @@ The main route groups:
 
 | Group | Endpoints | Purpose |
 |---|---|---|
-| Status | `POST /api/v1/system/status`, `GET /api/overview` | System health and the startup self-check (`checks`); the Dashboard's overview of what is happening now |
-| Projects | `/api/projects`, `/api/projects/:id`, `/api/projects/:id/knowledge/...` | Create, edit and delete projects; their knowledge documents and drafts |
-| Tasks | `/api/tasks`, `/api/tasks/create`, `/api/tasks/:id/...`, `/api/tasks/{start,stop,cancel,delete}` | List and create tasks (in a project, with optional `profile_overrides`), read one, start, stop, cancel, delete; activity and its SSE stream |
+| Status | `POST /api/v1/system/{status,overview}` | System health and the startup self-check (`checks`); the Dashboard's overview of what is happening now |
+| Projects | `POST /api/v1/project_admin/{list,create,update,delete}`, `POST /api/v1/project_knowledge/{list,add,get,update,delete,drafts,confirm_draft,discard_draft}` | Create, edit and delete projects; their knowledge documents and drafts |
+| Tasks | `POST /api/v1/tasks/{page,create,detail,delete,...}`, `POST /api/v1/ops/task_control/{start,stop,cancel,restart,start_over}` | List and create tasks (in a project, with optional `profile_overrides`), read one, start, stop, cancel, delete; activity and its SSE stream |
 | Schedules | `POST /api/v1/schedule_admin/<action>` | Create, edit, enable and delete a project's schedules; list every project's; run one now; its run history and messages; a rule's next fire times |
-| Catalog and installs | `/api/catalog/...`, `/api/installs/...`, `/api/projects/:id/installs`, `/api/projects/:id/skills/...` | Plugins, skills and MCP servers: import, upload, git, write, edit, delete; install them globally or in a project |
+| Catalog and installs | `POST /api/v1/catalog_items/...`, `POST /api/v1/catalog_sources/...`, `POST /api/v1/installs/...`, `POST /api/v1/project_skills/...` | Plugins, skills and MCP servers: import, upload, git, write, edit, delete; install them globally or in a project |
 | Agent settings | `POST /api/v1/agent_settings/{get,update_system,update_role}`, `POST /api/v1/project_agent_settings/{get,update,update_role}`, `POST /api/v1/roles/{list,get,update,reset_prompt}` | The settings layers, each field with its effective value and source; each role's prompt and limits |
 | Allowed profiles | `POST /api/v1/allowed_profiles/{get,replace}` | Read or replace a project's Planner profile allowlist; an empty list is unrestricted |
-| Registry | `GET /api/registry`, `/api/runtimes/:id/probe`, `POST /api/v1/provider_accounts/...`, `POST /api/v1/profiles/{create,update,delete,prompt_preview}` | Runtime types and the built-in runtimes (Re-detect probes one); register, edit and delete providers (API keys masked) and Agent Profiles, each with where it is used |
-| Configuration transfer | `POST /api/v1/config/export`, `/api/v1/config/import_upload`, `/api/v1/config/import_apply`, `/api/v1/config/import_cancel` | Download the configuration file; upload one, preview it, then apply or cancel |
-| Chat | `/api/v1/operator_chat/{send,targets,sessions,messages,save_message,reply_events,thread_events}` | Talk to the Manager or a running task's Planner; the Manager's conversations by channel; history and SSE stream |
+| Registry | `POST /api/v1/registry/view`, `POST /api/v1/runtimes/probe`, `POST /api/v1/provider_accounts/...`, `POST /api/v1/profiles/{create,update,delete,prompt_preview}`, `POST /api/v1/ops/models/...`, `POST /api/v1/models/get` | Runtime types and the built-in runtimes (Re-detect probes one); register, edit and delete providers (API keys masked) and Agent Profiles, each with where it is used |
+| Configuration transfer | `POST /api/v1/config/export`, `POST /api/v1/config/import_upload`, `POST /api/v1/config/import_apply`, `POST /api/v1/config/import_cancel` | Download the configuration file; upload one, preview it, then apply or cancel |
+| Chat | `POST /api/v1/operator_chat/{send,targets,sessions,messages,save_message,reply_events,thread_events,turn,stop}` | Talk to the Manager or a running task's Planner; the Manager's conversations by channel; history and SSE stream |
 | Runs | `POST /api/v1/runs/{list,get,events,for_task,usage}` | Every agent run with its launch command, usage, cost and events; one agent's spending and context |
-| Channels | `/api/v1/channel_configs/...`, `/api/channels/lark/...` | Telegram and Lark settings, the Telegram bot token (never returned) and sender allowlists; the Lark bot's status, refused senders and people search |
+| Channels | `POST /api/v1/channel_configs/...`, `POST /api/v1/channels/{status,people}` | Telegram and Lark settings, the Telegram bot token (never returned) and sender allowlists; the Lark bot's status, refused senders and people search |
 
 The [HTTP API reference](docs/architecture/agent-system.md#http-api) describes
 the endpoints with their fields and errors.

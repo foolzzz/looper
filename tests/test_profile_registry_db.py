@@ -274,7 +274,7 @@ def test_dsh_policy_checks_stored_effort_when_a_provider_changes(
         # Model a stored profile from an older policy; provider updates must not skip its effort.
         await pool.execute("UPDATE agent_profiles SET effort = 'medium' WHERE id = $1", profile_id)
         status, payload = await _call("POST", "/api/v1/provider_accounts/update", {"provider_id": provider_id, "fields": {"name": "changed"}})
-        assert status == 400 and payload["error"] == "invalid credential request"
+        assert status == 400 and payload["error"] == "invalid provider account request"
         assert (await db.get_provider(provider_id))["name"] == "gateway"
 
     run_db(_test, monkeypatch)
@@ -326,7 +326,7 @@ def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch
 def test_the_builtin_providers_are_read_only(monkeypatch: pytest.MonkeyPatch, method: str, path: str, body: Any) -> None:
     async def _test(_pool: Any) -> None:
         status, payload = await _call(method, path, body)
-        assert status == 400 and payload["error"] == "invalid credential request"
+        assert status == 400 and payload["error"] == "invalid provider account request"
 
     run_db(_test, monkeypatch)
 
@@ -468,27 +468,28 @@ def test_a_provider_api_key_is_stored_apart_and_never_shown(monkeypatch: pytest.
     run_db(_test, monkeypatch)
 
 
-@pytest.mark.parametrize(("body", "error"), [
-    ({"vendor_type": "custom", "endpoints": []}, "endpoints must be"),
+# Only checked domain refusals are public; schema failures remain credential-redacted.
+@pytest.mark.parametrize(("body", "message"), [
+    ({"vendor_type": "custom", "endpoints": []}, "invalid provider account request"),
     ({
         "vendor_type": "custom",
         "endpoints": [
-            {"protocol": "grpc", "base_url": "https://x.invalid"}]}, "protocol must be"),
-    ({"vendor_type": "custom", "auth": "token"}, "unknown field"),
-    ({"vendor_type": "custom", "protocols": ["openai-chat"]}, "unknown field"),
-    ({"vendor_type": "custom", "base_url": "https://x.invalid"}, "unknown field"),
-    ({"vendor_type": "custom", "models": [{"name": "m"}]}, "unknown field"),
+            {"protocol": "grpc", "base_url": "https://x.invalid"}]}, "invalid credential request"),
+    ({"vendor_type": "custom", "auth": "token"}, "invalid credential request"),
+    ({"vendor_type": "custom", "protocols": ["openai-chat"]}, "invalid credential request"),
+    ({"vendor_type": "custom", "base_url": "https://x.invalid"}, "invalid credential request"),
+    ({"vendor_type": "custom", "models": [{"name": "m"}]}, "invalid credential request"),
     ({
         "vendor_type": "custom",
         "endpoints": [
-            {"protocol": "openai-chat", "base_url": "ftp://x"}]}, "base_url must be"),
+            {"protocol": "openai-chat", "base_url": "ftp://x"}]}, "invalid provider account request"),
 ])
 def test_a_provider_that_does_not_validate_is_refused(
-    monkeypatch: pytest.MonkeyPatch, body: dict[str, Any], error: str,
+    monkeypatch: pytest.MonkeyPatch, body: dict[str, Any], message: str,
 ) -> None:
     async def _test(_pool: Any) -> None:
         status, payload = await _call("POST", "/api/v1/provider_accounts/create", {"name": "p", **body})
-        assert status == 400 and payload["error"] == "invalid credential request"
+        assert status == 400 and payload["error"] == message
 
     run_db(_test, monkeypatch)
 
@@ -661,7 +662,7 @@ def test_the_codex_login_pairs_only_with_codex_runtimes(monkeypatch: pytest.Monk
             assert "only use its own runtime" in payload["error"] or "exact protocol" in payload["error"]
         # A login problem is cleared only on the Codex login.
         status, payload = await _call("POST", "/api/v1/provider_accounts/clear_login_problem", {"provider_id": 'prov-claude-subscription'})
-        assert status == 400 and payload["error"] == "invalid credential request"
+        assert status == 400 and payload["error"] == "invalid provider account request"
 
     run_db(_test, monkeypatch)
 
@@ -899,7 +900,7 @@ def test_dsh_provider_cannot_remove_the_endpoint_needed_by_its_profile(
             "name": "must-rollback", "api_key": "must-not-replace-the-key",
             "endpoints": [{"protocol": "openai-responses", "base_url": "https://other.example/v1"}],
         }})
-        assert status == 409 and payload["error"] == "invalid credential request"
+        assert status == 409 and payload["error"] == "provider account conflict"
         assert await db.get_provider(provider_id) == before_provider
         assert await db.get_profile(profile_id) == before_profile
         assert await db.get_api_key(provider_id) == SECRET
@@ -1063,7 +1064,7 @@ def test_a_change_that_would_break_a_profile_is_refused_and_one_in_use_is_kept(
 
         status, payload = await _call("POST", "/api/v1/provider_accounts/update", {"provider_id": provider_id, "fields": {"endpoints": [
             {"protocol": "openai-chat", "base_url": "https://llm.example.invalid/v1"}]}})
-        assert status == 409 and payload["error"] == "invalid credential request"
+        assert status == 409 and payload["error"] == "provider account conflict"
         status, payload = await _call("PUT", f"/api/agent-profiles/{profile['profile_id']}",
                                       {"model_id": await _model_id("prov-claude-subscription", "sonnet")})
         assert status == 400 and "only use its own runtime" in payload["error"]
@@ -1072,7 +1073,7 @@ def test_a_change_that_would_break_a_profile_is_refused_and_one_in_use_is_kept(
         assert (renamed["name"], renamed["effort"]) == ("si-fast", None)
 
         status, payload = await _call("POST", "/api/v1/provider_accounts/delete", {"provider_id": provider_id})
-        assert status == 409 and payload["error"] == "invalid credential request"
+        assert status == 409 and payload["error"] == "provider account conflict"
         await _ok("DELETE", f"/api/agent-profiles/{profile['profile_id']}")
         await _ok("POST", "/api/v1/ops/models/delete", {"model": profile['model_id']})
         await _ok("POST", "/api/v1/provider_accounts/delete", {"provider_id": provider_id})
@@ -1438,6 +1439,6 @@ def test_model_settings_that_do_not_validate_are_refused(
             "provider": provider, "name": "m", "protocol": "openai-chat", **change})
         assert status == 400 and error in payload["error"], payload
         status, payload = await _call("POST", "/api/v1/provider_accounts/update", {"provider_id": provider, "fields": {"max_concurrency": 0}})
-        assert status == 400 and payload["error"] == "invalid credential request"
+        assert status == 400 and payload["error"] == "invalid provider account request"
 
     run_db(_test, monkeypatch)

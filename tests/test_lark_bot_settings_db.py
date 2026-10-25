@@ -109,15 +109,21 @@ def test_seed_and_secret_api_contract(monkeypatch: pytest.MonkeyPatch, platform:
     run_with_channel_configs(test, monkeypatch)
 
 
-@pytest.mark.parametrize(("field", "value"), [("app_id", 1), ("app_id", "a"), ("app_id", "a bcd"),
-                                             ("app_id", "a" * 65), ("domain", "unknown"), ("domain", [])])
+@pytest.mark.parametrize(("field", "value", "message"), [
+    ("app_id", 1, "invalid credential request"),
+    ("app_id", "a", "invalid channel configuration; check the sender allowlist and bot settings"),
+    ("app_id", "a bcd", "invalid channel configuration; check the sender allowlist and bot settings"),
+    ("app_id", "a" * 65, "invalid channel configuration; check the sender allowlist and bot settings"),
+    ("domain", "unknown", "invalid credential request"),
+    ("domain", [], "invalid credential request"),
+])
 @requires_db
 def test_invalid_configuration_is_refused(monkeypatch: pytest.MonkeyPatch, platform: Any,
-                                          field: str, value: Any) -> None:
+                                          field: str, value: Any, message: str) -> None:
     async def test(pool: Any) -> None:
         status, answer = await _call("PUT", "channel-lark_bot", {
             "config": {**CONFIG, field: value}, "bot_token": SECRET})
-        assert status == 400 and answer["error"] == "invalid credential request"
+        assert status == 400 and answer["error"] == message
         assert await pool.fetchval("SELECT count(*) FROM channel_secrets WHERE channel_id = 'channel-lark_bot'") == 0
 
     run_with_channel_configs(test, monkeypatch)

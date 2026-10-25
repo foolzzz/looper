@@ -2,7 +2,7 @@
 
 from .. import profile_registry
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR
-from ..projects import RequestError, HTTP_400, HTTP_404, HTTP_409
+from ..ops import ErrorCode, PublicOpError
 from .registry import PROVIDER, PROVIDER_ENDPOINT, PROVIDER_ENV_ENTRY, VENDOR_KIND, VENDOR_TYPE
 
 # Input endpoints may omit the runtime-default marker; read-modify-write bodies
@@ -70,10 +70,10 @@ async def run(server, operation, arguments, principal, headers):
             return await profile_registry.delete_provider(arguments["provider_id"])
         return await profile_registry.clear_login_problem(arguments["provider_id"])
     except profile_registry.RegistryNotFound:
-        raise RequestError(HTTP_404, "provider not found") from None
+        raise PublicOpError(ErrorCode.NOT_FOUND, "provider not found") from None
     except profile_registry.RegistryConflict:
-        raise RequestError(HTTP_409, "provider account conflict") from None
+        raise PublicOpError(ErrorCode.CONFLICT, "provider account conflict") from None
     except profile_registry.RegistryError:
         # Preserve public status codes without propagating credential-bearing
         # validation messages into a response, parameter audit or exception log.
-        raise RequestError(HTTP_400, "invalid provider account request") from None
+        raise PublicOpError(ErrorCode.INVALID, "invalid provider account request") from None

@@ -18,6 +18,19 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.106] - 2026-10-25
+
+### Fixed
+
+- **Credential-bearing dashboard operations keep actionable errors.** A new `PublicOpError` marks a domain refusal whose message is safe to show even when the operation accepts credentials; parser errors and arbitrary service exceptions stay private ("invalid credential request"). Provider-account not-found, conflict and invalid errors, Lark identity verification failures, and skill saves now return their own status and a stable explanation. Channel saves return "invalid sender allowlist: <format hint>" (never the submitted entry), "this bot is already added; update the existing bot instead", "Manager not found" or "channel not found"; a 500 stays private. An empty skill patch now reaches the skill service so it can say what to enter, and skill updates call the skill service directly so they cannot turn into an MCP write. Not a Manager tool change. ([#572](https://github.com/foolzzz/looper/pull/572))
+- **The dashboard v1 migration is complete, and unused legacy code is gone.** Every operation now declares a concrete result schema (building the API document fails otherwise); `confirm` is registered last with the union of the results of the operations that need confirmation, `openapi` has a typed result, and client chat streams describe their events (`heartbeat` carries `{}`). The API document's description now states the public v1 scope. The unused `registryCall`, `putJson` and `failed` helpers and the `/api` base in `web/src/lib/api.ts`, and the unreachable config export/import and `_answer` handlers and two route patterns in `looper/agents/http_server.py`, are removed; docs now name the `/api/v1` routes. A test fails if production frontend code requests a non-v1 `/api` path. Model-visible only through the client API document. ([#591](https://github.com/foolzzz/looper/pull/591))
+
+## [2.13.105] - 2026-10-25
+
+### Fixed
+
+- **The Gates page and its badge read only the rows they show, and a refresh no longer drops a loaded draft.** `fetchGates` used to read the server's whole ordered gate list even for a one-row badge. Ordinary reads (no saved cursor or `through` boundary) now request only the window `offset + limit` and check that the rows read match `min(window, total)`; saved boundaries still rebuild the full list so the server's ordering is kept. "Show more" now follows the server's `has_more` instead of comparing the loaded rows with the total, so an empty page no longer clears the saved cursor. A refresh across several windows rejects a changed `total` or a duplicated row with "Retry" and keeps the rows and any draft answer already on the page. Not model-visible; dashboard only. ([#586](https://github.com/foolzzz/looper/pull/586))
+
 ## [2.13.104] - 2026-10-25
 
 ### Fixed

@@ -31,6 +31,14 @@ def _bad(message: str) -> projects.RequestError:
     return projects.RequestError(projects.HTTP_400, message)
 
 
+class BotIdentityUnavailable(projects.RequestError):
+    """A fixed, public refusal; never includes CLI output or submitted values."""
+
+    def __init__(self) -> None:
+        super().__init__(projects.HTTP_409, "cannot verify Lark app identity; check the configured "
+                         "lark-cli profiles and authentication, then retry saving or importing")
+
+
 def _check_token(token: Any) -> str:
     if not isinstance(token, str) or not token or len(token) > TOKEN_MAX:
         raise _bad(f"bot_token must be a non-empty string (<={TOKEN_MAX} chars)")
@@ -57,8 +65,7 @@ async def _admission_app_id(channel_type: str, config: Mapping[str, Any]) -> str
     app_id = await lark_app_id(channel_type, config)
     if channel_type == "lark" and not app_id:
         # Never include a CLI error or profile value: either may contain credentials or machine paths.
-        raise projects.RequestError(projects.HTTP_409, "cannot verify Lark app identity; check the configured "
-                                    "lark-cli profiles and authentication, then retry saving or importing")
+        raise BotIdentityUnavailable()
     return app_id
 
 
