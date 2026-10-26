@@ -2255,6 +2255,8 @@ class _Importer:
                         stored = manager_template_entry(current, profile_names, project_names)
                         stored.pop("repoint", None)  # Only the file asks for a directory reminder.
                         template = {**stored, **template}
+                    if not isinstance(template.get("name"), str) or not template["name"].strip():
+                        raise ConfigFileError(f"{identity}/{key}: name must be non-empty")
                     project = template.get("project")
                     project_id = self.project_ids.get(project.strip().lower()) if isinstance(project, str) else None
                     if project is not None and project_id is None:

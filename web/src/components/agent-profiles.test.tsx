@@ -36,7 +36,7 @@ const model = (id: string, protocol: Model["protocol"], providerId = "provider")
 });
 const REGISTRY: Registry = {
   runtime_types: ["claude-code", "codex", "stand-in"].map<Registry["runtime_types"][number]>((type) => ({
-    type, label: type === "stand-in" ? "Stand-in" : "Claude Code", default_executable: type,
+    type, in_process: false, label: type === "stand-in" ? "Stand-in" : "Claude Code", default_executable: type,
     runtime_id: `rt-${type}`, protocols: type === "codex" ? ["openai-responses"] : type === "stand-in" ? ["anthropic-messages", "openai-chat"] : ["anthropic-messages"], capabilities: [], roles: ["worker"],
     auth_kinds: ["api_key", "oauth"], can_replace_system_prompt: type !== "stand-in", can_interrupt: type === "claude-code",
     supported_models: null,
@@ -44,7 +44,7 @@ const REGISTRY: Registry = {
   })),
   runtimes: ["claude-code", "codex", "stand-in"].map<Registry["runtimes"][number]>((type) => ({
     runtime_id: `rt-${type}`, name: type, type, type_label: type, executable: "", default_executable: type,
-    path: null, protocols: type === "codex" ? ["openai-responses"] : type === "stand-in" ? ["anthropic-messages", "openai-chat"] : ["anthropic-messages"], version: null, capabilities: [], roles: ["worker"],
+    path: null, in_process: false, protocols: type === "codex" ? ["openai-responses"] : type === "stand-in" ? ["anthropic-messages", "openai-chat"] : ["anthropic-messages"], version: null, capabilities: [], roles: ["worker"],
     probed_at: null, probe_error: null, builtin: true, profile_count: 0,
   })),
   providers: [provider("provider"), provider("other"), provider("codex-login", { auth: "oauth", oauth_runtime_type: "codex" }),
@@ -204,6 +204,44 @@ describe("Agent Profiles", () => {
   const registeredModels = (names: string[], providerId = "provider", protocol: Model["protocol"] = "anthropic-messages") =>
     names.map((name) => ({ ...model(`${providerId}-${name}`, protocol, providerId), name }));
   const modelOptions = () => [...select("Model *").options].filter((o) => o.value).map((o) => o.value);
+
+  const apiRuntime = () => {
+    registry.runtime_types.push({ ...registry.runtime_types[0], type: "api", label: "Model API", runtime_id: "rt-api",
+      in_process: true, protocols: ["openai-responses"], roles: ["manager"], auth_kinds: ["api_key"], supported_models: null });
+    registry.runtimes.push({ ...registry.runtimes[0], type: "api", runtime_id: "rt-api", type_label: "Model API",
+      in_process: true, path: null, protocols: ["openai-responses"], roles: ["manager"] });
+  };
+
+  it("lets a detected API runtime be selected", async () => {
+    apiRuntime();
+    await show();
+    expect([...select("Runtime").options].find((option) => option.value === "rt-api")?.disabled).toBe(false);
+    await choose("Runtime", "rt-api");
+    expect(select("Runtime").value).toBe("rt-api");
+  });
+
+  it("offers only Responses models for the API runtime", async () => {
+    apiRuntime();
+    await show();
+    await choose("Runtime", "rt-api");
+    expect(modelOptions()).toEqual(["model-responses"]);
+  });
+
+  it("uses the shared effort list for the API runtime", async () => {
+    apiRuntime();
+    await show();
+    await choose("Runtime", "rt-api");
+    expect([...select("Effort").options].map((option) => option.value)).toEqual(["", ...registry.limits.effort_levels]);
+  });
+
+  it("hides agent teams for the API runtime", async () => {
+    apiRuntime();
+    await show();
+    expect(container.querySelector('input[type="checkbox"]')).not.toBeNull();
+    await choose("Runtime", "rt-api");
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
+    expect(container.textContent).not.toContain("Agent teams");
+  });
 
   it("shows the DSH runtime card and pinned install command using the existing cards", async () => {
     dsh();
@@ -568,13 +606,13 @@ const PI_ROLES = ["manager", "planner", "worker", "reviewer"] as const;
 
 const PI_RUNTIME: Runtime = {
   runtime_id: "rt-pi", name: "pi", type: "pi", type_label: "pi", executable: "", default_executable: "pi",
-  path: "/usr/local/bin/pi", protocols: ["openai-chat", "openai-responses"], version: "1.3.0",
+  path: "/usr/local/bin/pi", in_process: false, protocols: ["openai-chat", "openai-responses"], version: "1.3.0",
   capabilities: ["run", "resident_session", "resume"], roles: [...PI_ROLES],
   probed_at: null, probe_error: null, builtin: true, profile_count: 1,
 };
 
 const PI_TYPE: RuntimeType = {
-  type: "pi", label: "pi", default_executable: "pi", runtime_id: "rt-pi",
+  type: "pi", in_process: false, label: "pi", default_executable: "pi", runtime_id: "rt-pi",
   supported_models: null,
   protocols: ["openai-chat", "openai-responses"], capabilities: ["run", "resident_session", "resume"],
   roles: [...PI_ROLES], auth_kinds: ["api_key"], can_replace_system_prompt: true, replace_system_prompt_refusal: null, can_interrupt: false,

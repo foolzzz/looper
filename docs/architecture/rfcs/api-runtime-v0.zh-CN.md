@@ -33,9 +33,9 @@
 
 | 入口 | 变化 | 不变 |
 |---|---|---|
-| 控制台 | Settings → Agent Runtimes 多一张「Model API (SDK)」卡：自动检测，显示 SDK 版本，能跑的角色只有 Manager。Agent Profiles 可以选运行时 `api` 和 provider 里协议受支持的模型；Roles 页只有 Manager 一行能选它。聊天的停止按钮可用（真的中断）。Runs 页里，这类运行的 command 是一行描述，不是 argv | 流式回复、配置块、确认说明、任务页、花费页 |
-| Telegram、飞书 | `/profile` 会列出 API Profile；`/stop` 在 API 管家上真的停掉这一轮 | 渠道协议、白名单、发消息逻辑 |
-| CLI 与 `loopercli` | 没有新参数。`loopercli chat` 照旧和管家对话；管家工具 `looper_agent_profiles` 能建 `api` Profile，因为运行时只是一个类型 | `looper serve`、`looper doctor`、v1 API |
+| 控制台 | Settings → Agent Runtimes 多一张「Model API (SDK)」卡：按 Python 包自动检测，显示 SDK 版本与「Runs inside looper serve」，能跑的角色只有 Manager；缺包时显示 Not detected 与重装 Looper 的探测错误，不显示路径。保留 Re-detect，不再单列 planned Norma。Agent Profiles 可以选运行时 `api` 和 provider 里的 `openai-responses` 模型，沿用共享 effort 列表，不显示 agent teams。Roles、项目与任务的选择器只有 Manager 能选它。聊天的停止按钮可用（真的中断）。Runs 页里，这类运行的 command 是一行描述，不是 argv | 流式回复、配置块、确认说明、任务页、花费页 |
+| Telegram、飞书 | `/profile` 会列出 API Profile，`/profile <n>` 可以选择；`/stop` 在 API 管家上真的停掉这一轮 | 渠道协议、白名单、发消息逻辑 |
+| CLI 与 `loopercli` | 没有新参数。`loopercli chat` 照旧和管家对话；v1 注册表读操作列出 `api` 类型及 `in_process: true`；管家工具 `looper_agent_profiles` 能建 `api` Profile，因为运行时只是一个类型 | `looper serve`、选择 api Profile 前后的 `looper doctor` 输出、v1 OpenAPI 生成命令的方式 |
 | 管家的行为 | API 管家只有平台工具：不能读文件、跑命令、上网，也不能用 skill。需要这些时，它会提议建任务（运行时说明里写明） | 平台工具的集合、范围（场景管家的 `OpsScope`）和风险档 |
 
 默认不变：没有 Profile 选它之前，所有管家照旧跑在原来的运行时上。

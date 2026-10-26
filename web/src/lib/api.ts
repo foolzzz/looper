@@ -2667,6 +2667,9 @@ export async function fetchLlmRecordEvents(recordId: number, after = 0): Promise
 /** What a runtime of one type can do; `capabilities` decide which roles its Agent Profiles can run. */
 export interface RuntimeType {
   type: string;
+  in_process: boolean;
+  /** Package probe diagnosis when an in-process type has no registered runtime yet. */
+  probe_error?: string | null;
   label: string;
   /** The command a runtime of this type runs when its executable is empty. */
   default_executable: string;
@@ -2691,6 +2694,7 @@ export interface RuntimeType {
  * before runtimes were built in (`builtin` false), kept read-only while an Agent Profile uses it. */
 export interface Runtime {
   runtime_id: string;
+  in_process: boolean;
   name: string;
   type: string;
   type_label: string;

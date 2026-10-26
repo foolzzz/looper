@@ -171,12 +171,18 @@ _MANAGER_CONFIG_FIELDS = {
     "task_policy": {"type": "string", "enum": ["free", "templates_only"]},
     "enabled": _BOOL, "templates": _array(TEMPLATE_CONFIG),
 }
-MANAGER_CONFIG = {**_object(_MANAGER_CONFIG_FIELDS, ["id", "name"], closed=True), "oneOf": [
-    _object({"id": {"const": "manager"}, "name": _STR, "description": _STR}, ["id", "name"], closed=True),
-    _object({**_MANAGER_CONFIG_FIELDS,
-             "id": {"type": "string", "pattern": r"^manager-[a-z][a-z0-9-]{1,30}$"}},
-            ["id", "name"], closed=True),
-]}
+
+
+def _manager_config(template: dict[str, Any]) -> dict[str, Any]:
+    fields = {**_MANAGER_CONFIG_FIELDS, "templates": _array(template)}
+    return {**_object(fields, ["id", "name"], closed=True), "oneOf": [
+        _object({"id": {"const": "manager"}, "name": _STR, "description": _STR}, ["id", "name"], closed=True),
+        _object({**fields, "id": {"type": "string", "pattern": r"^manager-[a-z][a-z0-9-]{1,30}$"}},
+                ["id", "name"], closed=True),
+    ]}
+
+
+MANAGER_CONFIG = _manager_config(TEMPLATE_CONFIG)
 BOT_CONFIG = {**_object({
     "channel_id": _STR,
     "channel_type": {"type": "string", "enum": ["telegram", "lark", "lark_bot"]},
@@ -203,6 +209,15 @@ CONFIG_DOCUMENT_VERSIONS = [
 CONFIG_DOCUMENT = {**_object({**_CONFIG_PROPERTIES, "agents": _array(),
                              "managers": _array(MANAGER_CONFIG)}, ["format"], closed=True),
                    "oneOf": CONFIG_DOCUMENT_VERSIONS}
+# Imports may overlay an existing template; exports still require its complete identity.
+_IMPORT_MANAGERS = _array(_manager_config({**TEMPLATE_CONFIG, "required": ["key"]}))
+CONFIG_IMPORT_DOCUMENT = {
+    **CONFIG_DOCUMENT, "properties": {**CONFIG_DOCUMENT["properties"], "managers": _IMPORT_MANAGERS},
+    "oneOf": [*CONFIG_DOCUMENT_VERSIONS[:-1], {
+        **CONFIG_DOCUMENT_VERSIONS[-1],
+        "properties": {**CONFIG_DOCUMENT_VERSIONS[-1]["properties"], "managers": _IMPORT_MANAGERS},
+    }],
+}
 
 RESULTS: dict[str, dict[str, Any]] = {
     "auth.set_password": _object({"user": _STR, "password_set": _BOOL}),

@@ -1087,7 +1087,8 @@ Manager tools.
   (`RuntimeAdapter`). Every tier starts its runtime through it, so no tier
   builds a command itself. An adapter declares its `capabilities`, the API
   `protocols` it speaks and the provider `auth_kinds` it takes, and it
-  probes an executable (`--version`, never a model call), binds a provider
+  probes an executable (`--version`) or an in-process Python package, never
+  a model call, binds a provider
   (`bind_provider`), lays out the launch (`launch_args`, `environment`,
   `resident_command`, `run_command`, with its isolation flags and the
   system-prompt file), resumes a session (`resume_args`), runs a resident
@@ -1462,16 +1463,31 @@ Manager tools.
   Settings → Agent Runtimes and Agent Profiles show Pi, with no login help.
   The CLI follows the registry. Telegram and Lark keep their protocols. What
   has run, and what is still open, is in the pi runtime RFC.
+- **Model API (SDK)** (`api`) runs only the Manager inside `looper serve`,
+  through the `openai` Python SDK on OpenAI Responses. Its platform tools run
+  in-process with the same confirmation and audit as the CLI runtimes. Its
+  turn loop is a Python port of Norma behind `AgentLoop`, with OpenAI
+  Responses as the first codec; there is only one `api` runtime kind. Neutral
+  session items are kept in `api_session_items`, with the protocol on the
+  `api_sessions` metadata row; the codec translates wire formats. Stage 1
+  adds no filesystem or process tools. Any future such tool must obey the
+  task cwd plus explicit `add_dirs`, an allowlisted environment and a private
+  per-runtime HOME; these tool boundaries do not provide an OS sandbox.
+  Stop cancels the model request. Settings → Agent Runtimes detects the
+  Python package, shows its SDK version and “Runs inside looper serve”, and
+  keeps Re-detect; a missing package shows the probe's reinstall error.
+  See the [API runtime RFC](rfcs/api-runtime-v0.zh-CN.md).
 - **Runtimes** (`agent_runtimes`) are built in, never registered by hand: one
-  per type found on the server's PATH (`rt-<type>`, named after its type;
+  per detected type (`rt-<type>`, named after its type; CLI types are found
+  on the server's PATH and in-process types by their Python package;
   Claude Code's `rt-claude-code` comes with the schema and runs the server's
   `claude`), with an `executable` (`''` = the type's default) and what its
   last probe found (`version`, `capabilities`, `probe_error`). A different
   binary comes from the server's PATH. Settings → Agent Runtimes shows one
   card per type, found or not, with its path, version, capabilities and the
-  roles it can run, and Re-detect (`POST /api/runtimes/<id>/probe`) probes it
-  again, or looks for a type not found yet and adds its runtime when it is on
-  PATH now. Runtimes registered by hand before (`builtin` false) are dropped
+  roles it can run, and Re-detect (`POST /api/v1/runtimes/probe`) probes it
+  again, or looks for a type not found yet and adds its runtime when its
+  probe succeeds. Runtimes registered by hand before (`builtin` false) are dropped
   once by the schema when no profile uses them (`schema_migrations`
   `agent_runtimes_unused_custom_removed`); one a profile uses stays,
   read-only, shown as "custom (legacy)", so the profile keeps running the
