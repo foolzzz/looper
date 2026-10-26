@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.134] - 2026-10-26
+
+### Changed
+
+- **Scenario Managers stage 3 is marked as implemented in the docs.** The scenario-Managers RFC and the long-horizon plan now record the maintainer's confirmation of the seven recommended semantics. Documentation only; no code, schema, API or prompt changes. ([#667](https://github.com/foolzzz/looper/pull/667))
+
 ## [2.13.133] - 2026-10-25
 
 ### Changed
