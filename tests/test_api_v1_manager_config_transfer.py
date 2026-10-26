@@ -116,6 +116,22 @@ def test_operator_manager_preview_apply_and_export_use_real_importer(tmp_path, m
             status, _, applied = await request("import_apply", {"import_id": staged["result"]["import_id"]})
             assert status == 200 and applied["status"] == "ok" and applied["result"]["plan"]["applied"]
             assert await pool.fetchval("SELECT name FROM managers WHERE id='manager-example'") == "Example manager"
+            partial = {"format": "looper-config/v4", "managers": [
+                {"id": "manager-example", "name": "Example manager", "templates": [
+                    {"key": "example", "name": "Renamed task"}]}]}
+            before = await pool.fetchrow("SELECT * FROM manager_task_templates WHERE manager_id='manager-example'")
+            status, _, staged = await request("import_preview", {"document": partial})
+            assert status == 200, staged
+            preview = staged["result"]["plan"]
+            assert preview["changes"] == [{"section": "manager.templates", "key": "manager-example/example",
+                                            "action": "changed", "fields": ["name"]}]
+            assert await pool.fetchrow(
+                "SELECT * FROM manager_task_templates WHERE manager_id='manager-example'") == before
+            status, _, applied = await request("import_apply", {"import_id": staged["result"]["import_id"]})
+            assert status == 200, applied
+            assert applied["result"]["plan"] == {**preview, "applied": True}
+            after = await pool.fetchrow("SELECT * FROM manager_task_templates WHERE manager_id='manager-example'")
+            assert dict(after) == {**before, "name": "Renamed task", "updated_at": after["updated_at"]}
             status, _, exported = await request("export", {})
             assert status == 200, exported
             document = exported["result"]["document"]
@@ -123,5 +139,6 @@ def test_operator_manager_preview_apply_and_export_use_real_importer(tmp_path, m
             managers = {entry["id"]: entry for entry in document["managers"]}
             assert managers["manager"] == GRAPH["managers"][0]
             assert managers["manager-example"]["templates"][0]["key"] == "example"
+            assert managers["manager-example"]["templates"][0]["requirement"] == "Inspect the example."
             server._config_imports.clear()
     run_db(run, monkeypatch, timeout=30)

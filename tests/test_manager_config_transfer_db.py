@@ -71,6 +71,157 @@ def _registry() -> dict[str, Any]:
     }
 
 
+async def _stored_template(pool: Any) -> dict[str, Any]:
+    await _codex_runtime(pool)
+    template = _template(description="Example review", requirement="Review public example changes.",
+                         planner_instructions="Check the tests first.", project="Example", workspace_mode="worktree",
+                         profiles=dict.fromkeys(("planner", "worker", "reviewer"), "Example profile"),
+                         role_templates=["security"])
+    await _run(pool, _document(_manager(profile="Example profile", templates=[template]),
+                              projects=[{"name": "Example", "role_templates": [
+                                  {"key": "security", "kind": "review", "role_prompt": "Review security."}]}],
+                              **_registry()))
+    return next(entry for entry in (await _export(pool))["managers"]
+                if entry["id"] == "manager-review")["templates"][0]
+
+
+@pytest.mark.parametrize("field", ["description", "requirement", "planner_instructions", "inputs", "profiles",
+                                   "project", "workspace_mode", "role_templates"])
+def test_partial_template_keeps_omitted_stored_field(field: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        template = await _stored_template(pool)
+        before = await managers.get_template("manager-review", "review", pool=pool)
+        del template[field]
+        template["name"] = "Updated review"
+        await _run(pool, _document({"id": "manager-review", "name": "Review", "templates": [template]}))
+        after = await managers.get_template("manager-review", "review", pool=pool)
+        assert after == {**before, "name": "Updated review", "updated_at": after["updated_at"]}
+
+    run_db(test, monkeypatch, timeout=20)
+
+
+@pytest.mark.parametrize("field,empty,columns", [
+    ("description", "", ("description",)),
+    ("requirement", "", ("requirement",)),
+    ("planner_instructions", "", ("planner_instructions",)),
+    ("inputs", [], ("inputs",)),
+    ("profiles", {}, ("planner_profile_id", "worker_profile_id", "reviewer_profile_id")),
+    ("project", None, ("project_id", "role_templates")),
+    ("workspace_mode", None, ("workspace_mode",)),
+    ("role_templates", [], ("role_templates",)),
+])
+def test_partial_template_explicit_empty_clears_only_given_fields(
+    field: str, empty: Any, columns: tuple[str, ...], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def test(pool: Any) -> None:
+        await _stored_template(pool)
+        before = await managers.get_template("manager-review", "review", pool=pool)
+        partial = {"key": "review", "name": "Review", field: empty}
+        if field == "project":
+            partial["role_templates"] = []  # Fixed roles require a project.
+        document = _document({"id": "manager-review", "name": "Review", "templates": [partial]})
+        preview = await _run(pool, document, apply=False)
+        assert await managers.get_template("manager-review", "review", pool=pool) == before
+        change = next(c for c in preview.view()["changes"] if c["section"] == "manager.templates")
+        assert change["action"] == "changed" and set(change["fields"]) == set(columns)
+        applied = await _run(pool, document)
+        assert applied.view() == {**preview.view(), "applied": True}
+        after = await managers.get_template("manager-review", "review", pool=pool)
+        expected = {**before, "updated_at": after["updated_at"]}
+        expected.update({column: None if field == "profiles" else [] if column == "role_templates" else empty
+                         for column in columns})
+        assert after == expected
+
+    run_db(test, monkeypatch, timeout=20)
+
+
+def test_minimal_template_preview_and_confirm_keep_all_other_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await _stored_template(pool)
+        before = await managers.get_template("manager-review", "review", pool=pool)
+        document = _document({"id": "manager-review", "name": "Review", "templates": [
+            {"key": "review", "name": "Renamed review"}]})
+        preview = await _run(pool, document, apply=False)
+        assert await managers.get_template("manager-review", "review", pool=pool) == before
+        assert preview.view()["changes"] == [{"section": "manager.templates", "key": "manager-review/review",
+                                             "action": "changed", "fields": ["name"]}]
+        applied = await _run(pool, document)
+        assert applied.view() == {**preview.view(), "applied": True}
+        after = await managers.get_template("manager-review", "review", pool=pool)
+        assert after == {**before, "name": "Renamed review", "updated_at": after["updated_at"]}
+        assert (await _run(pool, document)).writes == 0
+
+    run_db(test, monkeypatch, timeout=20)
+
+
+def test_new_template_with_omitted_fields_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await _stored_template(pool)
+        document = _document(_manager(templates=[{"key": "new", "name": "New review"}]))
+        preview = await _run(pool, document, apply=False)
+        assert preview.view()["counts"]["manager.templates"]["added"] == 1
+        applied = await _run(pool, document)
+        assert applied.view() == {**preview.view(), "applied": True}
+        stored = await managers.get_template("manager-review", "new", pool=pool)
+        assert {k: v for k, v in stored.items() if k != "updated_at"} == {
+            "manager_id": "manager-review", "key": "new", "name": "New review", "description": "",
+            "requirement": "", "planner_instructions": "", "inputs": [], "project_id": None, "work_dir": "",
+            "workspace_mode": None, "planner_profile_id": None, "worker_profile_id": None,
+            "reviewer_profile_id": None, "role_templates": []}
+
+    run_db(test, monkeypatch, timeout=20)
+
+
+def test_partial_manager_definition_already_keeps_omitted_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await _stored_template(pool)
+        before = await managers.get_manager("manager-review", pool=pool)
+        template = await managers.get_template("manager-review", "review", pool=pool)
+        document = _document({"id": "manager-review", "name": "Renamed manager"})
+        preview = await _run(pool, document, apply=False)
+        assert await managers.get_manager("manager-review", pool=pool) == before
+        assert preview.view()["changes"] == [{"section": "managers", "key": "manager-review",
+                                             "action": "changed", "fields": ["name"]}]
+        assert (await _run(pool, document)).view() == {**preview.view(), "applied": True}
+        after = await managers.get_manager("manager-review", pool=pool)
+        assert after == {**before, "name": "Renamed manager", "revision": before["revision"] + 1,
+                         "updated_at": after["updated_at"]}
+        assert await managers.get_template("manager-review", "review", pool=pool) == template
+
+    run_db(test, monkeypatch, timeout=20)
+
+
+def test_exported_manager_graph_roundtrips_byte_for_byte(monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import datetime, timezone
+    from looper.db.connection import ensure_schema
+
+    class ExportClock:
+        @staticmethod
+        def now(tz: Any) -> datetime:
+            return datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    # The export timestamp is metadata, not configuration.
+    monkeypatch.setattr(transfer, "datetime", ExportClock)
+
+    async def exported(pool: Any) -> bytes:
+        async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
+            return "".join([chunk async for chunk in transfer.export_chunks(
+                conn, include_projects=True, include_secrets=False)]).encode("utf-8")
+
+    async def test(pool: Any) -> None:
+        await _stored_template(pool)
+        first = await exported(pool)
+        async with fresh_schema() as target:
+            await ensure_schema(target)
+            await _codex_runtime(target)
+            document = json.loads(first)
+            assert document["format"] == transfer.V4_FORMAT
+            await _run(target, document)
+            assert await exported(target) == first
+
+    run_db(test, monkeypatch, timeout=30)
+
+
 def test_preview_is_read_only_including_revisions_sequences_and_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         await _codex_runtime(pool)
