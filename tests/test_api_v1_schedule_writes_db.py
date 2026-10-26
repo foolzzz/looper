@@ -71,6 +71,24 @@ def test_create_is_disabled_rejects_enabled_and_reads_back_saved_fields(tmp_path
     run_db(run, monkeypatch, timeout=30)
 
 
+def test_create_owner_survives_v1_readback(tmp_path, monkeypatch):
+    async def run(pool):
+        project = await projects.create_project(name="Reports", work_dir="/srv/reports")
+        await pool.execute("INSERT INTO managers (id, name, system_prompt) "
+                           "VALUES ('manager-reports', 'Reports owner', 'Review reports.')")
+        async with _api(tmp_path, pool) as call:
+            status, result = await call("create", {"project_id": project["id"],
+                "fields": {**FIELDS, "manager_id": "manager-reports"}})
+            assert status == 200, result
+            sid = result["schedule"]["schedule_id"]
+            for action, body in (("get", {"schedule_id": sid}), ("list", {}),
+                                 ("project_list", {"project_id": project["id"]})):
+                _, result = await call(action, body)
+                view = result["schedule"] if action == "get" else result["schedules"][0]
+                assert (view["manager_id"], view["manager_name"]) == ("manager-reports", "Reports owner")
+    run_db(run, monkeypatch, timeout=30)
+
+
 @pytest.mark.parametrize("timeout", ["default", None, 60])
 def test_timeout_budget_profile_and_task_limit_variants_are_saved(tmp_path, monkeypatch, timeout):
     async def run(pool):

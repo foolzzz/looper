@@ -140,6 +140,8 @@ async def _assert_readback(conn, old, conversion, before, history):
             row[column] = conversion.provider_map.get(row[column], row[column])
             if table == "agent_sessions":  # the schema adds the Manager's selected profile, NULL for old rows
                 row["selected_profile_id"] = None
+            elif table == "schedules":  # old schedules belong to the default Manager
+                row["manager_id"] = "manager"
             expected.append(row)
         assert sorted((json.loads(r[0]) for r in after[1][table]), key=str) == sorted(expected, key=str)
     profiles = await profile_registry.list_profiles(pool=conn)

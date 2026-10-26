@@ -12,6 +12,8 @@ from looper.agents.ops import OpError
 @pytest.mark.parametrize("action,options,body", [
     ("create", ["--project-id", "project-a", "--fields", '{"name":"Hourly","cron":"0 * * * *","requirement":"Read reports"}'],
      {"project_id": "project-a", "fields": {"name": "Hourly", "cron": "0 * * * *", "requirement": "Read reports"}}),
+    ("create", ["--project-id", "project-a", "--fields", '{"name":"Hourly","cron":"0 * * * *","requirement":"Read reports","manager_id":"manager-reports"}'],
+     {"project_id": "project-a", "fields": {"name": "Hourly", "cron": "0 * * * *", "requirement": "Read reports", "manager_id": "manager-reports"}}),
     ("update", ["--schedule-id", "sched-a", "--fields", '{"enabled":true}'],
      {"schedule_id": "sched-a", "fields": {"enabled": True}}),
     *[(action, ["--schedule-id", "sched-a"], {"schedule_id": "sched-a"})
@@ -30,7 +32,10 @@ def test_generated_cli_posts_declared_schedule_write(action, options, body):
 @pytest.mark.parametrize("action,body", [
     ("create", {"project_id": 1, "fields": {}}),
     ("create", {"project_id": "project-a", "fields": {"name": "Hourly", "cron": "0 * * * *", "requirement": "Read", "enabled": False}}),
+    *[("create", {"project_id": "project-a", "fields": {"name": "Hourly", "cron": "0 * * * *", "requirement": "Read", "manager_id": owner}})
+      for owner in ("", None, 1)],
     ("update", {"schedule_id": "sched-a", "fields": {}}),
+    ("update", {"schedule_id": "sched-a", "fields": {"manager_id": "manager-reports"}}),
     ("update", {"schedule_id": "sched-a", "fields": {"max_parallel_runs": True}}),
     ("update", {"schedule_id": "sched-a", "fields": {"profile_overrides": {"manager": "profile-a"}}}),
     ("update", {"schedule_id": "sched-a", "fields": {"task_limits": {"planner": 1}}}),

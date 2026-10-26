@@ -1736,6 +1736,10 @@ CREATE TABLE IF NOT EXISTS schedules (
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (enabled OR next_fire_at IS NULL)
 );
+-- Ownership is fixed when a schedule is created; old schedules belong to the default Manager.
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS manager_id TEXT NOT NULL DEFAULT 'manager'
+    REFERENCES managers(id) ON DELETE RESTRICT;
+CREATE INDEX IF NOT EXISTS idx_schedules_manager ON schedules (manager_id);
 -- S2: a gate command run in the work directory before each run (nothing printed: skipped; output: given to the
 -- task; failure: the run fails), a daily spend cap over the schedule's runs, and whom to tell: notify ('failures',
 -- 'alerts', 'always', 'never'; see the block after these) to a chat a channel allows (notify_channel and notify_chat, both or neither; none: the

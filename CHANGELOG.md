@@ -18,6 +18,24 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.148] - 2026-10-26
+
+### Changed
+
+- **A schedule has an immutable Manager owner.** `schedules.manager_id` (default `manager`, so old schedules stay with the default Manager) is chosen when a schedule is created through the API, the v1 API, the Manager's schedule tool or the dashboard's new Owner select, and cannot change afterwards. The tasks a schedule creates belong to that Manager and use its existing reporting. A firing or an enabling is refused when the owner is deleted, disabled or requires a template. Deleting a Manager that owns a schedule answers 409. Configuration export writes `manager` for a non-default owner; import skips a schedule whose owner is missing, requires a template or differs from the stored one, and locks incoming schedules before Managers. The schedule and run views gain `manager_id` (and `manager_name`). A schedule a Manager creates is now owned by that Manager; its `get` result still omits the owner. Tool declarations and prompts are unchanged. ([#695](https://github.com/foolzzz/looper/pull/695))
+
+## [2.13.147] - 2026-10-26
+
+### Fixed
+
+- **An unavailable in-process runtime shows its reinstall hint in Agent Profiles.** In Settings → Agent Profiles, a disabled in-process runtime such as Model API (SDK) now shows its probe error (for example, reinstall Looper) in the Runtime option text and tooltip instead of "not on the server's PATH"; it falls back to "not available" when there is no probe error. A CLI runtime keeps the PATH wording. The Runtime select can now shrink and truncate long option text. Only the dashboard changes; prompts, tool declarations and the API are unchanged. ([#700](https://github.com/foolzzz/looper/pull/700))
+
+## [2.13.146] - 2026-10-26
+
+### Fixed
+
+- **A configuration import may omit the name of an existing task template.** The overlay rule from #689 now also holds in the HTTP preview and upload paths: a new import-only schema (`ConfigImportDocument`) requires only the template `key`, while `ConfigDocument` and exports still require the full identity. After the stored template is merged in, a template without a name is rejected with an error that names its key, so a new template still needs one. Prompts and tool declarations are unchanged. ([#697](https://github.com/foolzzz/looper/pull/697))
+
 ## [2.13.145] - 2026-10-26
 
 ### Changed
