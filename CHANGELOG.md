@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.144] - 2026-10-26
+
+### Fixed
+
+- **Configuration import keeps stored template fields the file omits.** When the target already stores a task template for the same Manager and key, the import overlays the file's keys on the stored template before references are resolved and fields validated, so preview and apply agree. The stored directory reminder (`repoint`) is not carried over. Prompts and tool declarations are unchanged. ([#689](https://github.com/foolzzz/looper/pull/689))
+
 ## [2.13.143] - 2026-10-26
 
 ### Added
