@@ -212,6 +212,29 @@ describe("Agent Profiles", () => {
       in_process: true, path: null, protocols: ["openai-responses"], roles: ["manager"] });
   };
 
+  it("shows the package probe error for an unavailable in-process runtime", async () => {
+    apiRuntime();
+    const error = "the openai Python package is not installed with this Looper; reinstall Looper";
+    registry.runtime_types.at(-1)!.probe_error = error;
+    registry.runtimes = registry.runtimes.filter((runtime) => runtime.type !== "api");
+    await show(null);
+    const option = [...select("Runtime").options].find((item) => item.value === "rt-api")!;
+    expect(option.disabled).toBe(true);
+    expect(option.textContent).toContain(error);
+    expect(option.textContent).not.toContain("PATH");
+    expect(option.title).toBe(error);
+  });
+
+  it("keeps the PATH hint for an unavailable CLI runtime", async () => {
+    registry.runtimes = registry.runtimes.filter((runtime) => runtime.type !== "codex");
+    registry.runtime_types.find((type) => type.type === "codex")!.probe_error = "CLI probe failed";
+    await show(null);
+    const option = [...select("Runtime").options].find((item) => item.value === "rt-codex")!;
+    expect(option.disabled).toBe(true);
+    expect(option.textContent).toContain("not on the server's PATH");
+    expect(option.textContent).not.toContain("CLI probe failed");
+  });
+
   it("lets a detected API runtime be selected", async () => {
     apiRuntime();
     await show();
