@@ -64,7 +64,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, runtime_checkable
 
 from ..system_prompt_mode import SystemPromptMode as SystemPromptMode
 from .channel import RunChannel as RunChannel, StreamChannel as StreamChannel
@@ -213,6 +213,13 @@ class StopMethod(str, Enum):
     CONTROL = "control"
     CANCEL = "cancel"
     KILL = "kill"
+
+
+@runtime_checkable
+class InProcessTools(Protocol):
+    """A session whose next turn calls platform tools inside the service process."""
+
+    def set_turn_tools(self, tools: Any) -> None: ...
 
 
 class ResidentSession(Protocol):
@@ -494,6 +501,7 @@ def replace_refusal(adapter: RuntimeAdapter) -> str | None:
 
 
 def _adapters() -> dict[str, RuntimeAdapter]:
+    from .api import ApiRuntime
     from .claude_code import ClaudeCodeRuntime
     from .codex import CodexRuntime
     from .dsh import DshRuntime
@@ -502,7 +510,7 @@ def _adapters() -> dict[str, RuntimeAdapter]:
     from .pi import PiRuntime
 
     return {adapter.type: adapter for adapter in (
-        ClaudeCodeRuntime(), CodexRuntime(), OmpRuntime(), GrokRuntime(), DshRuntime(), PiRuntime())}
+        ClaudeCodeRuntime(), CodexRuntime(), OmpRuntime(), GrokRuntime(), DshRuntime(), PiRuntime(), ApiRuntime())}
 
 
 # The runtime types, by type id. Code owns this set: a registered runtime of a type missing here cannot run.

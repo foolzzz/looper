@@ -676,7 +676,7 @@ def test_codex_on_path_becomes_a_builtin_runtime_once(monkeypatch: pytest.Monkey
 
     async def _test(_pool: Any) -> None:
         monkeypatch.setenv("PATH", str(tmp_path / "empty"))
-        assert await register_found_runtimes() == []
+        assert await register_found_runtimes() == ["api"]  # The SDK runtime needs no executable.
         monkeypatch.setenv("PATH", str(bin_dir))
         assert await register_found_runtimes() == ["codex"]
         runtime = _by_name((await _registry())["runtimes"], "codex")
@@ -759,7 +759,7 @@ def test_omp_on_path_becomes_a_builtin_runtime_once(monkeypatch: pytest.MonkeyPa
 
     async def _test(_pool: Any) -> None:
         monkeypatch.setenv("PATH", str(bin_dir))
-        assert await register_found_runtimes() == ["omp"]
+        assert await register_found_runtimes() == ["omp", "api"]
         runtime = _by_name((await _registry())["runtimes"], "omp")
         assert (runtime["runtime_id"], runtime["builtin"], runtime["executable"], runtime["version"]) == (
             "rt-omp", True, "", "omp/18.4.3")
@@ -793,7 +793,7 @@ def test_dsh_path_registration_is_once_and_redetect_updates_the_persisted_probe(
     async def _test(pool: Any) -> None:
         status, payload = await _call("POST", "/api/v1/runtimes/probe", {"runtime_id": "rt-dsh"})
         assert status == 404 and "DSH (dsh) is not on the server's PATH" in payload["error"]
-        assert await register_found_runtimes() == []
+        assert await register_found_runtimes() == ["api"]
         _version_dsh(tmp_path / "dsh")
         assert await register_found_runtimes() == ["dsh"]
         runtime = _by_name((await _registry())["runtimes"], "dsh")
@@ -929,7 +929,7 @@ def test_grok_on_path_becomes_a_builtin_runtime_that_pairs_only_with_its_own_log
 
     async def _test(_pool: Any) -> None:
         monkeypatch.setenv("PATH", str(bin_dir))
-        assert await register_found_runtimes() == ["codex", "grok"]
+        assert await register_found_runtimes() == ["codex", "grok", "api"]
         runtime = _by_name((await _registry())["runtimes"], "grok")
         assert (runtime["runtime_id"], runtime["builtin"], runtime["version"], runtime["type_label"],
                 runtime["protocols"], runtime["roles"]) == (
@@ -995,7 +995,7 @@ def test_pi_on_path_is_discovered_once_offers_every_role_and_refuses_other_auth_
 
     async def _test(_pool: Any) -> None:
         monkeypatch.setenv("PATH", str(bin_dir))
-        assert await register_found_runtimes() == ["pi"]
+        assert await register_found_runtimes() == ["pi", "api"]
         assert await register_found_runtimes() == []  # once
         registry = await _registry()
         runtime = _by_name(registry["runtimes"], "pi")

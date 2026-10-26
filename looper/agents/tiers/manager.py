@@ -73,7 +73,8 @@ from ..library import load_installed
 from ..run_usage import Usage
 from ..reported_files import prompt_name
 from .. import session_switch
-from ..runtimes import CLAUDE_CODE
+from ..runtimes import CLAUDE_CODE, InProcessTools
+from ..runtimes.api.tools import ManagerTurnTools
 from ..runtimes.cancel import TurnCancel, TurnCancelled, abandon
 from ..session_switch import SessionSwitch
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
@@ -1110,7 +1111,8 @@ class ManagerAgent:
             await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
             await token.step("status_thinking", self._send_status(envelope, "thinking", phase=True, activity="thinking"))
             # Claude can do nothing without Looper's tools, and might say it did: the user hears that they are down.
-            problem = await token.step("tools_probe", self._tools_problem())
+            problem = (await token.step("tools_probe", self._tools_problem())
+                       if not self._claude_runtime.in_process else None)
             if problem is not None:
                 logger.error("%s: Looper's tools do not work (%s); %s was not answered", self._log, problem,
                              envelope.message_id)
@@ -1641,6 +1643,8 @@ class ManagerAgent:
             # A turn cut off by Claude's exit ends without a result; that Claude
             # is reaped and the next message starts a new process that resumes the session.
             try:
+                if isinstance(self._claude, InProcessTools) and self.ops is not None:
+                    self._claude.set_turn_tools(ManagerTurnTools(self.ops, token.binding))
                 turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope,
                                                    stop=lambda: recorder.cap_stop, cancel=token.cancel)
             except TurnCancelled:
