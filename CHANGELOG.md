@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.137] - 2026-10-26
+
+### Added
+
+- **Neutral agent loop for the planned `api` runtime.** `looper/agents/runtimes/api/loop.py` ports Norma's turn and tool-call cycle into typed asyncio Python behind `AgentLoop`, with versioned protocol-neutral session items, serial tool dispatch after a complete response, a request limit, cancellation, one safe stream resend and per-request records. Nothing imports it yet and `loop_for` rejects every protocol until a codec lands, so runtime behavior and prompts are unchanged. Adds `THIRD_PARTY_NOTICES.txt` (Norma MIT notice) as wheel package data. ([#674](https://github.com/foolzzz/looper/pull/674))
+
 ## [2.13.136] - 2026-10-26
 
 ### Changed
