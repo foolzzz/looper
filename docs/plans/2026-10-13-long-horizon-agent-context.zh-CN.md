@@ -55,7 +55,7 @@
 | M9a | 运行时、provider 与 agent 的注册和选择；现有 Claude Code 路径抽成第一个运行时适配器 | ✅ 已交付（looper #62） | M8d |
 | M9b | Claude Code 接多种 provider：订阅 OAuth、Anthropic key、兼容 anthropic 协议的接口；按 provider 价格计算花费 | ✅ 已交付（looper #68；DeepSeek、Kimi 真实 key 待维护者验证） | M9a |
 | M9c | Codex 运行时：四类角色都支持（含常驻会话），事件统一、MCP 翻译、API key（Codex 登录在 §5.0 第 3 项交付） | ✅ 已交付（looper #67） | M9a |
-| M9d | SDK 运行时与 norma SDK | 待定（norma 就绪后） | M9a |
+| M9d | SDK 运行时与 Norma 循环移植 | 按 §5.0 第 23 项交付：`api` 运行时，阶段 1 移植 Norma 循环（[RFC](../architecture/rfcs/api-runtime-v0.zh-CN.md)） | M9a |
 | M9e | OMP 运行时：先只读核实能力、填能力矩阵，再写适配器 | ✅ 已交付（looper #70） | M9c |
 | LLM 模型层 | Provider → Endpoint → Model → Profile；配置 v3 | 分支实现中；迁移后隔离服务、Manager/HTTP 读回、浏览器截图已验证；真实 CLI 与两档 dialogs 缺凭据未测，不可发布（§5.4） | M9a、M8e |
 | M9f | Grok 运行时：Grok 自己的登录（`grok-login`），四类角色都支持 | 进行中 | M9c、M9e |
@@ -545,9 +545,9 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
   - 密钥只在 `LOOPER_PROVIDER_API_KEY`，`models.json` 写 `"apiKey": "$LOOPER_PROVIDER_API_KEY"`；catalog cost 四项为 0，Looper 按所选模型的生效价格计费，软上限在 usage 边界停进程树；
   - Telegram、Lark 协议不改。安装后的 serve 里 `telegram`、`lark`、`lark_bot` 存在且禁用。没有发送替身渠道消息，也没有真实测试消息。
 
-#### M9d SDK 运行时与 norma
+#### M9d SDK 运行时与 Norma 循环移植
 
-- **范围：** 在适配器接口上接 SDK 类运行时；norma SDK 就绪后接入，验证它的双协议。范围在 M9a–M9c 之后再细化。
+- **范围：** 按 §5.0 第 23 项及 [API 运行时 RFC](../architecture/rfcs/api-runtime-v0.zh-CN.md) 交付：保持一种 `api` 运行时，阶段 1 将 Norma 循环移植为类型化 asyncio Python；后续唯一上游是 Go 移植版的副本 `loopgo-main:go/internal/norma`。不新增 `norma` 运行时类型，不等待单独的 Norma SDK。
 
 ## 4. 进度台账
 
