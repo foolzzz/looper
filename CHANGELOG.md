@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.145] - 2026-10-26
+
+### Changed
+
+- **Settings → Agent Runtimes shows the api runtime.** The Model API (SDK) card is listed as an in-process SDK runtime: its path row reads "Runs inside looper serve", a missing Python package shows the probe's reinstall error (the runtime type view gains an optional `probe_error`), and the "norma" placeholder is dropped from the planned runtimes. The registry view probes an in-process type that has no registered runtime so the diagnosis stays visible. agent-system.md, the API runtime RFC and design.md describe the runtime; a new test file checks the Agent Profile form, the Roles and project/task selectors, the chat stop button, Telegram and Lark `/profile` and `/stop`, `looper doctor` and `loopercli` against the RFC's entry-point table. Prompts and tool declarations are unchanged. ([#696](https://github.com/foolzzz/looper/pull/696))
+
 ## [2.13.144] - 2026-10-26
 
 ### Fixed
