@@ -177,11 +177,14 @@ MANAGER_CONFIG = {**_object(_MANAGER_CONFIG_FIELDS, ["id", "name"], closed=True)
              "id": {"type": "string", "pattern": r"^manager-[a-z][a-z0-9-]{1,30}$"}},
             ["id", "name"], closed=True),
 ]}
-BOT_CONFIG = _object({
+BOT_CONFIG = {**_object({
     "channel_id": _STR,
     "channel_type": {"type": "string", "enum": ["telegram", "lark", "lark_bot"]},
     "manager_id": _STR, "display_name": _NULL_STR, "enabled": _BOOL, "config": _OBJ,
-}, ["channel_id", "channel_type", "manager_id", "config"], closed=True)
+}, ["channel_id", "channel_type", "config"], closed=True), "anyOf": [
+    {"required": ["manager_id"]},
+    {"properties": {"channel_id": {"enum": ["channel-telegram", "channel-lark", "channel-lark_bot"]}}},
+]}
 _CONFIG_PROPERTIES = {
     "format": _STR, "looper_version": _STR, "exported_at": _STR, "secrets": _STR,
     "runtimes": _array(), "providers": _array(), "models": _array(), "profiles": _array(),

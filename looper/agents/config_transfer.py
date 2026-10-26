@@ -687,12 +687,16 @@ def _check_channel_document(data: Mapping[str, Any]) -> None:
             if (identity is not None and identity not in BUILTIN_CHANNEL_IDS) or entry.get("manager_id", "manager") != "manager":
                 raise ConfigFileError("channels: this is a bot of a Manager and requires looper-config/v4")
             continue
-        if set(entry) - _BOT_FIELDS or not {"channel_id", "channel_type", "manager_id", "config"} <= entry.keys():
+        required = {"channel_id", "channel_type", "config"}
+        if not isinstance(identity, str) or identity not in BUILTIN_CHANNEL_IDS:
+            required.add("manager_id")
+        if set(entry) - _BOT_FIELDS or not required <= entry.keys():
             raise ConfigFileError("channels: BotConfig has unknown or missing fields; enter credentials only in Settings → Channels")
         suffix = _bot_suffix(identity, kind)
-        if not isinstance(entry["manager_id"], str) or not entry["manager_id"]:
+        owner = entry.get("manager_id", "manager")
+        if not isinstance(owner, str) or not owner:
             raise ConfigFileError("channels: manager_id must reference a Manager")
-        if suffix is None and entry["manager_id"] != "manager":
+        if suffix is None and owner != "manager":
             raise ConfigFileError("channels: the built-in bot's immutable owner must be manager")
         if identity in seen or suffix is not None and suffix in suffixes:
             raise ConfigFileError("channels: duplicate bot ids or numeric suffixes in the file")
@@ -1820,19 +1824,49 @@ class _Importer:
     async def finish_channels(self) -> None:
         """Validate against the final imported + stored configs, including rows not yet inserted."""
         from ..db import config_transfer as db
+        from ..db import channel_configs as db_channels
+        from .channels.bot_api import _LOCK
+        from .channels.bots import SAME_BOT_TYPES, bot_keys, builtin_env_token, builtin_lark_pair, lark_app_id
 
-        for channel_id, kind, _, values, row, _ in self.bot_imports:
-            # Export always includes this unconfigured, disabled default. Transferring Telegram bots must not
-            # require a Lark installation. Configured candidates and competing rows still require admission.
-            if (channel_id == "channel-lark" and not values["enabled"]
-                    and not any(values["config"].get(key) for key in ("profile", "allowed_open_ids", "allowlist_app_id"))
-                    and (row is None or not row["enabled"] and not any(
-                        row["config"].get(key) for key in ("profile", "allowed_open_ids", "allowlist_app_id")))):
+        if not self.bot_imports:
+            return
+        await self.conn.execute(_LOCK)
+        final = {**self.target.channels, **{identity: {**values, "channel_type": kind}
+            for identity, kind, _, values, _, _ in self.bot_imports}}
+        relevant = {peer for _, kind, *_ in self.bot_imports for peer in SAME_BOT_TYPES[kind]}
+        has_secrets = await self.conn.fetchval("SELECT to_regclass('channel_secrets')") is not None
+        keys: dict[str, set[str]] = {}
+        unresolved: set[str] = set()
+        for identity, row in final.items():
+            kind, config = row["channel_type"], row["config"] or {}
+            if kind not in relevant:
                 continue
-            try:
-                await self._refuse_same_bot(channel_id, kind, values["config"])
-            except _Skip as exc:
-                raise ConfigFileError(f"channels: {exc}") from None
+            # An untouched, disabled default does not act as lark-cli's active profile. Apply this to
+            # competitors too; configured disabled rows still resolve their actual app identity.
+            if (identity == "channel-lark" and not row["enabled"] and not any(
+                    config.get(key) for key in ("profile", "allowed_open_ids", "allowlist_app_id"))):
+                continue
+            secret = await db_channels.get_bot_token(identity, pool=self.conn) if has_secrets else None
+            env = builtin_env_token(config) if kind == "telegram" and identity in BUILTIN_CHANNEL_IDS and not secret else ""
+            app_id = await lark_app_id(kind, config)
+            if kind == "lark" and not app_id:
+                unresolved.add(identity)
+            keys[identity] = bot_keys(kind, config, secret, env_token=env, channel_id=identity, app_id=app_id)
+        for identity, kind, _, values, _, _ in self.bot_imports:
+            if not keys.get(identity):
+                continue
+            peers = {other for other, row in final.items() if other != identity
+                     and row["channel_type"] in SAME_BOT_TYPES[kind] and not builtin_lark_pair(identity, other)}
+            if any(keys.get(identity, set()) & keys.get(other, set()) for other in peers):
+                raise ConfigFileError("channels: actual bot identity conflict; each added bot must use a different bot or Lark app")
+            if identity in unresolved or peers & unresolved:
+                # Restoring a graph is not activation approval. Keep unresolved candidates inert while
+                # restoring their Manager and the other bots; known profile/app collisions still fail above.
+                values["enabled"] = False
+                self.plan.notes.append(f"{identity}: imported disabled; verify lark-cli profiles and authentication "
+                                       "in Settings → Channels before activation, then restart the server")
+                self.plan.need_secret.append(NeededSecret("channels", identity,
+                    ("lark-cli profile authentication and identity verification",), ("channel", identity)))
         if self.apply:
             await db.reserve_bot_ids(self.conn, [_bot_suffix(identity, kind)
                 for identity, kind, _, _, row, _ in self.bot_imports
@@ -1872,12 +1906,11 @@ class _Importer:
                                                       ("channel", channel_id) if added_bot or row or self.apply else None))
 
     async def _refuse_same_bot(self, channel_id: str, kind: str, config: Mapping[str, Any]) -> None:
-        """Check actual identity against stored and imported rows, using only local credentials and fakeable CLI
-        admission. The built-in Telegram row alone may use an environment token."""
+        """Legacy files use strict per-channel admission; v4 validates the final graph in finish_channels."""
         from ..db import channel_configs as db_channel_configs
         from . import projects
         from .channels.bot_api import _LOCK, _admission_app_id, refuse_same_bot
-        from .channels.bots import SAME_BOT_TYPES, bot_keys, builtin_env_token, builtin_lark_pair
+        from .channels.bots import builtin_env_token
 
         try:
             has_secrets = await self.conn.fetchval("SELECT to_regclass('channel_secrets')") is not None
@@ -1889,22 +1922,8 @@ class _Importer:
             if has_secrets:
                 await refuse_same_bot(self.conn, kind, config, secret, env_token=env, exclude=channel_id,
                                       configs=self.bot_configs)
-            keys = bot_keys(kind, config, secret, env_token=env, channel_id=channel_id,
-                            app_id=await _admission_app_id(kind, config))
-            for other_id, other_kind, _, other_values, other_row, _ in self.bot_imports:
-                if (other_row is not None or other_id == channel_id or other_kind not in SAME_BOT_TYPES[kind]
-                        or builtin_lark_pair(channel_id, other_id)):
-                    continue
-                other_config = other_values["config"]
-                if keys & bot_keys(other_kind, other_config, None, channel_id=other_id,
-                                   app_id=await _admission_app_id(other_kind, other_config)):
-                    raise _Skip("actual bot identity conflict; each added bot must use a different bot or Lark app")
+            await _admission_app_id(kind, config)
         except projects.RequestError as exc:
-            if self.channel_graph:
-                from .channels.bot_api import BotIdentityUnavailable
-
-                raise _Skip(str(exc) if isinstance(exc, BotIdentityUnavailable) else
-                            "actual bot identity conflict; each added bot must use a different bot or Lark app") from None
             raise _Skip(str(exc)) from None
 
     # --- catalog ---
@@ -2474,7 +2493,7 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
                                    if isinstance(entry, Mapping) and isinstance(entry.get("id"), str)):
                 await db_managers.lock_for_update(identity, conn=conn)
         if data.get("format") == V4_FORMAT and data.get("channels"):
-            for identity in sorted({entry["manager_id"] for entry in data["channels"]}):
+            for identity in sorted({entry.get("manager_id", "manager") for entry in data["channels"]}):
                 await conn.fetchrow("SELECT id FROM managers WHERE id = $1 FOR KEY SHARE", identity)
         if data.get("managers") or data.get("format") == V4_FORMAT and data.get("channels"):
             # Resolve the projected dependencies and reject the complete graph before any import writes.

@@ -55,6 +55,14 @@ def test_legacy_builtin_channel_without_manager_still_validates(version):
     assert api_v1.validate_arguments(CONFIG_DOCUMENT, document) == document
 
 
+@pytest.mark.parametrize("kind", ["telegram", "lark", "lark_bot"])
+def test_v4_old_backup_builtin_without_manager_still_validates(kind):
+    entry = {"channel_id": f"channel-{kind}", "channel_type": kind, "enabled": False, "config": {}}
+    document = {"format": "looper-config/v4", "channels": [entry], "managers": [
+        {"id": "manager-example", "name": "Example"}]}
+    assert api_v1.validate_arguments(CONFIG_DOCUMENT, document) == document
+
+
 @pytest.mark.parametrize("route", ["import_preview", "import_upload"])
 @pytest.mark.usefixtures("clients")
 def test_clients_cannot_stage_added_bots_even_for_default_manager(tmp_path, monkeypatch, route):

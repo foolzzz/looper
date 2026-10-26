@@ -341,6 +341,171 @@ def test_disabled_unconfigured_builtin_lark_roundtrips_without_identity_lookup(m
     run_db(test, monkeypatch, setup=seed_channel_configs, timeout=25)
 
 
+def test_old_v4_backup_defaults_builtin_owners_to_manager(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    from looper.db.connection import ensure_schema
+
+    async def test(pool: Any) -> None:
+        await _run(pool, {"format": transfer.V4_FORMAT, "managers": [_manager("manager-first")]})
+        document = await _export(pool)
+        assert document["format"] == transfer.V4_FORMAT
+        for channel in document["channels"]:
+            del channel["manager_id"]  # The exporter before Manager bots omitted built-in owners in v4.
+        path = tmp_path / "backup.json"
+        path.write_text(json.dumps(document))
+        restored = transfer.read_file(path)
+        async with fresh_schema() as target:
+            await ensure_schema(target)
+            before = await _state(target)
+            await _run(target, restored, apply=False)
+            assert await _state(target) == before
+            await _run(target, restored)
+            assert await target.fetchval("SELECT count(*) FROM managers WHERE id='manager-first'") == 1
+            rows = await target.fetch("SELECT channel_id, manager_id FROM channel_configs ORDER BY channel_id")
+            assert [tuple(row) for row in rows] == [(channel, "manager") for channel in
+                ("channel-lark", "channel-lark_bot", "channel-telegram")]
+
+    run_db(test, monkeypatch, setup=seed_channel_configs, timeout=25)
+
+
+@pytest.mark.parametrize("include_default", [False, True])
+def test_lark_bot_backup_ignores_unconfigured_default_competitor(monkeypatch: pytest.MonkeyPatch, include_default: bool) -> None:
+    from unittest.mock import AsyncMock
+    from looper.agents.channels import lark_cli
+    from looper.db.connection import ensure_schema
+
+    identity = AsyncMock(side_effect=lark_cli.LarkCliError("synthetic unavailable CLI"))
+    monkeypatch.setattr(lark_cli, "identity", identity)
+
+    async def test(pool: Any) -> None:
+        await pool.execute("INSERT INTO managers (id, name, system_prompt) VALUES ('manager-first', 'First', 'Be.')")
+        await pool.execute("INSERT INTO channel_configs (channel_id, channel_type, manager_id, config) VALUES "
+                           "('channel-lark_bot-2', 'lark_bot', 'manager-first', '{\"app_id\":\"cli_imported\"}')")
+        document = await _export(pool)
+        if not include_default:
+            document["channels"] = [row for row in document["channels"] if row["channel_id"] != "channel-lark"]
+        async with fresh_schema() as target:
+            await ensure_schema(target)
+            await seed_channel_configs(target)
+            before = await _state(target)
+            preview = await _run(target, document, apply=False)
+            assert preview.view()["counts"]["channels"]["added"] == 1
+            assert await _state(target) == before
+            await _run(target, document)
+            row = await target.fetchrow("SELECT manager_id, enabled, config->>'app_id' FROM channel_configs "
+                                        "WHERE channel_id='channel-lark_bot-2'")
+            assert tuple(row) == ("manager-first", False, "cli_imported")
+        identity.assert_not_awaited()
+
+    run_db(test, monkeypatch, setup=seed_channel_configs, timeout=25)
+
+
+@pytest.mark.parametrize("builtin", [False, True])
+@pytest.mark.parametrize("unavailable", ["error", "empty"])
+def test_lark_backup_without_local_identity_imports_disabled_with_followup(
+    monkeypatch: pytest.MonkeyPatch, builtin: bool, unavailable: str,
+) -> None:
+    from looper.agents.channels import lark_cli
+    from looper.db.connection import ensure_schema
+
+    broken = False
+
+    async def identity(profile: str | None = None, *, fresh: bool = False) -> Any:
+        assert fresh
+        if profile is None:
+            return lark_cli.Identity("", "cli_default", "Default", "ou_default")
+        assert profile == "work"
+        if broken and unavailable == "error":
+            raise lark_cli.LarkCliError("synthetic-private-error /private/profile")
+        return lark_cli.Identity(profile, "" if broken else "cli_work", "Work", "ou_work")
+
+    monkeypatch.setattr(lark_cli, "identity", identity)
+
+    async def test(pool: Any) -> None:
+        nonlocal broken
+        lark = _bot(kind="lark", owner="manager" if builtin else "manager-first", config={"profile": "work"})
+        if builtin:
+            lark["channel_id"] = "channel-lark"
+        await _run(pool, _document(lark, _bot(3)))
+        document = await _export(pool)
+        broken = True
+        async with fresh_schema() as target:
+            await ensure_schema(target)
+            await seed_channel_configs(target)
+            before = await _state(target)
+            preview = await _run(target, document, apply=False)
+            assert await _state(target) == before
+            applied = await _run(target, document)
+            for plan in (preview, applied):
+                assert any(item["key"] == lark["channel_id"] for item in plan.view()["need_secret"])
+                assert "synthetic-private-error" not in json.dumps(plan.view())
+            assert await target.fetchval("SELECT count(*) FROM managers WHERE id='manager-first'") == 1
+            assert await target.fetchval("SELECT count(*) FROM channel_configs WHERE channel_id='channel-telegram-3'") == 1
+            row = await target.fetchrow("SELECT enabled, config->>'profile' FROM channel_configs WHERE channel_id=$1",
+                                        lark["channel_id"])
+            assert tuple(row) == (False, "work")
+
+    run_db(test, monkeypatch, setup=seed_channel_configs, timeout=25)
+
+
+@pytest.mark.parametrize("same_profile", [False, True])
+def test_unresolved_lark_identity_does_not_hide_proven_collision(monkeypatch: pytest.MonkeyPatch, same_profile: bool) -> None:
+    from unittest.mock import AsyncMock
+    from looper.agents.channels import lark_cli
+
+    identity = AsyncMock(side_effect=lark_cli.LarkCliError("synthetic unavailable CLI"))
+    monkeypatch.setattr(lark_cli, "identity", identity)
+
+    async def test(pool: Any) -> None:
+        bots = [_bot(kind="lark", config={"profile": "work"})]
+        bots += ([_bot(3, kind="lark", config={"profile": "work"})] if same_profile else [
+            _bot(3, kind="lark_bot", config={"app_id": "cli_duplicate"}),
+            _bot(4, kind="lark_bot", config={"app_id": "cli_duplicate"})])
+        before = await _state(pool)
+        for apply in (False, True):
+            with pytest.raises(transfer.ConfigFileError, match="identity conflict"):
+                await _run(pool, _document(*bots), apply=apply)
+            assert await _state(pool) == before
+
+    run_db(test, monkeypatch, timeout=20)
+
+
+def test_configured_disabled_competitor_is_verified_and_unresolved_import_needs_followup(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.channels import lark_cli
+
+    broken = True
+    calls: list[str | None] = []
+
+    async def identity(profile: str | None = None, *, fresh: bool = False) -> Any:
+        assert fresh and profile == "work"
+        calls.append(profile)
+        if broken:
+            raise lark_cli.LarkCliError("synthetic unavailable CLI")
+        return lark_cli.Identity(profile, "cli_shared", "Work", "ou_work")
+
+    monkeypatch.setattr(lark_cli, "identity", identity)
+
+    async def test(pool: Any) -> None:
+        nonlocal broken
+        await pool.execute("UPDATE channel_configs SET config='{\"profile\":\"work\"}' WHERE channel_id='channel-lark'")
+        document = _document(_bot(kind="lark_bot", config={"app_id": "cli_shared"}), _bot(3))
+        before = await _state(pool)
+        preview = await _run(pool, document, apply=False)
+        assert await _state(pool) == before
+        assert any(row["key"] == "channel-lark_bot-2" and "identity verification" in " ".join(row["names"])
+                   for row in preview.view()["need_secret"])
+        await _run(pool, document)
+        assert await pool.fetchval("SELECT enabled FROM channel_configs WHERE channel_id='channel-lark_bot-2'") is False
+        assert calls
+        broken = False
+        before = await _state(pool)
+        for apply in (False, True):
+            with pytest.raises(transfer.ConfigFileError, match="identity conflict"):
+                await _run(pool, document, apply=apply)
+            assert await _state(pool) == before
+
+    run_db(test, monkeypatch, setup=seed_channel_configs, timeout=20)
+
+
 @pytest.mark.parametrize("name", [None, "omitted"])
 def test_nullable_or_absent_display_name_uses_database_empty_name_and_repeats_unchanged(monkeypatch: pytest.MonkeyPatch, name: Any) -> None:
     async def test(pool: Any) -> None:
