@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.139] - 2026-10-26
+
+### Added
+
+- **OpenAI Responses codec for the API runtime loop.** `looper/agents/runtimes/api/responses.py` adds the first protocol codec: it uses the official async OpenAI SDK (no proxy environment, explicit key and base URL), sends the full input with `store=false` and function tools, replays encrypted reasoning only for the same protocol and model, assembles output by index and id and takes the final content from `response.completed`, maps errors and usage, and applies the fixed timeouts and two status-based retries (a provider's `x-should-retry` is ignored). `loop_for` now returns the Responses loop; other protocols are still refused. Nothing in Looper calls `loop_for` yet, so no Manager, session, adapter or entry point changes behavior. No prompt or tool declaration changes. A scripted local HTTP/SSE model server is added for the tests. ([#677](https://github.com/foolzzz/looper/pull/677))
+
 ## [2.13.138] - 2026-10-26
 
 ### Added
