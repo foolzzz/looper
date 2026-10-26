@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.147] - 2026-10-26
+
+### Fixed
+
+- **An unavailable in-process runtime shows its reinstall hint in Agent Profiles.** In Settings → Agent Profiles, a disabled in-process runtime such as Model API (SDK) now shows its probe error (for example, reinstall Looper) in the Runtime option text and tooltip instead of "not on the server's PATH"; it falls back to "not available" when there is no probe error. A CLI runtime keeps the PATH wording. The Runtime select can now shrink and truncate long option text. Only the dashboard changes; prompts, tool declarations and the API are unchanged. ([#700](https://github.com/foolzzz/looper/pull/700))
+
 ## [2.13.146] - 2026-10-26
 
 ### Fixed
