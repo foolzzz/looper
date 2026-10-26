@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.144] - 2026-10-26
+
+### Fixed
+
+- **Configuration import keeps stored template fields the file omits.** When the target already stores a task template for the same Manager and key, the import overlays the file's keys on the stored template before references are resolved and fields validated, so preview and apply agree. The stored directory reminder (`repoint`) is not carried over. Prompts and tool declarations are unchanged. ([#689](https://github.com/foolzzz/looper/pull/689))
+
+## [2.13.143] - 2026-10-26
+
+### Added
+
+- **Stopping an api Manager reply works.** `ApiRuntime` and `ApiSession` now declare `can_interrupt`; `interrupt()` requests the turn's `TurnCancel` and waits up to 5 seconds for the turn to finish (a tool call that is still running is never cancelled mid-write), and the turn reports `StopMethod.CANCEL`. A stop requested before the first request, or a cancelled turn that sent none, ends as a user stop without a request. Per-request details (upstream ids redacted, an `incomplete` count) are kept in the run record under `api` through a new `RuntimeAdapter.result_notes` hook, and each request writes one structured `looper.agents.runtimes.api` log line (agent, protocol, model, host, status, durations, retries, token counts, completeness, redacted upstream id). A request that ends without usage is now recorded as unknown, not zero: token sums stay unset when no request reported a count, and the run's cost is cleared when usage is incomplete. Prompts and tool declarations are unchanged. ([#687](https://github.com/foolzzz/looper/pull/687))
+
 ## [2.13.142] - 2026-10-26
 
 ### Added

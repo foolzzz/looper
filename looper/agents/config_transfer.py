@@ -2195,6 +2195,8 @@ class _Importer:
         checked: dict[str, dict[str, Any]] = {}
         templates: list[tuple[str, str, dict[str, Any], bool]] = []
         names: dict[str, str] = {}
+        profile_names = {pid: name for name, (pid, _) in self.profiles.items()}
+        project_names = {pid: name for name, pid in self.project_ids.items()}
         for raw in entries:
             try:
                 entry = _mapping(raw, "a Manager")
@@ -2249,6 +2251,12 @@ class _Importer:
                     if not isinstance(key, str) or key in seen:
                         raise ConfigFileError(f"{identity}: missing or duplicate template key {key!r}")
                     seen.add(key)
+                    current = self.target.manager_templates.get((identity, key))
+                    if current:
+                        # Overlay before reference resolution and validation so preview and apply agree.
+                        stored = manager_template_entry(current, profile_names, project_names)
+                        stored.pop("repoint", None)  # Only the file asks for a directory reminder.
+                        template = {**stored, **template}
                     project = template.get("project")
                     project_id = self.project_ids.get(project.strip().lower()) if isinstance(project, str) else None
                     if project is not None and project_id is None:
@@ -2269,7 +2277,6 @@ class _Importer:
                             for role, profile_id in profiles.items():
                                 if profile_id not in ids:
                                     raise ConfigFileError(f"{identity}/{key}: profiles.{role} is not on project {project!r}'s list")
-                    current = self.target.manager_templates.get((identity, key))
                     for name in ("name", "description", "requirement", "planner_instructions"):
                         if name in template:
                             _string(template[name], f"{identity}/{key}.{name}")
