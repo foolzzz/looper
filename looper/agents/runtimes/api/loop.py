@@ -190,6 +190,10 @@ class CodecError(Exception):
         super().__init__(self.message)
 
 
+class RequestLimitReached(Exception):
+    """The codec stopped an attempt before sending beyond the turn's budget."""
+
+
 class CodecStream(Protocol):
     def __aiter__(self) -> AsyncIterator[TextDelta | CodecDone]: ...
     def snapshot(self) -> RequestRecord: ...
@@ -200,7 +204,7 @@ class ProtocolCodec(Protocol):
     protocol: ApiProtocol
     def stream(self, *, target: ModelTarget, system_prompt: str,
                items: Sequence[SessionItem], specs: Sequence[ToolSpec],
-               session_id: str, index: int) -> CodecStream: ...
+               session_id: str, index: int, max_attempts: int) -> CodecStream: ...
     async def aclose(self) -> None: ...
 
 
@@ -295,12 +299,13 @@ class NormaAgentLoop:
         while True:
             if cancel.requested:
                 return finish(Outcome.CANCELLED)
-            if len(records) >= max_requests:
+            remaining = max_requests - sum(1 + record.retries for record in records)
+            if remaining <= 0:
                 return finish(Outcome.MAX_REQUESTS)
             if records and over_cap():
                 return finish(Outcome.CAPPED)
             stream = self.codec.stream(target=target, system_prompt=system_prompt, items=list(working),
-                                       specs=specs, session_id=session_id, index=len(records))
+                                       specs=specs, session_id=session_id, index=len(records), max_attempts=remaining)
             visible = ''
 
             async def consume() -> CodecDone:
@@ -343,6 +348,9 @@ class NormaAgentLoop:
                 if asyncio.current_task().cancelling() or not cancel.requested:
                     raise
                 return finish(Outcome.CANCELLED)
+            except RequestLimitReached:
+                records.append(_unfinished(stream.snapshot()))
+                return finish(Outcome.CANCELLED if cancel.requested else Outcome.MAX_REQUESTS)
             except CodecError as error:
                 records.append(_unfinished(stream.snapshot()))
                 if cancel.requested:
