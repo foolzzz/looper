@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.140] - 2026-10-26
+
+### Changed
+
+- **Hardened OpenAI Responses codec.** It refuses `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`, `OPENAI_ADMIN_KEY`, `OPENAI_CUSTOM_HEADERS` and `OPENAI_LOG` before importing the SDK and clears ambient organization, project and header settings; the loop counts SDK retries against the request limit and passes the remainder to the codec as `max_attempts` (`RequestLimitReached` ends the turn with `MAX_REQUESTS`); usage is kept from failed and incomplete responses and recorded as incomplete when a count is missing; encrypted reasoning is always requested; a stream that ends without a terminal event is marked for the existing safe resend. Nothing in Looper calls the codec yet, so no Manager, session, adapter or entry point changes behavior. No prompt or tool declaration changes. ([#683](https://github.com/foolzzz/looper/pull/683))
+
 ## [2.13.139] - 2026-10-26
 
 ### Added
