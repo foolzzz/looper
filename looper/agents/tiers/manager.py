@@ -117,6 +117,7 @@ from ..managers_api import (
 from ...db import tasks as db_tasks
 from ...db import chat as db_chat
 from ...db import agent_sessions as db_agent_sessions
+from ...db import api_sessions as db_api_sessions
 from ...db import llm_records as db_llm_records
 from ...db.llm_records import RecordStatus
 from ...db import projects as db_projects
@@ -763,6 +764,7 @@ class ManagerAgent:
             self._session_profile = saved.get("profile_id")
             self._session_provider = saved.get("provider_id")
             self._clean_start = bool(saved.get("clean_start"))
+            self._pending_handoff = saved.get("pending_handoff")
 
     async def _save_session_state(self) -> None:
         try:
@@ -771,10 +773,18 @@ class ManagerAgent:
             logger.exception("%s: failed to save its session", self._log)
 
     async def _write_session_state(self, pool: Any = None) -> None:
+        handoff = None if self._clean_start else self._pending_handoff
+        if handoff and self._session_runtime == "api" and self._session_id \
+                and await db_api_sessions.last_turn(self._session_id, pool=pool) is not None:
+            # API init can precede a failed request: only committed history owns the brief safely.
+            handoff = None
         await db_agent_sessions.save_session(self.agent_id, self._session_id, self._session_totals.to_dict(),
                                              runtime_type=self._session_runtime, provider_id=self._session_provider,
                                              profile_id=self._session_profile, clean_start=self._clean_start,
+                                             pending_handoff=handoff,
                                              pool=pool)
+        if not self._clean_start and self._pending_handoff and handoff is None:
+            self._pending_switch = self._pending_handoff = None
 
     async def start(self, bus: MessageBus) -> None:
         self._bus = bus
@@ -1219,7 +1229,7 @@ class ManagerAgent:
         command = self._claude.command if self._claude.started else self._claude_command(prepared.prompt_file, launch)
         # A new session's first turn starts with the resume brief ('' when it has nothing to say), unless the user
         # asked for a clean one.
-        brief = "" if self._claude.started or self._session_id or self._clean_start \
+        brief = "" if (self._claude.started or self._session_id or self._clean_start) and not self._pending_handoff \
             else await token.step("resume_brief", self._resume_brief(envelope, prepared.message))
         run.brief = brief
         asked = f"{prepared.note}\n\n{prepared.message}" if prepared.note else prepared.message
@@ -1558,7 +1568,8 @@ class ManagerAgent:
             session_id = payload.get("session_id")
             if isinstance(session_id, str) and session_id and session_id != self._session_id:
                 self._session_id, self._clean_start = session_id, False
-                self._pending_switch = self._pending_handoff = None  # the new session has its resume brief
+                if self._session_runtime != "api" or not self._pending_handoff:
+                    self._pending_switch = self._pending_handoff = None  # CLI sessions own the prompt at init
                 session_unsaved = True
             message = payload.get("message") if payload.get("type") == "assistant" else None
             if self.ops is None or not isinstance(message, dict):
@@ -1758,10 +1769,8 @@ class ManagerAgent:
                 await self._claude.stop()
                 self._session_id, self._session_totals = None, Usage()  # its totals went with it
                 await self._save_session_state()
+                # A rejected first request may not have stored its predecessor's handoff yet.
                 self._pending_switch = switch
-                # A new session may already carry its predecessor's successful handoff.
-                if not context_overflow:
-                    self._pending_handoff = None
             return await self._run_turn(message, context_envelope, ops_turn=ops_turn, note=note, retried=True,
                                         token=token)
 
@@ -2041,9 +2050,15 @@ class ManagerAgent:
         await self._claude.stop()
         logger.warning("%s: starting a new session (%s)%s", self._log, switch.describe(),
                        "; its previous session wrote a handoff" if handoff else "")
+        previous = self._session_id, self._session_totals, self._pending_switch, self._pending_handoff
         self._session_id, self._session_totals = None, Usage()
-        await self._save_session_state()
-        self._pending_switch, self._pending_handoff = switch, handoff
+        self._pending_switch, self._pending_handoff = switch, handoff or self._pending_handoff
+        try:
+            # Persist the summary in the same transaction that removes the old API transcript.
+            await self._write_session_state()
+        except BaseException:
+            self._session_id, self._session_totals, self._pending_switch, self._pending_handoff = previous
+            raise
 
     async def _handoff(self, switch: SessionSwitch, process: _Process, cancel: TurnCancel) -> str | None:
         """The handoff the running session writes before ``switch``; None when it writes none in time. A stop
@@ -2117,6 +2132,11 @@ class ManagerAgent:
     async def _resume_brief(self, envelope: MessageEnvelope, message: str) -> str:
         """What starts the first turn of a new session: why it is new, the handoff the old session wrote, and
         the recent conversation of each chat; '' when there is none of these."""
+        if self._pending_handoff and self._session_runtime == "api" and self._session_id:
+            # A prior turn may have committed before its final state write (or the Manager's restart).
+            await self._save_session_state()
+            if not self._pending_handoff:
+                return ""
         switch, handoff = self._pending_switch, self._pending_handoff
         conversations = await self._recent_conversations(envelope, message)
         if switch is None and not handoff and not conversations:

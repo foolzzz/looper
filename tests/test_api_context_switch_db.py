@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+from contextlib import AsyncExitStack
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -41,6 +43,76 @@ def test_api_handoff_prompt_names_its_fact_and_authority_boundaries() -> None:
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 class TestManagerContext:
+    @pytest.mark.parametrize("restart", [False, True])
+    @pytest.mark.parametrize("code", ["invalid_api_key", "context_length_exceeded"])
+    def test_handoff_survives_failed_first_request_until_history_is_committed(
+        self, monkeypatch, tmp_path: Path, restart: bool, code: str,
+    ) -> None:
+        from manager_mcp_stand_in import manager_endpoint
+
+        async def run(pool):
+            rejection = ResponseScript(status=401 if code == "invalid_api_key" else 400,
+                                       error={"error": {"code": code, "message": "request rejected"}})
+            scripts = [ResponseScript(events=text_events("First.", usage=HIGH_USAGE)),
+                       ResponseScript(events=text_events(SUMMARY, usage=USAGE)), rejection]
+            if code == "context_length_exceeded":
+                scripts.append(rejection)  # The automatic retry also fails.
+            scripts += [ResponseScript(events=text_events("Recovered.", usage=USAGE)),
+                        ResponseScript(events=text_events("Still here.", usage=USAGE))]
+            async with _manager(pool, tmp_path, monkeypatch, scripts) as chat:
+                await chat.manager._handle(_message("Keep the early constraints."))
+                old = (await agent_sessions.get_session("manager"))["session_id"]
+                _replies(chat.bus)
+                await chat.manager._handle(_message("Continue.", 1))
+                assert _replies(chat.bus)[0].payload["outcome"] == "failed"
+                assert SUMMARY in _input(chat.model.requests[2])
+                assert (await agent_sessions.get_session("manager"))["pending_handoff"] == SUMMARY
+                assert await pool.fetchval("SELECT count(*) FROM api_sessions WHERE session_id=$1", old) == 0
+                manager = chat.manager
+                async with AsyncExitStack() as stack:
+                    if restart:
+                        await manager.stop()
+                        manager = manager_module.ManagerAgent(
+                            config=manager_module.ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+                        manager._bus = chat.bus
+                        stack.push_async_callback(manager.stop)
+                        await stack.enter_async_context(manager_endpoint(
+                            manager, chat.bus, SimpleNamespace(has_planner=lambda _: False), tmp_path))
+                    await manager._handle(_message("Try again.", 2))
+                    assert [r.payload["text"] for r in _replies(chat.bus)] == ["Recovered."]
+                    recovered = chat.model.requests[-1].body["input"]
+                    assert SUMMARY in json.dumps(recovered)
+                    assert len(recovered) == 1 and "Try again." in recovered[0]["content"]
+                    assert "pending_handoff" not in await agent_sessions.get_session("manager")
+                    await manager._handle(_message("Continue normally.", 3))
+                    assert [r.payload["text"] for r in _replies(chat.bus)] == ["Still here."]
+                    assert _input(chat.model.requests[-1]).count(SUMMARY) == 1
+                    assert "[RESUME]" not in chat.model.requests[-1].body["input"][-1]["content"]
+                    assert len(chat.model.requests) == len(scripts)
+        run_db(run, monkeypatch, timeout=45)
+
+    def test_failed_handoff_persistence_retains_old_history_and_session_pointer(
+        self, monkeypatch, tmp_path: Path,
+    ) -> None:
+        async def run(pool):
+            scripts = [ResponseScript(events=text_events("Keep this evidence.", usage=HIGH_USAGE)),
+                       ResponseScript(events=text_events(SUMMARY, usage=USAGE))]
+            async with _manager(pool, tmp_path, monkeypatch, scripts) as chat:
+                await chat.manager._handle(_message("Keep every change read-only."))
+                old = (await agent_sessions.get_session("manager"))["session_id"]
+                _replies(chat.bus)
+                await pool.execute("ALTER TABLE agent_sessions ADD CONSTRAINT reject_handoff "
+                                   "CHECK (pending_handoff IS NULL)")
+                await chat.manager._handle(_message("Continue.", 1))
+                assert _replies(chat.bus)[0].payload["outcome"] == "failed"
+                assert len(chat.model.requests) == 2
+                assert (await agent_sessions.get_session("manager"))["session_id"] == old
+                assert chat.manager._session_id == old
+                history = await pool.fetchval(
+                    "SELECT jsonb_agg(item ORDER BY seq)::text FROM api_session_items WHERE session_id=$1", old)
+                assert "Keep this evidence." in history and SUMMARY in history
+        run_db(run, monkeypatch, timeout=45)
+
     def test_full_context_hands_off_before_the_next_user_message(self, monkeypatch, tmp_path: Path) -> None:
         async def run(pool):
             scripts = [ResponseScript(events=text_events("First.", usage=HIGH_USAGE)),

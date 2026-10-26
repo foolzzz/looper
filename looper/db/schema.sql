@@ -340,6 +340,8 @@ ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS provider_id TEXT;
 -- The user dropped the session (/new in a chat with the Manager): the next session starts clean, without the
 -- resume brief a new session otherwise gets. Cleared once that session has started.
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS clean_start BOOLEAN NOT NULL DEFAULT false;
+-- Keep the predecessor's summary until the replacement session has committed its context.
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS pending_handoff TEXT;
 -- The Agent Profile the user chose for the Manager's current session (/profile, the dashboard): it wins over the
 -- manager role's and the shared defaults' profile until /new. NULL follows Settings.
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS selected_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT;
