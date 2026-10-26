@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.149] - 2026-10-26
+
+### Changed
+
+- **Task lists can be filtered by Manager.** The dashboard Tasks page has a Manager select (with `manager` and `query` in its URL), the v1 `tasks.page` operation accepts `manager_id`, and status counts follow the filter. A `manager_id` naming no Manager returns an empty list. The client's task tool gains `manager_id` for `action: list` only; a client-scoped call sees only its own Manager's tasks. The Manager's own task tool is unchanged. ([#705](https://github.com/foolzzz/looper/pull/705))
+
 ## [2.13.148] - 2026-10-26
 
 ### Changed
