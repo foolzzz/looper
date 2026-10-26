@@ -16,11 +16,12 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from ...db import manager_actions as db_actions, tasks as db_tasks, user_gates as db_user_gates
-from .. import gate_service
+from ...db import manager_actions as db_actions, projects as db_projects, tasks as db_tasks, user_gates as db_user_gates
+from .. import gate_service, projects
 from ..managers_api import DEFAULT_MANAGER_ID
 from ..message import channel_address
 from ..tiers.journal import clip
@@ -29,7 +30,7 @@ from . import API_CHANNEL, Call, ErrorCode, OpError, Risk, Tool, Turn, check_arg
 from .config import answered
 from .service import (CONFIRM_TOOL, CONFIRMATION_CHATS, CONFIRMATION_SECONDS, MANAGER_TOOLS, Platform, _created_task,
                       _error, _plain)
-from .tasks import _TASK_ID, _gate_listed, _group, _task_argument, _via
+from .tasks import TASKS_LISTED, TASKS_SEARCHED, _TASK_ID, _gate_listed, _group, _task_argument, _via
 
 if TYPE_CHECKING:
     from ..api_v1 import Principal
@@ -126,7 +127,42 @@ GATES_TOOL = Tool(
     risk=Risk.WRITE, run=_gates, task_id=_task_argument, read_actions=frozenset({"list", "messages"}),
 )
 
-CLIENT_TOOLS: tuple[Tool, ...] = (*(t for t in MANAGER_TOOLS if t.name not in MANAGER_ONLY), PIPELINE_TOOL,
+
+def _client_tasks(original: Tool) -> Tool:
+    """The client's owner filter belongs only to its copy of the Manager's task tool."""
+    schema = deepcopy(original.schema)
+    schema["properties"]["manager_id"] = {"type": "string", "minLength": 1}
+
+    async def run(call: Call) -> dict[str, Any]:
+        arguments = call.arguments
+        if arguments["action"] != "list":
+            if "manager_id" in arguments:
+                raise OpError(ErrorCode.INVALID, "manager_id is only valid for action list")
+            return await original.run(call)
+        if "manager_id" in arguments and arguments["manager_id"] is None:
+            raise OpError(ErrorCode.INVALID, "manager_id must be a nonempty string")
+        project_id = None
+        if arguments.get("project"):
+            project = await db_projects.find_project_by_name(projects.project_name(arguments["project"]))
+            if project is None:
+                raise OpError(ErrorCode.NOT_FOUND, f"no project named {arguments['project']!r}")
+            project_id = project["id"]
+        manager_id = arguments.get("manager_id")
+        if call.scoped:
+            if manager_id is not None and manager_id != call.manager_id:
+                return {"tasks": [], "more": False}
+            manager_id = call.manager_id
+        return await projects.list_tasks_page(
+            limit=int(arguments.get("limit") or TASKS_LISTED), project_id=project_id,
+            group=db_tasks.TaskGroup(arguments["group"]) if arguments.get("group") else None,
+            manager_id=manager_id, query=str(arguments.get("query") or ""), compact=True,
+            search_limit=TASKS_SEARCHED)
+
+    return replace(original, schema=schema, run=run)
+
+
+CLIENT_TOOLS: tuple[Tool, ...] = (*(_client_tasks(t) if t.name == "looper_tasks" else t
+                                  for t in MANAGER_TOOLS if t.name not in MANAGER_ONLY), PIPELINE_TOOL,
                                   GATES_TOOL)
 
 
