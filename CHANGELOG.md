@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.136] - 2026-10-26
+
+### Changed
+
+- **M9d plan milestone points at the Norma loop.** The long-horizon plan's M9d row and section now describe the approved `api` runtime with a Norma loop port instead of waiting for a Norma SDK. Documentation only; no code, schema, API or prompt changes. ([#673](https://github.com/foolzzz/looper/pull/673))
+
 ## [2.13.135] - 2026-10-26
 
 ### Changed
