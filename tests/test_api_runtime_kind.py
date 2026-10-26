@@ -52,7 +52,7 @@ def test_api_type_view_exposes_manager_only_contract(runtime):
     assert view["in_process"] is True
     assert view["protocols"] == ["openai-responses"]
     assert view["auth_kinds"] == ["api_key"]
-    assert view["can_interrupt"] is False
+    assert view["can_interrupt"] is True
     assert view["can_replace_system_prompt"] is True
     registry.check_roles(launch_for(runtime).profile, ["manager"])
 

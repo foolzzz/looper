@@ -77,7 +77,7 @@ class ApiRuntime(RuntimeAdapter):
     in_process = True
     isolation_id = "api-v1"
     can_replace_system_prompt = True
-    can_interrupt = False
+    can_interrupt = True
     provider_env_owned = frozenset({KEY_ENV})
 
     def probe(self, executable: str) -> Probe:
@@ -164,6 +164,9 @@ class ApiRuntime(RuntimeAdapter):
 
     def cost(self, usage: Usage, provider: ProviderSpec) -> RunCost:
         return RunCost(usage, CostSource.PROVIDER_PRICE)
+
+    def result_notes(self, result_event: dict[str, Any] | None) -> dict[str, Any]:
+        return {"api": result_event["api"]} if result_event and "api" in result_event else {}
 
     def budget_error(self, result_event: dict[str, Any] | None) -> str | None:
         from ... import claude_cli

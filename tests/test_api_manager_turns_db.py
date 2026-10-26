@@ -5,7 +5,6 @@ its pinned fixtures do not change for API-only instructions.
 """
 from __future__ import annotations
 
-import asyncio
 from contextlib import asynccontextmanager
 import json
 from pathlib import Path
@@ -15,7 +14,7 @@ from typing import Any
 import pytest
 
 from manager_mcp_stand_in import manager_endpoint
-from looper.agents import chat_settings, profile_registry
+from looper.agents import profile_registry
 from looper.agents.bus import MessageBus
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.runtimes import ADAPTERS
@@ -189,40 +188,5 @@ def test_api_instructions_match_preview_with_custom_prompt_before_runtime_note(
             looper_prompt = process.system_prompt.text.removeprefix(CUSTOM_PROMPT + "\n\n")
             assert instructions == CUSTOM_PROMPT + "\n\n" + RUNTIME_NOTE + "\n\n---\n\n" + looper_prompt
             assert instructions.count(RUNTIME_NOTE) == 1
-
-    run_db(run, monkeypatch, timeout=45)
-
-
-def test_api_manager_refuses_dashboard_stop_while_the_model_request_is_running(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    from looper.agents.ops.clients import ClientOps
-    from looper.agents.ops.service import Platform
-    from tests.test_api_v1_auth import _bearer, _send, _serving
-    from tests.test_operator_auth import TOKEN
-
-    async def run(pool: Any) -> None:
-        monkeypatch.setattr(chat_settings, "_stop_enabled", True)
-        gate = asyncio.Event()
-        script = ResponseScript(events=text_events("Still answered.", usage=USAGE), gate=gate)
-        async with _manager(pool, tmp_path, monkeypatch, [script]) as chat:
-            message = _message()
-            answering = asyncio.create_task(chat.manager._handle(message))
-            try:
-                await asyncio.wait_for(script.gate_reached.wait(), 15)
-                http_root = tmp_path / "http"
-                http_root.mkdir()
-                async with _serving(http_root) as server:
-                    server._manager = chat.manager
-                    server._client_ops = ClientOps(Platform(bus=chat.bus, task_router=None, manager=chat.manager))
-                    status, _, answer = await _send(server, "POST /api/v1/operator_chat/stop", _bearer(TOKEN),
-                                                   json.dumps({"message_id": message.message_id}))
-                    assert status == 409
-                    assert answer["error"]["details"]["state"] == "cannot_interrupt"
-                assert not answering.done()
-            finally:
-                gate.set()
-                await asyncio.wait_for(answering, 15)
-            assert _replies(chat.bus)[0].payload["text"] == "Still answered."
 
     run_db(run, monkeypatch, timeout=45)
