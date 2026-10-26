@@ -38,9 +38,10 @@ sections:
 
 **Secrets** are an MCP server's environment and header values, a provider's
 API key and a channel config's keys other than its known public ones
-(``_CHANNEL_PUBLIC_KEYS``; a token itself lives in the environment variable a
-``*_env`` key names). Unless the export includes them, each is
-``PLACEHOLDER``. **Machine paths** stay out: a project's directory is not
+(``_CHANNEL_PUBLIC_KEYS``). Unless the export includes them, each is
+``PLACEHOLDER``. Channel credentials in ``channel_secrets`` never travel,
+even with secrets included. Local chat bindings and policy never travel.
+**Machine paths** stay out: a project's directory is not
 exported, an item's source or a runtime's executable that is a local path is
 ``null``, and a path document is a reference (relative to its project's
 directory) flagged ``repoint``.
@@ -48,7 +49,7 @@ directory) flagged ``repoint``.
 **Import** matches entries by natural key (an item by kind and name, a
 project-written one within its project; a project, runtime, provider or
 profile by name; a layer by scope, role and project; a role by name; a channel
-by type), and reports each as
+by its immutable channel_id), and reports each as
 added, changed (with the fields), unchanged or skipped (with the reason),
 plus the secrets still to fill in. Applying writes the same plan in one
 transaction: an entry with the same key is updated in place (an item keeps
@@ -137,6 +138,10 @@ class ConfigFileError(ValueError):
     """A file the import cannot use at all; nothing is written."""
 
 
+class ConfigFileConflict(ConfigFileError):
+    """A valid file conflicts with immutable destination identities or past allocations."""
+
+
 class SchemaChangePending(RuntimeError):
     """The database's schema is older than this Looper; ``looper serve`` backs it up, then changes it."""
 
@@ -172,7 +177,8 @@ class Change:
 @dataclass(frozen=True)
 class NeededSecret:
     """Secrets an entry still needs on this machine. ``target`` is what holds them here, for a link to its form:
-    ``("provider" | "mcp" | "channel", id)``; ``None`` while the entry is not stored (a preview's new one)."""
+    ``("provider" | "mcp" | "channel", id)``. New channels already have immutable ids in a preview; other new
+    entries have ``None`` until stored."""
 
     section: str
     key: str
@@ -215,7 +221,9 @@ class Plan:
                          **({"code": c.code} if c.code else {})}
                         for c in self.changes if c.action is not Action.UNCHANGED],
             "need_secret": [{"section": n.section, "key": n.key, "names": list(n.names),
-                             **({"target": {"kind": n.target[0], "id": n.target[1]}} if targets and n.target else {})}
+                             **({"target": {"kind": n.target[0], "id": n.target[1]}}
+                                if n.target and (targets or n.target[0] == "channel"
+                                                 and n.target[1] not in BUILTIN_CHANNEL_IDS) else {})}
                             for n in self.need_secret],
             "notes": list(self.notes),
         }
@@ -297,7 +305,7 @@ def _secret(value: Any, include_secrets: bool) -> Any:
     return value if include_secrets else dict(PLACEHOLDER)
 
 
-def channel_entry(row: Mapping[str, Any], include_secrets: bool) -> dict[str, Any]:
+def channel_entry(row: Mapping[str, Any], include_secrets: bool, *, portable_graph: bool = False) -> dict[str, Any]:
     from .channels.allowlist import AllowlistError, normalized_config
 
     public = _CHANNEL_PUBLIC_KEYS.get(row["channel_type"], frozenset())
@@ -307,7 +315,8 @@ def channel_entry(row: Mapping[str, Any], include_secrets: bool) -> dict[str, An
     except AllowlistError:
         pass
     config = {key: value if key in public else _secret(value, include_secrets) for key, value in config.items()}
-    return {"channel_type": row["channel_type"], "channel_id": row["channel_id"],
+    return {**({"manager_id": row.get("manager_id", "manager")} if portable_graph else {}),
+            "channel_type": row["channel_type"], "channel_id": row["channel_id"],
             "display_name": row["display_name"], "enabled": row["enabled"], "config": config}
 
 
@@ -430,7 +439,7 @@ class ExportSummary:
     secrets: int = 0  # the secret values written, or left out as placeholders
     repoint: int = 0
     bytes: int = 0
-    bots_left_out: int = 0  # the added bots of Managers, which the file does not carry
+    bots_left_out: int = 0  # retained for callers of the older summary; all bots now travel
     format: str = V3_FORMAT
 
 
@@ -465,11 +474,10 @@ async def export_chunks(
     items = await db.read_items(conn)
     installs = await db.read_installs(conn)
     channel_rows = await db.read_channels(conn)
-    channels = [channel_entry(row, include_secrets) for row in channel_rows
-                if row["channel_id"] in BUILTIN_CHANNEL_IDS]
-    summary.bots_left_out = len(channel_rows) - len(channels)
     managers = await db.read_managers(conn)
-    portable_graph = any(row["id"] != "manager" for row in managers) or bool(summary.bots_left_out)
+    portable_graph = any(row["id"] != "manager" for row in managers) or any(
+        row["channel_id"] not in BUILTIN_CHANNEL_IDS for row in channel_rows)
+    channels = [channel_entry(row, include_secrets, portable_graph=portable_graph) for row in channel_rows]
     summary.format = V4_FORMAT if portable_graph else V3_FORMAT
     providers = [provider_entry(r, include_secrets) for r in await db.read_providers(conn) if not r["builtin"]]
     head = {
@@ -626,14 +634,7 @@ def read_file(path: Path, *, label: str | None = None) -> dict[str, Any]:
             raise ConfigFileError(f"settings.{section} must be a JSON list")
     if not isinstance(data.get("settings", {}).get("scheduler", {}), dict):
         raise ConfigFileError("settings.scheduler must be a JSON object")
-    for entry in data.get("channels", []):
-        if not isinstance(entry, dict):
-            continue
-        channel_id = entry.get("channel_id")
-        if (channel_id is not None and channel_id not in BUILTIN_CHANNEL_IDS) or (
-                "manager_id" in entry and entry["manager_id"] != "manager"):
-            raise ConfigFileError(f"channels: {channel_id} is a bot of a Manager; this file cannot be imported "
-                                  "(bots are added in Settings → Channels, not imported)")
+    _check_channel_document(data)
     return _from_v1(data) if data["format"] in V1_FORMATS else data
 
 
@@ -645,6 +646,63 @@ def _check_manager_document(data: Mapping[str, Any]) -> None:
         return
     if not isinstance(data.get("managers", []), list):
         raise ConfigFileError("managers must be a JSON list")
+
+
+_BOT_ID = re.compile(r"channel-(telegram|lark|lark_bot)-([1-9][0-9]*)\Z")
+_BINDING_FIELDS = frozenset({"manager_chat_bindings", "channel_seen_chats", "channel_unbound_chats"})
+_BOT_FIELDS = frozenset({"channel_id", "channel_type", "manager_id", "display_name", "enabled", "config"})
+
+
+def _bot_suffix(channel_id: Any, kind: Any) -> int | None:
+    if not isinstance(channel_id, str) or not isinstance(kind, str) or kind not in _CHANNEL_PUBLIC_KEYS:
+        raise ConfigFileError("channels: invalid bot id or channel type")
+    if channel_id == builtin_channel_id(kind):
+        return None
+    match = _BOT_ID.fullmatch(channel_id)
+    if not match or match[1] != kind or len(match[2]) > 19 or int(match[2]) >= 2**63 - 1:
+        raise ConfigFileError("channels: malformed bot id or id/type mismatch")
+    return int(match[2])
+
+
+def _check_channel_document(data: Mapping[str, Any]) -> None:
+    """Reject identity ambiguity and nonportable state before importing any of the graph."""
+    if _BINDING_FIELDS & data.keys():
+        raise ConfigFileError("chat bindings, seen chats and unbound chats are local state and cannot be imported")
+    entries = data.get("channels", [])
+    if not isinstance(entries, list):
+        raise ConfigFileError("channels must be a JSON list")
+    graph = data.get("format") == V4_FORMAT
+    seen, suffixes = set(), set()
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            if graph:
+                raise ConfigFileError("channels: a bot must be a JSON object")
+            continue
+        config = entry.get("config", {})
+        if _BINDING_FIELDS & entry.keys() or isinstance(config, Mapping) and (
+                (_BINDING_FIELDS | {"bound_chats_only"}) & config.keys()):
+            raise ConfigFileError("channels: binding and policy fields are local configuration and cannot be imported")
+        identity, kind = entry.get("channel_id"), entry.get("channel_type")
+        if not graph:
+            if (identity is not None and identity not in BUILTIN_CHANNEL_IDS) or entry.get("manager_id", "manager") != "manager":
+                raise ConfigFileError("channels: this is a bot of a Manager and requires looper-config/v4")
+            continue
+        required = {"channel_id", "channel_type", "config"}
+        if not isinstance(identity, str) or identity not in BUILTIN_CHANNEL_IDS:
+            required.add("manager_id")
+        if set(entry) - _BOT_FIELDS or not required <= entry.keys():
+            raise ConfigFileError("channels: BotConfig has unknown or missing fields; enter credentials only in Settings → Channels")
+        suffix = _bot_suffix(identity, kind)
+        owner = entry.get("manager_id", "manager")
+        if not isinstance(owner, str) or not owner:
+            raise ConfigFileError("channels: manager_id must reference a Manager")
+        if suffix is None and owner != "manager":
+            raise ConfigFileError("channels: the built-in bot's immutable owner must be manager")
+        if identity in seen or suffix is not None and suffix in suffixes:
+            raise ConfigFileError("channels: duplicate bot ids or numeric suffixes in the file")
+        seen.add(identity)
+        if suffix is not None:
+            suffixes.add(suffix)
 
 
 def _from_v1(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -926,6 +984,7 @@ class _Target:
     schedules: dict[str, list[dict[str, Any]]] = field(default_factory=lambda: defaultdict(list))  # by project id
     managers: dict[str, dict[str, Any]] = field(default_factory=dict)  # immutable full id, including tombstones
     manager_templates: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+    bot_sequence: tuple[int, bool] = (1, False)
 
     @classmethod
     async def read(cls, conn: Any) -> _Target:
@@ -937,8 +996,8 @@ class _Target:
         for row in await db.read_layers(conn):
             target.layers[(row["scope"], row["role"], row["project_id"])] = row
         target.roles = {row["role"]: row for row in await db.read_roles(conn)}
-        target.channels = {row["channel_id"]: row for row in await db.read_channels(conn)
-                           if row["channel_id"] in BUILTIN_CHANNEL_IDS}
+        target.channels = {row["channel_id"]: row for row in await db.read_channels(conn)}
+        target.bot_sequence = await db.read_bot_sequence(conn)
         target.items = {(row["kind"], row["name"], row["owner_project_id"]): row for row in await db.read_items(conn)}
         target.installs = {(row["item_id"], row["project_id"]): row for row in await db.read_installs(conn)}
         target.projects = {row["name"].lower(): row for row in await db.read_projects(conn)}
@@ -996,10 +1055,13 @@ class _Importer:
         self.seen_projects: set[str] = set()
         # Each channel's configuration as the import leaves it (the file's over this machine's): its sender allowlist
         # says which chats a schedule may tell.
-        self.channel_configs = {row["channel_type"]: dict(row["config"] or {}) for row in target.channels.values()}
-        # The configs this import gives the built-in channels by channel_id, for the same-bot check of the later ones
-        # (a preview writes none).
+        self.channel_configs = {row["channel_type"]: dict(row["config"] or {}) for row in target.channels.values()
+                                if row["channel_id"] in BUILTIN_CHANNEL_IDS}
+        # Imported configs by immutable id; identity checks see the final graph even in a preview.
         self.bot_configs: dict[str, dict[str, Any]] = {}
+        self.bot_imports: list[tuple[str, str, str, dict[str, Any], Any, list[str]]] = []
+        self.channel_graph = False
+        self.imported_managers: set[str] = set()
         # The schedules this import adds or rewrites, disabled; those that had a directory of their own.
         self.disabled_schedules: list[str] = []
         self.min_interval: int | None = None  # the file's, once read
@@ -1690,9 +1752,22 @@ class _Importer:
             if kind not in _CHANNEL_PUBLIC_KEYS:
                 raise _Skip(f"channel type {kind!r} is not one of {', '.join(_CHANNEL_PUBLIC_KEYS)}")
             channel_id = entry.get("channel_id") or builtin_channel_id(kind)
-            if channel_id != builtin_channel_id(kind):
-                raise _Skip(f"channel_id {channel_id!r} is not the built-in channel of type {kind}")
+            suffix = _bot_suffix(channel_id, kind)
+            owner = entry.get("manager_id", "manager")
             row = self.target.channels.get(channel_id)
+            if row and (row["channel_type"] != kind or row["manager_id"] != owner):
+                raise ConfigFileConflict("channels: immutable bot type or owner conflict; existing bots cannot be reassigned")
+            if self.channel_graph:
+                manager = self.target.managers.get(owner)
+                if manager is not None and manager["deleted_at"] is not None or (
+                        manager is None and owner not in self.imported_managers and owner != "manager"):
+                    raise ConfigFileError("channels: missing or deleted Manager reference")
+                if suffix is not None and row is None:
+                    high, called = self.target.bot_sequence
+                    occupied = any(identity.endswith(f"-{suffix}") for identity in self.target.channels)
+                    if suffix < high or suffix == high and called or occupied:
+                        raise ConfigFileConflict("channels: bot id conflict: this suffix was already allocated; "
+                                                 "add a new bot locally in Settings → Channels")
             config, missing = _fill_placeholders(_mapping(entry.get("config", {}), "config"),
                                                  dict(row["config"] or {}) if row else {})
             try:
@@ -1708,51 +1783,146 @@ class _Importer:
                     config = stored_config(config)
             except (AllowlistError, ValueError) as exc:
                 raise _Skip(str(exc)) from None
-            values = {"display_name": _string(entry.get("display_name", ""), "display_name", max_chars=200),
+            name = entry.get("display_name", None if self.channel_graph else "")
+            values = {"display_name": "" if name is None and self.channel_graph else
+                      _string(name, "display_name", max_chars=200),
                       "enabled": _boolean(entry.get("enabled", False), "enabled"), "config": config}
-            await self._refuse_same_bot(channel_id, kind, config)
+            if suffix is not None:
+                from .channels.bot_api import BotValidationReason
+
+                if kind == "telegram" and config.get("bot_token_env"):
+                    raise _Skip("a bot's token is entered only in Settings → Channels, not read from the environment")
+                if kind == "lark" and not config.get("profile"):
+                    raise _Skip(BotValidationReason.LARK_PROFILE.value)
+                if kind == "lark_bot" and not config.get("app_id"):
+                    raise _Skip(BotValidationReason.LARK_APP_ID.value)
+                settings_changed = row is None or any(values[key] != row[key] for key in ("display_name", "config"))
+                # File enablement is never activation approval. Identical rows keep local enablement.
+                values["enabled"] = False if settings_changed else row["enabled"]
+                if settings_changed:
+                    self.plan.notes.append(
+                        f"{channel_id}: imported disabled; review credentials, local policy and chat bindings "
+                        "in Settings → Channels before activation, then restart the server")
+            if "bound_chats_only" in entry:
+                self.plan.notes.append(f"{channel_id}: legacy bound_chats_only was ignored; the destination's "
+                                       "local policy and chat bindings are preserved")
+            if not self.channel_graph:
+                await self._refuse_same_bot(channel_id, kind, config)
         except _Skip as exc:
-            self.record("channels", str(kind), Action.SKIPPED, reason=str(exc))
+            if self.channel_graph:
+                raise ConfigFileError(f"channels: {exc}") from None
+            self.record("channels", str(raw.get("channel_id") or builtin_channel_id(kind)) if kind in _CHANNEL_PUBLIC_KEYS
+                        else str(kind), Action.SKIPPED, reason=str(exc))
             return
         self.bot_configs[channel_id] = config
-        self.channel_configs[kind] = config
+        if suffix is None:
+            self.channel_configs[kind] = config
+        self.bot_imports.append((channel_id, kind, owner, values, row, missing))
+        if not self.channel_graph:
+            await self._write_channel(self.bot_imports.pop())
+
+    async def finish_channels(self) -> None:
+        """Validate against the final imported + stored configs, including rows not yet inserted."""
+        from ..db import config_transfer as db
+        from ..db import channel_configs as db_channels
+        from .channels.bot_api import _LOCK
+        from .channels.bots import SAME_BOT_TYPES, bot_keys, builtin_env_token, builtin_lark_pair, lark_app_id
+
+        if not self.bot_imports:
+            return
+        await self.conn.execute(_LOCK)
+        final = {**self.target.channels, **{identity: {**values, "channel_type": kind}
+            for identity, kind, _, values, _, _ in self.bot_imports}}
+        relevant = {peer for _, kind, *_ in self.bot_imports for peer in SAME_BOT_TYPES[kind]}
+        has_secrets = await self.conn.fetchval("SELECT to_regclass('channel_secrets')") is not None
+        keys: dict[str, set[str]] = {}
+        unresolved: set[str] = set()
+        for identity, row in final.items():
+            kind, config = row["channel_type"], row["config"] or {}
+            if kind not in relevant:
+                continue
+            # An untouched, disabled default does not act as lark-cli's active profile. Apply this to
+            # competitors too; configured disabled rows still resolve their actual app identity.
+            if (identity == "channel-lark" and not row["enabled"] and not any(
+                    config.get(key) for key in ("profile", "allowed_open_ids", "allowlist_app_id"))):
+                continue
+            secret = await db_channels.get_bot_token(identity, pool=self.conn) if has_secrets else None
+            env = builtin_env_token(config) if kind == "telegram" and identity in BUILTIN_CHANNEL_IDS and not secret else ""
+            app_id = await lark_app_id(kind, config)
+            if kind == "lark" and not app_id:
+                unresolved.add(identity)
+            keys[identity] = bot_keys(kind, config, secret, env_token=env, channel_id=identity, app_id=app_id)
+        for identity, kind, _, values, _, _ in self.bot_imports:
+            if not keys.get(identity):
+                continue
+            peers = {other for other, row in final.items() if other != identity
+                     and row["channel_type"] in SAME_BOT_TYPES[kind] and not builtin_lark_pair(identity, other)}
+            if any(keys.get(identity, set()) & keys.get(other, set()) for other in peers):
+                raise ConfigFileError("channels: actual bot identity conflict; each added bot must use a different bot or Lark app")
+            if identity in unresolved or peers & unresolved:
+                # Restoring a graph is not activation approval. Keep unresolved candidates inert while
+                # restoring their Manager and the other bots; known profile/app collisions still fail above.
+                values["enabled"] = False
+                self.plan.notes.append(f"{identity}: imported disabled; verify lark-cli profiles and authentication "
+                                       "in Settings → Channels before activation, then restart the server")
+                self.plan.need_secret.append(NeededSecret("channels", identity,
+                    ("lark-cli profile authentication and identity verification",), ("channel", identity)))
+        if self.apply:
+            await db.reserve_bot_ids(self.conn, [_bot_suffix(identity, kind)
+                for identity, kind, _, _, row, _ in self.bot_imports
+                if identity not in BUILTIN_CHANNEL_IDS])
+        for entry in self.bot_imports:
+            await self._write_channel(entry)
+
+    async def _write_channel(self, entry: tuple[str, str, str, dict[str, Any], Any, list[str]]) -> None:
+        channel_id, kind, owner, values, row, missing = entry
+        added_bot = channel_id not in BUILTIN_CHANNEL_IDS
         current = {"display_name": row["display_name"], "enabled": row["enabled"],
                    "config": dict(row["config"] or {})} if row else None
-        action = self.outcome("channels", kind, current, _differs(values, current, ("display_name", "enabled",
+        action = self.outcome("channels", channel_id, current, _differs(values, current, ("display_name", "enabled",
                                                                                       "config")))
+        if added_bot and action in (Action.ADDED, Action.CHANGED):
+            self.plan.changes[-1] = Change("channels", channel_id, action, self.plan.changes[-1].fields,
+                                          "effective enabled: false; local activation and restart required")
         needed = [f"config {name}" for name in missing]
         if values["enabled"]:
-            needed += [f"environment {value}" for name, value in sorted(config.items())
+            needed += [f"environment {value}" for name, value in sorted(values["config"].items())
                        if name.endswith("_env") and isinstance(value, str) and value]
             # A DB-stored token is not in the file; an enabled channel still needs it set here.
-            if kind in _CHANNEL_TOKEN_SECRET:
+            if kind in _CHANNEL_TOKEN_SECRET and not added_bot:
+                needed.append(_CHANNEL_TOKEN_SECRET[kind])
+        if added_bot and kind in _CHANNEL_TOKEN_SECRET:
+            from ..db import channel_configs as db_channels
+
+            has_secret = row is not None and await db_channels.get_bot_token(channel_id, pool=self.conn)
+            if not has_secret:
                 needed.append(_CHANNEL_TOKEN_SECRET[kind])
         if self.apply and action in (Action.ADDED, Action.CHANGED):
             from ..db import config_transfer as db
 
-            await db.write_channel(self.conn, channel_id, kind, values, exists=row is not None)
+            await db.write_channel(self.conn, channel_id, kind, values, exists=row is not None, manager_id=owner)
         if needed:
-            self.plan.need_secret.append(NeededSecret("channels", kind, tuple(needed),
-                                                      ("channel", channel_id) if row or self.apply else None))
+            self.plan.need_secret.append(NeededSecret("channels", channel_id, tuple(needed),
+                                                      ("channel", channel_id) if added_bot or row or self.apply else None))
 
     async def _refuse_same_bot(self, channel_id: str, kind: str, config: Mapping[str, Any]) -> None:
-        """``_Skip`` when the built-in channel, with ``config`` and the token stored for it (with none, the built-in
-        Telegram row's environment one), would be the same bot as another channel row, a Manager's bot or another
-        built-in channel as this import leaves it: the server would not start the later row (``bots.clashes``)."""
+        """Legacy files use strict per-channel admission; v4 validates the final graph in finish_channels."""
         from ..db import channel_configs as db_channel_configs
         from . import projects
         from .channels.bot_api import _LOCK, _admission_app_id, refuse_same_bot
         from .channels.bots import builtin_env_token
 
         try:
-            if await self.conn.fetchval("SELECT to_regclass('channel_secrets')") is None:
-                await _admission_app_id(kind, config)
-                return  # no competing rows yet, but the candidate still needs a known identity
-            await self.conn.execute(_LOCK)
-            secret = await db_channel_configs.get_bot_token(channel_id, pool=self.conn)
-            env = builtin_env_token(config) if kind == "telegram" and not secret else ""
-            await refuse_same_bot(self.conn, kind, config, secret, env_token=env, exclude=channel_id,
-                                  configs=self.bot_configs)
+            has_secrets = await self.conn.fetchval("SELECT to_regclass('channel_secrets')") is not None
+            secret = None
+            if has_secrets:
+                await self.conn.execute(_LOCK)
+                secret = await db_channel_configs.get_bot_token(channel_id, pool=self.conn)
+            env = builtin_env_token(config) if kind == "telegram" and channel_id in BUILTIN_CHANNEL_IDS and not secret else ""
+            if has_secrets:
+                await refuse_same_bot(self.conn, kind, config, secret, env_token=env, exclude=channel_id,
+                                      configs=self.bot_configs)
+            await _admission_app_id(kind, config)
         except projects.RequestError as exc:
             raise _Skip(str(exc)) from None
 
@@ -2296,6 +2466,7 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
     """The import's plan for ``data`` (from ``read_file``); with ``apply`` also written, in the caller's
     transaction. Raises ``ConfigFileError`` when the result would break a catalog cap."""
     _check_manager_document(data)
+    _check_channel_document(data)
     if apply:
         from ..db.connection import ensure_schema, schema_change_pending
 
@@ -2309,6 +2480,10 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
         # cannot leave conversion on a snapshot from before another writer.
         await conn.execute("LOCK TABLE llm_providers, llm_provider_endpoints, llm_models, agent_profiles "
                            "IN SHARE ROW EXCLUSIVE MODE")
+        if data.get("channels"):
+            from .channels.bot_api import _LOCK
+
+            await conn.execute(_LOCK)
         if data.get("managers"):
             from ..db import managers as db_managers
 
@@ -2317,11 +2492,18 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
             for identity in sorted(entry["id"] for entry in data["managers"]
                                    if isinstance(entry, Mapping) and isinstance(entry.get("id"), str)):
                 await db_managers.lock_for_update(identity, conn=conn)
+        if data.get("format") == V4_FORMAT and data.get("channels"):
+            for identity in sorted({entry.get("manager_id", "manager") for entry in data["channels"]}):
+                await conn.fetchrow("SELECT id FROM managers WHERE id = $1 FOR KEY SHARE", identity)
+        if data.get("managers") or data.get("format") == V4_FORMAT and data.get("channels"):
             # Resolve the projected dependencies and reject the complete graph before any import writes.
             await import_config(conn, data, apply=False)
     if data.get("format") in V1_FORMATS and "agents" in data:
         data = _from_v1(data)
     importer = _Importer(conn, await _Target.read(conn), apply)
+    importer.channel_graph = data.get("format") == V4_FORMAT
+    importer.imported_managers = {entry.get("id") for entry in data.get("managers", [])
+                                  if isinstance(entry, Mapping) and isinstance(entry.get("id"), str)}
     for entry in data.get("runtimes", []):
         await importer.runtime(entry)
     data = {**data, **{section: importer.registry_entries(section, data.get(section, []))
@@ -2346,8 +2528,6 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
             "settings.roles: a role's max_concurrency is no longer a role setting and was ignored; how many of a "
             "task's Workers and Reviewers run at once is the task's own limit, else the max_concurrency of their "
             "role layers")
-    for entry in data.get("channels", []):
-        await importer.channel(entry)
     for entry in data.get("catalog", []):
         await importer.item(entry, None)
 
@@ -2364,6 +2544,10 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
         await importer.documents(entry.get("knowledge") or [], project_id, label)
         await importer.role_templates(entry.get("role_templates") or [], project_id, label)
     await importer.managers(data.get("managers", []))
+    for entry in data.get("channels", []):
+        await importer.channel(entry)
+    if importer.channel_graph:
+        await importer.finish_channels()
     for entry, project_id, label in projects:
         await importer.schedules(entry.get("schedules") or [], project_id, label)
     importer.schedule_notes()
@@ -2437,9 +2621,7 @@ def format_export(summary: ExportSummary, path: Path, *, include_secrets: bool) 
     counts = ", ".join(f"{section} {count}" for section, count in summary.counts.items())
     secrets = (f"{summary.secrets} secret values included" if include_secrets
                else f"{summary.secrets} secret values left out as placeholders")
-    left_out = (f"; {summary.bots_left_out} bots of Managers are not exported "
-                "(add them again in Settings → Channels)" if summary.bots_left_out else "")
-    lines = [f"Wrote {path} ({summary.bytes} bytes, {summary.format}): {counts}; {secrets}{left_out}."]
+    lines = [f"Wrote {path} ({summary.bytes} bytes, {summary.format}): {counts}; {secrets}."]
     if summary.repoint:
         lines.append(f"{summary.repoint} path document(s) are references to re-point on the new machine.")
     lines.append(f"On the new machine: loopercli config import {path.name} (preview), then "

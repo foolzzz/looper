@@ -1,4 +1,4 @@
-"""Export and import carry only the built-in channel rows; the bots of Managers stay out (PostgreSQL)."""
+"""Channel transfer regressions: legacy schemas, local policy and native identity boundaries."""
 
 from __future__ import annotations
 
@@ -176,7 +176,7 @@ def test_export_and_preview_read_channels_before_the_manager_migration(
 
 
 @pytest.mark.parametrize("secrets", [False, True])
-def test_export_leaves_the_added_bot_out(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, secrets: bool) -> None:
+def test_export_includes_added_bot_without_credential(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, secrets: bool) -> None:
     async def _test() -> None:
         async with _installation() as (pool, url):
             from looper.agents.serve import seed_channel_configs
@@ -188,9 +188,12 @@ def test_export_leaves_the_added_bot_out(monkeypatch: pytest.MonkeyPatch, tmp_pa
             assert code == 0, err
             text = path.read_text()
             channels = json.loads(text)["channels"]
-            assert sorted(c["channel_id"] for c in channels) == ["channel-lark", "channel-lark_bot", "channel-telegram"]
-            assert BOT not in text and BOT_TOKEN not in text and BOT_ALLOWED not in text
-            assert "1 bots of Managers are not exported (add them again in Settings → Channels)" in out
+            assert sorted(c["channel_id"] for c in channels) == ["channel-lark", "channel-lark_bot", "channel-telegram", BOT]
+            added = next(c for c in channels if c["channel_id"] == BOT)
+            assert added["manager_id"] == "manager-review"
+            assert added["config"]["allowed_user_ids"] == [BOT_ALLOWED]
+            assert json.loads(text)["format"] == "looper-config/v4"
+            assert BOT_TOKEN not in text and "bots of Managers are not exported" not in out
 
     asyncio.run(_test())
 
@@ -210,6 +213,7 @@ def test_channel_import_cannot_set_or_erase_bound_only_policy(monkeypatch: pytes
         async with pool.acquire() as conn:
             plan = await run_import(conn, document, apply=True)
         assert plan.view()["counts"]["channels"]["changed"] == 1
+        assert any("bound_chats_only" in note or "policy" in note for note in plan.notes)
         row = await pool.fetchrow("SELECT display_name, bound_chats_only FROM channel_configs "
                                   "WHERE channel_id = 'channel-telegram'")
         assert row["display_name"] == "Imported bot" and row["bound_chats_only"] is policy
@@ -261,7 +265,7 @@ def test_a_file_with_a_bot_is_refused_and_nothing_changes(
             before, rows = await _dump(pool), await _rows(pool)
             code, out, err = await _transfer_file(url, "import", str(path), apply=True)
             assert code != 0
-            assert "is a bot of a Manager" in out + err
+            assert "v4" in out + err or "Manager" in out + err
             assert await _dump(pool) == before and await _rows(pool) == rows
 
     asyncio.run(_test())

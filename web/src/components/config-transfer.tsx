@@ -28,7 +28,7 @@ const SECTION_LABELS: Record<string, string> = {
   "settings.layers": "Settings layers",
   "settings.roles": "Role settings",
   "settings.scheduler": "Scheduler settings",
-  channels: "Channels",
+  channels: "Channel bots",
   catalog: "Catalog",
   installs: "Global installs",
   projects: "Projects",
@@ -232,7 +232,7 @@ function ImportPanel({ onApplied }: { onApplied: () => void }) {
     if (
       !confirm(
         `Apply ${count} ${count === 1 ? "change" : "changes"} from ${stage.file.name} to this installation? ` +
-          "Managers match by immutable ID, templates by Manager and key, and other entries by name. Nothing missing from the file is removed.",
+          "Managers match by immutable ID, templates by Manager and key, channel bots by channel ID, and other entries by name. Nothing missing from the file is removed.",
       )
     )
       return;
@@ -344,7 +344,10 @@ function ImportPanel({ onApplied }: { onApplied: () => void }) {
           <PlanView plan={stage.plan} />
           <NeededSecrets plan={stage.plan} />
           {stage.plan.counts.channels && stage.plan.counts.channels.added + stage.plan.counts.channels.changed > 0 && (
-            <p className="text-xs text-muted-foreground">Restart the server for the channel changes to take effect.</p>
+            <p className="text-xs text-muted-foreground">
+              Restart the server for channel credentials and settings changes to take effect. New and changed added bots
+              remain disabled until you review their credentials, local policy and chat bindings in Settings → Channels.
+            </p>
           )}
           <Button type="button" size="sm" variant="ghost" onClick={reset}>
             Done
@@ -398,7 +401,9 @@ export function ConfigTransferCard({ onImported }: { onImported?: () => void }) 
   return (
     <div className="space-y-4 rounded-lg border border-border bg-card px-5 py-4">
       <p className="text-xs text-muted-foreground">
-        Includes scenario Managers and their task templates. Local working directories stay on this machine;
+        Includes scenario Managers, their task templates and all channel bots. Bot credentials, local channel policy
+        and chat bindings stay on this machine. New bots import disabled and need local policy and bindings before
+        activation in Settings → Channels. Local working directories stay on this machine;
         templates that need a directory must be re-pointed on the target. Existing target directories are kept.
       </p>
       <div className="space-y-3">
@@ -417,15 +422,16 @@ export function ConfigTransferCard({ onImported }: { onImported?: () => void }) 
           <div className="text-sm">
             <div className="font-medium">Include secrets</div>
             <p className="text-xs text-muted-foreground">
-              Off: LLM provider API keys, MCP environment and header values and channel secrets are placeholders,
-              and the file is safe to share.
+              Off: LLM provider API keys and MCP environment and header values are placeholders.
+              Channel credentials are always omitted; enter them in Settings → Channels after import.
             </p>
           </div>
         </div>
         {secrets && (
           <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            The file will hold every secret in plain text. Keep it private and delete it once imported.
+            The file will hold provider and MCP secrets in plain text. Channel credentials remain omitted.
+            Keep it private and delete it once imported.
           </div>
         )}
       </div>

@@ -134,7 +134,28 @@ describe("configuration import", () => {
     vi.stubGlobal("confirm", vi.fn(() => false));
     await click("Apply 2 changes");
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Managers match by immutable ID, templates by Manager and key"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("channel bots by channel ID"));
     expect(fetcher.mock.calls.some(([url]) => String(url).endsWith("/import_apply"))).toBe(false);
+  });
+
+  it("keeps distinct bot IDs and their credential links through preview and apply", async () => {
+    plan.counts = { channels: counts(2) };
+    plan.changes = ["channel-telegram-41", "channel-telegram-42"].map((key) => ({ section: "channels", key, action: "added" }));
+    plan.need_secret = plan.changes.map(({ key }) => ({
+      section: "channels", key, names: ["bot_token"], target: { kind: "channel", id: key },
+    }));
+    applied = { ...plan, applied: true };
+    await show();
+    await upload();
+    expect(container.textContent).toContain("Channel bots");
+    expect(container.textContent).toContain("New bots import disabled");
+    expect(container.textContent).toContain("local policy and bindings before activation");
+    const links = () => [...container.querySelectorAll('a[href^="#settings/channels/"]')].map((link) => link.getAttribute("href"));
+    expect(links()).toEqual(["#settings/channels/channel-telegram-41", "#settings/channels/channel-telegram-42"]);
+    await click("Apply 2 changes");
+    expect(links()).toEqual(["#settings/channels/channel-telegram-41", "#settings/channels/channel-telegram-42"]);
+    expect(container.textContent).toContain("Restart the server for channel credentials and settings changes");
+    expect(container.textContent).toContain("remain disabled until you review their credentials, local policy and chat bindings");
   });
 
   it("keeps 202 pending and tolerates an already expired cancellation", async () => {
