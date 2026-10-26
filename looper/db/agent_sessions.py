@@ -17,7 +17,7 @@ from typing import Any
 
 import asyncpg
 
-from .connection import get_pool
+from .connection import _connection, get_pool
 
 
 async def get_session(
@@ -93,20 +93,27 @@ async def save_session(
     """Replace ``agent_id``'s session, with the runtime type and the provider it belongs to and the Agent Profile
     that ran it; a None ``session_id`` makes its next turn start a new one, without a resume brief when
     ``clean_start``."""
+    from . import api_sessions
+
     pool = pool or get_pool()
-    await pool.execute(
-        """
-        INSERT INTO agent_sessions (agent_id, session_id, session_totals, runtime_type, provider_id, profile_id,
-                                    clean_start, updated_at)
-        VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, now())
-        ON CONFLICT (agent_id) DO UPDATE
-        SET session_id = EXCLUDED.session_id, session_totals = EXCLUDED.session_totals,
-            runtime_type = EXCLUDED.runtime_type, provider_id = EXCLUDED.provider_id,
-            profile_id = EXCLUDED.profile_id, clean_start = EXCLUDED.clean_start, updated_at = now()
-        """,
-        agent_id, session_id, json.dumps(dict(session_totals)), runtime_type, provider_id, profile_id,
-        clean_start,
-    )
+    async with _connection(pool) as conn, conn.transaction():
+        old = await conn.fetchrow(
+            "SELECT session_id, runtime_type FROM agent_sessions WHERE agent_id = $1 FOR UPDATE", agent_id)
+        if old and old["runtime_type"] == "api" and old["session_id"] is not None and old["session_id"] != session_id:
+            await api_sessions.delete(old["session_id"], pool=conn)
+        await conn.execute(
+            """
+            INSERT INTO agent_sessions (agent_id, session_id, session_totals, runtime_type, provider_id, profile_id,
+                                        clean_start, updated_at)
+            VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, now())
+            ON CONFLICT (agent_id) DO UPDATE
+            SET session_id = EXCLUDED.session_id, session_totals = EXCLUDED.session_totals,
+                runtime_type = EXCLUDED.runtime_type, provider_id = EXCLUDED.provider_id,
+                profile_id = EXCLUDED.profile_id, clean_start = EXCLUDED.clean_start, updated_at = now()
+            """,
+            agent_id, session_id, json.dumps(dict(session_totals)), runtime_type, provider_id, profile_id,
+            clean_start,
+        )
 
 
 async def other_live_task_has_session(

@@ -73,10 +73,11 @@ from ..library import load_installed
 from ..run_usage import Usage
 from ..reported_files import prompt_name
 from .. import session_switch
-from ..runtimes import CLAUDE_CODE, InProcessTools
+from ..runtimes import CLAUDE_CODE, InProcessTools, ReportsContext
+from ..runtimes.api.loop import ToolCall, ToolOutcome, ToolSpec
 from ..runtimes.api.tools import ManagerTurnTools
 from ..runtimes.cancel import TurnCancel, TurnCancelled, abandon
-from ..session_switch import SessionSwitch
+from ..session_switch import SessionSwitch, SwitchReason
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .turn_token import StopRequest, TurnKind, TurnPhase, TurnRegistry, TurnStopped, TurnToken  # noqa: F401  (StopRequest re-exported)
 from .journal import HANDOFF_MAX_CHARS, clip, kept_text
@@ -358,6 +359,28 @@ class Prepared:
     switch: Any = None
     turn_text: str = ""
     run: RunState = field(default_factory=RunState)
+
+
+def api_handoff_prompt(reason: str, max_chars: int) -> str:
+    """A continuation note for an API session's successor, with no authority to act."""
+    return (
+        f"[HANDOFF] Prepare a continuation note because this session changes ({reason}). "
+        f"Use at most {max_chars} characters. Summarize the active goal, user decisions and constraints, "
+        "completed actions and their evidence, pending confirmations and commitments, and unresolved next steps. "
+        "Preserve uncertainty and distinguish proposed work from work actually completed. Do not invent actions "
+        "or decisions. This request is only for summarization; it authorizes no work or tool calls. "
+        "Return only the continuation note."
+    )
+
+
+class _HandoffTools:
+    """A handoff can describe work; it cannot reach the previous turn's operations."""
+
+    async def specs(self) -> list[ToolSpec]:
+        return []
+
+    async def call(self, call: ToolCall) -> ToolOutcome:
+        return ToolOutcome("No tools are available while writing a continuation note.", is_error=True, ran=False)
 
 
 class ProfileUnavailable(RuntimeError):
@@ -1163,6 +1186,11 @@ class ManagerAgent:
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
         switch = session_switch.profile_switch(self._session_id, self._session_runtime, self._session_profile,
                                                launch, session_provider=self._session_provider)
+        if switch is None and self._session_id and isinstance(self._claude, ReportsContext) \
+                and self._claude.started and self._claude.context_full:
+            switch = session_switch.context_full(
+                self._claude.context_tokens, self._claude.context_limit, runtime=self._session_runtime,
+                profile=self._session_profile, provider=self._session_provider)
         turn_text = await token.step("build_user_message", self._build_user_message(
             ask.message, ask.note, channel=channel_line(envelope), envelope=envelope))
         return Prepared(
@@ -1175,6 +1203,8 @@ class ManagerAgent:
         run, launch, signature = prepared.run, prepared.launch, prepared.signature
         envelope = prepared.envelope
         token.restart() if prepared.retried else token.advance(TurnPhase.STARTING)
+        pre_context = (self._claude.context_tokens if prepared.switch is not None
+                       and prepared.switch.reason is SwitchReason.CONTEXT_FULL else None)
         if prepared.switch is not None:
             # This agent cannot resume the session: a new one starts, after the old one hands over.
             # Not abandoned by a stop: the handoff's turn takes the token's cancel and ends itself.
@@ -1205,8 +1235,11 @@ class ManagerAgent:
         )
         try:
             await token.keep("recorder_start", recorder.start(), 10)
+            if prepared.switch is not None and prepared.switch.reason is SwitchReason.CONTEXT_FULL:
+                recorder.account({"type": "system", "subtype": "compact_boundary",
+                                  "compact_metadata": {"trigger": "auto", "pre_tokens": pre_context}})
             # The session this turn's new process resumes, if it starts one (its command resumes the saved session).
-            run.resuming = self._session_id if not self._claude.started else None
+            run.resuming = self._session_id if not self._claude.started or launch.runtime.in_process else None
             if not self._claude.started:
                 self._session_runtime, self._session_profile = launch.runtime.type, launch.profile.id
                 self._session_provider = launch.profile.provider.id
@@ -1689,7 +1722,8 @@ class ManagerAgent:
             await self._link_turn_task(recorder, ops_turn)
             raise
 
-        resume_lost = bool(resuming) and not turn.session_started and not retried
+        context_overflow = isinstance(self._claude, ReportsContext) and self._claude.context_full
+        resume_lost = (bool(resuming) or context_overflow) and not turn.session_started and not retried
         # Decided here, in one place and with nothing awaited since the events were handled: a stop asked until now
         # ends the turn stopped, even when the runtime came back with an answer; from the settle on, a stop is too
         # late (the token has ended).
@@ -1705,18 +1739,25 @@ class ManagerAgent:
             # turn would resume it again and never answer, so drop it and run
             # this message in a new session; the context each turn carries does
             # not depend on the old conversation.
-            logger.warning("%s: session %s could not be resumed; starting a new session", self._log, resuming)
+            failure = ("context full: its first request exceeded the context window" if context_overflow
+                       else f"session {resuming} could not be resumed")
+            logger.warning("%s: %s; starting a new session", self._log, failure)
             await recorder.finish(output_text=None, result_event=None, error=(
-                f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"))
+                f"{failure}{exit_note(turn.exit_code)}; retried in a new session"))
             await self._link_turn_task(recorder, ops_turn)
             if token.cancel.requested:
                 raise TurnStopped()
+            switch = (session_switch.context_full(
+                self._claude.context_tokens, self._claude.context_limit, runtime=self._session_runtime,
+                profile=self._session_profile, provider=self._session_provider)
+                if isinstance(self._claude, ReportsContext) and self._claude.context_full
+                else session_switch.session_lost(
+                    f"its saved session {resuming} could not be resumed", runtime=launch.runtime.type,
+                    profile=launch.profile.id))
             await self._claude.stop()
             self._session_id, self._session_totals = None, Usage()  # its totals went with it
             await self._save_session_state()
-            self._pending_switch = session_switch.session_lost(
-                f"its saved session {resuming} could not be resumed", runtime=launch.runtime.type,
-                profile=launch.profile.id)
+            self._pending_switch = switch
             self._pending_handoff = None
             return await self._run_turn(message, context_envelope, ops_turn=ops_turn, note=note, retried=True,
                                         token=token)
@@ -2007,6 +2048,8 @@ class ManagerAgent:
             f"questions. At most {HANDOFF_MAX_CHARS} characters. Reply with the handoff only; the user does not "
             "see it."
         )
+        if self._session_runtime == "api":
+            text = api_handoff_prompt(switch.describe(), HANDOFF_MAX_CHARS)
         recorder = ClaudeRunRecorder(
             agent_id=self.agent_id, task_id=None, command=process.command, cwd=str(self._config.work_dir),
             input_text=text, session_id=self._session_id, system_prompt=process.system_prompt,
@@ -2024,6 +2067,8 @@ class ManagerAgent:
                                  if isinstance(block, dict) and block.get("type") == "text")
 
             try:
+                if self._session_runtime == "api" and isinstance(self._claude, InProcessTools):
+                    self._claude.set_turn_tools(_HandoffTools())
                 turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, cancel=cancel),
                                               HANDOFF_TIMEOUT_SEC)
             except TurnCancelled as exc:

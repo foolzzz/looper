@@ -379,6 +379,25 @@ def _without_time(path: Path) -> dict[str, Any]:
     return data
 
 
+def test_configuration_export_excludes_api_session_state(tmp_path: Path) -> None:
+    async def run():
+        from looper.db import agent_sessions, api_sessions
+
+        async with _installation() as (pool, url):
+            await api_sessions.append("runtime-only-session", 1, "openai-responses", "runtime-only-model", [
+                {"version": 1, "kind": "message", "role": "user", "text": "runtime-only-history"}], pool=pool)
+            await agent_sessions.save_session("manager", "runtime-only-session", {}, runtime_type="api", pool=pool)
+            exported = tmp_path / "configuration.json"
+            code, _, err = await _transfer_file(url, "export", str(exported), include_projects=True)
+            assert code == 0, err
+            raw = exported.read_text()
+            assert json.loads(raw)["format"] == "looper-config/v3"
+            assert all(value not in raw for value in (
+                "api_sessions", "api_session_items", "runtime-only-session", "runtime-only-model", "runtime-only-history"))
+
+    asyncio.run(asyncio.wait_for(run(), timeout=15))
+
+
 @pytest.mark.usefixtures("lark_cli_stand_in")
 def test_a_round_trip_into_a_new_database_reproduces_the_configuration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,

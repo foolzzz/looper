@@ -23,6 +23,8 @@ from looper.agents.runtimes.api.loop import (
     ToolCallItem, ToolOutcome, ToolResultItem, ToolSpec,
 )
 from looper.agents.runtimes.api.session import ApiSession, FORBIDDEN_ENV
+from looper.agents.runtimes.api.transcript import DbTranscript
+from looper.db import api_sessions
 from looper.agents.runtimes.cancel import TurnCancel
 
 PROTOCOL = ApiProtocol.OPENAI_RESPONSES
@@ -41,6 +43,29 @@ def async_test(fn):
 def clear_sdk_environment(monkeypatch):
     for name in FORBIDDEN_ENV:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def transcript_store(monkeypatch):
+    """Keep runtime event tests independent of PostgreSQL; DB resume rules live in the DB suite."""
+    rows = {}
+
+    async def load(sid):
+        return list(rows.get(sid, []))
+
+    async def last_turn(sid):
+        return max((r['turn'] for r in rows.get(sid, [])), default=None)
+
+    async def append(sid, turn, protocol, model, items):
+        stored = rows.setdefault(sid, [])
+        if stored and stored[0]['protocol'] != protocol:
+            raise api_sessions.TranscriptMismatch('protocol mismatch')
+        stored.extend(dict(turn=turn, protocol=protocol, model=model, item=item) for item in items)
+
+    monkeypatch.setattr(api_sessions, 'load', load)
+    monkeypatch.setattr(api_sessions, 'last_turn', last_turn)
+    monkeypatch.setattr(api_sessions, 'append', append)
+    return rows
 
 
 class Tools:
@@ -119,7 +144,7 @@ async def test_session_streams_calls_and_results_in_order_with_one_listing_snaps
             assert [e['type'] for e in events] == [
                 'system', 'stream_event', 'assistant', 'usage', 'user', 'user',
                 'stream_event', 'assistant', 'usage']
-            history = await session._transcripts[result.result_event['session_id']].items()
+            history = await DbTranscript(result.result_event['session_id'], PROTOCOL, 'test-model').items()
             assert all(isinstance(item, (MessageItem, ReasoningItem, ToolCallItem, ToolResultItem))
                        for item in history)
             assert sum(isinstance(item, ToolCallItem) for item in history) == 2
@@ -156,13 +181,13 @@ async def test_two_turns_reuse_neutral_history_and_add_provider_priced_usage(tmp
         assert api.requests[1].body['input'] == [
             {'role': 'user', 'content': 'first'}, {'role': 'assistant', 'content': 'one'},
             {'role': 'user', 'content': 'second'}]
-        history = session._transcripts[sid]
+        history = DbTranscript(sid, PROTOCOL, 'test-model')
         assert history.protocol == PROTOCOL
         assert await history.items() == [MessageItem('user', 'first'), MessageItem('assistant', 'one'),
                                          MessageItem('user', 'second'), MessageItem('assistant', 'two')]
         await session.stop()
         assert closed == [True] and not session.started
-        assert await history.items() and sid in session._transcripts
+        assert await history.items()
         assert await session.interrupt() is None
 
 
@@ -225,14 +250,14 @@ async def test_unavailable_tool_listing_fails_before_init_or_request(tmp_path):
 
 @pytest.mark.parametrize('mismatch', [False, True])
 @async_test
-async def test_unknown_or_incompatible_saved_session_emits_nothing(tmp_path, mismatch):
+async def test_unknown_or_incompatible_saved_session_emits_nothing(tmp_path, mismatch, transcript_store):
     async with FakeModelAPI([ResponseScript(events=text_events())] if mismatch else []) as api:
         session, _ = await start(tmp_path, api.base_url)
         sid = 'api-unknown'
         if mismatch:
             previous, _ = await turn(session)
             sid = previous.result_event['session_id']
-            session._transcripts[sid].protocol = 'different-protocol'
+            transcript_store[sid][0]['protocol'] = 'different-protocol'
             await session.stop()
         session, _ = await start(tmp_path, api.base_url, session=sid, instance=session)
         try:
@@ -242,28 +267,6 @@ async def test_unknown_or_incompatible_saved_session_emits_nothing(tmp_path, mis
                 is_error=True, errors=[f'session {sid} could not be resumed'], num_turns=0)
             assert not result.session_started and not result.prompt_sent and result.usage == Usage()
             assert not events and len(api.requests) == before
-        finally:
-            await session.stop()
-
-
-@async_test
-async def test_session_history_evicts_the_least_recently_used_after_four_sessions(tmp_path):
-    async with FakeModelAPI([ResponseScript(events=text_events()) for _ in range(6)]) as api:
-        session, ids = None, []
-        for _ in range(4):
-            session, _ = await start(tmp_path, api.base_url, instance=session)
-            result, _ = await turn(session)
-            ids.append(result.result_event['session_id'])
-            await session.stop()
-        session, _ = await start(tmp_path, api.base_url, instance=session, session=ids[0])
-        await turn(session)
-        await session.stop()
-        session, _ = await start(tmp_path, api.base_url, instance=session)
-        result, _ = await turn(session)
-        try:
-            assert len(session._transcripts) == 4
-            assert ids[0] in session._transcripts and ids[1] not in session._transcripts
-            assert result.result_event['session_id'] in session._transcripts
         finally:
             await session.stop()
 
@@ -408,5 +411,38 @@ async def test_provider_detail_is_redacted_and_bounded_before_user_display(tmp_p
             detail = result.result_event['errors'][0]
             assert detail.startswith('the provider refused the request: ')
             assert 'test-key' not in detail and len(detail) == 300
+        finally:
+            await session.stop()
+
+
+@pytest.mark.parametrize('window,limit', [(None, 140_000), (1_050_000, 200_000), (100_000, 70_000)])
+@async_test
+async def test_context_limit_uses_model_window_with_ceiling(tmp_path, window, limit):
+    prompt = tmp_path / 'context-prompt.md'
+    prompt.write_text('system')
+    descriptor = Descriptor(PROTOCOL, 'test-model', 'http://127.0.0.1:1/v1', None, window, str(prompt))
+    session = ApiSession('Manager')
+    await session.start(descriptor.to_argv(), cwd=str(tmp_path), signature='s', env={KEY_ENV: 'test-key'})
+    try:
+        assert session.context_limit == limit
+        assert session.context_tokens is None and not session.context_full
+    finally:
+        await session.stop()
+
+
+@async_test
+async def test_first_request_context_overflow_emits_no_partial_events(tmp_path):
+    script = ResponseScript(events=[
+        event('response.output_text.delta', output_index=0, item_id='msg_1',
+              content_index=0, delta='unfinished prefix'),
+        event('response.failed', response={'id': 'resp_1', 'status': 'failed',
+              'error': {'code': 'context_length_exceeded', 'message': 'full'}}),
+    ])
+    async with FakeModelAPI([script]) as api:
+        session, _ = await start(tmp_path, api.base_url)
+        try:
+            result, events = await turn(session)
+            assert not events and not result.session_started and not result.prompt_sent
+            assert session.context_tokens > session.context_limit and session.context_full
         finally:
             await session.stop()

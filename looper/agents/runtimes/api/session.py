@@ -1,10 +1,9 @@
-"""Resident model API sessions with process-local, neutral conversation history."""
+"""Resident model API sessions with persistent neutral conversation history."""
 from __future__ import annotations
 
 import json
 import logging
 import os
-from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -13,11 +12,12 @@ from uuid import uuid4
 from ... import claude_cli, log_redaction
 from ...ops import OpError
 from ...run_usage import Price, Usage, run_usage
-from .. import ApiProtocol, pricing
+from .. import pricing
 from ..cancel import TurnCancel
 from .adapter import Descriptor, KEY_ENV
+from .transcript import DbTranscript, TranscriptMismatch
 from .loop import (
-    AgentLoop, ErrorKind, LoopEvent, LoopResult, ModelTarget, Outcome, RequestDone, RequestUsage, SessionItem,
+    AgentLoop, ErrorKind, LoopEvent, LoopResult, ModelTarget, Outcome, RequestDone, RequestUsage,
     TextDelta, ToolCall, ToolDone, ToolOutcome, ToolSpec, TurnTools, loop_for,
 )
 
@@ -25,20 +25,6 @@ FORBIDDEN_ENV = (
     "OPENAI_ORG_ID", "OPENAI_PROJECT_ID", "OPENAI_ADMIN_KEY", "OPENAI_CUSTOM_HEADERS",
     "ANTHROPIC_CUSTOM_HEADERS", "OPENAI_LOG", "ANTHROPIC_LOG",
 )
-
-
-class MemoryTranscript:
-    """Neutral items and protocol metadata, retained only by this session owner."""
-
-    def __init__(self, protocol: ApiProtocol):
-        self.protocol = protocol
-        self._items: list[SessionItem] = []
-
-    async def items(self) -> list[SessionItem]:
-        return list(self._items)
-
-    async def append(self, items: list[SessionItem]) -> None:
-        self._items.extend(items)
 
 
 class _TurnTools:
@@ -96,11 +82,24 @@ class ApiSession:
         self._totals = Usage()
         self._tools: TurnTools | None = None
         self._session: str | None = None
-        self._transcripts: OrderedDict[str, MemoryTranscript] = OrderedDict()
+        self._contexts: dict[str, int | None] = {}
 
     @property
     def started(self) -> bool:
         return self._descriptor is not None
+
+    @property
+    def context_tokens(self) -> int | None:
+        return self._contexts.get(self._session)
+
+    @property
+    def context_limit(self) -> int:
+        window = self._descriptor.context_window if self._descriptor else None
+        return min(int(0.7 * (window or 200_000)), 200_000)
+
+    @property
+    def context_full(self) -> bool:
+        return self.context_tokens is not None and self.context_tokens > self.context_limit
 
     @property
     def command(self) -> list[str]:
@@ -162,31 +161,54 @@ class ApiSession:
             return failed("the Manager gave the api session no tools")
         sid = self._session or f"api-{uuid4().hex}"
         descriptor = self._descriptor
-        transcript = self._transcripts.get(sid)
-        if self._session and (transcript is None or transcript.protocol != descriptor.protocol):
+        transcript = DbTranscript(sid, descriptor.protocol, descriptor.model)
+        try:
+            history = await transcript.items()
+        except TranscriptMismatch:
+            return failed(f"session {sid} could not be resumed", session_started=False)
+        if self._session and not history:
             return failed(f"session {sid} could not be resumed", session_started=False)
         try:
             specs = await self._tools.specs()
         except OpError as exc:
             return failed(f"Looper's platform tools are unavailable: {exc}")
         tools = _TurnTools(self._tools, specs)
-        if transcript is None:
-            transcript = MemoryTranscript(descriptor.protocol)
-            self._transcripts[sid] = transcript
-        self._transcripts.move_to_end(sid)
-        while len(self._transcripts) > 4:
-            self._transcripts.popitem(last=False)
         model = descriptor.model
+
+        initialized = False
+        first_completed = False
+        # A first-request overflow must be retried without exposing a partial answer.
+        pending_events: list[dict[str, Any]] = []
+
+        async def init() -> None:
+            nonlocal initialized
+            if not initialized:
+                initialized = True
+                await on_event({"type": "system", "subtype": "init", "session_id": sid, "model": model,
+                                "tools": [s.name for s in specs]})
 
         async def send(event: dict[str, Any]) -> None:
             if not cancel.requested:
+                if not first_completed:
+                    pending_events.append(event)
+                    return
+                await init()
                 await on_event(event)
+
+        async def flush() -> None:
+            nonlocal first_completed
+            first_completed = True
+            for event in pending_events:
+                await send(event)
+            pending_events.clear()
 
         async def emit(event: LoopEvent) -> None:
             if isinstance(event, TextDelta):
                 await send({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
                            "delta": {"type": "text_delta", "text": event.text}}})
             elif isinstance(event, RequestDone):
+                await flush()
+                self._contexts[sid] = event.record.prompt_tokens
                 content = []
                 if event.reasoning_summary:
                     content.append({"type": "thinking", "thinking": event.reasoning_summary})
@@ -205,11 +227,18 @@ class ApiSession:
                            "tool_use_id": event.call.call_id, "content": event.outcome.text,
                            "is_error": event.outcome.is_error}]}})
 
-        await send({"type": "system", "subtype": "init", "session_id": sid, "model": model,
-                    "tools": [s.name for s in specs]})
         result = await self._loop.run(target=self._target, system_prompt=self._prompt, user_text=text,
                     session_id=sid, transcript=transcript, tools=tools, cancel=cancel, emit=emit,
                     over_cap=lambda: stop is not None and stop() is not None, max_requests=30)
+        if result.error_kind is ErrorKind.CONTEXT_OVERFLOW:
+            self._contexts[sid] = max(self._contexts.get(sid) or 0, self.context_limit + 1)
+            if result.first_request_failed:
+                # Discard even partial output: the owner retries this message with a resume brief.
+                self._session = sid
+                return failed(_error_message(result, model), session_started=False)
+        if not cancel.requested:
+            await flush()
+            await init()
         complete = all(r.usage.complete for r in result.requests)
         tokens = {key: sum(_tokens(r.usage)[key] or 0 for r in result.requests)
                   for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")}

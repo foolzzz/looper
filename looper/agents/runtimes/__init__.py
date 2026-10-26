@@ -222,6 +222,18 @@ class InProcessTools(Protocol):
     def set_turn_tools(self, tools: Any) -> None: ...
 
 
+@runtime_checkable
+class ReportsContext(Protocol):
+    """A resident session that asks its owner to hand over its full context."""
+
+    @property
+    def context_tokens(self) -> int | None: ...
+    @property
+    def context_limit(self) -> int: ...
+    @property
+    def context_full(self) -> bool: ...
+
+
 class ResidentSession(Protocol):
     """The Manager's or a Planner's session on a runtime, as the tiers drive it (``RuntimeAdapter.resident_session``):
     ``start`` with a command, then one ``run_turn`` per user turn, ``stop``; ``stale`` when it must start over.

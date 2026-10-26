@@ -362,6 +362,22 @@ BEGIN
     END IF;
 END $$;
 
+-- One protocol per api session; agent_sessions keeps the current-session pointer.
+CREATE TABLE IF NOT EXISTS api_sessions (
+    session_id  TEXT PRIMARY KEY,
+    protocol    TEXT NOT NULL CHECK (protocol IN ('openai-responses', 'anthropic-messages', 'openai-chat'))
+);
+-- Neutral items, appended per completed request and removed with their session.
+CREATE TABLE IF NOT EXISTS api_session_items (
+    session_id  TEXT NOT NULL REFERENCES api_sessions(session_id) ON DELETE CASCADE,
+    seq         INTEGER NOT NULL,
+    turn        INTEGER NOT NULL,
+    model       TEXT NOT NULL,
+    item        JSONB NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (session_id, seq)
+);
+
 -- A task's journal: what happened in it that a later agent or session needs.
 -- Code writes an entry, never the model, when its event happens: a step
 -- accepted ('step_accepted', in the transaction that settles it), failed or

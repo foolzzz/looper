@@ -1,6 +1,6 @@
 # RFC：API 运行时 v0（管家直连模型 API）
 
-- **状态：** 已批准（2026-10-24），按维护者 2026-10-26 的决定更新。阶段 1 的运行时类型与接线已合入；中性循环（2a）、版本化条目和来源 notice 已合入；Responses 编解码器（2b）与本地假服务已合入；管家会话与进程内平台工具已在分支实现，会话暂存内存，持久化与停止接线待后续实现。阶段 1 移植 Norma 循环，接 `openai` Python SDK，用 CPA 的 OpenAI 协议模型验证；阶段 2 接 `anthropic` Python SDK，目标是 DeepSeek、GLM、Kimi、OpenCode 的 Anthropic 格式接口，用维护者已有的 DeepSeek key 验证；以后有官方 Anthropic key，只是多登记一个 provider，不改代码。决定见第 4、14 节，排期见第 12 节；第 15 节是仍需真实运行核实的项。
+- **状态：** 已批准（2026-10-24），按维护者 2026-10-26 的决定更新。阶段 1 的运行时类型与接线已合入；中性循环（2a）、版本化条目和来源 notice 已合入；Responses 编解码器（2b）与本地假服务已合入；管家会话与进程内平台工具已合入。中性会话持久化、跨重启续接、drop 清理与上下文交接换会话已在分支实现，原创摘要提示词的真实 CLI 专项对照尚未验证，停止接线仍待后续实现。阶段 1 移植 Norma 循环，接 `openai` Python SDK，用 CPA 的 OpenAI 协议模型验证；阶段 2 接 `anthropic` Python SDK，目标是 DeepSeek、GLM、Kimi、OpenCode 的 Anthropic 格式接口，用维护者已有的 DeepSeek key 验证；以后有官方 Anthropic key，只是多登记一个 provider，不改代码。决定见第 4、14 节，排期见第 12 节；第 15 节是仍需真实运行核实的项。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.0 节第 23 项。它落实 M9d 的 SDK 运行时与 Norma 循环移植，以及[管家平台工具 RFC](manager-platform-tools-v0.zh-CN.md) D8：「原生 tool 不单做，等 SDK 运行时上线时从同一份操作目录生成」。
 - **相关：** [多运行时](multi-runtime-agents-v0.zh-CN.md)、[dsh 运行时](dsh-runtime-v0.zh-CN.md)、[停止管家的回复 v2](chat-stop-v2.zh-CN.md)、[管家会话的 Agent Profile](manager-session-profile-v0.zh-CN.md)、[场景管家](scenario-managers.zh-CN.md)、[LLM 模型层](llm-models-v0.zh-CN.md)。
 - **核对基线：** 仓库路径与符号按 `main` `61a097507`（v2.13.133）核对；SDK 接口沿用初版的一次性虚拟环境离线核对结果：`openai` 3.37.0、`anthropic` 2.3.0。全程没有发出带 key 的请求。
@@ -101,9 +101,9 @@ Norma 是阶段 1 的循环来源。后续唯一上游是 Go 移植版的副本 
 **`ApiSession`：**
 
 - `start` 记下描述和 key（只在内存里），创建独占循环，SDK 客户端延迟打开；`run_turn` 复用循环跑一轮（第 6 节）；`stop` 关闭循环与客户端，保留历史；`shares_bridge = False`、`can_interrupt = False`。
-- `stale(signature)` 照现有的签名比较。当前 `MemoryTranscript` 保存类型化中性条目和会话协议，每个实例最多保留 4 个会话，按 LRU 淘汰；签名变了仍可续接实例里的历史。服务重启后历史丢失，续接失败走管家现有的新会话重跑路径；第 5 步再接 PostgreSQL。
+- `stale(signature)` 照现有的签名比较。每轮新建 `DbTranscript`，按同一个会话 id 从 PostgreSQL 读回版本化 `SessionItem`；签名改变或服务重启后仍可续接。元数据或条目不存在、协议不符、格式或版本无效时，走管家现有的新会话重跑路径。
 
-**管家的接线**（前 3 项已实现，上下文与交接待第 5 步）：
+**管家的接线**（前 3 项已合入，上下文与交接已在分支实现，真实提示词专项验收未完成）：
 
 1. `ApiSession` 另外实现一个小协议 `InProcessTools`。每轮 `run_turn`（`tiers/manager.py:1644`）之前，管家给它这一轮的 `TurnTools`：`specs()` 映射 `ops.current_listing()`；`call(call)` 就是 `ops.call(..., binding=token.binding, call_id=...)`。
 2. 这一轮 `Turn.require_match` 取 `shares_bridge`（`tiers/manager.py:1105、1248`），本来就是假：进程内的调用不需要和流里的调用对上。
@@ -147,7 +147,7 @@ Norma 是阶段 1 的循环来源。后续唯一上游是 Go 移植版的副本 
 | 工具执行完 | `user` 消息里的 `tool_result` |
 | 一轮结束 | `result`：成功时 `subtype: success`；失败时 `is_error: true`，带有界的原因（第 6.6 节）；超过软上限时用现有的 `soft_cap_result`（`claude_cli.py:240`） |
 
-Telegram 和飞书照旧只收最终回复，控制台照旧逐字显示。
+Telegram 和飞书照旧只收最终回复。为保证首请求超限后重跑不产生事件，本轮首个请求的文本事件先缓冲到请求完成；控制台首段展示因此延后，之后请求的增量照旧转发。
 
 ### 6.5 停止
 
@@ -179,7 +179,7 @@ Telegram 和飞书照旧只收最终回复，控制台照旧逐字显示。
 | 401、403 | provider 拒绝了 API key，请到 Settings → LLM Providers 更新 |
 | 404，或模型不存在 | provider 没有这个模型 |
 | 重试后仍是 429、5xx 或连接失败 | 模型接口暂时不可用，附上状态码 |
-| 上下文超限 | 当前提示发送 `/new` 开始新会话；第 5 步再接第一次请求超限重跑与上下文换会话 |
+| 上下文超限 | 本轮第一次请求超限时开新会话重跑并在简报中说明原因；后续请求超限时本轮报错，下一轮开始前换会话 |
 | 输出被截断（Responses 的 `incomplete`，Messages 的 `max_tokens`） | 回复超过长度上限，没有完成 |
 | 超过 30 次请求 | 工具调用的轮数超过上限，已经停下；已执行的操作没有撤销 |
 
@@ -190,7 +190,7 @@ Telegram 和飞书照旧只收最终回复，控制台照旧逐字显示。
 - 新表 `api_sessions(session_id PRIMARY KEY, protocol)`，每个 api 会话一行元数据；协议属于会话，不在每个条目上重复。
 - 新表 `api_session_items(session_id, seq, turn, model, item JSONB, created_at)`，主键 `(session_id, seq)`，`session_id` 外键指向 `api_sessions`，`ON DELETE CASCADE`。`item` 是带格式版本与类型的中性条目，覆盖 message、tool-call、tool-result、reasoning；由 Looper 定义类型与存储契约，不由 codec 定义。
 - 中性 reasoning 条目可附协议和来源模型标识，以及重放必需的最小类型化 opaque 字段（如加密推理、签名）；不能把整段原生 output 数组存下就称为中性格式。codec 在请求时编码、解码原生 wire 数据。
-- 一次模型请求完成（连同这批工具结果）后，在一个事务里原子追加整个条目批次。首次完成请求在同一事务内创建元数据行并写入批次；模型请求未完成即被取消时不创建元数据、不写半个批次；已完成请求在工具执行期间遇到停止时，按第 6.5 节补齐结果后整批写入。
+- 一次模型请求完成（连同这批工具结果）后，在一个事务里原子追加整个条目批次。同一会话的追加与删除共用 advisory lock，序号连续；首次完成请求在同一事务内创建元数据行、校验协议并写入已序列化的 v1 `SessionItem` 批次。模型请求未完成即被取消时不创建元数据、不写半个批次；已完成请求在工具执行期间遇到停止时，按第 6.5 节补齐结果后整批写入。会话原文是运行时状态，不随配置导出。
 - 会话 id 由 `ApiSession` 生成（`api-<uuid>`），经 `system/init` 交给管家，照旧存进 `agent_sessions.session_id`（`schema.sql:325`）；`session_totals`、`runtime_type`、`provider_id` 的用法不变。
 - `chat_messages`（每个渠道聊天的显示记录）不变，也不拿来重建模型会话，因为它没有工具调用。
 - 会话被丢弃后删除 `api_sessions` 元数据并级联删除条目，包括 `/new`、换 provider、续接失败、因上下文换会话这几种情况。`agent_sessions` 仍只保存 agent 当前会话的指针及既有状态，不接管会话内容；审计记录仍在 `llm_record_events`。
@@ -200,16 +200,16 @@ Telegram 和飞书照旧只收最终回复，控制台照旧逐字显示。
 - 服务重启后的第一轮按 `--session` 从表里读回原文。读不到（被删了，或从没写过）就是 `session_started = false`，走现有的续接失败路径（`tiers/manager.py:1699-1718`）。
 - **协议变了不续接。** 中性存储不承诺 v0 跨协议续接。同一个 provider 下换协议时，`can_resume`（`runtimes/__init__.py:518`）只看运行时类型和 provider，会判可以续接；`ApiSession` 读出 `api_sessions.protocol`，发现不同就按续接失败处理，开新会话带简报。
 - **同协议换模型可以续接。** 重放时按来源 `model` 去掉其他模型的 opaque reasoning 字段，不把加密推理或签名发给另一个模型；仍保留可重放的中性消息、工具调用和结果。
-- **一轮只写了一半。** 服务被强杀时，一轮可能只写了一半：有工具调用，没有最终回复。续接时补一条代码写的 assistant 文本「（上一轮没有完成）」，让原文保持协议形状。这与 Claude Code 续接一个被中断的会话一样，已执行的操作不撤销。
+- **一轮只写了一半。** 服务被强杀时，一轮可能停在工具结果后，没有最终 assistant 回复。续接时在下一条用户消息之前暂存 assistant 文本 `(the previous turn did not finish)`，并与下一次成功请求的首批条目原子写入一次；新请求失败不单独落修复文本。完整的空 assistant 回复也算完成，已执行的操作不撤销。
 
 ### 7.3 上下文上限
 
 - 窗口取模型目录里的 `context_window`，例如 CPA 的 `gpt-6.1-sol` 在预设里是 1,050,000（`provider_presets.py:191`）。没有登记窗口的模型按 200k 计。
-- 每次请求后记下它的提示规模：input + cache read + cache write。超过阈值（D6）时，下一个用户轮开始前换会话：
+- 每次完成请求后记下它的 `prompt_tokens`。阈值为 `min(int(0.7 * (context_window or 200_000)), 200_000)`；超过阈值（D6）时，下一个用户轮开始前换会话。提示规模按会话 id 暂存内存，重启后须完成一次请求才重新可用：
   - 原因是 `SwitchReason.CONTEXT_FULL`；
-  - 旧会话先做一轮 `[HANDOFF]`，`api` 使用 Looper 原创的交接摘要提示词；不复制 Norma 源自 Claude Code 的 compaction prompt、措辞或示例，CLI 的交接文本保持不变；
+  - 旧会话先做一轮 `[HANDOFF]`，`api` 使用 Looper 原创的交接摘要提示词，显式绑定零个工具，模型虚构的调用不能执行平台操作；不复制 Norma 源自 Claude Code 的 compaction prompt、措辞或示例，CLI 的交接文本保持不变；
   - 新会话的第一轮带 `[RESUME]` 简报（最近的对话和交接内容）；
-  - 记进这次运行的 `compactions`（`trigger: auto`，换会话前后的 token 数）。
+  - 记进新一轮运行的 `compactions`（`trigger: auto`、`pre_tokens` 为旧会话提示规模）。第一次请求直接超限时，本轮在新会话重跑；后续请求超限则本轮报错、下一轮换会话。交接本身失败或超限沿用没有交接内容的简报兜底。
 - 200k 的上限是为了花费：`gpt-6.1-sol` 的标价按 272K 以内的输入计（`runtimes/pricing.py:109`）。管家的状态大都在平台里，需要时可以用工具再读。
 - 会话与上下文实现一并交付该提示词，并按计划 §1 做定向真实 Claude CLI 对照（含交接与续接场景）；这是该实现的必需验收，不等到最终 CPA 全对话门槛才验证，也不替代它。
 
@@ -307,7 +307,7 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 - 单条工具结果截断时附的那句说明。
 - `api` 的交接摘要提示词由 Looper 原创，属于新增模型可见内容；不复制 Norma 源自 Claude Code 的 compaction prompt、措辞或示例。CLI 交接文本保持不变。
 
-**评测**（计划第 1 节第 5 条）：会话与上下文实现负责原创 api 交接提示词的定向真实 Claude CLI 对照，覆盖交接与续接，按 §1 要求的模型、重复次数和基线比较交付结果。该项必须在会话步骤完成；本次仅改设计文字，不运行模型。
+**评测**（计划第 1 节第 5 条）：`tests/test_api_handoff_installed_db.py` 提供显式启用的专项对照：在本地 Responses 假服务上捕获生产 Manager 交接输入，用真实 Claude CLI 原样评测，再把真实摘要回放进相同的换会话链路。公开合成对话覆盖约束、带证据的已完成动作、尚未执行且待确认的动作、承诺及未决问题；新旧 Looper prompt 分别跑 sonnet 两次、opus xhigh 一次，opus 首次失败才补第二次。复用调用、用例及总花费上限，原始产物留在忽略目录。当前环境没有显式注入的真实 CLI 凭据，真实事实保留分数、虚构动作及花费均未验证；sonnet 对话基线仍缺该场景。专项对照通过前，该步骤不能宣称完成，也不能替代最终 CPA 全对话准入。
 
 **最终准入：** 运行时变了，模型也不是 Claude，所以另按「新运行时担任一个角色，M6 评测全部通过」（多运行时 RFC 第 11 节）跑全部对话，不只跑改动涉及的；不能用提示词的定向对照替代。
 
