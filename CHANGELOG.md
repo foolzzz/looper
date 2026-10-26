@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.148] - 2026-10-26
+
+### Changed
+
+- **A schedule has an immutable Manager owner.** `schedules.manager_id` (default `manager`, so old schedules stay with the default Manager) is chosen when a schedule is created through the API, the v1 API, the Manager's schedule tool or the dashboard's new Owner select, and cannot change afterwards. The tasks a schedule creates belong to that Manager and use its existing reporting. A firing or an enabling is refused when the owner is deleted, disabled or requires a template. Deleting a Manager that owns a schedule answers 409. Configuration export writes `manager` for a non-default owner; import skips a schedule whose owner is missing, requires a template or differs from the stored one, and locks incoming schedules before Managers. The schedule and run views gain `manager_id` (and `manager_name`). A schedule a Manager creates is now owned by that Manager; its `get` result still omits the owner. Tool declarations and prompts are unchanged. ([#695](https://github.com/foolzzz/looper/pull/695))
+
 ## [2.13.147] - 2026-10-26
 
 ### Fixed
