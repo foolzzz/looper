@@ -298,6 +298,28 @@ def test_revision(monkeypatch: pytest.MonkeyPatch) -> None:
     run_db(body, monkeypatch)
 
 
+def test_connection_writes_leave_identical_configuration_and_revisions_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.db import managers
+
+    async def body(pool: Any) -> None:
+        async with pool.acquire() as conn, conn.transaction():
+            await managers.insert_manager({"id": "manager-xx", "name": "XX", "system_prompt": "Help."}, conn=conn)
+            template = {"name": "PR", "inputs": [], "role_templates": []}
+            original = await managers.put_template("manager-xx", "pr", template, conn=conn, only_if_changed=True)
+            revision = await managers.revision_of("manager-xx", pool=conn)
+            manager = await managers.get_manager("manager-xx", pool=conn)
+            stored = await managers.put_template("manager-xx", "pr", template, conn=conn, only_if_changed=True)
+            updated = await managers.update_manager("manager-xx", {"name": "XX"}, conn=conn, only_if_changed=True)
+            assert stored == original and updated == manager
+            assert await managers.revision_of("manager-xx", pool=conn) == revision
+            await managers.put_template("manager-xx", "pr", {**template, "name": "Changed"}, conn=conn,
+                                        only_if_changed=True)
+            await managers.update_manager("manager-xx", {"description": "Changed"}, conn=conn, only_if_changed=True)
+            assert await managers.revision_of("manager-xx", pool=conn) == (revision[0] + 2, True)
+
+    run_db(body, monkeypatch, max_size=1, timeout=10)
+
+
 def test_template_write_vs_delete(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.db import managers
 

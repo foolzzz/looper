@@ -220,3 +220,68 @@ def test_config_export_preserves_an_existing_destination(config_cli, tmp_path, c
     assert "cannot write the export file" in capsys.readouterr().err
     assert original.read_bytes() == b"keep this file"
     assert destination.exists() and destination.is_symlink() == symlink
+
+
+@pytest.mark.parametrize("command", ["export", "import", "apply", "cancel", "import-preview", "import-upload"])
+def test_config_transient_operator_aliases_and_generated_children(tmp_path, monkeypatch, capsys, command):
+    token = "transient-operator-config-token"
+    portable = {"format": "looper-config/v4", "managers": [{"id": "manager", "name": "Portable"}]}
+    token_file = tmp_path / "operator-token"
+    token_file.write_text(token + "\n")
+    token_file.chmod(0o600)
+    source = tmp_path / "portable.json"
+    source.write_text(json.dumps(portable))
+    client_file = tmp_path / "client.json"
+    client_file.write_text('{"url":"http://127.0.0.1:1","token":"lpc_existing"}')
+    original = client_file.read_bytes()
+    client_file.chmod(0o600)
+
+    def respond(handler, request):
+        assert request[2]["authorization"] == f"Bearer {token}"
+        result = {"document": portable} if request[1].endswith("config/export") else {"import_id": "cfgimp-example"}
+        _send(handler, 200, api_v1.document() if request[1].endswith("openapi.json")
+              else {"status": "ok", "result": result})
+
+    server = Server(respond)
+    try:
+        aliases = {
+            "export": ["export", "-"], "import": ["import", str(source)],
+            "apply": ["import", "--apply", "cfgimp-example"],
+            "cancel": ["import", "--cancel", "cfgimp-example"],
+            "import-preview": ["import-preview", "--document", json.dumps(portable)],
+            "import-upload": ["import-upload", "--format", "looper-config/v4", "--managers", json.dumps(portable["managers"])],
+        }
+        args = ["--client-file", str(client_file), "--json", "config", *aliases[command],
+                "--url", server.url, "--operator-token-file", str(token_file)]
+        assert loopercli.main(args) == 0
+        operation = {"import": "import_preview", "apply": "import_apply", "cancel": "import_cancel"}.get(
+            command, command.replace("-", "_"))
+        assert server.requests[-1][1] == "/api/v1/config/" + operation
+        if command in ("import", "import-preview"):
+            assert server.requests[-1][3] == {"document": portable}
+        elif command == "import-upload":
+            assert server.requests[-1][3] == portable
+        assert client_file.read_bytes() == original
+        output = capsys.readouterr()
+        assert token not in output.out + output.err
+    finally:
+        server.close()
+
+
+def test_config_operator_stdin_is_consumed_once_before_alias_file_stdin(tmp_path, monkeypatch, capsys):
+    token = "stdin-transient-config-token"
+    portable = {"format": "looper-config/v3"}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(token + "\n" + json.dumps(portable)))
+    def respond(handler, request):
+        assert request[2]["authorization"] == f"Bearer {token}"
+        _send(handler, 200, api_v1.document() if request[1].endswith("openapi.json")
+              else {"status": "ok", "result": {"import_id": "cfgimp-example"}})
+    server = Server(respond)
+    try:
+        client_file = tmp_path / "never-created.json"
+        assert loopercli.main(["--client-file", str(client_file), "config", "import", "-",
+                               "--url", server.url, "--operator-token-file", "-"]) == 0
+        assert server.requests[-1][3] == {"document": portable}
+        assert not client_file.exists()
+    finally:
+        server.close()

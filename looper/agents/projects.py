@@ -896,7 +896,8 @@ def _prompt_modes(raw: Any) -> dict[str, str | None]:
     return modes
 
 
-async def profile_choices(raw: Any, *, clearing: bool, field: str = "profiles") -> dict[str, str | None]:
+async def profile_choices(raw: Any, *, clearing: bool, field: str = "profiles",
+                          pool: asyncpg.Pool | asyncpg.Connection | None = None) -> dict[str, str | None]:
     """``profiles`` (the request's ``field``), a task's choice of Agent Profile per role (by id or name), as role ->
     profile id (None: drop the task's choice, only when ``clearing``); each one registered and able to run its role.
     400 otherwise."""
@@ -921,14 +922,14 @@ async def profile_choices(raw: Any, *, clearing: bool, field: str = "profiles") 
         if not isinstance(wanted, str):
             raise RequestError(HTTP_400, f"{field}.{role}: give an Agent Profile's id or name, or null")
         if registered is None:
-            registered = await db_profiles.list_profiles()
+            registered = await db_profiles.list_profiles(pool=pool)
         match = next((p for p in registered if p["id"] == wanted), None) or next(
             (p for p in registered if str(p["name"]).casefold() == wanted.strip().casefold()), None)
         if match is None:
             names = ", ".join(str(p["name"]) for p in registered[:20])
             raise RequestError(HTTP_400, f"{field}.{role}: no Agent Profile {wanted!r}; registered: {names}")
         try:
-            await check_selection(match["id"], [role])
+            await check_selection(match["id"], [role], pool=pool)
         except RegistryError as exc:
             raise RequestError(HTTP_400, f"{field}.{role}: {exc}") from None
         chosen[role] = match["id"]
@@ -939,7 +940,8 @@ async def profile_choices(raw: Any, *, clearing: bool, field: str = "profiles") 
 _CHOOSABLE = tuple(role.value for role in PLANNER_CHOICE_ROLES)
 
 
-async def choosable_profiles(project_id: str | None) -> tuple[list[dict[str, Any]], bool]:
+async def choosable_profiles(project_id: str | None, *,
+                             pool: asyncpg.Pool | asyncpg.Connection | None = None) -> tuple[list[dict[str, Any]], bool]:
     """The Agent Profiles (``profile_registry.PROFILE_JSON``) project ``project_id``'s Planners may choose, and
     whether the project restricts them: with a list, the list; with an empty list, or no project, every registered
     profile that can run the Worker or the Reviewer. Whether one can run a given role is checked where it is
@@ -947,10 +949,10 @@ async def choosable_profiles(project_id: str | None) -> tuple[list[dict[str, Any
     from ..db import profile_registry as db_profiles
     from .profile_registry import AgentProfile, servable_roles
 
-    listed = await db_projects.allowed_profiles(project_id) if project_id else []
+    listed = await db_projects.allowed_profiles(project_id, pool=pool) if project_id else []
     if listed:
         return listed, True
-    return [row for row in await db_profiles.list_profiles()
+    return [row for row in await db_profiles.list_profiles(pool=pool)
             if set(servable_roles((profile := AgentProfile.from_row(row)).runtime.capabilities,
                                   profile.runtime.type)) & set(_CHOOSABLE)], False
 

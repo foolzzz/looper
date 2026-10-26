@@ -746,11 +746,11 @@ def check_roles(profile: AgentProfile | LegacyAgentProfile, roles: Iterable[str]
 _SCOPE_ROLES = {"system": tuple(runtimes.ROLE_CAPABILITIES), "project": ("planner", "worker", "reviewer")}
 
 
-async def check_selection(profile_id: str, roles: Iterable[str]) -> AgentProfile:
+async def check_selection(profile_id: str, roles: Iterable[str], *, pool: Any = None) -> AgentProfile:
     """The Agent Profile ``profile_id``, refused when it cannot run one of ``roles``."""
     from ..db import profile_registry as db
 
-    row = await db.get_profile(profile_id) if isinstance(profile_id, str) else None
+    row = await db.get_profile(profile_id, pool=pool) if isinstance(profile_id, str) else None
     if row is None:
         raise RegistryError(f"no Agent Profile {profile_id!r}: give the profile_id of a registered one")
     profile = AgentProfile.from_row(row)

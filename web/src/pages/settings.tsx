@@ -46,7 +46,7 @@ const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = 
     "note and write only in its writable folders; each write is a git commit in the vault.",
   transfer:
     "One file with the role settings, the providers and Agent Profiles, the catalog with its files and MCP servers, " +
-    "global installs, channels and the scheduler's settings. Managers, their templates and their bots are not included.",
+    "global installs, channels, scenario Managers, their task templates and the scheduler's settings.",
 };
 
 /** One Settings page (#settings/<page>[/<sub>]); the sidebar's Settings group lists them. */

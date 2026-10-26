@@ -79,10 +79,16 @@ async def insert_manager(values: Mapping[str, Any], *, conn: asyncpg.Connection)
 
 
 async def update_manager(manager_id: str, values: Mapping[str, Any], *,
-                         conn: asyncpg.Connection) -> dict[str, Any] | None:
+                         conn: asyncpg.Connection, only_if_changed: bool = False) -> dict[str, Any] | None:
     """Set the keys given in ``values`` on a Manager not deleted and bump its ``revision``; None when there is
-    none."""
+    none. ``only_if_changed`` locks and leaves identical configuration, including its revision, alone."""
     names = [name for name in _FIELDS if name in values]
+    if only_if_changed:
+        current = await lock_for_update(manager_id, conn=conn)
+        if current is None or current["deleted_at"] is not None:
+            return None
+        if all(current[name] == values[name] for name in names):
+            return await get_manager(manager_id, pool=conn)
     sets = [f"{name} = ${i}" for i, name in enumerate(names, 2)]
     sets += ["updated_at = now()", "revision = revision + 1"]
     updated = await conn.fetchval(
@@ -182,11 +188,23 @@ async def _bump(conn: asyncpg.Connection, manager_id: str) -> None:
     await conn.execute("UPDATE managers SET revision = revision + 1, updated_at = now() WHERE id = $1", manager_id)
 
 
-async def put_template(manager_id: str, key: str, values: Mapping[str, Any]) -> dict[str, Any] | None:
+async def put_template(manager_id: str, key: str, values: Mapping[str, Any], *,
+                       conn: asyncpg.Connection | None = None,
+                       only_if_changed: bool = False) -> dict[str, Any] | None:
     """Create template ``key`` of the Manager or replace it with ``values`` (``_TEMPLATE_FIELDS``; the ones not
     given take their defaults) and bump the Manager's ``revision``; None, nothing written, when the Manager is
-    missing or deleted."""
+    missing or deleted. A caller's ``conn`` owns the transaction; ``only_if_changed`` keeps identical
+    configuration's revision and timestamp intact."""
+    if conn is None:
+        async with get_pool().acquire() as connection, connection.transaction():
+            return await put_template(manager_id, key, values, conn=connection, only_if_changed=only_if_changed)
+    if not await _lock_for_template(conn, manager_id):
+        return None
     given = {name: values[name] for name in _TEMPLATE_FIELDS if name in values}
+    if only_if_changed:
+        current = await get_template(manager_id, key, pool=conn)
+        if current is not None and all(current[name] == value for name, value in given.items()):
+            return current
     if "inputs" in given:
         given["inputs"] = json.dumps(list(given["inputs"] or []))
     if "role_templates" in given:
@@ -195,14 +213,11 @@ async def put_template(manager_id: str, key: str, values: Mapping[str, Any]) -> 
     params = [manager_id, key, *given.values()]
     placeholders = [f"${i}" + ("::jsonb" if name == "inputs" else "") for i, name in enumerate(columns, 1)]
     updates = [f"{name} = EXCLUDED.{name}" for name in given] + ["updated_at = now()"]
-    async with get_pool().acquire() as conn, conn.transaction():
-        if not await _lock_for_template(conn, manager_id):
-            return None
-        await conn.execute(
-            f"INSERT INTO manager_task_templates ({', '.join(columns)}) VALUES ({', '.join(placeholders)}) "
-            f"ON CONFLICT (manager_id, key) DO UPDATE SET {', '.join(updates)}", *params)
-        await _bump(conn, manager_id)
-        return await get_template(manager_id, key, pool=conn)
+    await conn.execute(
+        f"INSERT INTO manager_task_templates ({', '.join(columns)}) VALUES ({', '.join(placeholders)}) "
+        f"ON CONFLICT (manager_id, key) DO UPDATE SET {', '.join(updates)}", *params)
+    await _bump(conn, manager_id)
+    return await get_template(manager_id, key, pool=conn)
 
 
 async def delete_template(manager_id: str, key: str) -> Literal["deleted", "missing", "no_manager"]:

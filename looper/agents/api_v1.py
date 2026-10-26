@@ -151,17 +151,58 @@ _PLAN = _object({
                                   ["section", "key", "names"])),
     "notes": _array(_STR)})
 
+# Configuration DTOs are deliberately separate from the model-visible tool schemas.
+TEMPLATE_CONFIG = _object({
+    "key": {"type": "string", "pattern": r"^[a-z][a-z0-9_-]{0,31}$"}, "name": _STR,
+    "description": _STR, "requirement": _STR, "planner_instructions": _STR, "project": _NULL_STR,
+    "workspace_mode": {"type": ["string", "null"], "enum": ["worktree", "in_place", None]},
+    "profiles": _object(dict.fromkeys(("planner", "worker", "reviewer"), _STR), [], closed=True),
+    "role_templates": _array(_STR), "repoint": _BOOL,
+    "inputs": _array(_object({"key": _STR, "label": _STR,
+        "kind": {"type": "string", "enum": ["text", "url"]}, "required": _BOOL,
+        "pattern": _STR, "hint": _STR}, ["key", "label"], closed=True)),
+}, ["key", "name"], closed=True)
+_MANAGER_CONFIG_FIELDS = {
+    "id": {"type": "string", "pattern": r"^manager(?:-[a-z][a-z0-9-]{1,30})?$"}, "name": _STR,
+    "description": _STR,
+    "system_prompt": {"type": "string", "pattern": r"\S", "maxLength": 20_000},
+    "profile": _NULL_STR, "tools": {"type": "string", "enum": ["all", "tasks"]},
+    "task_scope": {"type": "string", "enum": ["all", "own"]},
+    "task_policy": {"type": "string", "enum": ["free", "templates_only"]},
+    "enabled": _BOOL, "templates": _array(TEMPLATE_CONFIG),
+}
+MANAGER_CONFIG = {**_object(_MANAGER_CONFIG_FIELDS, ["id", "name"], closed=True), "oneOf": [
+    _object({"id": {"const": "manager"}, "name": _STR, "description": _STR}, ["id", "name"], closed=True),
+    _object({**_MANAGER_CONFIG_FIELDS,
+             "id": {"type": "string", "pattern": r"^manager-[a-z][a-z0-9-]{1,30}$"}},
+            ["id", "name"], closed=True),
+]}
+_CONFIG_PROPERTIES = {
+    "format": _STR, "looper_version": _STR, "exported_at": _STR, "secrets": _STR,
+    "runtimes": _array(), "providers": _array(), "models": _array(), "profiles": _array(),
+    "settings": _OBJ, "channels": _array(), "catalog": _array(), "installs": _array(), "projects": _array(),
+    "loopx_version": _STR,
+}
+CONFIG_DOCUMENT_VERSIONS = [
+    _object({**_CONFIG_PROPERTIES, "format": {"enum": ["looper-config/v1", "loopx-config/v1"]},
+             "agents": _array()}, ["format"], closed=True),
+    _object({**_CONFIG_PROPERTIES, "format": {"const": "looper-config/v2"}}, ["format"], closed=True),
+    _object({**_CONFIG_PROPERTIES, "format": {"const": "looper-config/v3"}}, ["format"], closed=True),
+    _object({**_CONFIG_PROPERTIES, "format": {"const": "looper-config/v4"},
+             "managers": _array(MANAGER_CONFIG)}, ["format"], closed=True),
+]
+# Keep properties available to legacy schema consumers and generated CLI flags.
+CONFIG_DOCUMENT = {**_object({**_CONFIG_PROPERTIES, "agents": _array(),
+                             "managers": _array(MANAGER_CONFIG)}, ["format"], closed=True),
+                   "oneOf": CONFIG_DOCUMENT_VERSIONS}
+
 RESULTS: dict[str, dict[str, Any]] = {
     "auth.set_password": _object({"user": _STR, "password_set": _BOOL}),
     "auth.clear_password": _object({"removed": _BOOL}),
     "system.check": _object({"checks": _array(_object({
         "id": _STR, "label": _STR, "status": {"type": "string", "enum": ["ok", "warn", "fail", "skip"]},
         "detail": _STR, "fix": _STR}))}),
-    "config.export": _object({"document": _object({
-        "format": _STR, "looper_version": _STR, "exported_at": _STR, "secrets": _STR,
-        "runtimes": _array(), "providers": _array(), "models": _array(), "profiles": _array(),
-        "settings": _OBJ, "channels": _array(), "catalog": _array(), "installs": _array(),
-        "projects": _array()}, ["format"])}),
+    "config.export": _object({"document": CONFIG_DOCUMENT}),
     "config.import_preview": _object({"import_id": _STR, "bytes": _INT, "file": _OBJ,
                                       "expires_at": _STR, "plan": _PLAN}),
     "config.import_apply": _object({"import_id": _STR, "plan": _PLAN}),

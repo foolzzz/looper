@@ -59,7 +59,7 @@ def _chat(monkeypatch: pytest.MonkeyPatch, agent_db: Any, tmp_path: Path, messag
         return []
 
     monkeypatch.setattr(profile_registry, "registry_view", _view)
-    monkeypatch.setattr(db_registry, "get_profile", AsyncMock(side_effect=lambda pid: rows.get(pid)))
+    monkeypatch.setattr(db_registry, "get_profile", AsyncMock(side_effect=lambda pid, *, pool=None: rows.get(pid)))
     monkeypatch.setattr(db_registry, "get_api_key", AsyncMock(return_value="sk-test" if key else None))
     monkeypatch.setattr(db_registry, "list_models", AsyncMock(return_value=[]))
     monkeypatch.setattr(agent_setting_layers, "list_layers", _list_layers)

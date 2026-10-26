@@ -320,6 +320,31 @@ def test_a_template_may_only_name_the_profiles_its_project_allows(monkeypatch: p
     run_db(test, monkeypatch)
 
 
+def test_checked_values_see_references_created_in_the_callers_transaction(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents import managers_api
+    from looper.db import managers, projects
+
+    async def test(pool: Any) -> None:
+        async with pool.acquire() as conn, conn.transaction():
+            profile_id = await _profile(conn, "agent-imported")
+            project = await projects.create_project(name="Imported", pool=conn)
+            await conn.execute("INSERT INTO project_allowed_profiles (project_id, profile_id) VALUES ($1, $2)",
+                               project["id"], profile_id)
+            await conn.execute("INSERT INTO project_role_templates (project_id, template_key, kind, role_prompt) "
+                               "VALUES ($1, 'security', 'review', 'Check.')", project["id"])
+            values = await managers_api.checked_values(
+                {"name": "Imported", "system_prompt": PROMPT, "profile_id": profile_id}, own_id=None, conn=conn)
+            await managers.insert_manager({"id": "manager-imported", **values}, conn=conn)
+            template = await managers_api.checked_template_values("manager-imported", "pr", _template(
+                project_id=project["id"], profiles={"reviewer": profile_id}, role_templates=["security"]), conn=conn)
+            stored = await managers.put_template("manager-imported", "pr", template, conn=conn)
+            assert stored["reviewer_profile_id"] == profile_id
+            assert stored["project_id"] == project["id"] and stored["role_templates"] == ["security"]
+
+    # A single connection also proves the helpers do not acquire another connection for references or writes.
+    run_db(test, monkeypatch, max_size=1, timeout=10)
+
+
 def test_the_example_file_validates(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         project = await _project()

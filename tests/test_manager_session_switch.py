@@ -81,7 +81,7 @@ def _registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, key: bool = Tr
         return {"profiles": [profile_registry.profile_view(row) for row in rows.values()]}
 
     monkeypatch.setattr(profile_registry, "registry_view", _view)
-    monkeypatch.setattr(db_registry, "get_profile", AsyncMock(side_effect=lambda pid: rows.get(pid)))
+    monkeypatch.setattr(db_registry, "get_profile", AsyncMock(side_effect=lambda pid, *, pool=None: rows.get(pid)))
     monkeypatch.setattr(db_registry, "get_api_key", AsyncMock(return_value="sk-test" if key else None))
     monkeypatch.setattr(db_registry, "list_models", AsyncMock(return_value=[
         {"id": "model-gpt-5.5", "provider_id": "prov-cpa", "name": "gpt-5.5", "protocol": "openai-responses",
