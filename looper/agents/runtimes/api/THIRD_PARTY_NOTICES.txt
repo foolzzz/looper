@@ -1,10 +1,13 @@
 Norma (github.com/Autumn-27/norma)
 Source: main snapshot, revision 2f158eaa6e6eda46389cb429d5d61dd054665722.
-Derived module: loop.py; source modules: agentcore/agentcore.go,
+Derived modules: loop.py, responses.py; source modules: agentcore/agentcore.go,
 harness/query.go, harness/event.go, harness/tools.go, llm/types.go,
-tool/tool.go, tool/registry.go, hook/hook.go, transcript/transcript.go.
+tool/tool.go, tool/registry.go, hook/hook.go, transcript/transcript.go,
+llm/openai_responses.go, llm/accumulate.go, llm/retry.go.
 The asyncio port waits for complete responses, dispatches tools serially,
 preserves raw arguments, and uses atomic protocol-neutral transcript batches.
+The Responses codec uses the official async SDK for HTTP/SSE and Looper's
+fixed retry policy, retaining neutral output assembly and usage semantics.
 Ongoing upstream: Looper's Go copy at go/internal/norma on loopgo-main.
 MIT notice retained by the maintainer's declared license decision.
 Looper remains Apache-2.0.

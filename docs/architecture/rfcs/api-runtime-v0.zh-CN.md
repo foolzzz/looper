@@ -1,6 +1,6 @@
 # RFC：API 运行时 v0（管家直连模型 API）
 
-- **状态：** 已批准（2026-10-24），按维护者 2026-10-26 的决定更新。阶段 1 的运行时类型与接线已合入；中性循环（2a）、版本化条目和来源 notice 已在分支实现，Responses 编解码器、会话与管家接线尚未实现。阶段 1 移植 Norma 循环，接 `openai` Python SDK，用 CPA 的 OpenAI 协议模型验证；阶段 2 接 `anthropic` Python SDK，目标是 DeepSeek、GLM、Kimi、OpenCode 的 Anthropic 格式接口，用维护者已有的 DeepSeek key 验证；以后有官方 Anthropic key，只是多登记一个 provider，不改代码。决定见第 4、14 节，排期见第 12 节；第 15 节是仍需真实运行核实的项。
+- **状态：** 已批准（2026-10-24），按维护者 2026-10-26 的决定更新。阶段 1 的运行时类型与接线已合入；中性循环（2a）、版本化条目和来源 notice 已合入；Responses 编解码器（2b）与本地假服务已在分支实现，会话与管家接线尚未实现。阶段 1 移植 Norma 循环，接 `openai` Python SDK，用 CPA 的 OpenAI 协议模型验证；阶段 2 接 `anthropic` Python SDK，目标是 DeepSeek、GLM、Kimi、OpenCode 的 Anthropic 格式接口，用维护者已有的 DeepSeek key 验证；以后有官方 Anthropic key，只是多登记一个 provider，不改代码。决定见第 4、14 节，排期见第 12 节；第 15 节是仍需真实运行核实的项。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.0 节第 23 项。它落实 M9d 的 SDK 运行时与 Norma 循环移植，以及[管家平台工具 RFC](manager-platform-tools-v0.zh-CN.md) D8：「原生 tool 不单做，等 SDK 运行时上线时从同一份操作目录生成」。
 - **相关：** [多运行时](multi-runtime-agents-v0.zh-CN.md)、[dsh 运行时](dsh-runtime-v0.zh-CN.md)、[停止管家的回复 v2](chat-stop-v2.zh-CN.md)、[管家会话的 Agent Profile](manager-session-profile-v0.zh-CN.md)、[场景管家](scenario-managers.zh-CN.md)、[LLM 模型层](llm-models-v0.zh-CN.md)。
 - **核对基线：** 仓库路径与符号按 `main` `61a097507`（v2.13.133）核对；SDK 接口沿用初版的一次性虚拟环境离线核对结果：`openai` 3.37.0、`anthropic` 2.3.0。全程没有发出带 key 的请求。
@@ -82,7 +82,7 @@ Norma 是阶段 1 的循环来源。后续唯一上游是 Go 移植版的副本 
 
 **来源与许可：** 维护者明确决定按 Norma 的 MIT 来源保留 `Copyright (c) 2026 The Norma Authors` 和完整 MIT 文本，已放在 `looper/agents/runtimes/api/THIRD_PARTY_NOTICES.txt`；派生模块的 docstring 引用它，并随 wheel 分发。Looper 继续使用 Apache-2.0。这是维护者提供的许可决定，不声称在源快照中发现了许可文件；来源为 main 快照 `2f158eaa6e6eda46389cb429d5d61dd054665722`。
 
-**循环契约（2a，分支实现）：** `Transcript.items/append` 使用冻结的 `SessionItem`（消息、原始工具调用、工具结果、推理）；JSON 使用 `version: 1` 与显式 `kind`，坏格式抛 `TranscriptFormatError`。每个完成请求连同工具结果原子追加，首次追加才存用户输入；串行工具只在完整响应后执行。`CodecStream.snapshot()` 留下失败或取消请求的未知用量；断流一轮最多重发一次，计入请求上限并校验、抑制已显示前缀。`ReasoningItem` 仅携带摘要和最小 `ReplayState`，具体 codec 须在副本上按来源协议和模型筛选 opaque state，保留原历史。`AgentLoop.aclose()` 释放协议客户端；`loop_for` 在具体 codec 接入前明确拒绝启动。
+**循环契约（2a，已合入）：** `Transcript.items/append` 使用冻结的 `SessionItem`（消息、原始工具调用、工具结果、推理）；JSON 使用 `version: 1` 与显式 `kind`，坏格式抛 `TranscriptFormatError`。每个完成请求连同工具结果原子追加，首次追加才存用户输入；串行工具只在完整响应后执行。`CodecStream.snapshot()` 留下失败或取消请求的未知用量；断流一轮最多重发一次，计入请求上限并校验、抑制已显示前缀。`ReasoningItem` 仅携带摘要和最小 `ReplayState`，具体 codec 须在副本上按来源协议和模型筛选 opaque state，保留原历史。`AgentLoop.aclose()` 释放协议客户端；`loop_for` 为 Responses 懒加载新的 `NormaAgentLoop(ResponsesCodec())`，其余协议明确拒绝启动；客户端由该循环独占，重复轮次复用，关闭可重复执行。
 
 **工具边界：** 任何 api-loop 文件或进程工具都必须在任务 cwd 与显式 `add_dirs` 内工作，采用环境白名单和每个运行时私有 HOME，不能继承整个服务进程环境；这不是 OS 沙箱，也不能通过修改共享服务的 HOME 来实现。阶段 1 不提供这些工具，只给 Manager 进程内平台操作。可信服务自身的持久化和提示文件 I/O 不属于模型可调用的文件工具。
 
@@ -167,8 +167,8 @@ Telegram 和飞书照旧只收最终回复，控制台照旧逐字显示。
 ### 6.6 超时、重试与错误
 
 - **客户端设置：**
-  - 连接最多 10 秒；流里两块数据之间最多 120 秒；单次请求最多 600 秒；
-  - `max_retries = 2`：SDK 在拿到响应之前，对连接错误和 408、409、429、5xx 重试，并遵守 `Retry-After`（据 SDK 源码 `_base_client._should_retry`）。
+  - 连接最多 10 秒；流里两块数据之间最多 120 秒；单次请求最多 600 秒，覆盖 SDK 重试与所有读流，取消时关闭流；
+  - `max_retries = 2`：SDK 在拿到响应之前，对连接错误和 408、409、429、5xx 重试，并遵守 `Retry-After`（据 SDK 源码 `_base_client._should_retry`）。Responses 编解码器固定按这些状态重试，不接受 provider 的 `x-should-retry` 覆盖；HTTP 请求钩子记录实际尝试次数，首次尝试记 0 次重试。
 - **流中途断开：** 这次请求的工具还没执行，Looper 重发一次；再断就算失败。断掉那次的用量未知，`usage_complete = false`。
 - **用户看到的错误**由 `failure_detail` 给出：有界，经过 `log_redaction` 去掉 key，走管家现有的失败回复（`tiers/manager.py:1733-1737`）：
 
@@ -233,7 +233,7 @@ Telegram 和飞书照旧只收最终回复，控制台照旧逐字显示。
 - CPA 预设的 OpenAI 接口同时登记了两种协议（`provider_presets.py:188-197`），每个模型各有一条。Looper 经 CPA 已经真实跑通的是 Responses（Codex，M9c）。OMP 经 CPA 三种协议都跑通过，OMP 自己也是优先选 Responses。
 - 推理能延续：Responses 用 `include: ["reasoning.encrypted_content"]`，在 `store: false` 下把推理条目带回下一次请求，工具循环里的推理不会断。Chat Completions 没有标准字段，推理在每两次工具调用之间都会丢掉。
 - effort 直接对应 `reasoning.effort`；用量里有 `cached_tokens` 和 `cache_write_tokens`（SDK 的类型已核对）。
-- 代价：Responses 的流事件多，SDK 里有 59 种。编解码器只认需要的几种，其余的忽略，并记一条有界的诊断。
+- 代价：Responses 的流事件多。编解码器按输出索引与 id 跟踪条目，以 `response.completed` 的有序 output 为准；failed、incomplete、无终态或非法事件不执行工具。其余事件忽略，每个请求最多记录一条有界的事件名诊断，不记录载荷。
 - 传 `store: false`、每次发完整输入：会话原文本来就存在 Looper，不依赖上游存储；CPA 是否支持存储的响应也不知道。`store: false` 是 Codex 自己的用法，推测 CPA 支持，需要验证。
 
 **第二阶段的 `anthropic-messages`：**
@@ -244,7 +244,7 @@ Telegram 和飞书照旧只收最终回复，控制台照旧逐字显示。
 
 ### 8.2 客户端与凭据
 
-- 客户端显式传入 `api_key`（或 `auth_token`）和 `base_url`。核对过：收到显式的 key 后，SDK 不再读 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`，也不读 Anthropic 的 profile 配置（`anthropic` 构造函数的说明）。
+- 客户端显式传入 `api_key`（或 `auth_token`）和 `base_url`。本分支 Responses 编解码器使用已安装的 `openai` 3.39.0 与其实际传输层 `httpx2`；SDK 仅在运行时函数内导入，不继承 HTTP 代理环境。核对过：收到显式的 key 后，SDK 不再读 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`，也不读 Anthropic 的 profile 配置（`anthropic` 构造函数的说明）。
 - `anthropic` 2.3.0 把 `api_key` 和 `auth_token` 都以 `Authorization: Bearer` 发出（`anthropic/_client.py:376-387`）。M9b 里，第三方 Anthropic 接口本来就用 Bearer（`ANTHROPIC_AUTH_TOKEN`），GLM BigModel 已真实跑通；DeepSeek、Kimi、OpenCode 接不接受，需要验证。
 - 但 SDK 构造客户端时仍会读服务进程的另一些环境变量：`OPENAI_ORG_ID`、`OPENAI_PROJECT_ID`、`OPENAI_ADMIN_KEY`、`OPENAI_CUSTOM_HEADERS`、`ANTHROPIC_CUSTOM_HEADERS`，以及 `OPENAI_LOG`、`ANTHROPIC_LOG`（`openai` 的 `_client.py:1060-1122`、`anthropic` 的 `_client.py:693-706`，以及两者的 `_utils/_logs.py`）。它们会给请求加上额外的请求头，或打开调试日志。服务环境里有其中任何一个时，运行时在启动边界报错并写出变量名（不写值），不静默忽略。
 - key 注册进 `log_redaction.add_secret`；SDK 和 HTTP 库的 logger 固定在 WARNING。key 只在内存里，不进 argv、运行记录、日志、会话原文和错误文本。API 管家没有 shell，所以 P3（key 对 agent 可见）在这个运行时上不再成立。
@@ -355,8 +355,8 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 | 步 | 内容 | 依赖 | 完成时 |
 |---|---|---|---|
 | 1 | 运行时类型与 Profile、provider 接线：`api` 适配器、类型化的角色限制、按 SDK 检测、只接 API key 的 Responses 绑定、描述行、私有提示文件；`openai` 依赖 | — | 已合入；适配器不进 `ADAPTERS`，用户看不到；注册表的角色限制与无可执行文件的检测有测试 |
-| 2（2a） | 中性 Norma 循环与接口：将 agentcore turn/tool cycle 及所需 harness、llm、tool、hook、transcript 行为移植为类型化 asyncio Python；`AgentLoop`、`ProtocolCodec`、中性条目与工具接口；来源 notice、派生 docstring 引用和 wheel 分发 | 1 | 分支实现；不接管家或 SDK；注入式测试验证中性 turn/tool 契约；不加 workbench 工具、`noa`、`noaadapter` 或新框架；制作 Go 上游副本另做 |
-| 3 | Responses 编解码器与 SDK：wire 与中性条目互译、重试与超时、请求上限、错误分类、每次请求的用量；本地假 Responses 服务 | 2 | 不接管家；真实 SDK 在假服务上跑通文本、工具循环和各种错误 |
+| 2（2a） | 中性 Norma 循环与接口：将 agentcore turn/tool cycle 及所需 harness、llm、tool、hook、transcript 行为移植为类型化 asyncio Python；`AgentLoop`、`ProtocolCodec`、中性条目与工具接口；来源 notice、派生 docstring 引用和 wheel 分发 | 1 | 已合入；不接管家或 SDK；注入式测试验证中性 turn/tool 契约；不加 workbench 工具、`noa`、`noaadapter` 或新框架；制作 Go 上游副本另做 |
+| 3（2b） | Responses 编解码器与 SDK：wire 与中性条目互译、重试与超时、请求上限、错误分类、每次请求的用量；本地假 Responses 服务 | 2 | 分支实现；真实 SDK 经本地假服务验证文本、工具循环、错误、重试计数、用量与取消；尚未接会话、管家或真实 provider |
 | 4 | 管家跑在 `api` 上：`ApiSession`、进程内平台工具（`TurnTools` → `ManagerOps.call`，与 MCP 桥给出的文本和留痕一致）、单条工具结果上限、内部事件翻译、管家的改动、运行时说明、软上限；适配器进 `ADAPTERS` | 1、2、3 | 管家能在 `api` Profile 上回答、调工具、两步确认；会话只在进程内，重启后走续接失败的现有路径；停止仍被拒绝 |
 | 5 | 中性持久会话与上下文：`api_sessions`、版本化 `api_session_items`、首次元数据与请求批次同事务、跨重启续接、换协议新会话、跨模型不重放外来 opaque reasoning、半轮补齐、drop 级联清理；`CONTEXT_FULL`、阈值、第一次请求超限时重跑；原创 api 交接摘要提示词及其计划 §1 定向真实 Claude CLI 对照 | 4 | 重启后接着同一会话；长会话按 D6 交接换新；专项评测完成，CLI 交接文本不变 |
 | 6 | 停止与用量记录：`can_interrupt = True`、取消请求、停止后原文合法、`usage_complete`、`metadata.api`、每次请求的结构化日志 | 4 | 停止在控制台和渠道上可用；Runs 里每轮的 token、花费、未知用量都对 |
