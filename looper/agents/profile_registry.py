@@ -1095,9 +1095,16 @@ async def registry_view(*, server_claude: str = "claude", manager_id: str | None
     providers = await db.list_providers()
     logins = await _logins(providers)
     models = await db.list_models()
+    runtime_rows = await db.list_runtimes()
+    runtime_types = [type_view(a) for a in runtimes.ADAPTERS.values()]
+    for view in runtime_types:
+        if view["in_process"] and not any(r["id"] == view["runtime_id"] for r in runtime_rows):
+            # Failed package detection leaves no registered runtime; keep its diagnosis visible to the operator.
+            probe = await _probe(view["type"], "", server_claude)
+            view["probe_error"] = probe["probe_error"]
     return {
-        "runtime_types": [type_view(a) for a in runtimes.ADAPTERS.values()],
-        "runtimes": [runtime_view(r, server_claude=server_claude) for r in await db.list_runtimes()],
+        "runtime_types": runtime_types,
+        "runtimes": [runtime_view(r, server_claude=server_claude) for r in runtime_rows],
         "providers": [provider_view(r, logins) for r in providers],
         "profiles": [profile_view(r, uses.get(r["id"], NOT_USED), models) for r in await db.list_profiles()],
         "models": [model_view(r) for r in models],
