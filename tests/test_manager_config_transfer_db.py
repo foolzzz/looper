@@ -151,11 +151,11 @@ def test_default_owned_added_bot_selects_v4_with_default_metadata(monkeypatch: p
         await pool.execute("UPDATE managers SET name = 'Coordinator', description = 'Example coordinator' "
                            "WHERE id = 'manager'")
         await pool.execute("INSERT INTO channel_configs (channel_id, channel_type, manager_id, display_name) "
-                           "VALUES ('telegram-example', 'telegram', 'manager', 'Example bot')")
+                           "VALUES ('channel-telegram-2', 'telegram', 'manager', 'Example bot')")
         document = await _export(pool)
         assert document["format"] == transfer.V4_FORMAT
         assert document["managers"] == [{"id": "manager", "name": "Coordinator", "description": "Example coordinator"}]
-        assert all(channel["channel_id"] != "telegram-example" for channel in document["channels"])
+        assert next(channel for channel in document["channels"] if channel["channel_id"] == "channel-telegram-2")["manager_id"] == "manager"
 
     run_db(test, monkeypatch, timeout=15)
 

@@ -93,7 +93,10 @@ async def _run(data: dict[str, Any], *, apply: bool) -> config_transfer.Plan:
     from ..db.connection import get_pool
 
     async with get_pool().acquire() as conn:
-        plan = await config_transfer.run_import(conn, data, apply=apply)
+        try:
+            plan = await config_transfer.run_import(conn, data, apply=apply)
+        except config_transfer.ConfigFileConflict as exc:
+            raise ImportConflict(str(exc)) from None
     if apply:
         await scheduler_settings.load()  # a minimum interval in the file applies at once
     return plan

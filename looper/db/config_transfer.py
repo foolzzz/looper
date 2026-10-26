@@ -123,10 +123,38 @@ async def read_installs(conn: asyncpg.Connection) -> list[dict[str, Any]]:
 
 
 async def read_channels(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    # Offline preview/export also supports databases from before the Manager migration.
+    columns = {row["attname"] for row in await conn.fetch(
+        "SELECT attname FROM pg_attribute WHERE attrelid = 'channel_configs'::regclass "
+        "AND attnum > 0 AND NOT attisdropped")}
+    owner = "manager_id" if "manager_id" in columns else "'manager'::text AS manager_id"
+    policy = "bound_chats_only" if "bound_chats_only" in columns else "false AS bound_chats_only"
     rows = await conn.fetch(
-        "SELECT channel_id, channel_type, display_name, enabled, config FROM channel_configs ORDER BY channel_id"
+        f"SELECT channel_id, channel_type, {owner}, {policy}, display_name, enabled, config "
+        "FROM channel_configs ORDER BY channel_id"
     )
     return [{**dict(row), "config": _json(row["config"])} for row in rows]
+
+
+async def read_bot_sequence(conn: asyncpg.Connection) -> tuple[int, bool]:
+    """The allocation boundary, without allocating an id (including a never-called sequence)."""
+    if not await conn.fetchval("SELECT to_regclass('channel_bot_seq') IS NOT NULL"):
+        return (1, False)
+    row = await conn.fetchrow("SELECT last_value, is_called FROM channel_bot_seq")
+    return (row["last_value"], row["is_called"])
+
+
+async def reserve_bot_ids(conn: asyncpg.Connection, suffixes: Sequence[int]) -> None:
+    """Confirmed imports only, under the bots lock. Never move the global sequence backwards.
+
+    Sequence reservations survive rollback: an allocated historical id must never be reused.
+    """
+    if not suffixes:
+        return
+    high, called = await read_bot_sequence(conn)
+    maximum = max(suffixes)
+    if maximum > high or maximum == high and not called:
+        await conn.execute("SELECT setval('channel_bot_seq', $1, true)", maximum)
 
 
 async def read_projects(conn: asyncpg.Connection) -> list[dict[str, Any]]:
@@ -323,6 +351,7 @@ async def write_role(conn: asyncpg.Connection, role: str, values: Mapping[str, A
 
 async def write_channel(
     conn: asyncpg.Connection, channel_id: str, channel_type: str, values: Mapping[str, Any], *, exists: bool,
+    manager_id: str = "manager",
 ) -> None:
     config = json.dumps(dict(values["config"]), ensure_ascii=False)
     if exists:
@@ -332,9 +361,9 @@ async def write_channel(
         )
     else:
         await conn.execute(
-            "INSERT INTO channel_configs (channel_id, channel_type, display_name, enabled, config) "
-            "VALUES ($1, $2, $3, $4, $5::jsonb)", channel_id, channel_type, values["display_name"],
-            values["enabled"], config,
+            "INSERT INTO channel_configs (channel_id, channel_type, display_name, enabled, config, manager_id) "
+            "VALUES ($1, $2, $3, $4, $5::jsonb, $6)", channel_id, channel_type, values["display_name"],
+            values["enabled"], config, manager_id,
         )
 
 

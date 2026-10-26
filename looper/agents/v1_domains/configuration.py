@@ -12,7 +12,8 @@ CONFIG_ABOUT = _object(dict.fromkeys(("format", "looper_version", "exported_at",
 CONFIG_PLAN = api_v1._PLAN
 UPLOAD = _object({**api_v1.RESULTS["config.import_preview"]["properties"], "file": CONFIG_ABOUT})
 SCHEMAS = {"ConfigDocument": CONFIG_DOCUMENT, "ConfigAbout": CONFIG_ABOUT, "ConfigImportPlan": CONFIG_PLAN,
-           "ManagerConfig": api_v1.MANAGER_CONFIG, "TemplateConfig": api_v1.TEMPLATE_CONFIG}
+           "ManagerConfig": api_v1.MANAGER_CONFIG, "TemplateConfig": api_v1.TEMPLATE_CONFIG,
+           "BotConfig": api_v1.BOT_CONFIG}
 RESULTS = {}
 _ID = _object({"import_id": {"type": "string", "minLength": 1}}, closed=True)
 OPERATIONS = (
