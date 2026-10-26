@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.142] - 2026-10-26
+
+### Added
+
+- **Configuration transfer carries Manager bots.** An export now includes every added channel bot with its `manager_id` (`looper-config/v4`; a file with only built-in channels and the default Manager stays `v3`), and import matches bots by immutable channel id. Import validates the whole graph before writing: closed `BotConfig` fields, well-formed unique ids, an existing non-deleted Manager, no reassignment of an existing bot's type or owner, no reuse of an already allocated id (the id counter only moves forward), and no two bots resolving to the same Telegram token, Lark profile or app id. New and changed bots import disabled with a plan note and a credential follow-up; an identical bot keeps its local enablement. Bot credentials, chat bindings and `bound_chats_only` policy never travel, even with secrets included, and a bot in a pre-v4 file is refused. The dashboard Import/Export text says so. Prompts and tool declarations are unchanged. ([#681](https://github.com/foolzzz/looper/pull/681))
+
 ## [2.13.141] - 2026-10-26
 
 ### Added
