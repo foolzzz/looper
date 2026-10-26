@@ -5,13 +5,14 @@ import asyncio
 from contextvars import ContextVar
 from dataclasses import replace
 import logging
+import os
 import time
 
 from ... import log_redaction
-from .. import ApiProtocol
+from .. import ApiProtocol, RuntimeUnsupported
 from .loop import (
     CodecDone, CodecError, ErrorKind, MessageItem, ReasoningItem, ReplayState,
-    RequestRecord, RequestUsage, TextDelta, ToolCall, ToolCallItem, ToolResultItem,
+    RequestLimitReached, RequestRecord, RequestUsage, TextDelta, ToolCall, ToolCallItem, ToolResultItem,
 )
 
 CONNECT_TIMEOUT = 10.0
@@ -33,6 +34,17 @@ _ITEM_EVENTS = {
     'response.reasoning_summary_part.added': 'reasoning',
     'response.reasoning_summary_part.done': 'reasoning',
 }
+
+
+class ResponsesConfigurationError(RuntimeUnsupported):
+    """Ambient SDK configuration would override the resolved provider target."""
+
+
+def _check_environment():
+    names = [name for name in ('OPENAI_ORG_ID', 'OPENAI_PROJECT_ID', 'OPENAI_ADMIN_KEY',
+                              'OPENAI_CUSTOM_HEADERS', 'OPENAI_LOG') if name in os.environ]
+    if names:
+        raise ResponsesConfigurationError('Unsupported Responses environment variables: ' + ', '.join(names))
 
 
 def _error_kind(status, body, default):
@@ -73,9 +85,9 @@ def _usage(value):
         return _UNKNOWN, None
     total, output = value.get('input_tokens'), value.get('output_tokens')
     details = value.get('input_tokens_details') or {}
-    read, write = details.get('cached_tokens', 0), details.get('cache_write_tokens', 0)
-    uncached = total - read - write if total is not None else None
-    complete = total is not None and output is not None and uncached >= 0
+    read, write = details.get('cached_tokens'), details.get('cache_write_tokens')
+    uncached = total - read - write if all(v is not None for v in (total, read, write)) else None
+    complete = uncached is not None and output is not None and uncached >= 0
     return RequestUsage(max(0, uncached) if uncached is not None else None, output, read, write, complete), total
 
 
@@ -202,6 +214,7 @@ class ResponsesCodec:
         self._closing = None
 
     async def _get_client(self, target):
+        _check_environment()
         # The SDK's installed transport is httpx2, not the separate httpx dependency.
         import httpx2
         from openai import AsyncOpenAI
@@ -214,6 +227,8 @@ class ResponsesCodec:
 
             async def request_hook(request):
                 stream = self._active.get()
+                if stream.attempts >= stream.max_attempts:
+                    raise RequestLimitReached()
                 stream.attempts += 1
 
             async def response_hook(response):
@@ -227,10 +242,14 @@ class ResponsesCodec:
                 timeout=httpx2.Timeout(IDLE_TIMEOUT, connect=CONNECT_TIMEOUT),
                 event_hooks={'request': [request_hook], 'response': [response_hook]})
             self._client = AsyncOpenAI(api_key=target.api_key, base_url=target.base_url, max_retries=2,
+                organization=None, project=None, default_headers={},
                 timeout=httpx2.Timeout(IDLE_TIMEOUT, connect=CONNECT_TIMEOUT), http_client=transport)
-        return self._client.with_options(api_key=target.api_key, base_url=target.base_url)
+        return self._client.with_options(api_key=target.api_key, base_url=target.base_url,
+            organization=None, project=None, set_default_headers={})
 
     def stream(self, **request):
+        # Reject before even importing the SDK, whose import can enable logging.
+        _check_environment()
         return _Stream(self, **request)
 
     async def aclose(self):
@@ -251,18 +270,20 @@ class ResponsesCodec:
 
 
 class _Stream:
-    def __init__(self, codec, *, target, system_prompt, items, specs, session_id, index):
+    def __init__(self, codec, *, target, system_prompt, items, specs, session_id, index, max_attempts):
         self.codec, self.target = codec, target
+        self.max_attempts = max_attempts
         self.start, self.end, self.attempts = time.monotonic(), None, 0
         self.record = RequestRecord(index, None, 0, None, 0, None, _UNKNOWN, None)
         self.native, self.done, self.response_id = None, False, None
         self.assembly, self.ignored = _Assembly(), set()
         self.body = dict(model=target.model, max_output_tokens=target.max_output_tokens,
             instructions=system_prompt, input=_input(items, target), store=False,
+            include=['reasoning.encrypted_content'],
             prompt_cache_key=session_id, parallel_tool_calls=False,
             tools=[dict(type='function', name=s.name, description=s.description, parameters=s.schema, strict=False) for s in specs])
         if target.effort is not None:
-            self.body.update(reasoning={'effort': target.effort}, include=['reasoning.encrypted_content'])
+            self.body.update(reasoning={'effort': target.effort})
         log_redaction.add_secret(target.api_key)
 
     def snapshot(self):
@@ -310,6 +331,8 @@ class _Stream:
                     if kind in ('response.completed', 'response.failed', 'response.incomplete'):
                         response = e['response']
                         self._response_id(response)
+                        usage, prompt_tokens = _usage(response.get('usage'))
+                        self.record = replace(self.record, usage=usage, prompt_tokens=prompt_tokens)
                         if kind != 'response.completed':
                             err = response.get('error') or {}
                             category = ErrorKind.TRUNCATED if kind == 'response.incomplete' else _error_kind(None, err, ErrorKind.UNAVAILABLE)
@@ -317,8 +340,6 @@ class _Stream:
                         if response.get('status') != 'completed':
                             raise ValueError('inconsistent terminal status')
                         items, text, calls, summary = self.assembly.finish(response, self.target)
-                        usage, prompt_tokens = _usage(response.get('usage'))
-                        self.record = replace(self.record, usage=usage, prompt_tokens=prompt_tokens)
                         self.end, self.done = time.monotonic(), True
                         return CodecDone(items, self.snapshot(), text, calls, summary)
                     elif kind in ('response.created', 'response.in_progress'):
@@ -333,8 +354,9 @@ class _Stream:
                     elif len(self.ignored) < 8:
                         self.ignored.add(log_redaction.redact(kind)[:60])
         except StopAsyncIteration:
-            raise CodecError(ErrorKind.PROTOCOL, self.record.status, 'stream ended without terminal response') from None
-        except CodecError:
+            raise CodecError(ErrorKind.PROTOCOL, self.record.status, 'stream ended without terminal response',
+                             retryable_stream=self.native is not None) from None
+        except (CodecError, ResponsesConfigurationError):
             raise
         except openai.APIStatusError as error:
             raise CodecError(_error_kind(error.status_code, error.body, ErrorKind.INVALID_REQUEST),

@@ -8,7 +8,7 @@ from fake_model_api import (
     FakeModelAPI, ResponseScript, call_events, call_item, completed, event, failed,
     reasoning_item, text_events, text_item,
 )
-from looper.agents.runtimes import ApiProtocol
+from looper.agents.runtimes import ApiProtocol, RuntimeUnsupported
 from looper.agents.runtimes.api.loop import (
     ErrorKind, MessageItem, ModelTarget, Outcome, ReasoningItem, ReplayState,
     RequestDone, TextDelta, ToolCallItem, ToolOutcome, ToolResultItem, ToolSpec, loop_for,
@@ -82,11 +82,12 @@ async def test_loop_sends_full_history_and_verbatim_request_contract(effort):
         request = api.requests[0]
         assert request.path == '/v1/responses' and request.headers['authorization'] == 'Bearer test-key'
         expected = dict(model='test-model', instructions='system', store=False, prompt_cache_key='session',
+            include=['reasoning.encrypted_content'],
             parallel_tool_calls=False, max_output_tokens=16000, stream=True,
             input=[{'role': 'assistant', 'content': 'prior'}, {'role': 'user', 'content': 'input'}],
             tools=[dict(type='function', name='lookup', description='verbatim description', parameters=SCHEMA, strict=False)])
         if effort is not None:
-            expected.update(reasoning={'effort': effort}, include=['reasoning.encrypted_content'])
+            expected.update(reasoning={'effort': effort})
         assert request.body == expected and len(api.requests) == 1
 
 
@@ -171,9 +172,10 @@ async def test_refusal_is_an_answer_without_tools():
 async def test_invalid_or_unfinished_response_never_dispatches_calls(tail):
     tools, history = Tools(), Transcript()
     async with FakeModelAPI([ResponseScript(events=[*call_events()[:-1], *tail])]) as api:
-        result, _ = await turn(api, tools=tools, history=history)
-        assert result.outcome == Outcome.FAILED and not tools.calls and not history.history
-        assert result.error_kind == (ErrorKind.UNAVAILABLE if tail and tail[0] == failed() else ErrorKind.PROTOCOL)
+        result, _ = await turn(api, tools=tools, history=history, max_requests=1)
+        assert result.outcome == (Outcome.FAILED if tail else Outcome.MAX_REQUESTS)
+        assert not tools.calls and not history.history
+        assert result.error_kind == (None if not tail else ErrorKind.UNAVAILABLE if tail[0] == failed() else ErrorKind.PROTOCOL)
         assert len(result.requests) == 1
 
 
@@ -229,10 +231,10 @@ async def test_broken_transport_resends_once_and_retains_both_records_without_pa
 
 @pytest.mark.parametrize('usage,expected', [
     ({'input_tokens': 20, 'output_tokens': 5, 'input_tokens_details': {'cached_tokens': 4, 'cache_write_tokens': 3}}, (13, 5, 4, 3, True, 20)),
-    ({'input_tokens': 20, 'output_tokens': 5}, (20, 5, 0, 0, True, 20)),
-    ({'input_tokens': 2, 'output_tokens': 5, 'input_tokens_details': {'cached_tokens': 4}}, (0, 5, 4, 0, False, 2)),
-    ({'output_tokens': 5}, (None, 5, 0, 0, False, None)),
-    ({'input_tokens': 2}, (2, None, 0, 0, False, 2)),
+    ({'input_tokens': 20, 'output_tokens': 5}, (None, 5, None, None, False, 20)),
+    ({'input_tokens': 2, 'output_tokens': 5, 'input_tokens_details': {'cached_tokens': 4, 'cache_write_tokens': 0}}, (0, 5, 4, 0, False, 2)),
+    ({'output_tokens': 5}, (None, 5, None, None, False, None)),
+    ({'input_tokens': 2}, (None, None, None, None, False, 2)),
     (None, (None, None, None, None, False, None))])
 @async_test
 async def test_usage_preserves_unknown_totals_and_separate_cache_buckets(usage, expected):
@@ -339,3 +341,122 @@ async def test_broken_record_preserves_response_id_seen_before_terminal():
         result, _ = await turn(api, max_requests=1)
         assert result.requests[0].upstream_id == 'resp_partial'
         assert result.outcome == Outcome.MAX_REQUESTS
+
+
+@pytest.mark.parametrize('name', ['OPENAI_ORG_ID', 'OPENAI_PROJECT_ID', 'OPENAI_ADMIN_KEY'])
+@pytest.mark.parametrize('value', ['sentinel-ambient-credential', ''])
+@async_test
+async def test_environment_rejects_ambient_identity_before_sending(monkeypatch, caplog, name, value):
+    async with FakeModelAPI([ResponseScript(events=text_events())]) as api:
+        # Positive control: explicit credentials work without ambient overrides.
+        result, _ = await turn(api)
+        assert result.outcome == Outcome.ANSWERED
+        monkeypatch.setenv(name, value)
+        with pytest.raises(RuntimeUnsupported) as error:
+            await turn(api)
+        assert name in str(error.value)
+        assert 'sentinel-ambient-credential' not in str(error.value) + caplog.text
+        assert len(api.requests) == 1
+
+
+@pytest.mark.parametrize('name', ['OPENAI_CUSTOM_HEADERS', 'OPENAI_LOG'])
+@pytest.mark.parametrize('reuse', [False, True])
+@async_test
+async def test_environment_rejects_custom_headers_and_logging_before_client_construction(monkeypatch, caplog, name, reuse):
+    loop = loop_for(PROTOCOL)
+    try:
+        async with FakeModelAPI([ResponseScript(events=text_events())]) as api:
+            result, _ = await turn(api, loop=loop if reuse else None)
+            assert result.outcome == Outcome.ANSWERED
+            monkeypatch.setenv(name, 'Authorization: Bearer sentinel-ambient-credential')
+            with pytest.raises(RuntimeUnsupported) as error:
+                await turn(api, loop=loop)
+            assert name in str(error.value)
+            assert 'sentinel-ambient-credential' not in str(error.value) + caplog.text
+            assert len(api.requests) == 1
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.parametrize('cap,prior_call', [(1, False), (2, False), (3, False), (3, True)])
+@async_test
+async def test_request_budget_bounds_http_retries_across_tool_rounds(cap, prior_call):
+    unavailable = ResponseScript(status=503, headers={'Retry-After': '0.01'})
+    scripts = [ResponseScript(events=call_events())] if prior_call else []
+    scripts += [unavailable, unavailable, ResponseScript(events=text_events())]
+    tools = Tools()
+    async with FakeModelAPI(scripts) as api:
+        result, _ = await turn(api, max_requests=cap, tools=tools)
+        expected = Outcome.ANSWERED if cap == 3 and not prior_call else Outcome.MAX_REQUESTS
+        assert result.outcome == expected
+        assert len(api.requests) == cap
+        assert sum(1 + r.retries for r in result.requests) == cap
+        assert len(tools.calls) == int(prior_call)
+
+
+@async_test
+async def test_default_effort_requests_and_replays_encrypted_reasoning_across_tools():
+    output = [reasoning_item(), call_item()]
+    async with FakeModelAPI([ResponseScript(events=[completed(output)]), ResponseScript(events=text_events())]) as api:
+        result, _ = await turn(api)
+        assert result.outcome == Outcome.ANSWERED
+        assert all(r.body.get('include') == ['reasoning.encrypted_content'] for r in api.requests)
+        assert all(r.body['store'] is False and 'reasoning' not in r.body for r in api.requests)
+        assert api.requests[1].body['input'][1] == {
+            'type': 'reasoning', 'id': 'rs_1', 'encrypted_content': 'opaque',
+            'summary': [{'type': 'summary_text', 'text': 'Thinking'}]}
+
+
+@pytest.mark.parametrize('details,read,write', [
+    ('missing', None, None), (None, None, None), ({}, None, None),
+    ({'cached_tokens': 4}, 4, None), ({'cache_write_tokens': 3}, None, 3),
+    ({'cached_tokens': None, 'cache_write_tokens': 3}, None, 3),
+    ({'cached_tokens': 4, 'cache_write_tokens': None}, 4, None)])
+@async_test
+async def test_usage_keeps_missing_or_null_cache_breakdowns_unknown(details, read, write):
+    usage = {'input_tokens': 20, 'output_tokens': 5}
+    if details != 'missing':
+        usage['input_tokens_details'] = details
+    async with FakeModelAPI([ResponseScript(events=text_events(usage=usage))]) as api:
+        result, _ = await turn(api)
+        assert result.outcome == Outcome.ANSWERED
+        record = result.requests[0]
+        assert record.prompt_tokens == 20
+        assert (record.usage.input_tokens, record.usage.output_tokens,
+                record.usage.cache_read_tokens, record.usage.cache_write_tokens,
+                record.usage.complete) == (None, 5, read, write, False)
+
+
+@pytest.mark.parametrize('status,kind', [('incomplete', ErrorKind.TRUNCATED), ('failed', ErrorKind.UNAVAILABLE)])
+@async_test
+async def test_terminal_failure_retains_reported_usage_and_context_size(status, kind):
+    usage = {'input_tokens': 20, 'output_tokens': 5,
+             'input_tokens_details': {'cached_tokens': 4, 'cache_write_tokens': 3}}
+    terminal = event('response.' + status, response={
+        'id': 'resp_failed', 'status': status, 'output': [call_item()], 'usage': usage})
+    tools, history = Tools(), Transcript()
+    async with FakeModelAPI([ResponseScript(events=[*call_events()[:-1], terminal])]) as api:
+        result, _ = await turn(api, tools=tools, history=history)
+        assert result.outcome == Outcome.FAILED and result.error_kind == kind
+        record = result.requests[0]
+        assert record.prompt_tokens == 20 and record.upstream_id == 'resp_failed'
+        assert (record.usage.input_tokens, record.usage.output_tokens,
+                record.usage.cache_read_tokens, record.usage.cache_write_tokens) == (13, 5, 4, 3)
+        assert not record.usage.complete and not tools.calls and not history.history
+        assert len(api.requests) == 1
+
+
+@pytest.mark.parametrize('cap,second_complete', [(1, True), (2, True), (3, False)])
+@async_test
+async def test_clean_sse_end_without_terminal_resends_once_within_budget(cap, second_complete):
+    partial = [*call_events()[:-1], event('response.output_text.delta',
+        output_index=1, item_id='msg_1', content_index=0, delta='Hel')]
+    second = text_events('Hello') if second_complete else text_events('Hello')[:-1]
+    tools, history = Tools(), Transcript()
+    async with FakeModelAPI([ResponseScript(events=partial), ResponseScript(events=second)]) as api:
+        result, visible = await turn(api, max_requests=cap, tools=tools, history=history)
+        expected = Outcome.MAX_REQUESTS if cap == 1 else Outcome.ANSWERED if second_complete else Outcome.FAILED
+        assert result.outcome == expected and not tools.calls
+        assert len(api.requests) == len(result.requests) == min(cap, 2)
+        assert ''.join(e.text for e in visible if isinstance(e, TextDelta)) == ('Hel' if cap == 1 else 'Hello')
+        assert bool(history.history) == (expected == Outcome.ANSWERED)
