@@ -166,26 +166,115 @@ class TestManagerContext:
             scripts = [ResponseScript(events=text_events("First.", usage=USAGE)),
                        ResponseScript(status=400, error={"error": {"code": "context_length_exceeded",
                                                                  "message": "context full"}}),
+                       ResponseScript(events=text_events(SUMMARY, usage=USAGE)),
                        ResponseScript(events=text_events("Recovered.", usage=USAGE))]
             async with _manager(pool, tmp_path, monkeypatch, scripts) as chat:
                 await chat.manager._handle(_message())
                 _replies(chat.bus)
                 await chat.manager._handle(_message("Answer once.", 1))
                 assert [r.payload["text"] for r in _replies(chat.bus)] == ["Recovered."]
-                assert len(chat.model.requests) == 3
-                assert "context full:" in _input(chat.model.requests[2])
+                assert len(chat.model.requests) == 4
+                assert "context full:" in _input(chat.model.requests[3])
+                assert SUMMARY in _input(chat.model.requests[3])
         run_db(run, monkeypatch, timeout=45)
 
-    def test_new_session_first_request_overflow_retries_in_a_new_session(self, monkeypatch, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("restart", [False, True])
+    def test_first_request_overflow_summarizes_old_history_before_deleting_it(
+        self, monkeypatch, tmp_path: Path, restart: bool,
+    ) -> None:
+        async def run(pool):
+            import asyncio
+
+            gate = asyncio.Event()
+            summary = ResponseScript(events=text_events(SUMMARY, usage=USAGE), gate=gate)
+            scripts = [ResponseScript(events=call_events('{"action":"list"}', name="looper_tasks")),
+                       ResponseScript(events=text_events("Audit evidence: 17 entries.", usage=USAGE)),
+                       ResponseScript(status=400, error={"error": {"code": "context_length_exceeded",
+                                                                 "message": "context full"}}),
+                       summary, ResponseScript(events=text_events("Recovered.", usage=USAGE))]
+            async with _manager(pool, tmp_path, monkeypatch, scripts) as chat:
+                await chat.manager._handle(_message("Keep all changes read-only."))
+                old = (await agent_sessions.get_session("manager"))["session_id"]
+                count = await pool.fetchval("SELECT count(*) FROM api_session_items WHERE session_id=$1", old)
+                assert count > 0
+                if restart:
+                    await chat.manager._claude.stop()
+                _replies(chat.bus)
+                pasted = "New logs: " + "log line\n" * 10_000
+                turn = asyncio.create_task(chat.manager._handle(_message(pasted, 1)))
+                try:
+                    await asyncio.wait_for(summary.gate_reached.wait(), 10)
+                    handoff = chat.model.requests[3].body
+                    assert handoff["tools"] == []
+                    # The failed request added only its new message; no part of it reaches the summary.
+                    assert handoff["input"][:-1] == chat.model.requests[2].body["input"][:-1]
+                    assert "[HANDOFF]" in _input(chat.model.requests[3])
+                    assert "New logs:" not in _input(chat.model.requests[3])
+                    assert "Keep all changes read-only." in _input(chat.model.requests[3])
+                    assert "Audit evidence: 17 entries." in _input(chat.model.requests[3])
+                    assert any(item.get("type") == "function_call_output" for item in handoff["input"])
+                    assert await pool.fetchval(
+                        "SELECT count(*) FROM api_session_items WHERE session_id=$1", old) == count
+                    assert (await agent_sessions.get_session("manager"))["session_id"] == old
+                finally:
+                    gate.set()
+                    await turn
+                assert [r.payload["text"] for r in _replies(chat.bus)] == ["Recovered."]
+                assert len(chat.model.requests) == 5
+                resumed = chat.model.requests[4].body["input"][0]["content"]
+                assert SUMMARY in resumed and pasted in resumed
+                assert "context full:" in resumed
+                assert await pool.fetchval("SELECT count(*) FROM api_sessions WHERE session_id=$1", old) == 0
+                assert await pool.fetchval("SELECT count(*) FROM api_session_items WHERE session_id=$1", old) == 0
+        run_db(run, monkeypatch, timeout=45)
+
+    @pytest.mark.parametrize("code", ["invalid_request_error", "context_length_exceeded"])
+    def test_first_request_overflow_keeps_old_history_when_summary_fails(
+        self, monkeypatch, tmp_path: Path, code: str,
+    ) -> None:
+        async def run(pool):
+            scripts = [ResponseScript(events=text_events("Keep this evidence.", usage=USAGE)),
+                       ResponseScript(status=400, error={"error": {"code": "context_length_exceeded",
+                                                                 "message": "context full"}}),
+                       ResponseScript(status=400, error={"error": {"code": code, "message": "no summary"}})]
+            async with _manager(pool, tmp_path, monkeypatch, scripts) as chat:
+                await chat.manager._handle(_message("Keep every change read-only."))
+                old = (await agent_sessions.get_session("manager"))["session_id"]
+                count = await pool.fetchval("SELECT count(*) FROM api_session_items WHERE session_id=$1", old)
+                assert count > 0
+                _replies(chat.bus)
+                await chat.manager._handle(_message("New logs.", 1))
+                (reply,) = _replies(chat.bus)
+                assert reply.payload["outcome"] == "failed"
+                assert len(chat.model.requests) == 3
+                assert "[HANDOFF]" in _input(chat.model.requests[2])
+                assert (await agent_sessions.get_session("manager"))["session_id"] == old
+                assert await pool.fetchval(
+                    "SELECT count(*) FROM api_session_items WHERE session_id=$1", old) == count
+        run_db(run, monkeypatch, timeout=45)
+
+    @pytest.mark.parametrize("handoff_ready", [False, True])
+    def test_new_session_first_request_overflow_retries_in_a_new_session(
+        self, monkeypatch, tmp_path: Path, handoff_ready: bool,
+    ) -> None:
         async def run(pool):
             scripts = [ResponseScript(status=400, error={"error": {"code": "context_length_exceeded",
                                                                  "message": "context full"}}),
                        ResponseScript(events=text_events("Recovered.", usage=USAGE))]
+            if handoff_ready:
+                scripts[:0] = [ResponseScript(events=text_events("First.", usage=HIGH_USAGE)),
+                               ResponseScript(events=text_events(SUMMARY, usage=USAGE))]
             async with _manager(pool, tmp_path, monkeypatch, scripts) as chat:
-                await chat.manager._handle(_message("Answer once."))
+                if handoff_ready:
+                    await chat.manager._handle(_message("Keep the early constraints."))
+                    _replies(chat.bus)
+                await chat.manager._handle(_message("Answer once.", 1))
                 assert [r.payload["text"] for r in _replies(chat.bus)] == ["Recovered."]
-                assert len(chat.model.requests) == 2
-                assert "context full:" in _input(chat.model.requests[1])
+                assert len(chat.model.requests) == len(scripts)
+                assert "context full:" in _input(chat.model.requests[-1])
+                if handoff_ready:
+                    assert SUMMARY in _input(chat.model.requests[-2])
+                    assert SUMMARY in _input(chat.model.requests[-1])
         run_db(run, monkeypatch, timeout=45)
 
     def test_repeated_first_request_overflow_is_not_retried_forever(self, monkeypatch, tmp_path: Path) -> None:
@@ -201,19 +290,33 @@ class TestManagerContext:
         run_db(run, monkeypatch, timeout=45)
 
     @pytest.mark.parametrize("code", ["invalid_request_error", "context_length_exceeded"])
-    def test_failed_handoff_resumes_from_the_brief_alone(self, monkeypatch, tmp_path: Path, code) -> None:
+    def test_failed_handoff_retains_history_until_a_summary_succeeds(self, monkeypatch, tmp_path: Path, code) -> None:
         async def run(pool):
             scripts = [ResponseScript(events=text_events("First.", usage=HIGH_USAGE)),
                        ResponseScript(status=400, error={"error": {"code": code, "message": "no summary"}}),
+                       ResponseScript(events=text_events(SUMMARY, usage=USAGE)),
                        ResponseScript(events=text_events("Recovered.", usage=USAGE))]
             async with _manager(pool, tmp_path, monkeypatch, scripts) as chat:
                 await chat.manager._handle(_message())
+                old = (await agent_sessions.get_session("manager"))["session_id"]
+                count = await pool.fetchval("SELECT count(*) FROM api_session_items WHERE session_id=$1", old)
+                assert count > 0
                 _replies(chat.bus)
                 await chat.manager._handle(_message("Continue.", 1))
+                assert _replies(chat.bus)[0].payload["outcome"] == "failed"
+                assert len(chat.model.requests) == 2
+                assert (await agent_sessions.get_session("manager"))["session_id"] == old
+                assert await pool.fetchval(
+                    "SELECT count(*) FROM api_session_items WHERE session_id=$1", old) == count
+                await chat.manager._handle(_message("Continue after the failed summary.", 2))
                 assert _replies(chat.bus)[0].payload["text"] == "Recovered."
-                resumed = _input(chat.model.requests[2])
+                assert len(chat.model.requests) == 4
+                assert chat.model.requests[2].body["tools"] == []
+                assert "First." in _input(chat.model.requests[2])
+                resumed = _input(chat.model.requests[3])
                 assert "context full:" in resumed
-                assert "Handoff from your previous session" not in resumed
+                assert "Handoff from your previous session" in resumed and SUMMARY in resumed
+                assert await pool.fetchval("SELECT count(*) FROM api_sessions WHERE session_id=$1", old) == 0
         run_db(run, monkeypatch, timeout=45)
 
     def test_later_request_overflow_fails_then_next_turn_switches(self, monkeypatch, tmp_path: Path) -> None:

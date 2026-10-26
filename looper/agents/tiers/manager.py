@@ -1735,10 +1735,8 @@ class ManagerAgent:
             await self._end_stopped(token, prepared, turn, text_parts)
 
         if resume_lost:
-            # Claude never started the saved session: it no longer exists. Every
-            # turn would resume it again and never answer, so drop it and run
-            # this message in a new session; the context each turn carries does
-            # not depend on the old conversation.
+            # An overflow rejects the new message, not the saved history. Hand that history over before
+            # dropping it; only a genuinely lost session can be retried without its summary.
             failure = ("context full: its first request exceeded the context window" if context_overflow
                        else f"session {resuming} could not be resumed")
             logger.warning("%s: %s; starting a new session", self._log, failure)
@@ -1754,11 +1752,16 @@ class ManagerAgent:
                 else session_switch.session_lost(
                     f"its saved session {resuming} could not be resumed", runtime=launch.runtime.type,
                     profile=launch.profile.id))
-            await self._claude.stop()
-            self._session_id, self._session_totals = None, Usage()  # its totals went with it
-            await self._save_session_state()
-            self._pending_switch = switch
-            self._pending_handoff = None
+            if context_overflow and self._session_runtime == "api" and self._session_id:
+                await self._switch_session(switch, token.cancel)
+            else:
+                await self._claude.stop()
+                self._session_id, self._session_totals = None, Usage()  # its totals went with it
+                await self._save_session_state()
+                self._pending_switch = switch
+                # A new session may already carry its predecessor's successful handoff.
+                if not context_overflow:
+                    self._pending_handoff = None
             return await self._run_turn(message, context_envelope, ops_turn=ops_turn, note=note, retried=True,
                                         token=token)
 
@@ -2031,6 +2034,10 @@ class ManagerAgent:
                 handoff = await self._handoff(switch, process, inner)
             finally:
                 unregister()
+        if self._session_runtime == "api" and self._session_id \
+                and switch.reason is SwitchReason.CONTEXT_FULL and not handoff:
+            raise RuntimeError("The context handoff failed; the previous conversation has been retained. "
+                               "Retry with a shorter message.")
         await self._claude.stop()
         logger.warning("%s: starting a new session (%s)%s", self._log, switch.describe(),
                        "; its previous session wrote a handoff" if handoff else "")
