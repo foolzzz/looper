@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.138] - 2026-10-26
+
+### Added
+
+- **Scenario Managers and task templates in configuration export and import.** The export writes `looper-config/v4` with a `managers` section (immutable ids, profiles and projects by name, no machine paths; a template's local directory is flagged `repoint`) whenever a non-default Manager exists, and otherwise the unchanged v3. The import validates the whole Manager graph before writing, matches Managers by id and templates by Manager and key, never takes a working directory from the file, leaves unchanged entries alone and previews through the existing confirmation flow. A client identity may not stage a file with Managers, added bots or Manager installs; the check runs at upload and again at confirmation. `looper config` commands accept the operator token options and the dashboard text describes the change. No prompt or tool declaration changes. ([#670](https://github.com/foolzzz/looper/pull/670))
+
 ## [2.13.137] - 2026-10-26
 
 ### Added
