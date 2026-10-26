@@ -1,6 +1,7 @@
 """Resident model API sessions with persistent neutral conversation history."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -8,11 +9,12 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from urllib.parse import urlparse
 
 from ... import claude_cli, log_redaction
 from ...ops import OpError
 from ...run_usage import Price, Usage, run_usage
-from .. import pricing
+from .. import StopMethod, pricing
 from ..cancel import TurnCancel
 from .adapter import Descriptor, KEY_ENV
 from .transcript import DbTranscript, TranscriptMismatch
@@ -25,6 +27,7 @@ FORBIDDEN_ENV = (
     "OPENAI_ORG_ID", "OPENAI_PROJECT_ID", "OPENAI_ADMIN_KEY", "OPENAI_CUSTOM_HEADERS",
     "ANTHROPIC_CUSTOM_HEADERS", "OPENAI_LOG", "ANTHROPIC_LOG",
 )
+logger = logging.getLogger("looper.agents.runtimes.api")
 
 
 class _TurnTools:
@@ -72,7 +75,7 @@ def _error_message(result: LoopResult, model: str) -> str:
 
 class ApiSession:
     shares_bridge = False
-    can_interrupt = False
+    can_interrupt = True
     pid = None
 
     def __init__(self, label: str):
@@ -83,6 +86,8 @@ class ApiSession:
         self._tools: TurnTools | None = None
         self._session: str | None = None
         self._contexts: dict[str, int | None] = {}
+        self._cancel: TurnCancel | None = None
+        self._turn_done: asyncio.Event | None = None
 
     @property
     def started(self) -> bool:
@@ -145,12 +150,25 @@ class ApiSession:
     async def run_turn(self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]], *,
                        tag: Any = None, stop: Callable[[], claude_cli.CapStop | None] | None = None,
                        cancel: TurnCancel | None = None) -> claude_cli.ResidentTurn:
+        self._cancel = cancel or TurnCancel.never()
+        self._turn_done = done = asyncio.Event()
         try:
-            return await self._run_turn(text, on_event, stop=stop, cancel=cancel or TurnCancel.never())
+            return await self._run_turn(text, on_event, stop=stop, cancel=self._cancel)
         finally:
             self._tools = None
+            self._cancel = None
+            self._turn_done = None
+            done.set()
 
     async def _run_turn(self, text, on_event, *, stop, cancel):
+        def stopped_before_request():
+            return claude_cli.ResidentTurn(
+                claude_cli.user_stop_result(), session_started=True, usage=Usage(),
+                stopped=StopMethod.CANCEL, usage_complete=True, prompt_sent=cancel.prompt_sent)
+
+        if cancel.requested:
+            return stopped_before_request()
+
         def failed(message, *, session_started=True):
             return claude_cli.ResidentTurn(
                 {"type": "result", "subtype": "error_during_execution", "is_error": True,
@@ -172,6 +190,8 @@ class ApiSession:
             specs = await self._tools.specs()
         except OpError as exc:
             return failed(f"Looper's platform tools are unavailable: {exc}")
+        if cancel.requested:
+            return stopped_before_request()
         tools = _TurnTools(self._tools, specs)
         model = descriptor.model
 
@@ -230,6 +250,19 @@ class ApiSession:
         result = await self._loop.run(target=self._target, system_prompt=self._prompt, user_text=text,
                     session_id=sid, transcript=transcript, tools=tools, cancel=cancel, emit=emit,
                     over_cap=lambda: stop is not None and stop() is not None, max_requests=30)
+        for request in result.requests:
+            u = request.usage
+            logger.info("api request", extra={"api_request": {
+                "agent": self.label, "protocol": descriptor.protocol.value, "model": model,
+                "host": urlparse(descriptor.base_url).hostname, "status": request.status,
+                "duration_ms": request.duration_ms, "first_token_ms": request.first_token_ms,
+                "retries": request.retries, "input_tokens": u.input_tokens,
+                "cache_read_tokens": u.cache_read_tokens, "cache_write_tokens": u.cache_write_tokens,
+                "output_tokens": u.output_tokens, "complete": u.complete,
+                "upstream_id": log_redaction.redact(request.upstream_id) if request.upstream_id else None,
+            }})
+        if result.outcome is Outcome.CANCELLED and not result.requests:
+            return stopped_before_request()
         if result.error_kind is ErrorKind.CONTEXT_OVERFLOW:
             self._contexts[sid] = max(self._contexts.get(sid) or 0, self.context_limit + 1)
             if result.first_request_failed:
@@ -240,8 +273,10 @@ class ApiSession:
             await flush()
             await init()
         complete = all(r.usage.complete for r in result.requests)
-        tokens = {key: sum(_tokens(r.usage)[key] or 0 for r in result.requests)
-                  for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")}
+        tokens = {}
+        for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
+            counts = [_tokens(r.usage)[key] for r in result.requests if _tokens(r.usage)[key] is not None]
+            tokens[key] = sum(counts) if counts else None
         event = {"type": "result"}
         cap = None
         if result.outcome is Outcome.ANSWERED:
@@ -264,12 +299,15 @@ class ApiSession:
                      usage_complete=complete,
                      api={"protocol": descriptor.protocol.value, "requests": len(result.requests),
                           "retries": sum(r.retries for r in result.requests),
-                          "upstream_ids": [r.upstream_id for r in result.requests if r.upstream_id][:30]})
+                          "incomplete": sum(not r.usage.complete for r in result.requests),
+                          "upstream_ids": [log_redaction.redact(r.upstream_id)
+                                           for r in result.requests if r.upstream_id][:30]})
         usage = cap.usage if cap else run_usage(event, price=self._price)
         self._totals = self._totals.plus(usage)
         self._session = sid
         return claude_cli.ResidentTurn(event, session_started=True, usage=usage, prompt_sent=True,
-                                       usage_complete=complete)
+                                       usage_complete=complete,
+                                       stopped=StopMethod.CANCEL if result.outcome is Outcome.CANCELLED or cancel.requested else None)
 
     async def stop(self, *, kill: bool = False) -> None:
         try:
@@ -279,5 +317,13 @@ class ApiSession:
             self._loop = None
             self._descriptor = None
 
-    async def interrupt(self) -> None:
-        return None
+    async def interrupt(self) -> StopMethod | None:
+        cancel, done = self._cancel, self._turn_done
+        if cancel is None:
+            return None
+        cancel.request()
+        try:
+            await asyncio.wait_for(done.wait(), timeout=5)
+        except TimeoutError:
+            pass  # A tool call may still be finishing; never cancel its write.
+        return StopMethod.CANCEL

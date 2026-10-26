@@ -177,6 +177,14 @@ MANAGER_CONFIG = {**_object(_MANAGER_CONFIG_FIELDS, ["id", "name"], closed=True)
              "id": {"type": "string", "pattern": r"^manager-[a-z][a-z0-9-]{1,30}$"}},
             ["id", "name"], closed=True),
 ]}
+BOT_CONFIG = {**_object({
+    "channel_id": _STR,
+    "channel_type": {"type": "string", "enum": ["telegram", "lark", "lark_bot"]},
+    "manager_id": _STR, "display_name": _NULL_STR, "enabled": _BOOL, "config": _OBJ,
+}, ["channel_id", "channel_type", "config"], closed=True), "anyOf": [
+    {"required": ["manager_id"]},
+    {"properties": {"channel_id": {"enum": ["channel-telegram", "channel-lark", "channel-lark_bot"]}}},
+]}
 _CONFIG_PROPERTIES = {
     "format": _STR, "looper_version": _STR, "exported_at": _STR, "secrets": _STR,
     "runtimes": _array(), "providers": _array(), "models": _array(), "profiles": _array(),
@@ -189,7 +197,7 @@ CONFIG_DOCUMENT_VERSIONS = [
     _object({**_CONFIG_PROPERTIES, "format": {"const": "looper-config/v2"}}, ["format"], closed=True),
     _object({**_CONFIG_PROPERTIES, "format": {"const": "looper-config/v3"}}, ["format"], closed=True),
     _object({**_CONFIG_PROPERTIES, "format": {"const": "looper-config/v4"},
-             "managers": _array(MANAGER_CONFIG)}, ["format"], closed=True),
+             "managers": _array(MANAGER_CONFIG), "channels": _array(BOT_CONFIG)}, ["format"], closed=True),
 ]
 # Keep properties available to legacy schema consumers and generated CLI flags.
 CONFIG_DOCUMENT = {**_object({**_CONFIG_PROPERTIES, "agents": _array(),

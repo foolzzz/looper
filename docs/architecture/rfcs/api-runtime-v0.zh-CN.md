@@ -1,6 +1,6 @@
 # RFC：API 运行时 v0（管家直连模型 API）
 
-- **状态：** 已批准（2026-10-24），按维护者 2026-10-26 的决定更新。阶段 1 的运行时类型与接线已合入；中性循环（2a）、版本化条目和来源 notice 已合入；Responses 编解码器（2b）与本地假服务已合入；管家会话与进程内平台工具已合入。中性会话持久化、跨重启续接、drop 清理与上下文交接换会话已在分支实现，原创摘要提示词的真实 CLI 专项对照尚未验证，停止接线仍待后续实现。阶段 1 移植 Norma 循环，接 `openai` Python SDK，用 CPA 的 OpenAI 协议模型验证；阶段 2 接 `anthropic` Python SDK，目标是 DeepSeek、GLM、Kimi、OpenCode 的 Anthropic 格式接口，用维护者已有的 DeepSeek key 验证；以后有官方 Anthropic key，只是多登记一个 provider，不改代码。决定见第 4、14 节，排期见第 12 节；第 15 节是仍需真实运行核实的项。
+- **状态：** 已批准（2026-10-24），按维护者 2026-10-26 的决定更新。阶段 1 的运行时类型与接线已合入；中性循环（2a）、版本化条目和来源 notice 已合入；Responses 编解码器（2b）与本地假服务已合入；管家会话与进程内平台工具已合入。中性会话持久化、跨重启续接、drop 清理与上下文交接换会话已在分支实现；停止与用量记录已实现，原创摘要提示词的真实 CLI 专项对照尚未验证。阶段 1 移植 Norma 循环，接 `openai` Python SDK，用 CPA 的 OpenAI 协议模型验证；阶段 2 接 `anthropic` Python SDK，目标是 DeepSeek、GLM、Kimi、OpenCode 的 Anthropic 格式接口，用维护者已有的 DeepSeek key 验证；以后有官方 Anthropic key，只是多登记一个 provider，不改代码。决定见第 4、14 节，排期见第 12 节；第 15 节是仍需真实运行核实的项。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.0 节第 23 项。它落实 M9d 的 SDK 运行时与 Norma 循环移植，以及[管家平台工具 RFC](manager-platform-tools-v0.zh-CN.md) D8：「原生 tool 不单做，等 SDK 运行时上线时从同一份操作目录生成」。
 - **相关：** [多运行时](multi-runtime-agents-v0.zh-CN.md)、[dsh 运行时](dsh-runtime-v0.zh-CN.md)、[停止管家的回复 v2](chat-stop-v2.zh-CN.md)、[管家会话的 Agent Profile](manager-session-profile-v0.zh-CN.md)、[场景管家](scenario-managers.zh-CN.md)、[LLM 模型层](llm-models-v0.zh-CN.md)。
 - **核对基线：** 仓库路径与符号按 `main` `61a097507`（v2.13.133）核对；SDK 接口沿用初版的一次性虚拟环境离线核对结果：`openai` 3.37.0、`anthropic` 2.3.0。全程没有发出带 key 的请求。
@@ -88,7 +88,7 @@ Norma 是阶段 1 的循环来源。后续唯一上游是 Go 移植版的副本 
 
 **适配器**（`looper/agents/runtimes/api/adapter.py`，已加入 `ADAPTERS`；以下同时列出后续接线要求）：
 
-- `type = "api"`，`label = "Model API (SDK)"`；`protocols = {openai-responses}`，第二阶段加 `anthropic-messages`；`auth_kinds = {api_key}`；`capabilities = {resident_session, resume}`；`roles = {manager}` 限定只跑管家；`in_process = True`；`can_interrupt = False`，第 6 步接好停止后再改为 `True`。
+- `type = "api"`，`label = "Model API (SDK)"`；`protocols = {openai-responses}`，第二阶段加 `anthropic-messages`；`auth_kinds = {api_key}`；`capabilities = {resident_session, resume}`；`roles = {manager}` 限定只跑管家；`in_process = True`；`can_interrupt = True`。
 - `can_replace_system_prompt = True`：这个运行时没有自带的提示，追加和替换得到的是同一份文本，记录里照写所选的模式。
 - 没有可执行文件：`probe` 只用 `importlib.metadata.version("openai")` 读包版本，不导入 SDK、不请求模型。`_detect` 对进程内类型不查 PATH，包已安装时才登记 `rt-api`；缺包时说明需要重装 Looper。`openai>=3.37,<4` 是普通依赖，SDK 只在这个运行时的函数内延迟导入。
 - `bind_provider` 只接 API key，把 key 放进 `ProviderBinding.env` 的 `LOOPER_PROVIDER_API_KEY`，与 Codex、OMP 一样，不进 argv、记录和日志。
@@ -100,7 +100,7 @@ Norma 是阶段 1 的循环来源。后续唯一上游是 Go 移植版的副本 
 
 **`ApiSession`：**
 
-- `start` 记下描述和 key（只在内存里），创建独占循环，SDK 客户端延迟打开；`run_turn` 复用循环跑一轮（第 6 节）；`stop` 关闭循环与客户端，保留历史；`shares_bridge = False`、`can_interrupt = False`。
+- `start` 记下描述和 key（只在内存里），创建独占循环，SDK 客户端延迟打开；`run_turn` 复用循环跑一轮（第 6 节）；`stop` 关闭循环与客户端，保留历史；`shares_bridge = False`、`can_interrupt = True`。
 - `stale(signature)` 照现有的签名比较。每轮新建 `DbTranscript`，按同一个会话 id 从 PostgreSQL 读回版本化 `SessionItem`；签名改变或服务重启后仍可续接。元数据或条目不存在、协议不符、格式或版本无效时，走管家现有的新会话重跑路径。
 
 **管家的接线**（前 3 项已合入，上下文与交接已在分支实现，真实提示词专项验收未完成）：
@@ -151,9 +151,9 @@ Telegram 和飞书照旧只收最终回复。为保证首请求超限后重跑�
 
 ### 6.5 停止
 
-当前仍拒绝用户停止（`cannot_interrupt` 409）；以下停止接线在第 6 步开放。
+`api` 支持用户停止，沿用现有 `chat.stop_enabled` 设置和 Manager 的停止状态机。
 
-- 用户停止（Esc、停止按钮、`/stop`）时，请求的是这一轮的 `TurnCancel`（chat-stop-v2 第 4.1 节）。`ApiSession` 在每次请求、每次工具调用之前登记 `on_request`：
+- 用户停止（Esc、停止按钮、`/stop`）时，请求的是这一轮的 `TurnCancel`（chat-stop-v2 第 4.1 节）。循环订阅取消请求，并在每次请求、每次工具调用之前检查：
   - 正在流式读的请求：取消它的任务；
   - 正在执行的工具调用：等它做完，不打断一次写库，也不再开始下一个。
 - `ops.stop_turn` 已经让这一轮之后到达的调用一律返回 `stopped`（`ops/service.py:606`）。
@@ -163,7 +163,8 @@ Telegram 和飞书照旧只收最终回复。为保证首请求超限后重跑�
   - 已执行的工具调用连同结果写入；
   - 同一次请求里没执行的调用，补一条「未执行：用户停止了这一轮」的结果。
 - 下一轮照旧带上停止说明（chat-stop-v2 第 7 节）。
-- `ResidentTurn.stopped` 为 `cancel`。被取消的那次请求没有用量，所以 `usage_complete = false`，花费记 `null`，不记 0。
+- `ResidentTurn.stopped` 为 `cancel`。首个请求前停止不发送请求，用量保持未知且 `usage_complete = true`；已有请求被取消时，保留已完成请求的用量，`usage_complete = false`，花费记 `null`，不记 0。最终答复完成后才收到停止，也保留该请求的完整用量。
+- `interrupt()` 请求当前轮的取消，最多等 5 秒后返回 `cancel`；没有运行中的轮次时返回 `None`。未完成请求保留请求快照，不补发 `RequestDone`。
 - 规则 R1 不变：停止请求之后，不再把任何事件交给 `on_event`。
 
 ### 6.6 超时、重试与错误
@@ -265,7 +266,7 @@ Telegram 和飞书照旧只收最终回复。为保证首请求超限后重跑�
 - Responses 的 `input_tokens` 含缓存读，这是 OpenAI 的口径，Codex 经 CPA 的用量也是如此。它是否也含缓存写、CPA 实际报什么，需要验证。算出负数时按 0 计，并标 `usage_complete = false`。
 - Messages 的口径与 dsh 的发布代码一致：缓存不含在 `input_tokens` 里（dsh RFC 第 7 节）。
 - 花费：`cost_source = provider_price`，按模型目录的价格算，目录里没有就用内置价目表（`runtimes/pricing.py:103`，`gpt-6.1-sol` 和 `deepseek-v4-pro` 都在表里）；查不到价格就只记 token。CPA 背后是订阅，记的是按标价折算的等价花费。
-- 每次请求一条 `usage_event`。管家每轮的软上限（`run_budget_usd`）照旧在两次请求之间判断，可能多出一个请求。
+- 已完成请求在停止前发送一条 `usage_event`，缺失用量时带 `usage_complete = false`；被中止的请求仅从最终请求快照计入记录，停止后不补发事件。任一请求用量不完整时，整轮花费保持 `null`，已知 token 保留，未报告的 token 保持未知。管家每轮的软上限（`run_budget_usd`）照旧在两次请求之间判断，可能多出一个请求。
 
 ### 8.4 各接口的能力差异
 
@@ -333,8 +334,8 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 
 ## 10. 可观测性
 
-- **日志：** 每次模型请求一行结构化日志：管家 id、协议、模型、`base_url` 的主机名、HTTP 状态、耗时、首个 token 的耗时、重试次数、四类 token、上游的请求 id（`x-request-id` 或响应 id）。不写内容，不写 key。
-- **运行记录：** 照旧每轮一条 `llm_records`（记录器、`cost_source`、`context_tokens`、`compactions`），事件进 `llm_record_events`。`metadata.api` 多记：协议、请求数、重试数、各次请求的上游 id（最多 30 个）、`usage_complete`。
+- **日志：** 每次模型请求（含失败、取消）在 `looper.agents.runtimes.api` 写一条 INFO `api request`，结构化字段位于 `api_request`：管家 id、协议、模型、`base_url` 的主机名、HTTP 状态、耗时、首个 token 的耗时、重试次数、四类 token、用量完整性 `complete`、上游的请求 id（`x-request-id` 或响应 id）。不写内容，不写 key。
+- **运行记录：** 照旧每轮一条 `llm_records`（记录器、`cost_source`、`context_tokens`、`compactions`），事件进 `llm_record_events`。`metadata.api` 记下 `protocol`、`requests`、`retries`、`upstream_ids`（最多 30 个）与缺少完整用量的请求数 `incomplete`；结果事件的 `usage_complete = false` 使花费保持未知。
 - **看板：** 不新建监控平台。在 Runs 页按运行时筛选，成功率、耗时、token、花费就能看出 API 管家和 CLI 管家的差别；未知的花费单列，不填 0。
 - **出了问题怎么发现、怎么定位：**
   - 发现：用户在聊天里直接看到第 6.6 节的错误；
@@ -361,16 +362,16 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 
 ### 12.1 开发排期
 
-每一步一个 PR，各自是完整、可单独回滚的结果（计划第 1 节第 1 条）。第 1–3 步已合入，第 4 步管家接线已在分支实现并由本地假服务和一次性 PostgreSQL 验证；第 5–8 步尚未实现。第 5、6 步可以并行。
+每一步一个 PR，各自是完整、可单独回滚的结果（计划第 1 节第 1 条）。第 1–4 步已合入；第 6 步停止与用量记录已在分支实现，通过本地假 HTTP 与一次性 PostgreSQL 验证；第 5、7、8 步尚未实现。第 5、6 步可以并行。
 
 | 步 | 内容 | 依赖 | 完成时 |
 |---|---|---|---|
 | 1 | 运行时类型与 Profile、provider 接线：`api` 适配器、类型化的角色限制、按 SDK 检测、只接 API key 的 Responses 绑定、描述行、私有提示文件；`openai` 依赖 | — | 已合入；当时适配器未登记，第 4 步开放；注册表的角色限制与无可执行文件的检测有测试 |
 | 2（2a） | 中性 Norma 循环与接口：将 agentcore turn/tool cycle 及所需 harness、llm、tool、hook、transcript 行为移植为类型化 asyncio Python；`AgentLoop`、`ProtocolCodec`、中性条目与工具接口；来源 notice、派生 docstring 引用和 wheel 分发 | 1 | 已合入；不接管家或 SDK；注入式测试验证中性 turn/tool 契约；不加 workbench 工具、`noa`、`noaadapter` 或新框架；制作 Go 上游副本另做 |
 | 3（2b） | Responses 编解码器与 SDK：wire 与中性条目互译、重试与超时、请求上限、错误分类、每次请求的用量；本地假 Responses 服务 | 2 | 已合入；真实 SDK 经本地假服务验证文本、工具循环、错误、重试计数、用量与取消；真实 provider 待验证 |
-| 4 | 管家跑在 `api` 上：`ApiSession`、进程内平台工具（`TurnTools` → `ManagerOps.call`，与 MCP 桥给出的文本和留痕一致）、单条工具结果上限、内部事件翻译、管家的改动、运行时说明、软上限；适配器进 `ADAPTERS` | 1、2、3 | 分支实现；管家能在 `api` Profile 上回答、调工具、两步确认并按 provider 价格记账；会话只在进程内，重启后走续接失败的现有路径；停止仍被拒绝。真实 provider 与 api-only 文本评测待第 8 步 |
+| 4 | 管家跑在 `api` 上：`ApiSession`、进程内平台工具（`TurnTools` → `ManagerOps.call`，与 MCP 桥给出的文本和留痕一致）、单条工具结果上限、内部事件翻译、管家的改动、运行时说明、软上限；适配器进 `ADAPTERS` | 1、2、3 | 已合入；管家能在 `api` Profile 上回答、调工具、两步确认并按 provider 价格记账；会话只在进程内，重启后走续接失败的现有路径；停止见第 6 步。真实 provider 与 api-only 文本评测待第 8 步 |
 | 5 | 中性持久会话与上下文：`api_sessions`、版本化 `api_session_items`、首次元数据与请求批次同事务、跨重启续接、换协议新会话、跨模型不重放外来 opaque reasoning、半轮补齐、drop 级联清理；`CONTEXT_FULL`、阈值、第一次请求超限时重跑；原创 api 交接摘要提示词及其计划 §1 定向真实 Claude CLI 对照 | 4 | 重启后接着同一会话；长会话按 D6 交接换新；专项评测完成，CLI 交接文本不变 |
-| 6 | 停止与用量记录：`can_interrupt = True`、取消请求、停止后原文合法、`usage_complete`、`metadata.api`、每次请求的结构化日志 | 4 | 停止在控制台和渠道上可用；Runs 里每轮的 token、花费、未知用量都对 |
+| 6 | 停止与用量记录：`can_interrupt = True`、取消请求、停止后原文合法、`usage_complete`、`metadata.api`、每次请求的结构化日志 | 4 | 分支实现，本地假 HTTP 与一次性 PostgreSQL 已验证：控制台与渠道取消当前请求；保留工具结果与已知 token，缺失用量时花费为未知；记录请求数、重试、不完整请求数、上游 id 与逐请求日志；真实 provider 验证留第 8 步 |
 | 7 | 入口：控制台（运行时卡、Profile 表单、Roles、停止按钮）、Telegram 与飞书的 `/profile`、`/stop`，CLI 与 `loopercli` 的核对；`agent-system.md` 一节 | 6 | 各入口按第 2 节表现，截图一张 |
 | 8 | CPA 真实验证与评测：`dialogs --manager-agent`、示例 spec、验收脚本；隔离服务上的真实 smoke；全部对话与同模型 Codex 管家对照；把结果写回第 8.4、15 节 | 5、6、7 | D11 的门槛，独立于第 5 步的交接提示词评测 |
 

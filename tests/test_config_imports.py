@@ -268,7 +268,7 @@ def test_applying_writes_what_the_transfer_core_writes_and_removes_the_file(
                                ("catalog", "mcp:web"): {"kind": "mcp", "id": web},
                                ("catalog", "mcp:search"): {"kind": "mcp", "id": await by_api.fetchval(
                                    "SELECT id FROM library_items WHERE kind = 'mcp' AND name = 'search'")},
-                               ("channels", "telegram"): {"kind": "channel", "id": telegram}}
+                               ("channels", "channel-telegram"): {"kind": "channel", "id": telegram}}
 
     asyncio.run(_test())
 

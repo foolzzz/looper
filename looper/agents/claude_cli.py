@@ -11,7 +11,7 @@ import re
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
@@ -1427,9 +1427,12 @@ class ClaudeRunRecorder:
         if result_event is None or result.get(SOFT_CAP) or result.get(USER_STOP):
             # No result reported the run's spend: what its usage events add up to is what is known.
             usage = usage.filled_from(self._usage_so_far)
+        if result.get("usage_complete") is False:
+            usage = replace(usage, cost_usd=None)
         notes: dict[str, Any] = {}
         if denials := self._runtime().permission_denials(result_event):
             notes["permission_denials"] = denials
+        notes.update(self._runtime().result_notes(result_event))
         await self._close(
             status or (RecordStatus.COMPLETED if succeeded else RecordStatus.FAILED),
             output_text=output_text, session_id=result.get("session_id"), usage=usage,
