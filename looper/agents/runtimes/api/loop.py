@@ -411,4 +411,7 @@ _STOPPED = ToolOutcome(json.dumps({'status': 'error', 'error': {'code': 'stopped
 
 
 def loop_for(protocol: ApiProtocol) -> AgentLoop:
+    if protocol == ApiProtocol.OPENAI_RESPONSES:
+        from .responses import ResponsesCodec
+        return NormaAgentLoop(ResponsesCodec())
     raise RuntimeUnsupported(f'no API codec implemented for {protocol.value}')

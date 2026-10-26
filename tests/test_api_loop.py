@@ -345,8 +345,10 @@ async def test_protocol_mismatch_fails_before_request():
     with pytest.raises(RuntimeUnsupported):
         await turn(codec)
     assert not codec.requests
-    with pytest.raises(RuntimeUnsupported):
-        loop_for(PROTOCOL)
+    for protocol in ApiProtocol:
+        if protocol != PROTOCOL:
+            with pytest.raises(RuntimeUnsupported):
+                loop_for(protocol)
 
 
 @pytest.mark.parametrize('ending', ['success', 'error', 'cancel', 'shutdown', 'close_shutdown', 'eof'])
