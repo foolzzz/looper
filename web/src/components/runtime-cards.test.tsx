@@ -15,7 +15,7 @@ const MISSING_FLAGS = "pi --help does not show --mode; upgrade pi to 1.3.0 or ne
 
 function runtime(fields: Partial<Runtime>): Runtime {
   return {
-    runtime_id: "rt-pi", name: "pi", type: "pi", type_label: "pi", executable: "", default_executable: "pi",
+    runtime_id: "rt-pi", in_process: false, name: "pi", type: "pi", type_label: "pi", executable: "", default_executable: "pi",
     path: "/usr/local/bin/pi", protocols: ["openai-chat", "openai-responses"], version: "1.3.0",
     capabilities: ["run", "resident_session", "resume", "steer", "read_tools", "compaction_events", "mcp"],
     roles: [...ROLES], probed_at: "2026-10-20T00:00:00Z", probe_error: null, builtin: true, profile_count: 1,
@@ -26,7 +26,7 @@ function runtime(fields: Partial<Runtime>): Runtime {
 function registry(pi: Runtime | null): Registry {
   return {
     runtime_types: [{
-      type: "pi", label: "pi", default_executable: "pi", runtime_id: "rt-pi",
+      type: "pi", in_process: false, label: "pi", default_executable: "pi", runtime_id: "rt-pi",
       supported_models: null,
       protocols: ["openai-chat", "openai-responses"],
       capabilities: ["run", "resident_session", "resume", "steer", "read_tools", "compaction_events", "mcp"],
@@ -42,7 +42,7 @@ function registry(pi: Runtime | null): Registry {
   };
 }
 
-describe("pi on Agent Runtimes", () => {
+describe("Agent Runtimes", () => {
   let container: HTMLDivElement;
   let root: Root;
   let body: Registry;
@@ -59,7 +59,7 @@ describe("pi on Agent Runtimes", () => {
       calls.push({ url, method });
       if (url === "/api/v1/registry/view" && method === "POST") return Response.json({ status: "ok", result: body });
       if (url === "/api/v1/runtimes/probe" && method === "POST") {
-        expect(JSON.parse(String(init?.body))).toEqual({ runtime_id: "rt-pi" });
+        expect(JSON.parse(String(init?.body))).toEqual({ runtime_id: body.runtime_types[0].runtime_id });
         if (probeError) return Response.json({ status: "error", error: { code: "unavailable", message: probeError } }, { status: 503 });
         body = registry(runtime({}));
         return Response.json({ status: "ok", result: { runtime: body.runtimes[0] } });
@@ -89,6 +89,65 @@ describe("pi on Agent Runtimes", () => {
     const term = [...node.querySelectorAll("dt")].find((item) => item.textContent === label);
     return term?.nextElementSibling?.textContent ?? "";
   };
+
+  const api = () => {
+    body.runtime_types[0] = { ...body.runtime_types[0], type: "api", label: "Model API", runtime_id: "rt-api",
+      in_process: true, default_executable: "", roles: ["manager"], protocols: ["openai-responses"] };
+    body.runtimes[0] = runtime({ runtime_id: "rt-api", type: "api", in_process: true, name: "Model API",
+      default_executable: null, path: null, version: "openai 2.0.0", roles: ["manager"] });
+  };
+  const apiCard = () => [...container.querySelectorAll("h3")]
+    .find((node) => node.textContent === "Model API (SDK)")!.closest("li")!;
+
+  it.each(["type", "runtime"] as const)("shows an in-process runtime reported by the %s without PATH guidance", async (source) => {
+    api();
+    if (source === "type") delete (body.runtimes[0] as Partial<Runtime>).in_process;
+    else body.runtime_types[0].in_process = false;
+    await show();
+    const node = apiCard();
+    expect(fact(node, "Path")).toBe("Runs inside looper serve");
+    expect(node.textContent).toContain("Comes with Looper; Re-detect checks its Python package.");
+    expect(node.textContent).not.toContain("PATH");
+    expect(node.querySelector("button")!.getAttribute("aria-label")).toBe("Re-detect Model API (SDK)");
+  });
+
+  it("shows the package probe failure without a path fact or install command", async () => {
+    api();
+    const error = "the openai Python package is not installed with this Looper; reinstall Looper";
+    body.runtimes[0] = { ...body.runtimes[0], version: null, probe_error: error, roles: [], capabilities: [] };
+    await show();
+    const node = apiCard();
+    expect(node.textContent).toContain("Not detected");
+    expect([...node.querySelectorAll("dt")].map((term) => term.textContent)).not.toContain("Path");
+    expect(node.querySelector("p")!.textContent).toBe(error);
+    expect(node.textContent).not.toMatch(/PATH|Install:/);
+  });
+
+  it("shows the initial package failure before a runtime has been registered", async () => {
+    api();
+    const error = "the openai Python package is not installed with this Looper; reinstall Looper";
+    body.runtime_types[0].probe_error = error;
+    body.runtimes = [];
+    await show();
+    expect(apiCard().textContent).toContain("Not detected");
+    expect(apiCard().querySelector("p")!.textContent).toBe(error);
+    expect([...apiCard().querySelectorAll("dt")].map((term) => term.textContent)).not.toContain("Path");
+  });
+
+  it("keeps both planned SDKs without a separate Norma runtime", async () => {
+    api();
+    await show();
+    const titles = [...container.querySelectorAll("h3")].map((node) => node.textContent);
+    expect(titles).toEqual(["Model API (SDK)", "Claude Code SDK", "OpenAI Agents SDK"]);
+    expect(RUNTIME_TYPES.api).toEqual({ kind: "SDK", title: "Model API (SDK)" });
+  });
+
+  it("treats an older runtime row without in_process as a CLI", async () => {
+    delete (body.runtimes[0] as Partial<Runtime>).in_process;
+    await show();
+    expect(fact(card(), "Path")).toBe("/usr/local/bin/pi");
+    expect(card().textContent).toContain("Found as pi on the server's PATH.");
+  });
 
   it("names pi, shows the install command, and has no login help", () => {
     expect(RUNTIME_TYPES.pi).toEqual({ kind: "CLI", title: "Pi CLI", install: INSTALL });

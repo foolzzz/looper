@@ -34,7 +34,7 @@ RUNTIME_TYPE = _object({
     "auth_kinds": _array(PROVIDER_AUTH), "supported_models": _NULL_STRINGS,
     "effort_levels": _NULL_STRINGS, "in_process": _BOOL,
     "can_replace_system_prompt": _BOOL, "replace_system_prompt_refusal": _NULL_STR,
-    "can_interrupt": _BOOL,
+    "can_interrupt": _BOOL, "probe_error": _NULL_STR,
 }, ["type", "label", "default_executable", "runtime_id", "protocols", "capabilities", "roles",
     "auth_kinds", "supported_models", "in_process", "can_replace_system_prompt",
     "replace_system_prompt_refusal", "can_interrupt"], closed=True)
