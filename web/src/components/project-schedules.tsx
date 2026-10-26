@@ -11,6 +11,7 @@ import {
   createSchedule,
   deleteSchedule,
   fetchSchedule,
+  fetchManagers,
   fetchScheduleRuns,
   fetchSchedules,
   previewSchedule,
@@ -18,6 +19,8 @@ import {
   runSchedule,
   updateSchedule,
   type Project,
+  type ManagerInfo,
+  type ScheduleCreate,
   type ScheduleCatchUp,
   type ScheduleFields,
   type ScheduleInfo,
@@ -223,6 +226,7 @@ function interval(seconds: number) {
 
 /** A schedule as its form holds it: text as typed. */
 interface Draft {
+  managerId: string;
   name: string;
   cron: string;
   timezone: string;
@@ -263,6 +267,7 @@ function targetOf(key: string): ScheduleNotifyTarget | null {
 function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
   if (!schedule)
     return {
+      managerId: "manager",
       name: "",
       cron: "",
       timezone: limits.default_timezone,
@@ -283,6 +288,7 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
       notifyTarget: "",
     };
   return {
+    managerId: schedule.manager_id,
     name: schedule.name,
     cron: schedule.cron,
     timezone: schedule.timezone,
@@ -363,7 +369,7 @@ function changesOf(fields: Required<ScheduleFields>, schedule: ScheduleInfo): Sc
 }
 
 /** A new schedule's fields: the optional ones that are empty are left out, so the server's defaults apply. */
-function createFields(fields: Required<ScheduleFields>): ScheduleFields {
+function createFields(fields: Required<ScheduleFields>, managerId: string): ScheduleCreate {
   const {
     work_dir,
     max_parallel_runs,
@@ -378,6 +384,7 @@ function createFields(fields: Required<ScheduleFields>): ScheduleFields {
   } = fields;
   return {
     ...rest,
+    ...(managerId !== "manager" ? { manager_id: managerId } : {}),
     ...(work_dir ? { work_dir } : {}),
     ...(rest.overlap === "parallel" ? { max_parallel_runs } : {}),
     ...(run_budget_usd != null ? { run_budget_usd } : {}),
@@ -723,6 +730,19 @@ function ScheduleForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
+  const [managers, setManagers] = useState<ManagerInfo[] | null>(null);
+  const [managerError, setManagerError] = useState("");
+  const [managerReload, setManagerReload] = useState(0);
+  useEffect(() => {
+    if (schedule) return;
+    let active = true;
+    setManagerError("");
+    fetchManagers().then(
+      (rows) => { if (active) setManagers(rows); },
+      (err) => { if (active) setManagerError(errorText(err)); },
+    );
+    return () => { active = false; };
+  }, [schedule, managerReload]);
 
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => {
     setDraft((d) => ({ ...d, [key]: value }));
@@ -772,13 +792,13 @@ function ScheduleForm({
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (invalid || (schedule && !dirty)) return;
+    if (invalid || (schedule ? !dirty : !managers || Boolean(managerError))) return;
     setBusy(true);
     setError("");
     try {
       const next = schedule
         ? await updateSchedule(schedule.schedule_id, changes)
-        : await createSchedule(project.project_id, createFields(fields));
+        : await createSchedule(project.project_id, createFields(fields, draft.managerId));
       if (schedule) {
         setDraft(draftOf(next, limits));
         setSaved(true);
@@ -793,6 +813,30 @@ function ScheduleForm({
 
   return (
     <form onSubmit={submit} className="space-y-4">
+      {schedule ? (
+        <p className="text-sm text-muted-foreground">
+          Owner: {schedule.manager_name || schedule.manager_id}. Ownership cannot be changed.
+        </p>
+      ) : managers?.some((manager) => manager.id !== "manager") ? (
+        <div className="space-y-1">
+          <label htmlFor={id("manager")} className={LABEL}>Owner</label>
+          <select id={id("manager")} className={SELECT} value={draft.managerId}
+            onChange={(e) => set("managerId", e.target.value)}>
+            {managers.map((manager) => (
+              <option key={manager.id} value={manager.id}>
+                {manager.name}{manager.enabled ? "" : " (disabled)"}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs text-muted-foreground">The owner stays with this schedule and its runs.</p>
+        </div>
+      ) : null}
+      {managerError && (
+        <div className="space-y-1">
+          <p role="alert" className="text-xs text-destructive">Could not load owners: {managerError}</p>
+          <Button type="button" variant="outline" size="sm" onClick={() => setManagerReload((value) => value + 1)}>Retry owners</Button>
+        </div>
+      )}
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1">
           <label htmlFor={id("name")} className={LABEL}>Name *</label>
@@ -1090,7 +1134,7 @@ function ScheduleForm({
             Cancel
           </Button>
         )}
-        <Button type="submit" size="sm" disabled={(schedule ? !dirty : false) || busy || invalid}>
+        <Button type="submit" size="sm" disabled={(schedule ? !dirty : !managers || Boolean(managerError)) || busy || invalid}>
           {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
           {schedule ? "Save" : "Create"}
         </Button>

@@ -98,6 +98,7 @@ describe("Settings → Scheduler", () => {
 
   it.each([true, false])("shows a schedule's registered model summary or project inheritance (override: %s)", async (override) => {
     const schedule: ScheduleInfo = {
+      manager_id: "manager", manager_name: "Manager",
       schedule_id: "schedule", project_id: "project", project_name: "Project", name: "Scheduled task",
       cron: "0 9 * * *", timezone: "UTC", description: "Every morning", requirement: "Check changes", work_dir: "",
       overlap: "skip", max_parallel_runs: 1, catch_up: "skip", run_timeout_seconds: null,

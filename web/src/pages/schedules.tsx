@@ -110,6 +110,9 @@ function ScheduleRow({
             {schedule.name}
           </a>
           <p className="truncate text-xs text-muted-foreground">{schedule.description}</p>
+          {schedule.manager_id !== "manager" && (
+            <p className="text-xs text-muted-foreground">Owner: {schedule.manager_name || schedule.manager_id}</p>
+          )}
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
             <NextRun schedule={schedule} />
             <span aria-hidden="true">·</span>

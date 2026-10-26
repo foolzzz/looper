@@ -117,10 +117,12 @@ async def lock_for_task(manager_id: str, *, conn: asyncpg.Connection) -> bool:
         "SELECT enabled AND deleted_at IS NULL FROM managers WHERE id = $1 FOR KEY SHARE", manager_id))
 
 
-async def delete_manager(manager_id: str) -> Literal["deleted", "missing", "has_tasks", "has_bots", "has_bindings"]:
+async def delete_manager(manager_id: str) -> Literal[
+        "deleted", "missing", "has_tasks", "has_schedules", "has_bots", "has_bindings"]:
     """Soft-delete a scenario Manager in one transaction that holds its row lock: ``"has_tasks"`` (nothing written)
-    when a task belongs to it, ``"has_bots"`` when a channel bot does, ``"has_bindings"`` when a chat is explicitly
-    bound to it; ``"missing"`` for the default Manager, an unknown or a deleted one. Its templates and
+    when a task belongs to it, ``"has_schedules"`` when a schedule does, ``"has_bots"`` when a channel bot does,
+    ``"has_bindings"`` when a chat is explicitly bound to it; ``"missing"`` for the default Manager, an unknown
+    or a deleted one. Its templates and
     its session go, its profile is let go; its chat threads and messages stay."""
     pool = get_pool()
     async with pool.acquire() as conn, conn.transaction():
@@ -130,6 +132,8 @@ async def delete_manager(manager_id: str) -> Literal["deleted", "missing", "has_
             return "missing"
         if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM tasks WHERE manager_id = $1)", manager_id):
             return "has_tasks"
+        if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schedules WHERE manager_id = $1)", manager_id):
+            return "has_schedules"
         if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM channel_configs WHERE manager_id = $1)", manager_id):
             return "has_bots"
         if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM manager_chat_bindings WHERE manager_id = $1)", manager_id):

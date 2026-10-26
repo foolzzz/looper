@@ -44,7 +44,8 @@ SKIPPED = ("skipped_gate", *NOTHING_RAN)
 UNFINISHED = ("failed", "timed_out", "gate_failed", "stopped", "cancelled")
 
 _RUN = """
-    SELECT r.*, t.status AS task_status, t.title AS task_title FROM schedule_runs r LEFT JOIN tasks t ON t.id = r.task_id
+    SELECT r.*, s.manager_id, t.status AS task_status, t.title AS task_title FROM schedule_runs r
+    JOIN schedules s ON s.id = r.schedule_id LEFT JOIN tasks t ON t.id = r.task_id
 """
 
 Db = asyncpg.Pool | asyncpg.Connection
@@ -90,9 +91,10 @@ async def _with_overrides(db: Db, rows: list[asyncpg.Record]) -> list[dict[str, 
 
 
 # A schedule's row with its project's name.
-_WITH_PROJECT = ("SELECT s.*, p.name AS project_name, t.title AS planner_session_task_title, "
+_WITH_PROJECT = ("SELECT s.*, p.name AS project_name, m.name AS manager_name, t.title AS planner_session_task_title, "
                  "t.goal_id AS planner_session_task_goal_id, t.requirement AS planner_session_task_requirement "
                  "FROM schedules s JOIN projects p ON p.id = s.project_id "
+                 "LEFT JOIN managers m ON m.id = s.manager_id "
                  "LEFT JOIN tasks t ON t.id = s.planner_session_task_id")
 
 
@@ -132,18 +134,39 @@ async def _set_task_limits(conn: asyncpg.Connection, schedule_id: str, limits: M
     )
 
 
+async def owner_error(conn: asyncpg.Connection, manager_id: str, *, enabled: bool = True) -> str | None:
+    """Lock the owner after the schedule row, excluding deletion until this write commits.
+
+    Disabled owners may save schedules; free-form schedules always require the owner's task policy to allow them.
+    """
+    # A firing must also exclude disabling or changing policy until its task is inserted. Creation only needs
+    # KEY SHARE to exclude deletion; a disabled owner can still save a schedule.
+    lock = "SHARE" if enabled else "KEY SHARE"
+    row = await conn.fetchrow(f"SELECT enabled, deleted_at, task_policy FROM managers WHERE id = $1 FOR {lock}",
+                              manager_id)
+    if row is None or row["deleted_at"] is not None:
+        return f"schedule owner {manager_id!r} does not exist or was deleted"
+    if enabled and not row["enabled"]:
+        return f"schedule owner {manager_id!r} is disabled; enable the Manager first"
+    if row["task_policy"] == "templates_only":
+        return f"schedule owner {manager_id!r} requires a template; free-form schedules are not allowed"
+    return None
+
+
 async def create_schedule(conn: asyncpg.Connection, *, project_id: str, fields: Mapping[str, Any],
                           profiles: Mapping[str, str], task_limits: Mapping[str, int] | None = None,
-                          created_via: str = "dashboard") -> str:
+                          created_via: str = "dashboard", manager_id: str = "manager") -> str:
     """A new schedule, disabled; its id."""
+    if error := await owner_error(conn, manager_id, enabled=False):
+        raise ValueError(error)
     schedule_id = f"sched-{uuid.uuid4().hex[:12]}"
     columns = [name for name in FIELDS if name in fields]
     values = [fields[name] for name in columns]
-    placeholders = ", ".join(f"${i}" for i in range(4, len(columns) + 4))
+    placeholders = ", ".join(f"${i}" for i in range(5, len(columns) + 5))
     await conn.execute(
-        f"INSERT INTO schedules (id, project_id, created_via, {', '.join(columns)}) VALUES ($1, $2, $3, "
+        f"INSERT INTO schedules (id, project_id, created_via, manager_id, {', '.join(columns)}) VALUES ($1, $2, $3, $4, "
         f"{placeholders})",
-        schedule_id, project_id, created_via, *values,
+        schedule_id, project_id, created_via, manager_id, *values,
     )
     await _set_overrides(conn, schedule_id, profiles)
     await _set_task_limits(conn, schedule_id, task_limits or {})
@@ -155,6 +178,8 @@ async def update_schedule(conn: asyncpg.Connection, schedule_id: str, fields: Ma
                           task_limits: Mapping[str, int] | None = None) -> None:
     """Set ``fields`` (any of ``FIELDS``, ``enabled``, ``enabled_at``, ``rule_changed_at`` and ``next_fire_at``),
     and the profile overrides and the task limits when given (each replaces what the schedule had)."""
+    if "manager_id" in fields:
+        raise ValueError("a schedule's owner cannot change")
     columns = [name for name in (*FIELDS, "enabled", "enabled_at", "rule_changed_at", "next_fire_at") if name in fields]
     sets = [f"{name} = ${i}" for i, name in enumerate(columns, start=2)]
     await conn.execute(
@@ -380,8 +405,8 @@ async def latest_runs(schedule_ids: list[str], *, pool: Db | None = None) -> dic
     db = pool or get_pool()
     rows = await db.fetch(
         """
-        SELECT DISTINCT ON (r.schedule_id) r.*, t.status AS task_status
-        FROM schedule_runs r LEFT JOIN tasks t ON t.id = r.task_id
+        SELECT DISTINCT ON (r.schedule_id) r.*, s.manager_id, t.status AS task_status
+        FROM schedule_runs r JOIN schedules s ON s.id = r.schedule_id LEFT JOIN tasks t ON t.id = r.task_id
         WHERE r.schedule_id = ANY($1::text[]) ORDER BY r.schedule_id, r.created_at DESC, r.id DESC
         """,
         schedule_ids,

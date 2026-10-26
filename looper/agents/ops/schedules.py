@@ -77,8 +77,8 @@ def _listed(view: Mapping[str, Any]) -> dict[str, Any]:
 
 
 async def _runs_in_scope(call: Call, runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """``runs`` as the Manager may see them: for a scoped one, a run whose task is not its own (a schedule's tasks are
-    the default Manager's) keeps its time, trigger and status, without its task's id, title, result or cost."""
+    """``runs`` as the Manager may see them: for a scoped one, a run whose task is not its own keeps its time,
+    trigger and status, without its task's id, title, result or cost."""
     if not call.scoped:
         return runs
     owners = await db_tasks.manager_of({run["task_id"] for run in runs if run.get("task_id")})
@@ -151,7 +151,7 @@ async def _schedules(call: Call) -> dict[str, Any]:
     if action == "get":
         view = await _in_scope(call, (await answered(schedules.get_schedule(row["id"])))["schedule"])
         runs = await answered(schedules.list_runs(row["id"], {"limit": str(RUNS_SHOWN), "skips": "hide"}))
-        return {"schedule": {**{k: v for k, v in view.items() if k != "last_run"},
+        return {"schedule": {**{k: v for k, v in view.items() if k not in {"last_run", "manager_id", "manager_name"}},
                              "requirement": clip(view["requirement"], 1_000)},
                 "latest_runs": [_run_listed(run) for run in await _runs_in_scope(call, runs["runs"])],
                 "routine_skips": runs["routine_skips"]}
@@ -192,6 +192,7 @@ async def _create(call: Call) -> dict[str, Any]:
     _required(arguments, "create", "project")
     project = await project_named(arguments["project"])
     data = _fields(arguments, "create")
+    data["manager_id"] = call.manager_id
     bot = parse_channel_id(turn.channel_id)
     if ("notify_target" not in data and (is_lark(turn.channel) or turn.channel == "telegram") and turn.sender
             and (bot is None or bot.builtin)):

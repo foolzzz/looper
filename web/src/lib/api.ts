@@ -1007,6 +1007,7 @@ export interface ScheduleNotifyTargetOption extends ScheduleNotifyTarget {
 export interface ScheduleRunInfo {
   run_id: string;
   schedule_id: string;
+  manager_id: string;
   /** The fire time this run is for. */
   scheduled_for: string;
   /** Null while queued. */
@@ -1048,6 +1049,8 @@ export interface ScheduleInfo {
   schedule_id: string;
   project_id: string;
   project_name: string;
+  manager_id: string;
+  manager_name: string | null;
   name: string;
   /** Five-field cron rule, read in `timezone`. */
   cron: string;
@@ -1159,7 +1162,9 @@ export interface ScheduleFields {
   notify_target?: ScheduleNotifyTarget | null;
 }
 
-/** Any of a schedule's fields, plus turning it on or off. */
+/** Ownership is chosen only when a schedule is created. */
+export type ScheduleCreate = ScheduleFields & { manager_id?: string };
+/** Any mutable schedule field, plus turning it on or off. */
 export type ScheduleUpdate = Partial<ScheduleFields> & { enabled?: boolean };
 
 /** One of the scheduler's system settings and where its value comes from. */
@@ -1209,7 +1214,7 @@ export async function fetchSchedules(projectId: string): Promise<{ schedules: Sc
 }
 
 /** Create a schedule, disabled; 409 when the project has one with that name already. */
-export async function createSchedule(projectId: string, fields: ScheduleFields): Promise<ScheduleInfo> {
+export async function createSchedule(projectId: string, fields: ScheduleCreate): Promise<ScheduleInfo> {
   const data = await callV1<{ schedule: ScheduleInfo }>(
     "/api/v1/schedule_admin/create", { project_id: projectId, fields });
   if ("status" in data) throw new V1Error(202, "unavailable", data.impact);

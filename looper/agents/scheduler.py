@@ -463,6 +463,8 @@ class Scheduler:
         launched (``_launch``)."""
         common = {"schedule_id": schedule["id"], "scheduled_for": firing.scheduled_for,
                   "trigger": firing.trigger.value, "missed": firing.missed, "created_at": now}
+        if await db_schedules.owner_error(conn, schedule["manager_id"]):
+            return await self._create_run(conn, schedule, firing, now, common=common)
         open_runs = await db_schedules.open_runs(conn, schedule["id"])
         queued = next((run for run in open_runs if run["status"] == db_schedules.QUEUED), None)
         gating = next((run for run in open_runs if run["status"] == db_schedules.GATING), None)
@@ -509,6 +511,8 @@ class Scheduler:
     async def _launch(self, conn: asyncpg.Connection, schedule: dict[str, Any], firing: Firing, now: datetime, *,
                       common: Mapping[str, Any] | None = None, run_id: str | None = None) -> _Launched:
         """A firing past the overlap check: skipped at the daily budget, gating, or its task created."""
+        if await db_schedules.owner_error(conn, schedule["manager_id"]):
+            return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id)
         budget = schedule["daily_budget_usd"]
         if budget is not None:
             spent = await db_schedules.spent_since(conn, schedule["id"], self.day_start(now))
@@ -558,6 +562,8 @@ class Scheduler:
                            run_id: str | None, gate_output: str | None,
                            carried: list[Carried]) -> tuple[str | None, str | None]:
         """Create the run's task, ready to start; its id, or None and why it could not be created."""
+        if error := await db_schedules.owner_error(conn, schedule["manager_id"]):
+            return None, error
         work_dir = await self._work_dir(conn, schedule)
         if not work_dir:
             return None, "a work directory is required: set one on the schedule or on its project"
@@ -573,6 +579,7 @@ class Scheduler:
             work_dir=work_dir, status=db_tasks.READY, schedule_id=schedule["id"],
             budget_usd=schedule["run_budget_usd"], title=run_title(schedule, firing), pool=conn,
             workspace_dir=work_dir, workspace_mode=ProjectExecution.from_row(project).task_mode.value,
+            manager_id=schedule["manager_id"],
         )
         if schedule["profile_overrides"]:
             await db_layers.set_profile_overrides(conn, task_id, schedule["profile_overrides"])
