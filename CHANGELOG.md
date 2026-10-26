@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.141] - 2026-10-26
+
+### Added
+
+- **The Manager can answer on an api Profile.** `ApiRuntime.resident_session` now returns an `ApiSession` (`looper/agents/runtimes/api/session.py`) that keeps the neutral conversation history in memory (at most four sessions per owner), runs the Responses loop (at most 30 requests per turn) and turns the loop's events into the internal events the Manager already reads. Platform tools are called in the service process through `ManagerOps.call` (`looper/agents/runtimes/api/tools.py`) with the same confirmation and audit as the MCP bridge; a tool result over 100 KB is cut with a note. Launches on this runtime add a short runtime note to the system prompt, the soft cap applies, and the `api` adapter joins `ADAPTERS`, so startup registers the built-in `api` runtime (`rt-api`) when the `openai` package is installed. It runs only the Manager role and needs a profile with an API key; existing profiles are unchanged. Sessions are not persisted and stop is still refused. The dashboard card for the runtime follows in a later change. ([#684](https://github.com/foolzzz/looper/pull/684))
+
 ## [2.13.140] - 2026-10-26
 
 ### Changed
