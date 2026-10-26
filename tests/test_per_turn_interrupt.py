@@ -445,4 +445,4 @@ def test_a_per_turn_session_cannot_interrupt_so_the_manager_refuses_its_stop(tmp
     session, *_ = (_omp if runtime == "omp" else _codex)(tmp_path)
     assert session.can_interrupt is False
     offered = {kind for kind, runtime_adapter in ADAPTERS.items() if type_view(runtime_adapter)["can_interrupt"]}
-    assert offered == {"claude-code", "grok"}
+    assert offered == {"claude-code", "grok", "api"}

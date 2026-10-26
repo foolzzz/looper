@@ -15,7 +15,7 @@ from fake_model_api import (
 from looper.agents import claude_cli
 from looper.agents.ops import ErrorCode, OpError
 from looper.agents.run_usage import Usage
-from looper.agents.runtimes import ApiProtocol, InProcessTools
+from looper.agents.runtimes import ApiProtocol, InProcessTools, StopMethod
 from looper.agents.runtimes.api import session as session_module
 from looper.agents.runtimes.api.adapter import Descriptor, KEY_ENV
 from looper.agents.runtimes.api.loop import (
@@ -91,7 +91,7 @@ async def test_session_streams_calls_and_results_in_order_with_one_listing_snaps
             result, events = await turn(session, tools=tools)
             assert isinstance(session, InProcessTools)
             assert session.label == 'Manager' and session.started and session.command == command
-            assert session.pid is None and not session.shares_bridge and not session.can_interrupt
+            assert session.pid is None and not session.shares_bridge and session.can_interrupt
             assert not session.stale('signature') and session.stale('changed')
             assert events[0] == {'type': 'system', 'subtype': 'init',
                 'session_id': result.result_event['session_id'], 'model': 'test-model', 'tools': ['lookup']}
@@ -112,7 +112,7 @@ async def test_session_streams_calls_and_results_in_order_with_one_listing_snaps
             assert result.result_event['modelUsage'] == {'test-model': dict(inputTokens=26,
                 outputTokens=10, cacheReadInputTokens=8, cacheCreationInputTokens=6)}
             assert result.result_event['api'] == dict(protocol=PROTOCOL.value, requests=2,
-                retries=0, upstream_ids=['resp_1', 'resp_1'])
+                retries=0, incomplete=0, upstream_ids=['resp_1', 'resp_1'])
             usage_events = [e for e in events if e['type'] == 'usage']
             assert len(usage_events) == 2 and all('parent_tool_use_id' not in e for e in usage_events)
             assert result.session_started and result.prompt_sent and result.usage_complete
@@ -395,6 +395,78 @@ async def test_completed_request_without_usage_marks_its_usage_event_incomplete(
             assert len(usage_events) == 1 and usage_events[0]['usage_complete'] is False
             assert result.result_event['subtype'] == 'success' and not result.usage_complete
         finally:
+            await session.stop()
+
+
+@pytest.mark.parametrize('sent', [False, True])
+@async_test
+async def test_precancelled_turn_preserves_prompt_sent_without_events_or_requests(tmp_path, sent):
+    cancel = TurnCancel()
+    if sent:
+        cancel.sent()
+    cancel.request()
+    async with FakeModelAPI([]) as api:
+        session, _ = await start(tmp_path, api.base_url)
+        try:
+            result, events = await turn(session, cancel=cancel)
+            assert result == claude_cli.ResidentTurn(claude_cli.user_stop_result(), session_started=True,
+                usage=Usage(), stopped=StopMethod.CANCEL, usage_complete=True, prompt_sent=sent)
+            assert not events and not api.requests
+        finally:
+            await session.stop()
+
+
+@async_test
+async def test_interrupt_requests_the_active_turn_cancel_and_waits_for_stream_cleanup(tmp_path):
+    script = ResponseScript(events=text_events('partial', usage=TOKENS), gate=asyncio.Event())
+    async with FakeModelAPI([script]) as api:
+        session, _ = await start(tmp_path, api.base_url)
+        task = asyncio.create_task(turn(session))
+        try:
+            await script.gate_reached.wait()
+            assert await session.interrupt() is StopMethod.CANCEL
+            assert task.done()
+            result, _ = await task
+            assert result.stopped is StopMethod.CANCEL and not result.usage_complete
+            assert result.usage == Usage()
+            await script.closed.wait()
+            assert await session.interrupt() is None
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await session.stop()
+
+
+@async_test
+async def test_interrupt_times_out_without_cancelling_a_running_tool_write(tmp_path):
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class WaitingTools(Tools):
+        async def call(self, call):
+            entered.set()
+            await release.wait()
+            return ToolOutcome('finished', False, True)
+
+    script = ResponseScript(events=[completed([call_item()], usage=TOKENS)])
+    async with FakeModelAPI([script]) as api:
+        session, _ = await start(tmp_path, api.base_url)
+        task = asyncio.create_task(turn(session, tools=WaitingTools()))
+        try:
+            await entered.wait()
+            started = asyncio.get_running_loop().time()
+            assert await session.interrupt() is StopMethod.CANCEL
+            assert 4.8 <= asyncio.get_running_loop().time() - started < 6
+            assert not task.done()
+            release.set()
+            result, _ = await task
+            assert result.stopped is StopMethod.CANCEL and result.usage_complete
+            history = await session._transcripts[session._session].items()
+            assert history[-1] == ToolResultItem('call_1', 'finished', False, True)
+            assert len(api.requests) == 1
+        finally:
+            release.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
             await session.stop()
 
 

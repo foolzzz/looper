@@ -457,6 +457,10 @@ class RuntimeAdapter(ABC):
         the adapter says otherwise."""
         return []
 
+    def result_notes(self, result_event: dict[str, Any] | None) -> dict[str, Any]:
+        """Runtime-specific metadata to retain with the finished run's record."""
+        return {}
+
     def failure_detail(self, result_event: dict[str, Any] | None, *, launch: Launch,
                        command: list[str], pid: int | None = None) -> str | None:
         """A safe, bounded explanation of a failed run, when the runtime provides one."""
