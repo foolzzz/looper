@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.135] - 2026-10-26
+
+### Changed
+
+- **API runtime design updated in the docs.** The API runtime RFC and the long-horizon plan now record the maintainer's decisions: a Norma-derived typed asyncio loop, protocol-neutral session storage, a retained MIT notice, an original handoff prompt and the cwd/`add_dirs`, allowlisted-environment and private-HOME boundary for future tools. Documentation only; no code, schema, API or prompt changes. ([#669](https://github.com/foolzzz/looper/pull/669))
+
 ## [2.13.134] - 2026-10-26
 
 ### Changed
