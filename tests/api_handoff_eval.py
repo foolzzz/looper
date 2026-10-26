@@ -1,4 +1,4 @@
-"""Focused API handoff comparison; real calls require explicitly supplied credentials.
+"""Focused API handoff comparison using isolated Claude keychain login or explicit credentials.
 
 Only public synthetic conversation is used. Reports and raw events belong in
 ignored local output; neither operator configuration nor runtime state is read.
@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sys
 from typing import Any
 
 from evals.prompt_regression.runner import TaskError, install_claude
@@ -103,8 +104,10 @@ async def context_switch(root: Path, monkeypatch: Any, summary: str, *, control:
 def real_available() -> str | None:
     if not shutil.which("claude"):
         return "Claude CLI is unavailable"
-    if not any(os.environ.get(name) for name in AUTH_ENV):
-        return "no explicit Claude credential environment; operator configuration is excluded"
+    if not any(os.environ.get(name) for name in AUTH_ENV) and not (
+        sys.platform == "darwin" and (Path.home() / "Library" / "Keychains").is_dir()
+    ):
+        return "no macOS Claude keychain login path or explicit Claude credential environment"
     return None
 
 
@@ -131,8 +134,14 @@ async def summarize(root: Path, captured: dict[str, str], *, model: str, effort:
     command += ["--tools", "", "--no-session-persistence"]
     home = root / "home"
     home.mkdir()
+    keychains = Path.home() / "Library" / "Keychains"
+    if sys.platform == "darwin" and keychains.is_dir():
+        # Match evals/stop_realpath.py: share only the login keychain. Claude's
+        # .claude and .claude.json remain inside the throwaway HOME.
+        (home / "Library").mkdir()
+        (home / "Library" / "Keychains").symlink_to(keychains)
     env = {name: os.environ[name] for name in ("PATH", "TMPDIR", *AUTH_ENV) if name in os.environ}
-    env.update(HOME=str(home), CLAUDE_CONFIG_DIR=str(home / "config"))
+    env.update(HOME=str(home))
     session = claude_cli.ResidentClaude(label="synthetic-api-handoff")
     events: list[dict[str, Any]] = []
     recorder = claude_cli.ClaudeRunRecorder(agent_id="manager", task_id=None, command=command,

@@ -1,7 +1,8 @@
 """Opt-in real Claude comparison of the captured production API handoff.
 
-Set LOOPER_TEST_REAL_API_HANDOFF=1, an explicit Claude credential environment,
-and the disposable database URL. Raw inputs/events and the scored report stay
+Set LOOPER_TEST_REAL_API_HANDOFF=1 and the disposable database URL. Authentication
+uses the macOS Claude keychain login or explicit credential environment variables,
+with Claude configuration isolated in a throwaway HOME. Raw inputs/events and the scored report stay
 in the ignored evals/runs directory. Normal collection never calls a model.
 """
 from __future__ import annotations

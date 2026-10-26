@@ -307,7 +307,16 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 - 单条工具结果截断时附的那句说明。
 - `api` 的交接摘要提示词由 Looper 原创，属于新增模型可见内容；不复制 Norma 源自 Claude Code 的 compaction prompt、措辞或示例。CLI 交接文本保持不变。
 
-**评测**（计划第 1 节第 5 条）：`tests/test_api_handoff_installed_db.py` 提供显式启用的专项对照：在本地 Responses 假服务上捕获生产 Manager 交接输入，用真实 Claude CLI 原样评测，再把真实摘要回放进相同的换会话链路。公开合成对话覆盖约束、带证据的已完成动作、尚未执行且待确认的动作、承诺及未决问题；新旧 Looper prompt 分别跑 sonnet 两次、opus xhigh 一次，opus 首次失败才补第二次。复用调用、用例及总花费上限，原始产物留在忽略目录。本轮显式设置 `LOOPER_TEST_REAL_API_HANDOFF=1` 后，两个模型测试仍因没有显式 CLI 凭据跳过：新旧 prompt 共六次真实运行均未执行，事实保留、虚构动作、真实摘要续接和费用均无评分证据，跳过不计通过；sonnet 对话基线仍缺该场景。专项对照通过前，该步骤不能宣称完成，也不能替代最终 CPA 全对话准入。
+**评测**（计划第 1 节第 5 条）：`tests/test_api_handoff_installed_db.py` 提供显式启用的专项对照：在本地 Responses 假服务上捕获生产 Manager 交接输入，用真实 Claude CLI 原样评测，再把真实摘要回放进相同的换会话链路（续接响应由替身模型提供）。公开合成对话覆盖约束、带证据的已完成动作、尚未执行且待确认的动作、承诺及未决问题；新旧 Looper prompt 分别跑 sonnet high 两次、opus xhigh 一次，opus 首次失败才补第二次。保留 `LOOPER_TEST_REAL_API_HANDOFF=1` 开关及调用、用例、总花费上限；macOS 使用仅链接 `Library/Keychains` 的临时 HOME，不读取操作员的 Claude 配置，其他平台可使用显式凭据环境变量。原始产物只留在忽略的 `evals/runs/`。
+
+2026-10-26 隔离认证预检：Claude CLI 在上述临时 HOME 中返回 `loggedIn=false`、`authMethod=none`，退出码 1；因 keychain 登录不可用而停止，未发起真实模型调用。
+
+| 模型与 effort | 新旧 prompt 对照 | 事实保留 | 虚构动作 | 真实摘要续接 | 费用（USD） |
+|---|---|---|---|---|---|
+| sonnet high（各 2 次） | 未测，认证缺口 | 无评分 | 未测 | 未测 | 无模型调用，$0 |
+| opus xhigh（各 1 次，首次失败可补跑） | 未测，认证缺口 | 无评分 | 未测 | 未测 | 无模型调用，$0 |
+
+此结果不计通过；sonnet 对话基线仍缺该场景。专项对照通过前，该步骤不能宣称完成，也不能替代最终 CPA 全对话准入。
 
 **最终准入：** 运行时变了，模型也不是 Claude，所以另按「新运行时担任一个角色，M6 评测全部通过」（多运行时 RFC 第 11 节）跑全部对话，不只跑改动涉及的；不能用提示词的定向对照替代。
 
