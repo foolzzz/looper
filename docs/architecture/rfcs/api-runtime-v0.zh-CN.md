@@ -1,6 +1,6 @@
 # RFC：API 运行时 v0（管家直连模型 API）
 
-- **状态：** 已批准（2026-10-24），按维护者 2026-10-26 的决定更新。阶段 1 的运行时类型与接线已合入；中性循环（2a）、版本化条目和来源 notice 已合入；Responses 编解码器（2b）与本地假服务已合入；管家会话与进程内平台工具已合入。中性会话持久化、跨重启续接、drop 清理与上下文交接换会话已在分支实现；停止与用量记录已实现，原创摘要提示词的真实 CLI 专项对照尚未验证。阶段 1 移植 Norma 循环，接 `openai` Python SDK，用 CPA 的 OpenAI 协议模型验证；阶段 2 接 `anthropic` Python SDK，目标是 DeepSeek、GLM、Kimi、OpenCode 的 Anthropic 格式接口，用维护者已有的 DeepSeek key 验证；以后有官方 Anthropic key，只是多登记一个 provider，不改代码。决定见第 4、14 节，排期见第 12 节；第 15 节是仍需真实运行核实的项。
+- **状态：** 已批准（2026-10-24），按维护者 2026-10-26 的决定更新。阶段 1 的运行时类型与接线已合入；中性循环（2a）、版本化条目和来源 notice 已合入；Responses 编解码器（2b）与本地假服务已合入；管家会话与进程内平台工具已合入。中性会话持久化、跨重启续接、drop 清理与上下文交接换会话已在分支实现；停止与用量记录已实现，原创摘要提示词的真实 CLI 专项对照已通过（第 9 节）。阶段 1 移植 Norma 循环，接 `openai` Python SDK，用 CPA 的 OpenAI 协议模型验证；阶段 2 接 `anthropic` Python SDK，目标是 DeepSeek、GLM、Kimi、OpenCode 的 Anthropic 格式接口，用维护者已有的 DeepSeek key 验证；以后有官方 Anthropic key，只是多登记一个 provider，不改代码。决定见第 4、14 节，排期见第 12 节；第 15 节是仍需真实运行核实的项。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.0 节第 23 项。它落实 M9d 的 SDK 运行时与 Norma 循环移植，以及[管家平台工具 RFC](manager-platform-tools-v0.zh-CN.md) D8：「原生 tool 不单做，等 SDK 运行时上线时从同一份操作目录生成」。
 - **相关：** [多运行时](multi-runtime-agents-v0.zh-CN.md)、[dsh 运行时](dsh-runtime-v0.zh-CN.md)、[停止管家的回复 v2](chat-stop-v2.zh-CN.md)、[管家会话的 Agent Profile](manager-session-profile-v0.zh-CN.md)、[场景管家](scenario-managers.zh-CN.md)、[LLM 模型层](llm-models-v0.zh-CN.md)。
 - **核对基线：** 仓库路径与符号按 `main` `61a097507`（v2.13.133）核对；SDK 接口沿用初版的一次性虚拟环境离线核对结果：`openai` 3.37.0、`anthropic` 2.3.0。全程没有发出带 key 的请求。
@@ -103,7 +103,7 @@ Norma 是阶段 1 的循环来源。后续唯一上游是 Go 移植版的副本 
 - `start` 记下描述和 key（只在内存里），创建独占循环，SDK 客户端延迟打开；`run_turn` 复用循环跑一轮（第 6 节）；`stop` 关闭循环与客户端，保留历史；`shares_bridge = False`、`can_interrupt = True`。
 - `stale(signature)` 照现有的签名比较。每轮新建 `DbTranscript`，按同一个会话 id 从 PostgreSQL 读回版本化 `SessionItem`；签名改变或服务重启后仍可续接。元数据或条目不存在、协议不符、格式或版本无效时，走管家现有的新会话重跑路径。
 
-**管家的接线**（前 3 项已合入，上下文与交接已在分支实现，真实提示词专项验收未完成）：
+**管家的接线**（前 3 项已合入，上下文与交接已在分支实现，真实提示词专项验收已通过）：
 
 1. `ApiSession` 另外实现一个小协议 `InProcessTools`。每轮 `run_turn`（`tiers/manager.py:1644`）之前，管家给它这一轮的 `TurnTools`：`specs()` 映射 `ops.current_listing()`；`call(call)` 就是 `ops.call(..., binding=token.binding, call_id=...)`。
 2. 这一轮 `Turn.require_match` 取 `shares_bridge`（`tiers/manager.py:1105、1248`），本来就是假：进程内的调用不需要和流里的调用对上。
@@ -308,16 +308,16 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 - 单条工具结果截断时附的那句说明。
 - `api` 的交接摘要提示词由 Looper 原创，属于新增模型可见内容；不复制 Norma 源自 Claude Code 的 compaction prompt、措辞或示例。CLI 交接文本保持不变。
 
-**评测**（计划第 1 节第 5 条）：`tests/test_api_handoff_installed_db.py` 提供显式启用的专项对照：在本地 Responses 假服务上捕获生产 Manager 交接输入，用真实 Claude CLI 原样评测，再把真实摘要回放进相同的换会话链路（续接响应由替身模型提供）。公开合成对话覆盖约束、带证据的已完成动作、尚未执行且待确认的动作、承诺及未决问题；新旧 Looper prompt 分别跑 sonnet high 两次、opus xhigh 一次，opus 首次失败才补第二次。保留 `LOOPER_TEST_REAL_API_HANDOFF=1` 开关及调用、用例、总花费上限；macOS 使用仅链接 `Library/Keychains` 的临时 HOME，不读取操作员的 Claude 配置，其他平台可使用显式凭据环境变量。原始产物只留在忽略的 `evals/runs/`。
+**评测**（计划第 1 节第 5 条）：`tests/test_api_handoff_installed_db.py` 提供显式启用的专项对照：在本地 Responses 假服务上捕获生产 Manager 交接输入，用真实 Claude CLI 原样评测，再把真实摘要回放进相同的换会话链路（续接响应由替身模型提供）。公开合成对话覆盖约束、带证据的已完成动作、尚未执行且待确认的动作、承诺及未决问题；新旧 Looper prompt 分别跑 sonnet high 两次、opus xhigh 一次，opus 首次失败才补第二次。保留 `LOOPER_TEST_REAL_API_HANDOFF=1` 开关及调用、用例、总花费上限；macOS 使用仅链接 `Library/Keychains` 的临时 HOME，认证预检与摘要调用共用环境白名单：只透传 `PATH`、`TMPDIR`、`USER`、`LOGNAME` 及显式凭据变量，`HOME` 指向临时目录，不读取操作员的 Claude 配置；其他平台可使用显式凭据环境变量。原始产物只留在忽略的 `evals/runs/`。
 
-2026-10-26 隔离认证预检：Claude CLI 在上述临时 HOME 中返回 `loggedIn=false`、`authMethod=none`，退出码 1；因 keychain 登录不可用而停止，未发起真实模型调用。
+2026-10-26 实测：补齐 keychain 账户选择所需的 `USER`、`LOGNAME` 后，隔离的 `claude auth status --json` 返回 `loggedIn=true`。在一次性 PostgreSQL 上以 `LOOPER_TEST_REAL_API_HANDOFF=1`、`pytest -n 1` 仅运行该文件，结果为 **3 passed**，无跳过或费用上限中止；数据库已删除。
 
 | 模型与 effort | 新旧 prompt 对照 | 事实保留 | 虚构动作 | 真实摘要续接 | 费用（USD） |
 |---|---|---|---|---|---|
-| sonnet high（各 2 次） | 未测，认证缺口 | 无评分 | 未测 | 未测 | 无模型调用，$0 |
-| opus xhigh（各 1 次，首次失败可补跑） | 未测，认证缺口 | 无评分 | 未测 | 未测 | 无模型调用，$0 |
+| claude-sonnet-5-5 high（各 2 次） | 新 2/2、旧 2/2 通过 | 每次 5/5 | 新旧均 0 | 新 2/2、旧 2/2 成功 | 新 $0.0369938，旧 $0.0218680；合计 $0.0588618 |
+| claude-opus-5-5 xhigh（各 1 次） | 新 1/1、旧 1/1 通过，无补跑 | 每次 5/5 | 新旧均 0 | 新 1/1、旧 1/1 成功 | 新 $0.0479120，旧 $0.0243890；合计 $0.0723010 |
 
-此结果不计通过；sonnet 对话基线仍缺该场景。专项对照通过前，该步骤不能宣称完成，也不能替代最终 CPA 全对话准入。
+总费用 **$0.1311628**。新旧 prompt 的事实、虚构动作与续接评分持平，未触发改词重跑；本次候选费用较高，但两个模型的候选首调用均为冷缓存、对照有缓存命中，不能据此推断稳定的成本差异。续接验证的是将真实摘要注入生产 Manager 的新会话并完成替身响应轮次，不是第二次真实模型推理。sonnet 对话基线仍缺该场景；本专项对照已通过，不能替代最终 CPA 全对话准入。收尾以 `pytest -n 2` 回归 API session、持久会话、context switch、handoff 与 Manager session switch：88 passed、2 skipped（仅跳过已单独执行的 opt-in 真实对比），一次性数据库已删除。
 
 **最终准入：** 运行时变了，模型也不是 Claude，所以另按「新运行时担任一个角色，M6 评测全部通过」（多运行时 RFC 第 11 节）跑全部对话，不只跑改动涉及的；不能用提示词的定向对照替代。
 

@@ -13,7 +13,9 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
+import tempfile
 from typing import Any
 
 from evals.prompt_regression.runner import TaskError, install_claude
@@ -101,13 +103,39 @@ async def context_switch(root: Path, monkeypatch: Any, summary: str, *, control:
                 return {"inputs": inputs(handoff), "resume": resume_text}
 
 
+def _claude_env(home: Path) -> dict[str, str]:
+    home.mkdir()
+    keychains = Path.home() / "Library" / "Keychains"
+    if sys.platform == "darwin" and keychains.is_dir():
+        # Share only the login keychain; Claude's configuration stays in the temporary HOME.
+        (home / "Library").mkdir()
+        (home / "Library" / "Keychains").symlink_to(keychains)
+    # Claude uses USER to select the account's keychain item.
+    env = {name: os.environ[name] for name in ("PATH", "TMPDIR", "USER", "LOGNAME", *AUTH_ENV)
+           if name in os.environ}
+    return {**env, "HOME": str(home)}
+
+
 def real_available() -> str | None:
-    if not shutil.which("claude"):
+    executable = shutil.which("claude")
+    if not executable:
         return "Claude CLI is unavailable"
     if not any(os.environ.get(name) for name in AUTH_ENV) and not (
         sys.platform == "darwin" and (Path.home() / "Library" / "Keychains").is_dir()
     ):
         return "no macOS Claude keychain login path or explicit Claude credential environment"
+    output = Path("evals/runs/api-handoff")
+    output.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="auth-", dir=output.resolve()) as directory:
+        try:
+            result = subprocess.run([executable, "auth", "status", "--json"],
+                                    cwd=directory, env=_claude_env(Path(directory) / "home"),
+                                    capture_output=True, text=True, timeout=30, check=False)
+            status = json.loads(result.stdout)
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return "isolated Claude auth status could not be verified"
+    if status.get("loggedIn") is not True:
+        return f"isolated Claude auth status loggedIn={json.dumps(status.get('loggedIn'))} (exit {result.returncode})"
     return None
 
 
@@ -132,16 +160,7 @@ async def summarize(root: Path, captured: dict[str, str], *, model: str, effort:
                                    for name in ("CLAUDE.md", "AGENTS.md", ".claude/rules/**")]
     command[settings_index] = json.dumps(settings)
     command += ["--tools", "", "--no-session-persistence"]
-    home = root / "home"
-    home.mkdir()
-    keychains = Path.home() / "Library" / "Keychains"
-    if sys.platform == "darwin" and keychains.is_dir():
-        # Match evals/stop_realpath.py: share only the login keychain. Claude's
-        # .claude and .claude.json remain inside the throwaway HOME.
-        (home / "Library").mkdir()
-        (home / "Library" / "Keychains").symlink_to(keychains)
-    env = {name: os.environ[name] for name in ("PATH", "TMPDIR", *AUTH_ENV) if name in os.environ}
-    env.update(HOME=str(home))
+    env = _claude_env(root / "home")
     session = claude_cli.ResidentClaude(label="synthetic-api-handoff")
     events: list[dict[str, Any]] = []
     recorder = claude_cli.ClaudeRunRecorder(agent_id="manager", task_id=None, command=command,
