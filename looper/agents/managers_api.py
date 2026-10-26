@@ -137,22 +137,26 @@ def _line(field: str, value: Any, limit: int, *, required: bool) -> str:
     return text
 
 
-async def _unique_name(name: str, *, own_id: str | None) -> None:
+async def _unique_name(name: str, *, own_id: str | None, conn: asyncpg.Connection | None = None) -> None:
     folded = name.casefold()
-    for row in await db_managers.list_managers():
+    for row in await db_managers.list_managers(pool=conn):
         if row["id"] != own_id and " ".join(str(row["name"]).split()).casefold() == folded:
             raise _refuse(f"name {name!r} is used by another Manager: pick another", HTTP_409)
 
 
-async def _values(data: Mapping[str, Any], *, own_id: str | None) -> dict[str, Any]:
-    """The checked columns for the fields of ``data`` (not ``key``)."""
+async def checked_values(data: Mapping[str, Any], *, own_id: str | None,
+                         conn: asyncpg.Connection | None = None,
+                         check_references: bool = True) -> dict[str, Any]:
+    """Checked columns (not ``key``). Import previews check references in their projected graph; writes use
+    ``conn`` so profiles created in the same transaction are visible."""
     values: dict[str, Any] = {}
     if "name" in data:
         name = data["name"]
         if not isinstance(name, str) or "\n" in name or "\r" in name or not 1 <= len(name.strip()) <= NAME_MAX:
             raise _refuse(f"name must be one line of 1 to {NAME_MAX} characters")
         values["name"] = " ".join(name.split())
-        await _unique_name(values["name"], own_id=own_id)
+        if check_references:
+            await _unique_name(values["name"], own_id=own_id, conn=conn)
     if "description" in data:
         values["description"] = _line("description", data["description"] or "", DESCRIPTION_MAX, required=False)
     if "system_prompt" in data:
@@ -169,10 +173,11 @@ async def _values(data: Mapping[str, Any], *, own_id: str | None) -> dict[str, A
         else:
             if not isinstance(wanted, str):
                 raise _refuse("profile_id must be an Agent Profile's id, or null for the default")
-            try:
-                await check_selection(wanted, ["manager"])
-            except RegistryError as exc:
-                raise _refuse(f"profile_id: {exc}") from None
+            if check_references:
+                try:
+                    await check_selection(wanted, ["manager"], pool=conn)
+                except RegistryError as exc:
+                    raise _refuse(f"profile_id: {exc}") from None
             values["profile_id"] = wanted
     for field, (_, enum, help_text) in _ENUM_HELP.items():
         if field in data:
@@ -258,7 +263,7 @@ async def create_manager(data: Mapping[str, Any]) -> dict[str, Any]:
     manager_id = f"manager-{key}"
     if "name" not in data:
         raise _refuse("name is required")
-    values = await _values(data, own_id=None)
+    values = await checked_values(data, own_id=None)
     if "system_prompt" not in data:
         raise _refuse("system_prompt is required: say who this Manager is and how it works")
     values.setdefault("enabled", True)
@@ -295,7 +300,7 @@ async def update_manager(manager_id: str, data: Mapping[str, Any]) -> dict[str, 
         raise _refuse(f"nothing to change; the fields are {', '.join(f for f in MANAGER_FIELDS if f != 'key')}")
     if manager_id == DEFAULT_MANAGER_ID and set(data) - {"name", "description"}:
         raise _refuse(_DEFAULT_ONLY)
-    values = await _values(data, own_id=manager_id)
+    values = await checked_values(data, own_id=manager_id)
     try:
         async with db_connection.transaction() as conn:
             if values.get("enabled") is True:
@@ -345,11 +350,12 @@ async def delete_manager(manager_id: str) -> dict[str, Any]:
 # --- Templates ---
 
 
-async def _template_profiles(raw: Any, project_id: str | None) -> dict[str, str]:
-    chosen = await projects.profile_choices(raw, clearing=False, field="profiles")
+async def _template_profiles(raw: Any, project_id: str | None, *,
+                              conn: asyncpg.Connection | None = None) -> dict[str, str]:
+    chosen = await projects.profile_choices(raw, clearing=False, field="profiles", pool=conn)
     profiles = {role: profile for role, profile in chosen.items() if profile}
     if project_id and profiles:
-        allowed, restricted = await projects.choosable_profiles(project_id)
+        allowed, restricted = await projects.choosable_profiles(project_id, pool=conn)
         if restricted:
             ids = {p["id"] for p in allowed}
             for role, profile in profiles.items():
@@ -368,11 +374,14 @@ def _text(data: Mapping[str, Any], field: str) -> str:
     return value
 
 
-async def put_template(manager_id: str, key: str, data: Mapping[str, Any]) -> dict[str, Any]:
-    """Create template ``key`` of the Manager or replace it whole (404 for an unknown Manager, 400 for a template
-    Looper refuses, or for the default Manager, whose task tool never takes a template). Answers ``managers_view()``."""
-    if await db_managers.get_manager(manager_id) is None:
-        raise _refuse(f"no Manager {manager_id!r}", HTTP_404)
+async def checked_template_values(manager_id: str, key: str, data: Mapping[str, Any], *,
+                                  conn: asyncpg.Connection | None = None,
+                                  check_references: bool = True) -> dict[str, Any]:
+    """Validate a template without writing; check every reference on ``conn`` when supplied.
+
+    Previews pass ``check_references=False`` and check their projected identities and role settings instead.
+    Input regexes still run through ``task_templates.check_patterns``' bounded subprocess.
+    """
     if manager_id == DEFAULT_MANAGER_ID:
         raise _refuse(_DEFAULT_NO_TEMPLATES)
     if not re.fullmatch(task_templates.KEY_PATTERN, key):
@@ -395,7 +404,7 @@ async def put_template(manager_id: str, key: str, data: Mapping[str, Any]) -> di
         await task_templates.check_patterns(inputs)
     except task_templates.TemplateError as exc:
         raise _refuse(str(exc)) from None
-    if project_id and await db_projects.get_project(project_id) is None:
+    if check_references and project_id and await db_projects.get_project(project_id, pool=conn) is None:
         raise _refuse(f"no project {project_id!r}")
     work_dir = _text(data, "work_dir")
     if work_dir.strip():
@@ -405,18 +414,35 @@ async def put_template(manager_id: str, key: str, data: Mapping[str, Any]) -> di
             raise _refuse(f"work_dir: {exc}") from None
     else:
         work_dir = ""
-    profiles = await _template_profiles(data.get("profiles"), project_id)
-    for role_key in role_templates:
-        if await db_role_templates.get_template(project_id, role_key) is None:
-            raise _refuse(f"project {project_id!r} has no role template {role_key!r}")
+    if check_references:
+        profiles = await _template_profiles(data.get("profiles"), project_id, conn=conn)
+        for role_key in role_templates:
+            if await db_role_templates.get_template(project_id, role_key, pool=conn) is None:
+                raise _refuse(f"project {project_id!r} has no role template {role_key!r}")
+    else:
+        profiles = data.get("profiles") or {}
+        if not isinstance(profiles, dict):
+            raise _refuse('profiles must be an object: {"planner" | "worker" | "reviewer": profile}')
+        for role, profile in profiles.items():
+            if role not in projects.TASK_PROFILE_ROLES or not isinstance(profile, str):
+                raise _refuse(f"profiles.{role}: give an Agent Profile for a planner, worker or reviewer")
+    return {
+        "name": name, "description": description, "project_id": project_id, "work_dir": work_dir,
+        "workspace_mode": workspace_mode, "requirement": requirement, "planner_instructions": instructions,
+        "planner_profile_id": profiles.get("planner"), "worker_profile_id": profiles.get("worker"),
+        "reviewer_profile_id": profiles.get("reviewer"), "role_templates": role_templates,
+        "inputs": [{"key": i.key, "label": i.label, "kind": i.kind.value, "required": i.required,
+                    "pattern": i.pattern, "hint": i.hint} for i in inputs]}
+
+
+async def put_template(manager_id: str, key: str, data: Mapping[str, Any]) -> dict[str, Any]:
+    """Create template ``key`` of the Manager or replace it whole (404 for an unknown Manager, 400 for a template
+    Looper refuses, or for the default Manager, whose task tool never takes a template). Answers ``managers_view()``."""
+    if await db_managers.get_manager(manager_id) is None:
+        raise _refuse(f"no Manager {manager_id!r}", HTTP_404)
+    values = await checked_template_values(manager_id, key, data)
     try:
-        stored = await db_managers.put_template(manager_id, key, {
-            "name": name, "description": description, "project_id": project_id, "work_dir": work_dir,
-            "workspace_mode": workspace_mode, "requirement": requirement, "planner_instructions": instructions,
-            "planner_profile_id": profiles.get("planner"), "worker_profile_id": profiles.get("worker"),
-            "reviewer_profile_id": profiles.get("reviewer"), "role_templates": role_templates,
-            "inputs": [{"key": i.key, "label": i.label, "kind": i.kind.value, "required": i.required,
-                        "pattern": i.pattern, "hint": i.hint} for i in inputs]})
+        stored = await db_managers.put_template(manager_id, key, values)
     except asyncpg.ForeignKeyViolationError:
         raise _refuse("the project or an Agent Profile was removed meanwhile", HTTP_409) from None
     if stored is None:  # deleted after the early check

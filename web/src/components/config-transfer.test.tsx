@@ -125,6 +125,18 @@ describe("configuration import", () => {
     objectUrl.mockRestore(); anchor.mockRestore();
   });
 
+  it("explains immutable Manager and template matching before confirmation", async () => {
+    plan.counts = { managers: counts(1), "manager.templates": counts(1) };
+    plan.changes = [];
+    await show();
+    expect(container.textContent).toContain("Local working directories stay on this machine");
+    await upload();
+    vi.stubGlobal("confirm", vi.fn(() => false));
+    await click("Apply 2 changes");
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Managers match by immutable ID, templates by Manager and key"));
+    expect(fetcher.mock.calls.some(([url]) => String(url).endsWith("/import_apply"))).toBe(false);
+  });
+
   it("keeps 202 pending and tolerates an already expired cancellation", async () => {
     await show();
     await upload();

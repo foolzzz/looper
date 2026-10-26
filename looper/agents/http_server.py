@@ -649,7 +649,10 @@ class AgentHTTPServer:
                         reader = asyncio.StreamReader()
                         reader.feed_data(raw)
                         reader.feed_eof()
-                        return await self._config_imports.receive(reader, len(raw), owner=principal.key)
+                        from .v1_domains.configuration import CONFIG_DOCUMENT
+                        return await self._config_imports.receive(reader, len(raw), owner=principal.key,
+                            policy=principal.kind,
+                            validate=lambda document: api_v1.validate_arguments(CONFIG_DOCUMENT, document))
                     return await self._apply_import(self._config_imports, call.arguments["import_id"],
                                                     owner=principal.key)
                 except config_transfer.ConfigFileError as exc:
@@ -663,9 +666,11 @@ class AgentHTTPServer:
                 if self._config_imports is None:
                     raise OpError(ErrorCode.UNAVAILABLE, "the server has no runtime root")
                 try:
-                    self._config_imports._get(call.arguments["import_id"], owner=principal.key)
+                    await self._config_imports.check_policy(call.arguments["import_id"], owner=principal.key)
                 except config_imports.ImportNotFound as exc:
                     raise OpError(ErrorCode.NOT_FOUND, str(exc)) from None
+                except config_transfer.ConfigFileError as exc:
+                    raise OpError(ErrorCode.INVALID, str(exc)) from None
                 return f"Apply configuration import {call.arguments['import_id']} in one transaction."
 
             applying = name == "config.import_apply"

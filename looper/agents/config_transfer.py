@@ -1,6 +1,7 @@
 """Configuration export and import: one file that recreates an installation's agent configuration (M8e).
 
-**The file** is one JSON document, ``format: looper-config/v3``. A v1 file
+**The file** is one JSON document, ``looper-config/v4`` when it includes a
+portable Manager graph, otherwise the unchanged ``looper-config/v3`` shape. A v1 file
 (``looper-config/v1``, or ``loopx-config/v1`` from before the rename to Looper)
 is read too, as the same file under its older names (``_from_v1``): its Agent
 Profiles were ``agents``, and a layer named its profile ``agent``. V1 is first
@@ -26,6 +27,8 @@ sections:
   Profile's moves onto profiles as the upgrade moved it (``layer_effort``; see
   **Import**);
 - ``channels``: each chat channel's configuration;
+- ``managers`` (v4 only): live scenario definitions and task templates, with
+  immutable Manager ids, natural profile/project references and no machine paths;
 - ``installs``: the global installs, naming their item by kind and name;
 - ``projects`` (``--include-projects``): each project's fields, execution
   settings, layers, knowledge, the items it wrote, its installs and its
@@ -95,6 +98,8 @@ from ..db.channel_configs import BUILTIN_CHANNEL_IDS
 from .message import builtin_channel_id
 
 FORMAT = "looper-config/v3"
+V3_FORMAT = FORMAT
+V4_FORMAT = "looper-config/v4"
 # v1, and v1 under its name from before the rename to Looper (LoopX): read as v2 (``_from_v1``), never written.
 V2_FORMAT = "looper-config/v2"
 V1_FORMATS = ("looper-config/v1", "loopx-config/v1")
@@ -146,7 +151,7 @@ class Action(str, Enum):
 SECTIONS = ("runtimes", "providers", "models", "profiles", "settings.layers", "settings.roles", "settings.scheduler", "channels",
             "catalog", "installs",
             "projects", "project.layers", "project.items", "project.knowledge", "project.role_templates",
-            "project.schedules", "project.installs")
+            "project.schedules", "project.installs", "managers", "manager.templates")
 # A schedule's settings the file carries as they are; its notify target, Agent Profiles and task limits are
 # ``notify_target``, ``profiles`` (by name) and ``task_limits``.
 _SCHEDULE_FIELDS = ("name", "cron", "timezone", "requirement", "overlap", "max_parallel_runs", "catch_up",
@@ -349,6 +354,30 @@ def role_template_entry(row: Mapping[str, Any], items: Mapping[str, Mapping[str,
     return entry
 
 
+def manager_template_entry(row: Mapping[str, Any], profiles: Mapping[str, str],
+                           projects: Mapping[str, str]) -> dict[str, Any]:
+    """A portable task template, with natural references and an explicit local-directory reminder."""
+    entry = {name: row[name] for name in ("key", "name", "description", "workspace_mode", "requirement",
+                                         "planner_instructions", "role_templates", "inputs")}
+    entry["project"] = projects[row["project_id"]] if row["project_id"] else None
+    entry["profiles"] = {role: profiles[row[f"{role}_profile_id"]] for role in ("planner", "worker", "reviewer")
+                         if row[f"{role}_profile_id"]}
+    if row["work_dir"]:
+        entry["repoint"] = True
+    return entry
+
+
+def manager_entry(row: Mapping[str, Any], templates: Sequence[Mapping[str, Any]],
+                  profiles: Mapping[str, str], projects: Mapping[str, str]) -> dict[str, Any]:
+    entry = {name: row[name] for name in ("id", "name", "description")}
+    if row["id"] != "manager":
+        entry.update({name: row[name] for name in ("system_prompt", "tools", "task_scope", "task_policy", "enabled")})
+        entry["profile"] = profiles[row["profile_id"]] if row["profile_id"] else None
+        entry["templates"] = [manager_template_entry(t, profiles, projects) for t in templates
+                              if t["manager_id"] == row["id"]]
+    return entry
+
+
 def document_entry(row: Mapping[str, Any]) -> dict[str, Any]:
     entry = {"title": row["title"], "summary": row["summary"], "source_kind": row["source_kind"],
              "filename": row["filename"], "size_bytes": row["size_bytes"], "sha256": row["sha256"]}
@@ -402,6 +431,7 @@ class ExportSummary:
     repoint: int = 0
     bytes: int = 0
     bots_left_out: int = 0  # the added bots of Managers, which the file does not carry
+    format: str = V3_FORMAT
 
 
 def _secret_count(entry: Mapping[str, Any]) -> int:
@@ -438,9 +468,12 @@ async def export_chunks(
     channels = [channel_entry(row, include_secrets) for row in channel_rows
                 if row["channel_id"] in BUILTIN_CHANNEL_IDS]
     summary.bots_left_out = len(channel_rows) - len(channels)
+    managers = await db.read_managers(conn)
+    portable_graph = any(row["id"] != "manager" for row in managers) or bool(summary.bots_left_out)
+    summary.format = V4_FORMAT if portable_graph else V3_FORMAT
     providers = [provider_entry(r, include_secrets) for r in await db.read_providers(conn) if not r["builtin"]]
     head = {
-        "format": FORMAT,
+        "format": summary.format,
         "looper_version": __version__,
         "exported_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "secrets": "included" if include_secrets else "omitted",
@@ -453,6 +486,13 @@ async def export_chunks(
         "channels": channels,
         "installs": [install_entry(r) for r in installs if r["scope"] == "global"],
     }
+    if portable_graph:
+        manager_templates = await db.read_manager_templates(conn)
+        profile_names = {row["id"]: row["name"] for row in await db.read_profiles(conn)}
+        project_names = {row["id"]: row["name"] for row in await db.read_projects(conn)}
+        head["managers"] = [manager_entry(row, manager_templates, profile_names, project_names) for row in managers]
+        summary.counts["managers"] = len(managers)
+        summary.counts["manager.templates"] = len(manager_templates)
     if scheduler := await stored_scheduler_settings(conn):  # only a stored setting is carried
         head["settings"]["scheduler"] = scheduler
     summary.counts.update({"runtimes": len(head["runtimes"]), "providers": len(providers),
@@ -571,9 +611,11 @@ def read_file(path: Path, *, label: str | None = None) -> dict[str, Any]:
         raise ConfigFileError(f"cannot read {label}: {exc.strerror or exc}") from None
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ConfigFileError(f"{label} is not a Looper configuration file: {exc}") from None
-    if not isinstance(data, dict) or data.get("format") not in (FORMAT, V2_FORMAT, *V1_FORMATS):
+    if not isinstance(data, dict) or data.get("format") not in (V4_FORMAT, V3_FORMAT, V2_FORMAT, *V1_FORMATS):
         found = data.get("format") if isinstance(data, dict) else None
-        raise ConfigFileError(f"{label} is not a {FORMAT}, {V2_FORMAT} or {V1_FORMATS[0]} file (format: {found!r})")
+        raise ConfigFileError(f"{label} is not a {V4_FORMAT}, {V3_FORMAT}, {V2_FORMAT} or {V1_FORMATS[0]} file "
+                              f"(format: {found!r})")
+    _check_manager_document(data)
     profiles = "agents" if data["format"] in V1_FORMATS else "profiles"
     for section, kind in (("settings", dict), ("channels", list), ("installs", list), ("catalog", list),
                           ("projects", list), ("runtimes", list), ("providers", list), (profiles, list), ("models", list)):
@@ -593,6 +635,16 @@ def read_file(path: Path, *, label: str | None = None) -> dict[str, Any]:
             raise ConfigFileError(f"channels: {channel_id} is a bot of a Manager; this file cannot be imported "
                                   "(bots are added in Settings → Channels, not imported)")
     return _from_v1(data) if data["format"] in V1_FORMATS else data
+
+
+def _check_manager_document(data: Mapping[str, Any]) -> None:
+    """Version-gate the new graph even for callers that do not use the HTTP schema."""
+    if data.get("format") != V4_FORMAT:
+        if "managers" in data:
+            raise ConfigFileError("managers requires looper-config/v4; legacy files cannot carry a Manager graph")
+        return
+    if not isinstance(data.get("managers", []), list):
+        raise ConfigFileError("managers must be a JSON list")
 
 
 def _from_v1(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -872,6 +924,8 @@ class _Target:
     profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
     models: dict[tuple[str, str, str], dict[str, Any]] = field(default_factory=dict)
     schedules: dict[str, list[dict[str, Any]]] = field(default_factory=lambda: defaultdict(list))  # by project id
+    managers: dict[str, dict[str, Any]] = field(default_factory=dict)  # immutable full id, including tombstones
+    manager_templates: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
     async def read(cls, conn: Any) -> _Target:
@@ -896,6 +950,9 @@ class _Target:
         target.providers = {row["name"]: row for row in await db.read_providers(conn)}
         target.models = {(row["provider"], row["name"], row["protocol"]): row for row in await db.read_models(conn)}
         target.profiles = {row["name"]: row for row in await db.read_profiles(conn)}
+        target.managers = {row["id"]: row for row in await db.read_managers(conn, include_deleted=True)}
+        target.manager_templates = {(row["manager_id"], row["key"]): row for row in
+                                    await db.read_manager_templates(conn)}
         from ..db.schedules import list_schedules
 
         for row in await list_schedules(pool=conn):
@@ -948,6 +1005,8 @@ class _Importer:
         self.min_interval: int | None = None  # the file's, once read
         self.repointed_schedules: list[str] = []
         self.role_text_limits: dict[str, int] = {}  # by project id: how long its roles' texts may be
+        self.role_template_values = {pid: dict(rows) for pid, rows in target.role_templates.items()}
+        self.invalid_role_templates: set[tuple[str, str]] = set()
         from .profile_registry import (Endpoint, ModelSpec, ResolvedModel, builtin_resolved_profile,
                                        provider_spec, runtime_spec)
 
@@ -1894,6 +1953,8 @@ class _Importer:
                     raise _Skip("items is not a list")
             except _Skip as exc:
                 self.record(section, f"{label}{raw_key}", Action.SKIPPED, reason=str(exc))
+                if isinstance(raw_key, str):
+                    self.invalid_role_templates.add((project_id, raw_key))
                 continue
             items = []
             for ref in refs:
@@ -1902,6 +1963,7 @@ class _Importer:
                 item_id = self.item_ids.get((ref.get("kind"), ref.get("name"), owner)) if isinstance(ref, Mapping) \
                     and (owner_name is None or owner is not None) else None
                 if item_id is None:
+                    self.invalid_role_templates.add((project_id, key))
                     shown = f"{ref.get('kind')}:{ref.get('name')}" if isinstance(ref, Mapping) else repr(ref)
                     self.plan.notes.append(f"{label}role template {key}: no item {shown} here or in the file; "
                                            "imported without it")
@@ -1910,10 +1972,12 @@ class _Importer:
             profile_id = None
             if profile is not None:
                 if profile in self.blocked_profiles:
+                    self.invalid_role_templates.add((project_id, key))
                     self.record(section, f"{label}{key}", Action.SKIPPED,
                                 reason=f"no valid Agent Profile {profile!r} here or in the file")
                     continue
                 elif profile not in self.profiles:
+                    self.invalid_role_templates.add((project_id, key))
                     self.plan.notes.append(f"{label}role template {key}: no Agent Profile {profile!r} here or in "
                                            "the file; imported without one")
                 else:
@@ -1921,16 +1985,187 @@ class _Importer:
                         check_roles(self.profiles[profile][1], (kind.agent.value,))
                         profile_id = self.profiles[profile][0]
                     except RegistryError as exc:
+                        self.invalid_role_templates.add((project_id, key))
                         self.plan.notes.append(f"{label}role template {key}: {exc}; imported without a profile")
             values = {"kind": kind.value, "description": description, "role_prompt": prompt, "harness": harness,
                       "profile_id": profile_id, "items": items}
             row = stored.get(key)
             current = {**{name: row[name] for name in values}, "items": list(row["items"] or ())} if row else None
             action = self.outcome(section, f"{label}{key}", current, _differs(values, current, values))
+            self.role_template_values.setdefault(project_id, {})[key] = values
             if self.apply and action in (Action.ADDED, Action.CHANGED):
                 from ..db import role_templates as db_templates
 
                 await db_templates.put_template(project_id, key, values, pool=self.conn)
+
+    # --- Manager definitions and their task templates ---
+
+    def manager_profile(self, name: Any, role: str) -> str | None:
+        from .profile_registry import RegistryError, check_roles
+
+        if name is None:
+            return None
+        if not isinstance(name, str) or name in self.blocked_profiles or name not in self.profiles:
+            raise ConfigFileError(f"{role}: no valid Agent Profile {name!r} here or in the file; import it first")
+        identity, spec = self.profiles[name]
+        try:
+            check_roles(spec, (role,))
+        except RegistryError as exc:
+            raise ConfigFileError(f"{role} profile {name!r}: {exc}") from None
+        return identity
+
+    async def managers(self, entries: Sequence[Any]) -> None:
+        """Validate the complete graph before writing any Manager, then merge by immutable identity."""
+        from ..db import managers as db_managers, projects as db_projects
+        from . import managers_api
+        from .projects import RequestError
+
+        checked: dict[str, dict[str, Any]] = {}
+        templates: list[tuple[str, str, dict[str, Any], bool]] = []
+        names: dict[str, str] = {}
+        for raw in entries:
+            try:
+                entry = _mapping(raw, "a Manager")
+                allowed = {"id", "name", "description", "system_prompt", "profile", "tools", "task_scope",
+                           "task_policy", "enabled", "templates"}
+                unknown = set(entry) - allowed
+                if unknown:
+                    raise ConfigFileError(f"managers: unknown field {sorted(unknown)[0]!r}")
+                identity = entry.get("id")
+                if not isinstance(identity, str) or (identity != "manager" and not re.fullmatch(
+                        "manager-" + managers_api.MANAGER_KEY_PATTERN.removeprefix("^"), identity)):
+                    raise ConfigFileError("managers.id must be 'manager' or the full immutable 'manager-<key>' id")
+                if identity in checked:
+                    raise ConfigFileError(f"managers: duplicate id {identity!r}")
+                row = self.target.managers.get(identity)
+                if row and row["deleted_at"] is not None:
+                    raise ConfigFileError(f"Manager {identity!r} was deleted; choose a new immutable id")
+                if "name" not in entry:
+                    raise ConfigFileError(f"Manager {identity}: name is required")
+                if identity == "manager" and set(entry) - {"id", "name", "description"}:
+                    raise ConfigFileError("the default Manager entry may only set id, name and description")
+                values = {k: v for k, v in entry.items() if k not in ("id", "profile", "templates")}
+                for name in ("name", "description", "system_prompt"):
+                    if name in values:
+                        _string(values[name], f"{identity}.{name}")
+                if identity != "manager":
+                    if row is None:
+                        values = {"tools": "tasks", "task_scope": "own", "task_policy": "free", "enabled": True,
+                                  "description": "", "profile_id": None, **values}
+                        if "system_prompt" not in values:
+                            raise ConfigFileError(f"Manager {identity}: system_prompt is required for a new definition")
+                    if "profile" in entry:
+                        values["profile_id"] = self.manager_profile(entry["profile"], "manager")
+                values = await managers_api.checked_values(values, own_id=identity, conn=self.conn if self.apply else None,
+                                                            check_references=self.apply)
+                name_key = values["name"].casefold()
+                if name_key in names:
+                    raise ConfigFileError(f"managers: duplicate name {values['name']!r}")
+                names[name_key] = identity
+                checked[identity] = values
+                raw_templates = entry.get("templates", [])
+                if not isinstance(raw_templates, list):
+                    raise ConfigFileError(f"Manager {identity}: templates must be a list")
+                seen: set[str] = set()
+                for template in raw_templates:
+                    template = _mapping(template, f"{identity} task template")
+                    fields = {"key", "name", "description", "requirement", "planner_instructions", "project",
+                              "workspace_mode", "profiles", "role_templates", "repoint", "inputs"}
+                    if set(template) - fields:
+                        raise ConfigFileError(f"{identity} template: unknown field {sorted(set(template) - fields)[0]!r}")
+                    key = template.get("key")
+                    if not isinstance(key, str) or key in seen:
+                        raise ConfigFileError(f"{identity}: missing or duplicate template key {key!r}")
+                    seen.add(key)
+                    project = template.get("project")
+                    project_id = self.project_ids.get(project.strip().lower()) if isinstance(project, str) else None
+                    if project is not None and project_id is None:
+                        raise ConfigFileError(f"{identity}/{key}: no project {project!r}; include projects or create it first")
+                    raw_profiles = template.get("profiles", {})
+                    if not isinstance(raw_profiles, Mapping):
+                        raise ConfigFileError(f"{identity}/{key}: profiles must be an object")
+                    profiles = {}
+                    for role, profile in raw_profiles.items():
+                        if role not in ("planner", "worker", "reviewer") or not isinstance(profile, str):
+                            raise ConfigFileError(f"{identity}/{key}: profiles.{role} must name a task Agent Profile")
+                        profiles[role] = self.manager_profile(profile, role)
+                    allowed = []
+                    if project_id and not project_id.startswith("new:"):
+                        allowed = await db_projects.allowed_profiles(project_id, pool=self.conn)
+                        if allowed:
+                            ids = {p["id"] for p in allowed}
+                            for role, profile_id in profiles.items():
+                                if profile_id not in ids:
+                                    raise ConfigFileError(f"{identity}/{key}: profiles.{role} is not on project {project!r}'s list")
+                    current = self.target.manager_templates.get((identity, key))
+                    for name in ("name", "description", "requirement", "planner_instructions"):
+                        if name in template:
+                            _string(template[name], f"{identity}/{key}.{name}")
+                    if "role_templates" in template and not isinstance(template["role_templates"], list):
+                        raise ConfigFileError(f"{identity}/{key}: role_templates must be a list")
+                    # Never resolve or normalize a machine path carried by a file. Preserve the target's exact path.
+                    data = {k: v for k, v in template.items() if k not in ("key", "project", "repoint", "profiles")}
+                    data.update(project_id=project_id, profiles=profiles, work_dir="")
+                    values_template = await managers_api.checked_template_values(
+                        identity, key, data, conn=self.conn if self.apply else None, check_references=self.apply)
+                    values_template["work_dir"] = current["work_dir"] if current else ""
+                    for role_key in values_template["role_templates"]:
+                        if (project_id, role_key) in self.invalid_role_templates or role_key not in \
+                                self.role_template_values.get(project_id, {}):
+                            raise ConfigFileError(f"{identity}/{key}: project {project!r} has no valid role template {role_key!r}")
+                        from .project_execution import ProjectExecution
+                        from .task_roles import RoleError, check_definition
+
+                        fixed = self.role_template_values[project_id][role_key]
+                        project_row = next((p for p in self.target.projects.values() if p["id"] == project_id), {})
+                        limit = self.role_text_limits.get(project_id, ProjectExecution.from_row(project_row).role_text_limit)
+                        try:
+                            kind, _, _ = check_definition(fixed["kind"], fixed["role_prompt"], fixed.get("harness"), limit)
+                        except RoleError as exc:
+                            raise ConfigFileError(f"{identity}/{key}: role template {role_key!r}: {exc}") from None
+                        if fixed["profile_id"]:
+                            named = next((name for name, (pid, _) in self.profiles.items()
+                                          if pid == fixed["profile_id"]), None)
+                            if named is None:
+                                raise ConfigFileError(f"{identity}/{key}: role template {role_key!r} has no valid profile")
+                            self.manager_profile(named, kind.agent.value)
+                            if allowed and fixed["profile_id"] not in {p["id"] for p in allowed}:
+                                raise ConfigFileError(f"{identity}/{key}: role template {role_key!r}'s profile is not "
+                                                      f"on project {project!r}'s list")
+                    repoint = template.get("repoint", False)
+                    if not isinstance(repoint, bool):
+                        raise ConfigFileError(f"{identity}/{key}: repoint must be true or false")
+                    templates.append((identity, key, values_template, repoint))
+            except (RequestError, _Skip) as exc:
+                raise ConfigFileError(f"managers: {exc}") from None
+        for identity, row in self.target.managers.items():
+            owner = names.get(" ".join(row["name"].split()).casefold())
+            if row["deleted_at"] is None and owner is not None and owner != identity:
+                raise ConfigFileError(f"Manager name {row['name']!r} is already used by {identity}; "
+                                      "rename its current owner before importing another Manager with that name")
+        enabled = sum(bool(checked.get(identity, {}).get("enabled", row["enabled"]))
+                      for identity, row in self.target.managers.items() if row["deleted_at"] is None)
+        enabled += sum(bool(v.get("enabled", True)) for identity, v in checked.items()
+                       if identity not in self.target.managers)
+        if enabled > managers_api.MAX_ENABLED_MANAGERS:
+            raise ConfigFileError(f"at most {managers_api.MAX_ENABLED_MANAGERS} Managers may be enabled; disable one first")
+        # Disables precede enables so the maximum is respected throughout, too.
+        for identity, values in sorted(checked.items(), key=lambda pair: (bool(pair[1].get("enabled", True)), pair[0])):
+            row = self.target.managers.get(identity)
+            action = self.outcome("managers", identity, row, _differs(values, row, values))
+            if self.apply and action is Action.ADDED:
+                await db_managers.insert_manager({"id": identity, **values}, conn=self.conn)
+            elif self.apply and action is Action.CHANGED:
+                await db_managers.update_manager(identity, values, conn=self.conn, only_if_changed=True)
+        for identity, key, values, repoint in templates:
+            row = self.target.manager_templates.get((identity, key))
+            self.outcome("manager.templates", f"{identity}/{key}", row, _differs(values, row, values))
+            if repoint:
+                self.plan.notes.append(f"{identity}/{key}: local directory requires repointing on this machine; "
+                                       + ("the existing target directory is preserved" if row and row["work_dir"] else
+                                          "no local directory is invented; set one before using this template"))
+            if self.apply:
+                await db_managers.put_template(identity, key, values, conn=self.conn, only_if_changed=True)
 
     # --- schedules ---
 
@@ -2060,6 +2295,7 @@ class _Importer:
 async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> Plan:
     """The import's plan for ``data`` (from ``read_file``); with ``apply`` also written, in the caller's
     transaction. Raises ``ConfigFileError`` when the result would break a catalog cap."""
+    _check_manager_document(data)
     if apply:
         from ..db.connection import ensure_schema, schema_change_pending
 
@@ -2073,6 +2309,16 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
         # cannot leave conversion on a snapshot from before another writer.
         await conn.execute("LOCK TABLE llm_providers, llm_provider_endpoints, llm_models, agent_profiles "
                            "IN SHARE ROW EXCLUSIVE MODE")
+        if data.get("managers"):
+            from ..db import managers as db_managers
+
+            await db_managers.lock_managers(conn)
+            # Every Manager writer takes the global limit lock before these target row locks.
+            for identity in sorted(entry["id"] for entry in data["managers"]
+                                   if isinstance(entry, Mapping) and isinstance(entry.get("id"), str)):
+                await db_managers.lock_for_update(identity, conn=conn)
+            # Resolve the projected dependencies and reject the complete graph before any import writes.
+            await import_config(conn, data, apply=False)
     if data.get("format") in V1_FORMATS and "agents" in data:
         data = _from_v1(data)
     importer = _Importer(conn, await _Target.read(conn), apply)
@@ -2117,6 +2363,8 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
             await importer.item(item, project_id, label)
         await importer.documents(entry.get("knowledge") or [], project_id, label)
         await importer.role_templates(entry.get("role_templates") or [], project_id, label)
+    await importer.managers(data.get("managers", []))
+    for entry, project_id, label in projects:
         await importer.schedules(entry.get("schedules") or [], project_id, label)
     importer.schedule_notes()
     await importer.settle_layers()
@@ -2134,7 +2382,16 @@ async def run_import(conn: Any, data: Mapping[str, Any], *, apply: bool) -> Plan
     """Preview ``data`` in a read-only transaction, or apply it in one transaction, on ``conn``: what both
     v1 and the dashboard's import run."""
     async with conn.transaction(isolation="read_committed" if apply else "repeatable_read", readonly=not apply):
-        return await import_config(conn, data, apply=apply)
+        plan = await import_config(conn, data, apply=apply)
+    if apply:
+        from .managers_api import _on_change
+
+        touched = {change.key.split("/", 1)[0] for change in plan.changes
+                   if change.section in ("managers", "manager.templates")
+                   and change.action in (Action.ADDED, Action.CHANGED)}
+        for identity in sorted(touched):
+            await _on_change(identity)
+    return plan
 
 
 async def import_file(dsn: str, path: Path, *, apply: bool) -> Plan:
@@ -2182,7 +2439,7 @@ def format_export(summary: ExportSummary, path: Path, *, include_secrets: bool) 
                else f"{summary.secrets} secret values left out as placeholders")
     left_out = (f"; {summary.bots_left_out} bots of Managers are not exported "
                 "(add them again in Settings → Channels)" if summary.bots_left_out else "")
-    lines = [f"Wrote {path} ({summary.bytes} bytes, {FORMAT}): {counts}; {secrets}{left_out}."]
+    lines = [f"Wrote {path} ({summary.bytes} bytes, {summary.format}): {counts}; {secrets}{left_out}."]
     if summary.repoint:
         lines.append(f"{summary.repoint} path document(s) are references to re-point on the new machine.")
     lines.append(f"On the new machine: loopercli config import {path.name} (preview), then "

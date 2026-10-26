@@ -158,6 +158,26 @@ async def read_role_templates(conn: asyncpg.Connection) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+async def read_managers(conn: asyncpg.Connection, *, include_deleted: bool = False) -> list[dict[str, Any]]:
+    """Manager definitions in the export snapshot; old, not-yet-migrated databases have none."""
+    if not await conn.fetchval("SELECT to_regclass('managers') IS NOT NULL"):
+        return []
+    from .managers import list_managers
+
+    return await list_managers(include_deleted=include_deleted, pool=conn)
+
+
+async def read_manager_templates(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    """Task templates of live Managers, with local paths retained only for the repoint decision."""
+    if not await conn.fetchval("SELECT to_regclass('manager_task_templates') IS NOT NULL"):
+        return []
+    rows = await conn.fetch(
+        "SELECT t.* FROM manager_task_templates t JOIN managers m ON m.id = t.manager_id "
+        "WHERE m.deleted_at IS NULL ORDER BY t.manager_id, t.key")
+    return [{**dict(row), "inputs": _json(row["inputs"]), "role_templates": list(row["role_templates"])}
+            for row in rows]
+
+
 # --- Writing (inside the import's transaction) ---
 
 

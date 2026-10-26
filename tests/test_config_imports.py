@@ -119,9 +119,9 @@ def test_another_site_cannot_upload(tmp_path: Path) -> None:
     (b"", "the request holds no file"),
     (b"PK\x03\x04 a zip", "the uploaded file is not a Looper configuration file"),
     (b"\xff\xfe{}", "the uploaded file is not a Looper configuration file"),
-    (b"[]", "is not a looper-config/v3, looper-config/v2 or looper-config/v1 file (format: None)"),
+    (b"[]", "is not a looper-config/v4, looper-config/v3, looper-config/v2 or looper-config/v1 file (format: None)"),
     (b'{"format": "looper-config/v99"}',
-     "is not a looper-config/v3, looper-config/v2 or looper-config/v1 file (format: 'looper-config/v99')"),
+     "is not a looper-config/v4, looper-config/v3, looper-config/v2 or looper-config/v1 file (format: 'looper-config/v99')"),
     (b'{"format": "loopx-config/v1", "catalog": {}}', "catalog must be a JSON list"),
 ], ids=["empty", "not-json", "not-utf8", "no-format", "newer-version", "bad-section"])
 def test_a_file_that_is_not_a_configuration_file_is_refused_and_removed(

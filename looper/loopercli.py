@@ -555,9 +555,11 @@ def _config_arguments(parser: Parser) -> Any:
     export.add_argument("file", help="destination JSON file ('-' writes stdout)")
     export.add_argument("--include-projects", action="store_true")
     export.add_argument("--include-secrets", action="store_true")
+    _operator_arguments(export)
     import_ = commands.add_parser(
         "import", help="Preview configuration; request confirmation to apply, or cancel")
     import_.add_argument("file", nargs="?", help="configuration JSON file ('-' reads stdin); preview only")
+    _operator_arguments(import_)
     actions = import_.add_mutually_exclusive_group()
     actions.add_argument("--apply", metavar="IMPORT_ID", help="request confirmation to apply a staged import")
     actions.add_argument("--cancel", metavar="IMPORT_ID", help="cancel a staged import")
@@ -1206,6 +1208,8 @@ def build_parser(document: Mapping[str, Any] | None) -> Parser:
             if children is not None and tail and tail not in children.choices:
                 sub = children.add_parser(tail, help=_escape(summary), description=description)
                 _add_operation(sub, operation)
+                if head == "config" and not operation.operator_only:
+                    _operator_arguments(sub)
                 sub.set_defaults(_run=_run_generated)
             continue
         found[head, tail], summaries[head, tail] = operation, summary
@@ -1255,7 +1259,8 @@ def _needs_document(rest: list[str]) -> bool:
 def _run(opts: argparse.Namespace, rest: list[str]) -> int:
     ctx = Context(client_file(opts.client_file), opts.session, opts.json)
     document = None
-    if _needs_document(rest):
+    needs_document = _needs_document(rest)
+    if needs_document or (rest and rest[0] == "config"):
         # Discover generated operator commands with a transient token, before a client file is needed.
         # A bare --url may be an operation's request field, so only the credential flag selects this mode.
         if any(part == "--operator-token-file" or part.startswith("--operator-token-file=") for part in rest):
@@ -1266,6 +1271,7 @@ def _run(opts: argparse.Namespace, rest: list[str]) -> int:
             if operator_args._operator_url is not None:
                 operator_args.url = operator_args._operator_url
             _use_operator(operator_args, ctx)
+    if needs_document:
         try:
             document = _fetch_document(ctx)
         except CliError as exc:

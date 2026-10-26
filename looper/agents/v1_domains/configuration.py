@@ -6,14 +6,13 @@ from .. import api_v1, config_imports, config_transfer
 from ..api_v1 import Operation, _object, _STR
 from ..ops import ErrorCode, OpError
 
-# Reuse the existing portable document projection, including optional sections.
-CONFIG_DOCUMENT = {**api_v1.RESULTS["config.export"]["properties"]["document"],
-                   "title": "ConfigDocument", "additionalProperties": False}
-CONFIG_DOCUMENT["properties"] = {**CONFIG_DOCUMENT["properties"], "loopx_version": _STR}
+# Reuse the version branches as well as properties inspected by older callers.
+CONFIG_DOCUMENT = {**api_v1.CONFIG_DOCUMENT, "title": "ConfigDocument"}
 CONFIG_ABOUT = _object(dict.fromkeys(("format", "looper_version", "exported_at", "secrets"), _STR), [])
 CONFIG_PLAN = api_v1._PLAN
 UPLOAD = _object({**api_v1.RESULTS["config.import_preview"]["properties"], "file": CONFIG_ABOUT})
-SCHEMAS = {"ConfigDocument": CONFIG_DOCUMENT, "ConfigAbout": CONFIG_ABOUT, "ConfigImportPlan": CONFIG_PLAN}
+SCHEMAS = {"ConfigDocument": CONFIG_DOCUMENT, "ConfigAbout": CONFIG_ABOUT, "ConfigImportPlan": CONFIG_PLAN,
+           "ManagerConfig": api_v1.MANAGER_CONFIG, "TemplateConfig": api_v1.TEMPLATE_CONFIG}
 RESULTS = {}
 _ID = _object({"import_id": {"type": "string", "minLength": 1}}, closed=True)
 OPERATIONS = (
@@ -47,6 +46,7 @@ async def receive(server, reader, length, principal, headers):
         if server._config_imports is None:
             raise OpError(ErrorCode.UNAVAILABLE, "the server has no runtime root")
         result = await server._config_imports.receive(reader, length, owner=principal.key,
+            policy=principal.kind,
             validate=lambda data: api_v1.validate_arguments(CONFIG_DOCUMENT, data))
         return api_v1.OK, {"status": "ok", "result": result}
     except OpError as exc:

@@ -36,6 +36,8 @@ const SECTION_LABELS: Record<string, string> = {
   "project.items": "Project skills",
   "project.knowledge": "Project knowledge",
   "project.role_templates": "Project role templates",
+  managers: "Managers",
+  "manager.templates": "Templates",
   "project.schedules": "Project schedules",
   "project.installs": "Project installs",
 };
@@ -230,7 +232,7 @@ function ImportPanel({ onApplied }: { onApplied: () => void }) {
     if (
       !confirm(
         `Apply ${count} ${count === 1 ? "change" : "changes"} from ${stage.file.name} to this installation? ` +
-          "Entries with the same name are updated in place; nothing missing from the file is removed.",
+          "Managers match by immutable ID, templates by Manager and key, and other entries by name. Nothing missing from the file is removed.",
       )
     )
       return;
@@ -395,6 +397,10 @@ export function ConfigTransferCard({ onImported }: { onImported?: () => void }) 
 
   return (
     <div className="space-y-4 rounded-lg border border-border bg-card px-5 py-4">
+      <p className="text-xs text-muted-foreground">
+        Includes scenario Managers and their task templates. Local working directories stay on this machine;
+        templates that need a directory must be re-pointed on the target. Existing target directories are kept.
+      </p>
       <div className="space-y-3">
         <div className="flex items-start gap-3">
           <Switch checked={projects} onChange={setProjects} label="Include projects" />

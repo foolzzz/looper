@@ -498,7 +498,7 @@ async def _config_export(call: Call) -> dict[str, Any]:
     """Write the portable configuration file, without secrets, into the runtime directory's
     ``exports``: never a path from chat."""
     from ...db.connection import get_pool
-    from ..config_transfer import FORMAT, write_export
+    from ..config_transfer import write_export
 
     if call.platform.runtime_root is None:
         raise OpError(ErrorCode.UNAVAILABLE, "this server has no runtime directory to write the file into")
@@ -508,7 +508,7 @@ async def _config_export(call: Call) -> dict[str, Any]:
     include_projects = bool(call.arguments.get("include_projects"))
     async with get_pool().acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
         summary = await write_export(conn, path, include_projects=include_projects, include_secrets=False)
-    return {"path": str(path), "format": FORMAT, "bytes": summary.bytes, "counts": summary.counts,
+    return {"path": str(path), "format": summary.format, "bytes": summary.bytes, "counts": summary.counts,
             "secrets_left_out": summary.secrets, "path_documents_to_repoint": summary.repoint, "note": EXPORT_NOTE}
 
 

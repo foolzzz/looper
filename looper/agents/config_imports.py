@@ -26,11 +26,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
+from ..db.channel_configs import BUILTIN_CHANNEL_IDS
 from . import config_transfer, scheduler_settings
 from .config_transfer import ConfigFileError
 from .library import LIBRARY_MAX_BYTES
+from .ops import ErrorCode, OpError
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,7 @@ class _Pending:
     deadline: float  # time.monotonic()
     expires_at: datetime
     owner: str | None = None
+    policy: Literal["client", "operator"] | None = None
     timer: asyncio.TimerHandle | None = None
     applying: bool = False
 
@@ -70,6 +73,20 @@ class _Pending:
 def _about(data: dict[str, Any]) -> dict[str, str]:
     data = {"looper_version": data.get("loopx_version"), **data}  # a file exported before the rename
     return {name: data[name][:100] for name in _ABOUT_FIELDS if isinstance(data.get(name), str)}
+
+
+def authorize(data: dict[str, Any], policy: Literal["client", "operator"] | None) -> None:
+    """The staging identity's policy applies to the file, including at confirmation execution."""
+    if policy != "client":
+        return
+    added_bots = any(isinstance(entry, dict) and (
+        entry.get("channel_id") not in (None, *BUILTIN_CHANNEL_IDS) or
+        entry.get("manager_id", "manager") != "manager") for entry in data.get("channels", []))
+    manager_installs = any(isinstance(entry, dict) and "manager_id" in entry
+                           for entry in data.get("installs", []))
+    if data.get("managers") or added_bots or manager_installs:
+        raise OpError(ErrorCode.FORBIDDEN, "Manager definitions, templates, bots and Manager installs require "
+                      "operator identity; upload this configuration with an operator token")
 
 
 async def _run(data: dict[str, Any], *, apply: bool) -> config_transfer.Plan:
@@ -99,6 +116,7 @@ class ConfigImports:
         shutil.rmtree(self._directory, ignore_errors=True)
 
     async def receive(self, reader: asyncio.StreamReader, length: int, *, owner: str | None = None,
+                      policy: Literal["client", "operator"] | None = None,
                       validate: Callable[[dict[str, Any]], Any] | None = None) -> dict[str, Any]:
         """Stream a body of ``length`` bytes to a file, check it and preview it; the file waits under a new id.
 
@@ -128,6 +146,7 @@ class ConfigImports:
                     handle.write(chunk)
                     remaining -= len(chunk)
             data = await asyncio.to_thread(config_transfer.read_file, path, label=_LABEL)
+            authorize(data, policy)
             if validate is not None:
                 validate(data)
             plan = await _run(data, apply=False)
@@ -139,7 +158,7 @@ class ConfigImports:
             if not self._receiving[owner]:
                 del self._receiving[owner]
         pending = _Pending(path, _about(data), time.monotonic() + TTL_SECONDS,
-                           datetime.now(UTC) + timedelta(seconds=TTL_SECONDS), owner=owner)
+                           datetime.now(UTC) + timedelta(seconds=TTL_SECONDS), owner=owner, policy=policy)
         self._pending[import_id] = pending
         self._arm(import_id, pending)
         return {"import_id": import_id, "bytes": length, "file": pending.about,
@@ -156,6 +175,7 @@ class ConfigImports:
             pending.timer.cancel()
         try:
             data = await asyncio.to_thread(config_transfer.read_file, pending.path, label=_LABEL)
+            authorize(data, pending.policy)
             plan = await _run(data, apply=True)
         except BaseException:
             pending.applying = False
@@ -163,6 +183,12 @@ class ConfigImports:
             raise
         self._drop(import_id)
         return {"import_id": import_id, "plan": plan.view(targets=True)}
+
+    async def check_policy(self, import_id: str, *, owner: str | None = None) -> None:
+        """Read the stored file before even creating a generic high-risk confirmation."""
+        pending = self._get(import_id, owner=owner)
+        data = await asyncio.to_thread(config_transfer.read_file, pending.path, label=_LABEL)
+        authorize(data, pending.policy)
 
     async def cancel(self, import_id: str, *, owner: str | None = None) -> dict[str, str]:
         if self._get(import_id, owner=owner).applying:
