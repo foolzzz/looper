@@ -8,10 +8,12 @@ from ..ops import ErrorCode, OpError
 
 # Reuse the version branches as well as properties inspected by older callers.
 CONFIG_DOCUMENT = {**api_v1.CONFIG_DOCUMENT, "title": "ConfigDocument"}
+CONFIG_IMPORT_DOCUMENT = {**api_v1.CONFIG_IMPORT_DOCUMENT, "title": "ConfigImportDocument"}
 CONFIG_ABOUT = _object(dict.fromkeys(("format", "looper_version", "exported_at", "secrets"), _STR), [])
 CONFIG_PLAN = api_v1._PLAN
 UPLOAD = _object({**api_v1.RESULTS["config.import_preview"]["properties"], "file": CONFIG_ABOUT})
-SCHEMAS = {"ConfigDocument": CONFIG_DOCUMENT, "ConfigAbout": CONFIG_ABOUT, "ConfigImportPlan": CONFIG_PLAN,
+SCHEMAS = {"ConfigDocument": CONFIG_DOCUMENT, "ConfigImportDocument": CONFIG_IMPORT_DOCUMENT,
+           "ConfigAbout": CONFIG_ABOUT, "ConfigImportPlan": CONFIG_PLAN,
            "ManagerConfig": api_v1.MANAGER_CONFIG, "TemplateConfig": api_v1.TEMPLATE_CONFIG,
            "BotConfig": api_v1.BOT_CONFIG}
 RESULTS = {}
@@ -19,7 +21,7 @@ _ID = _object({"import_id": {"type": "string", "minLength": 1}}, closed=True)
 OPERATIONS = (
     Operation("config.import_upload", "POST", "/api/v1/config/import_upload", "Upload and preview a configuration.",
               "Upload and preview a configuration. Stream a raw portable document; no configuration is written.",
-              CONFIG_DOCUMENT, UPLOAD, risk="read"),
+              CONFIG_IMPORT_DOCUMENT, UPLOAD, risk="read"),
     Operation("config.import_cancel", "POST", "/api/v1/config/import_cancel", "Cancel a staged configuration import.",
               "Cancel a staged configuration import. Only this caller's staged file is removed.",
               _ID, _object({"deleted": _STR}), risk="write"),
@@ -48,7 +50,7 @@ async def receive(server, reader, length, principal, headers):
             raise OpError(ErrorCode.UNAVAILABLE, "the server has no runtime root")
         result = await server._config_imports.receive(reader, length, owner=principal.key,
             policy=principal.kind,
-            validate=lambda data: api_v1.validate_arguments(CONFIG_DOCUMENT, data))
+            validate=lambda data: api_v1.validate_arguments(CONFIG_IMPORT_DOCUMENT, data))
         return api_v1.OK, {"status": "ok", "result": result}
     except OpError as exc:
         return api_v1.error(exc.code, str(exc))

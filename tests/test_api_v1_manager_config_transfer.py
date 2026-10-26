@@ -50,6 +50,18 @@ def test_manager_full_identity_schema_keeps_manager_suffix_distinct():
     assert api_v1.RESULTS["config.export"]["properties"]["document"]["oneOf"] == CONFIG_DOCUMENT["oneOf"]
 
 
+def test_template_import_schema_allows_omitted_name_but_export_still_requires_it():
+    document = {"format": "looper-config/v4", "managers": [
+        {"id": "manager-example", "name": "Example", "templates": [
+            {"key": "example", "requirement": "Inspect the example."}]}]}
+    assert api_v1.validate_arguments(api_v1.CONFIG_IMPORT_DOCUMENT, document) == document
+    with pytest.raises(OpError):
+        api_v1.validate_arguments(api_v1.RESULTS["config.export"]["properties"]["document"], document)
+    del document["managers"][0]["templates"][0]["key"]
+    with pytest.raises(OpError):
+        api_v1.validate_arguments(api_v1.CONFIG_IMPORT_DOCUMENT, document)
+
+
 @pytest.mark.parametrize("route", ["import_preview", "import_upload"])
 @pytest.mark.usefixtures("clients")
 def test_client_cannot_stage_manager_graph(tmp_path, monkeypatch, route):
@@ -141,4 +153,63 @@ def test_operator_manager_preview_apply_and_export_use_real_importer(tmp_path, m
             assert managers["manager-example"]["templates"][0]["key"] == "example"
             assert managers["manager-example"]["templates"][0]["requirement"] == "Inspect the example."
             server._config_imports.clear()
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+@pytest.mark.parametrize("route", ["import_preview", "import_upload"])
+def test_template_import_without_name_keeps_stored_name(tmp_path, monkeypatch, route):
+    async def run(pool):
+        async with _serving(tmp_path, listen=True) as server:
+            server._client_ops = ClientOps(SimpleNamespace())
+
+            async def request(action, data):
+                return await _send(server, f"POST /api/v1/config/{action}", _bearer(TOKEN), json.dumps(data))
+
+            status, _, staged = await request("import_preview", {"document": GRAPH})
+            assert status == 200, staged
+            status, _, applied = await request("import_apply", {"import_id": staged["result"]["import_id"]})
+            assert status == 200, applied
+            before = await pool.fetchrow("SELECT * FROM manager_task_templates WHERE manager_id='manager-example'")
+            partial = {"format": "looper-config/v4", "managers": [
+                {"id": "manager-example", "name": "Example manager", "templates": [
+                    {"key": "example", "requirement": "Inspect the updated example."}]}]}
+            status, _, staged = await request(route, {"document": partial} if route == "import_preview" else partial)
+            assert status == 200, staged
+            preview = staged["result"]["plan"]
+            assert preview["changes"] == [{"section": "manager.templates", "key": "manager-example/example",
+                                            "action": "changed", "fields": ["requirement"]}]
+            assert await pool.fetchrow(
+                "SELECT * FROM manager_task_templates WHERE manager_id='manager-example'") == before
+            status, _, applied = await request("import_apply", {"import_id": staged["result"]["import_id"]})
+            assert status == 200, applied
+            assert applied["result"]["plan"] == {**preview, "applied": True}
+            after = await pool.fetchrow("SELECT * FROM manager_task_templates WHERE manager_id='manager-example'")
+            assert dict(after) == {**before, "requirement": "Inspect the updated example.",
+                                   "updated_at": after["updated_at"]}
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+@pytest.mark.parametrize("route", ["import_preview", "import_upload"])
+@pytest.mark.parametrize("template", [
+    {"key": "unnamed", "requirement": "Inspect the example."},
+    {"key": "unnamed", "name": "   "},
+])
+def test_new_template_import_requires_name_with_key_in_error(tmp_path, monkeypatch, route, template):
+    async def run(pool):
+        async with _serving(tmp_path, listen=True) as server:
+            server._client_ops = ClientOps(SimpleNamespace())
+            document = {"format": "looper-config/v4", "managers": [
+                {"id": "manager-example", "name": "Example manager", "system_prompt": "Handle examples.",
+                 "templates": [template]}]}
+            body = {"document": document} if route == "import_preview" else document
+            status, _, answer = await _send(server, f"POST /api/v1/config/{route}",
+                                            _bearer(TOKEN), json.dumps(body))
+            assert status == 400 and answer["error"]["code"] == "invalid", answer
+            assert template["key"] in answer["error"]["message"]
+            assert "name" in answer["error"]["message"]
+            assert not server._config_imports._pending
+            assert await pool.fetchval("SELECT count(*) FROM managers WHERE id='manager-example'") == 0
+            assert await pool.fetchval("SELECT count(*) FROM manager_task_templates") == 0
     run_db(run, monkeypatch, timeout=30)
