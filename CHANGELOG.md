@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.146] - 2026-10-26
+
+### Fixed
+
+- **A configuration import may omit the name of an existing task template.** The overlay rule from #689 now also holds in the HTTP preview and upload paths: a new import-only schema (`ConfigImportDocument`) requires only the template `key`, while `ConfigDocument` and exports still require the full identity. After the stored template is merged in, a template without a name is rejected with an error that names its key, so a new template still needs one. Prompts and tool declarations are unchanged. ([#697](https://github.com/foolzzz/looper/pull/697))
+
 ## [2.13.145] - 2026-10-26
 
 ### Changed
