@@ -611,6 +611,7 @@ async def count_by_status(
     project_id: str | None = None,
     group: TaskGroup | None = None,
     schedule_id: str | None = None,
+    manager_id: str | None = None,
     query: str = "",
     pool: asyncpg.Pool | None = None,
 ) -> dict[str, int]:
@@ -619,8 +620,9 @@ async def count_by_status(
     statuses, inside = _group_filter(group)
     rows = await pool.fetch(
         f"SELECT t.status, count(*) AS n FROM tasks t JOIN projects p ON p.id=t.project_id "
-        f"WHERE {_FILTERS} AND ($6 = '' OR {_SEARCH.format(parameter='$6')}) GROUP BY t.status",
-        project_id, None, statuses, inside, schedule_id, query,
+        f"WHERE {_FILTERS} AND ($6 = '' OR {_SEARCH.format(parameter='$6')}) "
+        "AND ($7::text IS NULL OR t.manager_id = $7) GROUP BY t.status",
+        project_id, None, statuses, inside, schedule_id, query, manager_id,
     )
     return {row["status"]: int(row["n"]) for row in rows}
 
