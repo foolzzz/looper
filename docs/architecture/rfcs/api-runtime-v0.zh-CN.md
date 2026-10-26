@@ -1,6 +1,6 @@
 # RFC：API 运行时 v0（管家直连模型 API）
 
-- **状态：** 已批准（2026-10-24），按维护者 2026-10-26 的决定更新。阶段 1 的运行时类型与接线已合入，其余尚未实现；本次只更新设计，不交付循环、会话表、提示词或 notice。阶段 1 移植 Norma 循环，接 `openai` Python SDK，用 CPA 的 OpenAI 协议模型验证；阶段 2 接 `anthropic` Python SDK，目标是 DeepSeek、GLM、Kimi、OpenCode 的 Anthropic 格式接口，用维护者已有的 DeepSeek key 验证；以后有官方 Anthropic key，只是多登记一个 provider，不改代码。决定见第 4、14 节，排期见第 12 节；第 15 节是仍需真实运行核实的项。
+- **状态：** 已批准（2026-10-24），按维护者 2026-10-26 的决定更新。阶段 1 的运行时类型与接线已合入；中性循环（2a）、版本化条目和来源 notice 已在分支实现，Responses 编解码器、会话与管家接线尚未实现。阶段 1 移植 Norma 循环，接 `openai` Python SDK，用 CPA 的 OpenAI 协议模型验证；阶段 2 接 `anthropic` Python SDK，目标是 DeepSeek、GLM、Kimi、OpenCode 的 Anthropic 格式接口，用维护者已有的 DeepSeek key 验证；以后有官方 Anthropic key，只是多登记一个 provider，不改代码。决定见第 4、14 节，排期见第 12 节；第 15 节是仍需真实运行核实的项。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.0 节第 23 项。它落实 M9d 的 SDK 运行时与 Norma 循环移植，以及[管家平台工具 RFC](manager-platform-tools-v0.zh-CN.md) D8：「原生 tool 不单做，等 SDK 运行时上线时从同一份操作目录生成」。
 - **相关：** [多运行时](multi-runtime-agents-v0.zh-CN.md)、[dsh 运行时](dsh-runtime-v0.zh-CN.md)、[停止管家的回复 v2](chat-stop-v2.zh-CN.md)、[管家会话的 Agent Profile](manager-session-profile-v0.zh-CN.md)、[场景管家](scenario-managers.zh-CN.md)、[LLM 模型层](llm-models-v0.zh-CN.md)。
 - **核对基线：** 仓库路径与符号按 `main` `61a097507`（v2.13.133）核对；SDK 接口沿用初版的一次性虚拟环境离线核对结果：`openai` 3.37.0、`anthropic` 2.3.0。全程没有发出带 key 的请求。
@@ -75,12 +75,14 @@
 | 层 | 职责 | 接口 |
 |---|---|---|
 | `ApiSession` | tier 看到的常驻会话：会话 id、中性条目存取、停止的接线、内部事件、续接 | `ResidentSession`（现有，`runtimes/__init__.py:218`），外加拟新增的 `InProcessTools.set_turn_tools(tools)` |
-| `AgentLoop` | Norma 循环的类型化 asyncio Python 移植：输入系统提示、用户文本、中性会话条目、工具列表；输出流式事件和工具调用（经 `TurnTools`）；能被取消；报告用量 | 拟新增 `async run(turn, *, tools, cancel, emit) -> LoopResult` |
-| `ProtocolCodec` | 请求时把中性条目编码为原生 wire 输入，把原生流事件与输出解码为中性事件和条目；负责协议参数及最小 opaque replay 字段的重放 | 拟新增；Responses（阶段 1）、Messages（阶段 2）；不拥有存储格式 |
+| `AgentLoop` | Norma 循环的类型化 asyncio Python 移植：输入系统提示、用户文本、中性会话条目、工具列表；输出流式事件和工具调用（经 `TurnTools`）；能被取消；报告用量 | `loop.py:AgentLoop.run(...) -> LoopResult`、`aclose()`；`NormaAgentLoop(codec)` 可注入脚本编解码器 |
+| `ProtocolCodec` | 请求时把中性条目编码为原生 wire 输入，把原生流事件与输出解码为中性事件和条目；负责协议参数及最小 opaque replay 字段的重放 | `loop.py:ProtocolCodec.stream(...) -> CodecStream`、`aclose()`；具体 Responses（阶段 1）、Messages（阶段 2）待实现，不拥有存储格式 |
 
 Norma 是阶段 1 的循环来源。后续唯一上游是 Go 移植版的副本 `loopgo-main:go/internal/norma`；制作该副本是独立任务，不属于 Python 实现。这里只保留 Looper 需要的 harness、llm、tool、hook、transcript 语义，以 Python 类型和 asyncio 表达；不移植 builtin workbench 工具、`noa` 或 `noaadapter`，不引入新框架。
 
-**来源与许可（循环实现时落地）：** 维护者明确决定按 Norma 的 MIT 来源保留 `Copyright (c) 2026 The Norma Authors` 和完整 MIT 文本，放在拟新增的 `looper/agents/runtimes/api/THIRD_PARTY_NOTICES.txt`；派生模块的 docstring 引用它，并随 wheel 分发。Looper 继续使用 Apache-2.0。这是维护者提供的许可决定，不声称在源快照中发现了许可文件；本次文档更新不创建 notice、不改打包配置。
+**来源与许可：** 维护者明确决定按 Norma 的 MIT 来源保留 `Copyright (c) 2026 The Norma Authors` 和完整 MIT 文本，已放在 `looper/agents/runtimes/api/THIRD_PARTY_NOTICES.txt`；派生模块的 docstring 引用它，并随 wheel 分发。Looper 继续使用 Apache-2.0。这是维护者提供的许可决定，不声称在源快照中发现了许可文件；来源为 main 快照 `2f158eaa6e6eda46389cb429d5d61dd054665722`。
+
+**循环契约（2a，分支实现）：** `Transcript.items/append` 使用冻结的 `SessionItem`（消息、原始工具调用、工具结果、推理）；JSON 使用 `version: 1` 与显式 `kind`，坏格式抛 `TranscriptFormatError`。每个完成请求连同工具结果原子追加，首次追加才存用户输入；串行工具只在完整响应后执行。`CodecStream.snapshot()` 留下失败或取消请求的未知用量；断流一轮最多重发一次，计入请求上限并校验、抑制已显示前缀。`ReasoningItem` 仅携带摘要和最小 `ReplayState`，具体 codec 须在副本上按来源协议和模型筛选 opaque state，保留原历史。`AgentLoop.aclose()` 释放协议客户端；`loop_for` 在具体 codec 接入前明确拒绝启动。
 
 **工具边界：** 任何 api-loop 文件或进程工具都必须在任务 cwd 与显式 `add_dirs` 内工作，采用环境白名单和每个运行时私有 HOME，不能继承整个服务进程环境；这不是 OS 沙箱，也不能通过修改共享服务的 HOME 来实现。阶段 1 不提供这些工具，只给 Manager 进程内平台操作。可信服务自身的持久化和提示文件 I/O 不属于模型可调用的文件工具。
 
@@ -348,12 +350,12 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 
 ### 12.1 开发排期
 
-每一步一个 PR，各自是完整、可单独回滚的结果（计划第 1 节第 1 条）。第 1 步已合入，第 2–8 步尚未实现；本次文档更新不计实现交付。第 5、6 步可以并行。
+每一步一个 PR，各自是完整、可单独回滚的结果（计划第 1 节第 1 条）。第 1 步已合入，第 2 步的中性循环（2a）已在分支实现并通过注入式测试和 wheel notice 校验；第 3–8 步尚未实现。第 5、6 步可以并行。
 
 | 步 | 内容 | 依赖 | 完成时 |
 |---|---|---|---|
 | 1 | 运行时类型与 Profile、provider 接线：`api` 适配器、类型化的角色限制、按 SDK 检测、只接 API key 的 Responses 绑定、描述行、私有提示文件；`openai` 依赖 | — | 已合入；适配器不进 `ADAPTERS`，用户看不到；注册表的角色限制与无可执行文件的检测有测试 |
-| 2 | 中性 Norma 循环与接口：将 agentcore turn/tool cycle 及所需 harness、llm、tool、hook、transcript 行为移植为类型化 asyncio Python；`AgentLoop`、`ProtocolCodec`、中性条目与工具接口；来源 notice、派生 docstring 引用和 wheel 分发 | 1 | 不接管家或 SDK；验证中性 turn/tool 契约；不加 workbench 工具、`noa`、`noaadapter` 或新框架；制作 Go 上游副本另做 |
+| 2（2a） | 中性 Norma 循环与接口：将 agentcore turn/tool cycle 及所需 harness、llm、tool、hook、transcript 行为移植为类型化 asyncio Python；`AgentLoop`、`ProtocolCodec`、中性条目与工具接口；来源 notice、派生 docstring 引用和 wheel 分发 | 1 | 分支实现；不接管家或 SDK；注入式测试验证中性 turn/tool 契约；不加 workbench 工具、`noa`、`noaadapter` 或新框架；制作 Go 上游副本另做 |
 | 3 | Responses 编解码器与 SDK：wire 与中性条目互译、重试与超时、请求上限、错误分类、每次请求的用量；本地假 Responses 服务 | 2 | 不接管家；真实 SDK 在假服务上跑通文本、工具循环和各种错误 |
 | 4 | 管家跑在 `api` 上：`ApiSession`、进程内平台工具（`TurnTools` → `ManagerOps.call`，与 MCP 桥给出的文本和留痕一致）、单条工具结果上限、内部事件翻译、管家的改动、运行时说明、软上限；适配器进 `ADAPTERS` | 1、2、3 | 管家能在 `api` Profile 上回答、调工具、两步确认；会话只在进程内，重启后走续接失败的现有路径；停止仍被拒绝 |
 | 5 | 中性持久会话与上下文：`api_sessions`、版本化 `api_session_items`、首次元数据与请求批次同事务、跨重启续接、换协议新会话、跨模型不重放外来 opaque reasoning、半轮补齐、drop 级联清理；`CONTEXT_FULL`、阈值、第一次请求超限时重跑；原创 api 交接摘要提示词及其计划 §1 定向真实 Claude CLI 对照 | 4 | 重启后接着同一会话；长会话按 D6 交接换新；专项评测完成，CLI 交接文本不变 |
