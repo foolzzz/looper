@@ -31,7 +31,8 @@ _FIELDS = {
     "task_limits": _nullable(_object(dict.fromkeys(("worker", "reviewer"), _nullable({
         "type": "integer", "minimum": 1, "maximum": CONCURRENCY_MAX})), [], closed=True)),
 }
-SCHEDULE_CREATE = _object(_FIELDS, ["name", "cron", "requirement"], closed=True)
+SCHEDULE_CREATE = _object({**_FIELDS, "manager_id": {"type": "string", "minLength": 1}},
+                          ["name", "cron", "requirement"], closed=True)
 SCHEDULE_PATCH = {**_object({**_FIELDS, "enabled": _BOOL}, [], closed=True),
                   "anyOf": [{"required": [key]} for key in (*_FIELDS, "enabled")]}
 SCHEMAS = {"ScheduleCreate": SCHEDULE_CREATE, "SchedulePatch": SCHEDULE_PATCH}

@@ -428,6 +428,8 @@ def schedule_entry(row: Mapping[str, Any], profile_names: Mapping[str, str]) -> 
                               if row["notify_channel"] else None)
     entry["profiles"] = {role: profile_names.get(pid, pid) for role, pid in sorted(row["profile_overrides"].items())}
     entry["task_limits"] = dict(sorted(row["task_limits"].items()))
+    if row["manager_id"] != "manager":
+        entry["manager"] = row["manager_id"]
     if row["work_dir"]:
         entry["repoint"] = True
     return entry
@@ -2350,7 +2352,7 @@ class _Importer:
         except AllowlistError:
             return False
 
-    def _schedule_values(self, entry: Any, label: str,
+    def _schedule_values(self, entry: Any, label: str, managers: Mapping[str, Mapping[str, Any]],
                          ) -> tuple[dict[str, Any], dict[str, tuple[str, str]], dict[str, int]]:
         """A schedule of the file, checked as the API checks one: its settings (``schedules.FIELDS`` but its
         directory), its Agent Profiles as role -> (name, id; ``new:...`` in a preview) and its task limits.
@@ -2360,11 +2362,16 @@ class _Importer:
         from .projects import TASK_PROFILE_ROLES, RequestError, _concurrency_limits
 
         entry = _mapping(entry, "a schedule")
-        unknown = sorted(set(entry) - {*_SCHEDULE_FIELDS, "notify_target", "profiles", "task_limits", "repoint"})
+        unknown = sorted(set(entry) - {*_SCHEDULE_FIELDS, "notify_target", "profiles", "task_limits", "repoint", "manager"})
         if unknown:
             raise _Skip(f"unknown field {unknown[0]!r}")
+        owner = entry.get("manager", "manager")
+        if not isinstance(owner, str) or owner not in managers:
+            raise _Skip(f"Manager owner conflict: no nondeleted Manager {owner!r} here or in the file")
+        if managers[owner].get("task_policy", "free") == "templates_only":
+            raise _Skip("this Manager requires a task template; free-form schedules cannot be imported")
         defaults = {"overlap": "skip", "max_parallel_runs": 3, "catch_up": "once", "notify": "failures"}
-        values: dict[str, Any] = {}
+        values: dict[str, Any] = {"manager_id": owner}
         try:
             for name in _SCHEDULE_FIELDS:
                 if name not in ("cron", "timezone", "run_timeout_seconds"):
@@ -2404,18 +2411,26 @@ class _Importer:
             profiles[role] = (name, profile_id)
         return values, profiles, {role: limit for role, limit in limits.items() if limit is not None}
 
-    async def schedules(self, entries: Any, project_id: str, label: str) -> None:
+    async def schedules(self, entries: Any, project_id: str, label: str, *,
+                        manager_entries: Sequence[Mapping[str, Any]] = ()) -> None:
         """Add or rewrite the project's schedules of the file, disabled; leave those whose settings match."""
+        from ..db import schedules as db_schedules
+
         if not isinstance(entries, list):
             self.record("project.schedules", f"{label}schedules", Action.SKIPPED, reason="schedules is not a list")
             return
         stored = {row["name"].lower(): row for row in self.target.schedules.get(project_id, [])}
         names = {row["id"]: name for name, row in self.target.profiles.items()}
+        managers = {identity: row for identity, row in self.target.managers.items() if row["deleted_at"] is None}
+        managers.setdefault("manager", {})
+        for manager in manager_entries:
+            identity = manager["id"]
+            managers[identity] = {**managers.get(identity, {}), **manager}
         seen: set[str] = set()
         for entry in entries:
             raw_name = entry.get("name") if isinstance(entry, Mapping) else None
             try:
-                values, profiles, limits = self._schedule_values(entry, label)
+                values, profiles, limits = self._schedule_values(entry, label, managers)
                 if values["name"].lower() in seen:
                     raise _Skip("the file gives this schedule twice")
                 seen.add(values["name"].lower())
@@ -2424,28 +2439,37 @@ class _Importer:
                 continue
             key = f"{label}{values['name']}"
             row = stored.get(values["name"].lower())
+            if row is not None and row["manager_id"] != values["manager_id"]:
+                self.record("project.schedules", key, Action.SKIPPED,
+                            reason="Manager owner conflict: an existing schedule's owner is immutable")
+                continue
             new = {**values, "profiles": {role: name for role, (name, _) in profiles.items()}, "task_limits": limits}
             profile_ids = {role: profile_id for role, (_, profile_id) in profiles.items()}
             current = None
             if row is not None:
                 current = {name: row[name] for name in (*_SCHEDULE_FIELDS, "run_timeout_mode", "notify_channel",
-                                                        "notify_chat")}
+                                                        "notify_chat", "manager_id")}
                 current["profiles"] = {role: names.get(pid, pid) for role, pid in row["profile_overrides"].items()}
                 current["task_limits"] = dict(row["task_limits"])
-            action = self.outcome("project.schedules", key, current, _differs(new, current, new))
+            changed = _differs(new, current, new)
+            if self.apply and row is not None and changed:
+                if error := await db_schedules.owner_error(self.conn, values["manager_id"], enabled=False):
+                    self.record("project.schedules", key, Action.SKIPPED, reason=error)
+                    continue
+            action = self.outcome("project.schedules", key, current, changed)
             if action in (Action.ADDED, Action.CHANGED):
                 self.disabled_schedules.append(key)
                 if isinstance(entry, Mapping) and entry.get("repoint") and row is None:
                     self.repointed_schedules.append(key)
             if not self.apply or action not in (Action.ADDED, Action.CHANGED):
                 continue
-            from ..db import schedules as db_schedules
-
             if row is None:
                 await db_schedules.create_schedule(self.conn, project_id=project_id, fields=values,
+                                                   manager_id=values["manager_id"],
                                                    profiles=profile_ids, task_limits=limits, created_via="import")
             else:
-                fields = {**values, "enabled": False, "next_fire_at": None}
+                fields = {name: value for name, value in values.items() if name != "manager_id"}
+                fields.update(enabled=False, next_fire_at=None)
                 if (values["cron"], values["timezone"]) != (row["cron"], row["timezone"]):
                     fields["rule_changed_at"] = datetime.now(UTC)
                 await db_schedules.update_schedule(self.conn, row["id"], fields, profiles=profile_ids,
@@ -2480,6 +2504,21 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
         # cannot leave conversion on a snapshot from before another writer.
         await conn.execute("LOCK TABLE llm_providers, llm_provider_endpoints, llm_models, agent_profiles "
                            "IN SHARE ROW EXCLUSIVE MODE")
+        # Firing locks a schedule before its owner. Import takes those locks before locking Managers, too.
+        schedule_projects, schedule_names = [], []
+        for project in data.get("projects", []):
+            if (not isinstance(project, Mapping) or not isinstance(project.get("name"), str)
+                    or not isinstance(project.get("schedules"), list)):
+                continue
+            for schedule in project["schedules"]:
+                if isinstance(schedule, Mapping) and isinstance(schedule.get("name"), str):
+                    schedule_projects.append(project["name"].strip().lower())
+                    schedule_names.append(schedule["name"].strip().lower())
+        if schedule_names:
+            await conn.fetch("SELECT s.id FROM schedules s JOIN projects p ON p.id = s.project_id "
+                             "JOIN unnest($1::text[], $2::text[]) AS incoming(project, schedule) "
+                             "ON lower(p.name) = incoming.project AND lower(s.name) = incoming.schedule "
+                             "ORDER BY s.project_id, s.id FOR UPDATE OF s", schedule_projects, schedule_names)
         if data.get("channels"):
             from .channels.bot_api import _LOCK
 
@@ -2549,7 +2588,8 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
     if importer.channel_graph:
         await importer.finish_channels()
     for entry, project_id, label in projects:
-        await importer.schedules(entry.get("schedules") or [], project_id, label)
+        await importer.schedules(entry.get("schedules") or [], project_id, label,
+                                 manager_entries=data.get("managers", []))
     importer.schedule_notes()
     await importer.settle_layers()
     importer.check_caps()

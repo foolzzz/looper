@@ -19,13 +19,14 @@ def _nullable(schema):
 _NULL_INT = {"type": ["integer", "null"]}
 _NULL_NUMBER = {"type": ["number", "null"]}
 RUN = _object({
-    **dict.fromkeys(("run_id", "schedule_id", "scheduled_for", "trigger", "status"), _STR),
+    **dict.fromkeys(("run_id", "schedule_id", "manager_id", "scheduled_for", "trigger", "status"), _STR),
     "missed": _INT, "firings": _INT,
     **dict.fromkeys(("fired_at", "task_id", "task_status", "task_title", "summary", "error", "finished_at",
                      "gate_output", "carried_from"), _NULL_STR), "cost_usd": _NULL_NUMBER})
 _SCHEDULE_FIELDS = {
-    **dict.fromkeys(("schedule_id", "project_id", "project_name", "name", "cron", "timezone", "description",
+    **dict.fromkeys(("schedule_id", "project_id", "project_name", "manager_id", "name", "cron", "timezone", "description",
                      "requirement", "work_dir", "created_via", "created_at", "updated_at"), _STR),
+    "manager_name": _NULL_STR,
     "enabled": _BOOL, "overlap": _enum("skip", "queue", "parallel"), "catch_up": _enum("once", "skip"),
     "notify": _enum("failures", "alerts", "always", "never"),
     "max_parallel_runs": _INT, "consecutive_failures": _INT,
@@ -40,7 +41,8 @@ _SCHEDULE_FIELDS = {
     "alerts": _object({"failures_since": _NULL_STR, "stale_since": _NULL_STR}),
     "planner_session": _object({"active": _BOOL, **dict.fromkeys(
         ("runtime", "profile", "last_task_id", "last_task_title", "updated_at"), _NULL_STR)})}
-SCHEDULE_WITHOUT_LAST_RUN = _object(_SCHEDULE_FIELDS)
+SCHEDULE_WITHOUT_LAST_RUN = _object({key: value for key, value in _SCHEDULE_FIELDS.items()
+                                    if key not in {"manager_id", "manager_name"}})
 SCHEDULE = _object({**_SCHEDULE_FIELDS, "last_run": _nullable(RUN)})
 SCHEDULE_LIMITS = _object({
     **dict.fromkeys(("name_max_chars", "requirement_max_chars", "min_interval_seconds",

@@ -151,6 +151,9 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
             {" · "}
             {schedule.description}
           </p>
+          {schedule.manager_id !== "manager" && (
+            <p className="text-sm text-muted-foreground">Owner: {schedule.manager_name || schedule.manager_id}</p>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <label className="flex h-11 cursor-pointer items-center gap-2 text-xs text-muted-foreground sm:h-9">
