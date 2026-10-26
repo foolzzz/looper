@@ -156,3 +156,62 @@ def test_failed_session_replacement_preserves_old_history_and_pointer():
         assert (await agent_sessions.get_session("manager", pool=pool))["session_id"] == "old"
 
     run_db(run, timeout=15)
+
+
+@pytest.mark.parametrize("runtime_type", ["api", "claude-code"])
+def test_deleting_manager_removes_only_its_api_session_history(monkeypatch, runtime_type):
+    from looper.db import api_sessions, managers
+
+    async def run(pool):
+        async with pool.acquire() as conn:
+            await managers.insert_manager({"id": "manager-review", "name": "Review",
+                                           "system_prompt": "Review code."}, conn=conn)
+        for session_id in ("review-session", "other-session"):
+            await api_sessions.append(session_id, 1, PROTOCOL, "model", [message("retained fact")], pool=pool)
+        await agent_sessions.save_session("manager-review", "review-session", {}, runtime_type=runtime_type)
+        await agent_sessions.save_session("manager", "other-session", {}, runtime_type="api")
+        assert await pool.fetchval("SELECT count(*) FROM api_sessions") == 2
+        assert await pool.fetchval("SELECT count(*) FROM api_session_items") == 2
+
+        assert await managers.delete_manager("manager-review") == "deleted"
+        assert await agent_sessions.get_session("manager-review") is None
+        assert await managers.get_manager("manager-review") is None
+        remaining = 0 if runtime_type == "api" else 1
+        assert await pool.fetchval(
+            "SELECT count(*) FROM api_sessions WHERE session_id = 'review-session'") == remaining
+        assert len(await api_sessions.load("review-session", pool=pool)) == remaining
+        assert len(await api_sessions.load("other-session", pool=pool)) == 1
+        assert (await agent_sessions.get_session("manager"))["session_id"] == "other-session"
+
+    run_db(run, monkeypatch, timeout=15)
+
+
+@pytest.mark.parametrize("table,event", [("api_sessions", "DELETE"), ("managers", "UPDATE")])
+def test_failed_manager_deletion_rolls_back_api_history_and_pointer(monkeypatch, table, event):
+    import asyncpg
+    from looper.db import api_sessions, managers
+
+    async def run(pool):
+        async with pool.acquire() as conn:
+            await managers.insert_manager({"id": "manager-review", "name": "Review",
+                                           "system_prompt": "Review code."}, conn=conn)
+        await managers.put_template("manager-review", "review", {"name": "Review"})
+        await api_sessions.append("review-session", 1, PROTOCOL, "model", [message("retained fact")], pool=pool)
+        await agent_sessions.save_session("manager-review", "review-session", {}, runtime_type="api")
+        before = await api_sessions.load("review-session", pool=pool)
+        # Fail either history cleanup or the final Manager write in the real transaction.
+        await pool.execute("""
+            CREATE FUNCTION reject_deletion() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'injected deletion failure' USING ERRCODE = '23514'; END $$
+        """)
+        await pool.execute(f"CREATE TRIGGER reject_deletion BEFORE {event} ON {table} "
+                           "FOR EACH ROW EXECUTE FUNCTION reject_deletion()")
+        with pytest.raises(asyncpg.CheckViolationError, match="injected deletion failure"):
+            await managers.delete_manager("manager-review")
+        assert (await managers.get_manager("manager-review"))["enabled"] is True
+        assert len(await managers.list_templates("manager-review")) == 1
+        assert (await agent_sessions.get_session("manager-review"))["session_id"] == "review-session"
+        assert await pool.fetchval("SELECT count(*) FROM api_sessions") == 1
+        assert await api_sessions.load("review-session", pool=pool) == before
+
+    run_db(run, monkeypatch, timeout=15)
