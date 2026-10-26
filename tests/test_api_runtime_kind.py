@@ -15,6 +15,8 @@ from looper.agents.library import AgentLibrary, ItemKind, LoadedItem
 from looper.agents.profile_registry import CatalogModel, LegacyProviderSpec, RuntimeSpec
 from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeUnsupported, SystemPromptMode
 from looper.agents.runtimes.api import ApiRuntime, Descriptor, KEY_ENV
+from looper.agents.runtimes.api.adapter import RUNTIME_NOTE
+from looper.agents.runtimes.api.session import ApiSession
 from tests.runtime_model_helpers import resolved_profile
 
 
@@ -40,8 +42,8 @@ def launch_for(runtime, *, mode=SystemPromptMode.APPEND):
                                 env=(("SETTINGS_SETTING", "settings-private-value"),)), role=AgentType.MANAGER)
 
 
-def test_api_runtime_is_not_enabled_by_default():
-    assert "api" not in runtimes.ADAPTERS
+def test_api_runtime_is_registered():
+    assert isinstance(runtimes.ADAPTERS["api"], ApiRuntime)
 
 
 def test_api_type_view_exposes_manager_only_contract(runtime):
@@ -137,7 +139,8 @@ def test_resident_description_materializes_preview_text_privately(runtime, tmp_p
     assert "test-key" not in json.dumps(command)
     target = Path(descriptor.system_prompt_file)
     assert target.parent == tmp_path / ".local" / "api" / "prompts"
-    assert target.read_text(encoding="utf-8") == runtime.prompt_blocks(launch, prompt)[0].text == prompt
+    assert target.read_text(encoding="utf-8") == runtime.prompt_blocks(launch, prompt)[0].text == (
+        "Custom instructions\n\n" + RUNTIME_NOTE + "\n\n---\n\nLooper instructions\n")
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert all(stat.S_IMODE(path.stat().st_mode) == 0o700 for path in (target.parent, target.parent.parent))
     before = target.stat().st_mtime_ns
@@ -199,6 +202,5 @@ def test_api_runtime_cannot_start_or_drive_a_process(runtime, tmp_path):
                       lambda: asyncio.run(runtime.write_turn(None, "hello"))):
         with pytest.raises(RuntimeUnsupported, match="inside looper serve; it has no process"):
             operation()
-    with pytest.raises(RuntimeUnsupported, match="cannot run a session in this version"):
-        runtime.resident_session("Manager")
+    assert isinstance(runtime.resident_session("Manager"), ApiSession)
     assert runtime.instruction_files(tmp_path) == ()

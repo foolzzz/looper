@@ -96,6 +96,7 @@ def test_selection_uses_target_profile_and_checks_role_capabilities(role, monkey
     ("codex", {"responses", "codex-login"}),
     ("omp", {"messages", "chat", "responses"}),
     ("grok", {"grok-login"}),
+    ("api", {"responses"}),
 ])
 @needs_db
 def test_create_and_update_enforce_protocol_auth_and_login_owner(runtime_type, accepted, monkeypatch):

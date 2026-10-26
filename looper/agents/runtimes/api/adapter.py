@@ -1,4 +1,4 @@
-"""Model API registration and launch descriptors; sessions are not available yet."""
+"""Model API registration, launch descriptions and resident session adapter."""
 
 from __future__ import annotations
 
@@ -24,11 +24,12 @@ if TYPE_CHECKING:
 
 
 KEY_ENV = "LOOPER_PROVIDER_API_KEY"
+RUNTIME_NOTE = "You run on a model API, not inside a coding tool. Your only tools are Looper's platform tools (looper_*): you cannot read or write files, run commands, browse the web or use skills. When the user needs any of that, offer to create a task for it."
 _NO_PROCESS = "the api runtime runs the Manager only, inside looper serve; it has no process"
 
 
 def prompt_text(launch: Launch, looper_prompt: str) -> str:
-    return runtime_prompt_text(launch, looper_prompt, keep_empty=False)
+    return runtime_prompt_text(launch, looper_prompt, RUNTIME_NOTE, keep_empty=False)
 
 
 @dataclass(frozen=True)
@@ -154,7 +155,9 @@ class ApiRuntime(RuntimeAdapter):
         raise RuntimeUnsupported(_NO_PROCESS)
 
     def resident_session(self, label: str):
-        raise RuntimeUnsupported("the api runtime cannot run a session in this version")
+        from .session import ApiSession
+
+        return ApiSession(label=label)
 
     def tool_summary(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         return f"Tool: {tool_name}"
@@ -166,6 +169,13 @@ class ApiRuntime(RuntimeAdapter):
         from ... import claude_cli
 
         return claude_cli.budget_error(result_event) if (result_event or {}).get(claude_cli.SOFT_CAP) else None
+
+    def failure_detail(self, result_event: dict[str, Any] | None, *, launch: Launch,
+                       command: list[str], pid: int | None = None) -> str | None:
+        from ... import log_redaction
+
+        errors = (result_event or {}).get("errors")
+        return log_redaction.redact(str(errors[0]))[:300] if errors else None
 
     def instruction_files(self, cwd: str | Path) -> tuple:
         return ()
