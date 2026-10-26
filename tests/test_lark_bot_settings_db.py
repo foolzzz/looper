@@ -305,7 +305,7 @@ def test_import_skips_extra_config_key_with_reason(monkeypatch: pytest.MonkeyPat
             entry["config"] = {**CONFIG, "extra": SECRET}
             async with conn.transaction():
                 plan = await import_config(conn, data, apply=True)
-        [change] = [c for c in plan.changes if c.section == "channels" and c.key == "lark_bot"]
+        [change] = [c for c in plan.changes if c.section == "channels" and c.key == "channel-lark_bot"]
         assert change.action == Action.SKIPPED and "extra" in change.reason
         assert SECRET not in change.reason
         assert await get_config("channel-lark_bot") == before
@@ -378,24 +378,24 @@ def test_config_export_import_round_trip(monkeypatch: pytest.MonkeyPatch, platfo
             await conn.execute("DELETE FROM channel_configs WHERE channel_id = 'channel-lark_bot'")
             async with conn.transaction():
                 plan = await import_config(conn, data, apply=True)
-            assert any(c.section == "channels" and c.key == "lark_bot" and c.action == Action.ADDED
+            assert any(c.section == "channels" and c.key == "channel-lark_bot" and c.action == Action.ADDED
                        for c in plan.changes)
-            assert any(n.key == "lark_bot" and n.names == ("app secret (Settings → Channels)",)
+            assert any(n.key == "channel-lark_bot" and n.names == ("app secret (Settings → Channels)",)
                        for n in plan.need_secret)
             assert json.loads(await conn.fetchval("SELECT config FROM channel_configs "
                                                   "WHERE channel_id = 'channel-lark_bot'")) == config
             again = await import_config(conn, data, apply=False)
-            assert any(c.section == "channels" and c.key == "lark_bot" and c.action == Action.UNCHANGED
+            assert any(c.section == "channels" and c.key == "channel-lark_bot" and c.action == Action.UNCHANGED
                        for c in again.changes)
             entry["config"]["app_id"] = " cli_other "
             async with conn.transaction():
                 normalized = await import_config(conn, data, apply=True)
-            assert not any(c.key == "lark_bot" and c.action == Action.SKIPPED for c in normalized.changes)
+            assert not any(c.key == "channel-lark_bot" and c.action == Action.SKIPPED for c in normalized.changes)
             assert json.loads(await conn.fetchval("SELECT config FROM channel_configs "
                                                   "WHERE channel_id = 'channel-lark_bot'"))["app_id"] == "cli_other"
             entry["config"]["domain"] = "unknown"
             invalid = await import_config(conn, data, apply=False)
-            assert any(c.key == "lark_bot" and c.action == Action.SKIPPED and "domain" in c.reason
+            assert any(c.key == "channel-lark_bot" and c.action == Action.SKIPPED and "domain" in c.reason
                        for c in invalid.changes)
 
     run_with_channel_configs(test, monkeypatch)
