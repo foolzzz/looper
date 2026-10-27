@@ -109,6 +109,7 @@ OPERATIONS = (
     Operation("tasks.page", "POST", "/api/v1/tasks/page", "Read a full task list page.",
         "Read a full task list page. Includes filters, status counts and an older-page cursor.",
         _object({"project_id": _STR, "schedule_id": _STR, "group": _GROUP,
+            "manager_id": {"type": "string", "minLength": 1},
             "status": {"type": "string", "enum": list(tasks.STATUS_GROUPS)}, "before": _STR,
             "limit": {"type": "integer", "minimum": 1, "maximum": projects.TASKS_PAGE_MAX}, "query": _STR},
             [], closed=True),

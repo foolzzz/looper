@@ -358,29 +358,33 @@ export interface TasksPage {
   tasks: TaskInfo[];
   /** Pass as `before` for the next page; null at the end. */
   next_before: string | null;
-  /** How many tasks each status holds under the project, group and schedule filters (not the status one). */
+  /** How many tasks each status holds under the list filters (not status or cursor). */
   counts: Record<string, number>;
 }
 
 /** A page of tasks: `limit` (default 50, at most 200) of them older than the task `before`, filtered by project,
- * group, schedule and status. */
+ * group, schedule, Manager, query and status. */
 export async function fetchTasks(
   filters: {
     projectId?: string;
+    managerId?: string;
     group?: TaskGroup;
     scheduleId?: string;
     status?: string;
     before?: string | null;
     limit?: number;
+    query?: string;
   } = {},
 ): Promise<TasksPage> {
   const result = await callV1<TasksPage>("/api/v1/tasks/page", {
     ...(filters.projectId ? { project_id: filters.projectId } : {}),
+    ...(filters.managerId ? { manager_id: filters.managerId } : {}),
     ...(filters.group ? { group: filters.group } : {}),
     ...(filters.scheduleId ? { schedule_id: filters.scheduleId } : {}),
     ...(filters.status ? { status: filters.status } : {}),
     ...(filters.before ? { before: filters.before } : {}),
     ...(filters.limit ? { limit: filters.limit } : {}),
+    ...(filters.query ? { query: filters.query } : {}),
   });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;

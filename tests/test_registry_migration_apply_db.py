@@ -193,7 +193,8 @@ def test_unknown_legacy_pair_rolls_back_expansion_and_historical_migrations():
             with pytest.raises(MigrationBlocked):
                 await connection.ensure_schema(conn)
             assert await state(conn) == before
-            for table in ('llm_models', 'llm_provider_endpoints', 'registry_schema_version', 'schema_fingerprint'):
+            for table in ('llm_models', 'llm_provider_endpoints', 'registry_schema_version', 'schema_fingerprint',
+                          'api_sessions', 'api_session_items'):
                 assert await conn.fetchval('SELECT to_regclass($1)', table) is None
 
     asyncio.run(asyncio.wait_for(run(), 45))

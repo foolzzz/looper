@@ -437,16 +437,18 @@ async def list_tasks_page(
     manager_id: str | None = None, query: str = "", compact: bool = False, search_limit: int = 200,
 ) -> dict[str, Any]:
     """A console page or the Manager's compact list; keyword searches retain its bounded recent-task search."""
+    from ..db import managers as db_managers
     from ..db.llm_records import task_costs
 
     query = " ".join(query.split()).casefold()
     if before is not None and not await db_tasks.task_exists(before):
         raise RequestError(HTTP_400, f"before must be a task id; {before!r} is not one")
-    filters = {"project_id": project_id, "group": group, "schedule_id": schedule_id}
+    if manager_id is not None and await db_managers.get_manager(manager_id) is None:
+        return {"tasks": [], "more": False} if compact else {"tasks": [], "counts": {}, "next_before": None}
+    filters = {"project_id": project_id, "group": group, "schedule_id": schedule_id, "manager_id": manager_id}
     fetch_limit = (search_limit if query else limit) if compact else limit + 1
     search = {"query": query} if query and not compact else {}
-    page = await db_tasks.list_tasks(limit=fetch_limit, status=status, before=before,
-                                     manager_id=manager_id, **filters, **search)
+    page = await db_tasks.list_tasks(limit=fetch_limit, status=status, before=before, **filters, **search)
     if compact:
         if query:
             page = [t for t in page if query in " ".join(
@@ -456,7 +458,6 @@ async def list_tasks_page(
     tasks = page[:limit]
     counts = await db_tasks.count_by_status(**filters, **search)
     costs = await task_costs([t["id"] for t in tasks])
-    from ..db import managers as db_managers
     manager_names = {m["id"]: m["name"] for m in await db_managers.list_managers(include_deleted=True)}
     result = []
     for t in tasks:

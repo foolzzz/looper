@@ -19,9 +19,10 @@ from looper.agents.channels.telegram import TelegramChannelAdapter
 from looper.agents.message import MessageType, channel_address
 from looper.db import agent_sessions
 from tests.db_support import DSN, run_db
+from tests.api_manager_support import _profile
 from tests.fake_model_api import FakeModelAPI, ResponseScript, text_events
 from tests.test_agent_channels import OPEN_ID, _allowlist, _lark_event, _tg_update
-from tests.test_api_manager_turns_db import USAGE, _manager, _message, _profile
+from tests.test_api_manager_turns_db import USAGE, _manager, _message
 from tests.test_api_v1_auth import _bearer, _send, _serving
 from tests.test_api_v1_registry_db import _api
 from tests.test_cli_entry import _doctor_env, _run_looper
