@@ -11,7 +11,7 @@ import pytest
 from looper.agents.run_usage import Usage
 from looper.agents.runtimes.pricing import ModelPrice, usage_event
 from looper.agents.runtimes.runner import protocol as p
-from looper.agents.runtimes.runner.bridge import RunnerBridge
+from looper.agents.runtimes.runner.bridge import RpcFailure, RunnerBridge
 
 
 async def pipe():
@@ -177,6 +177,89 @@ def test_scripted_stream_order_and_interleaved_responses():
             assert events[-1]["modelUsage"] is summary.model_usage
             assert summary.usage.input_tokens == 5 and events[-1]["modelUsage"]["model"]["inputTokens"] == 105
             assert summary.usage.cost_usd == 0.000034
+    run(exercise())
+
+
+@pytest.mark.parametrize("code", [p.ErrorCode.PROVIDER_AUTH, p.ErrorCode.SESSION_BUSY,
+                                 p.ErrorCode.CAPACITY, p.ErrorCode.INVALID_PARAMS])
+def test_prompt_rejection_is_local_and_session_can_retry(code):
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            active_turn, events, beginning, prompt = await open_turn(bridge, reader, writer)
+            await accept(writer, prompt)
+            await beginning
+            opening = asyncio.create_task(bridge.open_session(dict(NEW, session_key="other")))
+            request = await p.read_frame(reader)
+            await send(writer, p.Response(request.id, result={"session_id": "other"}))
+            await opening
+            rejected_turn, rejected_events = Turn(), []
+            beginning = asyncio.create_task(bridge.begin_turn(
+                "other", "rejected", rejected_events.append, rejected_turn, text="hello",
+                tools=[{"name": "unknown", "description": "unknown tool", "inputSchema": {}}]))
+            request = await p.read_frame(reader)
+            entry = bridge.sessions["other"]
+            worker = entry.worker
+            await send(writer, p.Response(request.id, error={"code": int(code), "message": code.name,
+                "data": {"session_id": "other", "trace_id": "rejected"}}))
+            with pytest.raises(RpcFailure) as failure:
+                await beginning
+            assert failure.value.code == code
+            assert entry.state == "idle" and worker.done() and entry.stopped
+            assert rejected_turn.stopped and not rejected_events
+            assert bridge.sessions["s"].state == "running" and not active_turn.stopped
+            assert not failures and not bridge.writer.is_closing()
+            await update(writer, "settled", outcome="completed", final_text="active done", requests=0,
+                         usage_complete=True)
+            assert (await bridge.wait_settled("s", "t")).outcome == "completed"
+            assert events[-1]["result"] == "active done"
+            retry_events = []
+            retry = asyncio.create_task(bridge.begin_turn(
+                "other", "retry", retry_events.append, Turn(), text="retry"))
+            request = await p.read_frame(reader)
+            await send(writer, p.Response(request.id, result={"session_id": "other", "trace_id": "retry",
+                "accepted": True}))
+            await retry
+            await send(writer, p.Notification("session/update", dict(kind="settled", session_id="other",
+                trace_id="retry", outcome="completed", final_text="retry done", requests=0, usage_complete=True)))
+            assert (await bridge.wait_settled("other", "retry")).outcome == "completed"
+            assert retry_events[-1]["result"] == "retry done" and not rejected_events
+            assert not failures
+    run(exercise())
+
+
+@pytest.mark.parametrize("fault", ["eof", "timeout"])
+@pytest.mark.parametrize("settled", [False, True], ids=["missing-settled", "queued-settled"])
+def test_missing_acceptance_preserves_usage_and_emits_one_terminal(fault, settled):
+    async def exercise():
+        async with connection(control_timeout=0.1) as (bridge, reader, writer, failures):
+            turn, events, beginning, _ = await open_turn(bridge, reader, writer)
+            await update(writer, "request_end", request_id="q", request_kind="turn", model="model", status="ok",
+                         input_uncached=5, output=2, cache_read=3, cache_write=4, reasoning=None, complete=True)
+            if settled:
+                await update(writer, "settled", outcome="completed", final_text="done", requests=1,
+                             usage_complete=True)
+            if fault == "eof":
+                writer.close()
+            with pytest.raises(ConnectionError if fault == "eof" else TimeoutError):
+                await beginning
+            summary = await bridge.wait_settled("s", "t")
+            assert summary.outcome == ("completed" if settled else "lost")
+            assert summary.usage.input_tokens == 5 and summary.usage.output_tokens == 2
+            assert summary.usage_complete is settled
+            assert [event["type"] for event in events] == ["usage", "result"]
+            terminal = events[-1]
+            assert terminal["result"] == ("done" if settled else "")
+            assert terminal["subtype"] == ("success" if settled else "error_during_execution")
+            assert terminal["is_error"] is not settled
+            assert terminal["runner"]["outcome"] == summary.outcome
+            assert terminal["usage_complete"] is settled
+            assert terminal["session_id"] == "s" and terminal["trace_id"] == "t"
+            assert terminal["usage"]["input_tokens"] == 5
+            assert terminal["total_cost_usd"] == summary.totals.cost_usd
+            assert turn.stopped and not bridge.sessions["s"].accepted
+            await bridge.close()
+            assert len(failures) == 1
+            assert len([event for event in events if event["type"] == "result"]) == 1
     run(exercise())
 
 
@@ -350,7 +433,10 @@ def test_prompt_timeout_cannot_be_reopened_by_late_acceptance():
             entry = bridge.sessions["s"]
             assert entry.prompt_sent and not entry.session_started
             assert summary.outcome == "lost" and entry.state == "poisoned"
-            assert not events
+            assert len(events) == 1 and events[0]["type"] == "result"
+            assert events[0]["subtype"] == "error_during_execution"
+            assert events[0]["runner"]["outcome"] == "lost"
+            assert not events[0]["usage_complete"]
     run(exercise())
 
 

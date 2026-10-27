@@ -228,6 +228,17 @@ class RunnerBridge:
         try:
             return await self.request("session/prompt", {"session_id": session_id, "trace_id": trace_id,
                 "text": text, "tools": tools or []}, _entry=entry)
+        except RpcFailure:
+            # A correlated rejection abandons only this prompt, not the connection.
+            entry.stopped = True
+            entry.worker.cancel()
+            await asyncio.gather(entry.worker, return_exceptions=True)
+            await _value(entry.turn.stop())
+            entry.updates.clear()
+            entry.settled.cancel()
+            entry.settled = None
+            entry.state = State.POISONED if self._error else State.IDLE
+            raise
         except BaseException:
             entry.stopped = True
             entry.ready.set()
@@ -441,8 +452,8 @@ class RunnerBridge:
             runner={"outcome": outcome, "cap_reason": summary.cap_reason, "error_kind": settled.get("error", {}).get("kind")})
         entry.result_event = event
         try:
-            if entry.accepted:
-                await self._emit(entry, event)
+            # Settlement (including loss) remains terminal if acceptance never arrived.
+            await self._emit(entry, event)
         finally:
             entry.state = (State.POISONED if self._error or outcome == "lost" else
                            State.CLOSING if entry.state == State.CLOSING else State.IDLE)
