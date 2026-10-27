@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.166] - 2026-10-27
+
+### Added
+
+- **Runner supervisor.** `RunnerSupervisor` owns runner processes: a strict launch environment, private runtime directories, one live process per configured kind, a session cap, crash restart with bounded backoff and joined shutdown. Nothing in Looper calls it yet. ([#751](https://github.com/foolzzz/looper/pull/751))
+
+### Changed
+
+- **Runner turn loss.** A turn whose runner is lost now settles with the host-owned outcome `lost`, which stays the terminal cause even under a cap, and counts only the requests the bridge completed. ([#751](https://github.com/foolzzz/looper/pull/751))
+
 ## [2.13.165] - 2026-10-27
 
 ### Fixed
