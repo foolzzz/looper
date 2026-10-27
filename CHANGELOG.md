@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.172] - 2026-10-27
+
+### Added
+
+- **Resident runner sessions for Manager and Planner.** `RunnerSession` drives a Manager or Planner turn through a runner process owned by a shared supervisor, with its host tools and per-turn budget limits wired into the Manager and Planner tiers, and `looper serve` can own a runner supervisor and stop it at shutdown. Nothing in Looper creates a `RunnerSession` or passes a runner supervisor to serve yet. ([#768](https://github.com/foolzzz/looper/pull/768))
+
+### Fixed
+
+- **Cancelled close settlement.** After `session/close` is acknowledged, a cancelled settlement wait now leaves the session `close_failed` with local settlement and a tombstone, instead of leaving it `closing` and raising `CancelledError` out of the lease release. ([#776](https://github.com/foolzzz/looper/pull/776))
+
 ## [2.13.171] - 2026-10-27
 
 ### Fixed
