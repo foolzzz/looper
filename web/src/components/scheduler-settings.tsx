@@ -18,7 +18,6 @@ const errorText = (err: unknown) => (err instanceof Error ? err.message : String
 
 const SOURCE_TEXT: Record<SchedulerSetting["source"], string> = {
   setting: "Saved here",
-  env: "From the deprecated LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS variable; save a value to replace it",
   "built-in": "Built-in value",
 };
 

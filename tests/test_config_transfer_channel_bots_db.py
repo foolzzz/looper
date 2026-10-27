@@ -1,4 +1,4 @@
-"""Channel transfer regressions: legacy schemas, local policy and native identity boundaries."""
+"""Channel transfer regressions: current graphs, local policy and native identity boundaries."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ async def _dump(pool: Any) -> dict[str, list[str]]:
     ("lark", "candidate"), ("lark", "existing"), ("lark", "empty"), ("lark", "schema"),
     ("lark_bot", "existing"),
 ])
-def test_lark_import_refuses_unknown_identity_without_partial_writes(
+def test_lark_graph_keeps_unknown_identity_inert_and_refuses_conflicts_without_partial_writes(
     monkeypatch: pytest.MonkeyPatch, apply: bool, kind: str, unavailable: str,
 ) -> None:
     from looper.agents.channels import lark_cli
@@ -81,25 +81,31 @@ def test_lark_import_refuses_unknown_identity_without_partial_writes(
         config = {"profile": "candidate"} if kind == "lark" else {"app_id": "cli_shared"}
         if unavailable == "schema":
             config["allowed_open_ids"] = ["bad"]
-        document = {"format": "looper-config/v3", "channels": [
-            {"channel_type": kind, "display_name": "Imported", "enabled": True, "config": config}]}
+        document = {"format": "looper-config/v4", "channels": [
+            {"channel_id": f"channel-{kind}", "channel_type": kind, "display_name": "Imported",
+             "enabled": True, "config": config}]}
+        from looper.agents.config_transfer import ConfigFileError
+
         before, bot = await _dump(pool), await _bot_state(pool)
-        async with pool.acquire() as conn:
-            plan = await run_import(conn, document, apply=apply)
-        change = next(c for c in plan.view()["changes"] if c["section"] == "channels")
-        assert change["action"] == "skipped", change
         if unavailable == "schema":
+            async with pool.acquire() as conn:
+                with pytest.raises(ConfigFileError):
+                    await run_import(conn, document, apply=apply)
             assert not calls
         else:
-            assert "lark-cli" in change["reason"] and "retry" in change["reason"]
-        assert secret not in json.dumps(plan.view()) and "/private/profile" not in json.dumps(plan.view())
+            # Unknown authentication may restore an inert graph; it cannot activate the channel.
+            async with pool.acquire() as conn:
+                plan = await run_import(conn, document, apply=False)
+            assert plan.need_secret
+            assert "verify lark-cli" in " ".join(plan.notes)
+            assert secret not in json.dumps(plan.view()) and "/private/profile" not in json.dumps(plan.view())
         assert await _dump(pool) == before and await _bot_state(pool) == bot
         if unavailable != "schema":
             nonlocal broken, duplicate
             broken = False
             async with pool.acquire() as conn:
-                conflict = await run_import(conn, document, apply=apply)
-            assert conflict.view()["counts"]["channels"]["skipped"] == 1
+                with pytest.raises(ConfigFileError, match="identity conflict"):
+                    await run_import(conn, document, apply=apply)
             assert await _dump(pool) == before and await _bot_state(pool) == bot
             duplicate = False
             async with pool.acquire() as conn:
@@ -126,11 +132,12 @@ def test_preview_without_channel_schema_still_requires_lark_identity(
     async def test() -> None:
         async with _installation(schema=False) as (pool, url):
             path = tmp_path / "in.json"
-            path.write_text(json.dumps({"format": "looper-config/v3", "channels": [
-                {"channel_type": "lark", "config": {"profile": "candidate"}}]}))
+            path.write_text(json.dumps({"format": "looper-config/v4", "channels": [
+                {"channel_id": "channel-lark", "channel_type": "lark", "config": {"profile": "candidate"}}]}))
             code, out, err = await _transfer_file(url, "import", str(path), json_output=True)
             assert code == 0, err
-            assert _plan(out)["counts"]["channels"]["skipped"] == 1
+            assert _plan(out)["need_secret"]
+            assert "verify lark-cli" in " ".join(_plan(out)["notes"])
             assert await pool.fetchval("SELECT to_regclass('channel_configs')") is None
 
     asyncio.run(asyncio.wait_for(test(), timeout=30))
@@ -149,7 +156,7 @@ def test_export_and_preview_read_channels_before_the_manager_migration(
         await pool.execute("UPDATE channel_configs SET display_name = 'Saved Telegram' "
                            "WHERE channel_id = 'channel-telegram'")
         before, rows = await _dump(pool), await _rows(pool)
-        document = {"format": "looper-config/v3", "channels": [
+        document = {"format": "looper-config/v4", "channels": [
             {"channel_type": "telegram", "channel_id": "channel-telegram", "display_name": "Preview name",
              "enabled": False, "config": {}}]}
         async with _serving(tmp_path) as server:
@@ -207,16 +214,18 @@ def test_channel_import_cannot_set_or_erase_bound_only_policy(monkeypatch: pytes
     async def test(pool: Any) -> None:
         async with pool.acquire() as conn, conn.transaction():
             await chat_bindings.set_bound_chats_only("channel-telegram", policy, conn=conn)
-        document = {"format": "looper-config/v3", "channels": [{
+        document = {"format": "looper-config/v4", "channels": [{
             "channel_type": "telegram", "channel_id": "channel-telegram", "display_name": "Imported bot",
             "enabled": False, "config": {}, "bound_chats_only": not policy}]}
+        from looper.agents.config_transfer import ConfigFileError
+
+        before = await _dump(pool)
         async with pool.acquire() as conn:
-            plan = await run_import(conn, document, apply=True)
-        assert plan.view()["counts"]["channels"]["changed"] == 1
-        assert any("bound_chats_only" in note or "policy" in note for note in plan.notes)
-        row = await pool.fetchrow("SELECT display_name, bound_chats_only FROM channel_configs "
-                                  "WHERE channel_id = 'channel-telegram'")
-        assert row["display_name"] == "Imported bot" and row["bound_chats_only"] is policy
+            with pytest.raises(ConfigFileError, match="unknown or missing fields"):
+                await run_import(conn, document, apply=True)
+        assert await _dump(pool) == before
+        assert await pool.fetchval("SELECT bound_chats_only FROM channel_configs "
+                                   "WHERE channel_id = 'channel-telegram'") is policy
 
     run_db(test, monkeypatch, setup=seed_channel_configs, timeout=30)
 
@@ -249,7 +258,7 @@ def test_import_leaves_the_added_bot_untouched(monkeypatch: pytest.MonkeyPatch, 
     {"channel_type": "telegram", "channel_id": "channel-telegram", "manager_id": "manager-review",
      "display_name": "x", "enabled": False, "config": {}},
 ])
-def test_a_file_with_a_bot_is_refused_and_nothing_changes(
+def test_an_ambiguous_bot_owner_is_refused_and_nothing_changes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, entry: dict[str, Any],
 ) -> None:
     async def _test() -> None:
@@ -259,13 +268,13 @@ def test_a_file_with_a_bot_is_refused_and_nothing_changes(
             await seed_channel_configs(pool)
             await _add_bot(pool)
             path = tmp_path / "in.json"
-            path.write_text(json.dumps({"format": "looper-config/v3", "settings": {"roles": [
+            path.write_text(json.dumps({"format": "looper-config/v4", "settings": {"roles": [
                 {"role": "worker", "prompt": "changed", "timeout_seconds": 60, "enabled": True}]},
                 "channels": [entry]}))
             before, rows = await _dump(pool), await _rows(pool)
             code, out, err = await _transfer_file(url, "import", str(path), apply=True)
             assert code != 0
-            assert "v4" in out + err or "Manager" in out + err
+            assert "missing fields" in out + err or "owner" in out + err
             assert await _dump(pool) == before and await _rows(pool) == rows
 
     asyncio.run(_test())
@@ -283,7 +292,7 @@ def test_a_schedule_cannot_tell_a_chat_only_the_added_bot_allows(
             path = tmp_path / "in.json"
             schedule = {"name": "good", "cron": "0 3 * * *", "timezone": "UTC", "requirement": "r",
                         "notify": "always", "notify_target": {"channel": "telegram", "chat": BOT_ALLOWED}}
-            path.write_text(json.dumps({"format": "looper-config/v2", "projects": [
+            path.write_text(json.dumps({"format": "looper-config/v4", "projects": [
                 {"name": "calc", "schedules": [schedule]}]}))
             code, out, err = await _transfer_file(url, "import", str(path), apply=True, json_output=True)
             assert code == 0, err
@@ -317,13 +326,12 @@ def test_the_built_in_channel_is_not_imported_as_an_added_bot(
             await _add_bot(pool)
             before = await _dump(pool)
             path = tmp_path / "in.json"
-            path.write_text(json.dumps({"format": "looper-config/v3", "channels": [
+            path.write_text(json.dumps({"format": "looper-config/v4", "channels": [
                 {"channel_type": "telegram", "channel_id": "channel-telegram", "display_name": "Telegram",
                  "enabled": True, "config": {"allowed_user_ids": ["1"], "bot_token_env": "ALT_TELEGRAM_TOKEN"}}]}))
             code, out, err = await _transfer_file(url, "import", str(path), apply=apply, json_output=True)
-            assert code == 0, err
-            change = next(c for c in _plan(out)["changes"] if c["section"] == "channels")
-            assert change["action"] == "skipped" and f"({BOT})" in change["reason"], change
+            assert code != 0
+            assert "identity conflict" in out + err
             assert "another-secret" not in out + err and BOT_TOKEN not in out + err
             assert await _dump(pool) == before
 
@@ -342,7 +350,7 @@ def test_both_built_in_lark_channels_of_one_app_are_imported(
             await seed_channel_configs(pool)
             await pool.execute("UPDATE channel_configs SET enabled = true WHERE channel_id = 'channel-lark'")
             path = tmp_path / "in.json"
-            path.write_text(json.dumps({"format": "looper-config/v3", "channels": [
+            path.write_text(json.dumps({"format": "looper-config/v4", "channels": [
                 {"channel_type": "lark_bot", "channel_id": "channel-lark_bot", "display_name": "Lark bot",
                  "enabled": False, "config": {"app_id": "cli_main"}}]}))
             code, out, err = await _transfer_file(url, "import", str(path), apply=True, json_output=True)

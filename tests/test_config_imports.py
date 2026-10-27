@@ -119,11 +119,8 @@ def test_another_site_cannot_upload(tmp_path: Path) -> None:
     (b"", "the request holds no file"),
     (b"PK\x03\x04 a zip", "the uploaded file is not a Looper configuration file"),
     (b"\xff\xfe{}", "the uploaded file is not a Looper configuration file"),
-    (b"[]", "is not a looper-config/v4, looper-config/v3, looper-config/v2 or looper-config/v1 file (format: None)"),
-    (b'{"format": "looper-config/v99"}',
-     "is not a looper-config/v4, looper-config/v3, looper-config/v2 or looper-config/v1 file (format: 'looper-config/v99')"),
-    (b'{"format": "loopx-config/v1", "catalog": {}}', "catalog must be a JSON list"),
-], ids=["empty", "not-json", "not-utf8", "no-format", "newer-version", "bad-section"])
+    (b'{"format": "looper-config/v4", "catalog": {}}', "catalog must be a JSON list"),
+], ids=["empty", "not-json", "not-utf8", "bad-section"])
 def test_a_file_that_is_not_a_configuration_file_is_refused_and_removed(
     tmp_path: Path, body: bytes, error: str,
 ) -> None:
@@ -211,7 +208,7 @@ def test_a_file_over_the_request_cap_is_previewed_without_writing(
 
             assert status == 200, answer
             assert answer["bytes"] == exported.stat().st_size
-            assert answer["file"] == {"format": "looper-config/v3", "looper_version": __version__,
+            assert answer["file"] == {"format": "looper-config/v4", "looper_version": __version__,
                                       "exported_at": answer["file"]["exported_at"], "secrets": "omitted"}
             plan = answer["plan"]
             assert not plan["applied"]
@@ -274,29 +271,6 @@ def test_applying_writes_what_the_transfer_core_writes_and_removes_the_file(
 
 
 @needs_db
-def test_a_file_exported_before_the_rename_is_previewed_with_its_version(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    from tests.test_config_transfer_db import _installation
-
-    async def _test() -> None:
-        old = tmp_path / "old.json"
-        old.write_text(json.dumps({"format": "loopx-config/v1", "loopx_version": "2.5.0", "secrets": "omitted",
-                                   "settings": {"layers": [
-                                       {"scope": "system", "harness_prompt": "Be brief.", "agent": None,
-                                        "effort": None, "env": [], "run_budget_usd": None}]}}))
-        async with _installation() as (target, _), _serving(monkeypatch, target, tmp_path / "runtime") as port:
-            status, answer = await _request(port, "POST", UPLOAD_PATH, old)
-
-        assert status == 200, answer
-        assert answer["file"] == {"format": "loopx-config/v1", "looper_version": "2.5.0", "secrets": "omitted"}
-        assert [(c["section"], c["key"], c["action"]) for c in answer["plan"]["changes"]] == [
-            ("settings.layers", "system", "added")]
-
-    asyncio.run(_test())
-
-
-@needs_db
 def test_an_import_not_applied_expires_or_is_cancelled_and_its_file_goes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -304,7 +278,7 @@ def test_an_import_not_applied_expires_or_is_cancelled_and_its_file_goes(
 
     async def _test() -> None:
         small = tmp_path / "small.json"
-        small.write_text(json.dumps({"format": "looper-config/v3", "settings": {"layers": [
+        small.write_text(json.dumps({"format": "looper-config/v4", "settings": {"layers": [
             {"scope": "system", "harness_prompt": "Be brief.", "profile": None, "env": [],
              "run_budget_usd": None}]}}))
         runtime_root = tmp_path / "runtime"
@@ -369,7 +343,7 @@ def test_v3_preview_merge_apply_and_readback_share_the_core_contract(
             assert status == 200, saved
             status, exported = await _request(port, "POST", "/api/v1/config/export")
             exported = exported["document"]
-            assert status == 200 and exported["format"] == "looper-config/v3"
+            assert status == 200 and exported["format"] == "looper-config/v4"
             assert exported["providers"][0]["api_key"] == {"secret": "omitted"}
             core_path = tmp_path / "core.json"
             code, _, err = await _transfer_file(url, "export", str(core_path))
@@ -474,7 +448,7 @@ def test_v3_upload_previews_models_and_retention_reasons_without_a_database(
         reader.feed_eof()
         try:
             uploaded = await imports.receive(reader, len(body))
-            assert uploaded["file"]["format"] == "looper-config/v3"
+            assert uploaded["file"]["format"] == "looper-config/v4"
             assert uploaded["plan"]["counts"]["models"] == {
                 "added": 1, "changed": 0, "unchanged": 0, "skipped": 1}
             skipped = next(c for c in uploaded["plan"]["changes"] if c["action"] == "skipped")
@@ -498,7 +472,7 @@ def test_unauthorized_v3_upload_creates_no_pending_file(tmp_path: Path, token: s
         server = AgentHTTPServer(port=0, operator_token=TOKEN, web_adapter=SimpleNamespace(),
                                  task_router=SimpleNamespace(), supervisor=SimpleNamespace(), runtime_root=tmp_path)
         try:
-            status, _ = await Client(server).call("POST", UPLOAD_PATH, {"format": "looper-config/v3"},
+            status, _ = await Client(server).call("POST", UPLOAD_PATH, {"format": "looper-config/v4"},
                                                   token=token)
             assert status == 401
             assert _left(tmp_path) == []
@@ -508,44 +482,36 @@ def test_unauthorized_v3_upload_creates_no_pending_file(tmp_path: Path, token: s
     asyncio.run(_test())
 
 
-def test_pre_profile_v1_layers_keep_their_explicit_model(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("version", [None, "loopx-config/v1", "looper-config/v1", "looper-config/v2",
+                                     "looper-config/v3", "looper-config/v99", "unknown"])
+def test_retired_formats_never_reach_upload_or_staged_apply_work(tmp_path, monkeypatch, version):
     from unittest.mock import AsyncMock
 
     from looper.agents import config_transfer
 
-    async def _test() -> None:
-        monkeypatch.setattr(config_transfer._Target, "read", AsyncMock(return_value=config_transfer._Target()))
-        data = {"format": "loopx-config/v1", "settings": {"layers": [
-            {"scope": "system", "model": "haiku", "effort": "low", "env": []},
-            {"scope": "role", "role": "manager", "model": "opus", "env": []}]}}
-        plan = await config_transfer.import_config(None, data, apply=False)
-        assert not [c for c in plan.changes if c.action == config_transfer.Action.SKIPPED]
-        assert {c.key for c in plan.changes if c.section == "profiles"} == {
-            "claude-code/haiku", "claude-code/haiku · low", "claude-code/opus · low"}
+    async def run():
+        document = {} if version is None else {"format": version}
+        work = AsyncMock(return_value=config_transfer.Plan())
+        monkeypatch.setattr(config_imports, "_run", work)
+        async with _server(tmp_path) as port:
+            for route, body in [(UPLOAD_PATH, document),
+                                ("/api/v1/config/import_preview", {"document": document})]:
+                status, answer = await _request(port, "POST", route, json.dumps(body).encode())
+                assert status == 400, answer
+                assert "v2.13.165" in answer["error"]["message"]
+                assert "export v4" in answer["error"]["message"]
+                assert _left(tmp_path) == []
+                work.assert_not_awaited()
+            status, staged = await _request(port, "POST", UPLOAD_PATH, b'{"format":"looper-config/v4"}')
+            assert status == 200, staged
+            work.reset_mock()
+            path = tmp_path / config_imports.DIRNAME / f"{staged['import_id']}.json"
+            path.write_text(json.dumps(document))
+            status, answer = await _import_action(port, "apply", staged["import_id"])
+            assert status == 400, answer
+            assert "v2.13.165" in answer["error"]["message"]
+            work.assert_not_awaited()
+            assert _left(tmp_path) == []
+        assert _left(tmp_path) == []
 
-    asyncio.run(_test())
-
-
-def test_legacy_preview_keeps_a_readable_reason_and_a_separate_code(monkeypatch: pytest.MonkeyPatch) -> None:
-    from unittest.mock import AsyncMock
-
-    from looper.agents import config_transfer, runtimes
-    from tests.test_config_v3_import_db import legacy
-
-    async def _test() -> None:
-        target = config_transfer._Target(runtimes={"codex": {
-            "id": "rt-codex", "name": "codex", "type": "codex", "executable": "codex", "builtin": True,
-            "capabilities": [c.value for c in runtimes.adapter("codex").capabilities]}})
-        monkeypatch.setattr(config_transfer._Target, "read", AsyncMock(return_value=target))
-        data = legacy()
-        data["providers"][0].update(protocols=["openai-responses"])
-        data["profiles"][0].update(runtime="codex")
-        plan = await config_transfer.import_config(None, data, apply=False)
-        change = next(c for c in plan.view()["changes"] if c["section"] == "profiles")
-        assert change["action"] == "skipped"
-        assert "agent teams are a Claude Code feature" in change["reason"]
-        assert "turn agent_teams off" in change["reason"]
-        assert change["code"] == "invalid_legacy_value"
-        assert change["reason"] in config_transfer.format_plan(plan, Path("config.json"))
-
-    asyncio.run(_test())
+    asyncio.run(run())

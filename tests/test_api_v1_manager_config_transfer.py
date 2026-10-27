@@ -28,7 +28,8 @@ INSTALL_GRAPH = {"format": "looper-config/v4", "managers": [{"id": "manager", "n
 
 @pytest.mark.parametrize("version", ["looper-config/v1", "loopx-config/v1", "looper-config/v2", "looper-config/v3"])
 def test_legacy_document_versions_reject_manager_fields(version):
-    assert api_v1.validate_arguments(CONFIG_DOCUMENT, {"format": version}) == {"format": version}
+    with pytest.raises(OpError):
+        api_v1.validate_arguments(CONFIG_DOCUMENT, {"format": version})
     with pytest.raises(OpError):
         api_v1.validate_arguments(CONFIG_DOCUMENT, {"format": version, "managers": []})
 
@@ -49,7 +50,7 @@ def test_manager_full_identity_schema_keeps_manager_suffix_distinct():
     document = {"format": "looper-config/v4", "managers": [
         {"id": "manager", "name": "Default"}, {"id": "manager-manager", "name": "Scenario"}]}
     assert api_v1.validate_arguments(CONFIG_DOCUMENT, document) == document
-    assert api_v1.RESULTS["config.export"]["properties"]["document"]["oneOf"] == CONFIG_DOCUMENT["oneOf"]
+    assert api_v1.RESULTS["config.export"]["properties"]["document"]["properties"] == CONFIG_DOCUMENT["properties"]
 
 
 def test_template_import_schema_allows_omitted_name_but_export_still_requires_it():
@@ -97,7 +98,7 @@ def test_client_stored_document_policy_is_rechecked_before_execution(tmp_path, m
             async def request(route, data):
                 return await _send(server, f"POST /api/v1/{route}",
                     {**_bearer(CLIENT_TOKEN), "X-Looper-Session": "portable"}, json.dumps(data))
-            status, _, answer = await request("config/import_preview", {"document": {"format": "looper-config/v3"}})
+            status, _, answer = await request("config/import_preview", {"document": {"format": "looper-config/v4"}})
             assert status == 200, answer
             import_id = answer["result"]["import_id"]
             pending = server._config_imports._pending[import_id]

@@ -1,4 +1,4 @@
-"""Shared legacy conversion and v3 import against an isolated target registry."""
+"""Current v4 import against an isolated target registry."""
 from __future__ import annotations
 
 import json
@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from looper.agents import config_transfer as transfer
-from looper.agents import registry_migration as migration
 from tests.db_support import DSN
 from tests.test_config_transfer_db import _installation
 
@@ -18,21 +17,6 @@ pytestmark = pytest.mark.anyio
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
-
-
-def legacy(version="v2", **changes):
-    data = {"format": f"looper-config/{version}", "providers": [{
-        "name": "account", "protocols": ["anthropic-messages"], "auth": "api_key",
-        "base_url": "https://example.invalid", "models": [{"name": "exact", "input_usd_per_mtok": 2}],
-        "env": [], "max_concurrency": None, "api_key": transfer.PLACEHOLDER,
-    }], "profiles": [{"name": "imported", "runtime": "claude-code", "provider": "account",
-                      "model": "exact", "agent_teams": True, "system_prompt_mode": "old"}],
-        "settings": {"layers": [{"scope": "role", "role": "worker", "profile": "imported"}]}, **changes}
-    if version == "v1":
-        data["agents"] = data.pop("profiles")
-        for row in data["settings"]["layers"]:
-            row["agent"] = row.pop("profile")
-    return data
 
 
 def v3():
@@ -45,32 +29,6 @@ def v3():
         "profiles": [{"name": "imported", "runtime": "claude-code", "agent_teams": True,
                       "model": {"provider": "account", "name": "exact", "protocol": "anthropic-messages"}}],
         "settings": {"layers": [{"scope": "role", "role": "worker", "profile": "imported"}]}}
-
-
-@pytest.mark.parametrize("version", ["v1", "v2"])
-async def test_legacy_file_uses_the_database_converter(tmp_path, monkeypatch, version):
-    path = tmp_path / "config.json"
-    path.write_text(json.dumps(legacy(version)))
-    data = transfer.read_file(path)
-    real_convert = migration.convert
-    calls = []
-
-    def capture(*args, **kwargs):
-        result = real_convert(*args, **kwargs)
-        calls.append((deepcopy(args), deepcopy(kwargs), result))
-        return result
-
-    monkeypatch.setattr(migration, "convert", capture)
-    monkeypatch.setattr(transfer._Target, "read", AsyncMock(return_value=transfer._Target()))
-    plan = await transfer.import_config(None, data, apply=False)
-    assert calls
-    args, kwargs, converted = calls[-1]
-    assert real_convert(*args, **kwargs) == converted
-    assert len(converted.models) == len(converted.profiles) == 1
-    assert any(c.section == "models" and c.action == transfer.Action.ADDED for c in plan.changes)
-    assert any(c.section == "profiles" and c.action == transfer.Action.ADDED for c in plan.changes)
-    assert plan.need_secret[0].names == ("api_key",)
-    assert any("system_prompt_mode" in n for n in plan.notes)
 
 
 async def preview(monkeypatch, data, target=None):
@@ -108,9 +66,11 @@ async def test_duplicate_natural_keys_are_skipped(monkeypatch, section):
 
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
-async def test_import_roundtrip_retains_ids_and_secret(tmp_path, version):
-    data = v3() if version == "v3" else legacy(version)
+@pytest.mark.parametrize("runtime_default", [False, True])
+async def test_import_roundtrip_retains_ids_and_secret(tmp_path, runtime_default):
+    data = v3()
+    if runtime_default:
+        data["providers"][0]["endpoints"]["anthropic-messages"] = {"base_url": "", "use_runtime_default": True}
     path = tmp_path / "config.json"
     path.write_text(json.dumps(data))
     data = transfer.read_file(path)
@@ -129,6 +89,7 @@ async def test_import_roundtrip_retains_ids_and_secret(tmp_path, version):
             exported = json.loads("".join([chunk async for chunk in transfer.export_chunks(
                 conn, include_projects=False, include_secrets=False)]))
             assert exported["providers"][0]["api_key"] == transfer.PLACEHOLDER
+            assert exported["providers"][0]["endpoints"] == data["providers"][0]["endpoints"]
             assert (await transfer.run_import(conn, exported, apply=True)).writes == 0
             assert await conn.fetchval("SELECT api_key FROM llm_provider_secrets s JOIN llm_providers p "
                                        "ON p.id = s.provider_id WHERE p.name = 'account'") == "synthetic-saved-key"
@@ -187,31 +148,6 @@ async def test_builtin_definitions_cannot_be_overwritten(monkeypatch, section):
                for c in plan.changes)
 
 
-async def test_bad_legacy_model_is_skipped_without_default_fallback(monkeypatch):
-    data = legacy()
-    data["profiles"][0]["model"] = "outside-catalog"
-    plan = await preview(monkeypatch, data)
-    assert any(c.section == "profiles" and c.action == transfer.Action.SKIPPED
-               and c.code == "model_outside_catalog" for c in plan.changes)
-    assert any(c.section == "settings.layers" and c.action == transfer.Action.SKIPPED for c in plan.changes)
-
-
-async def test_legacy_conversion_never_receives_unrelated_target_accounts(monkeypatch):
-    target = target_registry()
-    target.providers["unrelated-account"] = {**target.providers["account"], "id": "prov-unrelated",
-                                            "name": "unrelated-account"}
-    convert = migration.convert
-    seen = []
-
-    def capture(runtimes, providers, profiles, **kwargs):
-        seen.extend(p["id"] for p in providers)
-        return convert(runtimes, providers, profiles, **kwargs)
-
-    monkeypatch.setattr(migration, "convert", capture)
-    await preview(monkeypatch, legacy(), target)
-    assert "prov-existing" in seen and "prov-unrelated" not in seen
-
-
 async def test_apply_recomputes_and_keeps_existing_ids(monkeypatch):
     from looper.db import config_transfer as db
     from looper.db import connection
@@ -254,62 +190,12 @@ async def test_apply_failure_rolls_back_the_whole_import(monkeypatch):
             assert await conn.fetchval("SELECT count(*) FROM agent_profiles WHERE name = 'claude-code/opus'") == 1
 
 
-async def test_legacy_runtime_alias_uses_existing_runtime_once(monkeypatch):
-    data = legacy()
-    data["runtimes"] = [{"name": "old-claude", "type": "claude-code", "executable": None}]
-    data["profiles"][0]["runtime"] = "old-claude"
-    plan = await preview(monkeypatch, data)
-    assert any(c.section == "profiles" and c.action == transfer.Action.ADDED for c in plan.changes)
-
-
 async def test_existing_builtin_model_can_be_referenced_without_importing_its_definition(monkeypatch):
     data = {"format": transfer.FORMAT, "profiles": [{"name": "builtin-reference", "runtime": "claude-code",
             "model": {"provider": "claude-subscription", "name": "opus", "protocol": "anthropic-messages"}}]}
     plan = await preview(monkeypatch, data)
     assert plan.changes[0].action == transfer.Action.ADDED
     assert not plan.need_secret
-
-
-async def test_legacy_builtin_provider_is_not_recreated(monkeypatch):
-    data = legacy(providers=[])
-    data["profiles"][0].update(provider="claude-subscription", model="opus")
-    plan = await preview(monkeypatch, data)
-    assert any(c.section == "profiles" and c.action == transfer.Action.ADDED for c in plan.changes)
-    assert not any(c.section == "providers" for c in plan.changes)
-
-
-async def test_legacy_default_endpoint_marker_survives_import(monkeypatch):
-    data = legacy()
-    data["providers"][0]["base_url"] = ""
-    importer = transfer._Importer(None, transfer._Target(), False)
-    converted = importer.legacy(data)
-    endpoint = converted["providers"][0]["endpoints"]["anthropic-messages"]
-    assert endpoint == {"base_url": "", "use_runtime_default": True}
-    await importer.provider(converted["providers"][0])
-    assert importer.endpoints[("account", "anthropic-messages")].use_runtime_default
-
-
-@pytest.mark.parametrize("version", ["v1", "v2"])
-@pytest.mark.parametrize("key,provider_count", [(transfer.PLACEHOLDER, 2), ("synthetic-identical-key", 1)])
-async def test_legacy_mapping_matches_normalized_database_rows(version, key, provider_count):
-    from looper.agents.profile_registry import BUILTIN_RUNTIME
-
-    data = legacy(version)
-    data["providers"][0].update(name="a", base_url="https://api.deepseek.com/anthropic", api_key=key)
-    data["providers"].append({**deepcopy(data["providers"][0]), "name": "b"})
-    profiles = data["agents" if version == "v1" else "profiles"]
-    profiles[0]["provider"] = "b"
-    normalized = [{**p, "id": f"file:provider:{p['name']}"} for p in data["providers"]]
-    expected = migration.convert([BUILTIN_RUNTIME], normalized, [{
-        "id": "file:profile:imported", "name": "imported", "runtime_id": BUILTIN_RUNTIME.id,
-        "provider_id": "file:provider:b", "model": "exact", "agent_teams": True}])
-    assert len(expected.providers) == provider_count
-    importer = transfer._Importer(None, transfer._Target(), False)
-    converted = importer.legacy(transfer._from_v1(data) if version == "v1" else data)
-    assert {p["name"] for p in converted["providers"]} == {p.name for p in expected.providers.values()}
-    model = expected.models[expected.profiles["file:profile:imported"].model_id]
-    assert converted["profiles"][0]["model"] == {
-        "provider": expected.providers[model.provider_id].name, "name": model.name, "protocol": model.protocol.value}
 
 
 async def test_skipped_existing_profile_does_not_supply_a_layer_fallback(monkeypatch):
@@ -338,3 +224,53 @@ async def test_model_protocol_conflict_has_no_cross_protocol_fallback(monkeypatc
     change = next(c for c in plan.changes if c.section == "models")
     assert change.action == transfer.Action.SKIPPED and "endpoint" in change.reason
     assert next(c for c in plan.changes if c.section == "profiles").action == transfer.Action.SKIPPED
+
+
+@pytest.mark.parametrize("registered", [False, True])
+async def test_custom_runtime_references_require_the_exact_registered_runtime(monkeypatch, registered):
+    data = v3()
+    data["runtimes"] = [{"name": "custom-claude", "type": "claude-code", "executable": None}]
+    data["profiles"][0]["runtime"] = "custom-claude"
+    target = transfer._Target()
+    if registered:
+        target.runtimes["custom-claude"] = {
+            "id": "rt-custom", "name": "custom-claude", "type": "claude-code", "executable": "custom-claude",
+            "capabilities": ["resident_session", "resume", "run"], "builtin": False}
+    plan = await preview(monkeypatch, data, target)
+    profile = next(c for c in plan.changes if c.section == "profiles")
+    assert profile.action == (transfer.Action.ADDED if registered else transfer.Action.SKIPPED)
+    assert next(c for c in plan.changes if c.section == "runtimes").action == (
+        transfer.Action.UNCHANGED if registered else transfer.Action.SKIPPED)
+    assert not any("built-in claude-code" in note for note in plan.notes)
+
+
+@pytest.mark.parametrize("section,entry,field", [
+    ("providers", {"name": "old", "protocols": ["anthropic-messages"]}, "protocols"),
+    ("providers", {"name": "old", "base_url": "https://example.invalid"}, "base_url"),
+    ("providers", {"name": "old", "models": []}, "models"),
+    ("settings.layers", {"scope": "system", "effort": "high"}, "effort"),
+    ("settings.layers", {"scope": "system", "model": "sonnet"}, "model"),
+    ("settings.layers", {"scope": "system", "agent": "claude-code/opus"}, "agent"),
+    ("settings.layers", {"scope": "role", "role": "planner", "max_concurrency": 2}, "max_concurrency"),
+    ("settings.layers", {"scope": "system", "env": [
+        {"key": "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "value": "1"}]}, "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
+])
+async def test_current_document_refuses_old_provider_and_layer_fields(monkeypatch, section, entry, field):
+    data = {"format": transfer.FORMAT}
+    if section == "settings.layers":
+        data["settings"] = {"layers": [entry]}
+    else:
+        data[section] = [entry]
+    plan = await preview(monkeypatch, data)
+    assert len(plan.changes) == 1
+    assert plan.changes[0].action == transfer.Action.SKIPPED
+    assert field in plan.changes[0].reason
+    assert plan.writes == 0 and not plan.notes
+
+
+@pytest.mark.parametrize("field", ["app_id_env", "app_secret_env"])
+async def test_current_lark_channel_refuses_old_app_keys(monkeypatch, field):
+    data = {"format": transfer.FORMAT, "channels": [{"channel_id": "channel-lark", "channel_type": "lark",
+            "display_name": "Lark", "enabled": False, "config": {field: "RETIRED_APP"}}]}
+    with pytest.raises(transfer.ConfigFileError, match=field):
+        await preview(monkeypatch, data)

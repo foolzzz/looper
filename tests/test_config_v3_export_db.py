@@ -1,4 +1,4 @@
-"""Portable v3 exports from normalized registry rows and disposable PostgreSQL."""
+"""Portable v4 exports from normalized registry rows and disposable PostgreSQL."""
 
 from __future__ import annotations
 
@@ -55,19 +55,22 @@ async def _export(pool, *, projects=False, secrets=False):
     return json.loads(text), summary
 
 
-def _no_local_references(value):
+def _no_local_references(value, section=None):
     if isinstance(value, dict):
-        assert not {"id", "provider_id", "model_id", "runtime_id", "project_id", "work_dir",
-                    "created_at", "updated_at", "builtin"} & value.keys()
-        for nested in value.values():
-            _no_local_references(nested)
+        forbidden = {"provider_id", "model_id", "runtime_id", "project_id", "work_dir",
+                     "created_at", "updated_at", "builtin"}
+        if section != "managers":
+            forbidden.add("id")
+        assert not forbidden & value.keys()
+        for name, nested in value.items():
+            _no_local_references(nested, name)
     elif isinstance(value, list):
         for nested in value:
-            _no_local_references(nested)
+            _no_local_references(nested, section)
 
 
-def test_format_and_sections_are_v3():
-    assert transfer.FORMAT == "looper-config/v3"
+def test_format_and_sections_are_v4():
+    assert transfer.FORMAT == "looper-config/v4"
     assert "models" in transfer.SECTIONS
 
 
@@ -87,6 +90,7 @@ def test_streamed_file_uses_only_portable_registry_fields(tmp_path, monkeypatch,
                "model": "same-name", "protocol": "openai-chat", "effort": None, "agent_teams": False,
                "custom_prompt": "", "system_prompt_mode": "replace"}
     reads = {
+        "read_managers": [], "read_manager_installs": [], "read_manager_templates": [], "read_projects": [],
         "read_layers": [], "read_items": [], "read_installs": [], "read_channels": [], "read_roles": [],
         "read_runtimes": [{**private, "name": "custom-runtime", "type": "claude-code",
                            "executable": "/machine/private/claude"}],
@@ -102,7 +106,7 @@ def test_streamed_file_uses_only_portable_registry_fields(tmp_path, monkeypatch,
     path = tmp_path / "portable.json"
     summary = asyncio.run(transfer.write_export(conn, path, include_projects=False, include_secrets=include_secrets))
     data = json.loads(path.read_text())
-    assert data["format"] == "looper-config/v3"
+    assert data["format"] == "looper-config/v4"
     assert len(data["providers"]) == len(data["profiles"]) == 1
     assert len(data["models"]) == 2 and summary.counts["models"] == 2
     assert data["providers"][0]["api_key"] == (SECRET if include_secrets else transfer.PLACEHOLDER)
@@ -129,9 +133,9 @@ def test_models_have_natural_keys_and_preserve_price_metadata():
     async def test(pool):
         await _seed(pool)
         data, summary = await _export(pool)
-        assert data["format"] == "looper-config/v3"
+        assert data["format"] == "looper-config/v4"
         assert set(data) == {"format", "looper_version", "exported_at", "secrets", "runtimes",
-                             "providers", "models", "profiles", "settings", "channels", "installs", "catalog"}
+                             "providers", "models", "profiles", "settings", "channels", "installs", "catalog", "managers"}
         assert len(data["providers"]) == 2
         provider = data["providers"][0]
         assert provider == {

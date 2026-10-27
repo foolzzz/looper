@@ -176,13 +176,7 @@ def test_migration_on_a_database_without_the_old_column_changes_nothing(monkeypa
     run_db(run, monkeypatch)
 
 
-async def _profile_columns(conn: Any) -> list[str]:
-    rows = await conn.fetch("SELECT attname FROM pg_attribute WHERE attrelid = to_regclass('agent_profiles') "
-                            "AND attnum > 0 AND NOT attisdropped")
-    return [row["attname"] for row in rows]
-
-
-def test_config_transfer_carries_role_modes_and_ignores_a_profiles_old_mode(
+def test_config_transfer_carries_role_modes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from looper.agents.config_transfer import Action, export_chunks, import_config
@@ -201,18 +195,8 @@ def test_config_transfer_carries_role_modes_and_ignores_a_profiles_old_mode(
                 plan = await import_config(conn, document, apply=True)
             assert not any(c.action is Action.SKIPPED for c in plan.changes if c.section == "settings.layers")
             assert await _layer_modes(pool) == {"worker": "replace", "planner": "append"}
-            entry = {"name": "old", "runtime": "claude-code", "provider": "claude-subscription", "model": "sonnet",
-                     "effort": None, "agent_teams": True, "system_prompt_mode": "replace", "custom_prompt": ""}
-            async with conn.transaction():
-                plan = await import_config(conn, {"format": "looper-config/v2", "profiles": [entry]}, apply=True)
-            change = next(c for c in plan.changes if c.key == "old")
-            assert change.action is Action.ADDED and "system_prompt_mode" not in await _profile_columns(conn)
-            assert any("old: its system_prompt_mode is ignored" in note for note in plan.notes)
-            exported = next(e for e in json.loads("".join([chunk async for chunk in export_chunks(
-                conn, include_projects=False, include_secrets=False)]))["profiles"] if e["name"] == "old")
-            assert "system_prompt_mode" not in exported
             # A system layer cannot carry one.
-            bad = {"settings": {"layers": [{"scope": "system", "system_prompt_mode": "replace"}]}}
+            bad = {"format": "looper-config/v4", "settings": {"layers": [{"scope": "system", "system_prompt_mode": "replace"}]}}
             async with conn.transaction():
                 plan = await import_config(conn, bad, apply=True)
             assert any(c.action is Action.SKIPPED for c in plan.changes)

@@ -253,7 +253,7 @@ def test_roundtrip_resolves_target_local_profile_and_project_ids(monkeypatch: py
             await ensure_schema(target)
             await _codex_runtime(target)
             # The same natural references already have independent target-local ids.
-            await _run(target, {"format": transfer.V3_FORMAT, **_registry(), "projects": [{"name": "Example"}]})
+            await _run(target, {"format": transfer.FORMAT, **_registry(), "projects": [{"name": "Example"}]})
             target_profile = await target.fetchval("SELECT id FROM agent_profiles WHERE name = 'Example profile'")
             target_project = await target.fetchval("SELECT id FROM projects WHERE name = 'Example'")
             assert target_profile != source["planner_profile_id"] and target_project != source["project_id"]
@@ -282,19 +282,31 @@ def test_default_entry_changes_only_name_and_description(monkeypatch: pytest.Mon
     run_db(test, monkeypatch, timeout=15)
 
 
-def test_default_only_export_keeps_the_legacy_v3_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_only_v4_export_preview_apply_and_readback(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
+        from looper.agents.serve import seed_channel_configs
+        await seed_channel_configs(pool)
+        await _run(pool, _document({"id": "manager", "name": "Renamed default", "description": "Portable"}))
         first = await _export(pool, include_projects=False)
-        assert first["format"] == transfer.V3_FORMAT and "managers" not in first
-        assert set(first) == {"format", "looper_version", "exported_at", "secrets", "runtimes", "providers",
-                              "models", "profiles", "settings", "channels", "installs", "catalog"}
-        await _run(pool, _document({"id": "manager", "name": "Renamed default", "description": "Local"}))
-        second = await _export(pool, include_projects=False)
-        first.pop("exported_at")
-        second.pop("exported_at")
-        assert second == first
+        assert first["format"] == transfer.FORMAT
+        assert first["managers"] == [{"id": "manager", "name": "Renamed default", "description": "Portable",
+                                      "idle_timeout_seconds": 0}]
+        assert {channel["channel_id"] for channel in first["channels"]} == set(transfer.BUILTIN_CHANNEL_IDS)
+        assert all(channel["manager_id"] == "manager" for channel in first["channels"])
+        async with fresh_schema() as target:
+            from looper.db.connection import ensure_schema
+            await ensure_schema(target)
+            before = await _snapshot(target)
+            preview = await _run(target, first, apply=False)
+            assert await _snapshot(target) == before
+            applied = await _run(target, first)
+            assert applied.view() == {**preview.view(), "applied": True}
+            second = await _export(target, include_projects=False)
+            for document in (first, second):
+                document.pop("exported_at")
+            assert second == first
 
-    run_db(test, monkeypatch, timeout=15)
+    run_db(test, monkeypatch, timeout=20)
 
 
 @pytest.mark.parametrize("owner", ["manager", "manager-review"])
@@ -396,7 +408,7 @@ def test_manager_install_write_failure_rolls_back_catalog_and_manager(monkeypatc
 
 def test_default_owned_added_bot_selects_v4_with_default_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
-        assert (await _export(pool))["format"] == transfer.V3_FORMAT
+        assert (await _export(pool))["format"] == transfer.FORMAT
         await pool.execute("UPDATE managers SET name = 'Coordinator', description = 'Example coordinator' "
                            "WHERE id = 'manager'")
         await pool.execute("INSERT INTO channel_configs (channel_id, channel_type, manager_id, display_name) "
@@ -414,7 +426,7 @@ def test_default_owned_added_bot_selects_v4_with_default_metadata(monkeypatch: p
 def test_legacy_formats_reject_manager_graph_fields(version: str, tmp_path: Path) -> None:
     path = tmp_path / "config.json"
     path.write_text(json.dumps({"format": version, "managers": []}))
-    with pytest.raises(transfer.ConfigFileError, match="requires looper-config/v4"):
+    with pytest.raises(transfer.ConfigFileError, match="v2.13.165"):
         transfer.read_file(path)
 
 
@@ -515,7 +527,7 @@ def test_imported_fixed_role_requires_a_compatible_registered_profile(profile: s
                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         await _codex_runtime(pool)
-        await _run(pool, {"format": transfer.V3_FORMAT, **_registry()})
+        await _run(pool, {"format": transfer.FORMAT, **_registry()})
         if profile == "Example profile":
             await pool.execute("UPDATE agent_runtimes SET capabilities = ARRAY['resident_session', 'resume'] "
                                "WHERE id = 'rt-config-codex'")
@@ -533,7 +545,7 @@ def test_imported_fixed_role_requires_a_compatible_registered_profile(profile: s
 def test_existing_fixed_role_profile_must_be_on_the_project_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         await _codex_runtime(pool)
-        await _run(pool, {"format": transfer.V3_FORMAT, **_registry(), "projects": [{"name": "Example",
+        await _run(pool, {"format": transfer.FORMAT, **_registry(), "projects": [{"name": "Example",
             "role_templates": [{"key": "security", "kind": "review", "role_prompt": "Review security.",
                                 "profile": "Example profile"}]}]})
         await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id) "
@@ -616,7 +628,7 @@ def test_repeated_import_is_unchanged_and_notifies_only_after_commit(monkeypatch
     run_db(test, monkeypatch, timeout=20)
 
 
-@pytest.mark.parametrize("incoming", [{"format": "looper-config/v3"}, _document(),
+@pytest.mark.parametrize("incoming", [{"format": "looper-config/v4"}, _document(),
                                        _document(_manager()), _document(_manager(templates=[]))])
 def test_absent_and_empty_lists_preserve_existing_target_templates(incoming: Any,
                                                                  monkeypatch: pytest.MonkeyPatch) -> None:

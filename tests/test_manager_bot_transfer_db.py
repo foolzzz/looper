@@ -274,14 +274,20 @@ def test_duplicate_final_actual_app_identity_rejects_atomically(monkeypatch: pyt
     run_db(test, monkeypatch, timeout=20)
 
 
-@pytest.mark.parametrize("version", ["loopx-config/v1", "looper-config/v1", "looper-config/v2", "looper-config/v3"])
-def test_legacy_file_cannot_introduce_added_bot(version: str, tmp_path: Any) -> None:
-    path = tmp_path / "legacy.json"
-    entry = _bot()
-    entry.pop("manager_id")
-    path.write_text(json.dumps({"format": version, "channels": [entry]}))
-    with pytest.raises(transfer.ConfigFileError, match="v4|Manager"):
+@pytest.mark.parametrize("version", ["loopx-config/v1", "looper-config/v1", "looper-config/v2", "looper-config/v3",
+                                     None, "looper-config/v5", "unknown"])
+def test_unsupported_file_formats_require_the_bridge_before_bot_admission(version: str | None, tmp_path: Any) -> None:
+    path = tmp_path / "unsupported.json"
+    document = _document(_bot())
+    if version is None:
+        document.pop("format")
+    else:
+        document["format"] = version
+    path.write_text(json.dumps(document))
+    with pytest.raises(transfer.ConfigFileError, match="v2.13.165") as refused:
         transfer.read_file(path)
+    assert "required format looper-config/v4" in str(refused.value)
+    assert "upgrade" in str(refused.value) and "export v4" in str(refused.value)
 
 
 def test_import_checks_stored_actual_identity_and_never_partially_writes_manager(monkeypatch: pytest.MonkeyPatch) -> None:

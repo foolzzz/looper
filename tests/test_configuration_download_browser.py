@@ -109,7 +109,7 @@ def read_download(page, route, document, tmp_path):
 def test_configuration_download_readback(dashboard, tmp_path, delay_ms, items):
     page, pending, downloads, _, expect = dashboard
     content = "# Synthetic skill\nUnicode: 配置 🚀\n" + "portable content\n" * 24
-    document = {"format": "looper-config/v3", "secrets": "omitted", "settings": {},
+    document = {"format": "looper-config/v4", "secrets": "omitted", "settings": {},
                 "projects": [{"name": "Synthetic project", "knowledge": [], "items": []}],
                 "catalog": [{"kind": "skill", "name": f"synthetic-{n}", "origin": "upload",
                              "files": [{"path": "SKILL.md", "content": content, "executable": False}]}
@@ -154,7 +154,7 @@ def test_unsuccessful_export_has_no_download_and_retry_works(dashboard, tmp_path
     expect(button).to_be_enabled()
     assert not downloads
     button = begin_export(page, expect)
-    read_download(page, pending.pop(), {"format": "looper-config/v3", "catalog": []}, tmp_path)
+    read_download(page, pending.pop(), {"format": "looper-config/v4", "catalog": []}, tmp_path)
     expect(button).to_be_enabled()
     expect(page.get_by_role("alert")).to_have_count(0)
     assert len(downloads) == 1

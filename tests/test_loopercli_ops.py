@@ -81,7 +81,7 @@ def test_auth_does_not_fall_back_to_echoed_password_input(monkeypatch, capsys):
 
 
 def test_doctor_and_config_commands_use_openapi(tmp_path, monkeypatch, capsys):
-    document = {"format": "looper-config/v3", "projects": []}
+    document = {"format": "looper-config/v4", "projects": []}
     def respond(handler, request):
         path = request[1]
         result = ({"document": document} if path.endswith("config/export") else
@@ -157,7 +157,7 @@ def test_config_import_prints_the_complete_plan(config_cli, tmp_path, capsys, ac
 
 def test_config_export_uses_utf8_under_a_non_utf8_default(config_cli, tmp_path, monkeypatch):
     server, base = config_cli
-    document = {"format": "looper-config/v3", "projects": [{"name": "配置项目"}]}
+    document = {"format": "looper-config/v4", "projects": [{"name": "配置项目"}]}
     server.answers.append((200, {"status": "ok", "result": {"document": document}}))
     fdopen = loopercli.os.fdopen
     def non_utf8_default(fd, mode, **kwargs):
@@ -173,7 +173,7 @@ def test_config_export_uses_utf8_under_a_non_utf8_default(config_cli, tmp_path, 
 @pytest.mark.parametrize("failure", ["open", "write", "close", "encoding"])
 def test_config_export_removes_a_partial_file_on_failure(config_cli, tmp_path, monkeypatch, capsys, failure):
     server, base = config_cli
-    server.answers.append((200, {"status": "ok", "result": {"document": {"format": "looper-config/v3"}}}))
+    server.answers.append((200, {"status": "ok", "result": {"document": {"format": "looper-config/v4"}}}))
     fdopen = loopercli.os.fdopen
     descriptors = []
     class FailingWriter:
@@ -270,7 +270,7 @@ def test_config_transient_operator_aliases_and_generated_children(tmp_path, monk
 
 def test_config_operator_stdin_is_consumed_once_before_alias_file_stdin(tmp_path, monkeypatch, capsys):
     token = "stdin-transient-config-token"
-    portable = {"format": "looper-config/v3"}
+    portable = {"format": "looper-config/v4"}
     monkeypatch.setattr(sys, "stdin", io.StringIO(token + "\n" + json.dumps(portable)))
     def respond(handler, request):
         assert request[2]["authorization"] == f"Bearer {token}"
