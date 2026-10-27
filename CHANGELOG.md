@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.159] - 2026-10-27
+
+### Added
+
+- **An operator can install a global plugin or skill for one Manager.** The extras load on top of the Manager's inherited global installs at its next safe turn, through the new operator-only `manager_installs.list`, `put` and `delete` operations (`loopercli manager-installs`). Configuration export and import carry them, catalog deletion counts them, and three new prompt-regression dialogs cover installed, isolated and default Managers. ([#732](https://github.com/foolzzz/looper/pull/732))
+
 ## [2.13.158] - 2026-10-26
 
 ### Fixed
