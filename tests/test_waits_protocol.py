@@ -662,7 +662,7 @@ def test_manager_wait_settings_read_confirmation_update_and_reset(
 ) -> None:
     from looper.agents.ops import Turn
     from looper.agents.ops import settings as ops_settings
-    from looper.agents.ops.service import ManagerOps
+    from looper.agents.ops.service import ManagerOps, Platform
 
     monkeypatch.setattr(ops_settings.db_profiles, "list_profiles", AsyncMock(return_value=[]))
     monkeypatch.setattr(ops_settings.db_roles, "list_configs", AsyncMock(return_value=[]))
@@ -673,7 +673,7 @@ def test_manager_wait_settings_read_confirmation_update_and_reset(
     monkeypatch.setattr(ManagerOps, "_record", AsyncMock())
 
     async def run() -> None:
-        ops = ManagerOps(SimpleNamespace(), url="http://127.0.0.1:9", token="test")
+        ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="test")
         initial = await waits.settings_view()
         answer = await ops.call("looper_settings", {"action": "view"})
         assert answer["status"] == "ok", answer
@@ -728,7 +728,7 @@ def test_manager_wait_settings_validate_before_confirmation(
 
 def test_manager_task_returns_wait_conditions_and_each_step_kind(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.agents import projects
-    from looper.agents.ops.service import ManagerOps
+    from looper.agents.ops.service import ManagerOps, Platform
     from looper.db import llm_records, task_roles, tasks, user_gates, waits as db_waits
 
     check = {"type": "github_pr", "repo": "owner/name", "number": 12, "ready_when": "head_changed"}
@@ -747,7 +747,7 @@ def test_manager_task_returns_wait_conditions_and_each_step_kind(monkeypatch: py
     monkeypatch.setattr(ManagerOps, "_record", AsyncMock())
 
     async def run() -> None:
-        ops = ManagerOps(SimpleNamespace(), url="http://127.0.0.1:9", token="test")
+        ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="test")
         answer = await ops.call("looper_tasks", {"action": "get", "task_id": "task-a"})
         assert answer["status"] == "ok", answer
         result = answer["result"]
