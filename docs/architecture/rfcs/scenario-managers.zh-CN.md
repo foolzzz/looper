@@ -186,7 +186,8 @@ CREATE TABLE IF NOT EXISTS chat_threads (
   - 不进任何管家的 `[RESUME]` 续接简报（同一个筛选）；
   - `GET /api/chat/sessions?manager=<已删的 id>` 答 404；`POST /api/chat/send` 带这样的线程 id 答 409「这段对话属于已删除的管家」；`GET /api/chat/messages?session_id=` 仍能按 id 读（操作者登录后的审计用途，和今天读任何线程一样）；
   - 它的 key 不能再建新管家（409「key <k> was used by a deleted Manager」），所以旧线程永远不会归到一个同名的新管家下；名称可以再用。
-  被删管家的 `llm_records`、`manager_actions` 保留（审计）。不做物理删除和清理工具（第 17 节待办）。
+  被删管家的历史默认保留。操作者可通过 `manager_cleanup.preview` / `manager_cleanup.purge`（控制台 Settings → Managers 或生成的 `loopercli manager-cleanup`）手工清理删除满保留期的历史；默认 30 天，只接受整数 30–3650 天。预览不修改目标数据，仅在默认操作者动作流写入目标与保留期的读取审计（不记正文或读取结果）；数据库预览函数只读。执行前显式确认不可恢复的损失，执行时以数据库事务时间重新检查资格并锁定管家行，同时排除未完成退役、同步重试或仍能写入的 agent。任何任务、机器人、聊天绑定、定时任务或 `status = 'running'` 的运行记录都会阻止清理；历史已完成但没有 `finished_at` 的记录不阻止。
+  清理仅删除 `chat_threads.manager_id` 精确归属的消息、`llm_records.agent_id` 精确匹配的运行及其级联事件、`manager_actions.manager_id` 精确匹配的操作。一次事务全部提交或全部回滚；并发清理串行，重复清理返回零删除数。`managers` 和 `chat_threads` 永久保留为身份墓碑，`counts.threads` 表示保留数而非待删除数，旧 key 和线程归属不能重用；按 id 审计读取沿用原接口的空消息约定。成功审计写在默认操作者动作流，包含目标、保留期和数量，不包含正文，不在被清理管家下面重建动作。两项操作只对操作者开放，不进入 Manager 工具或渠道能力。没有自动清理器、schema 迁移或运行目录删除；渠道发现、拒绝记录、项目/任务/Planner 数据及文件均不清理。移除身份墓碑需要单独设计和维护者决定。
 - **Profile 和项目的删除检查：** `db.profile_registry.profile_usage` 多算未删除的管家定义和模板引用的 Profile，`usage_text` 写成「Manager <name>」「template <name> of Manager <name>」；删项目时，模板引用它答 409 并点名模板。外键是兜底。
 - **Profile 被改时的角色检查：** `profile_registry._selected_roles`（改 Profile 时拒绝「改完跑不了它被选中的角色」）多算三处：任一管家会话的选择和未删除管家定义的 `profile_id` → `manager`；模板的 `planner_profile_id` / `worker_profile_id` / `reviewer_profile_id` → `planner` / `worker` / `reviewer`。建任务时的 `check_selection` 见 8.3 第 5 步（兜底：直接改库的情况）。
 - **名称：** 默认管家的 `name` 迁移时写 `Manager`；控制台的显示名改读 `managers.name`（今天读 `role_configs.manager.display_name`，seed 时是 `Manager (管家)`）。为了不变：迁移在 `managers` 行刚插入时，若 `role_configs.manager.display_name` 非空就用它（`UPDATE ... WHERE name = 'Manager'`，只做一次，`schema_migrations` 记 `managers_default_name`）。
@@ -492,7 +493,7 @@ as for any task. When no template fits, say so[ and do not create a task].
 2. **阶段 2：每个管家一个机器人。** 第 9.1 节。
 3. **阶段 3：按聊天绑定和 Settings。** 第 9.2 节。
 
-阶段 1 之后的待办（记入开发计划第 5 节）：闲置的场景管家自动停进程；不再支持降级到阶段 2 之前的版本后，删掉 `task_user_gate_posts` 按类型的唯一约束（第 9.1 节）；已删管家的线程和记录的物理清理；管家、模板和它们的机器人进配置导出、导入；定时任务属于一个场景管家（并能用它的模板）；按管家分插件和 skill 的安装；任务列表按管家筛选。
+阶段 1 之后的待办（记入开发计划第 5 节）：不再支持降级到阶段 2 之前的版本后，删掉 `task_user_gate_posts` 按类型的唯一约束（第 9.1 节）；管家、模板和它们的机器人进配置导出、导入；定时任务属于一个场景管家（并能用它的模板）；按管家分插件和 skill 的安装；任务列表按管家筛选。闲置进程退役已实现；已删管家保留身份墓碑的手工历史清理已在本分支实现，最终验收仍由本文状态和开发计划第 21 项跟踪。
 
 ## 18. 默认行为的变化
 

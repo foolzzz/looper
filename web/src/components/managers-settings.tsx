@@ -34,6 +34,7 @@ import {
   type TemplateInput,
 } from "@/lib/api";
 import { ManagerChatBindings, useManagerChatBindings } from "@/components/manager-chat-bindings";
+import { ManagerCleanup } from "@/components/manager-cleanup";
 import type { Binding } from "@/lib/chat-bindings-api";
 import { MANAGER_EXAMPLE } from "@/lib/manager-example";
 import { settingsHref } from "@/lib/settings-pages";
@@ -699,6 +700,7 @@ export function ManagersSection() {
           bindings={grouped.get(m.id) ?? []} snapshot={chatState} reload={load} />)}
       </RegistryList>
       <ExampleManager reload={load} key={`example-${example}`} onDone={() => setExample((n) => n + 1)} />
+      <ManagerCleanup />
       {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
     </div>
   );
