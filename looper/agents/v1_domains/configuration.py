@@ -6,7 +6,7 @@ from .. import api_v1, config_imports, config_transfer
 from ..api_v1 import Operation, _object, _STR
 from ..ops import ErrorCode, OpError
 
-# Reuse the version branches as well as properties inspected by older callers.
+# Reuse the closed current document projection, including generated CLI properties.
 CONFIG_DOCUMENT = {**api_v1.CONFIG_DOCUMENT, "title": "ConfigDocument"}
 CONFIG_IMPORT_DOCUMENT = {**api_v1.CONFIG_IMPORT_DOCUMENT, "title": "ConfigImportDocument"}
 CONFIG_ABOUT = _object(dict.fromkeys(("format", "looper_version", "exported_at", "secrets"), _STR), [])

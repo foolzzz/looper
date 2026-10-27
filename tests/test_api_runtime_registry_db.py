@@ -214,7 +214,7 @@ def test_config_import_explains_missing_in_process_runtime(api, monkeypatch):
     async def test(pool):
         async with pool.acquire() as conn:
             plan = await run_import(conn, {
-                "format": "looper-config/v3", "runtimes": [{"name": "api", "type": "api"}],
+                "format": "looper-config/v4", "runtimes": [{"name": "api", "type": "api"}],
             }, apply=False)
         changes = plan.view()["changes"]
         assert changes == [{

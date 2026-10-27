@@ -412,7 +412,7 @@ def test_the_configuration_is_exported_into_the_runtime_directory_without_secret
         text = path.read_text()
         assert SECRET not in text
         data = json.loads(text)
-        assert data["format"] == result["format"] == "looper-config/v3" and data["secrets"] == "omitted"
+        assert data["format"] == result["format"] == "looper-config/v4" and data["secrets"] == "omitted"
         (project,) = data["projects"]
         assert [s["name"] for s in project["schedules"]] == ["nightly"]
         assert result["counts"]["schedules"] == 1 and result["secrets_left_out"] >= 1

@@ -164,17 +164,12 @@ def test_invalid_updates_preserve_the_full_snapshot(tmp_path, monkeypatch, famil
     run_db(run, monkeypatch, timeout=20)
 
 
-@pytest.mark.parametrize("family", ["scheduler_settings", "wait_settings"])
-def test_confirmation_revalidates_current_numeric_constraints(tmp_path, monkeypatch, family):
+def test_confirmation_revalidates_current_numeric_constraints(tmp_path, monkeypatch):
     async def run(pool):
         async with _api(tmp_path, pool) as (_, post, token):
-            data = {"min_interval_seconds": None} if family == "scheduler_settings" else {"max_wait_seconds": 300}
-            status, pending = await post(f"{family}/update", data, identity=token)
+            status, pending = await post("wait_settings/update", {"max_wait_seconds": 300}, identity=token)
             assert status == 202
-            if family == "scheduler_settings":
-                monkeypatch.setenv("LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS", "invalid")
-            else:
-                assert (await post("wait_settings/update", {"min_check_seconds": 400}))[0] == 200
+            assert (await post("wait_settings/update", {"min_check_seconds": 400}))[0] == 200
             before = await system_settings.get_settings([scheduler.MIN_INTERVAL_KEY, waits.MAX_WAIT_KEY, waits.MIN_CHECK_KEY])
             status, body = await post("confirm", {"confirmation_id": pending["confirmation_id"]}, identity=token)
             assert status == 400 and body["error"]["code"] == "invalid"
@@ -183,17 +178,17 @@ def test_confirmation_revalidates_current_numeric_constraints(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("variable", ["LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS", "LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS"])
-def test_scheduler_null_restores_legacy_environment_fallback(tmp_path, monkeypatch, variable):
+def test_scheduler_null_restores_builtin_despite_retired_environment(tmp_path, monkeypatch, variable):
     monkeypatch.delenv("LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS", raising=False)
     monkeypatch.delenv("LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS", raising=False)
     monkeypatch.setenv(variable, "93")
     async def run(pool):
         async with _api(tmp_path, pool) as (_, post, _):
             initial = (await post("scheduler_settings/get"))[1]["result"]
-            assert initial["min_interval_seconds"]["source"] == "env"
+            assert initial["min_interval_seconds"]["source"] == "built-in"
             assert (await post("scheduler_settings/update", {"min_interval_seconds": 45}))[1]["result"]["min_interval_seconds"]["source"] == "setting"
             restored = (await post("scheduler_settings/update", {"min_interval_seconds": None}))[1]["result"]
-            assert restored == initial and restored["min_interval_seconds"]["value"] == 93
+            assert restored == initial and restored["min_interval_seconds"]["value"] == 300
     run_db(run, monkeypatch, timeout=20)
 
 

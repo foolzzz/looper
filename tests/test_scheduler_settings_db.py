@@ -1,5 +1,5 @@
-"""The scheduler's system settings and the typed run timeout of a schedule, on a real PostgreSQL: precedence of the
-stored minimum interval over the deprecated variable, the bounds, a schedule that follows the default or has its
+"""The scheduler's system settings and the typed run timeout of a schedule, on a real PostgreSQL: the stored minimum
+interval and ignored retired variables, the bounds, a schedule that follows the default or has its
 own timeout or none, a run keeping the timeout it started with, schedules from before keeping their meaning, the
 Manager's settings tool and the configuration export and import.
 
@@ -9,7 +9,6 @@ Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database.
 from __future__ import annotations
 
 import json
-import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -25,14 +24,13 @@ from tests.test_ops_tasks_db import _Chat, _error, _project
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
-ENV = scheduler_settings.MIN_INTERVAL_ENV
+ENV = "LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS"
 
 
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(ENV, raising=False)
     monkeypatch.delenv("LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS", raising=False)
-    monkeypatch.setattr(scheduler_settings, "_warned_env", False)
     monkeypatch.setattr(scheduler_settings, "_min_source", None)
     monkeypatch.setattr(scheduler_settings, "_min_interval", scheduler_settings.DEFAULT_MIN_INTERVAL_SECONDS)
 
@@ -40,55 +38,27 @@ def _clean(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- The settings ---
 
 
-def test_the_stored_minimum_interval_beats_the_deprecated_variable_which_beats_the_built_in(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+@pytest.mark.parametrize("variable", [ENV, "LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS"])
+@pytest.mark.parametrize("value", ["123", "soon", "0"])
+def test_retired_variables_are_ignored_and_stored_values_survive_reset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, variable: str, value: str,
 ) -> None:
     async def test(env: ScheduleEnv) -> None:
+        monkeypatch.setenv(variable, value)
+        assert await scheduler_settings.load() == 300
         view = await env.ok("POST", "/api/v1/scheduler_settings/get", {})
-        assert view["min_interval_seconds"]["value"] == 300 and view["min_interval_seconds"]["source"] == "built-in"
+        assert (view["min_interval_seconds"]["value"], view["min_interval_seconds"]["source"]) == (300, "built-in")
         assert view["run_timeout_seconds"]["value"] is None and view["run_timeout_seconds"]["source"] == "built-in"
-
-        monkeypatch.setenv(ENV, "123")
-        with caplog.at_level(logging.WARNING):
-            await scheduler_settings.load()
-            await scheduler_settings.load()
-        warnings = [r.getMessage() for r in caplog.records if "deprecated" in r.getMessage()]
-        assert len(warnings) == 1 and ENV in warnings[0] and "123" not in warnings[0], warnings
-        view = await env.ok("POST", "/api/v1/scheduler_settings/get", {})
-        assert (view["min_interval_seconds"]["value"], view["min_interval_seconds"]["source"]) == (123, "env")
-
-        # Saved in the database, the variable is ignored; going back to the built-in hands over to it again.
         saved = await env.ok("POST", "/api/v1/scheduler_settings/update", {"min_interval_seconds": 60})
         assert (saved["min_interval_seconds"]["value"], saved["min_interval_seconds"]["source"]) == (60, "setting")
-        assert scheduler_settings.min_interval_seconds(gated=False) == 60
+        assert await scheduler_settings.load() == 60
+        assert await env.pool.fetchval("SELECT value FROM system_settings WHERE key = $1",
+                                       scheduler_settings.MIN_INTERVAL_KEY) == "60"
         reset = await env.ok("POST", "/api/v1/scheduler_settings/update", {"min_interval_seconds": None})
-        assert (reset["min_interval_seconds"]["value"], reset["min_interval_seconds"]["source"]) == (123, "env")
-
-    run_scheduled(test, monkeypatch, tmp_path)
-
-
-def test_the_legacy_variable_name_is_named_in_the_warning(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture,
-) -> None:
-    async def test(env: ScheduleEnv) -> None:
-        monkeypatch.setenv("LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS", "77")
-        with caplog.at_level(logging.WARNING):
-            assert await scheduler_settings.load() == 77
-        assert any("LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS is deprecated" in r.getMessage()
-                   and "77" not in r.getMessage() for r in caplog.records)
-
-    run_scheduled(test, monkeypatch, tmp_path)
-
-
-def test_a_variable_that_is_not_a_whole_number_refuses_the_start(monkeypatch: pytest.MonkeyPatch,
-                                                                 tmp_path: Path) -> None:
-    async def test(env: ScheduleEnv) -> None:
-        monkeypatch.setenv(ENV, "soon")
-        with pytest.raises(ValueError, match=f"{ENV} must be a whole number of seconds from 1"):
-            await scheduler_settings.load()
-        # A stored value makes the variable moot.
-        await env.ok("POST", "/api/v1/scheduler_settings/update", {"min_interval_seconds": 90})
-        assert await scheduler_settings.load() == 90
+        assert (reset["min_interval_seconds"]["value"], reset["min_interval_seconds"]["source"]) == (300, "built-in")
+        assert await scheduler_settings.load() == 300
+        assert await env.pool.fetchval("SELECT value FROM system_settings WHERE key = $1",
+                                       scheduler_settings.MIN_INTERVAL_KEY) is None
 
     run_scheduled(test, monkeypatch, tmp_path)
 
@@ -394,25 +364,6 @@ def test_an_import_checks_its_schedules_against_the_minimum_interval_it_brings(
         data["settings"] = {**data.get("settings", {}), "scheduler": {"min_interval_seconds": 60}}
         assert (await entry(data))[0] in ("changed", "added", "unchanged")
         assert scheduler_settings.min_interval_seconds(gated=False) == 300  # a preview changes nothing
-
-    run_scheduled(test, monkeypatch, tmp_path)
-
-
-def test_clearing_the_minimum_interval_is_refused_before_anything_changes_when_the_variable_is_bad(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    async def test(env: ScheduleEnv) -> None:
-        await env.ok("POST", "/api/v1/scheduler_settings/update", {"min_interval_seconds": 90})
-        monkeypatch.setenv(ENV, "soon")
-        status, payload = await env.call("POST", "/api/v1/scheduler_settings/update", {"min_interval_seconds": None})
-        assert status == 400 and ENV in payload["error"]["message"], payload
-        # The row itself, and what a restart would read, not only the cache.
-        assert await env.pool.fetchval("SELECT value FROM system_settings WHERE key = $1",
-                                       scheduler_settings.MIN_INTERVAL_KEY) == "90"
-        monkeypatch.delenv(ENV)
-        assert await scheduler_settings.load() == 90 and scheduler_settings._min_source == "setting"
-        view = await env.ok("POST", "/api/v1/scheduler_settings/get", {})
-        assert (view["min_interval_seconds"]["value"], view["min_interval_seconds"]["source"]) == (90, "setting")
 
     run_scheduled(test, monkeypatch, tmp_path)
 

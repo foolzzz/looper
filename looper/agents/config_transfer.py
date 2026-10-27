@@ -1,15 +1,6 @@
 """Configuration export and import: one file that recreates an installation's agent configuration (M8e).
 
-**The file** is one JSON document, ``looper-config/v4`` when it includes a
-portable Manager graph, otherwise the unchanged ``looper-config/v3`` shape. A v1 file
-(``looper-config/v1``, or ``loopx-config/v1`` from before the rename to Looper)
-is read too, as the same file under its older names (``_from_v1``): its Agent
-Profiles were ``agents``, and a layer named its profile ``agent``. V1 is first
-renamed to v2; v2 registry objects then use the same pure converter as the
-database migration, before v3 natural-key matching. Every catalog
-file is UTF-8 text (acquiring an item refuses binary files), so JSON holds it
-as it is, and one readable file can be checked before it is shared. Its
-sections:
+**The file** is one UTF-8 JSON document, ``looper-config/v4``. Its sections:
 
 - ``runtimes``, ``providers``, ``models`` and ``profiles``: the registered ones (the
   built-ins exist everywhere). Models name their provider; profiles reference a
@@ -19,13 +10,8 @@ sections:
   profiles still use; an import never adds or changes a runtime (see below);
 - ``settings``: the system and role layers of the agent settings (a layer
   names its Agent Profile, ``profile``), and each role's prompt (``null`` while
-  it follows the recommended one), timeout and enabled flag. A role's
-  ``max_concurrency`` from before the layers held it is ignored, with a note,
-  and so is a layer's from before concurrency was per task (any but the
-  Workers' or the Reviewers' role layer: a project's, a role's in a project or
-  the Planner's); a layer's ``effort`` from before the effort was the Agent
-  Profile's moves onto profiles as the upgrade moved it (``layer_effort``; see
-  **Import**);
+  it follows the recommended one), timeout and enabled flag. Effort belongs to
+  the Agent Profile; concurrency limits belong to current role layers;
 - ``channels``: each chat channel's configuration;
 - ``managers`` (v4 only): live scenario definitions and task templates, with
   immutable Manager ids, natural profile/project references and no machine paths;
@@ -57,14 +43,6 @@ its id and installs), nothing missing from the file is removed, and a
 placeholder never replaces a stored secret (without one, the value is left
 empty). Importing the same file again changes nothing.
 
-**A layer's effort** in an older file is converted like the upgrade converts
-a database (``layer_effort.convert``), over the layers as the import leaves
-them (this installation's, each replaced by the file's of the same key): every
-role then runs the profile and effort it would have run with the file's
-layers, through the profiles they select, added as needed (``<profile> ·
-<effort>``). A layer this changes that the file does not give, such as a
-role's in a project, is changed too; a note says each.
-
 **Schedules** carry their settings, their Agent Profiles by name and their
 task limits, not whether they are enabled, their runs or counters, nor their
 own directory (a machine path: ``repoint`` marks one that had it). An import
@@ -74,10 +52,9 @@ settings match is left as it is. A ``notify_target`` this machine's sender
 allowlists (as the import leaves the channels) do not allow is dropped, with a
 note.
 
-**Runtimes** are built in, so a file's runtime only says what its profiles run
-on here: the runtime of its name when one of its type is here, else the
-built-in runtime of its type (a note says so), else none (the entry and its
-profiles are skipped, with the reason).
+**Runtimes** are destination-local. A referenced custom runtime uses the same
+name and type here, or the built-in runtime of its type with a note. Imports
+never create runtimes or change their executables.
 """
 
 from __future__ import annotations
@@ -98,12 +75,8 @@ from typing import Any
 from ..db.channel_configs import BUILTIN_CHANNEL_IDS
 from .message import builtin_channel_id
 
-FORMAT = "looper-config/v3"
-V3_FORMAT = FORMAT
-V4_FORMAT = "looper-config/v4"
-# v1, and v1 under its name from before the rename to Looper (LoopX): read as v2 (``_from_v1``), never written.
-V2_FORMAT = "looper-config/v2"
-V1_FORMATS = ("looper-config/v1", "loopx-config/v1")
+FORMAT = "looper-config/v4"
+V4_FORMAT = FORMAT
 # What the file holds in place of a secret value it leaves out.
 PLACEHOLDER = {"secret": "omitted"}
 
@@ -123,9 +96,6 @@ _CHANNEL_TOKEN_SECRET = {"telegram": "bot token (Settings → Channels)",
 _ROLE_FIELDS = ("prompt", "timeout_seconds", "enabled")
 _LAYER_FIELDS = ("harness_prompt", "profile", "env", "run_budget_usd", "max_concurrency", "boundaries",
                  "system_prompt_mode")
-# The roles whose role layer takes a concurrency limit: the default for every task.
-_LIMIT_ROLES = ("worker", "reviewer")
-_PROVIDER_FIELDS = ("protocols", "auth", "oauth_runtime_type", "base_url", "models", "env", "max_concurrency")
 _ITEM_FIELDS = ("origin", "source", "version", "description", "modified")
 _DOCUMENT_FIELDS = ("summary", "source_kind", "filename", "path", "sha256", "size_bytes")
 _ITEM_NAME_MAX = 255
@@ -281,11 +251,21 @@ def profile_entry(row: Mapping[str, Any]) -> dict[str, Any]:
             "custom_prompt": row.get("custom_prompt", "")}
 
 
+def _portable_layer_environment(raw: Any) -> Any:
+    """Old stored layers may still override agent teams; only the Agent Profile owns that switch now."""
+    from .runtimes.claude_code import AGENT_TEAMS
+
+    if not isinstance(raw, list):
+        return raw  # leave invalid input for the ordinary layer validation
+    return [entry for entry in raw if not isinstance(entry, Mapping) or entry.get("key") != AGENT_TEAMS]
+
+
 def layer_entry(row: Mapping[str, Any]) -> dict[str, Any]:
     entry = {"scope": row["scope"]}
     if row.get("role"):
         entry["role"] = row["role"]
-    entry = {**entry, **{name: row.get(name) for name in _LAYER_FIELDS}, "env": list(row.get("env") or [])}
+    entry = {**entry, **{name: row.get(name) for name in _LAYER_FIELDS},
+             "env": _portable_layer_environment(list(row.get("env") or []))}
     # Only the shared defaults may hold boundaries, and only the Workers' and the Reviewers' role layers a
     # concurrency limit, and only role layers a system prompt mode; a file without one has none.
     for name in ("boundaries", "max_concurrency", "system_prompt_mode"):
@@ -305,7 +285,7 @@ def _secret(value: Any, include_secrets: bool) -> Any:
     return value if include_secrets else dict(PLACEHOLDER)
 
 
-def channel_entry(row: Mapping[str, Any], include_secrets: bool, *, portable_graph: bool = False) -> dict[str, Any]:
+def channel_entry(row: Mapping[str, Any], include_secrets: bool) -> dict[str, Any]:
     from .channels.allowlist import AllowlistError, normalized_config
 
     public = _CHANNEL_PUBLIC_KEYS.get(row["channel_type"], frozenset())
@@ -315,7 +295,7 @@ def channel_entry(row: Mapping[str, Any], include_secrets: bool, *, portable_gra
     except AllowlistError:
         pass
     config = {key: value if key in public else _secret(value, include_secrets) for key, value in config.items()}
-    return {**({"manager_id": row.get("manager_id", "manager")} if portable_graph else {}),
+    return {"manager_id": row.get("manager_id", "manager"),
             "channel_type": row["channel_type"], "channel_id": row["channel_id"],
             "display_name": row["display_name"], "enabled": row["enabled"], "config": config}
 
@@ -451,7 +431,7 @@ class ExportSummary:
     repoint: int = 0
     bytes: int = 0
     bots_left_out: int = 0  # retained for callers of the older summary; all bots now travel
-    format: str = V3_FORMAT
+    format: str = FORMAT
 
 
 def _secret_count(entry: Mapping[str, Any]) -> int:
@@ -487,10 +467,8 @@ async def export_chunks(
     channel_rows = await db.read_channels(conn)
     managers = await db.read_managers(conn)
     manager_installs = await db.read_manager_installs(conn)
-    portable_graph = any(row["id"] != "manager" for row in managers) or any(
-        row["channel_id"] not in BUILTIN_CHANNEL_IDS for row in channel_rows) or bool(manager_installs)
-    channels = [channel_entry(row, include_secrets, portable_graph=portable_graph) for row in channel_rows]
-    summary.format = V4_FORMAT if portable_graph else V3_FORMAT
+    channels = [channel_entry(row, include_secrets) for row in channel_rows]
+    summary.format = FORMAT
     providers = [provider_entry(r, include_secrets) for r in await db.read_providers(conn) if not r["builtin"]]
     head = {
         "format": summary.format,
@@ -506,7 +484,11 @@ async def export_chunks(
         "channels": channels,
         "installs": [install_entry(r) for r in installs if r["scope"] == "global"],
     }
-    if portable_graph:
+    # The default exists on every install, even with a custom display name or description; carrying it would make
+    # an otherwise client-importable export require operator identity.
+    portable_managers = any(row["id"] != "manager" for row in managers) or any(
+        row["channel_id"] not in BUILTIN_CHANNEL_IDS for row in channel_rows) or bool(manager_installs)
+    if portable_managers:
         manager_templates = await db.read_manager_templates(conn)
         profile_names = {row["id"]: row["name"] for row in await db.read_profiles(conn)}
         project_names = {row["id"]: row["name"] for row in await db.read_projects(conn)}
@@ -633,14 +615,29 @@ def read_file(path: Path, *, label: str | None = None) -> dict[str, Any]:
         raise ConfigFileError(f"cannot read {label}: {exc.strerror or exc}") from None
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ConfigFileError(f"{label} is not a Looper configuration file: {exc}") from None
-    if not isinstance(data, dict) or data.get("format") not in (V4_FORMAT, V3_FORMAT, V2_FORMAT, *V1_FORMATS):
-        found = data.get("format") if isinstance(data, dict) else None
-        raise ConfigFileError(f"{label} is not a {V4_FORMAT}, {V3_FORMAT}, {V2_FORMAT} or {V1_FORMATS[0]} file "
-                              f"(format: {found!r})")
-    _check_manager_document(data)
-    profiles = "agents" if data["format"] in V1_FORMATS else "profiles"
+    validate_document(data, label=label)
+    return data
+
+
+def validate_format(data: Any, *, label: str = "configuration") -> None:
+    """Reject unsupported formats before reading a destination or staging an import."""
+    supplied = data.get("format") if isinstance(data, Mapping) else None
+    if supplied != FORMAT:
+        raise ConfigFileError(
+            f"{label}: supplied format {supplied!r}; required format {FORMAT}. "
+            "Import old files on v2.13.165, upgrade that installation/database, then export v4 "
+            "with the new release.")
+
+
+def validate_document(data: Any, *, label: str = "configuration") -> None:
+    validate_format(data, label=label)
+    unknown = set(data) - {"format", "looper_version", "exported_at", "secrets", "runtimes", "providers",
+                           "models", "profiles", "settings", "channels", "catalog", "installs", "projects", "managers"}
+    if unknown:
+        raise ConfigFileError(f"unknown configuration field {sorted(unknown)[0]!r}")
     for section, kind in (("settings", dict), ("channels", list), ("installs", list), ("catalog", list),
-                          ("projects", list), ("runtimes", list), ("providers", list), (profiles, list), ("models", list)):
+                          ("projects", list), ("runtimes", list), ("providers", list), ("profiles", list),
+                          ("models", list), ("managers", list)):
         if section in data and not isinstance(data[section], kind):
             raise ConfigFileError(f"{section} must be a JSON {'object' if kind is dict else 'list'}")
     for section in ("layers", "roles"):
@@ -649,17 +646,6 @@ def read_file(path: Path, *, label: str | None = None) -> dict[str, Any]:
     if not isinstance(data.get("settings", {}).get("scheduler", {}), dict):
         raise ConfigFileError("settings.scheduler must be a JSON object")
     _check_channel_document(data)
-    return _from_v1(data) if data["format"] in V1_FORMATS else data
-
-
-def _check_manager_document(data: Mapping[str, Any]) -> None:
-    """Version-gate the new graph even for callers that do not use the HTTP schema."""
-    if data.get("format") != V4_FORMAT:
-        if "managers" in data:
-            raise ConfigFileError("managers requires looper-config/v4; legacy files cannot carry a Manager graph")
-        return
-    if not isinstance(data.get("managers", []), list):
-        raise ConfigFileError("managers must be a JSON list")
 
 
 _BOT_ID = re.compile(r"channel-(telegram|lark|lark_bot)-([1-9][0-9]*)\Z")
@@ -685,22 +671,15 @@ def _check_channel_document(data: Mapping[str, Any]) -> None:
     entries = data.get("channels", [])
     if not isinstance(entries, list):
         raise ConfigFileError("channels must be a JSON list")
-    graph = data.get("format") == V4_FORMAT
     seen, suffixes = set(), set()
     for entry in entries:
         if not isinstance(entry, Mapping):
-            if graph:
-                raise ConfigFileError("channels: a bot must be a JSON object")
-            continue
+            raise ConfigFileError("channels: a bot must be a JSON object")
         config = entry.get("config", {})
         if _BINDING_FIELDS & entry.keys() or isinstance(config, Mapping) and (
                 (_BINDING_FIELDS | {"bound_chats_only"}) & config.keys()):
             raise ConfigFileError("channels: binding and policy fields are local configuration and cannot be imported")
         identity, kind = entry.get("channel_id"), entry.get("channel_type")
-        if not graph:
-            if (identity is not None and identity not in BUILTIN_CHANNEL_IDS) or entry.get("manager_id", "manager") != "manager":
-                raise ConfigFileError("channels: this is a bot of a Manager and requires looper-config/v4")
-            continue
         required = {"channel_id", "channel_type", "config"}
         if not isinstance(identity, str) or identity not in BUILTIN_CHANNEL_IDS:
             required.add("manager_id")
@@ -718,27 +697,6 @@ def _check_channel_document(data: Mapping[str, Any]) -> None:
         if suffix is not None:
             suffixes.add(suffix)
 
-
-def _from_v1(data: Mapping[str, Any]) -> dict[str, Any]:
-    """A v1 file under v2's names (its ``format`` stays the file's): its ``agents`` are ``profiles``, and each
-    layer's ``agent`` (the system's and roles', and each project's) its ``profile``. Nothing else differs."""
-    def layers(entries: Any) -> Any:
-        if not isinstance(entries, list):
-            return entries
-        return [{("profile" if key == "agent" else key): value for key, value in entry.items()}
-                if isinstance(entry, Mapping) else entry for entry in entries]
-
-    upgraded = {("profiles" if key == "agents" else key): value for key, value in data.items()}
-    if "layers" in upgraded.get("settings", {}):
-        upgraded["settings"] = {**upgraded["settings"], "layers": layers(upgraded["settings"]["layers"])}
-    if isinstance(upgraded.get("projects"), list):
-        upgraded["projects"] = [{**project, "layers": layers(project["layers"])}
-                                if isinstance(project, Mapping) and "layers" in project else project
-                                for project in upgraded["projects"]]
-    return upgraded
-
-
-# --- Import: validating one entry (each raises _Skip) ---
 
 
 def _mapping(raw: Any, what: str) -> Mapping[str, Any]:
@@ -791,32 +749,23 @@ def _item_name(kind: str, raw: Any) -> str:
     return name
 
 
-def _layer_values(entry: Mapping[str, Any], scope: str, role: str | None) -> tuple[dict[str, Any], str | None]:
-    """A layer's values, its Agent Profile by name (``None`` for none), and the effort a file from before the effort
-    was the Agent Profile's gives it (``None`` for none). A file from before Agent Profiles gives a ``model``: that
-    is the profile ``claude-code/<model>``, as the upgrade made it."""
-    from .agent_settings import AgentType, Layer, SettingsError, effort_level, layer_update, model_name
+def _layer_values(entry: Mapping[str, Any], scope: str, role: str | None) -> dict[str, Any]:
+    """Validate current layers, with their Agent Profile referenced by name."""
+    from .agent_settings import AgentType, Layer, SettingsError, layer_update
 
-    unknown = sorted(set(entry) - {"scope", "role", "model", "effort", *_LAYER_FIELDS})
+    unknown = sorted(set(entry) - {"scope", "role", *_LAYER_FIELDS})
     if unknown:
         raise _Skip(f"unknown field {unknown[0]!r}")
     profile = entry.get("profile")
     try:
         values = layer_update({name: entry.get(name) for name in _LAYER_FIELDS if name != "profile"},
                               Layer(scope), AgentType(role) if role else None)
-        effort = effort_level(entry.get("effort")) or None
-        if "model" in entry and "profile" not in entry:
-            model = model_name(entry["model"])
-            profile = f"{_MODEL_PROFILE_PREFIX}{model}" if model else None
     except SettingsError as exc:
         raise _Skip(str(exc)) from None
     if profile is not None and not isinstance(profile, str):
         raise _Skip("profile must be an Agent Profile's name, or null")
-    return {**values, "profile": profile or None}, effort
+    return {**values, "profile": profile or None}
 
-
-# The name the upgrade gave the Agent Profile of each model layers used (Claude Code, its own login, the model).
-_MODEL_PROFILE_PREFIX = "claude-code/"
 
 
 def _stored_layer(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -1038,22 +987,14 @@ class _Target:
 
 @dataclass(frozen=True)
 class _FileLayer:
-    """A layer of the file, checked: its values (its profile by name), its profile's id and the effort it carries."""
+    """A layer of the file, checked: its values (its profile by name), its profile's id."""
 
     section: str
     label: str
     key: tuple[str, str | None, str | None]  # scope, role, project id
     values: dict[str, Any]
     profile_id: str | None
-    effort: str | None
 
-
-def _effort_key(key: tuple[str, str | None, str | None]) -> Any:
-    """A layer's key as ``layer_effort`` names it."""
-    from .agent_settings import AgentType, Layer
-
-    scope, role, project_id = key
-    return Layer(scope), AgentType(role) if role else None, project_id
 
 
 class _Importer:
@@ -1067,7 +1008,6 @@ class _Importer:
         self.item_origins = {key: row["origin"] for key, row in target.items.items()}
         self.item_sizes = {key: int(row["size_bytes"]) for key, row in target.items.items()}
         self.project_ids = {name: row["id"] for name, row in target.projects.items()}
-        self.project_labels = {row["id"]: f"{row['name']} / " for row in target.projects.values()}
         self.file_layers: list[_FileLayer] = []
         self.seen_items: set[tuple[str, str, str | None]] = set()
         self.seen_projects: set[str] = set()
@@ -1076,9 +1016,7 @@ class _Importer:
         self.channel_configs = {row["channel_type"]: dict(row["config"] or {}) for row in target.channels.values()
                                 if row["channel_id"] in BUILTIN_CHANNEL_IDS}
         # Imported configs by immutable id; identity checks see the final graph even in a preview.
-        self.bot_configs: dict[str, dict[str, Any]] = {}
         self.bot_imports: list[tuple[str, str, str, dict[str, Any], Any, list[str]]] = []
-        self.channel_graph = False
         self.imported_managers: set[str] = set()
         # The schedules this import adds or rewrites, disabled; those that had a directory of their own.
         self.disabled_schedules: list[str] = []
@@ -1162,32 +1100,6 @@ class _Importer:
                code: str = "") -> None:
         self.plan.changes.append(Change(section, key, action, tuple(fields), reason, code))
 
-    def legacy_failure(self, section: str, key: str, exc: Exception) -> None:
-        from .registry_migration import MigrationBlocked
-        from .profile_registry import RegistryError
-
-        code = getattr(exc, "code", "invalid_legacy_value" if isinstance(exc, RegistryError) else "")
-        reason = str(exc)
-        if isinstance(exc, MigrationBlocked):
-            reason = {
-                "invalid_legacy_value": "a legacy value is invalid; check the provider and Agent Profile fields",
-                "bad_provider_reference": "the legacy Agent Profile refers to a missing provider",
-                "bad_runtime_reference": "the legacy Agent Profile refers to a missing runtime",
-                "incompatible_auth": "the runtime cannot use this provider's authentication kind",
-                "incompatible_login": "a login provider can only use its own runtime",
-                "incompatible_protocol": "the runtime and provider share no supported protocol",
-                "model_outside_catalog": "the Agent Profile's model is not in its provider's model catalog",
-                "invalid_protocols": "the provider needs a non-empty list of supported protocols",
-                "unknown_protocol": "the provider uses an unsupported protocol",
-                "unknown_runtime": "the Agent Profile uses an unsupported runtime",
-                "unknown_login": "the provider uses an unsupported runtime login",
-                "unknown_default_endpoint": "the provider needs an explicit endpoint URL on this machine",
-                "default_endpoint_conflict": "the provider's default endpoint conflicts with its saved configuration",
-                "invalid_id": "a legacy registry entry needs a non-empty identifier",
-                "duplicate_id": "the file gives the same legacy registry identifier twice",
-            }.get(code, "the legacy registry cannot be converted safely; check its provider and Agent Profile fields")
-        self.record(section, key, Action.SKIPPED, reason=reason, code=code)
-
     def outcome(self, section: str, key: str, current: Any, changed: Sequence[str]) -> Action:
         action = Action.ADDED if current is None else Action.CHANGED if changed else Action.UNCHANGED
         self.record(section, key, action, changed)
@@ -1196,8 +1108,7 @@ class _Importer:
     # --- runtimes, providers and agents ---
 
     async def runtime(self, entry: Any) -> None:
-        """Map a runtime of the file to the one its profiles run on here; runtimes are built in, so nothing is
-        written (the module's **Runtimes**)."""
+        """Resolve a runtime by name or its built-in type, keeping the destination's executable."""
         from .profile_registry import RegistryError, _executable, entry_name
         from .runtimes import RuntimeUnsupported, adapter
 
@@ -1219,166 +1130,21 @@ class _Importer:
             if row is not None and row["type"] != runtime.type:
                 raise _Skip(f"a {row['type']} runtime has this name here")
             if row is None and runtime.type not in self.builtin_runtimes:
-                if runtime.in_process:
+                if runtime.in_process and (error := runtime.probe("").error):
                     raise _Skip(f"runtimes are built in, and {runtime.label} cannot run here: "
-                                f"{runtime.probe('').error}; then Re-detect it in Settings, Agent Runtimes")
-                raise _Skip(f"runtimes are built in, and {runtime.label} ({runtime.default_executable}) is not on "
-                            "this machine: install it, then Re-detect it in Settings, Agent Runtimes")
+                                f"{error}; then Re-detect it in Settings, Agent Runtimes")
+                raise _Skip(f"runtimes are built in, and {runtime.label} is not registered here; install it, "
+                            "then Re-detect it in Settings, Agent Runtimes")
         except _Skip as exc:
             self.blocked_runtimes.add(label)
             self.record("runtimes", label, Action.SKIPPED, reason=str(exc))
             return
         if row is not None:
             self.record("runtimes", name, Action.UNCHANGED)
-            return  # self.runtimes has it already
+            return
         self.runtimes[name] = self.builtin_runtimes[runtime.type]
         self.plan.notes.append(f"runtime {name}: runtimes are built in; its Agent Profiles run on the built-in "
                                f"{self.runtimes[name][1].name} runtime here")
-
-    def legacy(self, data: Mapping[str, Any]) -> Mapping[str, Any]:
-        """Normalize only this file's old objects, then use the schema converter.
-
-        Target credentials fill omitted keys in memory. Target accounts are
-        never candidates for opportunistic account merging.
-        """
-        from . import registry_migration as migration
-        from .profile_registry import AgentProfile, RegistryError, default_agent_teams, entry_name, _model
-
-        runtimes = list({spec.id: spec for _, spec in self.runtimes.values()}.values())
-        accounts, rows, sources = {}, [], {}
-        for entry in data.get("providers", []):
-            label = str(entry.get("name")) if isinstance(entry, Mapping) else "None"
-            try:
-                entry = _mapping(entry, "a legacy provider")
-                name = entry_name(entry.get("name"), "provider")
-                if name in sources:
-                    raise _Skip("duplicate natural key in the file")
-                sources[name] = entry
-                unknown = set(entry) - {"name", "api_key", *_PROVIDER_FIELDS}
-                if unknown:
-                    raise _Skip(f"unknown field {sorted(unknown)[0]!r}")
-                stored = self.target.providers.get(name, {})
-                row = {"id": stored.get("id", f"file:provider:{name}"), "oauth_runtime_type": None,
-                       "base_url": "", "models": [], "env": [], "max_concurrency": None, **entry}
-                if is_placeholder(row.get("api_key")):
-                    row["api_key"] = stored.get("api_key")
-                migration.convert(runtimes, [row], [])
-                accounts[name] = row
-            except (RegistryError, _Skip) as exc:
-                self.blocked_providers.add(label)
-                self.legacy_failure("providers", label, exc)
-        profile_sources = {}
-        profile_entries = list(data.get("profiles", []))
-        profile_names = {entry["name"] for entry in profile_entries
-                         if isinstance(entry, Mapping) and isinstance(entry.get("name"), str)}
-        layers = list(data.get("settings", {}).get("layers", []))
-        for project in data.get("projects", []):
-            if isinstance(project, Mapping) and isinstance(project.get("layers"), list):
-                layers.extend(project["layers"])
-        # Before profiles existed, a layer explicitly selected a Claude model.
-        # Convert that choice through the same registry converter as v1 profiles.
-        for layer in layers:
-            if not isinstance(layer, Mapping) or "profile" in layer or not isinstance(layer.get("model"), str):
-                continue
-            model = layer["model"]
-            name = f"{_MODEL_PROFILE_PREFIX}{model}"
-            if name not in self.profiles and name not in profile_names and name not in self.blocked_profiles:
-                profile_entries.append({"name": name, "runtime": "claude-code", "provider": "claude-subscription",
-                                        "model": model})
-                profile_names.add(name)
-        for entry in profile_entries:
-            label = str(entry.get("name")) if isinstance(entry, Mapping) else "None"
-            try:
-                entry = _mapping(entry, "a legacy Agent Profile")
-                name = entry_name(entry.get("name"), "Agent Profile")
-                if name in profile_sources:
-                    raise _Skip("duplicate natural key in the file")
-                profile_sources[name] = entry
-                if "system_prompt_mode" in entry:
-                    self.plan.notes.append(f"profiles {name}: its system_prompt_mode is ignored; set the mode per role")
-                unknown = set(entry) - {"name", "runtime", "provider", "model", "effort", "agent_teams",
-                                        "custom_prompt", "system_prompt_mode"}
-                if unknown:
-                    raise _Skip(f"unknown field {sorted(unknown)[0]!r}")
-                runtime = self.runtimes.get(_string(entry.get("runtime"), "runtime", required=True))
-                provider = _string(entry.get("provider"), "provider", required=True)
-                if runtime is None or entry["runtime"] in self.blocked_runtimes:
-                    raise _Skip(f"no runtime {entry['runtime']!r} here or in the file")
-                if provider in self.blocked_providers:
-                    raise _Skip("provider was skipped")
-                if provider not in accounts:
-                    # Legacy exports omit built-in accounts. Only explicitly
-                    # referenced target accounts enter, protected from merging.
-                    stored = self.target.providers.get(provider)
-                    if stored is not None:
-                        endpoints = stored["endpoints"]
-                        urls = {e["base_url"] for e in endpoints}
-                        if len(urls) != 1:
-                            raise _Skip("legacy profile needs an explicit model protocol on this target")
-                        row = {"id": stored["id"], "name": provider, "vendor_type": stored["vendor_type"],
-                               "auth": stored["auth"], "oauth_runtime_type": stored["oauth_runtime_type"],
-                               "protocols": [e["protocol"] for e in endpoints], "base_url": next(iter(urls)),
-                               "env": stored["env"], "api_key": stored["api_key"], "models": [], "builtin": True}
-                    elif provider in self.providers and self.providers[provider][1].builtin:
-                        spec = self.providers[provider][1]
-                        row = {"id": spec.id, "name": spec.name, "vendor_type": spec.vendor_type.value,
-                               "auth": spec.auth.value, "oauth_runtime_type": spec.oauth_runtime_type,
-                               "protocols": [spec.vendor_type.login_protocol.value], "base_url": "", "builtin": True}
-                    else:
-                        raise _Skip("no provider here or in the file")
-                    accounts[provider] = row
-                stored_profile = self.target.profiles.get(name, {})
-                row = {"id": stored_profile.get("id", f"file:profile:{name}"), "name": name,
-                       "runtime_id": runtime[0], "provider_id": accounts[provider]["id"],
-                       "model": entry.get("model"), "effort": entry.get("effort"),
-                       "agent_teams": entry.get("agent_teams", default_agent_teams(runtime[1])),
-                       "custom_prompt": entry.get("custom_prompt", "")}
-                # Keep the public validators' actionable messages before the
-                # migration converter reduces failures to safe report codes.
-                _model(row["model"])
-                AgentProfile(row["id"], name, runtime[1], "legacy-model", row["effort"],
-                             row["agent_teams"], row["custom_prompt"])
-                migration.convert(runtimes, [accounts[provider]], [row])
-                rows.append(row)
-            except (RegistryError, _Skip) as exc:
-                self.blocked_profiles.add(label)
-                self.legacy_failure("profiles", label, exc)
-        converted = migration.convert(runtimes, list(accounts.values()), rows)
-        for name, row in accounts.items():
-            canonical = converted.provider_map[row["id"]]
-            if canonical != row["id"]:
-                self.plan.notes.append(f"providers {name}: converted to {converted.providers[canonical].name}")
-        providers = []
-        for spec in converted.providers.values():
-            if spec.name not in sources or spec.name in self.blocked_providers:
-                continue
-            endpoints = [{"protocol": p.value, "base_url": e.base_url,
-                          "use_runtime_default": e.use_runtime_default}
-                         for (pid, p), e in converted.endpoints.items() if pid == spec.id]
-            source = sources[spec.name]
-            providers.append(provider_entry({"name": spec.name, "vendor_type": spec.vendor_type.value,
-                "auth": spec.auth.value, "oauth_runtime_type": spec.oauth_runtime_type,
-                "env": [{"key": k, "value": v} for k, v in spec.env], "max_concurrency": spec.max_concurrency,
-                "endpoints": endpoints, "api_key": source.get("api_key")}, True))
-        models = []
-        from dataclasses import asdict
-
-        for spec in converted.models.values():
-            provider = converted.providers[spec.provider_id].name
-            key = (provider, spec.name, spec.protocol.value)
-            if provider not in sources and key in self.models:
-                continue
-            models.append(model_entry({**asdict(spec), "provider": provider}))
-        profiles = []
-        for spec in converted.profiles.values():
-            if spec.name in self.blocked_profiles:
-                continue
-            model = converted.models[spec.model_id]
-            provider = converted.providers[model.provider_id].name
-            profiles.append({"name": spec.name, "runtime": spec.runtime.name, "effort": spec.effort,
-                             "agent_teams": spec.agent_teams, "custom_prompt": spec.custom_prompt,
-                             "model": {"provider": provider, "name": model.name, "protocol": model.protocol.value}})
-        return {**data, "format": FORMAT, "providers": providers, "models": models, "profiles": profiles}
 
     async def provider(self, entry: Any) -> None:
         from .profile_registry import Endpoint, ProviderSpec, RegistryError, ResolvedModel
@@ -1586,52 +1352,24 @@ class _Importer:
                 raise _Skip(f"role {role!r} is not one of {', '.join(roles)}")
             if scope in ("system", "project") and role is not None:
                 raise _Skip(f"a {scope} layer has no role")
-            raw = self._without_agent_teams_env(raw, section, label)
-            raw = self._without_project_concurrency(raw, section, label)
-            values, effort = _layer_values(raw, scope, role)
+            env = _portable_layer_environment(raw.get("env"))
+            values = _layer_values({**raw, "env": env}, scope, role)
             profile_id = await self._layer_profile(values["profile"], scope, role)
         except _Skip as exc:
             self.record(section, label, Action.SKIPPED, reason=str(exc))
             return
-        self.file_layers.append(_FileLayer(section, label, (scope, role, project_id), values, profile_id, effort))
+        if env != raw.get("env"):
+            from .runtimes.claude_code import AGENT_TEAMS
+
+            self.plan.notes.append(f"{label}: dropped {AGENT_TEAMS} from the layer environment; "
+                                   "the Agent Profile's agent teams switch controls it")
+        self.file_layers.append(_FileLayer(section, label, (scope, role, project_id), values, profile_id))
 
     async def settle_layers(self) -> None:
-        """Record and write the file's layers. When one carries an effort, the effort first moves onto profiles
-        (the module's **A layer's effort**): the profiles that takes are added, and each layer it changes selects
-        its profile."""
-        from .layer_effort import Derived
-
-        conversion = self._effort_conversion() if any(layer.effort for layer in self.file_layers) else None
-        changes = dict(conversion.layers) if conversion else {}
-        ids: dict[str, str] = {}
-        for derived in conversion.derived if conversion else ():
-            ids[derived.name] = await self._add_derived(derived)
-
-        def selected(choice: Any) -> tuple[str | None, str | None]:
-            if choice is None:
-                return None, None
-            return (ids[choice.name] if isinstance(choice, Derived) else choice.id), choice.name
-
+        """Write the file's validated current layers without synthesizing profiles."""
         for layer in self.file_layers:
-            values, profile_id = layer.values, layer.profile_id
-            key = _effort_key(layer.key)
-            if key in changes:
-                profile_id, name = selected(changes.pop(key))
-                values = {**values, "profile": name}
-                self._effort_note(layer.section, layer.label, layer.effort, name, layer.values["profile"])
             current = _stored_layer(self.target.layers.get(layer.key))
-            await self._write_layer(layer.section, layer.label, layer.key, current, values, profile_id)
-        for key, choice in changes.items():  # the layers of this installation the conversion changes
-            scope, role, project_id = key[0].value, key[1].value if key[1] else None, key[2]
-            section = "project.layers" if project_id else "settings.layers"
-            label = f"{self.project_labels.get(project_id or '', '')}{scope}" + (f":{role}" if role else "")
-            current = _stored_layer(self.target.layers.get((scope, role, project_id)))
-            profile_id, name = selected(choice)
-            empty = {"harness_prompt": None, "env": [], "run_budget_usd": None, "max_concurrency": None,
-                     "boundaries": None, "system_prompt_mode": None}
-            self._effort_note(section, label, None, name, current["profile"] if current else None)
-            await self._write_layer(section, label, (scope, role, project_id), current,
-                                    {**(current or empty), "profile": name}, profile_id)
+            await self._write_layer(layer.section, layer.label, layer.key, current, layer.values, layer.profile_id)
 
     async def _write_layer(self, section: str, label: str, key: tuple[str, str | None, str | None],
                            current: Mapping[str, Any] | None, values: Mapping[str, Any], profile_id: str | None,
@@ -1642,69 +1380,6 @@ class _Importer:
 
             await db.write_layer(self.conn, *key, {**values, "profile_id": profile_id})
 
-    def _effort_conversion(self) -> Any:
-        """``layer_effort.convert`` over this installation's layers, each replaced by the file's of the same key."""
-        from dataclasses import replace
-
-        from .layer_effort import Before, convert
-
-        # A profile this import adds keeps its "new:..." spec id in self.profiles; the conversion names it by its id.
-        specs = {profile_id: replace(spec, id=profile_id) for profile_id, spec in self.profiles.values()}
-        layers = {_effort_key(key): Before(specs.get(row["profile_id"])) for key, row in self.target.layers.items()}
-        for layer in self.file_layers:
-            layers[_effort_key(layer.key)] = Before(specs.get(layer.profile_id), layer.effort)
-        return convert(layers, specs.values())
-
-    async def _add_derived(self, derived: Any) -> str:
-        """Add a profile the effort conversion takes; its id (``new:...`` in a preview)."""
-        from dataclasses import replace
-
-        base = derived.base
-        spec = replace(base, id=f"new:{derived.name}", name=derived.name, effort=derived.effort)
-        self.record("profiles", derived.name, Action.ADDED)
-        profile_id = await self._write_profile(None, derived.name, spec) if self.apply else spec.id
-        self.profiles[derived.name] = (profile_id, replace(spec, id=profile_id))
-        self.plan.notes.append(f"profiles {derived.name}: added, {base.name} with effort {derived.effort}, for the "
-                               "effort the file's layers set (the effort is the Agent Profile's now)")
-        return profile_id
-
-    def _effort_note(self, section: str, label: str, effort: str | None, name: str | None,
-                     before: str | None) -> None:
-        selects = f"selects {name}" if name else "selects no Agent Profile of its own"
-        if effort:
-            self.plan.notes.append(f"{section} {label}: its effort {effort} is the Agent Profile's now: the layer "
-                                   f"{selects}")
-        elif name != before:
-            self.plan.notes.append(f"{section} {label}: {selects}, so its roles keep the effort the file's layers "
-                                   "give them (the effort is the Agent Profile's now)")
-
-    def _without_agent_teams_env(self, raw: Mapping[str, Any], section: str, label: str) -> Mapping[str, Any]:
-        """The layer without Claude Code's agent teams variable, which an Agent Profile's switch now owns (a file
-        from before it may carry it), with a note; the rest of the layer imports as it is."""
-        from .runtimes.claude_code import AGENT_TEAMS
-
-        env = raw.get("env")
-        if not isinstance(env, list) or not any(isinstance(e, Mapping) and e.get("key") == AGENT_TEAMS for e in env):
-            return raw
-        self.plan.notes.append(f"{section} {label}: {AGENT_TEAMS} was left out of the environment; agent teams are "
-                               "switched on each Agent Profile")
-        return {**raw, "env": [e for e in env if not (isinstance(e, Mapping) and e.get("key") == AGENT_TEAMS)]}
-
-    def _without_project_concurrency(self, raw: Mapping[str, Any], section: str, label: str) -> Mapping[str, Any]:
-        """The layer without a ``max_concurrency`` that only the Workers' and the Reviewers' role layers take now (a
-        file from before concurrency was per task may give a project's, a role's in a project or the Planner's), with
-        a note; the rest of the layer imports as it is."""
-        if raw.get("max_concurrency") is None or (raw.get("scope") == "role" and raw.get("role") in _LIMIT_ROLES):
-            return raw
-        self.plan.notes.append(
-            f"{section} {label}: its max_concurrency {raw['max_concurrency']} was ignored: concurrency is per task, so "
-            "nothing limits how many tasks run and a project has no limits; set the default for every task on the "
-            "worker or reviewer role (Settings → Roles), or a task's own limit")
-        rest = {name: value for name, value in raw.items() if name != "max_concurrency"}
-        if all(rest.get(name) in (None, [], "") for name in (*_LAYER_FIELDS, "model", "effort")):
-            raise _Skip("it sets nothing but a max_concurrency, which is ignored (see the notes)")
-        return rest
-
     async def role(self, entry: Any) -> None:
         from ..db import config_transfer as db
 
@@ -1714,6 +1389,8 @@ class _Importer:
             entry = _mapping(entry, "a role")
             if role not in db.ROLES:
                 raise _Skip(f"role {role!r} is not one of {', '.join(db.ROLES)}")
+            if unknown := set(entry) - {"role", *_ROLE_FIELDS}:
+                raise _Skip(f"unknown field {sorted(unknown)[0]!r}")
             prompt = entry.get("prompt")
             values = {
                 "prompt": None if prompt is None else _string(prompt, "prompt", max_chars=_PROMPT_MAX_CHARS),
@@ -1775,23 +1452,23 @@ class _Importer:
             row = self.target.channels.get(channel_id)
             if row and (row["channel_type"] != kind or row["manager_id"] != owner):
                 raise ConfigFileConflict("channels: immutable bot type or owner conflict; existing bots cannot be reassigned")
-            if self.channel_graph:
-                manager = self.target.managers.get(owner)
-                if manager is not None and manager["deleted_at"] is not None or (
-                        manager is None and owner not in self.imported_managers and owner != "manager"):
-                    raise ConfigFileError("channels: missing or deleted Manager reference")
-                if suffix is not None and row is None:
-                    high, called = self.target.bot_sequence
-                    occupied = any(identity.endswith(f"-{suffix}") for identity in self.target.channels)
-                    if suffix < high or suffix == high and called or occupied:
-                        raise ConfigFileConflict("channels: bot id conflict: this suffix was already allocated; "
-                                                 "add a new bot locally in Settings → Channels")
+            manager = self.target.managers.get(owner)
+            if manager is not None and manager["deleted_at"] is not None or (
+                    manager is None and owner not in self.imported_managers and owner != "manager"):
+                raise ConfigFileError("channels: missing or deleted Manager reference")
+            if suffix is not None and row is None:
+                high, called = self.target.bot_sequence
+                occupied = any(identity.endswith(f"-{suffix}") for identity in self.target.channels)
+                if suffix < high or suffix == high and called or occupied:
+                    raise ConfigFileConflict("channels: bot id conflict: this suffix was already allocated; "
+                                             "add a new bot locally in Settings → Channels")
             config, missing = _fill_placeholders(_mapping(entry.get("config", {}), "config"),
                                                  dict(row["config"] or {}) if row else {})
             try:
+                if kind == "lark" and {"app_id_env", "app_secret_env"} & config.keys():
+                    raise ValueError("app_id_env and app_secret_env are retired; use a lark-cli profile")
                 config = normalized_config(kind, config)
                 if kind == "lark":
-                    # A file from before lark-cli's profile chose the app names the app's env vars: dropped.
                     from .channels.lark_cli import lark_config
 
                     config = lark_config(config)
@@ -1801,8 +1478,8 @@ class _Importer:
                     config = stored_config(config)
             except (AllowlistError, ValueError) as exc:
                 raise _Skip(str(exc)) from None
-            name = entry.get("display_name", None if self.channel_graph else "")
-            values = {"display_name": "" if name is None and self.channel_graph else
+            name = entry.get("display_name")
+            values = {"display_name": "" if name is None else
                       _string(name, "display_name", max_chars=200),
                       "enabled": _boolean(entry.get("enabled", False), "enabled"), "config": config}
             if suffix is not None:
@@ -1821,23 +1498,11 @@ class _Importer:
                     self.plan.notes.append(
                         f"{channel_id}: imported disabled; review credentials, local policy and chat bindings "
                         "in Settings → Channels before activation, then restart the server")
-            if "bound_chats_only" in entry:
-                self.plan.notes.append(f"{channel_id}: legacy bound_chats_only was ignored; the destination's "
-                                       "local policy and chat bindings are preserved")
-            if not self.channel_graph:
-                await self._refuse_same_bot(channel_id, kind, config)
         except _Skip as exc:
-            if self.channel_graph:
-                raise ConfigFileError(f"channels: {exc}") from None
-            self.record("channels", str(raw.get("channel_id") or builtin_channel_id(kind)) if kind in _CHANNEL_PUBLIC_KEYS
-                        else str(kind), Action.SKIPPED, reason=str(exc))
-            return
-        self.bot_configs[channel_id] = config
+            raise ConfigFileError(f"channels: {exc}") from None
         if suffix is None:
             self.channel_configs[kind] = config
         self.bot_imports.append((channel_id, kind, owner, values, row, missing))
-        if not self.channel_graph:
-            await self._write_channel(self.bot_imports.pop())
 
     async def finish_channels(self) -> None:
         """Validate against the final imported + stored configs, including rows not yet inserted."""
@@ -1922,27 +1587,6 @@ class _Importer:
         if needed:
             self.plan.need_secret.append(NeededSecret("channels", channel_id, tuple(needed),
                                                       ("channel", channel_id) if added_bot or row or self.apply else None))
-
-    async def _refuse_same_bot(self, channel_id: str, kind: str, config: Mapping[str, Any]) -> None:
-        """Legacy files use strict per-channel admission; v4 validates the final graph in finish_channels."""
-        from ..db import channel_configs as db_channel_configs
-        from . import projects
-        from .channels.bot_api import _LOCK, _admission_app_id, refuse_same_bot
-        from .channels.bots import builtin_env_token
-
-        try:
-            has_secrets = await self.conn.fetchval("SELECT to_regclass('channel_secrets')") is not None
-            secret = None
-            if has_secrets:
-                await self.conn.execute(_LOCK)
-                secret = await db_channel_configs.get_bot_token(channel_id, pool=self.conn)
-            env = builtin_env_token(config) if kind == "telegram" and channel_id in BUILTIN_CHANNEL_IDS and not secret else ""
-            if has_secrets:
-                await refuse_same_bot(self.conn, kind, config, secret, env_token=env, exclude=channel_id,
-                                      configs=self.bot_configs)
-            await _admission_app_id(kind, config)
-        except projects.RequestError as exc:
-            raise _Skip(str(exc)) from None
 
     # --- catalog ---
 
@@ -2068,7 +1712,6 @@ class _Importer:
             await update_project(row["id"], description=values["description"], background=background,
                                  execution=execution, pool=self.conn)
         self.project_ids[name.lower()] = project_id
-        self.project_labels[project_id] = f"{name} / "
         from .project_execution import ProjectExecution
 
         self.role_text_limits[project_id] = ProjectExecution.from_row(execution).role_text_limit
@@ -2579,8 +2222,7 @@ class _Importer:
 async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> Plan:
     """The import's plan for ``data`` (from ``read_file``); with ``apply`` also written, in the caller's
     transaction. Raises ``ConfigFileError`` when the result would break a catalog cap."""
-    _check_manager_document(data)
-    _check_channel_document(data)
+    validate_document(data)
     if apply:
         from ..db.connection import ensure_schema, schema_change_pending
 
@@ -2591,7 +2233,7 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
         await ensure_schema(conn)
         # Take the same locks as registry writes before reading target rows.
         # The outer apply transaction uses READ COMMITTED, so a lock wait
-        # cannot leave conversion on a snapshot from before another writer.
+        # cannot leave the import on a snapshot from before another writer.
         await conn.execute("LOCK TABLE llm_providers, llm_provider_endpoints, llm_models, agent_profiles "
                            "IN SHARE ROW EXCLUSIVE MODE")
         # Firing locks a schedule before its owner. Import takes those locks before locking Managers, too.
@@ -2621,24 +2263,19 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
             for identity in sorted(entry["id"] for entry in data["managers"]
                                    if isinstance(entry, Mapping) and isinstance(entry.get("id"), str)):
                 await db_managers.lock_for_update(identity, conn=conn)
-        if data.get("format") == V4_FORMAT and data.get("channels"):
+        if data.get("channels"):
             for identity in sorted({entry.get("manager_id", "manager") for entry in data["channels"]}):
                 await conn.fetchrow("SELECT id FROM managers WHERE id = $1 FOR KEY SHARE", identity)
-        if data.get("managers") or data.get("format") == V4_FORMAT and data.get("channels"):
+        if data.get("managers") or data.get("channels"):
             # Resolve the projected dependencies and reject the complete graph before any import writes.
             await import_config(conn, data, apply=False)
-    if data.get("format") in V1_FORMATS and "agents" in data:
-        data = _from_v1(data)
     importer = _Importer(conn, await _Target.read(conn), apply)
-    importer.channel_graph = data.get("format") == V4_FORMAT
     importer.imported_managers = {entry.get("id") for entry in data.get("managers", [])
                                   if isinstance(entry, Mapping) and isinstance(entry.get("id"), str)}
     for entry in data.get("runtimes", []):
         await importer.runtime(entry)
     data = {**data, **{section: importer.registry_entries(section, data.get(section, []))
                       for section in ("providers", "models", "profiles")}}
-    if data.get("format") in (*V1_FORMATS, V2_FORMAT):
-        data = importer.legacy(data)
     for entry in data.get("providers", []):
         await importer.provider(entry)
     for entry in data.get("models", []):
@@ -2652,11 +2289,6 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
         await importer.role(entry)
     if "scheduler" in settings:
         await importer.scheduler(settings["scheduler"])
-    if any(isinstance(entry, Mapping) and "max_concurrency" in entry for entry in settings.get("roles", [])):
-        importer.plan.notes.append(
-            "settings.roles: a role's max_concurrency is no longer a role setting and was ignored; how many of a "
-            "task's Workers and Reviewers run at once is the task's own limit, else the max_concurrency of their "
-            "role layers")
     for entry in data.get("catalog", []):
         await importer.item(entry, None)
 
@@ -2676,8 +2308,7 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
     await importer.manager_installs(data.get("managers", []))
     for entry in data.get("channels", []):
         await importer.channel(entry)
-    if importer.channel_graph:
-        await importer.finish_channels()
+    await importer.finish_channels()
     for entry, project_id, label in projects:
         await importer.schedules(entry.get("schedules") or [], project_id, label,
                                  manager_entries=data.get("managers", []))

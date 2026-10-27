@@ -139,7 +139,7 @@ from ..log_redaction import redact
 from ..project_execution import LessonsMode, ProjectExecution, TaskBudgetAction, format_usd
 from ..run_usage import Usage
 from ..room import REF_MAX_CHARS, seat_key
-from ..runtimes import CLAUDE_CODE, ReadOnly
+from ..runtimes import CLAUDE_CODE, InProcessTools, ReadOnly
 from ..session_switch import SessionSwitch
 from ..step_workspaces import MergeError, MergeResult, Repo, StepWorkspace, StepWorkspaceState, Unusable
 from ..task_roles import RoleKind, TaskRole
@@ -3461,6 +3461,26 @@ class PlannerAgent:
             if self._ops is not None and self._token is not None:
                 self._ops.begin_turn(self._token)  # its tools may change things in this turn only
             try:
+                from ..runtimes.runner.session import RunnerSession
+                from ..runtimes.runner.turn import TurnLimits
+
+                if isinstance(self._claude, InProcessTools) and self._ops is not None and self._token is not None:
+                    from ..runtimes.api.tools import PlannerTurnTools
+
+                    self._claude.set_turn_tools(PlannerTurnTools(self._ops, self._token))
+                if isinstance(self._claude, RunnerSession):
+                    async def limits() -> TurnLimits:
+                        settings = await load_agent_settings(AgentType.PLANNER, plan.project_id or None, self._task_id)
+                        if settings.error or settings.profile_error:
+                            raise RuntimeError(settings.error or settings.profile_error)
+                        execution = await self._read_execution()
+                        costs = (await db_llm_records.task_costs([self._task_id]))[self._task_id]
+                        return {"run_cap": settings.max_budget_usd, "task_cap": execution.task_budget_usd,
+                                "task_spent": float(costs["cost_usd"]) if costs["cost_usd"] is not None else None}
+
+                    launch = process.launch
+                    self._claude.set_turn_budget(provider_id=launch.profile.provider.id, model=launch.model,
+                                                 price=launch.price, limits=limits)
                 turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop),
                                               limit if limit > 0 else None)
             except TimeoutError:
