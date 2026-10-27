@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.164] - 2026-10-27
+
+### Added
+
+- **Runner bridge.** Adds `RunnerBridge` in `looper/agents/runtimes/runner/bridge.py`: one runner stdio connection with request matching, a session table and translation of runner updates into Looper's existing event shape, routing tool and budget requests to `RunnerTurn`. Nothing in Looper calls it yet. ([#744](https://github.com/foolzzz/looper/pull/744))
+
 ## [2.13.163] - 2026-10-27
 
 ### Added
