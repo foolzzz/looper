@@ -54,6 +54,7 @@ class SessionEntry:
     initialized: bool = False
     accepted: bool = False
     settled_received: bool = False
+    requests_ended: int = 0
     summary: TurnSummary | None = None
     result_event: dict | None = field(default=None, repr=False)
     settled: asyncio.Future | None = field(default=None, repr=False)
@@ -222,6 +223,7 @@ class RunnerBridge:
         entry.traces.add(trace_id)
         entry.prompt_sent = entry.session_started = entry.accepted = entry.stopped = entry.settled_received = False
         entry.summary = entry.result_event = None
+        entry.requests_ended = 0
         entry.ready, entry.wake = asyncio.Event(), asyncio.Event()
         entry.settled = asyncio.get_running_loop().create_future()
         entry.worker = asyncio.create_task(self._updates(entry))
@@ -409,6 +411,7 @@ class RunnerBridge:
                             "tool_use_id": update["call_id"], "content": update["text"], "is_error": update["is_error"]}]}}
                     elif kind == "request_end":
                         event = await _value(entry.turn.request_end(update))
+                        entry.requests_ended += 1
                     else:
                         event = {"type": "system", "subtype": kind, "runner": update}
                     await self._emit(entry, event)
@@ -421,6 +424,7 @@ class RunnerBridge:
         if entry.summary is None:
             try:
                 await self._settle(entry, {"outcome": "lost", "final_text": "", "usage_complete": False,
+                    "requests": entry.requests_ended,
                     "session_id": entry.session_id, "trace_id": entry.trace_id,
                     "error": {"kind": "INTERNAL_ERROR", "message": str(self._error)}})
             except Exception:
