@@ -501,10 +501,30 @@ uv run python -m evals.prompt_regression dialogs --mode real --dialogs session_p
 
 #### The api runtime on CPA
 
-This change provides the eval entry point only. The real CPA smoke test, api and Codex full-dialog runs,
-and Opus descriptive comparison have not run; D11 remains unverified. There are no measured pass counts,
-cost totals, per-request token deltas, session-item or `api_sessions.protocol` readbacks from these runs.
-Keep the pending CPA capabilities in RFC §8.4 and the validation checklist in §15 open until those results exist.
+The real CPA validation used the local CPA proxy with `gpt-6-astra` for both Manager specs, as CPA served
+that model; other roles used Claude Code sonnet. Full-dialog runs used `--reps 2 --jobs 2`.
+
+| Run | Measured result | Recorded cost |
+|---|---|---|
+| api smoke: `status`, `confirm_create_start`, `cancel_confirmation`, `stop_then_continue`, one rep | 4/4 pass | $0.44 |
+| Codex Manager control, all dialogs | 78/84 scored passes, plus 4 harness errors (`stop_then_continue` and `withdraw_then_continue`, both reps) | $13.68 |
+| api Manager, all dialogs | 82/88 passes | $9.06 |
+
+On dialogs scored by both runs, recorded cost was $6.82 for Codex and $4.53 for api. D11 is met:
+every dialog's api pass count was at least the control's minus one. The api run matched or beat the
+control everywhere, and passed both dialogs with control harness errors 2/2; those control errors remain
+errors. `cancel_confirmation`, `config_tools`, `provider_key`, every `schedule_*` dialog and
+`client_relay_cancel` passed 2/2.
+
+Both Managers shared these failures, so they are not api regressions: `model_missing_endpoint` 0/2
+(the Manager read nothing through its tools), `start_no_wait` 0/2 (the reply did not say the task's
+questions would come to the user), and initially `session_profile_switch` 0/2. The last was an eval
+check bug: it compared the profile's display name, which includes the effort suffix. After this branch's
+fix, that dialog passed 2/2 for both Managers; those focused reruns are separate from the full-run totals above.
+Per-request token deltas, session-item and `api_sessions.protocol` readbacks, and the Opus descriptive
+comparison are not established by these measurements. Remaining capability checks are listed in RFC §8.4 and §15.
+The focused real Claude CLI handoff-prompt comparison from [#688](https://github.com/foolzzz/looper/pull/688)
+remains separate and unchanged.
 
 `dialogs --manager-agent SPEC.json` registers a Profile for the Manager's role layer only; other roles keep
 `--model` / `--agent`. It requires real mode and cannot be combined with `--manager-model`, `--manager-effort`
