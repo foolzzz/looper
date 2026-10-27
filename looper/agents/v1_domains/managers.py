@@ -103,7 +103,7 @@ async def run(server, operation, arguments, principal, headers):
     if name == "managers.update":
         return await answered(managers_api.update_manager(manager_id, arguments["fields"]))
     if name == "managers.delete":
-        return await answered(managers_api.delete_manager(manager_id))
+        return await answered(managers_api.delete_manager(manager_id, fleet=server._managers))
     if name == "manager_templates.put":
         return await answered(managers_api.put_template(manager_id, arguments["key"],
                               {k: v for k, v in arguments.items() if k not in ("manager_id", "key")}))

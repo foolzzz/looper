@@ -43,6 +43,41 @@ def test_api_handoff_prompt_names_its_fact_and_authority_boundaries() -> None:
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 class TestManagerContext:
+    def test_rebuilt_manager_hands_off_stored_context_before_the_next_message(self, monkeypatch, tmp_path):
+        from manager_mcp_stand_in import manager_endpoint
+
+        async def run(pool):
+            scripts = [ResponseScript(events=text_events("Keep this evidence.", usage=HIGH_USAGE)),
+                       ResponseScript(events=text_events(SUMMARY, usage=USAGE)),
+                       ResponseScript(events=text_events("Continued.", usage=USAGE))]
+            async with _manager(pool, tmp_path, monkeypatch, scripts) as chat:
+                await chat.manager._handle(_message("Keep the early constraints."))
+                old = (await agent_sessions.get_session("manager"))["session_id"]
+                assert await pool.fetchval(
+                    "SELECT context_tokens FROM api_sessions WHERE session_id=$1", old) == 150_001
+                await chat.manager.stop()
+                rebuilt = manager_module.ManagerAgent(
+                    config=manager_module.ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+                rebuilt._bus = chat.bus
+                try:
+                    async with manager_endpoint(
+                            rebuilt, chat.bus, SimpleNamespace(has_planner=lambda _: False), tmp_path):
+                        _replies(chat.bus)
+                        await rebuilt._handle(_message("Continue after restart.", 1))
+                        assert "[HANDOFF]" in _input(chat.model.requests[1])
+                        assert "Continue after restart." not in _input(chat.model.requests[1])
+                        assert "Keep this evidence." in _input(chat.model.requests[1])
+                        assert SUMMARY in _input(chat.model.requests[2])
+                        assert [r.payload["text"] for r in _replies(chat.bus)] == ["Continued."]
+                        compactions = await pool.fetchval(
+                            "SELECT compactions FROM llm_records ORDER BY id DESC LIMIT 1")
+                        assert json.loads(compactions) == [{"trigger": "auto", "pre_tokens": 150_001}]
+                        assert await pool.fetchval(
+                            "SELECT count(*) FROM api_sessions WHERE session_id=$1", old) == 0
+                finally:
+                    await rebuilt.stop()
+        run_db(run, monkeypatch, timeout=45)
+
     @pytest.mark.parametrize("restart", [False, True])
     @pytest.mark.parametrize("code", ["invalid_api_key", "context_length_exceeded"])
     def test_handoff_survives_failed_first_request_until_history_is_committed(

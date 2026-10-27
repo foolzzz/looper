@@ -647,3 +647,93 @@ def test_a_message_reaches_its_own_manager_only(tmp_path: Path, monkeypatch: pyt
             gate.set()
 
     run_db(body, monkeypatch)
+
+
+def test_delete_drains_in_flight_api_append_before_removing_session(tmp_path, monkeypatch):
+    from manager_mcp_stand_in import manager_endpoint
+    from looper.agents import api_v1, profile_registry
+    from looper.agents.runtimes.api.session import FORBIDDEN_ENV
+    from looper.agents.v1_domains import managers as manager_domain
+    from looper.db import agent_sessions, api_sessions
+    from tests.api_manager_support import USAGE, _profile
+    from tests.fake_model_api import FakeModelAPI, ResponseScript, text_events
+
+    async def body(pool):
+        review = await _insert(pool, "review")
+        entered, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        append = api_sessions.append
+
+        async def delayed_append(*args, **kwargs):
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                # A write already in progress can finish while shutdown drains its owner.
+                cancelled.set()
+                await release.wait()
+            await append(*args, **kwargs)
+
+        monkeypatch.setattr(profile_registry, "_login_modules", lambda: {})
+        for name in FORBIDDEN_ENV:
+            monkeypatch.delenv(name, raising=False)
+        async with FakeModelAPI([ResponseScript(events=text_events("Reply.", usage=USAGE))]) as model:
+            await _profile(pool, model.base_url)
+            await api_sessions.create("live", "openai-responses", pool=pool)
+            await append("live", 1, "openai-responses", "model", [
+                {"version": 1, "kind": "message", "role": "user", "text": "Keep this."}], pool=pool)
+            await agent_sessions.save_session("manager", "live", {}, runtime_type="api")
+            live = await api_sessions.load("live", pool=pool)
+            monkeypatch.setattr(api_sessions, "append", delayed_append)
+            async with rig(tmp_path) as r, manager_endpoint(
+                    r.fleet.get(review), r.bus, SimpleNamespace(has_planner=lambda _: False), tmp_path):
+                await r.bus.publish(_user(review))
+                await asyncio.wait_for(entered.wait(), 5)
+                deleting = asyncio.create_task(manager_domain.run(
+                    SimpleNamespace(_managers=r.fleet), api_v1.find("POST", "/api/v1/managers/delete"),
+                    {"manager_id": review}, api_v1.OPERATOR, {}))
+                try:
+                    await asyncio.wait_for(cancelled.wait(), 5)
+                    assert not deleting.done()
+                    assert (await pool.fetchval("SELECT deleted_at FROM managers WHERE id=$1", review)) is None
+                    assert await agent_sessions.get_session(review) is not None
+                finally:
+                    release.set()
+                    await asyncio.wait_for(deleting, 10)
+                assert r.fleet.get(review) is None
+                assert await agent_sessions.get_session(review) is None
+                assert [row["session_id"] for row in await pool.fetch("SELECT session_id FROM api_sessions")] == ["live"]
+                assert await pool.fetchval("SELECT count(*) FROM api_session_items WHERE session_id <> 'live'") == 0
+                assert await api_sessions.load("live", pool=pool) == live
+
+    run_db(body, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("failure", ["stop", "delete"])
+def test_failed_deletion_preserves_session_and_running_manager(tmp_path, monkeypatch, failure):
+    from looper.db import agent_sessions, api_sessions, managers
+
+    async def body(pool):
+        review = await _insert(pool, "review")
+        await api_sessions.create("review-session", "openai-responses", pool=pool)
+        await api_sessions.append("review-session", 1, "openai-responses", "model", [
+            {"version": 1, "kind": "message", "role": "user", "text": "Keep this."}], pool=pool)
+        await agent_sessions.save_session(review, "review-session", {}, runtime_type="api")
+        before = await api_sessions.load("review-session", pool=pool)
+        async with rig(tmp_path) as r:
+            async def fail(*args, **kwargs):
+                raise RuntimeError("injected deletion failure")
+
+            with monkeypatch.context() as patch:
+                if failure == "stop":
+                    patch.setattr(r.fleet.get(review), "stop", fail)
+                else:
+                    patch.setattr(managers, "delete_manager", fail)
+                with pytest.raises(RuntimeError, match="injected deletion failure"):
+                    await r.fleet.delete_manager(review)
+            assert await managers.get_manager(review) is not None
+            assert (await agent_sessions.get_session(review))["session_id"] == "review-session"
+            assert await api_sessions.load("review-session", pool=pool) == before
+            assert r.fleet.get(review).is_healthy()
+            assert r.fleet.is_running(review)
+
+    run_db(body, monkeypatch, timeout=20)

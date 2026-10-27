@@ -21,6 +21,7 @@ def test_append_load_preserves_neutral_order_and_originating_model():
     from looper.db import api_sessions
 
     async def run(pool):
+        await api_sessions.create("session", PROTOCOL, pool=pool)
         await api_sessions.append("session", 1, PROTOCOL, "first-model", [message("one"), message("two")], pool=pool)
         await api_sessions.append("session", 2, PROTOCOL, "second-model", [message("three")], pool=pool)
         rows = await api_sessions.load("session", pool=pool)
@@ -31,13 +32,14 @@ def test_append_load_preserves_neutral_order_and_originating_model():
     run_db(run, timeout=15)
 
 
-def test_failed_first_append_rolls_back_metadata_and_items():
+def test_failed_first_append_rolls_back_items():
     from looper.db import api_sessions
 
     async def run(pool):
+        await api_sessions.create("session", PROTOCOL, pool=pool)
         with pytest.raises(TypeError):
             await api_sessions.append("session", 1, PROTOCOL, "model", [message("one"), object()], pool=pool)
-        assert await pool.fetchval("SELECT count(*) FROM api_sessions") == 0
+        assert await pool.fetchval("SELECT count(*) FROM api_sessions") == 1
         assert await pool.fetchval("SELECT count(*) FROM api_session_items") == 0
 
     run_db(run, timeout=15)
@@ -47,6 +49,7 @@ def test_protocol_mismatch_preserves_committed_history():
     from looper.db import api_sessions
 
     async def run(pool):
+        await api_sessions.create("session", PROTOCOL, pool=pool)
         await api_sessions.append("session", 1, PROTOCOL, "model", [message("one")], pool=pool)
         before = await api_sessions.load("session", pool=pool)
         with pytest.raises(api_sessions.TranscriptMismatch):
@@ -60,6 +63,7 @@ def test_concurrent_appends_allocate_contiguous_sequences():
     from looper.db import api_sessions
 
     async def run(pool):
+        await api_sessions.create("session", PROTOCOL, pool=pool)
         await asyncio.gather(*(
             api_sessions.append("session", turn, PROTOCOL, "model", [message(str(turn)), message(str(turn))], pool=pool)
             for turn in (1, 2, 3)))
@@ -85,6 +89,7 @@ def test_last_turn_reads_highest_stored_turn():
     from looper.db import api_sessions
 
     async def run(pool):
+        await api_sessions.create("session", PROTOCOL, pool=pool)
         await api_sessions.append("session", 1, PROTOCOL, "model", [message("one")], pool=pool)
         await api_sessions.append("session", 2, PROTOCOL, "model", [message("two")], pool=pool)
         assert await api_sessions.last_turn("session", pool=pool) == 2
@@ -96,6 +101,7 @@ def test_delete_removes_metadata_and_cascades_items():
     from looper.db import api_sessions
 
     async def run(pool):
+        await api_sessions.create("session", PROTOCOL, pool=pool)
         await api_sessions.append("session", 1, PROTOCOL, "model", [message("one"), message("two")], pool=pool)
         assert await api_sessions.delete("session", pool=pool) == 2
         assert await pool.fetchval("SELECT count(*) FROM api_sessions") == 0
@@ -105,11 +111,46 @@ def test_delete_removes_metadata_and_cascades_items():
     run_db(run, timeout=15)
 
 
+def test_late_append_refuses_deleted_session_and_preserves_other_history():
+    from looper.db import api_sessions
+
+    async def run(pool):
+        for sid in ("deleted", "live"):
+            await api_sessions.create(sid, PROTOCOL, pool=pool)
+            await api_sessions.append(sid, 1, PROTOCOL, "model", [message("kept")], pool=pool)
+        live = await api_sessions.load("live", pool=pool)
+        await api_sessions.delete("deleted", pool=pool)
+        with pytest.raises(api_sessions.TranscriptMismatch, match="no longer exists"):
+            await api_sessions.append("deleted", 2, PROTOCOL, "model", [message("late")], pool=pool)
+        assert await pool.fetchval("SELECT count(*) FROM api_sessions WHERE session_id='deleted'") == 0
+        assert await pool.fetchval("SELECT count(*) FROM api_session_items WHERE session_id='deleted'") == 0
+        assert await api_sessions.load("live", pool=pool) == live
+
+    run_db(run, timeout=15)
+
+
+def test_unknown_usage_keeps_last_known_context_and_late_usage_cannot_recreate_session():
+    from looper.db import api_sessions
+
+    async def run(pool):
+        await api_sessions.create("session", PROTOCOL, pool=pool)
+        assert await api_sessions.context_tokens("session", pool=pool) is None
+        for tokens, expected in [(150_001, 150_001), (None, 150_001), (12, 12)]:
+            await api_sessions.save_context_tokens("session", tokens, pool=pool)
+            assert await api_sessions.context_tokens("session", pool=pool) == expected
+        await api_sessions.delete("session", pool=pool)
+        await api_sessions.save_context_tokens("session", 150_001, pool=pool)
+        assert await pool.fetchval("SELECT count(*) FROM api_sessions") == 0
+
+    run_db(run, timeout=15)
+
+
 @pytest.mark.parametrize("new_session", [None, "replacement"])
 def test_replacing_api_session_deletes_its_persisted_history(new_session):
     from looper.db import api_sessions
 
     async def run(pool):
+        await api_sessions.create("old", PROTOCOL, pool=pool)
         await api_sessions.append("old", 1, PROTOCOL, "model", [message("one")], pool=pool)
         await agent_sessions.save_session("manager", "old", {}, runtime_type="api", pool=pool)
         await agent_sessions.save_session("manager", new_session, {}, runtime_type="api", pool=pool)
@@ -124,6 +165,7 @@ def test_cli_session_replacement_does_not_delete_api_history():
     from looper.db import api_sessions
 
     async def run(pool):
+        await api_sessions.create("old", PROTOCOL, pool=pool)
         await api_sessions.append("old", 1, PROTOCOL, "model", [message("one")], pool=pool)
         await agent_sessions.save_session("manager", "old", {}, runtime_type="claude-code", pool=pool)
         await agent_sessions.save_session("manager", "new", {}, runtime_type="claude-code", pool=pool)
@@ -136,6 +178,7 @@ def test_same_api_session_keeps_history():
     from looper.db import api_sessions
 
     async def run(pool):
+        await api_sessions.create("session", PROTOCOL, pool=pool)
         await api_sessions.append("session", 1, PROTOCOL, "model", [message("one")], pool=pool)
         await agent_sessions.save_session("manager", "session", {}, runtime_type="api", pool=pool)
         await agent_sessions.save_session("manager", "session", {"cost_usd": 1}, runtime_type="api", pool=pool)
@@ -148,6 +191,7 @@ def test_failed_session_replacement_preserves_old_history_and_pointer():
     from looper.db import api_sessions
 
     async def run(pool):
+        await api_sessions.create("old", PROTOCOL, pool=pool)
         await api_sessions.append("old", 1, PROTOCOL, "model", [message("one")], pool=pool)
         await agent_sessions.save_session("manager", "old", {}, runtime_type="api", pool=pool)
         with pytest.raises(TypeError):
@@ -167,6 +211,7 @@ def test_deleting_manager_removes_only_its_api_session_history(monkeypatch, runt
             await managers.insert_manager({"id": "manager-review", "name": "Review",
                                            "system_prompt": "Review code."}, conn=conn)
         for session_id in ("review-session", "other-session"):
+            await api_sessions.create(session_id, PROTOCOL, pool=pool)
             await api_sessions.append(session_id, 1, PROTOCOL, "model", [message("retained fact")], pool=pool)
         await agent_sessions.save_session("manager-review", "review-session", {}, runtime_type=runtime_type)
         await agent_sessions.save_session("manager", "other-session", {}, runtime_type="api")
@@ -196,6 +241,7 @@ def test_failed_manager_deletion_rolls_back_api_history_and_pointer(monkeypatch,
             await managers.insert_manager({"id": "manager-review", "name": "Review",
                                            "system_prompt": "Review code."}, conn=conn)
         await managers.put_template("manager-review", "review", {"name": "Review"})
+        await api_sessions.create("review-session", PROTOCOL, pool=pool)
         await api_sessions.append("review-session", 1, PROTOCOL, "model", [message("retained fact")], pool=pool)
         await agent_sessions.save_session("manager-review", "review-session", {}, runtime_type="api")
         before = await api_sessions.load("review-session", pool=pool)

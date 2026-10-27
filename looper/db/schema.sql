@@ -369,6 +369,7 @@ CREATE TABLE IF NOT EXISTS api_sessions (
     session_id  TEXT PRIMARY KEY,
     protocol    TEXT NOT NULL CHECK (protocol IN ('openai-responses', 'anthropic-messages', 'openai-chat'))
 );
+ALTER TABLE api_sessions ADD COLUMN IF NOT EXISTS context_tokens INTEGER;
 -- Neutral items, appended per completed request and removed with their session.
 CREATE TABLE IF NOT EXISTS api_session_items (
     session_id  TEXT NOT NULL REFERENCES api_sessions(session_id) ON DELETE CASCADE,

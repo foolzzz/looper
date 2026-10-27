@@ -303,10 +303,27 @@ class ManagerFleet:
 
     # --- Retiring ---
 
-    async def _retire(self, manager_id: str) -> None:
+    async def delete_manager(self, manager_id: str) -> str:
+        """Drain the resident turn before deleting its durable state; exclude concurrent fleet applies."""
+        async with self._lock:
+            agent = self._agents.get(manager_id)
+            try:
+                if agent is not None:
+                    await self._retire(manager_id, strict=True)
+                return await db_managers.delete_manager(manager_id)
+            finally:
+                # A refused or rolled-back deletion must leave an enabled Manager running.
+                self._retiring.discard(manager_id)
+                await self._apply_once(manager_id)
+
+    async def _retire(self, manager_id: str, *, strict: bool = False) -> None:
         self._retiring.add(manager_id)
         agent = self._agents.get(manager_id)
-        await self._supervisor.stop_agent(manager_id)
+        if strict:
+            # A deletion cannot commit if stopping the resident turn failed.
+            await self._supervisor.stop_agent(manager_id, strict=True)
+        else:
+            await self._supervisor.stop_agent(manager_id)
         bus = self._bus
         taken = bus.take_queue(manager_id)
         queued = {envelope.message_id for envelope in taken}

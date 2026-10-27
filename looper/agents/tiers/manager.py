@@ -1196,6 +1196,17 @@ class ManagerAgent:
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
         switch = session_switch.profile_switch(self._session_id, self._session_runtime, self._session_profile,
                                                launch, session_provider=self._session_provider)
+        if switch is None and self._session_id and self._session_runtime == "api" \
+                and (self._claude_runtime is not launch.runtime or not self._claude.started):
+            # Restore the API session's saved context before deciding whether it needs a handoff.
+            await token.keep("claude_stop", self._claude.stop(), 10)
+            self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
+            command = self._claude_command(prompt_file, launch)
+            await token.keep("claude_start", self._claude.start(
+                command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
+                totals=self._session_totals, price=launch.price), 30,
+                undo=lambda: self._claude.stop(kill=True))
+            self._process = _Process(command, signature, system_prompt, launch)
         if switch is None and self._session_id and isinstance(self._claude, ReportsContext) \
                 and self._claude.started and self._claude.context_full:
             switch = session_switch.context_full(

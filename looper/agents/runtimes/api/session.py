@@ -11,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 from urllib.parse import urlparse
 
+from ....db import api_sessions
 from ... import claude_cli, log_redaction
 from ...ops import OpError
 from ...run_usage import Price, Usage, run_usage
@@ -142,6 +143,8 @@ class ApiSession:
         self._prompt = prompt
         self._signature, self._totals, self._price = signature, totals or Usage(), price
         self._session = descriptor.session
+        if self._session:
+            self._contexts[self._session] = await api_sessions.context_tokens(self._session)
         self._descriptor = descriptor
 
     def set_turn_tools(self, tools: Any) -> None:
@@ -216,7 +219,9 @@ class ApiSession:
                 await send({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
                            "delta": {"type": "text_delta", "text": event.text}}})
             elif isinstance(event, RequestDone):
-                self._contexts[sid] = event.record.prompt_tokens
+                if event.record.prompt_tokens is not None:
+                    self._contexts[sid] = event.record.prompt_tokens
+                await api_sessions.save_context_tokens(sid, event.record.prompt_tokens)
                 content = []
                 if event.reasoning_summary:
                     content.append({"type": "thinking", "thinking": event.reasoning_summary})
@@ -235,9 +240,16 @@ class ApiSession:
                            "tool_use_id": event.call.call_id, "content": event.outcome.text,
                            "is_error": event.outcome.is_error}]}})
 
-        result = await self._loop.run(target=self._target, system_prompt=self._prompt, user_text=text,
-                    session_id=sid, transcript=transcript, tools=tools, cancel=cancel, emit=emit,
-                    over_cap=lambda: stop is not None and stop() is not None, max_requests=30)
+        if not self._session:
+            await api_sessions.create(sid, descriptor.protocol.value)
+        try:
+            result = await self._loop.run(target=self._target, system_prompt=self._prompt, user_text=text,
+                        session_id=sid, transcript=transcript, tools=tools, cancel=cancel, emit=emit,
+                        over_cap=lambda: stop is not None and stop() is not None, max_requests=30)
+        finally:
+            # An interrupted or failed first request has no conversation to resume.
+            if not self._session and await api_sessions.last_turn(sid) is None:
+                await api_sessions.delete(sid)
         for request in result.requests:
             u = request.usage
             fields = {
