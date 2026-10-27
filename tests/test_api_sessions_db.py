@@ -145,6 +145,62 @@ def test_unknown_usage_keeps_last_known_context_and_late_usage_cannot_recreate_s
     run_db(run, timeout=15)
 
 
+def test_upgrade_backfills_the_last_known_context_of_each_api_session():
+    from looper.db import api_sessions, connection
+
+    async def before(pool):
+        await connection.ensure_schema(pool)
+        await pool.execute("ALTER TABLE api_sessions DROP COLUMN context_tokens")
+        await pool.execute("DELETE FROM schema_migrations WHERE name = 'api_sessions_context_tokens_backfill'")
+        await pool.execute("""
+            INSERT INTO api_sessions (session_id, protocol) VALUES
+                ('full', 'openai-responses'), ('smaller', 'openai-responses'),
+                ('unknown', 'openai-responses'), ('unrecorded', 'openai-responses');
+            INSERT INTO llm_records (agent_id, session_id, context_tokens, created_at) VALUES
+                ('manager', 'full', 120000, '2026-01-01'),
+                ('manager', 'full', 150001, '2026-01-02'),
+                ('manager', 'full', NULL, '2026-01-03'),
+                ('manager', 'full', 130000, '2025-12-31'),
+                ('manager', 'smaller', 170000, '2026-01-01'),
+                ('manager', 'smaller', 20, '2026-01-02'),
+                ('manager', 'smaller', 12, '2026-01-02'),
+                ('manager', 'unknown', NULL, '2026-01-03'),
+                ('manager', 'deleted', 180000, '2026-01-03');
+        """)
+
+    async def run(pool):
+        assert {row["session_id"]: row["context_tokens"] for row in await pool.fetch(
+            "SELECT session_id, context_tokens FROM api_sessions")} == {
+                "full": 150_001, "smaller": 12, "unknown": None, "unrecorded": None}
+        assert await api_sessions.context_tokens("deleted", pool=pool) is None
+
+    run_db(run, before=before, timeout=20)
+
+
+def test_context_backfill_preserves_live_values_and_does_not_repeat():
+    from looper.db import api_sessions, connection
+
+    async def run(pool):
+        await pool.execute("DELETE FROM schema_migrations WHERE name = 'api_sessions_context_tokens_backfill'")
+        for session_id, tokens in (("live", 12), ("zero", 0), ("missing", None)):
+            await api_sessions.create(session_id, PROTOCOL, pool=pool)
+            await api_sessions.save_context_tokens(session_id, tokens, pool=pool)
+            await pool.execute("INSERT INTO llm_records (agent_id, session_id, context_tokens) "
+                               "VALUES ('manager', $1, 150001)", session_id)
+        await connection.ensure_schema(pool)
+        assert await api_sessions.context_tokens("live", pool=pool) == 12
+        assert await api_sessions.context_tokens("zero", pool=pool) == 0
+        assert await api_sessions.context_tokens("missing", pool=pool) == 150_001
+        # A later restart cannot reapply historical usage to a post-migration session.
+        await pool.execute("UPDATE api_sessions SET context_tokens = NULL WHERE session_id = 'missing'")
+        await api_sessions.save_context_tokens("live", 5, pool=pool)
+        await connection.ensure_schema(pool)
+        assert await api_sessions.context_tokens("missing", pool=pool) is None
+        assert await api_sessions.context_tokens("live", pool=pool) == 5
+
+    run_db(run, timeout=20)
+
+
 @pytest.mark.parametrize("new_session", [None, "replacement"])
 def test_replacing_api_session_deletes_its_persisted_history(new_session):
     from looper.db import api_sessions

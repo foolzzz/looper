@@ -708,6 +708,83 @@ def test_delete_drains_in_flight_api_append_before_removing_session(tmp_path, mo
     run_db(body, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("dependency", ["schedules", "bots", "bindings"])
+def test_refused_deletion_keeps_in_flight_and_queued_messages(tmp_path, monkeypatch, dependency):
+    from looper.agents import managers_api
+    from looper.agents.projects import HTTP_409, RequestError
+
+    async def body(pool):
+        review = await _insert(pool, "review")
+        if dependency == "schedules":
+            await pool.execute("INSERT INTO projects (id, name) VALUES ('project', 'Project')")
+            await pool.execute("""
+                INSERT INTO schedules (id, project_id, name, cron, timezone, requirement, manager_id)
+                VALUES ('schedule', 'project', 'Scheduled work', '0 * * * *', 'UTC', 'Work.', $1)
+            """, review)
+        else:
+            await pool.execute("""
+                INSERT INTO channel_configs (channel_id, channel_type, manager_id)
+                VALUES ('channel-telegram', 'telegram', $1)
+            """, review if dependency == "bots" else "manager")
+            if dependency == "bindings":
+                await pool.execute("""
+                    INSERT INTO manager_chat_bindings (channel_id, chat_id, manager_id)
+                    VALUES ('channel-telegram', '42', $1)
+                """, review)
+        gate, seen = _stub_answer(monkeypatch)
+        async with rig(tmp_path) as r:
+            agent = r.fleet.get(review)
+            first, queued = _user(review, n=1), _user(review, n=2)
+            await r.bus.publish(first)
+            await until(lambda: len(seen) == 1, "the in-flight answer", timeout=5)
+            token = agent.turn_for(first.message_id)
+            await r.bus.publish(queued)
+            with pytest.raises(RequestError) as refused:
+                await managers_api.delete_manager(review, fleet=r.fleet)
+            assert refused.value.status == HTTP_409
+            assert r.fleet.get(review) is agent and agent.is_healthy()
+            assert agent.turn_for(first.message_id) is token and token.live
+            assert r.bus.pending_count(review) == 1
+            assert {first.message_id, queued.message_id} <= _journal_open(tmp_path)
+            assert not [e for e in r.bus.get_queue(WEB.agent_id)._queue
+                        if e.message_type == MessageType.AGENT_REPLY]
+            gate.set()
+            await until(lambda: len(seen) == 2 and not agent.busy, "both original answers", timeout=5)
+            assert [e.message_id for e in seen] == [first.message_id, queued.message_id]
+
+    run_db(body, monkeypatch, timeout=20)
+
+
+def test_delete_commit_failure_keeps_bus_messages_for_the_restarted_manager(tmp_path, monkeypatch):
+    import asyncpg
+
+    async def body(pool):
+        review = await _insert(pool, "review")
+        await pool.execute("""
+            CREATE FUNCTION reject_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'injected commit failure' USING ERRCODE = '23514'; END $$;
+            CREATE CONSTRAINT TRIGGER reject_commit AFTER UPDATE ON managers
+            DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_commit();
+        """)
+        gate, seen = _stub_answer(monkeypatch)
+        async with rig(tmp_path) as r:
+            first, queued = _user(review, n=1), _user(review, n=2)
+            await r.bus.publish(first)
+            await until(lambda: len(seen) == 1, "the in-flight answer", timeout=5)
+            await r.bus.publish(queued)
+            with pytest.raises(asyncpg.CheckViolationError, match="injected commit failure"):
+                await r.fleet.delete_manager(review)
+            assert r.fleet.get(review).is_healthy() and r.fleet.is_running(review)
+            assert {first.message_id, queued.message_id} <= _journal_open(tmp_path)
+            assert not [e for e in r.bus.get_queue(WEB.agent_id)._queue
+                        if e.message_type == MessageType.AGENT_REPLY]
+            gate.set()
+            await until(lambda: len(seen) == 3, "the interrupted and queued answers to resume", timeout=5)
+            assert [e.message_id for e in seen] == [first.message_id, first.message_id, queued.message_id]
+
+    run_db(body, monkeypatch, timeout=20)
+
+
 @pytest.mark.parametrize("failure", ["stop", "delete"])
 def test_failed_deletion_preserves_session_and_running_manager(tmp_path, monkeypatch, failure):
     from looper.db import agent_sessions, api_sessions, managers

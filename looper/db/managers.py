@@ -10,7 +10,7 @@ row (``lock_for_task``, ``put_template``) and the delete locks it too, so whiche
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Literal
 
 import asyncpg
@@ -118,13 +118,14 @@ async def lock_for_task(manager_id: str, *, conn: asyncpg.Connection) -> bool:
         "SELECT enabled AND deleted_at IS NULL FROM managers WHERE id = $1 FOR KEY SHARE", manager_id))
 
 
-async def delete_manager(manager_id: str) -> Literal[
+async def delete_manager(manager_id: str, *, before_delete: Callable[[], Awaitable[None]] | None = None) -> Literal[
         "deleted", "missing", "has_tasks", "has_schedules", "has_bots", "has_bindings"]:
     """Soft-delete a scenario Manager in one transaction that holds its row lock: ``"has_tasks"`` (nothing written)
     when a task belongs to it, ``"has_schedules"`` when a schedule does, ``"has_bots"`` when a channel bot does,
     ``"has_bindings"`` when a chat is explicitly bound to it; ``"missing"`` for the default Manager, an unknown
     or a deleted one. Its templates and its session (including API history) go, its profile is let go;
-    its chat threads and messages stay."""
+    its chat threads and messages stay. ``before_delete`` drains the resident process only after all refusal
+    checks, while the row lock excludes new dependents; bus messages must wait for this transaction to commit."""
     pool = get_pool()
     async with pool.acquire() as conn, conn.transaction():
         deleted_at = await conn.fetchrow(
@@ -139,6 +140,8 @@ async def delete_manager(manager_id: str) -> Literal[
             return "has_bots"
         if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM manager_chat_bindings WHERE manager_id = $1)", manager_id):
             return "has_bindings"
+        if before_delete is not None:
+            await before_delete()
         await conn.execute("DELETE FROM manager_task_templates WHERE manager_id = $1", manager_id)
         session = await conn.fetchrow(
             "DELETE FROM agent_sessions WHERE agent_id = $1 RETURNING session_id, runtime_type", manager_id)

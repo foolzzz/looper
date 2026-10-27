@@ -2030,6 +2030,23 @@ ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS cache_read_tokens BIGINT;
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS cache_creation_tokens BIGINT;
 -- The context at the run's end: the prompt of its last main-loop model request.
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS context_tokens INTEGER;
+-- Once: older API sessions kept their last known context only in the run records.
+-- Restore it before a restarted Manager decides whether the session needs a handoff;
+-- unknown later usage must not erase it, and a live session's own count wins.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'api_sessions_context_tokens_backfill') THEN
+        UPDATE api_sessions AS session SET context_tokens = latest.context_tokens
+        FROM (
+            SELECT DISTINCT ON (session_id) session_id, context_tokens
+            FROM llm_records
+            WHERE session_id IS NOT NULL AND context_tokens IS NOT NULL
+            ORDER BY session_id, created_at DESC, id DESC
+        ) AS latest
+        WHERE session.session_id = latest.session_id AND session.context_tokens IS NULL;
+        INSERT INTO schema_migrations (name) VALUES ('api_sessions_context_tokens_backfill');
+    END IF;
+END $$;
 -- The context compactions during the run, each {trigger, pre_tokens, post_tokens, duration_ms};
 -- NULL for runs recorded before compactions were.
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS compactions JSONB;

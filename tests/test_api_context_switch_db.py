@@ -43,8 +43,10 @@ def test_api_handoff_prompt_names_its_fact_and_authority_boundaries() -> None:
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 class TestManagerContext:
-    def test_rebuilt_manager_hands_off_stored_context_before_the_next_message(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize("upgrade", [False, True])
+    def test_rebuilt_manager_hands_off_stored_context_before_the_next_message(self, monkeypatch, tmp_path, upgrade):
         from manager_mcp_stand_in import manager_endpoint
+        from looper.db import connection
 
         async def run(pool):
             scripts = [ResponseScript(events=text_events("Keep this evidence.", usage=HIGH_USAGE)),
@@ -56,6 +58,12 @@ class TestManagerContext:
                 assert await pool.fetchval(
                     "SELECT context_tokens FROM api_sessions WHERE session_id=$1", old) == 150_001
                 await chat.manager.stop()
+                if upgrade:
+                    # Older versions persisted context only in llm_records, not api_sessions.
+                    await pool.execute("ALTER TABLE api_sessions DROP COLUMN context_tokens")
+                    await pool.execute("DELETE FROM schema_migrations "
+                                       "WHERE name = 'api_sessions_context_tokens_backfill'")
+                    await connection.ensure_schema(pool)
                 rebuilt = manager_module.ManagerAgent(
                     config=manager_module.ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
                 rebuilt._bus = chat.bus
