@@ -183,13 +183,14 @@ def test_assembles_runner_commands_from_explicit_env(tmp_path: Path) -> None:
 
     spec = json.loads((STATE / "agent.json").read_text(encoding="utf-8"))
     example = json.loads(example_before)
-    assert spec["runtime"] == example["runtime"]
-    assert spec["agent"] == example["agent"]
-    assert spec["provider"]["name"] == example["provider"]["name"]
-    assert spec["provider"]["protocols"] == example["provider"]["protocols"]
-    assert spec["provider"]["auth"] == example["provider"]["auth"]
-    assert spec["provider"]["api_key_env"] == "PI_EVAL_API_KEY"
-    assert spec["provider"]["base_url"] == ENDPOINT
+    assert spec == {
+        **example,
+        "provider": {
+            **example["provider"],
+            "api_key_env": "PI_EVAL_API_KEY",
+            "endpoints": [{"protocol": "openai-responses", "base_url": ENDPOINT}],
+        },
+    }
     assert KEY not in (STATE / "agent.json").read_text(encoding="utf-8")
     assert "operator-cpa.invalid" not in (STATE / "agent.json").read_text(encoding="utf-8")
     assert EXAMPLE.read_bytes() == example_before
@@ -351,12 +352,17 @@ def test_deepseek_commands_use_chat_spec_and_fresh_results(tmp_path: Path, deeps
             assert "--baseline" not in argv
             assert KEY not in " ".join(argv)
             spec = json.loads(Path(_flag(argv, "--register-agent")).read_text())
-            assert spec["runtime"] == {"type": "pi"}
-            assert spec["agent"] == {"name": DEEPSEEK_AGENT, "model": "deepseek-flash"}
-            assert spec["provider"]["protocols"] == ["openai-chat"]
-            assert spec["provider"]["auth"] == "api_key"
-            assert spec["provider"]["base_url"] == "https://api.deepseek.com"
-            assert spec["provider"]["api_key_env"] == "DEEPSEEK_API_KEY"
+            assert spec == {
+                "runtime": {"type": "pi"},
+                "agent": {"name": DEEPSEEK_AGENT},
+                "model": {"name": "deepseek-flash", "protocol": "openai-chat"},
+                "provider": {
+                    "name": "eval-deepseek",
+                    "vendor_type": "custom",
+                    "endpoints": [{"protocol": "openai-chat", "base_url": "https://api.deepseek.com"}],
+                    "api_key_env": "DEEPSEEK_API_KEY",
+                },
+            }
             assert KEY not in json.dumps(spec)
     assert outputs[0] != outputs[1]
     assert all(record["telegram"] == "" for record in invocations)
