@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.177] - 2026-10-27
+
+### Fixed
+
+- **Manager capability changes are visible; deleting an active Manager is refused.** When a changed skill set cannot be applied because the resident runtime is not idle, the turn carries the notice `能力变更待应用` and the change takes effect after `/new`. Catalog items report `manager_install_count`; the catalog card counts Manager-only installations as installed and its delete confirmation names them. Deleting a Manager that has active or admitted work, queued messages or a runtime that cannot prove it is idle now returns 409 instead of cancelling it; Manager tool executions are admitted under the retirement lock and refused while the Manager is retiring. No schema change. ([#773](https://github.com/foolzzz/looper/pull/773))
+
 ## [2.13.176] - 2026-10-27
 
 ### Fixed

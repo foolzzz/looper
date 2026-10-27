@@ -95,6 +95,10 @@ class ApiSession:
         return self._descriptor is not None
 
     @property
+    def idle(self) -> bool:
+        return self._turn_done is None
+
+    @property
     def context_tokens(self) -> int | None:
         return self._contexts.get(self._session)
 
