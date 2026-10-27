@@ -698,6 +698,14 @@ class _Output:
                         self._untracked_jobs.add(tool_id)
                     else:
                         self._idle_unknown = True
+        if event.get("type") == "user" and isinstance(message, dict):
+            content = message.get("content")
+            for block in content if isinstance(content, list) else []:
+                if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error") is True:
+                    tool_id = block.get("tool_use_id")
+                    if isinstance(tool_id, str):
+                        # A failed launch has no task_started; already started jobs stay tracked.
+                        self._untracked_jobs.discard(tool_id)
         if event.get("type") != "system":
             return
         subtype = event.get("subtype")
