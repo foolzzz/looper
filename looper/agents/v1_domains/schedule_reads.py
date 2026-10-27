@@ -26,7 +26,8 @@ RUN = _object({
 _SCHEDULE_FIELDS = {
     **dict.fromkeys(("schedule_id", "project_id", "project_name", "manager_id", "name", "cron", "timezone", "description",
                      "requirement", "work_dir", "created_via", "created_at", "updated_at"), _STR),
-    "manager_name": _NULL_STR,
+    "manager_name": _NULL_STR, "template_key": _NULL_STR, "template_name": _NULL_STR,
+    "template_inputs": {"type": "object", "additionalProperties": _STR},
     "enabled": _BOOL, "overlap": _enum("skip", "queue", "parallel"), "catch_up": _enum("once", "skip"),
     "notify": _enum("failures", "alerts", "always", "never"),
     "max_parallel_runs": _INT, "consecutive_failures": _INT,

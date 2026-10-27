@@ -25,7 +25,7 @@ from . import agent_sessions, tasks
 # The schedule fields a request sets (looper/agents/schedules.py validates them).
 FIELDS = ("name", "cron", "timezone", "requirement", "work_dir", "overlap", "max_parallel_runs", "catch_up",
           "run_timeout_mode", "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds",
-          "daily_budget_usd", "notify", "notify_channel", "notify_chat")
+          "daily_budget_usd", "notify", "notify_channel", "notify_chat", "template_key", "template_inputs")
 
 QUEUED = "queued"
 GATING = "gating"
@@ -83,6 +83,8 @@ async def _with_overrides(db: Db, rows: list[asyncpg.Record]) -> list[dict[str, 
     views = [{**dict(row), "profile_overrides": overrides[row["id"]], "task_limits": limits[row["id"]]}
              for row in rows]
     for row in views:
+        if isinstance(row.get("template_inputs"), str):
+            row["template_inputs"] = json.loads(row["template_inputs"])
         if "planner_session_task_title" in row and row.get("planner_session_task_id"):
             row["planner_session_task_title"] = tasks.task_name(
                 title=row["planner_session_task_title"], goal_id=row["planner_session_task_goal_id"],
@@ -91,10 +93,11 @@ async def _with_overrides(db: Db, rows: list[asyncpg.Record]) -> list[dict[str, 
 
 
 # A schedule's row with its project's name.
-_WITH_PROJECT = ("SELECT s.*, p.name AS project_name, m.name AS manager_name, t.title AS planner_session_task_title, "
+_WITH_PROJECT = ("SELECT s.*, p.name AS project_name, m.name AS manager_name, mt.name AS template_name, t.title AS planner_session_task_title, "
                  "t.goal_id AS planner_session_task_goal_id, t.requirement AS planner_session_task_requirement "
                  "FROM schedules s JOIN projects p ON p.id = s.project_id "
                  "LEFT JOIN managers m ON m.id = s.manager_id "
+                 "LEFT JOIN manager_task_templates mt ON mt.manager_id = s.manager_id AND mt.key = s.template_key "
                  "LEFT JOIN tasks t ON t.id = s.planner_session_task_id")
 
 
@@ -134,7 +137,7 @@ async def _set_task_limits(conn: asyncpg.Connection, schedule_id: str, limits: M
     )
 
 
-async def owner_error(conn: asyncpg.Connection, manager_id: str, *, enabled: bool = True) -> str | None:
+async def owner_error(conn: asyncpg.Connection, manager_id: str, *, enabled: bool = True, template_key: str | None = None) -> str | None:
     """Lock the owner after the schedule row, excluding deletion until this write commits.
 
     Disabled owners may save schedules; free-form schedules always require the owner's task policy to allow them.
@@ -148,7 +151,7 @@ async def owner_error(conn: asyncpg.Connection, manager_id: str, *, enabled: boo
         return f"schedule owner {manager_id!r} does not exist or was deleted"
     if enabled and not row["enabled"]:
         return f"schedule owner {manager_id!r} is disabled; enable the Manager first"
-    if row["task_policy"] == "templates_only":
+    if row["task_policy"] == "templates_only" and not template_key:
         return f"schedule owner {manager_id!r} requires a template; free-form schedules are not allowed"
     return None
 
@@ -157,11 +160,11 @@ async def create_schedule(conn: asyncpg.Connection, *, project_id: str, fields: 
                           profiles: Mapping[str, str], task_limits: Mapping[str, int] | None = None,
                           created_via: str = "dashboard", manager_id: str = "manager") -> str:
     """A new schedule, disabled; its id."""
-    if error := await owner_error(conn, manager_id, enabled=False):
+    if error := await owner_error(conn, manager_id, enabled=False, template_key=fields.get("template_key")):
         raise ValueError(error)
     schedule_id = f"sched-{uuid.uuid4().hex[:12]}"
     columns = [name for name in FIELDS if name in fields]
-    values = [fields[name] for name in columns]
+    values = [json.dumps(fields[name]) if name == "template_inputs" else fields[name] for name in columns]
     placeholders = ", ".join(f"${i}" for i in range(5, len(columns) + 5))
     await conn.execute(
         f"INSERT INTO schedules (id, project_id, created_via, manager_id, {', '.join(columns)}) VALUES ($1, $2, $3, $4, "
@@ -184,7 +187,7 @@ async def update_schedule(conn: asyncpg.Connection, schedule_id: str, fields: Ma
     sets = [f"{name} = ${i}" for i, name in enumerate(columns, start=2)]
     await conn.execute(
         f"UPDATE schedules SET {', '.join([*sets, 'updated_at = now()'])} WHERE id = $1",
-        schedule_id, *[fields[name] for name in columns],
+        schedule_id, *[json.dumps(fields[name]) if name == "template_inputs" else fields[name] for name in columns],
     )
     if profiles is not None:
         await _set_overrides(conn, schedule_id, profiles)

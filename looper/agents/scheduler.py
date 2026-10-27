@@ -61,10 +61,9 @@ from typing import Any, Protocol
 import asyncpg
 
 from ..db import agent_setting_layers as db_layers, connection as db_connection, llm_records as db_llm_records
-from ..db import projects as db_projects, schedules as db_schedules, tasks as db_tasks
+from ..db import schedules as db_schedules, tasks as db_tasks
 from . import cron
 from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType
-from .project_execution import ProjectExecution
 from .schedule_gate import GateResult, run_gate
 from .schedule_notify import Notifier, Sender
 from .scheduler_settings import effective_run_timeout
@@ -301,6 +300,7 @@ class _Launched:
     task_id: str | None = None
     gate: Firing | None = None
     ended: bool = False
+    fingerprint: str | None = None
 
 
 class Scheduler:
@@ -446,7 +446,7 @@ class Scheduler:
         if launched.task_id:
             await self._start_task(launched.task_id)
         if launched.gate is not None:
-            self._spawn(self._gate(schedule_id, launched.run_id, launched.gate))
+            self._spawn(self._gate(schedule_id, launched.run_id, launched.gate, launched.fingerprint))
         if launched.ended:
             self._spawn(self._notifier.run_ended(launched.run_id))
 
@@ -463,7 +463,7 @@ class Scheduler:
         launched (``_launch``)."""
         common = {"schedule_id": schedule["id"], "scheduled_for": firing.scheduled_for,
                   "trigger": firing.trigger.value, "missed": firing.missed, "created_at": now}
-        if await db_schedules.owner_error(conn, schedule["manager_id"]):
+        if await db_schedules.owner_error(conn, schedule["manager_id"], template_key=schedule.get("template_key")):
             return await self._create_run(conn, schedule, firing, now, common=common)
         open_runs = await db_schedules.open_runs(conn, schedule["id"])
         queued = next((run for run in open_runs if run["status"] == db_schedules.QUEUED), None)
@@ -511,7 +511,7 @@ class Scheduler:
     async def _launch(self, conn: asyncpg.Connection, schedule: dict[str, Any], firing: Firing, now: datetime, *,
                       common: Mapping[str, Any] | None = None, run_id: str | None = None) -> _Launched:
         """A firing past the overlap check: skipped at the daily budget, gating, or its task created."""
-        if await db_schedules.owner_error(conn, schedule["manager_id"]):
+        if await db_schedules.owner_error(conn, schedule["manager_id"], template_key=schedule.get("template_key")):
             return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id)
         budget = schedule["daily_budget_usd"]
         if budget is not None:
@@ -527,21 +527,40 @@ class Scheduler:
         timeout = {"run_timeout_seconds": await effective_run_timeout(schedule["run_timeout_mode"],
                                                                       schedule["run_timeout_seconds"], conn)}
         if schedule["gate_command"]:
+            from .schedule_templates import effective_schedule, fingerprint
+            try:
+                effective = await effective_schedule(conn, schedule)
+            except ValueError:
+                return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id)
             return _Launched(await self._put(conn, run_id, common, status=db_schedules.GATING, fired_at=now,
-                                             **timeout), gate=firing)
+                                             **timeout), gate=firing, fingerprint=fingerprint(schedule, effective))
         return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id, started=timeout)
 
     async def _create_run(self, conn: asyncpg.Connection, schedule: dict[str, Any], firing: Firing, now: datetime, *,
                           common: Mapping[str, Any] | None = None, run_id: str | None = None,
                           gate_output: str | None = None, carried: list[Carried] | None = None,
-                          fires_now: bool = True, started: Mapping[str, Any] | None = None) -> _Launched:
+                          fires_now: bool = True, started: Mapping[str, Any] | None = None,
+                          expected_fingerprint: str | None = None) -> _Launched:
         """Create the run's task (or fail the run, saying why) and record the run running; ``fires_now`` sets its
         ``fired_at`` (a gating run's was set when its gate started); ``started`` is what a run with no gate records
         as it starts (its timeout)."""
         if carried is None:
             carried = await self._carried(conn, schedule["id"], before=run_id)
-        task_id, error = await self._create_task(conn, schedule, firing, run_id=run_id, gate_output=gate_output,
-                                                 carried=carried)
+        from .schedule_templates import ConfigurationChanged
+        try:
+            # Savepoint: a role/profile insert failure must not leave a partial task in the firing transaction.
+            async with conn.transaction():
+                task_id, error = await self._create_task(conn, schedule, firing, run_id=run_id,
+                                                       gate_output=gate_output, carried=carried,
+                                                       expected_fingerprint=expected_fingerprint)
+        except ConfigurationChanged as exc:
+            # This output belongs to an obsolete configuration and must not become carried input.
+            if run_id is not None:
+                await db_schedules.update_run(conn, run_id, gate_output=None)
+            task_id, error = None, str(exc)
+        except Exception as exc:
+            logger.warning("schedule %s could not create its task: %s", schedule["id"], exc)
+            task_id, error = None, str(exc)
         fired = {"fired_at": now} if fires_now else {}
         if task_id is None:
             run_id = await self._put(conn, run_id, common, status="failed", finished_at=now, error=error, **fired)
@@ -555,36 +574,55 @@ class Scheduler:
         return _Launched(run_id, task_id=task_id)
 
     async def _work_dir(self, conn: asyncpg.Connection | None, schedule: Mapping[str, Any]) -> str:
-        project = await db_projects.get_project(schedule["project_id"], pool=conn)
-        return schedule["work_dir"] or (project or {}).get("work_dir") or ""
+        from .schedule_templates import effective_schedule
+        return (await effective_schedule(conn, schedule)).work_dir
 
     async def _create_task(self, conn: asyncpg.Connection, schedule: dict[str, Any], firing: Firing, *,
                            run_id: str | None, gate_output: str | None,
-                           carried: list[Carried]) -> tuple[str | None, str | None]:
-        """Create the run's task, ready to start; its id, or None and why it could not be created."""
-        if error := await db_schedules.owner_error(conn, schedule["manager_id"]):
-            return None, error
-        work_dir = await self._work_dir(conn, schedule)
-        if not work_dir:
-            return None, "a work directory is required: set one on the schedule or on its project"
+                           carried: list[Carried], expected_fingerprint: str | None = None) -> tuple[str | None, str | None]:
+        """Resolve all mutable dependencies in this firing transaction, then store one complete task."""
+        from .schedule_templates import effective_schedule, fingerprint, ConfigurationChanged
+        from ..db import task_roles as db_roles
+        from .tiers.journal import JournalKind, SUMMARY_MAX_CHARS, clip
+
+        try:
+            effective = await effective_schedule(conn, schedule)
+        except ValueError as exc:
+            if expected_fingerprint is not None:
+                raise ConfigurationChanged(str(exc)) from None
+            raise
+        if expected_fingerprint is not None and fingerprint(schedule, effective) != expected_fingerprint:
+            raise ConfigurationChanged("schedule/template configuration changed while its gate ran")
         recent = await db_schedules.recent_runs(conn, schedule["id"], limit=CONTEXT_RUNS)
         description = cron.describe(cron.parse(schedule["cron"]), schedule["timezone"])
-        requirement = run_requirement(schedule, firing, recent, description=description, gate_output=gate_output,
-                                      carried=carried)
+        requirement = run_requirement({**schedule, "requirement": effective.requirement}, firing, recent,
+                                      description=description, gate_output=gate_output, carried=carried)
         task_id = f"task-{uuid.uuid4().hex[:12]}"
-        # A run runs as its project's tasks do (task_workspaces), in place or in a worktree of the directory.
-        project = await db_projects.get_project(schedule["project_id"], pool=conn)
+        snapshot = None
+        if effective.template:
+            from dataclasses import asdict
+            snapshot = effective.template.snapshot(effective.values, effective.roles)
+            snapshot["inputs"] = [{**asdict(item), "value": effective.values.get(item.key, "")}
+                                  for item in effective.template.inputs]
         await db_tasks.create_task(
             task_id=task_id, requirement=requirement, project_id=schedule["project_id"],
-            work_dir=work_dir, status=db_tasks.READY, schedule_id=schedule["id"],
+            work_dir=effective.work_dir, status=db_tasks.READY, schedule_id=schedule["id"],
             budget_usd=schedule["run_budget_usd"], title=run_title(schedule, firing), pool=conn,
-            workspace_dir=work_dir, workspace_mode=ProjectExecution.from_row(project).task_mode.value,
+            workspace_dir=effective.work_dir, workspace_mode=effective.workspace_mode,
             manager_id=schedule["manager_id"],
+            template=snapshot,
         )
-        if schedule["profile_overrides"]:
-            await db_layers.set_profile_overrides(conn, task_id, schedule["profile_overrides"])
+        if effective.profiles:
+            await db_layers.set_profile_overrides(conn, task_id, effective.profiles)
         if schedule["task_limits"]:
             await db_layers.set_task_limits(conn, task_id, schedule["task_limits"])
+        for role in effective.roles:
+            name = effective.template.name
+            await db_roles.add_first_version(conn, task_id, role["role_key"], {
+                **role, "reason": f"from template {name}", "via": "template"},
+                {"step_id": "", "kind": JournalKind.ROLE_DEFINED.value,
+                 "summary": clip(f"Role {role['role_key']} v1 from the task template {name}", SUMMARY_MAX_CHARS),
+                 "learnings": []})
         return task_id, None
 
     @staticmethod
@@ -596,22 +634,33 @@ class Scheduler:
                         run["gate_output"].strip())
                 for run in await db_schedules.unhanded_runs(conn, schedule_id, besides=before)]
 
-    async def _gate(self, schedule_id: str, run_id: str, firing: Firing) -> None:
+    async def _gate(self, schedule_id: str, run_id: str, firing: Firing, expected: str | None = None) -> None:
         """Run a gating run's gate, then record what it decided: gate_failed, skipped_gate, or the task."""
         try:
-            schedule = await db_schedules.get_schedule(schedule_id)
-            if schedule is None:
-                return
+            from .schedule_templates import effective_schedule, fingerprint
+            async with db_connection.transaction() as conn:
+                # This read must not hide a due schedule from SKIP LOCKED ticks: they still need to record
+                # overlap skips while the gate starts. Completion locks the row and rechecks the fingerprint.
+                schedule = await db_schedules.get_schedule(schedule_id, pool=conn)
+                if schedule is None:
+                    return
+                try:
+                    effective = await effective_schedule(conn, schedule)
+                    current = fingerprint(schedule, effective)
+                    if expected is not None and expected != current:
+                        raise ValueError("schedule/template configuration changed before its gate started")
+                    expected = current
+                    configuration_error = None
+                except ValueError as exc:
+                    configuration_error = str(exc)
+                started = await db_schedules.get_run(run_id, pool=conn)
             timeout = schedule["gate_timeout_seconds"] or GATE_TIMEOUT_DEFAULT_SECONDS
-            work_dir = await self._work_dir(None, schedule)
-            started = await db_schedules.get_run(run_id)
-            if not work_dir:
-                result = GateResult(None, "", "", error="a work directory is required: set one on the schedule or "
-                                                        "on its project")
+            if configuration_error:
+                result = GateResult(None, "", "", error=configuration_error)
             else:
-                result = await run_gate(schedule["gate_command"], work_dir, timeout, label=f"gate of {run_id}",
-                                        env=gate_env(schedule, run_id, firing,
-                                                     started and started["run_timeout_seconds"]))
+                result = await run_gate(schedule["gate_command"], effective.work_dir, timeout,
+                                        label=f"gate of {run_id}", env=gate_env(schedule, run_id, firing,
+                                        started and started["run_timeout_seconds"]))
             now = self._clock()
             launched: _Launched | None = None
             async with db_connection.transaction() as conn:
@@ -619,8 +668,18 @@ class Scheduler:
                 run = await db_schedules.get_run(run_id, pool=conn)
                 if schedule is None or run is None or run["status"] != db_schedules.GATING:
                     return
+                try:
+                    current = await effective_schedule(conn, schedule)
+                    if configuration_error or fingerprint(schedule, current) != expected:
+                        raise ValueError(configuration_error or "schedule/template configuration changed while its gate ran")
+                except ValueError as exc:
+                    await db_schedules.update_run(conn, run_id, status="failed", finished_at=now, error=str(exc))
+                    await db_schedules.count_outcome(conn, schedule_id, "failed", now)
+                    launched = _Launched(run_id, ended=True)
                 output = result.stdout.strip()
-                if not result.ok:
+                if launched is not None:
+                    pass
+                elif not result.ok:
                     await db_schedules.update_run(conn, run_id, status="gate_failed", finished_at=now,
                                                   error=result.failure(timeout), gate_output=output or None)
                     await db_schedules.count_outcome(conn, schedule_id, "gate_failed", now)
@@ -642,7 +701,7 @@ class Scheduler:
                     else:
                         launched = await self._create_run(conn, schedule, firing, now, run_id=run_id,
                                                           gate_output=output or None, carried=carried,
-                                                          fires_now=False)
+                                                          fires_now=False, expected_fingerprint=expected)
             logger.info("schedule %s: gate of run %s %s", schedule_id, run_id,
                         "started a task" if launched.task_id else "ended the run")
             await self._follow(schedule_id, launched)

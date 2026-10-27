@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.153] - 2026-10-26
+
+### Added
+
+- **A schedule can run its owner Manager's task template.** A schedule stores `template_key` and static `template_inputs` (strings); each firing renders the template's requirement and creates the task with a template snapshot, the template's role templates as first role versions, and merged Agent Profiles. Fixed settings (project, work directory, profiles, rendered length, owner policy) are checked on save and again at fire, and a gate result from an older configuration is discarded. Adds `schedules.template_key` and `template_inputs` with a foreign key to the Manager's templates, so a template used by a schedule cannot be deleted. The v1 schedule schema, `looper-config` schedule entries and the schedule forms carry the two fields. The configuration export tool and its note now name `looper-config/v4` and report `bots_left_out`. ([#711](https://github.com/foolzzz/looper/pull/711))
+
 ## [2.13.152] - 2026-10-26
 
 ### Fixed

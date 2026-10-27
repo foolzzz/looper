@@ -458,7 +458,12 @@ async def put_template(manager_id: str, key: str, data: Mapping[str, Any]) -> di
 async def delete_template(manager_id: str, key: str) -> dict[str, Any]:
     """Delete template ``key`` of the Manager; 404 for an unknown Manager or template. Answers
     ``managers_view()``."""
-    result = await db_managers.delete_template(manager_id, key)
+    try:
+        result = await db_managers.delete_template(manager_id, key)
+    except asyncpg.ForeignKeyViolationError:
+        schedule = await db_managers.template_schedule(manager_id, key)
+        raise _refuse(f"template {key!r} is used by schedule {schedule or 'being created'!r}; "
+                      "change or delete that schedule first", HTTP_409) from None
     if result == "no_manager":
         raise _refuse(f"no Manager {manager_id!r}", HTTP_404)
     if result == "missing":

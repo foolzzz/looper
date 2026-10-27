@@ -230,6 +230,13 @@ def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
         if not line.strip():
             continue
         message = _user_text(line)
+        if script.get("schedule_run"):
+            # Scheduled PLAN turns keep this run's requirement before their typed turn marker.
+            from looper.agents.tiers.planner import SCHEDULE_RUN_REQUIREMENT_HEADING
+            if message.startswith(SCHEDULE_RUN_REQUIREMENT_HEADING):
+                _, marker, body = message.partition("\n\n[PLAN]")
+                if marker:
+                    message = "[PLAN]" + body
         writes = None
         kind = re.match(r"\[(\w+)\]", message)
         for name, arguments in calls.get(kind.group(1) if kind else "", []):

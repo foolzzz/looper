@@ -216,8 +216,16 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
             {schedule.description} <code className={CODE}>{schedule.cron}</code>
           </Field>
           <Field label="Time zone">{schedule.timezone}</Field>
+          {schedule.template_key && (
+            <Field label="Task template">
+              {schedule.template_name || schedule.template_key}
+              {Object.entries(schedule.template_inputs).map(([key, value]) => (
+                <span key={key} className="block break-words text-xs text-muted-foreground">{key}: {value}</span>
+              ))}
+            </Field>
+          )}
           <Field label="Work directory">
-            {schedule.work_dir ? <code className={CODE}>{schedule.work_dir}</code> : "The project's default"}
+            {schedule.work_dir ? <code className={CODE}>{schedule.work_dir}</code> : schedule.template_key ? "As the template and project set it" : "The project's default"}
           </Field>
           <Field label="Gate">
             {schedule.gate_command ? (
@@ -261,7 +269,7 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
           </Field>
           <Field label="Agent Profiles">
             {profiles.length === 0
-              ? "As the project sets them"
+              ? schedule.template_key ? "As the template and project set them" : "As the project sets them"
               : profiles.map((role) => (
                   <span key={role} className="block">
                     {roleLabel(role)}: {profileText(schedule.profile_overrides[role] as string)}

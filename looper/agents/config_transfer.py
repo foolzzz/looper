@@ -428,6 +428,9 @@ def schedule_entry(row: Mapping[str, Any], profile_names: Mapping[str, str]) -> 
                               if row["notify_channel"] else None)
     entry["profiles"] = {role: profile_names.get(pid, pid) for role, pid in sorted(row["profile_overrides"].items())}
     entry["task_limits"] = dict(sorted(row["task_limits"].items()))
+    if row.get("template_key"):
+        entry["template_key"] = row["template_key"]
+        entry["template_inputs"] = dict(row.get("template_inputs") or {})
     if row["manager_id"] != "manager":
         entry["manager"] = row["manager_id"]
     if row["work_dir"]:
@@ -2338,6 +2341,9 @@ class _Importer:
                 await db_managers.insert_manager({"id": identity, **values}, conn=self.conn)
             elif self.apply and action is Action.CHANGED:
                 await db_managers.update_manager(identity, values, conn=self.conn, only_if_changed=True)
+        self.schedule_templates = {**self.target.manager_templates,
+                                   **{(identity, key): {"manager_id": identity, "key": key, **values}
+                                      for identity, key, values, _ in templates}}
         for identity, key, values, repoint in templates:
             row = self.target.manager_templates.get((identity, key))
             self.outcome("manager.templates", f"{identity}/{key}", row, _differs(values, row, values))
@@ -2371,17 +2377,17 @@ class _Importer:
         from .projects import TASK_PROFILE_ROLES, RequestError, _concurrency_limits
 
         entry = _mapping(entry, "a schedule")
-        unknown = sorted(set(entry) - {*_SCHEDULE_FIELDS, "notify_target", "profiles", "task_limits", "repoint", "manager"})
+        unknown = sorted(set(entry) - {*_SCHEDULE_FIELDS, "notify_target", "profiles", "task_limits", "repoint", "manager", "template_key", "template_inputs"})
         if unknown:
             raise _Skip(f"unknown field {unknown[0]!r}")
         owner = entry.get("manager", "manager")
         if not isinstance(owner, str) or owner not in managers:
             raise _Skip(f"Manager owner conflict: no nondeleted Manager {owner!r} here or in the file")
-        if managers[owner].get("task_policy", "free") == "templates_only":
-            raise _Skip("this Manager requires a task template; free-form schedules cannot be imported")
         defaults = {"overlap": "skip", "max_parallel_runs": 3, "catch_up": "once", "notify": "failures"}
         values: dict[str, Any] = {"manager_id": owner}
         try:
+            from .schedule_templates import selection_patch
+            values.update(selection_patch(entry))
             for name in _SCHEDULE_FIELDS:
                 if name not in ("cron", "timezone", "run_timeout_seconds"):
                     values[name] = schedules._PARSERS[name](entry.get(name, defaults.get(name)))
@@ -2452,17 +2458,42 @@ class _Importer:
                 self.record("project.schedules", key, Action.SKIPPED,
                             reason="Manager owner conflict: an existing schedule's owner is immutable")
                 continue
+            from .schedule_templates import merge_selection
+            from .task_templates import TaskTemplate, check_values, render_requirement, TemplateError
+            try:
+                values.update(merge_selection(row or {}, values))
+                template_key = values["template_key"]
+                raw_template = self.schedule_templates.get((values["manager_id"], template_key)) if template_key else None
+                if template_key and raw_template is None:
+                    raise TemplateError(f"Manager {values['manager_id']} has no template {template_key!r}")
+                if not template_key and (values["template_inputs"] or
+                                        managers[values["manager_id"]].get("task_policy") == "templates_only"):
+                    raise TemplateError("template inputs and this Manager's policy require a template_key")
+                if raw_template is not None:
+                    template = TaskTemplate.from_row(raw_template)
+                    checked_values = await check_values(template, values["template_inputs"])
+                    from .schedule_templates import template_directory
+                    from .task_template_execution import fixed_profiles
+                    template_directory(template, {"project_id": project_id, "work_dir": (row or {}).get("work_dir")})
+                    fixed_profiles(template, {role: identity for role, (_, identity) in profiles.items()})
+                    from .schedules import REQUIREMENT_MAX_CHARS
+                    if len(render_requirement(template, checked_values, values["requirement"])) > REQUIREMENT_MAX_CHARS:
+                        raise TemplateError("the rendered schedule requirement is too long")
+            except ValueError as exc:
+                self.record("project.schedules", key, Action.SKIPPED, reason=str(exc))
+                continue
             new = {**values, "profiles": {role: name for role, (name, _) in profiles.items()}, "task_limits": limits}
             profile_ids = {role: profile_id for role, (_, profile_id) in profiles.items()}
             current = None
             if row is not None:
                 current = {name: row[name] for name in (*_SCHEDULE_FIELDS, "run_timeout_mode", "notify_channel",
-                                                        "notify_chat", "manager_id")}
+                                                        "notify_chat", "manager_id", "template_key", "template_inputs")}
                 current["profiles"] = {role: names.get(pid, pid) for role, pid in row["profile_overrides"].items()}
                 current["task_limits"] = dict(row["task_limits"])
             changed = _differs(new, current, new)
             if self.apply and row is not None and changed:
-                if error := await db_schedules.owner_error(self.conn, values["manager_id"], enabled=False):
+                if error := await db_schedules.owner_error(self.conn, values["manager_id"], enabled=False,
+                                                           template_key=values.get("template_key")):
                     self.record("project.schedules", key, Action.SKIPPED, reason=error)
                     continue
             action = self.outcome("project.schedules", key, current, changed)
