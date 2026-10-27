@@ -144,7 +144,7 @@ def test_every_request_logs_only_structured_operational_fields(
                 answering.cancel()
                 await asyncio.gather(answering, return_exceptions=True)
         lines = [record for record in caplog.records
-                 if record.name == "looper.agents.runtimes.api" and record.getMessage() == "api request"]
+                 if record.name == "looper.agents.runtimes.api" and record.getMessage().startswith("api_request ")]
         assert len(lines) == (2 if outcome == "completed" else 1)
         for index, line in enumerate(lines):
             assert line.levelno == logging.INFO
@@ -152,7 +152,10 @@ def test_every_request_logs_only_structured_operational_fields(
             assert set(fields) == {
                 "agent", "protocol", "model", "host", "status", "duration_ms", "first_token_ms", "retries",
                 "input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens", "complete", "upstream_id",
+                "request", "outcome",
             }
+            assert fields["request"] == index
+            assert fields["outcome"] == {"completed": "answered", "failed": "failed", "cancelled": "cancelled"}[outcome]
             assert (fields["agent"], fields["protocol"], fields["model"], fields["host"]) == (
                 "manager", "openai-responses", "test-model", "127.0.0.1")
             assert fields["status"] == (401 if outcome == "failed" else 200)

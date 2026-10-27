@@ -4,6 +4,7 @@ Prompt composition is also covered by tests/test_model_launch_parity_db.py;
 its CLI fixtures deliberately remain unchanged.
 """
 import asyncio
+import logging
 from functools import wraps
 
 import pytest
@@ -12,7 +13,7 @@ from fake_model_api import (
     FakeModelAPI, ResponseScript, call_item, completed, event, reasoning_item,
     text_events, text_item,
 )
-from looper.agents import claude_cli
+from looper.agents import claude_cli, log_redaction
 from looper.agents.ops import ErrorCode, OpError
 from looper.agents.run_usage import Usage
 from looper.agents.runtimes import ApiProtocol, InProcessTools, StopMethod
@@ -246,6 +247,71 @@ async def test_unavailable_tool_listing_fails_before_init_or_request(tmp_path):
             assert not events and not api.requests
         finally:
             await session.stop()
+
+
+@async_test
+async def test_interrupt_cancels_blocked_tool_listing_before_any_request(tmp_path, transcript_store):
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+
+    class WaitingTools(Tools):
+        async def specs(self):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+    async with FakeModelAPI([]) as api:
+        session, _ = await start(tmp_path, api.base_url)
+        task = asyncio.create_task(turn(session, tools=WaitingTools()))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            assert await asyncio.wait_for(session.interrupt(), 1) is StopMethod.CANCEL
+            result, events = await asyncio.wait_for(task, 1)
+            assert result == claude_cli.ResidentTurn(claude_cli.user_stop_result(), session_started=True,
+                usage=Usage(), stopped=StopMethod.CANCEL, usage_complete=True, prompt_sent=False)
+            assert cancelled.is_set()
+            assert not events and not api.requests and not transcript_store
+            assert await session.interrupt() is None
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await session.stop()
+
+
+@async_test
+async def test_request_fields_appear_in_redacted_service_log(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger='looper.agents.runtimes.api')
+    scripts = [ResponseScript(events=[completed([
+        call_item(arguments='{"private":"tool-argument-sentinel"}'),
+    ], usage=TOKENS, id='upstream-test-key')]),
+        ResponseScript(events=text_events('reply-body-sentinel', usage=TOKENS))]
+    async with FakeModelAPI(scripts) as api:
+        session, _ = await start(tmp_path, api.base_url)
+        try:
+            result, _ = await turn(session, 'prompt-body-sentinel')
+            assert result.result_event['subtype'] == 'success'
+        finally:
+            await session.stop()
+    records = [r for r in caplog.records if r.name == 'looper.agents.runtimes.api']
+    assert len(records) == 2
+    formatter = log_redaction.RedactingFormatter('%(levelname)s %(name)s %(message)s')
+    for index, record in enumerate(records):
+        line = formatter.format(record)
+        assert 'api_request ' in line
+        expected = dict(agent='Manager', protocol=PROTOCOL.value, model='test-model',
+            host='127.0.0.1', request=index, status=200, retries=0, input_tokens=13,
+            cache_read_tokens=4, cache_write_tokens=3, output_tokens=5, complete=True,
+            outcome='answered', upstream_id='upstream-***' if index == 0 else 'resp_1')
+        for key, value in expected.items():
+            assert f'{key}={value}' in line
+            assert record.api_request[key] == value
+        for key in ('duration_ms', 'first_token_ms'):
+            assert f'{key}={record.api_request[key]}' in line
+        assert 'test-key' not in line
+        assert all(value not in line for value in (
+            'system instructions', 'prompt-body-sentinel', 'tool-argument-sentinel',
+            'reply-body-sentinel', 'result call_1'))
 
 
 @pytest.mark.parametrize('mismatch', [False, True])
