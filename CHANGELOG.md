@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.156] - 2026-10-26
+
+### Added
+
+- **Idle scenario Managers are suspended and resumed.** A fleet sweep closes the resident Claude process of a scenario Manager that has been idle for its `idle_timeout_seconds` (0 = off, otherwise 60 to 86400; default 1800, the built-in Manager always 0) and resumes its saved session on the next message. A process with background jobs, pending messages or an unknown lifecycle state is kept; Grok ACP and per-turn runtimes never close. The field is stored per Manager (schema migration), in the Managers API, the `/api/v1` config schema, configuration transfer and the Managers settings form. ([#719](https://github.com/foolzzz/looper/pull/719))
+
 ## [2.13.155] - 2026-10-26
 
 ### Fixed
