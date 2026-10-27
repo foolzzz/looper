@@ -55,6 +55,10 @@ def fake_runner():
                 continue
             count += 1
             result = {"session_id": f"../native-{count}"}
+        elif method == "session/close" and options.get("reject_close"):
+            print(json.dumps({"jsonrpc": "2.0", "id": request["id"],
+                "error": {"code": -32603, "message": "session persistence failed", "data": params}}), flush=True)
+            continue
         elif method == "session/prompt":
             active[params["session_id"]] = params["trace_id"]
             result = {"session_id": params["session_id"], "trace_id": params["trace_id"], "accepted": True}
@@ -95,10 +99,12 @@ NEW = next(c["message"]["params"] for c in json.loads(
 
 
 def run(coro):
-    asyncio.run(asyncio.wait_for(coro, 8))
+    # Real process identity queries each allow five seconds. This is a hang
+    # guard for startup, recovery and cleanup, not a runner latency contract.
+    asyncio.run(asyncio.wait_for(coro, 30))
 
 
-async def until(predicate, *, timeout=2):
+async def until(predicate, *, timeout=10):
     async with asyncio.timeout(timeout):
         while not predicate():
             await asyncio.sleep(0.01)
@@ -141,7 +147,7 @@ def runners(tmp_path, monkeypatch):
     processes = []
 
     @asynccontextmanager
-    async def make(*, session_cap=4, kinds=("fake",), control_timeouts=(2.0,), **options):
+    async def make(*, session_cap=4, kinds=("fake",), control_timeouts=(10.0,), **options):
         async def connect(process, kind):
             processes.append(process)
             timeout = control_timeouts[min(len(processes) - 1, len(control_timeouts) - 1)]
@@ -266,7 +272,11 @@ def test_generation_loss_reaps_old_group_and_restarts_once(runners, options):
             if not options.get("corrupt"):
                 processes[0].kill()
             assert (await old.bridge.wait_settled(sid, "trace")).outcome == "lost"
-            await until(lambda: len(processes) == 2 and owner._kinds["fake"].generation is not None)
+            # Join recovery and its replacement handshake. The outer deadline
+            # bounds the operation without treating process-table latency as loss.
+            await asyncio.shield(old._generation.failure)
+            await asyncio.shield(owner._kinds["fake"].restart)
+            assert len(processes) == 2 and owner._kinds["fake"].generation is not None
             current = await owner.acquire("fake")
             assert current.runner_id != old.runner_id and current.bridge is not old.bridge
             assert processes[0].returncode < 0 and not proc_tree.tree_of(processes[0])
@@ -398,12 +408,16 @@ def test_fifth_failure_stops_restart_loop_and_returns_unavailable(runners, monke
             await owner.acquire("fake")
             for number in range(1, 6):
                 current = processes[-1]
-                current.kill()
                 state = owner._kinds["fake"]
-                await until(lambda: len(state.failures) == number)
+                generation = state.generation
+                current.kill()
+                await generation.exited.wait()
+                await asyncio.shield(generation.failure)
+                assert len(state.failures) == number
                 assert current.returncode is not None and not proc_tree.tree_of(current)
                 if number < 5:
-                    await until(lambda: len(processes) == number + 1 and state.generation is not None)
+                    await asyncio.shield(state.restart)
+                    assert len(processes) == number + 1 and state.generation is not None
             with pytest.raises(s.RunnerUnavailable, match="five failures"):
                 await owner.acquire("fake")
             assert len(processes) == 5 and (state.restart is None or state.restart.done())
@@ -536,19 +550,18 @@ def test_reparented_child_in_separate_group_is_reaped(runners, shutdown):
             stopping = None
             try:
                 # Synchronize on an observed identity before making the child unreachable from its parent.
-                await until(lambda: generation.tree.seen.get(child) == started, timeout=4)
+                await until(lambda: generation.tree.seen.get(child) == started)
                 processes[0].kill()
                 await generation.exited.wait()
                 assert child in proc_tree._snapshot() and child not in proc_tree.tree_of(processes[0])
                 if shutdown:
                     stopping = asyncio.create_task(owner.stop())
-                    done, _ = await asyncio.wait([stopping], timeout=4)
-                    assert stopping in done
                     await stopping
                     assert not owner._tasks
                 else:
-                    await until(lambda: len(processes) == 2 and owner._kinds["fake"].generation is not None,
-                                timeout=4)
+                    await asyncio.shield(generation.failure)
+                    await asyncio.shield(owner._kinds["fake"].restart)
+                    assert len(processes) == 2 and owner._kinds["fake"].generation is not None
                     assert (await owner.acquire("fake")).valid and not lease.valid
                 assert child not in proc_tree._snapshot()
             finally:
@@ -577,14 +590,14 @@ def test_stalled_diagnostic_drain_does_not_block_cleanup(runners, monkeypatch, s
             try:
                 if shutdown:
                     stopping = asyncio.create_task(owner.stop())
-                    done, _ = await asyncio.wait([stopping], timeout=4)
-                    assert stopping in done
                     await stopping
                     assert not owner._tasks
                 else:
                     processes[0].kill()
-                    await until(lambda: len(processes) == 2 and owner._kinds["fake"].generation is not None,
-                                timeout=4)
+                    await lease._generation.exited.wait()
+                    await asyncio.shield(lease._generation.failure)
+                    await asyncio.shield(owner._kinds["fake"].restart)
+                    assert len(processes) == 2 and owner._kinds["fake"].generation is not None
                 assert lease._generation.stderr.done()
             finally:
                 gate.set()
@@ -602,7 +615,7 @@ def test_reused_child_identity_is_not_signalled_or_allowed_to_hold_shutdown(runn
             assert started
             stopping = None
             try:
-                await until(lambda: lease._generation.tree.seen.get(child) == started, timeout=4)
+                await until(lambda: lease._generation.tree.seen.get(child) == started)
                 start_times = proc_tree._start_times
 
                 def reused(pids):
@@ -615,8 +628,6 @@ def test_reused_child_identity_is_not_signalled_or_allowed_to_hold_shutdown(runn
                 processes[0].kill()
                 await lease._generation.exited.wait()
                 stopping = asyncio.create_task(owner.stop())
-                done, _ = await asyncio.wait([stopping], timeout=4)
-                assert stopping in done
                 await stopping
                 assert child in proc_tree._snapshot()  # Its inherited diagnostic pipe is still open.
                 assert lease._generation.stderr.done() and not owner._tasks
@@ -632,20 +643,41 @@ def test_reused_child_identity_is_not_signalled_or_allowed_to_hold_shutdown(runn
 def test_initialize_timeout_uses_bounded_restart(runners, monkeypatch, recovers):
     monkeypatch.setattr(s, "BACKOFF_MAX", 0.01)
     async def exercise():
-        timeouts = (0.1, 2.0) if recovers else (0.1,)
+        timeouts = (0.1, 10.0) if recovers else (0.1,)
         async with runners(slow_initialize=True, control_timeouts=timeouts) as (owner, processes):
             with pytest.raises(s.RunnerUnavailable, match="restart is bounded"):
                 await owner.acquire("fake")
             state = owner._kinds["fake"]
             assert not state.fatal
+            await asyncio.shield(state.restart)
             if recovers:
-                await until(lambda: state.generation is not None)
+                assert state.generation is not None
                 lease = await owner.acquire("fake")
                 assert lease.valid and len(processes) == 2 and len(state.failures) == 1
             else:
-                await until(lambda: len(state.failures) == s.MAX_FAILURES, timeout=5)
+                assert len(state.failures) == s.MAX_FAILURES
                 with pytest.raises(s.RunnerUnavailable, match="five failures"):
                     await owner.acquire("fake")
                 assert not state.fatal and len(processes) == s.MAX_FAILURES
                 assert all(process.returncode is not None for process in processes)
+    run(exercise())
+
+
+def test_close_rpc_failure_releases_only_its_lease(runners):
+    async def exercise():
+        async with runners(reject_close=True, session_cap=2) as (owner, processes):
+            lease, other = await owner.acquire("fake"), await owner.acquire("fake")
+            await lease.open_session(NEW)
+            sid = await other.open_session(NEW)
+            turn, events = Turn(), []
+            await other.bridge.begin_turn(sid, "trace", events.append, turn, text="still active")
+            await lease.release()
+            assert other.valid and not lease._generation.failed
+            assert not lease.valid and not lease.directory.exists()
+            assert lease not in lease._generation.leases
+            assert processes[0].returncode is None and len(processes) == 1
+            replacement = await owner.acquire("fake")
+            assert replacement.bridge is other.bridge
+            await other.bridge.cancel_turn(sid, "trace")
+            assert other.valid and not events[-1].get("is_error")
     run(exercise())

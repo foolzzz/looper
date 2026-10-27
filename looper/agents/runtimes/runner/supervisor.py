@@ -357,10 +357,14 @@ class RunnerSupervisor:
             if sid is not None and not generation.failed:
                 try:
                     entry = bridge.sessions.get(sid)
-                    await bridge.close_session(sid)
-                    if entry is not None and entry.turn is not None:
-                        await entry.turn.drain_tools()
-                except Exception:
+                    try:
+                        await bridge.close_session(sid)
+                    except RpcFailure as error:
+                        logger.warning("runner %s session close rejected: %s", generation.kind, error.code)
+                    finally:
+                        if entry is not None and entry.turn is not None:
+                            await entry.turn.drain_tools()
+                except ConnectionLost:
                     self._failed(generation)
             if generation.failed:
                 await bridge.close()
