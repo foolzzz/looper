@@ -27,6 +27,7 @@ def fake_runner():
         sys.stderr.write("x" * 65536 + "\n" + "safe\u2028one-line\n" + "secret-sentinel\n" * 30)
         sys.stderr.flush()
     count, closes, active = 0, 0, {}
+    pending_prompt = None
     for line in sys.stdin:
         request = json.loads(line)
         if "method" not in request:
@@ -66,9 +67,17 @@ def fake_runner():
                 continue
             result = {key: params[key] for key in ("session_id", "trace_id") if key in params}
         elif method == "session/prompt":
+            if options.get("close_before_prompt") and count == 1:
+                pending_prompt = request
+                continue
             active[params["session_id"]] = params["trace_id"]
             result = {"session_id": params["session_id"], "trace_id": params["trace_id"], "accepted": True}
         else:
+            if method == "session/cancel" and pending_prompt is not None:
+                print(json.dumps({"jsonrpc": "2.0", "id": pending_prompt["id"],
+                    "error": {"code": -32603, "message": "session already closed",
+                        "data": {key: pending_prompt["params"][key] for key in ("session_id", "trace_id")}}}), flush=True)
+                pending_prompt = None
             result = {key: params[key] for key in ("session_id", "trace_id") if key in params}
         print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
         if method == "session/close" and params["session_id"] in active:
@@ -738,4 +747,55 @@ def test_generation_end_cleans_lease_retained_after_rejected_close(runners):
             assert all(process.returncode is not None for process in processes)
             assert not lease.directory.exists() and not generation.leases
             assert entry.close_state == "poisoned"
+    run(exercise())
+
+
+@pytest.mark.parametrize("cancel_caller", [False, True], ids=["internal", "caller"])
+def test_release_after_close_ack_and_prompt_rejection_settles_locally(runners, cancel_caller):
+    async def exercise():
+        async with runners(close_before_prompt=True, session_cap=1) as (owner, processes):
+            lease = await owner.acquire("fake")
+            sid = await lease.open_session(NEW)
+            gate, events = asyncio.Event(), []
+            turn = Turn(gate)
+            beginning = asyncio.create_task(lease.bridge.begin_turn(sid, "trace", events.append, turn, text="running"))
+            entry = lease.bridge.sessions[sid]
+            await until(lambda: entry.prompt_sent)
+            releasing = asyncio.create_task(lease.release())
+            try:
+                # request() has returned: close was acknowledged and its task is
+                # now waiting on the still-pending prompt's settlement.
+                await until(lambda: turn.stopped and entry.close_task is not None and not any(
+                    pending.method == "session/close" for pending in lease.bridge._pending.values()))
+                assert not releasing.done() and entry.close_state == "closing"
+                if cancel_caller:
+                    releasing.cancel()
+                await lease.bridge.request("session/cancel", dict(session_id=sid, trace_id="trace"))
+                with pytest.raises(RpcFailure):
+                    await beginning
+                await until(lambda: entry.close_state != "closing" or entry.close_task.done())
+                assert entry.close_state == "close_failed"
+                assert not releasing.done() and entry.ready.is_set()
+                assert lease.directory.exists() and lease in lease._generation.leases
+                with pytest.raises(p.ProtocolError) as full:
+                    await owner.acquire("fake")
+                assert full.value.code == p.ErrorCode.CAPACITY
+            finally:
+                gate.set()
+                await asyncio.gather(beginning, releasing, return_exceptions=True)
+            if cancel_caller:
+                with pytest.raises(asyncio.CancelledError):
+                    await releasing
+            else:
+                await releasing
+            assert entry.summary.outcome == "failed" and turn.finishes == 1 and entry.worker.done()
+            assert [event["runner"]["outcome"] for event in events if event["type"] == "result"] == ["failed"]
+            assert lease.bridge.tombstones[sid].trace_id == "trace"
+            assert lease.bridge.tombstones[sid].outcome == "failed"
+            assert lease in lease._generation.leases and lease.directory.exists()
+            await lease.release()
+            assert sid not in lease.bridge.sessions and not lease.directory.exists()
+            replacement = await owner.acquire("fake")
+            assert replacement.bridge is lease.bridge and len(processes) == 1
+            assert not replacement._generation.failed and processes[0].returncode is None
     run(exercise())

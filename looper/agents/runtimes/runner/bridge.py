@@ -371,22 +371,35 @@ class RunnerBridge:
             if entry.turn is not None:
                 await _value(entry.turn.stop())
             await self.request("session/close", params)
-        except (Exception, asyncio.CancelledError):
+            if entry.settled is not None and not entry.settled.done():
+                # Settlement drains admitted tools, including user confirmations. A
+                # slow tool is not evidence that the shared control pipe is dead.
+                await asyncio.shield(entry.settled)
+        except (Exception, asyncio.CancelledError) as error:
             if not self._error:
                 self._transition_close(entry, CloseState.CLOSE_FAILED, "close failed; retry retains ownership")
-                if entry.settled is not None and not entry.settled.done():
+                entry.ready.set()
+                if entry.turn is not None and entry.summary is None:
                     # The single consumer finishes any admitted callback before
                     # local settlement; never cancel or replay a tool write.
                     entry.local_error = "runner session close failed"
                     entry.updates.clear()
-                    entry.ready.set()
+                    # A rejected in-flight prompt cancels both its consumer and
+                    # settlement future. Restore them for local failure cleanup.
+                    if entry.settled is None or entry.settled.cancelled():
+                        entry.settled = asyncio.get_running_loop().create_future()
+                    if entry.worker is None or entry.worker.done():
+                        entry.worker = asyncio.create_task(self._updates(entry))
                     entry.wake.set()
+                if entry.settled is not None and not entry.settled.done():
                     await asyncio.shield(entry.settled)
+                self.tombstones[entry.session_id] = Tombstone(entry.session_id, entry.trace_id,
+                    entry.summary.outcome if entry.summary else None, time.monotonic())
+                self._prune_tombstones()
+                if isinstance(error, asyncio.CancelledError) and not asyncio.current_task().cancelling():
+                    # Only the internal settlement was cancelled, not this task.
+                    return entry.close_state
             raise
-        if entry.settled is not None and not entry.settled.done():
-            # Settlement drains admitted tools, including user confirmations. A
-            # slow tool is not evidence that the shared control pipe is dead.
-            await asyncio.shield(entry.settled)
         self._transition_close(entry, CloseState.CLOSED, "close acknowledged and settlement drained")
         self.tombstones[entry.session_id] = Tombstone(entry.session_id, entry.trace_id,
             entry.summary.outcome if entry.summary else None, time.monotonic())

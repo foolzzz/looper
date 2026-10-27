@@ -1199,6 +1199,32 @@ def test_cancelled_close_waiter_retains_shared_attempt():
     run(exercise())
 
 
+def test_cancelled_close_attempt_settles_locally_then_propagates_cancellation():
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            _, events, beginning, prompt = await open_turn(bridge, reader, writer)
+            await accept(writer, prompt)
+            await beginning
+            entry = bridge.sessions["s"]
+            closing = asyncio.create_task(bridge.close_session("s"))
+            request = await p.read_frame(reader)
+            await send(writer, p.Response(request.id, result=request.params))
+            # A peer round trip lets the acknowledged close enter its wait.
+            peer_events = await begin_peer(bridge, reader, writer)
+            assert not closing.done()
+            entry.close_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await closing
+            assert entry.close_state == "close_failed" and entry.ready.is_set()
+            assert (await bridge.wait_settled("s", "t")).outcome == "failed"
+            assert entry.worker.done() and len([e for e in events if e["type"] == "result"]) == 1
+            assert bridge.tombstones["s"].outcome == "failed"
+            await update(writer, "settled", outcome="completed", final_text="late", requests=0, usage_complete=True)
+            await complete_peer(bridge, writer, peer_events)
+            assert entry.summary.outcome == "failed" and not failures
+    run(exercise())
+
+
 def test_generation_loss_during_close_poison_settles_and_joins_attempt():
     async def exercise():
         async with connection() as (bridge, reader, writer, failures):
