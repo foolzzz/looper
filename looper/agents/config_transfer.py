@@ -645,7 +645,22 @@ def validate_document(data: Any, *, label: str = "configuration") -> None:
             raise ConfigFileError(f"settings.{section} must be a JSON list")
     if not isinstance(data.get("settings", {}).get("scheduler", {}), dict):
         raise ConfigFileError("settings.scheduler must be a JSON object")
+    _check_retired_fields(data.get("settings", {}).get("layers", []), "settings.layers", ("model", "effort"))
+    _check_retired_fields(data.get("providers", []), "providers", ("protocols", "base_url", "models"))
+    for index, project in enumerate(data.get("projects", [])):
+        if isinstance(project, Mapping):
+            _check_retired_fields(project.get("layers", []), f"projects[{index}].layers", ("model", "effort"))
     _check_channel_document(data)
+
+
+def _check_retired_fields(entries: Any, path: str, fields: Sequence[str]) -> None:
+    if not isinstance(entries, list):
+        return
+    for index, entry in enumerate(entries):
+        if isinstance(entry, Mapping):
+            for name in fields:
+                if name in entry:
+                    raise ConfigFileError(f"{path}[{index}].{name}: retired configuration field")
 
 
 _BOT_ID = re.compile(r"channel-(telegram|lark|lark_bot)-([1-9][0-9]*)\Z")

@@ -74,18 +74,32 @@ def _about(data: dict[str, Any]) -> dict[str, str]:
     return {name: data[name][:100] for name in _ABOUT_FIELDS if isinstance(data.get(name), str)}
 
 
-def authorize(data: dict[str, Any], policy: Literal["client", "operator"] | None) -> None:
-    """The staging identity's policy applies to the file, including at confirmation execution."""
+async def authorize(data: dict[str, Any], policy: Literal["client", "operator"] | None) -> dict[str, Any]:
+    """Check the staging policy, including at confirmation; exclude a client's unchanged default from execution."""
     if policy != "client":
-        return
+        return data
     added_bots = any(isinstance(entry, dict) and (
         entry.get("channel_id") not in (None, *BUILTIN_CHANNEL_IDS) or
         entry.get("manager_id", "manager") != "manager") for entry in data.get("channels", []))
     manager_installs = any(isinstance(entry, dict) and "manager_id" in entry
                            for entry in data.get("installs", []))
-    if data.get("managers") or added_bots or manager_installs:
+    managers = data.get("managers", [])
+    unchanged_default = (len(managers) == 1 and isinstance(managers[0], dict)
+                         and managers[0].get("id") == "manager"
+                         and set(managers[0]) <= {"id", "name", "description", "idle_timeout_seconds"})
+    if added_bots or manager_installs or managers and not unchanged_default:
         raise OpError(ErrorCode.FORBIDDEN, "Manager definitions, templates, bots and Manager installs require "
                       "operator identity; upload this configuration with an operator token")
+    if managers:
+        from ..db.managers import get_manager
+
+        current = await get_manager("manager")
+        if current is None or any(current.get(name) != value for name, value in managers[0].items()):
+            raise OpError(ErrorCode.FORBIDDEN, "Changing the default Manager requires operator identity; "
+                          "upload this configuration with an operator token")
+        # This is a no-op for the client. Do not write a stale definition if the target changes after this check.
+        return {name: value for name, value in data.items() if name != "managers"}
+    return data
 
 
 async def _run(data: dict[str, Any], *, apply: bool) -> config_transfer.Plan:
@@ -148,10 +162,10 @@ class ConfigImports:
                     handle.write(chunk)
                     remaining -= len(chunk)
             data = await asyncio.to_thread(config_transfer.read_file, path, label=_LABEL)
-            authorize(data, policy)
+            authorized = await authorize(data, policy)
             if validate is not None:
                 validate(data)
-            plan = await _run(data, apply=False)
+            plan = await _run(authorized, apply=False)
         except BaseException:
             path.unlink(missing_ok=True)
             raise
@@ -177,7 +191,7 @@ class ConfigImports:
             pending.timer.cancel()
         try:
             data = await asyncio.to_thread(config_transfer.read_file, pending.path, label=_LABEL)
-            authorize(data, pending.policy)
+            data = await authorize(data, pending.policy)
             plan = await _run(data, apply=True)
         except ConfigFileError:
             self._drop(import_id)
@@ -197,7 +211,7 @@ class ConfigImports:
         except ConfigFileError:
             self._drop(import_id)
             raise
-        authorize(data, pending.policy)
+        await authorize(data, pending.policy)
 
     async def cancel(self, import_id: str, *, owner: str | None = None) -> dict[str, str]:
         if self._get(import_id, owner=owner).applying:
