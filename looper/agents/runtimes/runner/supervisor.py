@@ -250,6 +250,9 @@ class RunnerSupervisor:
             generation.tree.start_ticker()
             generation.stderr = self._own(self._stderr(generation))
             generation.bridge = await self.connect(process, kind)
+            # Initialization can start children after the launch snapshot. Own
+            # them before publishing a runner that may immediately be killed.
+            await generation.tree.refresh(force=True)
             generation.bridge.on_failure = lambda cause: self._failed(generation)
             caps = generation.bridge.capabilities
             maximum = caps.get("max_sessions", 1)
