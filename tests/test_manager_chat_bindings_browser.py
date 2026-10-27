@@ -52,6 +52,8 @@ def managers_dashboard(dashboard_url):
             state["calls"].append((path, body))
             if path == "managers/list":
                 result = {"managers": managers, "max_enabled": 8}
+            elif path == "manager_installs/list":
+                result = {"manager_id": body["manager_id"], "installs": []}
             elif path == "manager_chat_bindings/list":
                 if state.pop("fail_list", False):
                     route.fulfill(status=503, json={"status": "error", "error": {

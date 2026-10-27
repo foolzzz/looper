@@ -3476,7 +3476,7 @@ export interface RunLibrary {
   role?: AgentRole | null;
   project_id?: string | null;
   /** `plugin` and `scope` are absent in runs recorded before the catalog. */
-  items: { kind: LibraryKind; name: string; sha256: string; plugin?: string; scope?: InstallScope }[];
+  items: { kind: LibraryKind; name: string; sha256: string; plugin?: string; scope?: InstallScope | "manager" }[];
   /** The MCP servers the run mounted, by name. */
   mcp_servers?: string[];
   error?: string;

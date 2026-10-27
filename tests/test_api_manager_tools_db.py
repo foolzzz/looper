@@ -12,9 +12,36 @@ import pytest
 from looper.agents import mcp_server
 from looper.agents.ops import ErrorCode, OpError, Turn
 from looper.agents.ops.service import ManagerOps, Platform
-from looper.agents.runtimes.api.loop import ToolCall, ToolSpec
-from looper.agents.runtimes.api.tools import ManagerTurnTools
+from looper.agents.runtimes.api.loop import ToolCall, ToolOutcome, ToolSpec
+from looper.agents.runtimes.api.tools import ManagerTurnTools, PlannerTurnTools
+from looper.agents.runtimes.runner.turn import RunnerTurn
 from tests.db_support import run_db
+
+
+async def _limits():
+    return {"run_cap": None, "task_cap": None, "task_spent": 0}
+
+
+class _RunnerEntry:
+    def __init__(self, ops, binding):
+        self.turn = RunnerTurn(session_id="session", trace_id="trace", role="manager",
+                               tools=ManagerTurnTools(ops, binding), provider_id="provider", model="model",
+                               price=None, limits=_limits)
+
+    async def call(self, call):
+        try:
+            arguments = json.loads(call.arguments or "{}")
+        except ValueError:
+            arguments = None
+        result = await self.turn.call_tool({"session_id": "session", "trace_id": "trace",
+                                           "call_id": call.call_id, "name": call.name, "arguments": arguments,
+                                           "binding": "untrusted", "role": "planner", "token": "untrusted"})
+        return ToolOutcome(result["text"], result["is_error"], result["ran"])
+
+
+@pytest.fixture(params=[ManagerTurnTools, _RunnerEntry], ids=["api", "runner"])
+def turn_tools(request):
+    return request.param
 
 
 def _ops() -> ManagerOps:
@@ -30,9 +57,9 @@ def _call(name: str, arguments: Any, call_id: str = "call-1") -> ToolCall:
     {"status": "needs_confirmation", "confirmation_id": "confirm-test"},
     {"status": "error", "error": {"code": "invalid", "message": "wrong action"}},
 ])
-def test_answers_match_the_mcp_tool_text(answer: dict[str, Any]) -> None:
+def test_answers_match_the_mcp_tool_text(answer: dict[str, Any], turn_tools: Any) -> None:
     ops = SimpleNamespace(call=AsyncMock(return_value=answer))
-    outcome = asyncio.run(ManagerTurnTools(ops, None).call(_call("looper_projects", {})))
+    outcome = asyncio.run(turn_tools(ops, None).call(_call("looper_projects", {})))
     bridge = mcp_server._call_tool("request-1", {"name": "looper_projects", "arguments": {}},
                                    SimpleNamespace(call_tool=lambda *args: answer))["result"]
     assert outcome.text == bridge["content"][0]["text"]
@@ -58,13 +85,13 @@ def test_a_listing_failure_propagates() -> None:
 
 @pytest.mark.parametrize("arguments", ["not JSON", "[]"])
 def test_bad_arguments_do_not_call_platform_ops_or_write_an_action(
-    monkeypatch: pytest.MonkeyPatch, arguments: str,
+    monkeypatch: pytest.MonkeyPatch, arguments: str, turn_tools: Any,
 ) -> None:
     async def test(pool: Any) -> None:
         ops = _ops()
         called = AsyncMock(wraps=ops.call)
         monkeypatch.setattr(ops, "call", called)
-        result = await ManagerTurnTools(ops, "binding").call(ToolCall("call-1", "looper_projects", arguments))
+        result = await turn_tools(ops, "binding").call(ToolCall("call-1", "looper_projects", arguments))
         assert json.loads(result.text) == {"status": "error", "error": {
             "code": "invalid", "message": "the arguments must be a JSON object"}}
         assert result.is_error and not result.ran
@@ -84,12 +111,12 @@ def test_an_empty_argument_string_is_an_object() -> None:
 
 
 @pytest.mark.parametrize("text", ["中" * 100, "中" * 34_120, "中" * 40_000])
-def test_tool_results_fit_the_utf8_byte_bound(text: str) -> None:
+def test_tool_results_fit_the_utf8_byte_bound(text: str, turn_tools: Any) -> None:
     answer = {"status": "ok", "result": text}
     original = json.dumps(answer, ensure_ascii=False)
     size = len(original.encode("utf-8"))
     ops = SimpleNamespace(call=AsyncMock(return_value=answer))
-    result = asyncio.run(ManagerTurnTools(ops, None).call(_call("looper_projects", {})))
+    result = asyncio.run(turn_tools(ops, None).call(_call("looper_projects", {})))
     assert len(result.text.encode("utf-8")) <= 102_400
     if size <= 102_400:
         assert result.text == original
@@ -124,7 +151,7 @@ async def _post(server: Any, name: str, arguments: Any) -> dict[str, Any]:
 @pytest.mark.parametrize("arguments", [{"action": "list"}, {"action": "get", "project": "sample"},
                                         {"action": "invalid"}])
 def test_in_process_calls_match_http_answers_and_audit_rows(
-    monkeypatch: pytest.MonkeyPatch, arguments: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch, arguments: dict[str, Any], turn_tools: Any,
 ) -> None:
     from looper.agents.http_server import AgentHTTPServer
     from looper.db import projects
@@ -133,7 +160,7 @@ def test_in_process_calls_match_http_answers_and_audit_rows(
         await projects.create_project(name="sample", work_dir="/srv/sample", pool=pool)
         ops = _ops()
         ops.begin_turn(Turn(channel="web", chat="chat-1", message_id="message-1"), "turn-binding")
-        tools = ManagerTurnTools(ops, "turn-binding")
+        tools = turn_tools(ops, "turn-binding")
         server = AgentHTTPServer(host="127.0.0.1", port=0, web_adapter=SimpleNamespace(),
                                  task_router=SimpleNamespace(), supervisor=SimpleNamespace(), manager_ops=ops)
         await server.start()
@@ -153,9 +180,11 @@ def test_in_process_calls_match_http_answers_and_audit_rows(
     run_db(test, monkeypatch, timeout=30)
 
 
-def test_unknown_tools_are_refused_by_ops_without_an_audit_row(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unknown_tools_are_refused_by_ops_without_an_audit_row(
+    monkeypatch: pytest.MonkeyPatch, turn_tools: Any,
+) -> None:
     async def test(pool: Any) -> None:
-        outcome = await ManagerTurnTools(_ops(), None).call(_call("looper_unknown", {}))
+        outcome = await turn_tools(_ops(), None).call(_call("looper_unknown", {}))
         assert json.loads(outcome.text)["error"]["code"] == "invalid"
         assert outcome.is_error
         assert await pool.fetchval("SELECT count(*) FROM manager_actions") == 0
@@ -163,7 +192,9 @@ def test_unknown_tools_are_refused_by_ops_without_an_audit_row(monkeypatch: pyte
     run_db(test, monkeypatch, timeout=30)
 
 
-def test_a_project_is_deleted_only_when_the_next_user_turn_confirms(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_project_is_deleted_only_when_the_next_user_turn_confirms(
+    monkeypatch: pytest.MonkeyPatch, turn_tools: Any,
+) -> None:
     from looper.db import projects
 
     async def test(pool: Any) -> None:
@@ -171,7 +202,7 @@ def test_a_project_is_deleted_only_when_the_next_user_turn_confirms(monkeypatch:
         ops = _ops()
         first = Turn(channel="web", chat="chat-1", message_id="message-1")
         ops.begin_turn(first, "binding-1")
-        asked = json.loads((await ManagerTurnTools(ops, "binding-1").call(
+        asked = json.loads((await turn_tools(ops, "binding-1").call(
             _call("looper_projects", {"action": "delete", "project": "sample"}))).text)
         assert asked["status"] == "needs_confirmation"
         assert len(first.blocks) == 1 and "sample" in first.blocks[0]
@@ -179,7 +210,7 @@ def test_a_project_is_deleted_only_when_the_next_user_turn_confirms(monkeypatch:
         ops.end_turn(first)
         second = Turn(channel="web", chat="chat-1", message_id="message-2")
         assert asked["confirmation_id"] in ops.begin_turn(second, "binding-2")
-        confirmed = json.loads((await ManagerTurnTools(ops, "binding-2").call(
+        confirmed = json.loads((await turn_tools(ops, "binding-2").call(
             _call("looper_confirm", {"confirmation_id": asked["confirmation_id"]}))).text)
         assert confirmed == {"status": "ok", "result": {"deleted": "sample"}}
         assert await projects.get_project(project["id"], pool=pool) is None
@@ -190,7 +221,9 @@ def test_a_project_is_deleted_only_when_the_next_user_turn_confirms(monkeypatch:
     run_db(test, monkeypatch, timeout=30)
 
 
-def test_an_autonomous_turn_cannot_confirm_a_project_deletion(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_autonomous_turn_cannot_confirm_a_project_deletion(
+    monkeypatch: pytest.MonkeyPatch, turn_tools: Any,
+) -> None:
     from looper.db import projects
 
     async def test(pool: Any) -> None:
@@ -198,11 +231,11 @@ def test_an_autonomous_turn_cannot_confirm_a_project_deletion(monkeypatch: pytes
         ops = _ops()
         first = Turn(channel="web", chat="chat-1", message_id="message-1")
         ops.begin_turn(first)
-        asked = json.loads((await ManagerTurnTools(ops, None).call(
+        asked = json.loads((await turn_tools(ops, None).call(
             _call("looper_projects", {"action": "delete", "project": "sample"}))).text)
         ops.end_turn(first)
         ops.begin_turn(Turn(channel="web", chat="chat-1"))
-        answer = await ManagerTurnTools(ops, None).call(
+        answer = await turn_tools(ops, None).call(
             _call("looper_confirm", {"confirmation_id": asked["confirmation_id"]}))
         assert json.loads(answer.text)["error"]["code"] == "needs_user_turn"
         assert await projects.get_project(project["id"], pool=pool) is not None
@@ -210,7 +243,9 @@ def test_an_autonomous_turn_cannot_confirm_a_project_deletion(monkeypatch: pytes
     run_db(test, monkeypatch, timeout=30)
 
 
-def test_an_in_process_write_runs_with_stop_enabled_and_its_turn_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_in_process_write_runs_with_stop_enabled_and_its_turn_binding(
+    monkeypatch: pytest.MonkeyPatch, turn_tools: Any,
+) -> None:
     from looper.agents import chat_settings
     from looper.db import projects
 
@@ -219,10 +254,46 @@ def test_an_in_process_write_runs_with_stop_enabled_and_its_turn_binding(monkeyp
         ops = _ops()
         ops.begin_turn(Turn(channel="web", chat="chat-1", message_id="message-1", runtime="api",
                             require_match=False), "turn-binding")
-        outcome = await ManagerTurnTools(ops, "turn-binding").call(
+        outcome = await turn_tools(ops, "turn-binding").call(
             _call("looper_projects", {"action": "create", "name": "sample"}))
         assert json.loads(outcome.text)["status"] == "ok"
         assert await projects.find_project_by_name("sample", pool=pool) is not None
         assert await pool.fetchval("SELECT status FROM manager_actions") == "ok"
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_runner_planner_uses_host_token_and_task_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.ops.planner import PlannerOps
+    from looper.db import projects, tasks
+
+    async def test(pool: Any) -> None:
+        project = await projects.create_project(name="sample", work_dir="/srv/sample", pool=pool)
+        await tasks.create_task(task_id="task-a", requirement="plan", project_id=project["id"],
+                                work_dir="/srv/sample", status="running", pool=pool)
+        ops = PlannerOps(SimpleNamespace(), url="http://127.0.0.1:9")
+        token = ops.issue("task-a")
+        ops.begin_turn(token)
+        adapter = PlannerTurnTools(ops, token)
+        assert await adapter.specs() == [ToolSpec(t["name"], t["description"], t["inputSchema"])
+                                         for t in await ops.listing("Bearer " + token)]
+        runner = RunnerTurn(session_id="s", trace_id="t", role="planner", tools=adapter,
+                            provider_id="p", model="m", price=None, limits=_limits)
+
+        async def call(arguments):
+            return await runner.call_tool({"session_id": "s", "trace_id": "t", "call_id": "c",
+                                           "name": "looper_task_profiles", "arguments": arguments,
+                                           "token": "forged", "role": "manager"})
+
+        allowed = await call({})
+        assert json.loads(allowed["text"])["status"] == "ok" and allowed["ran"]
+        denied = await call({"task_id": "another-task"})
+        assert json.loads(denied["text"])["error"]["code"] == "forbidden"
+        assert denied["ran"] and denied["is_error"]
+        ops.revoke(token)
+        denied = await call({})
+        assert json.loads(denied["text"])["error"]["code"] == "forbidden"
+        assert token not in denied["text"]
+        assert await pool.fetchval("SELECT count(*) FROM manager_actions") == 0
 
     run_db(test, monkeypatch, timeout=30)

@@ -11,6 +11,7 @@ import dataclasses
 import logging
 import time
 from collections.abc import Callable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -255,6 +256,28 @@ class ManagerFleet:
 
     def is_running(self, manager_id: str) -> bool:
         return manager_id in self._agents and manager_id not in self._retiring
+
+    def cleanup_blockers(self, manager_id: str) -> list[str]:
+        """A suspended process still owns a live agent; history cleanup requires full retirement."""
+        blockers = []
+        if manager_id in self._agents or manager_id in self._supervisor._agents:
+            blockers.append("The Manager still has a live agent or turn.")
+        if manager_id in self._retiring:
+            blockers.append("The Manager is still retiring.")
+        if manager_id in self._sync or manager_id in self._retries:
+            blockers.append("The Manager still has pending synchronization or retries.")
+        if self._bus.pending_count(manager_id):
+            blockers.append("The Manager still has pending messages.")
+        # subscribe() settles after channel delivery and history storage, including an in-flight reply.
+        if any(envelope.source == manager_address(manager_id) for envelope in self._bus.journal.undelivered()):
+            blockers.append("The Manager still has undelivered outbound messages.")
+        return blockers
+
+    @asynccontextmanager
+    async def cleanup_guard(self, manager_id: str):
+        # Same ordering as deletion: fleet lock, then Manager row lock. No apply/retry may launch a writer.
+        async with self._lock:
+            yield
 
     # --- Applying a change ---
 

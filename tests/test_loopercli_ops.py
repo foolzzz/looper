@@ -285,3 +285,40 @@ def test_config_operator_stdin_is_consumed_once_before_alias_file_stdin(tmp_path
         assert not client_file.exists()
     finally:
         server.close()
+
+
+@pytest.mark.parametrize("command,fields", [
+    ("list", {"manager_id": "manager-example"}),
+    ("put", {"manager_id": "manager-example", "item_id": "lib-example", "enabled": False}),
+    ("delete", {"manager_id": "manager-example", "item_id": "lib-example"}),
+])
+def test_generated_manager_installs_commands_use_transient_operator_credentials(tmp_path, capsys, command, fields):
+    token = "transient-manager-install-operator"
+    token_file = tmp_path / "operator-token"
+    token_file.write_text(token + "\n")
+    token_file.chmod(0o600)
+    client_file = tmp_path / "client.json"
+    client_file.write_text('{"url":"http://127.0.0.1:1","token":"lpc_existing"}')
+    client_file.chmod(0o600)
+    original = client_file.read_bytes()
+
+    def respond(handler, request):
+        assert request[2]["authorization"] == f"Bearer {token}"
+        _send(handler, 200, api_v1.document() if request[1].endswith("openapi.json") else
+              {"status": "ok", "result": {"manager_id": fields["manager_id"], "installs": []}})
+
+    server = Server(respond)
+    try:
+        arguments = ["--client-file", str(client_file), "--json", "manager-installs", command,
+                     "--url", server.url, "--operator-token-file", str(token_file)]
+        for key, value in fields.items():
+            arguments += (["--enabled" if value else "--no-enabled"] if isinstance(value, bool) else
+                          ["--" + key.replace("_", "-"), value])
+        assert loopercli.main(arguments) == 0
+        assert server.requests[-1][0:2] == ("POST", "/api/v1/manager_installs/" + command)
+        assert server.requests[-1][3] == fields
+        assert client_file.read_bytes() == original
+        output = capsys.readouterr()
+        assert token not in output.out + output.err
+    finally:
+        server.close()

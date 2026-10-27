@@ -192,6 +192,53 @@ def _seed_review_manager(api: Api, project_id: str) -> None:
               **example["templates"]["pr_review"], "project_id": project_id})
 
 
+def _seed_manager_capabilities(api: Api, project_id: str) -> None:
+    from looper.agents.tiers.manager import DEFAULT_SYSTEM_PROMPT
+
+    text = (Path(__file__).parent / "fixtures/manager-greeting/SKILL.md").read_text(encoding="utf-8")
+    content = text.split("---", 2)[2].strip()
+    extra = api.post("/api/v1/catalog_sources/create_skill", {
+        "name": "manager-greeting", "description": "Return a harmless capability greeting marker.",
+        "content": content})["result"]["item"]
+    shared = api.post("/api/v1/catalog_sources/create_skill", {
+        "name": "shared-greeting", "description": "Return a harmless shared greeting marker.",
+        "content": content.replace("HELLO-FROM-MANAGER-SKILL", "HELLO-FROM-SHARED-SKILL")})["result"]["item"]
+    api.post("/api/v1/installs/create", {"item_id": shared["item_id"], "scope": "global", "roles": ["manager"]})
+    for key in ("capability-a", "capability-b"):
+        api.post("/api/v1/managers/create", {"key": key, "name": key, "system_prompt": DEFAULT_SYSTEM_PROMPT})
+    api.post("/api/v1/manager_installs/put", {"manager_id": "manager-capability-a", "item_id": extra["item_id"]})
+
+
+def _manager_capabilities(look: Look) -> str | None:
+    owner = look.manager_id or "manager"
+    records = look.api.post("/api/v1/runs/list", {"agent_id": owner, "limit": 500})["result"]["records"]
+    if not records:
+        return "the Manager has no capability run"
+    record = max(records, key=lambda row: row["id"])
+    items = ((record.get("metadata") or {}).get("library") or {}).get("items", [])
+    extra = [item for item in items if item["name"] == "manager-greeting"]
+    shared = [item for item in items if item["name"] == "shared-greeting"]
+    installed = owner == "manager-capability-a"
+    if len(shared) != 1 or shared[0]["scope"] != "global" or len(extra) != int(installed) \
+            or extra and extra[0]["scope"] != "manager":
+        return "effective capability metadata lost global inheritance or Manager isolation"
+    if look.fake:  # The stand-in only proves loading; it cannot demonstrate a native Skill invocation.
+        return None
+    calls = [block.get("input", {}).get("skill", "")
+             for row in _all_events(look.api, record["id"])
+             for block in (row["event"].get("message") or {}).get("content", [])
+             if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Skill"]
+    wanted = "manager-greeting" if installed else "shared-greeting"
+    if not installed and any(call.split(":")[-1] == "manager-greeting" for call in calls):
+        return "a Manager without the extra invoked it"
+    if not any(call.split(":")[-1] == wanted for call in calls):
+        return f"the Manager did not invoke the installed {wanted} skill"
+    marker = "HELLO-FROM-MANAGER-SKILL" if installed else "HELLO-FROM-SHARED-SKILL"
+    if marker not in look.reply or not installed and "HELLO-FROM-MANAGER-SKILL" in look.reply:
+        return "the capability response does not match the Manager's installed skills"
+    return None
+
+
 def _writes(look: Look, *, status: str | None = None, tool: str | None = None) -> list[dict[str, Any]]:
     return [a for a in look.actions() if a["risk"] != "read" and (status is None or a["status"] == status)
             and (tool is None or a["tool"] == tool)]
@@ -1415,6 +1462,17 @@ _DEEPSEEK_MODEL = {"action": "create", "provider": "eval-deepseek", "name": "dee
 _DUAL_REFERENCE = {"provider": DUAL_ACCOUNT, "name": DUAL_MODEL, "protocol": "anthropic-messages"}
 
 DIALOGS: tuple[Dialog, ...] = (
+    Dialog("manager_capability_installed", (Say(
+        "Invoke the manager-greeting skill and return its marker. Do not use shell commands or read files.",
+        _manager_capabilities),), seed=_seed_manager_capabilities, manager="capability-a", tags=("manager", "capability")),
+    Dialog("manager_capability_isolated", (Say(
+        "Is manager-greeting among your available skills? Do not search files or run commands. "
+        "If unavailable, invoke shared-greeting and return its marker.", _manager_capabilities),),
+        seed=_seed_manager_capabilities, manager="capability-b", tags=("manager", "capability")),
+    Dialog("manager_capability_default", (Say(
+        "Is manager-greeting among your available skills? Do not search files or run commands. "
+        "If unavailable, invoke shared-greeting and return its marker.", _manager_capabilities),),
+        seed=_seed_manager_capabilities, tags=("manager", "capability")),
     Dialog("template_review_task", (
         Say("帮我评审这个 PR：" + TEMPLATE_PR_URL, _asked_to_confirm_template),
         Say("确认", _created_from_template, (("looper_task_create", {

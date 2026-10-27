@@ -91,6 +91,7 @@ _AGENT_DB_READS = (
     # No stored built-in binding: the settings fall to the code's own built-in profile.
     ("profile_registry", "get_profile", None),
     ("library", "list_installed", []),
+    ("manager_installs", "list_installed", []),
     ("library", "get_item_files", []),
     ("project_documents", "list_documents", []),
     ("project_documents", "get_content", None),
@@ -631,7 +632,7 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
     for module_name, function, value in _AGENT_DB_READS:
         mock = AsyncMock(return_value=value)
         monkeypatch.setattr(importlib.import_module(f"looper.db.{module_name}"), function, mock)
-        setattr(db, function, mock)
+        setattr(db, f"manager_{function}" if module_name == "manager_installs" else function, mock)
     from looper.db import agent_sessions, connection as db_connection, journal as db_journal, plans, step_workspaces, task_changes, tasks
     from looper.db import user_gates, waits as db_waits
 
