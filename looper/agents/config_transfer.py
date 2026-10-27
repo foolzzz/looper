@@ -251,11 +251,21 @@ def profile_entry(row: Mapping[str, Any]) -> dict[str, Any]:
             "custom_prompt": row.get("custom_prompt", "")}
 
 
+def _portable_layer_environment(raw: Any) -> Any:
+    """Old stored layers may still override agent teams; only the Agent Profile owns that switch now."""
+    from .runtimes.claude_code import AGENT_TEAMS
+
+    if not isinstance(raw, list):
+        return raw  # leave invalid input for the ordinary layer validation
+    return [entry for entry in raw if not isinstance(entry, Mapping) or entry.get("key") != AGENT_TEAMS]
+
+
 def layer_entry(row: Mapping[str, Any]) -> dict[str, Any]:
     entry = {"scope": row["scope"]}
     if row.get("role"):
         entry["role"] = row["role"]
-    entry = {**entry, **{name: row.get(name) for name in _LAYER_FIELDS}, "env": list(row.get("env") or [])}
+    entry = {**entry, **{name: row.get(name) for name in _LAYER_FIELDS},
+             "env": _portable_layer_environment(list(row.get("env") or []))}
     # Only the shared defaults may hold boundaries, and only the Workers' and the Reviewers' role layers a
     # concurrency limit, and only role layers a system prompt mode; a file without one has none.
     for name in ("boundaries", "max_concurrency", "system_prompt_mode"):
@@ -1342,11 +1352,17 @@ class _Importer:
                 raise _Skip(f"role {role!r} is not one of {', '.join(roles)}")
             if scope in ("system", "project") and role is not None:
                 raise _Skip(f"a {scope} layer has no role")
-            values = _layer_values(raw, scope, role)
+            env = _portable_layer_environment(raw.get("env"))
+            values = _layer_values({**raw, "env": env}, scope, role)
             profile_id = await self._layer_profile(values["profile"], scope, role)
         except _Skip as exc:
             self.record(section, label, Action.SKIPPED, reason=str(exc))
             return
+        if env != raw.get("env"):
+            from .runtimes.claude_code import AGENT_TEAMS
+
+            self.plan.notes.append(f"{label}: dropped {AGENT_TEAMS} from the layer environment; "
+                                   "the Agent Profile's agent teams switch controls it")
         self.file_layers.append(_FileLayer(section, label, (scope, role, project_id), values, profile_id))
 
     async def settle_layers(self) -> None:

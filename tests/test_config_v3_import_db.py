@@ -323,8 +323,9 @@ async def test_exported_custom_runtime_preserves_profiles_and_layers_on_fresh_in
     ("settings.layers", {"scope": "system", "model": "sonnet"}, "model"),
     ("settings.layers", {"scope": "system", "agent": "claude-code/opus"}, "agent"),
     ("settings.layers", {"scope": "role", "role": "planner", "max_concurrency": 2}, "max_concurrency"),
-    ("settings.layers", {"scope": "system", "env": [
-        {"key": "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "value": "1"}]}, "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
+    ("settings.layers", {"scope": "system", "harness_prompt": "Portable harness", "env": [
+        {"key": "REGION", "value": 42},
+        {"key": "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "value": "1"}]}, "REGION"),
 ])
 async def test_current_document_refuses_old_provider_and_layer_fields(monkeypatch, section, entry, field):
     data = {"format": transfer.FORMAT}
@@ -337,6 +338,50 @@ async def test_current_document_refuses_old_provider_and_layer_fields(monkeypatc
     assert plan.changes[0].action == transfer.Action.SKIPPED
     assert field in plan.changes[0].reason
     assert plan.writes == 0 and not plan.notes
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+@pytest.mark.parametrize("project_layer", [False, True])
+@pytest.mark.parametrize("existing", [False, True])
+async def test_import_drops_retired_agent_teams_environment_and_keeps_layer(project_layer, existing):
+    data = v3()
+    retired = "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
+    env = [{"key": "REGION", "value": "test"}, {"key": retired, "value": "1"}]
+    layer = {"scope": "role_project" if project_layer else "role", "role": "worker",
+             "profile": "imported", "harness_prompt": "Portable harness", "env": env,
+             "run_budget_usd": 12.5}
+    if project_layer:
+        data["settings"]["layers"] = []
+        data["projects"] = [{"name": "Portable project", "layers": [layer]}]
+    else:
+        data["settings"]["layers"] = [layer]
+    original = deepcopy(data)
+    async with _installation() as (pool, _), pool.acquire() as conn:
+        if project_layer:
+            await conn.execute("INSERT INTO projects (id, name) VALUES ('proj-portable', 'Portable project')")
+        if existing:
+            await conn.execute("""
+                INSERT INTO agent_setting_layers (scope, role, project_id, harness_prompt, env, run_budget_usd)
+                VALUES ($1, 'worker', $2, 'Destination harness', $3::jsonb, 1)
+            """, layer["scope"], "proj-portable" if project_layer else None, json.dumps(env))
+        before = await conn.fetch("SELECT * FROM agent_setting_layers")
+        previewed = await transfer.run_import(conn, data, apply=False)
+        assert await conn.fetch("SELECT * FROM agent_setting_layers") == before
+        applied = await transfer.run_import(conn, data, apply=True)
+        assert applied.changes == previewed.changes and applied.notes == previewed.notes
+        section = "project.layers" if project_layer else "settings.layers"
+        change = next(c for c in applied.changes if c.section == section)
+        assert change.action == (transfer.Action.CHANGED if existing else transfer.Action.ADDED)
+        assert any(retired in note and "agent teams" in note for note in applied.notes)
+        stored = await conn.fetchrow("SELECT * FROM agent_setting_layers")
+        assert stored["harness_prompt"] == layer["harness_prompt"]
+        assert stored["run_budget_usd"] == layer["run_budget_usd"]
+        assert json.loads(stored["env"]) == env[:1]
+        profile = await conn.fetchrow("SELECT name, agent_teams FROM agent_profiles WHERE id = $1",
+                                      stored["profile_id"])
+        assert (profile["name"], profile["agent_teams"]) == ("imported", True)
+        assert (await transfer.run_import(conn, data, apply=True)).writes == 0
+    assert data == original
 
 
 @pytest.mark.parametrize("field", ["app_id_env", "app_secret_env"])

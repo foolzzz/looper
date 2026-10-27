@@ -195,6 +195,26 @@ def test_builtin_model_references_do_not_export_builtin_definitions():
     _run(test)
 
 
+@needs_db
+def test_export_drops_only_retired_layer_agent_teams_environment():
+    async def test(pool):
+        await _seed(pool)
+        env = [{"key": "REGION", "value": "test"},
+               {"key": "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "value": "1"}]
+        await pool.execute("""
+            INSERT INTO agent_setting_layers
+              (scope, role, profile_id, harness_prompt, env, run_budget_usd, max_concurrency)
+            VALUES ('role', 'worker', 'agent-export-chat', 'Portable harness', $1::jsonb, 12.5, 3)
+        """, json.dumps(env))
+        data, _ = await _export(pool)
+        assert data["settings"]["layers"] == [{
+            "scope": "role", "role": "worker", "profile": "Chat profile",
+            "harness_prompt": "Portable harness", "env": env[:1], "run_budget_usd": 12.5,
+            "max_concurrency": 3}]
+        assert json.loads(await pool.fetchval("SELECT env FROM agent_setting_layers")) == env
+    _run(test)
+
+
 async def _seed_content(pool):
     from looper.agents import scheduler_settings
 
