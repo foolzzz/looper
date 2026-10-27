@@ -30,6 +30,8 @@ class SeedApi(RegistryApi):
 
 @pytest.mark.parametrize("mutation,problem", [
     (None, None),
+    ("missing_records", "expected at least 2 completed API Manager turns, read back 0"),
+    ("missing_completed_turn", "expected at least 2 completed API Manager turns, read back 1"),
     ("missing_agent_session", "active session"),
     ("null_agent_session", "active session"),
     ("different_agent_session", "active session"),
@@ -104,7 +106,13 @@ def test_fake_api_manager_dialog_reads_back_each_completed_turn(
                     # A positive control proves the real API runtime persisted both turns.
                     assert await pool.fetchval(
                         "SELECT count(DISTINCT turn) FROM api_session_items WHERE session_id = $1", sid) == 2
-                    if mutation == "missing_agent_session":
+                    if mutation == "missing_records":
+                        await pool.execute("DELETE FROM llm_records WHERE agent_id = 'manager'")
+                    elif mutation == "missing_completed_turn":
+                        await pool.execute("UPDATE llm_records SET status = 'failed' WHERE agent_id = 'manager' "
+                                           "AND id != (SELECT min(id) FROM llm_records WHERE session_id = $1 "
+                                           "AND status = 'completed' AND NOT (metadata ? 'session_profile'))", sid)
+                    elif mutation == "missing_agent_session":
                         await pool.execute("DELETE FROM agent_sessions WHERE agent_id = 'manager'")
                     elif mutation == "null_agent_session":
                         await pool.execute("UPDATE agent_sessions SET session_id = NULL WHERE agent_id = 'manager'")
