@@ -292,22 +292,26 @@ def test_config_secret_api_rejection_does_not_reach_storage(monkeypatch: pytest.
 
 
 @requires_db
-def test_import_skips_extra_config_key_with_reason(monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.agents.config_transfer import Action, export_chunks, import_config
-    from looper.db.channel_configs import get_config
+@pytest.mark.parametrize("apply", [False, True])
+def test_import_rejects_extra_config_key_with_reason(monkeypatch: pytest.MonkeyPatch, apply: bool) -> None:
+    from looper.agents.config_transfer import ConfigFileError, export_chunks, import_config
+    from looper.db.channel_configs import get_config, list_configs
 
     async def test(pool: Any) -> None:
         before = await get_config("channel-lark_bot")
         async with pool.acquire() as conn:
+            before_channels = await list_configs(pool=conn)
             data = json.loads("".join([chunk async for chunk in export_chunks(
                 conn, include_projects=False, include_secrets=False)]))
+            data["channels"][0]["display_name"] = "Must not be imported"
             entry = next(row for row in data["channels"] if row["channel_type"] == "lark_bot")
             entry["config"] = {**CONFIG, "extra": SECRET}
             async with conn.transaction():
-                plan = await import_config(conn, data, apply=True)
-        [change] = [c for c in plan.changes if c.section == "channels" and c.key == "channel-lark_bot"]
-        assert change.action == Action.SKIPPED and "extra" in change.reason
-        assert SECRET not in change.reason
+                with pytest.raises(ConfigFileError, match="channels: unknown config keys: extra") as error:
+                    await import_config(conn, data, apply=apply)
+                assert SECRET not in str(error.value)
+                # Read before commit so rollback cannot hide partial import writes.
+                assert await list_configs(pool=conn) == before_channels
         assert await get_config("channel-lark_bot") == before
 
     run_with_channel_configs(test, monkeypatch)
@@ -364,7 +368,8 @@ def test_status_keeps_working_when_name_lookup_fails(monkeypatch: pytest.MonkeyP
 
 @requires_db
 def test_config_export_import_round_trip(monkeypatch: pytest.MonkeyPatch, platform: Any) -> None:
-    from looper.agents.config_transfer import Action, export_chunks, import_config
+    from looper.agents.config_transfer import Action, ConfigFileError, export_chunks, import_config
+    from looper.db.channel_configs import list_configs
 
     async def test(pool: Any) -> None:
         config = {**CONFIG, "allowlist_app_id": "cli_main", "description": "bot-token channel"}
@@ -394,9 +399,13 @@ def test_config_export_import_round_trip(monkeypatch: pytest.MonkeyPatch, platfo
             assert json.loads(await conn.fetchval("SELECT config FROM channel_configs "
                                                   "WHERE channel_id = 'channel-lark_bot'"))["app_id"] == "cli_other"
             entry["config"]["domain"] = "unknown"
-            invalid = await import_config(conn, data, apply=False)
-            assert any(c.key == "channel-lark_bot" and c.action == Action.SKIPPED and "domain" in c.reason
-                       for c in invalid.changes)
+            before_invalid = await list_configs(pool=conn)
+            for apply in (False, True):
+                async with conn.transaction():
+                    with pytest.raises(ConfigFileError, match="channels: domain must be one of feishu, lark") as error:
+                        await import_config(conn, data, apply=apply)
+                    assert SECRET not in str(error.value)
+                    assert await list_configs(pool=conn) == before_invalid
 
     run_with_channel_configs(test, monkeypatch)
 
