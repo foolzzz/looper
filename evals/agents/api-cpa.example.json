@@ -1,0 +1,11 @@
+{
+  "runtime": {"type": "api"},
+  "provider": {
+    "name": "eval-cpa",
+    "vendor_type": "cpa",
+    "endpoints": [{"protocol": "openai-responses", "base_url": "http://127.0.0.1:8317/v1"}],
+    "api_key_env": "LOOPER_EVAL_API_KEY"
+  },
+  "model": {"name": "gpt-6.1-sol", "protocol": "openai-responses", "context_window": 1050000},
+  "agent": {"name": "api/cpa/gpt-6.1-sol", "effort": "high"}
+}

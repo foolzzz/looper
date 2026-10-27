@@ -2235,12 +2235,15 @@ def run(
     total_cap_usd: float | None = None, timeout: float | None = None, keep_work_dirs: bool = False,
     manager_model: str | None = None, manager_effort: str | None = None, reps: int = 1, jobs: int = 1,
     case_budget_usd: float | None = None, switch_agent: dict[str, Any] | None = None,
+    manager_agent: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], Path]:
     """Run ``dialogs`` ``reps`` times each in ``mode``, rep-major, ``jobs`` at a time, each (dialog, rep) on a
     database, a server, a working directory and a project of its own (``runner.run``'s setup); the run and the JSON file written to
     ``out_dir``, however the run ends (``runner.run``). With ``manager_model`` the Manager alone runs Claude Code
     with that model and ``manager_effort``. A failure to set a dialog's server up stops the run, as it would stop
-    every dialog after it."""
+    every dialog after it. ``manager_agent`` registers a spec for the Manager's role layer only."""
+    if manager_agent is not None and mode != "real":
+        raise EvalError("--manager-agent needs --mode real; the api runtime's fake runs are its own tests")
     if reps < 1:
         raise EvalError(f"reps must be at least 1, not {reps}")
     if jobs < 1:
@@ -2286,8 +2289,14 @@ def run(
                     if register is not None:
                         api.post("/api/v1/agent_settings/update_system", {"values": {
                             "profile_id": picked["profile_id"], "run_budget_usd": max_budget_usd}})["result"]
-                    configs[dialog.id, rep] = (picked, _manager_profile(api, manager_model, manager_effort)
-                                               if manager_model else picked)
+                    if manager_agent is not None:
+                        registered = register_agent(api, manager_agent)
+                        api.post("/api/v1/agent_settings/update_role", {
+                            "role": "manager", "values": {"profile_id": registered["profile_id"]}})["result"]
+                        configs[dialog.id, rep] = (picked, registered)
+                    else:
+                        configs[dialog.id, rep] = (picked, _manager_profile(api, manager_model, manager_effort)
+                                                   if manager_model else picked)
                     project_id = api.post("/api/v1/project_admin/create", {"name": PROJECT, "work_dir": str(work_dir)})["result"]["project"]["project_id"]
                     row = run_dialog(api, dialog, database_url=database_url, project_id=project_id,
                                      scenarios=scenarios, mode=mode, timeout=timeout,

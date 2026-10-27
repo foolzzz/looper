@@ -499,6 +499,36 @@ uv run python -m evals.prompt_regression dialogs --mode real --dialogs session_p
   --switch-agent evals/agents/omp-deepseek.example.json
 ```
 
+#### The api runtime on CPA
+
+`dialogs --manager-agent SPEC.json` registers a Profile for the Manager's role layer only; other roles keep
+`--model` / `--agent`. It requires real mode and cannot be combined with `--manager-model`, `--manager-effort`
+or `--register-agent`. The examples declare provider endpoints and a separate model with an explicit protocol.
+The key comes from the environment variable named by `api_key_env` (`LOOPER_EVAL_API_KEY`), never from a file
+in the repository. Use a disposable PostgreSQL server in `LOOPER_EVAL_DATABASE_URL`; each case gets its own
+database, server, port and runtime root, with external channels disabled.
+
+Run the Codex control first, then set `CODEX_RUN_JSON` to its reported run JSON path before the api comparison:
+
+```bash
+uv run --extra test python -m evals.prompt_regression dialogs --mode real --model sonnet \
+  --manager-agent evals/agents/codex-cpa.example.json \
+  --reps 2 --jobs 2 --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd 30 \
+  --pg-url "$LOOPER_EVAL_DATABASE_URL"
+uv run --extra test python -m evals.prompt_regression dialogs --mode real --model sonnet \
+  --manager-agent evals/agents/api-cpa.example.json --baseline "$CODEX_RUN_JSON" \
+  --reps 2 --jobs 2 --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd 30 \
+  --pg-url "$LOOPER_EVAL_DATABASE_URL"
+```
+
+First smoke-test the api selection with `--dialogs status,confirm_create_start,cancel_confirmation,stop_then_continue`,
+`--reps 1 --jobs 1 --total-cap-usd 4`. Preflight CPA's model list: use `gpt-6-astra` in both specs when served,
+otherwise `gpt-6.1-sol`; stop if neither is available. D11 requires each dialog's api pass count to be at least
+the same-model control's minus one, and `cancel_confirmation`, `config_tools`, `provider_key`, every `schedule_*`
+and `client_relay_cancel` to pass 2/2. Errors remain errors; rerun an errored dialog once and report both attempts.
+If a spending cap stops a run, raise it and rerun before claiming the gate. The Opus baseline is descriptive only
+because its model differs. This full comparison does not replace the focused real Claude CLI handoff-prompt comparison.
+
 #### Pi
 
 `--register-agent` can target the built-in runtime type `pi` (API key only:

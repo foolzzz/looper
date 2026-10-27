@@ -329,8 +329,10 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
   - 对照组：Claude Code + 同一个 DeepSeek 接口和模型（M9b 的路径）；
   - GLM、Kimi、OpenCode 有 key 时，跑 `status`、`confirm_create_start`、`cancel_confirmation` 三个对话，没有 key 就报告缺口。
 - 从不用 haiku 当管家，也不拿 haiku 的基线当门槛。
-- **评测需要一个只给管家登记 Profile 的选项：** `dialogs --manager-agent SPEC.json`。现有的 `--register-agent` 把 Profile 放进系统层、四个角色都用它（`dialogs.py:2262-2266`），而 API Profile 放在系统层会被 `check_roles` 拒绝。示例 spec 将新增在 `evals/agents/api-cpa.example.json`，里面只写 `api_key_env`。
+- **评测入口已实现：** `dialogs --manager-agent SPEC.json` 每个用例登记一次 Profile，通过现行 v1 `agent_settings/update_role` 只选择 Manager 的角色层，其他角色保持 `--model` / `--agent`。它与 `--manager-model`、`--manager-effort`、`--register-agent` 互斥，fake 模式拒绝；原有 `--register-agent` 的系统层选择保持不变。示例为 `evals/agents/api-cpa.example.json` 与 `evals/agents/codex-cpa.example.json`，provider endpoint 与 model protocol 显式分开，凭据只声明 `api_key_env`。
 - fake 模式的对话仍由假 Claude 扮演管家，它测的是管家的逻辑；API 运行时自己的协议行为，由第 13 节的假服务测试覆盖。
+
+**CPA 验证状态：** 评测入口与示例已实现，尚未运行真实 smoke、api/Codex 全对话或 Opus 描述性比较：验证环境未设置 `CPA_CONFIG`，按凭据边界在读取配置和请求模型列表之前停止。两组通过次数、总费用、D11 结论及逐请求 token 差值均未测；第 8.4、15 节的 CPA 待验证项保留。上面的原创交接提示词专项对照已随合入的 [PR #688](https://github.com/foolzzz/looper/pull/688) 的 RFC 结果表记录，本次未改提示词，也不以全对话评测替代该专项对照。
 
 ## 10. 可观测性
 
@@ -362,7 +364,7 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 
 ### 12.1 开发排期
 
-每一步一个 PR，各自是完整、可单独回滚的结果（计划第 1 节第 1 条）。第 1–4 步已合入；第 6 步停止与用量记录已在分支实现，通过本地假 HTTP 与一次性 PostgreSQL 验证；第 5、7、8 步尚未实现。第 5、6 步可以并行。
+每一步一个 PR，各自是完整、可单独回滚的结果（计划第 1 节第 1 条）。第 1–7 步已合入；第 8 步的评测入口与示例已实现，真实 CPA 验证因缺少 `CPA_CONFIG` 未执行，D11 尚未判定。
 
 | 步 | 内容 | 依赖 | 完成时 |
 |---|---|---|---|
@@ -373,7 +375,7 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 | 5 | 中性持久会话与上下文：`api_sessions`、版本化 `api_session_items`、首次元数据与请求批次同事务、跨重启续接、换协议新会话、跨模型不重放外来 opaque reasoning、半轮补齐、drop 级联清理；`CONTEXT_FULL`、阈值、第一次请求超限时重跑；原创 api 交接摘要提示词及其计划 §1 定向真实 Claude CLI 对照 | 4 | 重启后接着同一会话；长会话按 D6 交接换新；专项评测完成，CLI 交接文本不变 |
 | 6 | 停止与用量记录：`can_interrupt = True`、取消请求、停止后原文合法、`usage_complete`、`metadata.api`、每次请求的结构化日志 | 4 | 分支实现，本地假 HTTP 与一次性 PostgreSQL 已验证：控制台与渠道取消当前请求；保留工具结果与已知 token，缺失用量时花费为未知；记录请求数、重试、不完整请求数、上游 id 与逐请求日志；真实 provider 验证留第 8 步 |
 | 7 | 入口：控制台（运行时卡、Profile 表单、Roles、停止按钮）、Telegram 与飞书的 `/profile`、`/stop`，CLI 与 `loopercli` 的核对；`agent-system.md` 一节 | 6 | 各入口按第 2 节表现，截图一张 |
-| 8 | CPA 真实验证与评测：`dialogs --manager-agent`、示例 spec、验收脚本；隔离服务上的真实 smoke；全部对话与同模型 Codex 管家对照；把结果写回第 8.4、15 节 | 5、6、7 | D11 的门槛，独立于第 5 步的交接提示词评测 |
+| 8 | CPA 真实验证与评测：`dialogs --manager-agent`、示例 spec、验收脚本；隔离服务上的真实 smoke；全部对话与同模型 Codex 管家对照；把结果写回第 8.4、15 节 | 5、6、7 | 评测入口与示例已实现；缺少 `CPA_CONFIG`，真实验证未执行，D11 待判定；独立于第 5 步的交接提示词评测 |
 
 **阶段 2**（阶段 1 全部合入之后）：
 
