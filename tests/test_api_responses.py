@@ -251,13 +251,24 @@ async def test_usage_preserves_unknown_totals_and_separate_cache_buckets(usage, 
 @async_test
 async def test_deadlines_abort_io_and_close_server_connections(monkeypatch, deadline):
     from looper.agents.runtimes.api import responses
-    monkeypatch.setattr(responses, 'REQUEST_TIMEOUT' if deadline == 'SDK_RETRY' else deadline, 0.05)
+    # Finish lazy SDK imports/schema setup before imposing an I/O deadline.
+    # Otherwise a cold start can time out before any server connection exists.
+    async with FakeModelAPI([ResponseScript(events=text_events())]) as api:
+        warmup, _ = await turn(api)
+        assert warmup.outcome == Outcome.ANSWERED
+    monkeypatch.setattr(responses, 'REQUEST_TIMEOUT' if deadline == 'SDK_RETRY' else deadline, 0.2)
     scripts = ([ResponseScript(status=503, headers={'Retry-After': '1'})] if deadline == 'SDK_RETRY' else
                [ResponseScript(events=call_events(), gate=asyncio.Event()) for _ in range(2)])
+    history, tools = Transcript(), Tools()
     async with FakeModelAPI(scripts) as api:
-        result, _ = await turn(api)
+        result, events = await turn(api, history=history, tools=tools)
         assert result.outcome == Outcome.FAILED and result.error_kind == ErrorKind.UNAVAILABLE
         assert all(not r.usage.complete for r in result.requests)
+        assert len(api.requests) == len(result.requests) == len(scripts)
+        assert not history.history and not tools.calls
+        assert not any(isinstance(e, RequestDone) for e in events)
+        if deadline == 'SDK_RETRY':
+            assert result.requests[0].status == 503 and result.requests[0].retries == 0
         for script in scripts:
             await asyncio.wait_for(script.closed.wait(), 1)
 
