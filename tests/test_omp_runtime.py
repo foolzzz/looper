@@ -995,30 +995,29 @@ def test_exact_model_settings_and_all_roles_follow_the_resolved_model(
     assert settings["eval"] == {"autoBackground": {"enabled": False}}
 
 
-@pytest.mark.parametrize("case", ["responses-default", "chat-proxy", "messages-open", "priority-all",
-                                   "priority-chat", "responses-open"])
-def test_resolved_omp_config_matches_pinned_launches(case: str) -> None:
+@pytest.mark.parametrize("protocol,api", [(ApiProtocol.OPENAI_RESPONSES, "openai-responses"),
+                                         (ApiProtocol.OPENAI_CHAT, "openai-completions")])
+def test_current_omp_binding_keeps_explicit_endpoint_and_overlay(protocol: ApiProtocol, api: str, tmp_path: Path) -> None:
     from looper.agents.runtimes.omp import models_yml, overlay
 
-    pinned = json.loads((FIXTURES.parent / "model_launch_parity_v2_omp.json").read_text())["captures"][case]
-    for expected in pinned:
-        config = expected["config"]
-        models = json.loads(config["models_yml"])
-        bound = models["providers"]["looper"]
-        protocol = {"openai-responses": ApiProtocol.OPENAI_RESPONSES,
-                    "openai-completions": ApiProtocol.OPENAI_CHAT,
-                    "anthropic-messages": ApiProtocol.ANTHROPIC_MESSAGES}[config["api"]]
-        metadata = dict(config["catalog"][0]) if config["catalog"] else {"name": config["model"]}
-        resolved = _resolved_model(protocol=protocol, base_url=bound["baseUrl"], api_key="sk-test-capture", **metadata)
-        launch = _launch(resolved=resolved, effort=config["effort"], budget=expected["cap"])
-        assert models_yml(launch) == models
-        assert overlay(launch, outside_repository=True) == json.loads(config["overlay"])
-        launch = replace(launch, role=AgentType.PLANNER if expected["permissions"]["read_only"] else AgentType.WORKER)
-        argv = expected["argv"]
-        start, end = argv.index("-p"), argv.index("--config")
-        assert OMP.launch_args(launch) == argv[start:end]
-        assert launch.environment()[KEY_ENV] == expected["env"][KEY_ENV]
-        assert launch.cost_source.value == expected["price"]["source"]
+    resolved = _resolved_model(protocol=protocol, name="exact-model[1m]", base_url="https://proxy.example.test/exact/v1/")
+    launch = _launch(resolved=resolved, effort="high", budget=0.5)
+    provider = models_yml(launch)["providers"]["looper"]
+    assert provider["api"] == api and provider["baseUrl"] == "https://proxy.example.test/exact/v1/"
+    assert [model["id"] for model in provider["models"]] == ["exact-model[1m]"]
+    settings = overlay(launch, outside_repository=True)
+    assert settings["bash"] == settings["eval"] == {"autoBackground": {"enabled": False}}
+    assert settings["async"] == {"enabled": False}
+    assert launch.environment()[KEY_ENV] == KEY
+    session = tmp_path / "runtime/session"
+    command = OMP.run_command("omp", cwd=tmp_path, prompt_file=_prompt_file(tmp_path / "runtime"),
+                              launch=launch, session_dir=session)
+    assert _flag(command, "--model") == ["looper/exact-model[1m]"]
+    assert _flag(command, "--thinking") == ["high"]
+    assert _flag(command, "--session-dir") == [str(session)]
+    assert KEY not in " ".join(command)
+    assert "PI_CONFIG_DIR" not in launch.environment()
+
 
 
 @pytest.mark.parametrize("replacing", [False, True], ids=["append", "replace"])

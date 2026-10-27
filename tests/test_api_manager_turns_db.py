@@ -1,7 +1,7 @@
 """The Manager answers through a loopback model API with real registry and audit rows.
 
-The existing CLI launch contract is covered by tests/test_model_launch_parity_db.py;
-its pinned fixtures do not change for API-only instructions.
+The existing CLI launch contract is covered by tests/test_current_tier_launch_db.py;
+it exercises current registry declarations and persisted tier records.
 """
 from __future__ import annotations
 

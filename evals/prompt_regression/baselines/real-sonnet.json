@@ -1,5 +1,5 @@
 {
-  "schema": "loopx-prompt-eval/v1",
+  "schema": "looper-prompt-eval/v2",
   "mode": "real",
   "model": "sonnet",
   "started_at": "20261014T072953Z",
@@ -45,7 +45,9 @@
       "planner_modified_files": 0,
       "duration_s": 18.3,
       "stopped_by_cap": false,
-      "timed_out": false
+      "timed_out": false,
+      "rep": 1,
+      "outcome": "pass"
     },
     {
       "id": "dependent_steps",
@@ -78,7 +80,9 @@
       "planner_modified_files": 0,
       "duration_s": 32.4,
       "stopped_by_cap": false,
-      "timed_out": false
+      "timed_out": false,
+      "rep": 1,
+      "outcome": "pass"
     },
     {
       "id": "reviewed_step",
@@ -111,7 +115,9 @@
       "planner_modified_files": 0,
       "duration_s": 35.2,
       "stopped_by_cap": false,
-      "timed_out": false
+      "timed_out": false,
+      "rep": 1,
+      "outcome": "pass"
     },
     {
       "id": "retry_after_failure",
@@ -144,7 +150,9 @@
       "planner_modified_files": 0,
       "duration_s": 34.5,
       "stopped_by_cap": false,
-      "timed_out": false
+      "timed_out": false,
+      "rep": 1,
+      "outcome": "pass"
     },
     {
       "id": "chat_correction",
@@ -178,7 +186,11 @@
       "planner_modified_files": 0,
       "duration_s": 24.4,
       "stopped_by_cap": false,
-      "timed_out": false
+      "timed_out": false,
+      "rep": 1,
+      "outcome": "pass"
     }
-  ]
+  ],
+  "reps": 1,
+  "aborted": null
 }

@@ -118,7 +118,8 @@ def install_view(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def item_view(row: Mapping[str, Any], installs: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
+def item_view(row: Mapping[str, Any], installs: Sequence[Mapping[str, Any]] = (),
+              manager_install_count: int = 0) -> dict[str, Any]:
     """An item without its files, and where it is installed; an MCP server with its configuration, values
     masked."""
     from .mcp import public_view
@@ -142,17 +143,19 @@ def item_view(row: Mapping[str, Any], installs: Sequence[Mapping[str, Any]] = ()
         "updated_at": row["updated_at"],
         "mcp": public_view(row) if row["kind"] == "mcp" else None,
         "installs": [install_view(install) for install in installs],
+        "manager_install_count": manager_install_count,
     }
 
 
 async def _item(item_id: str) -> dict[str, Any]:
     """The item's view with its installs; raises ``CatalogNotFound``."""
-    from ..db import library as db_library
+    from ..db import library as db_library, manager_installs
 
     row = await db_library.get_item(item_id)
     if row is None:
         raise CatalogNotFound(f"no catalog item {item_id!r}")
-    return item_view(row, await db_library.list_installs(item_ids=[item_id]))
+    return item_view(row, await db_library.list_installs(item_ids=[item_id]),
+                     (await manager_installs.item_use_counts()).get(item_id, 0))
 
 
 async def catalog_view() -> dict[str, Any]:
@@ -179,7 +182,7 @@ async def catalog_view() -> dict[str, Any]:
         except ValueError:
             return None
     return {
-        "items": [item_view(row, by_item.get(row["id"], ())) for row in rows],
+        "items": [item_view(row, by_item.get(row["id"], ()), manager_uses.get(row["id"], 0)) for row in rows],
         "installed_count": sum(1 for row in rows if by_item.get(row["id"]) or manager_uses.get(row["id"])),
         "total_bytes": sum(int(row["size_bytes"]) for row in rows),
         "last_import": report(LAST_IMPORT_KEY),
@@ -365,8 +368,11 @@ async def project_view(project_id: str) -> dict[str, Any]:
     installs = [row for row in await db_library.list_installs(project_id=project_id)
                 if row["scope"] == Scope.PROJECT.value or set(row["roles"]) & {*TASK_ROLES, TASK_ROLE}]
     items = {row["id"]: row for row in await db_library.list_items()}
+    from ..db import manager_installs
+    manager_uses = await manager_installs.item_use_counts()
     entries = [{**install_view(row), "inherited": row["scope"] == Scope.GLOBAL.value,
-                "item": item_view(items[row["item_id"]])} for row in installs if row["item_id"] in items]
+                "item": item_view(items[row["item_id"]], manager_install_count=manager_uses.get(row["item_id"], 0))}
+               for row in installs if row["item_id"] in items]
     # The project's own installs first, then the inherited ones; each group plugins first, then by name.
     entries.sort(key=lambda e: (e["inherited"], e["item"]["kind"], e["item"]["name"]))
     owned = [row for row in items.values() if row["owner_project_id"] == project_id]

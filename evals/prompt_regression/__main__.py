@@ -165,8 +165,13 @@ def _report(result: dict[str, Any], path: Path, args: argparse.Namespace, *, is_
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "compare":
-        new = json.loads(args.new.read_text(encoding="utf-8"))
-        base = json.loads(args.base.read_text(encoding="utf-8")) if args.base else None
+        try:
+            new = runner.validate_report(json.loads(args.new.read_text(encoding="utf-8")))
+            base = runner.validate_report(json.loads(args.base.read_text(encoding="utf-8")),
+                                          dialogs="dialogs" in new) if args.base else None
+        except runner.EvalError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         print(compare.markdown(new, base))
         if "dialogs" in new:
             print("\n" + dialogs.markdown(new))

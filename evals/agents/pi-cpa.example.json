@@ -4,13 +4,20 @@
   },
   "provider": {
     "name": "eval-cpa",
-    "protocols": ["openai-responses"],
-    "auth": "api_key",
-    "base_url": "http://127.0.0.1:8080/v1",
-    "api_key_env": "LOOPER_EVAL_API_KEY"
+    "api_key_env": "LOOPER_EVAL_API_KEY",
+    "vendor_type": "custom",
+    "endpoints": [
+      {
+        "protocol": "openai-responses",
+        "base_url": "http://127.0.0.1:8080/v1"
+      }
+    ]
+  },
+  "model": {
+    "name": "gpt-6.1-sol",
+    "protocol": "openai-responses"
   },
   "agent": {
-    "name": "pi/cpa/gpt-6.1-sol",
-    "model": "gpt-6.1-sol"
+    "name": "pi/cpa/gpt-6.1-sol"
   }
 }

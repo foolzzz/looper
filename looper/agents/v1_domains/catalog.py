@@ -36,7 +36,7 @@ CATALOG_ITEM = _object({
     "owner_project_id": _NULL_STR, "owner_project_name": _NULL_STR, "description": _STR,
     "source": _STR, "version": _STR, "sha256": _STR, "size_bytes": _INT, "file_count": _INT,
     "modified": _BOOL, "imported_at": _STR, "updated_at": _STR,
-    "mcp": _nullable(MCP_CONFIG), "installs": _array(INSTALL)})
+    "mcp": _nullable(MCP_CONFIG), "installs": _array(INSTALL), "manager_install_count": _INT})
 _SKIPPED = {"item": _STR, "path": _STR, "reason": _STR}
 LIBRARY_SKIPPED = _object({**_SKIPPED, "size_bytes": {"type": ["integer", "null"]}})
 _IMPORT = {"imported_at": _STR, "source": _STR, "added": _STRINGS, "updated": _STRINGS,

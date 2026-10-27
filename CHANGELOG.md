@@ -18,6 +18,19 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.178] - 2026-10-27
+
+### Changed
+
+- **PR Python tests run in four CI shards.** The `Agent system tests` job is a four-shard matrix (`LOOPER_TEST_SHARD=N/4`, whole files assigned by weight in `tests/conftest.py`) behind one final job named `Agent system tests` that passes only when every shard passed; the job timeout drops from 20 to 15 minutes. No test is dropped and no production code changed. ([#786](https://github.com/foolzzz/looper/pull/786))
+- **Eval tooling accepts only current formats.** `register_agent` requires explicit provider `endpoints` and a top-level `model` and refuses the legacy `agent.model`, `provider.protocols`, `provider.base_url` and `provider.models`; `compare` and baseline lookup accept only `looper-prompt-eval/v2` (`looper-manager-dialogs/v2` for dialogs) reports and exit 2 otherwise. The committed real-Sonnet baseline is migrated to v2, launch parity checks the current four-tier contracts, and the historical pinned captures and the `launch-provenance.yml` workflow are removed. No product runtime or prompt change. ([#765](https://github.com/foolzzz/looper/pull/765))
+
+## [2.13.177] - 2026-10-27
+
+### Fixed
+
+- **Manager capability changes are visible; deleting an active Manager is refused.** When a changed skill set cannot be applied because the resident runtime is not idle, the turn carries the notice `能力变更待应用` and the change takes effect after `/new`. Catalog items report `manager_install_count`; the catalog card counts Manager-only installations as installed and its delete confirmation names them. Deleting a Manager that has active or admitted work, queued messages or a runtime that cannot prove it is idle now returns 409 instead of cancelling it; Manager tool executions are admitted under the retirement lock and refused while the Manager is retiring. No schema change. ([#773](https://github.com/foolzzz/looper/pull/773))
+
 ## [2.13.176] - 2026-10-27
 
 ### Fixed
