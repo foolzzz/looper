@@ -32,8 +32,9 @@ def test_the_server_recovers_consults_before_starting_agents_tasks_or_http() -> 
     import looper.agents.serve as serve
 
     tree = ast.parse(Path(serve.__file__).read_text())
+    # The entry point owns cleanup; the owned startup performs recovery and starts the services.
     run = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef)
-               and node.name == "_run_agent_system")
+               and node.name == "_run_agent_system_owned")
     calls = [node.value.value.func for node in run.body if isinstance(node, ast.Expr)
              and isinstance(node.value, ast.Await) and isinstance(node.value.value, ast.Call)]
     names = [ast.unparse(call) for call in calls]

@@ -71,6 +71,40 @@ def test_every_shipped_runtime_keeps_a_planner_read_only(runtime: str, read_only
     assert adapter(runtime).read_only is not ReadOnly.CHECK
 
 
+def test_exchange_binds_in_process_tools_and_runner_caps(agent_db, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from looper.agents.agent_settings import AgentSettings, Launch
+    from looper.agents.claude_cli import ResidentTurn
+    from looper.agents.project_execution import ProjectExecution
+    from looper.agents.runtimes.api.tools import PlannerTurnTools
+    from looper.agents.tiers import planner as module
+
+    async def run():
+        agent = PlannerAgent(task_id="cap-task", runtime_root=tmp_path)
+        agent._plan = module.TaskPlan("plan", "goal", "Inspect", str(tmp_path))
+        agent._token = "host-task-token"
+        agent._ops = SimpleNamespace(begin_turn=Mock(), end_turn=Mock())
+        agent._claude = SimpleNamespace(set_turn_tools=Mock(), set_turn_budget=Mock(), totals=Usage(), started=False, pid=None,
+            run_turn=AsyncMock(return_value=ResidentTurn({"subtype": "success", "result": "Inspected"})))
+        monkeypatch.setattr("looper.agents.runtimes.runner.session.RunnerSession", type(agent._claude))
+        monkeypatch.setattr(module, "load_agent_settings", AsyncMock(side_effect=[
+            AgentSettings(max_budget_usd=2), AgentSettings(max_budget_usd=1)]))
+        monkeypatch.setattr(agent, "_read_execution", AsyncMock(return_value=ProjectExecution(task_budget_usd=8)))
+        monkeypatch.setattr(module.db_llm_records, "task_costs", AsyncMock(return_value={"cap-task": {"cost_usd": 3}}))
+        launch = Launch(AgentSettings(), role=module.AgentType.PLANNER)
+        process = module._Process([], None, module.SystemPrompt("Inspect"), launch)
+        assert await agent._exchange("Inspect", process, 2) == "Inspected"
+        assert isinstance(agent._claude.set_turn_tools.call_args.args[0], PlannerTurnTools)
+        budget = agent._claude.set_turn_budget.call_args.kwargs
+        assert budget["provider_id"] == launch.profile.provider.id and budget["price"] is launch.price
+        assert await budget["limits"]() == {"run_cap": 2, "task_cap": 8, "task_spent": 3}
+        assert await budget["limits"]() == {"run_cap": 1, "task_cap": 8, "task_spent": 3}
+        agent._ops.begin_turn.assert_called_once_with(agent._token)
+        agent._ops.end_turn.assert_called_once_with(agent._token)
+    asyncio.run(run())
+
+
 # --- Scripted Planner replies ---
 
 
