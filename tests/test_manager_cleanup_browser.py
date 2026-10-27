@@ -35,7 +35,9 @@ def dashboard(dashboard_url):  # noqa: F811 — imported shared fixture
             path = route.request.url.split("/api/v1/")[-1]
             body = route.request.post_data_json or {}
             state["calls"].append((path, body))
-            if path in {"manager_cleanup/preview", "manager_cleanup/purge"}:
+            if path == "manager_installs/list":
+                result = {"manager_id": body["manager_id"], "installs": []}
+            elif path in {"manager_cleanup/preview", "manager_cleanup/purge"}:
                 if state.pop("fail", False):
                     route.fulfill(status=409, json={"status": "error", "error": {
                         "code": "conflict", "message": "Manager eligibility changed"}})

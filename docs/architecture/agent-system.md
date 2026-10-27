@@ -109,6 +109,28 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   resumes the saved session with `--resume`. Stopping the Manager closes
   Claude's stdin, ends Claude if it is still running after 5 s, and ends
   whatever it started ([How an agent is stopped](#how-an-agent-is-stopped))
+- Scenario Managers may suspend only their resident process after `idle_timeout_seconds`
+  (default 1800; `0` disables it). The default Manager is exempt. Suspension
+  requires no active or queued turn, autonomous turn or runtime background job,
+  and a runtime that can prove quiescence; an unknown state keeps the process.
+  The Manager stays enabled and healthy, retains its saved session, selected
+  Profile and totals, and still receives task reports. The next message uses
+  the normal resume path. Grok ACP cannot prove quiescence, so it does not
+  suspend. This is separate from disabling or deleting a Manager.
+- Deleted Managers keep their immutable key and thread ownership. The operator
+  can preview history cleanup in Settings → Managers or
+  `manager_cleanup.preview`, then cancel or explicitly choose permanent cleanup.
+  `manager_cleanup.purge` removes only that deleted Manager's exact-owner chat
+  bodies, run records and cascading events, and actions after 30 days by
+  default (an integer 30–3650). It rechecks retention and runtime/dependency
+  blockers under a database lock, and commits all deletions together.
+  Manager and thread tombstones survive; keys and thread owners cannot be
+  reused. Preview is read-only apart from a count-free audit entry; the purge
+  audit records counts in the default operator stream. Both operations are
+  operator-only, absent from Manager and client tools. The dashboard asks
+  inline before purge; an authenticated operator API/CLI purge executes once
+  without issuing a client confirmation id. There is no automatic cleanup,
+  runtime-directory deletion or cleanup of projects, tasks or channel catalogs.
 - A new session ([New sessions: handoff and resume brief](#new-sessions-handoff-and-resume-brief)):
   when its agent can no longer resume the saved session, the old session, while
   its Claude runs, first writes a handoff in a `[HANDOFF]` turn (a Runs record,
@@ -2435,6 +2457,28 @@ run's task's Workers and Reviewers run at once, `schedule_task_limits`); and, fr
 `alerts`, `always`, `never`) and a `notify_target` (a channel and chat; none: the
 dashboard only). A new schedule is disabled.
 
+A schedule has an immutable `manager_id`, chosen when created and defaulting
+to `manager` when omitted. The dashboard/operator API can choose its owner;
+a Manager's existing `looper_schedules` tool assigns the calling Manager.
+Saving, enabling and firing validate that owner and its task policy; manual,
+due, queued and gated runs retain the same owner on the run and task. An
+optional `template_key` selects that owner's template, with static string
+`template_inputs`. Placement, required inputs, roles and Profiles are checked
+together; the task snapshots the effective template, Planner instructions,
+inputs, roles and Profiles, and `start_over` restores its template roles.
+Editing a template does not rewrite existing tasks; a changed configuration
+invalidates a gate result rather than creating a task from stale settings.
+
+Task acceptance, progress and completion reports route to the owner, using
+the existing default-Manager fallback when the owner is unavailable. Scheduled
+tasks have no origin chat, so these reports do not add a second origin-chat
+notice; configured Notifier delivery remains unchanged. Firings that create
+no task retain owner-visible run records and the existing dashboard/Notifier
+policy, without a new message to the Manager conversation. Acceptance of
+that reporting scope is pending maintainer confirmation. If every non-task
+outcome must reach that conversation, a separate implementation and real-model
+evaluation is required before the original schedule requirement is complete.
+
 - **Time rules** (`looper/agents/cron.py`, no dependency): five fields
   (minute, hour, day of the month, month, day of the week, where 0 and 7 are
   Sunday) of `*`, numbers, ranges, steps and lists; when both day fields are
@@ -2669,6 +2713,21 @@ catalog first, and each loads only where it is installed
   A project install never names the Manager, which spans every project, and a
   project-authored item is installed in projects only. CHECK constraints hold
   the scope, the roles and the project together.
+- **Manager extras.** `manager_library_installs` adds global-catalog plugins
+  and skills to one Manager (including the default), independently of other
+  Managers. The effective set is the enabled global `manager` installs plus
+  that Manager's enabled extras, deduplicated by item; disabling or removing
+  an extra never masks an inherited global item. Project-owned items and
+  Manager-specific MCP installs are refused. Settings → Managers shows
+  inherited and own rows separately, with operator-only
+  `manager_installs.list/put/delete` for readback and changes. No Manager or
+  client install-management tools are added. Each turn refreshes the effective
+  set; a supported resident safely restarts with the saved session after
+  background work ends. Grok ACP cannot prove idle and may defer an install
+  change until `/new` or a service restart. Runtime support still applies:
+  Claude Code loads plugins/skills, other adapters load their supported parts
+  and report the rest in `runtime_catalog.skipped`; Pi skips catalog plugins
+  and skills. Readback metadata does not establish a real skill invocation.
 - **Import** (`POST /api/catalog/import`, Settings → "Import from this
   machine" / "Re-import") only reads the operator's Claude Code configuration
   (`$CLAUDE_CONFIG_DIR`, else `~/.claude`): every plugin `settings.json`
@@ -2765,13 +2824,26 @@ tokens, plugin hook context 3.8k).
 
 `loopercli config export <file>` and `loopercli config import <file>`
 (`looper/agents/config_transfer.py`) move an installation's agent configuration
-through one JSON file, `format: looper-config/v3`. The registry sections are
+through one JSON file. A default-only installation with no extra bots or
+Manager installs retains `format: looper-config/v3`; any scenario Manager,
+added bot or own Manager install selects `looper-config/v4`. The registry sections are
 `runtimes`, `providers` (account settings and endpoints keyed by protocol),
 `models` (settings keyed by provider name, exact model name and protocol), and
 `profiles` (runtime name and a composite `model` reference). Built-ins exist
-everywhere and are not exported. Local ids are never portable references.
+everywhere and are not exported. Registry database ids are never portable references.
 `settings` carries the system/role layers, role prompts, timeouts and enabled
-flags; `channels`, global `installs` and `catalog` carry their existing content; `channels` holds only the three built-in rows, matched by id, so added bots are not exported and a file naming one is refused.
+flags; `channels`, global `installs` and `catalog` carry their existing content.
+In v4, `managers` carries immutable full ids, definitions, idle timeout,
+templates and own plugin/skill installs (catalog references by kind/name);
+`channels` includes added bots, matched by `channel_id` with their fixed type
+and owner. Templates reference Profiles and projects by name. Bindings, seen
+and suppression records are local, excluded from the file, and import
+preserves the destination's existing bindings and `bound_chats_only` policy.
+New or changed added bots import disabled pending credentials, policy and
+binding review, enablement and restart; identical bots keep local enablement.
+Missing references, deleted Manager identities, immutable type/owner conflicts
+and already allocated bot suffixes are explicit errors, not omissions or
+reassignments.
 `--include-projects` adds projects, layers, knowledge, skills, installs and
 schedules. Export streams a read-only repeatable-read snapshot, either through
 v1 `config.export` or `GET /api/config/export`; both share the same implementation.
@@ -2779,9 +2851,11 @@ The CLI needs the running service; catalog files remain UTF-8 text.
 
 This minimal portable example can be previewed with
 `loopercli --json config import portable.json`, applied with
-`loopercli config import --apply <import_id>` and
-`loopercli confirm <confirmation_id>`, then
-exported again. The example endpoint is a placeholder and needs a real URL
+`loopercli config import --apply <import_id>`, then exported again. A client
+receives a pending confirmation and uses `loopercli confirm <confirmation_id>`
+in that same session; an authenticated operator applies once without this
+client confirmation. Canceling a preview changes no configuration. The example
+endpoint is a placeholder and needs a real URL
 and an API key before any run. Its unknown model prices are deliberately null.
 
 ```json
@@ -2834,10 +2908,12 @@ overrides.
 A project's schedules carry their settings (`name`, `cron`, `timezone`,
 `requirement`, `overlap`, `max_parallel_runs`, `catch_up`, the timeouts, the
 caps, the gate, `notify` and `notify_target`), their Agent Profiles by name
-(`profiles`) and their `task_limits`; not whether they are enabled, their runs,
-messages, counters or alerts, nor their own directory: a schedule that had one
+(`profiles`) and their `task_limits`, immutable `manager` reference (omitted
+for the default), `template_key` and static `template_inputs`; not whether
+they are enabled, their runs, messages, counters or alerts, nor their own directory: a schedule that had one
 is flagged `repoint`. The import matches a schedule by project and name,
-ignoring case (`project.schedules`): one it adds is created disabled
+ignoring case (`project.schedules`); a different owner is an explicit conflict,
+and template references and inputs must resolve. One it adds is created disabled
 (`created_via` `import`), one whose settings differ is rewritten disabled (its
 directory here stays), one that matches is left as it is, enabled or not.
 Enabling is the approval (scheduled-tasks RFC D6), so a schedule nobody here
@@ -2850,11 +2926,17 @@ dropped, with a note.
 An import matches entries by natural key: an item by kind and name (a
 project's own skill within its project), a model by provider name, exact name and protocol;
 a project, runtime, provider or profile by name, a layer by scope,
-role and project, a role by name, a channel by type. The preview (the
+role and project, a role by name, a channel by immutable id, a Manager by its
+full immutable id and a template by Manager/key. The preview (the
 default, in a read-only transaction) lists per section what would be added,
 changed (with the fields), unchanged or skipped (with the reason), and the
-secrets to fill in. `config.import_apply` uses the preview id; a client first
-receives a pending confirmation. Confirming recomputes and writes the plan in
+secrets to fill in. Manager definitions, templates, bots and own installs are
+operator-only import sections: client preview/upload, apply and confirmation
+all recheck the staged document and refuse them, including a changed staged
+file. The existing client-accessible legacy sections retain their same-session
+confirmation; confirmation never grants operator privileges. `config.import_apply`
+uses the preview id. Operator apply, or a permitted client's confirmation,
+recomputes and writes the plan in
 one transaction on a current schema (it refuses a pending schema upgrade;
 use `serve` and its backup gate for supported schema changes): an existing
 entry is updated in place (an item keeps its id and installs), nothing missing from the file is removed, and a placeholder
@@ -4588,8 +4670,11 @@ back to another Manager. Already admitted turns retain their destination, thread
 and correlation, and existing tasks retain their Manager and stored bot/chat for
 acceptance, progress and end delivery, even after unbind or policy changes.
 
-Binding/seen/suppression state is not configuration export/import; ordinary config
-import preserves the top-level policy. Previous binaries ignore these bindings and
+Configuration export/import carries bots and their immutable owner with the
+Manager/template graph in v4, using the transfer rules above; imported new or
+changed added bots remain disabled pending local review and restart.
+Binding/seen/suppression state is not portable; import preserves local bindings
+and the top-level `bound_chats_only` policy. Previous binaries ignore these bindings and
 policy and may process chats this version silences: before downgrading, the operator
 must disable the affected bot runners or accept the previous behavior. There is no
 destructive down migration, history rename or deletion. With no bindings and a false

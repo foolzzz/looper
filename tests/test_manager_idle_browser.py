@@ -41,6 +41,8 @@ def dashboard(dashboard_url):
             state["calls"].append((path, body))
             if path == "managers/list":
                 result = {"managers": state["rows"], "max_enabled": 8}
+            elif path == "manager_installs/list":
+                result = {"manager_id": body["manager_id"], "installs": []}
             elif path == "managers/update":
                 if state["refuse"]:
                     route.fulfill(status=400, json={"status": "error", "error": {
