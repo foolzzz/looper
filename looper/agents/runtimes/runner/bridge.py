@@ -379,16 +379,14 @@ class RunnerBridge:
     def _enqueue(self, update):
         entry = self.sessions.get(update["session_id"])
         if entry is None:
-            if update["kind"] == "text_delta":
-                logger.debug("Dropped text_delta for a missing session")
-                return
-            raise p.ProtocolError(p.ErrorCode.SESSION_NOT_FOUND)
-        if entry.state == State.POISONED:
-            logger.debug("Dropped update for a poisoned session")
+            logger.debug("Dropped %s for a missing session", update["kind"])
             return
-        if entry.state not in (State.RUNNING, State.CLOSING) and entry.summary is None:
+        if entry.state == State.POISONED or entry.summary is not None:
+            logger.debug("Dropped update for a poisoned or summarized session")
+            return
+        if entry.state not in (State.RUNNING, State.CLOSING):
             return  # Rejected prompts cannot enqueue work for the next turn.
-        if entry.trace_id != update["trace_id"] or entry.settled_received or entry.summary is not None:
+        if entry.trace_id != update["trace_id"] or entry.settled_received:
             if update["kind"] == "text_delta":
                 return  # A stale display delta cannot create effects or reopen a trace.
             raise p.ProtocolError(p.ErrorCode.INVALID_REQUEST)
@@ -489,8 +487,20 @@ class RunnerBridge:
                             # cancel callback fails. Finish still reconciles it.
                             if approved:
                                 entry.requests_ended += 1
+                            cancel_needed = not entry.stopped
                             entry.state = State.POISONED
                             entry.updates.clear()
+                            if cancel_needed:
+                                # Quarantine updates before awaiting cancellation.
+                                # Do not repeat an earlier stop or cancel attempt.
+                                entry.stopped = True
+                                try:
+                                    await _value(entry.turn.stop())
+                                    await self.request("session/cancel", {"session_id": entry.session_id,
+                                        "trace_id": entry.trace_id})
+                                except (Exception, asyncio.CancelledError):
+                                    if self._error:
+                                        raise self._error
                             await self._settle(entry, {"session_id": entry.session_id, "trace_id": entry.trace_id,
                                 "outcome": "failed", "final_text": "",
                                 "usage_complete": approved, "requests": entry.requests_ended,
