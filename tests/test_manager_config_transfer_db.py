@@ -282,15 +282,18 @@ def test_default_entry_changes_only_name_and_description(monkeypatch: pytest.Mon
     run_db(test, monkeypatch, timeout=15)
 
 
-def test_default_only_v4_export_preview_apply_and_readback(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_manager_with_install_export_preview_apply_and_readback(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         from looper.agents.serve import seed_channel_configs
         await seed_channel_configs(pool)
-        await _run(pool, _document({"id": "manager", "name": "Renamed default", "description": "Portable"}))
+        installs = [{"item": {"kind": "skill", "name": "public-example"}, "enabled": True}]
+        await _run(pool, _document({"id": "manager", "name": "Renamed default", "description": "Portable",
+                                   "installs": installs}, catalog=[_item("skill", "public-example",
+            [{"path": "SKILL.md", "content": "Public example.\n"}], origin="upload")]))
         first = await _export(pool, include_projects=False)
         assert first["format"] == transfer.FORMAT
         assert first["managers"] == [{"id": "manager", "name": "Renamed default", "description": "Portable",
-                                      "idle_timeout_seconds": 0}]
+                                      "idle_timeout_seconds": 0, "installs": installs}]
         assert {channel["channel_id"] for channel in first["channels"]} == set(transfer.BUILTIN_CHANNEL_IDS)
         assert all(channel["manager_id"] == "manager" for channel in first["channels"])
         async with fresh_schema() as target:

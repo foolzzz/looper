@@ -15,8 +15,18 @@ from tests.test_operator_auth import TOKEN
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
-def test_config_round_trip_matches_dashboard_and_requires_confirmation(tmp_path, monkeypatch, clients):
+@pytest.mark.parametrize("manager_name,manager_description", [
+    ("Manager", ""),
+    ("Manager (管家)", ""),  # Upgraded installs inherit the seeded role display name.
+    ("Coordinator", ""),
+    ("Manager", "Default coordinator"),
+])
+def test_config_round_trip_matches_dashboard_and_requires_confirmation(
+    tmp_path, monkeypatch, clients, manager_name, manager_description,
+):
     async def run(pool):
+        await pool.execute("UPDATE managers SET name=$1, description=$2 WHERE id='manager'",
+                           manager_name, manager_description)
         document = {"format": "looper-config/v4", "projects": [{"name": "Portable", "background": "context"}]}
         async with _serving(tmp_path) as server:
             server._client_ops = ClientOps(Platform(bus=MessageBus(runtime_root=tmp_path),

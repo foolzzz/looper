@@ -474,10 +474,9 @@ async def export_chunks(
         "channels": channels,
         "installs": [install_entry(r) for r in installs if r["scope"] == "global"],
     }
-    # The untouched default exists on every install; carrying it would make
+    # The default exists on every install, even with a custom display name or description; carrying it would make
     # an otherwise client-importable export require operator identity.
-    portable_managers = any(row["id"] != "manager" or row["name"] != "Manager" or row["description"]
-                            for row in managers) or any(
+    portable_managers = any(row["id"] != "manager" for row in managers) or any(
         row["channel_id"] not in BUILTIN_CHANNEL_IDS for row in channel_rows) or bool(manager_installs)
     if portable_managers:
         manager_templates = await db.read_manager_templates(conn)
