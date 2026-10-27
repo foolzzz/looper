@@ -15,6 +15,9 @@ vi.mock("@/lib/api", async (original) => ({
 vi.mock("@/lib/chat-bindings-api", () => ({
   fetchChatBindings: vi.fn(), fetchChannelChats: vi.fn(), putChatBinding: vi.fn(), deleteChatBinding: vi.fn(),
 }));
+vi.mock("@/lib/manager-installs-api", () => ({
+  fetchManagerInstalls: vi.fn(async (manager_id: string) => ({ manager_id, installs: [] })),
+}));
 const m = vi.mocked(api);
 const b = vi.mocked(bindingsApi);
 function manager(id: string, name: string, enabled = true): api.ManagerInfo {
