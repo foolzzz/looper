@@ -301,6 +301,7 @@ class _Launched:
     gate: Firing | None = None
     ended: bool = False
     fingerprint: str | None = None
+    gate_enabled: bool | None = None
 
 
 class Scheduler:
@@ -446,7 +447,8 @@ class Scheduler:
         if launched.task_id:
             await self._start_task(launched.task_id)
         if launched.gate is not None:
-            self._spawn(self._gate(schedule_id, launched.run_id, launched.gate, launched.fingerprint))
+            self._spawn(self._gate(schedule_id, launched.run_id, launched.gate, launched.fingerprint,
+                                   launched.gate_enabled))
         if launched.ended:
             self._spawn(self._notifier.run_ended(launched.run_id))
 
@@ -532,8 +534,11 @@ class Scheduler:
                 effective = await effective_schedule(conn, schedule)
             except ValueError:
                 return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id)
-            return _Launched(await self._put(conn, run_id, common, status=db_schedules.GATING, fired_at=now,
-                                             **timeout), gate=firing, fingerprint=fingerprint(schedule, effective))
+            import json
+            expected = fingerprint(schedule, effective)
+            run_id = await self._put(conn, run_id, common, status=db_schedules.GATING, fired_at=now, **timeout)
+            await db_schedules.update_run(conn, run_id, execution_snapshot=json.loads(expected))
+            return _Launched(run_id, gate=firing, fingerprint=expected, gate_enabled=schedule["enabled"])
         return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id, started=timeout)
 
     async def _create_run(self, conn: asyncpg.Connection, schedule: dict[str, Any], firing: Firing, now: datetime, *,
@@ -544,19 +549,17 @@ class Scheduler:
         """Create the run's task (or fail the run, saying why) and record the run running; ``fires_now`` sets its
         ``fired_at`` (a gating run's was set when its gate started); ``started`` is what a run with no gate records
         as it starts (its timeout)."""
-        if carried is None:
-            carried = await self._carried(conn, schedule["id"], before=run_id)
         from .schedule_templates import ConfigurationChanged
         try:
             # Savepoint: a role/profile insert failure must not leave a partial task in the firing transaction.
             async with conn.transaction():
+                if carried is None:
+                    carried = await self._carried(conn, schedule, before=run_id)
                 task_id, error = await self._create_task(conn, schedule, firing, run_id=run_id,
                                                        gate_output=gate_output, carried=carried,
                                                        expected_fingerprint=expected_fingerprint)
         except ConfigurationChanged as exc:
-            # This output belongs to an obsolete configuration and must not become carried input.
-            if run_id is not None:
-                await db_schedules.update_run(conn, run_id, gate_output=None)
+            # Output and its original snapshot were saved outside the task creation savepoint.
             task_id, error = None, str(exc)
         except Exception as exc:
             logger.warning("schedule %s could not create its task: %s", schedule["id"], exc)
@@ -626,15 +629,22 @@ class Scheduler:
         return task_id, None
 
     @staticmethod
-    async def _carried(conn: asyncpg.Connection, schedule_id: str, *, before: str | None) -> list[Carried]:
+    async def _carried(conn: asyncpg.Connection, schedule: Mapping[str, Any], *, before: str | None,
+                       expected_fingerprint: str | None = None) -> list[Carried]:
         """The unfinished input of every run that ended without finishing it and has not handed it on yet, oldest
         first: each goes to the next run only, all of them when several runs of a parallel schedule failed before
         it."""
+        import json
+        from .schedule_templates import effective_schedule, fingerprint
+        runs = await db_schedules.unhanded_runs(conn, schedule["id"], besides=before)
+        current = (json.loads(expected_fingerprint or fingerprint(schedule, await effective_schedule(conn, schedule)))
+                   if runs else None)
         return [Carried(run["id"], run["status"], run.get("fired_at") or run["scheduled_for"],
                         run["gate_output"].strip())
-                for run in await db_schedules.unhanded_runs(conn, schedule_id, besides=before)]
+                for run in runs if run.get("execution_snapshot") is None or run["execution_snapshot"] == current]
 
-    async def _gate(self, schedule_id: str, run_id: str, firing: Firing, expected: str | None = None) -> None:
+    async def _gate(self, schedule_id: str, run_id: str, firing: Firing, expected: str | None = None,
+                    enabled: bool | None = None) -> None:
         """Run a gating run's gate, then record what it decided: gate_failed, skipped_gate, or the task."""
         try:
             from .schedule_templates import effective_schedule, fingerprint
@@ -645,6 +655,9 @@ class Scheduler:
                 if schedule is None:
                     return
                 try:
+                    if enabled is not None and schedule["enabled"] != enabled:
+                        raise ValueError("schedule enabled state changed before its gate started")
+                    enabled = schedule["enabled"]
                     effective = await effective_schedule(conn, schedule)
                     current = fingerprint(schedule, effective)
                     if expected is not None and expected != current:
@@ -668,7 +681,11 @@ class Scheduler:
                 run = await db_schedules.get_run(run_id, pool=conn)
                 if schedule is None or run is None or run["status"] != db_schedules.GATING:
                     return
+                output = result.stdout.strip()
+                await db_schedules.update_run(conn, run_id, gate_output=output or None)
                 try:
+                    if schedule["enabled"] != enabled:
+                        raise ValueError("schedule enabled state changed while its gate ran")
                     current = await effective_schedule(conn, schedule)
                     if configuration_error or fingerprint(schedule, current) != expected:
                         raise ValueError(configuration_error or "schedule/template configuration changed while its gate ran")
@@ -676,7 +693,6 @@ class Scheduler:
                     await db_schedules.update_run(conn, run_id, status="failed", finished_at=now, error=str(exc))
                     await db_schedules.count_outcome(conn, schedule_id, "failed", now)
                     launched = _Launched(run_id, ended=True)
-                output = result.stdout.strip()
                 if launched is not None:
                     pass
                 elif not result.ok:
@@ -685,9 +701,7 @@ class Scheduler:
                     await db_schedules.count_outcome(conn, schedule_id, "gate_failed", now)
                     launched = _Launched(run_id, ended=True)
                 else:
-                    carried = await self._carried(conn, schedule_id, before=run_id)
-                    if output:
-                        await db_schedules.update_run(conn, run_id, gate_output=output)
+                    carried = await self._carried(conn, schedule, before=run_id, expected_fingerprint=expected)
                     if not output and not carried:
                         # Nothing new: counted on the latest run when that is a skipped_gate of today too.
                         merged = await db_schedules.count_skip(conn, schedule_id, status="skipped_gate", at=now,

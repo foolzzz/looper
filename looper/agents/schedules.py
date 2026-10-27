@@ -153,6 +153,7 @@ def run_view(row: Mapping[str, Any], cost: Mapping[str, Any] | None = None) -> d
         "task_title": row.get("task_title"),
         "summary": row.get("summary"), "cost_usd": cost_usd, "error": row.get("error"),
         "finished_at": row.get("finished_at"), "gate_output": row.get("gate_output"),
+        "execution_snapshot": row.get("execution_snapshot"),
         "carried_from": row.get("carried_from"),
         # A skip that repeated counts every firing it stands for, from scheduled_for to finished_at.
         "firings": row.get("firings") or 1,

@@ -183,7 +183,8 @@ def test_actual_gate_uses_template_directory_and_rejects_changed_configuration(m
         if mutate:
             assert run["status"] == "failed" and "changed" in run["error"]
             assert await env.pool.fetchval("SELECT count(*) FROM tasks") == 0
-            assert run["gate_output"] is None
+            # Configuration changes reject task creation but retain the gate's claimed input.
+            assert run["gate_output"] == str(fixed)
         else:
             assert run["status"] == "running", run
             task = await tasks.get_task(run["task_id"])
@@ -255,7 +256,7 @@ def test_final_gate_recheck_rejects_a_dependency_changed_after_first_comparison(
         monkeypatch.setattr(schedule_templates, "effective_schedule", change_before_final_read)
         run = await fire(env, schedule)
         assert reads == 4 and run["status"] == "failed" and "changed" in run["error"]
-        assert run["task_id"] is None and run["gate_output"] is None
+        assert run["task_id"] is None and run["gate_output"] == "public input"
         assert await env.pool.fetchval("SELECT count(*) FROM tasks") == 0
     run_scheduled(test, monkeypatch, tmp_path)
 
