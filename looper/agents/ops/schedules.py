@@ -21,6 +21,7 @@ changed, before and after.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
@@ -49,6 +50,7 @@ FIELD_WORDS = {
     "run_timeout_seconds": "运行超时", "gate_command": "前置检查", "gate_timeout_seconds": "前置检查超时",
     "run_budget_usd": "每次运行的花费上限", "daily_budget_usd": "每日花费上限", "notify": "通知",
     "notify_target": "通知对象", "profile_overrides": "Agent Profile", "task_limits": "每次运行的任务并发",
+    "template_key": "任务模板", "template_inputs": "模板静态输入",
 }
 _OVERLAP_WORDS = {"skip": "跳过这次触发", "queue": "排队等它结束（最多一个）", "parallel": "并行运行"}
 _NOTIFY_WORDS = {"failures": "失败时", "alerts": "只发告警", "always": "每次运行", "never": "不发"}
@@ -72,6 +74,8 @@ def _listed(view: Mapping[str, Any]) -> dict[str, Any]:
     return {"schedule_id": view["schedule_id"], "name": view["name"], "project": view["project_name"],
             "cron": view["cron"], "timezone": view["timezone"], "description": view["description"],
             "enabled": view["enabled"], "next_fire_at": view["next_fire_at"],
+            "template_key": view.get("template_key"), "template_name": view.get("template_name"),
+            "template_inputs": view.get("template_inputs") or {},
             "last_run": _run_listed(view["last_run"]) if view["last_run"] else None,
             "consecutive_failures": view["consecutive_failures"]}
 
@@ -88,10 +92,13 @@ async def _runs_in_scope(call: Call, runs: list[dict[str, Any]]) -> list[dict[st
 
 async def _in_scope(call: Call, view: dict[str, Any]) -> dict[str, Any]:
     """A schedule's view as the Manager may see it: its last run as ``_runs_in_scope``, and for a scoped Manager
-    none of its tasks' spend, nor its Planner session's last task unless that task is its own."""
+    none of its tasks' spend, another owner's template selection, nor its Planner session's last task unless
+    that task is its own."""
     if not call.scoped:
         return view
     view = {**view, **({"spent_today_usd": None} if "spent_today_usd" in view else {})}
+    if view.get("manager_id") != call.manager_id:
+        view.update(template_key=None, template_name=None, template_inputs={})
     if view.get("last_run"):
         (view["last_run"],) = await _runs_in_scope(call, [view["last_run"]])
     session = view.get("planner_session")
@@ -213,7 +220,7 @@ async def _create(call: Call) -> dict[str, Any]:
 async def _update(call: Call, row: Mapping[str, Any]) -> dict[str, Any]:
     before = (await answered(schedules.get_schedule(row["id"])))["schedule"]
     view = (await answered(schedules.update_schedule(row["id"], _fields(call.arguments, "update"))))["schedule"]
-    changed = await _changes(before, view)
+    changed = await _changes(await _in_scope(call, before), await _in_scope(call, view))
     call.turn.blocks.append("\n".join([f"已修改定时任务「{view['name']}」（项目 {view['project_name']}）：",
                                        *(changed.values() or ["- 没有变化"]), *_next_line(before, view),
                                        f"它现在{'已启用' if view['enabled'] else '是停用的'}。"]))
@@ -281,12 +288,14 @@ async def _starting(call: Call) -> str | None:
     action = call.arguments["action"]
     if action == "enable" and row["enabled"]:
         return None
-    view = (await answered(schedules.get_schedule(row["id"])))["schedule"]
+    view = await _in_scope(call, (await answered(schedules.get_schedule(row["id"])))["schedule"])
     names = await _profile_names()
     head = f"定时任务「{row['name']}」（项目 {row['project_name']}）"
     lines = [f"- 时间规则：{_shown('cron', view, names)}，时区 {view['timezone']}",
              f"- 需求：{_shown('requirement', view, names)}",
              f"- 花费上限：每次运行 {_shown('run_budget_usd', view, names)}，每天 {_shown('daily_budget_usd', view, names)}"]
+    if view.get("template_key"):
+        lines.extend(f"- {FIELD_WORDS[key]}：{_shown(key, view, names)}" for key in ("template_key", "template_inputs"))
     if action == "run":
         return "\n".join([f"要现在运行{head}一次吗？它会立刻建出任务并开始执行，花费计入它的上限。", *lines])
     lines.insert(1, f"- 接下来 {NEXT_SHOWN} 次：{_next_fires(view)}")
@@ -303,7 +312,7 @@ async def _changes(before: Mapping[str, Any], after: Mapping[str, Any], *,
         if only is not None and key not in only:
             continue
         old, new = _shown(key, before, names), _shown(key, after, names)
-        if old != new:
+        if old != new or (key == "template_inputs" and before.get(key) != after.get(key)):
             lines[key] = f"- {label}：{old} → {new}"
     return lines
 
@@ -325,6 +334,10 @@ def _money(value: Any, unset: str) -> str:
 def _shown(key: str, view: Mapping[str, Any], names: Mapping[str, str]) -> str:
     """A setting of a schedule's view as the user is shown it."""
     value = view.get(key)
+    if key == "template_key":
+        return f"{view.get('template_name') or value}（{value}）" if value else "没有"
+    if key == "template_inputs":
+        return "、".join(f"{k}={json.dumps(clip(v, 200), ensure_ascii=False)}" for k, v in sorted((value or {}).items())) or "没有"
     if key == "cron":
         return f"{value}（{view['description']}）"
     if key == "work_dir":
@@ -382,6 +395,8 @@ async def _configuration(view: Mapping[str, Any], project: Mapping[str, Any]) ->
              f"- 花费上限：每次运行 {_shown('run_budget_usd', view, names)}，每天 {_shown('daily_budget_usd', view, names)}",
              f"- 通知：{_shown('notify', view, names)} → {_shown('notify_target', view, names)}"]
     lines.append(f"- 运行超时：{_shown('run_timeout_seconds', view, names)}")
+    if view.get("template_key"):
+        lines.extend(f"- {FIELD_WORDS[key]}：{_shown(key, view, names)}" for key in ("template_key", "template_inputs"))
     if view["profile_overrides"]:
         lines.append(f"- Agent Profile：{_shown('profile_overrides', view, names)}")
     if any(limit is not None for limit in view["task_limits"].values()):
@@ -426,6 +441,11 @@ _FIELDS = {
         "notify_target": {"type": "object", "description": "{channel, chat}; null: dashboard only."},
         "profiles": {"type": "object", "description": "{planner, worker, reviewer}: Agent Profile (id or name) per role; a role left out keeps the project's. Set only what the user asks for: a repetitive schedule's Planner may be a cheaper profile."},
         "task_limits": {"type": "object", "description": "{worker, reviewer}: each run's task's own limits."},
+        "template_key": {"type": ["string", "null"], "description": "This schedule owner's template key; omitted: "
+                         "keep selection; a new key resets inherited inputs; null clears selection and inputs."},
+        "template_inputs": {"type": "object", "additionalProperties": {"type": "string"},
+                            "description": "Static string values by template input key; omitted: keep inputs "
+                                           "unless changing template_key. Supplied values replace all inputs."},
     },
 }
 
