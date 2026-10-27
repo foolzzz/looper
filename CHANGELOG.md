@@ -18,6 +18,13 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.180] - 2026-10-27
+
+### Changed
+
+- **A configuration with retired fields is refused before an import touches the target.** `validate_document` refuses the whole file when `settings.layers[]` or a project's `layers[]` carries `model` or `effort`, or `providers[]` carries `protocols`, `base_url` or `models`; before, the retired entry was skipped. An API client (client policy) may now import a file it exported when its `managers` list holds only the unchanged default Manager: the entry is dropped from execution and nothing is written for it, while any other Manager change is still refused as FORBIDDEN. ([#790](https://github.com/foolzzz/looper/pull/790))
+- **The dialog eval readback fails without completed API turns.** The api Manager session check in `evals/prompt_regression/dialogs.py` counts the steps that need the model (not code-only steps such as `/profile`, stopped or withdrawn ones) and reports a failure when fewer completed API Manager turns are read back, instead of passing on an empty query. No product runtime change. ([#793](https://github.com/foolzzz/looper/pull/793))
+
 ## [2.13.179] - 2026-10-27
 
 ### Changed
