@@ -1792,7 +1792,7 @@ def test_release_dialog_tiers_cover_default_selection_without_unmeasured_caps() 
         assert f"--total-cap-usd ${model.upper()}_DIALOG_CAP_USD" in " ".join(text.split())
         assert args.case_budget_usd > 0 and args.max_budget_usd > 0
     readme = (Path(__file__).resolve().parents[1] / "evals/README.md").read_text()
-    assert "complete 44-dialog cost measurement is blocked" in readme
+    assert f"complete {len(dialogs.select(None))}-dialog cost measurement is blocked" in readme
     assert "Only promote a complete three-rep" in readme
     assert "If a cap stops a run, raise it and rerun" in readme
     assert "missing\nSonnet dialog baseline remain a coverage gap" in readme

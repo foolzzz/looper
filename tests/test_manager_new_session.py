@@ -195,7 +195,7 @@ for record in [{_dsh_step()!r},
 
     agent_db.save_session.side_effect = save_with_provider
     monkeypatch.setattr(module, "load_agent_settings", AsyncMock(side_effect=lambda *_, **__: state.settings))
-    monkeypatch.setattr(module, "load_installed", AsyncMock(side_effect=lambda *_: state.library))
+    monkeypatch.setattr(module, "load_installed", AsyncMock(side_effect=lambda *_, **__: state.library))
     return state
 
 

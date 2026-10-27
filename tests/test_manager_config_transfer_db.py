@@ -13,6 +13,7 @@ import pytest
 from looper.agents import config_transfer as transfer
 from looper.db import managers
 from tests.db_support import DSN, fresh_schema, run_db
+from tests.test_config_transfer_db import _item
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -294,6 +295,103 @@ def test_default_only_export_keeps_the_legacy_v3_shape(monkeypatch: pytest.Monke
         assert second == first
 
     run_db(test, monkeypatch, timeout=15)
+
+
+@pytest.mark.parametrize("owner", ["manager", "manager-review"])
+def test_manager_installs_preview_apply_and_fresh_schema_roundtrip(owner, monkeypatch, tmp_path):
+    from looper.agents.library import load_installed
+    from looper.db import connection
+    from looper.db.connection import ensure_schema
+
+    async def test(pool):
+        installs = [{"item": {"kind": kind, "name": name}, "enabled": enabled}
+                    for kind, name, enabled in (("skill", "public-example", True), ("plugin", "public-kit", False))]
+        catalog = [_item(kind, name, [{"path": "SKILL.md" if kind == "skill" else "plugin.json",
+                                      "content": "Public example fixture.\n"}], origin="upload")
+                   for kind, name in (("skill", "public-example"), ("plugin", "public-kit"))]
+        entry = {"id": "manager", "name": "Default"} if owner == "manager" else _manager()
+        document = _document({**entry, "installs": installs}, catalog=catalog)
+        before = await _snapshot(pool)
+        preview = await _run(pool, document, apply=False)
+        assert preview.view()["counts"]["manager.installs"]["added"] == 2
+        assert await _snapshot(pool) == before
+        applied = await _run(pool, document)
+        assert applied.view() == {**preview.view(), "applied": True}
+        exported = await _export(pool, include_projects=False)
+        assert exported["format"] == transfer.V4_FORMAT
+        assert next(m for m in exported["managers"] if m["id"] == owner)["installs"] == sorted(
+            installs, key=lambda install: (install["item"]["kind"], install["item"]["name"]))
+        assert await pool.fetchval("SELECT count(*) FROM library_installs") == 0
+        loaded = await load_installed(tmp_path / "source", "manager", manager_id=owner)
+        assert loaded.error is None and [item.name for item in loaded.items] == ["public-example"]
+        before = await _snapshot(pool)
+        assert (await _run(pool, exported)).writes == 0
+        assert await _snapshot(pool) == before
+        async with fresh_schema() as target:
+            await ensure_schema(target)
+            await _run(target, exported)
+            assert (await _export(target, include_projects=False))["managers"] == exported["managers"]
+            assert await target.fetchval("SELECT count(*) FROM manager_library_installs") == 2
+            assert await target.fetchval("SELECT count(*) FROM library_installs") == 0
+            with monkeypatch.context() as target_patch:
+                target_patch.setattr(connection, "_pool", target)
+                second = await load_installed(tmp_path / "target", "manager", manager_id=owner)
+            assert second.error is None and second.items == loaded.items and second.sha256 == loaded.sha256
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("incoming", [{}, {"installs": []}])
+def test_omitted_and_empty_manager_installs_preserve_existing_rows(incoming, monkeypatch):
+    async def test(pool):
+        install = {"item": {"kind": "skill", "name": "public-example"}, "enabled": False}
+        catalog = [_item("skill", "public-example", [{"path": "SKILL.md", "content": "Public example.\n"}],
+                         origin="upload")]
+        await _run(pool, _document(_manager(installs=[install]), catalog=catalog))
+        before = await pool.fetch("SELECT * FROM manager_library_installs")
+        assert (await _run(pool, _document(_manager(**incoming)))).writes == 0
+        assert await pool.fetch("SELECT * FROM manager_library_installs") == before
+        await _run(pool, _document(_manager(installs=[{**install, "enabled": True}])))
+        assert await pool.fetchval("SELECT enabled FROM manager_library_installs") is True
+
+    run_db(test, monkeypatch, timeout=20)
+
+
+@pytest.mark.parametrize("reference", [
+    {"kind": "skill", "name": "missing"}, {"kind": "mcp", "name": "missing"},
+    {"kind": "skill", "name": "project-example", "project": "Example"},
+])
+def test_invalid_manager_install_reference_rolls_back_other_sections(reference, monkeypatch):
+    async def test(pool):
+        document = _document(_manager(installs=[{"item": reference, "enabled": True}]),
+                             projects=[{"name": "Example", "items": [_item("skill", "project-example",
+                                 [{"path": "SKILL.md", "content": "Public example.\n"}], origin="project")]}])
+        before = await _snapshot(pool)
+        for apply in (False, True):
+            with pytest.raises(transfer.ConfigFileError):
+                await _run(pool, document, apply=apply)
+            assert await _snapshot(pool) == before
+
+    run_db(test, monkeypatch, timeout=20)
+
+
+def test_manager_install_write_failure_rolls_back_catalog_and_manager(monkeypatch):
+    from looper.db import manager_installs
+
+    async def test(pool):
+        async def refuse_write(*args, **kwargs):
+            raise RuntimeError("synthetic install write failure")
+
+        monkeypatch.setattr(manager_installs, "put_install", refuse_write)
+        before = await _snapshot(pool)
+        document = _document(_manager(installs=[{"item": {"kind": "skill", "name": "public-example"},
+                                                "enabled": True}]), catalog=[_item("skill", "public-example",
+            [{"path": "SKILL.md", "content": "Public example.\n"}], origin="upload")])
+        with pytest.raises(RuntimeError, match="synthetic install write failure"):
+            await _run(pool, document)
+        assert await _snapshot(pool) == before
+
+    run_db(test, monkeypatch, timeout=20)
 
 
 def test_default_owned_added_bot_selects_v4_with_default_metadata(monkeypatch: pytest.MonkeyPatch) -> None:

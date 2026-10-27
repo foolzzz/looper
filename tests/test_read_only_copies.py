@@ -103,6 +103,9 @@ class _Content:
             return files(project_id, int(n))
 
         monkeypatch.setattr(db_projects, "list_projects", list_projects)
+        from looper.db import managers, manager_installs
+        monkeypatch.setattr(managers, "list_managers", AsyncMock(return_value=[]))
+        monkeypatch.setattr(manager_installs, "list_installed", AsyncMock(return_value=[]))
         monkeypatch.setattr(db_documents, "list_documents", list_documents)
         monkeypatch.setattr(db_documents, "get_content", get_content)
         monkeypatch.setattr(db_library, "list_installed", list_installed)

@@ -159,6 +159,7 @@ async def catalog_view() -> dict[str, Any]:
     """Every item with its installs, the last import's report and the caps."""
     from ..db import library as db_library
     from ..db import system_settings
+    from ..db import manager_installs
     from . import mcp
     from .library import (
         FILE_MAX_BYTES, ITEM_MAX_BYTES, ITEM_MAX_FILES, LAST_IMPORT_KEY, LIBRARY_MAX_BYTES,
@@ -170,6 +171,7 @@ async def catalog_view() -> dict[str, Any]:
     for install in await db_library.list_installs():
         by_item[install["item_id"]].append(install)
     stored = await system_settings.get_settings([LAST_IMPORT_KEY, mcp.LAST_IMPORT_KEY])
+    manager_uses = await manager_installs.item_use_counts()
 
     def report(key: str) -> Any:
         try:
@@ -178,7 +180,7 @@ async def catalog_view() -> dict[str, Any]:
             return None
     return {
         "items": [item_view(row, by_item.get(row["id"], ())) for row in rows],
-        "installed_count": sum(1 for row in rows if by_item.get(row["id"])),
+        "installed_count": sum(1 for row in rows if by_item.get(row["id"]) or manager_uses.get(row["id"])),
         "total_bytes": sum(int(row["size_bytes"]) for row in rows),
         "last_import": report(LAST_IMPORT_KEY),
         "last_mcp_import": report(mcp.LAST_IMPORT_KEY),
