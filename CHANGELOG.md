@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.154] - 2026-10-26
+
+### Fixed
+
+- **api Manager sessions stay consistent across a restart and a Manager deletion.** `api_sessions` stores the last known `context_tokens` (backfilled once from the run records), so a restarted api Manager applies the context handoff threshold. The session row is created before the first request and removed if that request leaves no turn; a late append or context save can no longer recreate a deleted session. Deleting a scenario Manager through `managers.delete` now stops it and waits for its turn, then deletes the session pointer and api history in one transaction, and restores the Manager if the delete fails. ([#715](https://github.com/foolzzz/looper/pull/715))
+
 ## [2.13.153] - 2026-10-26
 
 ### Added
