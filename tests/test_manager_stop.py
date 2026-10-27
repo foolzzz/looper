@@ -205,6 +205,38 @@ def _with_ops(manager: ManagerAgent) -> Any:
     return ops
 
 
+def test_runner_turn_and_direct_handoff_bind_fresh_tools_and_budget(agent_db, monkeypatch, tmp_path) -> None:
+    from unittest.mock import AsyncMock
+    from looper.agents.agent_settings import AgentSettings
+    from looper.agents.runtimes.api.tools import ManagerTurnTools
+    from looper.agents.runtimes.cancel import TurnCancel
+    from looper.agents.tiers import manager as module
+
+    async def run():
+        session = _Session(hold=False)
+        monkeypatch.setattr(_Session, "set_turn_tools", lambda self, tools: setattr(self, "tools", tools), raising=False)
+        monkeypatch.setattr(_Session, "set_turn_budget", lambda self, **kw: setattr(self, "budget", kw), raising=False)
+        monkeypatch.setattr("looper.agents.runtimes.runner.session.RunnerSession", _Session)
+        monkeypatch.setattr(module.CLAUDE_CODE, "platform_tools_in_process", True)
+        manager, bus, _ = _manager(tmp_path, session)
+        probe = AsyncMock(side_effect=AssertionError("runner must not probe MCP"))
+        monkeypatch.setattr(_with_ops(manager), "tools_problem", probe)
+        await manager._handle(_web("Answer once"))
+        assert isinstance(session.tools, ManagerTurnTools)
+        first, launch = session.budget, manager._process.launch
+        monkeypatch.setattr(manager, "_load_agent_settings", AsyncMock(return_value=AgentSettings(max_budget_usd=2)))
+        assert await first["limits"]() == {"run_cap": 2, "task_cap": None, "task_spent": 0}
+        await manager._handoff(module.session_switch.session_lost("runner unavailable"), manager._process, TurnCancel())
+        assert session.budget is not first and session.budget["price"] is launch.price
+        assert session.budget["provider_id"] == launch.profile.provider.id and session.budget["model"] == launch.model
+        assert isinstance(session.tools, module._HandoffTools) and await session.tools.specs() == []
+        assert await session.budget["limits"]() == await first["limits"]()
+        probe.assert_not_awaited()
+        await manager.stop()
+        await bus.shutdown()
+    asyncio.run(run())
+
+
 def test_an_error_reply_is_failed_and_a_turn_that_asked_to_confirm_is_confirm(agent_db: Any) -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmp:

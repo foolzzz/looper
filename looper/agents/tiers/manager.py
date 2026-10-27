@@ -101,6 +101,7 @@ from ..message import (
 if TYPE_CHECKING:
     from ..managers import ChatStopSummary
     from ..ops.service import ManagerOps
+    from ..runtimes.runner.turn import TurnLimits
 
 logger = logging.getLogger(__name__)
 
@@ -1221,7 +1222,8 @@ class ManagerAgent:
             await token.step("status_thinking", self._send_status(envelope, "thinking", phase=True, activity="thinking"))
             # Claude can do nothing without Looper's tools, and might say it did: the user hears that they are down.
             problem = (await token.step("tools_probe", self._tools_problem())
-                       if not self._claude_runtime.in_process else None)
+                       if not (self._claude_runtime.in_process
+                               or self._claude_runtime.platform_tools_in_process) else None)
             if problem is not None:
                 logger.error("%s: Looper's tools do not work (%s); %s was not answered", self._log, problem,
                              envelope.message_id)
@@ -1606,6 +1608,12 @@ class ManagerAgent:
         self._agent_settings = agent_settings
         return agent_settings
 
+    async def _runner_limits(self) -> TurnLimits:
+        settings = await self._load_agent_settings(fallback=False)
+        if settings.error or settings.profile_error:
+            raise RuntimeError(settings.error or settings.profile_error)
+        return {"run_cap": settings.max_budget_usd, "task_cap": None, "task_spent": 0}
+
     def _composed_prompt(self, agent_settings: AgentSettings) -> SystemPrompt:
         """The Manager's harness, its role prompt, then how to use Looper's tools (no project, no task)."""
         contract_name, contract = "TOOLS_CONTRACT", TOOLS_CONTRACT
@@ -1647,6 +1655,8 @@ class ManagerAgent:
 
     async def _converse(self, token: TurnToken, prepared: Prepared) -> str:
         """Send the prepared message to the started Claude, follow its events and end the turn's record."""
+        from ..runtimes.runner.session import RunnerSession
+
         message, context_envelope, ops_turn, note = prepared.message, prepared.envelope, prepared.turn, prepared.note
         retried, launch, run = prepared.retried, prepared.launch, prepared.run
         recorder, command, brief, resuming = run.recorder, run.command, run.brief, run.resuming
@@ -1791,6 +1801,9 @@ class ManagerAgent:
             try:
                 if isinstance(self._claude, InProcessTools) and self.ops is not None:
                     self._claude.set_turn_tools(ManagerTurnTools(self.ops, token.binding))
+                if isinstance(self._claude, RunnerSession):
+                    self._claude.set_turn_budget(provider_id=launch.profile.provider.id, model=launch.model,
+                                                 price=launch.price, limits=self._runner_limits)
                 turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope,
                                                    stop=lambda: recorder.cap_stop, cancel=token.cancel)
             except TurnCancelled:
@@ -2168,6 +2181,8 @@ class ManagerAgent:
     async def _handoff(self, switch: SessionSwitch, process: _Process, cancel: TurnCancel) -> str | None:
         """The handoff the running session writes before ``switch``; None when it writes none in time. A stop
         ends it with ``TurnStopped``: the old session and its process stay, and the next turn switches again."""
+        from ..runtimes.runner.session import RunnerSession
+
         text = (
             f"[HANDOFF] This session ends here ({switch.describe()}), and the next one cannot read this "
             "conversation. Write a compact handoff for it: what you and the user are working on in each chat, "
@@ -2194,9 +2209,15 @@ class ManagerAgent:
                                  if isinstance(block, dict) and block.get("type") == "text")
 
             try:
-                if self._session_runtime == "api" and isinstance(self._claude, InProcessTools):
+                if isinstance(self._claude, InProcessTools) and (self._session_runtime == "api"
+                                                               or isinstance(self._claude, RunnerSession)):
                     self._claude.set_turn_tools(_HandoffTools())
-                turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, cancel=cancel),
+                if isinstance(self._claude, RunnerSession):
+                    launch = process.launch
+                    self._claude.set_turn_budget(provider_id=launch.profile.provider.id, model=launch.model,
+                                                 price=launch.price, limits=self._runner_limits)
+                options = {"stop": lambda: recorder.cap_stop} if isinstance(self._claude, RunnerSession) else {}
+                turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, cancel=cancel, **options),
                                               HANDOFF_TIMEOUT_SEC)
             except TurnCancelled as exc:
                 await recorder.finish(output_text=None, result_event=None, error="stopped by the user",
