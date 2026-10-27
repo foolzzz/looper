@@ -1,6 +1,6 @@
 # RFC：Agent SDK 运行器 v0（Looper 宿主驱动原生语言的 SDK 运行器）
 
-- **状态：** 草案，待维护者批准。第 1.2 节和第 4 节标「维护者已定」的条目，由维护者在 2026-10-26 的对话中决定；其余是本 RFC 的建议。同进程多会话、每会话 cwd/env、同一次运行内引导、按会话取消和短时 RSS，已由 2026-10-26 离线实测（runner spike）验证，结果见第 2.3 节；spike 没有覆盖的项仍标「需要验证」。
+- **状态：** 维护者 2026-10-27 同意按本 RFC 开发，从 S0 开始；第 17 节的待决问题先按推荐默认值实施，维护者可随时调整。第 1.2 节和第 4 节标「维护者已定」的条目，由维护者在 2026-10-26 的对话中决定；其余是本 RFC 的建议。同进程多会话、每会话 cwd/env、同一次运行内引导、按会话取消和短时 RSS，已由 2026-10-26 离线实测（runner spike）验证，结果见第 2.3 节；spike 没有覆盖的项仍标「需要验证」。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.0 节，批准后新增一项（建议第 24 项）。它接在 M9d（SDK 运行时与 Norma 循环移植）之后，取代 M9g（pi）和 DSH 运行时里驱动 CLI 的路径。
 - **相关：** [API 运行时](api-runtime-v0.zh-CN.md)（进程内 `AgentLoop`、`TurnTools`、Norma 移植）、[pi 运行时](pi-runtime-v0.zh-CN.md)、[dsh 运行时](dsh-runtime-v0.zh-CN.md)、[Grok 运行时](grok-runtime-v0.zh-CN.md)（ACP）、[多运行时](multi-runtime-agents-v0.zh-CN.md)、[Worker 引导](worker-steering-v0.zh-CN.md)、[Agent 办公台](agent-room-v0.zh-CN.md)、[停止管家的回复 v2](chat-stop-v2.zh-CN.md)。
 - **核对基线：** 仓库按 `main` `d6778eb0c`（v2.13.144）核对。SDK 只读核对已安装的包和源码，没有启动 SDK、调用模型或读取凭据：`@earendil-works/pi-coding-agent` 1.3.0；`@deepseek-ai/dsh` 0.2.1-rc.2；Norma 是维护者提供的 `main` 源码快照。快照没有 git 元数据，它和 API 运行时 RFC 第 5 节的 `2f158eaa6` 是不是同一提交，需要验证。
