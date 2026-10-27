@@ -488,7 +488,8 @@ async def _costs(call: Call) -> dict[str, Any]:
 # --- looper_config_export ---
 
 EXPORT_DIR = "exports"
-EXPORT_NOTE = ("Secret values are placeholders: `loopercli config export <file> --include-secrets` includes them. "
+EXPORT_NOTE = ("The file uses looper-config/v4 and includes scenario Manager definitions and task templates "
+               "when any exist. Secret values are placeholders: `loopercli config export <file> --include-secrets` includes them. "
                "Import with `loopercli config import <file>` (preview), then `loopercli config import --apply "
                "<import_id>` and `loopercli confirm <confirmation_id>`, or the dashboard's "
                "Settings → Import / Export; its schedules come in disabled.")
@@ -509,7 +510,7 @@ async def _config_export(call: Call) -> dict[str, Any]:
     async with get_pool().acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
         summary = await write_export(conn, path, include_projects=include_projects, include_secrets=False)
     return {"path": str(path), "format": summary.format, "bytes": summary.bytes, "counts": summary.counts,
-            "secrets_left_out": summary.secrets, "path_documents_to_repoint": summary.repoint, "note": EXPORT_NOTE}
+            "bots_left_out": summary.bots_left_out, "secrets_left_out": summary.secrets, "path_documents_to_repoint": summary.repoint, "note": EXPORT_NOTE}
 
 
 # --- The tools ---
@@ -638,7 +639,8 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         name="looper_config_export",
-        description="Export the configuration (profiles, providers, settings, channels, skills, MCP) to a file on "
+        description="Export looper-config/v4 (profiles, providers, settings, channels, skills, MCP, and scenario "
+                    "Manager definitions and task templates when any exist) to a file on "
                     "this machine, never with secrets; include_projects adds each project and its schedules.",
         schema={"type": "object", "additionalProperties": False,
                 "properties": {"include_projects": {"type": "boolean"}}},

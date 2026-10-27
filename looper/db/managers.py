@@ -224,6 +224,12 @@ async def put_template(manager_id: str, key: str, values: Mapping[str, Any], *,
     return await get_template(manager_id, key, pool=conn)
 
 
+async def template_schedule(manager_id: str, key: str) -> str | None:
+    return await get_pool().fetchval(
+        "SELECT name FROM schedules WHERE manager_id = $1 AND template_key = $2 ORDER BY id LIMIT 1",
+        manager_id, key)
+
+
 async def delete_template(manager_id: str, key: str) -> Literal["deleted", "missing", "no_manager"]:
     """Delete template ``key`` of the Manager and bump its ``revision``; ``"no_manager"`` when the Manager is
     missing or deleted, ``"missing"`` (nothing written) when it has no such template."""

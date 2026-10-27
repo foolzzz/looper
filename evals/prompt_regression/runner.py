@@ -551,7 +551,23 @@ def run_task(
         gates = _project_user_gates(task, user_gates)
         if gates is not None:
             api.post("/api/v1/project_admin/update", {"project_id": created['project_id'], "fields": {"user_gates": gates}})["result"]["project"]
-        api.post("/api/v1/ops/task_control/start", {"task_id": task_id})
+        if task.schedule_template:
+            owner_key = "eval-" + uuid.uuid4().hex[:8]
+            api.post("/api/v1/managers/create", {"key": owner_key, "name": "Public reports " + owner_key,
+                "system_prompt": "Handle the public source report scenario.", "task_policy": "templates_only"})
+            owner = "manager-" + owner_key
+            api.post("/api/v1/manager_templates/put", {"manager_id": owner, "key": "report",
+                "project_id": created["project_id"], **task.schedule_template})
+            schedule = api.post("/api/v1/schedule_admin/create", {"project_id": created["project_id"], "fields": {
+                "name": "Public report", "cron": "0 9 * * *", "timezone": "UTC", "manager_id": owner,
+                "template_key": "report", "template_inputs": {"source_url": "https://example.org/report"},
+                "requirement": task.requirement}})["result"]["schedule"]
+            run = api.post("/api/v1/schedule_admin/run", {"schedule_id": schedule["schedule_id"]})["result"]["run"]
+            task_id = run["task_id"]
+            if not task_id:
+                raise EvalError(f"schedule template failed: {run.get('error')}")
+        else:
+            api.post("/api/v1/ops/task_control/start", {"task_id": task_id})
         answered: dict[str, int] = {}  # each gate's script entries posted so far
         resumed: dict[str, float] = {}  # each wait resumed by the runner, and when (database clock)
 

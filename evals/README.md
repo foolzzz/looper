@@ -30,6 +30,7 @@ directories), one at a time over the HTTP API:
 | `roles_two_reviews` | the same switch; the script that must not run a shell, with a docstring and PEP 8, reviewed by the built-in Reviewer and by two review roles it asks for (security, style): one step names both (`most_review_roles` 2), they review one after the other after the built-in Reviewer, and the step is accepted only with all three passed. `roles_security_review` is the other direction: it asks for one review role, and no step names more (`most_review_roles` at most 1) |
 | `roles_multi_platform` | the same switch, and a requirement that asks for no role: one tip-of-the-day feature across a back end (`backend/tips.py`, run by the check), a web front end, an Android and an iOS client (`web/tip.js`, `android/TipClient.kt`, `ios/TipClient.swift`, no build), which must agree on an interface recorded in `api/tip_api.json`: a work role per discipline whose prompt names at least two of that platform's conventions, at least four role steps built on one interface step, at least two Workers at once, the role runs on a version defined with the boundaries before the contract, and no contract violation |
 | `roles_not_needed` | the same switch on a one-file task: the Planner defines no role and plans at most two steps |
+| `schedule_template_report` | a schedule fires its Manager template, keeping static inputs, Planner instructions and a task role snapshot |
 | `roles_template_fits` | the same switch, and the project keeps two role templates (`security-review` for steps whose code runs commands or takes untrusted input, `doc-writer` for user documentation); the script that must not run a shell, reviewed by an independent Reviewer, with no role asked for: the Planner copies `security-review` as the step's review role, which reviews after the built-in Reviewer |
 | `roles_template_unfit` | the same templates on two text files neither fits: the Planner copies no template and defines no role |
 | `gate_ambiguous` | the task's project lets its Planner open user gates (`user_gates` on); the settings file's format, name and key are the user's choice, written down nowhere: the Planner asks at a gate, the scripted user answers (TOML, `settings.toml`, `[service]`), the gate passes, a Worker reads the conclusion and the file follows the answer |
@@ -435,17 +436,17 @@ Once before a release, on the release candidate (`main` after every merge):
 - opus on the 24 Planner tasks: `run --mode real --model opus --reps 3
   --tasks planner --jobs 4 --max-budget-usd 3.0 --case-budget-usd 6.0
   --total-cap-usd 40` (the earlier baseline cost about $27.73);
-- haiku on all 43 dialogs: `dialogs --mode real --reps 3 --jobs 4
+- haiku on all 44 dialogs: `dialogs --mode real --reps 3 --jobs 4
   --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd $HAIKU_DIALOG_CAP_USD`;
-- sonnet on all 43 dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
+- sonnet on all 44 dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
   --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd $SONNET_DIALOG_CAP_USD`, refreshing
   `baselines/dialogs-real-sonnet.json`;
-- the opus xhigh Manager on all 43 dialogs: `dialogs --mode real --reps 3 --jobs 4
+- the opus xhigh Manager on all 44 dialogs: `dialogs --mode real --reps 3 --jobs 4
   --manager-model opus --manager-effort xhigh --max-budget-usd 3.0
   --case-budget-usd 3.0 --total-cap-usd $OPUS_DIALOG_CAP_USD`.
 
 Omitting `--dialogs` selects every dialog in `dialogs.select(None)`: currently
-43, or 129 case/reps per three-rep tier. A complete 43-dialog cost measurement is blocked
+44, or 132 case/reps per three-rep tier. A complete 44-dialog cost measurement is blocked
 pending evaluation credentials, a fresh disposable database/runtime root and
 an authorized budget. Set the three `*_DIALOG_CAP_USD` variables to explicitly
 authorized candidate measurement ceilings before running these commands;
@@ -454,8 +455,8 @@ until each tier completes. Do not extrapolate from the committed 24-dialog
 reports: at clean commit `c9ac42d5c562306259203790cb23766d9abed34f`,
 `dialogs-real-haiku.json` covers 72 rows / $4.226970 and
 `dialogs-real-opus.json` covers 72 rows / $8.426588 (other roles on haiku).
-Neither measures the current 43-dialog selection; no Sonnet dialog report exists.
-After each full real candidate run, verify all 43 IDs at reps 1–3, no cap stop,
+Neither measures the current 44-dialog selection; no Sonnet dialog report exists.
+After each full real candidate run, verify all 44 IDs at reps 1–3, no cap stop,
 skipped or error rows, and reconcile row costs with the report total. Record
 the candidate commit, models/Manager effort, selected IDs/count, repetitions,
 row count and measured total here before deriving numeric caps with headroom.
@@ -469,6 +470,23 @@ run covering every selected case, with no aborted, skipped or error cases;
 retain scored model failures. If a cap stops a run, raise it and rerun before
 refreshing. The existing five-task, one-rep Sonnet task baseline and missing
 Sonnet dialog baseline remain a coverage gap until those real runs complete.
+
+#### Schedule task templates
+
+`schedule_template_report` fires a schedule through its scenario Manager's template, with a static public URL,
+Planner instructions and a complete role snapshot. Run only this affected Planner case with Sonnet at two reps
+and Opus at one rep; repeat Opus only if its first run fails. Its prior-path comparison uses the same case
+with `dataclasses.replace(case, schedule_template=None)` in `runner.run`: that launch has no template inputs,
+instructions or preinstalled task roles. The intended delta is that the scheduled launch can follow those
+instructions and use the saved role. All existing cases retain their original launch path.
+
+`template_config_export` checks the affected Manager export description and answer: the file is
+`looper-config/v4`, scenario Manager definitions and task templates travel, and the answer reports the count of
+omitted added bots. Select only this dialog, with Sonnet at two reps and the Opus xhigh Manager at one rep.
+There is no committed baseline for either new case. During this change's isolated real-mode attempts, Sonnet
+(two reps), Opus (one rep), the prior path (two reps), and the export dialog all stopped without model output:
+the isolated CLI was not logged in. These attempts leave the model comparison unverified; they do not establish
+a baseline or a performance pass. The fake schedule case checks harness wiring only.
 
 #### OMP on DeepSeek
 
@@ -592,6 +610,7 @@ database, a disposable `looper serve`, and fake or real mode.
 | `schedule_modify` | on an enabled schedule with a $1 daily cap: a new rule and a Worker limit change at once; raising the cap waits for the user's word in the next message, and a refusal leaves it |
 | `schedule_run` | on a schedule whose gate finds nothing (no task, no cost): asking when it runs next reads only; 「现在立即运行一次」 waits for the user's word in the next message and runs nothing, and 「确认。」 runs it once (`run`) |
 | `schedule_ambiguous` | two projects each have the schedule: asked to run it by name, the Manager runs neither and asks; told the project, it waits for the user's word and runs nothing, and 「确认。」 runs that one only |
+| `template_config_export` | a v4 file includes scenario Manager definitions and task templates; the answer reports omitted added bots |
 | `config_export` | the configuration is exported with its projects and their schedules into the server's runtime directory (`looper_config_export`); asked to include the API keys, every export still leaves them out |
 | `session_profile_switch` | the Manager's session changes its Agent Profile through `/profile`, which Looper answers itself: `/profile` lists `eval/switch` with a number and starts no Manager run; `/profile <number>` selects it (`POST /api/v1/manager_session/get` `selected`, and a run recording the choice); the next message runs on it (`metadata.profile.source` `session`), after a `[HANDOFF]` run on the old profile and with a `[RESUME]` input when the switch starts a new session; `/profile 0` follows the settings again, and the next message no longer runs on the session's profile and (real mode) still knows the code word |
 | `session_profile_ask` | asked to switch the session's profile, the Manager changes nothing (no `looper_settings` `set`), selects nothing and does not claim a change; it points the user to `/profile` (real mode) |
@@ -606,7 +625,7 @@ no reply within `--timeout` (`timeout`) or the eval itself failed (`harness`,
 such as the slow task not getting under way); after an error its remaining
 turns are not sent and the run goes on with the next dialog. Fake mode plays
 the Manager with the stand-in, which makes each message's scripted calls over
-MCP; it takes about two minutes. Real mode now selects all 43 dialogs by
+MCP; it takes about two minutes. Real mode now selects all 44 dialogs by
 default. The committed cost references cover only 24 dialogs (see the release
 tiers above), so neither they nor the default `--total-cap-usd` (0.50)
 establish a sufficient cap. Use an explicitly authorized measurement ceiling
@@ -622,7 +641,7 @@ uv run --extra test python -m evals.prompt_regression dialogs --mode real \
 Options: `--dialogs status,ask_project`, `--model`, `--agent`,
 `--manager-model opus --manager-effort xhigh` (the Manager alone on that
 model, the other roles on `--model`; the historical 24-dialog Opus report
-does not establish a cap for the current 43 dialogs; give it
+does not establish a cap for the current 44 dialogs; give it
 `--max-budget-usd 3.0`, `--case-budget-usd 3.0` with `--jobs 4` and a
 `--total-cap-usd "$OPUS_DIALOG_CAP_USD"` authorized for candidate measurement),
 `--switch-agent SPEC.json` (`session_profile_switch`: register that spec as the profile `eval/switch`, while the

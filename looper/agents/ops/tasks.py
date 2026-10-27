@@ -20,14 +20,11 @@ from typing import Any
 from ...db import agent_setting_layers as db_layers, projects as db_projects
 from ...db import steps as db_steps, tasks as db_tasks
 from ...db import managers as db_managers, user_gates as db_user_gates
-from ...db import profile_registry as db_profiles, role_templates as db_role_templates
 from .. import task_templates, task_workspaces
 from ..managers_api import DEFAULT_MANAGER_ID, TaskPolicy
-from ..profile_registry import RegistryError, check_selection
 from ..task_templates import TaskTemplate, TemplateError
 from ..gate_service import origin_chat, post_message as post_gate_message
 from ..message import MessageEnvelope, MessageType, is_lark, planner_address
-from ..project_execution import ProjectExecution
 from ..projects import HTTP_404, HTTP_409, PROFILES_NOTE, TASK_PROFILE_ROLES, RequestError
 from ..projects import edit_requirement, profile_choices, project_name, rename_task, set_task_agents
 from ..projects import add_task_supplement, check_task_control, control_task
@@ -323,46 +320,22 @@ async def _new_project(call: Call) -> str | None:
 async def _merged_profiles(template: TaskTemplate | None, arguments: Mapping[str, Any]) -> dict[str, str | None]:
     """The task's Agent Profile per role: the template's, plus the call's for the other roles; each able to run
     its role (the call's were checked by ``_profile_choices``, the template's are checked again here)."""
+    from ..task_template_execution import merged_profiles, TemplateConflict
     profiles = await _profile_choices(arguments.get("profiles"), clearing=False)
-    if template is None:
-        return profiles
-    merged: dict[str, str | None] = dict(profiles)
-    for role, profile_id in template.profiles.items():
-        merged[role] = _fixed(template.name, f"the {role}'s Agent Profile", profile_id, profiles.get(role),
-                              operator.eq)
-        try:
-            await check_selection(profile_id, [role])
-        except RegistryError as exc:
-            profile = await db_profiles.get_profile(profile_id)
-            raise OpError(ErrorCode.CONFLICT, f"the template {template.name}'s {role} Agent Profile "
-                                              f"{profile['name'] if profile else profile_id} can no longer run the "
-                                              f"{role}: tell the user to fix the template on the dashboard "
-                                              f"({exc})") from None
-    return merged
+    try:
+        return await merged_profiles(template, profiles)
+    except TemplateConflict as exc:
+        raise OpError(ErrorCode.CONFLICT, str(exc)) from None
+    except TemplateError as exc:
+        raise OpError(ErrorCode.INVALID, str(exc)) from None
 
 
 async def _template_roles(template: TaskTemplate, project: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """The project's role templates the template names, as the task's first role versions."""
-    keys = list(template.role_templates)
-    if not keys:
-        return []
-    for key in keys:
-        if keys.count(key) > 1:
-            raise OpError(ErrorCode.CONFLICT, f"the template {template.name} lists the role template {key} twice: "
-                                              "tell the user to fix the template on the dashboard")
-    if not ProjectExecution.from_row(project).roles_on:
-        raise OpError(ErrorCode.CONFLICT, "the template's project has Planner-defined roles off: tell the user to "
-                                          "turn them on for the project or change the template")
-    roles = []
-    for key in keys:
-        row = await db_role_templates.get_template(project["id"], key)
-        if row is None:
-            raise OpError(ErrorCode.CONFLICT, f"project {project['name']} has no role template {key} any more: tell "
-                                              "the user to fix the template")
-        roles.append({"role_key": key, "kind": row["kind"], "profile_id": row["profile_id"],
-                      "role_prompt": row["role_prompt"], "harness": row["harness"],
-                      "items": list(row["items"] or ()), "template_key": key})
-    return roles
+    from ..task_template_execution import template_roles
+    try:
+        return await template_roles(template, project)
+    except TemplateError as exc:
+        raise OpError(ErrorCode.CONFLICT, str(exc)) from None
 
 
 async def _create(call: Call) -> dict[str, Any]:

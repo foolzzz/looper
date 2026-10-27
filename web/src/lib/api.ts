@@ -1051,6 +1051,9 @@ export interface ScheduleInfo {
   project_name: string;
   manager_id: string;
   manager_name: string | null;
+  template_key: string | null;
+  template_inputs: Record<string, string>;
+  template_name: string | null;
   name: string;
   /** Five-field cron rule, read in `timezone`. */
   cron: string;
@@ -1140,6 +1143,8 @@ export interface SchedulePreview {
 
 /** A new schedule's fields; one is always created disabled. */
 export interface ScheduleFields {
+  template_key?: string | null;
+  template_inputs?: Record<string, string>;
   name: string;
   cron: string;
   requirement: string;
