@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.151] - 2026-10-26
+
+### Changed
+
+- **api Manager sessions persist in PostgreSQL and hand over when the context fills.** Conversation history is stored per completed request, so it survives a restart; a stored session is refused if its protocol differs. Above the smaller of 70% of the context window and 200,000 tokens, the Manager summarizes in a tool-free turn and continues in a new session. Adds the `api_sessions` and `api_session_items` tables and `agent_sessions.pending_handoff`. ([#688](https://github.com/foolzzz/looper/pull/688))
+
 ## [2.13.150] - 2026-10-26
 
 ### Fixed
