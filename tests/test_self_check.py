@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from evals.prompt_regression.runner import fresh_database, running_server
+from looper import ops_config
 from looper.agents import self_check
 from looper.agents.self_check import mask_dsn
 from tests.db_support import DSN
@@ -42,8 +43,10 @@ def test_serve_without_postgresql_stops_with_the_fix(tmp_path: Path) -> None:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
-    env = {**os.environ, "LOOPER_DATABASE_URL": f"postgresql://looper:s3cret-pw@127.0.0.1:{port}/loopx",
-           "PYTHONPATH": str(REPO_ROOT)}
+    ops = ops_config.OpsConfig(runtime_root=tmp_path, path=tmp_path / ops_config.FILE,
+                               database_url=f"postgresql://looper:s3cret-pw@127.0.0.1:{port}/loopx")
+    ops_config.write_private(ops.path, ops_config.render(ops))
+    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
     serve = ("from pathlib import Path; from looper.agents.serve import serve_agent; "
              "serve_agent(port=1, runtime_root=Path.cwd(), work_dir=Path.cwd())")
 

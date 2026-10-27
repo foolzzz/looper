@@ -37,6 +37,7 @@ SHELL_ENV = {
     "LOOPX_DATABASE_URL": "postgresql://postgres:old-s3cret@127.0.0.1:54329/loopx",
     "LOOPER_PUBLIC_URL": "https://looper.example.com",
     "LOOPER_TELEGRAM_BOT_TOKEN": "123:abc",
+    "LOOPX_TELEGRAM_BOT_TOKEN": "456:retired",
     "ANTHROPIC_API_KEY": "sk-test",
     "LARK_APP_ID": "cli_test",
     "ANTHROPIC_CUSTOM_HEADERS": "X-Secret: header-secret",
@@ -105,19 +106,6 @@ class FakeLaunchd:
         return [argv[1] for argv in self.calls]
 
 
-class LaunchdJobs:
-    """launchd with several jobs, each a ``FakeLaunchd``, chosen by the label a call names."""
-
-    def __init__(self, *jobs: FakeLaunchd) -> None:
-        self.jobs = {job.label: job for job in jobs}
-        self.calls: list[list[str]] = []
-
-    def __call__(self, argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
-        self.calls.append(list(argv))
-        label = Path(argv[3]).stem if argv[1] == "bootstrap" else argv[2].rsplit("/", 1)[1]
-        return self.jobs[label](argv)
-
-
 class FakeSystemd:
     """A systemd user manager: units are loaded from the unit directory on daemon-reload."""
 
@@ -184,11 +172,9 @@ def _host(tmp_path: Path, checkout: Path, fake, *, system: str, port_busy: bool 
 
 
 def _looper(monkeypatch: pytest.MonkeyPatch, host: service.Host, *argv: str) -> int:
-    load = ops_config.load
     with monkeypatch.context() as patch:
         patch.setattr(service.Host, "current", classmethod(lambda cls: host))
         patch.setenv("HOME", str(host.home))
-        patch.setattr(ops_config, "load", lambda flags: load(flags, environ=host.environ, dotenv=host.cwd / ".env"))
         return cli.main(["service", *argv])
 
 
@@ -535,54 +521,28 @@ def test_without_a_console_script_the_unit_runs_the_module(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
-def test_install_replaces_the_unit_from_before_the_rename_and_moves_its_runtime_root(
-    tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], system: str
+def test_default_service_never_queries_or_changes_the_retired_unit_or_directory(
+    tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch, system: str,
 ) -> None:
-    """``com.loopx.serve`` holds the port and runs on ``~/.loopx``: install stops and removes it first, then moves
-    ``~/.loopx`` to ``~/.looper`` before the new unit writes there."""
-    home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
-    for name in ("LOOPER_RUNTIME_ROOT", "LOOPX_RUNTIME_ROOT"):
-        monkeypatch.delenv(name, raising=False)
-    (home / ".loopx" / "logs").mkdir(parents=True)
-    (home / ".loopx" / "logs" / "serve.log").write_text("from before the rename\n")
-    if system == "Darwin":
-        legacy, new = FakeLaunchd(loaded=True, label="com.loopx.serve"), FakeLaunchd(label="com.looper.serve")
-        fake = LaunchdJobs(legacy, new)
-    else:
-        fake = legacy = new = FakeSystemd()
-        legacy.active = True
+    fake = FakeLaunchd(label=service.DEFAULT_LABEL) if system == "Darwin" else FakeSystemd()
     host = _host(tmp_path, checkout, fake, system=system)
-    host.get_status = lambda port, token: {"status": "running"} if new.serving else None
+    old_root = host.home / ".loopx"
+    old_root.mkdir(parents=True)
+    marker = old_root / "keep"
+    marker.write_bytes(b"unchanged")
     old_unit = service.manager(host, "com.loopx.serve").unit_path
     old_unit.parent.mkdir(parents=True)
-    old_unit.write_text("the old unit")
-    held = []
-    host.port_in_use = lambda port: held.append(port) or (legacy.serving and legacy is not new)
-    assert service.doctor_check(host).status == service.WARN
-
+    old_unit.write_bytes(b"unchanged unit")
+    assert service.doctor_check(host).status == service.SKIP
+    assert _looper(monkeypatch, host, "status") == 1
     config = _write_ops(checkout)
+
     assert _looper(monkeypatch, host, "install", "--port", "9876", "--config", str(config)) == 0
 
-    assert not old_unit.exists() and held == [9876]
-    new_unit = service.manager(host, "com.looper.serve").unit_path
-    argv = (plistlib.loads(new_unit.read_bytes())["ProgramArguments"] if system == "Darwin" else
-            service._systemd_words(dict(line.split("=", 1) for line in new_unit.read_text().splitlines()
-                                        if line.startswith("ExecStart="))["ExecStart"]))
-    assert argv == [str(checkout / ".venv" / "bin" / "looper"), "serve", "--config", str(config),
-                    "--runtime-root", str(home / ".looper"), "--port", "9876"]
-    assert (home / ".looper" / "logs" / "serve.log").read_text() == "from before the rename\n"
-    assert (home / ".loopx").is_symlink() and (home / ".loopx" / "logs" / "serve.log").is_file()
-    if system == "Darwin":
-        calls = [(argv[1], argv[-1]) for argv in fake.calls]
-        assert calls.index(("bootout", f"gui/{UID}/com.loopx.serve")) < calls.index(("bootstrap", str(new_unit)))
-        assert not legacy.loaded and new.loaded
-    else:
-        commands = [command for command in fake.commands() if not command.startswith("show ")]
-        assert commands == ["disable --now com.loopx.serve.service", "daemon-reload", "daemon-reload",
-                            "stop com.looper.serve.service", "enable --now com.looper.serve.service"]
-    out = capsys.readouterr().out
-    assert "replaced   com.loopx.serve" in out and f"runtime    moved the runtime root {home / '.loopx'}" in out
+    assert old_unit.read_bytes() == b"unchanged unit" and marker.read_bytes() == b"unchanged"
+    assert not old_root.is_symlink()
+    assert (host.home / ".looper" / "logs").is_dir()
+    assert all("com.loopx.serve" not in " ".join(call) for call in fake.calls)
     assert service.doctor_check(host).status == service.OK
 
 
@@ -593,14 +553,14 @@ def test_install_without_a_port_uses_the_ops_file_for_status_and_restart(
     fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
     host = _host(tmp_path, checkout, fake, system=system)
     root = tmp_path / "runtime"
-    config = _write_ops(root, port=9002)
+    _write_ops(root, port=9002)
     received = []
     host.get_status = lambda port, token: received.append(port) or {"status": "running"}
 
     assert _install(monkeypatch, host, root, port=None) == 0
     mgr = service.manager(host, LABEL)
-    assert mgr.unit_argv() == [str(checkout / ".venv" / "bin" / "looper"), "serve", "--config", str(config),
-                               "--runtime-root", str(root)]
+    assert b"--port" not in mgr.unit_path.read_bytes()
+    assert mgr.unit_settings() == (9002, root / "logs" / "serve.log", root)
     assert received == [9002]
 
     _write_ops(root, port=9003)
@@ -637,42 +597,19 @@ def test_install_requires_an_ops_file(
     assert _looper(monkeypatch, host, "install", "--label", LABEL, "--runtime-root", str(tmp_path / "runtime")) == 1
 
     output = capsys.readouterr()
-    assert "no ops file" in output.err and "looper config init-ops" in output.err
+    assert "looper config init-ops" in output.err and "server.toml" in output.err
     assert "s3cret" not in output.err + output.out
     assert fake.calls == [] and not service.manager(host, LABEL).unit_path.exists()
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
-@pytest.mark.parametrize("variable", ["LOOPER_DATABASE_URL", "LOOPX_DATABASE_URL", "LOOPER_PG_DUMP"])
-def test_install_refuses_a_setting_still_from_the_environment(
-    tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    system: str, variable: str,
-) -> None:
-    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
-    host = _host(tmp_path, checkout, fake, system=system)
-    root = tmp_path / "runtime"
-    _write_ops(root, database=variable == "LOOPER_PG_DUMP")
-    if variable == "LOOPX_DATABASE_URL":
-        host.environ = {name: value for name, value in host.environ.items() if name != "LOOPER_DATABASE_URL"}
-    elif variable == "LOOPER_PG_DUMP":
-        host.environ = {**host.environ, variable: "/secret-S3kr1t/bin/pg_dump"}
-
-    assert _install(monkeypatch, host, root) == 1
-
-    output = capsys.readouterr()
-    assert f"{variable} still sets" in output.err and "looper config init-ops" in output.err
-    assert host.environ[variable] not in output.err + output.out
-    assert fake.calls == [] and not service.manager(host, LABEL).unit_path.exists()
-
-
-@pytest.mark.parametrize("system", ["Darwin", "Linux"])
-def test_reinstall_removes_the_old_database_environment_and_preserves_its_explicit_port(
+def test_reinstall_uses_current_settings_without_inheriting_the_installed_port(
     tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], system: str,
 ) -> None:
     fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
     host = _host(tmp_path, checkout, fake, system=system)
     root = tmp_path / "runtime"
-    config = _write_ops(root)
+    _write_ops(root)
     mgr = service.manager(host, LABEL)
     old = service.ServiceSpec(
         label=LABEL, argv=(str(checkout / ".venv" / "bin" / "looper"), "serve", "--port", "9001",
@@ -687,7 +624,20 @@ def test_reinstall_removes_the_old_database_environment_and_preserves_its_explic
 
     data = mgr.unit_path.read_bytes()
     assert b"DATABASE_URL" not in data and b"postgresql://" not in data and b"s3cret" not in data
-    assert mgr.unit_argv() == [str(checkout / ".venv" / "bin" / "looper"), "serve", "--config", str(config),
-                               "--runtime-root", str(root), "--port", "9001"]
+    assert b"--port" not in data
+    assert mgr.unit_settings() == (ops_config.DEFAULT_PORT, root / "logs" / "serve.log", root)
     output = capsys.readouterr()
-    assert "9001" in output.out and "s3cret" not in output.out + output.err
+    assert str(ops_config.DEFAULT_PORT) in output.out and "s3cret" not in output.out + output.err
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_retired_token_name_is_only_captured_when_explicitly_requested(
+    tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch, explicit: bool,
+) -> None:
+    fake = FakeLaunchd()
+    host = _host(tmp_path, checkout, fake, system="Darwin")
+    flags = ("--env", "LOOPX_TELEGRAM_BOT_TOKEN") if explicit else ()
+    assert _install(monkeypatch, host, tmp_path / ".loopx", *flags) == 0
+    unit = plistlib.loads(service.manager(host, LABEL).unit_path.read_bytes())
+    assert ("LOOPX_TELEGRAM_BOT_TOKEN" in unit["EnvironmentVariables"]) is explicit
+    assert unit["ProgramArguments"][-4:-2] == ["--runtime-root", str(tmp_path / ".loopx")]

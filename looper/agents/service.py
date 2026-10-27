@@ -10,8 +10,7 @@ checkout's ``.venv/bin/looper``) in the directory ``install`` ran in, as
 ``looper serve --config <ops file> --runtime-root <root>``, both absolute, and
 ``--port`` only when ``install`` was given one: the ops file
 (``looper.ops_config``) holds the database URL and the other settings, so the
-unit holds none of them, and ``install`` refuses while one still comes from a
-variable it would not carry. launchd and systemd start services with an almost
+unit holds none of them. launchd and systemd start services with an almost
 empty environment, so ``install`` copies the variables the service and its
 agents need (``CAPTURED_NAMES``, and each ``--env NAME``) from its own
 environment into the unit, which is why the unit file is written with mode
@@ -22,11 +21,6 @@ launchd: a job is reloaded with ``launchctl bootout`` then ``bootstrap``, never
 started before. ``bootout`` returns before the job is gone, and a ``bootstrap``
 issued meanwhile fails, so ``stop`` waits until ``launchctl print`` no longer
 finds the job and ``bootstrap`` is retried a few times.
-
-Before the rename the service was ``com.loopx.serve``. ``install`` with the
-default label first stops and removes that unit, so the two never compete
-for the port, and moves ``~/.loopx`` to ``~/.looper`` when the new unit uses
-the default runtime root (``looper.paths.settle_runtime_root``).
 """
 
 from __future__ import annotations
@@ -50,23 +44,21 @@ from pathlib import Path
 
 from .. import child_env, ops_config
 from ..ops_config import OpsConfig
-from ..paths import settle_runtime_root
 from . import operator_auth
 from .self_check import OK, SKIP, WARN, Check
 
 DEFAULT_LABEL = "com.looper.serve"
-LEGACY_LABEL = "com.loopx.serve"  # before the rename; `install` replaces it
 DEFAULT_PORT = 8767
 DEFAULT_TIMEOUT_SECONDS = 120.0
 LOG_RELATIVE_PATH = Path("logs") / "serve.log"
 
 # Copied from the environment of `install` when set: what the server and the agents it starts read
-# (``child_env``) but launchd and systemd do not set, and the Telegram channel's token variable (``LOOPX_*`` for
-# one release). Not the session's own (HOME, SSH_AUTH_SOCK, TMPDIR: the service manager sets them), not CLAUDECODE
+# (``child_env``) but launchd and systemd do not set, and the Telegram channel's token variable.
+# Not the session's own (HOME, SSH_AUTH_SOCK, TMPDIR: the service manager sets them), not CLAUDECODE
 # or a Claude Code session's other markers, and no ops setting: the ops file holds those.
 CAPTURED_NAMES = (
     "PATH", "TZ", *(name for name in child_env.SYSTEM if name.startswith(("LANG", "LC_"))),
-    *child_env.NETWORK, *child_env.RUNTIMES, "LOOPER_TELEGRAM_BOT_TOKEN", "LOOPX_TELEGRAM_BOT_TOKEN",
+    *child_env.NETWORK, *child_env.RUNTIMES, "LOOPER_TELEGRAM_BOT_TOKEN",
 )
 # What `install` copied before the ops file, by prefix: a variable of these it no longer copies is named in its report.
 FORMER_PREFIXES = ("LOOPER_", "LOOPX_", "ANTHROPIC_", "LARK_")
@@ -304,10 +296,6 @@ class _Manager:
         """The port, log path and runtime root the installed unit names."""
         raise NotImplementedError
 
-    def unit_argv(self) -> list[str]:
-        """The installed unit's command; [] when there is none to read."""
-        raise NotImplementedError
-
     def state(self) -> State:
         raise NotImplementedError
 
@@ -346,12 +334,6 @@ class Launchd(_Manager):
         log = unit.get("StandardOutPath")
         argv = unit.get("ProgramArguments") or []
         return _port_of(argv), Path(log) if log else None, _runtime_root_of(argv)
-
-    def unit_argv(self) -> list[str]:
-        try:
-            return list(plistlib.loads(self.unit_path.read_bytes()).get("ProgramArguments") or [])
-        except (OSError, plistlib.InvalidFileException, ValueError):
-            return []
 
     def _print(self) -> subprocess.CompletedProcess[str]:
         return self._call("launchctl", "print", self.target)
@@ -421,13 +403,6 @@ class Systemd(_Manager):
         return (_port_of(argv),
                 Path(log.removeprefix("append:").replace("%%", "%")) if log.startswith("append:") else None,
                 _runtime_root_of(argv))
-
-    def unit_argv(self) -> list[str]:
-        try:
-            lines = self.unit_path.read_text().splitlines()
-        except OSError:
-            return []
-        return _systemd_words(dict(line.split("=", 1) for line in lines if "=" in line).get("ExecStart", ""))
 
     def _systemctl(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         result = self._call("systemctl", "--user", *args)
@@ -554,39 +529,21 @@ def _describe(state: State) -> str:
 
 def install(host: Host, ops: OpsConfig, *, label: str = DEFAULT_LABEL, port: int | None = None,
             extra_env: Sequence[str] = (), timeout: float = DEFAULT_TIMEOUT_SECONDS) -> str:
-    """Write the unit (again) for the ops settings ``ops`` (``ops_config.load`` with this command's flags), reload
-    the service and wait until it serves; the report to print. ``port``: the ``--port`` given, written into the unit;
-    without one, the ops file's port, or the port the unit installed before names when the file names none.
-
-    It refuses before anything is written when there is no ops file, or when a setting still comes from a variable
-    of this environment, which the unit no longer carries. With the default label, the unit from before the rename
-    (``LEGACY_LABEL``) is stopped and removed first, then the runtime root is settled (``~/.loopx`` moved to
-    ``~/.looper``) before anything is written under it.
+    """Write the unit for ``ops``, reload it and wait until it serves. Only an explicitly given ``port`` is
+    written into the unit; otherwise the service reads its port from the ops file.
     """
     mgr = manager(host, label)
     if not os.path.lexists(ops.path):
         raise ServiceError(f"no ops file at {ops.path}: run `looper config init-ops` first, which writes it from the "
                            "settings in effect")
-    if from_variables := sorted(source.label for source in ops.sources.values()
-                                if source.origin is ops_config.Origin.ENVIRONMENT):
-        raise ServiceError(f"{', '.join(from_variables)} still sets what the ops file should: the unit does not "
-                           f"carry it. Set it in {ops.path} (or remove the file and run `looper config init-ops`), "
-                           "remove the variable, and install again")
-    if port is None and "port" not in ops.sources:
-        port = _given_port(mgr.unit_argv())  # keep a port the installed unit was given (every one before the ops file)
-    runtime_root = ops.runtime_root
+    runtime_root = _absolute_root(host, ops.runtime_root)
     spec = build_spec(host, label=label, port=port, runtime_root=runtime_root, config=ops.path, extra_env=extra_env)
-    retired = _retire_legacy_unit(host) if label == DEFAULT_LABEL else ""
-    settled = settle_runtime_root(_absolute_root(host, runtime_root), home=host.home)
-    if settled.root != _absolute_root(host, runtime_root):
-        spec = build_spec(host, label=label, port=port, runtime_root=settled.root, config=ops.path,
-                          extra_env=extra_env)
-    settled.root.mkdir(mode=0o700, parents=True, exist_ok=True)  # private before logs/ under it (operator_auth)
+    runtime_root.mkdir(mode=0o700, parents=True, exist_ok=True)  # private before logs/ under it (operator_auth)
     spec.log_path.parent.mkdir(parents=True, exist_ok=True)
     write_private(mgr.unit_path, mgr.render(spec))
     mgr.stop()
     serving_port = port if port is not None else ops.port
-    serving = _start_and_wait(mgr, serving_port, spec.log_path, timeout, settled.root)
+    serving = _start_and_wait(mgr, serving_port, spec.log_path, timeout, runtime_root)
     names = [name for name, _ in spec.env]
     dropped = sorted(name for name in host.environ if name.startswith(FORMER_PREFIXES) and name not in names
                      and name not in ops_config.VARIABLES and name not in ("LOOPER_RUNTIME_ROOT", "LOOPX_RUNTIME_ROOT"))
@@ -603,32 +560,10 @@ def install(host: Host, ops: OpsConfig, *, label: str = DEFAULT_LABEL, port: int
     ]
     lines += [f"  not copied {', '.join(dropped)}: install no longer copies every LOOPER_*, ANTHROPIC_* and LARK_* "
               "variable; add --env NAME for one the service needs"] if dropped else []
-    lines += [f"  replaced   {retired}"] if retired else []
-    lines += [f"  {'warning' if settled.warning else 'runtime':<10} {settled.note}"] if settled.note else []
     lines += [f"  warning    {warning}" for warning in ops.warnings]
     if host.system == "Linux":
         lines.append("  note       to run it without a login session too: loginctl enable-linger $USER")
     return "\n".join(lines)
-
-
-def _retire_legacy_unit(host: Host) -> str:
-    """Stop and remove the ``LEGACY_LABEL`` unit when it is there; what was removed, or ""."""
-    legacy = manager(host, LEGACY_LABEL)
-    state = legacy.state()
-    if not state.installed and not state.loaded:
-        return ""
-    legacy.remove()
-    return f"{LEGACY_LABEL}, the unit from before the rename: stopped it and removed {legacy.unit_path}"
-
-
-def _legacy_hint(host: Host, label: str) -> str:
-    """For the default label: a note when the unit from before the rename is still there, else ""."""
-    if label != DEFAULT_LABEL:
-        return ""
-    state = manager(host, LEGACY_LABEL).state()
-    if not state.installed and not state.loaded:
-        return ""
-    return f"{LEGACY_LABEL} from before the rename is installed; `looper service install` replaces it"
 
 
 def restart(host: Host, *, label: str = DEFAULT_LABEL, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> str:
@@ -660,9 +595,7 @@ def status(host: Host, *, label: str = DEFAULT_LABEL) -> tuple[int, str]:
     mgr = manager(host, label)
     state = mgr.state()
     if not state.installed and not state.loaded:
-        hint = _legacy_hint(host, label)
-        return 1, (f"{label}: not installed (`looper service install` runs looper serve in the background)"
-                   + (f"\n{hint}" if hint else ""))
+        return 1, f"{label}: not installed (`looper service install` runs looper serve in the background)"
     lines = [
         f"service    {label} ({mgr.kind})",
         f"unit       {mgr.unit_path}" + ("" if state.installed else " (missing; the service is still loaded)"),
@@ -697,8 +630,6 @@ def doctor_check(host: Host | None = None, label: str = DEFAULT_LABEL) -> Check:
     except ServiceError as exc:
         return Check("service", "Service", SKIP, f"not checked: {exc}")
     if not state.installed and not state.loaded:
-        if hint := _legacy_hint(host, label):
-            return Check("service", "Service", WARN, f"{label} not installed; {hint}", "run `looper service install`")
         return Check("service", "Service", SKIP, f"{label} not installed (optional: `looper service install`)")
     if state.running:
         return Check("service", "Service", OK, f"{label} running (pid {state.pid})")

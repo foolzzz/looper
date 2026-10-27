@@ -1,8 +1,7 @@
 """The ``looper`` console script starts the agent system without upstream LoopX code.
 
 Each case runs in a fresh interpreter and calls the function that
-``[project.scripts]`` in pyproject.toml names for ``looper`` (or for ``loopx``,
-the alias kept for one release), as the installed script does. ``serve_agent``
+``[project.scripts]`` in pyproject.toml names for ``looper``, as the installed script does. ``serve_agent``
 is replaced by a recorder, so nothing listens; the case then lists every
 ``looper`` module the interpreter loaded.
 ``doctor`` runs its checks against a stand-in ``claude`` on a minimal PATH.
@@ -100,7 +99,7 @@ def _ops_file(root: Path, database_url: str) -> Path:
     return path
 
 
-def test_init_ops_cli_writes_the_effective_database_without_showing_its_password(tmp_path: Path) -> None:
+def test_init_ops_cli_writes_a_sample_database_and_ignores_deployment_environment(tmp_path: Path) -> None:
     root = tmp_path / "runtime"
     database_url = "postgresql://looper:Sekr1t-init-pw@127.0.0.1:5432/loopx"
     env = {**_clean_env(tmp_path), "LOOPER_DATABASE_URL": database_url}
@@ -109,39 +108,11 @@ def test_init_ops_cli_writes_the_effective_database_without_showing_its_password
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     path = root / "ops" / "server.toml"
-    assert tomllib.loads(path.read_text())["database"]["url"] == database_url
+    assert tomllib.loads(path.read_text())["database"]["url"] == "postgresql://localhost:5432/looper"
     assert path.stat().st_mode & 0o777 == 0o600
     assert path.parent.stat().st_mode & 0o777 == 0o700
-    assert "LOOPER_DATABASE_URL" in proc.stdout
+    assert "postgresql://localhost:5432/looper" in proc.stdout
     assert "Sekr1t-init-pw" not in proc.stdout + proc.stderr
-
-
-@pytest.mark.parametrize("variable", ["LOOPER_DATABASE_URL", "LOOPX_DATABASE_URL"])
-def test_doctor_cli_warns_once_for_each_legacy_setting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], variable: str,
-) -> None:
-    """The CLI owns config warnings; the doctor report does not repeat them."""
-    from unittest.mock import AsyncMock
-
-    from looper import cli, ops_config
-    from looper.agents import self_check, service
-
-    database_url = "postgresql://looper:Sekr1t-warning-pw@127.0.0.1:5432/loopx"
-    load = ops_config.load
-    monkeypatch.setattr(ops_config, "load", lambda flags: load(
-        flags, environ={variable: database_url}, dotenv=tmp_path / ".env"))
-    checks = AsyncMock(return_value=[self_check.Check("database", "PostgreSQL", self_check.OK, "available")])
-    monkeypatch.setattr(self_check, "run_checks", checks)
-    monkeypatch.setattr(service, "doctor_check", lambda: self_check.Check("service", "Service", self_check.SKIP,
-                                                                       "not installed"))
-
-    code = cli.main(["doctor", "--runtime-root", str(tmp_path / "runtime")])
-
-    output = capsys.readouterr()
-    assert code == 0
-    assert output.err.count(f"{variable} in the environment is deprecated: set database.url") == 1
-    assert "Sekr1t-warning-pw" not in output.out + output.err
-    assert checks.await_args.args[0].database_url == database_url
 
 
 def test_serve_cli_without_a_database_exits_with_setup_instructions(tmp_path: Path) -> None:
@@ -162,8 +133,7 @@ def test_doctor_cli_uses_the_ops_file_and_masks_the_database_password(tmp_path: 
     port = _closed_port()
     database_url = f"postgresql://looper:Sekr1t-doctor-pw@127.0.0.1:{port}/loopx"
     _ops_file(root, database_url)
-    env = _doctor_env(tmp_path, claude="logged_in", database_url="")
-    del env["LOOPER_DATABASE_URL"]
+    env = _doctor_env(tmp_path, claude="logged_in", database_url=None)
 
     proc = _run_cli("doctor", "--runtime-root", str(root), cwd=tmp_path, env=env)
 
@@ -207,15 +177,13 @@ def test_serve_starts_the_agent_system_without_upstream_modules(
     assert not upstream, f"{len(upstream)} upstream modules loaded, e.g. {upstream[:10]}"
 
 
-@pytest.mark.parametrize("script", ["looper", "loopx"])
 @pytest.mark.parametrize(
     "argv",
     [["version"], ["--version"], ["version", "--format", "json"]],
     ids=["version", "--version", "version-json"],
 )
-def test_version_loads_only_the_cli(tmp_path: Path, argv: list[str], script: str) -> None:
-    """``loopx``, the name before the rename, is the same command after a one-line deprecation note on stderr."""
-    result, output, stderr = _run_looper(*argv, cwd=tmp_path, script=script)
+def test_version_loads_only_the_cli(tmp_path: Path, argv: list[str]) -> None:
+    result, output, stderr = _run_looper(*argv, cwd=tmp_path)
 
     assert result["code"] == 0, stderr
     if "json" in argv:
@@ -227,19 +195,17 @@ def test_version_loads_only_the_cli(tmp_path: Path, argv: list[str], script: str
         }
     else:
         assert output == f"looper {__version__}"
-    assert stderr == ("loopx is now called looper; the loopx alias goes away in the next release\n"
-                      if script == "loopx" else "")
+    assert stderr == ""
     assert result["modules"] == ["looper", "looper.cli"]
 
 
 @pytest.mark.parametrize("command", ["export", "import"])
-def test_removed_config_commands_name_the_running_service_replacement(tmp_path: Path, command: str) -> None:
-    """Removed offline commands fail before reading state and explain their replacement."""
+def test_removed_config_commands_are_rejected_by_argparse(tmp_path: Path, command: str) -> None:
+    """Removed offline commands fail before reading state."""
     result, output, stderr = _run_looper("config", command, "portable.json", cwd=tmp_path)
 
     assert result["code"] == 2, output + stderr
-    assert f"loopercli config {command}" in stderr
-    assert "running service" in stderr
+    assert f"invalid choice: '{command}'" in stderr
     assert not (tmp_path / "portable.json").exists()
     assert result["modules"] == ["looper", "looper.cli"]
 
@@ -286,7 +252,7 @@ esac
 """
 
 
-def _doctor_env(tmp_path: Path, *, claude: str | None, database_url: str) -> dict[str, str]:
+def _doctor_env(tmp_path: Path, *, claude: str | None, database_url: str | None) -> dict[str, str]:
     """PATH holds only the system tools and, unless ``claude`` is None, a stand-in in that state."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -299,8 +265,9 @@ def _doctor_env(tmp_path: Path, *, claude: str | None, database_url: str) -> dic
         stub = bin_dir / name
         stub.write_text("#!/bin/sh\nexit 1\n")
         stub.chmod(0o755)
-    return {**_clean_env(tmp_path), "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin",
-            "LOOPER_DATABASE_URL": database_url}
+    if database_url is not None:
+        _ops_file(tmp_path / "runtime", database_url)
+    return {**_clean_env(tmp_path), "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin"}
 
 
 def _closed_port() -> int:
@@ -315,18 +282,15 @@ def _check_lines(output: str) -> dict[str, str]:
     return {label: line for line in output.splitlines() for label in labels if line[6:].startswith(label)}
 
 
-def test_the_database_url_from_before_the_rename_still_works_with_a_warning(tmp_path: Path) -> None:
-    """Only ``LOOPX_DATABASE_URL`` set: it is the database used, and the deprecation is said once."""
-    port = _closed_port()
-    env = _doctor_env(tmp_path, claude="logged_in", database_url="")
-    del env["LOOPER_DATABASE_URL"]
-    env["LOOPX_DATABASE_URL"] = f"postgresql://127.0.0.1:{port}/loopx"
-
-    result, output, stderr = _run_looper("doctor", cwd=tmp_path, env=env)
-
-    assert result["code"] == 1, stderr
-    assert f"cannot connect to postgresql://127.0.0.1:{port}/loopx" in _check_lines(output)["PostgreSQL"]
-    assert stderr.count("LOOPX_DATABASE_URL in the environment is deprecated: set database.url") == 1, stderr
+@pytest.mark.parametrize("command", ["serve", "doctor"])
+def test_deployment_environment_and_dotenv_do_not_supply_a_database(tmp_path: Path, command: str) -> None:
+    env = {**_clean_env(tmp_path), "LOOPER_DATABASE_URL": "postgresql://ignored/current",
+           "LOOPX_DATABASE_URL": "postgresql://ignored/retired"}
+    (tmp_path / ".env").write_text("LOOPER_DATABASE_URL=postgresql://ignored/dotenv\n")
+    result = _run_cli(command, "--runtime-root", str(tmp_path / "runtime"), cwd=tmp_path, env=env)
+    assert result.returncode == 1
+    assert "no database configured" in result.stdout + result.stderr
+    assert "postgresql://ignored" not in result.stdout + result.stderr
 
 
 def test_doctor_shows_an_unreachable_database_masked_with_its_fix(tmp_path: Path) -> None:
@@ -538,3 +502,22 @@ def test_doctor_checks_git_and_the_directories_of_projects_with_step_worktrees(t
     lines = {line[6:].split("  ")[0].strip(): line for line in output.splitlines() if line[:5].strip()}
     assert lines["git"].startswith("ok") and "git version 2." in lines["git"], output
     assert lines["Step worktrees"] == ("warn  Step worktrees   alarm: main, 9 B checkout, nothing to link at .env"), output
+
+
+@pytest.mark.parametrize("format", ["json", "markdown"])
+def test_serve_format_is_rejected(tmp_path: Path, format: str) -> None:
+    result, _, stderr = _run_looper("serve", "--format", format, cwd=tmp_path)
+    assert result["code"] == 2 and "unrecognized arguments: --format" in stderr
+    assert result["calls"] == []
+
+
+def test_installed_looper_entrypoint_reports_the_current_version(tmp_path: Path) -> None:
+    from importlib.metadata import distribution
+
+    scripts = {entry.name: entry.value for entry in distribution("looper").entry_points
+               if entry.group == "console_scripts"}
+    assert scripts == {"looper": "looper.cli:main", "loopercli": "looper.loopercli:main"}
+    proc = subprocess.run([str(Path(sys.executable).with_name("looper")), "--version"], cwd=tmp_path,
+                          env=_clean_env(tmp_path), text=True, capture_output=True, timeout=30)
+    assert proc.returncode == 0 and proc.stdout.strip() == f"looper {__version__}"
+    assert proc.stderr == ""

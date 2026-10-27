@@ -121,6 +121,28 @@ describe("chat Manager picker", () => {
     container.remove();
   });
 
+  it.each([false, true])("uses current cache only, with current messages present=%s", async (current) => {
+    const oldKey = `loopx-chat-messages-${SID}`;
+    const cached = (content: string) => JSON.stringify([{ id: "cached", role: "assistant", content, timestamp: 1 }]);
+    localStorage.setItem("loopx-chat-session-id", "retired-session");
+    localStorage.setItem(oldKey, cached("retired cache"));
+    if (current) localStorage.setItem(`looper-chat-messages-${SID}`, cached("current cache"));
+    await mount();
+    expect(container.textContent).not.toContain("retired cache");
+    expect(container.textContent.includes("current cache")).toBe(current);
+    expect(localStorage.getItem("loopx-chat-session-id")).toBe("retired-session");
+    expect(localStorage.getItem(oldKey)).toContain("retired cache");
+    expect(api.fetchChatMessages).toHaveBeenCalledWith(SID, expect.anything(), "manager");
+  });
+
+  it("starts a current thread when only a retired pointer exists", async () => {
+    localStorage.removeItem("looper-chat-session-id");
+    localStorage.setItem("loopx-chat-session-id", "retired-session");
+    await mount();
+    expect(localStorage.getItem("looper-chat-session-id")).not.toBe("retired-session");
+    expect(localStorage.getItem("loopx-chat-session-id")).toBe("retired-session");
+  });
+
   it("lists every Manager before Tasks", async () => {
     await mount();
     await click(buttons().find((b) => b.querySelector("p.text-sm.font-semibold")));

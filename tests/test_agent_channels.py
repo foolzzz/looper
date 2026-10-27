@@ -253,11 +253,12 @@ class TestServeChannelWiring:
     """Telegram and Lark are configured from the Settings page (channel_configs);
     a channel without a usable sender allowlist does not start."""
 
-    def test_telegram_adapter_reads_settings(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize("variable", ["MY_TG_TOKEN", "LOOPX_TELEGRAM_BOT_TOKEN"])
+    def test_telegram_adapter_reads_settings(self, monkeypatch: pytest.MonkeyPatch, variable: str) -> None:
         from looper.agents.serve import _telegram_adapter_from_config
-        monkeypatch.setenv("MY_TG_TOKEN", "token-from-env")
+        monkeypatch.setenv(variable, "token-from-env")
         adapter = _telegram_adapter_from_config(
-            {"bot_token_env": "MY_TG_TOKEN", "allowed_user_ids": ["7", "8"]}
+            {"bot_token_env": variable, "allowed_user_ids": ["7", "8"]}
         )
         assert adapter is not None
         assert adapter._bot_token == "token-from-env"

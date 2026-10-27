@@ -43,12 +43,12 @@ def session_roots() -> list[str]:
     They are computed with the resolver of the tree under test, before any test
     can monkeypatch HOME: the default runtime root of the starting HOME and of
     the account's home directory, the retired ``~/.loopx`` and ``~/.codex/loopx`` of both, and an
-    ambient LOOPER_RUNTIME_ROOT.
+    both ambient runtime-root variables.
     """
 
     if str(SOURCE_ROOT) not in sys.path:
         sys.path.insert(0, str(SOURCE_ROOT))
-    from looper.paths import configured_runtime_root, home_runtime_root
+    from looper.paths import home_runtime_root
 
     homes = [Path.home()]
     try:
@@ -59,9 +59,9 @@ def session_roots() -> list[str]:
         pass
     roots = [str(home_runtime_root(home)) for home in homes]
     roots += [root for home in homes for root in guard.legacy_home_roots(home)]
-    ambient = configured_runtime_root()
-    if ambient is not None:
-        roots.append(str(ambient))
+    for name in ("LOOPER_RUNTIME_ROOT", "LOOPX_RUNTIME_ROOT"):
+        if value := (os.environ.get(name) or "").strip():
+            roots.append(os.path.abspath(os.path.expanduser(value)))
     return roots
 
 
