@@ -2125,19 +2125,21 @@ def _root_overrun(api: Api, seen: dict[int, float]) -> float:
 
 
 def _api_session_check(database_url: str, agent: str, since: int) -> str | None:
-    """Every completed API Manager turn must have protocol metadata and neutral history in its own session."""
+    """Completed API Manager turns in its current session must have protocol metadata and neutral history."""
     import asyncpg
 
     async def read() -> str | None:
         conn = await asyncpg.connect(database_url)
         try:
-            # Earlier or interrupted turns cannot stand in for a completed turn's persisted history.
+            # Profile switches retire old API transcripts. Read the current session from agent_sessions,
+            # so a missing active transcript still fails. Earlier or interrupted items cannot fill a turn.
             rows = await conn.fetch(
                 "WITH completed AS ("
                 "SELECT r.session_id, metadata->'llm_model'->>'protocol' AS protocol, count(*) AS turns, "
                 "bool_and(EXISTS (SELECT 1 FROM api_session_items i WHERE i.session_id = r.session_id "
                 "AND i.created_at BETWEEN r.created_at AND r.finished_at)) AS has_items "
                 "FROM llm_records r WHERE agent_id = $1 AND id > $2 AND status = 'completed' "
+                "AND r.session_id = (SELECT session_id FROM agent_sessions WHERE agent_id = $1) "
                 "AND metadata->'profile'->'runtime'->>'type' = 'api' "
                 "AND NOT (metadata ? 'session_profile') "
                 "GROUP BY r.session_id, metadata->'llm_model'->>'protocol') "

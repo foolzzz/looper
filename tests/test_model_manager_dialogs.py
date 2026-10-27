@@ -37,7 +37,10 @@ class SeedApi(RegistryApi):
     ("wrong_session", "neutral session item"),
     ("stale_items", "neutral session item"),
 ])
-def test_fake_api_manager_dialog_reads_back_each_completed_turn(monkeypatch, tmp_path, mutation, problem):
+@pytest.mark.parametrize("cross_provider", [False, True])
+def test_fake_api_manager_dialog_reads_back_each_completed_turn(
+    monkeypatch, tmp_path, mutation, problem, cross_provider,
+):
     from tests.api_manager_support import _manager, _message, _replies
     from tests.fake_model_api import ResponseScript, text_events
 
@@ -54,7 +57,31 @@ def test_fake_api_manager_dialog_reads_back_each_completed_turn(monkeypatch, tmp
 
         scripts = [ResponseScript(events=text_events("First answer.")),
                    ResponseScript(events=text_events("Second answer."))]
+        if cross_provider:
+            scripts = [ResponseScript(events=text_events("Remember TEAL-42.")),
+                       ResponseScript(events=text_events("The passphrase is TEAL-42.")), *scripts]
         async with _manager(pool, tmp_path, monkeypatch, scripts) as chat:
+            if cross_provider:
+                await pool.execute("""
+                    INSERT INTO llm_providers (id, name, vendor_type, auth)
+                      SELECT 'prov-switch', 'Switch provider', vendor_type, auth FROM llm_providers
+                      WHERE id = 'prov-api-test';
+                    INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url)
+                      SELECT 'prov-switch', protocol, base_url FROM llm_provider_endpoints
+                      WHERE provider_id = 'prov-api-test';
+                    INSERT INTO llm_provider_secrets (provider_id, api_key) VALUES ('prov-switch', 'test-key');
+                    INSERT INTO llm_models (id, provider_id, name, protocol)
+                      VALUES ('model-switch', 'prov-switch', 'test-model', 'openai-responses');
+                    INSERT INTO agent_profiles (id, name, runtime_id, model_id)
+                      VALUES ('agent-switch', 'eval/switch', 'rt-api-test', 'model-switch');
+                """)
+                # /profile 0 retires the switched provider's transcript on the next model turn.
+                await chat.manager._handle(_message("/profile agent-switch", -3))
+                await chat.manager._handle(_message("Remember TEAL-42.", -2))
+                retired = await pool.fetchval("SELECT session_id FROM api_sessions")
+                assert await pool.fetchval("SELECT count(*) FROM api_session_items WHERE session_id = $1", retired)
+                await chat.manager._handle(_message("/profile 0", -1))
+                _replies(chat.bus)
             index = 0
 
             async def answer(text):
@@ -63,6 +90,14 @@ def test_fake_api_manager_dialog_reads_back_each_completed_turn(monkeypatch, tmp
                 index += 1
                 if index == 2:
                     sid = await pool.fetchval("SELECT session_id FROM api_sessions")
+                    if cross_provider:
+                        assert sid != retired
+                        assert not await pool.fetchval(
+                            "SELECT EXISTS (SELECT 1 FROM api_sessions WHERE session_id = $1)", retired)
+                        assert await pool.fetchval(
+                            "SELECT count(*) FROM llm_records WHERE session_id = $1 AND status = 'completed' "
+                            "AND NOT (metadata ? 'session_profile')",
+                            retired) == 2  # The answer and HANDOFF audit survive transcript retirement.
                     # A positive control proves the real API runtime persisted both turns.
                     assert await pool.fetchval(
                         "SELECT count(DISTINCT turn) FROM api_session_items WHERE session_id = $1", sid) == 2
