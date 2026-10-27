@@ -8,11 +8,13 @@ import asyncpg
 
 from .connection import get_pool
 from .library import _BY_NAME
+from .managers import lock_installs
 
 
 async def _lock(conn: asyncpg.Connection, manager_id: str) -> None:
     from ..agents.catalog import CatalogNotFound
 
+    await lock_installs(manager_id, conn=conn)
     row = await conn.fetchrow("SELECT deleted_at FROM managers WHERE id = $1 FOR NO KEY UPDATE", manager_id)
     if row is None or row["deleted_at"] is not None:
         raise CatalogNotFound(f"no Manager {manager_id!r}")

@@ -72,13 +72,27 @@ def test_delete_race_serializes_and_catalog_counts_cascade(monkeypatch):
             await release.wait()
         deleting = asyncio.create_task(managers.delete_manager('manager-race', before_delete=deleting_first))
         await asyncio.wait_for(locked.wait(), 5)
-        inserting = asyncio.create_task(db.put_install('manager-race', 'plugin'))
-        await asyncio.sleep(0)
-        assert not inserting.done()
-        release.set()
-        assert await asyncio.wait_for(deleting, 5) == 'deleted'
-        with pytest.raises(catalog.CatalogNotFound):
-            await asyncio.wait_for(inserting, 5)
+        async with pool.acquire() as conn:
+            pid = await conn.fetchval('SELECT pg_backend_pid()')
+            async def install():
+                async with conn.transaction():
+                    await db.put_install('manager-race', 'plugin', conn=conn)
+            inserting = asyncio.create_task(install())
+            async def wait_for_install_lock():
+                while not await pool.fetchval(
+                        "SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = $1", pid):
+                    assert not inserting.done(), 'install completed during the drain'
+                    await asyncio.sleep(0.01)
+            try:
+                # Observe an actual database lock wait before allowing the drain to finish.
+                await asyncio.wait_for(wait_for_install_lock(), 5)
+                assert not inserting.done()
+            finally:
+                release.set()
+                await asyncio.wait_for(asyncio.gather(deleting, inserting, return_exceptions=True), 5)
+            assert deleting.result() == 'deleted'
+            with pytest.raises(catalog.CatalogNotFound):
+                inserting.result()
         assert await db.list_installs('manager-beta') == []
         await service.put_install('manager-beta', 'skill')
         await service.put_install('manager', 'skill')
