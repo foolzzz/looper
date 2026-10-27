@@ -30,8 +30,10 @@ changed (``task_cost``); a provider registered without the key the user pasted
 (``provider_key``). The schedules tool: a schedule listed, disabled, and
 deleted only on the user's word (``schedules``, on a schedule made first);
 one created disabled at once, enabled only after 「启用」 and then 「确认」
-(``schedule_create``) and left disabled when the user does not confirm
-(``schedule_enable_declined``), none created without a project
+(``schedule_create``); one created from the ``pr_review`` template with that
+template, its title and the PR link in the reply (``schedule_template_create``);
+one left disabled when the user does not confirm
+(``schedule_enable_declined``); none created without a project
 (``schedule_ask_project``), one changed at once but its spend cap raised only
 on the user's word (``schedule_modify``), one read without running it, then
 run now only after 「确认」 (``schedule_run``), the schedules' default run timeout
@@ -190,6 +192,23 @@ def _seed_review_manager(api: Api, project_id: str) -> None:
     api.post("/api/v1/manager_templates/put",
              {"manager_id": f"manager-{example['manager']['key']}", "key": "pr_review",
               **example["templates"]["pr_review"], "project_id": project_id})
+
+
+def _seed_schedule_template_manager(api: Api, project_id: str) -> None:
+    example = json.loads(REVIEW_EXAMPLE.read_text(encoding="utf-8"))
+    api.post("/api/v1/managers/create", {**example["manager"], "tools": "all"})
+    api.post("/api/v1/manager_templates/put", {"manager_id": "manager-code-review", "key": "pr_review",
+             **example["templates"]["pr_review"], "project_id": project_id})
+
+
+def _template_schedule_shown(look: Look) -> str | None:
+    problem = _schedule_created_disabled(look)
+    if problem:
+        return problem
+    for value in ("pr_review", "Pull request review", TEMPLATE_PR_URL):
+        if value not in look.reply:
+            return f"the schedule configuration omits {value}"
+    return None
 
 
 def _seed_manager_capabilities(api: Api, project_id: str) -> None:
@@ -1647,6 +1666,15 @@ DIALOGS: tuple[Dialog, ...] = (
         Say("启用。", _schedule_enable_asked, (("looper_schedules", {"action": "enable", "schedule": DEPS}),)),
         Say("确认。", _schedule_enabled_on_confirmation, (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
     )),
+    Dialog("schedule_template_create", (
+        Say(f"在 {PROJECT} 项目里建一个定时任务 {DEPS}：每个工作日早上 9 点（Asia/Shanghai 时区），"
+            "使用 pr_review 模板评审这个 PR：" + TEMPLATE_PR_URL + "。目录用项目默认的，先创建停用的定时任务。",
+            _template_schedule_shown, (("looper_schedules", {"action": "create", "project": PROJECT, "fields": {
+                "name": DEPS, "cron": "0 9 * * 1-5", "timezone": "Asia/Shanghai", "requirement": "Review the PR",
+                "template_key": "pr_review", "template_inputs": {"pr_url": TEMPLATE_PR_URL}}}),)),
+        Say("启用。", _schedule_enable_asked, (("looper_schedules", {"action": "enable", "schedule": DEPS}),)),
+        Say("确认。", _schedule_enabled_on_confirmation, (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
+    ), seed=_seed_schedule_template_manager, manager="code-review", tags=("manager", "schedules", "templates")),
     Dialog("scheduler_settings", (
         Say("所有定时任务默认的运行超时改成 30 分钟。", _default_timeout_change_asked,
             (("looper_settings", {"action": "scheduler", "scheduler": {"run_timeout_seconds": 1800}}),)),
