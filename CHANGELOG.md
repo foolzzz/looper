@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.162] - 2026-10-27
+
+### Added
+
+- **Core runner wire contract.** Defines the typed JSON-RPC messages and bounded line-feed framing (protocol 0.1) for agent SDK runners in `looper/agents/runtimes/runner/protocol.py`, with a JSON Schema and shared vectors under `runners/protocol/`. Nothing in Looper calls it yet; the only dependency added is `jsonschema` in the `test` extra. ([#740](https://github.com/foolzzz/looper/pull/740))
+
 ## [2.13.161] - 2026-10-27
 
 ### Changed
