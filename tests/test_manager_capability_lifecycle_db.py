@@ -20,13 +20,15 @@ from tests.fake_claude import fake_claude
 
 
 @asynccontextmanager
-async def lifecycle(root, *, quiescent=True):
-    binary = fake_claude(root / 'resident', f'BACKGROUND = {not quiescent!r}\n' + '''import json, sys
+async def lifecycle(root, *, quiescent=True, background_events=None):
+    if background_events is None:
+        background_events = [] if quiescent else [{'type':'system','subtype':'task_started','task_id':'example-job'}]
+    binary = fake_claude(root / 'resident', f'BACKGROUND_EVENTS = {background_events!r}\n' + '''import json, sys
 for line in sys.stdin:
     print(json.dumps({'type':'command_lifecycle','command_uuid':json.loads(line)['uuid'],'state':'started'}), flush=True)
     print(json.dumps({'type':'system','subtype':'init','session_id':'example-session'}), flush=True)
-    if BACKGROUND:
-        print(json.dumps({'type':'system','subtype':'task_started','task_id':'example-job'}), flush=True)
+    for event in BACKGROUND_EVENTS:
+        print(json.dumps(event), flush=True)
     print(json.dumps({'type':'result','subtype':'success','is_error':False,
                       'session_id':'example-session','result':'Reply.'}), flush=True)
 ''')
@@ -91,6 +93,46 @@ def test_pending_capabilities_repeat_until_reset_and_records_keep_actual_launch(
                     assert '/new' not in await ask()
                 assert (agent._process.launch.library.sha256 != initial) is installing
     run_db(check, monkeypatch, timeout=45)
+
+
+@pytest.mark.parametrize('background_events', [
+    pytest.param([{'type':'system','subtype':'task_started','task_id':'example-job'}], id='tracked-job'),
+    pytest.param([{'type':'assistant','message':{'content':[{
+        'type':'tool_use','id':'example-tool','name':'Bash','input':{'run_in_background':True}}]}}],
+        id='untracked-launch'),
+    pytest.param([{'type':'system','subtype':'task_started'}], id='unknown-job-state'),
+    pytest.param([], id='idle'),
+])
+def test_public_delete_requires_runtime_quiescence_after_reply(tmp_path, monkeypatch, background_events):
+    async def check(pool):
+        async with lifecycle(tmp_path, background_events=background_events) as (agent, fleet, bus, server):
+            agent.ops = None  # Exercise the resident without invoking model tools.
+            await bus.publish(message(agent))
+            await until(lambda: agent._handling is None and not agent._turns.live())
+            replies = [e for e in bus.get_queue('channel-web')._queue
+                       if e.message_type == MessageType.AGENT_REPLY]
+            assert len(replies) == 1 and replies[0].payload['text'] == 'Reply.'
+            assert not agent.busy and bus.pending_count(agent.agent_id) == 0
+            resident, pid, ops = agent._claude, agent._claude.pid, fleet.ops(agent.agent_id)
+            session = await pool.fetchrow('SELECT * FROM agent_sessions WHERE agent_id=$1', agent.agent_id)
+            assert session is not None and pid is not None
+
+            status, _ = await call_v1(server, '/api/v1/managers/delete', {'manager_id':agent.agent_id})
+            if not background_events:
+                assert status == 200
+                assert fleet.get(agent.agent_id) is None and not resident.started
+            else:
+                assert status == 409
+                assert fleet.get(agent.agent_id) is agent and agent.is_healthy()
+                assert resident.started and resident.pid == pid
+                assert fleet.ops(agent.agent_id) is ops and ops.authorized('Bearer ' + ops._token)
+                assert await pool.fetchval('SELECT deleted_at FROM managers WHERE id=$1', agent.agent_id) is None
+                assert await pool.fetchrow('SELECT * FROM agent_sessions WHERE agent_id=$1', agent.agent_id) == session
+                await bus.publish(message(agent, 'continue'))
+                await until(lambda: len([e for e in bus.get_queue('channel-web')._queue
+                                        if e.message_type == MessageType.AGENT_REPLY]) == 2)
+                assert resident.pid == pid
+    run_db(check, monkeypatch, timeout=20)
 
 
 @pytest.mark.parametrize('phase', ['preparing', 'executing', 'disconnected'])

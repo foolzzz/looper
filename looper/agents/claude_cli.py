@@ -1087,6 +1087,12 @@ class ResidentClaude:
             return None
         return await asyncio.shield(task)
 
+    @property
+    def idle(self) -> bool:
+        return bool(not self._idle_stopping and self._process is not None
+                    and self._output is not None and self._output.idle
+                    and self._user_turn is None and not self._ending and self._interrupting is None)
+
     async def try_stop_if_idle(self) -> bool:
         """Claim and close a quiescent process without disturbing its session totals.
 
@@ -1095,9 +1101,7 @@ class ResidentClaude:
         write to a closing pipe. Failed cleanup keeps the original resident
         state available for retry (or stale-process recovery on the next turn).
         """
-        output = self._output
-        if (self._idle_stopping or self._process is None or output is None or not output.idle
-                or self._user_turn is not None or self._ending or self._interrupting is not None):
+        if not self.idle:
             return False
         self._idle_stopping = True
         resident = self._process, self._output, self._command, self._signature, self._tree

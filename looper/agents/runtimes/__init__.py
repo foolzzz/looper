@@ -246,6 +246,10 @@ class ResidentSession(Protocol):
     @property
     def started(self) -> bool: ...
     @property
+    def idle(self) -> bool:
+        """Whether the runtime can prove that no turn or background work remains."""
+        return False
+    @property
     def command(self) -> list[str]: ...
     @property
     def pid(self) -> int | None: ...

@@ -721,7 +721,10 @@ def test_delete_finishes_when_turn_cleanup_blocks(tmp_path, monkeypatch, caplog,
         await agent_sessions.save_session(review, "review-session", {}, runtime_type="api")
         entered, cancelled, release, finished = (asyncio.Event() for _ in range(4))
         late_append_refused = []
-        monkeypatch.setattr(manager_module, "STOP_DRAIN_SEC", 0.05)
+        if blocked_on == "cancellation":
+            # Only this case tests the drain timeout. Database cleanup can take more than 50 ms;
+            # the lock cases already require deletion to finish within one second below.
+            monkeypatch.setattr(manager_module, "STOP_DRAIN_SEC", 0.05)
         async with rig(tmp_path) as r:
             agent = r.fleet.get(review)
 
@@ -869,7 +872,8 @@ def test_deletion_while_replying_handles_in_flight_and_queued_messages(tmp_path,
                 agent = r.fleet.get(review)
                 first, queued = _user(review, n=1), _user(review, n=2)
                 await r.bus.publish(first)
-                await asyncio.wait_for(scripts[0].gate_reached.wait(), 10)
+                # The SDK starts lazily; run_db bounds startup and both turns together.
+                await scripts[0].gate_reached.wait()
                 token = agent.turn_for(first.message_id)
                 await r.bus.publish(queued)
                 queue = r.bus.get_queue(review)

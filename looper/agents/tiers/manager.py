@@ -956,8 +956,9 @@ class ManagerAgent:
 
     @property
     def deletion_blocked(self) -> bool:
-        """Include preparation, queued messages and resets, even before the turn lock is taken."""
-        return self._idle_blocked() or self._lifecycle_gate.locked()
+        """Include runtime background work as well as preparation, queued messages and resets."""
+        return (self._idle_blocked() or self._lifecycle_gate.locked()
+                or (self._claude.started and not getattr(self._claude, "idle", False)))
 
     async def try_suspend_idle(self, now: float) -> bool:
         """Close only a provably idle resident, retaining the enabled agent and its complete session state."""
