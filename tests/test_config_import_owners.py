@@ -13,7 +13,7 @@ from looper.agents.ops.service import Platform
 from tests.test_api_v1_auth import CLIENT_TOKEN, _bearer, _send, _serving, clients
 from tests.test_operator_auth import TOKEN
 
-DOCUMENT = {"format": "looper-config/v3"}
+DOCUMENT = {"format": "looper-config/v4"}
 
 
 @pytest.fixture

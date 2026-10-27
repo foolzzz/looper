@@ -9,7 +9,7 @@ from .global_settings import _operation
 
 SCHEDULER_SETTING = _object({
     "value": {"type": ["integer", "null"]},
-    "source": {"type": "string", "enum": ["setting", "env", "built-in"]},
+    "source": {"type": "string", "enum": ["setting", "built-in"]},
     "built_in": {"type": ["integer", "null"]}, "minimum": _INT, "maximum": _INT,
 }, ["value", "source", "built_in", "minimum"], closed=True)
 SCHEDULER_SETTINGS = _object({

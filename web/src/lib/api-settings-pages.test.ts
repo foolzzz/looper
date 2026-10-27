@@ -5,7 +5,7 @@ import { fetchSchedulerSettings, updateSchedulerSettings, getWaitSettings, updat
 import { installSessionGuard, resetSessionGuard, SessionEndedError } from "@/lib/session";
 
 const scheduler = {
-  min_interval_seconds: { value: 120, source: "env", built_in: 300, minimum: 1, gated_value: 60 },
+  min_interval_seconds: { value: 300, source: "built-in", built_in: 300, minimum: 1, gated_value: 60 },
   run_timeout_seconds: { value: null, source: "built-in", built_in: null, minimum: 1, maximum: 2592000 },
 };
 const waits = {

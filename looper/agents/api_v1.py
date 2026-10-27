@@ -203,28 +203,14 @@ _CONFIG_PROPERTIES = {
     "format": _STR, "looper_version": _STR, "exported_at": _STR, "secrets": _STR,
     "runtimes": _array(), "providers": _array(), "models": _array(), "profiles": _array(),
     "settings": _OBJ, "channels": _array(), "catalog": _array(), "installs": _array(), "projects": _array(),
-    "loopx_version": _STR,
 }
-CONFIG_DOCUMENT_VERSIONS = [
-    _object({**_CONFIG_PROPERTIES, "format": {"enum": ["looper-config/v1", "loopx-config/v1"]},
-             "agents": _array()}, ["format"], closed=True),
-    _object({**_CONFIG_PROPERTIES, "format": {"const": "looper-config/v2"}}, ["format"], closed=True),
-    _object({**_CONFIG_PROPERTIES, "format": {"const": "looper-config/v3"}}, ["format"], closed=True),
-    _object({**_CONFIG_PROPERTIES, "format": {"const": "looper-config/v4"},
-             "managers": _array(MANAGER_CONFIG), "channels": _array(BOT_CONFIG)}, ["format"], closed=True),
-]
-# Keep properties available to legacy schema consumers and generated CLI flags.
-CONFIG_DOCUMENT = {**_object({**_CONFIG_PROPERTIES, "agents": _array(),
-                             "managers": _array(MANAGER_CONFIG)}, ["format"], closed=True),
-                   "oneOf": CONFIG_DOCUMENT_VERSIONS}
+CONFIG_DOCUMENT = _object({**_CONFIG_PROPERTIES, "format": {**_STR, "const": "looper-config/v4"},
+                           "managers": _array(MANAGER_CONFIG), "channels": _array(BOT_CONFIG)},
+                          ["format"], closed=True)
 # Imports may overlay an existing template; exports still require its complete identity.
 _IMPORT_MANAGERS = _array(_manager_config({**TEMPLATE_CONFIG, "required": ["key"]}))
 CONFIG_IMPORT_DOCUMENT = {
     **CONFIG_DOCUMENT, "properties": {**CONFIG_DOCUMENT["properties"], "managers": _IMPORT_MANAGERS},
-    "oneOf": [*CONFIG_DOCUMENT_VERSIONS[:-1], {
-        **CONFIG_DOCUMENT_VERSIONS[-1],
-        "properties": {**CONFIG_DOCUMENT_VERSIONS[-1]["properties"], "managers": _IMPORT_MANAGERS},
-    }],
 }
 
 RESULTS: dict[str, dict[str, Any]] = {

@@ -25,7 +25,7 @@ def test_export_json_envelope_and_stream_failure(tmp_path, monkeypatch, caplog, 
     async def chunks(conn, **kwargs):
         if failure == "before":
             raise RuntimeError("snapshot failed")
-        yield '{"format":"looper-config/v3","catalog":['
+        yield '{"format":"looper-config/v4","catalog":['
         if failure == "after":
             raise RuntimeError("catalog failed")
         yield '{"name":"portable","files":[]}]}'
@@ -56,9 +56,9 @@ def test_export_json_envelope_and_stream_failure(tmp_path, monkeypatch, caplog, 
 
 
 @pytest.mark.parametrize(("body", "headers"), [
-    ('{"format":"looper-config/v3"}', {"Content-Type": "text/plain"}),
-    ('{"format":"looper-config/v3","runtime_root":"somewhere"}', {}),
-    ('{"format":"looper-config/v3"}', {"Content-Length": "1000"}),
+    ('{"format":"looper-config/v4"}', {"Content-Type": "text/plain"}),
+    ('{"format":"looper-config/v4","runtime_root":"somewhere"}', {}),
+    ('{"format":"looper-config/v4"}', {"Content-Length": "1000"}),
 ])
 def test_upload_refusals_are_typed_and_remove_private_files(tmp_path, body, headers):
     async def run():
@@ -82,12 +82,12 @@ def test_upload_refusals_are_typed_and_remove_private_files(tmp_path, body, head
 
 
 @pytest.mark.parametrize(("action", "flags", "body"), [
-    ("import-upload", ["--format", "looper-config/v3", "--catalog", '[{"name":"portable"}]'],
-     {"format": "looper-config/v3", "catalog": [{"name": "portable"}]}),
+    ("import-upload", ["--format", "looper-config/v4", "--catalog", '[{"name":"portable"}]'],
+     {"format": "looper-config/v4", "catalog": [{"name": "portable"}]}),
     ("import-cancel", ["--import-id", "cfgimp-example"], {"import_id": "cfgimp-example"}),
     ("import-apply", ["--import-id", "cfgimp-example"], {"import_id": "cfgimp-example"}),
-    ("import-preview", ["--document", '{"format":"looper-config/v3"}'],
-     {"document": {"format": "looper-config/v3"}}),
+    ("import-preview", ["--document", '{"format":"looper-config/v4"}'],
+     {"document": {"format": "looper-config/v4"}}),
 ])
 def test_generated_configuration_commands_use_raw_json(action, flags, body):
     document = api_v1.document()
@@ -114,10 +114,10 @@ def test_cli_cancels_its_uploaded_import_over_http(tmp_path, monkeypatch, capsys
             argv = ["--client-file", str(client), "--json", "config"]
             try:
                 assert await asyncio.to_thread(loopercli.main, [*argv, "import-upload", "--format",
-                                                                "looper-config/v3"]) == 0
+                                                                "looper-config/v4"]) == 0
                 import_id = json.loads(capsys.readouterr().out)["result"]["import_id"]
                 staged = tmp_path / config_imports.DIRNAME / f"{import_id}.json"
-                assert json.loads(staged.read_text()) == {"format": "looper-config/v3"}
+                assert json.loads(staged.read_text()) == {"format": "looper-config/v4"}
                 cancel = [*argv, "import-cancel", "--import-id", import_id]
                 assert await asyncio.to_thread(loopercli.main, cancel) == 0
                 assert json.loads(capsys.readouterr().out)["result"] == {"deleted": import_id}
@@ -140,11 +140,11 @@ def test_removed_import_routes_have_successful_v1_controls(tmp_path, monkeypatch
         async with _serving(tmp_path) as server:
             server._client_ops = ClientOps(SimpleNamespace())
             status, _, staged = await _send(server, "POST /api/v1/config/import_upload", _bearer(TOKEN),
-                                              '{"format":"looper-config/v3"}')
+                                              '{"format":"looper-config/v4"}')
             assert status == 200
             import_id = staged["result"]["import_id"]
             if action == "upload":
-                method, old, body = "POST", "/api/config/imports", '{"format":"looper-config/v3"}'
+                method, old, body = "POST", "/api/config/imports", '{"format":"looper-config/v4"}'
             else:
                 status, _, result = await _send(server, f"POST /api/v1/config/import_{action}", _bearer(TOKEN),
                                                 json.dumps({"import_id": import_id}))

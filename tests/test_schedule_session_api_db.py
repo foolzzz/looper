@@ -138,7 +138,7 @@ def test_configuration_export_excludes_session_state_and_import_skips_unknown_se
             for column in SESSION_COLUMNS:
                 name = "invalid-" + column
                 async with conn.transaction():
-                    plan = await import_config(conn, {"format": "looper-config/v2", "projects": [
+                    plan = await import_config(conn, {"format": "looper-config/v4", "projects": [
                         {"name": "calc", "schedules": [{**entry, "name": name, column: "untrusted"}]}]}, apply=True)
                 changes = [change for change in plan.changes if change.section == "project.schedules"]
                 assert len(changes) == 1

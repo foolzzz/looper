@@ -1180,8 +1180,8 @@ export type ScheduleUpdate = Partial<ScheduleFields> & { enabled?: boolean };
 export interface SchedulerSetting {
   /** Null: no limit (the run timeout's built-in). */
   value: number | null;
-  /** "setting" (saved in Settings), "env" (the deprecated variable) or "built-in". */
-  source: "setting" | "env" | "built-in";
+  /** "setting" (saved in Settings) or "built-in". */
+  source: "setting" | "built-in";
   built_in: number | null;
   minimum: number;
   maximum?: number;

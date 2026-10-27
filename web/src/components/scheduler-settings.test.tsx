@@ -38,7 +38,7 @@ describe("Settings → Scheduler", () => {
         if (body.min_interval_seconds === 0) return Response.json({ status: "error", error: { code: "invalid", message: "bad value" } }, { status: 400 });
         return Response.json({ status: "ok", result: view(body.min_interval_seconds ?? 120, "setting") });
       }
-      if (String(_url) === "/api/v1/scheduler_settings/get") return Response.json({ status: "ok", result: view(120, "env") });
+      if (String(_url) === "/api/v1/scheduler_settings/get") return Response.json({ status: "ok", result: view(300, "built-in") });
       throw new Error(`Unexpected request: ${_url}`);
     }));
     container = document.createElement("div");
@@ -63,8 +63,7 @@ describe("Settings → Scheduler", () => {
     await act(async () => root.render(<SchedulerSection />));
     await flush();
     const inputs = container.querySelectorAll("input");
-    expect((inputs[0] as HTMLInputElement).value).toBe("120");
-    expect(container.textContent).toContain("deprecated LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS");
+    expect((inputs[0] as HTMLInputElement).value).toBe("300");
     expect(container.textContent).toContain("Built-in value");
     const save = container.querySelector("button[type=submit]") as HTMLButtonElement;
     expect(save.disabled).toBe(true);

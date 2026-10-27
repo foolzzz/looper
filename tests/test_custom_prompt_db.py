@@ -1,4 +1,4 @@
-"""Custom profile text survives registry writes, imports and effort conversion."""
+"""Custom profile text survives registry writes, current configuration imports."""
 
 from __future__ import annotations
 
@@ -50,12 +50,11 @@ def test_custom_prompt_bad_values_return_400(monkeypatch: pytest.MonkeyPatch, va
     run_db(run, monkeypatch)
 
 
-def test_custom_prompt_config_round_trip_legacy_and_derived(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_custom_prompt_config_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.agents.config_transfer import Action, export_chunks, import_config
 
     async def run(pool: Any) -> None:
         profile = await _profile("custom", custom_prompt="CUSTOM")
-        await _profile("plain-high", effort="high")
         async with pool.acquire() as conn:
             document = json.loads("".join([chunk async for chunk in export_chunks(
                 conn, include_projects=False, include_secrets=False)]))
@@ -63,18 +62,12 @@ def test_custom_prompt_config_round_trip_legacy_and_derived(monkeypatch: pytest.
             assert exported["custom_prompt"] == "CUSTOM"
             await conn.execute("DELETE FROM agent_profiles WHERE id = $1", profile["profile_id"])
             async with conn.transaction():
-                plan = await import_config(conn, {"profiles": [exported]}, apply=True)
+                plan = await import_config(conn, {"format": "looper-config/v4", "profiles": [exported]}, apply=True)
             assert next(c for c in plan.changes if c.key == "custom").action is Action.ADDED
             assert await conn.fetchval("SELECT custom_prompt FROM agent_profiles WHERE name = 'custom'") == "CUSTOM"
+            omitted = {k: v for k, v in exported.items() if k != "custom_prompt"}
             async with conn.transaction():
-                await import_config(conn, {"settings": {"layers": [
-                    {"scope": "system", "profile": "custom", "effort": "high"}]}}, apply=True)
-            row = await conn.fetchrow("SELECT a.name, a.effort, a.custom_prompt FROM agent_profiles a "
-                                      "JOIN agent_setting_layers l ON l.profile_id = a.id WHERE l.scope = 'system'")
-            assert dict(row) == {"name": "custom · high", "effort": "high", "custom_prompt": "CUSTOM"}
-            legacy = {k: v for k, v in exported.items() if k != "custom_prompt"}
-            async with conn.transaction():
-                await import_config(conn, {"profiles": [legacy]}, apply=True)
+                await import_config(conn, {"format": "looper-config/v4", "profiles": [omitted]}, apply=True)
             assert await conn.fetchval("SELECT custom_prompt FROM agent_profiles WHERE name = 'custom'") == ""
 
     run_db(run, monkeypatch)

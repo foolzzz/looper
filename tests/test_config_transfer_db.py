@@ -27,13 +27,13 @@ ROLES = ("manager", "planner", "worker", "reviewer")
 
 
 def _documented_v3() -> dict[str, Any]:
-    """Execute the portable example operators copy from the architecture guide."""
-    import re
-
-    doc = (Path(__file__).resolve().parents[1] / "docs/architecture/agent-system.md").read_text()
-    section = doc.split("### Moving the configuration: export and import", 1)[1].split("\n### ", 1)[0]
-    examples = [json.loads(block) for block in re.findall(r"```json\n(.*?)\n```", section, re.S)]
-    return next(example for example in examples if example.get("format") == "looper-config/v3")
+    """Explicit current data until the documentation card updates the architecture example."""
+    return {"format": "looper-config/v4", "providers": [{
+        "name": "Example account", "vendor_type": "custom", "auth": "api_key",
+        "endpoints": {"anthropic-messages": {"base_url": "https://example.invalid"}},
+    }], "models": [{"provider": "Example account", "name": "exact-model", "protocol": "anthropic-messages"}],
+        "profiles": [{"name": "Example profile", "runtime": "claude-code", "model": {
+            "provider": "Example account", "name": "exact-model", "protocol": "anthropic-messages"}}]}
 
 
 def test_documented_v3_example_previews_applies_and_reads_back(monkeypatch, tmp_path):
@@ -69,7 +69,7 @@ def test_documented_v3_example_previews_applies_and_reads_back(monkeypatch, tmp_
             code, _, err = await _transfer_file(url, "export", str(exported))
             assert code == 0, err
             saved = json.loads(exported.read_text())
-            assert saved["format"] == "looper-config/v3"
+            assert saved["format"] == "looper-config/v4"
             assert saved["profiles"][0]["model"] == data["profiles"][0]["model"]
             code, out, err = await _transfer_file(url, "import", str(path), json_output=True)
             assert code == 0, err
@@ -155,12 +155,7 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
     _serve(monkeypatch, pool)
     await seed_role_configs(pool)
     await seed_channel_configs(pool)
-    # Runtimes, providers and Agent Profiles: a runtime registered by hand before runtimes were built in, a
-    # provider with an API key and a model catalog, and profiles on the built-in and the registered pieces.
-    beta = "rt-custom-beta"
-    await pool.execute("INSERT INTO agent_runtimes (id, name, type, executable, capabilities) "
-                       "VALUES ($1, 'claude-beta', 'claude-code', 'claude-beta', $2)", beta,
-                       ["resident_session", "resume", "run"])
+    # Providers use current protocol endpoints and profiles select seeded model ids.
     await _ok("POST", "/api/v1/provider_accounts/create", {"name": "anthropic-key", "vendor_type": "custom",
                                          "api_key": SECRET, "endpoints": [
                                              {"protocol": "anthropic-messages", "base_url": "https://api.example.test"}]})
@@ -176,7 +171,7 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
     sonnet = (await _ok("POST", "/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
                                                 "model_id": sonnet_model, "effort": "high", "agent_teams": True}))["profile"][
         "profile_id"]
-    beta_haiku = (await _ok("POST", "/api/agent-profiles", {"name": "beta-haiku", "runtime_id": beta,
+    beta_haiku = (await _ok("POST", "/api/agent-profiles", {"name": "beta-haiku", "runtime_id": "rt-claude-code",
                                                     "model_id": haiku_model,
                                                             "effort": "low"}))["profile"]["profile_id"]
     await _ok("PUT", "/api/agent-settings/system", {"harness_prompt": "Be careful.", "profile_id": sonnet,
@@ -356,15 +351,6 @@ async def _rows(pool: Any) -> dict[str, list[Any]]:
         return {t: sorted(map(repr, map(tuple, await conn.fetch(f"SELECT * FROM {t}")))) for t in tables}
 
 
-def _replaced(value: Any, old: str, new: str) -> Any:
-    """``value`` with every string ``old`` in it (not a key) replaced by ``new``."""
-    if isinstance(value, dict):
-        return {k: _replaced(v, old, new) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return type(value)(_replaced(v, old, new) for v in value)
-    return new if value == old else value
-
-
 def _by_name(entries: list[dict[str, Any]], name: str) -> dict[str, Any]:
     return next(e for e in entries if e["name"] == name)
 
@@ -392,7 +378,7 @@ def test_configuration_export_excludes_api_session_state(tmp_path: Path) -> None
             code, _, err = await _transfer_file(url, "export", str(exported), include_projects=True)
             assert code == 0, err
             raw = exported.read_text()
-            assert json.loads(raw)["format"] == "looper-config/v3"
+            assert json.loads(raw)["format"] == "looper-config/v4"
             assert all(value not in raw for value in (
                 "api_sessions", "api_session_items", "runtime-only-session", "runtime-only-model", "runtime-only-history"))
 
@@ -418,28 +404,21 @@ def test_a_round_trip_into_a_new_database_reproduces_the_configuration(
             assert not [c for c in plan["changes"] if c["action"] == "skipped"], plan
 
             # Agents resolve the same settings and load the same items; only the projects' and the schedules'
-            # directories stay behind, the schedules come in disabled, and the profile on the custom runtime runs on
-            # the built-in runtime of its type.
+            # directories stay behind and the schedules come in disabled.
             before, after = await _state(source), await _state(target)
             before["projects"]["calc"]["work_dir"] = ""
             for schedule in before["schedules"].values():
                 schedule.update(work_dir="", enabled=False, created_via="import")
-            before["runtimes"] = [r for r in before["runtimes"] if r["name"] != "claude-beta"]
-            assert after == _replaced(before, "claude-beta", "claude-code")
-            assert after["schedules"][("calc", "nightly")]["notify_chat"] == "123456789"  # the file's allowlist lets it
-            assert plan["notes"][0] == ("runtime claude-beta: runtimes are built in; its Agent Profiles run on the "
-                                        "built-in claude-code runtime here")
+            assert after == before
+            assert after["schedules"][("calc", "nightly")]["notify_chat"] == "123456789"
             assert [n.split(":")[0] for n in plan["notes"]] == [
-                "runtime claude-beta", "project calc",
-                "2 schedule(s) come in disabled (calc / nightly, calc / weekly)", "calc / nightly"]
+                "project calc", "2 schedule(s) come in disabled (calc / nightly, calc / weekly)", "calc / nightly"]
 
-            # Exporting the new installation gives the same file, but for the runtime.
+            # Exporting the new installation gives the same portable configuration.
             again = tmp_path / "again.json"
             assert (await _transfer_file(target_url, "export", str(again), include_projects=True, include_secrets=True))[0] == 0
             first = _without_time(exported)
-            assert first["runtimes"] == [{"name": "claude-beta", "type": "claude-code", "executable": "claude-beta"}]
-            first["runtimes"] = []
-            _by_name(first["profiles"], "beta-haiku")["runtime"] = "claude-code"
+            assert first["runtimes"] == []
             # Here the schedule runs in its project's directory: it has none of its own to re-point.
             assert _by_name(_by_name(first["projects"], "calc")["schedules"], "nightly").pop("repoint") is True
             assert _without_time(again) == first
@@ -671,93 +650,6 @@ def test_the_settings_download_streams_the_same_file(monkeypatch: pytest.MonkeyP
     asyncio.run(_test())
 
 
-def test_a_file_from_before_profiles_selects_the_profile_of_each_model(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    """A file exported before Agent Profiles, and before the rename to Looper (``loopx-config/v1``), still imports;
-    its layers' effort moves onto profiles as the upgrade moves it."""
-    async def _test() -> None:
-        async with _installation(schema=False) as (target, target_url):
-            old = tmp_path / "old.json"
-            old.write_text(json.dumps({"format": "loopx-config/v1", "settings": {"layers": [
-                {"scope": "system", "harness_prompt": None, "model": "haiku", "effort": "low", "env": [],
-                 "run_budget_usd": None},
-                {"scope": "role", "role": "manager", "harness_prompt": None, "model": "opus", "effort": None,
-                 "env": [], "run_budget_usd": None}]}}))
-
-            code, out, err = await _transfer_file(target_url, "import", str(old), apply=True, json_output=True)
-
-            assert code == 0, err
-            plan = _plan(out)
-            # The system effort applied to the Manager's opus too: each runs its model with effort low.
-            assert [(c["section"], c["key"], c["action"]) for c in plan["changes"]] == [
-                ("profiles", "claude-code/haiku", "added"), ("profiles", "claude-code/haiku · low", "added"),
-                ("profiles", "claude-code/opus · low", "added"), ("settings.layers", "system", "added"),
-                ("settings.layers", "role:manager", "added")]
-            assert [n for n in plan["notes"] if "effort" in n] == [
-                "profiles claude-code/haiku · low: added, claude-code/haiku with effort low, for the effort the "
-                "file's layers set (the effort is the Agent Profile's now)",
-                "profiles claude-code/opus · low: added, claude-code/opus with effort low, for the effort the file's "
-                "layers set (the effort is the Agent Profile's now)",
-                "settings.layers system: its effort low is the Agent Profile's now: the layer selects "
-                "claude-code/haiku · low",
-                "settings.layers role:manager: selects claude-code/opus · low, so its roles keep the effort the "
-                "file's layers give them (the effort is the Agent Profile's now)"]
-            from looper.db import config_transfer as db
-
-            async with target.acquire() as conn:
-                layers = {r["scope"]: r["profile"] for r in await db.read_layers(conn)}
-                profiles = {r["name"]: (r["model"], r["effort"]) for r in await db.read_profiles(conn)}
-            assert layers == {"system": "claude-code/haiku · low", "role": "claude-code/opus · low"}
-            assert profiles == {"claude-code/opus": ("opus", None), "claude-code/haiku": ("haiku", None),
-                                "claude-code/haiku · low": ("haiku", "low"), "claude-code/opus · low": ("opus", "low")}
-
-            # Imported again, the file finds the profiles it took and changes nothing.
-            code, out, err = await _transfer_file(target_url, "import", str(old), json_output=True)
-            assert code == 0, err
-            assert _plan(out)["changes"] == []
-
-    asyncio.run(_test())
-
-
-def test_a_runtime_of_the_file_maps_to_the_built_in_runtime_of_its_type_or_is_skipped(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    """Runtimes are built in: an import adds none, and a profile on a runtime of a type not on this machine
-    waits."""
-    async def _test() -> None:
-        async with _installation() as (target, target_url):
-            old = tmp_path / "old.json"
-            old.write_text(json.dumps({"format": "looper-config/v2", "runtimes": [
-                {"name": "claude-beta", "type": "claude-code", "executable": "/opt/claude-beta/bin/claude"},
-                {"name": "codex-local", "type": "codex", "executable": ""}],
-                "providers": [{"name": "cpa", "protocols": ["openai-responses"], "auth": "api_key",
-                               "oauth_runtime_type": None, "base_url": "http://127.0.0.1:8317/v1", "models": [],
-                               "env": [], "max_concurrency": None, "api_key": None}],
-                "profiles": [{"name": "beta/haiku", "runtime": "claude-beta", "provider": "claude-subscription",
-                              "model": "haiku", "effort": None},
-                             {"name": "codex/gpt", "runtime": "codex-local", "provider": "cpa", "model": "gpt-5.5",
-                              "effort": None}]}))
-            before = await target.fetch("SELECT id FROM agent_runtimes")
-
-            code, out, err = await _transfer_file(target_url, "import", str(old), apply=True, json_output=True)
-
-            assert code == 0, err
-            plan = _plan(out)
-            changes = {(c["section"], c["key"]): (c["action"], c.get("reason", "")) for c in plan["changes"]}
-            assert changes[("runtimes", "codex-local")][0] == "skipped"
-            assert "Codex (codex) is not on this machine" in changes[("runtimes", "codex-local")][1]
-            assert changes[("profiles", "codex/gpt")] == ("skipped", "no runtime 'codex-local' here or in the file")
-            assert changes[("profiles", "beta/haiku")][0] == "added"
-            assert ("runtimes", "claude-beta") not in changes
-            assert "runtime claude-beta: runtimes are built in" in plan["notes"][0]
-            assert await target.fetch("SELECT id FROM agent_runtimes") == before
-            assert await target.fetchval("SELECT runtime_id FROM agent_profiles WHERE name = 'beta/haiku'") \
-                == "rt-claude-code"
-
-    asyncio.run(_test())
-
-
 def test_a_profile_without_agent_teams_imports_with_its_runtimes_default_and_another_runtime_cannot_have_them(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -773,15 +665,16 @@ def test_a_profile_without_agent_teams_imports_with_its_runtimes_default_and_ano
             await target.execute("INSERT INTO agent_runtimes (id, name, type, capabilities, builtin) "
                                  "VALUES ('rt-codex', 'codex', 'codex', $1, true)", ["resident_session", "resume", "run"])
             path = tmp_path / "config.json"
-            path.write_text(json.dumps({"format": "looper-config/v2", "providers": [
-                {"name": "cpa", "protocols": ["openai-responses"], "auth": "api_key", "oauth_runtime_type": None,
-                 "base_url": "http://127.0.0.1:8317/v1", "models": [], "env": [], "max_concurrency": None,
-                 "api_key": None}],
-                "profiles": [{"name": "cc/off", "runtime": "claude-code", "provider": "claude-subscription",
-                              "model": "sonnet", "effort": None},
-                             {"name": "codex/gpt", "runtime": "codex", "provider": "cpa", "model": "gpt-5.5",
+            path.write_text(json.dumps({"format": "looper-config/v4", "providers": [
+                {"name": "cpa", "vendor_type": "custom", "auth": "api_key", "oauth_runtime_type": None,
+                 "endpoints": {"openai-responses": {"base_url": "https://example.invalid/v1"}},
+                 "env": [], "max_concurrency": None, "api_key": None}],
+                "models": [{"provider": "cpa", "name": "gpt-5.5", "protocol": "openai-responses"}],
+                "profiles": [{"name": "cc/off", "runtime": "claude-code", "model": {"provider": "claude-subscription",
+                              "name": "sonnet", "protocol": "anthropic-messages"}, "effort": None},
+                             {"name": "codex/gpt", "runtime": "codex", "model": {"provider": "cpa", "name": "gpt-5.5", "protocol": "openai-responses"},
                               "effort": None},
-                             {"name": "codex/teams", "runtime": "codex", "provider": "cpa", "model": "gpt-5.5",
+                             {"name": "codex/teams", "runtime": "codex", "model": {"provider": "cpa", "name": "gpt-5.5", "protocol": "openai-responses"},
                               "effort": None, "agent_teams": True}]}))
 
             code, out, err = await _transfer_file(target_url, "import", str(path), apply=True, json_output=True)
@@ -794,183 +687,8 @@ def test_a_profile_without_agent_teams_imports_with_its_runtimes_default_and_ano
             assert changes[("profiles", "codex/gpt")]["action"] == "added"
             assert changes[("profiles", "codex/teams")]["action"] == "skipped"
             assert "agent teams are a Claude Code feature" in changes[("profiles", "codex/teams")]["reason"]
-            assert changes[("profiles", "codex/teams")]["code"] == "invalid_legacy_value"
             rows = await target.fetch("SELECT name, agent_teams FROM agent_profiles WHERE NOT builtin")
             assert {r["name"]: r["agent_teams"] for r in rows} == {"cc/off": True, "codex/gpt": False}
-
-    asyncio.run(_test())
-
-
-def test_a_layers_agent_teams_variable_is_left_out_with_a_note_and_the_rest_imports(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    async def _test() -> None:
-        async with _installation() as (target, target_url):
-            path = tmp_path / "config.json"
-            path.write_text(json.dumps({"format": "looper-config/v2", "settings": {"layers": [
-                {"scope": "system", "role": None, "harness_prompt": None, "profile": None, "effort": "high",
-                 "env": [{"key": "LANG", "value": "C"}, {"key": "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "value": "1"}],
-                 "run_budget_usd": None, "max_concurrency": None}]}}))
-
-            code, out, err = await _transfer_file(target_url, "import", str(path), apply=True, json_output=True)
-
-            assert code == 0, err
-            plan = _plan(out)
-            changes = {(c["section"], c["key"]): c["action"] for c in plan["changes"]}
-            assert changes[("settings.layers", "system")] == "added"
-            assert [n for n in plan["notes"] if "AGENT_TEAMS" in n] == [
-                "settings.layers system: CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS was left out of the environment; agent "
-                "teams are switched on each Agent Profile"]
-            row = await target.fetchrow("SELECT a.name, a.effort, l.env FROM agent_setting_layers l "
-                                        "JOIN agent_profiles a ON a.id = l.profile_id WHERE l.scope = 'system'")
-            assert (row["name"], row["effort"], json.loads(row["env"])) == (
-                "claude-code/opus · high", "high", [{"key": "LANG", "value": "C"}])
-
-    asyncio.run(_test())
-
-
-def test_a_files_project_and_planner_limits_are_ignored_with_a_note_and_the_rest_imports(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    """A file from before concurrency was per task may give a project's, a role's in a project or the Planner's
-    max_concurrency: each is ignored with a note, the rest of its layer imports, a layer that set nothing else is
-    skipped, and the Workers' and the Reviewers' role layers keep theirs. The export then has none of them."""
-    async def _test() -> None:
-        async with _installation() as (target, target_url):
-            path = tmp_path / "config.json"
-            layer = {"harness_prompt": None, "profile": None, "env": [], "run_budget_usd": None}
-            path.write_text(json.dumps({"format": "looper-config/v2", "settings": {"layers": [
-                {"scope": "role", "role": "planner", **layer, "max_concurrency": 3},
-                {"scope": "role", "role": "worker", **layer, "max_concurrency": 6},
-            ]}, "projects": [{"name": "alarm", "description": "", "background": "", "execution": {}, "layers": [
-                {"scope": "role_project", "role": "planner", **layer, "max_concurrency": 3},
-                {"scope": "role_project", "role": "worker", **layer, "harness_prompt": "Triage.", "max_concurrency": 8},
-            ]}]}))
-
-            code, out, err = await _transfer_file(target_url, "import", str(path), apply=True, json_output=True)
-
-            assert code == 0, err
-            plan = _plan(out)
-            changes = {(c["section"], c["key"]): c for c in plan["changes"]}
-            assert changes[("settings.layers", "role:worker")]["action"] == "added"
-            assert changes[("project.layers", "alarm / role_project:worker")]["action"] == "added"
-            for key in (("settings.layers", "role:planner"), ("project.layers", "alarm / role_project:planner")):
-                assert changes[key]["action"] == "skipped" and "nothing but a max_concurrency" in changes[key]["reason"]
-            notes = [n for n in plan["notes"] if "max_concurrency" in n]
-            assert [n.split(":")[0] for n in notes] == ["settings.layers role", "project.layers alarm / role_project",
-                                                       "project.layers alarm / role_project"]
-            assert all("was ignored: concurrency is per task" in n for n in notes)
-            rows = {(r["scope"], r["role"]): (r["harness_prompt"], r["max_concurrency"]) for r in await target.fetch(
-                "SELECT scope, role, harness_prompt, max_concurrency FROM agent_setting_layers")}
-            assert rows == {("role", "worker"): (None, 6), ("role_project", "worker"): ("Triage.", None)}
-
-            exported = tmp_path / "out.json"
-            assert (await _transfer_file(target_url, "export", str(exported), include_projects=True))[0] == 0
-            new = _without_time(exported)
-            assert new["settings"]["layers"] == [{"scope": "role", "role": "worker", **layer, "max_concurrency": 6}]
-            [alarm] = [p for p in new["projects"] if p["name"] == "alarm"]
-            assert alarm["layers"] == [{"scope": "role_project", "role": "worker", **layer,
-                                        "harness_prompt": "Triage."}]
-
-    asyncio.run(_test())
-
-
-def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    """``fixtures/config_v2_6_0.json`` is what ``looper config export --include-projects`` of the v2.6.0 release
-    wrote for ``profile_rename_parity.V2_6_0_ROWS`` plus a global skill: its agents and each layer's agent are
-    this version's profiles and each layer's profile."""
-    old = json.loads((Path(__file__).parent / "fixtures" / "config_v2_6_0.json").read_text("utf-8"))
-    assert (old["format"], old["looper_version"]) == ("looper-config/v1", "2.6.0") and "profiles" not in old
-
-    async def _test() -> None:
-        async with _installation(schema=False) as (target, target_url):
-            path = tmp_path / "v2.6.0.json"
-            path.write_text(json.dumps(old))
-            code, out, err = await _transfer_file(target_url, "import", str(path), apply=True, json_output=True)
-            assert code == 0, err
-            plan = _plan(out)
-            # Its 3 profiles, and the 4 that keep the effort its layers set (high on the system, low on calc's
-            # Workers), each on the profile it applied to.
-            assert plan["counts"]["profiles"] == {"added": 7, "changed": 0, "unchanged": 0, "skipped": 0}
-            assert not [c for c in plan["changes"] if c["action"] == "skipped"], plan
-            assert plan["need_secret"] == [{"section": "providers", "key": "glm", "names": ["api_key"]}]
-            # Each role's max_concurrency is ignored, and one note says so.
-            assert [n for n in plan["notes"] if "max_concurrency" in n] == [
-                "settings.roles: a role's max_concurrency is no longer a role setting and was ignored; how many of a "
-                "task's Workers and Reviewers run at once is the task's own limit, else the max_concurrency of their "
-                "role layers"]
-
-            from looper.db import config_transfer as db
-
-            async with target.acquire() as conn:
-                layers = {(r["scope"], r["role"]): r["profile"] for r in await db.read_layers(conn)
-                          if r["project_id"] is None}
-            assert layers == {("system", None): "claude-code/glm/glm-5.3[1m] · high",
-                              ("role", "planner"): "claude-code/sonnet · high", ("role", "worker"): None,
-                              ("role", "reviewer"): "beta/haiku · high"}
-
-            again = tmp_path / "again.json"
-            assert (await _transfer_file(target_url, "export", str(again), include_projects=True))[0] == 0
-            new = _without_time(again)
-            assert new["format"] == "looper-config/v3" and "agents" not in new
-
-            # The layers' effort is on the profiles they select now.
-            moved = {("system", None, "claude-code/glm/glm-5.3[1m]"): "claude-code/glm/glm-5.3[1m] · high",
-                     ("role", "planner", "claude-code/sonnet"): "claude-code/sonnet · high",
-                     ("role", "reviewer", "beta/haiku"): "beta/haiku · high",
-                     ("role_project", "worker", "claude-code/sonnet"): "claude-code/sonnet · low"}
-
-            def renamed(layer: dict[str, Any]) -> dict[str, Any]:
-                layer = {("profile" if k == "agent" else k): v for k, v in layer.items() if k != "effort"}
-                return {**layer, "profile": moved.get((layer["scope"], layer.get("role"), layer["profile"]),
-                                                      layer["profile"])}
-
-            expected = {k: v for k, v in old.items() if k not in ("exported_at", "agents")}
-            # An older file uses agent teams on its Claude Code profiles.
-            profiles = [{**a, "agent_teams": True, "custom_prompt": ""} for a in old["agents"]]
-            # The runtime registered by hand stays behind: its profile runs on the built-in runtime of its type.
-            _by_name(profiles, "beta/haiku")["runtime"] = "claude-code"
-            for base, effort in (("claude-code/glm/glm-5.3[1m]", "high"), ("claude-code/sonnet", "high"),
-                                 ("beta/haiku", "high"), ("claude-code/sonnet", "low")):
-                profiles.append({**_by_name(profiles, base), "name": f"{base} · {effort}", "effort": effort})
-            expected.update(format="looper-config/v3", looper_version=new["looper_version"], runtimes=[],
-                            profiles=sorted([{**{k: v for k, v in p.items() if k != "provider"},
-                                              "model": {"provider": p["provider"], "name": p["model"],
-                                                        "protocol": "anthropic-messages"}} for p in profiles],
-                                            key=lambda p: p["name"].encode()))
-            # The file left the provider's key out, so none is stored here to export.
-            legacy_provider = _by_name(old["providers"], "glm")
-            expected["providers"] = [{**{k: v for k, v in legacy_provider.items()
-                                          if k not in ("models", "protocols", "base_url", "api_key")},
-                                      "vendor_type": "glm-bigmodel", "api_key": None,
-                                      "endpoints": {"anthropic-messages": {"base_url": legacy_provider["base_url"]}}}]
-            from looper.agents.profile_registry import MODEL_FIELDS
-
-            defaults = dict.fromkeys(MODEL_FIELDS)
-            # Built-in login models stay on the target and are omitted from exports.
-            expected["models"] = [
-                {**defaults, **model, "provider": "glm", "protocol": "anthropic-messages", "catalog_order": order}
-                for order, model in enumerate(legacy_provider["models"])]
-            expected["settings"] = {"layers": [renamed(x) for x in old["settings"]["layers"]], "roles": [
-                {k: v for k, v in role.items() if k != "max_concurrency"} for role in old["settings"]["roles"]]}
-            # A file from before step workspaces, per-project retries, Planner roles, wait commands, user gates and the agent room
-            # leaves them unset.
-            expected["projects"] = [{**p, "execution": {**p["execution"], "step_workspaces": None,
-                                                        "workspace_links": None, "max_step_retries": None, "planner_roles": None,
-                                                        "wait_commands": None,
-                                                        "role_text_max_chars": None, "user_gates": None,
-                                                        "gate_reminder_hours": None, "task_workspaces": None,
-                                                        "operator_notes": None, "vault": None,
-                                                        "agent_room": None, "room_post_per_minute": None,
-                                                        "room_broadcasts_per_run": None, "room_message_max_chars": None,
-                                                        "room_messages_per_task": None, "room_ping_pong_rounds": None,
-                                                        "room_wait_max_seconds": None, "room_consult_budget_usd": None,
-                                                        "room_consult_timeout_seconds": None,
-                                                        "room_consults_per_task": None},
-                                     "layers": [renamed(x) for x in p["layers"]]} for p in old["projects"]]
-            assert new == expected
 
     asyncio.run(_test())
 
@@ -993,7 +711,7 @@ def test_a_projects_role_templates_import_checked_and_the_ones_the_file_does_not
                 "profile_id": None, "items": []})
             path = tmp_path / "config.json"
             good = {"kind": "review", "description": "Auth steps.", "role_prompt": "Check security."}
-            path.write_text(json.dumps({"format": "looper-config/v2", "projects": [
+            path.write_text(json.dumps({"format": "looper-config/v4", "projects": [
                 {"name": "calc", "description": "", "background": "", "execution": {"role_text_max_chars": 500},
                  "role_templates": [
                      {**good, "key": "security", "profile": "claude-code/nowhere",
@@ -1107,7 +825,7 @@ def test_a_schedule_the_import_cannot_use_is_skipped_with_the_reason(
     async def _test() -> None:
         async with _installation() as (target, target_url):
             path = tmp_path / "config.json"
-            path.write_text(json.dumps({"format": "looper-config/v2", "projects": [
+            path.write_text(json.dumps({"format": "looper-config/v4", "projects": [
                 {"name": "calc", "schedules": [_GOOD, {**_GOOD, "name": "bad", **bad}]}]}))
             code, out, err = await _transfer_file(target_url, "import", str(path), apply=True, json_output=True)
 
@@ -1130,7 +848,7 @@ def test_a_schedules_chat_this_machine_does_not_allow_is_dropped_with_a_note(
         async with _installation() as (target, target_url):
             path = tmp_path / "config.json"
             told = {**_GOOD, "notify_target": {"channel": "lark", "chat": "ou_elsewhere"}}
-            path.write_text(json.dumps({"format": "looper-config/v2", "projects": [
+            path.write_text(json.dumps({"format": "looper-config/v4", "projects": [
                 {"name": "calc", "schedules": [told]}]}))
             code, out, err = await _transfer_file(target_url, "import", str(path), apply=True, json_output=True)
 
