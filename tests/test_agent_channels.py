@@ -275,6 +275,16 @@ class TestServeChannelWiring:
         assert "c0" not in adapter._correlation_chat  # oldest gone
         assert adapter._correlation_chat[f"c{_CORRELATION_MAX + 4}"] == _CORRELATION_MAX + 4  # newest kept
 
+    def test_telegram_starts_with_the_token_from_an_existing_unit(self, monkeypatch):
+        from looper.agents.serve import _telegram_adapter_from_config
+
+        monkeypatch.delenv("LOOPER_TELEGRAM_BOT_TOKEN", raising=False)
+        monkeypatch.setenv("LOOPX_TELEGRAM_BOT_TOKEN", "existing-unit-token")
+        adapter = _telegram_adapter_from_config({"allowed_user_ids": ["7"]})
+        assert adapter is not None
+        assert adapter._bot_token == "existing-unit-token"
+        assert adapter._allowlist.ids == {"7"}
+
     def test_telegram_prefers_the_db_token_over_the_env_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The token now comes from channel_secrets (passed in); the env var is only a fallback.
         from looper.agents.serve import _telegram_adapter_from_config

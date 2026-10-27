@@ -76,12 +76,12 @@ def test_clear_password_reports_removed_and_absent(
 
 
 @pytest.mark.parametrize("command", ["set-password", "clear-password"])
-def test_cli_uses_the_default_and_explicit_runtime_root(
+def test_cli_uses_the_environment_and_explicit_runtime_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str,
 ) -> None:
-    default, explicit = tmp_path / ".looper", tmp_path / "explicit"
+    default, explicit = tmp_path / "environment-root", tmp_path / "explicit"
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("LOOPER_RUNTIME_ROOT", str(tmp_path / "ignored-current"))
+    monkeypatch.setenv("LOOPER_RUNTIME_ROOT", str(default))
     monkeypatch.setenv("LOOPX_RUNTIME_ROOT", str(tmp_path / "ignored-retired"))
     received = []
     if command == "set-password":

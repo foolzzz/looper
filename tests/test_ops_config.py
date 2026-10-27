@@ -50,10 +50,13 @@ def _file(root: Path, text: str | bytes) -> Path:
     return path
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
+    for name in ops.VARIABLES | {"LOOPER_RUNTIME_ROOT", "LOOPX_RUNTIME_ROOT"}:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(ops, "DOTENV", tmp_path / ".env", raising=False)
     return tmp_path / ".env"
 
 
@@ -61,22 +64,79 @@ def _load(root: Path, dotenv: Path, **kwargs: object) -> ops.OpsConfig:
     return ops.load(Flags(runtime_root=root), require_database=False, **kwargs)
 
 
+@pytest.mark.parametrize("prefix", ["LOOPER_", "LOOPX_"])
+@pytest.mark.parametrize("origin", ["environment", ".env"])
+def test_legacy_inputs_survive_load_and_init_ops(tmp_path, dotenv, monkeypatch, prefix, origin):
+    values = {
+        prefix + "DATABASE_URL": DATABASE_URL,
+        prefix + "PUBLIC_URL": "https://example.com",
+        prefix + "PG_DUMP": "/bin/pg_dump",
+        prefix + "BACKUP_CMD": 'dump --file "path with spaces" {dbname}',
+        "LOOPER_BACKUP_VERIFY_CMD": 'restore --list "path with spaces"',
+        "LOOPER_OPERATOR_NOTES_ROOT": "~/notes",
+    }
+    root = tmp_path / "runtime"
+    monkeypatch.setenv(prefix + "RUNTIME_ROOT", str(root))
+    if origin == "environment":
+        for name, value in values.items():
+            monkeypatch.setenv(name, value)
+    else:
+        dotenv.write_text("\n".join(f"{name}={value}" for name, value in values.items()))
+    config = ops.load()
+    expected = {
+        "database_url": DATABASE_URL, "public_url": "https://example.com", "pg_dump": "/bin/pg_dump",
+        "backup_command": ("dump", "--file", "path with spaces", "{dbname}"),
+        "backup_verify_command": ("restore", "--list", "path with spaces"),
+        "operator_notes_root": str(tmp_path / "home" / "notes"),
+    }
+    assert config.runtime_root == root
+    assert {name: getattr(config, name) for name in expected} == expected
+    assert {source.origin.value for source in config.sources.values()} == {origin}
+    written, notes = ops.init_file()
+    assert {name: getattr(written, name) for name in expected} == expected
+    assert all(source.origin is Origin.FILE for source in written.sources.values())
+    assert SECRET not in "\n".join((*config.warnings, *notes))
+    for name in values:
+        if origin == ".env":
+            assert name not in ops.os.environ
+        monkeypatch.delenv(name, raising=False)
+    dotenv.unlink(missing_ok=True)
+    assert ops.load(Flags(runtime_root=root)) == written
+
+
 @pytest.mark.parametrize("in_file", [False, True])
-def test_retired_environment_and_dotenv_are_ignored(tmp_path: Path, dotenv: Path, monkeypatch, in_file):
-    for name in ops.VARIABLES | {"LOOPER_RUNTIME_ROOT", "LOOPX_RUNTIME_ROOT"}:
-        monkeypatch.setenv(name, SECRET)
-    dotenv.write_text("\n".join(f"{name}={SECRET}" for name in ops.VARIABLES))
+def test_file_then_environment_then_dotenv_precedence(tmp_path, dotenv, monkeypatch, in_file):
+    dotenv.write_text("LOOPER_DATABASE_URL=postgresql://dotenv/db\nLOOPER_PUBLIC_URL=https://dotenv.example.com\n")
+    monkeypatch.setenv("LOOPX_DATABASE_URL", DATABASE_URL)
+    monkeypatch.setenv("LOOPER_DATABASE_URL", "postgresql://environment/db")
     if in_file:
         _file(tmp_path, f'[database]\nurl = "{DATABASE_URL}"\n')
     config = _load(tmp_path, dotenv)
-    assert config.database_url == (DATABASE_URL if in_file else "")
-    assert config.warnings == ()
-    assert config.runtime_root == tmp_path
-    assert config.pg_dump == config.public_url == config.operator_notes_root == ""
-    assert config.backup_command == config.backup_verify_command == ()
-    if not in_file:
-        with pytest.raises(OpsConfigError, match="no database configured"):
-            ops.load(Flags(runtime_root=tmp_path))
+    assert config.database_url == (DATABASE_URL if in_file else "postgresql://environment/db")
+    assert config.public_url == "https://dotenv.example.com"
+    assert SECRET not in "\n".join(config.warnings)
+
+
+def test_sample_dsn_keeps_the_existing_database_name():
+    assert ops.SAMPLE_DATABASE_URL == "postgresql://localhost:5432/loopx"
+
+
+@pytest.mark.parametrize("origin", ["environment", ".env"])
+@pytest.mark.parametrize(("name", "value"), [
+    ("LOOPER_DATABASE_URL", f"mysql://{SECRET}@host/db"),
+    ("LOOPER_PUBLIC_URL", f"https://user:{SECRET}@example.com"),
+    ("LOOPER_BACKUP_CMD", f'dump "{SECRET}'),
+    ("LOOPER_BACKUP_VERIFY_CMD", f'restore "{SECRET}'),
+    ("LOOPER_OPERATOR_NOTES_ROOT", SECRET),
+])
+def test_invalid_legacy_inputs_fail_without_disclosing_values(tmp_path, dotenv, monkeypatch, origin, name, value):
+    if origin == "environment":
+        monkeypatch.setenv(name, value)
+    else:
+        dotenv.write_text(f"{name}={value}\n")
+    with pytest.raises(OpsConfigError) as error:
+        _load(tmp_path, dotenv)
+    assert name in str(error.value) and SECRET not in str(error.value)
 
 
 @pytest.mark.parametrize(("section", "key", "value", "field"), [
@@ -87,7 +147,11 @@ def test_retired_environment_and_dotenv_are_ignored(tmp_path: Path, dotenv: Path
     ("backup", "verify_command", ["restore", "--list"], "backup_verify_command"),
     ("operator_notes", "root", "/notes", "operator_notes_root"),
 ])
-def test_file_settings_have_file_sources(tmp_path, dotenv, section, key, value, field):
+def test_file_settings_have_file_sources(tmp_path, dotenv, monkeypatch, section, key, value, field):
+    setting = next(setting for setting in ops.SETTINGS if setting.name == field)
+    for name in setting.variables:
+        monkeypatch.setenv(name, SECRET)
+    dotenv.write_text("\n".join(f"{name}={SECRET}" for name in setting.variables))
     _file(tmp_path, f"[{section}]\n{key} = {json.dumps(value)}\n")
     config = _load(tmp_path, dotenv)
     assert getattr(config, field) == (tuple(value) if isinstance(value, list) else value)
@@ -183,14 +247,15 @@ def test_missing_explicit_file_refused_but_missing_default_is_fine(tmp_path: Pat
 
 
 @pytest.mark.parametrize("flag", [None, "relative-root", ".loopx"])
-def test_runtime_root_uses_flag_or_home(tmp_path, dotenv, monkeypatch, flag):
+def test_runtime_root_uses_flag_before_environment(tmp_path, dotenv, monkeypatch, flag):
     monkeypatch.setenv("LOOPER_RUNTIME_ROOT", str(tmp_path / "retired-new"))
     monkeypatch.setenv("LOOPX_RUNTIME_ROOT", str(tmp_path / "retired-old"))
     root, warning = ops.runtime_root(flag)
-    assert root == (tmp_path / flag if flag else tmp_path / "home" / ".looper")
-    assert warning == ""
+    assert root == (tmp_path / flag if flag else tmp_path / "retired-new")
+    assert bool(warning) is (flag is None)
     config = ops.load(Flags(runtime_root=flag), require_database=False)
-    assert config.runtime_root == root and config.warnings == ()
+    assert config.runtime_root == root
+    assert config.warnings == ((warning,) if warning else ())
     assert ops.config_path(None, root) == root / "ops" / "server.toml"
     assert ops.config_path("relative.toml", root) == tmp_path / "relative.toml"
 

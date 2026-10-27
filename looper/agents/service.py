@@ -8,7 +8,7 @@ way the service starts at login, is started again when it exits with a failure
 The unit runs the ``looper`` of the interpreter that ran ``install`` (a
 checkout's ``.venv/bin/looper``) in the directory ``install`` ran in, as
 ``looper serve --config <ops file> --runtime-root <root>``, both absolute, and
-``--port`` only when ``install`` was given one: the ops file
+``--port`` when explicitly selected or retained from an installed unit: the ops file
 (``looper.ops_config``) holds the database URL and the other settings, so the
 unit holds none of them. launchd and systemd start services with an almost
 empty environment, so ``install`` copies the variables the service and its
@@ -292,8 +292,8 @@ class _Manager:
     def render(self, spec: ServiceSpec) -> bytes:
         raise NotImplementedError
 
-    def unit_settings(self) -> tuple[int | None, Path | None, Path | None]:
-        """The port, log path and runtime root the installed unit names."""
+    def unit_settings(self, *, explicit_port: bool = False) -> tuple[int | None, Path | None, Path | None]:
+        """The unit's port, log path and root; ``explicit_port`` ignores a port read from its ops file."""
         raise NotImplementedError
 
     def state(self) -> State:
@@ -326,14 +326,15 @@ class Launchd(_Manager):
     def render(self, spec: ServiceSpec) -> bytes:
         return render_plist(spec)
 
-    def unit_settings(self) -> tuple[int | None, Path | None, Path | None]:
+    def unit_settings(self, *, explicit_port: bool = False) -> tuple[int | None, Path | None, Path | None]:
         try:
             unit = plistlib.loads(self.unit_path.read_bytes())
         except (OSError, plistlib.InvalidFileException, ValueError):
             return None, None, None
         log = unit.get("StandardOutPath")
         argv = unit.get("ProgramArguments") or []
-        return _port_of(argv), Path(log) if log else None, _runtime_root_of(argv)
+        port = _given_port(argv) if explicit_port else _port_of(argv)
+        return port, Path(log) if log else None, _runtime_root_of(argv)
 
     def _print(self) -> subprocess.CompletedProcess[str]:
         return self._call("launchctl", "print", self.target)
@@ -392,7 +393,7 @@ class Systemd(_Manager):
     def render(self, spec: ServiceSpec) -> bytes:
         return render_systemd_unit(spec).encode()
 
-    def unit_settings(self) -> tuple[int | None, Path | None, Path | None]:
+    def unit_settings(self, *, explicit_port: bool = False) -> tuple[int | None, Path | None, Path | None]:
         try:
             lines = self.unit_path.read_text().splitlines()
         except OSError:
@@ -400,7 +401,8 @@ class Systemd(_Manager):
         values = dict(line.split("=", 1) for line in lines if "=" in line)
         log = values.get("StandardOutput", "")
         argv = _systemd_words(values.get("ExecStart", ""))
-        return (_port_of(argv),
+        port = _given_port(argv) if explicit_port else _port_of(argv)
+        return (port,
                 Path(log.removeprefix("append:").replace("%%", "%")) if log.startswith("append:") else None,
                 _runtime_root_of(argv))
 
@@ -529,13 +531,15 @@ def _describe(state: State) -> str:
 
 def install(host: Host, ops: OpsConfig, *, label: str = DEFAULT_LABEL, port: int | None = None,
             extra_env: Sequence[str] = (), timeout: float = DEFAULT_TIMEOUT_SECONDS) -> str:
-    """Write the unit for ``ops``, reload it and wait until it serves. Only an explicitly given ``port`` is
-    written into the unit; otherwise the service reads its port from the ops file.
+    """Write the unit for ``ops``, reload it and wait until it serves. Keep an installed unit's explicit port
+    unless a new flag or the ops file selects one; otherwise the service reads its port from the ops file.
     """
     mgr = manager(host, label)
     if not os.path.lexists(ops.path):
         raise ServiceError(f"no ops file at {ops.path}: run `looper config init-ops` first, which writes it from the "
                            "settings in effect")
+    if port is None and "port" not in ops.sources:
+        port, _, _ = mgr.unit_settings(explicit_port=True)
     runtime_root = _absolute_root(host, ops.runtime_root)
     spec = build_spec(host, label=label, port=port, runtime_root=runtime_root, config=ops.path, extra_env=extra_env)
     runtime_root.mkdir(mode=0o700, parents=True, exist_ok=True)  # private before logs/ under it (operator_auth)

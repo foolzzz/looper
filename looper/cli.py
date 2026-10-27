@@ -68,8 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
     init_ops = config_commands.add_parser(
         "init-ops", allow_abbrev=False, help="Write the ops file from the settings in effect now (mode 0600).",
         description=(
-            "Write the ops file, <runtime root>/ops/server.toml (or --config), with current defaults and the sample "
-            "database URL postgresql://localhost:5432/looper. It refuses to replace an existing file."
+            "Write the ops file, <runtime root>/ops/server.toml (or --config), from the settings in effect, "
+            "including deployment settings from the environment or the checkout's .env. Without a database URL, "
+            "it writes the sample postgresql://localhost:5432/loopx. It refuses to replace an existing file."
         ),
     )
     _add_location_flags(init_ops)
@@ -106,7 +107,8 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
         description=(
             "Write the unit and (re)start the service, then wait until it serves. The unit runs this looper in the "
             "current directory with the ops file and the runtime root (absolute --config and --runtime-root; "
-            "--port only when given), and with the variables it needs copied from this environment: PATH, locale, "
+            "--port when given, else the installed unit's port when server.port is unset), and with the variables "
+            "it needs copied from this environment: PATH, locale, "
             "time zone, proxy and certificate settings, the runtimes' directories and logins (CLAUDE_CONFIG_DIR, "
             "CODEX_HOME, GROK_HOME, ANTHROPIC_API_KEY and the others an agent gets), LOOPER_TELEGRAM_BOT_TOKEN, and "
             "each --env NAME. No deployment setting is copied: the ops file names it (run `looper config init-ops` "

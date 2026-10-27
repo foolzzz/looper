@@ -574,6 +574,20 @@ def test_install_without_a_port_uses_the_ops_file_for_status_and_restart(
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_reinstall_does_not_pin_a_port_read_from_the_ops_file(tmp_path, checkout, monkeypatch, system):
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    _write_ops(root, port=9002)
+    assert _install(monkeypatch, host, root, port=None) == 0
+    assert _install(monkeypatch, host, root, port=None) == 0
+    mgr = service.manager(host, LABEL)
+    assert b"--port" not in mgr.unit_path.read_bytes()
+    _write_ops(root, port=9003)
+    assert mgr.unit_settings()[0] == 9003
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
 def test_install_refuses_to_copy_a_database_setting_with_env(
     tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], system: str,
 ) -> None:
@@ -603,31 +617,46 @@ def test_install_requires_an_ops_file(
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
-def test_reinstall_uses_current_settings_without_inheriting_the_installed_port(
-    tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], system: str,
+@pytest.mark.parametrize("override", ["none", "flag", "file"])
+@pytest.mark.parametrize("old_config", [False, True], ids=["legacy-unit", "ops-unit"])
+def test_reinstall_preserves_installed_port_unless_explicitly_overridden(
+    tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    system: str, override: str, old_config: bool,
 ) -> None:
-    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    fake = FakeLaunchd(loaded=True) if system == "Darwin" else FakeSystemd()
+    if system == "Linux":
+        fake.active = True
     host = _host(tmp_path, checkout, fake, system=system)
     root = tmp_path / "runtime"
     _write_ops(root)
     mgr = service.manager(host, LABEL)
     old = service.ServiceSpec(
         label=LABEL, argv=(str(checkout / ".venv" / "bin" / "looper"), "serve", "--port", "9001",
-                          "--runtime-root", str(root)), working_dir=checkout,
+                          "--runtime-root", str(root),
+                          *(("--config", str(root / ops_config.FILE)) if old_config else ())), working_dir=checkout,
         env=(("LOOPER_DATABASE_URL", SHELL_ENV["LOOPER_DATABASE_URL"]),),
         log_path=root / "logs" / "serve.log",
     )
     service.write_private(mgr.unit_path, mgr.render(old))
     assert b"LOOPER_DATABASE_URL" in mgr.unit_path.read_bytes()
 
-    assert _install(monkeypatch, host, root, port=None) == 0
+    expected = {"none": 9001, "flag": 9003, "file": 8767}[override]
+    if override != "none":
+        _write_ops(root, port=8767)
+    host.port_in_use = lambda port: port == 8767 and override != "file"
+    received = []
+    host.get_status = lambda port, token: received.append(port) or {"status": "running"}
+    assert _install(monkeypatch, host, root, port="9003" if override == "flag" else None) == 0
 
     data = mgr.unit_path.read_bytes()
     assert b"DATABASE_URL" not in data and b"postgresql://" not in data and b"s3cret" not in data
-    assert b"--port" not in data
-    assert mgr.unit_settings() == (ops_config.DEFAULT_PORT, root / "logs" / "serve.log", root)
+    assert (b"--port" in data) is (override != "file")
+    assert mgr.unit_settings() == (expected, root / "logs" / "serve.log", root)
+    assert received == [expected] and fake.serving
+    assert _looper(monkeypatch, host, "restart", "--label", LABEL) == 0
+    assert received == [expected, expected]
     output = capsys.readouterr()
-    assert str(ops_config.DEFAULT_PORT) in output.out and "s3cret" not in output.out + output.err
+    assert str(expected) in output.out and "s3cret" not in output.out + output.err
 
 
 @pytest.mark.parametrize("explicit", [False, True])

@@ -99,7 +99,7 @@ def _ops_file(root: Path, database_url: str) -> Path:
     return path
 
 
-def test_init_ops_cli_writes_a_sample_database_and_ignores_deployment_environment(tmp_path: Path) -> None:
+def test_init_ops_cli_preserves_the_database_from_deployment_environment(tmp_path: Path) -> None:
     root = tmp_path / "runtime"
     database_url = "postgresql://looper:Sekr1t-init-pw@127.0.0.1:5432/loopx"
     env = {**_clean_env(tmp_path), "LOOPER_DATABASE_URL": database_url}
@@ -108,10 +108,10 @@ def test_init_ops_cli_writes_a_sample_database_and_ignores_deployment_environmen
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     path = root / "ops" / "server.toml"
-    assert tomllib.loads(path.read_text())["database"]["url"] == "postgresql://localhost:5432/looper"
+    assert tomllib.loads(path.read_text())["database"]["url"] == database_url
     assert path.stat().st_mode & 0o777 == 0o600
     assert path.parent.stat().st_mode & 0o777 == 0o700
-    assert "postgresql://localhost:5432/looper" in proc.stdout
+    assert "database.url from LOOPER_DATABASE_URL" in proc.stdout
     assert "Sekr1t-init-pw" not in proc.stdout + proc.stderr
 
 
@@ -283,13 +283,13 @@ def _check_lines(output: str) -> dict[str, str]:
 
 
 @pytest.mark.parametrize("command", ["serve", "doctor"])
-def test_deployment_environment_and_dotenv_do_not_supply_a_database(tmp_path: Path, command: str) -> None:
-    env = {**_clean_env(tmp_path), "LOOPER_DATABASE_URL": "postgresql://ignored/current",
+def test_invalid_deployment_environment_is_validated_before_startup(tmp_path: Path, command: str) -> None:
+    env = {**_clean_env(tmp_path), "LOOPER_DATABASE_URL": "mysql://u:Sekr1t-env-pw@ignored/current",
            "LOOPX_DATABASE_URL": "postgresql://ignored/retired"}
-    (tmp_path / ".env").write_text("LOOPER_DATABASE_URL=postgresql://ignored/dotenv\n")
     result = _run_cli(command, "--runtime-root", str(tmp_path / "runtime"), cwd=tmp_path, env=env)
     assert result.returncode == 1
-    assert "no database configured" in result.stdout + result.stderr
+    assert "LOOPER_DATABASE_URL must be a postgresql:// URL" in result.stdout + result.stderr
+    assert "Sekr1t-env-pw" not in result.stdout + result.stderr
     assert "postgresql://ignored" not in result.stdout + result.stderr
 
 
