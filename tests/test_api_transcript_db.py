@@ -105,6 +105,7 @@ def test_unfinished_turn_repair_is_staged_once_before_new_user(tmp_path, monkeyp
     async def run(pool):
         history = [MessageItem('user', 'old'), ToolCallItem(ToolCall('a', 'lookup', '{}')),
                    ToolResultItem('a', 'found', False, True)]
+        await api_sessions.create('saved', PROTOCOL.value)
         await api_sessions.append('saved', 1, PROTOCOL.value, 'test-model', [item_to_json(i) for i in history])
         scripts = ([ResponseScript(status=401)] if fail_first else []) + [
             ResponseScript(events=text_events('done')), ResponseScript(events=text_events('again'))]
@@ -132,6 +133,7 @@ def test_unfinished_turn_repair_is_staged_once_before_new_user(tmp_path, monkeyp
 
 def test_empty_completed_answer_needs_no_repair(tmp_path, monkeypatch):
     async def run(pool):
+        await api_sessions.create('saved', PROTOCOL.value)
         await api_sessions.append('saved', 1, PROTOCOL.value, 'test-model', [
             item_to_json(MessageItem('user', 'old')), item_to_json(MessageItem('assistant', ''))])
         async with FakeModelAPI([ResponseScript(events=text_events('done'))]) as api:
@@ -148,6 +150,7 @@ def test_model_change_keeps_text_and_filters_foreign_reasoning(tmp_path, monkeyp
     async def run(pool):
         history = [MessageItem('user', 'old text'), ReasoningItem(('summary',),
             ReplayState(PROTOCOL, 'old-model', 'r1', 'opaque-state')), MessageItem('assistant', 'old answer')]
+        await api_sessions.create('saved', PROTOCOL.value)
         await api_sessions.append('saved', 1, PROTOCOL.value, 'old-model', [item_to_json(i) for i in history])
         async with FakeModelAPI([ResponseScript(events=text_events('done'))]) as api:
             session = await start(tmp_path, api.base_url, sid='saved', model='new-model')

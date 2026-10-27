@@ -50,6 +50,22 @@ def clear_sdk_environment(monkeypatch):
 def transcript_store(monkeypatch):
     """Keep runtime event tests independent of PostgreSQL; DB resume rules live in the DB suite."""
     rows = {}
+    contexts = {}
+
+    async def create(sid, protocol):
+        assert sid not in rows
+        rows[sid] = []
+
+    async def context_tokens(sid):
+        return contexts.get(sid)
+
+    async def save_context_tokens(sid, tokens):
+        if tokens is not None:
+            contexts[sid] = tokens
+
+    async def delete(sid):
+        rows.pop(sid, None)
+        contexts.pop(sid, None)
 
     async def load(sid):
         return list(rows.get(sid, []))
@@ -64,6 +80,10 @@ def transcript_store(monkeypatch):
         stored.extend(dict(turn=turn, protocol=protocol, model=model, item=item) for item in items)
 
     monkeypatch.setattr(api_sessions, 'load', load)
+    monkeypatch.setattr(api_sessions, 'create', create)
+    monkeypatch.setattr(api_sessions, 'context_tokens', context_tokens)
+    monkeypatch.setattr(api_sessions, 'save_context_tokens', save_context_tokens)
+    monkeypatch.setattr(api_sessions, 'delete', delete)
     monkeypatch.setattr(api_sessions, 'last_turn', last_turn)
     monkeypatch.setattr(api_sessions, 'append', append)
     return rows

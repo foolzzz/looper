@@ -303,10 +303,51 @@ class ManagerFleet:
 
     # --- Retiring ---
 
+    async def delete_manager(self, manager_id: str) -> str:
+        """Check dependents under the delete lock, drain the turn, then settle only after commit."""
+        async with self._lock:
+            agent = self._agents.get(manager_id)
+            stopped = False
+
+            async def stop() -> None:
+                nonlocal stopped
+                self._retiring.add(manager_id)
+                await self._supervisor.stop_agent(manager_id, strict=True)
+                stopped = True
+                self._drop(manager_id)
+
+            try:
+                result = await db_managers.delete_manager(manager_id, before_delete=stop if agent else None)
+            except BaseException:
+                if stopped and agent is not None:
+                    # The delete rolled back after shutdown: replay the interrupted turn before the queue,
+                    # without journaling it again or settling any of the user's pending messages.
+                    taken = self._bus.take_queue(manager_id)
+                    queued = {envelope.message_id for envelope in taken}
+                    pending = {envelope.message_id for envelope in self._bus.journal.undelivered()}
+                    queue = self._bus.get_queue(manager_id)
+                    for envelope, _ in agent.stopped_in_flight:
+                        if envelope.message_id in pending and envelope.message_id not in queued:
+                            queue.put_nowait(envelope)
+                    for envelope in taken:
+                        queue.put_nowait(envelope)
+                raise
+            else:
+                if result == "deleted" and agent is not None:
+                    await self._settle_retired(manager_id, agent)
+                return result
+            finally:
+                # A refused or rolled-back deletion must leave an enabled Manager running.
+                self._retiring.discard(manager_id)
+                await self._apply_once(manager_id)
+
     async def _retire(self, manager_id: str) -> None:
         self._retiring.add(manager_id)
         agent = self._agents.get(manager_id)
         await self._supervisor.stop_agent(manager_id)
+        await self._settle_retired(manager_id, agent)
+
+    async def _settle_retired(self, manager_id: str, agent: ManagerAgent | None) -> None:
         bus = self._bus
         taken = bus.take_queue(manager_id)
         queued = {envelope.message_id for envelope in taken}

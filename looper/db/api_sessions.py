@@ -15,6 +15,30 @@ class TranscriptMismatch(ValueError):
     """A stored session cannot be resumed with the requested transcript format."""
 
 
+async def create(
+    session_id: str, protocol: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> None:
+    """Allocate metadata once, before a new session's first request."""
+    pool = pool or get_pool()
+    await pool.execute("INSERT INTO api_sessions (session_id, protocol) VALUES ($1, $2)", session_id, protocol)
+
+
+async def context_tokens(
+    session_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> int | None:
+    pool = pool or get_pool()
+    return await pool.fetchval("SELECT context_tokens FROM api_sessions WHERE session_id = $1", session_id)
+
+
+async def save_context_tokens(
+    session_id: str, tokens: int | None, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> None:
+    """Keep the last known request size; never recreate a deleted session."""
+    pool = pool or get_pool()
+    await pool.execute("UPDATE api_sessions SET context_tokens = coalesce($2, context_tokens) WHERE session_id = $1",
+                       session_id, tokens)
+
+
 async def append(
     session_id: str, turn: int, protocol: str, model: str, items: Sequence[dict[str, Any]], *,
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
@@ -23,10 +47,9 @@ async def append(
     pool = pool or get_pool()
     async with _connection(pool) as conn, conn.transaction():
         await conn.execute("SELECT pg_advisory_xact_lock(hashtext('api_session_items:' || $1))", session_id)
-        await conn.execute(
-            "INSERT INTO api_sessions (session_id, protocol) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-            session_id, protocol)
         stored_protocol = await conn.fetchval("SELECT protocol FROM api_sessions WHERE session_id = $1", session_id)
+        if stored_protocol is None:
+            raise TranscriptMismatch("the API session no longer exists")
         if stored_protocol != protocol:
             raise TranscriptMismatch("the stored API session uses a different protocol")
         seq = await conn.fetchval(

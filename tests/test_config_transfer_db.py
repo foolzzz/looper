@@ -384,6 +384,7 @@ def test_configuration_export_excludes_api_session_state(tmp_path: Path) -> None
         from looper.db import agent_sessions, api_sessions
 
         async with _installation() as (pool, url):
+            await api_sessions.create("runtime-only-session", "openai-responses", pool=pool)
             await api_sessions.append("runtime-only-session", 1, "openai-responses", "runtime-only-model", [
                 {"version": 1, "kind": "message", "role": "user", "text": "runtime-only-history"}], pool=pool)
             await agent_sessions.save_session("manager", "runtime-only-session", {}, runtime_type="api", pool=pool)
