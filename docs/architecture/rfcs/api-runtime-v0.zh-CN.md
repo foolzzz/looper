@@ -1,9 +1,9 @@
 # RFC：API 运行时 v0（管家直连模型 API）
 
-- **状态：** 已批准（2026-10-24），按维护者 2026-10-26 的决定更新。阶段 1 的运行时类型与接线已合入；中性循环（2a）、版本化条目和来源 notice 已合入；Responses 编解码器（2b）与本地假服务已合入；管家会话与进程内平台工具已合入。中性会话持久化、跨重启续接、drop 清理与上下文交接换会话已在分支实现；停止与用量记录已实现，原创摘要提示词的真实 CLI 专项对照已通过（第 9 节）。阶段 1 移植 Norma 循环，接 `openai` Python SDK，用 CPA 的 OpenAI 协议模型验证；阶段 2 接 `anthropic` Python SDK，目标是 DeepSeek、GLM、Kimi、OpenCode 的 Anthropic 格式接口，用维护者已有的 DeepSeek key 验证；以后有官方 Anthropic key，只是多登记一个 provider，不改代码。决定见第 4、14 节，排期见第 12 节；第 15 节是仍需真实运行核实的项。
+- **状态：** 已批准（2026-10-24），按维护者 2026-10-26 的决定更新。阶段 1 的运行时类型与接线已合入；中性循环（2a）、版本化条目和来源 notice 已合入；Responses 编解码器（2b）与本地假服务已合入；管家会话与进程内平台工具已合入。中性会话持久化、跨重启续接、drop 清理与上下文交接换会话已在分支实现；停止与用量记录已实现，原创摘要提示词的真实 CLI 专项对照已通过（第 9 节）。阶段 1 移植 Norma 循环，接 `openai` Python SDK，用 CPA 的 OpenAI 协议模型验证；阶段 2 接 `anthropic` Python SDK，目标是 DeepSeek、GLM、Kimi、OpenCode 的 Anthropic 格式接口，用维护者已有的 DeepSeek key 验证；以后有官方 Anthropic key，只是多登记一个 provider，不改代码。决定见第 4、14 节，排期见第 12 节；第 15 节汇总实测结果与仍需真实运行核实的项。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.0 节第 23 项。它落实 M9d 的 SDK 运行时与 Norma 循环移植，以及[管家平台工具 RFC](manager-platform-tools-v0.zh-CN.md) D8：「原生 tool 不单做，等 SDK 运行时上线时从同一份操作目录生成」。
 - **相关：** [多运行时](multi-runtime-agents-v0.zh-CN.md)、[dsh 运行时](dsh-runtime-v0.zh-CN.md)、[停止管家的回复 v2](chat-stop-v2.zh-CN.md)、[管家会话的 Agent Profile](manager-session-profile-v0.zh-CN.md)、[场景管家](scenario-managers.zh-CN.md)、[LLM 模型层](llm-models-v0.zh-CN.md)。
-- **核对基线：** 仓库路径与符号按 `main` `61a097507`（v2.13.133）核对；SDK 接口沿用初版的一次性虚拟环境离线核对结果：`openai` 3.37.0、`anthropic` 2.3.0。全程没有发出带 key 的请求。
+- **核对基线：** 仓库路径与符号按 `main` `61a097507`（v2.13.133）核对；SDK 接口沿用初版的一次性虚拟环境离线核对结果：`openai` 3.37.0、`anthropic` 2.3.0。该次离线核对没有发出带 key 的请求。
 - **路径约定：** 以 `looper/`、`evals/` 开头的路径相对仓库根目录，其余代码路径相对 `looper/agents/`；`schema.sql` 指 `looper/db/schema.sql`，`dialogs.py` 指 `evals/prompt_regression/dialogs.py`；SDK 源码的行号对应上面两个版本。
 
 ## 1. 背景与目标
@@ -252,7 +252,7 @@ Telegram 和飞书照旧只收最终回复。控制台从首请求开始实时�
 - 但 SDK 构造客户端时仍会读服务进程的另一些环境变量：`OPENAI_ORG_ID`、`OPENAI_PROJECT_ID`、`OPENAI_ADMIN_KEY`、`OPENAI_CUSTOM_HEADERS`、`ANTHROPIC_CUSTOM_HEADERS`，以及 `OPENAI_LOG`、`ANTHROPIC_LOG`（`openai` 的 `_client.py:1060-1122`、`anthropic` 的 `_client.py:693-706`，以及两者的 `_utils/_logs.py`）。它们会给请求加上额外的请求头，或打开调试日志。服务环境里有其中任何一个时，运行时在启动边界报错并写出变量名（不写值），不静默忽略。
 - key 注册进 `log_redaction.add_secret`；SDK 和 HTTP 库的 logger 固定在 WARNING。key 只在内存里，不进 argv、运行记录、日志、会话原文和错误文本。API 管家没有 shell，所以 P3（key 对 agent 可见）在这个运行时上不再成立。
 - 代理配置只从显式环境白名单选取并交给客户端，不授权继承整个服务环境。CPA 在 127.0.0.1，选用代理时 `NO_PROXY` 需要包含它，运维说明里写明。若以后增加文件、进程工具，工具环境同样只用白名单和每个运行时私有 HOME；不改共享服务的 HOME，不宣称 OS 沙箱。阶段 1 只有进程内平台操作。
-- **CPA 的 key：** 在产品路径上，CPA 和其他 API key provider 一样，key 存在 `llm_provider_secrets`。真实验证时，由验收脚本在运行时从 CPA 的配置文件把 key 读进内存，经 eval 的 `api_key_env` 交给被测 provider（多运行时 RFC 第 7 节「开发测试」、dsh RFC 第 9 节），不回显，不写文件。
+- **CPA 的 key：** 在产品路径上，CPA 和其他 API key provider 一样，key 存在 `llm_provider_secrets`。本次真实验证只在运行时通过 `LOOPER_EVAL_API_KEY` 提供 CPA 客户端 key，经 eval 的 `api_key_env` 交给被测 provider，不回显，不写入仓库。
 
 ### 8.3 用量与花费
 
@@ -281,12 +281,14 @@ Telegram 和飞书照旧只收最终回复。控制台从首请求开始实时�
 
 | 能力 | Responses（CPA） | Messages（DeepSeek、GLM、Kimi、OpenCode） |
 |---|---|---|
-| 工具调用 | ✅ Codex 经 CPA 调用 MCP 工具（M9c）；❓ 直接用函数工具 | ✅ Claude Code + GLM BigModel（v2.6.0）；✅ dsh 在 DeepSeek Messages 上，四个角色都调用了 MCP 工具（dsh RFC 第 9 节）；❓ Kimi、OpenCode |
+| 工具调用 | ✅ Codex 经 CPA 调用 MCP 工具（M9c）；✅ api 管家直接用函数工具，真实 smoke 与全对话验证通过 D11（第 9 节） | ✅ Claude Code + GLM BigModel（v2.6.0）；✅ dsh 在 DeepSeek Messages 上，四个角色都调用了 MCP 工具（dsh RFC 第 9 节）；❓ Kimi、OpenCode |
 | 流式 | ✅ Codex 经 CPA | ✅ GLM（Claude Code）；❓ DeepSeek（dsh 的 JSONL 不是 token 流） |
 | 推理、effort | ✅ `model_reasoning_effort` 经 CPA；❓ 在 `store: false` 下回传加密推理 | ❓ `output_config.effort`、`thinking` 和签名回传；dsh 对 DeepSeek 用 `low/high/max` |
 | 提示缓存 | ✅ 会报缓存读（Codex 经 CPA）；❓ `prompt_cache_key` | ✅ DeepSeek 自动缓存，用量分桶按 dsh 代码映射；❓ 真实数值、`cache_control` 是否被接受 |
 | 流里的用量 | ✅ SDK 类型里有 `response.completed.usage`；❓ CPA 实际给不给 | ❓ `message_delta.usage` |
 | 关闭并行工具调用 | ❓ `parallel_tool_calls: false` | 不传，Looper 串行执行即可 |
+
+**CPA 实测：** 本地 CPA 代理提供了 `gpt-6-astra`，api 与 Codex 管家两份 spec 均使用它，其他角色为 Claude Code sonnet。api smoke 为 4/4、$0.44；全部对话 `--reps 2 --jobs 2`，Codex 为 78/84 个已评分项通过、另有 4 个 harness error，记录 $13.68；api 为 82/88、$9.06。双方均评分的对话花费分别为 $6.82 与 $4.53。D11 已满足；共同失败与 `session_profile_switch` 检查修正后的双方 2/2 结果见第 9 节。上述结果不单独证明加密推理、缓存参数、用量分桶或数据库读回，未有测量依据的 ❓ 项仍保留。
 
 Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126`），与两个 SDK 的取值同名（核对过 `ReasoningEffort` 和 `OutputConfigParam.effort`），所以不需要映射表。
 
@@ -321,16 +323,30 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 
 **最终准入：** 运行时变了，模型也不是 Claude，所以另按「新运行时担任一个角色，M6 评测全部通过」（多运行时 RFC 第 11 节）跑全部对话，不只跑改动涉及的；不能用提示词的定向对照替代。
 
-- **阶段 1：** 管家用 `api` + CPA + `gpt-6.1-sol`，effort `high`。这是 CPA 预设里最强的一档，`luna` 是小档。全部对话 `--reps 2`。
-  - 对照组：同一模型的 Codex 管家（`codex` + CPA + `gpt-6.1-sol`），两者只差运行时；
+- **阶段 1：** 管家用 `api` + CPA，effort `high`。预检模型列表，提供 `gpt-6-astra` 时两份 spec 都用它，否则用 `gpt-6.1-sol`，两者都没有就停止；本次 CPA 提供了 `gpt-6-astra`。全部对话 `--reps 2 --jobs 2`。
+  - 对照组：同一模型的 Codex 管家（本次为 `codex` + CPA + `gpt-6-astra`），两者只差运行时；
   - 再与 `dialogs-real-opus.json` 做描述性的比较。模型不同，差异不归因于运行时；
   - 其他角色照旧用 `--model sonnet`。
 - **阶段 2：** 管家用 `api` + DeepSeek 的 Anthropic 接口 + `deepseek-v4-pro`，全部对话 `--reps 2`。
   - 对照组：Claude Code + 同一个 DeepSeek 接口和模型（M9b 的路径）；
   - GLM、Kimi、OpenCode 有 key 时，跑 `status`、`confirm_create_start`、`cancel_confirmation` 三个对话，没有 key 就报告缺口。
 - 从不用 haiku 当管家，也不拿 haiku 的基线当门槛。
-- **评测需要一个只给管家登记 Profile 的选项：** `dialogs --manager-agent SPEC.json`。现有的 `--register-agent` 把 Profile 放进系统层、四个角色都用它（`dialogs.py:2262-2266`），而 API Profile 放在系统层会被 `check_roles` 拒绝。示例 spec 将新增在 `evals/agents/api-cpa.example.json`，里面只写 `api_key_env`。
+- **评测入口已实现：** `dialogs --manager-agent SPEC.json` 每个用例登记一次 Profile，通过现行 v1 `agent_settings/update_role` 只选择 Manager 的角色层，其他角色保持 `--model` / `--agent`。它与 `--manager-model`、`--manager-effort`、`--register-agent` 互斥，fake 模式拒绝；原有 `--register-agent` 的系统层选择保持不变。示例为 `evals/agents/api-cpa.example.json` 与 `evals/agents/codex-cpa.example.json`，provider endpoint 与 model protocol 显式分开，凭据只声明 `api_key_env`。
 - fake 模式的对话仍由假 Claude 扮演管家，它测的是管家的逻辑；API 运行时自己的协议行为，由第 13 节的假服务测试覆盖。
+
+**CPA 验证结果：** 已在本地 CPA 代理完成真实 smoke 与两组全对话对照，客户端 key 仅在运行时通过 `LOOPER_EVAL_API_KEY` 提供。运行方式见 [evals/README.md](../../../evals/README.md#the-api-runtime-on-cpa)。
+
+| 运行 | 实测结果 | 记录花费 |
+|---|---|---|
+| api smoke：`status`、`confirm_create_start`、`cancel_confirmation`、`stop_then_continue`，`--reps 1` | 4/4 通过 | $0.44 |
+| Codex 管家对照，全部对话 | 78/84 个已评分项通过，另有 4 个 harness error：`stop_then_continue`、`withdraw_then_continue` 的两次重复均出错 | $13.68 |
+| api 管家，全部对话 | 82/88 通过 | $9.06 |
+
+双方均评分的对话记录花费为 Codex $6.82、api $4.53。**D11 已满足：** 每个对话的 api 通过次数均不低于 Codex 对照减 1；api 在各对话持平或更好，对照出现 harness error 的两个对话在 api 下均为 2/2，但对照错误仍按错误报告。`cancel_confirmation`、`config_tools`、`provider_key`、全部 `schedule_*` 和 `client_relay_cancel` 均为 2/2。
+
+共同失败不属于 api 回归：`model_missing_endpoint` 双方均为 0/2（管家没有通过工具读取任何内容）；`start_no_wait` 双方均为 0/2（回复没有说明任务的问题会交给用户）；`session_profile_switch` 首轮双方均为 0/2，原因是 eval 检查比较了带 effort 后缀的 Profile 显示名。本分支修正检查后，该对话在 api 和 Codex 管家下均为 2/2；这次定向复跑与上表首轮全量统计分开记录。
+
+本次测量未提供逐请求 token 差值、中性会话条目、`api_sessions.protocol` 读回或 Opus 描述性比较结论，不据此关闭第 8.4、15 节的独立能力检查。原创交接提示词专项对照已随合入的 [PR #688](https://github.com/foolzzz/looper/pull/688) 的 RFC 结果表记录，保持独立且不变；本次未改提示词，也不以全对话评测替代该专项对照。
 
 ## 10. 可观测性
 
@@ -362,18 +378,18 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 
 ### 12.1 开发排期
 
-每一步一个 PR，各自是完整、可单独回滚的结果（计划第 1 节第 1 条）。第 1–4 步已合入；第 6 步停止与用量记录已在分支实现，通过本地假 HTTP 与一次性 PostgreSQL 验证；第 5、7、8 步尚未实现。第 5、6 步可以并行。
+每一步一个 PR，各自是完整、可单独回滚的结果（计划第 1 节第 1 条）。第 1–7 步已合入；第 8 步的评测入口、示例、真实 CPA smoke 与全对话对照已完成，D11 已满足，实测结果见第 8.4、9、15 节。
 
 | 步 | 内容 | 依赖 | 完成时 |
 |---|---|---|---|
 | 1 | 运行时类型与 Profile、provider 接线：`api` 适配器、类型化的角色限制、按 SDK 检测、只接 API key 的 Responses 绑定、描述行、私有提示文件；`openai` 依赖 | — | 已合入；当时适配器未登记，第 4 步开放；注册表的角色限制与无可执行文件的检测有测试 |
 | 2（2a） | 中性 Norma 循环与接口：将 agentcore turn/tool cycle 及所需 harness、llm、tool、hook、transcript 行为移植为类型化 asyncio Python；`AgentLoop`、`ProtocolCodec`、中性条目与工具接口；来源 notice、派生 docstring 引用和 wheel 分发 | 1 | 已合入；不接管家或 SDK；注入式测试验证中性 turn/tool 契约；不加 workbench 工具、`noa`、`noaadapter` 或新框架；制作 Go 上游副本另做 |
-| 3（2b） | Responses 编解码器与 SDK：wire 与中性条目互译、重试与超时、请求上限、错误分类、每次请求的用量；本地假 Responses 服务 | 2 | 已合入；真实 SDK 经本地假服务验证文本、工具循环、错误、重试计数、用量与取消；真实 provider 待验证 |
-| 4 | 管家跑在 `api` 上：`ApiSession`、进程内平台工具（`TurnTools` → `ManagerOps.call`，与 MCP 桥给出的文本和留痕一致）、单条工具结果上限、内部事件翻译、管家的改动、运行时说明、软上限；适配器进 `ADAPTERS` | 1、2、3 | 已合入；管家能在 `api` Profile 上回答、调工具、两步确认并按 provider 价格记账；会话只在进程内，重启后走续接失败的现有路径；停止见第 6 步。真实 provider 与 api-only 文本评测待第 8 步 |
+| 3（2b） | Responses 编解码器与 SDK：wire 与中性条目互译、重试与超时、请求上限、错误分类、每次请求的用量；本地假 Responses 服务 | 2 | 已合入；真实 SDK 经本地假服务验证文本、工具循环、错误、重试计数、用量与取消；真实 CPA 验证结果见第 8 步 |
+| 4 | 管家跑在 `api` 上：`ApiSession`、进程内平台工具（`TurnTools` → `ManagerOps.call`，与 MCP 桥给出的文本和留痕一致）、单条工具结果上限、内部事件翻译、管家的改动、运行时说明、软上限；适配器进 `ADAPTERS` | 1、2、3 | 已合入；管家能在 `api` Profile 上回答、调工具、两步确认并按 provider 价格记账；会话只在进程内，重启后走续接失败的现有路径；停止见第 6 步。真实 CPA 与 api-only 文本评测结果见第 8 步 |
 | 5 | 中性持久会话与上下文：`api_sessions`、版本化 `api_session_items`、首次元数据与请求批次同事务、跨重启续接、换协议新会话、跨模型不重放外来 opaque reasoning、半轮补齐、drop 级联清理；`CONTEXT_FULL`、阈值、第一次请求超限时重跑；原创 api 交接摘要提示词及其计划 §1 定向真实 Claude CLI 对照 | 4 | 重启后接着同一会话；长会话按 D6 交接换新；专项评测完成，CLI 交接文本不变 |
-| 6 | 停止与用量记录：`can_interrupt = True`、取消请求、停止后原文合法、`usage_complete`、`metadata.api`、每次请求的结构化日志 | 4 | 分支实现，本地假 HTTP 与一次性 PostgreSQL 已验证：控制台与渠道取消当前请求；保留工具结果与已知 token，缺失用量时花费为未知；记录请求数、重试、不完整请求数、上游 id 与逐请求日志；真实 provider 验证留第 8 步 |
+| 6 | 停止与用量记录：`can_interrupt = True`、取消请求、停止后原文合法、`usage_complete`、`metadata.api`、每次请求的结构化日志 | 4 | 分支实现，本地假 HTTP 与一次性 PostgreSQL 已验证：控制台与渠道取消当前请求；保留工具结果与已知 token，缺失用量时花费为未知；记录请求数、重试、不完整请求数、上游 id 与逐请求日志；真实 CPA 验证结果见第 8 步 |
 | 7 | 入口：控制台（运行时卡、Profile 表单、Roles、停止按钮）、Telegram 与飞书的 `/profile`、`/stop`，CLI 与 `loopercli` 的核对；`agent-system.md` 一节 | 6 | 各入口按第 2 节表现，截图一张 |
-| 8 | CPA 真实验证与评测：`dialogs --manager-agent`、示例 spec、验收脚本；隔离服务上的真实 smoke；全部对话与同模型 Codex 管家对照；把结果写回第 8.4、15 节 | 5、6、7 | D11 的门槛，独立于第 5 步的交接提示词评测 |
+| 8 | CPA 真实验证与评测：`dialogs --manager-agent`、示例 spec、验收脚本；隔离服务上的真实 smoke；全部对话与同模型 Codex 管家对照；把结果写回第 8.4、15 节 | 5、6、7 | 已完成真实 CPA 验证，双方用 `gpt-6-astra`，其他角色 sonnet；smoke 4/4、$0.44；Codex 78/84 加 4 个 harness error、$13.68，api 82/88、$9.06；共同评分对话 $6.82 / $4.53，D11 已满足；共同失败及 Profile 检查修正后双方 2/2 见第 9 节；独立于第 5 步的交接提示词评测 |
 
 **阶段 2**（阶段 1 全部合入之后）：
 
@@ -407,7 +423,7 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
   - 本 worktree 的 `looper serve`、全新数据库、8767 以外的端口、一次性的 `--runtime-root`；
   - 确认 `sys.executable` 和 `looper.__file__` 指向本 worktree；
   - 外部渠道关闭，用替身渠道；
-  - CPA 的 key 由脚本在运行时读进内存。
+  - CPA 的 key 仅在运行时通过 `LOOPER_EVAL_API_KEY` 提供，经 `api_key_env` 传入，不写入仓库。
 - **评测：** 见第 9 节。
 - PR 的 Validation 里写明新增的测试行数和生产代码行数。
 
@@ -427,14 +443,16 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 10. 循环来源：阶段 1 即将 Norma agentcore 及所需行为移植为类型化 asyncio Python，放在 `AgentLoop` 后，Responses 为首个 codec；唯一后续上游是 `loopgo-main:go/internal/norma`，制作副本另做（D3）。
 11. 许可：维护者决定保留 Norma 的 MIT 来源、版权行及完整 MIT 文本，循环实现时创建第 5 节所述 notice、派生模块引用和 wheel 分发；Looper 保持 Apache-2.0，不声称从快照找到了许可文件。
 
-## 15. 需要验证（汇总）
+## 15. 验证结果与待验证项（汇总）
 
-都要在真实运行里核实，结果写回第 8.4 节：
+**已测：** CPA 提供 `gpt-6-astra`，api 与 Codex 管家均使用它，其他角色为 Claude Code sonnet，全对话 `--reps 2 --jobs 2`。api smoke 4/4、$0.44；Codex 78/84 个已评分项通过、另有 4 个 harness error、$13.68；api 82/88、$9.06。双方均评分的对话为 $6.82 / $4.53，D11 已满足，确认类对话全部 2/2。共同失败为 `model_missing_endpoint`、`start_no_wait` 和首轮的 `session_profile_switch`（各 0/2）；最后一项是带 effort 后缀的显示名比较错误，本分支修正后双方均 2/2，单独记定向复跑，不改首轮总数。详见第 9 节；#688 的真实 Claude CLI 交接提示词专项对照保持独立且不变。
 
-- CPA 实际提供哪些模型（是否有 `gpt-6.1-sol`）；是否接受 `store: false`、`include: ["reasoning.encrypted_content"]`、`prompt_cache_key` 和 `parallel_tool_calls: false`；流里是否带 `response.completed.usage`；`input_tokens` 是否含缓存写；
+以下独立能力仍需真实运行核实，结果写回第 8.4 节；上述对话分数与记录花费不作为逐请求 token 或数据库读回的证明：
+
+- CPA 请求参数 `store: false`、`include: ["reasoning.encrypted_content"]`、`prompt_cache_key` 和 `parallel_tool_calls: false` 的逐项核实；流里的 `response.completed.usage` 与 `input_tokens` 是否含缓存写；
 - Responses 加密推理在同模型续接时能否正确重放；同协议换模型按第 7.2 节去掉外来 opaque reasoning，不尝试跨模型回传；
 - DeepSeek、Kimi、OpenCode 的 Anthropic 接口是否接受 Bearer、`cache_control` 和 `thinking` / `output_config.effort`；它们流里的用量分桶；
 - SDK 在流中途断开时不重试：这是读源码得出的，没有实跑；
 - Claude Code 当前版本对 MCP 输出的默认上限；
-- 每次请求少约一万 token 的估计；
-- 非 Claude 模型担任管家的质量：只有评测能回答。
+- 每次请求少约一万 token 的估计及逐请求 token 差值；中性会话条目与 `api_sessions.protocol` 读回；
+- Opus 描述性比较；模型不同，不用于 D11 判定。

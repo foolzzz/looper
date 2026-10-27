@@ -136,3 +136,57 @@ def test_encoder_rejects_non_json(value):
 def test_encoder_rejects_ambiguous_response():
     with pytest.raises(p.ProtocolError):
         p.encode_frame(p.Response("l-1", result={}, error={"code": -32603, "message": "error"}))
+
+
+@pytest.mark.parametrize("first_size", [p.MAX_FRAME_BYTES, p.MAX_FRAME_BYTES - 17])
+def test_segmented_oversized_frame_is_rejected_without_lf(first_size):
+    async def exercise():
+        reader = asyncio.StreamReader()
+        original_limit = reader._limit
+        pending = asyncio.create_task(p.read_frame(reader))
+        try:
+            reader.feed_data(b"x" * first_size)
+            await asyncio.sleep(0)
+            assert not pending.done()
+            reader.feed_data(b"x" * (p.MAX_FRAME_BYTES + 1 - first_size))
+            with pytest.raises(p.ProtocolError) as error:
+                await asyncio.wait_for(pending, 0.5)
+            assert error.value.code == p.ErrorCode.INVALID_REQUEST
+            assert reader._limit == original_limit
+        finally:
+            if not pending.done():
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+    asyncio.run(exercise())
+
+
+def test_maximum_frame_preserves_next_frame_and_reader_limit():
+    async def exercise():
+        reader = asyncio.StreamReader(limit=p.MAX_FRAME_BYTES * 2)
+        original_limit = reader._limit
+        first = {"jsonrpc": "2.0", "id": "l-1", "result": {"text": ""}}
+        overhead = len(p.encode_frame(first)) - 1
+        first["result"]["text"] = "x" * (p.MAX_FRAME_BYTES - overhead)
+        second = p.Response("l-2", result={})
+        reader.feed_data(p.encode_frame(first) + p.encode_frame(second))
+        assert (await p.read_frame(reader)).result == first["result"]
+        assert reader._limit == original_limit
+        assert await p.read_frame(reader) == second
+        assert reader._limit == original_limit
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("uncovered", get_args(p.RequestKind))
+def test_default_initialize_rejects_any_uncovered_request_kind(uncovered):
+    result = next(c["message"]["result"] for c in CASES if c["name"] == "handshake")
+    result = dict(result, capabilities={**result["capabilities"], "authorize_covers": [
+        kind for kind in get_args(p.RequestKind) if kind != uncovered]})
+    with pytest.raises(p.ProtocolError) as error:
+        p.validate_initialize(result, [p.PROTOCOL_VERSION], "fake")
+    assert error.value.code == p.ErrorCode.UNSUPPORTED
+
+
+def test_default_initialize_accepts_all_request_kinds():
+    result = next(c["message"]["result"] for c in CASES if c["name"] == "handshake")
+    result = dict(result, capabilities={**result["capabilities"], "authorize_covers": list(get_args(p.RequestKind))})
+    assert p.validate_initialize(result, [p.PROTOCOL_VERSION], "fake") == result

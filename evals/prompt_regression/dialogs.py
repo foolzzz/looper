@@ -1338,9 +1338,10 @@ SWITCH = "eval/switch"
 _SWITCH_NUMBER = re.compile(r"^\s*(\d+)\.\s*" + re.escape(SWITCH) + r"\b", re.MULTILINE)
 
 
-def _make_switch_profile(api: Api, project_id: str, *, fake: bool = True, spec: dict[str, Any] | None = None) -> None:
+def _make_switch_profile(api: Api, project_id: str, *, fake: bool = True, spec: dict[str, Any] | None = None,
+                         manager_profile: dict[str, Any] | None = None) -> None:
     """Register SWITCH. Fake: Claude Code on a provider of its own (the stand-in ignores it, and another provider
-    makes the switch start a new session). Real: the login provider, which resumes; ``spec`` replaces both."""
+    makes the switch start a new session). Real: reuse the Manager's binding; ``spec`` replaces both."""
     if spec is not None:
         register_agent(api, {**spec, "agent": {**spec["agent"], "name": SWITCH}})
     elif fake:
@@ -1349,7 +1350,13 @@ def _make_switch_profile(api: Api, project_id: str, *, fake: bool = True, spec: 
         register_agent(api, {"runtime": {"type": "claude-code"}, "provider": {"provider_id": provider["provider_id"]},
             "model": {"name": "haiku", "protocol": "anthropic-messages"}, "agent": {"name": SWITCH}})
     else:
-        _subscription_profile(api, SWITCH, "haiku", None)
+        if manager_profile is None:
+            raise EvalError("a real profile switch needs the selected Manager profile")
+        # A distinct profile exercises /profile without changing the comparison's runtime or model.
+        api.post("/api/v1/profiles/create", {"name": SWITCH,
+            "runtime_id": manager_profile["runtime_id"], "model_id": manager_profile["model_id"],
+            **{key: manager_profile[key] for key in ("effort", "agent_teams", "custom_prompt")
+               if key in manager_profile}})["result"]
 
 
 def _manager_runs(look: Look) -> list[dict[str, Any]]:
@@ -1395,12 +1402,13 @@ def _selected(look: Look) -> dict[str, Any] | None:
 
 def _switch_selected(look: Look) -> str | None:
     chosen = _selected(look)
-    if not chosen or chosen.get("name") != SWITCH:
+    wanted = _switch_id(look)
+    if not chosen or wanted is None or chosen.get("profile_id") != wanted:
         return f"the session's selected profile is {chosen}, not {SWITCH}"
     recorded = [r for r in _manager_runs(look) if _is_switch(r)]
     if not recorded:
         return "no Manager run records the choice"
-    if recorded[-1]["metadata"]["session_profile"].get("to") != _switch_id(look):
+    if recorded[-1]["metadata"]["session_profile"].get("to") != wanted:
         return f"the choice is recorded as {recorded[-1]['metadata']['session_profile']}"
     return None
 
@@ -2118,7 +2126,8 @@ def _root_overrun(api: Api, seen: dict[int, float]) -> float:
 
 def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, scenarios: Path, mode: str,
                timeout: float, runtime_root: Path | None = None, cap_left: float | None = None,
-               switch_spec: dict[str, Any] | None = None) -> dict[str, Any]:
+               switch_spec: dict[str, Any] | None = None,
+               manager_profile: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run ``dialog`` on the server it has to itself; its row without its cost (read once the server stopped).
     No reply within ``timeout`` is an error of class ``timeout``, and any other exception, such as the slow task
     not getting under way, one of class ``harness``; the turns after an error are not sent. With ``cap_left``,
@@ -2150,7 +2159,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             _make_schedule(api, project_id)
         runs_since = 0
         if dialog.seed is _make_switch_profile:
-            _make_switch_profile(api, project_id, fake=mode == "fake", spec=switch_spec)
+            _make_switch_profile(api, project_id, fake=mode == "fake", spec=switch_spec,
+                                 manager_profile=manager_profile)
         elif dialog.seed is not None:
             dialog.seed(api, project_id)
         if dialog.seed is _make_switch_profile or any(say.stop or say.withdraw for say in dialog.says):
@@ -2293,12 +2303,15 @@ def run(
     total_cap_usd: float | None = None, timeout: float | None = None, keep_work_dirs: bool = False,
     manager_model: str | None = None, manager_effort: str | None = None, reps: int = 1, jobs: int = 1,
     case_budget_usd: float | None = None, switch_agent: dict[str, Any] | None = None,
+    manager_agent: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], Path]:
     """Run ``dialogs`` ``reps`` times each in ``mode``, rep-major, ``jobs`` at a time, each (dialog, rep) on a
     database, a server, a working directory and a project of its own (``runner.run``'s setup); the run and the JSON file written to
     ``out_dir``, however the run ends (``runner.run``). With ``manager_model`` the Manager alone runs Claude Code
     with that model and ``manager_effort``. A failure to set a dialog's server up stops the run, as it would stop
-    every dialog after it."""
+    every dialog after it. ``manager_agent`` registers a spec for the Manager's role layer only."""
+    if manager_agent is not None and mode != "real":
+        raise EvalError("--manager-agent needs --mode real; the api runtime's fake runs are its own tests")
     if reps < 1:
         raise EvalError(f"reps must be at least 1, not {reps}")
     if jobs < 1:
@@ -2344,13 +2357,19 @@ def run(
                     if register is not None:
                         api.post("/api/v1/agent_settings/update_system", {"values": {
                             "profile_id": picked["profile_id"], "run_budget_usd": max_budget_usd}})["result"]
-                    configs[dialog.id, rep] = (picked, _manager_profile(api, manager_model, manager_effort)
-                                               if manager_model else picked)
+                    if manager_agent is not None:
+                        registered = register_agent(api, manager_agent)
+                        api.post("/api/v1/agent_settings/update_role", {
+                            "role": "manager", "values": {"profile_id": registered["profile_id"]}})["result"]
+                        configs[dialog.id, rep] = (picked, registered)
+                    else:
+                        configs[dialog.id, rep] = (picked, _manager_profile(api, manager_model, manager_effort)
+                                                   if manager_model else picked)
                     project_id = api.post("/api/v1/project_admin/create", {"name": PROJECT, "work_dir": str(work_dir)})["result"]["project"]["project_id"]
                     row = run_dialog(api, dialog, database_url=database_url, project_id=project_id,
                                      scenarios=scenarios, mode=mode, timeout=timeout,
                                      runtime_root=case / "runtime", cap_left=cap_left if jobs > 1 else None,
-                                     switch_spec=switch_agent)
+                                     switch_spec=switch_agent, manager_profile=configs[dialog.id, rep][1])
                     if mode == "real" and register is not None and register.get("runtime", {}).get("type") == "dsh":
                         row["runtime_evidence"] = runtime_evidence(api)
                 cost, models = _usage(database_url)

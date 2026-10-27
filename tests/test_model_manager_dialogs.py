@@ -318,11 +318,12 @@ def test_switch_profile_seed_registers_a_spec_as_eval_switch(monkeypatch):
     assert calls == [{**spec, "agent": {"name": dialogs.SWITCH, "model": "m"}}]
 
 
-def test_switch_profile_seed_uses_the_login_provider_in_real_mode():
+def test_switch_profile_seed_reuses_the_selected_manager_in_real_mode():
     api = SeedApi()
-    dialogs._make_switch_profile(api, "project-test", fake=False)
+    manager = dialogs._manager_profile(api, "sonnet", "high")
+    dialogs._make_switch_profile(api, "project-test", fake=False, manager_profile=manager)
     assert [p for p, _ in api.posts if p == "/api/v1/provider_accounts/create"] == []
-    assert api.registry["profiles"][0]["name"] == dialogs.SWITCH
+    assert api.registry["profiles"][-1]["name"] == dialogs.SWITCH
 
 
 def run_record(record_id, text="hi", *, source="session", profile="agent-1", switch=None):

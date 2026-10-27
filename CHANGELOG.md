@@ -18,6 +18,26 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.168] - 2026-10-27
+
+### Fixed
+
+- **Runner supervision.** The supervisor tracks and reaps a runner's children, including ones in their own process groups, bounds the stderr drain so recovery and shutdown cannot hang, resolves only `Path` launch arguments instead of any string naming a file, and treats a slow or transiently failing initialize as a retryable start failure. Nothing in Looper calls the supervisor yet. ([#755](https://github.com/foolzzz/looper/pull/755))
+
+## [2.13.167] - 2026-10-27
+
+### Added
+
+- **Manager-only profile for CPA dialog evals.** `dialogs --manager-agent SPEC.json` registers the supplied agent spec and runs the Manager alone on it, with api and Codex example specs under `evals/agents/`. Only the evaluation CLI and its documentation change. ([#725](https://github.com/foolzzz/looper/pull/725))
+
+### Changed
+
+- **Eval profile switch.** A real profile-switch dialog now defaults to a distinct profile that keeps the selected Manager's runtime, model, effort and prompt options; an explicit `--switch-agent` still overrides it. ([#725](https://github.com/foolzzz/looper/pull/725))
+
+### Fixed
+
+- **Runner protocol, bridge and turn policy.** Frame reads are bounded by the remaining frame budget, usage not matched by an authorization is settled as failed, a rejected prompt or close no longer poisons the shared connection or leaves stale session state, a long room-inbox poll gets a matching tool timeout, and a settled turn applies the actual run and task caps. ([#754](https://github.com/foolzzz/looper/pull/754))
+
 ## [2.13.166] - 2026-10-27
 
 ### Added

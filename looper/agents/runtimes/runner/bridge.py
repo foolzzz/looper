@@ -10,6 +10,7 @@ import inspect
 import json
 import re
 from typing import TYPE_CHECKING
+from typing import get_args
 
 from looper import __version__
 from ...claude_cli import BUDGET_SUBTYPE, user_stop_result
@@ -55,6 +56,8 @@ class SessionEntry:
     accepted: bool = False
     settled_received: bool = False
     requests_ended: int = 0
+    authorized: dict[str, str] = field(default_factory=dict, repr=False)
+    invalid_usage: bool = False
     summary: TurnSummary | None = None
     result_event: dict | None = field(default=None, repr=False)
     settled: asyncio.Future | None = field(default=None, repr=False)
@@ -86,6 +89,14 @@ class _FrameReader:
     def __init__(self, reader):
         self.reader, self.parts = reader, []
 
+    @property
+    def _limit(self):
+        return self.reader._limit
+
+    @_limit.setter
+    def _limit(self, value):
+        self.reader._limit = value
+
     async def readuntil(self, separator):
         chunk = await self.reader.readuntil(separator)
         self.parts.append(chunk)
@@ -102,7 +113,8 @@ class _FrameReader:
             return await p.read_frame(self)
         except p.ProtocolError:
             # Unknown methods have no schema; validate the envelope, not its payload.
-            if sum(map(len, self.parts)) <= p.MAX_FRAME_BYTES + 1:
+            if (self.parts and self.parts[-1].endswith(b"\n")
+                    and sum(map(len, self.parts)) <= p.MAX_FRAME_BYTES + 1):
                 try:
                     raw = json.loads(b"".join(self.parts),
                         parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
@@ -140,7 +152,7 @@ class RunnerBridge:
         self._reader = _FrameReader(reader)
         self._reader_task = asyncio.create_task(self._read())
 
-    async def initialize(self, *, permitted=("turn",)):
+    async def initialize(self, *, permitted=get_args(p.RequestKind)):
         if self._initialize_attempted:
             raise RuntimeError("runner initialize may only be called once")
         self._initialize_attempted = True
@@ -224,14 +236,21 @@ class RunnerBridge:
         entry.prompt_sent = entry.session_started = entry.accepted = entry.stopped = entry.settled_received = False
         entry.summary = entry.result_event = None
         entry.requests_ended = 0
+        entry.authorized.clear()
+        entry.invalid_usage = False
+        entry.updates.clear()
         entry.ready, entry.wake = asyncio.Event(), asyncio.Event()
         entry.settled = asyncio.get_running_loop().create_future()
         entry.worker = asyncio.create_task(self._updates(entry))
         try:
             return await self.request("session/prompt", {"session_id": session_id, "trace_id": trace_id,
                 "text": text, "tools": tools or []}, _entry=entry)
-        except RpcFailure:
+        except (RpcFailure, p.ProtocolError) as error:
+            if not isinstance(error, RpcFailure) and entry.prompt_sent:
+                self._fail(ConnectionLost("runner protocol-error: prompt rejected"))
+                raise
             # A correlated rejection abandons only this prompt, not the connection.
+            # Local schema/encoding failures have not written anything to the pipe.
             entry.stopped = True
             entry.worker.cancel()
             await asyncio.gather(entry.worker, return_exceptions=True)
@@ -271,25 +290,31 @@ class RunnerBridge:
             "message_id": message_id, "text": text, "if_idle": "reject"})
 
     async def close_session(self, session_id):
-        entry = self._entry(session_id)
-        if entry.state == State.CLOSED:
+        entry = self.sessions.get(session_id)
+        if entry is None:
             return
+        previous = entry.state
+        if previous == State.CLOSING:
+            previous = State.RUNNING if entry.accepted and entry.summary is None else State.IDLE
         params = {"session_id": session_id}
-        if entry.state == State.RUNNING:
+        if previous == State.RUNNING:
             params["trace_id"] = entry.trace_id
             entry.stopped = True
             entry.state = State.CLOSING
             await _value(entry.turn.stop())
         entry.state = State.CLOSING
-        await self.request("session/close", params)
+        try:
+            await self.request("session/close", params)
+        except RpcFailure:
+            if not self._error:
+                entry.state = State.IDLE if entry.summary is not None else previous
+            raise
         if entry.settled is not None and not entry.settled.done():
-            try:
-                async with asyncio.timeout(self.control_timeout):
-                    await self.wait_settled(session_id, entry.trace_id)
-            except TimeoutError:
-                self._fail(ConnectionLost("runner protocol-error: close missing settlement"))
-                raise
+            # Settlement drains admitted tools, including user confirmations. A
+            # slow tool is not evidence that the shared control pipe is dead.
+            await asyncio.shield(entry.settled)
         entry.state = State.CLOSED
+        self.sessions.pop(session_id, None)
 
     async def _read(self):
         try:
@@ -332,6 +357,8 @@ class RunnerBridge:
         entry = self.sessions.get(update["session_id"])
         if entry is None:
             raise p.ProtocolError(p.ErrorCode.SESSION_NOT_FOUND)
+        if entry.state not in (State.RUNNING, State.CLOSING) and entry.summary is None:
+            return  # Rejected prompts cannot enqueue work for the next turn.
         if entry.trace_id != update["trace_id"] or entry.settled_received or entry.summary is not None:
             if update["kind"] == "text_delta":
                 return  # A stale display delta cannot create effects or reopen a trace.
@@ -363,11 +390,15 @@ class RunnerBridge:
                 result = ({"allow": False, "reason": "stopped"} if message.method == "budget/authorize" else
                           {"text": "stopped", "is_error": True, "ran": False})
             else:
+                if (message.method == "budget/authorize"
+                        and params["kind"] not in self.capabilities.get("authorize_covers", [])):
+                    raise p.ProtocolError(p.ErrorCode.UNSUPPORTED)
                 handler = entry.turn.call_tool if message.method == "tools/call" else entry.turn.authorize
                 result = await _value(handler(params))
-                if message.method == "budget/authorize" and (
-                        entry.stopped or entry.trace_id != params["trace_id"]):
-                    result = {"allow": False, "reason": "stopped"}
+                if message.method == "budget/authorize" and result.get("allow") is True:
+                    # The policy already owns this reservation. A concurrent stop
+                    # cancels the turn; it must not rewrite a committed allowance.
+                    entry.authorized[params["request_id"]] = params["kind"]
             response = p.Response(message.id, result={**result, **data})
         except p.ProtocolError as error:
             response = p.Response(message.id, error={"code": int(error.code), "message": error.code.name, "data": data})
@@ -410,6 +441,16 @@ class RunnerBridge:
                         event = {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result",
                             "tool_use_id": update["call_id"], "content": update["text"], "is_error": update["is_error"]}]}}
                     elif kind == "request_end":
+                        authorized = entry.authorized.pop(update["request_id"], None)
+                        if (authorized != update["request_kind"]
+                                or update["request_kind"] not in self.capabilities.get("authorize_covers", [])):
+                            entry.invalid_usage = True
+                            if entry.state == State.RUNNING and not entry.stopped:
+                                try:
+                                    await self.cancel_turn(entry.session_id, entry.trace_id)
+                                except RpcFailure:
+                                    pass  # Rejected cancellation still settles only this trace.
+                            continue
                         event = await _value(entry.turn.request_end(update))
                         entry.requests_ended += 1
                     else:
@@ -434,6 +475,10 @@ class RunnerBridge:
     async def _settle(self, entry, settled):
         entry.stopped = True
         await _value(entry.turn.stop())
+        if entry.invalid_usage:
+            settled = {**settled, "usage_complete": False, "requests": entry.requests_ended,
+                       "outcome": "lost" if settled["outcome"] == "lost" else "failed",
+                       "error": {"kind": "INVALID_REQUEST", "message": "runner usage lacks matching authorization"}}
         summary = await _value(entry.turn.finish(settled))
         entry.summary = summary
         outcome = summary.outcome
