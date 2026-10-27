@@ -3,8 +3,8 @@
 
 Builds the wheel from this checkout, checks its contents, installs it into a
 fresh virtualenv and resolves both files from the installed package (not the
-checkout), and checks that it installs the ``looper`` command with ``loopx`` as
-its alias. With LOOPER_TEST_DATABASE_URL pointing at a disposable database it
+checkout), and checks that it installs the ``looper`` command (the retired ``loopx``
+alias is gone). With LOOPER_TEST_DATABASE_URL pointing at a disposable database it
 also starts the installed `looper serve` and fetches the dashboard and the API.
 Run `scripts/stage-dashboard.sh` first; the staged dashboard is not in Git.
 """
@@ -124,10 +124,8 @@ def main() -> int:
         print("PASS the installed package resolves its own schema and dashboard")
         version = run(str(venv / "bin" / "looper"), "--version", cwd=work).split()
         assert version[0] == "looper", version
-        alias = subprocess.run([str(venv / "bin" / "loopx"), "--version"], cwd=work, capture_output=True, text=True,
-                               check=True)
-        assert alias.stdout.split() == version and "loopx is now called looper" in alias.stderr, alias
-        print(f"PASS the wheel installs the looper command ({' '.join(version)}), and loopx as its alias")
+        assert not (venv / "bin" / "loopx").exists(), "the retired loopx alias is installed"
+        print(f"PASS the wheel installs the looper command ({' '.join(version)}) and not the retired loopx alias")
 
         dsn = os.environ.get("LOOPER_TEST_DATABASE_URL")
         if dsn:
