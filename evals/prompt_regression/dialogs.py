@@ -30,8 +30,10 @@ changed (``task_cost``); a provider registered without the key the user pasted
 (``provider_key``). The schedules tool: a schedule listed, disabled, and
 deleted only on the user's word (``schedules``, on a schedule made first);
 one created disabled at once, enabled only after 「启用」 and then 「确认」
-(``schedule_create``) and left disabled when the user does not confirm
-(``schedule_enable_declined``), none created without a project
+(``schedule_create``); one created from the ``pr_review`` template with that
+template, its title and the PR link in the reply (``schedule_template_create``);
+one left disabled when the user does not confirm
+(``schedule_enable_declined``); none created without a project
 (``schedule_ask_project``), one changed at once but its spend cap raised only
 on the user's word (``schedule_modify``), one read without running it, then
 run now only after 「确认」 (``schedule_run``), the schedules' default run timeout
