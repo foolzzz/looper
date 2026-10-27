@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.150] - 2026-10-26
+
+### Fixed
+
+- **The dashboard Tasks page keeps updating under slow responses.** The list now polls three seconds after the previous request settles, instead of on a fixed timer, so a slow response is applied rather than discarded. A Show more page is dropped if a poll has since changed its cursor, so rows are no longer lost. Dashboard only; no API change. ([#708](https://github.com/foolzzz/looper/pull/708))
+
 ## [2.13.149] - 2026-10-26
 
 ### Changed
