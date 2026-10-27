@@ -321,12 +321,12 @@ def test_pi_eval_specs_register_without_exposing_the_key(
     spec_path = runner.REPO_ROOT / "evals" / "agents" / filename
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     assert spec["runtime"] == {"type": "pi"}
-    assert spec["provider"]["auth"] == "api_key"
-    assert spec["provider"]["protocols"] == [protocol]
-    assert spec["agent"]["model"] == model
+    assert spec["provider"]["vendor_type"] == "custom"
+    assert spec["model"] == {"name": model, "protocol": protocol}
     assert "api_key" not in spec["provider"]
-    assert spec["provider"]["base_url"] == ("http://127.0.0.1:8080/v1" if protocol == "openai-responses"
-                                               else "https://api.deepseek.com/v1")
+    endpoint = spec["provider"]["endpoints"][0]
+    assert endpoint == {"protocol": protocol, "base_url": "http://127.0.0.1:8080/v1"
+                        if protocol == "openai-responses" else "https://api.deepseek.com/v1"}
     original = json.dumps(spec)
     secret = "sk-disposable-eval-secret"
     variable = spec["provider"]["api_key_env"]
@@ -342,7 +342,7 @@ def test_pi_eval_specs_register_without_exposing_the_key(
                                "name": model, "protocol": protocol}
     account = eval_registry.providers["provider-eval"]
     assert account.api_key == secret
-    assert eval_registry.endpoints[account.id, ApiProtocol(protocol)].base_url == spec["provider"]["base_url"]
+    assert eval_registry.endpoints[account.id, ApiProtocol(protocol)].base_url == endpoint["base_url"]
     assert list(eval_registry.models) == [chosen["model_id"]]
     assert eval_registry.models[chosen["model_id"]].model.protocol is ApiProtocol(protocol)
     assert json.dumps(spec) == original  # adding the key must not mutate a shareable spec
@@ -1009,11 +1009,11 @@ def test_task_metrics_read_the_flow_cost_and_violations(tmp_path: Path) -> None:
 
 
 def _run(**tasks: dict[str, Any]) -> dict[str, Any]:
-    return {"mode": "real", "model": "haiku", "git": {"commit": "abcdef1234567", "dirty": False},
+    return {"schema": runner.SCHEMA, "mode": "real", "model": "haiku", "git": {"commit": "abcdef1234567", "dirty": False},
             "tasks": [{"id": task_id, **values} for task_id, values in tasks.items()]}
 
 
-_OK = {"success": True, "steps": 1, "retries": 0, "reviews": 0, "contract_violations": {"total": 0},
+_OK = {"outcome": "pass", "success": True, "steps": 1, "retries": 0, "reviews": 0, "contract_violations": {"total": 0},
        "planner_modified_files": 0, "cost_usd": 0.02}
 
 
@@ -1021,7 +1021,7 @@ def test_comparison_marks_what_changed_and_sums_the_run() -> None:
     base = _run(single_step=_OK, chat_correction=_OK)
     tokens = {"input": 1200, "output": 2500, "cache_read": 30000, "cache_creation": 800}
     new = _run(single_step={**_OK, "cost_usd": 0.03, "tokens": tokens},
-               chat_correction={**_OK, "success": False, "contract_violations": {"total": 2},
+               chat_correction={**_OK, "outcome": "fail", "success": False, "contract_violations": {"total": 2},
                                 "problems": ["color.txt holds 'red', expected 'blue'"]})
     new["git"]["dirty"] = True
     table = compare.markdown(new, base)
@@ -1061,8 +1061,8 @@ _TIMEOUT = {"outcome": "error", "success": False, "error_class": "timeout", "err
 
 
 def test_comparison_of_repeated_runs_counts_the_scored_reps_and_keeps_errors_apart() -> None:
-    # A base of one rep per task (schema v1: no rep, no outcome; a task cancelled at its timeout is an error).
-    base = _run(single_step=_OK, dependent_steps={**_OK, "success": False, "timed_out": True},
+    # The base has one scored pass and one typed timeout for the shared tasks.
+    base = _run(single_step={**_PASS, "rep": 1}, dependent_steps={**_TIMEOUT, "rep": 1},
                 chat_correction=_OK)
     new = {**_run(), "tasks": [*_reps("single_step", _PASS, _PASS, _PASS),
                                *_reps("dependent_steps", _PASS, _FAIL, _TIMEOUT),
@@ -1093,7 +1093,7 @@ def test_comparison_of_repeated_runs_counts_the_scored_reps_and_keeps_errors_apa
 
 def test_against_a_base_of_more_tasks_the_total_is_over_the_shared_ones() -> None:
     # A base of seven tasks, six passed; the new run has one of them, twice.
-    base = _run(**{f"task_{i}": _OK if i < 6 else {**_OK, "success": False} for i in range(7)})
+    base = _run(**{f"task_{i}": _OK if i < 6 else {**_OK, "outcome": "fail", "success": False} for i in range(7)})
     base["tasks"][0]["id"] = "single_step"
     new = {**_run(), "tasks": _reps("single_step", _PASS, {**_PASS, "cost_usd": 0.04})}
     lines = compare.markdown(new, base).splitlines()
@@ -1139,12 +1139,12 @@ def test_each_row_records_whether_its_planner_could_open_gates(task_gates: bool,
 
 
 def test_comparison_of_dialogs_shows_success_and_cost() -> None:
-    run = {"mode": "fake", "agent": "claude-code/opus", "manager_agent": "claude-code/opus",
+    run = {"schema": "looper-manager-dialogs/v2", "mode": "fake", "manager_agent": "claude-code/opus",
            "git": {"commit": "abcdef1234567", "dirty": False},
            "dialogs": _reps("status", {"outcome": "pass", "success": True, "cost_usd": 0.001},
                             {"outcome": "error", "success": False, "error_class": "timeout",
                              "error": "no reply to 'hi' within 60 s", "cost_usd": 0.002})}
-    old = {**run, "dialogs": [{"id": "status", "success": True, "cost_usd": 0.003}]}  # schema v1
+    old = {**run, "dialogs": _reps("status", {"outcome": "pass", "success": True, "cost_usd": 0.003})}
     lines = compare.markdown(run, old).splitlines()
     assert lines[0] == "Manager dialogs: fake/claude-code/opus @ abcdef123 (1 rep) → fake/claude-code/opus @ abcdef123 (2 reps)"
     assert "| dialog | success | cost (USD) |" in lines
@@ -1165,12 +1165,11 @@ def test_the_wilson_interval(passes: int, scored: int, interval: tuple[float, fl
 
 
 @pytest.mark.parametrize(("row", "outcome", "error_class"), [
-    ({"outcome": "pass", "success": True}, "pass", None),
+    ({"outcome": "pass", "success": False, "timed_out": True}, "pass", None),
     ({"outcome": "error", "success": False, "error_class": "harness"}, "error", "harness"),
-    ({"success": True}, "pass", None),  # schema v1
-    ({"success": False}, "fail", None),
-    ({"success": False, "timed_out": True}, "error", "timeout"),
-    ({"success": False, "stopped_by_cap": True}, "error", "spending_cap"),
+    ({"outcome": "fail", "success": True}, "fail", None),
+    ({"outcome": "error", "error_class": "timeout"}, "error", "timeout"),
+    ({"outcome": "error", "error_class": "spending_cap"}, "error", "spending_cap"),
     ({"skipped": "the spending cap was reached"}, "skipped", None),
 ])
 def test_a_rows_outcome_is_read_from_its_typed_fields(row: dict[str, Any], outcome: str,
@@ -1677,16 +1676,15 @@ def test_a_gate_task_has_gates_on_whatever_user_gates_says(tmp_path: Path) -> No
     assert row["outcome"] == "pass" and row["gates_opened"] == 1, row["problems"]
 
 
-@pytest.mark.parametrize("typed", [False, True])
 @pytest.mark.parametrize("suite", ["tasks", "dialogs"])
-def test_run_metadata_keeps_model_names_with_typed_or_legacy_profiles(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, typed: bool, suite: str,
+def test_run_metadata_projects_model_names_from_current_profiles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suite: str,
 ) -> None:
     from evals.prompt_regression import dialogs
 
     def profile(name: str) -> dict[str, Any]:
         model = {"name": name, "protocol": "anthropic-messages", "model_id": f"model-{name}",
-                 "provider_id": "prov-test"} if typed else name
+                 "provider_id": "prov-test"}
         return {"name": f"claude-code/{name}", "model": model}
 
     @contextmanager
@@ -1708,7 +1706,7 @@ def test_run_metadata_keeps_model_names_with_typed_or_legacy_profiles(
             "id": task.id, "outcome": "pass", "cost_usd": 0.0})
         result, path = runner.run(mode="real", tasks=task_list.select(["single_step"]),
                                   admin_url="unused", out_dir=tmp_path)
-        assert result["protocol"] == ("anthropic-messages" if typed else None)
+        assert result["protocol"] == "anthropic-messages"
     else:
         monkeypatch.setattr(dialogs, "_manager_profile", lambda *_: profile("opus"))
         monkeypatch.setattr(dialogs, "run_dialog", lambda _api, case, **_: {
@@ -1723,30 +1721,61 @@ def test_run_metadata_keeps_model_names_with_typed_or_legacy_profiles(
     assert runner.compared_model(result) == ("opus" if suite == "dialogs" else "sonnet")
 
 
-@pytest.mark.parametrize("typed", [False, True])
+@pytest.mark.parametrize("name", ["sonnet", None])
 @pytest.mark.parametrize("dialogs", [False, True])
-def test_baseline_comparison_reads_model_names_from_existing_raw_runs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, typed: bool, dialogs: bool,
+def test_baseline_comparison_reads_current_string_or_null_model_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str | None, dialogs: bool,
 ) -> None:
-    def model(name: str) -> Any:
-        return {"name": name, "protocol": "anthropic-messages", "model_id": f"model-{name}",
-                "provider_id": "prov-test"} if typed else name
-
-    run = {"mode": "real", "model": model("sonnet"), "tasks": []}
-    if dialogs:
-        run.update(manager_model=model("opus"), dialogs=[])
-    expected = "opus" if dialogs else "sonnet"
+    run = {"schema": "looper-manager-dialogs/v2" if dialogs else runner.SCHEMA,
+           "mode": "real", "model": name, **({"manager_model": name, "dialogs": []} if dialogs else {"tasks": []})}
     monkeypatch.setattr(runner, "BASELINES_DIR", tmp_path)
-    baseline = tmp_path / ("dialogs-real-opus.json" if dialogs else "real-sonnet.json")
+    baseline = runner.baseline_path(mode="real", model=name, dialogs=dialogs)
     baseline.write_text(json.dumps(run))
     earlier = tmp_path / "20261016T100000Z-real.json"
     earlier.write_text(json.dumps(run))
     current = tmp_path / "20261016T110000Z-real.json"
-    assert runner.compared_model(run) == expected
+    assert runner.compared_model(run) == name
     for choice in (None, "previous"):
         data, _ = runner.comparison_base(choice, out_dir=tmp_path, current=current, mode="real",
-                                         model=runner.compared_model(run), dialogs=dialogs)
+                                         model=name, dialogs=dialogs)
         assert data == run
+
+
+@pytest.mark.parametrize("dialogs", [False, True])
+@pytest.mark.parametrize("schema", ["loopx-prompt-eval/v1", "looper-prompt-eval/v1", "unknown/v2", None, [], 1])
+def test_report_file_boundaries_reject_retired_schemas(tmp_path, capsys, dialogs, schema):
+    current = {"schema": "looper-manager-dialogs/v2" if dialogs else runner.SCHEMA,
+               "model": "sonnet", "mode": "real", "dialogs" if dialogs else "tasks": []}
+    good, bad = tmp_path / "good.json", tmp_path / "20261016T100000Z-real.json"
+    good.write_text(json.dumps(current))
+    bad.write_text(json.dumps({**current, "schema": schema} if isinstance(schema, str) else schema))
+    for new, base in ((bad, good), (good, bad)):
+        assert cli.main(["compare", str(new), str(base)]) == 2
+        assert "unsupported report schema" in capsys.readouterr().err
+    for choice in (str(bad), "previous"):
+        with pytest.raises(runner.EvalError, match="unsupported report schema"):
+            runner.comparison_base(choice, out_dir=tmp_path, current=tmp_path / "20261016T110000Z-real.json",
+                                   mode="real", model="sonnet", dialogs=dialogs)
+    if dialogs:
+        current.update(reps=1, manager_agent="claude-code/sonnet", git={}, total_cost_usd=0)
+        good.write_text(json.dumps(current))
+    assert cli.main(["compare", str(good), str(good)]) == 0
+    assert "total" in capsys.readouterr().out
+
+
+def test_recorded_sonnet_baseline_preserves_every_original_measurement():
+    import hashlib
+
+    run = json.loads((runner.BASELINES_DIR / "real-sonnet.json").read_text())
+    assert run.pop("schema") == runner.SCHEMA
+    assert run.pop("reps") == 1 and run.pop("aborted") is None
+    assert len(run["tasks"]) == 5 and compare._tally(run["tasks"]) == (5, 5, {})
+    for row in run["tasks"]:
+        assert row.pop("rep") == 1 and row.pop("outcome") == "pass"
+        assert "tokens" not in row and "user_gates" not in row
+    run["schema"] = "loopx-prompt-eval/v1"
+    assert hashlib.sha256(json.dumps(run, sort_keys=True).encode()).hexdigest() == \
+        "3dfe32eeb5c3d424b4f126871faf07f3bd327359a3389423b80cd0882626e486"
 
 
 def _release_commands() -> list[tuple[Any, str, str]]:
@@ -1809,7 +1838,8 @@ def test_the_base_is_the_committed_baseline_unless_another_is_named(tmp_path: Pa
     monkeypatch.setattr(runner, "REPO_ROOT", tmp_path / "repository")
 
     def write(path: Path, **data: Any) -> Path:
-        path.write_text(json.dumps({"mode": "real", **data}), encoding="utf-8")
+        path.write_text(json.dumps({"schema": "looper-manager-dialogs/v2" if "dialogs" in data else runner.SCHEMA,
+                                    "mode": "real", **data}), encoding="utf-8")
         return path
 
     committed = write(baselines / "real-haiku.json", model="haiku", tasks=[], git={"commit": "c0ffee"})

@@ -226,12 +226,12 @@ def test_eval_arguments_are_bounded_and_register_only_dsh(command, selector, cas
     assert "--manager-model" not in argv
     spec = json.loads(Path(argv[argv.index("--register-agent") + 1]).read_text())
     assert spec["runtime"]["type"] == "dsh"
-    assert spec["provider"]["auth"] == "api_key"
-    assert spec["provider"]["protocols"] == ["anthropic-messages"]
-    assert spec["provider"]["base_url"] == "https://api.deepseek.com/anthropic"
+    assert spec["provider"]["vendor_type"] == "custom"
+    assert spec["provider"]["endpoints"] == [{"protocol": "anthropic-messages",
+        "base_url": "https://api.deepseek.com/anthropic"}]
     assert spec["provider"]["api_key_env"] == "LOOPER_EVAL_API_KEY"
     assert "api_key" not in spec["provider"]
-    assert spec["agent"]["model"] == "deepseek-flash"
+    assert spec["model"] == {"name": "deepseek-flash", "protocol": "anthropic-messages"}
     assert spec["agent"]["effort"] == "high"
 
 
@@ -498,25 +498,21 @@ def test_execute_rejects_incomplete_or_invalid_success_rows(command, problem, tm
     assert summary["status"] != "pass"
 
 
-def test_agent_spec_provider_passes_registry_validation():
+def test_agent_spec_current_layers_pass_registry_validation():
     from looper.agents import profile_registry
 
-    from evals.prompt_regression import runner
-
     spec = json.loads(launcher.SPEC.read_text())
-    source = {key: value for key, value in spec["provider"].items() if key != "api_key_env"}
-    runtime = {"runtime_id": "rt-dsh", "name": "DSH", "type": "dsh"}
-    provider, models, selected = runner._legacy_eval_spec(spec, runtime, source)
+    provider = {key: value for key, value in spec["provider"].items() if key != "api_key_env"}
     fields, _ = profile_registry._provider_fields(provider, None)
     assert fields["endpoints"] == [{"protocol": "anthropic-messages",
         "base_url": "https://api.deepseek.com/anthropic", "use_runtime_default": False}]
-    assert selected == {"name": spec["agent"]["model"], "protocol": "anthropic-messages"}
-    assert {model["name"] for model in models} == {selected["name"]}
     account = profile_registry.provider_spec({**fields, "id": "account"})
-    model = profile_registry.ModelSpec("selected", account.id, **models[0])
+    model = profile_registry.ModelSpec.from_entry({"id": "selected", "provider_id": account.id, **spec["model"]})
+    assert model.name == "deepseek-flash" and model.protocol.value == "anthropic-messages"
     endpoint = profile_registry.Endpoint(account.id, model.protocol, fields["endpoints"][0]["base_url"])
     resolved = profile_registry.ResolvedModel(model, account, endpoint)
     resolved.check_runtime(profile_registry.RuntimeSpec("rt-dsh", "DSH", "dsh"), spec["agent"]["effort"])
+    assert set(spec["agent"]) == {"name", "effort"}
     assert "api_key" not in provider and "api_key_env" not in provider
 
 
