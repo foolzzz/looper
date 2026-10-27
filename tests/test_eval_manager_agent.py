@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -112,3 +113,71 @@ def test_manager_spec_registers_once_per_case_and_only_selects_the_manager(runti
         assert api.settings == [{"profile_id": "agent-0"}]
         assert api.roles == [{"role": "manager", "values": {"profile_id": "agent-1"}}]
     assert "test-key" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("runtime,explicit_switch", [("api", False), ("codex", False), ("api", True)])
+def test_real_profile_switch_keeps_the_manager_binding_unless_explicitly_overridden(
+    runtime, explicit_switch, monkeypatch, tmp_path,
+):
+    api = DialogApi()
+
+    @contextmanager
+    def database(_):
+        yield "unused", None
+
+    @contextmanager
+    def server(**_):
+        yield api
+
+    original_post = api.post
+
+    def post(path, body):
+        if path == "/api/v1/tasks/page":
+            return {"status": "ok", "result": {"tasks": []}}
+        return original_post(path, body)
+
+    monkeypatch.setattr(api, "post", post)
+    monkeypatch.setenv("LOOPER_EVAL_API_KEY", "test-key")
+    monkeypatch.setattr(dialogs, "fresh_database", database)
+    monkeypatch.setattr(dialogs, "running_server", server)
+    monkeypatch.setattr(dialogs, "install_claude", lambda *_, **__: None)
+    monkeypatch.setattr(dialogs, "_usage", lambda _: (0.0, {}))
+    monkeypatch.setattr(dialogs, "_git", lambda: {})
+    monkeypatch.setattr(dialogs, "_newest_run", lambda *_: 0)
+    monkeypatch.setattr(dialogs, "_last_action", lambda *_: 0)
+    monkeypatch.setattr(dialogs, "_stop_leftovers", lambda _: None)
+    spec = json.loads(Path(f"evals/agents/{runtime}-cpa.example.json").read_text())
+    spec["agent"].update(agent_teams=False, custom_prompt="Keep the comparison instructions.")
+    switch = {"runtime": {"type": "claude-code"},
+              "provider": {"provider_id": "prov-claude-subscription"},
+              "model": {"name": "opus", "protocol": "anthropic-messages"},
+              "agent": {"name": "explicit switch", "effort": "xhigh"}} if explicit_switch else None
+    # Exercise the real per-case setup and dialog seed without making model requests.
+    case = replace(dialogs.select(["session_profile_switch"])[0], says=())
+    result, _ = dialogs.run(mode="real", dialogs=(case,), admin_url="unused", out_dir=tmp_path,
+                            model="sonnet", manager_agent=spec, switch_agent=switch)
+    assert result["aborted"] is None
+    assert result["dialogs"][0]["outcome"] == "pass"
+    profiles = api.post("/api/v1/registry/view", {})["result"]["profiles"]
+    selected = next(p for p in profiles if p["name"] == dialogs.SWITCH)
+    manager = next(p for p in profiles if p["name"] == spec["agent"]["name"])
+    if explicit_switch:
+        assert selected["runtime_id"] == "rt-claude-code"
+        assert selected["model"]["name"] == "opus" and selected["effort"] == "xhigh"
+        assert selected["provider_id"] == "prov-claude-subscription"
+    else:
+        assert selected["profile_id"] != manager["profile_id"]
+        for field in ("runtime_id", "provider_id", "model_id", "model", "effort", "agent_teams", "custom_prompt"):
+            assert selected.get(field) == manager.get(field), field
+        assert len(api.registry["providers"]) == 2 and len(api.registry["models"]) == 2
+    assert api.roles == [{"role": "manager", "values": {"profile_id": manager["profile_id"]}}]
+    assert api.settings == [{"profile_id": "agent-0"}]
+
+
+def test_cpa_eval_instructions_explicitly_leave_the_real_admission_gate_pending():
+    readme = Path("evals/README.md").read_text()
+    cpa = readme.split("#### The api runtime on CPA\n", 1)[1].split("#### Pi\n", 1)[0]
+    # The documented commands are an entry point, not evidence of a completed gate.
+    for pending in ("D11 remains unverified", "pass counts", "cost", "per-request token deltas",
+                    "session-item", "api_sessions.protocol"):
+        assert pending in cpa

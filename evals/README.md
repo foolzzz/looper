@@ -501,12 +501,19 @@ uv run python -m evals.prompt_regression dialogs --mode real --dialogs session_p
 
 #### The api runtime on CPA
 
+This change provides the eval entry point only. The real CPA smoke test, api and Codex full-dialog runs,
+and Opus descriptive comparison have not run; D11 remains unverified. There are no measured pass counts,
+cost totals, per-request token deltas, session-item or `api_sessions.protocol` readbacks from these runs.
+Keep the pending CPA capabilities in RFC §8.4 and the validation checklist in §15 open until those results exist.
+
 `dialogs --manager-agent SPEC.json` registers a Profile for the Manager's role layer only; other roles keep
 `--model` / `--agent`. It requires real mode and cannot be combined with `--manager-model`, `--manager-effort`
 or `--register-agent`. The examples declare provider endpoints and a separate model with an explicit protocol.
 The key comes from the environment variable named by `api_key_env` (`LOOPER_EVAL_API_KEY`), never from a file
 in the repository. Use a disposable PostgreSQL server in `LOOPER_EVAL_DATABASE_URL`; each case gets its own
 database, server, port and runtime root, with external channels disabled.
+Without `--switch-agent`, real profile-switch dialogs create `eval/switch` with the selected Manager's
+runtime, saved provider/model binding, effort and prompt options, so switching keeps the same-model comparison.
 
 Run the Codex control first, then set `CODEX_RUN_JSON` to its reported run JSON path before the api comparison:
 
@@ -676,7 +683,7 @@ does not establish a cap for the current 44 dialogs; give it
 `--total-cap-usd "$OPUS_DIALOG_CAP_USD"` authorized for candidate measurement),
 `--switch-agent SPEC.json` (`session_profile_switch`: register that spec as the profile `eval/switch`, while the
 other roles keep `--model` / `--agent`; without it, fake mode uses Claude Code on a provider of its own, which makes
-the switch start a new session, and real mode Claude Code with haiku on the login provider, which resumes),
+the switch start a new session, and real mode reuses the selected Manager's runtime, provider/model and options),
 `--register-agent SPEC.json` (as for `run`; `--dialogs status` with a Codex,
 OMP, Grok or Pi agent checks that runtime's tool calls), `--reps` (as for `run`),
 `--baseline <run.json>|previous` (the default is

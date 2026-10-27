@@ -332,7 +332,7 @@ Looper 的 effort 档位是 `low/medium/high/xhigh/max`（`agent_settings.py:126
 - **评测入口已实现：** `dialogs --manager-agent SPEC.json` 每个用例登记一次 Profile，通过现行 v1 `agent_settings/update_role` 只选择 Manager 的角色层，其他角色保持 `--model` / `--agent`。它与 `--manager-model`、`--manager-effort`、`--register-agent` 互斥，fake 模式拒绝；原有 `--register-agent` 的系统层选择保持不变。示例为 `evals/agents/api-cpa.example.json` 与 `evals/agents/codex-cpa.example.json`，provider endpoint 与 model protocol 显式分开，凭据只声明 `api_key_env`。
 - fake 模式的对话仍由假 Claude 扮演管家，它测的是管家的逻辑；API 运行时自己的协议行为，由第 13 节的假服务测试覆盖。
 
-**CPA 验证状态：** 评测入口与示例已实现，尚未运行真实 smoke、api/Codex 全对话或 Opus 描述性比较：验证环境未设置 `CPA_CONFIG`，按凭据边界在读取配置和请求模型列表之前停止。两组通过次数、总费用、D11 结论及逐请求 token 差值均未测；第 8.4、15 节的 CPA 待验证项保留。上面的原创交接提示词专项对照已随合入的 [PR #688](https://github.com/foolzzz/looper/pull/688) 的 RFC 结果表记录，本次未改提示词，也不以全对话评测替代该专项对照。
+**CPA 验证状态：** 本次仅交付评测入口与示例，不交付第 8 步的真实准入结论。尚未运行真实 smoke、api/Codex 全对话或 Opus 描述性比较：验证环境未设置 `CPA_CONFIG`，按凭据边界在读取配置和请求模型列表之前停止。两组通过次数、总费用、D11 结论、逐请求 token 差值、中性会话条目及 `api_sessions.protocol` 读回均未测；第 8.4、15 节的 CPA 待验证项保留，第 8 步仍未完成。上面的原创交接提示词专项对照已随合入的 [PR #688](https://github.com/foolzzz/looper/pull/688) 的 RFC 结果表记录，本次未改提示词，也不以全对话评测替代该专项对照。
 
 ## 10. 可观测性
 

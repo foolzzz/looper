@@ -1291,9 +1291,10 @@ SWITCH = "eval/switch"
 _SWITCH_NUMBER = re.compile(r"^\s*(\d+)\.\s*" + re.escape(SWITCH) + r"\b", re.MULTILINE)
 
 
-def _make_switch_profile(api: Api, project_id: str, *, fake: bool = True, spec: dict[str, Any] | None = None) -> None:
+def _make_switch_profile(api: Api, project_id: str, *, fake: bool = True, spec: dict[str, Any] | None = None,
+                         manager_profile: dict[str, Any] | None = None) -> None:
     """Register SWITCH. Fake: Claude Code on a provider of its own (the stand-in ignores it, and another provider
-    makes the switch start a new session). Real: the login provider, which resumes; ``spec`` replaces both."""
+    makes the switch start a new session). Real: reuse the Manager's binding; ``spec`` replaces both."""
     if spec is not None:
         register_agent(api, {**spec, "agent": {**spec["agent"], "name": SWITCH}})
     elif fake:
@@ -1302,7 +1303,13 @@ def _make_switch_profile(api: Api, project_id: str, *, fake: bool = True, spec: 
         register_agent(api, {"runtime": {"type": "claude-code"}, "provider": {"provider_id": provider["provider_id"]},
             "model": {"name": "haiku", "protocol": "anthropic-messages"}, "agent": {"name": SWITCH}})
     else:
-        _subscription_profile(api, SWITCH, "haiku", None)
+        if manager_profile is None:
+            raise EvalError("a real profile switch needs the selected Manager profile")
+        # A distinct profile exercises /profile without changing the comparison's runtime or model.
+        api.post("/api/v1/profiles/create", {"name": SWITCH,
+            "runtime_id": manager_profile["runtime_id"], "model_id": manager_profile["model_id"],
+            **{key: manager_profile[key] for key in ("effort", "agent_teams", "custom_prompt")
+               if key in manager_profile}})["result"]
 
 
 def _manager_runs(look: Look) -> list[dict[str, Any]]:
@@ -2060,7 +2067,8 @@ def _root_overrun(api: Api, seen: dict[int, float]) -> float:
 
 def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, scenarios: Path, mode: str,
                timeout: float, runtime_root: Path | None = None, cap_left: float | None = None,
-               switch_spec: dict[str, Any] | None = None) -> dict[str, Any]:
+               switch_spec: dict[str, Any] | None = None,
+               manager_profile: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run ``dialog`` on the server it has to itself; its row without its cost (read once the server stopped).
     No reply within ``timeout`` is an error of class ``timeout``, and any other exception, such as the slow task
     not getting under way, one of class ``harness``; the turns after an error are not sent. With ``cap_left``,
@@ -2092,7 +2100,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             _make_schedule(api, project_id)
         runs_since = 0
         if dialog.seed is _make_switch_profile:
-            _make_switch_profile(api, project_id, fake=mode == "fake", spec=switch_spec)
+            _make_switch_profile(api, project_id, fake=mode == "fake", spec=switch_spec,
+                                 manager_profile=manager_profile)
         elif dialog.seed is not None:
             dialog.seed(api, project_id)
         if dialog.seed is _make_switch_profile or any(say.stop or say.withdraw for say in dialog.says):
@@ -2301,7 +2310,7 @@ def run(
                     row = run_dialog(api, dialog, database_url=database_url, project_id=project_id,
                                      scenarios=scenarios, mode=mode, timeout=timeout,
                                      runtime_root=case / "runtime", cap_left=cap_left if jobs > 1 else None,
-                                     switch_spec=switch_agent)
+                                     switch_spec=switch_agent, manager_profile=configs[dialog.id, rep][1])
                     if mode == "real" and register is not None and register.get("runtime", {}).get("type") == "dsh":
                         row["runtime_evidence"] = runtime_evidence(api)
                 cost, models = _usage(database_url)
