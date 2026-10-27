@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.163] - 2026-10-27
+
+### Added
+
+- **Runner turn policy.** Adds `RunnerTurn` in `looper/agents/runtimes/runner/turn.py`, which admits platform tool calls for one runner trace and enforces request, run-cap and task-cap budgets with fail-closed accounting. Nothing in Looper calls it yet. ([#743](https://github.com/foolzzz/looper/pull/743))
+
+### Changed
+
+- **Shared platform tool helpers.** The Manager tool adapter's argument parsing, invalid-argument error and 100 KB result bound moved into helpers in `looper/agents/runtimes/api/tools.py` without changing their output, and a `PlannerTurnTools` adapter was added for Planner dispatch that no runtime uses yet. ([#743](https://github.com/foolzzz/looper/pull/743))
+
 ## [2.13.162] - 2026-10-27
 
 ### Added
