@@ -152,8 +152,8 @@ class AgentSupervisor:
         self._schedule_restart(agent.agent_id)
         return False
 
-    async def stop_agent(self, agent_id: str) -> None:
-        """Take the agent out of the supervisor (no health check or restart sees it any more) and stop it."""
+    async def stop_agent(self, agent_id: str, *, strict: bool = False) -> None:
+        """Take the agent out and stop it; ``strict`` restores supervision and propagates a shutdown failure."""
         entry = self._agents.pop(agent_id, None)
         if entry is None:
             return
@@ -166,6 +166,9 @@ class AgentSupervisor:
             logger.info("agent %s stopped", agent_id)
         except Exception:
             logger.exception("error stopping agent %s", agent_id)
+            if strict:
+                self._agents[agent_id] = entry
+                raise
 
     async def start_all(self) -> None:
         """Start the agent hierarchy in order."""

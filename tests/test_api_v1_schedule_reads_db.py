@@ -66,6 +66,9 @@ def test_full_list_get_and_project_limits_keep_requirement_spend_and_session(tmp
                 view = result["schedule"] if action == "get" else result["schedules"][0]
                 assert view["requirement"] == "Read the project reports. " * 99 + "Read the project reports."
                 assert view["spent_today_usd"] == 0.75
+                assert view["manager_id"] == "manager"
+                assert isinstance(view["manager_name"], str) or view["manager_name"] is None
+                assert view["last_run"]["manager_id"] == "manager"
                 assert view["last_run"]["summary"] == "Reports checked"
                 assert view["planner_session"]["active"] is True
                 assert view["planner_session"]["last_task_title"] == "Latest report"
@@ -87,6 +90,7 @@ def test_compact_get_stays_clipped_and_compact_list_keeps_its_shape(tmp_path, mo
             assert len(full["schedule"]["requirement"]) > 1000
             assert len(compact["schedule"]["requirement"]) == 1000
             assert "last_run" not in compact["schedule"]
+            assert not {"manager_id", "manager_name"} & compact["schedule"].keys()
             assert compact["latest_runs"][0]["firings"] == 3
             _, listed = await call("/api/v1/ops/schedules/list")
             assert listed["schedules"][0]["last_run"]["run_id"] == rid
@@ -132,6 +136,7 @@ def test_hidden_routine_skips_keep_aggregate_firing_counts(tmp_path, monkeypatch
             assert [row["run_id"] for row in hidden["runs"]] == [first]
             _, shown = await call("runs", {"schedule_id": sid})
             assert len(shown["runs"]) == 3
+            assert {row["manager_id"] for row in shown["runs"]} == {"manager"}
             assert shown["routine_skips"] == hidden["routine_skips"] == {"skipped_gate": 7, "skipped_overlap": 4}
     run_db(run, monkeypatch, timeout=30)
 

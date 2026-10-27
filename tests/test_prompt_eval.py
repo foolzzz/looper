@@ -1792,7 +1792,7 @@ def test_release_dialog_tiers_cover_default_selection_without_unmeasured_caps() 
         assert f"--total-cap-usd ${model.upper()}_DIALOG_CAP_USD" in " ".join(text.split())
         assert args.case_budget_usd > 0 and args.max_budget_usd > 0
     readme = (Path(__file__).resolve().parents[1] / "evals/README.md").read_text()
-    assert "complete 43-dialog cost measurement is blocked" in readme
+    assert "complete 44-dialog cost measurement is blocked" in readme
     assert "Only promote a complete three-rep" in readme
     assert "If a cap stops a run, raise it and rerun" in readme
     assert "missing\nSonnet dialog baseline remain a coverage gap" in readme
@@ -2340,6 +2340,7 @@ _FLOW = {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_ste
          "roles_multi_platform": (6, 0, 0, 0),
          "roles_not_needed": (1, 0, 0, 0), "roles_template_fits": (1, 0, 2, 0),
          "roles_template_unfit": (1, 0, 0, 0),
+         "schedule_template_report": (1, 0, 1, 0),
          # A gate is a step; the steps its closing turn added follow it.
          "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
          "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0),
@@ -2363,6 +2364,7 @@ _SHAPE = {"single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": 
           "roles_tester_docs": (1, 0, 2), "roles_security_review": (0, 0, 1),
           "roles_advisory_review": (0, 0, 1), "roles_two_reviews": (0, 0, 1), "roles_not_needed": (0, 0, 1),
           "roles_template_fits": (0, 0, 1), "roles_template_unfit": (0, 0, 1),
+          "schedule_template_report": (0, 0, 1),
           # Its four platform steps run side by side between the interface step and the check.
           "roles_multi_platform": (6, 6, 4),
           "gate_ambiguous": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
@@ -2374,8 +2376,8 @@ _SHAPE = {"single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": 
           "planner_plan_file": (0, 0, 1), "reviewer_retry_note": (0, 0, 1),
           "reviewer_unrelated_note": (0, 0, 1), "reviewer_elsewhere": (0, 0, 1),
           "reviewer_elsewhere_wrong": (0, 0, 1)}
-# What only some tasks do; a task not named in a table is checked to do none of it. Only the tasks whose Planner defined roles run
-# steps as them: each run on a version it defined, with the boundaries before its contract, and the reviewed step
+# What only some tasks do; a task not named in a table is checked to do none of it. Tasks with Planner-defined or
+# template-installed roles run steps as them: each run on a stored version, with the boundaries before its contract, and the reviewed step
 # accepted only after both reviews passed. An advisory review role's failing review does not keep its step from being
 # accepted.
 _ROLE_KEYS = ("roles_defined", "role_runs", "role_profile_runs", "role_reviews", "role_prompt_mismatches",
@@ -2384,13 +2386,14 @@ _ROLES = {"roles_tester_docs": (2, 2, 1, 0, 0, 0, 0, 0), "roles_security_review"
           "roles_advisory_review": (1, 1, 0, 1, 0, 0, 0, 1),
           "roles_two_reviews": (2, 2, 0, 2, 0, 0, 0, 0),
           "roles_multi_platform": (4, 4, 0, 0, 0, 0, 0, 0),
-          "roles_template_fits": (1, 1, 0, 1, 0, 0, 0, 0)}
+          "roles_template_fits": (1, 1, 0, 1, 0, 0, 0, 0),
+          "schedule_template_report": (1, 1, 0, 0, 0, 0, 0, 0)}
 # Only the two-reviews task names more than one review role on a step.
 _COUNTS = {
     "most_review_roles": {"roles_security_review": 1, "roles_advisory_review": 1, "roles_template_fits": 1,
                           "roles_two_reviews": 2},
-    # Only the task whose step fits a project role template copies it.
-    "template_roles": {"roles_template_fits": 1},
+    # Roles are copied by the Planner or installed from the schedule's task template.
+    "template_roles": {"roles_template_fits": 1, "schedule_template_report": 1},
     # Only the multi-platform task's disciplines each get a role that names their conventions, and its four platform
     # steps are built on its interface step (the tester's and the doc writer's on the module).
     "discipline_roles": {"roles_multi_platform": 4},

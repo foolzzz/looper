@@ -47,6 +47,8 @@ function RuntimeCard({ type, runtime }: { type: RuntimeType | undefined; runtime
   const action = useAction();
   const info = RUNTIME_TYPES[runtime?.type ?? type?.type ?? ""];
   const legacy = runtime ? !runtime.builtin : false;
+  const inProcess = !!(type?.in_process || runtime?.in_process);
+  const probeError = runtime?.probe_error ?? type?.probe_error;
   const state = detection(runtime);
   const { label, variant, icon: Icon } = DETECTION[state];
   const capabilities = runtime ? runtime.capabilities : type?.capabilities ?? [];
@@ -72,22 +74,22 @@ function RuntimeCard({ type, runtime }: { type: RuntimeType | undefined; runtime
       />
       <dl className="space-y-1.5">
         {legacy && <Fact label="Type">{runtime!.type_label}</Fact>}
-        <Fact label="Path">
-          {runtime?.path ? (
+        {(!inProcess || state !== "missing") && <Fact label="Path">
+          {inProcess ? "Runs inside looper serve" : runtime?.path ? (
             <span className="font-mono">{runtime.path}</span>
           ) : (
             <span className="text-muted-foreground">
               <span className="font-mono text-foreground">{command}</span> is not on the server&apos;s PATH
             </span>
           )}
-        </Fact>
+        </Fact>}
         <Fact label="Version">
           {runtime?.version ? (
             <span className="font-mono">{runtime.version}</span>
           ) : !runtime?.probe_error ? (
             <span className="text-muted-foreground">{runtime ? "not checked yet: Re-detect" : "not found"}</span>
           ) : null}
-          {runtime?.probe_error ? (
+          {runtime?.probe_error && !inProcess ? (
             <span className="text-warning">{runtime.version ? " · " : ""}{runtime.probe_error}</span>
           ) : null}
           {runtime?.probed_at && (
@@ -120,7 +122,11 @@ function RuntimeCard({ type, runtime }: { type: RuntimeType | undefined; runtime
       </dl>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="min-w-0 flex-1 text-[11px] text-muted-foreground">
-          {legacy
+          {inProcess
+            ? state === "detected"
+              ? "Comes with Looper; Re-detect checks its Python package."
+              : probeError ?? "Re-detect checks its Python package."
+            : legacy
             ? "Registered by hand before runtimes were built in; read-only, and kept while an Agent Profile uses it."
             : state === "detected"
               ? `Found as ${command} on the server's PATH.`
@@ -139,8 +145,7 @@ function RuntimeCard({ type, runtime }: { type: RuntimeType | undefined; runtime
 }
 
 /**
- * Settings → Agent Runtimes, read-only: one card per runtime type this version runs (found on the server's PATH
- * or not), the ones registered by hand before, and the planned types.
+ * Settings → Agent Runtimes, read-only: built-in runtime types, ones registered by hand before, and planned types.
  */
 export function RuntimesSection() {
   const { registry, error } = useRegistry();

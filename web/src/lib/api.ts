@@ -358,29 +358,33 @@ export interface TasksPage {
   tasks: TaskInfo[];
   /** Pass as `before` for the next page; null at the end. */
   next_before: string | null;
-  /** How many tasks each status holds under the project, group and schedule filters (not the status one). */
+  /** How many tasks each status holds under the list filters (not status or cursor). */
   counts: Record<string, number>;
 }
 
 /** A page of tasks: `limit` (default 50, at most 200) of them older than the task `before`, filtered by project,
- * group, schedule and status. */
+ * group, schedule, Manager, query and status. */
 export async function fetchTasks(
   filters: {
     projectId?: string;
+    managerId?: string;
     group?: TaskGroup;
     scheduleId?: string;
     status?: string;
     before?: string | null;
     limit?: number;
+    query?: string;
   } = {},
 ): Promise<TasksPage> {
   const result = await callV1<TasksPage>("/api/v1/tasks/page", {
     ...(filters.projectId ? { project_id: filters.projectId } : {}),
+    ...(filters.managerId ? { manager_id: filters.managerId } : {}),
     ...(filters.group ? { group: filters.group } : {}),
     ...(filters.scheduleId ? { schedule_id: filters.scheduleId } : {}),
     ...(filters.status ? { status: filters.status } : {}),
     ...(filters.before ? { before: filters.before } : {}),
     ...(filters.limit ? { limit: filters.limit } : {}),
+    ...(filters.query ? { query: filters.query } : {}),
   });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
@@ -1007,6 +1011,7 @@ export interface ScheduleNotifyTargetOption extends ScheduleNotifyTarget {
 export interface ScheduleRunInfo {
   run_id: string;
   schedule_id: string;
+  manager_id: string;
   /** The fire time this run is for. */
   scheduled_for: string;
   /** Null while queued. */
@@ -1048,6 +1053,11 @@ export interface ScheduleInfo {
   schedule_id: string;
   project_id: string;
   project_name: string;
+  manager_id: string;
+  manager_name: string | null;
+  template_key: string | null;
+  template_inputs: Record<string, string>;
+  template_name: string | null;
   name: string;
   /** Five-field cron rule, read in `timezone`. */
   cron: string;
@@ -1137,6 +1147,8 @@ export interface SchedulePreview {
 
 /** A new schedule's fields; one is always created disabled. */
 export interface ScheduleFields {
+  template_key?: string | null;
+  template_inputs?: Record<string, string>;
   name: string;
   cron: string;
   requirement: string;
@@ -1159,7 +1171,9 @@ export interface ScheduleFields {
   notify_target?: ScheduleNotifyTarget | null;
 }
 
-/** Any of a schedule's fields, plus turning it on or off. */
+/** Ownership is chosen only when a schedule is created. */
+export type ScheduleCreate = ScheduleFields & { manager_id?: string };
+/** Any mutable schedule field, plus turning it on or off. */
 export type ScheduleUpdate = Partial<ScheduleFields> & { enabled?: boolean };
 
 /** One of the scheduler's system settings and where its value comes from. */
@@ -1209,7 +1223,7 @@ export async function fetchSchedules(projectId: string): Promise<{ schedules: Sc
 }
 
 /** Create a schedule, disabled; 409 when the project has one with that name already. */
-export async function createSchedule(projectId: string, fields: ScheduleFields): Promise<ScheduleInfo> {
+export async function createSchedule(projectId: string, fields: ScheduleCreate): Promise<ScheduleInfo> {
   const data = await callV1<{ schedule: ScheduleInfo }>(
     "/api/v1/schedule_admin/create", { project_id: projectId, fields });
   if ("status" in data) throw new V1Error(202, "unavailable", data.impact);
@@ -2667,6 +2681,9 @@ export async function fetchLlmRecordEvents(recordId: number, after = 0): Promise
 /** What a runtime of one type can do; `capabilities` decide which roles its Agent Profiles can run. */
 export interface RuntimeType {
   type: string;
+  in_process: boolean;
+  /** Package probe diagnosis when an in-process type has no registered runtime yet. */
+  probe_error?: string | null;
   label: string;
   /** The command a runtime of this type runs when its executable is empty. */
   default_executable: string;
@@ -2691,6 +2708,7 @@ export interface RuntimeType {
  * before runtimes were built in (`builtin` false), kept read-only while an Agent Profile uses it. */
 export interface Runtime {
   runtime_id: string;
+  in_process: boolean;
   name: string;
   type: string;
   type_label: string;
@@ -3995,6 +4013,7 @@ export interface ManagerInfo {
   tools: ManagerTools;
   task_scope: TaskScope;
   task_policy: TaskPolicy;
+  idle_timeout_seconds: number;
   system_prompt: string | null;
   profile_id: string | null;
   profile_name: string | null;
@@ -4015,6 +4034,7 @@ export interface ManagerFields {
   tools?: ManagerTools;
   task_scope?: TaskScope;
   task_policy?: TaskPolicy;
+  idle_timeout_seconds?: number;
   enabled?: boolean;
 }
 

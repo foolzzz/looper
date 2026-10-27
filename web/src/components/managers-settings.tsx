@@ -59,6 +59,7 @@ interface ManagerDraft {
   tools: ManagerTools;
   task_scope: TaskScope;
   task_policy: TaskPolicy;
+  idle_timeout_seconds: string;
   enabled: boolean;
 }
 
@@ -72,6 +73,7 @@ function draftOf(manager: ManagerInfo | null): ManagerDraft {
     tools: manager?.tools ?? "tasks",
     task_scope: manager?.task_scope ?? "own",
     task_policy: manager?.task_policy ?? "free",
+    idle_timeout_seconds: String(manager?.idle_timeout_seconds ?? 1800),
     enabled: manager?.enabled ?? true,
   };
 }
@@ -116,9 +118,14 @@ function ManagerForm({
     let keyRejected = false;
     const ok = await action.run(async () => {
       try {
+        const idleTimeout = Number(draft.idle_timeout_seconds);
+        if (!fixed && (!draft.idle_timeout_seconds.trim() || !Number.isInteger(idleTimeout)
+            || (idleTimeout !== 0 && (idleTimeout < 60 || idleTimeout > 86400)))) {
+          throw new Error("Idle timeout must be 0 (off) or a whole number from 60 to 86400 seconds.");
+        }
         if (!manager) {
           const { key, ...rest } = draft;
-          await createManager({ key: key.trim(), ...rest, name, description });
+          await createManager({ key: key.trim(), ...rest, name, description, idle_timeout_seconds: idleTimeout });
         } else if (fixed) {
           await updateManager(manager.id, { name, description });
         } else {
@@ -130,6 +137,7 @@ function ManagerForm({
           if (draft.tools !== manager.tools) changes.tools = draft.tools;
           if (draft.task_scope !== manager.task_scope) changes.task_scope = draft.task_scope;
           if (draft.task_policy !== manager.task_policy) changes.task_policy = draft.task_policy;
+          if (idleTimeout !== manager.idle_timeout_seconds) changes.idle_timeout_seconds = idleTimeout;
           if (draft.enabled !== manager.enabled) changes.enabled = draft.enabled;
           await updateManager(manager.id, changes);
         }
@@ -231,6 +239,15 @@ function ManagerForm({
                 {draft.task_policy === "free"
                   ? "Free: any task, with or without a template."
                   : "Templates only: every task comes from one of this Manager's task templates."}
+              </p>
+            </div>
+            <div className="space-y-1">
+              <label htmlFor={`${id}-idle`} className={LABEL}>Idle timeout (seconds)</label>
+              <Input id={`${id}-idle`} type="number" min={0} max={86400} step={1} required
+                     value={draft.idle_timeout_seconds} aria-describedby={`${id}-idle-help`}
+                     onChange={(e) => set({ idle_timeout_seconds: e.target.value })} />
+              <p id={`${id}-idle-help`} className="text-[11px] text-muted-foreground">
+                0 = off; otherwise 60–86400 seconds. Idle processes sleep and resume the same conversation on the next message.
               </p>
             </div>
           </div>

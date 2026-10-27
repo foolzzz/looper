@@ -19,7 +19,7 @@ const m = vi.mocked(api);
 const b = vi.mocked(bindingsApi);
 function manager(id: string, name: string, enabled = true): api.ManagerInfo {
   return { id, name, enabled, builtin: id === "manager", description: "", tools: "tasks", task_scope: "own",
-    task_policy: "free", system_prompt: null, profile_id: null, profile_name: null, templates: [], revision: 0,
+    task_policy: "free", idle_timeout_seconds: id === "manager" ? 0 : 1800, system_prompt: null, profile_id: null, profile_name: null, templates: [], revision: 0,
     created_at: "", updated_at: "", state: { sync: "ok", running: false, busy: false, healthy: true },
     spend: { today_usd: 0, last_7d_usd: 0, runs_today: 0 } };
 }

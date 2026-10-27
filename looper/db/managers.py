@@ -10,18 +10,20 @@ row (``lock_for_task``, ``put_template``) and the delete locks it too, so whiche
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Literal
 
 import asyncpg
 
+from . import api_sessions
 from .chat import claim_thread, thread_owner  # noqa: F401 (the thread ownership helpers live with the chat)
 from .connection import get_pool
 
 DEFAULT_MANAGER_ID = "manager"
 
 # The columns update_manager and insert_manager write.
-_FIELDS = ("name", "description", "system_prompt", "profile_id", "tools", "task_scope", "task_policy", "enabled")
+_FIELDS = ("name", "description", "system_prompt", "profile_id", "tools", "task_scope", "task_policy", "enabled",
+           "idle_timeout_seconds")
 _TEMPLATE_FIELDS = ("name", "description", "project_id", "work_dir", "workspace_mode", "requirement",
                     "planner_instructions", "planner_profile_id", "worker_profile_id", "reviewer_profile_id",
                     "role_templates", "inputs")
@@ -117,11 +119,14 @@ async def lock_for_task(manager_id: str, *, conn: asyncpg.Connection) -> bool:
         "SELECT enabled AND deleted_at IS NULL FROM managers WHERE id = $1 FOR KEY SHARE", manager_id))
 
 
-async def delete_manager(manager_id: str) -> Literal["deleted", "missing", "has_tasks", "has_bots", "has_bindings"]:
+async def delete_manager(manager_id: str, *, before_delete: Callable[[], Awaitable[None]] | None = None) -> Literal[
+        "deleted", "missing", "has_tasks", "has_schedules", "has_bots", "has_bindings"]:
     """Soft-delete a scenario Manager in one transaction that holds its row lock: ``"has_tasks"`` (nothing written)
-    when a task belongs to it, ``"has_bots"`` when a channel bot does, ``"has_bindings"`` when a chat is explicitly
-    bound to it; ``"missing"`` for the default Manager, an unknown or a deleted one. Its templates and
-    its session go, its profile is let go; its chat threads and messages stay."""
+    when a task belongs to it, ``"has_schedules"`` when a schedule does, ``"has_bots"`` when a channel bot does,
+    ``"has_bindings"`` when a chat is explicitly bound to it; ``"missing"`` for the default Manager, an unknown
+    or a deleted one. Its templates and its session (including API history) go, its profile is let go;
+    its chat threads and messages stay. ``before_delete`` drains the resident process only after all refusal
+    checks, while the row lock excludes new dependents; bus messages must wait for this transaction to commit."""
     pool = get_pool()
     async with pool.acquire() as conn, conn.transaction():
         deleted_at = await conn.fetchrow(
@@ -130,12 +135,19 @@ async def delete_manager(manager_id: str) -> Literal["deleted", "missing", "has_
             return "missing"
         if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM tasks WHERE manager_id = $1)", manager_id):
             return "has_tasks"
+        if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schedules WHERE manager_id = $1)", manager_id):
+            return "has_schedules"
         if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM channel_configs WHERE manager_id = $1)", manager_id):
             return "has_bots"
         if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM manager_chat_bindings WHERE manager_id = $1)", manager_id):
             return "has_bindings"
+        if before_delete is not None:
+            await before_delete()
         await conn.execute("DELETE FROM manager_task_templates WHERE manager_id = $1", manager_id)
-        await conn.execute("DELETE FROM agent_sessions WHERE agent_id = $1", manager_id)
+        session = await conn.fetchrow(
+            "DELETE FROM agent_sessions WHERE agent_id = $1 RETURNING session_id, runtime_type", manager_id)
+        if session and session["runtime_type"] == "api" and session["session_id"] is not None:
+            await api_sessions.delete(session["session_id"], pool=conn)
         await conn.execute(
             "UPDATE managers SET deleted_at = now(), enabled = false, profile_id = NULL, updated_at = now() "
             "WHERE id = $1", manager_id)
@@ -218,6 +230,12 @@ async def put_template(manager_id: str, key: str, values: Mapping[str, Any], *,
         f"ON CONFLICT (manager_id, key) DO UPDATE SET {', '.join(updates)}", *params)
     await _bump(conn, manager_id)
     return await get_template(manager_id, key, pool=conn)
+
+
+async def template_schedule(manager_id: str, key: str) -> str | None:
+    return await get_pool().fetchval(
+        "SELECT name FROM schedules WHERE manager_id = $1 AND template_key = $2 ORDER BY id LIMIT 1",
+        manager_id, key)
 
 
 async def delete_template(manager_id: str, key: str) -> Literal["deleted", "missing", "no_manager"]:

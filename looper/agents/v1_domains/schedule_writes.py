@@ -16,6 +16,8 @@ _BUDGET = _nullable({"type": "number", "exclusiveMinimum": 0, "maximum": BUDGET_
 _FIELDS = {
     "name": {"type": "string", "maxLength": schedules.NAME_MAX_CHARS}, "cron": _STR,
     "requirement": _STR, "timezone": _STR, "work_dir": _STR,
+    "template_key": _nullable({"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$"}),
+    "template_inputs": {"type": "object", "additionalProperties": {"type": "string", "maxLength": 2000}},
     "overlap": _enum("skip", "queue", "parallel"), "catch_up": _enum("once", "skip"),
     "max_parallel_runs": {"type": "integer", "minimum": 1, "maximum": schedules.MAX_PARALLEL_RUNS_LIMIT},
     "run_timeout_seconds": {"anyOf": [
@@ -31,7 +33,8 @@ _FIELDS = {
     "task_limits": _nullable(_object(dict.fromkeys(("worker", "reviewer"), _nullable({
         "type": "integer", "minimum": 1, "maximum": CONCURRENCY_MAX})), [], closed=True)),
 }
-SCHEDULE_CREATE = _object(_FIELDS, ["name", "cron", "requirement"], closed=True)
+SCHEDULE_CREATE = _object({**_FIELDS, "manager_id": {"type": "string", "minLength": 1}},
+                          ["name", "cron", "requirement"], closed=True)
 SCHEDULE_PATCH = {**_object({**_FIELDS, "enabled": _BOOL}, [], closed=True),
                   "anyOf": [{"required": [key]} for key in (*_FIELDS, "enabled")]}
 SCHEMAS = {"ScheduleCreate": SCHEDULE_CREATE, "SchedulePatch": SCHEDULE_PATCH}

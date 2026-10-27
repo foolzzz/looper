@@ -47,6 +47,7 @@ class EvalTask:
     # The task's project lets its Planner define the roles its steps run as (planner_roles on), and keeps these
     # role templates (each its key and fields, as the dashboard writes one) for it to copy.
     roles_on: bool = False
+    schedule_template: dict[str, Any] | None = None
     role_templates: tuple[dict[str, Any], ...] = ()
     # The task's project lets its Planner open user gates (user_gates on); what the user answers in them, in turn
     # (END_DISCUSSION ends the discussion), and how long a gate waits before each answer.
@@ -1546,6 +1547,29 @@ READ_ONLY_TASKS: tuple[EvalTask, ...] = (
     ),
 )
 TASKS = TASKS + READ_ONLY_TASKS
+
+
+# This new scenario intentionally adds template instructions, static inputs and a preinstalled role to
+# the Planner context. Existing task launches keep their original context and launch path.
+TASKS = TASKS + (EvalTask(
+    id="schedule_template_report",
+    requirement="Produce the selected source's concise report using the template instructions.",
+    roles_on=True,
+    role_templates=({"key": "report-writer", "kind": "work", "role_prompt": "Write the requested public report and verify its exact content."},),
+    schedule_template={"name": "Public source report", "requirement": "Source: {{source_url}}.",
+        "planner_instructions": ("Give the step to the report-writer role and have its result reviewed before it "
+                                 "completes. The step writes report.txt containing exactly: "
+                                 "source=https://example.org/report; checked\n"),
+        "inputs": [{"key": "source_url", "label": "Source URL", "kind": "url", "required": True}],
+        "role_templates": ["report-writer"]},
+    check=lambda work: None if (work / "report.txt").exists() and
+        (work / "report.txt").read_text().strip() == "source=https://example.org/report; checked" else "template report differs",
+    expect={"min_steps": 1, "min_reviews": 1, "min_role_runs": 1, "max_contract_violations": 0},
+    fake={"schedule_run": True, "plan": [{**_step("s1", "Write report.txt", ["report.txt matches the template instructions"], review=True),
+                    "role": "report-writer"}],
+          "attempts": {"s1": [{"status": "completed", "files": {
+              "report.txt": "source=https://example.org/report; checked\n"}}]}},
+),)
 
 
 def select(ids: list[str] | None) -> tuple[EvalTask, ...]:

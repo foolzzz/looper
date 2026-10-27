@@ -649,10 +649,10 @@ class AgentHTTPServer:
                         reader = asyncio.StreamReader()
                         reader.feed_data(raw)
                         reader.feed_eof()
-                        from .v1_domains.configuration import CONFIG_DOCUMENT
+                        from .v1_domains.configuration import CONFIG_IMPORT_DOCUMENT
                         return await self._config_imports.receive(reader, len(raw), owner=principal.key,
                             policy=principal.kind,
-                            validate=lambda document: api_v1.validate_arguments(CONFIG_DOCUMENT, document))
+                            validate=lambda document: api_v1.validate_arguments(CONFIG_IMPORT_DOCUMENT, document))
                     return await self._apply_import(self._config_imports, call.arguments["import_id"],
                                                     owner=principal.key)
                 except config_transfer.ConfigFileError as exc:

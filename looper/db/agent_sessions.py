@@ -7,6 +7,7 @@ type and the provider it belongs to and the Agent Profile that ran it last
 (``runtimes.can_resume``). ``clean_start`` marks a session the user dropped
 (the Manager's ``/new``): the next one starts without a resume brief. ``selected_profile_id`` is the Agent Profile the user chose for the
 Manager's current session (``select_profile``); ``save_session`` never writes it.
+``pending_handoff`` survives a failed first request, until the new session stores its context.
 """
 
 from __future__ import annotations
@@ -17,28 +18,31 @@ from typing import Any
 
 import asyncpg
 
-from .connection import get_pool
+from .connection import _connection, get_pool
 
 
 async def get_session(
     agent_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> dict[str, Any] | None:
     """``{"session_id", "session_totals", "runtime_type", "provider_id", "profile_id", "clean_start",
-    "selected_profile_id"}`` saved
-    for ``agent_id``; None when nothing is saved."""
+    "selected_profile_id"}`` saved for ``agent_id``; None when nothing is saved.
+    Includes ``pending_handoff`` only while a summary awaits the new session."""
     pool = pool or get_pool()
     row = await pool.fetchrow(
         "SELECT session_id, session_totals, runtime_type, provider_id, profile_id, clean_start, "
-        "selected_profile_id "
+        "selected_profile_id, pending_handoff "
         "FROM agent_sessions WHERE agent_id = $1", agent_id,
     )
     if row is None:
         return None
     totals = row["session_totals"]
-    return {"session_id": row["session_id"], "session_totals": json.loads(totals) if isinstance(totals, str) else {},
-            "runtime_type": row["runtime_type"], "provider_id": row["provider_id"],
-            "profile_id": row["profile_id"], "clean_start": row["clean_start"],
-            "selected_profile_id": row["selected_profile_id"]}
+    saved = {"session_id": row["session_id"], "session_totals": json.loads(totals) if isinstance(totals, str) else {},
+             "runtime_type": row["runtime_type"], "provider_id": row["provider_id"],
+             "profile_id": row["profile_id"], "clean_start": row["clean_start"],
+             "selected_profile_id": row["selected_profile_id"]}
+    if row["pending_handoff"] is not None:
+        saved["pending_handoff"] = row["pending_handoff"]
+    return saved
 
 
 async def selects_profile(
@@ -88,25 +92,34 @@ async def save_session(
     provider_id: str | None = None,
     profile_id: str | None = None,
     clean_start: bool = False,
+    pending_handoff: str | None = None,
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> None:
     """Replace ``agent_id``'s session, with the runtime type and the provider it belongs to and the Agent Profile
     that ran it; a None ``session_id`` makes its next turn start a new one, without a resume brief when
     ``clean_start``."""
+    from . import api_sessions
+
     pool = pool or get_pool()
-    await pool.execute(
-        """
-        INSERT INTO agent_sessions (agent_id, session_id, session_totals, runtime_type, provider_id, profile_id,
-                                    clean_start, updated_at)
-        VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, now())
-        ON CONFLICT (agent_id) DO UPDATE
-        SET session_id = EXCLUDED.session_id, session_totals = EXCLUDED.session_totals,
-            runtime_type = EXCLUDED.runtime_type, provider_id = EXCLUDED.provider_id,
-            profile_id = EXCLUDED.profile_id, clean_start = EXCLUDED.clean_start, updated_at = now()
-        """,
-        agent_id, session_id, json.dumps(dict(session_totals)), runtime_type, provider_id, profile_id,
-        clean_start,
-    )
+    async with _connection(pool) as conn, conn.transaction():
+        old = await conn.fetchrow(
+            "SELECT session_id, runtime_type FROM agent_sessions WHERE agent_id = $1 FOR UPDATE", agent_id)
+        if old and old["runtime_type"] == "api" and old["session_id"] is not None and old["session_id"] != session_id:
+            await api_sessions.delete(old["session_id"], pool=conn)
+        await conn.execute(
+            """
+            INSERT INTO agent_sessions (agent_id, session_id, session_totals, runtime_type, provider_id, profile_id,
+                                        clean_start, pending_handoff, updated_at)
+            VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, now())
+            ON CONFLICT (agent_id) DO UPDATE
+            SET session_id = EXCLUDED.session_id, session_totals = EXCLUDED.session_totals,
+                runtime_type = EXCLUDED.runtime_type, provider_id = EXCLUDED.provider_id,
+                profile_id = EXCLUDED.profile_id, clean_start = EXCLUDED.clean_start,
+                pending_handoff = EXCLUDED.pending_handoff, updated_at = now()
+            """,
+            agent_id, session_id, json.dumps(dict(session_totals)), runtime_type, provider_id, profile_id,
+            clean_start, pending_handoff,
+        )
 
 
 async def other_live_task_has_session(

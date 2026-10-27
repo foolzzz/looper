@@ -13,6 +13,7 @@ export interface RuntimeTypeInfo {
 }
 
 export const RUNTIME_TYPES: Record<string, RuntimeTypeInfo> = {
+  api: { kind: "SDK", title: "Model API (SDK)" },
   "claude-code": { kind: "CLI", title: "Claude Code CLI", install: "npm install -g @anthropic-ai/claude-code" },
   codex: { kind: "CLI", title: "Codex CLI", install: "npm install -g @openai/codex" },
   omp: { kind: "CLI", title: "OMP CLI" },
@@ -43,7 +44,6 @@ export function loginUsable(state: string): boolean {
 export const PLANNED_RUNTIMES: { title: string; kind: RuntimeKind }[] = [
   { title: "Claude Code SDK", kind: "SDK" },
   { title: "OpenAI Agents SDK", kind: "SDK" },
-  { title: "norma", kind: "SDK" },
 ];
 
 const ROLE_LABELS: Record<string, string> = {

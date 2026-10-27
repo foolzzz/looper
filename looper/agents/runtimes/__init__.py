@@ -222,6 +222,18 @@ class InProcessTools(Protocol):
     def set_turn_tools(self, tools: Any) -> None: ...
 
 
+@runtime_checkable
+class ReportsContext(Protocol):
+    """A resident session that asks its owner to hand over its full context."""
+
+    @property
+    def context_tokens(self) -> int | None: ...
+    @property
+    def context_limit(self) -> int: ...
+    @property
+    def context_full(self) -> bool: ...
+
+
 class ResidentSession(Protocol):
     """The Manager's or a Planner's session on a runtime, as the tiers drive it (``RuntimeAdapter.resident_session``):
     ``start`` with a command, then one ``run_turn`` per user turn, ``stop``; ``stale`` when it must start over.
@@ -251,6 +263,13 @@ class ResidentSession(Protocol):
                        tag: Any = None, stop: Callable[[], CapStop | None] | None = None,
                        cancel: TurnCancel | None = None) -> ResidentTurn: ...
     async def stop(self, *, kill: bool = False) -> None: ...
+    async def try_stop_if_idle(self) -> bool:
+        """Close only a provably quiescent resident, claiming it before the first await.
+
+        Owners serialize this with admission, start and reset. Unknown runtimes
+        retain their process; per-turn adapters have no resident to reclaim.
+        """
+        return False
     # A wrapper over the running turn's ``cancel`` (request it, await the turn's end); None: no turn running
     async def interrupt(self) -> StopMethod | None: ...
 

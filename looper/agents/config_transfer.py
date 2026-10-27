@@ -379,6 +379,7 @@ def manager_template_entry(row: Mapping[str, Any], profiles: Mapping[str, str],
 def manager_entry(row: Mapping[str, Any], templates: Sequence[Mapping[str, Any]],
                   profiles: Mapping[str, str], projects: Mapping[str, str]) -> dict[str, Any]:
     entry = {name: row[name] for name in ("id", "name", "description")}
+    entry["idle_timeout_seconds"] = row.get("idle_timeout_seconds", 0 if row["id"] == "manager" else 1800)
     if row["id"] != "manager":
         entry.update({name: row[name] for name in ("system_prompt", "tools", "task_scope", "task_policy", "enabled")})
         entry["profile"] = profiles[row["profile_id"]] if row["profile_id"] else None
@@ -428,6 +429,11 @@ def schedule_entry(row: Mapping[str, Any], profile_names: Mapping[str, str]) -> 
                               if row["notify_channel"] else None)
     entry["profiles"] = {role: profile_names.get(pid, pid) for role, pid in sorted(row["profile_overrides"].items())}
     entry["task_limits"] = dict(sorted(row["task_limits"].items()))
+    if row.get("template_key"):
+        entry["template_key"] = row["template_key"]
+        entry["template_inputs"] = dict(row.get("template_inputs") or {})
+    if row["manager_id"] != "manager":
+        entry["manager"] = row["manager_id"]
     if row["work_dir"]:
         entry["repoint"] = True
     return entry
@@ -2199,7 +2205,7 @@ class _Importer:
             try:
                 entry = _mapping(raw, "a Manager")
                 allowed = {"id", "name", "description", "system_prompt", "profile", "tools", "task_scope",
-                           "task_policy", "enabled", "templates"}
+                           "task_policy", "enabled", "templates", "idle_timeout_seconds"}
                 unknown = set(entry) - allowed
                 if unknown:
                     raise ConfigFileError(f"managers: unknown field {sorted(unknown)[0]!r}")
@@ -2214,8 +2220,8 @@ class _Importer:
                     raise ConfigFileError(f"Manager {identity!r} was deleted; choose a new immutable id")
                 if "name" not in entry:
                     raise ConfigFileError(f"Manager {identity}: name is required")
-                if identity == "manager" and set(entry) - {"id", "name", "description"}:
-                    raise ConfigFileError("the default Manager entry may only set id, name and description")
+                if identity == "manager" and set(entry) - {"id", "name", "description", "idle_timeout_seconds"}:
+                    raise ConfigFileError("the default Manager entry may only set id, name, description and idle_timeout_seconds: 0")
                 values = {k: v for k, v in entry.items() if k not in ("id", "profile", "templates")}
                 for name in ("name", "description", "system_prompt"):
                     if name in values:
@@ -2223,7 +2229,7 @@ class _Importer:
                 if identity != "manager":
                     if row is None:
                         values = {"tools": "tasks", "task_scope": "own", "task_policy": "free", "enabled": True,
-                                  "description": "", "profile_id": None, **values}
+                                  "description": "", "profile_id": None, "idle_timeout_seconds": 1800, **values}
                         if "system_prompt" not in values:
                             raise ConfigFileError(f"Manager {identity}: system_prompt is required for a new definition")
                     if "profile" in entry:
@@ -2255,6 +2261,8 @@ class _Importer:
                         stored = manager_template_entry(current, profile_names, project_names)
                         stored.pop("repoint", None)  # Only the file asks for a directory reminder.
                         template = {**stored, **template}
+                    if not isinstance(template.get("name"), str) or not template["name"].strip():
+                        raise ConfigFileError(f"{identity}/{key}: name must be non-empty")
                     project = template.get("project")
                     project_id = self.project_ids.get(project.strip().lower()) if isinstance(project, str) else None
                     if project is not None and project_id is None:
@@ -2334,6 +2342,9 @@ class _Importer:
                 await db_managers.insert_manager({"id": identity, **values}, conn=self.conn)
             elif self.apply and action is Action.CHANGED:
                 await db_managers.update_manager(identity, values, conn=self.conn, only_if_changed=True)
+        self.schedule_templates = {**self.target.manager_templates,
+                                   **{(identity, key): {"manager_id": identity, "key": key, **values}
+                                      for identity, key, values, _ in templates}}
         for identity, key, values, repoint in templates:
             row = self.target.manager_templates.get((identity, key))
             self.outcome("manager.templates", f"{identity}/{key}", row, _differs(values, row, values))
@@ -2357,7 +2368,7 @@ class _Importer:
         except AllowlistError:
             return False
 
-    def _schedule_values(self, entry: Any, label: str,
+    def _schedule_values(self, entry: Any, label: str, managers: Mapping[str, Mapping[str, Any]],
                          ) -> tuple[dict[str, Any], dict[str, tuple[str, str]], dict[str, int]]:
         """A schedule of the file, checked as the API checks one: its settings (``schedules.FIELDS`` but its
         directory), its Agent Profiles as role -> (name, id; ``new:...`` in a preview) and its task limits.
@@ -2367,12 +2378,17 @@ class _Importer:
         from .projects import TASK_PROFILE_ROLES, RequestError, _concurrency_limits
 
         entry = _mapping(entry, "a schedule")
-        unknown = sorted(set(entry) - {*_SCHEDULE_FIELDS, "notify_target", "profiles", "task_limits", "repoint"})
+        unknown = sorted(set(entry) - {*_SCHEDULE_FIELDS, "notify_target", "profiles", "task_limits", "repoint", "manager", "template_key", "template_inputs"})
         if unknown:
             raise _Skip(f"unknown field {unknown[0]!r}")
+        owner = entry.get("manager", "manager")
+        if not isinstance(owner, str) or owner not in managers:
+            raise _Skip(f"Manager owner conflict: no nondeleted Manager {owner!r} here or in the file")
         defaults = {"overlap": "skip", "max_parallel_runs": 3, "catch_up": "once", "notify": "failures"}
-        values: dict[str, Any] = {}
+        values: dict[str, Any] = {"manager_id": owner}
         try:
+            from .schedule_templates import selection_patch
+            values.update(selection_patch(entry))
             for name in _SCHEDULE_FIELDS:
                 if name not in ("cron", "timezone", "run_timeout_seconds"):
                     values[name] = schedules._PARSERS[name](entry.get(name, defaults.get(name)))
@@ -2411,18 +2427,26 @@ class _Importer:
             profiles[role] = (name, profile_id)
         return values, profiles, {role: limit for role, limit in limits.items() if limit is not None}
 
-    async def schedules(self, entries: Any, project_id: str, label: str) -> None:
+    async def schedules(self, entries: Any, project_id: str, label: str, *,
+                        manager_entries: Sequence[Mapping[str, Any]] = ()) -> None:
         """Add or rewrite the project's schedules of the file, disabled; leave those whose settings match."""
+        from ..db import schedules as db_schedules
+
         if not isinstance(entries, list):
             self.record("project.schedules", f"{label}schedules", Action.SKIPPED, reason="schedules is not a list")
             return
         stored = {row["name"].lower(): row for row in self.target.schedules.get(project_id, [])}
         names = {row["id"]: name for name, row in self.target.profiles.items()}
+        managers = {identity: row for identity, row in self.target.managers.items() if row["deleted_at"] is None}
+        managers.setdefault("manager", {})
+        for manager in manager_entries:
+            identity = manager["id"]
+            managers[identity] = {**managers.get(identity, {}), **manager}
         seen: set[str] = set()
         for entry in entries:
             raw_name = entry.get("name") if isinstance(entry, Mapping) else None
             try:
-                values, profiles, limits = self._schedule_values(entry, label)
+                values, profiles, limits = self._schedule_values(entry, label, managers)
                 if values["name"].lower() in seen:
                     raise _Skip("the file gives this schedule twice")
                 seen.add(values["name"].lower())
@@ -2431,28 +2455,62 @@ class _Importer:
                 continue
             key = f"{label}{values['name']}"
             row = stored.get(values["name"].lower())
+            if row is not None and row["manager_id"] != values["manager_id"]:
+                self.record("project.schedules", key, Action.SKIPPED,
+                            reason="Manager owner conflict: an existing schedule's owner is immutable")
+                continue
+            from .schedule_templates import merge_selection
+            from .task_templates import TaskTemplate, check_values, render_requirement, TemplateError
+            try:
+                values.update(merge_selection(row or {}, values))
+                template_key = values["template_key"]
+                raw_template = self.schedule_templates.get((values["manager_id"], template_key)) if template_key else None
+                if template_key and raw_template is None:
+                    raise TemplateError(f"Manager {values['manager_id']} has no template {template_key!r}")
+                if not template_key and (values["template_inputs"] or
+                                        managers[values["manager_id"]].get("task_policy") == "templates_only"):
+                    raise TemplateError("template inputs and this Manager's policy require a template_key")
+                if raw_template is not None:
+                    template = TaskTemplate.from_row(raw_template)
+                    checked_values = await check_values(template, values["template_inputs"])
+                    from .schedule_templates import template_directory
+                    from .task_template_execution import fixed_profiles
+                    template_directory(template, {"project_id": project_id, "work_dir": (row or {}).get("work_dir")})
+                    fixed_profiles(template, {role: identity for role, (_, identity) in profiles.items()})
+                    from .schedules import REQUIREMENT_MAX_CHARS
+                    if len(render_requirement(template, checked_values, values["requirement"])) > REQUIREMENT_MAX_CHARS:
+                        raise TemplateError("the rendered schedule requirement is too long")
+            except ValueError as exc:
+                self.record("project.schedules", key, Action.SKIPPED, reason=str(exc))
+                continue
             new = {**values, "profiles": {role: name for role, (name, _) in profiles.items()}, "task_limits": limits}
             profile_ids = {role: profile_id for role, (_, profile_id) in profiles.items()}
             current = None
             if row is not None:
                 current = {name: row[name] for name in (*_SCHEDULE_FIELDS, "run_timeout_mode", "notify_channel",
-                                                        "notify_chat")}
+                                                        "notify_chat", "manager_id", "template_key", "template_inputs")}
                 current["profiles"] = {role: names.get(pid, pid) for role, pid in row["profile_overrides"].items()}
                 current["task_limits"] = dict(row["task_limits"])
-            action = self.outcome("project.schedules", key, current, _differs(new, current, new))
+            changed = _differs(new, current, new)
+            if self.apply and row is not None and changed:
+                if error := await db_schedules.owner_error(self.conn, values["manager_id"], enabled=False,
+                                                           template_key=values.get("template_key")):
+                    self.record("project.schedules", key, Action.SKIPPED, reason=error)
+                    continue
+            action = self.outcome("project.schedules", key, current, changed)
             if action in (Action.ADDED, Action.CHANGED):
                 self.disabled_schedules.append(key)
                 if isinstance(entry, Mapping) and entry.get("repoint") and row is None:
                     self.repointed_schedules.append(key)
             if not self.apply or action not in (Action.ADDED, Action.CHANGED):
                 continue
-            from ..db import schedules as db_schedules
-
             if row is None:
                 await db_schedules.create_schedule(self.conn, project_id=project_id, fields=values,
+                                                   manager_id=values["manager_id"],
                                                    profiles=profile_ids, task_limits=limits, created_via="import")
             else:
-                fields = {**values, "enabled": False, "next_fire_at": None}
+                fields = {name: value for name, value in values.items() if name != "manager_id"}
+                fields.update(enabled=False, next_fire_at=None)
                 if (values["cron"], values["timezone"]) != (row["cron"], row["timezone"]):
                     fields["rule_changed_at"] = datetime.now(UTC)
                 await db_schedules.update_schedule(self.conn, row["id"], fields, profiles=profile_ids,
@@ -2487,6 +2545,21 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
         # cannot leave conversion on a snapshot from before another writer.
         await conn.execute("LOCK TABLE llm_providers, llm_provider_endpoints, llm_models, agent_profiles "
                            "IN SHARE ROW EXCLUSIVE MODE")
+        # Firing locks a schedule before its owner. Import takes those locks before locking Managers, too.
+        schedule_projects, schedule_names = [], []
+        for project in data.get("projects", []):
+            if (not isinstance(project, Mapping) or not isinstance(project.get("name"), str)
+                    or not isinstance(project.get("schedules"), list)):
+                continue
+            for schedule in project["schedules"]:
+                if isinstance(schedule, Mapping) and isinstance(schedule.get("name"), str):
+                    schedule_projects.append(project["name"].strip().lower())
+                    schedule_names.append(schedule["name"].strip().lower())
+        if schedule_names:
+            await conn.fetch("SELECT s.id FROM schedules s JOIN projects p ON p.id = s.project_id "
+                             "JOIN unnest($1::text[], $2::text[]) AS incoming(project, schedule) "
+                             "ON lower(p.name) = incoming.project AND lower(s.name) = incoming.schedule "
+                             "ORDER BY s.project_id, s.id FOR UPDATE OF s", schedule_projects, schedule_names)
         if data.get("channels"):
             from .channels.bot_api import _LOCK
 
@@ -2556,7 +2629,8 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
     if importer.channel_graph:
         await importer.finish_channels()
     for entry, project_id, label in projects:
-        await importer.schedules(entry.get("schedules") or [], project_id, label)
+        await importer.schedules(entry.get("schedules") or [], project_id, label,
+                                 manager_entries=data.get("managers", []))
     importer.schedule_notes()
     await importer.settle_layers()
     importer.check_caps()

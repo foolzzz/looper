@@ -226,17 +226,20 @@ export function AgentProfileForm({
           <label htmlFor={`${id}-name`} className={LABEL}>Name *</label>
           <Input id={`${id}-name`} value={draft.name} maxLength={registry.limits.name_max_chars} onChange={(e) => set({ name: e.target.value })} placeholder="claude-code/sonnet" spellCheck={false} autoCapitalize="none" className="font-mono" autoFocus />
         </div>
-        <div className="space-y-1">
+        <div className="min-w-0 space-y-1">
           <label htmlFor={`${id}-runtime`} className={LABEL}>Runtime</label>
-          <select id={`${id}-runtime`} value={draft.runtime_id} onChange={(e) => chooseRuntime(e.target.value)} className={SELECT}>
+          <select id={`${id}-runtime`} value={draft.runtime_id} onChange={(e) => chooseRuntime(e.target.value)} className={`${SELECT} min-w-0 truncate`}>
             {selectable.map((r) => (
               <option key={r.runtime_id} value={r.runtime_id}>{runtimeTitle(r)}</option>
             ))}
-            {undetected.map((t) => (
-              <option key={t.type} value={t.runtime_id} disabled>
-                {RUNTIME_TYPES[t.type]?.title ?? t.label} (not on the server&apos;s PATH)
-              </option>
-            ))}
+            {undetected.map((t) => {
+              const hint = t.in_process ? t.probe_error || "not available" : "not on the server's PATH";
+              return (
+                <option key={t.type} value={t.runtime_id} disabled title={hint}>
+                  {RUNTIME_TYPES[t.type]?.title ?? t.label} ({hint})
+                </option>
+              );
+            })}
             {PLANNED_RUNTIMES.map((p) => (
               <option key={p.title} value="" disabled>{p.title} (planned)</option>
             ))}

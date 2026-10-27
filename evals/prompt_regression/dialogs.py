@@ -1155,6 +1155,24 @@ def _exported(look: Look) -> str | None:
     return None if schedules == [SCHEDULE] else f"the file's schedules are {schedules}, not [{SCHEDULE}]"
 
 
+def _template_exported(look: Look) -> str | None:
+    if problem := _exported(look):
+        return problem
+    document = _exports(look)[-1]
+    if document.get("format") != "looper-config/v4":
+        return "the scenario export is not looper-config/v4"
+    if not any(m.get("templates") for m in document.get("managers", [])):
+        return "the export lost the scenario Manager task templates"
+    if not look.fake and ("v4" not in look.reply or "0" not in look.reply):
+        return "the answer must name v4 and report zero omitted added bots"
+    return None
+
+
+def _seed_template_export(api: Api, project_id: str) -> None:
+    _seed_review_manager(api, project_id)
+    _make_schedule(api, project_id)
+
+
 def _exported_without_keys(look: Look) -> str | None:
     if any(data.get("secrets") != "omitted" for data in _exports(look)):
         return "an export holds secrets"
@@ -1645,6 +1663,10 @@ DIALOGS: tuple[Dialog, ...] = (
         Say(WITHDRAWN_ASK, _was_stopped, withdraw=True),
         Say("我刚才让你做什么了？你做了吗？", _knows_it_was_withdrawn),
     ), seed=_enable_stop, tags=("stop",)),
+    Dialog("template_config_export", (
+        Say("把配置、场景管家、任务模板和项目定时任务导出到文件。说明文件格式，以及漏掉了几个额外添加的机器人。", _template_exported,
+            (("looper_config_export", {"include_projects": True}),)),
+    ), seed=_seed_template_export),
     Dialog("config_export", (
         Say("把 Looper 的配置导出成一个文件，包括项目和它们的定时任务。", _exported,
             (("looper_config_export", {"include_projects": True}),)),

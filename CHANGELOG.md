@@ -18,6 +18,78 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.156] - 2026-10-26
+
+### Added
+
+- **Idle scenario Managers are suspended and resumed.** A fleet sweep closes the resident Claude process of a scenario Manager that has been idle for its `idle_timeout_seconds` (0 = off, otherwise 60 to 86400; default 1800, the built-in Manager always 0) and resumes its saved session on the next message. A process with background jobs, pending messages or an unknown lifecycle state is kept; Grok ACP and per-turn runtimes never close. The field is stored per Manager (schema migration), in the Managers API, the `/api/v1` config schema, configuration transfer and the Managers settings form. ([#719](https://github.com/foolzzz/looper/pull/719))
+
+## [2.13.155] - 2026-10-26
+
+### Fixed
+
+- **The api deadline test is reliable and stricter.** `test_deadlines_abort_io_and_close_server_connections` warms up the SDK before imposing the deadline and checks that a deadline during an SDK retry ends the turn as an unavailable failure with no history, tool call or `RequestDone` event. Tests only; no production code changed. ([#718](https://github.com/foolzzz/looper/pull/718))
+
+## [2.13.154] - 2026-10-26
+
+### Fixed
+
+- **api Manager sessions stay consistent across a restart and a Manager deletion.** `api_sessions` stores the last known `context_tokens` (backfilled once from the run records), so a restarted api Manager applies the context handoff threshold. The session row is created before the first request and removed if that request leaves no turn; a late append or context save can no longer recreate a deleted session. Deleting a scenario Manager through `managers.delete` now stops it and waits for its turn, then deletes the session pointer and api history in one transaction, and restores the Manager if the delete fails. ([#715](https://github.com/foolzzz/looper/pull/715))
+
+## [2.13.153] - 2026-10-26
+
+### Added
+
+- **A schedule can run its owner Manager's task template.** A schedule stores `template_key` and static `template_inputs` (strings); each firing renders the template's requirement and creates the task with a template snapshot, the template's role templates as first role versions, and merged Agent Profiles. Fixed settings (project, work directory, profiles, rendered length, owner policy) are checked on save and again at fire, and a gate result from an older configuration is discarded. Adds `schedules.template_key` and `template_inputs` with a foreign key to the Manager's templates, so a template used by a schedule cannot be deleted. The v1 schedule schema, `looper-config` schedule entries and the schedule forms carry the two fields. The configuration export tool and its note now name `looper-config/v4` and report `bots_left_out`. ([#711](https://github.com/foolzzz/looper/pull/711))
+
+## [2.13.152] - 2026-10-26
+
+### Fixed
+
+- **api request logs carry their fields, and Stop works while Manager tools load.** Each api request is logged as `api_request key=value ...` (redacted) with new `request` and `outcome` fields; Stop now ends a turn that is still waiting for the platform tool list. ([#713](https://github.com/foolzzz/looper/pull/713))
+
+## [2.13.151] - 2026-10-26
+
+### Changed
+
+- **api Manager sessions persist in PostgreSQL and hand over when the context fills.** Conversation history is stored per completed request, so it survives a restart; a stored session is refused if its protocol differs. Above the smaller of 70% of the context window and 200,000 tokens, the Manager summarizes in a tool-free turn and continues in a new session. Adds the `api_sessions` and `api_session_items` tables and `agent_sessions.pending_handoff`. ([#688](https://github.com/foolzzz/looper/pull/688))
+
+## [2.13.150] - 2026-10-26
+
+### Fixed
+
+- **The dashboard Tasks page keeps updating under slow responses.** The list now polls three seconds after the previous request settles, instead of on a fixed timer, so a slow response is applied rather than discarded. A Show more page is dropped if a poll has since changed its cursor, so rows are no longer lost. Dashboard only; no API change. ([#708](https://github.com/foolzzz/looper/pull/708))
+
+## [2.13.149] - 2026-10-26
+
+### Changed
+
+- **Task lists can be filtered by Manager.** The dashboard Tasks page has a Manager select (with `manager` and `query` in its URL), the v1 `tasks.page` operation accepts `manager_id`, and status counts follow the filter. A `manager_id` naming no Manager returns an empty list. The client's task tool gains `manager_id` for `action: list` only; a client-scoped call sees only its own Manager's tasks. The Manager's own task tool is unchanged. ([#705](https://github.com/foolzzz/looper/pull/705))
+
+## [2.13.148] - 2026-10-26
+
+### Changed
+
+- **A schedule has an immutable Manager owner.** `schedules.manager_id` (default `manager`, so old schedules stay with the default Manager) is chosen when a schedule is created through the API, the v1 API, the Manager's schedule tool or the dashboard's new Owner select, and cannot change afterwards. The tasks a schedule creates belong to that Manager and use its existing reporting. A firing or an enabling is refused when the owner is deleted, disabled or requires a template. Deleting a Manager that owns a schedule answers 409. Configuration export writes `manager` for a non-default owner; import skips a schedule whose owner is missing, requires a template or differs from the stored one, and locks incoming schedules before Managers. The schedule and run views gain `manager_id` (and `manager_name`). A schedule a Manager creates is now owned by that Manager; its `get` result still omits the owner. Tool declarations and prompts are unchanged. ([#695](https://github.com/foolzzz/looper/pull/695))
+
+## [2.13.147] - 2026-10-26
+
+### Fixed
+
+- **An unavailable in-process runtime shows its reinstall hint in Agent Profiles.** In Settings → Agent Profiles, a disabled in-process runtime such as Model API (SDK) now shows its probe error (for example, reinstall Looper) in the Runtime option text and tooltip instead of "not on the server's PATH"; it falls back to "not available" when there is no probe error. A CLI runtime keeps the PATH wording. The Runtime select can now shrink and truncate long option text. Only the dashboard changes; prompts, tool declarations and the API are unchanged. ([#700](https://github.com/foolzzz/looper/pull/700))
+
+## [2.13.146] - 2026-10-26
+
+### Fixed
+
+- **A configuration import may omit the name of an existing task template.** The overlay rule from #689 now also holds in the HTTP preview and upload paths: a new import-only schema (`ConfigImportDocument`) requires only the template `key`, while `ConfigDocument` and exports still require the full identity. After the stored template is merged in, a template without a name is rejected with an error that names its key, so a new template still needs one. Prompts and tool declarations are unchanged. ([#697](https://github.com/foolzzz/looper/pull/697))
+
+## [2.13.145] - 2026-10-26
+
+### Changed
+
+- **Settings → Agent Runtimes shows the api runtime.** The Model API (SDK) card is listed as an in-process SDK runtime: its path row reads "Runs inside looper serve", a missing Python package shows the probe's reinstall error (the runtime type view gains an optional `probe_error`), and the "norma" placeholder is dropped from the planned runtimes. The registry view probes an in-process type that has no registered runtime so the diagnosis stays visible. agent-system.md, the API runtime RFC and design.md describe the runtime; a new test file checks the Agent Profile form, the Roles and project/task selectors, the chat stop button, Telegram and Lark `/profile` and `/stop`, `looper doctor` and `loopercli` against the RFC's entry-point table. Prompts and tool declarations are unchanged. ([#696](https://github.com/foolzzz/looper/pull/696))
+
 ## [2.13.144] - 2026-10-26
 
 ### Fixed

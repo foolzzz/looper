@@ -340,6 +340,8 @@ ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS provider_id TEXT;
 -- The user dropped the session (/new in a chat with the Manager): the next session starts clean, without the
 -- resume brief a new session otherwise gets. Cleared once that session has started.
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS clean_start BOOLEAN NOT NULL DEFAULT false;
+-- Keep the predecessor's summary until the replacement session has committed its context.
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS pending_handoff TEXT;
 -- The Agent Profile the user chose for the Manager's current session (/profile, the dashboard): it wins over the
 -- manager role's and the shared defaults' profile until /new. NULL follows Settings.
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS selected_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT;
@@ -361,6 +363,23 @@ BEGIN
             CHECK (selected_profile_id IS NULL OR agent_id = 'manager' OR agent_id LIKE 'manager-%');
     END IF;
 END $$;
+
+-- One protocol per api session; agent_sessions keeps the current-session pointer.
+CREATE TABLE IF NOT EXISTS api_sessions (
+    session_id  TEXT PRIMARY KEY,
+    protocol    TEXT NOT NULL CHECK (protocol IN ('openai-responses', 'anthropic-messages', 'openai-chat'))
+);
+ALTER TABLE api_sessions ADD COLUMN IF NOT EXISTS context_tokens INTEGER;
+-- Neutral items, appended per completed request and removed with their session.
+CREATE TABLE IF NOT EXISTS api_session_items (
+    session_id  TEXT NOT NULL REFERENCES api_sessions(session_id) ON DELETE CASCADE,
+    seq         INTEGER NOT NULL,
+    turn        INTEGER NOT NULL,
+    model       TEXT NOT NULL,
+    item        JSONB NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (session_id, seq)
+);
 
 -- A task's journal: what happened in it that a later agent or session needs.
 -- Code writes an entry, never the model, when its event happens: a step
@@ -1219,6 +1238,9 @@ CREATE TABLE IF NOT EXISTS managers (
     task_policy   TEXT NOT NULL DEFAULT 'free'
                   CONSTRAINT managers_task_policy_check CHECK (task_policy IN ('free', 'templates_only')),
     enabled       BOOLEAN NOT NULL DEFAULT true,
+    idle_timeout_seconds INTEGER NOT NULL DEFAULT 1800
+                  CONSTRAINT managers_idle_timeout_seconds_check
+                  CHECK (idle_timeout_seconds = 0 OR idle_timeout_seconds BETWEEN 60 AND 86400),
     -- Bumped in the same transaction by every write that changes what the Manager may do (tools, task_scope,
     -- task_policy, enabled, a template saved or removed): ManagerOps compares it at each call.
     revision      BIGINT NOT NULL DEFAULT 0,
@@ -1229,13 +1251,30 @@ CREATE TABLE IF NOT EXISTS managers (
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT managers_default_check CHECK (id <> 'manager' OR
         (system_prompt IS NULL AND profile_id IS NULL AND tools = 'all' AND task_scope = 'all' AND enabled
-         AND deleted_at IS NULL)),
+         AND deleted_at IS NULL AND idle_timeout_seconds = 0)),
     CONSTRAINT managers_deleted_check CHECK (deleted_at IS NULL OR NOT enabled),
     CONSTRAINT managers_prompt_check CHECK (id = 'manager' OR btrim(coalesce(system_prompt, '')) <> '')
 );
+ALTER TABLE managers ADD COLUMN IF NOT EXISTS idle_timeout_seconds INTEGER NOT NULL DEFAULT 1800
+    CONSTRAINT managers_idle_timeout_seconds_check
+    CHECK (idle_timeout_seconds = 0 OR idle_timeout_seconds BETWEEN 60 AND 86400);
+-- Existing scenarios inherit the column default; the built-in Manager always stays resident.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'managers_default_check'
+               AND conrelid = 'managers'::regclass
+               AND pg_get_constraintdef(oid) NOT LIKE '%idle_timeout_seconds%') THEN
+        UPDATE managers SET idle_timeout_seconds = 0 WHERE id = 'manager';
+        ALTER TABLE managers DROP CONSTRAINT managers_default_check;
+        ALTER TABLE managers ADD CONSTRAINT managers_default_check CHECK (id <> 'manager' OR
+            (system_prompt IS NULL AND profile_id IS NULL AND tools = 'all' AND task_scope = 'all' AND enabled
+             AND deleted_at IS NULL AND idle_timeout_seconds = 0));
+    END IF;
+END $$;
 -- A deleted Manager's name is free again; its id is not.
 CREATE UNIQUE INDEX IF NOT EXISTS managers_name_key ON managers (lower(btrim(name))) WHERE deleted_at IS NULL;
-INSERT INTO managers (id, name, tools, task_scope) VALUES ('manager', 'Manager', 'all', 'all') ON CONFLICT (id) DO NOTHING;
+INSERT INTO managers (id, name, tools, task_scope, idle_timeout_seconds)
+    VALUES ('manager', 'Manager', 'all', 'all', 0) ON CONFLICT (id) DO NOTHING;
 -- Once: the default Manager keeps the display name it had in Settings → Roles.
 DO $$
 BEGIN
@@ -1718,6 +1757,20 @@ CREATE TABLE IF NOT EXISTS schedules (
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (enabled OR next_fire_at IS NULL)
 );
+-- Ownership is fixed when a schedule is created; old schedules belong to the default Manager.
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS manager_id TEXT NOT NULL DEFAULT 'manager'
+    REFERENCES managers(id) ON DELETE RESTRICT;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS template_key TEXT NULL;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS template_inputs JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(template_inputs) = 'object');
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'schedules'::regclass
+                   AND conname = 'schedules_template_fkey') THEN
+        ALTER TABLE schedules ADD CONSTRAINT schedules_template_fkey FOREIGN KEY (manager_id, template_key)
+            REFERENCES manager_task_templates(manager_id, key) ON DELETE RESTRICT;
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_schedules_manager ON schedules (manager_id);
 -- S2: a gate command run in the work directory before each run (nothing printed: skipped; output: given to the
 -- task; failure: the run fails), a daily spend cap over the schedule's runs, and whom to tell: notify ('failures',
 -- 'alerts', 'always', 'never'; see the block after these) to a chat a channel allows (notify_channel and notify_chat, both or neither; none: the
@@ -2007,6 +2060,23 @@ ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS cache_read_tokens BIGINT;
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS cache_creation_tokens BIGINT;
 -- The context at the run's end: the prompt of its last main-loop model request.
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS context_tokens INTEGER;
+-- Once: older API sessions kept their last known context only in the run records.
+-- Restore it before a restarted Manager decides whether the session needs a handoff;
+-- unknown later usage must not erase it, and a live session's own count wins.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'api_sessions_context_tokens_backfill') THEN
+        UPDATE api_sessions AS session SET context_tokens = latest.context_tokens
+        FROM (
+            SELECT DISTINCT ON (session_id) session_id, context_tokens
+            FROM llm_records
+            WHERE session_id IS NOT NULL AND context_tokens IS NOT NULL
+            ORDER BY session_id, created_at DESC, id DESC
+        ) AS latest
+        WHERE session.session_id = latest.session_id AND session.context_tokens IS NULL;
+        INSERT INTO schema_migrations (name) VALUES ('api_sessions_context_tokens_backfill');
+    END IF;
+END $$;
 -- The context compactions during the run, each {trigger, pre_tokens, post_tokens, duration_ms};
 -- NULL for runs recorded before compactions were.
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS compactions JSONB;

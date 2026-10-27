@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ArrowRight,
   Trash2,
@@ -20,6 +20,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   fetchSchedule,
+  fetchManagers,
   fetchTasks,
   deleteTask,
   stopTask,
@@ -34,6 +35,7 @@ import {
   type TaskGroup,
   type TaskInfo,
   type TaskRole,
+  type ManagerInfo,
 } from "@/lib/api";
 import { useProjects } from "@/lib/use-projects";
 import { AgentProfileSelect } from "@/components/agent-profiles";
@@ -180,12 +182,14 @@ interface TasksPageProps {
   onNavigate?: (sub: string, query?: string) => void;
 }
 
-function filterQuery(project: string, group: TaskGroup | null, schedule = "", status: StatusFilter = "all"): string {
+function filterQuery(project: string, group: TaskGroup | null, schedule = "", status: StatusFilter = "all", manager = "", search = ""): string {
   const query = new URLSearchParams();
   if (project) query.set("project", project);
   if (group) query.set("group", group);
   if (schedule) query.set("schedule", schedule);
   if (status !== "all") query.set("status", status);
+  if (manager) query.set("manager", manager);
+  if (search) query.set("query", search);
   return query.toString();
 }
 
@@ -211,10 +215,25 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const groupFilter = isTaskGroup(groupParam) ? groupParam : null;
   const group = TASK_GROUPS.find((g) => g.id === groupFilter) ?? null;
   const scheduleFilter = params.get("schedule") || "";
+  const managerFilter = params.get("manager") || "";
+  const searchFilter = params.get("query") || "";
   const statusParam = params.get("status");
   const filter: StatusFilter = STATUS_FILTERS.find((f) => f === statusParam) ?? "all";
-  // What the list shows: the server filters by all four.
-  const listKey = filterQuery(projectFilter, groupFilter, scheduleFilter, filter);
+  const listKey = filterQuery(projectFilter, groupFilter, scheduleFilter, filter, managerFilter, searchFilter);
+  const [managers, setManagers] = useState<ManagerInfo[] | null>(null);
+  const [managerError, setManagerError] = useState("");
+  useEffect(() => {
+    let alive = true;
+    fetchManagers().then((rows) => {
+      if (alive) setManagers(rows);
+    }).catch((err) => {
+      if (alive) setManagerError(err.message);
+    });
+    return () => { alive = false; };
+  }, []);
+  const selectedManager = managers?.find((manager) => manager.id === managerFilter);
+  const managerMissing = !!managerFilter && managers !== null && !selectedManager;
+  const showManagerFilter = !!managerFilter || !!managers?.some((manager) => !manager.builtin);
   const { projects, reload: reloadProjects } = useProjects();
   const selectedProject = projects?.find((p) => p.project_id === projectFilter) ?? null;
   // A filter for a project the list does not hold yet (just created elsewhere) is
@@ -272,19 +291,26 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   }, [sub, query]);
   const setSelectedTaskId = (id: string | null) =>
     id ? onNavigate?.(id) : onNavigate?.("", listQuery.current);
-  const setProjectFilter = (id: string) => onNavigate?.("", filterQuery(id, groupFilter, scheduleFilter, filter));
-  const clearGroup = () => onNavigate?.("", filterQuery(projectFilter, null, scheduleFilter, filter));
-  const clearSchedule = () => onNavigate?.("", filterQuery(projectFilter, groupFilter, "", filter));
-  const setFilter = (next: StatusFilter) => onNavigate?.("", filterQuery(projectFilter, groupFilter, scheduleFilter, next));
+  const setProjectFilter = (id: string) => onNavigate?.("", filterQuery(id, groupFilter, scheduleFilter, filter, managerFilter, searchFilter));
+  const clearGroup = () => onNavigate?.("", filterQuery(projectFilter, null, scheduleFilter, filter, managerFilter, searchFilter));
+  const clearSchedule = () => onNavigate?.("", filterQuery(projectFilter, groupFilter, "", filter, managerFilter, searchFilter));
+  const setFilter = (next: StatusFilter) => onNavigate?.("", filterQuery(projectFilter, groupFilter, scheduleFilter, next, managerFilter, searchFilter));
+  const setManagerFilter = (id: string) => onNavigate?.("", filterQuery(projectFilter, groupFilter, scheduleFilter, filter, id, searchFilter));
 
-  // Drop answers for a filter the page has already left.
-  const currentFilter = useRef(listKey);
-  useEffect(() => {
-    currentFilter.current = listKey;
+  // A fresh identity also rejects an old A response after navigating A → B → A.
+  // Keep its cursor synchronous so pending pages see a refresh's boundary before React renders.
+  const currentFilter = useRef<{ key: string; before: string | null } | null>(null);
+  useLayoutEffect(() => {
+    currentFilter.current = { key: listKey, before: null };
+    return () => { currentFilter.current = null; };
   }, [listKey]);
+  const latestRefresh = useRef(0);
+  const appliedRefresh = useRef(0);
 
   const filters = {
     projectId: projectFilter || undefined,
+    managerId: managerFilter || undefined,
+    query: searchFilter || undefined,
     group: groupFilter ?? undefined,
     scheduleId: scheduleFilter || undefined,
     status: filter === "all" ? undefined : filter,
@@ -293,51 +319,79 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   /** Read the newest page again; older pages loaded for this list stay below it. */
   const load = () => {
     const requested = listKey;
-    fetchTasks(filters)
+    const filterRequest = currentFilter.current;
+    if (filterRequest?.key !== requested) return;
+    const refresh = ++latestRefresh.current;
+    // A newer request still in flight must not starve a usable response.
+    const isCurrent = () => filterRequest === currentFilter.current && refresh >= appliedRefresh.current;
+    return fetchTasks(filters)
       .then((page) => {
-        if (requested !== currentFilter.current) return;
+        if (!isCurrent()) return;
+        appliedRefresh.current = refresh;
         setCounts(page.counts);
         if (older.current.key === requested && older.current.loaded) {
           setTasks((current) => withOlder(page.tasks, current));
         } else {
           older.current = { key: requested, loaded: false };
           setTasks(page.tasks);
+          filterRequest.before = page.next_before;
           setNextBefore(page.next_before);
         }
         setError("");
       })
       .catch((e) => {
-        if (requested === currentFilter.current) setError(e.message);
+        if (isCurrent()) setError(e.message);
       })
       .finally(() => {
-        if (requested === currentFilter.current) setLoadedFor(requested);
+        if (isCurrent()) setLoadedFor(requested);
       });
   };
 
   useEffect(() => {
-    load();
-    const timer = setInterval(load, 3000);
-    return () => clearInterval(timer);
+    setLoadedFor(null);
+    setTasks([]);
+    setCounts({});
+    setNextBefore(null);
+    setLoadingMore(false);
+    setError("");
+    older.current = { key: listKey, loaded: false };
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      await load();
+      if (!stopped) timer = setTimeout(poll, 3000);
+    };
+    void poll();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
   }, [listKey]);
 
   const loadMore = () => {
-    if (!nextBefore) return;
+    if (!nextBefore || loadingMore || loading) return;
     const requested = listKey;
+    const filterRequest = currentFilter.current;
+    if (filterRequest?.key !== requested) return;
+    const isCurrent = () => filterRequest === currentFilter.current;
+    const before = nextBefore;
+    const canAppend = () => isCurrent() && before === filterRequest.before;
     setLoadingMore(true);
-    fetchTasks({ ...filters, before: nextBefore })
+    fetchTasks({ ...filters, before })
       .then((page) => {
-        if (requested !== currentFilter.current) return;
+        if (!canAppend()) return;
         older.current = { key: requested, loaded: true };
         setTasks((current) => {
           const shown = new Set(current.map((t) => t.task_id));
           return [...current, ...page.tasks.filter((t) => !shown.has(t.task_id))];
         });
+        filterRequest.before = page.next_before;
         setNextBefore(page.next_before);
         setCounts(page.counts);
         setError("");
       })
-      .catch((e) => requested === currentFilter.current && setError(e.message))
-      .finally(() => setLoadingMore(false));
+      .catch((e) => canAppend() && setError(e.message))
+      .finally(() => { if (isCurrent()) setLoadingMore(false); });
   };
 
   const handleStop = async (taskId: string) => {
@@ -521,7 +575,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
         </div>
       </div>
 
-      {/* Project and status filters */}
+      {/* List filters */}
       <div className="flex items-center gap-3 flex-wrap">
         <select
           aria-label="Project"
@@ -535,6 +589,26 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
           ))}
           {projectFilter && !selectedProject && <option value={projectFilter}>{projectFilter}</option>}
         </select>
+        {showManagerFilter && (
+          <select
+            aria-label="Manager"
+            value={managerFilter}
+            onChange={(e) => setManagerFilter(e.target.value)}
+            className="h-11 max-w-[14rem] rounded-md border border-input bg-transparent px-2 text-xs font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:h-8"
+          >
+            <option value="">All Managers</option>
+            {managers?.map((manager) => (
+              <option key={manager.id} value={manager.id}>
+                {manager.builtin ? "Default Manager" : manager.name}{!manager.enabled ? " (disabled)" : ""}
+              </option>
+            ))}
+            {managerFilter && !selectedManager && (
+              <option value={managerFilter}>
+                {managerFilter}{managerMissing ? " (unavailable)" : ""}
+              </option>
+            )}
+          </select>
+        )}
         {group && (
           <span className="inline-flex h-8 items-center gap-1 rounded-md bg-primary/10 pl-3 pr-1 text-xs font-medium text-primary ring-1 ring-inset ring-primary/20">
             {group.label}
@@ -616,6 +690,18 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
             </Button>
           </div>
         )
+      )}
+
+      {(managerMissing || (managerFilter && managerError)) && (
+        <div role="status" className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-border bg-card px-5 py-4 text-sm text-muted-foreground">
+          <span>
+            {managerMissing ? `Manager ${managerFilter} is unavailable.` : `Managers could not be loaded: ${managerError}`}
+            {" "}The Manager filter is still applied.
+          </span>
+          <Button type="button" variant="outline" size="sm" onClick={() => setManagerFilter("")}>
+            Remove Manager filter
+          </Button>
+        </div>
       )}
 
       {actionError && (

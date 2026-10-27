@@ -4,6 +4,7 @@ Prompt composition is also covered by tests/test_model_launch_parity_db.py;
 its CLI fixtures deliberately remain unchanged.
 """
 import asyncio
+import logging
 from functools import wraps
 
 import pytest
@@ -12,7 +13,7 @@ from fake_model_api import (
     FakeModelAPI, ResponseScript, call_item, completed, event, reasoning_item,
     text_events, text_item,
 )
-from looper.agents import claude_cli
+from looper.agents import claude_cli, log_redaction
 from looper.agents.ops import ErrorCode, OpError
 from looper.agents.run_usage import Usage
 from looper.agents.runtimes import ApiProtocol, InProcessTools, StopMethod
@@ -20,9 +21,11 @@ from looper.agents.runtimes.api import session as session_module
 from looper.agents.runtimes.api.adapter import Descriptor, KEY_ENV
 from looper.agents.runtimes.api.loop import (
     ErrorKind, LoopResult, MessageItem, Outcome, ReasoningItem,
-    ToolCallItem, ToolOutcome, ToolResultItem, ToolSpec,
+    ToolCallItem, ToolOutcome, ToolResultItem, ToolSpec, item_from_json,
 )
 from looper.agents.runtimes.api.session import ApiSession, FORBIDDEN_ENV
+from looper.agents.runtimes.api.transcript import DbTranscript
+from looper.db import api_sessions
 from looper.agents.runtimes.cancel import TurnCancel
 
 PROTOCOL = ApiProtocol.OPENAI_RESPONSES
@@ -41,6 +44,49 @@ def async_test(fn):
 def clear_sdk_environment(monkeypatch):
     for name in FORBIDDEN_ENV:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def transcript_store(monkeypatch):
+    """Keep runtime event tests independent of PostgreSQL; DB resume rules live in the DB suite."""
+    rows = {}
+    contexts = {}
+
+    async def create(sid, protocol):
+        assert sid not in rows
+        rows[sid] = []
+
+    async def context_tokens(sid):
+        return contexts.get(sid)
+
+    async def save_context_tokens(sid, tokens):
+        if tokens is not None:
+            contexts[sid] = tokens
+
+    async def delete(sid):
+        rows.pop(sid, None)
+        contexts.pop(sid, None)
+
+    async def load(sid):
+        return list(rows.get(sid, []))
+
+    async def last_turn(sid):
+        return max((r['turn'] for r in rows.get(sid, [])), default=None)
+
+    async def append(sid, turn, protocol, model, items):
+        stored = rows.setdefault(sid, [])
+        if stored and stored[0]['protocol'] != protocol:
+            raise api_sessions.TranscriptMismatch('protocol mismatch')
+        stored.extend(dict(turn=turn, protocol=protocol, model=model, item=item) for item in items)
+
+    monkeypatch.setattr(api_sessions, 'load', load)
+    monkeypatch.setattr(api_sessions, 'create', create)
+    monkeypatch.setattr(api_sessions, 'context_tokens', context_tokens)
+    monkeypatch.setattr(api_sessions, 'save_context_tokens', save_context_tokens)
+    monkeypatch.setattr(api_sessions, 'delete', delete)
+    monkeypatch.setattr(api_sessions, 'last_turn', last_turn)
+    monkeypatch.setattr(api_sessions, 'append', append)
+    return rows
 
 
 class Tools:
@@ -119,7 +165,7 @@ async def test_session_streams_calls_and_results_in_order_with_one_listing_snaps
             assert [e['type'] for e in events] == [
                 'system', 'stream_event', 'assistant', 'usage', 'user', 'user',
                 'stream_event', 'assistant', 'usage']
-            history = await session._transcripts[result.result_event['session_id']].items()
+            history = await DbTranscript(result.result_event['session_id'], PROTOCOL, 'test-model').items()
             assert all(isinstance(item, (MessageItem, ReasoningItem, ToolCallItem, ToolResultItem))
                        for item in history)
             assert sum(isinstance(item, ToolCallItem) for item in history) == 2
@@ -156,13 +202,13 @@ async def test_two_turns_reuse_neutral_history_and_add_provider_priced_usage(tmp
         assert api.requests[1].body['input'] == [
             {'role': 'user', 'content': 'first'}, {'role': 'assistant', 'content': 'one'},
             {'role': 'user', 'content': 'second'}]
-        history = session._transcripts[sid]
+        history = DbTranscript(sid, PROTOCOL, 'test-model')
         assert history.protocol == PROTOCOL
         assert await history.items() == [MessageItem('user', 'first'), MessageItem('assistant', 'one'),
                                          MessageItem('user', 'second'), MessageItem('assistant', 'two')]
         await session.stop()
         assert closed == [True] and not session.started
-        assert await history.items() and sid in session._transcripts
+        assert await history.items()
         assert await session.interrupt() is None
 
 
@@ -223,16 +269,81 @@ async def test_unavailable_tool_listing_fails_before_init_or_request(tmp_path):
             await session.stop()
 
 
+@async_test
+async def test_interrupt_cancels_blocked_tool_listing_before_any_request(tmp_path, transcript_store):
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+
+    class WaitingTools(Tools):
+        async def specs(self):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+    async with FakeModelAPI([]) as api:
+        session, _ = await start(tmp_path, api.base_url)
+        task = asyncio.create_task(turn(session, tools=WaitingTools()))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            assert await asyncio.wait_for(session.interrupt(), 1) is StopMethod.CANCEL
+            result, events = await asyncio.wait_for(task, 1)
+            assert result == claude_cli.ResidentTurn(claude_cli.user_stop_result(), session_started=True,
+                usage=Usage(), stopped=StopMethod.CANCEL, usage_complete=True, prompt_sent=False)
+            assert cancelled.is_set()
+            assert not events and not api.requests and not transcript_store
+            assert await session.interrupt() is None
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await session.stop()
+
+
+@async_test
+async def test_request_fields_appear_in_redacted_service_log(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger='looper.agents.runtimes.api')
+    scripts = [ResponseScript(events=[completed([
+        call_item(arguments='{"private":"tool-argument-sentinel"}'),
+    ], usage=TOKENS, id='upstream-test-key')]),
+        ResponseScript(events=text_events('reply-body-sentinel', usage=TOKENS))]
+    async with FakeModelAPI(scripts) as api:
+        session, _ = await start(tmp_path, api.base_url)
+        try:
+            result, _ = await turn(session, 'prompt-body-sentinel')
+            assert result.result_event['subtype'] == 'success'
+        finally:
+            await session.stop()
+    records = [r for r in caplog.records if r.name == 'looper.agents.runtimes.api']
+    assert len(records) == 2
+    formatter = log_redaction.RedactingFormatter('%(levelname)s %(name)s %(message)s')
+    for index, record in enumerate(records):
+        line = formatter.format(record)
+        assert 'api_request ' in line
+        expected = dict(agent='Manager', protocol=PROTOCOL.value, model='test-model',
+            host='127.0.0.1', request=index, status=200, retries=0, input_tokens=13,
+            cache_read_tokens=4, cache_write_tokens=3, output_tokens=5, complete=True,
+            outcome='answered', upstream_id='upstream-***' if index == 0 else 'resp_1')
+        for key, value in expected.items():
+            assert f'{key}={value}' in line
+            assert record.api_request[key] == value
+        for key in ('duration_ms', 'first_token_ms'):
+            assert f'{key}={record.api_request[key]}' in line
+        assert 'test-key' not in line
+        assert all(value not in line for value in (
+            'system instructions', 'prompt-body-sentinel', 'tool-argument-sentinel',
+            'reply-body-sentinel', 'result call_1'))
+
+
 @pytest.mark.parametrize('mismatch', [False, True])
 @async_test
-async def test_unknown_or_incompatible_saved_session_emits_nothing(tmp_path, mismatch):
+async def test_unknown_or_incompatible_saved_session_emits_nothing(tmp_path, mismatch, transcript_store):
     async with FakeModelAPI([ResponseScript(events=text_events())] if mismatch else []) as api:
         session, _ = await start(tmp_path, api.base_url)
         sid = 'api-unknown'
         if mismatch:
             previous, _ = await turn(session)
             sid = previous.result_event['session_id']
-            session._transcripts[sid].protocol = 'different-protocol'
+            transcript_store[sid][0]['protocol'] = 'different-protocol'
             await session.stop()
         session, _ = await start(tmp_path, api.base_url, session=sid, instance=session)
         try:
@@ -242,28 +353,6 @@ async def test_unknown_or_incompatible_saved_session_emits_nothing(tmp_path, mis
                 is_error=True, errors=[f'session {sid} could not be resumed'], num_turns=0)
             assert not result.session_started and not result.prompt_sent and result.usage == Usage()
             assert not events and len(api.requests) == before
-        finally:
-            await session.stop()
-
-
-@async_test
-async def test_session_history_evicts_the_least_recently_used_after_four_sessions(tmp_path):
-    async with FakeModelAPI([ResponseScript(events=text_events()) for _ in range(6)]) as api:
-        session, ids = None, []
-        for _ in range(4):
-            session, _ = await start(tmp_path, api.base_url, instance=session)
-            result, _ = await turn(session)
-            ids.append(result.result_event['session_id'])
-            await session.stop()
-        session, _ = await start(tmp_path, api.base_url, instance=session, session=ids[0])
-        await turn(session)
-        await session.stop()
-        session, _ = await start(tmp_path, api.base_url, instance=session)
-        result, _ = await turn(session)
-        try:
-            assert len(session._transcripts) == 4
-            assert ids[0] in session._transcripts and ids[1] not in session._transcripts
-            assert result.result_event['session_id'] in session._transcripts
         finally:
             await session.stop()
 
@@ -460,8 +549,8 @@ async def test_interrupt_times_out_without_cancelling_a_running_tool_write(tmp_p
             release.set()
             result, _ = await task
             assert result.stopped is StopMethod.CANCEL and result.usage_complete
-            history = await session._transcripts[session._session].items()
-            assert history[-1] == ToolResultItem('call_1', 'finished', False, True)
+            history = await api_sessions.load(result.result_event['session_id'])
+            assert item_from_json(history[-1]['item']) == ToolResultItem('call_1', 'finished', False, True)
             assert len(api.requests) == 1
         finally:
             release.set()
@@ -480,5 +569,52 @@ async def test_provider_detail_is_redacted_and_bounded_before_user_display(tmp_p
             detail = result.result_event['errors'][0]
             assert detail.startswith('the provider refused the request: ')
             assert 'test-key' not in detail and len(detail) == 300
+        finally:
+            await session.stop()
+
+
+@pytest.mark.parametrize('window,limit', [(None, 140_000), (1_050_000, 200_000), (100_000, 70_000)])
+@async_test
+async def test_context_limit_uses_model_window_with_ceiling(tmp_path, window, limit):
+    prompt = tmp_path / 'context-prompt.md'
+    prompt.write_text('system')
+    descriptor = Descriptor(PROTOCOL, 'test-model', 'http://127.0.0.1:1/v1', None, window, str(prompt))
+    session = ApiSession('Manager')
+    await session.start(descriptor.to_argv(), cwd=str(tmp_path), signature='s', env={KEY_ENV: 'test-key'})
+    try:
+        assert session.context_limit == limit
+        assert session.context_tokens is None and not session.context_full
+    finally:
+        await session.stop()
+
+
+@pytest.mark.parametrize('partial', [False, True])
+@async_test
+async def test_first_request_context_overflow_retries_only_before_visible_output(tmp_path, partial):
+    prefix = [
+        event('response.output_text.delta', output_index=0, item_id='msg_1',
+              content_index=0, delta='unfinished prefix'),
+    ] if partial else []
+    script = ResponseScript(events=[*prefix,
+        event('response.failed', response={'id': 'resp_1', 'status': 'failed',
+              'error': {'code': 'context_length_exceeded', 'message': 'full'}}),
+    ])
+    async with FakeModelAPI([script]) as api:
+        session, _ = await start(tmp_path, api.base_url)
+        try:
+            result, events = await turn(session)
+            assert result.session_started is partial and result.prompt_sent is partial
+            assert result.result_event['is_error'] is True
+            if partial:
+                assert events == [
+                    {'type': 'system', 'subtype': 'init', 'session_id': result.result_event['session_id'],
+                     'model': 'test-model', 'tools': ['lookup']},
+                    {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': 0,
+                     'delta': {'type': 'text_delta', 'text': 'unfinished prefix'}}},
+                ]
+            else:
+                assert not events
+            assert len(api.requests) == 1
+            assert session.context_tokens > session.context_limit and session.context_full
         finally:
             await session.stop()
