@@ -90,6 +90,8 @@ class ManagerFleet:
         self._retries: dict[str, asyncio.Task[None]] = {}
         self._turned_off_tasks: set[asyncio.Task[Any]] = set()
         self._lock = asyncio.Lock()
+        self._delete_lock = asyncio.Lock()  # Serialize deletes without holding the lock a turn may need.
+        self._deleting: str | None = None
         self._clock = clock
         self._idle_task: asyncio.Task[None] | None = None
 
@@ -299,6 +301,8 @@ class ManagerFleet:
                 del self._retries[manager_id]
 
     async def _apply_once(self, manager_id: str) -> None:
+        if manager_id == self._deleting:
+            return  # The deleting caller reconciles the latest definition after commit or rollback.
         row = await db_managers.get_manager(manager_id)
         enabled = row is not None and bool(row.get("enabled"))
         running = manager_id in self._agents
@@ -330,42 +334,49 @@ class ManagerFleet:
     # --- Retiring ---
 
     async def delete_manager(self, manager_id: str) -> str:
-        """Check dependents under the delete lock, drain the turn, then settle only after commit."""
-        async with self._lock:
-            agent = self._agents.get(manager_id)
+        """Refuse first, drain without holding the fleet or row lock, then settle only after commit."""
+        async with self._delete_lock:
+            agent = None
             stopped = False
+            result = None
 
             async def stop() -> None:
-                nonlocal stopped
-                self._retiring.add(manager_id)
+                nonlocal agent, stopped
+                async with self._lock:
+                    agent = self._agents.get(manager_id)
+                    self._deleting = manager_id
+                    self._retiring.add(manager_id)
+                if agent is None:
+                    return
                 await self._supervisor.stop_agent(manager_id, strict=True)
                 stopped = True
-                self._drop(manager_id)
+                async with self._lock:
+                    self._drop(manager_id)
 
             try:
-                result = await db_managers.delete_manager(manager_id, before_delete=stop if agent else None)
-            except BaseException:
-                if stopped and agent is not None:
-                    # The delete rolled back after shutdown: replay the interrupted turn before the queue,
-                    # without journaling it again or settling any of the user's pending messages.
-                    taken = self._bus.take_queue(manager_id)
-                    queued = {envelope.message_id for envelope in taken}
-                    pending = {envelope.message_id for envelope in self._bus.journal.undelivered()}
-                    queue = self._bus.get_queue(manager_id)
-                    for envelope, _ in agent.stopped_in_flight:
-                        if envelope.message_id in pending and envelope.message_id not in queued:
-                            queue.put_nowait(envelope)
-                    for envelope in taken:
-                        queue.put_nowait(envelope)
-                raise
-            else:
+                result = await db_managers.delete_manager(manager_id, before_delete=stop)
                 if result == "deleted" and agent is not None:
-                    await self._settle_retired(manager_id, agent)
+                    async with self._lock:
+                        await self._settle_retired(manager_id, agent)
                 return result
             finally:
-                # A refused or rolled-back deletion must leave an enabled Manager running.
-                self._retiring.discard(manager_id)
-                await self._apply_once(manager_id)
+                async with self._lock:
+                    if stopped and result != "deleted" and agent is not None:
+                        # Rollback or a new dependent during drain: replay the interrupted turn before the queue,
+                        # without journaling it again or settling any of the user's pending messages.
+                        taken = self._bus.take_queue(manager_id)
+                        queued = {envelope.message_id for envelope in taken}
+                        pending = {envelope.message_id for envelope in self._bus.journal.undelivered()}
+                        queue = self._bus.get_queue(manager_id)
+                        for envelope, _ in agent.stopped_in_flight:
+                            if envelope.message_id in pending and envelope.message_id not in queued:
+                                queue.put_nowait(envelope)
+                        for envelope in taken:
+                            queue.put_nowait(envelope)
+                    # A refused or rolled-back deletion must leave an enabled Manager running.
+                    self._deleting = None
+                    self._retiring.discard(manager_id)
+                    await self._apply_once(manager_id)
 
     async def _retire(self, manager_id: str) -> None:
         self._retiring.add(manager_id)

@@ -711,6 +711,111 @@ def test_delete_drains_in_flight_api_append_before_removing_session(tmp_path, mo
     run_db(body, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("blocked_on", ["row_lock", "fleet_lock", "cancellation"])
+def test_delete_finishes_when_turn_cleanup_blocks(tmp_path, monkeypatch, caplog, blocked_on):
+    from looper.agents.tiers import manager as manager_module
+    from looper.db import agent_sessions, api_sessions, managers
+
+    async def body(pool):
+        review = await _insert(pool, "review")
+        await api_sessions.create("review-session", "openai-responses", pool=pool)
+        await agent_sessions.save_session(review, "review-session", {}, runtime_type="api")
+        entered, cancelled, release, finished = (asyncio.Event() for _ in range(4))
+        late_append_refused = []
+        monkeypatch.setattr(manager_module, "STOP_DRAIN_SEC", 0.05)
+        async with rig(tmp_path) as r:
+            agent = r.fleet.get(review)
+
+            async def answer(envelope, token):
+                async with agent._turn_lock:
+                    entered.set()
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        cancelled.set()
+                        if blocked_on == "row_lock":
+                            async with pool.acquire() as conn, conn.transaction():
+                                await conn.execute("SELECT id FROM managers WHERE id=$1 FOR KEY SHARE", review)
+                        elif blocked_on == "fleet_lock":
+                            async with r.fleet._lock:
+                                pass
+                        else:
+                            while not release.is_set():
+                                try:
+                                    await release.wait()
+                                except asyncio.CancelledError:
+                                    pass  # A resident's cleanup can outlive repeated cancellation.
+                            try:
+                                await api_sessions.append("review-session", 1, "openai-responses", "model", [
+                                    {"version": 1, "kind": "message", "role": "assistant", "text": "Late."}])
+                            except api_sessions.TranscriptMismatch:
+                                late_append_refused.append(True)
+                    finally:
+                        finished.set()
+
+            monkeypatch.setattr(agent, "_answer_user_message", answer)
+            turn_task = agent._task
+            try:
+                await r.bus.publish(_user(review))
+                await asyncio.wait_for(entered.wait(), 1)
+                assert await asyncio.wait_for(r.fleet.delete_manager(review), 1) == "deleted"
+                assert cancelled.is_set()
+                if blocked_on != "cancellation":
+                    assert finished.is_set()  # Cleanup acquired its lock before deletion completed.
+                    assert "turn drain" not in caplog.text
+                else:
+                    assert not finished.is_set()
+                    assert "drain" in caplog.text
+                assert await managers.get_manager(review) is None
+                assert await agent_sessions.get_session(review) is None
+            finally:
+                release.set()
+                await asyncio.wait_for(finished.wait(), 1)
+                turn_task.cancel()
+                await asyncio.wait_for(turn_task, 2)
+            assert await pool.fetchval("SELECT count(*) FROM api_sessions") == 0
+            assert await pool.fetchval("SELECT count(*) FROM api_session_items") == 0
+            assert late_append_refused == ([True] if blocked_on == "cancellation" else [])
+
+    run_db(body, monkeypatch, timeout=10)
+
+
+def test_dependent_created_during_drain_refuses_delete_and_replays_messages(tmp_path, monkeypatch):
+    from looper.db import managers, tasks
+
+    async def body(pool):
+        review = await _insert(pool, "review")
+        await pool.execute("INSERT INTO projects (id, name) VALUES ('project', 'Project')")
+        gate, seen = _stub_answer(monkeypatch)
+        async with rig(tmp_path) as r:
+            agent = r.fleet.get(review)
+            stop = agent.stop
+
+            async def stop_and_create_task():
+                await stop()
+                async with pool.acquire() as conn, conn.transaction():
+                    assert await managers.lock_for_task(review, conn=conn)
+                    await tasks.create_task(task_id="late-task", requirement="Work.", project_id="project",
+                                            manager_id=review, pool=conn)
+
+            monkeypatch.setattr(agent, "stop", stop_and_create_task)
+            first, queued = _user(review, n=1), _user(review, n=2)
+            await r.bus.publish(first)
+            await until(lambda: len(seen) == 1, timeout=1)
+            await r.bus.publish(queued)
+            assert await asyncio.wait_for(r.fleet.delete_manager(review), 2) == "has_tasks"
+            assert r.fleet.get(review) is not agent and r.fleet.is_running(review)
+            assert await managers.get_manager(review) is not None
+            assert {first.message_id, queued.message_id} <= _journal_open(tmp_path)
+            assert not [e for e in r.bus.get_queue(WEB.agent_id)._queue
+                        if e.message_type == MessageType.AGENT_REPLY]
+            gate.set()
+            await until(lambda: len(seen) == 3, timeout=1)
+            assert [e.message_id for e in seen] == [first.message_id, first.message_id, queued.message_id]
+
+    run_db(body, monkeypatch, timeout=10)
+
+
 @pytest.mark.parametrize(("dependency", "message"), [
     ("schedules", "Manager Review has schedules: delete those schedules first, or disable the Manager"),
     ("bots", "Manager Review has bots: remove them in Settings → Channels first"),

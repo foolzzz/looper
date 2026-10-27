@@ -311,6 +311,8 @@ HANDOFF_TIMEOUT_SEC = 300
 STOP_HANDLING_SEC = 3.0
 # How long a stopped turn's own record and session writes may take (a row lock held elsewhere) before it ends without.
 STOP_FINISH_SEC = 10.0
+# A retiring Manager may abandon an unresponsive turn, but must never block deletion indefinitely.
+STOP_DRAIN_SEC = 10.0
 
 # The one command Looper answers itself in a chat with the Manager: a message that is exactly this (trimmed, any
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
@@ -919,13 +921,34 @@ class ManagerAgent:
         if self._bus is not None:
             self._bus.unsubscribe_topic(MessageType.USER_MESSAGE.value, self._receive)
         if self._task:
-            await cancel_and_wait(self._task)
+            try:
+                async with asyncio.timeout(STOP_DRAIN_SEC):
+                    await cancel_and_wait(self._task)
+            except TimeoutError:
+                self._task.cancel()
+                logger.warning("%s: turn drain did not finish within %.1f s; proceeding with shutdown",
+                               self._log, STOP_DRAIN_SEC)
             self._task = None
         for token in self._turns.live():
             token.settle(ReplyOutcome.STOPPED)
         self._turns.clear()
-        async with self._turn_lock, self._lifecycle_gate:
-            await self._claude.stop()
+        async def close() -> None:
+            # A cancelled turn can still own its lock. Idle close alone needs serialization here.
+            async with self._lifecycle_gate:
+                await self._claude.stop()
+
+        closing = asyncio.create_task(close())
+        try:
+            done, _ = await asyncio.wait({closing}, timeout=STOP_DRAIN_SEC)
+            if done:
+                closing.result()
+            else:
+                logger.warning("%s: resident close did not finish within %.1f s; proceeding with shutdown",
+                               self._log, STOP_DRAIN_SEC)
+        finally:
+            if not closing.done():
+                closing.cancel()
+                closing.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
 
     def _idle_blocked(self) -> bool:
         return bool(self.busy or self._handling is not None or self._running_token is not None
@@ -987,6 +1010,9 @@ class ManagerAgent:
                 finally:
                     self._handling = None
                     self._last_activity = self._clock()
+                # Cleanup may consume cancellation. Do not wait for another bus message after shutdown.
+                if not self._running:
+                    break
         except asyncio.CancelledError:
             pass
 
