@@ -5,6 +5,8 @@ from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
+import weakref
+from typing import get_args
 
 import pytest
 
@@ -35,7 +37,7 @@ async def connection(handshake=None, **options):
     try:
         init = asyncio.create_task(bridge.initialize())
         req = await p.read_frame(runner_reader)
-        caps = {"cancel": True, "usage": {"per_request": True}, "authorize_covers": ["turn"],
+        caps = {"cancel": True, "usage": {"per_request": True}, "authorize_covers": list(get_args(p.RequestKind)),
                 "steer": {"in_trace": True, "boundary": "after_tool_batch", "idle_start": False}}
         result = {"protocol_version": "0.1",
             "runner": {"kind": "fake", "version": "1"}, "sdk": {"name": "fake", "version": "1"},
@@ -108,6 +110,8 @@ class Turn:
         self.entered.set()
         if self.gate:
             await self.gate.wait()
+        if self.stopped:
+            return {"allow": False, "reason": "stopped"}
         return {"allow": True}
 
     async def request_end(self, params):
@@ -339,6 +343,7 @@ def test_missing_acceptance_preserves_usage_and_emits_one_terminal(fault, settle
     async def exercise():
         async with connection(control_timeout=0.1) as (bridge, reader, writer, failures):
             turn, events, beginning, _ = await open_turn(bridge, reader, writer)
+            await authorize(reader, writer)
             await update(writer, "request_end", request_id="q", request_kind="turn", model="model", status="ok",
                          input_uncached=5, output=2, cache_read=3, cache_write=4, reasoning=None, complete=True)
             if settled:
@@ -411,6 +416,7 @@ def test_connection_fault_fails_pending_and_emits_one_lost_terminal(fault):
             _, events, beginning, prompt = await open_turn(bridge, reader, writer)
             await accept(writer, prompt)
             await beginning
+            await authorize(reader, writer)
             await update(writer, "request_end", request_id="q", request_kind="turn", model="model", status="ok",
                          input_uncached=5, output=2, cache_read=3, cache_write=4, reasoning=None, complete=True)
             pending = asyncio.create_task(bridge.request("session/cancel", {"session_id": "s", "trace_id": "t"}))
@@ -462,7 +468,8 @@ def test_terminal_outcomes_and_unknown_reverse_method(outcome, subtype):
 
 
 @pytest.mark.parametrize("handshake", [{"protocol_version": "2.0"},
-    {"runner": {"kind": "wrong", "version": "1"}}, {"capabilities": {}}])
+    {"runner": {"kind": "wrong", "version": "1"}}, {"capabilities": {}},
+    {"capabilities": {"cancel": True, "usage": {"per_request": True}, "authorize_covers": ["turn"]}}])
 def test_initialize_rejects_incompatible_runner(handshake):
     async def exercise():
         with pytest.raises(p.ProtocolError):
@@ -510,6 +517,7 @@ def test_bounded_queue_overflow_preserves_observed_usage_and_loses_turn():
             bridge.sessions["s"].on_event = consume
             await accept(writer, prompt)
             await beginning
+            await authorize(reader, writer)
             await update(writer, "text_delta", text="first")
             await entered.wait()
             try:
@@ -564,4 +572,291 @@ def test_host_callback_exception_is_a_bounded_safe_rpc_error():
             await update(writer, "settled", outcome="completed", final_text="done", requests=0, usage_complete=True)
             assert (await bridge.wait_settled("s", "t")).outcome == "completed"
             assert events[-1]["subtype"] == "success" and not failures
+    run(exercise())
+
+
+async def open_peer(bridge, reader, writer):
+    opening = asyncio.create_task(bridge.open_session(dict(NEW, session_key="peer")))
+    request = await p.read_frame(reader)
+    await send(writer, p.Response(request.id, result={"session_id": "peer"}))
+    await opening
+
+
+async def authorize(reader, writer, *, request_id="q", kind="turn"):
+    await send(writer, p.Request("r-99", "budget/authorize", dict(session_id="s", trace_id="t",
+        request_id=request_id, kind=kind, provider="account", model="model",
+        estimated_input_tokens=1, max_output_tokens=1)))
+    return await p.read_frame(reader)
+
+
+def test_closed_sessions_release_turn_and_callback():
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            turn, events, beginning, prompt = await open_turn(bridge, reader, writer)
+            await accept(writer, prompt)
+            await beginning
+            await update(writer, "settled", outcome="completed", final_text="done", requests=0, usage_complete=True)
+            await bridge.wait_settled("s", "t")
+            reference = weakref.ref(turn)
+            closing = asyncio.create_task(bridge.close_session("s"))
+            request = await p.read_frame(reader)
+            await send(writer, p.Response(request.id, result=request.params))
+            await closing
+            del turn, beginning
+            assert "s" not in bridge.sessions
+            assert reference() is None
+            await bridge.close_session("s")  # Repeated cleanup is harmless.
+            assert not failures
+    run(exercise())
+
+
+def test_close_rpc_rejection_leaves_session_retryable():
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            await open_peer(bridge, reader, writer)
+            closing = asyncio.create_task(bridge.close_session("peer"))
+            request = await p.read_frame(reader)
+            await send(writer, p.Response(request.id, error={"code": int(p.ErrorCode.SESSION_NOT_FOUND),
+                "message": "missing session"}))
+            with pytest.raises(RpcFailure):
+                await closing
+            assert bridge.sessions["peer"].state == "idle"
+            retry = asyncio.create_task(bridge.begin_turn("peer", "retry", lambda _: None, Turn(), text="retry"))
+            request = await p.read_frame(reader)
+            await send(writer, p.Response(request.id, result=dict(session_id="peer", trace_id="retry", accepted=True)))
+            await retry
+            assert not failures
+    run(exercise())
+
+
+def test_concurrent_close_rejections_leave_session_retryable():
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            await open_peer(bridge, reader, writer)
+            first = asyncio.create_task(bridge.close_session("peer"))
+            a = await p.read_frame(reader)
+            second = asyncio.create_task(bridge.close_session("peer"))
+            b = await p.read_frame(reader)
+            for request in (a, b):
+                await send(writer, p.Response(request.id, error={"code": int(p.ErrorCode.SESSION_NOT_FOUND),
+                    "message": "missing session"}))
+            results = await asyncio.gather(first, second, return_exceptions=True)
+            assert all(isinstance(result, RpcFailure) for result in results)
+            assert bridge.sessions["peer"].state == "idle"
+            assert not failures
+    run(exercise())
+
+
+@pytest.mark.parametrize("fault", ["oversized", "empty-name", "missing-schema"])
+def test_local_prompt_validation_does_not_lose_other_turn(fault):
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            _, events, beginning, prompt = await open_turn(bridge, reader, writer)
+            await accept(writer, prompt)
+            await beginning
+            await open_peer(bridge, reader, writer)
+            tools = [{"name": "", "description": "tool", "inputSchema": {}}] if fault == "empty-name" else (
+                [{"name": "tool", "description": "tool"}] if fault == "missing-schema" else [])
+            text = "x" * p.MAX_FRAME_BYTES if fault == "oversized" else "hello"
+            with pytest.raises(p.ProtocolError):
+                await bridge.begin_turn("peer", "invalid", lambda _: None, Turn(), text=text, tools=tools)
+            assert not failures and not bridge.writer.is_closing()
+            assert bridge.sessions["peer"].state == "idle"
+            await update(writer, "settled", outcome="completed", final_text="active", requests=0, usage_complete=True)
+            assert (await bridge.wait_settled("s", "t")).outcome == "completed"
+            assert events[-1]["result"] == "active"
+            retry = asyncio.create_task(bridge.begin_turn("peer", "retry", lambda _: None, Turn(), text="retry"))
+            request = await p.read_frame(reader)
+            assert request.params["trace_id"] == "retry"  # Invalid prompt never reached the pipe.
+            await send(writer, p.Response(request.id, result=dict(session_id="peer", trace_id="retry", accepted=True)))
+            await retry
+    run(exercise())
+
+
+@pytest.mark.parametrize("kind", ["request_end", "settled"])
+def test_rejected_prompt_discards_late_updates_before_retry(kind):
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            _, _, beginning, prompt = await open_turn(bridge, reader, writer)
+            await accept(writer, prompt)
+            await beginning
+            await open_peer(bridge, reader, writer)
+            rejected = asyncio.create_task(bridge.begin_turn("peer", "rejected", lambda _: None, Turn(), text="hi"))
+            request = await p.read_frame(reader)
+            await send(writer, p.Response(request.id, error={"code": int(p.ErrorCode.PROVIDER_AUTH),
+                "message": "rejected", "data": {"session_id": "peer", "trace_id": "rejected"}}))
+            with pytest.raises(RpcFailure):
+                await rejected
+            fields = (dict(outcome="completed", final_text="stale", requests=0, usage_complete=True)
+                if kind == "settled" else dict(request_id="stale", request_kind="turn", model="model", status="ok",
+                    input_uncached=1, output=0, cache_read=0, cache_write=0, reasoning=None, complete=True))
+            await send(writer, p.Notification("session/update", dict(session_id="peer", trace_id="rejected", kind=kind, **fields)))
+            # A control round trip ensures the reader has processed the late update.
+            barrier = asyncio.create_task(bridge.request("session/cancel", dict(session_id="s", trace_id="t")))
+            request = await p.read_frame(reader)
+            await send(writer, p.Response(request.id, result=request.params))
+            await barrier
+            assert not bridge.sessions["peer"].updates
+            retry_events = []
+            retry = asyncio.create_task(bridge.begin_turn("peer", "retry", retry_events.append, Turn(), text="retry"))
+            request = await p.read_frame(reader)
+            await send(writer, p.Response(request.id, result=dict(session_id="peer", trace_id="retry", accepted=True)))
+            await retry
+            await send(writer, p.Notification("session/update", dict(session_id="peer", trace_id="retry", kind="settled",
+                outcome="completed", final_text="fresh", requests=0, usage_complete=True)))
+            assert (await bridge.wait_settled("peer", "retry")).outcome == "completed"
+            assert retry_events[-1]["result"] == "fresh"
+            await update(writer, "settled", outcome="completed", final_text="active", requests=0, usage_complete=True)
+            assert (await bridge.wait_settled("s", "t")).outcome == "completed"
+            assert not failures
+    run(exercise())
+
+
+@pytest.mark.parametrize("fault", ["unknown-id", "wrong-kind", "uncovered", "denied", "duplicate"])
+def test_unapproved_usage_cancels_only_its_turn(fault):
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            turn, events, beginning, prompt = await open_turn(bridge, reader, writer)
+            await accept(writer, prompt)
+            await beginning
+            if fault != "unknown-id":
+                if fault == "denied":
+                    async def deny(_):
+                        return {"allow": False, "reason": "stopped"}
+                    turn.authorize = deny
+                await authorize(reader, writer, kind="compaction" if fault == "uncovered" else "turn")
+            if fault == "uncovered":
+                bridge.capabilities["authorize_covers"] = ["turn"]
+            fields = dict(request_id="q", request_kind="compaction" if fault in ("wrong-kind", "uncovered") else "turn",
+                model="model", status="ok", input_uncached=5, output=0, cache_read=0, cache_write=0,
+                reasoning=None, complete=True)
+            if fault == "duplicate":
+                await update(writer, "request_end", **fields)
+            await update(writer, "request_end", **fields)
+            cancellation = await p.read_frame(reader)
+            assert cancellation.method == "session/cancel"
+            assert turn.stopped
+            await send(writer, p.Response(cancellation.id, result=cancellation.params))
+            await update(writer, "settled", outcome="completed", final_text="unsafe", requests=1, usage_complete=True)
+            summary = await bridge.wait_settled("s", "t")
+            assert not summary.usage_complete and summary.outcome != "completed"
+            assert len([e for e in events if e["type"] == "usage"]) == (1 if fault == "duplicate" else 0)
+            await open_peer(bridge, reader, writer)
+            assert not failures
+    run(exercise())
+
+
+def test_close_waits_for_tool_without_connection_timeout():
+    class DrainingTurn(Turn):
+        async def finish(self, params):
+            await self.gate.wait()
+            return super().finish(params)
+
+    async def exercise():
+        gate = asyncio.Event()
+        async with connection(control_timeout=0.02) as (bridge, reader, writer, failures):
+            turn, _, beginning, prompt = await open_turn(bridge, reader, writer, DrainingTurn(gate))
+            await accept(writer, prompt)
+            await beginning
+            await open_peer(bridge, reader, writer)
+            await send(writer, p.Request("r-1", "tools/call", dict(session_id="s", trace_id="t",
+                call_id="c", name="looper_tasks", arguments={})))
+            await turn.entered.wait()
+            closing = asyncio.create_task(bridge.close_session("s"))
+            try:
+                request = await p.read_frame(reader)
+                await send(writer, p.Response(request.id, result=request.params))
+                await update(writer, "settled", outcome="cancelled", final_text="", requests=0, usage_complete=True)
+                # Settlement can outlast the control deadline while admitted work drains.
+                done, _ = await asyncio.wait({closing}, timeout=0.06)
+                assert not done and not failures and not bridge.writer.is_closing()
+                retry = asyncio.create_task(bridge.begin_turn("peer", "t", lambda _: None, Turn(), text="hi"))
+                request = await p.read_frame(reader)
+                await send(writer, p.Response(request.id, result=dict(session_id="peer", trace_id="t", accepted=True)))
+                await retry
+            finally:
+                gate.set()
+                await asyncio.gather(closing, return_exceptions=True)
+            assert "s" not in bridge.sessions and not failures
+    run(exercise())
+
+
+def test_authorization_committed_before_stop_keeps_allow_reply():
+    class CommittedTurn(Turn):
+        async def authorize(self, params):
+            self.entered.set()
+            await self.gate.wait()
+            return {"allow": True}
+
+    async def exercise():
+        gate = asyncio.Event()
+        async with connection() as (bridge, reader, writer, failures):
+            turn, _, beginning, prompt = await open_turn(bridge, reader, writer, CommittedTurn(gate))
+            await accept(writer, prompt)
+            await beginning
+            authorizing = asyncio.create_task(authorize(reader, writer))
+            await turn.entered.wait()
+            stopping = asyncio.create_task(bridge.cancel_turn("s", "t"))
+            # authorize() owns the next peer read, which receives the cancellation.
+            cancellation = await authorizing
+            assert cancellation.method == "session/cancel"
+            await send(writer, p.Response(cancellation.id, result=cancellation.params))
+            await stopping
+            gate.set()
+            reply = await p.read_frame(reader)
+            assert reply.result["allow"] is True
+            await update(writer, "request_end", request_id="q", request_kind="turn", model="model", status="ok",
+                input_uncached=1, output=0, cache_read=0, cache_write=0, reasoning=None, complete=True)
+            await update(writer, "settled", outcome="cancelled", final_text="", requests=1, usage_complete=True)
+            assert (await bridge.wait_settled("s", "t")).usage_complete
+            assert not failures
+    run(exercise())
+
+
+@pytest.mark.parametrize("settled_queued", [False, True])
+def test_unapproved_usage_settlement_race_keeps_connection(settled_queued):
+    async def exercise():
+        async with connection(control_timeout=0.1) as (bridge, reader, writer, failures):
+            _, _, beginning, prompt = await open_turn(bridge, reader, writer)
+            await accept(writer, prompt)
+            await beginning
+            usage = p.Notification("session/update", dict(session_id="s", trace_id="t", kind="request_end",
+                request_id="unknown", request_kind="turn", model="model", status="ok", input_uncached=1,
+                output=0, cache_read=0, cache_write=0, reasoning=None, complete=True))
+            settled = p.Notification("session/update", dict(session_id="s", trace_id="t", kind="settled",
+                outcome="completed", final_text="unsafe", requests=1, usage_complete=True))
+            if settled_queued:
+                writer.write(p.encode_frame(usage) + p.encode_frame(settled))
+                await writer.drain()
+            else:
+                await send(writer, usage)
+                cancellation = await p.read_frame(reader)
+                await send(writer, p.Response(cancellation.id, error={"code": int(p.ErrorCode.NOT_RUNNING),
+                    "message": "already settled", "data": cancellation.params}))
+                await send(writer, settled)
+            summary = await bridge.wait_settled("s", "t")
+            assert not summary.usage_complete and summary.outcome != "completed"
+            assert not failures and not bridge.writer.is_closing()
+            await open_peer(bridge, reader, writer)
+    run(exercise())
+
+
+def test_oversized_unknown_reverse_request_without_lf_is_fatal():
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            _, _, beginning, prompt = await open_turn(bridge, reader, writer)
+            await accept(writer, prompt)
+            await beginning
+            value = {"jsonrpc": "2.0", "id": "r-9", "method": "future/call", "params": {"padding": ""}}
+            overhead = len(json.dumps(value, separators=(",", ":")).encode())
+            value["params"]["padding"] = "x" * (p.MAX_FRAME_BYTES + 1 - overhead)
+            frame = json.dumps(value, separators=(",", ":")).encode()
+            writer.write(frame)
+            try:
+                await writer.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            assert await reader.readline() == b""
+            assert (await bridge.wait_settled("s", "t")).outcome == "lost"
+            assert len(failures) == 1
     run(exercise())

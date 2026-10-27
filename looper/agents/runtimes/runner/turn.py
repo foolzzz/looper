@@ -66,10 +66,12 @@ class RunnerTurn:
                  cancel: Callable[[str], Awaitable[None]] | None = None) -> None:
         if role not in ("manager", "planner"):
             raise ValueError("a runner turn must be Manager or Planner")
+        if type(max_requests) is not int or max_requests <= 0:
+            raise ValueError("max_requests must be a positive integer")
         self.session_id, self.trace_id, self.role = session_id, trace_id, role
         self._tools, self._provider, self._model, self._price = tools, provider_id, model, price
         self._limits, self._cancel = limits, cancel
-        self.max_requests = max_requests if type(max_requests) is int and max_requests > 0 else 30
+        self.max_requests = max_requests
         self._prior = prior_totals
         self._prior_models = dict(prior_model_usage or {})
         self._active = True
@@ -110,14 +112,18 @@ class RunnerTurn:
                 if not isinstance(params.get(key), str) or not params[key]:
                     raise ProtocolError(ErrorCode.INVALID_PARAMS)
             call = ToolCall(params["call_id"], params["name"], json.dumps(arguments, ensure_ascii=False))
+            timeout = 120
+            wait = arguments.get("wait_seconds") if call.name == "looper_room_inbox" else None
+            if isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait > 0:
+                timeout = max(timeout, float(wait) + 20)
             work = asyncio.create_task(self._tools.call(call))
             self._work.add(work)
             # A timeout/cancel cannot establish whether an admitted write ran.
             # Retain it until finish/shutdown drains it, without cancelling it.
             try:
-                result = await asyncio.wait_for(asyncio.shield(work), timeout=120)
+                result = await asyncio.wait_for(asyncio.shield(work), timeout=timeout)
             except TimeoutError:
-                result = ToolOutcome(f"Looper did not answer the call to {call.name} within 120 s. "
+                result = ToolOutcome(f"Looper did not answer the call to {call.name} within {timeout:g} s. "
                                      "It may still have run, so check its effect before calling it again.",
                                      is_error=True, ran=True)
         return self._reply(text=result.text, is_error=result.is_error, ran=result.ran)
@@ -134,6 +140,15 @@ class RunnerTurn:
                            or not _money(estimate)
                            or any(r.raw is None and not _money(r.estimate) for r in self._requests.values())
                            or (limits["task_cap"] is not None and not _money(limits["task_spent"])))
+
+    def _actual_cap_reason(self, limits: TurnLimits) -> CapReason | None:
+        if self._unverifiable(limits):
+            return "budget_unverifiable"
+        if limits["run_cap"] is not None and self.usage.cost_usd >= limits["run_cap"]:
+            return "run_cap"
+        if limits["task_cap"] is not None and round(limits["task_spent"] + self.usage.cost_usd, 10) >= limits["task_cap"]:
+            return "task_cap"
+        return None
 
     async def authorize(self, params: Mapping[str, Any]) -> dict[str, Any]:
         self._trace(params)
@@ -196,13 +211,7 @@ class RunnerTurn:
             self.usage = _add(self.usage, usage)
             self.usage_complete = self.usage_complete and complete
             limits = await self._current_limits()
-            reason = None
-            if self._unverifiable(limits):
-                reason = "budget_unverifiable"
-            elif limits["run_cap"] is not None and self.usage.cost_usd >= limits["run_cap"]:
-                reason = "run_cap"
-            elif limits["task_cap"] is not None and round(limits["task_spent"] + self.usage.cost_usd, 10) >= limits["task_cap"]:
-                reason = "task_cap"
+            reason = self._actual_cap_reason(limits)
             if reason:
                 self._active = False
         if reason:
@@ -241,9 +250,11 @@ class RunnerTurn:
                 self.usage = replace(self.usage, cost_usd=None)
             # There is no runner left to cancel; loss must remain the terminal cause,
             # even under a cap or when current settings can no longer be read.
-            notify = not lost and self.cap_reason is None and self._unverifiable(await self._current_limits())
+            reason = (self._actual_cap_reason(await self._current_limits())
+                      if not lost and self.cap_reason is None else None)
+            notify = reason is not None
             if notify:
-                self.cap_reason = "budget_unverifiable"
+                self.cap_reason = reason
             totals = self.usage if self._prior is None else _add(self._prior, self.usage)
             models = dict(self._prior_models)
             if self._requests:

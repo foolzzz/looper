@@ -36,7 +36,8 @@ def fake_runner():
                 "runner": {"kind": options.get("kind", "fake"), "version": "1"}, "sdk": {"name": "fake", "version": "1"},
                 "capabilities": {"max_sessions": options.get("cap", 4),
                     "per_session_isolation": options.get("isolation", True),
-                    "cancel": True, "usage": {"per_request": True}, "authorize_covers": ["turn"]}}
+                    "cancel": True, "usage": {"per_request": True},
+                    "authorize_covers": ["turn", "retry", "compaction", "subagent", "tool", "title", "other"]}}
         elif method == "session/new":
             Path("opening").touch()
             Path("session-paths.json").write_text(json.dumps({key: params[key]
