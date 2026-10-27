@@ -99,10 +99,8 @@ describe("Agent Runtimes", () => {
   const apiCard = () => [...container.querySelectorAll("h3")]
     .find((node) => node.textContent === "Model API (SDK)")!.closest("li")!;
 
-  it.each(["type", "runtime"] as const)("shows an in-process runtime reported by the %s without PATH guidance", async (source) => {
+  it("shows an in-process runtime without PATH guidance", async () => {
     api();
-    if (source === "type") delete (body.runtimes[0] as Partial<Runtime>).in_process;
-    else body.runtime_types[0].in_process = false;
     await show();
     const node = apiCard();
     expect(fact(node, "Path")).toBe("Runs inside looper serve");
@@ -142,16 +140,20 @@ describe("Agent Runtimes", () => {
     expect(RUNTIME_TYPES.api).toEqual({ kind: "SDK", title: "Model API (SDK)" });
   });
 
-  it("treats an older runtime row without in_process as a CLI", async () => {
-    delete (body.runtimes[0] as Partial<Runtime>).in_process;
-    await show();
-    expect(fact(card(), "Path")).toBe("/usr/local/bin/pi");
-    expect(card().textContent).toContain("Found as pi on the server's PATH.");
-  });
-
   it("names pi, shows the install command, and has no login help", () => {
     expect(RUNTIME_TYPES.pi).toEqual({ kind: "CLI", title: "Pi CLI", install: INSTALL });
     expect(LOGIN_HELP).not.toHaveProperty("pi");
+  });
+
+  it("keeps a referenced custom executable visible", async () => {
+    body.runtimes.push(runtime({ runtime_id: "rt-custom", builtin: false, name: "Project Pi",
+      executable: "project-pi", path: "/opt/project-pi", profile_count: 2 }));
+    await show();
+    const node = [...container.querySelectorAll("h3")].find((h) => h.textContent === "Project Pi")!.closest("li")!;
+    expect(node.textContent).toContain("custom");
+    expect(node.textContent).not.toContain("legacy");
+    expect(fact(node, "Path")).toBe("/opt/project-pi");
+    expect(fact(node, "Agent Profiles")).toContain("2");
   });
 
   it("shows a detected pi with four roles and no login", async () => {

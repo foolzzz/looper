@@ -26,7 +26,7 @@ def fake_runner():
     if options.get("stderr"):
         sys.stderr.write("x" * 65536 + "\n" + "safe\u2028one-line\n" + "secret-sentinel\n" * 30)
         sys.stderr.flush()
-    count, active = 0, {}
+    count, closes, active = 0, 0, {}
     for line in sys.stdin:
         request = json.loads(line)
         if "method" not in request:
@@ -55,10 +55,16 @@ def fake_runner():
                 continue
             count += 1
             result = {"session_id": f"../native-{count}"}
-        elif method == "session/close" and options.get("reject_close"):
-            print(json.dumps({"jsonrpc": "2.0", "id": request["id"],
-                "error": {"code": -32603, "message": "session persistence failed", "data": params}}), flush=True)
-            continue
+        elif method == "session/close":
+            closes += 1
+            if options.get("timeout_close_once") and closes == 1:
+                # Keep reading the shared pipe while this one response is withheld.
+                continue
+            if options.get("reject_close") or (options.get("reject_close_once") and closes == 1):
+                print(json.dumps({"jsonrpc": "2.0", "id": request["id"],
+                    "error": {"code": -32603, "message": "session persistence failed", "data": params}}), flush=True)
+                continue
+            result = {key: params[key] for key in ("session_id", "trace_id") if key in params}
         elif method == "session/prompt":
             active[params["session_id"]] = params["trace_id"]
             result = {"session_id": params["session_id"], "trace_id": params["trace_id"], "accepted": True}
@@ -663,21 +669,73 @@ def test_initialize_timeout_uses_bounded_restart(runners, monkeypatch, recovers)
     run(exercise())
 
 
-def test_close_rpc_failure_releases_only_its_lease(runners):
+@pytest.mark.parametrize("active", [False, True], ids=["idle", "running"])
+@pytest.mark.parametrize("failure", ["reject_close_once", "timeout_close_once"], ids=["rejected", "timeout"])
+def test_failed_close_retains_lease_capacity_until_retry_succeeds(runners, active, failure):
+    async def exercise():
+        async with runners(**{failure: True}, session_cap=2) as (owner, processes):
+            lease, other = await owner.acquire("fake"), await owner.acquire("fake")
+            sid = await lease.open_session(NEW)
+            other_sid = await other.open_session(NEW)
+            entry = lease.bridge.sessions[sid]
+            events = []
+            if active:
+                async def limits():
+                    return {"run_cap": None, "task_cap": None, "task_spent": 0}
+                turn = RunnerTurn(session_id=sid, trace_id="trace", role="manager", tools=None,
+                    provider_id="fake", model="fake", price=None, limits=limits)
+                await lease.bridge.begin_turn(sid, "trace", events.append, turn, text="running")
+                assert (await turn.authorize({"session_id": sid, "trace_id": "trace", "request_id": "pending",
+                    "kind": "turn", "provider": "fake", "model": "fake",
+                    "estimated_input_tokens": 1, "max_output_tokens": 1}))["allow"]
+                assert turn._requests
+            other_events = []
+            await other.bridge.begin_turn(other_sid, "other-trace", other_events.append, Turn(), text="still active")
+            other_entry = other.bridge.sessions[other_sid]
+            lease.bridge.control_timeout = 0.1
+
+            await lease.release()
+            assert not lease.valid and lease.directory.exists()
+            assert lease in lease._generation.leases and len(lease._generation.leases) == 2
+            assert entry.close_state == "close_failed"
+            assert other.valid and not lease._generation.failed and other_entry.summary is None
+            assert other_entry.state == "running" and not any(event["type"] == "result" for event in other_events)
+            assert processes[0].returncode is None and len(processes) == 1
+            if active:
+                assert (await lease.bridge.wait_settled(sid, "trace")).outcome == "failed"
+                assert entry.worker.done() and not turn._requests
+                assert [event["runner"]["outcome"] for event in events if event["type"] == "result"] == ["failed"]
+            with pytest.raises(p.ProtocolError) as full:
+                await owner.acquire("fake")
+            assert full.value.code == p.ErrorCode.CAPACITY
+            # A fresh request on the peer trace proves the shared reader still works.
+            result = await other.bridge.request("session/cancel", {"session_id": other_sid, "trace_id": "other-trace"})
+            assert result["session_id"] == other_sid and other_entry.summary is None
+
+            await lease.release()
+            assert not lease.directory.exists() and lease not in lease._generation.leases
+            assert sid not in lease.bridge.sessions
+            replacement = await owner.acquire("fake")
+            assert replacement.bridge is other.bridge and len(lease._generation.leases) == 2
+            await other.release()
+            assert other_events[-1]["runner"]["outcome"] == "cancelled"
+            assert processes[0].returncode is None and len(processes) == 1
+    run(exercise())
+
+
+def test_generation_end_cleans_lease_retained_after_rejected_close(runners):
     async def exercise():
         async with runners(reject_close=True, session_cap=2) as (owner, processes):
-            lease, other = await owner.acquire("fake"), await owner.acquire("fake")
-            await lease.open_session(NEW)
-            sid = await other.open_session(NEW)
-            turn, events = Turn(), []
-            await other.bridge.begin_turn(sid, "trace", events.append, turn, text="still active")
+            lease = await owner.acquire("fake")
+            sid = await lease.open_session(NEW)
+            entry = lease.bridge.sessions[sid]
+            generation = lease._generation
             await lease.release()
-            assert other.valid and not lease._generation.failed
-            assert not lease.valid and not lease.directory.exists()
-            assert lease not in lease._generation.leases
-            assert processes[0].returncode is None and len(processes) == 1
-            replacement = await owner.acquire("fake")
-            assert replacement.bridge is other.bridge
-            await other.bridge.cancel_turn(sid, "trace")
-            assert other.valid and not events[-1].get("is_error")
+            assert not lease.valid and lease.directory.exists() and lease in generation.leases
+            assert lease.bridge.sessions[sid].close_state == "close_failed"
+            # Stop ends the generation even when every close attempt is rejected.
+            await owner.stop()
+            assert all(process.returncode is not None for process in processes)
+            assert not lease.directory.exists() and not generation.leases
+            assert entry.close_state == "poisoned"
     run(exercise())

@@ -11,7 +11,6 @@ import pytest
 from looper.agents.bus import MessageBus, MessageJournal
 from looper.agents.message import (
     MANAGER_ADDRESS,
-    PLANNER_ADDRESS,
     AgentAddress,
     MessageEnvelope,
     MessageType,
@@ -82,15 +81,15 @@ class TestMessageBus:
             await bus.start()
             request_env = _make_envelope(
                 source=MANAGER_ADDRESS,
-                target=PLANNER_ADDRESS,
+                target=planner_address("t1"),
                 message_type=MessageType.TASK_REQUEST,
             )
 
             async def responder() -> None:
-                q = bus.get_queue("planner")
+                q = bus.get_queue("planner-t1")
                 msg = await q.get()
                 reply = MessageEnvelope.create(
-                    source=PLANNER_ADDRESS,
+                    source=planner_address("t1"),
                     target=MANAGER_ADDRESS,
                     message_type=MessageType.TASK_ACCEPTED,
                     payload={"plan_id": "plan-1"},
@@ -118,10 +117,10 @@ class TestMessageBus:
             bus = MessageBus(tmp_path)
             await bus.start()
             requester = asyncio.create_task(bus.request(_make_envelope(
-                source=MANAGER_ADDRESS, target=PLANNER_ADDRESS, message_type=MessageType.TASK_REQUEST), timeout=5))
-            asked = await bus.get_queue("planner").get()
+                source=MANAGER_ADDRESS, target=planner_address("t1"), message_type=MessageType.TASK_REQUEST), timeout=5))
+            asked = await bus.get_queue("planner-t1").get()
             await bus.publish(MessageEnvelope.create(
-                source=PLANNER_ADDRESS, target=MANAGER_ADDRESS, message_type=MessageType.TASK_ACCEPTED, payload={},
+                source=planner_address("t1"), target=MANAGER_ADDRESS, message_type=MessageType.TASK_ACCEPTED, payload={},
                 reply_to=asked.message_id))
             requester.cancel()  # the stop, as the reply wakes the requester
             await asyncio.wait([requester])
@@ -133,7 +132,7 @@ class TestMessageBus:
         async def _run() -> None:
             bus = MessageBus(tmp_path)
             await bus.start()
-            env = _make_envelope(target=PLANNER_ADDRESS)
+            env = _make_envelope(target=planner_address("t1"))
             with pytest.raises(asyncio.TimeoutError):
                 await bus.request(env, timeout=0.01)
 
@@ -184,12 +183,12 @@ class TestMessageBus:
             bus = MessageBus(tmp_path)
             await bus.start()
             env_mgr = _make_envelope(target=MANAGER_ADDRESS)
-            env_planner = _make_envelope(target=PLANNER_ADDRESS)
+            env_planner = _make_envelope(target=planner_address("t1"))
             await bus.publish(env_mgr)
             await bus.publish(env_planner)
 
             mgr_msgs = await bus.drain_queue("manager")
-            planner_msgs = await bus.drain_queue("planner")
+            planner_msgs = await bus.drain_queue("planner-t1")
             assert len(mgr_msgs) == 1
             assert mgr_msgs[0].message_id == env_mgr.message_id
             assert len(planner_msgs) == 1
@@ -282,7 +281,7 @@ class TestReplay:
         stale = [
             _make_envelope(target=worker_address("w1"), message_type=MessageType.WORK_ITEM),
             _make_envelope(target=planner_address("t1"), message_type=MessageType.WORK_RESULT),
-            _make_envelope(target=PLANNER_ADDRESS, message_type=MessageType.WORK_RESULT),
+            _make_envelope(target=planner_address("t2"), message_type=MessageType.WORK_RESULT),
         ]
         for env in [for_manager, *stale]:
             journal.append(env)
@@ -296,7 +295,7 @@ class TestReplay:
         assert bus.pending_count("manager") == 1
         assert bus.pending_count("w1") == 0
         assert bus.pending_count("planner-t1") == 0
-        assert bus.pending_count("planner") == 0
+        assert bus.pending_count("planner-t2") == 0
         # Only the replayed message remains in the journal; the stale ones are gone.
         lines = (tmp_path / ".local" / "agent-bus" / "journal.jsonl").read_text().splitlines()
         assert [json.loads(line)["message_id"] for line in lines] == [for_manager.message_id]

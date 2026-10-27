@@ -25,24 +25,11 @@ interface Route {
   query: string;
 }
 
-/** Where the links from before the Settings pages and the Runs page go now (the hash without #). */
-function currentHash(raw: string): string {
-  // #agents/<id>[/sessions]: the role's runs.
-  const agents = /^agents(?:\/([^/?]+))?(?:\/sessions)?(\?.*)?$/.exec(raw);
-  if (agents) return `runs${agents[1] ? `/${agents[1]}` : ""}${agents[2] ?? ""}`;
-  const settings = /^settings(?:\/([^/?]*))?(?:\/([^?]*))?/.exec(raw);
-  if (!settings) return raw;
-  const [, page = "", rest = ""] = settings;
-  // The import's links from before: #settings/provider|mcp|channel/<id>.
-  const moved: Record<string, string> = { provider: "providers", mcp: "catalog/mcp", channel: "channels", defaults: "roles" };
-  if (page in moved) return `settings/${moved[page]}${rest ? `/${rest}` : ""}`;
-  return isSettingsPage(page) ? raw : `settings/${DEFAULT_SETTINGS_PAGE}`;
-}
-
 function readHash(): Route {
   const shown = window.location.hash.replace(/^#\/?/, "");
-  const raw = currentHash(shown);
-  // An old link is replaced in place, so Back does not return to it.
+  const settingsPage = /^settings(?:\/([^/?]*))?(?:[/?]|$)/.exec(shown);
+  const raw = settingsPage && !isSettingsPage(settingsPage[1] ?? "")
+    ? `settings/${DEFAULT_SETTINGS_PAGE}` : shown;
   if (raw !== shown) window.history.replaceState(null, "", `#${raw}`);
   const cut = raw.search(/[/?]/);
   const pagePart = (cut >= 0 ? raw.slice(0, cut) : raw) as Page;
