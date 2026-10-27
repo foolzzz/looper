@@ -479,25 +479,38 @@ def test_initialize_rejects_incompatible_runner(handshake):
 
 
 @pytest.mark.parametrize("kind", ["settled", "request_end"])
-def test_post_settlement_traffic_is_fatal_except_stale_delta(kind):
+@pytest.mark.parametrize("summarized", [False, True])
+def test_summary_drops_late_updates_but_active_trace_mismatch_is_fatal(kind, summarized):
     async def exercise():
         async with connection() as (bridge, reader, writer, failures):
             _, events, beginning, prompt = await open_turn(bridge, reader, writer)
             await accept(writer, prompt)
             await beginning
+            peer_events = await begin_peer(bridge, reader, writer)
             settled = dict(outcome="completed", final_text="done", requests=0, usage_complete=True)
-            await update(writer, "settled", **settled)
-            await bridge.wait_settled("s", "t")
+            if summarized:
+                await update(writer, "settled", **settled)
+                await bridge.wait_settled("s", "t")
+            else:
+                # A different trace on an active session is still a protocol error.
+                settled["trace_id"] = "stale"
             await update(writer, "text_delta", text="stale")
             tool = dict(session_id="s", trace_id="t", call_id="c", name="looper_tasks", arguments={})
             await send(writer, p.Request("r-1", "tools/call", tool))
-            assert (await p.read_frame(reader)).result["ran"] is False
+            assert (await p.read_frame(reader)).result["ran"] is (not summarized)
             fields = settled if kind == "settled" else dict(request_id="q", request_kind="turn", model="model",
                 status="ok", input_uncached=1, output=0, cache_read=0, cache_write=0, reasoning=None, complete=True)
-            await update(writer, kind, **fields)
-            assert await reader.read() == b""
-            await bridge.close()
-            assert len(failures) == 1
+            if not summarized:
+                fields["trace_id"] = "stale"
+            await send(writer, p.Notification("session/update", {
+                "session_id": "s", "trace_id": "t", "kind": kind, **fields}))
+            if summarized:
+                await complete_peer(bridge, writer, peer_events)
+                assert not failures and not bridge.writer.is_closing()
+            else:
+                assert await reader.read() == b""
+                await bridge.close()
+                assert len(failures) == 1
             assert len([e for e in events if e["type"] == "result"]) == 1
     run(exercise())
 
@@ -859,4 +872,221 @@ def test_oversized_unknown_reverse_request_without_lf_is_fatal():
             assert await reader.readline() == b""
             assert (await bridge.wait_settled("s", "t")).outcome == "lost"
             assert len(failures) == 1
+    run(exercise())
+
+
+async def begin_peer(bridge, reader, writer):
+    await open_peer(bridge, reader, writer)
+    events = []
+    beginning = asyncio.create_task(bridge.begin_turn("peer", "t", events.append, Turn(), text="peer"))
+    request = await p.read_frame(reader)
+    await send(writer, p.Response(request.id, result=dict(session_id="peer", trace_id="t", accepted=True)))
+    await beginning
+    return events
+
+
+async def complete_peer(bridge, writer, events):
+    await send(writer, p.Notification("session/update", dict(session_id="peer", trace_id="t", kind="settled",
+        outcome="completed", final_text="peer completed", requests=0, usage_complete=True)))
+    assert (await bridge.wait_settled("peer", "t")).outcome == "completed"
+    assert events[-1]["result"] == "peer completed"
+
+
+def test_closed_session_late_text_does_not_lose_active_peer(caplog):
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            _, _, beginning, prompt = await open_turn(bridge, reader, writer)
+            await accept(writer, prompt)
+            await beginning
+            events = await begin_peer(bridge, reader, writer)
+            await update(writer, "settled", outcome="completed", final_text="done", requests=0, usage_complete=True)
+            await bridge.wait_settled("s", "t")
+            closing = asyncio.create_task(bridge.close_session("s"))
+            request = await p.read_frame(reader)
+            await send(writer, p.Response(request.id, result=request.params))
+            await closing
+            assert "s" not in bridge.sessions
+            await update(writer, "text_delta", text="late")
+            await complete_peer(bridge, writer, events)
+            assert not failures and not bridge.writer.is_closing()
+            assert any(record.levelname == "DEBUG" and "text_delta" in record.message for record in caplog.records)
+    caplog.set_level("DEBUG", logger="looper.agents.runtimes.runner.bridge")
+    run(exercise())
+
+
+@pytest.mark.parametrize("reply", ["timeout", "cancelled", "not-running"])
+def test_unapproved_usage_cancel_failure_is_local(reply):
+    async def exercise():
+        async with connection(control_timeout=0.05) as (bridge, reader, writer, failures):
+            _, events, beginning, prompt = await open_turn(bridge, reader, writer)
+            await accept(writer, prompt)
+            await beginning
+            peer_events = await begin_peer(bridge, reader, writer)
+            await update(writer, "request_end", request_id="unknown", request_kind="turn", model="model", status="ok",
+                input_uncached=1, output=0, cache_read=0, cache_write=0, reasoning=None, complete=True)
+            request = await p.read_frame(reader)
+            assert request.method == "session/cancel" and request.params["session_id"] == "s"
+            if reply == "not-running":
+                await send(writer, p.Response(request.id, error={"code": int(p.ErrorCode.NOT_RUNNING),
+                    "message": "already ended", "data": request.params}))
+            elif reply == "cancelled":
+                bridge.sessions["s"].worker.cancel()
+            summary = await bridge.wait_settled("s", "t")
+            assert summary.outcome == "failed" and not summary.usage_complete
+            if reply != "not-running":
+                # A late correlated reply to an abandoned cancel is harmless too.
+                await send(writer, p.Response(request.id, result=request.params))
+            await update(writer, "settled", outcome="cancelled", final_text="", requests=0, usage_complete=True)
+            await complete_peer(bridge, writer, peer_events)
+            assert not failures and not bridge.writer.is_closing()
+            assert len([e for e in events if e["type"] == "result"]) == 1
+    run(exercise())
+
+
+@pytest.mark.parametrize("fault", ["settings", "settings-down", "model", "cancel-not-running", "cancel-timeout"])
+def test_request_end_failure_settles_only_its_real_turn(fault):
+    async def exercise():
+        async with connection(control_timeout=0.05) as (bridge, reader, writer, failures):
+            reads = 0
+            async def limits():
+                nonlocal reads
+                reads += 1
+                if (reads == 2 and fault == "settings") or (reads >= 2 and fault == "settings-down"):
+                    raise OSError("settings unavailable")
+                return {"run_cap": None if fault == "model" else 1 if reads == 1 else 0.005,
+                        "task_cap": None, "task_spent": 0}
+            async def cancel(_):
+                await bridge.cancel_turn("s", "t")
+            turn = RunnerTurn(session_id="s", trace_id="t", role="manager", tools=None,
+                provider_id="account", model="model", price=lambda model, usage: 0.01, limits=limits,
+                cancel=cancel if fault.startswith("cancel-") else None)
+            _, events, beginning, prompt = await open_turn(bridge, reader, writer, turn)
+            await accept(writer, prompt)
+            await beginning
+            peer_events = await begin_peer(bridge, reader, writer)
+            assert (await authorize(reader, writer)).result["allow"]
+            await update(writer, "request_end", request_id="q", request_kind="turn",
+                model="wrong" if fault == "model" else "model", status="ok", input_uncached=1,
+                output=0, cache_read=0, cache_write=0, reasoning=None, complete=True)
+            request = await p.read_frame(reader)
+            assert request.method == "session/cancel" and request.params == dict(session_id="s", trace_id="t")
+            if fault == "cancel-not-running":
+                await send(writer, p.Response(request.id, error={"code": int(p.ErrorCode.NOT_RUNNING),
+                    "message": "already ended", "data": request.params}))
+            elif fault != "cancel-timeout":
+                await send(writer, p.Response(request.id, result=request.params))
+            summary = await bridge.wait_settled("s", "t")
+            assert summary.outcome == ("capped" if fault == "settings" or fault.startswith("cancel-") else "failed")
+            assert summary.usage_complete == (fault == "settings" or fault.startswith("cancel-"))
+            assert not turn._requests
+            if summary.outcome == "capped":
+                assert summary.cap_reason == "run_cap" and summary.usage.cost_usd == 0.01
+            if fault != "model":
+                assert summary.usage.input_tokens == 1
+            if fault == "cancel-timeout":
+                await send(writer, p.Response(request.id, result=request.params))
+            await update(writer, "settled", outcome="completed", final_text="stale", requests=1, usage_complete=True)
+            await complete_peer(bridge, writer, peer_events)
+            assert not failures and not bridge.writer.is_closing()
+            assert len([e for e in events if e["type"] == "result"]) == 1
+    run(exercise())
+
+
+@pytest.mark.parametrize("reply", ["success", "not-running", "timeout"])
+def test_failed_request_end_cancels_before_settlement_and_close_ignores_all_late_updates(reply):
+    async def exercise():
+        async with connection(control_timeout=0.05) as (bridge, reader, writer, failures):
+            reads = 0
+            async def limits():
+                nonlocal reads
+                reads += 1
+                if reads >= 2:
+                    raise OSError("settings unavailable")
+                return {"run_cap": 1, "task_cap": None, "task_spent": 0}
+            turn = RunnerTurn(session_id="s", trace_id="t", role="manager", tools=None,
+                provider_id="account", model="model", price=lambda model, usage: 0.01, limits=limits)
+            _, events, beginning, prompt = await open_turn(bridge, reader, writer, turn)
+            await accept(writer, prompt)
+            await beginning
+            peer_events = await begin_peer(bridge, reader, writer)
+            assert (await authorize(reader, writer)).result["allow"]
+            await update(writer, "request_end", request_id="q", request_kind="turn", model="model", status="ok",
+                input_uncached=1, output=0, cache_read=0, cache_write=0, reasoning=None, complete=True)
+            cancellation = await p.read_frame(reader)
+            assert cancellation.method == "session/cancel"
+            assert cancellation.params == dict(session_id="s", trace_id="t")
+            assert bridge.sessions["s"].summary is None and turn._summary is None
+            assert not turn._active
+
+            async def late_updates():
+                for fields in [
+                    dict(kind="settled", outcome="completed", final_text="late", requests=1, usage_complete=True),
+                    dict(kind="request_end", request_id="q", request_kind="turn", model="model", status="ok",
+                        input_uncached=100, output=0, cache_read=0, cache_write=0, reasoning=None, complete=True),
+                    dict(kind="message", model="model", content=[{"type": "text", "text": "late"}]),
+                    dict(kind="tool_result", call_id="late", text="late", is_error=False),
+                    dict(kind="steer_applied", message_id="late", after_request_id="q",
+                        after_tool_batch=True, new_turn=False),
+                    dict(kind="steer_dropped", message_id="late", reason="session_closed"),
+                    dict(kind="text_delta", text="late"),
+                ]:
+                    await update(writer, **fields)
+
+            await late_updates()  # Poisoned, before the local summary exists.
+            if reply == "not-running":
+                await send(writer, p.Response(cancellation.id, error={"code": int(p.ErrorCode.NOT_RUNNING),
+                    "message": "already ended", "data": cancellation.params}))
+            elif reply == "success":
+                await send(writer, p.Response(cancellation.id, result=cancellation.params))
+            summary = await bridge.wait_settled("s", "t")
+            assert summary.outcome == "failed" and not summary.usage_complete
+            assert summary.usage.input_tokens == 1 and summary.usage.cost_usd is None
+            assert not turn._requests
+            if reply == "timeout":
+                await send(writer, p.Response(cancellation.id, result=cancellation.params))
+            await late_updates()  # Summarized, before lease release.
+            closing = asyncio.create_task(bridge.close_session("s"))
+            request = await p.read_frame(reader)
+            assert request.method == "session/close"
+            await late_updates()  # CLOSING must not reopen a summarized trace.
+            await send(writer, p.Response(request.id, result=request.params))
+            await closing
+            assert "s" not in bridge.sessions
+            await late_updates()  # Removed entries cannot poison the shared pipe.
+            await complete_peer(bridge, writer, peer_events)
+            assert not failures and not bridge.writer.is_closing()
+            assert [event["type"] for event in events] == ["system", "result"]
+            assert summary.usage.input_tokens == 1
+    run(exercise())
+
+
+@pytest.mark.parametrize("abandoned", [False, True])
+def test_cancel_correlation_is_bounded_until_late_reply(monkeypatch, abandoned):
+    monkeypatch.setattr("looper.agents.runtimes.runner.bridge.MAX_ABANDONED_CANCELS", 1)
+    async def exercise():
+        async with connection(control_timeout=0.05) as (bridge, reader, writer, failures):
+            _, _, beginning, prompt = await open_turn(bridge, reader, writer)
+            await accept(writer, prompt)
+            await beginning
+            events = await begin_peer(bridge, reader, writer)
+            cancellation = asyncio.create_task(bridge.cancel_turn("s", "t"))
+            request = await p.read_frame(reader)
+            if abandoned:
+                with pytest.raises(TimeoutError):
+                    await cancellation
+            with pytest.raises(p.ProtocolError) as rejected:
+                await bridge.cancel_turn("s", "t")
+            assert rejected.value.code == p.ErrorCode.CAPACITY
+            await send(writer, p.Response(request.id, error={"code": int(p.ErrorCode.NOT_RUNNING),
+                "message": "already ended", "data": request.params}))
+            if not abandoned:
+                with pytest.raises(RpcFailure):
+                    await cancellation
+            # The peer's settlement is also a read barrier for the late response.
+            await complete_peer(bridge, writer, events)
+            retry = asyncio.create_task(bridge.cancel_turn("s", "t"))
+            request = await p.read_frame(reader)
+            await send(writer, p.Response(request.id, result=request.params))
+            await retry
+            assert not failures and not bridge.writer.is_closing()
     run(exercise())
