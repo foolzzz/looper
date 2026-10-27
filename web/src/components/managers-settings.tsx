@@ -35,6 +35,7 @@ import {
 } from "@/lib/api";
 import { ManagerChatBindings, useManagerChatBindings } from "@/components/manager-chat-bindings";
 import { ManagerCleanup } from "@/components/manager-cleanup";
+import { ManagerInstalls } from "@/components/manager-installs";
 import type { Binding } from "@/lib/chat-bindings-api";
 import { MANAGER_EXAMPLE } from "@/lib/manager-example";
 import { settingsHref } from "@/lib/settings-pages";
@@ -615,6 +616,7 @@ function ManagerRow({ manager, managers, bindings, snapshot, reload }: {
             </RegistryList>
           )}
           <ManagerChatBindings manager={manager} managers={managers} bindings={bindings} snapshot={snapshot} reload={reload} />
+          <ManagerInstalls manager={manager} hasScenarios={managers.some((item) => !item.builtin)} />
         </>
       }
     >
