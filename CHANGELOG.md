@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.155] - 2026-10-26
+
+### Fixed
+
+- **The api deadline test is reliable and stricter.** `test_deadlines_abort_io_and_close_server_connections` warms up the SDK before imposing the deadline and checks that a deadline during an SDK retry ends the turn as an unavailable failure with no history, tool call or `RequestDone` event. Tests only; no production code changed. ([#718](https://github.com/foolzzz/looper/pull/718))
+
 ## [2.13.154] - 2026-10-26
 
 ### Fixed

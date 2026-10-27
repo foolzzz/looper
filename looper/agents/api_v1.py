@@ -169,6 +169,7 @@ _MANAGER_CONFIG_FIELDS = {
     "profile": _NULL_STR, "tools": {"type": "string", "enum": ["all", "tasks"]},
     "task_scope": {"type": "string", "enum": ["all", "own"]},
     "task_policy": {"type": "string", "enum": ["free", "templates_only"]},
+    "idle_timeout_seconds": {"type": "integer", "anyOf": [{"const": 0}, {"minimum": 60, "maximum": 86400}]},
     "enabled": _BOOL, "templates": _array(TEMPLATE_CONFIG),
 }
 
@@ -176,7 +177,8 @@ _MANAGER_CONFIG_FIELDS = {
 def _manager_config(template: dict[str, Any]) -> dict[str, Any]:
     fields = {**_MANAGER_CONFIG_FIELDS, "templates": _array(template)}
     return {**_object(fields, ["id", "name"], closed=True), "oneOf": [
-        _object({"id": {"const": "manager"}, "name": _STR, "description": _STR}, ["id", "name"], closed=True),
+        _object({"id": {"const": "manager"}, "name": _STR, "description": _STR,
+                 "idle_timeout_seconds": {"type": "integer", "const": 0}}, ["id", "name"], closed=True),
         _object({**fields, "id": {"type": "string", "pattern": r"^manager-[a-z][a-z0-9-]{1,30}$"}},
                 ["id", "name"], closed=True),
     ]}

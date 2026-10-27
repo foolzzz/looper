@@ -149,7 +149,7 @@ def test_operator_manager_preview_apply_and_export_use_real_importer(tmp_path, m
             document = exported["result"]["document"]
             api_v1.validate_arguments(CONFIG_DOCUMENT, document)
             managers = {entry["id"]: entry for entry in document["managers"]}
-            assert managers["manager"] == GRAPH["managers"][0]
+            assert managers["manager"] == {**GRAPH["managers"][0], "idle_timeout_seconds": 0}
             assert managers["manager-example"]["templates"][0]["key"] == "example"
             assert managers["manager-example"]["templates"][0]["requirement"] == "Inspect the example."
             server._config_imports.clear()
