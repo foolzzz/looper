@@ -20,7 +20,7 @@ OTHER = "lpc_" + "d" * 43
 
 @pytest.fixture(autouse=True)
 def isolated_scheduler(monkeypatch):
-    for name in ("_min_interval", "_min_source", "_warned_env"):
+    for name in ("_min_interval", "_min_source"):
         monkeypatch.setattr(scheduler_settings, name, getattr(scheduler_settings, name))
 
 
@@ -62,7 +62,7 @@ def test_streamed_import_owner_confirmation_and_scheduler_reload(tmp_path, monke
     async def run(pool):
         async with _serving(tmp_path) as server:
             server._client_ops = ClientOps(SimpleNamespace())
-            document = {"format": "looper-config/v3", "projects": [{"name": "Transferred"}],
+            document = {"format": "looper-config/v4", "projects": [{"name": "Transferred"}],
                         "settings": {"scheduler": {"min_interval_seconds": 73}}}
             status, uploaded = await request(server, owner, "config/import_upload", document)
             assert status == 200 and not uploaded["result"]["plan"]["applied"]
