@@ -12,6 +12,7 @@ from looper.agents.run_usage import Usage
 from looper.agents.runtimes.pricing import ModelPrice, usage_event
 from looper.agents.runtimes.runner import protocol as p
 from looper.agents.runtimes.runner.bridge import RpcFailure, RunnerBridge
+from looper.agents.runtimes.runner.turn import RunnerTurn
 
 
 async def pipe():
@@ -129,6 +130,111 @@ class Turn:
 
 def run(coro):
     asyncio.run(asyncio.wait_for(coro, 5))
+
+
+@pytest.mark.parametrize("budget", ["uncapped", "reserved", "capped"])
+def test_connection_loss_settles_all_real_turns_and_releases_reservations(budget):
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            turns, results = [], []
+            caps = {"run_cap": None if budget == "uncapped" else 1, "task_cap": None, "task_spent": 0}
+            async def limits():
+                return caps
+            async def cancel(reason):
+                # Loss settlement must not try to cancel through a dead connection.
+                assert bridge._error is None
+            for sid in ("s", "other"):
+                opening = asyncio.create_task(bridge.open_session(dict(NEW, session_key=sid)))
+                request = await p.read_frame(reader)
+                await send(writer, p.Response(request.id, result={"session_id": sid}))
+                assert await opening == sid
+                turn = RunnerTurn(session_id=sid, trace_id="t", role="manager", tools=None,
+                    provider_id="account", model="model", price=lambda model, usage: ModelPrice(1, 2, 3, 4).cost(usage),
+                    limits=limits, cancel=cancel)
+                events = []
+                usage_seen = asyncio.Event()
+                def on_event(event, events=events, usage_seen=usage_seen):
+                    events.append(event)
+                    if event["type"] == "usage":
+                        usage_seen.set()
+                beginning = asyncio.create_task(bridge.begin_turn(sid, "t", on_event, turn, text="hello"))
+                request = await p.read_frame(reader)
+                await send(writer, p.Response(request.id, result={"session_id": sid, "trace_id": "t", "accepted": True}))
+                await beginning
+                for number, request_id in enumerate(("done", "pending"), 1):
+                    await send(writer, p.Request(f"r-{number}", "budget/authorize", dict(session_id=sid,
+                        trace_id="t", request_id=request_id, kind="turn", provider="account", model="model",
+                        estimated_input_tokens=5, max_output_tokens=2)))
+                    assert (await p.read_frame(reader)).result["allow"]
+                await send(writer, p.Notification("session/update", dict(session_id=sid, trace_id="t",
+                    kind="request_end", request_id="done", request_kind="turn", model="model", status="ok",
+                    input_uncached=5, output=2, cache_read=0, cache_write=0, reasoning=None, complete=True)))
+                await usage_seen.wait()
+                turns.append(turn)
+                results.append(events)
+            if budget == "capped":
+                caps["run_cap"] = 0
+                for turn in turns:
+                    denied = await turn.authorize(dict(session_id=turn.session_id, trace_id="t", request_id="denied",
+                        kind="turn", provider="account", model="model", estimated_input_tokens=1, max_output_tokens=1))
+                    assert denied["reason"] == "run_cap"
+            writer.close()
+            summaries = await asyncio.gather(*(bridge.wait_settled(sid, "t") for sid in ("s", "other")))
+            await bridge.close()
+            await bridge.close()
+            assert len(failures) == 1
+            for turn, events, summary in zip(turns, results, summaries):
+                assert summary.outcome == "lost" and not summary.usage_complete
+                assert summary.usage.input_tokens == 5 and summary.usage.output_tokens == 2
+                assert summary.usage.cost_usd is summary.totals.cost_usd is None
+                assert not turn._requests  # No outstanding monetary reservation survives loss.
+                terminals = [event for event in events if event["type"] == "result"]
+                assert len(terminals) == 1
+                assert terminals[0]["runner"]["outcome"] == "lost"
+                assert terminals[0]["errors"] == ["runner-exited: stdout EOF"]
+                assert terminals[0]["num_turns"] == 1
+                assert (await bridge.wait_settled(turn.session_id, "t")) is summary
+    run(exercise())
+
+
+def test_loss_settles_usage_when_inflight_settings_read_fails():
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            reading, release = asyncio.Event(), asyncio.Event()
+            reads = 0
+            async def limits():
+                nonlocal reads
+                reads += 1
+                if reads > 1:
+                    reading.set()
+                    await release.wait()
+                    raise OSError("settings unavailable")
+                return {"run_cap": 1, "task_cap": None, "task_spent": 0}
+            turn = RunnerTurn(session_id="s", trace_id="t", role="manager", tools=None,
+                provider_id="account", model="model", price=lambda model, usage: 0.01, limits=limits)
+            _, events, beginning, prompt = await open_turn(bridge, reader, writer, turn)
+            await accept(writer, prompt)
+            await beginning
+            await send(writer, p.Request("r-1", "budget/authorize", dict(session_id="s", trace_id="t",
+                request_id="q", kind="turn", provider="account", model="model",
+                estimated_input_tokens=5, max_output_tokens=2)))
+            assert (await p.read_frame(reader)).result["allow"]
+            await update(writer, "request_end", request_id="q", request_kind="turn", model="model", status="ok",
+                input_uncached=5, output=2, cache_read=0, cache_write=0, reasoning=None, complete=True)
+            await reading.wait()
+            writer.close()
+            # EOF is observed while the usage callback is still in flight.
+            assert await reader.read() == b""
+            release.set()
+            summary = await bridge.wait_settled("s", "t")
+            assert summary.outcome == "lost" and not summary.usage_complete
+            assert summary.usage.input_tokens == 5 and summary.usage.cost_usd is None
+            assert not turn._requests and reads == 2
+            terminals = [event for event in events if event["type"] == "result"]
+            assert len(terminals) == 1
+            assert terminals[0]["errors"] == ["runner-exited: stdout EOF"]
+            assert len(failures) == 1
+    run(exercise())
 
 
 def test_scripted_stream_order_and_interleaved_responses():

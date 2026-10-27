@@ -22,7 +22,8 @@ class TurnLimits(TypedDict):
 
 
 CapReason = Literal["run_cap", "task_cap", "max_requests", "budget_unverifiable"]
-Outcome = Literal["completed", "cancelled", "capped", "max_requests", "failed"]
+# Loss is host-owned; the wire protocol deliberately excludes it.
+Outcome = Literal["completed", "cancelled", "capped", "max_requests", "failed", "lost"]
 
 
 @dataclass(frozen=True)
@@ -226,16 +227,21 @@ class RunnerTurn:
             if self._summary is not None:
                 raise ProtocolError(ErrorCode.NOT_RUNNING)
             ended = sum(r.raw is not None for r in self._requests.values())
-            if (not _count(params.get("requests")) or not ended <= params["requests"] <= len(self._requests)
+            lost = params.get("outcome") == "lost"
+            # Loss counts only callbacks the bridge completed. A request_end may
+            # already have recorded usage before an in-flight settings read failed.
+            if (not _count(params.get("requests"))
+                    or (not lost and not ended <= params["requests"] <= len(self._requests))
                     or params.get("outcome") not in get_args(Outcome)
                     or type(params.get("usage_complete")) is not bool):
                 raise ProtocolError(ErrorCode.INVALID_PARAMS)
-            self.usage_complete = (self.usage_complete and ended == len(self._requests)
+            self.usage_complete = (not lost and self.usage_complete and ended == len(self._requests)
                                    and params.get("usage_complete") is True)
             if not self.usage_complete:
                 self.usage = replace(self.usage, cost_usd=None)
-            limits = await self._current_limits()
-            notify = self.cap_reason is None and self._unverifiable(limits)
+            # There is no runner left to cancel; loss must remain the terminal cause,
+            # even under a cap or when current settings can no longer be read.
+            notify = not lost and self.cap_reason is None and self._unverifiable(await self._current_limits())
             if notify:
                 self.cap_reason = "budget_unverifiable"
             totals = self.usage if self._prior is None else _add(self._prior, self.usage)
@@ -244,9 +250,10 @@ class RunnerTurn:
                 models[self._model] = (_add(models[self._model], self.usage)
                                        if self._model in models else self.usage)
             outcome = params.get("outcome", "failed")
-            if self.cap_reason:
+            if self.cap_reason and not lost:
                 outcome = "max_requests" if self.cap_reason == "max_requests" else "capped"
             self._summary = TurnSummary(self.usage, totals, models, outcome, self.cap_reason, self.usage_complete)
+            self._requests.clear()  # Settlement releases every outstanding reservation.
         if notify and self._cancel is not None:
             await self._cancel(self.cap_reason)
         return self._summary
