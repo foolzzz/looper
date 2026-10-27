@@ -8,7 +8,7 @@ import pytest
 
 from looper.agents import api_v1, managers_api
 from looper.agents.ops.clients import ClientOps
-from looper.db import api_clients, projects, tasks
+from looper.db import api_clients, managers as db_managers, projects, tasks
 from tests.db_support import DSN, run_db
 from tests.test_api_v1_auth import _bearer, _send, _serving
 from tests.test_managers_api_db import _body, _profile, _template
@@ -24,7 +24,8 @@ async def _api(tmp_path, pool):
     async with _serving(tmp_path) as server:
         server._client_ops = ClientOps(SimpleNamespace())
         server._managers = SimpleNamespace(state=lambda _: {
-            "running": False, "busy": False, "healthy": False, "sync": "pending", "sync_error": "retrying"})
+            "running": False, "busy": False, "healthy": False, "sync": "pending", "sync_error": "retrying"},
+            delete_manager=db_managers.delete_manager)
         async def call(operation, body=None, *, client=False, method="POST"):
             path = operation if operation.startswith("/") else "/api/v1/" + operation.replace(".", "/")
             status, _, answer = await _send(server, f"{method} {path}",
