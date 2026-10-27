@@ -38,7 +38,7 @@ RENAMED = [
 DROPPED = {"agent_configs": {"role", "max_concurrency"}, "agent_setting_layers": {"effort"}}
 # What a later migration of main adds to a v2.6.0 database, not the rename's doing: columns (agent teams, on for its
 # profiles, all on Claude Code runtimes), and built-in rows.
-ADDED = {"agent_sessions": {"clean_start": False, "selected_profile_id": None}, "agent_setting_layers": {"max_concurrency": None, "boundaries": None,
+ADDED = {"agent_sessions": {"clean_start": False, "selected_profile_id": None, "pending_handoff": None}, "agent_setting_layers": {"max_concurrency": None, "boundaries": None,
                                                       "system_prompt_mode": None},
          "agents": {"agent_teams": True, "custom_prompt": "", "protocol": "anthropic-messages"}}
 ADDED_ROWS = {"llm_providers": {"prov-codex-login", "prov-grok-login"}}

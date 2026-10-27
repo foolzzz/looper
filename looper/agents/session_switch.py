@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 class SwitchReason(str, Enum):
     PROFILE_CHANGED = "profile_changed"
     SESSION_LOST = "session_lost"
+    CONTEXT_FULL = "context_full"
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,8 @@ class SessionSwitch:
         if self.reason is SwitchReason.PROFILE_CHANGED:
             return (f"agent changed from {side(self.old_runtime, self.old_profile)} to "
                     f"{side(self.new_runtime, self.new_profile)}: {self.detail}")
+        if self.reason is SwitchReason.CONTEXT_FULL:
+            return f"context full: {self.detail}"
         return f"session lost: {self.detail}"
 
 
@@ -90,3 +93,13 @@ def session_lost(detail: str, *, runtime: str | None = None, profile: str | None
     """The switch to a new session when the saved one cannot be resumed, or there is none."""
     return SessionSwitch(SwitchReason.SESSION_LOST, detail, old_runtime=runtime, old_profile=profile,
                          new_runtime=runtime, new_profile=profile)
+
+
+def context_full(tokens: int, limit: int, *, runtime: str | None, profile: str | None,
+                 provider: str | None) -> SessionSwitch:
+    """The same API binding starts a fresh session once its context passes its limit."""
+    return SessionSwitch(
+        SwitchReason.CONTEXT_FULL, f"its context reached {tokens} tokens, over its limit of {limit}",
+        old_runtime=runtime, new_runtime=runtime, old_profile=profile, new_profile=profile,
+        old_provider=provider, new_provider=provider,
+    )

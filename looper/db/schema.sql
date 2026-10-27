@@ -340,6 +340,8 @@ ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS provider_id TEXT;
 -- The user dropped the session (/new in a chat with the Manager): the next session starts clean, without the
 -- resume brief a new session otherwise gets. Cleared once that session has started.
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS clean_start BOOLEAN NOT NULL DEFAULT false;
+-- Keep the predecessor's summary until the replacement session has committed its context.
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS pending_handoff TEXT;
 -- The Agent Profile the user chose for the Manager's current session (/profile, the dashboard): it wins over the
 -- manager role's and the shared defaults' profile until /new. NULL follows Settings.
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS selected_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT;
@@ -361,6 +363,22 @@ BEGIN
             CHECK (selected_profile_id IS NULL OR agent_id = 'manager' OR agent_id LIKE 'manager-%');
     END IF;
 END $$;
+
+-- One protocol per api session; agent_sessions keeps the current-session pointer.
+CREATE TABLE IF NOT EXISTS api_sessions (
+    session_id  TEXT PRIMARY KEY,
+    protocol    TEXT NOT NULL CHECK (protocol IN ('openai-responses', 'anthropic-messages', 'openai-chat'))
+);
+-- Neutral items, appended per completed request and removed with their session.
+CREATE TABLE IF NOT EXISTS api_session_items (
+    session_id  TEXT NOT NULL REFERENCES api_sessions(session_id) ON DELETE CASCADE,
+    seq         INTEGER NOT NULL,
+    turn        INTEGER NOT NULL,
+    model       TEXT NOT NULL,
+    item        JSONB NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (session_id, seq)
+);
 
 -- A task's journal: what happened in it that a later agent or session needs.
 -- Code writes an entry, never the model, when its event happens: a step
