@@ -9,13 +9,17 @@ from decimal import Decimal
 from pathlib import Path
 import sys
 import time
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import asyncpg
 import pytest
 
 from evals.prompt_regression.runner import EvalError, fresh_database
-from tests.runner_support import serving
+from tests.runner_support import (
+    DISPOSABLE_SERVERS, OPERATOR_DATABASES, require_disposable_database, serving)
+
+_CI_ADMIN = "postgresql://postgres:postgres@localhost:5432/postgres"
+_LOCAL_ADMIN = "postgresql://postgres:postgres@127.0.0.1:54329/postgres"
 
 ROOT = Path(__file__).resolve().parents[1]
 KEY = "synthetic-runner-test-key"
@@ -80,6 +84,60 @@ def events(url, record):
         "SELECT event FROM llm_record_events WHERE record_id=$1 ORDER BY seq", record["id"])]
 
 
+@pytest.mark.parametrize("url", [
+    _CI_ADMIN,
+    "postgresql://postgres:postgres@localhost:5432/postgres_gw2",
+    _LOCAL_ADMIN,
+    "postgresql://postgres:postgres@localhost:54329/my_disposable",
+    "postgresql://postgres:postgres@127.0.0.1:5432/postgres",
+])
+def test_admin_url_accepts_only_the_disposable_servers(url):
+    parts = urlsplit(url)
+    assert (parts.scheme, parts.hostname, parts.port, parts.username) in DISPOSABLE_SERVERS
+    assert unquote(parts.path.lstrip("/")) not in OPERATOR_DATABASES
+    require_disposable_database(url, served=False)
+
+
+@pytest.mark.parametrize("url", [
+    "postgresql://postgres:postgres@localhost:5432/loopx",
+    "postgresql://postgres:postgres@localhost:5432/looper",
+    "postgresql://postgres:postgres@127.0.0.1:54329/loopx",
+    "postgresql://postgres:postgres@127.0.0.1:54329/looper",
+    "postgresql://postgres:postgres@db.example:5432/postgres",
+    "postgresql://postgres:postgres@localhost:5433/postgres",
+    "postgresql://postgres:postgres@localhost/postgres",
+    "postgresql://other:postgres@localhost:5432/postgres",
+    "postgresql://postgres:secret@localhost:5432/postgres",
+    "postgresql://postgres:postgres@localhost:5432/postgres?sslmode=require",
+    "postgres://postgres:postgres@localhost:5432/postgres",
+    "postgresql://postgres:postgres@localhost:5432",
+])
+def test_admin_url_rejects_operator_remote_and_other_servers(url):
+    with pytest.raises(ValueError, match="disposable local database"):
+        require_disposable_database(url, served=False)
+
+
+@pytest.mark.parametrize("url", [
+    "postgresql://postgres:postgres@localhost:5432/looper_eval_abc",
+    "postgresql://postgres:postgres@127.0.0.1:54329/looper_eval_abc",
+])
+def test_served_url_accepts_a_fresh_eval_database_on_either_disposable_server(url):
+    require_disposable_database(url, served=True)
+
+
+@pytest.mark.parametrize("url", [
+    _CI_ADMIN,
+    _LOCAL_ADMIN,
+    "postgresql://postgres:postgres@localhost:5432/loopx",
+    "postgresql://postgres:postgres@localhost:5432/looper_eval_abc?x=1",
+    "postgresql://postgres:postgres@db.example:5432/looper_eval_abc",
+    "postgresql://postgres:secret@127.0.0.1:54329/looper_eval_abc",
+])
+def test_served_url_rejects_anything_but_a_fresh_eval_database(url):
+    with pytest.raises(ValueError, match="disposable local database"):
+        require_disposable_database(url, served=True)
+
+
 def test_isolated_serve_tools_host_charge_and_pre_request_denial(tmp_path):
     import looper
 
@@ -89,8 +147,13 @@ def test_isolated_serve_tools_host_charge_and_pre_request_denial(tmp_path):
     if not admin:
         pytest.skip("serve acceptance untested: disposable LOOPER_TEST_DATABASE_URL required")
     parts = urlsplit(admin)
-    assert (parts.hostname, parts.port, parts.username) == ("127.0.0.1", 54329, "postgres")
-    assert parts.path != "/looper", "operator database is forbidden"
+    # Host, port, role and database name stay in the assertion. The password is
+    # checked by require_disposable_database so a failure does not print it.
+    assert (parts.scheme, parts.hostname, parts.port, parts.username) in DISPOSABLE_SERVERS
+    name = unquote(parts.path.lstrip("/"))
+    assert name and name not in OPERATOR_DATABASES, "operator database is forbidden"
+    assert not parts.query and not parts.fragment
+    require_disposable_database(admin, served=False)
     log = tmp_path / "serve.log"
     with ExitStack() as resources:
         try:

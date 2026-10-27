@@ -15,9 +15,18 @@ import signal
 import subprocess
 import sys
 import time
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
+# Local disposable Postgres is 127.0.0.1:54329. CI's service is localhost:5432
+# (.github/workflows/python-tests.yml). Either host spelling of those ports.
+DISPOSABLE_SERVERS = frozenset({
+    ("postgresql", "127.0.0.1", 54329, "postgres"),
+    ("postgresql", "localhost", 54329, "postgres"),
+    ("postgresql", "127.0.0.1", 5432, "postgres"),
+    ("postgresql", "localhost", 5432, "postgres"),
+})
+OPERATOR_DATABASES = frozenset({"looper", "loopx"})
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -26,12 +35,24 @@ from looper import ops_config
 from looper.agents import operator_auth, proc_tree
 
 
-def _disposable_url(database_url: str) -> None:
+def require_disposable_database(database_url: str, *, served: bool) -> None:
+    """Refuse a URL that is not this suite's disposable local PostgreSQL.
+
+    The served database is a fresh ``looper_eval_*`` name. An admin URL may be
+    the maintenance database or an xdist worker database, and neither may be
+    the operator database. The password is checked here so a failure does not
+    print it.
+    """
     url = urlsplit(database_url)
-    if (url.scheme != "postgresql" or url.hostname != "127.0.0.1" or url.port != 54329
-            or url.username != "postgres" or url.password != "postgres"
-            or not url.path.startswith("/looper_eval_") or url.query or url.fragment):
+    name = unquote(url.path.lstrip("/"))
+    server = (url.scheme, url.hostname, url.port, url.username)
+    name_ok = name.startswith("looper_eval_") if served else bool(name) and name not in OPERATOR_DATABASES
+    if server not in DISPOSABLE_SERVERS or url.password != "postgres" or not name_ok or url.query or url.fragment:
         raise ValueError("runner serve tests require their own disposable local database")
+
+
+def _disposable_url(database_url: str) -> None:
+    require_disposable_database(database_url, served=True)
 
 
 def _register(supervisor) -> None:
