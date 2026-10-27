@@ -27,7 +27,6 @@ import pytest
 from evals.prompt_regression.runner import fresh_database, free_port
 from looper import ops_config
 from looper.agents import db_backup, operator_auth
-from looper.env import counterpart
 from tests.db_support import DSN
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -91,17 +90,21 @@ def _install(bin_dir: Path, *, version: str | None = "99.1", mode: str = "dump",
 
 def _env(**extra: str) -> dict[str, str]:
     dropped = {"LOOPER_PG_DUMP", "LOOPER_BACKUP_CMD", "LOOPER_BACKUP_VERIFY_CMD", "LOOPER_RUNTIME_ROOT"}
-    env = {key: value for key, value in os.environ.items() if key not in dropped and counterpart(key) not in dropped}
+    env = {key: value for key, value in os.environ.items()
+           if key not in dropped and key.replace("LOOPX_", "LOOPER_", 1) not in dropped}
     return {**env, **extra}
 
 
-def _serve(tmp_path: Path, database_url: str, *flags: str, **extra_env: str) -> tuple[int | None, str]:
+def _serve(tmp_path: Path, database_url: str, *flags: str, backup: dict | None = None, **extra_env: str) -> tuple[int | None, str]:
     """Start ``looper serve`` with PATH = tmp_path/bin: its exit code, or None when it came up (then stopped); its log."""
     port = free_port()
     for name in ("runtime", "work", "home"):
         (tmp_path / name).mkdir(exist_ok=True)
     log_path = tmp_path / "serve.log"
-    env = _env(LOOPER_DATABASE_URL=database_url, PATH=str(tmp_path / "bin"), HOME=str(tmp_path / "home"),
+    body = f"[database]\nurl = {json.dumps(database_url)}\n[backup]\n"
+    body += "\n".join(f"{key} = {json.dumps(value)}" for key, value in (backup or {}).items())
+    ops_config.write_private(tmp_path / "runtime" / ops_config.FILE, body)
+    env = _env(PATH=str(tmp_path / "bin"), HOME=str(tmp_path / "home"),
                PYTHONPATH=str(REPO_ROOT), **extra_env)
     with log_path.open("w") as log:
         process = subprocess.Popen(
@@ -342,11 +345,7 @@ def test_a_backup_command_runs_as_given_with_the_database_filled_in(
     """``backup.command`` wins over any pg_dump: its version is not asked, its stdout is the backup."""
     calls = _install(tmp_path / "bin", version="9.6.24", mode="offline")
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
-    ops = ops_config.load(
-        ops_config.Flags(runtime_root=tmp_path),
-        environ={"LOOPER_BACKUP_CMD": f"{tmp_path / 'bin' / 'pg_dump'} --format=custom -U {{user}} {{dbname}}"},
-        dotenv=tmp_path / ".env", require_database=False,
-    )
+    ops = _ops(tmp_path, command=[str(tmp_path / "bin" / "pg_dump"), "--format=custom", "-U", "{user}", "{dbname}"])
 
     dumper = db_backup.find_dumper(16, ops)
     path, checked = db_backup.back_up(dumper, "postgresql://alice:pw@127.0.0.1:1/loopx", tmp_path / "backups")
@@ -361,16 +360,13 @@ def test_a_backup_command_is_shown_by_its_program_only(tmp_path: Path) -> None:
     source and the program, never the arguments."""
     from looper.agents import self_check
 
-    ops = ops_config.load(
-        ops_config.Flags(runtime_root=tmp_path),
-        environ={"LOOPER_BACKUP_CMD": "docker exec -e PGPASSWORD=Sekr1t-pw pg pg_dump --format=custom {dbname}"},
-        dotenv=tmp_path / ".env", require_database=False,
-    )
+    ops = _ops(tmp_path, command=["docker", "exec", "-e", "PGPASSWORD=Sekr1t-pw", "pg", "pg_dump",
+                                  "--format=custom", "{dbname}"])
 
     dumper = db_backup.find_dumper(16, ops)
     check, _ = self_check.check_pg_dump(160004, True, ops)
 
-    assert dumper.detail == "LOOPER_BACKUP_CMD: docker … (version not checked)"
+    assert dumper.detail == f"backup.command in {ops.path}: docker … (version not checked)"
     assert "Sekr1t-pw" not in self_check.format_checks([check]) and "PGPASSWORD" not in check.detail
 
 
@@ -417,18 +413,15 @@ def _docker_calls(calls: Path) -> list[dict]:
     return [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
 
 
-def _ops(tmp_path: Path, **environ: str) -> ops_config.OpsConfig:
-    return ops_config.load(ops_config.Flags(runtime_root=tmp_path), environ=environ, dotenv=tmp_path / ".env",
-                           require_database=False)
+def _ops(tmp_path: Path, **backup) -> ops_config.OpsConfig:
+    return _ops_file(tmp_path, backup)
 
 
 def _ops_file(tmp_path: Path, backup: dict) -> ops_config.OpsConfig:
-    path = tmp_path / "runtime" / "ops" / "server.toml"
-    path.parent.mkdir(parents=True, mode=0o700)
+    path = tmp_path / "runtime" / ops_config.FILE
     body = "\n".join(f"{key} = {json.dumps(value)}" for key, value in backup.items())
-    path.write_text(f'[database]\nurl = "postgresql://u@127.0.0.1:1/loopx"\n[backup]\n{body}\n')
-    path.chmod(0o600)
-    return ops_config.load(ops_config.Flags(runtime_root=tmp_path / "runtime"), environ={}, dotenv=tmp_path / ".env")
+    ops_config.write_private(path, f'[database]\nurl = "postgresql://u@127.0.0.1:1/loopx"\n[backup]\n{body}\n')
+    return ops_config.load(ops_config.Flags(runtime_root=tmp_path / "runtime"))
 
 
 @pytest.mark.parametrize("command", [
@@ -448,9 +441,9 @@ def test_the_verifier_is_derived_from_a_docker_exec_pg_dump_in_the_ops_file(tmp_
     assert dumper.verifier == "docker exec -i pgc pg_restore --list"
 
 
-def test_the_verifier_is_derived_from_the_deprecated_environment_string(tmp_path):
-    ops = _ops(tmp_path, LOOPER_BACKUP_CMD="docker exec -e PGPASSWORD=Sekr1t-pw --env A=b pgc pg_dump --format=custom "
-                                           "-U {user} {dbname}")
+def test_the_derived_verifier_does_not_retain_dump_credentials(tmp_path):
+    ops = _ops(tmp_path, command=["docker", "exec", "-e", "PGPASSWORD=Sekr1t-pw", "--env", "A=b", "pgc",
+                                  "pg_dump", "--format=custom", "-U", "{user}", "{dbname}"])
 
     dumper = db_backup.find_dumper(16, ops)
 
@@ -518,14 +511,14 @@ def test_an_explicit_verify_command_serves_a_local_pg_dump_without_pg_restore(tm
     _install(tmp_path / "bin", mode="offline", restore_ok=None)
     calls = _install_docker(tmp_path / "bin")
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
-    ops = _ops(tmp_path, LOOPER_BACKUP_VERIFY_CMD="docker exec -i pgc pg_restore --list")
+    ops = _ops(tmp_path, verify_command=list(DOCKER_VERIFY))
 
     dumper = db_backup.find_dumper(16, ops)
     _, checked = db_backup.back_up(dumper, "postgresql://u@127.0.0.1:1/loopx", tmp_path / "backups")
 
-    assert checked.startswith("listed with docker … (LOOPER_BACKUP_VERIFY_CMD")
+    assert checked == "listed with docker … (backup.verify_command)"
     assert _docker_calls(calls)[-1]["argv"] == ["exec", "-i", "pgc", "pg_restore", "--list"]
-    assert any("LOOPER_BACKUP_VERIFY_CMD in the environment is deprecated" in warning for warning in ops.warnings)
+    assert not ops.warnings
 
 
 def test_a_verify_command_timeout_does_not_leak_its_argv(tmp_path, monkeypatch):
@@ -568,7 +561,7 @@ def test_a_verifier_that_fails_or_lists_nothing_fails_the_backup(tmp_path, monke
 def test_without_any_verifier_the_backup_fails_naming_verify_command(tmp_path, monkeypatch):
     _install(tmp_path / "bin", mode="offline", restore_ok=None)
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
-    dumper = db_backup.find_dumper(16, _ops(tmp_path, LOOPER_BACKUP_CMD=f"{tmp_path / 'bin' / 'pg_dump'} {{dbname}}"))
+    dumper = db_backup.find_dumper(16, _ops(tmp_path, command=[str(tmp_path / "bin" / "pg_dump"), "{dbname}"]))
 
     with pytest.raises(db_backup.BackupFailed, match="backup.verify_command") as failure:
         db_backup.back_up(dumper, "postgresql://u@127.0.0.1:1/loopx", tmp_path / "backups")
@@ -587,6 +580,6 @@ def test_the_self_check_reports_the_verifier_and_fails_without_one(tmp_path, mon
     assert dumper is not None and check.status == self_check.OK
     assert check.detail.endswith("backup verified by docker exec -i pgc pg_restore --list")
 
-    check, dumper = self_check.check_pg_dump(160004, True, _ops(tmp_path, LOOPER_PG_DUMP=str(tmp_path / "bin" / "pg_dump")))
+    check, dumper = self_check.check_pg_dump(160004, True, _ops(tmp_path, pg_dump=str(tmp_path / "bin" / "pg_dump")))
     assert dumper is None and check.status == self_check.FAIL
     assert "backup.verify_command" in check.detail

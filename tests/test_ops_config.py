@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import stat
 import tomllib
 from dataclasses import replace
@@ -51,119 +50,113 @@ def _file(root: Path, text: str | bytes) -> Path:
     return path
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    for name in ops.VARIABLES | {"LOOPER_RUNTIME_ROOT", "LOOPX_RUNTIME_ROOT"}:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(ops, "DOTENV", tmp_path / ".env", raising=False)
     return tmp_path / ".env"
 
 
-def _load(root: Path, dotenv: Path, environ: dict[str, str] | None = None, **kwargs: object) -> ops.OpsConfig:
-    return ops.load(Flags(runtime_root=root), environ={} if environ is None else environ, dotenv=dotenv,
-                    require_database=False, **kwargs)
+def _load(root: Path, dotenv: Path, **kwargs: object) -> ops.OpsConfig:
+    return ops.load(Flags(runtime_root=root), require_database=False, **kwargs)
 
 
-def _value(name: str, tag: str) -> str | list[str]:
-    return {
-        "database_url": f"postgresql://u:{SECRET}-{tag}@h/db",
-        "public_url": f"https://example.com/{SECRET}-{tag}",
-        "pg_dump": f"/bin/{SECRET}-{tag}/pg_dump",
-        "backup_command": ["docker", "exec", f"{SECRET}-{tag} container", "pg_dump"],
-        "backup_verify_command": ["docker", "exec", "-i", f"{SECRET}-{tag} container", "pg_restore", "--list"],
-        "operator_notes_root": f"/notes/{SECRET}-{tag}",
-    }[name]
-
-
-LEGACY_SETTINGS = [
-    ("database_url", "database", "url", "DATABASE_URL"),
-    ("public_url", "server", "public_url", "PUBLIC_URL"),
-    ("pg_dump", "backup", "pg_dump", "PG_DUMP"),
-    ("backup_command", "backup", "command", "BACKUP_CMD"),
-    ("backup_verify_command", "backup", "verify_command", "BACKUP_VERIFY_CMD"),
-    ("operator_notes_root", "operator_notes", "root", "OPERATOR_NOTES_ROOT"),
-]
-COMMANDS = ("backup_command", "backup_verify_command")  # argv lists, written as one string in a variable
-NO_LEGACY_PREFIX = ("backup_verify_command", "operator_notes_root")  # never had a LOOPX_ name
-
-
-def _words(name: str, tag: str) -> str:
-    """What a variable holds for ``name``: a command as one string with a quoted word, else the value."""
-    value = _value(name, tag)
-    if name == "backup_verify_command":
-        return f'docker exec -i "{SECRET}-{tag} container" pg_restore --list'
-    return f'docker exec "{SECRET}-{tag} container" pg_dump' if isinstance(value, list) else value
-
-
-# ``ops.load`` walks one table of settings: the whole order of sources on one setting, and on each of the others the
-# variable that names it (the file's section and key are read back for every setting by the init-file round trip).
-@pytest.mark.parametrize(("name", "section", "key", "suffix", "winner"), [
-    (*LEGACY_SETTINGS[0], winner) for winner in ("file", "environment-new", "environment-old", "dotenv-new", "dotenv-old")
-] + [(*setting, "environment-new") for setting in LEGACY_SETTINGS[1:]])
-def test_setting_precedence_and_sources(
-    tmp_path: Path, dotenv: Path, name: str, section: str, key: str, suffix: str, winner: str,
-) -> None:
-    candidates = ["file", "environment-new", "environment-old", "dotenv-new", "dotenv-old"]
-    if name in NO_LEGACY_PREFIX:
-        candidates = [candidate for candidate in candidates if not candidate.endswith("old")]
-    present = candidates[candidates.index(winner):]
-    environ: dict[str, str] = {}
-    lines = []
-    for candidate in present:
-        value = _value(name, candidate)
-        if candidate == "file":
-            _file(tmp_path, f"[{section}]\n{key} = {json.dumps(value)}\n")
-            continue
-        prefix = "LOOPER_" if candidate.endswith("new") else "LOOPX_"
-        variable = prefix + suffix
-        text = _words(name, candidate)
-        if candidate.startswith("environment"):
-            environ[variable] = text
-        else:
-            lines.append(f"{variable}={text}")
-    if winner == "environment-old":
-        environ["LOOPER_" + suffix] = " \t"
-    elif winner == "dotenv-old":
-        lines.append("LOOPER_" + suffix + "= ")
-    dotenv.write_text("\n".join(lines))
-    config = _load(tmp_path, dotenv, environ)
-    value = _value(name, winner)
-    assert getattr(config, name) == (tuple(value) if isinstance(value, list) else value)
-    assert config.sources[name].origin is {
-        "file": Origin.FILE, "environment": Origin.ENVIRONMENT, "dotenv": Origin.DOTENV,
-    }[winner.split("-")[0]]
-    assert len(config.warnings) == 1
-    if winner != "file":
-        prefix = "LOOPER_" if winner.endswith("new") else "LOOPX_"
-        assert prefix + suffix in config.warnings[0] and "is deprecated" in config.warnings[0]
-    assert SECRET not in "\n".join(config.warnings)
-
-
-# A plain setting (the database, which is also required), and a command (an empty tuple, not an empty string).
-@pytest.mark.parametrize(("name", "section", "key", "suffix"), [LEGACY_SETTINGS[0], LEGACY_SETTINGS[3]])
-def test_missing_and_blank_variables_are_unset(
-    tmp_path: Path, dotenv: Path, name: str, section: str, key: str, suffix: str,
-) -> None:
-    dotenv.write_text(f"LOOPER_{suffix}= \nLOOPX_{suffix}=\n")
-    config = _load(tmp_path, dotenv, {f"LOOPER_{suffix}": " \t", f"LOOPX_{suffix}": ""})
-    assert getattr(config, name) == (() if name in COMMANDS else "")
-    assert name not in config.sources
-    assert not any("is deprecated" in warning for warning in config.warnings)
-    if name == "database_url":
-        with pytest.raises(OpsConfigError, match="looper config init-ops") as error:
-            ops.load(Flags(runtime_root=tmp_path), environ={}, dotenv=dotenv)
-        assert SECRET not in str(error.value)
-
-
-@pytest.mark.parametrize("origin", ["environment", "dotenv"])
-def test_loopx_operator_notes_root_is_not_read(tmp_path: Path, dotenv: Path, origin: str) -> None:
-    value = f"/notes/{SECRET}"
-    dotenv.write_text(f"LOOPX_OPERATOR_NOTES_ROOT={value}" if origin == "dotenv" else "")
-    config = _load(tmp_path, dotenv, {"LOOPX_OPERATOR_NOTES_ROOT": value} if origin == "environment" else {})
-    assert config.operator_notes_root == "" and "operator_notes_root" not in config.sources
-    assert SECRET not in "\n".join(config.warnings)
-    if origin == "dotenv":
-        assert len(config.warnings) == 1 and "not read: LOOPX_OPERATOR_NOTES_ROOT" in config.warnings[0]
+@pytest.mark.parametrize("prefix", ["LOOPER_", "LOOPX_"])
+@pytest.mark.parametrize("origin", ["environment", ".env"])
+def test_legacy_inputs_survive_load_and_init_ops(tmp_path, dotenv, monkeypatch, prefix, origin):
+    values = {
+        prefix + "DATABASE_URL": DATABASE_URL,
+        prefix + "PUBLIC_URL": "https://example.com",
+        prefix + "PG_DUMP": "/bin/pg_dump",
+        prefix + "BACKUP_CMD": 'dump --file "path with spaces" {dbname}',
+        "LOOPER_BACKUP_VERIFY_CMD": 'restore --list "path with spaces"',
+        "LOOPER_OPERATOR_NOTES_ROOT": "~/notes",
+    }
+    root = tmp_path / "runtime"
+    monkeypatch.setenv(prefix + "RUNTIME_ROOT", str(root))
+    if origin == "environment":
+        for name, value in values.items():
+            monkeypatch.setenv(name, value)
     else:
-        assert config.warnings == ()
+        dotenv.write_text("\n".join(f"{name}={value}" for name, value in values.items()))
+    config = ops.load()
+    expected = {
+        "database_url": DATABASE_URL, "public_url": "https://example.com", "pg_dump": "/bin/pg_dump",
+        "backup_command": ("dump", "--file", "path with spaces", "{dbname}"),
+        "backup_verify_command": ("restore", "--list", "path with spaces"),
+        "operator_notes_root": str(tmp_path / "home" / "notes"),
+    }
+    assert config.runtime_root == root
+    assert {name: getattr(config, name) for name in expected} == expected
+    assert {source.origin.value for source in config.sources.values()} == {origin}
+    written, notes = ops.init_file()
+    assert {name: getattr(written, name) for name in expected} == expected
+    assert all(source.origin is Origin.FILE for source in written.sources.values())
+    assert SECRET not in "\n".join((*config.warnings, *notes))
+    for name in values:
+        if origin == ".env":
+            assert name not in ops.os.environ
+        monkeypatch.delenv(name, raising=False)
+    dotenv.unlink(missing_ok=True)
+    assert ops.load(Flags(runtime_root=root)) == written
+
+
+@pytest.mark.parametrize("in_file", [False, True])
+def test_file_then_environment_then_dotenv_precedence(tmp_path, dotenv, monkeypatch, in_file):
+    dotenv.write_text("LOOPER_DATABASE_URL=postgresql://dotenv/db\nLOOPER_PUBLIC_URL=https://dotenv.example.com\n")
+    monkeypatch.setenv("LOOPX_DATABASE_URL", DATABASE_URL)
+    monkeypatch.setenv("LOOPER_DATABASE_URL", "postgresql://environment/db")
+    if in_file:
+        _file(tmp_path, f'[database]\nurl = "{DATABASE_URL}"\n')
+    config = _load(tmp_path, dotenv)
+    assert config.database_url == (DATABASE_URL if in_file else "postgresql://environment/db")
+    assert config.public_url == "https://dotenv.example.com"
+    assert SECRET not in "\n".join(config.warnings)
+
+
+def test_sample_dsn_keeps_the_existing_database_name():
+    assert ops.SAMPLE_DATABASE_URL == "postgresql://localhost:5432/loopx"
+
+
+@pytest.mark.parametrize("origin", ["environment", ".env"])
+@pytest.mark.parametrize(("name", "value"), [
+    ("LOOPER_DATABASE_URL", f"mysql://{SECRET}@host/db"),
+    ("LOOPER_PUBLIC_URL", f"https://user:{SECRET}@example.com"),
+    ("LOOPER_BACKUP_CMD", f'dump "{SECRET}'),
+    ("LOOPER_BACKUP_VERIFY_CMD", f'restore "{SECRET}'),
+    ("LOOPER_OPERATOR_NOTES_ROOT", SECRET),
+])
+def test_invalid_legacy_inputs_fail_without_disclosing_values(tmp_path, dotenv, monkeypatch, origin, name, value):
+    if origin == "environment":
+        monkeypatch.setenv(name, value)
+    else:
+        dotenv.write_text(f"{name}={value}\n")
+    with pytest.raises(OpsConfigError) as error:
+        _load(tmp_path, dotenv)
+    assert name in str(error.value) and SECRET not in str(error.value)
+
+
+@pytest.mark.parametrize(("section", "key", "value", "field"), [
+    ("database", "url", DATABASE_URL, "database_url"),
+    ("server", "public_url", "https://example.com", "public_url"),
+    ("backup", "pg_dump", "/bin/pg_dump", "pg_dump"),
+    ("backup", "command", ["dump", "{dbname}"], "backup_command"),
+    ("backup", "verify_command", ["restore", "--list"], "backup_verify_command"),
+    ("operator_notes", "root", "/notes", "operator_notes_root"),
+])
+def test_file_settings_have_file_sources(tmp_path, dotenv, monkeypatch, section, key, value, field):
+    setting = next(setting for setting in ops.SETTINGS if setting.name == field)
+    for name in setting.variables:
+        monkeypatch.setenv(name, SECRET)
+    dotenv.write_text("\n".join(f"{name}={SECRET}" for name in setting.variables))
+    _file(tmp_path, f"[{section}]\n{key} = {json.dumps(value)}\n")
+    config = _load(tmp_path, dotenv)
+    assert getattr(config, field) == (tuple(value) if isinstance(value, list) else value)
+    assert config.sources[field].origin is Origin.FILE
+    assert not config.warnings
 
 
 @pytest.mark.parametrize(("name", "file_value", "flag_value", "default"), [
@@ -178,45 +171,13 @@ def test_server_flags_file_and_defaults(
     if winner != "default":
         _file(tmp_path, f"[server]\n{name} = {json.dumps(file_value)}\n")
     flags = Flags(runtime_root=tmp_path, **({name: flag_value} if winner == "flag" else {}))
-    config = ops.load(flags, environ={f"LOOPER_{name.upper()}": SECRET}, dotenv=dotenv, require_database=False)
+    config = ops.load(flags, require_database=False)
     assert getattr(config, name) == {"flag": flag_value, "file": file_value, "default": default}[winner]
     if winner == "default":
         assert name not in config.sources
     else:
         assert config.sources[name].origin is (Origin.FLAG if winner == "flag" else Origin.FILE)
     assert not config.warnings
-
-
-def test_legacy_warnings_name_each_used_variable_once(tmp_path: Path, dotenv: Path) -> None:
-    environ = {"LOOPER_" + suffix: _words(name, "env") for name, _, _, suffix in LEGACY_SETTINGS}
-    config = _load(tmp_path, dotenv, environ)
-    assert len(config.warnings) == len(environ)
-    for name in environ:
-        assert sum(name in warning for warning in config.warnings) == 1
-    assert all("is deprecated" in warning and SECRET not in warning for warning in config.warnings)
-
-
-@pytest.mark.parametrize("prefix", ["LOOPER_", "LOOPX_"])
-def test_shadowed_environment_is_warned_without_reading_its_value(tmp_path: Path, dotenv: Path, prefix: str) -> None:
-    _file(tmp_path, f'[database]\nurl = "{DATABASE_URL}"\n')
-    config = _load(tmp_path, dotenv, {prefix + "DATABASE_URL": SECRET})
-    assert config.database_url == DATABASE_URL
-    assert len(config.warnings) == 1
-    assert prefix + "DATABASE_URL is set but not used" in config.warnings[0]
-    assert SECRET not in config.warnings[0]
-
-
-def test_dotenv_unknown_keys_are_names_only_and_never_exported(
-    tmp_path: Path, dotenv: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    for name in ("FOO", "LOOPER_DATABASE_URL"):
-        monkeypatch.delenv(name, raising=False)
-    dotenv.write_text(f"FOO={SECRET}\nLOOPER_DATABASE_URL={DATABASE_URL}\n")
-    config = _load(tmp_path, dotenv)
-    assert config.database_url == DATABASE_URL
-    assert any("not read: FOO" in warning for warning in config.warnings)
-    assert SECRET not in "\n".join(config.warnings)
-    assert "FOO" not in os.environ and "LOOPER_DATABASE_URL" not in os.environ
 
 
 BAD_FILE_VALUES = [
@@ -247,19 +208,6 @@ def test_invalid_file_names_the_key_or_file_without_values(
     assert key in str(error.value)
     assert SECRET not in str(error.value)
     assert "user:secret" not in str(error.value)
-
-
-@pytest.mark.parametrize(("variable", "value"), [
-    ("LOOPER_PUBLIC_URL", f"{SECRET}.example.com"),
-    ("LOOPER_BACKUP_CMD", f'{SECRET} unterminated "quote'),
-    ("LOOPER_DATABASE_URL", f"mysql://u:{SECRET}@h/db"),
-])
-def test_invalid_environment_names_variable_without_value(
-    tmp_path: Path, dotenv: Path, variable: str, value: str,
-) -> None:
-    with pytest.raises(OpsConfigError) as error:
-        _load(tmp_path, dotenv, {variable: value})
-    assert variable in str(error.value) and SECRET not in str(error.value)
 
 
 @pytest.mark.parametrize(("problem", "message"), [
@@ -294,77 +242,60 @@ def test_missing_explicit_file_refused_but_missing_default_is_fine(tmp_path: Pat
     config = _load(tmp_path, dotenv)
     assert config.sources == {} and config.warnings == ()
     with pytest.raises(OpsConfigError, match="no such file"):
-        ops.load(Flags(runtime_root=tmp_path, config=tmp_path / "missing.toml"), environ={}, dotenv=dotenv,
+        ops.load(Flags(runtime_root=tmp_path, config=tmp_path / "missing.toml"),
                  require_database=False)
 
 
-@pytest.mark.parametrize("winner", ["flag", "LOOPER_RUNTIME_ROOT", "LOOPX_RUNTIME_ROOT", "home", "blank"])
-def test_runtime_root_precedence_and_warning(
-    tmp_path: Path, dotenv: Path, monkeypatch: pytest.MonkeyPatch, winner: str,
-) -> None:
-    environ = {"LOOPER_RUNTIME_ROOT": str(tmp_path / f"{SECRET}-new"),
-               "LOOPX_RUNTIME_ROOT": str(tmp_path / f"{SECRET}-old")}
-    if winner == "LOOPX_RUNTIME_ROOT":
-        environ["LOOPER_RUNTIME_ROOT"] = " \t"
-    if winner in ("home", "blank"):
-        environ = {} if winner == "home" else dict.fromkeys(environ, " \t")
-    monkeypatch.chdir(tmp_path)
-    flag = "relative-root" if winner == "flag" else None
-    root, warning = ops.runtime_root(flag, environ)
-    expected = tmp_path / "relative-root" if flag else (
-        tmp_path / "home" / ".looper" if winner in ("home", "blank") else Path(environ[winner]))
-    assert root == expected and root.is_absolute()
-    if winner.startswith("LOOP"):
-        assert winner in warning and "is deprecated" in warning
-    else:
-        assert warning == ""
-    assert SECRET not in warning
-    config = ops.load(Flags(runtime_root=flag), environ=environ, dotenv=dotenv, require_database=False)
+@pytest.mark.parametrize("flag", [None, "relative-root", ".loopx"])
+def test_runtime_root_uses_flag_before_environment(tmp_path, dotenv, monkeypatch, flag):
+    monkeypatch.setenv("LOOPER_RUNTIME_ROOT", str(tmp_path / "retired-new"))
+    monkeypatch.setenv("LOOPX_RUNTIME_ROOT", str(tmp_path / "retired-old"))
+    root, warning = ops.runtime_root(flag)
+    assert root == (tmp_path / flag if flag else tmp_path / "retired-new")
+    assert bool(warning) is (flag is None)
+    config = ops.load(Flags(runtime_root=flag), require_database=False)
     assert config.runtime_root == root
     assert config.warnings == ((warning,) if warning else ())
     assert ops.config_path(None, root) == root / "ops" / "server.toml"
     assert ops.config_path("relative.toml", root) == tmp_path / "relative.toml"
 
 
-def test_public_url_is_trimmed_and_trailing_slashes_removed(tmp_path: Path, dotenv: Path) -> None:
-    config = _load(tmp_path, dotenv, {"LOOPER_PUBLIC_URL": f" https://example.com/{SECRET}/// "})
-    assert config.public_url == f"https://example.com/{SECRET}"
+def test_public_url_is_trimmed_and_trailing_slashes_removed(tmp_path, dotenv):
+    _file(tmp_path, f'[server]\npublic_url = " https://example.com/{SECRET}/// "')
+    assert _load(tmp_path, dotenv).public_url == f"https://example.com/{SECRET}"
 
 
-@pytest.mark.parametrize("configured", [True, False], ids=["effective-settings", "legacy-default"])
-def test_init_file_is_private_round_trips_and_explains_sources(
-    tmp_path: Path, dotenv: Path, configured: bool,
-) -> None:
-    environ = {"LOOPER_" + suffix: _words(name, "env") for name, _, _, suffix in LEGACY_SETTINGS} if configured else {}
+@pytest.mark.parametrize("configured", [True, False], ids=["flags", "sample-dsn"])
+def test_init_file_is_private_round_trips_and_explains_sources(tmp_path, dotenv, configured):
     flags = Flags(runtime_root=tmp_path / "runtime")
     if configured:
         flags = replace(flags, host=f"{SECRET}-host", port=9002, log_level="debug")
-    before = ops.load(flags, environ=environ, dotenv=dotenv, require_database=False)
-    written, notes = ops.init_file(flags, environ=environ, dotenv=dotenv)
+    before = ops.load(flags, require_database=False)
+    written, notes = ops.init_file(flags)
     assert stat.S_IMODE(written.path.stat().st_mode) == 0o600
     assert stat.S_IMODE(written.path.parent.stat().st_mode) == 0o700
     table = tomllib.loads(written.path.read_text())
-    assert table["database"]["url"] == (before.database_url or ops.LEGACY_DEFAULT_DATABASE_URL)
-    assert table["server"] == ({"host": before.host, "port": before.port, "log_level": before.log_level,
-                                "public_url": before.public_url} if configured else {})
-    if configured:
-        assert table["backup"] == {"pg_dump": before.pg_dump, "command": list(before.backup_command),
-                                    "verify_command": list(before.backup_verify_command)}
-        assert table["operator_notes"] == {"root": before.operator_notes_root}
-    for name, source in before.sources.items():
-        setting = next(setting for setting in ops.SETTINGS if setting.name == name)
-        assert f"{setting.dotted} from {source}" in notes
+    assert table["database"]["url"] == ops.SAMPLE_DATABASE_URL
+    assert table["server"] == ({"host": before.host, "port": before.port, "log_level": before.log_level}
+                                if configured else {})
+    assert any(ops.SAMPLE_DATABASE_URL in note and "sample DSN" in note for note in notes)
     assert SECRET not in "\n".join(notes)
-    if not configured:
-        assert any(ops.LEGACY_DEFAULT_DATABASE_URL in note and "old built-in default" in note for note in notes)
-    later = ops.load(Flags(runtime_root=flags.runtime_root), environ={}, dotenv=dotenv)
+    later = ops.load(Flags(runtime_root=flags.runtime_root))
     assert later == written
     assert all(source.origin is Origin.FILE for source in later.sources.values()) and not later.warnings
     for name in before.sources:
         assert getattr(later, name) == getattr(before, name)
-    assert set(later.sources) == set(before.sources) | {"database_url"}
     with pytest.raises(OpsConfigError, match="exists already"):
-        ops.init_file(flags, environ=environ, dotenv=dotenv)
+        ops.init_file(flags)
+
+
+def test_existing_database_url_is_preserved(tmp_path, dotenv):
+    path = _file(tmp_path, f'[database]\nurl = "{DATABASE_URL}"\n')
+    config = ops.load(Flags(runtime_root=tmp_path))
+    assert tomllib.loads(ops.render(config))["database"]["url"] == DATABASE_URL
+    with pytest.raises(OpsConfigError, match="exists already"):
+        ops.init_file(Flags(runtime_root=tmp_path))
+    assert ops.read_file(path)["database_url"] == DATABASE_URL
 
 
 @pytest.mark.parametrize("fails", [False, True], ids=["replace", "failed-replace"])
@@ -415,9 +346,8 @@ def test_init_file_writes_a_new_config_path(tmp_path: Path, dotenv: Path) -> Non
     directory = tmp_path / "private"
     directory.mkdir(mode=0o700)
     path = directory / "looper.toml"
-    written, notes = ops.init_file(Flags(runtime_root=tmp_path / "runtime", config=path),
-                                   environ={"LOOPER_DATABASE_URL": DATABASE_URL}, dotenv=dotenv)
-    assert written.path == path and written.database_url == DATABASE_URL
+    written, notes = ops.init_file(Flags(runtime_root=tmp_path / "runtime", config=path))
+    assert written.path == path and written.database_url == ops.SAMPLE_DATABASE_URL
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert not (tmp_path / "runtime" / ops.FILE).exists()
     assert all(SECRET not in note for note in notes)

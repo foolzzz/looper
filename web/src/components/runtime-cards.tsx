@@ -46,15 +46,15 @@ function CardHead({ title, kind, badges }: { title: string; kind: RuntimeKind; b
 function RuntimeCard({ type, runtime }: { type: RuntimeType | undefined; runtime: Runtime | undefined }) {
   const action = useAction();
   const info = RUNTIME_TYPES[runtime?.type ?? type?.type ?? ""];
-  const legacy = runtime ? !runtime.builtin : false;
-  const inProcess = !!(type?.in_process || runtime?.in_process);
+  const custom = runtime ? !runtime.builtin : false;
+  const inProcess = runtime ? runtime.in_process : type!.in_process;
   const probeError = runtime?.probe_error ?? type?.probe_error;
   const state = detection(runtime);
   const { label, variant, icon: Icon } = DETECTION[state];
   const capabilities = runtime ? runtime.capabilities : type?.capabilities ?? [];
   const roles = runtime ? runtime.roles : type?.roles ?? [];
   const command = runtime?.executable || runtime?.default_executable || type?.default_executable || "";
-  const title = legacy ? runtime!.name : info?.title ?? type?.label ?? runtime?.type ?? "";
+  const title = custom ? runtime!.name : info?.title ?? type?.label ?? runtime?.type ?? "";
   const redetect = () => action.run(() => probeRuntime(runtime?.runtime_id ?? type!.runtime_id));
 
   return (
@@ -64,7 +64,7 @@ function RuntimeCard({ type, runtime }: { type: RuntimeType | undefined; runtime
         kind={info?.kind ?? "CLI"}
         badges={
           <>
-            {legacy && <Badge variant="outline">custom (legacy)</Badge>}
+            {custom && <Badge variant="outline">custom</Badge>}
             <Badge variant={variant}>
               <Icon className="mr-1 h-3 w-3" aria-hidden="true" />
               {label}
@@ -73,7 +73,7 @@ function RuntimeCard({ type, runtime }: { type: RuntimeType | undefined; runtime
         }
       />
       <dl className="space-y-1.5">
-        {legacy && <Fact label="Type">{runtime!.type_label}</Fact>}
+        {custom && <Fact label="Type">{runtime!.type_label}</Fact>}
         {(!inProcess || state !== "missing") && <Fact label="Path">
           {inProcess ? "Runs inside looper serve" : runtime?.path ? (
             <span className="font-mono">{runtime.path}</span>
@@ -126,7 +126,7 @@ function RuntimeCard({ type, runtime }: { type: RuntimeType | undefined; runtime
             ? state === "detected"
               ? "Comes with Looper; Re-detect checks its Python package."
               : probeError ?? "Re-detect checks its Python package."
-            : legacy
+            : custom
             ? "Registered by hand before runtimes were built in; read-only, and kept while an Agent Profile uses it."
             : state === "detected"
               ? `Found as ${command} on the server's PATH.`
@@ -159,13 +159,13 @@ export function RuntimesSection() {
     );
   }
   const builtin = (type: RuntimeType) => registry.runtimes.find((r) => r.builtin && r.runtime_id === type.runtime_id);
-  const legacy = registry.runtimes.filter((r) => !r.builtin);
+  const custom = registry.runtimes.filter((r) => !r.builtin);
   return (
     <ul className="grid gap-4 xl:grid-cols-2">
       {registry.runtime_types.map((type) => (
         <RuntimeCard key={type.type} type={type} runtime={builtin(type)} />
       ))}
-      {legacy.map((runtime) => (
+      {custom.map((runtime) => (
         <RuntimeCard key={runtime.runtime_id} type={registry.runtime_types.find((t) => t.type === runtime.type)} runtime={runtime} />
       ))}
       {PLANNED_RUNTIMES.map((planned) => (

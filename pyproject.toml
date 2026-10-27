@@ -37,8 +37,6 @@ test = [
 
 [project.scripts]
 looper = "looper.cli:main"
-# The command's name before the rename, kept for one release: a deprecation note, then looper.
-loopx = "looper.cli:legacy_main"
 loopercli = "looper.loopercli:main"
 
 [tool.setuptools.packages.find]

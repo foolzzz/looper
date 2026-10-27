@@ -34,7 +34,6 @@ from typing import Any
 
 from .. import env, ops_config
 from ..ops_config import OpsConfig
-from ..paths import settle_runtime_root
 from .broadcast import Broadcaster
 from .bus import MessageBus
 from .channels.allowlist import SenderAllowlist, allowlist_from_config, start_problem
@@ -1075,16 +1074,13 @@ def serve_agent(
     for warning in ops.warnings:
         logger.warning("%s", warning)
 
-    settled = settle_runtime_root(ops.runtime_root)  # ~/.loopx from before the rename becomes ~/.looper
-    if settled.note:
-        logger.log(logging.WARNING if settled.warning else logging.INFO, "%s", settled.note)
     resolved_work_dir = work_dir or Path.cwd()
 
     try:
         asyncio.run(
             _run_agent_system(
                 ops=ops,
-                runtime_root=settled.root,
+                runtime_root=ops.runtime_root,
                 work_dir=resolved_work_dir,
                 claude_bin=claude_bin,
                 skip_backup=skip_backup,

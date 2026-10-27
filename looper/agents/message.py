@@ -266,10 +266,6 @@ def manager_address(manager_id: str) -> AgentAddress:
 MANAGER_ADDRESS = manager_address("manager")
 TASK_ROUTER_ADDRESS = AgentAddress(agent_type="task_router", agent_id="task-router")
 
-# Kept for backwards compatibility in tests; prefer planner_address(task_id).
-PLANNER_ADDRESS = AgentAddress(agent_type="planner", agent_id="planner")
-
-
 def planner_address(task_id: str) -> AgentAddress:
     return AgentAddress(agent_type="planner", agent_id=f"planner-{task_id}")
 

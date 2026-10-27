@@ -1,6 +1,5 @@
 """The ``looper`` command: ``serve`` starts the agent system, ``service`` runs it in the background, ``doctor``
-checks what it needs, ``mcp-server`` serves the Manager's platform tools, ``version`` prints the version.
-``loopx``, its name before the rename, is kept as an alias for one release."""
+checks what it needs, ``mcp-server`` serves the Manager's platform tools, ``version`` prints the version."""
 
 from __future__ import annotations
 
@@ -14,8 +13,6 @@ from . import __version__
 
 if TYPE_CHECKING:
     from .ops_config import OpsConfig
-
-LEGACY_COMMAND_NOTE = "loopx is now called looper; the loopx alias goes away in the next release"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,19 +62,15 @@ def build_parser() -> argparse.ArgumentParser:
         "config",
         allow_abbrev=False,
         help="Create the service's local ops file.",
-        description=(
-            "init-ops writes the local ops file used to start Looper. "
-            "For configuration export and import, use loopercli with the running service."
-        ),
+        description="init-ops writes the local ops file used to start Looper.",
     )
     config_commands = config.add_subparsers(dest="config_command", required=True)
     init_ops = config_commands.add_parser(
         "init-ops", allow_abbrev=False, help="Write the ops file from the settings in effect now (mode 0600).",
         description=(
-            "Write the ops file, <runtime root>/ops/server.toml (or --config), from the settings in effect now: "
-            "LOOPER_DATABASE_URL, LOOPER_PUBLIC_URL, LOOPER_PG_DUMP, LOOPER_BACKUP_CMD and "
-            "LOOPER_OPERATOR_NOTES_ROOT (or their LOOPX_* names) from the environment or the checkout's .env, which "
-            "Looper reads for this release only. It refuses to replace an existing file, and shows no value."
+            "Write the ops file, <runtime root>/ops/server.toml (or --config), from the settings in effect, "
+            "including deployment settings from the environment or the checkout's .env. Without a database URL, "
+            "it writes the sample postgresql://localhost:5432/loopx. It refuses to replace an existing file."
         ),
     )
     _add_location_flags(init_ops)
@@ -90,8 +83,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     version = commands.add_parser("version", allow_abbrev=False, help="Print the installed Looper version.")
     version.add_argument("--format", choices=["markdown", "json"], default="markdown", help="Output format.")
-    # serve prints no payload; --format stays accepted so existing invocations keep working.
-    serve.add_argument("--format", choices=["markdown", "json"], help=argparse.SUPPRESS)
     return parser
 
 
@@ -116,15 +107,13 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
         description=(
             "Write the unit and (re)start the service, then wait until it serves. The unit runs this looper in the "
             "current directory with the ops file and the runtime root (absolute --config and --runtime-root; "
-            "--port only when given), and with the variables it needs copied from this environment: PATH, locale, "
+            "--port when given, else the installed unit's port when server.port is unset), and with the variables "
+            "it needs copied from this environment: PATH, locale, "
             "time zone, proxy and certificate settings, the runtimes' directories and logins (CLAUDE_CONFIG_DIR, "
             "CODEX_HOME, GROK_HOME, ANTHROPIC_API_KEY and the others an agent gets), LOOPER_TELEGRAM_BOT_TOKEN, and "
-            "each --env NAME. No database URL is copied: the ops file names it, and install refuses while a setting "
-            "still comes from a variable (run `looper config init-ops` first). The unit file is private (mode 0600) "
-            "because it can hold API keys. Running it again updates the unit and restarts the service. With the "
-            "default "
-            "--label it first stops and removes com.loopx.serve, the unit from before the rename, and moves "
-            "~/.loopx to ~/.looper when the service uses the default runtime root."
+            "each --env NAME. No deployment setting is copied: the ops file names it (run `looper config init-ops` "
+            "first). The unit file is private (mode 0600) because it can hold API keys. Running it again updates "
+            "the unit and restarts the service."
         ),
     )
     install.add_argument("--port", type=int,
@@ -151,9 +140,6 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     parser = build_parser()
-    if len(argv) >= 2 and argv[0] == "config" and argv[1] in ("export", "import"):
-        parser.error(f"looper config {argv[1]} was removed; use loopercli config {argv[1]} "
-                     "with the running service")
     args = parser.parse_args(argv)
     if args.command == "version":
         payload = {"ok": True, "schema_version": "looper_version_v0", "name": "looper", "version": __version__}
@@ -196,12 +182,6 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def legacy_main(argv: list[str] | None = None) -> int:
-    """``loopx``, kept for one release: a deprecation note on stderr, then the same command as ``looper``."""
-    print(LEGACY_COMMAND_NOTE, file=sys.stderr)
-    return main(argv)
-
-
 def _load_ops(args: argparse.Namespace, port: int | None = None) -> OpsConfig | None:
     """The ops settings for this command's --runtime-root, --config (and ``port``), with their warnings printed; None
     (the error printed) when they cannot be used."""
@@ -227,8 +207,6 @@ def _init_ops(args: argparse.Namespace) -> int:
         return 1
     lines = [f"wrote {ops.path} (mode 0600); `looper serve` reads it at every start"]
     lines += ["  values taken (not shown):", *(f"    {note}" for note in notes)] if notes else []
-    lines.append("then remove those variables from the environment and .env, and if `looper service` runs Looper, run "
-                 "`looper service install` again: its unit then names this file and carries no database URL")
     print("\n".join(lines))
     return 0
 
