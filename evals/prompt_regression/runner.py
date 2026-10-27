@@ -63,7 +63,7 @@ DEFAULT_OUT_DIR = REPO_ROOT / "evals" / "runs"
 RESERVED_PORT = 8767  # the operator's own server
 RESERVED_DATABASE = "loopx"  # the operator's own database
 # v2: every row has rep and outcome (and error_class and error when it is an error); the run has reps and
-# aborted. A v1 row is rep 1, its outcome read from success, timed_out and stopped_by_cap (``compare.outcome``).
+# aborted.
 SCHEMA = "looper-prompt-eval/v2"
 ERROR_TEXT_LIMIT = 300  # characters of an error row's message (and of the reason a run was aborted)
 
@@ -1110,46 +1110,20 @@ def _eval_model(api: Api, registry: dict[str, Any], provider_id: str, wanted: An
     return model
 
 
-def _legacy_eval_spec(spec: dict[str, Any], runtime: dict[str, Any],
-                      provider: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
-    """Normalize old eval input through the same converter as schema/file migration."""
-    from looper.agents import registry_migration
-    from looper.agents.profile_registry import MODEL_FIELDS, RuntimeSpec
-
-    row = {**provider, "id": provider.get("provider_id", "eval-provider")}
-    if "endpoints" in row:
-        urls = {e["base_url"] for e in row["endpoints"]}
-        if len(urls) != 1:
-            raise EvalError("legacy provider reference has ambiguous endpoint URLs; use an explicit model")
-        row.update(protocols=[e["protocol"] for e in row["endpoints"]], base_url=urls.pop())
-    profile = {**spec["agent"], "id": "eval-profile", "runtime_id": runtime["runtime_id"],
-               "provider_id": row["id"]}
-    try:
-        converted = registry_migration.convert(
-            [RuntimeSpec(runtime["runtime_id"], runtime["name"], runtime["type"])], [row], [profile])
-    except registry_migration.MigrationBlocked as exc:
-        raise EvalError(f"legacy eval registration blocked: {exc.code}") from None
-    account = converted.providers[row["id"]]
-    endpoints = [{"protocol": endpoint.protocol.value,
-                  "base_url": converted.default_urls.get((account.id, endpoint.protocol), endpoint.base_url)}
-                 for endpoint in converted.endpoints.values()]
-    draft = {"name": account.name, "vendor_type": account.vendor_type.value, "endpoints": endpoints,
-             "env": [{"key": k, "value": v} for k, v in account.env],
-             "max_concurrency": account.max_concurrency}
-    models = [{"protocol": m.protocol.value, **{key: getattr(m, key) for key in MODEL_FIELDS}}
-              for m in converted.models.values()]
-    selected = converted.models[converted.profiles["eval-profile"].model_id]
-    return draft, models, {"name": selected.name, "protocol": selected.protocol.value}
-
-
 def register_agent(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
     """Register runtime/provider/model/agent layers in provider → model → profile order.
 
     ``model`` is {name, protocol, settings...}, a model_id string/object, or a
     {provider_id, name, protocol} saved reference. ``agent`` holds only name and
-    runtime options. Older specs with agent.model use the shared legacy converter.
+    runtime options. Provider endpoints and the top-level model must be explicit.
     Credentials come exclusively from provider.api_key_env and never alter spec.
     """
+    if spec.get("model") is None:
+        raise EvalError("an eval spec needs a top-level model")
+    if {"model", "provider_id", "model_id"} & spec["agent"].keys():
+        raise EvalError("put the model reference in the model layer, not the agent layer")
+    if {"protocols", "base_url", "models"} & spec["provider"].keys():
+        raise EvalError("eval provider declarations must use endpoints, not a legacy catalog")
     registry = api.post("/api/v1/registry/view", {})["result"]
     wanted = spec["runtime"]
     runtime = next((r for r in registry["runtimes"] if r["name"] == wanted.get("name")), None) or next(
@@ -1164,24 +1138,14 @@ def register_agent(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
     if provider_id is not None and existing is None:
         raise EvalError(f"no provider {provider_id!r} in the eval's server")
     provider = {k: v for k, v in source.items() if k != "api_key_env"}
-    models = []
-    model = spec.get("model")
+    model = spec["model"]
     agent = dict(spec["agent"])
-    if model is None:
-        provider, models, model = _legacy_eval_spec(spec, runtime, existing or provider)
-        agent.pop("model", None)
-    elif "model" in agent or "provider_id" in agent or "model_id" in agent:
-        raise EvalError("put the model reference in the model layer, not the agent layer")
     if provider_id is None:
         if (variable := source.get("api_key_env")) is not None:
             if not os.environ.get(variable):
                 raise EvalError(f"the provider's API key is read from ${variable}, which is not set")
             provider["api_key"] = os.environ[variable]
         provider_id = _register_eval_provider(api, provider)["provider_id"]
-    for entry in models:
-        saved = _eval_model(api, registry, provider_id, entry)
-        if saved not in registry["models"]:
-            registry["models"].append(saved)
     saved = _eval_model(api, registry, provider_id, model)
     return api.post("/api/v1/profiles/create", {**agent, "runtime_id": runtime["runtime_id"],
                                             "model_id": saved["model_id"]})["result"]["profile"]
@@ -1275,7 +1239,7 @@ def baseline_path(*, mode: str, model: str | None, dialogs: bool = False) -> Pat
 
 
 def model_name(value: Any) -> str | None:
-    """Keep report model names stable across legacy strings and typed registry references."""
+    """Project a typed registry model reference to its report name."""
     if isinstance(value, Mapping):
         value = value.get("name")
     return value if isinstance(value, str) else None
@@ -1284,14 +1248,25 @@ def model_name(value: Any) -> str | None:
 def compared_model(run: dict[str, Any]) -> str | None:
     """The model a run is compared by: the Manager's for dialogs (``manager_model``, else every role's)."""
     value = run.get("manager_model", run.get("model")) if "dialogs" in run else run.get("model")
-    return model_name(value)
+    return value if isinstance(value, str) else None
+
+
+def validate_report(data: Any, *, dialogs: bool | None = None) -> dict[str, Any]:
+    """Accept only the current report schema for the requested kind of comparison."""
+    if not isinstance(data, dict):
+        raise EvalError("unsupported report schema: expected a JSON object")
+    is_dialogs = "dialogs" in data
+    expected = "looper-manager-dialogs/v2" if (is_dialogs if dialogs is None else dialogs) else SCHEMA
+    if data.get("schema") != expected or (dialogs is not None and is_dialogs != dialogs):
+        raise EvalError(f"unsupported report schema {data.get('schema')!r}; expected {expected}")
+    return data
 
 
 def previous_run(out_dir: Path, current: Path, *, mode: str, model: str | None, dialogs: bool = False) -> Path | None:
     """The newest earlier run in ``out_dir`` of the same kind (the task set's or the dialogs'), mode and model."""
     earlier = sorted(p for p in out_dir.glob(f"*-{mode}.json") if p.name < current.name)
     for path in reversed(earlier):
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = validate_report(json.loads(path.read_text(encoding="utf-8")))
         if ("dialogs" in data) == dialogs and compared_model(data) == model:
             return path
     return None
@@ -1312,7 +1287,7 @@ def comparison_base(choice: str | None, *, out_dir: Path, current: Path, mode: s
             return None, f"no committed baseline {_shown(path)}"
     else:
         path = Path(choice)
-    return json.loads(path.read_text(encoding="utf-8")), _shown(path)
+    return validate_report(json.loads(path.read_text(encoding="utf-8")), dialogs=dialogs), _shown(path)
 
 
 def _shown(path: Path) -> str:

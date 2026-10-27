@@ -409,6 +409,11 @@ class AcpGrok:
         return self._legacy.started if self._fallback else bool(self._command)
 
     @property
+    def idle(self) -> bool:
+        # ACP cannot acknowledge that its background work has finished.
+        return self._fallback and self._legacy.idle
+
+    @property
     def command(self) -> list[str]:
         return self._legacy.command if self._fallback else self._command
 

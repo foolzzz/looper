@@ -330,10 +330,10 @@ async def _merged_profiles(template: TaskTemplate | None, arguments: Mapping[str
         raise OpError(ErrorCode.INVALID, str(exc)) from None
 
 
-async def _template_roles(template: TaskTemplate, project: Mapping[str, Any]) -> list[dict[str, Any]]:
+async def _template_roles(template: TaskTemplate, project: Mapping[str, Any], fallbacks: list[str]) -> list[dict[str, Any]]:
     from ..task_template_execution import template_roles
     try:
-        return await template_roles(template, project)
+        return await template_roles(template, project, interactive=True, fallbacks=fallbacks)
     except TemplateError as exc:
         raise OpError(ErrorCode.CONFLICT, str(exc)) from None
 
@@ -344,7 +344,8 @@ async def _create(call: Call) -> dict[str, Any]:
     placement = await effective_placement(template, arguments)
     name, project, work_dir = placement.name, placement.project, placement.work_dir
     profiles = await _merged_profiles(template, arguments)
-    roles = await _template_roles(template, project) if template is not None and project is not None else []
+    fallbacks: list[str] = []
+    roles = await _template_roles(template, project, fallbacks) if template is not None and project is not None else []
     requirement = arguments["requirement"].strip()
     if template is not None:
         try:
@@ -389,6 +390,8 @@ async def _create(call: Call) -> dict[str, Any]:
     task_id, shown = result["task_id"], result["name"]
     project, created = result["project"], result["project_created"]
     block = result["configuration"]
+    if fallbacks:
+        block = block.replace(f"\n\n{START_QUESTION}", f"\n- 模板角色回退：{clip('；'.join(fallbacks), 1000)}\n\n{START_QUESTION}")
     turn.blocks.append(block)
     turn.created_task_blocks[task_id] = block
     return {"task_id": task_id, "name": shown, "status": "ready", "project": project["name"],

@@ -1008,6 +1008,8 @@ class _Importer:
         self.item_origins = {key: row["origin"] for key, row in target.items.items()}
         self.item_sizes = {key: int(row["size_bytes"]) for key, row in target.items.items()}
         self.project_ids = {name: row["id"] for name, row in target.projects.items()}
+        self.project_values = {row["id"]: dict(row) for row in target.projects.values()}
+        self.install_values = dict(target.installs)
         self.file_layers: list[_FileLayer] = []
         self.seen_items: set[tuple[str, str, str | None]] = set()
         self.seen_projects: set[str] = set()
@@ -1665,6 +1667,7 @@ class _Importer:
         row = self.target.installs.get((item_id, project_id))
         current = {"roles": list(row["roles"]), "enabled": row["enabled"]} if row else None
         action = self.outcome(section, label, current, _differs(values, current, ("roles", "enabled")))
+        self.install_values[(item_id, project_id)] = values
         if self.apply and action in (Action.ADDED, Action.CHANGED):
             from ..db import config_transfer as db
 
@@ -1712,6 +1715,7 @@ class _Importer:
             await update_project(row["id"], description=values["description"], background=background,
                                  execution=execution, pool=self.conn)
         self.project_ids[name.lower()] = project_id
+        self.project_values[project_id] = {**(row or {}), "id": project_id, "name": name, **values}
         from .project_execution import ProjectExecution
 
         self.role_text_limits[project_id] = ProjectExecution.from_row(execution).role_text_limit
@@ -2049,6 +2053,34 @@ class _Importer:
 
     # --- schedules ---
 
+    async def _schedule_dependencies(self, project_id: str, template: Any,
+                                     profiles: Mapping[str, str]) -> None:
+        """Strict execution checks over the import's final graph, including preview-only ids."""
+        from ..db import projects as db_projects
+        from . import runtimes
+        from .profile_registry import RegistryError, check_roles
+        from .task_template_execution import fixed_profiles, validate_role_dependencies
+        from .task_templates import TemplateError
+
+        allowed = {p["id"] for p in await db_projects.allowed_profiles(project_id, pool=self.conn)} \
+            if not project_id.startswith("new:") else set()
+        specs = {identity: spec for identity, spec in self.profiles.values()}
+
+        def check_profile(identity: str, role: str) -> None:
+            spec = specs.get(identity)
+            if spec is None or spec.runtime.type not in runtimes.ADAPTERS:
+                raise RegistryError(f"no selectable Agent Profile {identity!r} here or in the file")
+            check_roles(spec, (role,))
+
+        for role, identity in fixed_profiles(template, profiles).items():
+            if allowed and identity not in allowed:
+                raise TemplateError(f"{role} Agent Profile is not on the project's list")
+            check_profile(identity, role)
+        items = {item for (item, owner), install in self.install_values.items()
+                 if owner in (None, project_id) and install["enabled"] and "task_role" in install["roles"]}
+        validate_role_dependencies(template, self.project_values[project_id],
+                                   self.role_template_values.get(project_id, {}), allowed, items, check_profile)
+
     def _notify_allowed(self, channel: Any, chat: Any) -> bool:
         from .channels.allowlist import SENDER_ID_FORMATS, AllowlistError, sender_ids
 
@@ -2166,12 +2198,12 @@ class _Importer:
                     template = TaskTemplate.from_row(raw_template)
                     checked_values = await check_values(template, values["template_inputs"])
                     from .schedule_templates import template_directory
-                    from .task_template_execution import fixed_profiles
                     template_directory(template, {"project_id": project_id, "work_dir": (row or {}).get("work_dir")})
-                    fixed_profiles(template, {role: identity for role, (_, identity) in profiles.items()})
                     from .schedules import REQUIREMENT_MAX_CHARS
                     if len(render_requirement(template, checked_values, values["requirement"])) > REQUIREMENT_MAX_CHARS:
                         raise TemplateError("the rendered schedule requirement is too long")
+                    await self._schedule_dependencies(project_id, template,
+                                                      {role: identity for role, (_, identity) in profiles.items()})
             except ValueError as exc:
                 self.record("project.schedules", key, Action.SKIPPED, reason=str(exc))
                 continue
@@ -2309,6 +2341,12 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
     for entry in data.get("channels", []):
         await importer.channel(entry)
     await importer.finish_channels()
+    # Installs must be projected before schedule validation in previews as well as applied imports.
+    for entry in data.get("installs", []):
+        await importer.install(entry, None)
+    for entry, project_id, label in projects:
+        for install in entry.get("installs") or ():
+            await importer.install(install, project_id, label)
     for entry, project_id, label in projects:
         await importer.schedules(entry.get("schedules") or [], project_id, label,
                                  manager_entries=data.get("managers", []))
@@ -2316,11 +2354,6 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
     await importer.settle_layers()
     importer.check_caps()
 
-    for entry in data.get("installs", []):
-        await importer.install(entry, None)
-    for entry, project_id, label in projects:
-        for install in entry.get("installs") or ():
-            await importer.install(install, project_id, label)
     return importer.plan
 
 

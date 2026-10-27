@@ -37,6 +37,11 @@ RETRY_DELAYS = (2, 5, 15, 30, 60)
 RETRY_LATER_SECONDS = 60
 IDLE_SWEEP_SECONDS = 5
 
+
+class _DeletionBusy(Exception):
+    pass
+
+
 _TASK_REPORTS = (MessageType.GOAL_STATUS, MessageType.TASK_ACCEPTED, MessageType.WORK_RESULT)
 
 
@@ -367,6 +372,11 @@ class ManagerFleet:
                 nonlocal agent, stopped
                 async with self._lock:
                     agent = self._agents.get(manager_id)
+                    ops = self._ops.get(manager_id)
+                    if ((agent is not None and agent.deletion_blocked) or (ops is not None and ops.executing)
+                            or self._bus.pending_count(manager_id)):
+                        raise _DeletionBusy
+                    # No await between the last admission check and retirement, as with message dispatch.
                     self._deleting = manager_id
                     self._retiring.add(manager_id)
                 if agent is None:
@@ -382,6 +392,8 @@ class ManagerFleet:
                     async with self._lock:
                         await self._settle_retired(manager_id, agent)
                 return result
+            except _DeletionBusy:
+                return "busy"
             finally:
                 async with self._lock:
                     if stopped and result != "deleted" and agent is not None:

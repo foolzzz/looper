@@ -18,6 +18,47 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.178] - 2026-10-27
+
+### Changed
+
+- **PR Python tests run in four CI shards.** The `Agent system tests` job is a four-shard matrix (`LOOPER_TEST_SHARD=N/4`, whole files assigned by weight in `tests/conftest.py`) behind one final job named `Agent system tests` that passes only when every shard passed; the job timeout drops from 20 to 15 minutes. No test is dropped and no production code changed. ([#786](https://github.com/foolzzz/looper/pull/786))
+- **Eval tooling accepts only current formats.** `register_agent` requires explicit provider `endpoints` and a top-level `model` and refuses the legacy `agent.model`, `provider.protocols`, `provider.base_url` and `provider.models`; `compare` and baseline lookup accept only `looper-prompt-eval/v2` (`looper-manager-dialogs/v2` for dialogs) reports and exit 2 otherwise. The committed real-Sonnet baseline is migrated to v2, launch parity checks the current four-tier contracts, and the historical pinned captures and the `launch-provenance.yml` workflow are removed. No product runtime or prompt change. ([#765](https://github.com/foolzzz/looper/pull/765))
+
+## [2.13.177] - 2026-10-27
+
+### Fixed
+
+- **Manager capability changes are visible; deleting an active Manager is refused.** When a changed skill set cannot be applied because the resident runtime is not idle, the turn carries the notice `能力变更待应用` and the change takes effect after `/new`. Catalog items report `manager_install_count`; the catalog card counts Manager-only installations as installed and its delete confirmation names them. Deleting a Manager that has active or admitted work, queued messages or a runtime that cannot prove it is idle now returns 409 instead of cancelling it; Manager tool executions are admitted under the retirement lock and refused while the Manager is retiring. No schema change. ([#773](https://github.com/foolzzz/looper/pull/773))
+
+## [2.13.176] - 2026-10-27
+
+### Fixed
+
+- **Interactive template tasks fall back; schedule imports check dependencies.** A task created from a template through `looper_task_create` uses the built-in profile when a role template's Agent Profile is off the project's list or fails the capability check, drops items that are no longer installed, and lists each fallback in the returned configuration block (`模板角色回退`). Schedules stay strict. Configuration import preview and apply now check a schedule's profiles, role templates and items against the import's final graph and skip a schedule that could not run; installs are processed before schedules. No schema change. ([#779](https://github.com/foolzzz/looper/pull/779))
+
+## [2.13.175] - 2026-10-27
+
+### Fixed
+
+- **Schedules: a claimed gate's output survives a rename or notification edit.** A schedule's execution fingerprint now covers only execution settings (not the name, notifications or the `enabled` flag, which is checked separately), a gate run's stdout is saved before the configuration check, and each gating run records its fingerprint in the new `schedule_runs.execution_snapshot` column (also in the run view). Carried input skips earlier runs whose snapshot differs from the current execution settings. No prompt or tool change. ([#777](https://github.com/foolzzz/looper/pull/777))
+
+## [2.13.174] - 2026-10-27
+
+### Changed
+
+- **Prompt-regression dialogs: Manager budget and api session readback.** With `--manager-agent`, the run budget (`--max-budget-usd`) is now written to the selected Manager profile's role settings together with `profile_id`. After an api Manager dialog, a new check reads back that every completed api turn in the Manager's current session has an `api_sessions` row whose protocol matches the Manager profile's, and a neutral `api_session_items` entry; a mismatch is added to the dialog's problems and fails it. Evaluation tooling only; no runtime, prompt or tool change. ([#764](https://github.com/foolzzz/looper/pull/764))
+
+## [2.13.173] - 2026-10-27
+
+### Changed
+
+- **Configuration is `looper-config/v4` only.** Export always writes v4 and import refuses any other format, and a top-level field outside the v4 set (including `loopx_version`), before work begins; an invalid pending import file is discarded. The older-format conversions are removed: import such a file on v2.13.165, upgrade that installation, then export v4. The Claude Code agent teams switch is dropped from layer environments on export and import. ([#761](https://github.com/foolzzz/looper/pull/761))
+
+### Removed
+
+- **Scheduler minimum interval variable.** `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` and `LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS` no longer apply; only the stored setting or the built-in 300 seconds does, and the source `env` is gone from the settings page. ([#761](https://github.com/foolzzz/looper/pull/761))
+
 ## [2.13.172] - 2026-10-27
 
 ### Added

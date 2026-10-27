@@ -130,6 +130,10 @@ class PerTurnSession(ABC):
         return bool(self._command)
 
     @property
+    def idle(self) -> bool:
+        return not self._active and self._process is None
+
+    @property
     def command(self) -> list[str]:
         return self._command
 

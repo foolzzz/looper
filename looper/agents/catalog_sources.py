@@ -399,8 +399,10 @@ async def _store(items: Sequence[NewItem], origin: Origin, source: str, *, repos
     except asyncpg.UniqueViolationError:
         raise CatalogConflict("another request took one of these names just now; try again") from None
     installs = await _installs([row["id"] for row in rows])
+    from ..db import manager_installs
+    manager_uses = await manager_installs.item_use_counts()
     return {
-        "items": [item_view(row, installs.get(row["id"], ())) for row in rows],
+        "items": [item_view(row, installs.get(row["id"], ()), manager_uses.get(row["id"], 0)) for row in rows],
         "added": added, "updated": updated, "unchanged": unchanged,
     }
 
@@ -1020,4 +1022,6 @@ async def update_item(item_id: str, data: Any) -> dict[str, Any]:
     except asyncpg.UniqueViolationError:
         raise CatalogConflict(f"another request took the name {fields.get('name')!r} just now") from None
     installs = await _installs([item_id])
-    return {"item": item_view(row, installs.get(item_id, ()))}
+    from ..db import manager_installs
+    return {"item": item_view(row, installs.get(item_id, ()),
+                              (await manager_installs.item_use_counts()).get(item_id, 0))}

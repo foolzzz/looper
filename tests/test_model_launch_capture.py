@@ -43,6 +43,11 @@ def _record(root: Path) -> dict[str, Any]:
     ("env", {"ANTHROPIC_BASE_URL": "https://other.example.test/api/anthropic/"}),
     ("config", {"settings.json": '{"protocol":"openai-responses","name":"provider"}\n'}),
     ("totals", {"input_tokens": 101, "cost_usd": 0.25}),
+    ("argv", ["different-runtime", "--model", "model[1m]"]),
+    ("argv", ["<root>/bin/claude", "--model", "different-model"]),
+    ("isolation", {"home": "/shared-home", "mode": "0700"}),
+    ("prompt_layers", {"role": {"config_id": "different-role"}}),
+    ("session", {"id": "sess-parity", "provider_id": "different-account"}),
 ])
 def test_behavior_changes_are_never_normalized_away(tmp_path: Path, field: str, value: Any) -> None:
     expected = _record(tmp_path)
