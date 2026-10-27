@@ -1,5 +1,6 @@
 """Observable Manager model dialogs, including mutations that must fail fake evals."""
 
+import asyncio
 from copy import deepcopy
 from dataclasses import asdict
 import json
@@ -12,6 +13,7 @@ import pytest
 from evals.prompt_regression import dialogs
 from evals.prompt_regression.runner import Api
 from looper.agents.profile_registry import ModelSpec
+from tests.db_support import DSN, run_db
 from tests.test_model_eval_registration import RegistryApi
 
 
@@ -24,6 +26,93 @@ class SeedApi(RegistryApi):
 
     def put(self, path, body):
         self.settings.append((path, deepcopy(body)))
+
+
+@pytest.mark.parametrize("mutation,problem", [
+    (None, None),
+    ("missing_session", "missing from api_sessions"),
+    ("wrong_protocol", "protocol"),
+    ("missing_items", "neutral session item"),
+    ("missing_turn", "neutral session item"),
+    ("wrong_session", "neutral session item"),
+    ("stale_items", "neutral session item"),
+])
+def test_fake_api_manager_dialog_reads_back_each_completed_turn(monkeypatch, tmp_path, mutation, problem):
+    from tests.api_manager_support import _manager, _message, _replies
+    from tests.fake_model_api import ResponseScript, text_events
+
+    async def check(pool):
+        import asyncpg
+
+        loop = asyncio.get_running_loop()
+        schema = await pool.fetchval("SELECT current_schema()")
+        connect = asyncpg.connect
+
+        async def case_connection(url):
+            assert url == DSN
+            return await connect(url, server_settings={"search_path": schema})
+
+        scripts = [ResponseScript(events=text_events("First answer.")),
+                   ResponseScript(events=text_events("Second answer."))]
+        async with _manager(pool, tmp_path, monkeypatch, scripts) as chat:
+            index = 0
+
+            async def answer(text):
+                nonlocal index
+                await chat.manager._handle(_message(text, index))
+                index += 1
+                if index == 2:
+                    sid = await pool.fetchval("SELECT session_id FROM api_sessions")
+                    # A positive control proves the real API runtime persisted both turns.
+                    assert await pool.fetchval(
+                        "SELECT count(DISTINCT turn) FROM api_session_items WHERE session_id = $1", sid) == 2
+                    if mutation == "missing_session":
+                        await pool.execute("DELETE FROM api_sessions WHERE session_id = $1", sid)
+                    elif mutation == "wrong_protocol":
+                        await pool.execute("UPDATE api_sessions SET protocol = 'openai-chat' WHERE session_id = $1", sid)
+                    elif mutation == "missing_items":
+                        await pool.execute("DELETE FROM api_session_items WHERE session_id = $1", sid)
+                    elif mutation == "missing_turn":
+                        # Multiple items from turn 1 cannot stand in for turn 2.
+                        await pool.execute("UPDATE api_session_items SET turn = 1 WHERE session_id = $1", sid)
+                    elif mutation == "wrong_session":
+                        await pool.execute("INSERT INTO api_sessions (session_id, protocol) "
+                                           "VALUES ('unrelated', 'openai-responses')")
+                        await pool.execute("UPDATE api_session_items SET session_id = 'unrelated' WHERE session_id = $1", sid)
+                    elif mutation == "stale_items":
+                        await pool.execute("UPDATE api_session_items SET created_at = created_at - interval '1 day' "
+                                           "WHERE session_id = $1", sid)
+                return _replies(chat.bus)[-1].payload["text"]
+
+            def ask(_api, _session, text, **_):
+                return asyncio.run_coroutine_threadsafe(answer(text), loop).result(timeout=15)
+
+            class Api:
+                def post(self, path, body):
+                    assert path == "/api/v1/tasks/page"
+                    return {"result": {"tasks": []}}
+
+            monkeypatch.setattr(asyncpg, "connect", case_connection)
+            monkeypatch.setattr(dialogs, "_ask", ask)
+            monkeypatch.setattr(dialogs, "_newest_run", lambda *_: 0)
+            monkeypatch.setattr(dialogs, "_last_action", lambda *_: 0)
+            monkeypatch.setattr(dialogs, "_trail", lambda *_: [])
+            monkeypatch.setattr(dialogs, "_stop_leftovers", lambda *_: None)
+            scenarios = tmp_path / "scenarios.json"
+            scenarios.write_text("{}")
+            case = dialogs.Dialog("api_history", (dialogs.Say("First question.", lambda _: None),
+                                                   dialogs.Say("Second question.", lambda _: None)))
+            row = await asyncio.to_thread(
+                dialogs.run_dialog, Api(), case, database_url=DSN, project_id="eval-project",
+                scenarios=scenarios, mode="fake", timeout=15, manager_profile={"runtime_type": "api"})
+            assert row["outcome"] == ("pass" if problem is None else "fail"), row
+            assert len(row["turns"]) == 2 and all(turn["problem"] is None for turn in row["turns"])
+            if problem is None:
+                assert row["problems"] == []
+            else:
+                assert any(problem in p for p in row["problems"])
+
+    run_db(check, monkeypatch, timeout=45)
 
 
 def test_light_and_manager_seeds_register_model_references_once():

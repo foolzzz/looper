@@ -2124,6 +2124,42 @@ def _root_overrun(api: Api, seen: dict[int, float]) -> float:
             return sum(seen.values())
 
 
+def _api_session_check(database_url: str, agent: str, since: int) -> str | None:
+    """Every completed API Manager turn must have protocol metadata and neutral history in its own session."""
+    import asyncpg
+
+    async def read() -> str | None:
+        conn = await asyncpg.connect(database_url)
+        try:
+            # Earlier or interrupted turns cannot stand in for a completed turn's persisted history.
+            rows = await conn.fetch(
+                "WITH completed AS ("
+                "SELECT r.session_id, metadata->'llm_model'->>'protocol' AS protocol, count(*) AS turns, "
+                "bool_and(EXISTS (SELECT 1 FROM api_session_items i WHERE i.session_id = r.session_id "
+                "AND i.created_at BETWEEN r.created_at AND r.finished_at)) AS has_items "
+                "FROM llm_records r WHERE agent_id = $1 AND id > $2 AND status = 'completed' "
+                "AND metadata->'profile'->'runtime'->>'type' = 'api' "
+                "AND NOT (metadata ? 'session_profile') "
+                "GROUP BY r.session_id, metadata->'llm_model'->>'protocol') "
+                "SELECT c.protocol AS expected_protocol, s.protocol, c.turns, c.has_items, "
+                "count(DISTINCT i.turn) AS stored_turns "
+                "FROM completed c LEFT JOIN api_sessions s USING (session_id) "
+                "LEFT JOIN api_session_items i ON i.session_id = s.session_id "
+                "GROUP BY c.session_id, c.protocol, s.protocol, c.turns, c.has_items", agent, since)
+            for row in rows:
+                if row["protocol"] is None:
+                    return "api Manager session is missing from api_sessions"
+                if row["expected_protocol"] is None or row["protocol"] != row["expected_protocol"]:
+                    return "api_sessions.protocol does not match the Manager profile's protocol"
+                if not row["has_items"] or row["stored_turns"] < row["turns"]:
+                    return "api Manager session has no neutral session item for every completed turn"
+            return None
+        finally:
+            await conn.close()
+
+    return asyncio.run(read())
+
+
 def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, scenarios: Path, mode: str,
                timeout: float, runtime_root: Path | None = None, cap_left: float | None = None,
                switch_spec: dict[str, Any] | None = None,
@@ -2135,6 +2171,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
     started = time.monotonic()
     turns: list[dict[str, Any]] = []
     error: dict[str, Any] = {}
+    problems: list[str] = []
 
     overrun: dict[int, float] = {}
 
@@ -2163,8 +2200,10 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                                  manager_profile=manager_profile)
         elif dialog.seed is not None:
             dialog.seed(api, project_id)
-        if dialog.seed is _make_switch_profile or any(say.stop or say.withdraw for say in dialog.says):
-            runs_since = _newest_run(api, "manager")
+        api_manager = (manager_profile or {}).get("runtime_type") == "api"
+        agent = f"manager-{dialog.manager}" if dialog.manager else "manager"
+        if api_manager or dialog.seed is _make_switch_profile or any(say.stop or say.withdraw for say in dialog.says):
+            runs_since = _newest_run(api, agent)
         if dialog.id == "model_price_history":
             _price_history(database_url, seed=True)
         if dialog.id == "model_login_runtime":
@@ -2190,7 +2229,6 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                 data.setdefault("manager", {})[text] = [[name, json.loads(json.dumps(arguments).replace(
                     "<task>", task or ""))] for name, arguments in say.fake]
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-            agent = f"manager-{dialog.manager}" if dialog.manager else "manager"
             before = _last_action(database_url, agent)
             if client_api is not None:
                 reply, conversation = _ask_client(client_api, api, conversation, text, timeout=timeout,
@@ -2213,6 +2251,10 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             if problem:
                 break
         check_budget()
+        if api_manager:
+            problem = _api_session_check(database_url, agent, runs_since)
+            if problem:
+                problems.append(problem)
     except SpendingCap as exc:
         error = error_row(ErrorClass.SPENDING_CAP, str(exc), stopped_by_cap=True)
     except ReplyTimeout as exc:
@@ -2227,10 +2269,11 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                 api.post("/api/v1/clients/revoke", {"client_id": client_id})
             except Exception as exc:  # the token is never in this message: it names the client, not the token
                 print(f"could not revoke the eval's API client {client_id}: {exc}", file=sys.stderr)
-    passed = all(t["problem"] is None for t in turns) and len(turns) == len(dialog.says)
+    problems = [t["problem"] for t in turns if t["problem"]] + problems
+    passed = not problems and len(turns) == len(dialog.says)
     return {"id": dialog.id, **(error or {"outcome": (Outcome.PASS if passed else Outcome.FAIL).value,
                                           "success": passed}),
-            "problems": [t["problem"] for t in turns if t["problem"]], "turns": turns,
+            "problems": problems, "turns": turns,
             "calls": sum(len(t["calls"]) for t in turns), "duration_s": round(time.monotonic() - started, 1)}
 
 
@@ -2360,7 +2403,8 @@ def run(
                     if manager_agent is not None:
                         registered = register_agent(api, manager_agent)
                         api.post("/api/v1/agent_settings/update_role", {
-                            "role": "manager", "values": {"profile_id": registered["profile_id"]}})["result"]
+                            "role": "manager", "values": {"profile_id": registered["profile_id"],
+                                                           "run_budget_usd": max_budget_usd}})["result"]
                         configs[dialog.id, rep] = (picked, registered)
                     else:
                         configs[dialog.id, rep] = (picked, _manager_profile(api, manager_model, manager_effort)
