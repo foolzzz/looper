@@ -205,6 +205,48 @@ looper serve（宿主，Python）
 - **崩溃与重启：** 在途的轮次以 `lost` 结束（与现在「进程死在一轮中间，没有 result」同一条路径）；按 1、2、4…60 秒退避重启，10 分钟内重启 5 次判定崩溃循环，这个运行时标为不可用，新的轮次明确报错。会话在下一次用到时 `session/load`，从 SDK 自己的持久化恢复；没确认的总线信封在会话重新打开后重投。
 - **服务停机：** `looper serve` 先对每个运行器发 `shutdown`（停止接新请求，取消在途轮次，写完持久化，回答后退出）；5 秒内不退出就杀进程组。运行器读到 stdin EOF 时也按 `shutdown` 处理。
 
+### 5.5 目录结构（维护者 2026-10-27 认可）
+
+**源码。** Looper 仓库放宿主一侧和 TypeScript 运行器；Norma 运行器放在 Go 移植版的模块里，因为 `go/internal/norma` 是 Go 的 internal 包，别的模块导入不了。
+
+```text
+looper 仓库
+├─ looper/agents/runtimes/runner/   宿主一侧（Python）
+│   ├─ protocol.py      消息类型、错误码、版本（类型化）
+│   ├─ bridge.py        RunnerBridge：每条连接一个；tools/call、budget/authorize、总线
+│   ├─ supervisor.py    RunnerSupervisor：起停、放置、准入、健康
+│   └─ session.py       RunnerSession / RunnerChannel，接现有的 tier
+├─ runners/                         原生语言的运行器
+│   ├─ protocol/        协议的 JSON Schema 和与语言无关的一致性用例（每个运行器都要通过）
+│   ├─ fake/            假运行器：S0 和一致性测试用
+│   ├─ pi/              TypeScript：src/{main,session,provider,tools,exec,extensions}.ts 与 test/
+│   └─ dsh/             TypeScript，结构同 pi/
+└─ tests/
+
+Go 移植版（loopgo-main）
+├─ go/internal/norma/            Norma 副本，唯一上游
+├─ go/internal/runner/           Go 的协议实现：读写 goroutine、会话表、准入信号量
+└─ go/cmd/looper-norma-runner/   入口
+```
+
+`runners/pi`、`runners/dsh` 的源码随 wheel 发布，由 Node 直接运行（只用可擦除的 TypeScript 语法，Q7）；不打包 SDK，SDK 从探测到的 `pi`、`dsh` 可执行文件的真实路径解析。Norma 运行器由 CI 按平台编译，`install.sh` 校验 SHA-256 后下载（Q6）。
+
+**运行时。** 每个运行器进程在 Looper 的 runtime root 下有一个私有目录，同时是它的 cwd；会话的状态都在这个目录里，不指向操作者的目录。
+
+```text
+<runtime_root>/runners/
+├─ pi-1/                      每个运行器进程一个；池子扩容时编号递增（pi-2 …）
+│   ├─ tmp/                   私有 TMPDIR
+│   └─ sessions/<会话 id>/
+│       ├─ agent/             Pi 的 agentDir：只有设置和模型，没有 auth
+│       ├─ home/              工具子进程的 HOME
+│       └─ native/            SDK 原生的会话文件（Pi 的 JSONL）
+├─ dsh-1/                     同上；DSH_HOME 按运行器设（它是进程级的配置）
+└─ norma-1/                   同上；native/ 放 Norma 的 transcript
+```
+
+任务的工作区仍是现有的任务 worktree，经 `cwd` 与 `add_dirs` 交给运行器；`agent_sessions` 只记指针（运行器种类、会话 id、`native/` 的位置）。运行器重启后按指针续接；会话关闭或管家删除时，RunnerSupervisor 删除对应的 `sessions/<会话 id>/`。
+
 ## 6. 协议
 
 ### 6.1 连接与分帧
