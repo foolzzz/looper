@@ -154,7 +154,7 @@ async def current_copies(runtime_root: Path) -> list[str] | None:
 
     None when any of them cannot be read or written.
     """
-    from ..db import projects as db_projects
+    from ..db import managers as db_managers, projects as db_projects
     from .catalog import ROLES, TASK_ROLES
     from .knowledge import load_knowledge
     from .library import load_installed
@@ -164,6 +164,12 @@ async def current_copies(runtime_root: Path) -> list[str] | None:
     places = [(role, None) for role in ROLES] + [(role, str(p["id"])) for p in projects for role in TASK_ROLES]
     for role, project_id in places:
         library = await load_installed(runtime_root, role, project_id)
+        if library.error is not None:
+            return None
+        paths += [*library.plugin_dirs, *([library.mcp_config] if library.mcp_config else [])]
+    # Definitions that are cold or disabled still own valid capability bundles.
+    for manager in await db_managers.list_managers():
+        library = await load_installed(runtime_root, "manager", manager_id=manager["id"])
         if library.error is not None:
             return None
         paths += [*library.plugin_dirs, *([library.mcp_config] if library.mcp_config else [])]

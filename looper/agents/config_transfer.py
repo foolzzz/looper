@@ -156,7 +156,7 @@ class Action(str, Enum):
 SECTIONS = ("runtimes", "providers", "models", "profiles", "settings.layers", "settings.roles", "settings.scheduler", "channels",
             "catalog", "installs",
             "projects", "project.layers", "project.items", "project.knowledge", "project.role_templates",
-            "project.schedules", "project.installs", "managers", "manager.templates")
+            "project.schedules", "project.installs", "managers", "manager.templates", "manager.installs")
 # A schedule's settings the file carries as they are; its notify target, Agent Profiles and task limits are
 # ``notify_target``, ``profiles`` (by name) and ``task_limits``.
 _SCHEDULE_FIELDS = ("name", "cron", "timezone", "requirement", "overlap", "max_parallel_runs", "catch_up",
@@ -377,9 +377,14 @@ def manager_template_entry(row: Mapping[str, Any], profiles: Mapping[str, str],
 
 
 def manager_entry(row: Mapping[str, Any], templates: Sequence[Mapping[str, Any]],
-                  profiles: Mapping[str, str], projects: Mapping[str, str]) -> dict[str, Any]:
+                  profiles: Mapping[str, str], projects: Mapping[str, str],
+                  installs: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
     entry = {name: row[name] for name in ("id", "name", "description")}
     entry["idle_timeout_seconds"] = row.get("idle_timeout_seconds", 0 if row["id"] == "manager" else 1800)
+    extras = [{"item": {"kind": s["kind"], "name": s["name"]}, "enabled": s["enabled"]}
+              for s in installs if s["manager_id"] == row["id"]]
+    if extras:
+        entry["installs"] = extras
     if row["id"] != "manager":
         entry.update({name: row[name] for name in ("system_prompt", "tools", "task_scope", "task_policy", "enabled")})
         entry["profile"] = profiles[row["profile_id"]] if row["profile_id"] else None
@@ -481,8 +486,9 @@ async def export_chunks(
     installs = await db.read_installs(conn)
     channel_rows = await db.read_channels(conn)
     managers = await db.read_managers(conn)
+    manager_installs = await db.read_manager_installs(conn)
     portable_graph = any(row["id"] != "manager" for row in managers) or any(
-        row["channel_id"] not in BUILTIN_CHANNEL_IDS for row in channel_rows)
+        row["channel_id"] not in BUILTIN_CHANNEL_IDS for row in channel_rows) or bool(manager_installs)
     channels = [channel_entry(row, include_secrets, portable_graph=portable_graph) for row in channel_rows]
     summary.format = V4_FORMAT if portable_graph else V3_FORMAT
     providers = [provider_entry(r, include_secrets) for r in await db.read_providers(conn) if not r["builtin"]]
@@ -504,9 +510,11 @@ async def export_chunks(
         manager_templates = await db.read_manager_templates(conn)
         profile_names = {row["id"]: row["name"] for row in await db.read_profiles(conn)}
         project_names = {row["id"]: row["name"] for row in await db.read_projects(conn)}
-        head["managers"] = [manager_entry(row, manager_templates, profile_names, project_names) for row in managers]
+        head["managers"] = [manager_entry(row, manager_templates, profile_names, project_names, manager_installs)
+                            for row in managers]
         summary.counts["managers"] = len(managers)
         summary.counts["manager.templates"] = len(manager_templates)
+        summary.counts["manager.installs"] = len(manager_installs)
     if scheduler := await stored_scheduler_settings(conn):  # only a stored setting is carried
         head["settings"]["scheduler"] = scheduler
     summary.counts.update({"runtimes": len(head["runtimes"]), "providers": len(providers),
@@ -990,6 +998,7 @@ class _Target:
     schedules: dict[str, list[dict[str, Any]]] = field(default_factory=lambda: defaultdict(list))  # by project id
     managers: dict[str, dict[str, Any]] = field(default_factory=dict)  # immutable full id, including tombstones
     manager_templates: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+    manager_installs: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
     bot_sequence: tuple[int, bool] = (1, False)
 
     @classmethod
@@ -1018,6 +1027,8 @@ class _Target:
         target.managers = {row["id"]: row for row in await db.read_managers(conn, include_deleted=True)}
         target.manager_templates = {(row["manager_id"], row["key"]): row for row in
                                     await db.read_manager_templates(conn)}
+        target.manager_installs = {(row["manager_id"], row["item_id"]): row for row in
+                                   await db.read_manager_installs(conn)}
         from ..db.schedules import list_schedules
 
         for row in await list_schedules(pool=conn):
@@ -1053,6 +1064,7 @@ class _Importer:
         self.plan = Plan(applied=apply)
         # Item ids by key, for installs: stored ones and the ones this import adds ("new:..." in a preview).
         self.item_ids = {key: row["id"] for key, row in target.items.items()}
+        self.item_origins = {key: row["origin"] for key, row in target.items.items()}
         self.item_sizes = {key: int(row["size_bytes"]) for key, row in target.items.items()}
         self.project_ids = {name: row["id"] for name, row in target.projects.items()}
         self.project_labels = {row["id"]: f"{row['name']} / " for row in target.projects.values()}
@@ -1952,6 +1964,7 @@ class _Importer:
         action = self.outcome(section, label, current, changed)
         self.item_sizes[item.key] = item.values["size_bytes"]
         self.item_ids[item.key] = current["id"] if current else f"new:{label}"
+        self.item_origins[item.key] = item.values["origin"]
         if self.apply and action in (Action.ADDED, Action.CHANGED):
             from ..db import config_transfer as db
 
@@ -2205,7 +2218,7 @@ class _Importer:
             try:
                 entry = _mapping(raw, "a Manager")
                 allowed = {"id", "name", "description", "system_prompt", "profile", "tools", "task_scope",
-                           "task_policy", "enabled", "templates", "idle_timeout_seconds"}
+                           "task_policy", "enabled", "templates", "idle_timeout_seconds", "installs"}
                 unknown = set(entry) - allowed
                 if unknown:
                     raise ConfigFileError(f"managers: unknown field {sorted(unknown)[0]!r}")
@@ -2220,9 +2233,9 @@ class _Importer:
                     raise ConfigFileError(f"Manager {identity!r} was deleted; choose a new immutable id")
                 if "name" not in entry:
                     raise ConfigFileError(f"Manager {identity}: name is required")
-                if identity == "manager" and set(entry) - {"id", "name", "description", "idle_timeout_seconds"}:
-                    raise ConfigFileError("the default Manager entry may only set id, name, description and idle_timeout_seconds: 0")
-                values = {k: v for k, v in entry.items() if k not in ("id", "profile", "templates")}
+                if identity == "manager" and set(entry) - {"id", "name", "description", "idle_timeout_seconds", "installs"}:
+                    raise ConfigFileError("the default Manager entry may only set id, name, description, installs and idle_timeout_seconds: 0")
+                values = {k: v for k, v in entry.items() if k not in ("id", "profile", "templates", "installs")}
                 for name in ("name", "description", "system_prompt"):
                     if name in values:
                         _string(values[name], f"{identity}.{name}")
@@ -2354,6 +2367,42 @@ class _Importer:
                                           "no local directory is invented; set one before using this template"))
             if self.apply:
                 await db_managers.put_template(identity, key, values, conn=self.conn, only_if_changed=True)
+
+    async def manager_installs(self, entries: Sequence[Any]) -> None:
+        """Merge explicit extras after catalog and Manager identity resolution, in the import transaction."""
+        from ..db import manager_installs as db_installs
+
+        for entry in entries:
+            identity = entry["id"]  # The Manager phase already validated identity and deletion state.
+            raw = entry.get("installs", [])
+            if not isinstance(raw, list):
+                raise ConfigFileError(f"Manager {identity}: installs must be a list")
+            seen = set()
+            for install in raw:
+                try:
+                    install = _mapping(install, "a Manager install")
+                    if set(install) != {"item", "enabled"}:
+                        raise _Skip("a Manager install requires only item and enabled")
+                    ref = _mapping(install["item"], "item")
+                    if set(ref) != {"kind", "name"} or ref.get("kind") not in ("plugin", "skill"):
+                        raise _Skip("Manager installs require a global plugin or skill natural reference")
+                    name = _string(ref["name"], "item.name", required=True)
+                    key = (ref["kind"], name, None)
+                    item_id = self.item_ids.get(key)
+                    if item_id is None or self.item_origins.get(key) == "project":
+                        raise _Skip(f"no global {ref['kind']} {name!r} here or in the file")
+                    if item_id in seen:
+                        raise _Skip(f"duplicate Manager install {name!r}")
+                    seen.add(item_id)
+                    enabled = _boolean(install["enabled"], "enabled")
+                except _Skip as exc:
+                    raise ConfigFileError(f"Manager {identity} installs: {exc}") from None
+                row = self.target.manager_installs.get((identity, item_id))
+                values = {"enabled": enabled}
+                action = self.outcome("manager.installs", f"{identity}/{ref['kind']}:{name}", row,
+                                      _differs(values, row, values))
+                if self.apply and action in (Action.ADDED, Action.CHANGED):
+                    await db_installs.put_install(identity, item_id, enabled, conn=self.conn)
 
     # --- schedules ---
 
@@ -2624,6 +2673,7 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
         await importer.documents(entry.get("knowledge") or [], project_id, label)
         await importer.role_templates(entry.get("role_templates") or [], project_id, label)
     await importer.managers(data.get("managers", []))
+    await importer.manager_installs(data.get("managers", []))
     for entry in data.get("channels", []):
         await importer.channel(entry)
     if importer.channel_graph:

@@ -162,6 +162,11 @@ TEMPLATE_CONFIG = _object({
         "kind": {"type": "string", "enum": ["text", "url"]}, "required": _BOOL,
         "pattern": _STR, "hint": _STR}, ["key", "label"], closed=True)),
 }, ["key", "name"], closed=True)
+_MANAGER_INSTALLS = _array(_object({
+    "item": _object({"kind": {"type": "string", "enum": ["plugin", "skill"]},
+                     "name": {"type": "string", "minLength": 1}}, ["kind", "name"], closed=True),
+    "enabled": _BOOL,
+}, ["item", "enabled"], closed=True))
 _MANAGER_CONFIG_FIELDS = {
     "id": {"type": "string", "pattern": r"^manager(?:-[a-z][a-z0-9-]{1,30})?$"}, "name": _STR,
     "description": _STR,
@@ -170,7 +175,7 @@ _MANAGER_CONFIG_FIELDS = {
     "task_scope": {"type": "string", "enum": ["all", "own"]},
     "task_policy": {"type": "string", "enum": ["free", "templates_only"]},
     "idle_timeout_seconds": {"type": "integer", "anyOf": [{"const": 0}, {"minimum": 60, "maximum": 86400}]},
-    "enabled": _BOOL, "templates": _array(TEMPLATE_CONFIG),
+    "enabled": _BOOL, "templates": _array(TEMPLATE_CONFIG), "installs": _MANAGER_INSTALLS,
 }
 
 
@@ -178,7 +183,8 @@ def _manager_config(template: dict[str, Any]) -> dict[str, Any]:
     fields = {**_MANAGER_CONFIG_FIELDS, "templates": _array(template)}
     return {**_object(fields, ["id", "name"], closed=True), "oneOf": [
         _object({"id": {"const": "manager"}, "name": _STR, "description": _STR,
-                 "idle_timeout_seconds": {"type": "integer", "const": 0}}, ["id", "name"], closed=True),
+                 "idle_timeout_seconds": {"type": "integer", "const": 0},
+                 "installs": _MANAGER_INSTALLS}, ["id", "name"], closed=True),
         _object({**fields, "id": {"type": "string", "pattern": r"^manager-[a-z][a-z0-9-]{1,30}$"}},
                 ["id", "name"], closed=True),
     ]}

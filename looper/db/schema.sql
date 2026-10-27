@@ -1309,6 +1309,16 @@ CREATE TABLE IF NOT EXISTS manager_task_templates (
     PRIMARY KEY (manager_id, key)
 );
 
+-- Additive capabilities owned by one Manager; global/project installs keep their existing scopes.
+CREATE TABLE IF NOT EXISTS manager_library_installs (
+    manager_id TEXT NOT NULL REFERENCES managers(id) ON DELETE RESTRICT,
+    item_id TEXT NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
+    enabled BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (manager_id, item_id)
+);
+
 -- The Manager a task belongs to: the one that created it, which hears of its progress and end
 -- (the dashboard's and the schedules' tasks belong to the default Manager). template: what the template it was
 -- created from said then (key, name, updated_at, inputs, planner_instructions, and roles: each task role it copied,

@@ -36,7 +36,7 @@ import json
 import logging
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1224,7 +1224,8 @@ class ManagerAgent:
             raise ProfileUnavailable(agent_settings.profile_error, agent_settings.profile_source)
         await token.step("templates", self._read_templates())
         system_prompt = self._composed_prompt(agent_settings)
-        library = await token.step("library", load_installed(self._runtime_root, AgentType.MANAGER.value))
+        library = await token.step("library", load_installed(
+            self._runtime_root, AgentType.MANAGER.value, manager_id=self.agent_id))
         library = await token.step("library_server", self._library_with_server(library))
         launch = Launch(agent_settings, library, role=AgentType.MANAGER)
         if ask.turn is not None:
@@ -1360,6 +1361,18 @@ class ManagerAgent:
         failure: BaseException | None = None
         try:
             async with self._lifecycle_gate:
+                previous = self._process
+                if previous is not None and prepared.switch is None and self._claude.started \
+                        and self._claude.pid is not None \
+                        and prepared.launch.runtime is self._claude_runtime \
+                        and previous.launch.library.sha256 != prepared.launch.library.sha256:
+                    close = getattr(self._claude, "try_stop_if_idle", None)
+                    if close is None or not await token.keep("library_idle_close", close(), 10):
+                        # A user result may leave background/autonomous work running. Keep the actual
+                        # launch in this turn's record and retry the capability refresh next turn.
+                        prepared = replace(prepared, launch=previous.launch, system_prompt=previous.system_prompt,
+                                           signature=previous.signature,
+                                           prompt_file=previous.system_prompt.write_file(self._runtime_root))
                 await self._start_turn(token, prepared)
             return await self._converse(token, prepared)
         except BaseException as exc:

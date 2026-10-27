@@ -137,7 +137,10 @@ async def impact(server, operation, arguments, principal, headers):
     if operation.operation_id != "catalog_items.delete":
         return None
     item = await _answer(_deletable(arguments["item_id"]))
-    return (f"Delete catalog item {item['qualified_name']!r} and all {len(item['installs'])} installations? "
+    from ...db import manager_installs
+    manager_uses = (await manager_installs.item_use_counts()).get(arguments["item_id"], 0)
+    return (f"Delete catalog item {item['qualified_name']!r} and all {len(item['installs']) + manager_uses} installations "
+            f"({manager_uses} Manager installations)? "
             "Its stored files and installations will be removed; other catalog items are unchanged.")
 
 

@@ -144,6 +144,7 @@ async def delete_manager(manager_id: str, *, before_delete: Callable[[], Awaitab
         if before_delete is not None:
             await before_delete()
         await conn.execute("DELETE FROM manager_task_templates WHERE manager_id = $1", manager_id)
+        await conn.execute("DELETE FROM manager_library_installs WHERE manager_id = $1", manager_id)
         session = await conn.fetchrow(
             "DELETE FROM agent_sessions WHERE agent_id = $1 RETURNING session_id, runtime_type", manager_id)
         if session and session["runtime_type"] == "api" and session["session_id"] is not None:
