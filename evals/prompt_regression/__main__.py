@@ -53,8 +53,19 @@ _BASELINE_HELP = ("compare with this run file, or with the newest earlier run in
                   "committed baseline of the mode and model")
 
 
+class _EvalParser(argparse.ArgumentParser):
+    def parse_args(self, args: list[str] | None = None,
+                   namespace: argparse.Namespace | None = None) -> argparse.Namespace:
+        parsed = super().parse_args(args, namespace)
+        if parsed.command == "dialogs" and parsed.manager_agent is not None:
+            for option in ("manager_model", "manager_effort", "register_agent"):
+                if getattr(parsed, option) is not None:
+                    self.error(f"--manager-agent is not allowed with --{option.replace('_', '-')}")
+        return parsed
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m evals.prompt_regression", description=__doc__)
+    parser = _EvalParser(prog="python -m evals.prompt_regression", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser("run", help="Run the task set and compare it with the previous run or the baseline.")
@@ -107,6 +118,9 @@ def _parser() -> argparse.ArgumentParser:
                       help="session_profile_switch: register this agent as eval/switch (other roles keep "
                            "--model/--agent)")
     talk.add_argument("--manager-model", help="the Manager alone runs Claude Code with this model (its role layer)")
+    talk.add_argument("--manager-agent", type=Path, metavar="SPEC.json",
+                      help="real mode: register this agent and run the Manager alone on it (its role layer); "
+                           "the other roles keep --model/--agent")
     talk.add_argument("--manager-effort", help="with --manager-model: its effort, such as xhigh")
     talk.add_argument("--dialogs", help="comma-separated dialog ids (default: all)")
     talk.add_argument("--reps", type=_reps, default=1, help=_REPS_HELP)
@@ -197,6 +211,8 @@ def main(argv: list[str] | None = None) -> int:
 def _dialogs(args: argparse.Namespace) -> int:
     real = args.mode == "real"
     try:
+        if args.manager_agent is not None and not real:
+            raise runner.EvalError("--manager-agent needs --mode real; the api runtime's fake runs are its own tests")
         result, path = dialogs.run(
             mode=args.mode, dialogs=dialogs.select(args.dialogs.split(",") if args.dialogs else None),
             admin_url=args.pg_url, out_dir=args.out_dir,
@@ -205,6 +221,7 @@ def _dialogs(args: argparse.Namespace) -> int:
             max_budget_usd=args.max_budget_usd if real else None, total_cap_usd=args.total_cap_usd if real else None,
             timeout=args.timeout, keep_work_dirs=args.keep_work_dirs,
             manager_model=args.manager_model if real else None, manager_effort=args.manager_effort, reps=args.reps,
+            manager_agent=json.loads(args.manager_agent.read_text(encoding="utf-8")) if args.manager_agent else None,
             jobs=args.jobs,
             case_budget_usd=args.case_budget_usd if real else None,
             switch_agent=json.loads(args.switch_agent.read_text(encoding="utf-8")) if args.switch_agent else None,
