@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.161] - 2026-10-27
+
+### Changed
+
+- **Scenario Manager documentation matches the shipped behavior.** The architecture document, the scenario Manager RFC and the long-horizon plan now describe idle suspension, deleted-Manager cleanup, schedule ownership and templates, Manager installs and configuration transfer v4, and a new integration regression covers the portable graph. Documentation and tests only. ([#737](https://github.com/foolzzz/looper/pull/737))
+
+### Added
+
+- **RFC for agent SDK runners.** Proposes Pi, DSH and Norma runners in their native languages, driven by Looper over JSON-RPC on stdio; the maintainer agreed to develop it from stage S0. Design document only; no code. ([#703](https://github.com/foolzzz/looper/pull/703))
+
 ## [2.13.160] - 2026-10-27
 
 ### Added
