@@ -305,7 +305,8 @@ def test_default_owned_added_bot_selects_v4_with_default_metadata(monkeypatch: p
                            "VALUES ('channel-telegram-2', 'telegram', 'manager', 'Example bot')")
         document = await _export(pool)
         assert document["format"] == transfer.V4_FORMAT
-        assert document["managers"] == [{"id": "manager", "name": "Coordinator", "description": "Example coordinator"}]
+        assert document["managers"] == [{"id": "manager", "name": "Coordinator", "description": "Example coordinator",
+                                         "idle_timeout_seconds": 0}]
         assert next(channel for channel in document["channels"] if channel["channel_id"] == "channel-telegram-2")["manager_id"] == "manager"
 
     run_db(test, monkeypatch, timeout=15)
@@ -338,7 +339,7 @@ def test_manager_manager_roundtrips_separately_from_default(monkeypatch: pytest.
         await _run(pool, _document({"id": "manager", "name": "Coordinator"},
                                    _manager("manager-manager", name="Scenario", templates=[_template()])))
         entries = {entry["id"]: entry for entry in (await _export(pool))["managers"]}
-        assert entries["manager"] == {"id": "manager", "name": "Coordinator", "description": ""}
+        assert entries["manager"] == {"id": "manager", "name": "Coordinator", "description": "", "idle_timeout_seconds": 0}
         assert entries["manager-manager"]["name"] == "Scenario"
         assert entries["manager-manager"]["templates"][0]["key"] == "review"
         plan = await _run(pool, _document(*entries.values()))

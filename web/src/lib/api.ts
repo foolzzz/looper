@@ -4013,6 +4013,7 @@ export interface ManagerInfo {
   tools: ManagerTools;
   task_scope: TaskScope;
   task_policy: TaskPolicy;
+  idle_timeout_seconds: number;
   system_prompt: string | null;
   profile_id: string | null;
   profile_name: string | null;
@@ -4033,6 +4034,7 @@ export interface ManagerFields {
   tools?: ManagerTools;
   task_scope?: TaskScope;
   task_policy?: TaskPolicy;
+  idle_timeout_seconds?: number;
   enabled?: boolean;
 }
 

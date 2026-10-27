@@ -595,6 +595,10 @@ class _Output:
         self._between: deque[dict[str, Any]] = deque(maxlen=_BETWEEN_LIMIT)  # events outside any turn
         self._own_open = False  # a turn of Claude's own is running
         self._own: AutonomousTurn | None = None  # its owner's handler, if any
+        self._pending_jobs: dict[str, str | None] = {}  # task id -> launching tool id
+        self._untracked_jobs: set[str] = set()  # background launches not yet assigned a task id
+        self._idle_unknown = False  # malformed lifecycle events cannot prove quiescence
+        self._seen_result = False
         self._capped = False  # a user turn was ended at its soft cap: the rest of the output belongs to no turn
         self.discard = False  # Claude was killed mid-turn: what it writes as it dies belongs to no turn
 
@@ -624,6 +628,7 @@ class _Output:
     async def _dispatch(self, event: dict[str, Any]) -> None:
         if self._capped or self.discard:
             return  # what Claude writes before it is killed: the turn has ended
+        self._track_jobs(event)
         if event.get("type") == "control_response":
             logger.debug("%s: control response: %s", self._claude.label, event)
             return
@@ -662,6 +667,72 @@ class _Output:
         if event.get("type") == "command_lifecycle":
             return  # the "completed" of a message whose turn has ended
         await self._outside(event)
+
+    @property
+    def idle(self) -> bool:
+        """No admitted turn, autonomous turn, unhandled output or unfinished job."""
+        return (self._seen_result and not self.ended and self.turn is None and not self._own_open
+                and not self._between and not self._pending_jobs and not self._untracked_jobs
+                and not self._idle_unknown)
+
+    def _track_jobs(self, event: dict[str, Any]) -> None:
+        """Track structured runtime lifecycles, including the gap before an own turn.
+
+        A user result does not finish its background Bash/Agent/teammate jobs.
+        Missing lifecycle identifiers retain the process rather than guessing
+        from tool-result prose. A completion outside a turn remains in
+        ``_between`` until Claude has handled its notification.
+        """
+        if event.get("type") == "result":
+            self._seen_result = True
+        message = event.get("message")
+        if event.get("type") == "assistant" and isinstance(message, dict):
+            content = message.get("content")
+            for block in content if isinstance(content, list) else []:
+                if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    continue
+                arguments = block.get("input")
+                if isinstance(arguments, dict) and arguments.get("run_in_background") is True:
+                    tool_id = block.get("id")
+                    if isinstance(tool_id, str) and tool_id:
+                        self._untracked_jobs.add(tool_id)
+                    else:
+                        self._idle_unknown = True
+        if event.get("type") != "system":
+            return
+        subtype = event.get("subtype")
+        if subtype == "background_tasks_changed":
+            # Some versions omit the snapshot. Their task_started/notification
+            # events still carry the identifiers; never infer completion here.
+            tasks = event.get("tasks")
+            if isinstance(tasks, list):
+                for task in tasks:
+                    task_id = task.get("task_id") if isinstance(task, dict) else None
+                    if isinstance(task_id, str) and task_id:
+                        self._pending_jobs.setdefault(task_id, None)
+                    else:
+                        self._idle_unknown = True
+            return
+        if subtype not in {"task_started", "task_notification", "task_updated"}:
+            return
+        task_id, tool_id = event.get("task_id"), event.get("tool_use_id")
+        if not isinstance(task_id, str) or not task_id:
+            self._idle_unknown = True
+            return
+        if subtype == "task_started":
+            self._pending_jobs[task_id] = tool_id if isinstance(tool_id, str) else None
+            if isinstance(tool_id, str):
+                self._untracked_jobs.discard(tool_id)
+            return
+        patch = event.get("patch")
+        status = patch.get("status") if subtype == "task_updated" and isinstance(patch, dict) else event.get("status")
+        if isinstance(status, str) and status in {"completed", "failed", "stopped"}:
+            launched_by = self._pending_jobs.pop(task_id, None)
+            self._untracked_jobs.discard(launched_by)
+            if isinstance(tool_id, str):
+                self._untracked_jobs.discard(tool_id)
+        else:
+            self._pending_jobs.setdefault(task_id, tool_id if isinstance(tool_id, str) else None)
 
     async def _outside(self, event: dict[str, Any]) -> None:
         """An event of no user turn: part of a turn Claude runs on its own, or written between turns."""
@@ -760,6 +831,7 @@ class ResidentClaude:
         # Cleanup owners and the signal that skips their remaining stdin-close grace.
         self._ending: dict[asyncio.Task[None], asyncio.Event] = {}
         self._price: Price | None = None  # prices the totals at the provider's prices, if Looper prices them
+        self._idle_stopping = False
 
     @property
     def label(self) -> str:
@@ -798,6 +870,7 @@ class ResidentClaude:
         return process is not None and (
             process.returncode is not None or self._signature != signature
             or (self._output is not None and self._output.ended)
+            or (process.stdin is not None and process.stdin.is_closing())
         )
 
     async def start(
@@ -1006,6 +1079,30 @@ class ResidentClaude:
             return None
         return await asyncio.shield(task)
 
+    async def try_stop_if_idle(self) -> bool:
+        """Claim and close a quiescent process without disturbing its session totals.
+
+        The owner holds its lifecycle gate across this call. The check, claim
+        and ``stop``'s detachment run without an await gap, so admissions cannot
+        write to a closing pipe. Failed cleanup keeps the original resident
+        state available for retry (or stale-process recovery on the next turn).
+        """
+        output = self._output
+        if (self._idle_stopping or self._process is None or output is None or not output.idle
+                or self._user_turn is not None or self._ending or self._interrupting is not None):
+            return False
+        self._idle_stopping = True
+        resident = self._process, self._output, self._command, self._signature, self._tree
+        try:
+            await self.stop()
+        except BaseException:
+            if self._process is None:
+                self._process, self._output, self._command, self._signature, self._tree = resident
+            raise
+        finally:
+            self._idle_stopping = False
+        return True
+
     async def stop(self, *, kill: bool = False) -> None:
         """End the process, if any, and forget it.
 
@@ -1046,7 +1143,10 @@ class ResidentClaude:
     def _process_ended(self, task: asyncio.Task[None]) -> None:
         self._ending.pop(task, None)
         if not task.cancelled() and (problem := task.exception()) is not None:
-            logger.error("%s: resident cleanup failed", self._label, exc_info=problem)
+            if self._idle_stopping:
+                logger.error("%s: idle resident cleanup failed (%s)", self._label, type(problem).__name__)
+            else:
+                logger.error("%s: resident cleanup failed", self._label, exc_info=problem)
 
     async def _stop_process(self, process: asyncio.subprocess.Process, output: _Output | None,
                             tree: proc_tree.TurnTree | None, *, hurry: asyncio.Event) -> None:

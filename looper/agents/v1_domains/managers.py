@@ -27,6 +27,7 @@ _MANAGER_FIELDS = {
     "name": _STR, "description": _STR, "system_prompt": _NULL_STR, "profile_id": _NULL_STR,
     "tools": _enum("all", "tasks"), "task_scope": _enum("all", "own"),
     "task_policy": _enum("free", "templates_only"), "enabled": _BOOL,
+    "idle_timeout_seconds": {"type": "integer", "anyOf": [{"const": 0}, {"minimum": 60, "maximum": 86400}]},
 }
 _VIEW_FIELDS = {
     "id": _STR, **_MANAGER_FIELDS, "builtin": _BOOL, "profile_name": _NULL_STR,
