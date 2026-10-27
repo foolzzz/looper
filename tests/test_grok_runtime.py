@@ -818,41 +818,33 @@ def test_resolved_grok_metadata_does_not_enable_a_soft_cap_or_background_model(t
     assert "side-model" not in (_home(command) / "config.toml").read_text()
 
 
-@pytest.mark.parametrize("case", ["acp-known", "acp-unknown", "fallback-known", "fallback-unknown"])
-def test_resolved_grok_config_matches_pinned_launches(case: str, tmp_path: Path) -> None:
-    from unittest.mock import patch
-    from model_launch_parity import GROK_CASES, grok_environment
+@pytest.mark.parametrize("replacing", [False, True])
+def test_current_grok_binding_keeps_model_home_env_and_cost(
+    replacing: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tomllib
     from looper.agents.runtimes import SystemPromptMode
-    from looper.agents.runtimes.grok import config_toml
 
-    pinned = json.loads((FIXTURES.parent / "model_launch_parity_v2_grok.json").read_text())["captures"][case]
-    parent = grok_environment(tmp_path, explicit_home=GROK_CASES[case][4])
-    with patch.dict(os.environ, parent, clear=True):
-        for expected in pinned:
-            metadata = {k: v for k, v in expected["config"]["catalog"][0].items() if k != "name"}
-            resolved = _resolved_model(**metadata)
-            resolved = dataclasses.replace(resolved, provider=dataclasses.replace(
-                resolved.provider, env=(("CAPTURE_SETTING", "provider"),)))
-            launch = _launch(resolved=resolved, effort=expected["config"]["effort"],
-                              env=(("CAPTURE_SETTING", "settings"),))
-            mode = SystemPromptMode(GROK_CASES[case][3])
-            launch = dataclasses.replace(launch, role=AgentType.PLANNER if expected["permissions"]["read_only"]
-                                         else AgentType.WORKER, settings=dataclasses.replace(
-                launch.settings, max_budget_usd=expected["cap"], system_prompt_mode=mode))
-            config = config_toml(launch, shell_home=tmp_path / "runtime/.local/grok/shell-home")
-            assert config.replace(str(tmp_path), "<root>") == expected["config"]["toml"]
-            binding = GROK.bind_provider(resolved.binding_provider(), launch.model, launch.effort)
-            assert sorted(binding.unset) == expected["unset"]
-            argv = expected["argv"]
-            start = argv.index("-m")
-            assert argv[start:start + len(binding.args)] == list(binding.args)
-            env = launch.environment()
-            env.update({name: value.replace("<root>", str(tmp_path))
-                        for name, value in expected["env"].items() if name in ("HOME", "GROK_HOME")})
-            assert {k: v.replace(str(tmp_path), "<root>") for k, v in env.items()
-                    if parent.get(k) != v} == expected["env"]
-            assert launch.cost_source.value == expected["price"]["source"]
-            assert launch.price is None and not GROK.runtime_cost_capped
+    login = _operator(tmp_path, monkeypatch)
+    monkeypatch.setenv("XAI_API_KEY", "inherited-secret")
+    launch = _launch(resolved=_resolved_model(name="grok-4.7[1m]"), effort="xhigh",
+                     env=(("CAPTURE_SETTING", "settings"),))
+    launch = dataclasses.replace(launch, role=AgentType.WORKER, settings=dataclasses.replace(launch.settings, system_prompt_mode=(
+        SystemPromptMode.REPLACE if replacing else SystemPromptMode.APPEND)))
+    command = GROK.run_command("grok", cwd=tmp_path, prompt_file=_prompt_file(tmp_path / "runtime"), launch=launch)
+    home = _home(command)
+    config = tomllib.loads((home / "config.toml").read_text())
+    assert home.is_relative_to(tmp_path / "runtime") and home != login.parent
+    assert (home / "auth.json").is_symlink() and os.readlink(home / "auth.json") == str(login)
+    assert _flag(command, "-m") == ["grok-4.7[1m]"] and _flag(command, "--effort") == ["xhigh"]
+    assert bool((home / "rules/looper.md").read_text().strip()) is not replacing
+    assert config["memory"] == {"enabled": False}
+    assert config["features"] == {"telemetry": False}
+    assert config["cli"] == {"auto_update": False, "use_leader": False}
+    assert launch.environment()["CAPTURE_SETTING"] == "settings"
+    assert "XAI_API_KEY" not in launch.environment()
+    assert launch.cost_source is CostSource.RUNTIME and launch.price is None and not GROK.runtime_cost_capped
+
 
 
 @pytest.mark.parametrize("fallback", [False, True], ids=["acp", "per-turn-fallback"])

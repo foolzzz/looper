@@ -4,13 +4,20 @@
   },
   "provider": {
     "name": "eval-deepseek",
-    "protocols": ["openai-chat"],
-    "auth": "api_key",
-    "base_url": "https://api.deepseek.com/v1",
-    "api_key_env": "LOOPER_EVAL_API_KEY"
+    "api_key_env": "LOOPER_EVAL_API_KEY",
+    "vendor_type": "custom",
+    "endpoints": [
+      {
+        "protocol": "openai-chat",
+        "base_url": "https://api.deepseek.com/v1"
+      }
+    ]
+  },
+  "model": {
+    "name": "deepseek-flash",
+    "protocol": "openai-chat"
   },
   "agent": {
-    "name": "pi/deepseek/deepseek-flash",
-    "model": "deepseek-flash"
+    "name": "pi/deepseek/deepseek-flash"
   }
 }

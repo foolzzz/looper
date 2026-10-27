@@ -14,7 +14,7 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
-from .runner import ErrorClass, Outcome
+from .runner import Outcome
 
 SKIPPED = "skipped"  # a row past the spending cap: it never ran
 
@@ -37,24 +37,13 @@ _Z95 = 1.959963984540054  # the standard normal's 97.5% quantile
 
 
 def outcome(row: Mapping[str, Any]) -> str:
-    """``pass``, ``fail``, ``error`` or ``skipped``. A row from before outcomes (schema v1) is read from its typed
-    fields: cancelled at the cap or after its timeout is an error, else ``success`` says."""
-    if row.get("skipped"):
-        return SKIPPED
-    if "outcome" in row:
-        return str(row["outcome"])
-    if row.get("stopped_by_cap") or row.get("timed_out"):
-        return Outcome.ERROR.value
-    return (Outcome.PASS if row.get("success") else Outcome.FAIL).value
+    """The recorded typed outcome, or skipped when the case never ran."""
+    return SKIPPED if row.get("skipped") else str(row["outcome"])
 
 
 def error_class(row: Mapping[str, Any]) -> str | None:
-    """The class of an error row (a v1 row's from ``stopped_by_cap``), else None."""
-    if outcome(row) != Outcome.ERROR:
-        return None
-    if "error_class" in row:
-        return str(row["error_class"])
-    return (ErrorClass.SPENDING_CAP if row.get("stopped_by_cap") else ErrorClass.TIMEOUT).value
+    """The recorded class of an error row, else None."""
+    return str(row["error_class"]) if outcome(row) == Outcome.ERROR else None
 
 
 def wilson(passes: int, scored: int) -> tuple[float, float] | None:
@@ -189,7 +178,7 @@ def _total(groups: dict[str, list[Mapping[str, Any]]], columns: tuple[tuple[str,
 def _label(run: Mapping[str, Any]) -> str:
     commit = str((run.get("git") or {}).get("commit") or "")[:9] or "?"
     dirty = "+local changes" if (run.get("git") or {}).get("dirty") else ""
-    who = (run.get("manager_agent") or run.get("agent")) if "dialogs" in run else run.get("model")
+    who = run.get("manager_agent") if "dialogs" in run else run.get("model")
     count = reps(run)
     return f"{run.get('mode', '?')}/{who or '-'} @ {commit}{dirty} ({count} rep{'' if count == 1 else 's'})"
 

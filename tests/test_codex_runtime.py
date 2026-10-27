@@ -733,63 +733,39 @@ def test_a_login_consult_links_the_operators_login_and_copies_no_auth_file(
     assert sorted(p.name for p in fork.iterdir()) == ["AGENTS.md", "auth.json", "config.toml", "sessions"]
 
 
-@pytest.mark.parametrize("case", ["key-default", "key-proxy", "login-home", "login-codex-home"])
-def test_resolved_codex_binding_matches_pinned_launches(case: str) -> None:
-    from unittest.mock import patch
-
-    from model_launch_parity import CODEX_CASES, codex_capture_root, codex_environment, without_prompt_text
+@pytest.mark.parametrize("login", [False, True])
+@pytest.mark.parametrize("replacing", [False, True])
+def test_current_codex_binding_keeps_auth_prompt_and_isolation(
+    login: bool, replacing: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from looper.agents.runtimes import SystemPromptMode
 
-    with codex_capture_root() as tmp_path:
-        baseline = json.loads((FIXTURES.parent / "model_launch_parity_v2_codex.json").read_text())
-        auth, url, _, mode, explicit_home = CODEX_CASES[case]
-        parent = codex_environment(tmp_path, explicit_home=explicit_home)
-        records = baseline["captures"][case]
-        roles = (AgentType.MANAGER, AgentType.MANAGER, AgentType.PLANNER, AgentType.PLANNER,
-                 AgentType.WORKER, AgentType.REVIEWER)
-        with patch.dict(os.environ, parent, clear=True):
-            for role, expected in zip(roles, records, strict=True):
-                protocol = ApiProtocol(expected["config"]["protocol"])
-                vendor = VendorType.CODEX_LOGIN if auth == "oauth" else VendorType.CUSTOM
-                provider = ProviderSpec("provider", "capture", vendor, AuthKind(auth), vendor.oauth_runtime_type,
-                                        env=(("CAPTURE_SETTING", "provider"),),
-                                        api_key=None if auth == "oauth" else "sk-test-capture")
-                model = ModelSpec("model", provider.id, protocol=protocol, **expected["config"]["catalog"][0])
-                resolved = ResolvedModel(model, provider, Endpoint(provider.id, protocol, url,
-                                         use_runtime_default=not url and auth == "api_key"))
-                profile = ResolvedAgentProfile("profile", "capture", RuntimeSpec("runtime", "codex", "codex"),
-                                               model.id, expected["config"]["effort"] or None, resolved_model=resolved)
-                launch = Launch(AgentSettings(profile=profile, max_budget_usd=expected["cap"],
-                                env=(("CAPTURE_SETTING", "settings"),), system_prompt_mode=SystemPromptMode(mode)), role=role)
-                # The capture holds no prompt text (the wording is the prompt tests' business): give the adapter a
-                # stand-in, and compare the files with the prompt text masked as the capture masks it.
-                prompt = "A stand-in for the system prompt."
-                session_dir = None
-                if role in (AgentType.MANAGER, AgentType.PLANNER):
-                    owner = "manager" if role is AgentType.MANAGER else "planner-task-0000000000a1"
-                    session_dir = tmp_path / "runtime/.local/codex/sessions" / owner
-                command = CODEX.run_command("codex", cwd=tmp_path,
-                           prompt_file=_prompt_file(tmp_path / "runtime", prompt), launch=launch,
-                           session_dir=session_dir)
-                home = Path(command[1].removeprefix("CODEX_HOME="))
-                actual_config = (home / "config.toml").read_text()
-                env = {**launch.environment(), "CODEX_HOME": str(home)}
-                changed = {k: v.replace(str(tmp_path), "<root>") for k, v in env.items() if parent.get(k) != v}
-                masked = without_prompt_text({"prompt": prompt, "argv": [], "env": changed, "config": {
-                    "toml": actual_config.replace(str(tmp_path), "<root>"),
-                    "agents_md": (home / "AGENTS.md").read_text().replace(str(tmp_path), "<root>")}})
-                assert masked["config"] == {"toml": expected["config"]["toml"],
-                                            "agents_md": expected["config"]["agents_md"]}
-                assert masked["env"] == expected["env"]
-                binding = CODEX.bind_provider(profile.provider, launch.model, launch.effort)
-                assert sorted((parent.keys() - env.keys()) | set(binding.unset)) == expected["unset"]
-                argv = expected["argv"]
-                end = next((argv.index(flag) for flag in ("resume", "--ephemeral") if flag in argv), len(argv) - 1)
-                assert launch.args() == argv[argv.index("--json"):end]
-                assert launch.cost_source.value == expected["price"]["source"]
-                if auth == "oauth":
-                    assert (home / "auth.json").is_symlink()
-                    assert os.readlink(home / "auth.json").replace(str(tmp_path), "<root>") == expected["login_target"]
-                else:
-                    assert not (home / "auth.json").exists()
-                assert "sk-test-capture" not in actual_config + " ".join(command)
+    operator = tmp_path / "operator"
+    operator.mkdir()
+    (operator / "auth.json").write_text("synthetic login")
+    monkeypatch.setenv("CODEX_HOME", str(operator))
+    monkeypatch.setenv("CODEX_API_KEY", "inherited-secret")
+    resolved = _provider(base_url="" if login else "https://proxy.example.test/responses/v1/",
+                         vendor=VendorType.CODEX_LOGIN if login else VendorType.CUSTOM,
+                         api_key=None if login else KEY, name="exact-model[1m]")
+    launch = _launch(provider=resolved, effort="high")
+    launch = replace(launch, role=AgentType.WORKER, settings=replace(launch.settings, system_prompt_mode=(
+        SystemPromptMode.REPLACE if replacing else SystemPromptMode.APPEND)))
+    command = CODEX.run_command("codex", cwd=tmp_path, prompt_file=_prompt_file(tmp_path / "runtime"), launch=launch)
+    home = Path(command[1].removeprefix("CODEX_HOME="))
+    config = tomllib.loads((home / "config.toml").read_text())
+    assert home != operator and home.is_relative_to(tmp_path / "runtime")
+    assert command[command.index("-m") + 1] == "exact-model[1m]"
+    assert 'model_reasoning_effort="high"' in command
+    assert config["skills"] == {"include_instructions": False}
+    assert config["features"] == ({"plugins": False, "apps": False} if login else {"plugins": False})
+    assert config.get("mcp_servers", {}) == {}
+    assert bool(config.get("model_instructions_file")) is replacing
+    assert (home / "auth.json").is_symlink() is login
+    if login:
+        assert os.readlink(home / "auth.json") == str(operator / "auth.json")
+    else:
+        assert config["model_providers"]["looper"]["base_url"] == "https://proxy.example.test/responses/v1/"
+    if login:
+        assert "CODEX_API_KEY" not in launch.environment()
+    assert KEY not in " ".join(command) + (home / "config.toml").read_text()

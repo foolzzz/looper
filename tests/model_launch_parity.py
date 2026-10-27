@@ -1,4 +1,4 @@
-"""Portable launch capture for legacy and current checkouts; no production imports.
+"""Portable current launch capture; no production imports.
 
 ``capture(root, exercise, inspect_launch=..., readback=...)`` runs an async
 driver through its real tiers/adapters. Reuse ``agent_launch_parity.capture``
@@ -12,12 +12,11 @@ session, totals, price, cap and persisted prompt-layer sources *after the
 exercise*. Both must return all
 their fields, using explicit None for inapplicable facts. No runtime-specific
 defaults or expected values are invented here. The returned list is JSON
-data, suitable for freezing on an old checkout and comparing on a new one.
+data, suitable for strict comparison of current launch behavior.
 Drivers must seed deterministic IDs and control their inherited environment.
 
 Only the supplied temporary root, explicitly requested session timestamps,
-materialized model identity metadata, internal catalog price number spelling
-and declared account-id mappings can be normalized; and the system prompt's
+internal catalog price number spelling can be normalized; and the system prompt's
 text, which the capture does not compare (``without_prompt_text``): the flag
 and the directory that carry it, and whether there is one, stay. Layer sources
 remain significant; only their content hashes and project row timestamps vary.
@@ -30,14 +29,11 @@ Existing main fixtures are never read or refreshed by this module.
 from __future__ import annotations
 
 import asyncio
-import copy
 import difflib
 import json
 import math
 import os
 import re
-import subprocess
-import sys
 import tempfile
 import tomllib
 import uuid
@@ -53,15 +49,9 @@ LAUNCH_FIELDS = frozenset({"unset", "config", "prompt", "permissions", "isolatio
 STATE_FIELDS = frozenset({"session", "totals", "price", "cap", "prompt_layers"})
 FIELDS = frozenset({"argv", "env", "unset", "first_input"}) | LAUNCH_FIELDS | STATE_FIELDS
 TIME_PATHS = frozenset({("session", "created_at"), ("session", "updated_at")})
-CATALOG_FIELDS = ("name", "context_window", "input_usd_per_mtok", "output_usd_per_mtok",
-                  "cache_read_usd_per_mtok", "cache_write_usd_per_mtok", "efforts", "background_model")
 CATALOG_PRICE_FIELDS = ("input_usd_per_mtok", "output_usd_per_mtok",
                         "cache_read_usd_per_mtok", "cache_write_usd_per_mtok")
 
-# The last old-schema main after both preset patches, before model splitting.
-# A new resolver must never manufacture the expected side of this contract.
-CLAUDE_LEGACY_REVISION = "252e736725c427d4b19e3a427e9f044077781ef8"
-CODEX_LEGACY_REVISION = CLAUDE_LEGACY_REVISION
 CODEX_CASES = {
     "key-default": ("api_key", "", "", "append", True),
     "key-proxy": ("api_key", "https://proxy.example.test/responses/v1/", "high", "replace", True),
@@ -73,23 +63,17 @@ CODEX_CATALOG = {"name": "capture-codex", "context_window": 128000,
                  "cache_read_usd_per_mtok": 0.1, "cache_write_usd_per_mtok": 1,
                  "efforts": ["high", "low"]}
 CODEX_TOTALS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "cost_usd")
-OMP_LEGACY_REVISION = CLAUDE_LEGACY_REVISION
-# The one deliberate contract change since OMP_LEGACY_REVISION: the overlay turns off bash/eval auto-background
-# (looper/agents/runtimes/omp.py). It is applied to the old checkout's overlay in the capture child, so the
-# checkout stays clean and the pinned blobs stay the provenance; nothing else of the old source is altered.
-OMP_LEGACY_OVERLAY_PATCH = {"bash": {"autoBackground": {"enabled": False}},
-                            "eval": {"autoBackground": {"enabled": False}}}
 OMP_CATALOG = {**CODEX_CATALOG, "name": "capture-omp[1m]", "context_window": 1_000_000}
 OMP_CASES = {
-    "responses-default": (["openai-responses"], "", [OMP_CATALOG], "high", "replace"),
-    "chat-proxy": (["openai-chat"], "https://proxy.example.test/chat/v1/",
-                   [{**OMP_CATALOG, "efforts": []}], "", "append"),
-    "messages-open": (["anthropic-messages"], "", [], "", "replace"),
-    "priority-all": (["anthropic-messages", "openai-chat", "openai-responses"],
-                     "https://proxy.example.test/responses/", [{**OMP_CATALOG, "efforts": None}],
+    "responses-default": ("openai-responses", "", OMP_CATALOG, "high", "replace"),
+    "chat-proxy": ("openai-chat", "https://proxy.example.test/chat/v1/",
+                   {**OMP_CATALOG, "efforts": []}, "", "append"),
+    "messages-open": ("anthropic-messages", "", {}, "", "replace"),
+    "responses-explicit": ("openai-responses",
+                     "https://proxy.example.test/responses/", {**OMP_CATALOG, "efforts": None},
                      "low", "append"),
-    "priority-chat": (["anthropic-messages", "openai-chat"], "", [OMP_CATALOG], "high", "replace"),
-    "responses-open": (["openai-responses"], "https://proxy.example.test/exact/v1/", [], "low", "append"),
+    "chat-explicit": ("openai-chat", "", OMP_CATALOG, "high", "replace"),
+    "responses-open": ("openai-responses", "https://proxy.example.test/exact/v1/", {}, "low", "append"),
 }
 
 
@@ -134,127 +118,6 @@ for event in [
 ]:
     print(json.dumps(event), flush=True)
 ''')
-
-
-def omp_legacy_source(checkout: Path) -> dict[str, str]:
-    source = claude_legacy_source(checkout)
-    result = subprocess.run(["git", "-C", str(checkout), "rev-parse",
-                             "HEAD:looper/agents/runtimes/omp.py"],
-                            capture_output=True, text=True, timeout=10, check=True)
-    return {**source, "adapter_blob": result.stdout.strip()}
-
-
-def generate_omp_baseline(checkout: Path, output: Path) -> None:
-    """Only the clean patched v2 interpreter and disposable SQL can produce expected."""
-    checkout = checkout.resolve()
-    source = omp_legacy_source(checkout)
-    if not os.environ.get("LOOPER_TEST_DATABASE_URL"):
-        raise LegacyBaselineUnavailable("OMP baseline requires a disposable test database")
-    interpreter = checkout / ".venv/bin/python"
-    if not interpreter.is_file():
-        raise LegacyBaselineUnavailable("OMP baseline requires the old checkout's test venv")
-    baseline = json.loads(_run_legacy_capture(checkout, interpreter, "omp"))
-    if baseline["source"] != source or baseline["captures"].keys() != OMP_CASES.keys():
-        raise LegacyBaselineUnavailable("legacy OMP capture returned inconsistent source or cases")
-    for records in baseline["captures"].values():
-        if len(records) != 4:
-            raise LegacyBaselineUnavailable("OMP capture requires all four real tiers")
-        for record in records:
-            _fields(record, FIELDS)
-    with tempfile.NamedTemporaryFile(mode="w", dir=output.parent, encoding="utf-8", delete=False) as stream:
-        temporary = Path(stream.name)
-        try:
-            stream.write(json.dumps(baseline, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-            stream.close()
-            temporary.replace(output)
-        finally:
-            temporary.unlink(missing_ok=True)
-
-
-async def _capture_legacy_omp(checkout: Path) -> dict[str, Any]:
-    source = omp_legacy_source(checkout)
-    sys.path[:0] = [str(checkout), str(checkout / "tests")]
-    import asyncpg
-    import looper
-    import agent_launch_parity as tiers
-    from looper.agents.runtimes import adapter, omp as legacy_omp
-    from looper.db import agent_sessions, connection
-
-    if (Path(looper.__file__).resolve() != checkout / "looper/__init__.py"
-            or Path(tiers.__file__).resolve() != checkout / "tests/agent_launch_parity.py"):
-        raise LegacyBaselineUnavailable("legacy OMP capture imported a different checkout")
-    legacy_overlay = legacy_omp.overlay
-
-    def patched_overlay(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        settings = legacy_overlay(*args, **kwargs)
-        if settings.keys() & OMP_LEGACY_OVERLAY_PATCH.keys():
-            raise LegacyBaselineUnavailable("legacy OMP overlay already carries the patched settings")
-        return {**settings, **copy.deepcopy(OMP_LEGACY_OVERLAY_PATCH)}
-
-    legacy_omp.overlay = patched_overlay
-    dsn = os.environ.get("LOOPER_TEST_DATABASE_URL")
-    if not dsn:
-        raise LegacyBaselineUnavailable("OMP baseline requires a disposable test database")
-    captures = {}
-    for case, (protocols, url, catalog, effort, mode) in OMP_CASES.items():
-        schema = f"looper_omp_baseline_{uuid.uuid4().hex}"
-        admin = await asyncpg.connect(dsn, timeout=10)
-        pool = None
-        try:
-            await admin.execute(f'CREATE SCHEMA "{schema}"')
-            pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4,
-                                            server_settings={"search_path": schema}, command_timeout=15)
-            await connection.ensure_schema(pool)
-            connection._pool = pool
-            await tiers.seed_projects(pool)
-            with omp_capture_root() as root:
-                executable = omp_executable(root)
-                runtime = adapter("omp")
-                await pool.execute(
-                    "INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin) "
-                    "VALUES ('rt-omp', 'omp', 'omp', $1, $2, true)", executable,
-                    sorted(capability.value for capability in runtime.capabilities))
-                await pool.execute(
-                    "INSERT INTO llm_providers (id, name, auth, protocols, base_url, models, env) "
-                    "VALUES ('prov-capture', 'capture', 'api_key', $1, $2, $3::jsonb, $4::jsonb)",
-                    protocols, url, json.dumps(catalog), json.dumps([{"key": "CAPTURE_SETTING", "value": "provider"}]))
-                await pool.execute("INSERT INTO llm_provider_secrets VALUES ('prov-capture', 'sk-test-capture')")
-                await pool.execute(
-                    "INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort) "
-                    "VALUES ('profile-capture', 'capture', 'rt-omp', 'prov-capture', 'capture-omp[1m]', $1)",
-                    effort or None)
-                await pool.execute(
-                    "INSERT INTO agent_setting_layers (scope, profile_id, run_budget_usd, env) "
-                    "VALUES ('system', 'profile-capture', 0.5, $1::jsonb)",
-                    json.dumps([{"key": "CAPTURE_SETTING", "value": "settings"}]))
-                for role in ("manager", "planner", "worker", "reviewer"):
-                    await pool.execute("INSERT INTO agent_setting_layers (scope, role, system_prompt_mode) "
-                                       "VALUES ('role', $1, $2)", role, mode)
-
-                async def state(index: int) -> dict[str, Any]:
-                    rows = await pool.fetch("SELECT session_id, input_tokens, output_tokens, cache_read_tokens, "
-                                            "cache_creation_tokens, cost_usd, status, metadata FROM llm_records ORDER BY id")
-                    if len(rows) != index + 1 or rows[-1]["status"] != "completed":
-                        raise LegacyBaselineUnavailable("OMP tier did not persist a completed run")
-                    owner = "manager" if index == 0 else f"planner-{tiers.TASKS[tiers.PROJECT_A]}"
-                    session = await agent_sessions.get_session(owner) if index < 2 else {
-                        "session_id": rows[-1]["session_id"]}
-                    return {"session": session, "totals": {key: rows[-1][key] for key in CODEX_TOTALS},
-                            "prompt_layers": _prompt_layer_sources(json.loads(rows[-1]["metadata"])["prompt_layers"])}
-
-                with patch.dict(os.environ, omp_environment(root), clear=True):
-                    await tiers.seed_rest("unconfigured", root)
-                    records = await capture_omp_tiers(root, read_state=state)
-                    captures[case] = [normalize(record, root=root) for record in records]
-        finally:
-            connection._pool = None
-            if pool is not None:
-                await pool.close()
-            try:
-                await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-            finally:
-                await admin.close()
-    return {"source": source, "captures": captures}
 
 
 @contextmanager
@@ -305,8 +168,6 @@ for event in [
 ''')
 
 
-
-GROK_LEGACY_REVISION = CLAUDE_LEGACY_REVISION
 GROK_CATALOG = {**CODEX_CATALOG, "name": "grok-4.7", "efforts": ["low", "xhigh"]}
 # ACP refusal is supplied by the stand-in executable, never by changing the
 # runtime's transport, configuration, permissions or budget policy.
@@ -377,246 +238,6 @@ def grok_executable(root: Path, *, cost: float, fallback: bool) -> str:
     return fake_claude(root / "bin/grok", body)
 
 
-def grok_legacy_source(checkout: Path) -> dict[str, str]:
-    source = claude_legacy_source(checkout)
-    result = subprocess.run(["git", "-C", str(checkout), "rev-parse",
-                             "HEAD:looper/agents/runtimes/grok.py"],
-                            capture_output=True, text=True, timeout=10, check=True)
-    acp = subprocess.run(["git", "-C", str(checkout), "rev-parse",
-                          "HEAD:looper/agents/runtimes/grok_acp.py"],
-                         capture_output=True, text=True, timeout=10, check=True)
-    try:
-        subprocess.run(["git", "-C", str(checkout), "diff", "--exit-code", "HEAD", "--",
-                        "tests/fake_grok_acp.py", "tests/test_grok_runtime.py"],
-                       capture_output=True, text=True, timeout=10, check=True)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise LegacyBaselineUnavailable("cannot verify old Grok checkout revision") from exc
-    return {**source, "adapter_blob": result.stdout.strip(), "acp_blob": acp.stdout.strip()}
-
-
-def generate_grok_baseline(checkout: Path, output: Path) -> None:
-    """Generate expected exclusively in the verified old interpreter and SQL store."""
-    checkout = checkout.resolve()
-    source = grok_legacy_source(checkout)
-    if not os.environ.get("LOOPER_TEST_DATABASE_URL"):
-        raise LegacyBaselineUnavailable("Grok baseline requires a disposable test database")
-    interpreter = checkout / ".venv/bin/python"
-    if not interpreter.is_file():
-        raise LegacyBaselineUnavailable("Grok baseline requires the old checkout's test venv")
-    baseline = json.loads(_run_legacy_capture(checkout, interpreter, "grok"))
-    if baseline["source"] != source or baseline["captures"].keys() != GROK_CASES.keys():
-        raise LegacyBaselineUnavailable("legacy Grok capture returned inconsistent source or cases")
-    for case, records in baseline["captures"].items():
-        if len(records) != (10 if GROK_CASES[case][0] else 6):
-            raise LegacyBaselineUnavailable("Grok capture requires four tiers and two resumed turns")
-        for record in records:
-            _fields(record, FIELDS)
-    with tempfile.NamedTemporaryFile(mode="w", dir=output.parent, encoding="utf-8", delete=False) as stream:
-        temporary = Path(stream.name)
-        try:
-            stream.write(json.dumps(baseline, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-            stream.close()
-            temporary.replace(output)
-        finally:
-            temporary.unlink(missing_ok=True)
-
-
-async def _capture_legacy_grok(checkout: Path) -> dict[str, Any]:
-    source = grok_legacy_source(checkout)
-    sys.path[:0] = [str(checkout), str(checkout / "tests")]
-    import asyncpg
-    import looper
-    import agent_launch_parity as tiers
-    from looper.db import agent_sessions, connection
-
-    if (Path(looper.__file__).resolve() != checkout / "looper/__init__.py"
-            or Path(tiers.__file__).resolve() != checkout / "tests/agent_launch_parity.py"):
-        raise LegacyBaselineUnavailable("legacy Grok capture imported a different checkout")
-    dsn = os.environ.get("LOOPER_TEST_DATABASE_URL")
-    if not dsn:
-        raise LegacyBaselineUnavailable("Grok baseline requires a disposable test database")
-    captures = {}
-    for case, (fallback, cost, effort, mode, explicit_home) in GROK_CASES.items():
-        schema = f"looper_grok_baseline_{uuid.uuid4().hex}"
-        admin = await asyncpg.connect(dsn, timeout=10)
-        pool = None
-        try:
-            await admin.execute(f'CREATE SCHEMA "{schema}"')
-            pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4,
-                                            server_settings={"search_path": schema}, command_timeout=15)
-            await connection.ensure_schema(pool)
-            connection._pool = pool
-            await tiers.seed_projects(pool)
-            with grok_capture_root() as root:
-                executable = grok_executable(root, cost=cost, fallback=fallback)
-                # The patched v2 schema ships Claude Code only. Grok is registered
-                # when its executable is found (rt-<type>), which this capture supplies.
-                from looper.agents.runtimes import adapter as runtime_adapter
-                grok = runtime_adapter("grok")
-                await pool.execute(
-                    "INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin) "
-                    "VALUES ('rt-grok', 'grok', 'grok', $1, $2, true)",
-                    executable, sorted(capability.value for capability in grok.capabilities),
-                )
-                await pool.execute(
-                    "INSERT INTO llm_providers (id, name, auth, protocols, oauth_runtime_type, base_url, models, env) "
-                    "VALUES ('prov-capture', 'capture', $1, ARRAY['openai-responses'], $2, $3, $4::jsonb, $5::jsonb)",
-                    "oauth", "grok", "", json.dumps([GROK_CATALOG]),
-                    json.dumps([{"key": "CAPTURE_SETTING", "value": "provider"}]))
-                await pool.execute(
-                    "INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort) "
-                    "VALUES ('profile-capture', 'capture', 'rt-grok', 'prov-capture', 'grok-4.7', $1)",
-                    effort or None)
-                await pool.execute(
-                    "INSERT INTO agent_setting_layers (scope, profile_id, run_budget_usd, env) "
-                    "VALUES ('system', 'profile-capture', 0.005, $1::jsonb)",
-                    json.dumps([{"key": "CAPTURE_SETTING", "value": "settings"}]))
-                for role in ("manager", "planner", "worker", "reviewer"):
-                    await pool.execute("INSERT INTO agent_setting_layers (scope, role, system_prompt_mode) "
-                                       "VALUES ('role', $1, $2)", role, mode)
-
-                async def read_state(index: int) -> dict[str, Any]:
-                    rows = await pool.fetch("SELECT session_id, input_tokens, output_tokens, cache_read_tokens, "
-                                            "cache_creation_tokens, cost_usd, status, metadata FROM llm_records ORDER BY id")
-                    if len(rows) != index + 1 or rows[-1]["status"] != "completed":
-                        raise LegacyBaselineUnavailable("Grok tier did not persist a completed run")
-                    owner = "manager" if index < 2 else f"planner-{tiers.TASKS[tiers.PROJECT_A]}"
-                    session = await agent_sessions.get_session(owner) if index < 4 else {
-                        "session_id": rows[-1]["session_id"]}
-                    return {"session": session, "totals": {key: rows[-1][key] for key in CODEX_TOTALS},
-                            "prompt_layers": _prompt_layer_sources(json.loads(rows[-1]["metadata"])["prompt_layers"])}
-
-                with patch.dict(os.environ, grok_environment(root, explicit_home=explicit_home), clear=True):
-                    await tiers.seed_rest("unconfigured", root)
-                    records = await capture_grok_tiers(root, read_state=read_state)
-                    captures[case] = [normalize(record, root=root) for record in records]
-        finally:
-            connection._pool = None
-            if pool is not None:
-                await pool.close()
-            try:
-                await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-            finally:
-                await admin.close()
-    return {"source": source, "captures": captures}
-
-
-def codex_legacy_source(checkout: Path) -> dict[str, str]:
-    source = claude_legacy_source(checkout)
-    result = subprocess.run(["git", "-C", str(checkout), "rev-parse",
-                             "HEAD:looper/agents/runtimes/codex.py"],
-                            capture_output=True, text=True, timeout=10, check=True)
-    return {**source, "adapter_blob": result.stdout.strip()}
-
-
-def generate_codex_baseline(checkout: Path, output: Path) -> None:
-    """Generate expected exclusively in the verified old interpreter and SQL store."""
-    checkout = checkout.resolve()
-    source = codex_legacy_source(checkout)
-    if not os.environ.get("LOOPER_TEST_DATABASE_URL"):
-        raise LegacyBaselineUnavailable("Codex baseline requires a disposable test database")
-    interpreter = checkout / ".venv/bin/python"
-    if not interpreter.is_file():
-        raise LegacyBaselineUnavailable("Codex baseline requires the old checkout's test venv")
-    baseline = json.loads(_run_legacy_capture(checkout, interpreter, "codex"))
-    if baseline["source"] != source or baseline["captures"].keys() != CODEX_CASES.keys():
-        raise LegacyBaselineUnavailable("legacy Codex capture returned inconsistent source or cases")
-    for records in baseline["captures"].values():
-        if len(records) != 6:
-            raise LegacyBaselineUnavailable("Codex capture requires four tiers and two resumed turns")
-        for record in records:
-            _fields(record, FIELDS)
-    with tempfile.NamedTemporaryFile(mode="w", dir=output.parent, encoding="utf-8", delete=False) as stream:
-        temporary = Path(stream.name)
-        try:
-            stream.write(json.dumps(baseline, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-            stream.close()
-            temporary.replace(output)
-        finally:
-            temporary.unlink(missing_ok=True)
-
-
-async def _capture_legacy_codex(checkout: Path) -> dict[str, Any]:
-    source = codex_legacy_source(checkout)
-    sys.path[:0] = [str(checkout), str(checkout / "tests")]
-    import asyncpg
-    import looper
-    import agent_launch_parity as tiers
-    from looper.db import agent_sessions, connection
-
-    if (Path(looper.__file__).resolve() != checkout / "looper/__init__.py"
-            or Path(tiers.__file__).resolve() != checkout / "tests/agent_launch_parity.py"):
-        raise LegacyBaselineUnavailable("legacy Codex capture imported a different checkout")
-    dsn = os.environ.get("LOOPER_TEST_DATABASE_URL")
-    if not dsn:
-        raise LegacyBaselineUnavailable("Codex baseline requires a disposable test database")
-    captures = {}
-    for case, (account, url, effort, mode, explicit_home) in CODEX_CASES.items():
-        schema = f"looper_codex_baseline_{uuid.uuid4().hex}"
-        admin = await asyncpg.connect(dsn, timeout=10)
-        pool = None
-        try:
-            await admin.execute(f'CREATE SCHEMA "{schema}"')
-            pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4,
-                                            server_settings={"search_path": schema}, command_timeout=15)
-            await connection.ensure_schema(pool)
-            connection._pool = pool
-            await tiers.seed_projects(pool)
-            with codex_capture_root() as root:
-                executable = codex_executable(root)
-                # The patched v2 schema ships Claude Code only. Codex is registered
-                # when its executable is found (rt-<type>), which this capture supplies.
-                from looper.agents.runtimes import adapter as runtime_adapter
-                codex = runtime_adapter("codex")
-                await pool.execute(
-                    "INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin) "
-                    "VALUES ('rt-codex', 'codex', 'codex', $1, $2, true)",
-                    executable, sorted(capability.value for capability in codex.capabilities),
-                )
-                await pool.execute(
-                    "INSERT INTO llm_providers (id, name, auth, protocols, oauth_runtime_type, base_url, models, env) "
-                    "VALUES ('prov-capture', 'capture', $1, ARRAY['openai-responses'], $2, $3, $4::jsonb, $5::jsonb)",
-                    account, "codex" if account == "oauth" else None, url, json.dumps([CODEX_CATALOG]),
-                    json.dumps([{"key": "CAPTURE_SETTING", "value": "provider"}]))
-                if account == "api_key":
-                    await pool.execute("INSERT INTO llm_provider_secrets VALUES ('prov-capture', 'sk-test-capture')")
-                await pool.execute(
-                    "INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort) "
-                    "VALUES ('profile-capture', 'capture', 'rt-codex', 'prov-capture', 'capture-codex', $1)",
-                    effort or None)
-                await pool.execute(
-                    "INSERT INTO agent_setting_layers (scope, profile_id, run_budget_usd, env) "
-                    "VALUES ('system', 'profile-capture', 0.5, $1::jsonb)",
-                    json.dumps([{"key": "CAPTURE_SETTING", "value": "settings"}]))
-                for role in ("manager", "planner", "worker", "reviewer"):
-                    await pool.execute("INSERT INTO agent_setting_layers (scope, role, system_prompt_mode) "
-                                       "VALUES ('role', $1, $2)", role, mode)
-
-                async def read_state(index: int) -> dict[str, Any]:
-                    rows = await pool.fetch("SELECT session_id, input_tokens, output_tokens, cache_read_tokens, "
-                                            "cache_creation_tokens, cost_usd, status, metadata FROM llm_records ORDER BY id")
-                    if len(rows) != index + 1 or rows[-1]["status"] != "completed":
-                        raise LegacyBaselineUnavailable("Codex tier did not persist a completed run")
-                    owner = "manager" if index < 2 else f"planner-{tiers.TASKS[tiers.PROJECT_A]}"
-                    session = await agent_sessions.get_session(owner) if index < 4 else {
-                        "session_id": rows[-1]["session_id"]}
-                    return {"session": session, "totals": {key: rows[-1][key] for key in CODEX_TOTALS},
-                            "prompt_layers": _prompt_layer_sources(json.loads(rows[-1]["metadata"])["prompt_layers"])}
-
-                with patch.dict(os.environ, codex_environment(root, explicit_home=explicit_home), clear=True):
-                    await tiers.seed_rest("unconfigured", root)
-                    records = await capture_codex_tiers(root, read_state=read_state)
-                    captures[case] = [normalize(record, root=root) for record in records]
-        finally:
-            connection._pool = None
-            if pool is not None:
-                await pool.close()
-            try:
-                await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-            finally:
-                await admin.close()
-    return {"source": source, "captures": captures}
-
 # Public, synthetic inputs shared by the source capture and its coverage tests.
 CLAUDE_CASES = {
     "oauth-default": ("oauth", "", None, True, None, "role"),
@@ -627,120 +248,6 @@ CLAUDE_CASES = {
     "proxy-key-task-replace": ("api_key", "https://proxy.example.test/messages/", None,
                                False, "replace", "task"),
 }
-
-
-class LegacyBaselineUnavailable(RuntimeError):
-    """A baseline cannot be generated from the required, patched v2 source."""
-
-
-_CAPTURE_ERROR_TAIL = 4000
-_DSN_TEXT = re.compile(r"postgres(?:ql)?://\S+", re.IGNORECASE)
-_KEY_TEXT = re.compile(r"(?i)\bsk-[A-Za-z0-9_\-]+")
-_ASSIGNED_SECRET = re.compile(
-    r"(?i)(token|password|secret|api[_-]?key|authorization)(\s*[:=]\s*)(\S+)"
-)
-
-
-def _process_text(value: str | bytes | None) -> str:
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "replace")
-    return value or ""
-
-
-def _redact_process_text(text: str) -> str:
-    """Keep a capture failure diagnosable without echoing credentials."""
-    redacted = _DSN_TEXT.sub("postgresql://<redacted>", text)
-    redacted = _KEY_TEXT.sub("sk-<redacted>", redacted)
-    redacted = _ASSIGNED_SECRET.sub(r"\1\2<redacted>", redacted)
-    redacted = redacted.replace("synthetic-login-secret", "<redacted>")
-    if len(redacted) > _CAPTURE_ERROR_TAIL:
-        redacted = redacted[-_CAPTURE_ERROR_TAIL:]
-    return redacted
-
-
-def _run_legacy_capture(checkout: Path, interpreter: Path, runtime: str | None = None) -> str:
-    """Run ``--capture`` in the old interpreter and keep its stderr when it fails.
-
-    ``check=True`` turns a non-zero exit into ``CalledProcessError`` whose
-    string form omits stderr, which hides why a patched checkout could not
-    reproduce the pinned contract.
-    """
-    command = [str(interpreter), "-I", str(Path(__file__).resolve()), "--checkout", str(checkout)]
-    if runtime is not None:
-        command.extend(("--runtime", runtime))
-    command.append("--capture")
-    label = runtime or "claude"
-    try:
-        result = subprocess.run(
-            command, cwd=checkout, capture_output=True, text=True, timeout=180, check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        detail = _redact_process_text(_process_text(exc.stderr) or _process_text(exc.stdout))
-        raise LegacyBaselineUnavailable(f"legacy {label} capture timed out: {detail}") from exc
-    if result.returncode != 0:
-        detail = _redact_process_text(result.stderr or "")
-        raise LegacyBaselineUnavailable(f"legacy {label} capture exited {result.returncode}: {detail}")
-    return result.stdout
-
-
-def claude_legacy_source(checkout: Path) -> dict[str, str]:
-    """Verify a clean old checkout; return public provenance, never local paths.
-
-    Call this in the generator subprocess before importing Looper. Supplying
-    the current checkout, a dirty adapter or an unpatched revision is an error,
-    not permission to update expected from the implementation under test.
-    """
-    if not checkout.is_dir() or not (checkout / ".git").exists():
-        raise LegacyBaselineUnavailable("patched Claude baseline requires an old checkout")
-
-    def git(*args: str) -> str:
-        try:
-            result = subprocess.run(["git", "-C", str(checkout), *args], capture_output=True,
-                                    text=True, timeout=10, check=True)
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise LegacyBaselineUnavailable("cannot verify old checkout revision") from exc
-        return result.stdout.strip()
-
-    revision = git("rev-parse", "HEAD")
-    if revision != CLAUDE_LEGACY_REVISION:
-        raise LegacyBaselineUnavailable("Claude baseline requires the pinned patched v2 revision")
-    git("diff", "--exit-code", "HEAD", "--", "looper", "tests/agent_launch_parity.py", "tests/fake_claude.py")
-    return {"revision": revision, "tree": git("rev-parse", "HEAD^{tree}"),
-            "adapter_blob": git("rev-parse", "HEAD:looper/agents/runtimes/claude_code.py"),
-            "registry_blob": git("rev-parse", "HEAD:looper/agents/profile_registry.py")}
-
-
-def generate_claude_baseline(checkout: Path, output: Path) -> None:
-    """Run only the pinned source in a fresh interpreter; write after all cases succeed.
-
-    Usage: ``python tests/model_launch_parity.py --checkout OLD --output FIXTURE``
-    with LOOPER_TEST_DATABASE_URL set to a disposable PostgreSQL database.
-    A missing prerequisite is an error, never a reason to synthesize expected.
-    """
-    checkout = checkout.resolve()
-    source = claude_legacy_source(checkout)
-    if not os.environ.get("LOOPER_TEST_DATABASE_URL"):
-        raise LegacyBaselineUnavailable("Claude baseline requires a disposable test database")
-    interpreter = checkout / ".venv/bin/python"
-    if not interpreter.is_file():
-        raise LegacyBaselineUnavailable("Claude baseline requires the old checkout's test venv")
-    baseline = json.loads(_run_legacy_capture(checkout, interpreter))
-    if baseline["source"] != source or baseline["captures"].keys() != CLAUDE_CASES.keys():
-        raise LegacyBaselineUnavailable("legacy capture returned inconsistent source or cases")
-    for records in baseline["captures"].values():
-        if len(records) != 4:
-            raise LegacyBaselineUnavailable("legacy capture did not run all four tiers")
-        for record in records:
-            _fields(record, FIELDS)
-    # Do not truncate a previous baseline when capture or validation fails.
-    with tempfile.NamedTemporaryFile(mode="w", dir=output.parent, encoding="utf-8", delete=False) as stream:
-        temporary = Path(stream.name)
-        try:
-            stream.write(json.dumps(baseline, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-            stream.close()
-            temporary.replace(output)
-        finally:
-            temporary.unlink(missing_ok=True)
 
 
 def with_planner_file_reads(argv: list[str]) -> list[str]:
@@ -755,181 +262,45 @@ def with_planner_file_reads(argv: list[str]) -> list[str]:
     return argv
 
 
-async def _capture_legacy_claude(checkout: Path) -> dict[str, Any]:
-    """Child-only driver: real old settings, SQL persistence, tiers and adapter."""
-    source = claude_legacy_source(checkout)
-    # -I ignores PYTHONPATH and the caller's test imports. The old checkout wins
-    # over any editable installation in the interpreter's site-packages.
-    sys.path[:0] = [str(checkout), str(checkout / "tests")]
-    import asyncpg
-    import looper
-    import agent_launch_parity as tiers
-    from looper.agents import claude_cli
-    from looper.db import agent_sessions, connection
-
-    if (Path(looper.__file__).resolve() != checkout / "looper/__init__.py"
-            or Path(tiers.__file__).resolve() != checkout / "tests/agent_launch_parity.py"):
-        raise LegacyBaselineUnavailable("legacy capture imported a different checkout")
-    # Reproduce the historical permissions verbatim; declared deltas belong in current comparison expectations.
-    dsn = os.environ.get("LOOPER_TEST_DATABASE_URL")
-    if not dsn:
-        raise LegacyBaselineUnavailable("Claude baseline requires a disposable test database")
-    captures = {}
-    for name, (account, url, background, teams, mode, scope) in CLAUDE_CASES.items():
-        schema = f"looper_claude_baseline_{uuid.uuid4().hex}"
-        admin = await asyncpg.connect(dsn)
-        pool = None
-        try:
-            await admin.execute(f'CREATE SCHEMA "{schema}"')
-            pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4,
-                                            server_settings={"search_path": schema})
-            await connection.ensure_schema(pool)
-            connection._pool = pool
-            await tiers.seed_projects(pool)
-            catalog = [{"name": "main-model[1m]", "context_window": 1_000_000,
-                        "input_usd_per_mtok": 0.6, "output_usd_per_mtok": 2.2,
-                        "cache_read_usd_per_mtok": 0, "cache_write_usd_per_mtok": 1,
-                        "efforts": ["high", "low"], "background_model": background}]
-            await pool.execute(
-                "INSERT INTO llm_providers (id, name, auth, protocols, oauth_runtime_type, base_url, models, env) "
-                "VALUES ('prov-capture', 'capture', $1, ARRAY['anthropic-messages'], $2, $3, $4::jsonb, $5::jsonb)",
-                account, "claude-code" if account == "oauth" else None, url, json.dumps(catalog),
-                json.dumps([{"key": "API_TIMEOUT_MS", "value": "3000000"}]),
-            )
-            if account == "api_key":
-                await pool.execute("INSERT INTO llm_provider_secrets VALUES ('prov-capture', 'sk-test-capture')")
-            await pool.execute(
-                "INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort, agent_teams) "
-                "VALUES ('profile-capture', 'capture', 'rt-claude-code', 'prov-capture', 'main-model[1m]', 'high', $1)",
-                teams,
-            )
-            await pool.execute(
-                "INSERT INTO agent_setting_layers (scope, profile_id, run_budget_usd) "
-                "VALUES ('system', 'profile-capture', 0.5)")
-            with tempfile.TemporaryDirectory(prefix="looper-claude-baseline-", dir="/tmp") as directory:
-                root = Path(directory).resolve()
-                environment = {"PATH": "/usr/bin:/bin", "HOME": str(root / "home"),
-                               "CLAUDE_CONFIG_DIR": str(root / "login"),
-                               "ANTHROPIC_API_KEY": "sk-test-inherited-key",
-                               "ANTHROPIC_AUTH_TOKEN": "sk-test-inherited-token",
-                               "ANTHROPIC_BASE_URL": "https://inherited.example.test/",
-                               "ANTHROPIC_DEFAULT_HAIKU_MODEL": "inherited-side",
-                               "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"}
-                login = root / "login/.credentials.json"
-                login.parent.mkdir()
-                login.write_text('{"synthetic":true}\n', encoding="utf-8")
-                states: list[dict[str, Any]] = []
-                original_capture = tiers.capture
-
-                async def exercise(*args: Any) -> Any:
-                    result = await original_capture(*args)
-                    records = await pool.fetch(
-                        "SELECT session_id, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, "
-                        "cost_usd, status, metadata FROM llm_records ORDER BY id")
-                    if len(records) != 4 or any(row["status"] != "completed" for row in records):
-                        raise LegacyBaselineUnavailable("legacy tiers did not persist four completed runs")
-                    for index, row in enumerate(records):
-                        owner = "manager" if index == 0 else f"planner-{tiers.TASKS[tiers.PROJECT_A]}"
-                        session = await agent_sessions.get_session(owner) if index < 2 else {
-                            "session_id": row["session_id"]}
-                        states.append({"session": session, "totals": {key: row[key] for key in CODEX_TOTALS},
-                                       "prompt_layers": _prompt_layer_sources(json.loads(row["metadata"])["prompt_layers"])})
-                    return result
-
-                cli = tiers._CLAUDE.replace(
-                    "'total_cost_usd': 0,", "'total_cost_usd': 0.25, 'modelUsage': {{'main-model[1m]': "
-                    "{{'inputTokens': 100, 'outputTokens': 40, 'cacheReadInputTokens': 5, "
-                    "'cacheCreationInputTokens': 2}}}},")
-                from itertools import count
-                ids = count(1)
-                with patch.dict(os.environ, environment, clear=True), patch.object(tiers, "_CLAUDE", cli), \
-                        patch.object(tiers, "capture", exercise), \
-                        patch.object(claude_cli, "uuid4", lambda: uuid.UUID(int=next(ids))):
-                    await tiers.seed_rest("unconfigured", root)
-                    if mode is not None:
-                        for role in ("manager", "planner", "worker", "reviewer"):
-                            if scope == "task" and role != "manager":
-                                await pool.execute(
-                                    "INSERT INTO agent_setting_layers (scope, role, system_prompt_mode) "
-                                    "VALUES ('role', $1, 'append')", role)
-                                await pool.execute("INSERT INTO task_system_prompt_modes VALUES ($1, $2, $3)",
-                                                   tiers.TASKS[tiers.PROJECT_A], role, mode)
-                            else:
-                                await pool.execute(
-                                    "INSERT INTO agent_setting_layers (scope, role, system_prompt_mode) "
-                                    "VALUES ('role', $1, $2)", role, mode)
-                    records = await capture_claude_tiers(root, "unconfigured", read_state=states.__getitem__)
-                    captures[name] = [normalize(record, root=root) for record in records]
-        finally:
-            connection._pool = None
-            if pool is not None:
-                await pool.close()
-            try:
-                await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-            finally:
-                await admin.close()
-    return {"source": source, "captures": captures}
-
-
-async def seed_conversion(pool: Any, conversion: Any) -> None:
-    """Seed an already initialized, disposable v3 schema from the pure converter.
-
-    No legacy DDL or upgrade entry point: the release gate can run before the
-    transactional upgrade is connected. Readback still uses production SQL.
-    """
+async def seed_current(pool: Any, runtime: Any, provider: Any, endpoint: Any, model: Any, profile: Any) -> None:
+    """Persist explicit current declarations in an initialized disposable schema."""
     from looper.agents.profile_registry import MODEL_FIELDS
 
-    for profile in conversion.profiles.values():
-        runtime = profile.runtime
-        await pool.execute(
-            "INSERT INTO agent_runtimes (id, name, type, executable, capabilities) VALUES ($1,$2,$3,$4,$5) "
-            "ON CONFLICT (id) DO UPDATE SET executable = EXCLUDED.executable, capabilities = EXCLUDED.capabilities",
-            runtime.id, runtime.name, runtime.type, runtime.executable,
-            sorted(capability.value for capability in runtime.capabilities))
-    for account in conversion.providers.values():
-        await pool.execute(
-            "INSERT INTO llm_providers (id, name, vendor_type, auth, oauth_runtime_type, env, max_concurrency) "
-            "VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)", account.id, account.name, account.vendor_type.value,
-            account.auth.value, account.oauth_runtime_type,
-            json.dumps([{"key": key, "value": value} for key, value in account.env]), account.max_concurrency)
-        if account.api_key is not None:
-            await pool.execute("INSERT INTO llm_provider_secrets (provider_id, api_key) VALUES ($1,$2)",
-                               account.id, account.api_key)
-    for endpoint in conversion.endpoints.values():
-        await pool.execute(
-            "INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url, use_runtime_default) "
-            "VALUES ($1,$2,$3,$4)", endpoint.provider_id, endpoint.protocol.value, endpoint.base_url,
-            endpoint.use_runtime_default)
+    await pool.execute(
+        "INSERT INTO agent_runtimes (id, name, type, executable, capabilities) VALUES ($1,$2,$3,$4,$5) "
+        "ON CONFLICT (id) DO UPDATE SET executable = EXCLUDED.executable, capabilities = EXCLUDED.capabilities",
+        runtime.id, runtime.name, runtime.type, runtime.executable,
+        sorted(capability.value for capability in runtime.capabilities))
+    await pool.execute(
+        "INSERT INTO llm_providers (id, name, vendor_type, auth, oauth_runtime_type, env, max_concurrency) "
+        "VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)", provider.id, provider.name, provider.vendor_type.value,
+        provider.auth.value, provider.oauth_runtime_type,
+        json.dumps([{"key": key, "value": value} for key, value in provider.env]), provider.max_concurrency)
+    if provider.api_key is not None:
+        await pool.execute("INSERT INTO llm_provider_secrets (provider_id, api_key) VALUES ($1,$2)",
+                           provider.id, provider.api_key)
+    await pool.execute(
+        "INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url, use_runtime_default) "
+        "VALUES ($1,$2,$3,$4)", endpoint.provider_id, endpoint.protocol.value, endpoint.base_url,
+        endpoint.use_runtime_default)
     columns = ("id", "provider_id", "protocol", *MODEL_FIELDS, "catalog_order", "builtin")
-    for model in conversion.models.values():
-        values = [getattr(model, name) for name in columns]
-        await pool.execute(f"INSERT INTO llm_models ({', '.join(columns)}) "
-                           f"VALUES ({', '.join(f'${index}' for index in range(1, len(columns) + 1))})", *values)
-    for profile in conversion.profiles.values():
-        await pool.execute(
-            "INSERT INTO agent_profiles (id, name, runtime_id, model_id, effort, agent_teams, custom_prompt) "
-            "VALUES ($1,$2,$3,$4,$5,$6,$7)", profile.id, profile.name, profile.runtime.id, profile.model_id,
-            profile.effort, profile.agent_teams, profile.custom_prompt)
-    for (provider, name, protocol), (target_provider, model) in conversion.model_map.items():
-        await pool.execute(
-            "INSERT INTO llm_model_migration_map (legacy_provider_id, legacy_model, protocol, provider_id, model_id) "
-            "VALUES ($1,$2,$3,$4,$5)", provider, name, protocol.value, target_provider, model)
+    values = [getattr(model, name) for name in columns]
+    await pool.execute(f"INSERT INTO llm_models ({', '.join(columns)}) "
+                       f"VALUES ({', '.join(f'${index}' for index in range(1, len(columns) + 1))})", *values)
+    await pool.execute(
+        "INSERT INTO agent_profiles (id, name, runtime_id, model_id, effort, agent_teams, custom_prompt) "
+        "VALUES ($1,$2,$3,$4,$5,$6,$7)", profile.id, profile.name, profile.runtime.id, profile.model_id,
+        profile.effort, profile.agent_teams, profile.custom_prompt)
 
 
-async def capture_converted_tiers(
+async def capture_tiers(
     pool: Any, runtime: str, case: str, temporary_root: Path, *, rename_profile_after: int | None = None,
-    merge_provider: bool = False,
-) -> tuple[list[dict[str, Any]], Any]:
-    """Capture all roles from converted rows, never patching settings or adapters.
-
-    Inputs are the same synthetic scenarios used by the pinned legacy driver;
-    expected output is exclusively the frozen files. Every run is read back
-    from SQL, including resumed turns before their totals are overwritten.
-    """
+) -> list[dict[str, Any]]:
+    """Exercise current registry rows through real tier classes and SQL readback."""
     import agent_launch_parity as tiers
     from looper.agents import claude_cli
-    from looper.agents.profile_registry import RuntimeSpec
-    from looper.agents.registry_migration import convert
+    from looper.agents.profile_registry import AgentProfile, Endpoint, ModelSpec, ProviderSpec, RuntimeSpec
+    from looper.agents.runtimes import ApiProtocol, AuthKind, VendorType
     from looper.agents.runtimes import adapter
     from looper.db import agent_sessions
     from itertools import count
@@ -938,29 +309,28 @@ async def capture_converted_tiers(
     if runtime == "claude":
         auth, url, background, teams, mode, scope = CLAUDE_CASES[case]
         runtime_type, name, effort = "claude-code", "main-model[1m]", "high"
-        protocols = ["anthropic-messages"]
-        catalog = [{"name": name, "context_window": 1_000_000, "input_usd_per_mtok": 0.6,
+        protocol = "anthropic-messages"
+        metadata = {"name": name, "context_window": 1_000_000, "input_usd_per_mtok": 0.6,
                     "output_usd_per_mtok": 2.2, "cache_read_usd_per_mtok": 0,
-                    "cache_write_usd_per_mtok": 1, "efforts": ["high", "low"], "background_model": background}]
+                    "cache_write_usd_per_mtok": 1, "efforts": ["high", "low"], "background_model": background}
         account_env = [{"key": "API_TIMEOUT_MS", "value": "3000000"}]
         budget = 0.5
-        # Use the same temporary-root layout as the independent legacy capture.
         root_context = tempfile.TemporaryDirectory(prefix="looper-target-claude-", dir="/tmp")
     else:
         runtime_type = runtime
         account_env = [{"key": "CAPTURE_SETTING", "value": "provider"}]
-        protocols = ["openai-responses"]
+        protocol = "openai-responses"
         if runtime == "codex":
             auth, url, effort, mode, explicit_home = CODEX_CASES[case]
-            name, catalog, budget = "capture-codex", [CODEX_CATALOG], 0.5
+            name, metadata, budget = "capture-codex", CODEX_CATALOG, 0.5
             root_context = codex_capture_root()
         elif runtime == "omp":
-            protocols, url, catalog, effort, mode = OMP_CASES[case]
+            protocol, url, metadata, effort, mode = OMP_CASES[case]
             auth, name, budget = "api_key", "capture-omp[1m]", 0.5
             root_context = omp_capture_root()
         elif runtime == "grok":
             fallback, cost, effort, mode, explicit_home = GROK_CASES[case]
-            auth, url, name, catalog, budget = "oauth", "", "grok-4.7", [GROK_CATALOG], 0.005
+            auth, url, name, metadata, budget = "oauth", "", "grok-4.7", GROK_CATALOG, 0.005
             root_context = grok_capture_root()
         else:
             raise ValueError(f"unsupported capture runtime: {runtime}")
@@ -989,21 +359,17 @@ async def capture_converted_tiers(
             environment = grok_environment(root, explicit_home=explicit_home)
         spec = RuntimeSpec(f"rt-{runtime_type}", runtime_type, runtime_type, executable,
                            adapter(runtime_type).capabilities)
-        account = {"id": "prov-capture", "name": "capture", "auth": auth,
-                   "oauth_runtime_type": runtime_type if auth == "oauth" else None,
-                   "protocols": protocols, "base_url": url, "models": catalog, "env": account_env,
-                   "api_key": "sk-test-capture" if auth == "api_key" else None}
-        accounts = [account]
-        if merge_provider:
-            # Two explicitly identified accounts with the same saved key,
-            # endpoint, catalog, name and env. The converter owns the mapping.
-            account["vendor_type"] = "glm-bigmodel"
-            accounts.append({**account, "id": "prov-canonical"})
-        conversion = convert([spec], accounts,
-                             [{"id": "profile-capture", "name": "capture", "runtime_id": spec.id,
-                               "provider_id": "prov-capture", "model": name, "effort": effort or None,
-                               "agent_teams": teams}])
-        await seed_conversion(pool, conversion)
+        vendor = ({"claude": VendorType.CLAUDE_SUBSCRIPTION, "codex": VendorType.CODEX_LOGIN,
+                   "grok": VendorType.GROK_LOGIN}[runtime] if auth == "oauth" else VendorType.CUSTOM)
+        provider = ProviderSpec("prov-capture", "capture", vendor, AuthKind(auth), vendor.oauth_runtime_type,
+                                env=tuple((entry["key"], entry["value"]) for entry in account_env),
+                                api_key="sk-test-capture" if auth == "api_key" else None)
+        protocol = ApiProtocol(protocol)
+        endpoint = Endpoint(provider.id, protocol, url, use_runtime_default=not url and auth == "api_key")
+        model = ModelSpec("model-capture", provider.id, protocol=protocol,
+                          **(metadata or {"name": name}))
+        profile = AgentProfile("profile-capture", "capture", spec, model.id, effort or None, teams)
+        await seed_current(pool, spec, provider, endpoint, model, profile)
         await tiers.seed_projects(pool)
         await pool.execute(
             "INSERT INTO agent_setting_layers (scope, profile_id, run_budget_usd, env) "
@@ -1023,12 +389,7 @@ async def capture_converted_tiers(
             result = {"session": session, "totals": {key: rows[-1][key] for key in CODEX_TOTALS},
                             "prompt_layers": _prompt_layer_sources(json.loads(rows[-1]["metadata"])["prompt_layers"])}
             if index == rename_profile_after:
-                await pool.execute(
-                    "INSERT INTO agent_profiles (id, name, runtime_id, model_id, effort, agent_teams, custom_prompt) "
-                    "SELECT 'profile-renamed', 'renamed', runtime_id, model_id, effort, agent_teams, custom_prompt "
-                    "FROM agent_profiles WHERE id = 'profile-capture'")
-                await pool.execute("UPDATE agent_setting_layers SET profile_id = 'profile-renamed' "
-                                   "WHERE scope = 'system'")
+                await pool.execute("UPDATE agent_profiles SET name = 'renamed' WHERE id = 'profile-capture'")
             return result
 
         original_capture = tiers.capture
@@ -1070,13 +431,13 @@ async def capture_converted_tiers(
             else:
                 driver = {"codex": capture_codex_tiers, "omp": capture_omp_tiers, "grok": capture_grok_tiers}[runtime]
                 records = await driver(root, read_state=state)
-        return [normalize(record, root=root) for record in records], conversion
+        return [normalize(record, root=root) for record in records]
 
 
 def above_root_normalized(settings: str, root: str) -> str:
     """The Claude ``--settings`` text with ``root`` as ``<root>`` and every exclusion for a directory above it as
     ``<above>/<name>`` (each once; entries under the root keep their count). The directories above a temporary root depend on the host (``/private/tmp`` on
-    macOS, ``/tmp`` on Linux CI), so a pinned capture cannot name them."""
+    macOS, ``/tmp`` on Linux CI), so captures cannot name them."""
     parsed = json.loads(settings)
     excludes: list[str] = []
     for pattern in parsed.get("claudeMdExcludes", []):
@@ -1269,35 +630,17 @@ def normalize(record: dict[str, Any], *, root: Path,
 
 def assert_parity(expected: list[dict[str, Any]], actual: list[dict[str, Any]], *,
                   expected_root: Path, actual_root: Path,
-                  time_paths: Iterable[tuple[str, ...]] = (),
-                  provider_ids: Mapping[str, str] | None = None) -> None:
+                  time_paths: Iterable[tuple[str, ...]] = ()) -> None:
     """Compare every launch, with a field-level diff. Empty baselines are errors."""
     if not expected or not actual:
         raise ValueError("launch captures must be non-empty")
     if len(expected) != len(actual):
         raise AssertionError(f"launch count: expected {len(expected)}, actual {len(actual)}")
     paths = tuple(time_paths)
-    identities = dict(provider_ids or {})
-    if any(type(key) is not str or not key or type(value) is not str or not value
-           for key, value in identities.items()):
-        raise ValueError("provider_ids must map non-empty ids to declared canonical ids")
-
     def comparable(record: dict[str, Any], root: Path) -> dict[str, Any]:
         result = _above_root_everywhere(normalize(record, root=root, time_paths=paths))
-        # An open legacy catalog has no row. Conversion materializes the
-        # selected name with every setting unknown: only new model identity
-        # metadata (§6.3). Generated files and the exact selected name remain
-        # byte-for-byte inputs. A zero price or [] efforts is NOT unknown.
-        config = result["config"]
-        if isinstance(config, dict) and isinstance(config.get("model"), str) and config["model"]:
-            identity = {name: None for name in CATALOG_FIELDS}
-            identity["name"] = config.get("model")
-            for field in ("config", "price"):
-                metadata = result[field]
-                if isinstance(metadata, dict) and metadata.get("catalog") == [identity]:
-                    metadata["catalog"] = []
         # These two catalogs are internal asdict(provider.catalog) snapshots,
-        # not runtime files/argv/env. SQL DOUBLE PRECISION reads legacy JSON
+        # not runtime files/argv/env. SQL DOUBLE PRECISION reads JSON
         # prices 0/1 as 0.0/1.0. Normalize only their four price fields by value;
         # generated config strings and every other field retain exact bytes.
         for field in ("config", "price"):
@@ -1309,11 +652,6 @@ def assert_parity(expected: list[dict[str, Any]], actual: list[dict[str, Any]], 
                             value = entry.get(name)
                             if type(value) is float and value.is_integer():
                                 entry[name] = int(value)
-        # An account merge changes saved ownership metadata, never strings in
-        # prompts, URLs, generated config, argv or environment variables.
-        session = result["session"]
-        if isinstance(session, dict) and isinstance(session.get("provider_id"), str):
-            session["provider_id"] = identities.get(session["provider_id"], session["provider_id"])
         return result
 
     for index, (before, after) in enumerate(zip(expected, actual)):
@@ -1321,7 +659,7 @@ def assert_parity(expected: list[dict[str, Any]], actual: list[dict[str, Any]], 
         right = json.dumps(comparable(after, actual_root), ensure_ascii=False, sort_keys=True, indent=2)
         if left != right:
             diff = "\n".join(difflib.unified_diff(left.splitlines(), right.splitlines(),
-                                                fromfile="legacy", tofile="current", lineterm=""))
+                                                fromfile="expected", tofile="current", lineterm=""))
             raise AssertionError(f"launch {index} differs:\n{diff}")
 
 
@@ -1436,7 +774,7 @@ async def capture_claude_tiers(
     ``read_state`` returns ``session``, ``totals`` and ``prompt_layers`` from the driver's
     persistence *after* the exercise. The other fields are read from the
     actual Launch at subprocess creation, including explicit binding removals.
-    Imports are lazy so this same helper can be copied into the old checkout.
+    Imports are lazy so the capture remains independently importable.
     Login bytes are never read: only the path Claude will consult is recorded.
     """
     import agent_launch_parity as tiers
@@ -1587,8 +925,8 @@ async def capture_omp_tiers(
 ) -> list[dict[str, Any]]:
     """Observe generated OMP files and SQL readback through the four real tiers.
 
-    The selected API is read from models.yml, including legacy multi-protocol
-    precedence. Neither the capture nor its comparator resolves a protocol.
+    The explicitly selected API is read from models.yml. Neither the capture
+    nor its comparator resolves a protocol.
     """
     import agent_launch_parity as tiers
     from looper.agents import claude_cli
@@ -1777,24 +1115,3 @@ async def capture_grok_tiers(
         if "agent" in record["argv"]:
             record["config"]["acp_requests"] = sent
     return records
-
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Capture the patched old Claude baseline without model calls")
-    parser.add_argument("--checkout", type=Path, required=True)
-    parser.add_argument("--output", type=Path)
-    parser.add_argument("--capture", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--runtime", choices=("claude", "codex", "omp", "grok"), default="claude")
-    options = parser.parse_args()
-    if options.capture:
-        driver = {"claude": _capture_legacy_claude, "codex": _capture_legacy_codex,
-                  "omp": _capture_legacy_omp, "grok": _capture_legacy_grok}[options.runtime]
-        print(json.dumps(asyncio.run(driver(options.checkout.resolve()))))
-    elif options.output is None:
-        parser.error("--output is required")
-    else:
-        generate = {"claude": generate_claude_baseline, "codex": generate_codex_baseline,
-                    "omp": generate_omp_baseline, "grok": generate_grok_baseline}[options.runtime]
-        generate(options.checkout, options.output)
