@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.179] - 2026-10-27
+
+### Changed
+
+- **Managers can select a schedule template and read it back.** The `looper_schedules` tool accepts `template_key` and `template_inputs` (static string values) on create and update; the list, the configuration shown on creation, the enable/run confirmation and the before/after of a change now name the template and its inputs. A scoped Manager sees another owner's template selection blanked and is refused when it tries to change it, before anything is written. A new `schedule_template_create` dialog covers it, so the dialog selection grows from 47 to 48. ([#774](https://github.com/foolzzz/looper/pull/774))
+
 ## [2.13.178] - 2026-10-27
 
 ### Changed
