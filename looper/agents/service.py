@@ -58,7 +58,7 @@ LOG_RELATIVE_PATH = Path("logs") / "serve.log"
 # or a Claude Code session's other markers, and no ops setting: the ops file holds those.
 CAPTURED_NAMES = (
     "PATH", "TZ", *(name for name in child_env.SYSTEM if name.startswith(("LANG", "LC_"))),
-    *child_env.NETWORK, *child_env.RUNTIMES, "LOOPER_TELEGRAM_BOT_TOKEN",
+    *child_env.NETWORK, *child_env.RUNTIMES, "LOOPER_TELEGRAM_BOT_TOKEN", "LOOPX_TELEGRAM_BOT_TOKEN",
 )
 # What `install` copied before the ops file, by prefix: a variable of these it no longer copies is named in its report.
 FORMER_PREFIXES = ("LOOPER_", "LOOPX_", "ANTHROPIC_", "LARK_")
@@ -538,6 +538,10 @@ def install(host: Host, ops: OpsConfig, *, label: str = DEFAULT_LABEL, port: int
     if not os.path.lexists(ops.path):
         raise ServiceError(f"no ops file at {ops.path}: run `looper config init-ops` first, which writes it from the "
                            "settings in effect")
+    if transient := [str(source) for source in ops.sources.values()
+                     if source.origin is ops_config.Origin.ENVIRONMENT]:
+        raise ServiceError(f"{', '.join(transient)} still comes from the environment, which the unit does not carry; "
+                           f"set these settings in {ops.path} before installing (the existing service is unchanged)")
     if port is None and "port" not in ops.sources:
         port, _, _ = mgr.unit_settings(explicit_port=True)
     runtime_root = _absolute_root(host, ops.runtime_root)

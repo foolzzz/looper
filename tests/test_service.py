@@ -48,7 +48,8 @@ SHELL_ENV = {
     "GITHUB_TOKEN": "ghp_unrelated",
 }
 CAPTURED = {name: SHELL_ENV[name] for name in (
-    "ANTHROPIC_API_KEY", "CODEX_HOME", "HTTPS_PROXY", "LANG", "LOOPER_TELEGRAM_BOT_TOKEN", "PATH", "TZ",
+    "ANTHROPIC_API_KEY", "CODEX_HOME", "HTTPS_PROXY", "LANG", "LOOPER_TELEGRAM_BOT_TOKEN",
+    "LOOPX_TELEGRAM_BOT_TOKEN", "PATH", "TZ",
 )}
 
 
@@ -602,6 +603,47 @@ def test_install_refuses_to_copy_a_database_setting_with_env(
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
+@pytest.mark.parametrize("variable,value", [
+    ("LOOPER_DATABASE_URL", SHELL_ENV["LOOPER_DATABASE_URL"]),
+    ("LOOPX_DATABASE_URL", SHELL_ENV["LOOPX_DATABASE_URL"]),
+    ("LOOPER_PUBLIC_URL", "https://env.example.com"),
+])
+def test_reinstall_refuses_environment_settings_before_changing_the_running_service(
+    tmp_path, checkout, monkeypatch, capsys, system, variable, value,
+):
+    for name in ops_config.VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(ops_config, "DOTENV", tmp_path / ".env")
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    assert _install(monkeypatch, host, root) == 0
+    mgr = service.manager(host, LABEL)
+    before = mgr.unit_path.read_bytes()
+    config = root / ops_config.FILE
+    config.write_text('[server]\n' if variable.endswith("DATABASE_URL") else
+                      '[database]\nurl = "postgresql://localhost/loopx"\n')
+    config_before = config.read_bytes()
+    host.environ = {**host.environ, variable: value}
+    monkeypatch.setenv(variable, value)
+    fake.calls.clear()
+    capsys.readouterr()
+
+    assert _install(monkeypatch, host, root) == 1
+
+    output = capsys.readouterr()
+    assert variable in output.err and str(config) in output.err
+    assert "s3cret" not in output.out + output.err
+    assert mgr.unit_path.read_bytes() == before and config.read_bytes() == config_before
+    assert fake.serving and fake.calls == []
+    # Persisting the effective settings makes the same installation safe, even with the variable still set.
+    ops = ops_config.load(ops_config.Flags(runtime_root=root))
+    ops_config.write_private(config, ops_config.render(ops))
+    assert _install(monkeypatch, host, root) == 0
+    assert fake.serving and b"DATABASE_URL" not in mgr.unit_path.read_bytes()
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
 def test_install_requires_an_ops_file(
     tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], system: str,
 ) -> None:
@@ -660,13 +702,29 @@ def test_reinstall_preserves_installed_port_unless_explicitly_overridden(
 
 
 @pytest.mark.parametrize("explicit", [False, True])
-def test_retired_token_name_is_only_captured_when_explicitly_requested(
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_install_preserves_the_legacy_telegram_token_for_the_builtin_channel(
     tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch, explicit: bool,
+    system: str,
 ) -> None:
-    fake = FakeLaunchd()
-    host = _host(tmp_path, checkout, fake, system="Darwin")
+    from looper.agents.channels import bots
+
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    del host.environ["LOOPER_TELEGRAM_BOT_TOKEN"]
     flags = ("--env", "LOOPX_TELEGRAM_BOT_TOKEN") if explicit else ()
     assert _install(monkeypatch, host, tmp_path / ".loopx", *flags) == 0
-    unit = plistlib.loads(service.manager(host, LABEL).unit_path.read_bytes())
-    assert ("LOOPX_TELEGRAM_BOT_TOKEN" in unit["EnvironmentVariables"]) is explicit
-    assert unit["ProgramArguments"][-4:-2] == ["--runtime-root", str(tmp_path / ".loopx")]
+    data = service.manager(host, LABEL).unit_path.read_bytes()
+    if system == "Darwin":
+        unit = plistlib.loads(data)
+        environment, argv = unit["EnvironmentVariables"], unit["ProgramArguments"]
+    else:
+        lines = data.decode().splitlines()
+        environment = dict(service._systemd_words(line.removeprefix("Environment="))[0].split("=", 1)
+                           for line in lines if line.startswith("Environment="))
+        argv = service._systemd_words(next(line.removeprefix("ExecStart=") for line in lines
+                                          if line.startswith("ExecStart=")))
+    assert environment["LOOPX_TELEGRAM_BOT_TOKEN"] == SHELL_ENV["LOOPX_TELEGRAM_BOT_TOKEN"]
+    assert argv[-4:-2] == ["--runtime-root", str(tmp_path / ".loopx")]
+    monkeypatch.setattr(service.os, "environ", environment)
+    assert bots.builtin_env_token({}) == SHELL_ENV["LOOPX_TELEGRAM_BOT_TOKEN"]

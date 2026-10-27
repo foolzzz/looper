@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from looper import __version__
+from looper import __version__, ops_config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -99,9 +99,11 @@ def _ops_file(root: Path, database_url: str) -> Path:
     return path
 
 
-def test_init_ops_cli_preserves_the_database_from_deployment_environment(tmp_path: Path) -> None:
+@pytest.mark.parametrize("database_url", [
+    "postgresql://looper:Sekr1t-init-pw@127.0.0.1:5432/loopx", ops_config.SAMPLE_DATABASE_URL,
+])
+def test_init_ops_cli_preserves_the_database_from_deployment_environment(tmp_path: Path, database_url: str) -> None:
     root = tmp_path / "runtime"
-    database_url = "postgresql://looper:Sekr1t-init-pw@127.0.0.1:5432/loopx"
     env = {**_clean_env(tmp_path), "LOOPER_DATABASE_URL": database_url}
 
     proc = _run_cli("config", "init-ops", "--runtime-root", str(root), cwd=tmp_path, env=env)
@@ -113,6 +115,20 @@ def test_init_ops_cli_preserves_the_database_from_deployment_environment(tmp_pat
     assert path.parent.stat().st_mode & 0o777 == 0o700
     assert "database.url from LOOPER_DATABASE_URL" in proc.stdout
     assert "Sekr1t-init-pw" not in proc.stdout + proc.stderr
+    assert "sample DSN" not in proc.stdout and "set database.url" not in proc.stdout
+    assert "postgresql://" not in proc.stdout
+
+
+def test_init_ops_cli_reports_the_sample_written_when_no_database_is_configured(tmp_path: Path) -> None:
+    root = tmp_path / "runtime"
+
+    proc = _run_cli("config", "init-ops", "--runtime-root", str(root), cwd=tmp_path, env=_clean_env(tmp_path))
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    database_url = tomllib.loads((root / ops_config.FILE).read_text())["database"]["url"]
+    assert database_url == ops_config.SAMPLE_DATABASE_URL
+    assert "sample DSN" in proc.stdout and "edit it for your database" in proc.stdout
+    assert set(re.findall(r"postgresql://[^\s;]+", proc.stdout)) == {database_url}
 
 
 def test_serve_cli_without_a_database_exits_with_setup_instructions(tmp_path: Path) -> None:

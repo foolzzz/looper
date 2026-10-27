@@ -207,8 +207,6 @@ def _init_ops(args: argparse.Namespace) -> int:
         return 1
     lines = [f"wrote {ops.path} (mode 0600); `looper serve` reads it at every start"]
     lines += ["  values taken (not shown):", *(f"    {note}" for note in notes)] if notes else []
-    lines.append("set database.url in this file before starting Looper; the sample DSN is "
-                 "postgresql://localhost:5432/looper")
     print("\n".join(lines))
     return 0
 
