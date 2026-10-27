@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.158] - 2026-10-26
+
+### Fixed
+
+- **A failed Claude Code background Agent launch no longer keeps the Manager process from being suspended when idle.** The untracked background-job marker is now cleared when the launch returns an error result without a `task_started` event; jobs that already started stay tracked. ([#729](https://github.com/foolzzz/looper/pull/729))
+
 ## [2.13.157] - 2026-10-26
 
 ### Added
