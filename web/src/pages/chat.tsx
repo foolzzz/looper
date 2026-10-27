@@ -65,10 +65,6 @@ interface ChatMessage {
 
 const STORAGE_SESSION_KEY = "looper-chat-session-id";
 const messagesKey = (sessionId: string) => `looper-chat-messages-${sessionId}`;
-// The keys from before the rename (LoopX), read when the new ones are missing so an open chat carries on.
-const LEGACY_SESSION_KEY = "loopx-chat-session-id";
-const legacyMessagesKey = (sessionId: string) => `loopx-chat-messages-${sessionId}`;
-
 const stagedKey = (sessionId: string) => `looper-chat-staged-${sessionId}`;
 const draftKey = (managerId: string, sessionId: string) => `looper-chat-draft:${managerId}:${sessionId}`;
 // The server's running turn is asked again this often while the page waits for it to end.
@@ -274,7 +270,7 @@ const localThreadsKey = (managerId: string) => `looper-chat-local-threads:${mana
 
 function getOrCreateSessionId(managerId = "manager"): string {
   const key = sessionKey(managerId);
-  const existing = localStorage.getItem(key) ?? (managerId === "manager" ? localStorage.getItem(LEGACY_SESSION_KEY) : null);
+  const existing = localStorage.getItem(key);
   if (existing) {
     localStorage.setItem(key, existing);
     return existing;
@@ -290,7 +286,7 @@ function newSessionId(): string {
 
 function loadMessages(sessionId: string): ChatMessage[] {
   try {
-    const raw = localStorage.getItem(messagesKey(sessionId)) ?? localStorage.getItem(legacyMessagesKey(sessionId));
+    const raw = localStorage.getItem(messagesKey(sessionId));
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];

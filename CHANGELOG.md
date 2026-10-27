@@ -18,6 +18,57 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.175] - 2026-10-27
+
+### Fixed
+
+- **Schedules: a claimed gate's output survives a rename or notification edit.** A schedule's execution fingerprint now covers only execution settings (not the name, notifications or the `enabled` flag, which is checked separately), a gate run's stdout is saved before the configuration check, and each gating run records its fingerprint in the new `schedule_runs.execution_snapshot` column (also in the run view). Carried input skips earlier runs whose snapshot differs from the current execution settings. No prompt or tool change. ([#777](https://github.com/foolzzz/looper/pull/777))
+
+## [2.13.174] - 2026-10-27
+
+### Changed
+
+- **Prompt-regression dialogs: Manager budget and api session readback.** With `--manager-agent`, the run budget (`--max-budget-usd`) is now written to the selected Manager profile's role settings together with `profile_id`. After an api Manager dialog, a new check reads back that every completed api turn in the Manager's current session has an `api_sessions` row whose protocol matches the Manager profile's, and a neutral `api_session_items` entry; a mismatch is added to the dialog's problems and fails it. Evaluation tooling only; no runtime, prompt or tool change. ([#764](https://github.com/foolzzz/looper/pull/764))
+
+## [2.13.173] - 2026-10-27
+
+### Changed
+
+- **Configuration is `looper-config/v4` only.** Export always writes v4 and import refuses any other format, and a top-level field outside the v4 set (including `loopx_version`), before work begins; an invalid pending import file is discarded. The older-format conversions are removed: import such a file on v2.13.165, upgrade that installation, then export v4. The Claude Code agent teams switch is dropped from layer environments on export and import. ([#761](https://github.com/foolzzz/looper/pull/761))
+
+### Removed
+
+- **Scheduler minimum interval variable.** `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` and `LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS` no longer apply; only the stored setting or the built-in 300 seconds does, and the source `env` is gone from the settings page. ([#761](https://github.com/foolzzz/looper/pull/761))
+
+## [2.13.172] - 2026-10-27
+
+### Added
+
+- **Resident runner sessions for Manager and Planner.** `RunnerSession` drives a Manager or Planner turn through a runner process owned by a shared supervisor, with its host tools and per-turn budget limits wired into the Manager and Planner tiers, and `looper serve` can own a runner supervisor and stop it at shutdown. Nothing in Looper creates a `RunnerSession` or passes a runner supervisor to serve yet. ([#768](https://github.com/foolzzz/looper/pull/768))
+
+### Fixed
+
+- **Cancelled close settlement.** After `session/close` is acknowledged, a cancelled settlement wait now leaves the session `close_failed` with local settlement and a tombstone, instead of leaving it `closing` and raising `CancelledError` out of the lease release. ([#776](https://github.com/foolzzz/looper/pull/776))
+
+## [2.13.171] - 2026-10-27
+
+### Fixed
+
+- **Runner session close.** Closing a runner session is one explicit per-session state machine: a close that fails, is rejected or times out stays local to its session and the session keeps its capacity until cleanup completes, closed sessions leave bounded tombstones so late updates are dropped, and the supervisor keeps a lease whose close failed so the close can be retried. Nothing in Looper calls the runner bridge yet. ([#769](https://github.com/foolzzz/looper/pull/769))
+- **Release smoke.** The wheel smoke no longer runs the removed `loopx` command, which blocked the v2.13.170 release; it asserts the wheel installs only `looper`. ([#771](https://github.com/foolzzz/looper/pull/771))
+
+## [2.13.170] - 2026-10-27
+
+### Removed
+
+- **Retired entry points and runtime deployment fallbacks.** The `loopx` command, the installer's removal of an old `loopx` package, the automatic `~/.loopx` to `~/.looper` move, the `com.loopx.serve` unit replacement, `looper serve --format`, the old dashboard hash redirects and the `loopx-chat-*` browser keys are gone; `service install` and `init-ops` read deployment settings more simply. Current deployment and routing are kept. ([#762](https://github.com/foolzzz/looper/pull/762))
+
+## [2.13.169] - 2026-10-27
+
+### Fixed
+
+- **Runner session isolation.** One session's close or cancel failure, a failing request-end callback, and late updates after a close no longer fail the runner generation or the shared connection: abandoned cancels are bounded and their late responses dropped, failed request-end processing settles only that trace, and a rejected session close no longer marks the generation failed. Nothing in Looper calls the runner bridge yet. ([#763](https://github.com/foolzzz/looper/pull/763))
+
 ## [2.13.168] - 2026-10-27
 
 ### Fixed

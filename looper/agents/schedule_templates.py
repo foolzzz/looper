@@ -111,6 +111,13 @@ async def effective_schedule(conn: Any, schedule: Mapping[str, Any], *, enabled:
 def fingerprint(schedule: Mapping[str, Any], effective: EffectiveSchedule) -> str:
     import dataclasses
     import json
-    settings = {k: schedule.get(k) for k in (*schedules.FIELDS, "manager_id", "project_id", "enabled",
-                                            "profile_overrides", "task_limits")}
-    return json.dumps({"settings": settings, "effective": dataclasses.asdict(effective)}, sort_keys=True, default=str)
+    settings = {k: schedule.get(k) for k in (
+        "manager_id", "project_id", "requirement", "work_dir", "template_key", "template_inputs",
+        "profile_overrides", "task_limits", "gate_command", "gate_timeout_seconds", "run_timeout_mode",
+        "run_timeout_seconds", "run_budget_usd", "daily_budget_usd", "cron", "timezone", "overlap",
+        "max_parallel_runs", "catch_up")}
+    resolved = dataclasses.asdict(effective)
+    if resolved["template"]:
+        # Restoring the same execution settings must match despite the edit's timestamp.
+        resolved["template"].pop("updated_at", None)
+    return json.dumps({"settings": settings, "effective": resolved}, sort_keys=True, default=str)

@@ -34,7 +34,6 @@ from typing import Any
 
 from .. import env, ops_config
 from ..ops_config import OpsConfig
-from ..paths import settle_runtime_root
 from .broadcast import Broadcaster
 from .bus import MessageBus
 from .channels.allowlist import SenderAllowlist, allowlist_from_config, start_problem
@@ -52,6 +51,7 @@ from .wait_service import WaitService
 from .http_server import AgentHTTPServer
 from .log_redaction import log_to_stderr
 from .scheduler import Scheduler
+from .runtimes.runner.supervisor import RunnerSupervisor
 from .supervisor import AgentSupervisor
 from .tiers.manager import ManagerAgent, ManagerConfig
 from .tiers.task import TaskRouter
@@ -775,6 +775,31 @@ async def _run_agent_system(
     work_dir: Path,
     claude_bin: str = "claude",
     skip_backup: bool = False,
+    runner_supervisor: RunnerSupervisor | None = None,
+) -> None:
+    """Own an explicitly supplied runner, including when startup only partly completes."""
+    kwargs = dict(ops=ops, runtime_root=runtime_root, work_dir=work_dir,
+                  claude_bin=claude_bin, skip_backup=skip_backup)
+    if runner_supervisor is None:
+        await _run_agent_system_owned(**kwargs)
+        return
+    from ..db import close_pool
+    async with contextlib.AsyncExitStack() as ownership:
+        ownership.push_async_callback(close_pool)
+        ownership.push_async_callback(runner_supervisor.stop)
+        await _run_agent_system_owned(**kwargs, runner_supervisor=runner_supervisor, ownership=ownership)
+        ownership.pop_all()  # The normal shutdown already stopped these owners and closed the database.
+
+
+async def _run_agent_system_owned(
+    *,
+    ops: OpsConfig,
+    runtime_root: Path,
+    work_dir: Path,
+    claude_bin: str = "claude",
+    skip_backup: bool = False,
+    runner_supervisor: RunnerSupervisor | None = None,
+    ownership: contextlib.AsyncExitStack | None = None,
 ) -> None:
     """Start the full agent system with the ops settings ``ops`` and run until interrupted."""
 
@@ -883,6 +908,8 @@ async def _run_agent_system(
 
     bus = MessageBus(runtime_root=runtime_root)
     supervisor = AgentSupervisor(bus=bus, runtime_root=runtime_root)
+    if ownership is not None:
+        ownership.push_async_callback(supervisor.stop_all)
     registry = ChannelRegistry(bus=bus)
 
     # --- Channel Adapters ---
@@ -927,6 +954,8 @@ async def _run_agent_system(
                         supervisor=supervisor, scheduler=scheduler, runtime_root=runtime_root)
     fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=runtime_root,
                          url=_local_url(host, port), config=manager_config, broadcaster=broadcaster)
+    if ownership is not None:
+        ownership.push_async_callback(fleet.stop)
     task_router.manager_running = fleet.is_running
     await fleet.load()
     # Start receiving only once every enabled Manager is known, so backlog is not lost or sent to a disabled one.
@@ -1033,6 +1062,8 @@ async def _run_agent_system(
         await http_server.stop()
         await fleet.stop()
         await supervisor.stop_all()
+        if runner_supervisor is not None:
+            await runner_supervisor.stop()
         await registry.stop_all()
         await bus.shutdown()
         await close_pool()
@@ -1075,16 +1106,13 @@ def serve_agent(
     for warning in ops.warnings:
         logger.warning("%s", warning)
 
-    settled = settle_runtime_root(ops.runtime_root)  # ~/.loopx from before the rename becomes ~/.looper
-    if settled.note:
-        logger.log(logging.WARNING if settled.warning else logging.INFO, "%s", settled.note)
     resolved_work_dir = work_dir or Path.cwd()
 
     try:
         asyncio.run(
             _run_agent_system(
                 ops=ops,
-                runtime_root=settled.root,
+                runtime_root=ops.runtime_root,
                 work_dir=resolved_work_dir,
                 claude_bin=claude_bin,
                 skip_backup=skip_backup,

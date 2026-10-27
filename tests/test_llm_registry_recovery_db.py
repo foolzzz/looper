@@ -232,7 +232,8 @@ def test_registry_upgrade_with_a_docker_backup_passes_the_gate_without_local_pg_
             await target.execute(_VERSION_TWO)
             code, log = await asyncio.to_thread(
                 _serve, tmp_path, target_dsn,
-                LOOPER_BACKUP_CMD="docker exec -e A=b pgc pg_dump --format=custom -U {user} {dbname}")
+                backup={"command": ["docker", "exec", "-e", "A=b", "pgc", "pg_dump", "--format=custom", "-U",
+                                    "{user}", "{dbname}"]})
             assert code is None, log
             assert "phase=backup_verified" in log and "pg_restore is required" not in log
             assert await target.fetchval("SELECT version FROM registry_schema_version") == 3
@@ -292,9 +293,10 @@ def test_full_backup_restores_old_patch_in_isolation_and_keeps_new_writes(tmp_pa
             assert len(history[0]) == 24 and history[1]["runs"] == 144
             assert await connection.schema_change_pending(target)
             dump, restore = pg_clients
-            ops = ops_config.load(ops_config.Flags(runtime_root=tmp_path),
-                                  environ={"LOOPER_DATABASE_URL": target_dsn, "LOOPER_PG_DUMP": dump},
-                                  dotenv=tmp_path / "absent.env")
+            ops = ops_config.OpsConfig(runtime_root=tmp_path, path=tmp_path / ops_config.FILE,
+                                       database_url=target_dsn, pg_dump=dump)
+            ops_config.write_private(ops.path, ops_config.render(ops))
+            ops = ops_config.load(ops_config.Flags(runtime_root=tmp_path))
             pool = await asyncpg.create_pool(target_dsn, min_size=1, max_size=2, command_timeout=15)
             try:
                 await _back_up_before_schema_change(pool, ops, tmp_path, skip_backup=False)

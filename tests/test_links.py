@@ -41,6 +41,7 @@ def test_serve_does_not_start_with_a_malformed_public_url(
 ) -> None:
     import asyncpg
 
+    from looper import ops_config
     from looper.agents import serve
 
     connect = AsyncMock(side_effect=AssertionError("the database must not be contacted"))
@@ -48,12 +49,14 @@ def test_serve_does_not_start_with_a_malformed_public_url(
     monkeypatch.setattr(asyncpg, "connect", connect)
     monkeypatch.setattr(asyncpg, "create_pool", create_pool)
     monkeypatch.setattr(serve, "_configure_logging", lambda level: None)  # leaves the process's logging alone
-    monkeypatch.setenv("LOOPER_PUBLIC_URL", "looper.example.com")
-    monkeypatch.setenv("LOOPER_DATABASE_URL", "postgresql://u:Sekr1t-pw@127.0.0.1:1/db")
+    config = ops_config.OpsConfig(runtime_root=tmp_path, path=tmp_path / ops_config.FILE,
+                                  database_url="postgresql://u:Sekr1t-pw@127.0.0.1:1/db",
+                                  public_url="looper.example.com")
+    ops_config.write_private(config.path, ops_config.render(config))
     with pytest.raises(SystemExit) as stopped:
         serve.serve_agent(runtime_root=tmp_path, work_dir=tmp_path)
     assert stopped.value.code == 1
-    assert "LOOPER_PUBLIC_URL" in caplog.text
+    assert "server.public_url" in caplog.text
     connect.assert_not_called()
     create_pool.assert_not_called()
 

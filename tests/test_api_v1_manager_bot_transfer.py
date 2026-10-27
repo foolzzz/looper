@@ -45,14 +45,15 @@ def test_v4_bot_schema_is_closed_and_typed(fields):
 def test_v4_nullable_display_name_and_export_share_document_projection():
     document = {"format": "looper-config/v4", "channels": [{**BOT, "display_name": None}]}
     assert api_v1.validate_arguments(CONFIG_DOCUMENT, document) == document
-    assert api_v1.RESULTS["config.export"]["properties"]["document"]["oneOf"] == CONFIG_DOCUMENT["oneOf"]
+    assert api_v1.RESULTS["config.export"]["properties"]["document"]["properties"] == CONFIG_DOCUMENT["properties"]
 
 
 @pytest.mark.parametrize("version", ["loopx-config/v1", "looper-config/v1", "looper-config/v2", "looper-config/v3"])
-def test_legacy_builtin_channel_without_manager_still_validates(version):
+def test_retired_builtin_channel_format_is_rejected(version):
     entry = {"channel_id": "channel-telegram", "channel_type": "telegram", "enabled": False, "config": {}}
     document = {"format": version, "channels": [entry]}
-    assert api_v1.validate_arguments(CONFIG_DOCUMENT, document) == document
+    with pytest.raises(OpError):
+        api_v1.validate_arguments(CONFIG_DOCUMENT, document)
 
 
 @pytest.mark.parametrize("kind", ["telegram", "lark", "lark_bot"])
@@ -92,7 +93,7 @@ def test_clients_cannot_bypass_bot_guard_by_replacing_staged_file(tmp_path, monk
             async def request(route, data):
                 return await _send(server, f"POST /api/v1/{route}",
                     {**_bearer(CLIENT_TOKEN), "X-Looper-Session": "bot-transfer"}, json.dumps(data))
-            status, _, staged = await request("config/import_preview", {"document": {"format": "looper-config/v3"}})
+            status, _, staged = await request("config/import_preview", {"document": {"format": "looper-config/v4"}})
             assert status == 200, staged
             import_id = staged["result"]["import_id"]
             pending = server._config_imports._pending[import_id]
@@ -111,10 +112,10 @@ def test_clients_cannot_bypass_bot_guard_by_replacing_staged_file(tmp_path, monk
 
 
 @pytest.mark.usefixtures("clients")
-def test_legacy_builtin_client_import_keeps_confirmation_flow(tmp_path, monkeypatch):
+def test_current_builtin_client_import_keeps_confirmation_flow(tmp_path, monkeypatch):
     runner = AsyncMock(return_value=config_transfer.Plan())
     monkeypatch.setattr(config_imports, "_run", runner)
-    document = {"format": "looper-config/v3", "channels": [{"channel_type": "telegram", "config": {}}]}
+    document = {"format": "looper-config/v4", "channels": [{"channel_id": "channel-telegram", "channel_type": "telegram", "config": {}}]}
 
     async def run():
         async with _serving(tmp_path) as server:

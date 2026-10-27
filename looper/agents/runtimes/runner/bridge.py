@@ -8,7 +8,9 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 import inspect
 import json
+import logging
 import re
+import time
 from typing import TYPE_CHECKING
 from typing import get_args
 
@@ -20,13 +22,25 @@ from . import protocol as p
 if TYPE_CHECKING:
     from .turn import RunnerTurn, TurnSummary
 
+logger = logging.getLogger(__name__)
+MAX_ABANDONED_CONTROLS = 128
+MAX_TOMBSTONES = 128
+TOMBSTONE_MAX_AGE = 600.0
+_LOCAL_CONTROLS = frozenset({"session/cancel", "session/close"})
+
 
 class State(StrEnum):
+    """Turn activity, independent of session admission and close ownership."""
     OPENING = "opening"
     IDLE = "idle"
     RUNNING = "running"
+
+
+class CloseState(StrEnum):
+    OPEN = "open"
     CLOSING = "closing"
     CLOSED = "closed"
+    CLOSE_FAILED = "close_failed"
     POISONED = "poisoned"
 
 
@@ -46,6 +60,9 @@ class SessionEntry:
     role: str
     session_id: str = ""
     state: State = State.OPENING
+    close_state: CloseState = CloseState.OPEN
+    close_task: asyncio.Task | None = field(default=None, repr=False)
+    local_error: str | None = None
     trace_id: str | None = None
     turn: RunnerTurn | None = field(default=None, repr=False)
     on_event: Callable | None = field(default=None, repr=False)
@@ -74,6 +91,14 @@ class Pending:
     params: dict = field(repr=False)
     future: asyncio.Future = field(repr=False)
     entry: SessionEntry | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
+class Tombstone:
+    session_id: str
+    trace_id: str | None
+    outcome: str | None
+    closed_at: float
 
 
 async def _value(value):
@@ -140,7 +165,9 @@ class RunnerBridge:
         self.control_timeout, self.max_updates = control_timeout, max_updates
         self.on_failure = on_failure
         self.sessions: dict[str, SessionEntry] = {}
+        self.tombstones: dict[str, Tombstone] = {}
         self._pending: dict[str, Pending] = {}
+        self._abandoned_controls: dict[str, tuple[str, dict]] = {}
         self._reverse_tasks: set[asyncio.Task] = set()
         self._reverse_ids: set[str] = set()
         self._write_lock = asyncio.Lock()
@@ -187,6 +214,10 @@ class RunnerBridge:
             raise self._error
         if method != "initialize" and not self._initialized:
             raise RuntimeError("runner is not initialized")
+        if method in _LOCAL_CONTROLS and (len(self._abandoned_controls)
+                + sum(pending.method in _LOCAL_CONTROLS for pending in self._pending.values())
+                >= MAX_ABANDONED_CONTROLS):
+            raise p.ProtocolError(p.ErrorCode.CAPACITY)
         params = p.decode_params(method, params)  # Strip host-only objects before encoding.
         self._counter += 1
         rpc_id = f"l-{self._counter}"
@@ -197,8 +228,14 @@ class RunnerBridge:
                 await self._write(p.Request(rpc_id, method, params), _entry)
                 return await asyncio.shield(future)
         except (TimeoutError, asyncio.CancelledError):
-            # A late acceptance cannot make an abandoned prompt runnable again.
-            self._fail(ConnectionLost("runner protocol-error: control abandoned or timed out"))
+            if method in _LOCAL_CONTROLS:
+                # Cancel and close cannot admit new work. Keep bounded correlation
+                # state so its late response cannot take down another session.
+                if not future.done():
+                    self._abandoned_controls[rpc_id] = (method, params)
+            else:
+                # A late acceptance cannot make an abandoned prompt runnable again.
+                self._fail(ConnectionLost("runner protocol-error: control abandoned or timed out"))
             raise
         finally:
             self._pending.pop(rpc_id, None)
@@ -211,7 +248,8 @@ class RunnerBridge:
         entry = SessionEntry(params["session_key"], params["role"])
         result = await self.request("session/new", params)
         sid = result["session_id"]
-        if sid in self.sessions:
+        self._prune_tombstones()
+        if sid in self.sessions or sid in self.tombstones:
             self._fail(ConnectionLost("runner protocol-error: duplicate session id"))
             raise self._error
         entry.session_id, entry.state = sid, State.IDLE
@@ -228,7 +266,7 @@ class RunnerBridge:
         entry = self._entry(session_id)
         if self._error:
             raise self._error
-        if entry.state != State.IDLE or trace_id in entry.traces:
+        if entry.close_state != CloseState.OPEN or entry.state != State.IDLE or trace_id in entry.traces:
             raise p.ProtocolError(p.ErrorCode.SESSION_BUSY)
         # No await until the active trace, policy and consumer have all been installed.
         entry.state, entry.trace_id, entry.turn, entry.on_event = State.RUNNING, trace_id, turn, on_event
@@ -258,7 +296,7 @@ class RunnerBridge:
             entry.updates.clear()
             entry.settled.cancel()
             entry.settled = None
-            entry.state = State.POISONED if self._error else State.IDLE
+            entry.state = State.IDLE
             raise
         except BaseException:
             entry.stopped = True
@@ -274,7 +312,7 @@ class RunnerBridge:
 
     async def cancel_turn(self, session_id, trace_id):
         entry = self._entry(session_id, trace_id)
-        if entry.state != State.RUNNING:
+        if entry.close_state != CloseState.OPEN or entry.state != State.RUNNING:
             raise p.ProtocolError(p.ErrorCode.NOT_RUNNING)
         entry.stopped = True
         await _value(entry.turn.stop())
@@ -282,45 +320,107 @@ class RunnerBridge:
 
     async def steer(self, session_id, trace_id, message_id, text):
         entry = self._entry(session_id, trace_id)
-        if entry.state != State.RUNNING or entry.stopped:
+        if entry.close_state != CloseState.OPEN or entry.state != State.RUNNING or entry.stopped:
             raise p.ProtocolError(p.ErrorCode.NOT_RUNNING)
         if not self.capabilities.get("steer", {}).get("in_trace", False):
             raise p.ProtocolError(p.ErrorCode.UNSUPPORTED)
         return await self.request("session/steer", {"session_id": session_id, "trace_id": trace_id,
             "message_id": message_id, "text": text, "if_idle": "reject"})
 
-    async def close_session(self, session_id):
+    def _transition_close(self, entry: SessionEntry, state: CloseState, reason: str) -> None:
+        previous = entry.close_state
+        # Poison is irreversible, including while a cancel is awaiting its reply.
+        if previous == CloseState.POISONED or previous == state:
+            return
+        allowed = {
+            CloseState.OPEN: {CloseState.CLOSING, CloseState.POISONED},
+            CloseState.CLOSING: {CloseState.CLOSED, CloseState.CLOSE_FAILED, CloseState.POISONED},
+            CloseState.CLOSE_FAILED: {CloseState.CLOSING, CloseState.POISONED},
+            CloseState.CLOSED: set(),
+        }
+        if state not in allowed[previous]:
+            raise RuntimeError(f"invalid runner close transition: {previous} -> {state}")
+        entry.close_state = state
+        logger.debug("Runner session %s close %s -> %s: %s", entry.session_id, previous, state, reason)
+
+    def _prune_tombstones(self) -> None:
+        now = time.monotonic()
+        while self.tombstones:
+            sid, tombstone = next(iter(self.tombstones.items()))
+            if len(self.tombstones) <= MAX_TOMBSTONES and now - tombstone.closed_at < TOMBSTONE_MAX_AGE:
+                break
+            del self.tombstones[sid]
+
+    async def close_session(self, session_id) -> CloseState:
         entry = self.sessions.get(session_id)
         if entry is None:
-            return
-        previous = entry.state
-        if previous == State.CLOSING:
-            previous = State.RUNNING if entry.accepted and entry.summary is None else State.IDLE
-        params = {"session_id": session_id}
-        if previous == State.RUNNING:
-            params["trace_id"] = entry.trace_id
+            return CloseState.CLOSED
+        if entry.close_task is None or entry.close_task.done():
+            self._transition_close(entry, CloseState.CLOSING, "close requested")
             entry.stopped = True
-            entry.state = State.CLOSING
-            await _value(entry.turn.stop())
-        entry.state = State.CLOSING
-        try:
-            await self.request("session/close", params)
-        except RpcFailure:
-            if not self._error:
-                entry.state = State.IDLE if entry.summary is not None else previous
-            raise
+            entry.close_task = asyncio.create_task(self._close_session(entry))
+            # The bridge owns the attempt even if its caller stops waiting.
+            entry.close_task.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+        return await asyncio.shield(entry.close_task)
+
+    async def _close_session(self, entry: SessionEntry) -> CloseState:
+        params = {"session_id": entry.session_id}
         if entry.settled is not None and not entry.settled.done():
-            # Settlement drains admitted tools, including user confirmations. A
-            # slow tool is not evidence that the shared control pipe is dead.
-            await asyncio.shield(entry.settled)
-        entry.state = State.CLOSED
-        self.sessions.pop(session_id, None)
+            params["trace_id"] = entry.trace_id
+        try:
+            if entry.turn is not None:
+                await _value(entry.turn.stop())
+            await self.request("session/close", params)
+            if entry.settled is not None and not entry.settled.done():
+                # Settlement drains admitted tools, including user confirmations. A
+                # slow tool is not evidence that the shared control pipe is dead.
+                await asyncio.shield(entry.settled)
+        except (Exception, asyncio.CancelledError) as error:
+            if not self._error:
+                self._transition_close(entry, CloseState.CLOSE_FAILED, "close failed; retry retains ownership")
+                entry.ready.set()
+                if entry.turn is not None and entry.summary is None:
+                    # The single consumer finishes any admitted callback before
+                    # local settlement; never cancel or replay a tool write.
+                    entry.local_error = "runner session close failed"
+                    entry.updates.clear()
+                    # A rejected in-flight prompt cancels both its consumer and
+                    # settlement future. Restore them for local failure cleanup.
+                    if entry.settled is None or entry.settled.cancelled():
+                        entry.settled = asyncio.get_running_loop().create_future()
+                    if entry.worker is None or entry.worker.done():
+                        entry.worker = asyncio.create_task(self._updates(entry))
+                    entry.wake.set()
+                if entry.settled is not None and not entry.settled.done():
+                    await asyncio.shield(entry.settled)
+                self.tombstones[entry.session_id] = Tombstone(entry.session_id, entry.trace_id,
+                    entry.summary.outcome if entry.summary else None, time.monotonic())
+                self._prune_tombstones()
+                if isinstance(error, asyncio.CancelledError) and not asyncio.current_task().cancelling():
+                    # Only the internal settlement was cancelled, not this task.
+                    return entry.close_state
+            raise
+        self._transition_close(entry, CloseState.CLOSED, "close acknowledged and settlement drained")
+        self.tombstones[entry.session_id] = Tombstone(entry.session_id, entry.trace_id,
+            entry.summary.outcome if entry.summary else None, time.monotonic())
+        self._prune_tombstones()
+        self.sessions.pop(entry.session_id, None)
+        return CloseState.CLOSED
 
     async def _read(self):
         try:
             while True:
                 message = await self._reader.read()
                 if isinstance(message, p.Response):
+                    abandoned = self._abandoned_controls.pop(message.id, None)
+                    if abandoned is not None:
+                        method, params = abandoned
+                        if message.error is not None:
+                            p.verify_error(message.error, params)
+                        else:
+                            p.decode_result(method, message.result, params)
+                        logger.debug("Dropped late %s response", method)
+                        continue
                     pending = self._pending.get(message.id)
                     if not pending or not message.id.startswith("l-") or pending.future.done():
                         raise p.ProtocolError(p.ErrorCode.INVALID_REQUEST)
@@ -354,12 +454,20 @@ class RunnerBridge:
             self._fail(ConnectionLost("runner protocol-error: invalid stdout or correlation"))
 
     def _enqueue(self, update):
+        self._prune_tombstones()
+        if update["session_id"] in self.tombstones:
+            logger.debug("Dropped late %s for a closed session", update["kind"])
+            return
         entry = self.sessions.get(update["session_id"])
         if entry is None:
-            raise p.ProtocolError(p.ErrorCode.SESSION_NOT_FOUND)
-        if entry.state not in (State.RUNNING, State.CLOSING) and entry.summary is None:
+            logger.debug("Dropped %s for a missing session", update["kind"])
+            return
+        if entry.close_state in (CloseState.POISONED, CloseState.CLOSE_FAILED) or entry.summary is not None:
+            logger.debug("Dropped update for a poisoned or summarized session")
+            return
+        if entry.state != State.RUNNING:
             return  # Rejected prompts cannot enqueue work for the next turn.
-        if entry.trace_id != update["trace_id"] or entry.settled_received or entry.summary is not None:
+        if entry.trace_id != update["trace_id"] or entry.settled_received:
             if update["kind"] == "text_delta":
                 return  # A stale display delta cannot create effects or reopen a trace.
             raise p.ProtocolError(p.ErrorCode.INVALID_REQUEST)
@@ -386,7 +494,7 @@ class RunnerBridge:
             entry = self.sessions.get(params["session_id"])
             if entry is None or entry.trace_id != params["trace_id"]:
                 raise p.ProtocolError(p.ErrorCode.TRACE_MISMATCH)
-            if entry.stopped or entry.state != State.RUNNING or self._error:
+            if entry.stopped or entry.close_state != CloseState.OPEN or entry.state != State.RUNNING or self._error:
                 result = ({"allow": False, "reason": "stopped"} if message.method == "budget/authorize" else
                           {"text": "stopped", "is_error": True, "ran": False})
             else:
@@ -425,6 +533,12 @@ class RunnerBridge:
                 entry.initialized = True
                 await self._emit(entry, {"type": "system", "subtype": "init"})
             while entry.summary is None:
+                if entry.local_error is not None:
+                    await self._settle(entry, {"session_id": entry.session_id, "trace_id": entry.trace_id,
+                        "outcome": "failed", "final_text": "", "usage_complete": False,
+                        "requests": entry.requests_ended,
+                        "error": {"kind": "INTERNAL_ERROR", "message": entry.local_error}})
+                    return
                 while entry.updates:
                     update = entry.updates.popleft()
                     kind = update["kind"]
@@ -442,22 +556,50 @@ class RunnerBridge:
                             "tool_use_id": update["call_id"], "content": update["text"], "is_error": update["is_error"]}]}}
                     elif kind == "request_end":
                         authorized = entry.authorized.pop(update["request_id"], None)
-                        if (authorized != update["request_kind"]
-                                or update["request_kind"] not in self.capabilities.get("authorize_covers", [])):
-                            entry.invalid_usage = True
-                            if entry.state == State.RUNNING and not entry.stopped:
-                                try:
+                        approved = (authorized == update["request_kind"]
+                                    and update["request_kind"] in self.capabilities.get("authorize_covers", []))
+                        try:
+                            if approved:
+                                event = await _value(entry.turn.request_end(update))
+                                entry.requests_ended += 1
+                            else:
+                                entry.invalid_usage = True
+                                if entry.state == State.RUNNING and not entry.stopped:
                                     await self.cancel_turn(entry.session_id, entry.trace_id)
-                                except RpcFailure:
-                                    pass  # Rejected cancellation still settles only this trace.
-                            continue
-                        event = await _value(entry.turn.request_end(update))
-                        entry.requests_ended += 1
+                                continue
+                        except (Exception, asyncio.CancelledError):
+                            if self._error:
+                                raise self._error
+                            # A callback can record usage before settings or its
+                            # cancel callback fails. Finish still reconciles it.
+                            if approved:
+                                entry.requests_ended += 1
+                            cancel_needed = not entry.stopped
+                            self._transition_close(entry, CloseState.POISONED, "request_end processing failed")
+                            entry.updates.clear()
+                            if cancel_needed:
+                                # Quarantine updates before awaiting cancellation.
+                                # Do not repeat an earlier stop or cancel attempt.
+                                entry.stopped = True
+                                try:
+                                    await _value(entry.turn.stop())
+                                    await self.request("session/cancel", {"session_id": entry.session_id,
+                                        "trace_id": entry.trace_id})
+                                except (Exception, asyncio.CancelledError):
+                                    if self._error:
+                                        raise self._error
+                            await self._settle(entry, {"session_id": entry.session_id, "trace_id": entry.trace_id,
+                                "outcome": "failed", "final_text": "",
+                                "usage_complete": approved, "requests": entry.requests_ended,
+                                "error": {"kind": "INTERNAL_ERROR", "message": "runner request_end processing failed"}})
+                            return
                     else:
                         event = {"type": "system", "subtype": kind, "runner": update}
                     await self._emit(entry, event)
                 if self._error:
                     break
+                if entry.local_error is not None:
+                    continue
                 entry.wake.clear()
                 await entry.wake.wait()
         except Exception:
@@ -504,8 +646,9 @@ class RunnerBridge:
             # Settlement (including loss) remains terminal if acceptance never arrived.
             await self._emit(entry, event)
         finally:
-            entry.state = (State.POISONED if self._error or outcome == "lost" else
-                           State.CLOSING if entry.state == State.CLOSING else State.IDLE)
+            if self._error or outcome == "lost":
+                self._transition_close(entry, CloseState.POISONED, "trace lost")
+            entry.state = State.IDLE
             entry.settled.set_result(summary)
 
     def _fail(self, error):
@@ -519,8 +662,7 @@ class RunnerBridge:
             entry.stopped = True
             entry.ready.set()
             entry.wake.set()
-            if entry.state != State.CLOSED:
-                entry.state = State.POISONED
+            self._transition_close(entry, CloseState.POISONED, "connection lost")
         self._close_task = asyncio.create_task(self._shutdown())
 
     async def _shutdown(self):
@@ -532,7 +674,8 @@ class RunnerBridge:
         self._reader_task.cancel()
         self.writer.close()  # Close this connection only; never terminate the process.
         await asyncio.gather(self._reader_task, return_exceptions=True)
-        tasks = [e.worker for e in self.sessions.values() if e.worker is not None]
+        tasks = [task for entry in self.sessions.values() for task in (entry.worker, entry.close_task)
+                 if task is not None]
         # Started tool writes belong to the turn adapter; join them rather than cancel/retry.
         await asyncio.gather(*tasks, *self._reverse_tasks, return_exceptions=True)
         try:

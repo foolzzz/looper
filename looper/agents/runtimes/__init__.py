@@ -315,6 +315,7 @@ class RuntimeAdapter(ABC):
     roles: ClassVar[frozenset[str] | None] = None
     # Runs and calls tools inside looper serve, with no executable to find or probe.
     in_process: ClassVar[bool] = False
+    platform_tools_in_process: ClassVar[bool] = False
     protocols: ClassVar[frozenset[ApiProtocol]]
     # The provider auth kinds it can be started with now; OAUTH is the type's own login.
     auth_kinds: ClassVar[frozenset[AuthKind]]

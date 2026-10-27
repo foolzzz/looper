@@ -138,11 +138,10 @@ def test_default_only_schedule_export_omits_default_template_extensions(monkeypa
     async def test(pool):
         document = _document()
         document.pop("managers")
-        document["format"] = transfer.V3_FORMAT
         document["projects"][0]["schedules"][0].pop("manager")
         await _run(pool, document)
         exported = await _export(pool)
-        assert exported["format"] == transfer.V3_FORMAT
+        assert exported["format"] == transfer.V4_FORMAT
         schedule = exported["projects"][0]["schedules"][0]
         assert "template_key" not in schedule and "template_inputs" not in schedule
         assert _change(await _run(pool, exported)).action is transfer.Action.UNCHANGED

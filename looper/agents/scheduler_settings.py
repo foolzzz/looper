@@ -2,8 +2,7 @@
 
 ``scheduler.min_interval_seconds``: how close two fires of a schedule may be (a minute with a gate command, else
 this many seconds). ``scheduler.run_timeout_seconds``: the run timeout of a schedule that follows the default.
-With no stored minimum interval, ``LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS`` (or its ``LOOPX_`` name) still applies
-for one more version, with a warning that names the variable; a stored value wins over it.
+With no stored minimum interval, the built-in default is 300 seconds.
 
 The minimum interval is read by synchronous validation, so it is kept in memory: ``load`` reads it at startup and
 ``update`` refreshes it. The run timeout is read when a run starts (``effective_run_timeout``).
@@ -12,19 +11,16 @@ The minimum interval is read by synchronous validation, so it is kept in memory:
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Mapping
 from enum import Enum
 from typing import Any
 
-from .. import env
 from ..db import system_settings as db_settings
 
 logger = logging.getLogger(__name__)
 
 MIN_INTERVAL_KEY = "scheduler.min_interval_seconds"
 RUN_TIMEOUT_KEY = "scheduler.run_timeout_seconds"
-MIN_INTERVAL_ENV = "LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS"
 DEFAULT_MIN_INTERVAL_SECONDS = 300
 # A gated schedule may fire every minute: a run with nothing new ends at its gate, without a task.
 MIN_INTERVAL_GATED_SECONDS = 60
@@ -33,13 +29,11 @@ RUN_TIMEOUT_MAX_SECONDS = 30 * 86400
 FIELDS = ("min_interval_seconds", "run_timeout_seconds")
 
 _min_interval = DEFAULT_MIN_INTERVAL_SECONDS
-_min_source: str | None = None  # "setting", "env"; None: the built-in
-_warned_env = False
+_min_source: str | None = None  # "setting"; None: the built-in
 
 
 class Source(str, Enum):
     SETTING = "setting"
-    ENV = "env"  # the deprecated environment variable
     DEFAULT = "built-in"
 
 
@@ -65,27 +59,9 @@ def min_interval_seconds(*, gated: bool, base: int | None = None) -> int:
     return min(MIN_INTERVAL_GATED_SECONDS, least) if gated else least
 
 
-def _env_name() -> str:
-    legacy = env.counterpart(MIN_INTERVAL_ENV)
-    return MIN_INTERVAL_ENV if MIN_INTERVAL_ENV in os.environ or not legacy else legacy
-
-
-def _env_min_interval() -> int | None:
-    """The deprecated variable's value (None when unset); ``ValueError`` when it is not a whole number from 1."""
-    raw = env.get(MIN_INTERVAL_ENV)
-    if raw is None or raw.strip() == "":
-        return None
-    try:
-        return _seconds(int(raw), MIN_INTERVAL_ENV)
-    except ValueError:
-        raise ValueError(f"{MIN_INTERVAL_ENV} must be a whole number of seconds from 1; got {raw!r}") from None
-
-
 async def load() -> int:
-    """Read the minimum interval at startup: the stored setting, else the deprecated variable (warned about once,
-    without its value), else the built-in. Raises ``ValueError`` for a variable that is not a whole number of
-    seconds from 1, as the server refuses to start with it."""
-    global _min_interval, _min_source, _warned_env
+    """Read the minimum interval at startup: the stored setting, else the built-in."""
+    global _min_interval, _min_source
     stored = (await db_settings.get_settings([MIN_INTERVAL_KEY])).get(MIN_INTERVAL_KEY)
     if stored is not None:
         try:
@@ -93,15 +69,7 @@ async def load() -> int:
             return _min_interval
         except ValueError:
             logger.warning("the stored %s is not a whole number of seconds from 1; ignoring it", MIN_INTERVAL_KEY)
-    value = _env_min_interval()
-    if value is None:
-        _min_interval, _min_source = DEFAULT_MIN_INTERVAL_SECONDS, None
-        return _min_interval
-    if not _warned_env:
-        _warned_env = True
-        logger.warning("%s is deprecated and will be ignored in the next version: set the minimum interval in "
-                       "Settings → Scheduler instead", _env_name())
-    _min_interval, _min_source = value, Source.ENV.value
+    _min_interval, _min_source = DEFAULT_MIN_INTERVAL_SECONDS, None
     return _min_interval
 
 
@@ -131,7 +99,7 @@ async def effective_run_timeout(mode: str, seconds: int | None, conn: Any = None
 
 
 async def settings_view() -> dict[str, Any]:
-    """Each setting's effective value and where it comes from (``setting``, ``env``, ``built-in``)."""
+    """Each setting's effective value and where it comes from (``setting``, ``built-in``)."""
     run_timeout = await _stored_run_timeout()
     return {
         "min_interval_seconds": {
@@ -174,8 +142,6 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
     """Store the settings in ``body`` and apply them: a minimum interval to every later save, a run timeout to the
     runs that start after. A refused body changes nothing."""
     values = checked(body)
-    if "min_interval_seconds" in values and values["min_interval_seconds"] is None:
-        _env_min_interval()  # going back to the built-in hands over to the variable: refuse before storing
     await db_settings.put_settings({_KEYS[name]: None if value is None else str(value)
                                     for name, value in values.items()})
     if "min_interval_seconds" in values:
