@@ -18,6 +18,13 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.178] - 2026-10-27
+
+### Changed
+
+- **PR Python tests run in four CI shards.** The `Agent system tests` job is a four-shard matrix (`LOOPER_TEST_SHARD=N/4`, whole files assigned by weight in `tests/conftest.py`) behind one final job named `Agent system tests` that passes only when every shard passed; the job timeout drops from 20 to 15 minutes. No test is dropped and no production code changed. ([#786](https://github.com/foolzzz/looper/pull/786))
+- **Eval tooling accepts only current formats.** `register_agent` requires explicit provider `endpoints` and a top-level `model` and refuses the legacy `agent.model`, `provider.protocols`, `provider.base_url` and `provider.models`; `compare` and baseline lookup accept only `looper-prompt-eval/v2` (`looper-manager-dialogs/v2` for dialogs) reports and exit 2 otherwise. The committed real-Sonnet baseline is migrated to v2, launch parity checks the current four-tier contracts, and the historical pinned captures and the `launch-provenance.yml` workflow are removed. No product runtime or prompt change. ([#765](https://github.com/foolzzz/looper/pull/765))
+
 ## [2.13.177] - 2026-10-27
 
 ### Fixed
