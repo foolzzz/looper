@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.160] - 2026-10-27
+
+### Added
+
+- **Settings can manage a Manager's own plugins and skills.** Each Manager in Settings gets a "Plugins and skills" section that lists inherited global installs and the Manager's additions, adds, enables, disables and removes additions through the `manager_installs` operator API, and reads the committed state back after every change. It is hidden for the built-in default Manager unless the Manager has additions or an error. ([#735](https://github.com/foolzzz/looper/pull/735))
+
 ## [2.13.159] - 2026-10-27
 
 ### Added
