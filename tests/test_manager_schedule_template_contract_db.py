@@ -159,6 +159,42 @@ def test_scoped_manager_does_not_display_another_owners_template_selection(monke
     run_db(test, monkeypatch, timeout=120)
 
 
+def test_scoped_manager_refuses_another_owners_template_change_before_writing(monkeypatch, tmp_path):
+    """A real template change on another owner's schedule must not commit and then read back as no change."""
+    async def test(pool):
+        chat, project = await _setup(pool, tmp_path)
+        await managers.put_template("manager", "foreign", {"name": "Foreign private template", "inputs": [
+            {"key": "note", "label": "Private note"}]})
+        await managers.put_template("manager", "optional", {"name": "Optional foreign template"})
+        foreign = (await schedules.create_schedule(project["id"], {**FIELDS, "name": "foreign",
+            "template_key": "foreign", "template_inputs": {"note": "Private static value"}}))["schedule"]
+        sid = foreign["schedule_id"]
+        before = await _read(sid)
+        patches = ({"template_inputs": {"note": "Replaced private value"}}, {"template_key": "optional"},
+                   {"name": "should-not-stick", "template_inputs": {"note": "Replaced private value"}})
+        for patch in patches:
+            (answer,) = await chat.say("Change the other owner's template", (TOOL, {
+                "action": "update", "schedule": sid, "fields": patch}))
+            assert _error(answer) == "forbidden" and "another Manager" in answer["error"]["message"]
+            assert await _read(sid) == before
+            shown = str(answer) + "\n" + "\n".join(chat.turns[-1].blocks)
+            assert "没有变化" not in shown
+            for secret in ("Private static value", "Foreign private template", "Optional foreign template",
+                           "Replaced private value"):
+                assert secret not in shown
+        (renamed,) = await chat.say("Rename the other schedule", (TOOL, {
+            "action": "update", "schedule": sid, "fields": {"name": "foreign-renamed"}}))
+        assert renamed["status"] == "ok", renamed
+        assert renamed["result"]["changed"] == ["name"]
+        block = "\n".join(chat.turns[-1].blocks)
+        assert "没有变化" not in block and "foreign-renamed" in block
+        assert "Private static value" not in block and "Foreign private template" not in block
+        stored = await _read(sid)
+        assert stored["name"] == "foreign-renamed"
+        assert (stored["template_key"], stored["template_inputs"]) == ("foreign", {"note": "Private static value"})
+    run_db(test, monkeypatch, timeout=120)
+
+
 def test_templates_only_owner_refuses_free_form_create(monkeypatch, tmp_path):
     async def test(pool):
         chat, _ = await _setup(pool, tmp_path)

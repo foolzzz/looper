@@ -217,9 +217,20 @@ async def _create(call: Call) -> dict[str, Any]:
                              "your reply; do not repeat them, and enable it only when the user answers."}
 
 
+def _refuse_other_owner_template(call: Call, row: Mapping[str, Any], data: Mapping[str, Any]) -> None:
+    """A scoped Manager's view blanks another owner's template and static inputs. Writing them would commit,
+    then the before/after of those blanked views would say nothing changed. Refuse before anything is written."""
+    if call.scoped and row.get("manager_id") != call.manager_id and (
+            "template_key" in data or "template_inputs" in data):
+        raise OpError(ErrorCode.FORBIDDEN, f"schedule {row['name']!r} belongs to another Manager; this Manager "
+                                           "does not change its template or static inputs")
+
+
 async def _update(call: Call, row: Mapping[str, Any]) -> dict[str, Any]:
+    data = _fields(call.arguments, "update")
+    _refuse_other_owner_template(call, row, data)
     before = (await answered(schedules.get_schedule(row["id"])))["schedule"]
-    view = (await answered(schedules.update_schedule(row["id"], _fields(call.arguments, "update"))))["schedule"]
+    view = (await answered(schedules.update_schedule(row["id"], data)))["schedule"]
     changed = await _changes(await _in_scope(call, before), await _in_scope(call, view))
     call.turn.blocks.append("\n".join([f"已修改定时任务「{view['name']}」（项目 {view['project_name']}）：",
                                        *(changed.values() or ["- 没有变化"]), *_next_line(before, view),
@@ -264,6 +275,7 @@ async def _confirming(call: Call) -> str | None:
         return None
     row = await _schedule(call.arguments)
     data = _fields(call.arguments, "update")
+    _refuse_other_owner_template(call, row, data)
     # Refused as the update would refuse it, before anything is asked.
     fields = (await answered(schedules._fields(data, update=True)))[0]
     gated = bool(fields.get("gate_command", row["gate_command"]))
