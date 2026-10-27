@@ -5,6 +5,7 @@ import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+import errno
 import logging
 import os
 from pathlib import Path
@@ -26,6 +27,7 @@ MAX_FAILURES = 5
 SHUTDOWN_TIMEOUT = 5.0
 DIAGNOSTIC_BYTES = 8192
 STDERR_LINES_PER_SECOND = 10
+STDERR_DRAIN_TIMEOUT = 1.0
 _KIND = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,63}")
 _ENV = frozenset({"PATH", "LANG", "LANGUAGE", "TZ", "LC_ALL", "LC_CTYPE", "LC_NUMERIC",
     "LC_TIME", "LC_COLLATE", "LC_MONETARY", "LC_MESSAGES", "LC_PAPER", "LC_NAME",
@@ -134,6 +136,7 @@ class _Generation:
     state: _Kind
     directory: Path
     process: asyncio.subprocess.Process
+    tree: proc_tree.TurnTree | None = None
     exited: asyncio.Event = field(default_factory=asyncio.Event)
     bridge: RunnerBridge | None = None
     cap: int = 1
@@ -147,7 +150,7 @@ class _Generation:
 
 
 class RunnerSupervisor:
-    def __init__(self, runtime_root: Path, commands: Mapping[str, Sequence[str]], *,
+    def __init__(self, runtime_root: Path, commands: Mapping[str, Sequence[str | Path]], *,
                  session_cap: int = 4,
                  connect: Callable[[asyncio.subprocess.Process, str], Awaitable[RunnerBridge]]):
         if type(session_cap) is not int or session_cap <= 0:
@@ -158,13 +161,12 @@ class RunnerSupervisor:
         for kind, argv in commands.items():
             if not isinstance(kind, str) or not _KIND.fullmatch(kind):
                 raise ValueError("runner kind must be a safe identifier")
-            if isinstance(argv, (str, bytes)) or not argv or not all(isinstance(a, str) and a for a in argv):
+            if isinstance(argv, (str, bytes)) or not argv or not all(isinstance(a, (str, Path)) and a for a in argv):
                 raise ValueError("runner command must be an explicit argv")
             if not Path(argv[0]).is_absolute():
                 raise ValueError("runner executable must be absolute")
-            # Resolve file arguments (including the fake Python script) before changing cwd.
-            command = tuple(str(Path(a).absolute()) if not a.startswith("-") and Path(a).is_file()
-                            else a for a in argv)
+            # Path arguments explicitly declare files relative to the launch cwd; strings are opaque argv.
+            command = tuple(str(a.absolute()) if isinstance(a, Path) else a for a in argv)
             self._kinds[kind] = _Kind(command)
         self._stopped = False
         self._shutdown = asyncio.Event()
@@ -244,6 +246,8 @@ class RunnerSupervisor:
                 stderr=asyncio.subprocess.PIPE, limit=MAX_FRAME_BYTES + 1)
             generation = _Generation(kind, state, directory, process)
             generation.exited = _exit_signal(process)
+            generation.tree = proc_tree.track(process, label=f"runner {kind}")
+            generation.tree.start_ticker()
             generation.stderr = self._own(self._stderr(generation))
             generation.bridge = await self.connect(process, kind)
             generation.bridge.on_failure = lambda cause: self._failed(generation)
@@ -257,9 +261,10 @@ class RunnerSupervisor:
             state.generation = generation
             generation.waiter = self._own(self._wait(generation))
         except BaseException as error:
-            # ConnectionLost is an OSError too; a runner crash remains retryable.
-            state.fatal = (isinstance(error, (ValueError, OSError, ProtocolError))
-                and not isinstance(error, ConnectionLost) or
+            # Timeouts and transient I/O failures use the same bounded restart path as a crash.
+            state.fatal = (isinstance(error, (ValueError, ProtocolError)) or
+                generation is None and isinstance(error, OSError) and error.errno in {
+                    errno.ENOENT, errno.EACCES, errno.ENOEXEC} or
                 isinstance(error, RpcFailure) and error.code in {
                     ErrorCode.VERSION_MISMATCH, ErrorCode.INVALID_PARAMS, ErrorCode.UNSUPPORTED,
                     ErrorCode.ISOLATION_REFUSED})
@@ -368,7 +373,12 @@ class RunnerSupervisor:
     async def _dispose(self, generation: _Generation, *, graceful: bool = False) -> None:
         generation.stopping = True
         process = generation.process
-        known = await proc_tree.begin_end(process)
+        known = {}
+        if graceful and process.returncode is None:
+            if generation.tree is not None:
+                await generation.tree.begin_end()
+            else:
+                known = await proc_tree.begin_end(process)
         releases = []
         if graceful:
             releases = [self._own(lease.release()) for lease in list(generation.leases)]
@@ -383,17 +393,26 @@ class RunnerSupervisor:
                 pass
         # Even after the parent exits, its group or tracked children can remain.
         self._failed(generation)
-        await proc_tree.end(process, label=f"runner {generation.kind}", known=known)
+        if generation.tree is not None:
+            await generation.tree.end()
+        else:
+            await proc_tree.end(process, label=f"runner {generation.kind}", known=known)
         if generation.bridge is not None:
             await generation.bridge.close()
         else:
             process.stdin.close()
+        if generation.stderr is not None:
+            await asyncio.wait([generation.stderr], timeout=STDERR_DRAIN_TIMEOUT)
+            if not generation.stderr.done():
+                logger.warning("runner %s stderr did not close within %.1f s", generation.kind, STDERR_DRAIN_TIMEOUT)
+                generation.stderr.cancel()
+                process._transport.get_pipe_transport(2).close()
         results = await asyncio.gather(*(t for t in (generation.stderr, generation.waiter, *releases)
                                          if t is not None), return_exceptions=True)
         results.extend(await asyncio.gather(*(lease.release() for lease in list(generation.leases)),
                                             return_exceptions=True))
         for error in results:
-            if isinstance(error, BaseException):
+            if isinstance(error, BaseException) and not isinstance(error, asyncio.CancelledError):
                 logger.error("runner %s cleanup failed (%s)", generation.kind, type(error).__name__)
 
     async def stop(self) -> None:
