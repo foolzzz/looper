@@ -141,8 +141,10 @@ async def _assert_readback(conn, old, conversion, before, history):
             if table == "agent_sessions":  # old rows have neither a selected profile nor a pending handoff
                 row["selected_profile_id"] = None
                 row["pending_handoff"] = None
-            elif table == "schedules":  # old schedules belong to the default Manager
+            elif table == "schedules":  # old schedules belong to the default Manager, without a template
                 row["manager_id"] = "manager"
+                row["template_key"] = None
+                row["template_inputs"] = {}
             expected.append(row)
         assert sorted((json.loads(r[0]) for r in after[1][table]), key=str) == sorted(expected, key=str)
     profiles = await profile_registry.list_profiles(pool=conn)

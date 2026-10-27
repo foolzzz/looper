@@ -183,6 +183,8 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
     return {
         "schedule_id": row["id"], "project_id": row["project_id"], "project_name": row["project_name"],
         "manager_id": row.get("manager_id", "manager"), "manager_name": row.get("manager_name"),
+        "template_key": row.get("template_key"), "template_inputs": row.get("template_inputs") or {},
+        "template_name": row.get("template_name"),
         "name": row["name"], "cron": row["cron"],
         "timezone": row["timezone"], "description": describe(row["cron"], row["timezone"]),
         "requirement": row["requirement"], "work_dir": row["work_dir"], "overlap": row["overlap"],
@@ -412,6 +414,11 @@ async def _fields(data: Mapping[str, Any], *, update: bool,
             fields["timezone"] = zone_name if zone_name not in (None, "") else cron.local_zone_name()
     except ValueError as exc:
         raise RequestError(HTTP_400, str(exc)) from None
+    from .schedule_templates import selection_patch
+    try:
+        fields.update(selection_patch(data))
+    except ValueError as exc:
+        raise RequestError(HTTP_400, str(exc)) from None
     if "notify_target" in data:
         fields.update(await _notify_target(data["notify_target"]))
     task_limits = _task_limits(data["task_limits"]) if "task_limits" in data else None
@@ -474,15 +481,20 @@ async def list_all_schedules() -> dict[str, Any]:
 
 async def create_schedule(project_id: str, data: dict[str, Any], *, created_via: str = "dashboard",
                           now: datetime | None = None) -> dict[str, Any]:
-    project = await _existing_project(project_id)
+    await _existing_project(project_id)
     fields, profiles, task_limits = await _fields(data, update=False)
     manager_id = fields.pop("manager_id")
     _check_rule(fields["cron"], fields["timezone"], now or _utcnow(), gated=bool(fields.get("gate_command")))
     fields["cron"] = cron.parse(fields["cron"]).text
-    if not fields.get("work_dir") and not project["work_dir"]:
-        raise RequestError(HTTP_400, NO_WORK_DIR)
     try:
         async with db_connection.transaction() as conn:
+            from .schedule_templates import effective_schedule, merge_selection
+            try:
+                fields.update(merge_selection({}, fields))
+                await effective_schedule(conn, {**fields, "manager_id": manager_id, "project_id": project_id,
+                                                "profile_overrides": profiles or {}}, enabled=False)
+            except ValueError as exc:
+                raise RequestError(HTTP_400, str(exc)) from None
             schedule_id = await db_schedules.create_schedule(conn, project_id=project_id, fields=fields,
                                                              profiles=profiles or {}, task_limits=task_limits,
                                                              created_via=created_via, manager_id=manager_id)
@@ -521,15 +533,19 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
                                removes_gate=bool(row["gate_command"]) and not gated)
             if "cron" in fields:
                 fields["cron"] = rule.text
-            work_dir = fields.get("work_dir", row["work_dir"])
-            if not work_dir:
-                project = await db_projects.get_project(row["project_id"], pool=conn)
-                if not (project and project["work_dir"]):
-                    raise RequestError(HTTP_400, NO_WORK_DIR)
+            from .schedule_templates import effective_schedule, merge_selection, MissingDirectory
+            try:
+                fields.update(merge_selection(row, fields))
+            except ValueError as exc:
+                raise RequestError(HTTP_400, str(exc)) from None
             will_run = row["enabled"] if enabled is None else enabled
             if data != {"enabled": False}:
-                if error := await db_schedules.owner_error(conn, row["manager_id"], enabled=will_run):
-                    raise RequestError(HTTP_409, error)
+                try:
+                    await effective_schedule(conn, {**row, **fields,
+                        "profile_overrides": profiles if profiles is not None else row["profile_overrides"]},
+                        enabled=will_run)
+                except ValueError as exc:
+                    raise RequestError(HTTP_400 if isinstance(exc, MissingDirectory) else HTTP_409, str(exc)) from None
             if not will_run:
                 fields["next_fire_at"] = None
             elif (enabled and not row["enabled"]) or "cron" in fields or "timezone" in fields:

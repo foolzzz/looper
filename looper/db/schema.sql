@@ -1739,6 +1739,16 @@ CREATE TABLE IF NOT EXISTS schedules (
 -- Ownership is fixed when a schedule is created; old schedules belong to the default Manager.
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS manager_id TEXT NOT NULL DEFAULT 'manager'
     REFERENCES managers(id) ON DELETE RESTRICT;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS template_key TEXT NULL;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS template_inputs JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(template_inputs) = 'object');
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'schedules'::regclass
+                   AND conname = 'schedules_template_fkey') THEN
+        ALTER TABLE schedules ADD CONSTRAINT schedules_template_fkey FOREIGN KEY (manager_id, template_key)
+            REFERENCES manager_task_templates(manager_id, key) ON DELETE RESTRICT;
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_schedules_manager ON schedules (manager_id);
 -- S2: a gate command run in the work directory before each run (nothing printed: skipped; output: given to the
 -- task; failure: the run fails), a daily spend cap over the schedule's runs, and whom to tell: notify ('failures',

@@ -227,6 +227,8 @@ function interval(seconds: number) {
 /** A schedule as its form holds it: text as typed. */
 interface Draft {
   managerId: string;
+  templateKey: string;
+  templateInputs: Record<string, string>;
   name: string;
   cron: string;
   timezone: string;
@@ -268,6 +270,8 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
   if (!schedule)
     return {
       managerId: "manager",
+      templateKey: "",
+      templateInputs: {},
       name: "",
       cron: "",
       timezone: limits.default_timezone,
@@ -289,6 +293,8 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
     };
   return {
     managerId: schedule.manager_id,
+    templateKey: schedule.template_key ?? "",
+    templateInputs: { ...schedule.template_inputs },
     name: schedule.name,
     cron: schedule.cron,
     timezone: schedule.timezone,
@@ -321,6 +327,8 @@ function numberOf(text: string): number | null {
 function fieldsOf(draft: Draft, limits: ScheduleLimits): Required<ScheduleFields> {
   const minutes = numberOf(draft.timeout);
   return {
+    template_key: draft.templateKey || null,
+    template_inputs: draft.templateKey ? draft.templateInputs : {},
     name: draft.name.trim(),
     cron: draft.cron.trim(),
     requirement: draft.requirement.trim(),
@@ -352,6 +360,11 @@ function changesOf(fields: Required<ScheduleFields>, schedule: ScheduleInfo): Sc
   for (const key of ["name", "cron", "requirement", "timezone", "work_dir", "overlap", "catch_up", "notify"] as const) {
     if (fields[key] !== schedule[key]) (changes as Record<string, unknown>)[key] = fields[key];
   }
+  if (fields.template_key !== (schedule.template_key ?? null)) changes.template_key = fields.template_key;
+  const storedInputs = schedule.template_inputs ?? {};
+  const inputKeys = new Set([...Object.keys(fields.template_inputs), ...Object.keys(storedInputs)]);
+  if ([...inputKeys].some((key) => fields.template_inputs[key] !== storedInputs[key]))
+    changes.template_inputs = fields.template_inputs;
   // The cap counts only for a parallel schedule; it is left alone otherwise.
   if (fields.overlap === "parallel" && fields.max_parallel_runs !== schedule.max_parallel_runs)
     changes.max_parallel_runs = fields.max_parallel_runs;
@@ -371,6 +384,8 @@ function changesOf(fields: Required<ScheduleFields>, schedule: ScheduleInfo): Sc
 /** A new schedule's fields: the optional ones that are empty are left out, so the server's defaults apply. */
 function createFields(fields: Required<ScheduleFields>, managerId: string): ScheduleCreate {
   const {
+    template_key,
+    template_inputs,
     work_dir,
     max_parallel_runs,
     run_budget_usd,
@@ -384,6 +399,7 @@ function createFields(fields: Required<ScheduleFields>, managerId: string): Sche
   } = fields;
   return {
     ...rest,
+    ...(template_key ? { template_key, template_inputs } : {}),
     ...(managerId !== "manager" ? { manager_id: managerId } : {}),
     ...(work_dir ? { work_dir } : {}),
     ...(rest.overlap === "parallel" ? { max_parallel_runs } : {}),
@@ -734,7 +750,6 @@ function ScheduleForm({
   const [managerError, setManagerError] = useState("");
   const [managerReload, setManagerReload] = useState(0);
   useEffect(() => {
-    if (schedule) return;
     let active = true;
     setManagerError("");
     fetchManagers().then(
@@ -742,10 +757,22 @@ function ScheduleForm({
       (err) => { if (active) setManagerError(errorText(err)); },
     );
     return () => { active = false; };
-  }, [schedule, managerReload]);
+  }, [schedule?.schedule_id, managerReload]);
 
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => {
     setDraft((d) => ({ ...d, [key]: value }));
+    setSaved(false);
+  };
+  const owner = managers?.find((manager) => manager.id === draft.managerId);
+  const templates = owner?.templates ?? [];
+  const template = templates.find((item) => item.key === draft.templateKey);
+  const showTemplates = Boolean(schedule?.template_key) || managers?.some((manager) => manager.id !== "manager");
+  const selectOwner = (managerId: string) => {
+    setDraft((d) => ({ ...d, managerId, templateKey: "", templateInputs: {} }));
+    setSaved(false);
+  };
+  const selectTemplate = (templateKey: string) => {
+    setDraft((d) => ({ ...d, templateKey, templateInputs: {} }));
     setSaved(false);
   };
   const fields = fieldsOf(draft, limits);
@@ -759,7 +786,10 @@ function ScheduleForm({
     !fields.name && "a name",
     !fields.cron && "a rule",
     !fields.requirement && "a requirement",
-    !fields.work_dir && !project.work_dir && "a work directory",
+    !fields.work_dir && !template?.work_dir && !project.work_dir && "a work directory",
+    owner?.task_policy === "templates_only" && !template && "a task template",
+    ...((template?.inputs ?? []).filter((input) => input.required && !draft.templateInputs[input.key]?.trim())
+      .map((input) => input.label || input.key)),
   ].filter(Boolean);
   const tooLong = fields.requirement.length > limits.requirement_max_chars;
   const badTimeout = draft.timeoutMode === "limit" && !(Number(fields.run_timeout_seconds) >= 1);
@@ -787,7 +817,8 @@ function ScheduleForm({
     badBudget ||
     gateTooLong ||
     badGateTimeout ||
-    badDailyBudget;
+    badDailyBudget ||
+    Boolean(draft.templateKey && !template && managers && !managerError);
   const id = (field: string) => `${idPrefix}-${field}`;
 
   const submit = async (e: React.FormEvent) => {
@@ -821,7 +852,7 @@ function ScheduleForm({
         <div className="space-y-1">
           <label htmlFor={id("manager")} className={LABEL}>Owner</label>
           <select id={id("manager")} className={SELECT} value={draft.managerId}
-            onChange={(e) => set("managerId", e.target.value)}>
+            onChange={(e) => selectOwner(e.target.value)}>
             {managers.map((manager) => (
               <option key={manager.id} value={manager.id}>
                 {manager.name}{manager.enabled ? "" : " (disabled)"}
@@ -837,6 +868,36 @@ function ScheduleForm({
           <Button type="button" variant="outline" size="sm" onClick={() => setManagerReload((value) => value + 1)}>Retry owners</Button>
         </div>
       )}
+      {showTemplates && (
+        <section aria-label="Template configuration" className="space-y-3">
+          <div className="space-y-1">
+            <label htmlFor={id("template")} className={LABEL}>Task template{owner?.task_policy === "templates_only" ? " *" : ""}</label>
+            <select id={id("template")} className={SELECT} value={draft.templateKey}
+              disabled={!managers || Boolean(managerError)}
+              onChange={(e) => selectTemplate(e.target.value)} aria-describedby={id("template-hint")}>
+              <option value="">{owner?.task_policy === "templates_only" ? "Choose a template" : "No template"}</option>
+              {templates.map((item) => <option key={item.key} value={item.key}>{item.name}</option>)}
+              {draft.templateKey && !template && <option value={draft.templateKey}>{schedule?.template_name || draft.templateKey} (unavailable)</option>}
+            </select>
+            <p id={id("template-hint")} className="text-xs text-muted-foreground">
+              {draft.templateKey && !template && managers && !managerError
+                ? "This template is unavailable. Choose another template or clear the selection."
+                : template?.description || (templates.length ? "Each run uses the owner's current template with these saved inputs." : "This owner has no task templates. Add one in Settings → Managers, or choose another owner.")}
+            </p>
+            {owner && !owner.enabled && <p className="text-xs text-warning">This owner is disabled. Enable it in Settings → Managers before running this schedule.</p>}
+          </div>
+          {template?.inputs.map((input) => (
+            <div key={input.key} className="space-y-1">
+              <label htmlFor={id(`input-${input.key}`)} className={LABEL}>{input.label || input.key}{input.required ? " *" : ""}</label>
+              <Input id={id(`input-${input.key}`)} value={draft.templateInputs[input.key] ?? ""}
+                onChange={(e) => set("templateInputs", { ...draft.templateInputs, [input.key]: e.target.value })}
+                aria-required={input.required} aria-describedby={input.hint ? id(`input-${input.key}-hint`) : undefined}
+                autoComplete="off" spellCheck={input.kind !== "url"} inputMode={input.kind === "url" ? "url" : "text"} />
+              {input.hint && <p id={id(`input-${input.key}-hint`)} className="text-xs text-muted-foreground">{input.hint}</p>}
+            </div>
+          ))}
+        </section>
+      )}
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1">
           <label htmlFor={id("name")} className={LABEL}>Name *</label>
@@ -850,18 +911,18 @@ function ScheduleForm({
           />
         </div>
         <div className="space-y-1">
-          <label htmlFor={id("dir")} className={LABEL}>Work directory{project.work_dir ? "" : " *"}</label>
+          <label htmlFor={id("dir")} className={LABEL}>Work directory{project.work_dir || template?.work_dir ? "" : " *"}</label>
           <Input
             id={id("dir")}
             value={draft.workDir}
             onChange={(e) => set("workDir", e.target.value)}
-            placeholder={project.work_dir ? `Default: ${project.work_dir}` : "Required: the project has no default directory"}
+            placeholder={template?.work_dir ? `Template: ${template.work_dir}` : project.work_dir ? `Default: ${project.work_dir}` : "Required: the project has no default directory"}
             aria-describedby={id("dir-hint")}
             spellCheck={false}
             className="font-mono"
           />
           <p id={id("dir-hint")} className="text-xs text-muted-foreground">
-            {project.work_dir && "Empty: the project's default directory when it fires. "}
+            {template?.work_dir ? "Empty: the template's fixed directory when it fires. " : project.work_dir && "Empty: the project's default directory when it fires. "}
             An absolute path or one starting with ~/.
           </p>
         </div>
