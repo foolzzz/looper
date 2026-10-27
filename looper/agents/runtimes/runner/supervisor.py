@@ -16,7 +16,7 @@ import uuid
 
 from ... import proc_tree
 from ...log_redaction import add_secret, redact
-from .bridge import ConnectionLost, RpcFailure, RunnerBridge
+from .bridge import CloseState, ConnectionLost, RpcFailure, RunnerBridge
 from .protocol import ErrorCode, MAX_FRAME_BYTES, ProtocolError
 
 logger = logging.getLogger(__name__)
@@ -113,7 +113,7 @@ class RunnerLease:
             raise
 
     async def release(self) -> None:
-        if self._release_task is None:
+        if self._release_task is None or self._release_task.done() and self in self._generation.leases:
             self.valid = False
             self._release_task = self._owner._own(self._owner._release(self))
         await _joined(self._release_task)
@@ -346,6 +346,7 @@ class RunnerSupervisor:
 
     async def _release(self, lease: RunnerLease) -> None:
         generation, bridge = lease._generation, lease.bridge
+        closed = lease.session_id is None and lease._open_task is None
         try:
             if lease._open_task is not None:
                 result, = await asyncio.gather(lease._open_task, return_exceptions=True)
@@ -354,13 +355,15 @@ class RunnerSupervisor:
             # Also support a session opened directly through the lease's Bridge.
             sid = lease.session_id or next((s for s, e in bridge.sessions.items()
                                             if e.session_key == lease.session_key), None)
+            closed = sid is None
             if sid is not None and not generation.failed:
                 try:
                     entry = bridge.sessions.get(sid)
                     try:
-                        await bridge.close_session(sid)
-                    except RpcFailure as error:
-                        logger.warning("runner %s session close rejected: %s", generation.kind, error.code)
+                        closed = await bridge.close_session(sid) == CloseState.CLOSED
+                    except (RpcFailure, ProtocolError, TimeoutError) as error:
+                        logger.warning("runner %s session close failed (%s); retaining lease for retry",
+                                       generation.kind, type(error).__name__)
                     finally:
                         if entry is not None and entry.turn is not None:
                             await entry.turn.drain_tools()
@@ -369,10 +372,11 @@ class RunnerSupervisor:
             if generation.failed:
                 await bridge.close()
         finally:
-            try:
-                shutil.rmtree(lease.directory)
-            finally:
-                generation.leases.discard(lease)
+            if closed or generation.failed:
+                try:
+                    shutil.rmtree(lease.directory)
+                finally:
+                    generation.leases.discard(lease)
 
     async def _dispose(self, generation: _Generation, *, graceful: bool = False) -> None:
         generation.stopping = True
