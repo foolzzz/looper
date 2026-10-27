@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.174] - 2026-10-27
+
+### Changed
+
+- **Prompt-regression dialogs: Manager budget and api session readback.** With `--manager-agent`, the run budget (`--max-budget-usd`) is now written to the selected Manager profile's role settings together with `profile_id`. After an api Manager dialog, a new check reads back that every completed api turn in the Manager's current session has an `api_sessions` row whose protocol matches the Manager profile's, and a neutral `api_session_items` entry; a mismatch is added to the dialog's problems and fails it. Evaluation tooling only; no runtime, prompt or tool change. ([#764](https://github.com/foolzzz/looper/pull/764))
+
 ## [2.13.173] - 2026-10-27
 
 ### Changed
