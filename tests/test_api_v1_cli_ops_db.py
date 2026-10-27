@@ -56,10 +56,15 @@ def test_config_round_trip_matches_dashboard_and_requires_confirmation(tmp_path,
             for value in (dashboard_export, new_export):
                 value.pop("exported_at")
             assert new_export == dashboard_export
-            status, _, denied = await request("/api/v1/config/import_preview", {"document": new_export})
-            assert status == 403 and denied["error"]["code"] == "forbidden"
-            status, _, again = await request("/api/v1/config/import_preview", {"document": new_export}, client=False)
+            assert not new_export.get("managers")
+            status, _, again = await request("/api/v1/config/import_preview", {"document": new_export})
             assert status == 200 and again["result"]["plan"]["changes"] == []
+            status, _, asked = await request("/api/v1/config/import_apply", {"import_id": again["result"]["import_id"]})
+            assert status == 202
+            status, _, applied = await request("/api/v1/confirm", {"confirmation_id": asked["confirmation_id"]})
+            assert status == 200 and applied["result"]["plan"]["applied"]
+            assert applied["result"]["plan"]["changes"] == []
+            assert await pool.fetchval("SELECT background FROM projects WHERE name='Portable'") == "context"
             server._config_imports.clear()
     run_db(run, monkeypatch, timeout=30)
 
@@ -122,9 +127,14 @@ def test_cli_commands_against_disposable_serve(tmp_path, monkeypatch, capsys):
             assert loopercli.main([*base, "config", "export", str(exported)]) == 0
             capsys.readouterr()
             document = json.loads(exported.read_text())
-            assert document["format"] == "looper-config/v4" and document["managers"]
-            assert loopercli.main([*base, "config", "import", str(exported)]) == 1
-            assert json.loads(capsys.readouterr().out)["error"]["code"] == "forbidden"
+            assert document["format"] == "looper-config/v4" and not document.get("managers")
+            assert loopercli.main([*base, "config", "import", str(exported)]) == 0
+            roundtrip = json.loads(capsys.readouterr().out)["result"]
+            assert roundtrip["plan"]["changes"] == []
+            assert loopercli.main([*base, "config", "import", "--apply", roundtrip["import_id"]]) == 3
+            confirmation = json.loads(capsys.readouterr().out)["confirmation_id"]
+            assert loopercli.main([*base, "confirm", confirmation]) == 0
+            assert json.loads(capsys.readouterr().out)["result"]["plan"]["applied"]
             assert api.call("POST", "/api/v1/config/import_preview", {"document": document})[0] == 200
             portable = tmp_path / "client-import.json"
             portable.write_text(json.dumps({"format": "looper-config/v4", "projects": [{"name": "Smoke portable"}]}))

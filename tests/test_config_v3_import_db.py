@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from looper.agents import config_transfer as transfer
-from tests.db_support import DSN
+from tests.db_support import DSN, fresh_schema
 from tests.test_config_transfer_db import _installation
 
 pytestmark = pytest.mark.anyio
@@ -227,7 +227,7 @@ async def test_model_protocol_conflict_has_no_cross_protocol_fallback(monkeypatc
 
 
 @pytest.mark.parametrize("registered", [False, True])
-async def test_custom_runtime_references_require_the_exact_registered_runtime(monkeypatch, registered):
+async def test_custom_runtime_uses_existing_name_or_builtin_of_same_type(monkeypatch, registered):
     data = v3()
     data["runtimes"] = [{"name": "custom-claude", "type": "claude-code", "executable": None}]
     data["profiles"][0]["runtime"] = "custom-claude"
@@ -238,10 +238,81 @@ async def test_custom_runtime_references_require_the_exact_registered_runtime(mo
             "capabilities": ["resident_session", "resume", "run"], "builtin": False}
     plan = await preview(monkeypatch, data, target)
     profile = next(c for c in plan.changes if c.section == "profiles")
-    assert profile.action == (transfer.Action.ADDED if registered else transfer.Action.SKIPPED)
-    assert next(c for c in plan.changes if c.section == "runtimes").action == (
-        transfer.Action.UNCHANGED if registered else transfer.Action.SKIPPED)
-    assert not any("built-in claude-code" in note for note in plan.notes)
+    assert profile.action == transfer.Action.ADDED
+    assert next(c for c in plan.changes if c.section == "settings.layers").action == transfer.Action.ADDED
+    assert not any(c.action == transfer.Action.SKIPPED for c in plan.changes)
+    assert any("built-in claude-code" in note for note in plan.notes) is not registered
+    if registered:
+        assert next(c for c in plan.changes if c.section == "runtimes").action == transfer.Action.UNCHANGED
+
+
+@pytest.mark.parametrize("conflicting_name", [False, True])
+async def test_runtime_fallback_requires_same_type_and_preserves_name_conflicts(monkeypatch, conflicting_name):
+    data = v3()
+    data["runtimes"] = [{"name": "custom-runtime", "type": "codex"}]
+    data["profiles"][0]["runtime"] = "custom-runtime"
+    target = transfer._Target()
+    if conflicting_name:
+        data["runtimes"][0]["type"] = "claude-code"
+        target.runtimes["custom-runtime"] = {
+            "id": "rt-conflict", "name": "custom-runtime", "type": "codex", "executable": "codex",
+            "capabilities": ["resident_session", "resume", "run"], "builtin": True}
+    plan = await preview(monkeypatch, data, target)
+    for section in ("runtimes", "profiles", "settings.layers"):
+        assert next(c for c in plan.changes if c.section == section).action == transfer.Action.SKIPPED
+    assert not plan.notes
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+@pytest.mark.parametrize("registered", [False, True])
+async def test_exported_custom_runtime_preserves_profiles_and_layers_on_fresh_install(registered):
+    from looper.db.connection import ensure_schema
+
+    async with fresh_schema() as source, fresh_schema() as target:
+        await ensure_schema(source)
+        await source.execute("""
+            INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin)
+            SELECT 'rt-custom', 'custom-claude', type, '/source/claude', capabilities, false
+            FROM agent_runtimes WHERE id = 'rt-claude-code';
+            INSERT INTO agent_profiles (id, name, runtime_id, model_id, effort, agent_teams, custom_prompt)
+            SELECT 'agent-custom', 'Portable custom', 'rt-custom', model_id, 'high', false, 'Check carefully.'
+            FROM agent_profiles WHERE builtin;
+            INSERT INTO agent_setting_layers (scope, role, profile_id, harness_prompt)
+            VALUES ('role', 'worker', 'agent-custom', 'Portable instructions.');
+        """)
+        # Upgrade preserves a custom runtime already used by a profile.
+        await ensure_schema(source)
+        async with source.acquire() as conn:
+            document = json.loads("".join([chunk async for chunk in transfer.export_chunks(
+                conn, include_projects=False, include_secrets=False)]))
+        assert document["format"] == transfer.FORMAT
+        assert document["runtimes"] == [{"name": "custom-claude", "type": "claude-code", "executable": None}]
+        assert document["profiles"][0]["runtime"] == "custom-claude"
+
+        await ensure_schema(target)
+        await target.execute("UPDATE agent_runtimes SET executable = '/destination/claude' WHERE id = 'rt-claude-code'")
+        runtime_id = 'rt-claude-code'
+        if registered:
+            await target.execute("INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin) "
+                                 "SELECT 'rt-destination-custom', 'custom-claude', type, '/destination/custom-claude', "
+                                 "capabilities, false FROM agent_runtimes WHERE id = 'rt-claude-code'")
+            runtime_id = 'rt-destination-custom'
+        runtimes_before = await target.fetch("SELECT * FROM agent_runtimes ORDER BY id")
+        async with target.acquire() as conn:
+            previewed = await transfer.run_import(conn, document, apply=False)
+            assert await conn.fetchval("SELECT count(*) FROM agent_profiles WHERE name = 'Portable custom'") == 0
+            applied = await transfer.run_import(conn, document, apply=True)
+            assert previewed.changes == applied.changes
+            assert not any(c.action == transfer.Action.SKIPPED for c in applied.changes)
+            assert any("built-in claude-code" in note for note in applied.notes) is not registered
+            profile = await conn.fetchrow("SELECT * FROM agent_profiles WHERE name = 'Portable custom'")
+            assert profile is not None
+            assert (profile["runtime_id"], profile["effort"], profile["agent_teams"], profile["custom_prompt"]) == (
+                runtime_id, 'high', False, 'Check carefully.')
+            layer = await conn.fetchrow("SELECT * FROM agent_setting_layers WHERE scope = 'role' AND role = 'worker'")
+            assert (layer["profile_id"], layer["harness_prompt"]) == (profile["id"], 'Portable instructions.')
+            assert (await transfer.run_import(conn, document, apply=True)).writes == 0
+        assert await target.fetch("SELECT * FROM agent_runtimes ORDER BY id") == runtimes_before
 
 
 @pytest.mark.parametrize("section,entry,field", [

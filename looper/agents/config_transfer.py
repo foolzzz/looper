@@ -52,8 +52,9 @@ settings match is left as it is. A ``notify_target`` this machine's sender
 allowlists (as the import leaves the channels) do not allow is dropped, with a
 note.
 
-**Runtimes** are destination-local. A referenced custom runtime must already
-exist under its exact name and type; imports never create or remap runtimes.
+**Runtimes** are destination-local. A referenced custom runtime uses the same
+name and type here, or the built-in runtime of its type with a note. Imports
+never create runtimes or change their executables.
 """
 
 from __future__ import annotations
@@ -473,14 +474,20 @@ async def export_chunks(
         "channels": channels,
         "installs": [install_entry(r) for r in installs if r["scope"] == "global"],
     }
-    manager_templates = await db.read_manager_templates(conn)
-    profile_names = {row["id"]: row["name"] for row in await db.read_profiles(conn)}
-    project_names = {row["id"]: row["name"] for row in await db.read_projects(conn)}
-    head["managers"] = [manager_entry(row, manager_templates, profile_names, project_names, manager_installs)
-                        for row in managers]
-    summary.counts["managers"] = len(managers)
-    summary.counts["manager.templates"] = len(manager_templates)
-    summary.counts["manager.installs"] = len(manager_installs)
+    # The untouched default exists on every install; carrying it would make
+    # an otherwise client-importable export require operator identity.
+    portable_managers = any(row["id"] != "manager" or row["name"] != "Manager" or row["description"]
+                            for row in managers) or any(
+        row["channel_id"] not in BUILTIN_CHANNEL_IDS for row in channel_rows) or bool(manager_installs)
+    if portable_managers:
+        manager_templates = await db.read_manager_templates(conn)
+        profile_names = {row["id"]: row["name"] for row in await db.read_profiles(conn)}
+        project_names = {row["id"]: row["name"] for row in await db.read_projects(conn)}
+        head["managers"] = [manager_entry(row, manager_templates, profile_names, project_names, manager_installs)
+                            for row in managers]
+        summary.counts["managers"] = len(managers)
+        summary.counts["manager.templates"] = len(manager_templates)
+        summary.counts["manager.installs"] = len(manager_installs)
     if scheduler := await stored_scheduler_settings(conn):  # only a stored setting is carried
         head["settings"]["scheduler"] = scheduler
     summary.counts.update({"runtimes": len(head["runtimes"]), "providers": len(providers),
@@ -1015,6 +1022,8 @@ class _Importer:
         builtin = builtin_resolved_profile()
         self.runtimes = {name: (row["id"], runtime_spec(row)) for name, row in target.runtimes.items()}
         self.runtimes.setdefault(builtin.runtime.name, (builtin.runtime.id, builtin.runtime))
+        self.builtin_runtimes = {spec.type: (identity, spec) for name, (identity, spec) in self.runtimes.items()
+                                 if name not in target.runtimes or target.runtimes[name]["builtin"]}
         self.providers = {name: (row["id"], provider_spec(row)) for name, row in target.providers.items()}
         self.providers.setdefault(builtin.resolved_model.provider.name,
                                   (builtin.resolved_model.provider.id, builtin.resolved_model.provider))
@@ -1090,7 +1099,7 @@ class _Importer:
     # --- runtimes, providers and agents ---
 
     async def runtime(self, entry: Any) -> None:
-        """Require the exact destination-local runtime name and type, without changing its executable."""
+        """Resolve a runtime by name or its built-in type, keeping the destination's executable."""
         from .profile_registry import RegistryError, _executable, entry_name
         from .runtimes import RuntimeUnsupported, adapter
 
@@ -1111,16 +1120,22 @@ class _Importer:
             row = self.target.runtimes.get(name)
             if row is not None and row["type"] != runtime.type:
                 raise _Skip(f"a {row['type']} runtime has this name here")
-            if row is None:
+            if row is None and runtime.type not in self.builtin_runtimes:
                 if runtime.in_process and (error := runtime.probe("").error):
                     raise _Skip(f"runtimes are built in, and {runtime.label} cannot run here: "
                                 f"{error}; then Re-detect it in Settings, Agent Runtimes")
-                raise _Skip(f"no runtime {name!r} here; install and register this exact runtime before importing")
+                raise _Skip(f"runtimes are built in, and {runtime.label} is not registered here; install it, "
+                            "then Re-detect it in Settings, Agent Runtimes")
         except _Skip as exc:
             self.blocked_runtimes.add(label)
             self.record("runtimes", label, Action.SKIPPED, reason=str(exc))
             return
-        self.record("runtimes", name, Action.UNCHANGED)
+        if row is not None:
+            self.record("runtimes", name, Action.UNCHANGED)
+            return
+        self.runtimes[name] = self.builtin_runtimes[runtime.type]
+        self.plan.notes.append(f"runtime {name}: runtimes are built in; its Agent Profiles run on the built-in "
+                               f"{self.runtimes[name][1].name} runtime here")
 
     async def provider(self, entry: Any) -> None:
         from .profile_registry import Endpoint, ProviderSpec, RegistryError, ResolvedModel

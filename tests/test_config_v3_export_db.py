@@ -135,7 +135,7 @@ def test_models_have_natural_keys_and_preserve_price_metadata():
         data, summary = await _export(pool)
         assert data["format"] == "looper-config/v4"
         assert set(data) == {"format", "looper_version", "exported_at", "secrets", "runtimes",
-                             "providers", "models", "profiles", "settings", "channels", "installs", "catalog", "managers"}
+                             "providers", "models", "profiles", "settings", "channels", "installs", "catalog"}
         assert len(data["providers"]) == 2
         provider = data["providers"][0]
         assert provider == {
