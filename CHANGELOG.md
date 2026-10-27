@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.173] - 2026-10-27
+
+### Changed
+
+- **Configuration is `looper-config/v4` only.** Export always writes v4 and import refuses any other format, and a top-level field outside the v4 set (including `loopx_version`), before work begins; an invalid pending import file is discarded. The older-format conversions are removed: import such a file on v2.13.165, upgrade that installation, then export v4. The Claude Code agent teams switch is dropped from layer environments on export and import. ([#761](https://github.com/foolzzz/looper/pull/761))
+
+### Removed
+
+- **Scheduler minimum interval variable.** `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` and `LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS` no longer apply; only the stored setting or the built-in 300 seconds does, and the source `env` is gone from the settings page. ([#761](https://github.com/foolzzz/looper/pull/761))
+
 ## [2.13.172] - 2026-10-27
 
 ### Added
