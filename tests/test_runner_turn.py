@@ -264,3 +264,63 @@ def test_tool_timeout_keeps_the_write_for_shutdown(monkeypatch):
         await t.drain_tools()
         assert written == ["c"]
     asyncio.run(test())
+
+
+@pytest.mark.parametrize("name,wait,expected", [
+    ("looper_room_inbox", 120, 140), ("looper_room_inbox", 150.5, 170.5),
+    ("looper_room_inbox", 100, 120), ("looper_room_inbox", True, 120),
+    ("looper_room_inbox", "120", 120), ("looper_room_inbox", -1, 120),
+    ("other_tool", 120, 120),
+])
+def test_room_inbox_wait_has_time_to_return_before_tool_timeout(monkeypatch, name, wait, expected):
+    async def test():
+        wait_for = asyncio.wait_for
+
+        async def inspect_timeout(awaitable, timeout):
+            assert timeout == expected
+            return await wait_for(awaitable, 1)
+
+        monkeypatch.setattr(asyncio, "wait_for", inspect_timeout)
+        t = turn()
+        result = await t.call_tool({"session_id": "s", "trace_id": "t", "call_id": "c", "name": name,
+                                    "arguments": {"wait_seconds": wait}})
+        assert not result["is_error"] and result["ran"]
+        await t.drain_tools()
+    asyncio.run(test())
+
+
+@pytest.mark.parametrize("max_requests", [0, -1, True, 1.5, "30", None])
+def test_invalid_request_limit_is_rejected(max_requests):
+    with pytest.raises(ValueError, match="max_requests must be a positive integer"):
+        turn(max_requests=max_requests)
+
+
+@pytest.mark.parametrize("cap_key", ["run_cap", "task_cap"])
+@pytest.mark.parametrize("actual", [20, 21])
+def test_finish_checks_actual_cap_after_request_end_limits_read_failed(cap_key, actual):
+    async def test():
+        reads, cancelled = 0, []
+        caps = {"run_cap": None, "task_cap": None, "task_spent": 0.1 if cap_key == "task_cap" else 0}
+        caps[cap_key] = round(caps["task_spent"] + 0.00002, 10)
+
+        async def limits():
+            nonlocal reads
+            reads += 1
+            if reads == 2:
+                raise OSError("limits temporarily unavailable")
+            return caps
+
+        async def cancel(reason):
+            cancelled.append(reason)
+
+        t = RunnerTurn(session_id="s", trace_id="t", role="planner", tools=Tools(), provider_id="p", model="m",
+                       price=lambda model, usage: ModelPrice(1, 2, 3, 4).cost(usage), limits=limits, cancel=cancel)
+        assert (await t.authorize(authorize()))["allow"]
+        with pytest.raises(OSError, match="limits temporarily unavailable"):
+            await t.request_end(ended(input_uncached=actual, output=0))
+        summary = await t.finish(settled())
+        assert summary.outcome == "capped" and summary.cap_reason == cap_key
+        assert summary.usage_complete and summary.usage.cost_usd == actual / 1_000_000
+        assert cancelled == [cap_key]
+        assert (await t.authorize(authorize("next")))["reason"] == "stopped"
+    asyncio.run(test())

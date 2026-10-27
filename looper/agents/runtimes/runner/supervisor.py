@@ -351,9 +351,9 @@ class RunnerSupervisor:
                                             if e.session_key == lease.session_key), None)
             if sid is not None and not generation.failed:
                 try:
+                    entry = bridge.sessions.get(sid)
                     await bridge.close_session(sid)
-                    entry = bridge.sessions[sid]
-                    if entry.turn is not None:
+                    if entry is not None and entry.turn is not None:
                         await entry.turn.drain_tools()
                 except Exception:
                     self._failed(generation)

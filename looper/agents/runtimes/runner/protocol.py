@@ -230,7 +230,7 @@ def select_version(offered: list[str]) -> str:
 
 
 def validate_initialize(result: InitializeResult, offered: list[str], kind: str,
-                        permitted: tuple[RequestKind, ...] = ("turn",)) -> InitializeResult:
+                        permitted: tuple[RequestKind, ...] = get_args(RequestKind)) -> InitializeResult:
     if result["protocol_version"] != select_version(offered) or result["runner"]["kind"] != kind:
         raise ProtocolError(ErrorCode.VERSION_MISMATCH)
     caps = result.get("capabilities", {})  # Absent capabilities are false.
@@ -300,14 +300,21 @@ async def read_frame(reader: asyncio.StreamReader) -> Message:
     """
     chunks, size = [], 0
     while True:
+        # StreamReader has no per-read limit argument. Temporarily narrow its
+        # limit so readuntil rejects the first byte beyond the remaining budget.
+        limit = reader._limit
+        reader._limit = min(limit, MAX_FRAME_BYTES - size)
         try:
-            chunk = await reader.readuntil(b"\n")
-        except asyncio.LimitOverrunError as error:
-            chunk = await reader.readexactly(min(error.consumed, MAX_FRAME_BYTES + 1))
-        except asyncio.IncompleteReadError as error:
-            if not size and not error.partial:
-                raise EOFError from None
-            raise ProtocolError(ErrorCode.INVALID_REQUEST) from None
+            try:
+                chunk = await reader.readuntil(b"\n")
+            except asyncio.LimitOverrunError as error:
+                chunk = await reader.readexactly(min(error.consumed, MAX_FRAME_BYTES - size + 1))
+            except asyncio.IncompleteReadError as error:
+                if not size and not error.partial:
+                    raise EOFError from None
+                raise ProtocolError(ErrorCode.INVALID_REQUEST) from None
+        finally:
+            reader._limit = limit
         chunks.append(chunk)
         size += len(chunk)
         if size > MAX_FRAME_BYTES + (1 if chunk.endswith(b"\n") else 0):
