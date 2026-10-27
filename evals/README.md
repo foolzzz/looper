@@ -511,6 +511,63 @@ uv run python -m evals.prompt_regression dialogs --mode real --dialogs session_p
   --switch-agent evals/agents/omp-deepseek.example.json
 ```
 
+#### The api runtime on CPA
+
+The real CPA validation used the local CPA proxy with `gpt-6-astra` for both Manager specs, as CPA served
+that model; other roles used Claude Code sonnet. Full-dialog runs used `--reps 2 --jobs 2`.
+
+| Run | Measured result | Recorded cost |
+|---|---|---|
+| api smoke: `status`, `confirm_create_start`, `cancel_confirmation`, `stop_then_continue`, one rep | 4/4 pass | $0.44 |
+| Codex Manager control, all dialogs | 78/84 scored passes, plus 4 harness errors (`stop_then_continue` and `withdraw_then_continue`, both reps) | $13.68 |
+| api Manager, all dialogs | 82/88 passes | $9.06 |
+
+On dialogs scored by both runs, recorded cost was $6.82 for Codex and $4.53 for api. D11 is met:
+every dialog's api pass count was at least the control's minus one. The api run matched or beat the
+control everywhere, and passed both dialogs with control harness errors 2/2; those control errors remain
+errors. `cancel_confirmation`, `config_tools`, `provider_key`, every `schedule_*` dialog and
+`client_relay_cancel` passed 2/2.
+
+Both Managers shared these failures, so they are not api regressions: `model_missing_endpoint` 0/2
+(the Manager read nothing through its tools), `start_no_wait` 0/2 (the reply did not say the task's
+questions would come to the user), and initially `session_profile_switch` 0/2. The last was an eval
+check bug: it compared the profile's display name, which includes the effort suffix. After this branch's
+fix, that dialog passed 2/2 for both Managers; those focused reruns are separate from the full-run totals above.
+Per-request token deltas, session-item and `api_sessions.protocol` readbacks, and the Opus descriptive
+comparison are not established by these measurements. Remaining capability checks are listed in RFC §8.4 and §15.
+The focused real Claude CLI handoff-prompt comparison from [#688](https://github.com/foolzzz/looper/pull/688)
+remains separate and unchanged.
+
+`dialogs --manager-agent SPEC.json` registers a Profile for the Manager's role layer only; other roles keep
+`--model` / `--agent`. It requires real mode and cannot be combined with `--manager-model`, `--manager-effort`
+or `--register-agent`. The examples declare provider endpoints and a separate model with an explicit protocol.
+The key comes from the environment variable named by `api_key_env` (`LOOPER_EVAL_API_KEY`), never from a file
+in the repository. Use a disposable PostgreSQL server in `LOOPER_EVAL_DATABASE_URL`; each case gets its own
+database, server, port and runtime root, with external channels disabled.
+Without `--switch-agent`, real profile-switch dialogs create `eval/switch` with the selected Manager's
+runtime, saved provider/model binding, effort and prompt options, so switching keeps the same-model comparison.
+
+Run the Codex control first, then set `CODEX_RUN_JSON` to its reported run JSON path before the api comparison:
+
+```bash
+uv run --extra test python -m evals.prompt_regression dialogs --mode real --model sonnet \
+  --manager-agent evals/agents/codex-cpa.example.json \
+  --reps 2 --jobs 2 --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd 30 \
+  --pg-url "$LOOPER_EVAL_DATABASE_URL"
+uv run --extra test python -m evals.prompt_regression dialogs --mode real --model sonnet \
+  --manager-agent evals/agents/api-cpa.example.json --baseline "$CODEX_RUN_JSON" \
+  --reps 2 --jobs 2 --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd 30 \
+  --pg-url "$LOOPER_EVAL_DATABASE_URL"
+```
+
+First smoke-test the api selection with `--dialogs status,confirm_create_start,cancel_confirmation,stop_then_continue`,
+`--reps 1 --jobs 1 --total-cap-usd 4`. Preflight CPA's model list: use `gpt-6-astra` in both specs when served,
+otherwise `gpt-6.1-sol`; stop if neither is available. D11 requires each dialog's api pass count to be at least
+the same-model control's minus one, and `cancel_confirmation`, `config_tools`, `provider_key`, every `schedule_*`
+and `client_relay_cancel` to pass 2/2. Errors remain errors; rerun an errored dialog once and report both attempts.
+If a spending cap stops a run, raise it and rerun before claiming the gate. The Opus baseline is descriptive only
+because its model differs. This full comparison does not replace the focused real Claude CLI handoff-prompt comparison.
+
 #### Pi
 
 `--register-agent` can target the built-in runtime type `pi` (API key only:
@@ -658,7 +715,7 @@ does not establish a cap for the current 47 dialogs; give it
 `--total-cap-usd "$OPUS_DIALOG_CAP_USD"` authorized for candidate measurement),
 `--switch-agent SPEC.json` (`session_profile_switch`: register that spec as the profile `eval/switch`, while the
 other roles keep `--model` / `--agent`; without it, fake mode uses Claude Code on a provider of its own, which makes
-the switch start a new session, and real mode Claude Code with haiku on the login provider, which resumes),
+the switch start a new session, and real mode reuses the selected Manager's runtime, provider/model and options),
 `--register-agent SPEC.json` (as for `run`; `--dialogs status` with a Codex,
 OMP, Grok or Pi agent checks that runtime's tool calls), `--reps` (as for `run`),
 `--baseline <run.json>|previous` (the default is
