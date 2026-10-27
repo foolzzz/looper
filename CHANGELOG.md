@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.170] - 2026-10-27
+
+### Removed
+
+- **Retired entry points and runtime deployment fallbacks.** The `loopx` command, the installer's removal of an old `loopx` package, the automatic `~/.loopx` to `~/.looper` move, the `com.loopx.serve` unit replacement, `looper serve --format`, the old dashboard hash redirects and the `loopx-chat-*` browser keys are gone; `service install` and `init-ops` read deployment settings more simply. Current deployment and routing are kept. ([#762](https://github.com/foolzzz/looper/pull/762))
+
+## [2.13.169] - 2026-10-27
+
+### Fixed
+
+- **Runner session isolation.** One session's close or cancel failure, a failing request-end callback, and late updates after a close no longer fail the runner generation or the shared connection: abandoned cancels are bounded and their late responses dropped, failed request-end processing settles only that trace, and a rejected session close no longer marks the generation failed. Nothing in Looper calls the runner bridge yet. ([#763](https://github.com/foolzzz/looper/pull/763))
+
 ## [2.13.168] - 2026-10-27
 
 ### Fixed

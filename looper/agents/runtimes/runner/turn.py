@@ -250,8 +250,17 @@ class RunnerTurn:
                 self.usage = replace(self.usage, cost_usd=None)
             # There is no runner left to cancel; loss must remain the terminal cause,
             # even under a cap or when current settings can no longer be read.
-            reason = (self._actual_cap_reason(await self._current_limits())
-                      if not lost and self.cap_reason is None else None)
+            reason = None
+            if not lost and self.cap_reason is None:
+                try:
+                    reason = self._actual_cap_reason(await self._current_limits())
+                except Exception:
+                    if params.get("outcome") != "failed":
+                        raise
+                    # A failed settings callback must still release reservations
+                    # and settle this trace if the settings remain unavailable.
+                    self.usage_complete = False
+                    self.usage = replace(self.usage, cost_usd=None)
             notify = reason is not None
             if notify:
                 self.cap_reason = reason
@@ -265,6 +274,8 @@ class RunnerTurn:
                 outcome = "max_requests" if self.cap_reason == "max_requests" else "capped"
             self._summary = TurnSummary(self.usage, totals, models, outcome, self.cap_reason, self.usage_complete)
             self._requests.clear()  # Settlement releases every outstanding reservation.
-        if notify and self._cancel is not None:
+        # Failed request processing already stopped admission. Final accounting
+        # must not reenter the cancellation callback that may have just failed.
+        if notify and self._cancel is not None and params.get("outcome") != "failed":
             await self._cancel(self.cap_reason)
         return self._summary
