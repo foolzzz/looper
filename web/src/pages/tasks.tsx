@@ -298,12 +298,14 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const setManagerFilter = (id: string) => onNavigate?.("", filterQuery(projectFilter, groupFilter, scheduleFilter, filter, id, searchFilter));
 
   // A fresh identity also rejects an old A response after navigating A → B → A.
-  const currentFilter = useRef<{ key: string } | null>(null);
+  // Keep its cursor synchronous so pending pages see a refresh's boundary before React renders.
+  const currentFilter = useRef<{ key: string; before: string | null } | null>(null);
   useLayoutEffect(() => {
-    currentFilter.current = { key: listKey };
+    currentFilter.current = { key: listKey, before: null };
     return () => { currentFilter.current = null; };
   }, [listKey]);
   const latestRefresh = useRef(0);
+  const appliedRefresh = useRef(0);
 
   const filters = {
     projectId: projectFilter || undefined,
@@ -320,16 +322,19 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     const filterRequest = currentFilter.current;
     if (filterRequest?.key !== requested) return;
     const refresh = ++latestRefresh.current;
-    const isCurrent = () => filterRequest === currentFilter.current && refresh === latestRefresh.current;
-    fetchTasks(filters)
+    // A newer request still in flight must not starve a usable response.
+    const isCurrent = () => filterRequest === currentFilter.current && refresh >= appliedRefresh.current;
+    return fetchTasks(filters)
       .then((page) => {
         if (!isCurrent()) return;
+        appliedRefresh.current = refresh;
         setCounts(page.counts);
         if (older.current.key === requested && older.current.loaded) {
           setTasks((current) => withOlder(page.tasks, current));
         } else {
           older.current = { key: requested, loaded: false };
           setTasks(page.tasks);
+          filterRequest.before = page.next_before;
           setNextBefore(page.next_before);
         }
         setError("");
@@ -350,9 +355,17 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     setLoadingMore(false);
     setError("");
     older.current = { key: listKey, loaded: false };
-    load();
-    const timer = setInterval(load, 3000);
-    return () => clearInterval(timer);
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      await load();
+      if (!stopped) timer = setTimeout(poll, 3000);
+    };
+    void poll();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
   }, [listKey]);
 
   const loadMore = () => {
@@ -361,20 +374,23 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     const filterRequest = currentFilter.current;
     if (filterRequest?.key !== requested) return;
     const isCurrent = () => filterRequest === currentFilter.current;
+    const before = nextBefore;
+    const canAppend = () => isCurrent() && before === filterRequest.before;
     setLoadingMore(true);
-    fetchTasks({ ...filters, before: nextBefore })
+    fetchTasks({ ...filters, before })
       .then((page) => {
-        if (!isCurrent()) return;
+        if (!canAppend()) return;
         older.current = { key: requested, loaded: true };
         setTasks((current) => {
           const shown = new Set(current.map((t) => t.task_id));
           return [...current, ...page.tasks.filter((t) => !shown.has(t.task_id))];
         });
+        filterRequest.before = page.next_before;
         setNextBefore(page.next_before);
         setCounts(page.counts);
         setError("");
       })
-      .catch((e) => isCurrent() && setError(e.message))
+      .catch((e) => canAppend() && setError(e.message))
       .finally(() => { if (isCurrent()) setLoadingMore(false); });
   };
 
