@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.165] - 2026-10-27
+
+### Fixed
+
+- **Manager deletion.** Deleting a scenario Manager now checks tasks, schedules, bots and chat bindings before stopping its reply, so a refused deletion leaves the current reply and queued messages alone. The checks run again under the row lock after the drain, installs wait for a deletion, and a Manager's drain is bounded at 10 s. ([#727](https://github.com/foolzzz/looper/pull/727))
+
 ## [2.13.164] - 2026-10-27
 
 ### Added
