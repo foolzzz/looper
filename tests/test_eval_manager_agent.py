@@ -195,10 +195,32 @@ def test_switch_profile_check_uses_id_when_display_name_has_effort_suffix(
     assert (dialogs._switch_selected(look) is None) is ok
 
 
-def test_cpa_eval_instructions_explicitly_leave_the_real_admission_gate_pending():
+def test_cpa_eval_instructions_distinguish_measured_gate_results_from_pending_checks():
     readme = Path("evals/README.md").read_text()
     cpa = readme.split("#### The api runtime on CPA\n", 1)[1].split("#### Pi\n", 1)[0]
-    # The documented commands are an entry point, not evidence of a completed gate.
-    for pending in ("D11 remains unverified", "pass counts", "cost", "per-request token deltas",
-                    "session-item", "api_sessions.protocol"):
-        assert pending in cpa
+    cpa = " ".join(cpa.split())
+    # Measured results close D11 without turning harness errors or reruns into full-run passes.
+    for measured in (
+        "`gpt-6-astra` for both Manager specs",
+        "other roles used Claude Code sonnet. Full-dialog runs used `--reps 2 --jobs 2`.",
+        "one rep | 4/4 pass | $0.44 |",
+        "Codex Manager control, all dialogs | 78/84 scored passes, plus 4 harness errors "
+        "(`stop_then_continue` and `withdraw_then_continue`, both reps) | $13.68 |",
+        "api Manager, all dialogs | 82/88 passes | $9.06 |",
+        "On dialogs scored by both runs, recorded cost was $6.82 for Codex and $4.53 for api.",
+        "D11 is met: every dialog's api pass count was at least the control's minus one.",
+        "those control errors remain errors.",
+        "`cancel_confirmation`, `config_tools`, `provider_key`, every `schedule_*` dialog and "
+        "`client_relay_cancel` passed 2/2.",
+        "that dialog passed 2/2 for both Managers; those focused reruns are separate from "
+        "the full-run totals above.",
+    ):
+        assert measured in cpa
+    assert "D11 remains unverified" not in cpa
+    # The dialog scores and costs do not establish these independent capability checks.
+    assert (
+        "Per-request token deltas, session-item and `api_sessions.protocol` readbacks, and the Opus "
+        "descriptive comparison are not established by these measurements. Remaining capability "
+        "checks are listed in RFC §8.4 and §15."
+    ) in cpa
+    assert "This full comparison does not replace the focused real Claude CLI handoff-prompt comparison." in cpa
