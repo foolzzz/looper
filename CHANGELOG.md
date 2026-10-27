@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.168] - 2026-10-27
+
+### Fixed
+
+- **Runner supervision.** The supervisor tracks and reaps a runner's children, including ones in their own process groups, bounds the stderr drain so recovery and shutdown cannot hang, resolves only `Path` launch arguments instead of any string naming a file, and treats a slow or transiently failing initialize as a retryable start failure. Nothing in Looper calls the supervisor yet. ([#755](https://github.com/foolzzz/looper/pull/755))
+
 ## [2.13.167] - 2026-10-27
 
 ### Added
