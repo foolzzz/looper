@@ -46,6 +46,7 @@ import time
 import uuid
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
@@ -210,6 +211,28 @@ class ManagerOps:
         # "missed"): whether the bridge sent the runtime's call id, and whether its tool_use was read first.
         self._matches: Counter[tuple[str, str]] = Counter()
         self._observing: set[asyncio.Task[None]] = set()
+        self._executing = 0
+
+    @property
+    def executing(self) -> bool:
+        """Admitted executions, independent of the HTTP connection or the lifetime of their turn."""
+        return self._executing > 0
+
+    async def _run_tool(self, tool: Tool, call: Call) -> Any:
+        fleet = self._platform.managers
+        admitted = False
+        try:
+            # Share retirement's lock only for admission, never while a tool needs the Manager row.
+            async with fleet.cleanup_guard(self.scope.manager_id) if fleet is not None else nullcontext():
+                if fleet is not None and not fleet.is_running(self.scope.manager_id):
+                    raise OpError(ErrorCode.UNAVAILABLE, "The Manager is retiring; this operation did not run")
+                _check_answering(call.turn)
+                self._executing += 1
+                admitted = True
+            return await tool.run(call)
+        finally:
+            if admitted:
+                self._executing -= 1
 
     @property
     def platform(self) -> Platform:
@@ -386,7 +409,7 @@ class ManagerOps:
                         "expires_in_seconds": CONFIRMATION_SECONDS,
                         "shown_to_user": "Looper adds what this does and the request to confirm it after your reply. "
                                          "It has not run: do not say it did."}
-            result = _plain(await tool.run(call))
+            result = _plain(await self._run_tool(tool, call))
         except _Recorded as exc:
             return _error(exc.code, str(exc))
         except OpError as exc:
@@ -423,7 +446,7 @@ class ManagerOps:
             except OpError:
                 raise OpError(ErrorCode.FORBIDDEN, "the operation was not run: this Manager may no longer do "
                                                    "it") from None
-            result = _plain(await tool.run(Call(pending.arguments, turn, self._platform, scope=scope)))
+            result = _plain(await self._run_tool(tool, Call(pending.arguments, turn, self._platform, scope=scope)))
         except Exception as exc:
             if isinstance(exc, OpError):
                 error = exc

@@ -3371,8 +3371,10 @@ export interface CatalogItem {
   updated_at: string;
   /** An MCP server's configuration, its env and header values masked; null for a plugin or a skill. */
   mcp: McpConfig | null;
-  /** Where it is installed; empty when it loads nowhere. */
+  /** Global and project installs. */
   installs: Install[];
+  /** Explicit Manager installs, including disabled records removed with this item. */
+  manager_install_count?: number;
 }
 
 export type McpTransport = "stdio" | "http" | "sse";

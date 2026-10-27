@@ -954,6 +954,11 @@ class ManagerAgent:
         return bool(self.busy or self._handling is not None or self._running_token is not None
                     or self._turns.live() or (self._bus and self._bus.pending_count(self.agent_id)))
 
+    @property
+    def deletion_blocked(self) -> bool:
+        """Include preparation, queued messages and resets, even before the turn lock is taken."""
+        return self._idle_blocked() or self._lifecycle_gate.locked()
+
     async def try_suspend_idle(self, now: float) -> bool:
         """Close only a provably idle resident, retaining the enabled agent and its complete session state."""
         timeout = self._definition.idle_timeout_seconds
@@ -1384,6 +1389,9 @@ class ManagerAgent:
 
     async def _run_prepared(self, token: TurnToken, prepared: Prepared) -> str:
         """Start the prepared turn and run it; the turn's record ends however it ends."""
+        notice = "能力变更待应用：已保存的 skills 将在 /new 后生效；当前会话继续使用原有能力。"
+        if prepared.turn is not None and notice in prepared.turn.blocks:
+            prepared.turn.blocks.remove(notice)  # A resume retry recomputes whether the new process needs it.
         failure: BaseException | None = None
         try:
             async with self._lifecycle_gate:
@@ -1399,6 +1407,8 @@ class ManagerAgent:
                         prepared = replace(prepared, launch=previous.launch, system_prompt=previous.system_prompt,
                                            signature=previous.signature,
                                            prompt_file=previous.system_prompt.write_file(self._runtime_root))
+                        if prepared.turn is not None:
+                            prepared.turn.blocks.append(notice)
                 await self._start_turn(token, prepared)
             return await self._converse(token, prepared)
         except BaseException as exc:

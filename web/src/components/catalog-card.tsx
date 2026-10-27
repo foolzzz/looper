@@ -76,6 +76,7 @@ function ItemRow({
   const [removeError, setRemoveError] = useState("");
   const global = item.installs.find((install) => install.scope === "global");
   const where = installSummary(item.installs);
+  if (item.manager_install_count) where.push(`Managers: ${item.manager_install_count}`);
   const own = OWN_ORIGINS.has(item.origin) && item.kind !== "mcp";
   const remove = async () => {
     setConfirming(false);
@@ -161,7 +162,8 @@ function ItemRow({
       {confirming && (
         <div className="flex flex-wrap items-center justify-end gap-2">
           <span className="text-xs text-muted-foreground">
-            Delete it from the catalog{item.installs.length ? " and every place it is installed" : ""}?
+            Delete it from the catalog{item.installs.length ? " and every place it is installed" : ""}
+            {item.manager_install_count ? ` and ${item.manager_install_count} Manager installation${item.manager_install_count === 1 ? "" : "s"}` : ""}?
           </span>
           <Button type="button" variant="destructive" size="sm" disabled={busy} onClick={() => void remove()}>
             Delete
@@ -275,7 +277,7 @@ export function CatalogCard() {
           ? c.items.map((other) => (other.item_id === itemId ? item : other))
           : [...kept, item].sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name))
         : kept;
-      return { ...c, items, installed_count: items.filter((other) => other.installs.length).length };
+      return { ...c, items, installed_count: items.filter((other) => other.installs.length || other.manager_install_count).length };
     });
 
   /** Run one install change; the item it answers with replaces the row, and a refusal shows the server's reason. */

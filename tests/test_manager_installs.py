@@ -109,7 +109,9 @@ def test_changed_extra_waits_for_background_work_then_resumes_saved_session(inst
         assert spawned[0][1].returncode is None
 
     result = _converse(monkeypatch, body, ["hello", "while background runs", "after completion"], between=install)
-    assert result["replies"] == ["turn 1: hello", "turn 2: while background runs", "turn 1: after completion"]
+    assert [reply.split("\n\n")[0] for reply in result["replies"]] == [
+        "turn 1: hello", "turn 2: while background runs", "turn 1: after completion"]
+    assert "/new" in result["replies"][1]
     first, second = [argv for argv, _ in result["spawned"]]
     assert _flag(first, "--resume") is None and _flag(second, "--resume") == "sess-1"
     records = [call.kwargs["metadata"] for call in agent_db.start_record.await_args_list]
