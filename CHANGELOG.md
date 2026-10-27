@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.176] - 2026-10-27
+
+### Fixed
+
+- **Interactive template tasks fall back; schedule imports check dependencies.** A task created from a template through `looper_task_create` uses the built-in profile when a role template's Agent Profile is off the project's list or fails the capability check, drops items that are no longer installed, and lists each fallback in the returned configuration block (`模板角色回退`). Schedules stay strict. Configuration import preview and apply now check a schedule's profiles, role templates and items against the import's final graph and skip a schedule that could not run; installs are processed before schedules. No schema change. ([#779](https://github.com/foolzzz/looper/pull/779))
+
 ## [2.13.175] - 2026-10-27
 
 ### Fixed
