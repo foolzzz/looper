@@ -30,6 +30,9 @@ class SeedApi(RegistryApi):
 
 @pytest.mark.parametrize("mutation,problem", [
     (None, None),
+    ("missing_agent_session", "active session"),
+    ("null_agent_session", "active session"),
+    ("different_agent_session", "active session"),
     ("missing_session", "missing from api_sessions"),
     ("wrong_protocol", "protocol"),
     ("missing_items", "neutral session item"),
@@ -101,7 +104,13 @@ def test_fake_api_manager_dialog_reads_back_each_completed_turn(
                     # A positive control proves the real API runtime persisted both turns.
                     assert await pool.fetchval(
                         "SELECT count(DISTINCT turn) FROM api_session_items WHERE session_id = $1", sid) == 2
-                    if mutation == "missing_session":
+                    if mutation == "missing_agent_session":
+                        await pool.execute("DELETE FROM agent_sessions WHERE agent_id = 'manager'")
+                    elif mutation == "null_agent_session":
+                        await pool.execute("UPDATE agent_sessions SET session_id = NULL WHERE agent_id = 'manager'")
+                    elif mutation == "different_agent_session":
+                        await pool.execute("UPDATE agent_sessions SET session_id = 'unrelated' WHERE agent_id = 'manager'")
+                    elif mutation == "missing_session":
                         await pool.execute("DELETE FROM api_sessions WHERE session_id = $1", sid)
                     elif mutation == "wrong_protocol":
                         await pool.execute("UPDATE api_sessions SET protocol = 'openai-chat' WHERE session_id = $1", sid)

@@ -2131,24 +2131,31 @@ def _api_session_check(database_url: str, agent: str, since: int) -> str | None:
     async def read() -> str | None:
         conn = await asyncpg.connect(database_url)
         try:
-            # Profile switches retire old API transcripts. Read the current session from agent_sessions,
-            # so a missing active transcript still fails. Earlier or interrupted items cannot fill a turn.
+            # Profile switches retire old API transcripts. Count all completed API turns before selecting
+            # the current session, so a missing active session or transcript still fails.
+            # Earlier or interrupted items cannot fill a turn.
             rows = await conn.fetch(
                 "WITH completed AS ("
                 "SELECT r.session_id, metadata->'llm_model'->>'protocol' AS protocol, count(*) AS turns, "
                 "bool_and(EXISTS (SELECT 1 FROM api_session_items i WHERE i.session_id = r.session_id "
                 "AND i.created_at BETWEEN r.created_at AND r.finished_at)) AS has_items "
                 "FROM llm_records r WHERE agent_id = $1 AND id > $2 AND status = 'completed' "
-                "AND r.session_id = (SELECT session_id FROM agent_sessions WHERE agent_id = $1) "
                 "AND metadata->'profile'->'runtime'->>'type' = 'api' "
                 "AND NOT (metadata ? 'session_profile') "
                 "GROUP BY r.session_id, metadata->'llm_model'->>'protocol') "
-                "SELECT c.protocol AS expected_protocol, s.protocol, c.turns, c.has_items, "
+                "SELECT t.turns AS completed_turns, c.protocol AS expected_protocol, s.protocol, c.turns, c.has_items, "
                 "count(DISTINCT i.turn) AS stored_turns "
-                "FROM completed c LEFT JOIN api_sessions s USING (session_id) "
+                "FROM (SELECT coalesce(sum(turns), 0) AS turns FROM completed) t "
+                "LEFT JOIN completed c ON c.session_id = "
+                "(SELECT session_id FROM agent_sessions WHERE agent_id = $1) "
+                "LEFT JOIN api_sessions s USING (session_id) "
                 "LEFT JOIN api_session_items i ON i.session_id = s.session_id "
-                "GROUP BY c.session_id, c.protocol, s.protocol, c.turns, c.has_items", agent, since)
+                "GROUP BY t.turns, c.session_id, c.protocol, s.protocol, c.turns, c.has_items", agent, since)
             for row in rows:
+                if not row["completed_turns"]:
+                    continue
+                if row["turns"] is None:
+                    return "api Manager active session is missing or does not match completed API turns"
                 if row["protocol"] is None:
                     return "api Manager session is missing from api_sessions"
                 if row["expected_protocol"] is None or row["protocol"] != row["expected_protocol"]:
