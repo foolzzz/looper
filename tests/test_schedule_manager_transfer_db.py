@@ -52,7 +52,7 @@ def test_schedule_owner_roundtrip_uses_full_identity_and_target_project(monkeypa
         async with fresh_schema() as target:
             await ensure_schema(target)
             async with target.acquire() as conn:
-                await transfer.run_import(conn, {"format": transfer.V3_FORMAT,
+                await transfer.run_import(conn, {"format": transfer.V4_FORMAT,
                                                  "projects": [{"name": "Example"}]}, apply=True)
                 await transfer.run_import(conn, document, apply=True)
             stored = await target.fetchrow("SELECT project_id, manager_id, enabled FROM schedules")
@@ -62,11 +62,10 @@ def test_schedule_owner_roundtrip_uses_full_identity_and_target_project(monkeypa
     run_db(test, monkeypatch, timeout=30)
 
 
-def test_legacy_schedule_owner_defaults_and_export_shape_stay_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_omitted_schedule_owner_defaults_and_roundtrips(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         document = _document()
         del document["managers"]
-        document["format"] = transfer.V3_FORMAT
         del document["projects"][0]["schedules"][0]["manager"]
         async with pool.acquire() as conn:
             await transfer.run_import(conn, document, apply=True)
@@ -74,7 +73,7 @@ def test_legacy_schedule_owner_defaults_and_export_shape_stay_unchanged(monkeypa
         async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
             exported = json.loads("".join([chunk async for chunk in transfer.export_chunks(
                 conn, include_projects=True, include_secrets=False)]))
-        assert exported["format"] == transfer.V3_FORMAT
+        assert exported["format"] == transfer.V4_FORMAT
         assert set(exported["projects"][0]["schedules"][0]) == {
             "name", "cron", "timezone", "requirement", "overlap", "max_parallel_runs", "catch_up",
             "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds",

@@ -15,9 +15,19 @@ from tests.test_operator_auth import TOKEN
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
-def test_config_round_trip_matches_dashboard_and_requires_confirmation(tmp_path, monkeypatch, clients):
+@pytest.mark.parametrize("manager_name,manager_description", [
+    ("Manager", ""),
+    ("Manager (管家)", ""),  # Upgraded installs inherit the seeded role display name.
+    ("Coordinator", ""),
+    ("Manager", "Default coordinator"),
+])
+def test_config_round_trip_matches_dashboard_and_requires_confirmation(
+    tmp_path, monkeypatch, clients, manager_name, manager_description,
+):
     async def run(pool):
-        document = {"format": "looper-config/v3", "projects": [{"name": "Portable", "background": "context"}]}
+        await pool.execute("UPDATE managers SET name=$1, description=$2 WHERE id='manager'",
+                           manager_name, manager_description)
+        document = {"format": "looper-config/v4", "projects": [{"name": "Portable", "background": "context"}]}
         async with _serving(tmp_path) as server:
             server._client_ops = ClientOps(Platform(bus=MessageBus(runtime_root=tmp_path),
                                                    task_router=server._task_router, runtime_root=tmp_path))
@@ -56,8 +66,15 @@ def test_config_round_trip_matches_dashboard_and_requires_confirmation(tmp_path,
             for value in (dashboard_export, new_export):
                 value.pop("exported_at")
             assert new_export == dashboard_export
+            assert not new_export.get("managers")
             status, _, again = await request("/api/v1/config/import_preview", {"document": new_export})
             assert status == 200 and again["result"]["plan"]["changes"] == []
+            status, _, asked = await request("/api/v1/config/import_apply", {"import_id": again["result"]["import_id"]})
+            assert status == 202
+            status, _, applied = await request("/api/v1/confirm", {"confirmation_id": asked["confirmation_id"]})
+            assert status == 200 and applied["result"]["plan"]["applied"]
+            assert applied["result"]["plan"]["changes"] == []
+            assert await pool.fetchval("SELECT background FROM projects WHERE name='Portable'") == "context"
             server._config_imports.clear()
     run_db(run, monkeypatch, timeout=30)
 
@@ -119,16 +136,28 @@ def test_cli_commands_against_disposable_serve(tmp_path, monkeypatch, capsys):
             exported = tmp_path / "exported.json"
             assert loopercli.main([*base, "config", "export", str(exported)]) == 0
             capsys.readouterr()
+            document = json.loads(exported.read_text())
+            assert document["format"] == "looper-config/v4" and not document.get("managers")
             assert loopercli.main([*base, "config", "import", str(exported)]) == 0
+            roundtrip = json.loads(capsys.readouterr().out)["result"]
+            assert roundtrip["plan"]["changes"] == []
+            assert loopercli.main([*base, "config", "import", "--apply", roundtrip["import_id"]]) == 3
+            confirmation = json.loads(capsys.readouterr().out)["confirmation_id"]
+            assert loopercli.main([*base, "confirm", confirmation]) == 0
+            assert json.loads(capsys.readouterr().out)["result"]["plan"]["applied"]
+            assert api.call("POST", "/api/v1/config/import_preview", {"document": document})[0] == 200
+            portable = tmp_path / "client-import.json"
+            portable.write_text(json.dumps({"format": "looper-config/v4", "projects": [{"name": "Smoke portable"}]}))
+            assert loopercli.main([*base, "config", "import", str(portable)]) == 0
             staged = json.loads(capsys.readouterr().out)["result"]["import_id"]
             for _ in range(3):
-                assert loopercli.main([*base, "config", "import", str(exported)]) == 0
+                assert loopercli.main([*base, "config", "import", str(portable)]) == 0
                 unused = json.loads(capsys.readouterr().out)["result"]["import_id"]
-            assert loopercli.main([*base, "config", "import", str(exported)]) == 1
+            assert loopercli.main([*base, "config", "import", str(portable)]) == 1
             assert json.loads(capsys.readouterr().out)["error"]["code"] == "conflict"
             assert loopercli.main([*base, "config", "import", "--cancel", unused]) == 0
             assert json.loads(capsys.readouterr().out)["result"] == {"deleted": unused}
-            assert loopercli.main([*base, "config", "import", str(exported)]) == 0
+            assert loopercli.main([*base, "config", "import", str(portable)]) == 0
             capsys.readouterr()
             assert loopercli.main([*base, "config", "import", "--apply", staged]) == 3
             confirmation = json.loads(capsys.readouterr().out)["confirmation_id"]

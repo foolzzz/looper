@@ -232,11 +232,11 @@ def test_handwritten_children_and_flags_do_not_discover_openapi(
 
 @pytest.mark.parametrize(("action", "flags", "body"), [
     ("import-cancel", ["--import-id", "cfgimp-example"], {"import_id": "cfgimp-example"}),
-    ("import-upload", ["--format", "looper-config/v3", "--catalog", "[]"],
-     {"format": "looper-config/v3", "catalog": []}),
+    ("import-upload", ["--format", "looper-config/v4", "--catalog", "[]"],
+     {"format": "looper-config/v4", "catalog": []}),
     ("import-apply", ["--import-id", "cfgimp-example"], {"import_id": "cfgimp-example"}),
-    ("import-preview", ["--document", '{"format":"looper-config/v3"}'],
-     {"document": {"format": "looper-config/v3"}}),
+    ("import-preview", ["--document", '{"format":"looper-config/v4"}'],
+     {"document": {"format": "looper-config/v4"}}),
 ])
 def test_generated_config_children_discover_the_document_from_main(cli: Run, looper: FakeLooper,
                                                                   action: str, flags: list[str], body: Any) -> None:
@@ -252,12 +252,12 @@ def test_generated_config_children_discover_the_document_from_main(cli: Run, loo
 
 @pytest.mark.parametrize(("argv", "operation", "body"), [
     (["export", "-"], "export", {"include_projects": False, "include_secrets": False}),
-    (["import", "-"], "import_preview", {"document": {"format": "looper-config/v3"}}),
+    (["import", "-"], "import_preview", {"document": {"format": "looper-config/v4"}}),
     (["import", "--cancel", "cfgimp-example"], "import_cancel", {"import_id": "cfgimp-example"}),
 ])
 def test_handwritten_config_commands_keep_their_parsers(cli: Run, looper: FakeLooper,
                                                        argv: list[str], operation: str, body: Any) -> None:
-    document = {"format": "looper-config/v3"}
+    document = {"format": "looper-config/v4"}
     answer = {"status": "ok", "result": {"document": document}}
     looper.answers.append((200, answer))
     code, out, err = cli("--json", "config", *argv, stdin=json.dumps(document))

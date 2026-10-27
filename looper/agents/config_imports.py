@@ -71,7 +71,6 @@ class _Pending:
 
 
 def _about(data: dict[str, Any]) -> dict[str, str]:
-    data = {"looper_version": data.get("loopx_version"), **data}  # a file exported before the rename
     return {name: data[name][:100] for name in _ABOUT_FIELDS if isinstance(data.get(name), str)}
 
 
@@ -168,8 +167,8 @@ class ConfigImports:
                 "expires_at": pending.expires_at.isoformat(timespec="seconds"), "plan": plan.view()}
 
     async def apply(self, import_id: str, *, owner: str | None = None) -> dict[str, Any]:
-        """Write the pending import in one transaction and delete its file. On a failure nothing is written and
-        it stays pending (until it expires) for another try."""
+        """Write the pending import in one transaction and delete its file. Invalid documents are discarded;
+        other failures leave it pending (until it expires) for another try, without writing configuration."""
         pending = self._get(import_id, owner=owner)
         if pending.applying:
             raise ImportConflict("this import is being applied")
@@ -180,6 +179,9 @@ class ConfigImports:
             data = await asyncio.to_thread(config_transfer.read_file, pending.path, label=_LABEL)
             authorize(data, pending.policy)
             plan = await _run(data, apply=True)
+        except ConfigFileError:
+            self._drop(import_id)
+            raise
         except BaseException:
             pending.applying = False
             self._arm(import_id, pending)
@@ -190,7 +192,11 @@ class ConfigImports:
     async def check_policy(self, import_id: str, *, owner: str | None = None) -> None:
         """Read the stored file before even creating a generic high-risk confirmation."""
         pending = self._get(import_id, owner=owner)
-        data = await asyncio.to_thread(config_transfer.read_file, pending.path, label=_LABEL)
+        try:
+            data = await asyncio.to_thread(config_transfer.read_file, pending.path, label=_LABEL)
+        except ConfigFileError:
+            self._drop(import_id)
+            raise
         authorize(data, pending.policy)
 
     async def cancel(self, import_id: str, *, owner: str | None = None) -> dict[str, str]:
