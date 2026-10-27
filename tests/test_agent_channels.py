@@ -253,11 +253,12 @@ class TestServeChannelWiring:
     """Telegram and Lark are configured from the Settings page (channel_configs);
     a channel without a usable sender allowlist does not start."""
 
-    def test_telegram_adapter_reads_settings(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize("variable", ["MY_TG_TOKEN", "LOOPX_TELEGRAM_BOT_TOKEN"])
+    def test_telegram_adapter_reads_settings(self, monkeypatch: pytest.MonkeyPatch, variable: str) -> None:
         from looper.agents.serve import _telegram_adapter_from_config
-        monkeypatch.setenv("MY_TG_TOKEN", "token-from-env")
+        monkeypatch.setenv(variable, "token-from-env")
         adapter = _telegram_adapter_from_config(
-            {"bot_token_env": "MY_TG_TOKEN", "allowed_user_ids": ["7", "8"]}
+            {"bot_token_env": variable, "allowed_user_ids": ["7", "8"]}
         )
         assert adapter is not None
         assert adapter._bot_token == "token-from-env"
@@ -273,6 +274,16 @@ class TestServeChannelWiring:
         assert len(adapter._correlation_chat) == _CORRELATION_MAX
         assert "c0" not in adapter._correlation_chat  # oldest gone
         assert adapter._correlation_chat[f"c{_CORRELATION_MAX + 4}"] == _CORRELATION_MAX + 4  # newest kept
+
+    def test_telegram_starts_with_the_token_from_an_existing_unit(self, monkeypatch):
+        from looper.agents.serve import _telegram_adapter_from_config
+
+        monkeypatch.delenv("LOOPER_TELEGRAM_BOT_TOKEN", raising=False)
+        monkeypatch.setenv("LOOPX_TELEGRAM_BOT_TOKEN", "existing-unit-token")
+        adapter = _telegram_adapter_from_config({"allowed_user_ids": ["7"]})
+        assert adapter is not None
+        assert adapter._bot_token == "existing-unit-token"
+        assert adapter._allowlist.ids == {"7"}
 
     def test_telegram_prefers_the_db_token_over_the_env_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The token now comes from channel_secrets (passed in); the env var is only a fallback.

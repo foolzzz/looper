@@ -18,6 +18,19 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.171] - 2026-10-27
+
+### Fixed
+
+- **Runner session close.** Closing a runner session is one explicit per-session state machine: a close that fails, is rejected or times out stays local to its session and the session keeps its capacity until cleanup completes, closed sessions leave bounded tombstones so late updates are dropped, and the supervisor keeps a lease whose close failed so the close can be retried. Nothing in Looper calls the runner bridge yet. ([#769](https://github.com/foolzzz/looper/pull/769))
+- **Release smoke.** The wheel smoke no longer runs the removed `loopx` command, which blocked the v2.13.170 release; it asserts the wheel installs only `looper`. ([#771](https://github.com/foolzzz/looper/pull/771))
+
+## [2.13.170] - 2026-10-27
+
+### Removed
+
+- **Retired entry points and runtime deployment fallbacks.** The `loopx` command, the installer's removal of an old `loopx` package, the automatic `~/.loopx` to `~/.looper` move, the `com.loopx.serve` unit replacement, `looper serve --format`, the old dashboard hash redirects and the `loopx-chat-*` browser keys are gone; `service install` and `init-ops` read deployment settings more simply. Current deployment and routing are kept. ([#762](https://github.com/foolzzz/looper/pull/762))
+
 ## [2.13.169] - 2026-10-27
 
 ### Fixed

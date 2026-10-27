@@ -17,7 +17,6 @@ from collections.abc import Mapping
 from enum import Enum
 from typing import Any
 
-from .. import env
 from ..db import system_settings as db_settings
 
 logger = logging.getLogger(__name__)
@@ -66,13 +65,13 @@ def min_interval_seconds(*, gated: bool, base: int | None = None) -> int:
 
 
 def _env_name() -> str:
-    legacy = env.counterpart(MIN_INTERVAL_ENV)
+    legacy = "LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS"
     return MIN_INTERVAL_ENV if MIN_INTERVAL_ENV in os.environ or not legacy else legacy
 
 
 def _env_min_interval() -> int | None:
     """The deprecated variable's value (None when unset); ``ValueError`` when it is not a whole number from 1."""
-    raw = env.get(MIN_INTERVAL_ENV)
+    raw = os.environ.get(MIN_INTERVAL_ENV, os.environ.get("LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS"))
     if raw is None or raw.strip() == "":
         return None
     try:
