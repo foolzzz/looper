@@ -2,6 +2,7 @@
 # ruff: noqa: E402 -- the subprocess entry point only imports the standard library.
 import asyncio
 from contextlib import asynccontextmanager
+import errno
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,8 @@ def fake_runner():
             continue
         method, params = request["method"], request["params"]
         if method == "initialize":
+            if options.get("slow_initialize"):
+                time.sleep(0.25)
             result = {"protocol_version": options.get("version", "0.1"),
                 "runner": {"kind": options.get("kind", "fake"), "version": "1"}, "sdk": {"name": "fake", "version": "1"},
                 "capabilities": {"max_sessions": options.get("cap", 4),
@@ -95,8 +98,8 @@ def run(coro):
     asyncio.run(asyncio.wait_for(coro, 8))
 
 
-async def until(predicate):
-    async with asyncio.timeout(2):
+async def until(predicate, *, timeout=2):
+    async with asyncio.timeout(timeout):
         while not predicate():
             await asyncio.sleep(0.01)
 
@@ -130,6 +133,7 @@ class Turn:
 def runners(tmp_path, monkeypatch):
     monkeypatch.setattr(s, "BACKOFF_BASE", 0.02)
     monkeypatch.setattr(s, "SHUTDOWN_TIMEOUT", 0.1)
+    monkeypatch.setattr(s, "STDERR_DRAIN_TIMEOUT", 0.1)
     monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.1)
     monkeypatch.setattr(proc_tree, "REAP_SEC", 0.5)
     monkeypatch.setattr(proc_tree, "_records", None)
@@ -137,10 +141,11 @@ def runners(tmp_path, monkeypatch):
     processes = []
 
     @asynccontextmanager
-    async def make(*, session_cap=4, kinds=("fake",), **options):
+    async def make(*, session_cap=4, kinds=("fake",), control_timeouts=(2.0,), **options):
         async def connect(process, kind):
             processes.append(process)
-            bridge = RunnerBridge(process.stdout, process.stdin, kind, control_timeout=0.5)
+            timeout = control_timeouts[min(len(processes) - 1, len(control_timeouts) - 1)]
+            bridge = RunnerBridge(process.stdout, process.stdin, kind, control_timeout=timeout)
             try:
                 await bridge.initialize()
             except BaseException:
@@ -148,7 +153,7 @@ def runners(tmp_path, monkeypatch):
                 raise
             return bridge
         supervisor = s.RunnerSupervisor(tmp_path, {kind: [sys.executable,
-            "tests/test_runner_supervisor.py", json.dumps({**options, "kind": kind})] for kind in kinds},
+            Path("tests/test_runner_supervisor.py"), json.dumps({**options, "kind": kind})] for kind in kinds},
             session_cap=session_cap, connect=connect)
         try:
             yield supervisor, processes
@@ -158,6 +163,10 @@ def runners(tmp_path, monkeypatch):
             for process in processes:
                 await proc_tree.end(process, label="test runner cleanup")
             assert all(p.returncode is not None for p in processes)
+            children = {child for path in tmp_path.glob("runners/*/observed.json")
+                        if (child := json.loads(path.read_text())["child"]) is not None}
+            if children:
+                await until(lambda: not children & proc_tree._snapshot().keys())
     return make
 
 
@@ -453,4 +462,190 @@ def test_real_turn_reports_lost_after_runner_crash(runners):
             await lease.bridge.begin_turn(sid, "trace", lambda e: None, turn, text="accepted")
             processes[0].kill()
             assert (await lease.bridge.wait_settled(sid, "trace")).outcome == "lost"
+    run(exercise())
+
+
+@pytest.mark.parametrize("flag", ["-c", "-e"])
+def test_launch_preserves_long_inline_code_and_ordinary_file_arguments(tmp_path, monkeypatch, flag):
+    monkeypatch.chdir(tmp_path)
+    Path("payload").touch()
+    code = "print('inline code');" + " " * 16384
+    argv = [sys.executable, flag, code, "payload"]
+    owner = s.RunnerSupervisor(tmp_path, {"fake": argv}, connect=None)
+    assert owner._kinds["fake"].command == tuple(argv)
+
+
+def test_launch_resolves_only_explicit_path_arguments(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    Path("payload").touch()
+    owner = s.RunnerSupervisor(tmp_path, {"fake": [sys.executable, Path("runner.py"), "payload"]},
+                               connect=None)
+    assert owner._kinds["fake"].command == (sys.executable, str(tmp_path / "runner.py"), "payload")
+
+
+@pytest.mark.parametrize("binary", ["missing", "not-executable", "invalid-format"])
+def test_launch_refusal_is_terminal(tmp_path, binary):
+    executable = tmp_path / "runner"
+    if binary != "missing":
+        executable.write_text("invalid executable\n")
+        executable.chmod(0o755 if binary == "invalid-format" else 0o644)
+
+    async def exercise():
+        owner = s.RunnerSupervisor(tmp_path, {"fake": [str(executable)]}, connect=None)
+        try:
+            for _ in range(2):
+                with pytest.raises(s.RunnerUnavailable, match="configuration or protocol"):
+                    await owner.acquire("fake")
+            state = owner._kinds["fake"]
+            assert state.fatal and state.restart is None and len(state.failures) == 1
+        finally:
+            await owner.stop()
+    run(exercise())
+
+
+def test_temporary_initialize_io_error_is_retryable(runners):
+    async def exercise():
+        async with runners() as (owner, processes):
+            connect = owner.connect
+
+            async def fail_once(process, kind):
+                if not processes:
+                    processes.append(process)
+                    raise OSError(errno.EIO, "temporary initialization I/O failure")
+                return await connect(process, kind)
+
+            owner.connect = fail_once
+            with pytest.raises(s.RunnerUnavailable, match="restart is bounded"):
+                await owner.acquire("fake")
+            state = owner._kinds["fake"]
+            assert not state.fatal
+            await until(lambda: state.generation is not None)
+            assert (await owner.acquire("fake")).valid and len(processes) == 2
+    run(exercise())
+
+
+@pytest.mark.parametrize("shutdown", [False, True], ids=["recover", "shutdown"])
+def test_reparented_child_in_separate_group_is_reaped(runners, shutdown):
+    async def exercise():
+        async with runners(uncooperative=True) as (owner, processes):
+            lease = await owner.acquire("fake")
+            generation = lease._generation
+            child = json.loads((generation.directory / "observed.json").read_text())["child"]
+            started = proc_tree._start_time(child)
+            assert started and child in proc_tree.tree_of(processes[0])
+            stopping = None
+            try:
+                # Synchronize on an observed identity before making the child unreachable from its parent.
+                await until(lambda: generation.tree.seen.get(child) == started, timeout=4)
+                processes[0].kill()
+                await generation.exited.wait()
+                assert child in proc_tree._snapshot() and child not in proc_tree.tree_of(processes[0])
+                if shutdown:
+                    stopping = asyncio.create_task(owner.stop())
+                    done, _ = await asyncio.wait([stopping], timeout=4)
+                    assert stopping in done
+                    await stopping
+                    assert not owner._tasks
+                else:
+                    await until(lambda: len(processes) == 2 and owner._kinds["fake"].generation is not None,
+                                timeout=4)
+                    assert (await owner.acquire("fake")).valid and not lease.valid
+                assert child not in proc_tree._snapshot()
+            finally:
+                # A regression must not strand the real child or keep fixture shutdown on its pipe.
+                if proc_tree._start_time(child) == started:
+                    os.kill(child, signal.SIGKILL)
+                if stopping is not None:
+                    await stopping
+    run(exercise())
+
+
+@pytest.mark.parametrize("shutdown", [False, True], ids=["recover", "shutdown"])
+def test_stalled_diagnostic_drain_does_not_block_cleanup(runners, monkeypatch, shutdown):
+    async def exercise():
+        gate, entered = asyncio.Event(), asyncio.Event()
+
+        async def held_pipe(self, generation):
+            entered.set()
+            await gate.wait()
+
+        monkeypatch.setattr(s.RunnerSupervisor, "_stderr", held_pipe)
+        async with runners() as (owner, processes):
+            lease = await owner.acquire("fake")
+            await entered.wait()
+            stopping = None
+            try:
+                if shutdown:
+                    stopping = asyncio.create_task(owner.stop())
+                    done, _ = await asyncio.wait([stopping], timeout=4)
+                    assert stopping in done
+                    await stopping
+                    assert not owner._tasks
+                else:
+                    processes[0].kill()
+                    await until(lambda: len(processes) == 2 and owner._kinds["fake"].generation is not None,
+                                timeout=4)
+                assert lease._generation.stderr.done()
+            finally:
+                gate.set()
+                if stopping is not None:
+                    await stopping
+    run(exercise())
+
+
+def test_reused_child_identity_is_not_signalled_or_allowed_to_hold_shutdown(runners, monkeypatch):
+    async def exercise():
+        async with runners(uncooperative=True) as (owner, processes):
+            lease = await owner.acquire("fake")
+            child = json.loads((lease._generation.directory / "observed.json").read_text())["child"]
+            started = proc_tree._start_time(child)
+            assert started
+            stopping = None
+            try:
+                await until(lambda: lease._generation.tree.seen.get(child) == started, timeout=4)
+                start_times = proc_tree._start_times
+
+                def reused(pids):
+                    starts = start_times(pids)
+                    if starts is not None and child in starts:
+                        starts[child] = "different process start time"
+                    return starts
+
+                monkeypatch.setattr(proc_tree, "_start_times", reused)
+                processes[0].kill()
+                await lease._generation.exited.wait()
+                stopping = asyncio.create_task(owner.stop())
+                done, _ = await asyncio.wait([stopping], timeout=4)
+                assert stopping in done
+                await stopping
+                assert child in proc_tree._snapshot()  # Its inherited diagnostic pipe is still open.
+                assert lease._generation.stderr.done() and not owner._tasks
+            finally:
+                if proc_tree._start_time(child) == started:
+                    os.kill(child, signal.SIGKILL)
+                if stopping is not None:
+                    await stopping
+    run(exercise())
+
+
+@pytest.mark.parametrize("recovers", [True, False], ids=["retry-succeeds", "bounded-failures"])
+def test_initialize_timeout_uses_bounded_restart(runners, monkeypatch, recovers):
+    monkeypatch.setattr(s, "BACKOFF_MAX", 0.01)
+    async def exercise():
+        timeouts = (0.1, 2.0) if recovers else (0.1,)
+        async with runners(slow_initialize=True, control_timeouts=timeouts) as (owner, processes):
+            with pytest.raises(s.RunnerUnavailable, match="restart is bounded"):
+                await owner.acquire("fake")
+            state = owner._kinds["fake"]
+            assert not state.fatal
+            if recovers:
+                await until(lambda: state.generation is not None)
+                lease = await owner.acquire("fake")
+                assert lease.valid and len(processes) == 2 and len(state.failures) == 1
+            else:
+                await until(lambda: len(state.failures) == s.MAX_FAILURES, timeout=5)
+                with pytest.raises(s.RunnerUnavailable, match="five failures"):
+                    await owner.acquire("fake")
+                assert not state.fatal and len(processes) == s.MAX_FAILURES
+                assert all(process.returncode is not None for process in processes)
     run(exercise())
