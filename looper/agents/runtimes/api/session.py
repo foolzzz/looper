@@ -15,7 +15,7 @@ from ... import claude_cli, log_redaction
 from ...ops import OpError
 from ...run_usage import Price, Usage, run_usage
 from .. import StopMethod, pricing
-from ..cancel import TurnCancel
+from ..cancel import TurnCancel, TurnCancelled
 from .adapter import Descriptor, KEY_ENV
 from .transcript import DbTranscript, TranscriptMismatch
 from .loop import (
@@ -187,7 +187,9 @@ class ApiSession:
         if self._session and not history:
             return failed(f"session {sid} could not be resumed", session_started=False)
         try:
-            specs = await self._tools.specs()
+            specs = await cancel.race(self._tools.specs())
+        except TurnCancelled:
+            return stopped_before_request()
         except OpError as exc:
             return failed(f"Looper's platform tools are unavailable: {exc}")
         if cancel.requested:
@@ -238,15 +240,18 @@ class ApiSession:
                     over_cap=lambda: stop is not None and stop() is not None, max_requests=30)
         for request in result.requests:
             u = request.usage
-            logger.info("api request", extra={"api_request": {
+            fields = {
                 "agent": self.label, "protocol": descriptor.protocol.value, "model": model,
-                "host": urlparse(descriptor.base_url).hostname, "status": request.status,
+                "host": urlparse(descriptor.base_url).hostname, "request": request.index, "status": request.status,
                 "duration_ms": request.duration_ms, "first_token_ms": request.first_token_ms,
                 "retries": request.retries, "input_tokens": u.input_tokens,
                 "cache_read_tokens": u.cache_read_tokens, "cache_write_tokens": u.cache_write_tokens,
                 "output_tokens": u.output_tokens, "complete": u.complete,
                 "upstream_id": log_redaction.redact(request.upstream_id) if request.upstream_id else None,
-            }})
+                "outcome": result.outcome.value,
+            }
+            logger.info("api_request %s", log_redaction.redact(
+                " ".join(f"{key}={value}" for key, value in fields.items())), extra={"api_request": fields})
         if result.outcome is Outcome.CANCELLED and not result.requests:
             return stopped_before_request()
         if result.error_kind is ErrorKind.CONTEXT_OVERFLOW:
