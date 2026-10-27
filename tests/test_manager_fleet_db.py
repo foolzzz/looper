@@ -789,7 +789,10 @@ def test_deletion_while_replying_handles_in_flight_and_queued_messages(tmp_path,
                 assert {first.message_id, queued.message_id} <= _journal_open(tmp_path)
                 assert _replies(r.bus) == []
                 gate.set()
-                await until(lambda: not agent.busy and r.bus.pending_count(review) == 0,
+                # A dequeued message can still be preparing, before it takes the turn lock.
+                # subscribe marks it delivered only after its handler (including the reply) returns.
+                await until(lambda: not agent.busy and r.bus.pending_count(review) == 0
+                            and not {first.message_id, queued.message_id} & _journal_open(tmp_path),
                             "both original replies to finish", timeout=5)
                 replies = _replies(r.bus)
                 assert [reply.correlation_id for reply in replies] == [first.correlation_id, queued.correlation_id]
