@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.152] - 2026-10-26
+
+### Fixed
+
+- **api request logs carry their fields, and Stop works while Manager tools load.** Each api request is logged as `api_request key=value ...` (redacted) with new `request` and `outcome` fields; Stop now ends a turn that is still waiting for the platform tool list. ([#713](https://github.com/foolzzz/looper/pull/713))
+
 ## [2.13.151] - 2026-10-26
 
 ### Changed
