@@ -379,6 +379,7 @@ def manager_template_entry(row: Mapping[str, Any], profiles: Mapping[str, str],
 def manager_entry(row: Mapping[str, Any], templates: Sequence[Mapping[str, Any]],
                   profiles: Mapping[str, str], projects: Mapping[str, str]) -> dict[str, Any]:
     entry = {name: row[name] for name in ("id", "name", "description")}
+    entry["idle_timeout_seconds"] = row.get("idle_timeout_seconds", 0 if row["id"] == "manager" else 1800)
     if row["id"] != "manager":
         entry.update({name: row[name] for name in ("system_prompt", "tools", "task_scope", "task_policy", "enabled")})
         entry["profile"] = profiles[row["profile_id"]] if row["profile_id"] else None
@@ -2204,7 +2205,7 @@ class _Importer:
             try:
                 entry = _mapping(raw, "a Manager")
                 allowed = {"id", "name", "description", "system_prompt", "profile", "tools", "task_scope",
-                           "task_policy", "enabled", "templates"}
+                           "task_policy", "enabled", "templates", "idle_timeout_seconds"}
                 unknown = set(entry) - allowed
                 if unknown:
                     raise ConfigFileError(f"managers: unknown field {sorted(unknown)[0]!r}")
@@ -2219,8 +2220,8 @@ class _Importer:
                     raise ConfigFileError(f"Manager {identity!r} was deleted; choose a new immutable id")
                 if "name" not in entry:
                     raise ConfigFileError(f"Manager {identity}: name is required")
-                if identity == "manager" and set(entry) - {"id", "name", "description"}:
-                    raise ConfigFileError("the default Manager entry may only set id, name and description")
+                if identity == "manager" and set(entry) - {"id", "name", "description", "idle_timeout_seconds"}:
+                    raise ConfigFileError("the default Manager entry may only set id, name, description and idle_timeout_seconds: 0")
                 values = {k: v for k, v in entry.items() if k not in ("id", "profile", "templates")}
                 for name in ("name", "description", "system_prompt"):
                     if name in values:
@@ -2228,7 +2229,7 @@ class _Importer:
                 if identity != "manager":
                     if row is None:
                         values = {"tools": "tasks", "task_scope": "own", "task_policy": "free", "enabled": True,
-                                  "description": "", "profile_id": None, **values}
+                                  "description": "", "profile_id": None, "idle_timeout_seconds": 1800, **values}
                         if "system_prompt" not in values:
                             raise ConfigFileError(f"Manager {identity}: system_prompt is required for a new definition")
                     if "profile" in entry:

@@ -1237,6 +1237,9 @@ CREATE TABLE IF NOT EXISTS managers (
     task_policy   TEXT NOT NULL DEFAULT 'free'
                   CONSTRAINT managers_task_policy_check CHECK (task_policy IN ('free', 'templates_only')),
     enabled       BOOLEAN NOT NULL DEFAULT true,
+    idle_timeout_seconds INTEGER NOT NULL DEFAULT 1800
+                  CONSTRAINT managers_idle_timeout_seconds_check
+                  CHECK (idle_timeout_seconds = 0 OR idle_timeout_seconds BETWEEN 60 AND 86400),
     -- Bumped in the same transaction by every write that changes what the Manager may do (tools, task_scope,
     -- task_policy, enabled, a template saved or removed): ManagerOps compares it at each call.
     revision      BIGINT NOT NULL DEFAULT 0,
@@ -1247,13 +1250,30 @@ CREATE TABLE IF NOT EXISTS managers (
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT managers_default_check CHECK (id <> 'manager' OR
         (system_prompt IS NULL AND profile_id IS NULL AND tools = 'all' AND task_scope = 'all' AND enabled
-         AND deleted_at IS NULL)),
+         AND deleted_at IS NULL AND idle_timeout_seconds = 0)),
     CONSTRAINT managers_deleted_check CHECK (deleted_at IS NULL OR NOT enabled),
     CONSTRAINT managers_prompt_check CHECK (id = 'manager' OR btrim(coalesce(system_prompt, '')) <> '')
 );
+ALTER TABLE managers ADD COLUMN IF NOT EXISTS idle_timeout_seconds INTEGER NOT NULL DEFAULT 1800
+    CONSTRAINT managers_idle_timeout_seconds_check
+    CHECK (idle_timeout_seconds = 0 OR idle_timeout_seconds BETWEEN 60 AND 86400);
+-- Existing scenarios inherit the column default; the built-in Manager always stays resident.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'managers_default_check'
+               AND conrelid = 'managers'::regclass
+               AND pg_get_constraintdef(oid) NOT LIKE '%idle_timeout_seconds%') THEN
+        UPDATE managers SET idle_timeout_seconds = 0 WHERE id = 'manager';
+        ALTER TABLE managers DROP CONSTRAINT managers_default_check;
+        ALTER TABLE managers ADD CONSTRAINT managers_default_check CHECK (id <> 'manager' OR
+            (system_prompt IS NULL AND profile_id IS NULL AND tools = 'all' AND task_scope = 'all' AND enabled
+             AND deleted_at IS NULL AND idle_timeout_seconds = 0));
+    END IF;
+END $$;
 -- A deleted Manager's name is free again; its id is not.
 CREATE UNIQUE INDEX IF NOT EXISTS managers_name_key ON managers (lower(btrim(name))) WHERE deleted_at IS NULL;
-INSERT INTO managers (id, name, tools, task_scope) VALUES ('manager', 'Manager', 'all', 'all') ON CONFLICT (id) DO NOTHING;
+INSERT INTO managers (id, name, tools, task_scope, idle_timeout_seconds)
+    VALUES ('manager', 'Manager', 'all', 'all', 0) ON CONFLICT (id) DO NOTHING;
 -- Once: the default Manager keeps the display name it had in Settings → Roles.
 DO $$
 BEGIN

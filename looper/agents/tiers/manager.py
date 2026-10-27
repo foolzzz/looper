@@ -34,6 +34,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -171,7 +172,8 @@ def scope_contract(definition: ManagerDefinition, *, has_templates: bool = False
 def default_definition() -> ManagerDefinition:
     return ManagerDefinition(id=DEFAULT_MANAGER_ID, name="Manager", description="", system_prompt=None,
                              profile_id=None, tools=ManagerTools.ALL, task_scope=TaskScope.ALL,
-                             task_policy=TaskPolicy.FREE, enabled=True, builtin=True, revision=0)
+                             task_policy=TaskPolicy.FREE, enabled=True, builtin=True, revision=0,
+                             idle_timeout_seconds=0)
 
 
 # Appended to the (editable) system prompt on every call: Looper's tools are code's, so is how to use them.
@@ -664,6 +666,7 @@ class ManagerAgent:
         runtime_root: Path,
         broadcaster: Broadcaster | None = None,
         definition: ManagerDefinition | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._definition = definition or default_definition()
         self._log = self._definition.id
@@ -700,6 +703,10 @@ class ManagerAgent:
         self._claude = CLAUDE_CODE.resident_session(self.agent_id)
         self._claude_runtime = CLAUDE_CODE  # the runtime type whose session self._claude is
         self._turn_lock = asyncio.Lock()
+        # Serializes resident admission, reset and idle close. An idle check never waits for a busy turn.
+        self._lifecycle_gate = asyncio.Lock()
+        self._clock = clock
+        self._last_activity = clock()
         self._turns = TurnRegistry()  # every user message from its delivery to its end (stop_turn's targets)
         self._lock_owner: TurnToken | None = None  # the turn that holds ``_turn_lock`` from its preparation
         self._running_token: TurnToken | None = None  # the token of the user turn being answered
@@ -789,6 +796,7 @@ class ManagerAgent:
     async def start(self, bus: MessageBus) -> None:
         self._bus = bus
         self._running = True
+        self._last_activity = self._clock()
 
         await self._load_db_config()
         if not self._session_loaded:
@@ -856,6 +864,7 @@ class ManagerAgent:
         return True
 
     def _register_turn(self, envelope: MessageEnvelope) -> TurnToken:
+        self._last_activity = self._clock()
         origin = _message_origin(envelope)
         context = envelope.payload.get("channel_context")
         client_id = context.get("client_message_id") if isinstance(context, dict) else None
@@ -915,8 +924,44 @@ class ManagerAgent:
         for token in self._turns.live():
             token.settle(ReplyOutcome.STOPPED)
         self._turns.clear()
-        async with self._turn_lock:
+        async with self._turn_lock, self._lifecycle_gate:
             await self._claude.stop()
+
+    def _idle_blocked(self) -> bool:
+        return bool(self.busy or self._handling is not None or self._running_token is not None
+                    or self._turns.live() or (self._bus and self._bus.pending_count(self.agent_id)))
+
+    async def try_suspend_idle(self, now: float) -> bool:
+        """Close only a provably idle resident, retaining the enabled agent and its complete session state."""
+        timeout = self._definition.idle_timeout_seconds
+        if self.agent_id == DEFAULT_MANAGER_ID or not timeout or not self._running or self._turned_off:
+            return False
+        if self._idle_blocked() or self._lifecycle_gate.locked():
+            self._last_activity = now
+            return False
+        if now - self._last_activity < timeout or not self._claude.started:
+            return False
+        async with self._lifecycle_gate:
+            # No await between this last admission check and the runtime's atomic idle claim.
+            if not self._running or self._turned_off or self._idle_blocked():
+                self._last_activity = now
+                return False
+            close = getattr(self._claude, "try_stop_if_idle", None)
+            if close is None:
+                self._last_activity = now
+                return False
+            try:
+                closed = await close()
+            except Exception as exc:
+                # Do not log runtime exception text: it can contain model or tool output.
+                logger.warning("Manager %s idle suspension failed (%s); retaining session for retry",
+                               self.agent_id, type(exc).__name__)
+                return False
+            if not closed:
+                self._last_activity = now
+                return False
+            logger.info("Manager %s resident suspended (idle timeout)", self.agent_id)
+            return True
 
     def is_healthy(self) -> bool:
         # Runtime availability is checked per launch; Claude is optional for other profiles.
@@ -941,6 +986,7 @@ class ManagerAgent:
                     logger.exception("error handling message %s", envelope.message_id)
                 finally:
                     self._handling = None
+                    self._last_activity = self._clock()
         except asyncio.CancelledError:
             pass
 
@@ -964,6 +1010,9 @@ class ManagerAgent:
             return
         token = self._turns.find(envelope.message_id) or self._register_turn(envelope)
         try:
+            # A message admitted during graceful close waits for the resident to finish closing.
+            async with self._lifecycle_gate:
+                self._last_activity = self._clock()
             try:
                 token.advance(TurnPhase.PREPARING)
                 await self._answer_user_message(envelope, token)
@@ -975,6 +1024,7 @@ class ManagerAgent:
         finally:
             self._persisted.discard(envelope.message_id)
             token.settle(token.outcome)
+            self._last_activity = self._clock()
 
     async def _persist_user(self, envelope: MessageEnvelope, text: str) -> None:
         self._persisted.add(envelope.message_id)
@@ -1298,7 +1348,8 @@ class ManagerAgent:
         """Start the prepared turn and run it; the turn's record ends however it ends."""
         failure: BaseException | None = None
         try:
-            await self._start_turn(token, prepared)
+            async with self._lifecycle_gate:
+                await self._start_turn(token, prepared)
             return await self._converse(token, prepared)
         except BaseException as exc:
             failure = exc
@@ -1309,6 +1360,7 @@ class ManagerAgent:
                     await prepared.run.recorder.end_left_open(failure)
             finally:
                 self._publish_binding(None)  # drained or boundedly abandoned, even if closing the record is cancelled
+                self._last_activity = self._clock()
 
     async def stop_turn(self, message_id: str, *, via: str) -> StopResult:
         """Ask the user turn of ``message_id`` (the envelope's id or the web page's own), in any phase, to stop.
@@ -1841,7 +1893,7 @@ class ManagerAgent:
         first. Tasks and their Planners are not touched."""
         origin = _message_origin(envelope)
         chosen = envelope.payload.get("new_session_profile_id") or None
-        async with self._turn_lock:
+        async with self._turn_lock, self._lifecycle_gate:
             name = None
             if chosen is not None:
                 try:
@@ -2208,6 +2260,7 @@ class ManagerAgent:
         """
 
         async def begin(after: Any) -> AutonomousRun:
+            self._last_activity = self._clock()
             last = after if isinstance(after, MessageEnvelope) else None
             origin = _message_origin(last) if last is not None else {"channel": None, "channel_id": None, "chat": None}
             turn = Turn(channel=origin["channel"], chat=origin["chat"], channel_id=origin["channel_id"])
@@ -2228,14 +2281,17 @@ class ManagerAgent:
             await recorder.start()
 
             async def on_end(text: str, resident: ResidentTurn) -> None:
-                await self._link_turn_task(recorder, turn)
-                if self.ops is not None:
-                    self.ops.end_turn(turn)
-                if resident.result_event is not None:
-                    self._session_totals = self._claude.totals  # it spent too: a restart resumes from here
-                    await self._save_session_state()
-                if text:
-                    await self._send_own_reply(last, text)
+                try:
+                    await self._link_turn_task(recorder, turn)
+                    if self.ops is not None:
+                        self.ops.end_turn(turn)
+                    if resident.result_event is not None:
+                        self._session_totals = self._claude.totals  # it spent too: a restart resumes from here
+                        await self._save_session_state()
+                    if text:
+                        await self._send_own_reply(last, text)
+                finally:
+                    self._last_activity = self._clock()
 
             return AutonomousRun(recorder, on_end)
 

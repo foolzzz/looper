@@ -466,6 +466,14 @@ class AcpGrok:
                                  totals=self._totals, autonomous=self._autonomous, price=self._price)
         self._fallback = True
 
+    async def try_stop_if_idle(self) -> bool:
+        """ACP has no background-work quiescence acknowledgement: retain it.
+
+        A prompt/request in flight is always busy. Even between prompts the
+        current protocol cannot prove that the process has no background work.
+        """
+        return False
+
     async def stop(self, *, kill: bool = False) -> None:
         """Forget the command and the session; the process, with a turn still running, is ended."""
         await self._end_process()

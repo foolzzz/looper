@@ -357,6 +357,10 @@ class PerTurnSession(ABC):
             logger.warning("%s: the stopped turn did not end in time", self._label)
         return StopMethod.KILL
 
+    async def try_stop_if_idle(self) -> bool:
+        """No resident process exists between turns; keep the prepared session."""
+        return False
+
     async def stop(self, *, kill: bool = False) -> None:
         """Forget the session's command and the session; a turn still running is killed."""
         process, self._process = self._process, None
