@@ -13,8 +13,9 @@ from looper.agents import chat_settings
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.ops import Risk, Tool
 from looper.agents.runtimes import StopMethod
-from looper.agents.runtimes.api.loop import NormaAgentLoop, ToolCallItem, ToolResultItem
+from looper.agents.runtimes.api.loop import NormaAgentLoop, ToolCallItem, ToolResultItem, item_from_json
 from looper.agents.tiers.manager import StopResult
+from looper.db import api_sessions
 from tests.db_support import DSN, run_db, until
 from tests.fake_model_api import ResponseScript, call_item, completed, text_events
 from tests.test_api_manager_turns_db import USAGE, _manager, _message, _replies
@@ -73,8 +74,8 @@ def test_dashboard_stop_closes_stream_and_keeps_only_partial_reply_and_pre_stop_
                     "cost_usd", "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"))
                 assert json.loads(record["metadata"])["user_stop"]["method"] == "cancel"
                 assert await pool.fetch("SELECT seq, event FROM llm_record_events ORDER BY seq") == before
-                session = chat.manager._claude
-                assert await session._transcripts[session._session].items() == []
+                assert await api_sessions.load(record["session_id"]) == []
+                assert await pool.fetchval("SELECT count(*) FROM api_sessions") == 0
             finally:
                 answering.cancel()
                 await asyncio.gather(answering, return_exceptions=True)
@@ -114,7 +115,8 @@ def test_stop_during_ops_call_keeps_its_result_and_marks_remaining_calls_stopped
                 await asyncio.wait_for(answering, 2)
                 assert ran == [1] and len(chat.model.requests) == 1
                 session = chat.manager._claude
-                history = await session._transcripts[session._session].items()
+                history = [item_from_json(json.loads(row["item"]))
+                           for row in await api_sessions.load(session._session)]
                 assert len([item for item in history if isinstance(item, ToolCallItem)]) == 2
                 first, second = [item for item in history if isinstance(item, ToolResultItem)]
                 assert first.call_id == "call_1" and first.ran and not first.is_error
@@ -200,17 +202,23 @@ def test_channel_stop_command_cancels_api_manager_without_real_accounts(
     run_db(run, monkeypatch, timeout=45)
 
 
+@pytest.mark.parametrize("partial", [False, True])
 def test_next_turn_receives_stop_note_and_only_completed_history(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, partial: bool,
 ) -> None:
     async def run(pool: Any) -> None:
-        script = ResponseScript(events=text_events("Unfinished.", usage=USAGE), gate=asyncio.Event())
+        script = ResponseScript(events=text_events("Unfinished.", usage=USAGE) if partial else [completed([])],
+                                gate=asyncio.Event())
         scripts = [script, ResponseScript(events=text_events("Next reply.", usage=USAGE))]
         async with _manager(pool, tmp_path, monkeypatch, scripts) as chat:
             first = _message()
             answering = asyncio.create_task(chat.manager._handle(first))
             try:
                 await asyncio.wait_for(script.gate_reached.wait(), 30)
+                if partial:
+                    await until(lambda: chat.manager.turn_for(first.message_id).partial == "Unfinished.")
+                else:
+                    assert chat.manager.turn_for(first.message_id).partial == ""
                 await chat.manager.stop_turn(first.message_id, via="web")
                 await asyncio.wait_for(answering, 2)
                 assert chat.manager._stopped_notes
@@ -218,8 +226,12 @@ def test_next_turn_receives_stop_note_and_only_completed_history(
                 sent = chat.model.requests[1].body["input"]
                 assert len(sent) == 1 and sent[0]["role"] == "user"
                 assert "[Looper] The user stopped your previous reply" in sent[0]["content"]
+                assert "Unfinished." not in sent[0]["content"]
                 assert chat.manager._stopped_notes == []
                 assert _replies(chat.bus)[-1].payload["text"] == "Next reply."
+                assert len(chat.model.requests) == 2
+                assert [row["status"] for row in await pool.fetch("SELECT status FROM llm_records ORDER BY id")] \
+                    == ["interrupted", "completed"]
             finally:
                 answering.cancel()
                 await asyncio.gather(answering, return_exceptions=True)

@@ -196,9 +196,6 @@ class ApiSession:
         model = descriptor.model
 
         initialized = False
-        first_completed = False
-        # A first-request overflow must be retried without exposing a partial answer.
-        pending_events: list[dict[str, Any]] = []
 
         async def init() -> None:
             nonlocal initialized
@@ -209,25 +206,14 @@ class ApiSession:
 
         async def send(event: dict[str, Any]) -> None:
             if not cancel.requested:
-                if not first_completed:
-                    pending_events.append(event)
-                    return
                 await init()
                 await on_event(event)
-
-        async def flush() -> None:
-            nonlocal first_completed
-            first_completed = True
-            for event in pending_events:
-                await send(event)
-            pending_events.clear()
 
         async def emit(event: LoopEvent) -> None:
             if isinstance(event, TextDelta):
                 await send({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
                            "delta": {"type": "text_delta", "text": event.text}}})
             elif isinstance(event, RequestDone):
-                await flush()
                 self._contexts[sid] = event.record.prompt_tokens
                 content = []
                 if event.reasoning_summary:
@@ -265,12 +251,11 @@ class ApiSession:
             return stopped_before_request()
         if result.error_kind is ErrorKind.CONTEXT_OVERFLOW:
             self._contexts[sid] = max(self._contexts.get(sid) or 0, self.context_limit + 1)
-            if result.first_request_failed:
-                # Discard even partial output: the owner retries this message with a resume brief.
+            if result.first_request_failed and not initialized:
+                # Only retry before any output is visible; streamed text must not be shown twice.
                 self._session = sid
                 return failed(_error_message(result, model), session_started=False)
         if not cancel.requested:
-            await flush()
             await init()
         complete = all(r.usage.complete for r in result.requests)
         tokens = {}
@@ -304,7 +289,9 @@ class ApiSession:
                                            for r in result.requests if r.upstream_id][:30]})
         usage = cap.usage if cap else run_usage(event, price=self._price)
         self._totals = self._totals.plus(usage)
-        self._session = sid
+        # An interrupted first request created no durable history to resume, even if init was not observed.
+        self._session = (None if result.outcome is Outcome.CANCELLED and result.first_request_failed and not history
+                         else sid)
         return claude_cli.ResidentTurn(event, session_started=True, usage=usage, prompt_sent=True,
                                        usage_complete=complete,
                                        stopped=StopMethod.CANCEL if result.outcome is Outcome.CANCELLED or cancel.requested else None)

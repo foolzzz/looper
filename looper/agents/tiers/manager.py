@@ -2034,7 +2034,11 @@ class ManagerAgent:
             raise TurnStopped()
         process = self._process
         handoff: str | None = None
-        if self._claude.started and process is not None and not self._claude.stale(process.signature):
+        api_history = (self._session_runtime == "api" and self._session_id is not None
+                       and await db_api_sessions.last_turn(self._session_id) is not None)
+        # A failed first API request has no committed conversation to summarize.
+        if self._claude.started and process is not None and not self._claude.stale(process.signature) \
+                and (self._session_runtime != "api" or api_history):
             # The handoff's prompt is not the user's message: it gets a cancel of its own, requested with the turn's, so
             # that writing it does not make the turn "running" or its message "seen".
             inner = TurnCancel()
@@ -2043,8 +2047,7 @@ class ManagerAgent:
                 handoff = await self._handoff(switch, process, inner)
             finally:
                 unregister()
-        if self._session_runtime == "api" and self._session_id \
-                and switch.reason is SwitchReason.CONTEXT_FULL and not handoff:
+        if api_history and switch.reason is SwitchReason.CONTEXT_FULL and not handoff:
             raise RuntimeError("The context handoff failed; the previous conversation has been retained. "
                                "Retry with a shorter message.")
         await self._claude.stop()

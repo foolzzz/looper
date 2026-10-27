@@ -13,7 +13,7 @@ from looper.agents import session_switch
 from looper.agents.tiers import manager as manager_module
 from looper.db import agent_sessions
 from tests.db_support import DSN, run_db
-from tests.fake_model_api import ResponseScript, call_events, text_events
+from tests.fake_model_api import ResponseScript, call_events, event, text_events
 from tests.api_manager_support import USAGE, _manager, _message, _replies
 
 
@@ -389,6 +389,44 @@ class TestManagerContext:
                 assert "context full:" in resumed
                 assert "Handoff from your previous session" in resumed and SUMMARY in resumed
                 assert await pool.fetchval("SELECT count(*) FROM api_sessions WHERE session_id=$1", old) == 0
+        run_db(run, monkeypatch, timeout=45)
+
+    @pytest.mark.parametrize("saved_history", [False, True])
+    def test_overflow_after_visible_text_fails_without_replay_and_next_turn_recovers(
+        self, monkeypatch, tmp_path: Path, saved_history: bool,
+    ) -> None:
+        async def run(pool):
+            overflow = ResponseScript(events=[
+                event("response.output_text.delta", output_index=0, item_id="msg_1",
+                      content_index=0, delta="Unfinished prefix."),
+                event("response.failed", response={"id": "resp_overflow", "status": "failed",
+                      "error": {"code": "context_length_exceeded", "message": "full"}}),
+            ])
+            scripts = ([ResponseScript(events=text_events("Earlier evidence.", usage=USAGE))]
+                       if saved_history else [])
+            scripts.append(overflow)
+            if saved_history:
+                scripts.append(ResponseScript(events=text_events(SUMMARY, usage=USAGE)))
+            scripts.append(ResponseScript(events=text_events("Recovered.", usage=USAGE)))
+            async with _manager(pool, tmp_path, monkeypatch, scripts) as chat:
+                if saved_history:
+                    await chat.manager._handle(_message("Keep the evidence."))
+                    _replies(chat.bus)
+                await chat.manager._handle(_message("Answer once.", 1))
+                (failed,) = _replies(chat.bus)
+                assert failed.payload["outcome"] == "failed"
+                assert "context window" in failed.payload["text"]
+                assert len(chat.model.requests) == 1 + int(saved_history)
+                await chat.manager._handle(_message("Continue.", 2))
+                assert _replies(chat.bus)[0].payload["text"] == "Recovered."
+                assert len(chat.model.requests) == len(scripts)
+                if saved_history:
+                    assert "Earlier evidence." in _input(chat.model.requests[2])
+                    assert "Unfinished prefix." not in _input(chat.model.requests[2])
+                    assert SUMMARY in _input(chat.model.requests[3])
+                else:
+                    assert chat.model.requests[1].body["tools"]
+                    assert len(chat.model.requests[1].body["input"]) == 1
         run_db(run, monkeypatch, timeout=45)
 
     def test_later_request_overflow_fails_then_next_turn_switches(self, monkeypatch, tmp_path: Path) -> None:

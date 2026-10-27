@@ -502,11 +502,14 @@ async def test_context_limit_uses_model_window_with_ceiling(tmp_path, window, li
         await session.stop()
 
 
+@pytest.mark.parametrize('partial', [False, True])
 @async_test
-async def test_first_request_context_overflow_emits_no_partial_events(tmp_path):
-    script = ResponseScript(events=[
+async def test_first_request_context_overflow_retries_only_before_visible_output(tmp_path, partial):
+    prefix = [
         event('response.output_text.delta', output_index=0, item_id='msg_1',
               content_index=0, delta='unfinished prefix'),
+    ] if partial else []
+    script = ResponseScript(events=[*prefix,
         event('response.failed', response={'id': 'resp_1', 'status': 'failed',
               'error': {'code': 'context_length_exceeded', 'message': 'full'}}),
     ])
@@ -514,7 +517,18 @@ async def test_first_request_context_overflow_emits_no_partial_events(tmp_path):
         session, _ = await start(tmp_path, api.base_url)
         try:
             result, events = await turn(session)
-            assert not events and not result.session_started and not result.prompt_sent
+            assert result.session_started is partial and result.prompt_sent is partial
+            assert result.result_event['is_error'] is True
+            if partial:
+                assert events == [
+                    {'type': 'system', 'subtype': 'init', 'session_id': result.result_event['session_id'],
+                     'model': 'test-model', 'tools': ['lookup']},
+                    {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': 0,
+                     'delta': {'type': 'text_delta', 'text': 'unfinished prefix'}}},
+                ]
+            else:
+                assert not events
+            assert len(api.requests) == 1
             assert session.context_tokens > session.context_limit and session.context_full
         finally:
             await session.stop()
