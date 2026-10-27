@@ -28,7 +28,7 @@ const m = vi.mocked(api);
 function manager(patch: Partial<api.ManagerInfo> = {}): api.ManagerInfo {
   return {
     id: "manager-review", name: "Review", description: "", builtin: false, enabled: true, tools: "tasks",
-    task_scope: "own", task_policy: "free", system_prompt: "Review things.", profile_id: null, profile_name: null,
+    task_scope: "own", task_policy: "free", idle_timeout_seconds: 1800, system_prompt: "Review things.", profile_id: null, profile_name: null,
     templates: [], revision: 0, created_at: "2026-10-24T00:00:00Z", updated_at: "2026-10-24T00:00:00Z",
     state: { running: false, busy: false, healthy: true, sync: "ok" },
     spend: { today_usd: 0, last_7d_usd: 0, runs_today: 0 },
@@ -36,7 +36,7 @@ function manager(patch: Partial<api.ManagerInfo> = {}): api.ManagerInfo {
   };
 }
 
-const DEFAULT = manager({ id: "manager", name: "Manager", builtin: true, tools: "all", task_scope: "all", system_prompt: null });
+const DEFAULT = manager({ id: "manager", name: "Manager", builtin: true, tools: "all", task_scope: "all", idle_timeout_seconds: 0, system_prompt: null });
 
 describe("Managers settings", () => {
   let container: HTMLDivElement;
@@ -87,6 +87,7 @@ describe("Managers settings", () => {
     await click(button("Edit"));
     expect(find<HTMLAnchorElement>('a[href="#settings/roles"]')).not.toBeNull();
     expect(container.textContent).not.toContain("Task visibility");
+    expect(container.textContent).not.toContain("Idle timeout");
   });
 
   it("creates a Manager with tools tasks and own tasks by default", async () => {
@@ -99,7 +100,7 @@ describe("Managers settings", () => {
     await click(button("Save"));
     expect(m.createManager).toHaveBeenCalledWith(expect.objectContaining({
       key: "review", name: "Review", system_prompt: "Review things.", tools: "tasks", task_scope: "own",
-      task_policy: "free", enabled: true,
+      task_policy: "free", idle_timeout_seconds: 1800, enabled: true,
     }));
   });
 
@@ -125,6 +126,37 @@ describe("Managers settings", () => {
     await click(button("Save"));
     expect(m.updateManager).toHaveBeenCalledWith("manager-review", { task_scope: "all" });
     expect(container.textContent).not.toContain("own tasks");
+  });
+
+  it.each([0, 60, 86400])("saves idle timeout %s as an integer", async (seconds) => {
+    m.fetchManagers.mockResolvedValue([DEFAULT, manager()]);
+    await render();
+    await click(find('[aria-label="Edit Manager Review"]'));
+    expect(field<HTMLInputElement>("Idle timeout").value).toBe("1800");
+    await type(field("Idle timeout"), String(seconds));
+    await click(button("Save"));
+    expect(m.updateManager).toHaveBeenCalledWith("manager-review", { idle_timeout_seconds: seconds });
+  });
+
+  it.each(["", "59", "60.5", "86401", "-1"])("refuses idle timeout %s before sending", async (value) => {
+    m.fetchManagers.mockResolvedValue([DEFAULT, manager()]);
+    await render();
+    await click(find('[aria-label="Edit Manager Review"]'));
+    await type(field("Idle timeout"), value);
+    await act(async () => { container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
+    expect(m.updateManager).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Idle timeout must be 0 (off)");
+  });
+
+  it("keeps an idle timeout server error and the edited value visible", async () => {
+    m.fetchManagers.mockResolvedValue([DEFAULT, manager()]);
+    m.updateManager.mockRejectedValueOnce(new Error("Idle timeout could not be saved"));
+    await render();
+    await click(find('[aria-label="Edit Manager Review"]'));
+    await type(field("Idle timeout"), "60");
+    await click(button("Save"));
+    expect(container.textContent).toContain("Idle timeout could not be saved");
+    expect(field<HTMLInputElement>("Idle timeout").value).toBe("60");
   });
 
   it("shows a pending sync with its reason and clears it on the next fetch", async () => {

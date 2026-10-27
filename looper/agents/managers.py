@@ -9,7 +9,8 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 # A failed apply is retried after these many seconds, then every RETRY_LATER_SECONDS.
 RETRY_DELAYS = (2, 5, 15, 30, 60)
 RETRY_LATER_SECONDS = 60
+IDLE_SWEEP_SECONDS = 5
 
 _TASK_REPORTS = (MessageType.GOAL_STATUS, MessageType.TASK_ACCEPTED, MessageType.WORK_RESULT)
 
@@ -74,7 +76,7 @@ def chat_stop_reply(summary: ChatStopSummary) -> str:
 
 class ManagerFleet:
     def __init__(self, *, platform: Platform, supervisor: AgentSupervisor, runtime_root: Path, url: str,
-                 config: ManagerConfig, broadcaster: Any | None) -> None:
+                 config: ManagerConfig, broadcaster: Any | None, clock: Callable[[], float] = time.monotonic) -> None:
         self._platform = platform
         self._supervisor = supervisor
         self._runtime_root = runtime_root
@@ -88,6 +90,8 @@ class ManagerFleet:
         self._retries: dict[str, asyncio.Task[None]] = {}
         self._turned_off_tasks: set[asyncio.Task[Any]] = set()
         self._lock = asyncio.Lock()
+        self._clock = clock
+        self._idle_task: asyncio.Task[None] | None = None
 
     @property
     def _bus(self) -> MessageBus:
@@ -97,7 +101,7 @@ class ManagerFleet:
 
     def _build(self, definition: ManagerDefinition, template_keys: Sequence[str] = ()) -> ManagerAgent:
         agent = ManagerAgent(config=self._config, runtime_root=self._runtime_root, broadcaster=self._broadcaster,
-                             definition=definition)
+                             definition=definition, clock=self._clock)
         ops = ManagerOps(dataclasses.replace(self._platform, manager=agent, managers=self), url=self._url,
                          scope=scope_for(definition, template_keys),
                          turn_file=self._runtime_root / ".local" / f"{definition.id}-turn.json")
@@ -136,6 +140,22 @@ class ManagerFleet:
                              MAX_ENABLED_MANAGERS)
                 continue
             self._supervisor.register(self._build(ManagerDefinition.from_row(row), await self._template_keys(row["id"])))
+        if self._idle_task is None:
+            self._idle_task = asyncio.create_task(self._idle_loop())
+
+    async def _idle_loop(self) -> None:
+        """One fleet-owned sweep; shutdown joins an idle close already admitted before cancelling the sweep."""
+        while True:
+            await asyncio.sleep(IDLE_SWEEP_SECONDS)
+            for agent in self.agents():
+                check = asyncio.create_task(agent.try_suspend_idle(self._clock()))
+                try:
+                    await asyncio.shield(check)
+                except asyncio.CancelledError:
+                    await check
+                    raise
+                except Exception:
+                    logger.warning("Manager %s idle check failed", agent.agent_id)
 
     @staticmethod
     async def _template_keys(manager_id: str) -> list[str]:
@@ -147,6 +167,10 @@ class ManagerFleet:
 
     async def stop(self) -> None:
         """The service shuts down: no retry goes on."""
+        idle, self._idle_task = self._idle_task, None
+        if idle is not None:
+            idle.cancel()
+            await asyncio.gather(idle, return_exceptions=True)
         for task in list(self._retries.values()):
             task.cancel()
         await asyncio.gather(*self._retries.values(), return_exceptions=True)
@@ -292,6 +316,8 @@ class ManagerFleet:
             await self._supervisor.start_agent(agent)
         else:
             # Running and still enabled: the definition (tools, task scope, task policy, templates) may have changed.
+            agent = self._agents[manager_id]
+            agent._definition = dataclasses.replace(agent._definition, idle_timeout_seconds=row["idle_timeout_seconds"])
             ops = self._ops.get(manager_id)
             if ops is not None and ops.scope.revision != row.get("revision"):
                 ops.set_scope(scope_for(ManagerDefinition.from_row(row), await self._read_template_keys(manager_id)))

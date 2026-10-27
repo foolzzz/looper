@@ -263,6 +263,13 @@ class ResidentSession(Protocol):
                        tag: Any = None, stop: Callable[[], CapStop | None] | None = None,
                        cancel: TurnCancel | None = None) -> ResidentTurn: ...
     async def stop(self, *, kill: bool = False) -> None: ...
+    async def try_stop_if_idle(self) -> bool:
+        """Close only a provably quiescent resident, claiming it before the first await.
+
+        Owners serialize this with admission, start and reset. Unknown runtimes
+        retain their process; per-turn adapters have no resident to reclaim.
+        """
+        return False
     # A wrapper over the running turn's ``cancel`` (request it, await the turn's end); None: no turn running
     async def interrupt(self) -> StopMethod | None: ...
 

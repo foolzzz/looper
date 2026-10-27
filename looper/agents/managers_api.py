@@ -29,7 +29,7 @@ MAX_ENABLED_MANAGERS = 8  # includes the default Manager
 DEFAULT_MANAGER_ID = "manager"
 MANAGER_KEY_PATTERN = r"^[a-z][a-z0-9-]{1,30}$"
 MANAGER_FIELDS = ("key", "name", "description", "system_prompt", "profile_id", "tools", "task_scope", "task_policy",
-                  "enabled")
+                  "enabled", "idle_timeout_seconds")
 TEMPLATE_FIELDS = ("name", "description", "project_id", "work_dir", "workspace_mode", "requirement",
                    "planner_instructions", "profiles", "role_templates", "inputs")
 SYSTEM_PROMPT_MAX = 20_000
@@ -72,6 +72,7 @@ class ManagerDefinition:
     enabled: bool
     builtin: bool
     revision: int
+    idle_timeout_seconds: int = 1800
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> "ManagerDefinition":
@@ -79,7 +80,8 @@ class ManagerDefinition:
                    system_prompt=row.get("system_prompt"), profile_id=row.get("profile_id"),
                    tools=ManagerTools(row["tools"]), task_scope=TaskScope(row["task_scope"]),
                    task_policy=TaskPolicy(row["task_policy"]), enabled=bool(row["enabled"]),
-                   builtin=row["id"] == DEFAULT_MANAGER_ID, revision=int(row.get("revision") or 0))
+                   builtin=row["id"] == DEFAULT_MANAGER_ID, revision=int(row.get("revision") or 0),
+                   idle_timeout_seconds=row.get("idle_timeout_seconds", 0 if row["id"] == DEFAULT_MANAGER_ID else 1800))
 
 
 _listener: Callable[[str], Awaitable[None]] | None = None
@@ -189,6 +191,13 @@ async def checked_values(data: Mapping[str, Any], *, own_id: str | None,
         if not isinstance(data["enabled"], bool):
             raise _refuse("enabled must be true or false")
         values["enabled"] = data["enabled"]
+    if "idle_timeout_seconds" in data:
+        timeout = data["idle_timeout_seconds"]
+        if type(timeout) is not int or not (timeout == 0 or 60 <= timeout <= 86400):
+            raise _refuse("idle_timeout_seconds must be an integer: 0 (off), or 60 to 86400 seconds")
+        if own_id == DEFAULT_MANAGER_ID and timeout != 0:
+            raise _refuse("the default Manager's idle_timeout_seconds must be 0")
+        values["idle_timeout_seconds"] = timeout
     return values
 
 
@@ -213,6 +222,7 @@ def manager_view(row: Mapping[str, Any], templates: list[Mapping[str, Any]]) -> 
         "system_prompt": row["system_prompt"], "profile_id": row["profile_id"],
         "profile_name": row.get("profile_name"), "tools": row["tools"], "task_scope": row["task_scope"],
         "task_policy": row["task_policy"], "enabled": row["enabled"], "builtin": row["id"] == DEFAULT_MANAGER_ID,
+        "idle_timeout_seconds": row.get("idle_timeout_seconds", 0 if row["id"] == DEFAULT_MANAGER_ID else 1800),
         "revision": row["revision"], "created_at": row["created_at"], "updated_at": row["updated_at"],
         "templates": [template_view(t) for t in templates],
     }
@@ -287,7 +297,7 @@ async def create_manager(data: Mapping[str, Any]) -> dict[str, Any]:
 
 async def update_manager(manager_id: str, data: Mapping[str, Any]) -> dict[str, Any]:
     """Change the fields given of a Manager (404 when unknown or deleted). The default Manager takes ``name`` and
-    ``description`` only. A write of ``enabled: true`` always takes ``lock_managers`` and re-reads the row under
+    ``description`` and ``idle_timeout_seconds: 0`` only. A write of ``enabled: true`` takes ``lock_managers`` and re-reads the row under
     ``FOR UPDATE``, whatever an earlier read said, before it counts the enabled Managers. Answers
     ``{"manager": view}``."""
     row = await db_managers.get_manager(manager_id)
@@ -298,7 +308,7 @@ async def update_manager(manager_id: str, data: Mapping[str, Any]) -> dict[str, 
     _fields(data, MANAGER_FIELDS)
     if not data:
         raise _refuse(f"nothing to change; the fields are {', '.join(f for f in MANAGER_FIELDS if f != 'key')}")
-    if manager_id == DEFAULT_MANAGER_ID and set(data) - {"name", "description"}:
+    if manager_id == DEFAULT_MANAGER_ID and set(data) - {"name", "description", "idle_timeout_seconds"}:
         raise _refuse(_DEFAULT_ONLY)
     values = await checked_values(data, own_id=manager_id)
     try:
