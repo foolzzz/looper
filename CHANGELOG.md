@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.158] - 2026-10-26
+
+### Fixed
+
+- **A failed Claude Code background Agent launch no longer keeps the Manager process from being suspended when idle.** The untracked background-job marker is now cleared when the launch returns an error result without a `task_started` event; jobs that already started stay tracked. ([#729](https://github.com/foolzzz/looper/pull/729))
+
+## [2.13.157] - 2026-10-26
+
+### Added
+
+- **Deleted Manager history can be purged after a retention window.** Two operator-only operations, `manager_cleanup.preview` and `manager_cleanup.purge` (`/api/v1/manager_cleanup/*`, the generated `loopercli manager-cleanup` and a control in Settings → Managers), preview and then permanently remove a deleted Manager's chat message bodies, run records with their events, and action records, once the Manager has been deleted for at least 30 days (default 30, integer 30 to 3650). The Manager row and its thread ownership rows stay as identity tombstones, so the key and old sessions are never reassigned. Purge needs a confirmation, rechecks eligibility at execution, runs in one transaction and is blocked by live agents, pending messages or retries, tasks, bots, chat bindings, schedules or running records. There is no automatic cleaner and no schema migration. ([#728](https://github.com/foolzzz/looper/pull/728))
+
 ## [2.13.156] - 2026-10-26
 
 ### Added

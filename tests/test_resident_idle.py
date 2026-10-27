@@ -147,6 +147,41 @@ def test_background_launch_without_task_identifier_stays_protected() -> None:
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("state,is_error,suspendable", [
+    pytest.param("unstarted", True, True, id="failed-before-start"),
+    pytest.param("unstarted", False, False, id="success-without-task-id"),
+    pytest.param("running", False, False, id="started-and-running"),
+    pytest.param("running", True, False, id="error-after-start"),
+    pytest.param("completed", False, True, id="started-and-finished"),
+])
+def test_background_agent_tool_result_idle_admission(state: str, is_error: bool, suspendable: bool) -> None:
+    async def run() -> None:
+        resident, output = _resident()
+        resident.stop = AsyncMock()
+        events = [json.loads(line) for line in
+                  (Path(__file__).parent / "fixtures" / "claude_stream" / "background_agent.jsonl")
+                  .read_text().splitlines()]
+        for event in events:
+            if "type" not in event:
+                continue
+            if state == "unstarted" and event.get("subtype") in {"background_tasks_changed", "task_started"}:
+                continue
+            if event.get("type") == "user":
+                content = event["message"]["content"]
+                for block in content if isinstance(content, list) else []:
+                    if block.get("type") == "tool_result":
+                        block["is_error"] = is_error
+            await output._dispatch(event)
+            if event.get("type") == "result" and state != "completed":
+                break
+        assert await resident.try_stop_if_idle() is suspendable
+        if suspendable:
+            resident.stop.assert_awaited_once()
+        else:
+            resident.stop.assert_not_awaited()
+    asyncio.run(run())
+
+
 def test_malformed_job_lifecycle_keeps_resident() -> None:
     async def run() -> None:
         resident, output = _resident()
