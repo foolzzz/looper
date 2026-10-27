@@ -149,7 +149,7 @@ def dashboard_server(tmp_path, database_admin_url):
 
 
 @pytest.fixture
-def chromium_browser(dashboard_server, tmp_path, monkeypatch):
+def chromium_browser(dashboard_server, tmp_path, monkeypatch, staged_dashboard_dir):
     # Keep the server outside Playwright's sync event loop: fresh_database uses
     # asyncio.run() both to create the database and to drop it on teardown.
     playwright = pytest.importorskip(
@@ -517,6 +517,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     selection.select_option("__new_profile__")
     nested = role.get_by_role("group", name="New Agent Profile", exact=True)
     nested.get_by_label("Name *", exact=True).fill("Embedded smoke profile")
+    nested.get_by_label("Runtime", exact=True).select_option("rt-claude-code")
     nested.get_by_label("Provider", exact=True).select_option(pid)
     nested.get_by_label("Model *", exact=True).select_option(mid)
     _finish_form(nested, "Add Agent Profile")

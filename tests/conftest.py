@@ -34,6 +34,14 @@ from lark_cli_stand_in import lark_cli_stand_in  # noqa: E402,F401 (a fixture fo
 import worker_database  # noqa: E402
 
 
+@pytest.fixture(scope="session")
+def staged_dashboard_dir() -> Path:
+    """Use the wheel's dashboard, built once before pytest, never rebuild it in workers."""
+    directory = REPO_ROOT / "looper" / "web" / "dashboard"
+    assert (directory / "index.html").is_file(), "Run scripts/stage-dashboard.sh before browser tests"
+    return directory
+
+
 def pytest_configure(config: pytest.Config) -> None:
     # Before any test module is imported (several read the URL at import): an xdist worker gets a database of its own.
     worker_database.start(getattr(config, "workerinput", {}).get("workerid"))

@@ -2,7 +2,6 @@
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-import subprocess
 from threading import Thread
 from urllib.parse import urlsplit
 
@@ -24,15 +23,12 @@ def gate_row(n):
 
 
 @pytest.fixture(scope="module")
-def static_dashboard():
-    subprocess.run(["npm", "run", "build"], cwd=ROOT / "web", check=True, timeout=180,
-                   capture_output=True, text=True)
-
+def static_dashboard(staged_dashboard_dir):
     class QuietHandler(SimpleHTTPRequestHandler):
         def log_message(self, *_args):
             pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(QuietHandler, directory=str(ROOT / "web/dist")))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(QuietHandler, directory=str(staged_dashboard_dir)))
     thread = Thread(target=server.serve_forever)
     thread.start()
     try:
