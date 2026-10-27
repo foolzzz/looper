@@ -156,6 +156,7 @@ class Say:
     withdraw: bool = False
     # The text computed from the previous turn's Look (``text`` is then only a label).
     text_from: Callable[[Look], str] | None = None
+    code_only: bool = False  # Looper answers the step without calling the model (for example, /profile).
 
 
 @dataclass(frozen=True)
@@ -1741,11 +1742,11 @@ DIALOGS: tuple[Dialog, ...] = (
              ("looper_config_export", {"include_projects": True}))),
     ), seed=lambda api, project_id: _make_schedule(api, project_id)),
     Dialog("session_profile_switch", (
-        Say("/profile", _profile_listed),
-        Say("/profile <number>", _switch_selected, text_from=_switch_text),
+        Say("/profile", _profile_listed, code_only=True),
+        Say("/profile <number>", _switch_selected, text_from=_switch_text, code_only=True),
         Say("记住暗号 TEAL-42。然后告诉我现在有几个项目。", _answered_on_the_switch_profile,
             (("looper_projects", {"action": "list"}),)),
-        Say("/profile 0", _follows_settings),
+        Say("/profile 0", _follows_settings, code_only=True),
         Say("刚才的暗号是什么？", _remembered_after_switching_back, (("looper_projects", {"action": "list"}),)),
     ), seed=_make_switch_profile),
     Dialog("session_profile_ask", (
@@ -2124,7 +2125,7 @@ def _root_overrun(api: Api, seen: dict[int, float]) -> float:
             return sum(seen.values())
 
 
-def _api_session_check(database_url: str, agent: str, since: int) -> str | None:
+def _api_session_check(database_url: str, agent: str, since: int, expected_turns: int) -> str | None:
     """Completed API Manager turns in its current session must have protocol metadata and neutral history."""
     import asyncpg
 
@@ -2151,6 +2152,9 @@ def _api_session_check(database_url: str, agent: str, since: int) -> str | None:
                 "LEFT JOIN api_sessions s USING (session_id) "
                 "LEFT JOIN api_session_items i ON i.session_id = s.session_id "
                 "GROUP BY t.turns, c.session_id, c.protocol, s.protocol, c.turns, c.has_items", agent, since)
+            completed_turns = int(rows[0]["completed_turns"]) if rows else 0
+            if completed_turns < expected_turns:
+                return f"expected at least {expected_turns} completed API Manager turns, read back {completed_turns}"
             for row in rows:
                 if not row["completed_turns"]:
                     continue
@@ -2181,6 +2185,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
     turns: list[dict[str, Any]] = []
     error: dict[str, Any] = {}
     problems: list[str] = []
+    expected_turns = 0
 
     overrun: dict[int, float] = {}
 
@@ -2245,6 +2250,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             else:
                 reply = _ask(api, session, text, timeout=timeout, stop=say.stop, withdraw=say.withdraw,
                              database_url=database_url, manager=dialog.manager, **budget_args)
+            if not (say.code_only or say.stop or say.withdraw):
+                expected_turns += 1
             previous = Look(api, task, reply, database_url, since, known, fake=mode == "fake",
                             runtime_root=runtime_root, registry_before=registry_before, runs_since=runs_since,
                             manager_id=agent if dialog.manager else None, conversation=conversation,
@@ -2261,7 +2268,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                 break
         check_budget()
         if api_manager:
-            problem = _api_session_check(database_url, agent, runs_since)
+            problem = _api_session_check(database_url, agent, runs_since, expected_turns)
             if problem:
                 problems.append(problem)
     except SpendingCap as exc:
