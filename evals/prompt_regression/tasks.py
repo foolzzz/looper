@@ -1557,7 +1557,9 @@ TASKS = TASKS + (EvalTask(
     roles_on=True,
     role_templates=({"key": "report-writer", "kind": "work", "role_prompt": "Write the requested public report and verify its exact content."},),
     schedule_template={"name": "Public source report", "requirement": "Source: {{source_url}}.",
-        "planner_instructions": "Write report.txt containing exactly: source=https://example.org/report; checked\n",
+        "planner_instructions": ("Give the step to the report-writer role and have its result reviewed before it "
+                                 "completes. The step writes report.txt containing exactly: "
+                                 "source=https://example.org/report; checked\n"),
         "inputs": [{"key": "source_url", "label": "Source URL", "kind": "url", "required": True}],
         "role_templates": ["report-writer"]},
     check=lambda work: None if (work / "report.txt").exists() and
