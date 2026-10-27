@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.150] - 2026-10-26
+
+### Fixed
+
+- **The dashboard Tasks page keeps updating under slow responses.** The list now polls three seconds after the previous request settles, instead of on a fixed timer, so a slow response is applied rather than discarded. A Show more page is dropped if a poll has since changed its cursor, so rows are no longer lost. Dashboard only; no API change. ([#708](https://github.com/foolzzz/looper/pull/708))
+
+## [2.13.149] - 2026-10-26
+
+### Changed
+
+- **Task lists can be filtered by Manager.** The dashboard Tasks page has a Manager select (with `manager` and `query` in its URL), the v1 `tasks.page` operation accepts `manager_id`, and status counts follow the filter. A `manager_id` naming no Manager returns an empty list. The client's task tool gains `manager_id` for `action: list` only; a client-scoped call sees only its own Manager's tasks. The Manager's own task tool is unchanged. ([#705](https://github.com/foolzzz/looper/pull/705))
+
 ## [2.13.148] - 2026-10-26
 
 ### Changed
