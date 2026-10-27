@@ -18,6 +18,74 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.165] - 2026-10-27
+
+### Fixed
+
+- **Manager deletion.** Deleting a scenario Manager now checks tasks, schedules, bots and chat bindings before stopping its reply, so a refused deletion leaves the current reply and queued messages alone. The checks run again under the row lock after the drain, installs wait for a deletion, and a Manager's drain is bounded at 10 s. ([#727](https://github.com/foolzzz/looper/pull/727))
+
+## [2.13.164] - 2026-10-27
+
+### Added
+
+- **Runner bridge.** Adds `RunnerBridge` in `looper/agents/runtimes/runner/bridge.py`: one runner stdio connection with request matching, a session table and translation of runner updates into Looper's existing event shape, routing tool and budget requests to `RunnerTurn`. Nothing in Looper calls it yet. ([#744](https://github.com/foolzzz/looper/pull/744))
+
+## [2.13.163] - 2026-10-27
+
+### Added
+
+- **Runner turn policy.** Adds `RunnerTurn` in `looper/agents/runtimes/runner/turn.py`, which admits platform tool calls for one runner trace and enforces request, run-cap and task-cap budgets with fail-closed accounting. Nothing in Looper calls it yet. ([#743](https://github.com/foolzzz/looper/pull/743))
+
+### Changed
+
+- **Shared platform tool helpers.** The Manager tool adapter's argument parsing, invalid-argument error and 100 KB result bound moved into helpers in `looper/agents/runtimes/api/tools.py` without changing their output, and a `PlannerTurnTools` adapter was added for Planner dispatch that no runtime uses yet. ([#743](https://github.com/foolzzz/looper/pull/743))
+
+## [2.13.162] - 2026-10-27
+
+### Added
+
+- **Core runner wire contract.** Defines the typed JSON-RPC messages and bounded line-feed framing (protocol 0.1) for agent SDK runners in `looper/agents/runtimes/runner/protocol.py`, with a JSON Schema and shared vectors under `runners/protocol/`. Nothing in Looper calls it yet; the only dependency added is `jsonschema` in the `test` extra. ([#740](https://github.com/foolzzz/looper/pull/740))
+
+## [2.13.161] - 2026-10-27
+
+### Changed
+
+- **Scenario Manager documentation matches the shipped behavior.** The architecture document, the scenario Manager RFC and the long-horizon plan now describe idle suspension, deleted-Manager cleanup, schedule ownership and templates, Manager installs and configuration transfer v4, and a new integration regression covers the portable graph. Documentation and tests only. ([#737](https://github.com/foolzzz/looper/pull/737))
+
+### Added
+
+- **RFC for agent SDK runners.** Proposes Pi, DSH and Norma runners in their native languages, driven by Looper over JSON-RPC on stdio; the maintainer agreed to develop it from stage S0. Design document only; no code. ([#703](https://github.com/foolzzz/looper/pull/703))
+
+## [2.13.160] - 2026-10-27
+
+### Added
+
+- **Settings can manage a Manager's own plugins and skills.** Each Manager in Settings gets a "Plugins and skills" section that lists inherited global installs and the Manager's additions, adds, enables, disables and removes additions through the `manager_installs` operator API, and reads the committed state back after every change. It is hidden for the built-in default Manager unless the Manager has additions or an error. ([#735](https://github.com/foolzzz/looper/pull/735))
+
+## [2.13.159] - 2026-10-27
+
+### Added
+
+- **An operator can install a global plugin or skill for one Manager.** The extras load on top of the Manager's inherited global installs at its next safe turn, through the new operator-only `manager_installs.list`, `put` and `delete` operations (`loopercli manager-installs`). Configuration export and import carry them, catalog deletion counts them, and three new prompt-regression dialogs cover installed, isolated and default Managers. ([#732](https://github.com/foolzzz/looper/pull/732))
+
+## [2.13.158] - 2026-10-26
+
+### Fixed
+
+- **A failed Claude Code background Agent launch no longer keeps the Manager process from being suspended when idle.** The untracked background-job marker is now cleared when the launch returns an error result without a `task_started` event; jobs that already started stay tracked. ([#729](https://github.com/foolzzz/looper/pull/729))
+
+## [2.13.157] - 2026-10-26
+
+### Added
+
+- **Deleted Manager history can be purged after a retention window.** Two operator-only operations, `manager_cleanup.preview` and `manager_cleanup.purge` (`/api/v1/manager_cleanup/*`, the generated `loopercli manager-cleanup` and a control in Settings → Managers), preview and then permanently remove a deleted Manager's chat message bodies, run records with their events, and action records, once the Manager has been deleted for at least 30 days (default 30, integer 30 to 3650). The Manager row and its thread ownership rows stay as identity tombstones, so the key and old sessions are never reassigned. Purge needs a confirmation, rechecks eligibility at execution, runs in one transaction and is blocked by live agents, pending messages or retries, tasks, bots, chat bindings, schedules or running records. There is no automatic cleaner and no schema migration. ([#728](https://github.com/foolzzz/looper/pull/728))
+
+## [2.13.156] - 2026-10-26
+
+### Added
+
+- **Idle scenario Managers are suspended and resumed.** A fleet sweep closes the resident Claude process of a scenario Manager that has been idle for its `idle_timeout_seconds` (0 = off, otherwise 60 to 86400; default 1800, the built-in Manager always 0) and resumes its saved session on the next message. A process with background jobs, pending messages or an unknown lifecycle state is kept; Grok ACP and per-turn runtimes never close. The field is stored per Manager (schema migration), in the Managers API, the `/api/v1` config schema, configuration transfer and the Managers settings form. ([#719](https://github.com/foolzzz/looper/pull/719))
+
 ## [2.13.155] - 2026-10-26
 
 ### Fixed

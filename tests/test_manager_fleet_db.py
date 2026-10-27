@@ -686,19 +686,22 @@ def test_delete_drains_in_flight_api_append_before_removing_session(tmp_path, mo
             monkeypatch.setattr(api_sessions, "append", delayed_append)
             async with rig(tmp_path) as r, manager_endpoint(
                     r.fleet.get(review), r.bus, SimpleNamespace(has_planner=lambda _: False), tmp_path):
-                await r.bus.publish(_user(review))
-                await asyncio.wait_for(entered.wait(), 5)
-                deleting = asyncio.create_task(manager_domain.run(
-                    SimpleNamespace(_managers=r.fleet), api_v1.find("POST", "/api/v1/managers/delete"),
-                    {"manager_id": review}, api_v1.OPERATOR, {}))
+                deleting = None
                 try:
+                    await r.bus.publish(_user(review))
+                    # The real SDK starts lazily; run_db bounds startup and the turn together.
+                    await entered.wait()
+                    deleting = asyncio.create_task(manager_domain.run(
+                        SimpleNamespace(_managers=r.fleet), api_v1.find("POST", "/api/v1/managers/delete"),
+                        {"manager_id": review}, api_v1.OPERATOR, {}))
                     await asyncio.wait_for(cancelled.wait(), 5)
                     assert not deleting.done()
                     assert (await pool.fetchval("SELECT deleted_at FROM managers WHERE id=$1", review)) is None
                     assert await agent_sessions.get_session(review) is not None
                 finally:
                     release.set()
-                    await asyncio.wait_for(deleting, 10)
+                    if deleting is not None:
+                        await asyncio.wait_for(deleting, 10)
                 assert r.fleet.get(review) is None
                 assert await agent_sessions.get_session(review) is None
                 assert [row["session_id"] for row in await pool.fetch("SELECT session_id FROM api_sessions")] == ["live"]
@@ -708,10 +711,126 @@ def test_delete_drains_in_flight_api_append_before_removing_session(tmp_path, mo
     run_db(body, monkeypatch, timeout=30)
 
 
-@pytest.mark.parametrize("dependency", ["schedules", "bots", "bindings"])
-def test_refused_deletion_keeps_in_flight_and_queued_messages(tmp_path, monkeypatch, dependency):
-    from looper.agents import managers_api
+@pytest.mark.parametrize("blocked_on", ["row_lock", "fleet_lock", "cancellation"])
+def test_delete_finishes_when_turn_cleanup_blocks(tmp_path, monkeypatch, caplog, blocked_on):
+    from looper.agents.tiers import manager as manager_module
+    from looper.db import agent_sessions, api_sessions, managers
+
+    async def body(pool):
+        review = await _insert(pool, "review")
+        await api_sessions.create("review-session", "openai-responses", pool=pool)
+        await agent_sessions.save_session(review, "review-session", {}, runtime_type="api")
+        entered, cancelled, release, finished = (asyncio.Event() for _ in range(4))
+        late_append_refused = []
+        monkeypatch.setattr(manager_module, "STOP_DRAIN_SEC", 0.05)
+        async with rig(tmp_path) as r:
+            agent = r.fleet.get(review)
+
+            async def answer(envelope, token):
+                async with agent._turn_lock:
+                    entered.set()
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        cancelled.set()
+                        if blocked_on == "row_lock":
+                            async with pool.acquire() as conn, conn.transaction():
+                                await conn.execute("SELECT id FROM managers WHERE id=$1 FOR KEY SHARE", review)
+                        elif blocked_on == "fleet_lock":
+                            async with r.fleet._lock:
+                                pass
+                        else:
+                            while not release.is_set():
+                                try:
+                                    await release.wait()
+                                except asyncio.CancelledError:
+                                    pass  # A resident's cleanup can outlive repeated cancellation.
+                            try:
+                                await api_sessions.append("review-session", 1, "openai-responses", "model", [
+                                    {"version": 1, "kind": "message", "role": "assistant", "text": "Late."}])
+                            except api_sessions.TranscriptMismatch:
+                                late_append_refused.append(True)
+                    finally:
+                        finished.set()
+
+            monkeypatch.setattr(agent, "_answer_user_message", answer)
+            turn_task = agent._task
+            try:
+                await r.bus.publish(_user(review))
+                await asyncio.wait_for(entered.wait(), 1)
+                assert await asyncio.wait_for(r.fleet.delete_manager(review), 1) == "deleted"
+                assert cancelled.is_set()
+                if blocked_on != "cancellation":
+                    assert finished.is_set()  # Cleanup acquired its lock before deletion completed.
+                    assert "turn drain" not in caplog.text
+                else:
+                    assert not finished.is_set()
+                    assert "drain" in caplog.text
+                assert await managers.get_manager(review) is None
+                assert await agent_sessions.get_session(review) is None
+            finally:
+                release.set()
+                await asyncio.wait_for(finished.wait(), 1)
+                turn_task.cancel()
+                await asyncio.wait_for(turn_task, 2)
+            assert await pool.fetchval("SELECT count(*) FROM api_sessions") == 0
+            assert await pool.fetchval("SELECT count(*) FROM api_session_items") == 0
+            assert late_append_refused == ([True] if blocked_on == "cancellation" else [])
+
+    run_db(body, monkeypatch, timeout=10)
+
+
+def test_dependent_created_during_drain_refuses_delete_and_replays_messages(tmp_path, monkeypatch):
+    from looper.db import managers, tasks
+
+    async def body(pool):
+        review = await _insert(pool, "review")
+        await pool.execute("INSERT INTO projects (id, name) VALUES ('project', 'Project')")
+        gate, seen = _stub_answer(monkeypatch)
+        async with rig(tmp_path) as r:
+            agent = r.fleet.get(review)
+            stop = agent.stop
+
+            async def stop_and_create_task():
+                await stop()
+                async with pool.acquire() as conn, conn.transaction():
+                    assert await managers.lock_for_task(review, conn=conn)
+                    await tasks.create_task(task_id="late-task", requirement="Work.", project_id="project",
+                                            manager_id=review, pool=conn)
+
+            monkeypatch.setattr(agent, "stop", stop_and_create_task)
+            first, queued = _user(review, n=1), _user(review, n=2)
+            await r.bus.publish(first)
+            await until(lambda: len(seen) == 1, timeout=1)
+            await r.bus.publish(queued)
+            assert await asyncio.wait_for(r.fleet.delete_manager(review), 2) == "has_tasks"
+            assert r.fleet.get(review) is not agent and r.fleet.is_running(review)
+            assert await managers.get_manager(review) is not None
+            assert {first.message_id, queued.message_id} <= _journal_open(tmp_path)
+            assert not [e for e in r.bus.get_queue(WEB.agent_id)._queue
+                        if e.message_type == MessageType.AGENT_REPLY]
+            gate.set()
+            await until(lambda: len(seen) == 3, timeout=1)
+            assert [e.message_id for e in seen] == [first.message_id, first.message_id, queued.message_id]
+
+    run_db(body, monkeypatch, timeout=10)
+
+
+@pytest.mark.parametrize(("dependency", "message"), [
+    ("schedules", "Manager Review has schedules: delete those schedules first, or disable the Manager"),
+    ("bots", "Manager Review has bots: remove them in Settings → Channels first"),
+    ("bindings", "Manager Review has chat bindings: unbind them first"),
+    (None, None),
+], ids=["schedules", "bots", "bindings", "allowed"])
+def test_deletion_while_replying_handles_in_flight_and_queued_messages(tmp_path, monkeypatch, dependency, message):
+    from manager_mcp_stand_in import manager_endpoint
+    from looper.agents import managers_api, profile_registry
     from looper.agents.projects import HTTP_409, RequestError
+    from looper.agents.runtimes.api.session import FORBIDDEN_ENV
+    from looper.agents.tiers.manager import TURNED_OFF_REPLY
+    from looper.db import agent_sessions, api_sessions, managers
+    from tests.api_manager_support import USAGE, _profile, _replies
+    from tests.fake_model_api import FakeModelAPI, ResponseScript, text_events
 
     async def body(pool):
         review = await _insert(pool, "review")
@@ -721,7 +840,7 @@ def test_refused_deletion_keeps_in_flight_and_queued_messages(tmp_path, monkeypa
                 INSERT INTO schedules (id, project_id, name, cron, timezone, requirement, manager_id)
                 VALUES ('schedule', 'project', 'Scheduled work', '0 * * * *', 'UTC', 'Work.', $1)
             """, review)
-        else:
+        elif dependency in {"bots", "bindings"}:
             await pool.execute("""
                 INSERT INTO channel_configs (channel_id, channel_type, manager_id)
                 VALUES ('channel-telegram', 'telegram', $1)
@@ -731,26 +850,63 @@ def test_refused_deletion_keeps_in_flight_and_queued_messages(tmp_path, monkeypa
                     INSERT INTO manager_chat_bindings (channel_id, chat_id, manager_id)
                     VALUES ('channel-telegram', '42', $1)
                 """, review)
-        gate, seen = _stub_answer(monkeypatch)
-        async with rig(tmp_path) as r:
-            agent = r.fleet.get(review)
-            first, queued = _user(review, n=1), _user(review, n=2)
-            await r.bus.publish(first)
-            await until(lambda: len(seen) == 1, "the in-flight answer", timeout=5)
-            token = agent.turn_for(first.message_id)
-            await r.bus.publish(queued)
-            with pytest.raises(RequestError) as refused:
-                await managers_api.delete_manager(review, fleet=r.fleet)
-            assert refused.value.status == HTTP_409
-            assert r.fleet.get(review) is agent and agent.is_healthy()
-            assert agent.turn_for(first.message_id) is token and token.live
-            assert r.bus.pending_count(review) == 1
-            assert {first.message_id, queued.message_id} <= _journal_open(tmp_path)
-            assert not [e for e in r.bus.get_queue(WEB.agent_id)._queue
-                        if e.message_type == MessageType.AGENT_REPLY]
-            gate.set()
-            await until(lambda: len(seen) == 2 and not agent.busy, "both original answers", timeout=5)
-            assert [e.message_id for e in seen] == [first.message_id, queued.message_id]
+        monkeypatch.setattr(profile_registry, "_login_modules", lambda: {})
+        for name in FORBIDDEN_ENV:
+            monkeypatch.delenv(name, raising=False)
+        gate = asyncio.Event()
+        scripts = [ResponseScript(events=text_events(text, usage=USAGE)) for text in ("First.", "Second.")]
+        scripts[0].gate = gate
+        async with FakeModelAPI(scripts) as model:
+            await _profile(pool, model.base_url)
+            async with rig(tmp_path) as r, manager_endpoint(
+                    r.fleet.get(review), r.bus, SimpleNamespace(has_planner=lambda _: False), tmp_path):
+                agent = r.fleet.get(review)
+                first, queued = _user(review, n=1), _user(review, n=2)
+                await r.bus.publish(first)
+                await asyncio.wait_for(scripts[0].gate_reached.wait(), 10)
+                token = agent.turn_for(first.message_id)
+                await r.bus.publish(queued)
+                queue = r.bus.get_queue(review)
+                assert list(queue._queue) == [queued]
+                if dependency is None:
+                    await managers_api.delete_manager(review, fleet=r.fleet)
+                    assert r.fleet.get(review) is None and not token.live
+                    assert await managers.get_manager(review) is None
+                    assert await agent_sessions.get_session(review) is None
+                    assert await pool.fetchval("SELECT count(*) FROM api_sessions") == 0
+                    assert await pool.fetchval("SELECT count(*) FROM api_session_items") == 0
+                    replies = _replies(r.bus)
+                    assert [reply.correlation_id for reply in replies] == [first.correlation_id, queued.correlation_id]
+                    assert replies[0].payload["outcome"] == "stopped"
+                    assert replies[1].payload["text"] == TURNED_OFF_REPLY
+                    assert r.bus.pending_count(review) == 0
+                    assert not {first.message_id, queued.message_id} & _journal_open(tmp_path)
+                    assert len(model.requests) == 1
+                    return
+                with pytest.raises(RequestError) as refused:
+                    await managers_api.delete_manager(review, fleet=r.fleet)
+                assert refused.value.status == HTTP_409
+                assert str(refused.value) == message
+                assert await managers.get_manager(review) is not None
+                assert r.fleet.get(review) is agent and agent.is_healthy() and r.fleet.is_running(review)
+                assert agent.turn_for(first.message_id) is token and token.live
+                assert list(queue._queue) == [queued]
+                assert {first.message_id, queued.message_id} <= _journal_open(tmp_path)
+                assert _replies(r.bus) == []
+                gate.set()
+                # A dequeued message can still be preparing, before it takes the turn lock.
+                # subscribe marks it delivered only after its handler (including the reply) returns.
+                await until(lambda: not agent.busy and r.bus.pending_count(review) == 0
+                            and not {first.message_id, queued.message_id} & _journal_open(tmp_path),
+                            "both original replies to finish", timeout=5)
+                replies = _replies(r.bus)
+                assert [reply.correlation_id for reply in replies] == [first.correlation_id, queued.correlation_id]
+                assert [reply.payload["text"] for reply in replies] == ["First.", "Second."]
+                assert [reply.payload["outcome"] for reply in replies] == ["answered", "answered"]
+                assert len(model.requests) == 2
+                session = await agent_sessions.get_session(review)
+                assert len(await api_sessions.load(session["session_id"], pool=pool)) == 4
+                assert not {first.message_id, queued.message_id} & _journal_open(tmp_path)
 
     run_db(body, monkeypatch, timeout=20)
 

@@ -36,7 +36,7 @@ import json
 import logging
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from datetime import datetime, timezone
 from pathlib import Path
@@ -311,6 +311,8 @@ HANDOFF_TIMEOUT_SEC = 300
 STOP_HANDLING_SEC = 3.0
 # How long a stopped turn's own record and session writes may take (a row lock held elsewhere) before it ends without.
 STOP_FINISH_SEC = 10.0
+# A retiring Manager may abandon an unresponsive turn, but must never block deletion indefinitely.
+STOP_DRAIN_SEC = 10.0
 
 # The one command Looper answers itself in a chat with the Manager: a message that is exactly this (trimmed, any
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
@@ -919,13 +921,34 @@ class ManagerAgent:
         if self._bus is not None:
             self._bus.unsubscribe_topic(MessageType.USER_MESSAGE.value, self._receive)
         if self._task:
-            await cancel_and_wait(self._task)
+            try:
+                async with asyncio.timeout(STOP_DRAIN_SEC):
+                    await cancel_and_wait(self._task)
+            except TimeoutError:
+                self._task.cancel()
+                logger.warning("%s: turn drain did not finish within %.1f s; proceeding with shutdown",
+                               self._log, STOP_DRAIN_SEC)
             self._task = None
         for token in self._turns.live():
             token.settle(ReplyOutcome.STOPPED)
         self._turns.clear()
-        async with self._turn_lock, self._lifecycle_gate:
-            await self._claude.stop()
+        async def close() -> None:
+            # A cancelled turn can still own its lock. Idle close alone needs serialization here.
+            async with self._lifecycle_gate:
+                await self._claude.stop()
+
+        closing = asyncio.create_task(close())
+        try:
+            done, _ = await asyncio.wait({closing}, timeout=STOP_DRAIN_SEC)
+            if done:
+                closing.result()
+            else:
+                logger.warning("%s: resident close did not finish within %.1f s; proceeding with shutdown",
+                               self._log, STOP_DRAIN_SEC)
+        finally:
+            if not closing.done():
+                closing.cancel()
+                closing.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
 
     def _idle_blocked(self) -> bool:
         return bool(self.busy or self._handling is not None or self._running_token is not None
@@ -987,6 +1010,9 @@ class ManagerAgent:
                 finally:
                     self._handling = None
                     self._last_activity = self._clock()
+                # Cleanup may consume cancellation. Do not wait for another bus message after shutdown.
+                if not self._running:
+                    break
         except asyncio.CancelledError:
             pass
 
@@ -1224,7 +1250,8 @@ class ManagerAgent:
             raise ProfileUnavailable(agent_settings.profile_error, agent_settings.profile_source)
         await token.step("templates", self._read_templates())
         system_prompt = self._composed_prompt(agent_settings)
-        library = await token.step("library", load_installed(self._runtime_root, AgentType.MANAGER.value))
+        library = await token.step("library", load_installed(
+            self._runtime_root, AgentType.MANAGER.value, manager_id=self.agent_id))
         library = await token.step("library_server", self._library_with_server(library))
         launch = Launch(agent_settings, library, role=AgentType.MANAGER)
         if ask.turn is not None:
@@ -1360,6 +1387,18 @@ class ManagerAgent:
         failure: BaseException | None = None
         try:
             async with self._lifecycle_gate:
+                previous = self._process
+                if previous is not None and prepared.switch is None and self._claude.started \
+                        and self._claude.pid is not None \
+                        and prepared.launch.runtime is self._claude_runtime \
+                        and previous.launch.library.sha256 != prepared.launch.library.sha256:
+                    close = getattr(self._claude, "try_stop_if_idle", None)
+                    if close is None or not await token.keep("library_idle_close", close(), 10):
+                        # A user result may leave background/autonomous work running. Keep the actual
+                        # launch in this turn's record and retry the capability refresh next turn.
+                        prepared = replace(prepared, launch=previous.launch, system_prompt=previous.system_prompt,
+                                           signature=previous.signature,
+                                           prompt_file=previous.system_prompt.write_file(self._runtime_root))
                 await self._start_turn(token, prepared)
             return await self._converse(token, prepared)
         except BaseException as exc:

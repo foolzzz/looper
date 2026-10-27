@@ -22,6 +22,8 @@ GRAPH = {"format": "looper-config/v4", "managers": [
      "tools": "tasks", "enabled": False, "templates": [
          {"key": "example", "name": "Example task", "requirement": "Inspect the example."}]},
 ]}
+INSTALL_GRAPH = {"format": "looper-config/v4", "managers": [{"id": "manager", "name": "Default", "installs": [
+    {"item": {"kind": "skill", "name": "public-example"}, "enabled": True}]}]}
 
 
 @pytest.mark.parametrize("version", ["looper-config/v1", "loopx-config/v1", "looper-config/v2", "looper-config/v3"])
@@ -63,15 +65,16 @@ def test_template_import_schema_allows_omitted_name_but_export_still_requires_it
 
 
 @pytest.mark.parametrize("route", ["import_preview", "import_upload"])
+@pytest.mark.parametrize("document", [GRAPH, INSTALL_GRAPH])
 @pytest.mark.usefixtures("clients")
-def test_client_cannot_stage_manager_graph(tmp_path, monkeypatch, route):
+def test_client_cannot_stage_manager_graph(tmp_path, monkeypatch, route, document):
     runner = AsyncMock(side_effect=AssertionError("a refused document must not reach the importer"))
     monkeypatch.setattr(config_imports, "_run", runner)
 
     async def run():
         async with _serving(tmp_path) as server:
             server._client_ops = ClientOps(SimpleNamespace())
-            body = {"document": GRAPH} if route == "import_preview" else GRAPH
+            body = {"document": document} if route == "import_preview" else document
             status, _, answer = await _send(server, f"POST /api/v1/config/{route}",
                                             _bearer(CLIENT_TOKEN), json.dumps(body))
             assert status == 403 and answer["error"]["code"] == "forbidden"
@@ -82,8 +85,9 @@ def test_client_cannot_stage_manager_graph(tmp_path, monkeypatch, route):
 
 
 @pytest.mark.parametrize("execution", ["apply", "confirm"])
+@pytest.mark.parametrize("document", [GRAPH, INSTALL_GRAPH])
 @pytest.mark.usefixtures("clients")
-def test_client_stored_document_policy_is_rechecked_before_execution(tmp_path, monkeypatch, execution):
+def test_client_stored_document_policy_is_rechecked_before_execution(tmp_path, monkeypatch, execution, document):
     runner = AsyncMock(return_value=config_transfer.Plan())
     monkeypatch.setattr(config_imports, "_run", runner)
 
@@ -105,13 +109,57 @@ def test_client_stored_document_policy_is_rechecked_before_execution(tmp_path, m
             else:
                 data = {"import_id": import_id}
             # Simulate staged-file tampering after preview or after the high-risk request.
-            pending.path.write_text(json.dumps(GRAPH))
+            pending.path.write_text(json.dumps(document))
             status, _, refused = await request("confirm" if execution == "confirm" else "config/import_apply", data)
             assert status == 403 and refused["error"]["code"] == "forbidden"
             assert runner.await_count == 1  # preview only; no apply transaction
             assert pending.path.exists() and not pending.applying
             server._config_imports.clear()
     asyncio.run(asyncio.wait_for(run(), 10))
+
+
+@pytest.mark.parametrize("install", [
+    {"item": {"kind": "mcp", "name": "example"}, "enabled": True},
+    {"item": {"kind": "skill", "name": "example", "project": "Example"}, "enabled": True},
+    {"item": {"kind": "skill", "name": ""}, "enabled": True},
+    {"item": {"kind": "skill", "name": "example"}, "enabled": "true"},
+    {"item": {"kind": "skill", "name": "example"}, "enabled": True, "scope": "global"},
+])
+def test_manager_install_document_is_closed_and_portable(install):
+    document = {"format": "looper-config/v4", "managers": [{"id": "manager", "name": "Default", "installs": [install]}]}
+    with pytest.raises(OpError):
+        api_v1.validate_arguments(CONFIG_DOCUMENT, document)
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_operator_default_install_preview_apply_and_export(tmp_path, monkeypatch):
+    from tests.test_config_transfer_db import _item
+
+    async def run(pool):
+        document = {**INSTALL_GRAPH, "catalog": [_item("skill", "public-example",
+            [{"path": "SKILL.md", "content": "Public example.\n"}], origin="upload")]}
+        async with _serving(tmp_path) as server:
+            server._client_ops = ClientOps(SimpleNamespace())
+
+            async def request(route, data):
+                return await _send(server, f"POST /api/v1/config/{route}", _bearer(TOKEN), json.dumps(data))
+
+            status, _, staged = await request("import_preview", {"document": document})
+            assert status == 200, staged
+            preview = staged["result"]["plan"]
+            assert preview["counts"]["manager.installs"]["added"] == 1
+            assert await pool.fetchval("SELECT count(*) FROM manager_library_installs") == 0
+            status, _, applied = await request("import_apply", {"import_id": staged["result"]["import_id"]})
+            assert status == 200, applied
+            assert applied["result"]["plan"] == {**preview, "applied": True}
+            assert await pool.fetchval("SELECT enabled FROM manager_library_installs WHERE manager_id='manager'")
+            status, _, exported = await request("export", {})
+            assert status == 200, exported
+            exported = exported["result"]["document"]
+            api_v1.validate_arguments(CONFIG_DOCUMENT, exported)
+            assert exported["format"] == "looper-config/v4"
+            assert exported["managers"][0]["installs"] == INSTALL_GRAPH["managers"][0]["installs"]
+    run_db(run, monkeypatch, timeout=30)
 
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")

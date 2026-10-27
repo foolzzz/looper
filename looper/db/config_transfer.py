@@ -206,6 +206,16 @@ async def read_manager_templates(conn: asyncpg.Connection) -> list[dict[str, Any
             for row in rows]
 
 
+async def read_manager_installs(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    if not await conn.fetchval("SELECT to_regclass('manager_library_installs') IS NOT NULL"):
+        return []
+    rows = await conn.fetch(
+        "SELECT s.manager_id, s.item_id, s.enabled, i.kind, i.name FROM manager_library_installs s "
+        "JOIN managers m ON m.id = s.manager_id JOIN library_items i ON i.id = s.item_id "
+        "WHERE m.deleted_at IS NULL ORDER BY s.manager_id, i.kind, i.name COLLATE \"C\"")
+    return [dict(row) for row in rows]
+
+
 # --- Writing (inside the import's transaction) ---
 
 

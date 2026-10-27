@@ -69,6 +69,17 @@ def test_scenario_identity(tmp_path: Path) -> None:
     assert manager.agent_address.agent_type == "manager"
 
 
+@sync
+async def test_stop_without_a_running_turn_does_not_wait_for_a_stale_turn_lock(tmp_path: Path) -> None:
+    manager = _agent(tmp_path, _definition())
+    await manager._turn_lock.acquire()
+    try:
+        await asyncio.wait_for(manager.stop(), 0.5)
+        assert manager._task is None
+    finally:
+        manager._turn_lock.release()
+
+
 @pytest.mark.usefixtures("agent_db")
 @sync
 async def test_default_prompt_is_unchanged(tmp_path: Path) -> None:

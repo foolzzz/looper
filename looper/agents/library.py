@@ -372,7 +372,7 @@ class LoadedItem:
     # The plugin it loads in: a plugin's own directory name, or the generated plugin of a skill; '' for an MCP
     # server, which loads from the run's --mcp-config file.
     plugin: str = SKILLS_PLUGIN
-    scope: str = "global"  # where it is installed for the run: "global", or "project" when its project has it
+    scope: str = "global"  # where it is installed for the run: global, project, or Manager
 
     def view(self) -> dict[str, Any]:
         return {"kind": self.kind.value, "name": self.name, "sha256": self.sha256,
@@ -552,7 +552,7 @@ def resolve_installed(rows: Sequence[Mapping[str, Any]], project_id: str | None)
         plugin = (directory_name(kind, row["name"]) if kind is ItemKind.PLUGIN
                   else skill_plugin(row["origin"]) if kind is ItemKind.SKILL else "")
         scope = "project" if row["scope"] == "project" or row["id"] in chosen and \
-            chosen[row["id"]][1].scope == "project" else "global"
+            chosen[row["id"]][1].scope == "project" else row["scope"]
         chosen[row["id"]] = (row, LoadedItem(kind, row["name"], row["sha256"], plugin, scope))
     loaded: dict[tuple[str, str, str], tuple[Mapping[str, Any], LoadedItem]] = {}
     for row, item in chosen.values():
@@ -570,7 +570,7 @@ def resolve_installed(rows: Sequence[Mapping[str, Any]], project_id: str | None)
 
 
 async def load_installed(runtime_root: Path, role: str, project_id: str | None = None,
-                         items: Sequence[str] = ()) -> AgentLibrary:
+                         items: Sequence[str] = (), *, manager_id: str | None = None) -> AgentLibrary:
     """The items installed for one run of ``role`` in ``project_id``, materialized under ``runtime_root``.
 
     They are the enabled installs naming the role, global or in the project
@@ -582,13 +582,20 @@ async def load_installed(runtime_root: Path, role: str, project_id: str | None =
     cannot be read or written, the run goes without its items and its record
     says why.
     """
-    from ..db import library as db_library
+    from ..db import library as db_library, manager_installs
 
+    if manager_id is not None and role != "manager":
+        raise ValueError("manager_id is only supported for the manager role")
     project_id = project_id or None
     try:
         rows = await db_library.list_installed(role, project_id)
         if items:
             rows = [*rows, *await db_library.list_role_items(project_id, items)]
+        if manager_id is not None:
+            # Keep inherited rows and their ordering/metadata unchanged for redundant extras.
+            inherited = {row["id"] for row in rows}
+            rows = [*rows, *(row for row in await manager_installs.list_installed(manager_id)
+                             if row["id"] not in inherited)]
     except Exception:
         logger.warning("cannot read the installed items; the agent runs without them", exc_info=True)
         return AgentLibrary(error="the installed items could not be read", role=role, project_id=project_id)

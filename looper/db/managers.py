@@ -119,6 +119,11 @@ async def lock_for_task(manager_id: str, *, conn: asyncpg.Connection) -> bool:
         "SELECT enabled AND deleted_at IS NULL FROM managers WHERE id = $1 FOR KEY SHARE", manager_id))
 
 
+async def lock_installs(manager_id: str, *, conn: asyncpg.Connection) -> None:
+    """Serialize installs with the entire delete, including its drain, without blocking task writes."""
+    await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('manager_installs:' || $1, 0))", manager_id)
+
+
 async def delete_manager(manager_id: str, *, before_delete: Callable[[], Awaitable[None]] | None = None) -> Literal[
         "deleted", "missing", "has_tasks", "has_schedules", "has_bots", "has_bindings"]:
     """Soft-delete a scenario Manager in one transaction that holds its row lock: ``"has_tasks"`` (nothing written)
@@ -126,32 +131,39 @@ async def delete_manager(manager_id: str, *, before_delete: Callable[[], Awaitab
     ``"has_bindings"`` when a chat is explicitly bound to it; ``"missing"`` for the default Manager, an unknown
     or a deleted one. Its templates and its session (including API history) go, its profile is let go;
     its chat threads and messages stay. ``before_delete`` drains the resident process only after all refusal
-    checks, while the row lock excludes new dependents; bus messages must wait for this transaction to commit."""
+    checks. An install lock spans the transaction, including the drain; the row lock is taken only after the
+    drain so a turn can finish work needing this row. The checks run again under the row lock before deletion,
+    excluding new dependents; bus messages must wait for the delete to commit."""
     pool = get_pool()
     async with pool.acquire() as conn, conn.transaction():
-        deleted_at = await conn.fetchrow(
-            "SELECT deleted_at FROM managers WHERE id = $1 AND id <> 'manager' FOR UPDATE", manager_id)
-        if deleted_at is None or deleted_at["deleted_at"] is not None:
-            return "missing"
-        if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM tasks WHERE manager_id = $1)", manager_id):
-            return "has_tasks"
-        if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schedules WHERE manager_id = $1)", manager_id):
-            return "has_schedules"
-        if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM channel_configs WHERE manager_id = $1)", manager_id):
-            return "has_bots"
-        if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM manager_chat_bindings WHERE manager_id = $1)", manager_id):
-            return "has_bindings"
-        if before_delete is not None:
+        await lock_installs(manager_id, conn=conn)
+        while True:
+            row_lock = " FOR UPDATE" if before_delete is None else ""
+            deleted_at = await conn.fetchrow(
+                "SELECT deleted_at FROM managers WHERE id = $1 AND id <> 'manager'" + row_lock, manager_id)
+            if deleted_at is None or deleted_at["deleted_at"] is not None:
+                return "missing"
+            if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM tasks WHERE manager_id = $1)", manager_id):
+                return "has_tasks"
+            if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schedules WHERE manager_id = $1)", manager_id):
+                return "has_schedules"
+            if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM channel_configs WHERE manager_id = $1)", manager_id):
+                return "has_bots"
+            if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM manager_chat_bindings WHERE manager_id = $1)", manager_id):
+                return "has_bindings"
+            if before_delete is None:
+                await conn.execute("DELETE FROM manager_task_templates WHERE manager_id = $1", manager_id)
+                await conn.execute("DELETE FROM manager_library_installs WHERE manager_id = $1", manager_id)
+                session = await conn.fetchrow(
+                    "DELETE FROM agent_sessions WHERE agent_id = $1 RETURNING session_id, runtime_type", manager_id)
+                if session and session["runtime_type"] == "api" and session["session_id"] is not None:
+                    await api_sessions.delete(session["session_id"], pool=conn)
+                await conn.execute(
+                    "UPDATE managers SET deleted_at = now(), enabled = false, profile_id = NULL, updated_at = now() "
+                    "WHERE id = $1", manager_id)
+                return "deleted"
             await before_delete()
-        await conn.execute("DELETE FROM manager_task_templates WHERE manager_id = $1", manager_id)
-        session = await conn.fetchrow(
-            "DELETE FROM agent_sessions WHERE agent_id = $1 RETURNING session_id, runtime_type", manager_id)
-        if session and session["runtime_type"] == "api" and session["session_id"] is not None:
-            await api_sessions.delete(session["session_id"], pool=conn)
-        await conn.execute(
-            "UPDATE managers SET deleted_at = now(), enabled = false, profile_id = NULL, updated_at = now() "
-            "WHERE id = $1", manager_id)
-    return "deleted"
+            before_delete = None
 
 
 async def count_enabled(*, conn: asyncpg.Connection | None = None) -> int:
