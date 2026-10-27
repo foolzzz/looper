@@ -331,7 +331,14 @@ async def insert_run(conn: Db, *, schedule_id: str, scheduled_for: datetime, tri
 
 
 _RUN_COLUMNS = ("status", "fired_at", "task_id", "summary", "cost_usd", "error", "finished_at", "gate_output",
-                "carried_from", "run_timeout_seconds")
+                "carried_from", "run_timeout_seconds", "execution_snapshot")
+
+
+def _run_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(row)
+    if isinstance(result.get("execution_snapshot"), str):
+        result["execution_snapshot"] = json.loads(result["execution_snapshot"])
+    return result
 
 
 async def count_skip(conn: Db, schedule_id: str, *, status: str, at: datetime, since: datetime,
@@ -363,13 +370,15 @@ async def update_run(conn: Db, run_id: str, **fields: Any) -> None:
     if unknown:
         raise ValueError(f"not a run column: {unknown[0]}")
     sets = [f"{name} = ${i}" for i, name in enumerate(fields, start=2)]
-    await conn.execute(f"UPDATE schedule_runs SET {', '.join(sets)} WHERE id = $1", run_id, *fields.values())
+    values = [json.dumps(value) if name == "execution_snapshot" and value is not None else value
+              for name, value in fields.items()]
+    await conn.execute(f"UPDATE schedule_runs SET {', '.join(sets)} WHERE id = $1", run_id, *values)
 
 
 async def get_run(run_id: str, *, pool: Db | None = None) -> dict[str, Any] | None:
     db = pool or get_pool()
     row = await db.fetchrow(f"{_RUN} WHERE r.id = $1", run_id)
-    return dict(row) if row else None
+    return _run_row(row) if row else None
 
 
 async def list_runs(schedule_id: str, *, limit: int, before: str | None = None, without: Sequence[str] = (),
@@ -387,7 +396,7 @@ async def list_runs(schedule_id: str, *, limit: int, before: str | None = None, 
         """,
         schedule_id, limit, list(without), before,
     )
-    return [dict(row) for row in rows]
+    return [_run_row(row) for row in rows]
 
 
 async def run_counts(schedule_id: str, statuses: Sequence[str], *, pool: Db | None = None) -> dict[str, int]:
@@ -414,7 +423,7 @@ async def latest_runs(schedule_ids: list[str], *, pool: Db | None = None) -> dic
         """,
         schedule_ids,
     )
-    return {row["schedule_id"]: dict(row) for row in rows}
+    return {row["schedule_id"]: _run_row(row) for row in rows}
 
 
 async def finish_run(conn: Db, run_id: str, *, status: str, at: datetime, summary: str | None = None,
@@ -504,7 +513,7 @@ async def unhanded_runs(conn: Db, schedule_id: str, *, besides: str | None = Non
         """,
         schedule_id, list(UNFINISHED), besides,
     )
-    return [dict(row) for row in rows]
+    return [_run_row(row) for row in rows]
 
 
 async def hand_on(conn: Db, run_ids: Sequence[str]) -> None:

@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.175] - 2026-10-27
+
+### Fixed
+
+- **Schedules: a claimed gate's output survives a rename or notification edit.** A schedule's execution fingerprint now covers only execution settings (not the name, notifications or the `enabled` flag, which is checked separately), a gate run's stdout is saved before the configuration check, and each gating run records its fingerprint in the new `schedule_runs.execution_snapshot` column (also in the run view). Carried input skips earlier runs whose snapshot differs from the current execution settings. No prompt or tool change. ([#777](https://github.com/foolzzz/looper/pull/777))
+
 ## [2.13.174] - 2026-10-27
 
 ### Changed
