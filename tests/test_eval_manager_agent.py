@@ -174,6 +174,27 @@ def test_real_profile_switch_keeps_the_manager_binding_unless_explicitly_overrid
     assert api.settings == [{"profile_id": "agent-0"}]
 
 
+@pytest.mark.parametrize("selected_id,recorded_id,ok", [
+    ("agent-1", "agent-1", True),
+    ("agent-0", "agent-1", False),
+    (None, "agent-1", False),
+    ("agent-1", "agent-0", False),
+])
+def test_switch_profile_check_uses_id_when_display_name_has_effort_suffix(
+    selected_id, recorded_id, ok, monkeypatch,
+):
+    api = DialogApi()
+    manager = {**api.registry["profiles"][0], "effort": "high"}
+    dialogs._make_switch_profile(api, "eval-project", fake=False, manager_profile=manager)
+    selected = {"profile_id": selected_id, "name": f"{dialogs.SWITCH} · high"} if selected_id else None
+    monkeypatch.setattr(dialogs, "_selected", lambda _: selected)
+    monkeypatch.setattr(dialogs, "_manager_runs", lambda _: [
+        {"metadata": {"session_profile": {"to": recorded_id}}},
+    ])
+    look = dialogs.Look(api, None, "ok", "unused", 0, frozenset(), False)
+    assert (dialogs._switch_selected(look) is None) is ok
+
+
 def test_cpa_eval_instructions_explicitly_leave_the_real_admission_gate_pending():
     readme = Path("evals/README.md").read_text()
     cpa = readme.split("#### The api runtime on CPA\n", 1)[1].split("#### Pi\n", 1)[0]

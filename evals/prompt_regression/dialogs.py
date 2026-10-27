@@ -1355,12 +1355,13 @@ def _selected(look: Look) -> dict[str, Any] | None:
 
 def _switch_selected(look: Look) -> str | None:
     chosen = _selected(look)
-    if not chosen or chosen.get("name") != SWITCH:
+    wanted = _switch_id(look)
+    if not chosen or wanted is None or chosen.get("profile_id") != wanted:
         return f"the session's selected profile is {chosen}, not {SWITCH}"
     recorded = [r for r in _manager_runs(look) if _is_switch(r)]
     if not recorded:
         return "no Manager run records the choice"
-    if recorded[-1]["metadata"]["session_profile"].get("to") != _switch_id(look):
+    if recorded[-1]["metadata"]["session_profile"].get("to") != wanted:
         return f"the choice is recorded as {recorded[-1]['metadata']['session_profile']}"
     return None
 
