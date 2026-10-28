@@ -28,6 +28,7 @@ class Session:
     authorizing: bool = False
     cancel_requested: bool = False
     cancel_tasks: set = field(default_factory=set)
+    settled: bool = True
 
 
 class Fake:
@@ -66,6 +67,19 @@ class Fake:
             return await future
         finally:
             self.pending.pop(rpc_id, None)
+
+    async def settle(self, session, correlation, *, outcome, final_text="", requests=0, usage_complete=True):
+        if session.settled:
+            return
+        session.settled = True
+        for message_id, _ in session.steers:
+            await self.update(correlation, "steer_dropped", message_id=message_id,
+                reason="session_closed" if session.closing else "cancelled" if outcome == "cancelled" else "turn_ended")
+        session.steers.clear()
+        await self.update(correlation, "settled", outcome=outcome, final_text=final_text,
+                          requests=requests, usage_complete=usage_complete)
+        session.task = None
+        session.authorizing = False
 
     async def turn(self, session, params):
         correlation = {k: params[k] for k in ("session_id", "trace_id")}
@@ -136,14 +150,8 @@ class Fake:
         except Exception:
             final_text = "fake scripted turn failed"
         finally:
-            for message_id, _ in session.steers:
-                await self.update(correlation, "steer_dropped", message_id=message_id,
-                    reason="session_closed" if session.closing else "cancelled" if outcome == "cancelled" else "turn_ended")
-            session.steers.clear()
-            await self.update(correlation, "settled", outcome=outcome, final_text=final_text,
+            await self.settle(session, correlation, outcome=outcome, final_text=final_text,
                               requests=requests, usage_complete=complete)
-            session.task = None
-            session.authorizing = False
 
     async def cancel_after_authorization(self, session, turn):
         # Only this trace gets 0.25 s for the host cap-denial reply after ACK.
@@ -198,6 +206,7 @@ class Fake:
                         raise p.ProtocolError(p.ErrorCode.UNSUPPORTED)
                     session.trace, session.boundary = params["trace_id"], asyncio.Event()
                     session.authorizing, session.cancel_requested = True, False
+                    session.settled = False
                     await self.send(p.Response(message.id, result=dict(correlation, accepted=True)))
                     session.task = asyncio.create_task(self.turn(session, params))
                     return
@@ -206,6 +215,9 @@ class Fake:
                 if method == "session/close":
                     session.closing = True
                     await self.cancel(session)
+                    # A task cancelled before its first step never runs its finally block.
+                    await self.settle(session, dict(session_id=params["session_id"], trace_id=session.trace),
+                                      outcome="cancelled")
                     del self.sessions[params["session_id"]]
                     result = correlation if "trace_id" in params else {}
                 elif method in {"session/cancel", "session/steer"}:
