@@ -3,6 +3,7 @@ import { diagnostic, request, scrub, update } from './rpc.ts';
 import { sdk } from './sdk.ts';
 import type { Session } from './session.ts';
 import type { Turn } from './turn.ts';
+import { steersSent } from './turn.ts';
 
 let counter = 0;
 export function endRequest(record: Session, turn: Turn, id: string, status: string,
@@ -54,8 +55,11 @@ export async function authorizingStream(record: Session, model: any, context: an
       await options.onProviderStreamEvent?.(event, eventModel);
     },
     fetch: async (...args: Parameters<typeof globalThis.fetch>) => {
+      if (turn.cancel || turn.settled || turn.settling || options.signal?.aborted) throw new Error('request aborted');
       turn.transport = true;
-      const response = await fetch(...args);
+      const responsePromise = fetch(...args);
+      steersSent(record, turn, context.messages);
+      const response = await responsePromise;
       turn.httpStatus = status = response.status;
       return response;
     },

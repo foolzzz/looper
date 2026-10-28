@@ -198,6 +198,78 @@ def test_steer_applies_in_the_same_trace(tmp_path):
     run(exercise())
 
 
+@pytest.mark.parametrize("decision", ["allow", "max_requests", "run_cap", "stopped", "cancel"])
+def test_steer_waits_for_request_send_and_cannot_leak_after_denial(tmp_path, monkeypatch, decision):
+    from looper.agents.runtimes.runner.turn import RunnerTurn
+
+    async def exercise():
+        gate, authorizing, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        tools = Tools(gate=gate)
+        original = RunnerTurn.authorize
+        attempts = 0
+
+        async def held(turn, params):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 2:
+                authorizing.set()
+                await release.wait()
+                if decision == "max_requests":
+                    turn.max_requests = 1
+                elif decision == "run_cap":
+                    async def limits():
+                        return dict(run_cap=0, task_cap=None, task_spent=0)
+                    turn._limits = limits
+                elif decision == "stopped":
+                    turn.stop()
+            return await original(turn, params)
+
+        monkeypatch.setattr(RunnerTurn, "authorize", held)
+        async with FakeModelAPI([tool_reply(), answer(), answer("Next clean turn")], api_key=KEY) as api, pi_session(tmp_path, api, tools) as session:
+            events = []
+            task = asyncio.create_task(session.run_turn("Inspect tasks", events.append))
+            try:
+                await tools.entered.wait()
+                queued = await session.steer(STEER, message_id="m1")
+                gate.set()
+                await authorizing.wait()
+                assert len(api.requests) == 1
+                # SDK history insertion has happened, but the request is still held.
+                assert not steer_events(events)
+                if decision == "cancel":
+                    turn, lease = session._turn, session._lease
+                    await lease.bridge.cancel_turn(turn.session_id, turn.trace_id)
+            finally:
+                gate.set()
+                release.set()
+                result = await task
+            notice, = steer_events(events)
+            assert notice["trace_id"] == queued["trace_id"]
+            assert notice["runner"]["message_id"] == "m1"
+            assert notice["subtype"] == ("steer_applied" if decision == "allow" else "steer_dropped")
+            assert result.result_event["runner"]["outcome"] == {
+                "allow": "completed", "max_requests": "max_requests", "run_cap": "capped",
+                "stopped": "cancelled", "cancel": "cancelled"}[decision]
+            assert len(api.requests) == (2 if decision == "allow" else 1)
+            if decision == "allow":
+                assert json.dumps(api.requests[1].body).count(STEER) == 1
+            else:
+                native = [json.loads(line) for file in session._lease.state_dir.glob("*.jsonl")
+                    for line in file.read_text().splitlines()]
+                steered, = [row for row in native if row.get("type") == "message"
+                    and row["message"]["role"] == "user" and STEER in json.dumps(row["message"]["content"])]
+                assert any(row.get("type") == "context_edit" and row["targetId"] == steered["id"]
+                    and row["replacement"] is None for row in native)
+            assert events.index(notice) < next(i for i, e in enumerate(events) if e["type"] == "result")
+            bind_pi_turn(session, tools)
+            assert not (await session.run_turn("Next turn", [].append)).result_event["is_error"]
+            next_body = json.dumps(api.requests[-1].body)
+            assert "Inspect tasks" in next_body  # Cleanup must preserve the original history.
+            if decision != "allow":
+                assert STEER not in next_body
+    run(exercise())
+
+
 @pytest.mark.parametrize("ending", ["cancel", "close", "final-answer"])
 def test_steer_is_dropped_never_lost(tmp_path, ending):
     async def exercise():
