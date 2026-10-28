@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.200] - 2026-10-28
+
+### Fixed
+
+- **The Pi runner accounts for every authorised model request exactly once.** A budget authorisation that is still pending when a turn is cancelled is now awaited, and an `allow` that arrives afterwards ends with one aborted `request_end` that sent nothing, before the turn settles. A request that was sent but failed before response headers now reports `complete=false` instead of complete zero usage, and a completed request reports usage only from validated terminal counts. ([#832](https://github.com/foolzzz/looper/pull/832))
+
+## [2.13.199] - 2026-10-28
+
+### Fixed
+
+- **Hosted Worker runs that stop early keep their dropped steers and session.** A Worker run on a runner session killed by the Planner now returns the steers it dropped as `missed_input` on the kill reply, which the Planner adds to `missed_messages`; a run cancelled by a pool stop ends as `stopped` with the same drops; and a hosted launch that fails with `RunStartError` ends its handle so the session is released. ([#844](https://github.com/foolzzz/looper/pull/844))
+
 ## [2.13.198] - 2026-10-28
 
 ### Added

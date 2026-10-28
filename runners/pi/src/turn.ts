@@ -12,6 +12,7 @@ export type Turn = {
   transport: boolean; last?: any; settling?: Promise<void>; drained?: () => void;
   failure?: Failure; forced?: boolean; compacting?: boolean; retryPending?: boolean;
   requestKinds?: Map<string, 'turn' | 'retry' | 'compaction'>;
+  authorizations?: Map<string, Promise<unknown>>;
   finished: Promise<void>; finish: () => void;
   steers: Steer[]; steerIds: Set<string>; forwarding: Promise<void>; initialUserEnded: boolean;
   lastRequestId: string | null; afterToolBatch: boolean;
@@ -129,6 +130,8 @@ export async function cancelTurn(record: Session, turn: Turn, deadlineMs = 4000)
   dropSteers(record, turn, turn.cancel === 'close' ? 'session_closed' : 'cancelled');
   if (!turn.started) { await settle(record, turn); return; }
   void record.agent.abort().catch(() => {});
+  // A slow host reply is not an unresponsive SDK; reconcile its reservation first.
+  await Promise.allSettled(turn.authorizations?.values() ?? []);
   if (await within(turn.finished, deadlineMs)) return;
   turn.failure = { kind: 'INTERNAL_ERROR', message: 'cancel did not settle; the session was released' };
   turn.forced = true;
@@ -174,6 +177,7 @@ export function settle(record: Session, turn: Turn, failure?: Failure): Promise<
   if (turn.settling) return turn.settling;
   turn.settling = (async () => {
     await turn.forwarding;
+    await Promise.allSettled(turn.authorizations?.values() ?? []);
     dropSteers(record, turn, turn.cancel === 'close' ? 'session_closed' : turn.cancel ? 'cancelled' : 'turn_ended');
     if (turn.inflight.size) {
       await within(new Promise<void>(resolve => { turn.drained = resolve; }), 1000);
