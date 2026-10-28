@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.189] - 2026-10-28
+
+### Changed
+
+- **Every browser test serves the staged dashboard.** `default_static_dir()` honors a `PYTEST_LOOPER_STATIC_DIR` override, which the test session sets to `looper/web/dashboard`, so a leftover `web/dist` build can no longer be served in tests; unset (every install), the lookup is unchanged. The browser tests assert the served page is the staged `index.html`, and the Python tests job now sets up Node and runs `scripts/stage-dashboard.sh` before pytest. ([#816](https://github.com/foolzzz/looper/pull/816))
+
 ## [2.13.188] - 2026-10-28
 
 ### Added
