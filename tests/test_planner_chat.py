@@ -230,6 +230,27 @@ class TestPlannerChatThroughClaude:
         assert "delivery not confirmed; the Worker may already have acted on it" in decision and "also log errors" in decision
         assert h.work_items[1].payload["feedback"] == ["also log errors"]
 
+    def test_dropped_worker_input_reaches_the_decision(self, planner_claude: Any) -> None:
+        claude = planner_claude(
+            plan(step("s1")),
+            decide("retry", feedback="also log errors"),
+            decide("accept"),
+        )
+
+        async def scenario(h: Harness) -> None:
+            await h.start()
+            await h.until(lambda: h.held)
+            await h.release({**WORK_OK, "missed_input": ["also log errors", None, 42]})
+            await h.finished()
+
+        h = drive(claude, hold_first(), scenario)
+        first, second = [turn["text"] for turn in claude.turns()[1:]]
+        heading = "delivery not confirmed; the Worker may already have acted on it"
+        assert heading in first and "- also log errors" in first
+        assert "- None" not in first and "- 42" not in first
+        assert heading not in second and "- also log errors" not in second
+        assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+
     def test_invalid_action_gets_a_repair_turn(self, planner_claude: Any) -> None:
         claude = planner_claude(
             plan(step("s1")),

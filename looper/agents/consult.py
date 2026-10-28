@@ -53,15 +53,19 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .. import child_env
 from ..db import llm_records as db_llm_records, projects as db_projects, room as db_room, steps as db_steps
 from ..db import tasks as db_tasks
 from .agent_settings import AgentType, Launch, load_agent_settings
 from .runtimes import ReadOnly
+from .runtimes.channel import Fork, RunHandle, RunStartError
 from .room import FallbackReason, Member, MemberKind, RoomService, _line, run_session_dir
 from .system_prompt import REVIEW_CONTRACT, WORK_CONTRACT, SystemPrompt
+
+if TYPE_CHECKING:
+    from .runtimes.runner.turn import TurnLimits
 
 logger = logging.getLogger(__name__)
 
@@ -358,10 +362,21 @@ class ConsultService:
 
             try:
                 prompt_file = system_prompt.write_file(self.runtime_root)
-                command = runtime.consult_command(launch.executable(self.claude_bin), cwd=cwd, prompt_file=prompt_file,
-                                                  launch=launch, session_id=str(record["session_id"]),
-                                                  session_dir=session_dir, fork_dir=fork_dir,
-                                                  max_turns=CONSULT_MAX_TURNS)
+                handle = None
+                if runtime.hosts_runs:
+                    async def run_limits() -> TurnLimits:
+                        return {"run_cap": budget, "task_cap": None, "task_spent": 0}
+
+                    handle = runtime.hosted_run(
+                        launch.executable(self.claude_bin), cwd=cwd, prompt_file=prompt_file, launch=launch,
+                        max_turns=CONSULT_MAX_TURNS, timeout_s=limits.consult_timeout_seconds,
+                        session_dir=None, tools=None, limits=run_limits,
+                        fork=Fork(str(record["session_id"]), session_dir, fork_dir))
+                else:
+                    command = runtime.consult_command(
+                        launch.executable(self.claude_bin), cwd=cwd, prompt_file=prompt_file,
+                        launch=launch, session_id=str(record["session_id"]), session_dir=session_dir,
+                        fork_dir=fork_dir, max_turns=CONSULT_MAX_TURNS)
             except RuntimeUnsupported as exc:
                 raise _Failed(FallbackReason.RUNTIME_CANNOT, str(exc)) from None
             # A run of the seat writes its session only after its record exists, so a record that is still missing
@@ -369,8 +384,12 @@ class ConsultService:
             await self._ensure_current(task_id, row, record, "its seat started another run while its session was copied")
             asked = ", ".join(f"#{m['id']}" for m in questions)
             await self._note(task_id, run_id, f"Consulting {seat_name} for question(s) {asked} (read only: {read_only})")
-            result, started, timed_out = await self._execute(
-                task_id, step, run_id, command, cwd, prompt, system_prompt, launch, limits.consult_timeout_seconds)
+            if handle is not None:
+                result, started, timed_out = await self._execute_hosted(
+                    handle, task_id, step, run_id, cwd, prompt, system_prompt, launch, limits.consult_timeout_seconds)
+            else:
+                result, started, timed_out = await self._execute(
+                    task_id, step, run_id, command, cwd, prompt, system_prompt, launch, limits.consult_timeout_seconds)
             wrote = await asyncio.to_thread(_changed, snapshot[2]) if snapshot is not None else []
             denied = len(result.get("permission_denials") or []) if result else 0
             cost = await _run_cost(task_id, run_id)
@@ -525,6 +544,60 @@ class ConsultService:
                 await recorder.finish(output_text=str((result or {}).get("result") or "") or None,
                                       result_event=result, error=(error + "\n" + stderr_tail if stderr_tail else error)
                                       if error else None)
+        return result, started, False
+
+    async def _execute_hosted(self, handle: RunHandle, task_id: str, step: Mapping[str, Any], run_id: str,
+                              cwd: str, prompt: str, system_prompt: SystemPrompt, launch: Launch, timeout: int
+                              ) -> tuple[dict[str, Any] | None, bool, bool]:
+        """Run a consult in a runner session with the process path's deadline and recording contract."""
+        from .claude_cli import ClaudeRunRecorder
+
+        recorder = ClaudeRunRecorder(agent_id=run_id, task_id=task_id, command=handle.command, cwd=cwd,
+                                     input_text=prompt, step_id=str(step["id"]), system_prompt=system_prompt,
+                                     launch=launch)
+        await recorder.start()
+        result: dict[str, Any] | None = None
+        started, ended = False, False
+
+        async def run() -> None:
+            nonlocal result, started, ended
+            await handle.launch()
+            channel = handle.channel
+            await channel.start(prompt)
+            async for event in channel.events():
+                await recorder.record(event)
+                if (capped := recorder.cap_stop) is not None:
+                    result = capped.result_event
+                    await handle.end()
+                    ended = True
+                    break
+                if event.get("type") == "system" and event.get("subtype") == "init":
+                    started = True
+                if event.get("type") == "result":
+                    result = event
+            await handle.wait()
+
+        error: str | None = None
+        try:
+            await asyncio.wait_for(run(), timeout=timeout)
+            if result is None or result.get("is_error"):
+                error = "the consult gave no result"
+        except RunStartError as exc:
+            error = f"cannot start the consult: {exc}"
+            raise _Failed(FallbackReason.RUNTIME_CANNOT, f"its runtime does not start: {exc}") from None
+        except asyncio.TimeoutError:
+            error = f"the consult ran over {timeout} s"
+            return None, started, True
+        except BaseException:
+            error = "the consult was stopped"
+            raise
+        finally:
+            try:
+                if not ended:
+                    await handle.end()
+            finally:
+                await recorder.finish(output_text=str((result or {}).get("result") or "") or None,
+                                      result_event=result, error=error)
         return result, started, False
 
     async def _give_up(self, consult_id: int, task_id: str, seat_name: str, reason: FallbackReason,
