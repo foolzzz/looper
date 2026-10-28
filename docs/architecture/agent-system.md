@@ -1131,7 +1131,7 @@ Manager tools.
   `library.load_installed` and `knowledge.load_knowledge`. `CodexRuntime`,
   `OmpRuntime`, `GrokRuntime` and `PiRuntime` (`codex`, `omp`, `grok`, `pi`,
   below) translate
-  them at launch; Codex, OMP and Pi keep the Manager's and a Planner's session
+  them at launch; Codex, OMP and, by default, Pi keep the Manager's and a Planner's session
   with one process per turn (`runtimes/per_turn.py`), Grok with one process
   over ACP (`runtimes/grok_acp.py`, `RuntimeAdapter.resident_transport`).
   Capabilities:
@@ -1389,7 +1389,22 @@ Manager tools.
   skipped while no Agent Profile uses the login.
 - **Pi** (`looper/agents/runtimes/pi.py`, the `pi` CLI, minimum 1.3.0,
   verified against pi 1.3.0 in the [pi runtime RFC](rfcs/pi-runtime-v0.zh-CN.md))
-  runs Manager, Planner, Worker and Reviewer. A Worker or Reviewer is
+  runs Manager, Planner, Worker and Reviewer. With `[runtimes] pi = "runner"`
+  in the ops file, `PiRunnerRuntime` runs only Manager and Planner through
+  one shared Node >= 22.19 SDK runner; Worker, Reviewer and consults keep
+  the CLI path below. The opt-in is read once at startup and needs a restart;
+  there is no environment-variable override or dashboard control.
+  The runner has 10 session slots; further acquisition returns `CAPACITY`,
+  with no runner pool or automatic CLI fallback. Missing prerequisites fail
+  Pi Manager and Planner turns with the startup reason. Turns submitted during
+  restart backoff fail fast; after recovery the resident session loads its saved history.
+  Provider environment
+  entries are refused because they would change process-wide settings.
+  Platform tools use `looper_*` directly, without Manager MCP setup or probing;
+  Planner offers read, grep, find and ls plus those platform tools.
+  Dashboard Stop and Telegram/Lark `/stop` use the existing interrupt path.
+  The following describes the default `[runtimes] pi = "cli"` path.
+  A Worker or Reviewer is
   `pi -p --mode json`; a Worker that can steer drops `-p` and uses
   `--mode rpc` (`pi_steer`), without OMP's `--no-ui`. Providers are API keys
   only, speaking `openai-responses` or `openai-chat` (pi's
@@ -4149,7 +4164,8 @@ another file. The keys are `[database] url`, `[server]` `host`, `port`,
 `public_url` and `log_level` (`debug`, `info`, `warning`, `error`), `[backup]`
 `pg_dump`, `command` (an argv array; `{dbname}` and `{user}` are filled
 in) and `verify_command` (an argv array that lists the dump read on stdin like
-`pg_restore --list`), and `[operator_notes] root` (an absolute path). Nothing is expanded: no
+`pg_restore --list`), `[operator_notes] root` (an absolute path), and
+`[runtimes] pi` (`"cli"` by default, or `"runner"`; file only). Nothing is expanded: no
 variable, no `~`, no include. An unknown key, a wrong type or a bad value
 stops the command; the message names the key and never shows the value. The
 file must be a regular file (not a symlink), owned by the user, mode 0600, in
@@ -4174,7 +4190,8 @@ database) or in the server's environment (`looper service install --env
 NAME`).
 
 `looper config init-ops` writes the file once from the values in effect, mode
-0600, and refuses to overwrite a file that exists. With nothing configured it
+0600, including `[runtimes]` with the commented Pi CLI default (or the explicit
+runner opt-in), and refuses to overwrite a file that exists. With nothing configured it
 writes `postgresql://localhost:5432/loopx` and says so. Remove the old
 variables from the shell and `.env`, then run `looper service install` again
 if the service is used. Until then `looper serve` keeps working from the

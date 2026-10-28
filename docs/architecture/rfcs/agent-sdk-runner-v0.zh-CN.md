@@ -229,12 +229,13 @@ Go 移植版（loopgo-main）
 └─ go/cmd/looper-norma-runner/   入口
 ```
 
-`runners/pi`、`runners/dsh` 的源码随 wheel 发布，由 Node 直接运行（只用可擦除的 TypeScript 语法，Q7）；不打包 SDK，SDK 从探测到的 `pi`、`dsh` 可执行文件的真实路径解析。Norma 运行器由 CI 按平台编译，`install.sh` 校验 SHA-256 后下载（Q6）。
+`runners/pi` 的源码经 `looper/agents/runtimes/runner/pi_runner -> ../../../../runners/pi` 符号链接进入 wheel 的 package data，由 `importlib.resources` 定位 `pi_runner/src/main.ts`，Node ≥ 22.19 直接运行；不打包 SDK，SDK 从探测到的 `pi` 可执行文件的真实路径解析。DSH 沿用同一发布方案；Norma 运行器由 CI 按平台编译，`install.sh` 校验 SHA-256 后下载（Q6）。
 
-**运行时。** 每个运行器进程在 Looper 的 runtime root 下有一个私有目录，同时是它的 cwd；会话的状态都在这个目录里，不指向操作者的目录。
+**运行时。** 每个运行器进程在 Looper 的 runtime root 下有一个私有目录，同时是它的 cwd；常驻 owner 的持久状态单独放置，避免运行器重启时丢失，不指向操作者的目录。
 
 ```text
 <runtime_root>/runners/
+├─ state/pi/<owner>/          Manager / Planner 的持久 JSONL；跨 runner generation 保留
 ├─ pi-1/                      每个运行器进程一个；池子扩容时编号递增（pi-2 …）
 │   ├─ tmp/                   私有 TMPDIR
 │   └─ sessions/<会话 id>/
@@ -245,7 +246,7 @@ Go 移植版（loopgo-main）
 └─ norma-1/                   同上；native/ 放 Norma 的 transcript
 ```
 
-任务的工作区仍是现有的任务 worktree，经 `cwd` 与 `add_dirs` 交给运行器；`agent_sessions` 只记指针（运行器种类、会话 id、`native/` 的位置）。运行器重启后按指针续接；会话关闭或管家删除时，RunnerSupervisor 删除对应的 `sessions/<会话 id>/`。
+任务的工作区仍是现有的任务 worktree，经 `cwd` 与 `add_dirs` 交给运行器；`agent_sessions` 保存会话指针，运行器重启后按 owner 的状态目录执行 `session/load`。会话关闭清理临时会话目录，owner 状态目录的删除与过期清扫仍待实现。
 
 ## 6. 协议
 
@@ -461,28 +462,28 @@ bash、读写、编辑、搜索在运行器里执行，受第 12 节的隔离约
 
 ### 9.1 进程结构
 
-Node 进程，导入已安装的 `@earendil-works/pi-coding-agent`：从探测到的 `pi` 可执行文件的真实路径解析包（同 `dsh_bootstrap.mjs` 的 `createRequire(realpathSync(executable))`），不打包、不在运行时安装。源码用 TypeScript，只用可擦除的语法，由 Node ≥ 22.19 自带的类型擦除直接运行；这个版本是否默认开启类型擦除需要验证，不行就在发布时编译成 ESM（Q7）。
+Node 进程，导入已安装的 `@earendil-works/pi-coding-agent`：从探测到的 `pi` 可执行文件的真实路径解析包（同 `dsh_bootstrap.mjs` 的 `createRequire(realpathSync(executable))`），不打包、不在运行时安装。源码用 TypeScript，只用可擦除的语法，由 Node ≥ 22.19 自带的类型擦除直接运行，版本门禁与安装包入口由测试覆盖。
 
 所有会话共用一个 JS 事件循环。Pi 的会话 JSONL 是同步写的，settings、auth 的同步锁重试有 20 ms 忙等、最多 10 次（`pi:dist/core/session-manager.js:754`、`:812`、`pi:dist/core/settings-manager.js:126`、`pi:dist/core/auth-storage.js:45`），会卡住同进程的其他会话。运行器用内存里的 SettingsManager，不用 AuthStorage，避开锁路径；事件循环延迟上报，并参与准入（第 5.3 节 (b)）。离线实测里 50 个会话各跑一轮时 p99 是 18.0 ms（第 2.3 节，短时测量）。
 
-导入 SDK 就会加上 SIGINT、SIGTERM、SIGHUP 的监听，释放会话也不移除（第 2.3 节）。运行器的退出以 stdin EOF 和 `shutdown` 为准；RunnerSupervisor 发 SIGTERM 时 Pi 的处理器做什么，需要验证，必要时运行器在启动后接管这几个信号。
+导入 SDK 就会加上 SIGINT、SIGTERM、SIGHUP 的监听，释放会话也不移除（第 2.3 节）。运行器接管这些信号，并以 stdin EOF、`shutdown` 或信号统一触发退出与清理；SIGTERM 等待 hooks 的路径已覆盖（第 9.6 节）。
 
 ### 9.2 协议映射
 
 | 协议 | Pi 1.3.0 |
 |---|---|
-| `initialize` | 核对 1.3.x 和用到的导出；能力：`per_session_isolation: true`（第 9.3 节）、`per_session_credentials: true`（每会话一个 ModelRuntime 加 `setRuntimeApiKey`；spike 用的是共享的 ModelRuntime，每会话各一个需要验证）、`steer: {in_trace: true, boundary: "after_tool_batch", idle_start: true}`、`follow_up`、`cancel`、`compaction: {auto, manual, events}`、`fork` |
+| `initialize` | 核对 1.3.x 和用到的导出；能力：`per_session_isolation: true`（第 9.3 节）、`per_session_credentials: true`（每会话一个 ModelRuntime 加 `setRuntimeApiKey`，隔离验证见第 9.6 节）、`steer: {in_trace: true, boundary: "after_tool_batch", idle_start: false}`、`cancel`、`authorize_covers: [turn, retry, compaction]`；follow_up、manual compaction/events 与 fork 仍待做 |
 | `session/new` | `createAgentSession({cwd, agentDir, modelRuntime, model, thinkingLevel, sessionManager, settingsManager, resourceLoader, tools, customTools})`（`pi:dist/core/sdk.d.ts:10-64`）：每会话自己的 ModelRuntime、`SessionManager.create(cwd, state_dir)`、内存 SettingsManager（关掉 cache warming、遥测）、`DefaultResourceLoader`（`noContextFiles`，只加载 Looper 给的扩展和 skill，`systemPrompt` 或 `appendSystemPrompt`）；`customTools` 是平台工具代理和运行器包装过的内置工具 |
 | `session/load` | `SessionManager.open(<state_dir 里唯一匹配的文件>)` 后同上；`fork_from` 先复制源文件再打开副本 |
 | `session/prompt` | `session.prompt(text)`；`agent_settled` 发 `settled`，`agent_end` 之后还可能重试或继续（`pi:docs/sdk.md:72-94`） |
-| `session/steer` | 运行中 `session.steer(text)`（`pi:dist/core/agent-session.d.ts:570`）：当前回合的工具结束后、下一次请求前进入，同一 trace。离线实测：bash 运行中调用，下一次 provider 请求就带上了这条消息，全程只有一次 `agent_start`/`agent_end`（第 2.3 节）。`steer_applied` 取自这条用户消息出现在事件流里的时刻（事件名需要验证）。空闲时按 `start` 处理 |
+| `session/steer` | 运行中 `session.steer(text)`（`pi:dist/core/agent-session.d.ts:570`）：当前回合的工具结束后、下一次请求前进入，同一 trace。离线实测：bash 运行中调用，下一次 provider 请求就带上了这条消息，全程只有一次 `agent_start`/`agent_end`（第 2.3 节）。`message_end` 的 user 消息用于跟踪，进入 provider 请求后才发 `steer_applied`；空闲时拒绝，结束竞争见第 9.6 节 |
 | `session/follow_up` | 运行器排队，见第 7.3 节 |
 | `session/cancel` | 先 `session.clearQueue()`，再 `await session.abort()`（`:636`、`:650`；`abort` 不清队列）；清掉的引导各发 `steer_dropped` |
 | `session/compact` | `session.compact()`（`:722`） |
 | `session/close` | `session.dispose()`（`:387`）：停止工作、使扩展上下文失效、移除订阅 |
 | 事件 | `session.subscribe`（`:380`）：`message_update` 的 `text_delta` → delta；`message_end` → `message`、`tool_result`；`compaction_end` → `compaction`；`auto_retry` → `retry` |
 | 用量 | 每条 assistant `message_end.usage`、`compaction_end` 的用量、toolResult 里嵌套的用量各记一次 `request_end`；input 已是未缓存的，cacheRead、cacheWrite 分列，reasoning 含在 output（`looper/agents/runtimes/pi.py:415-418`）。`getSessionStats()` 是累计值，只进 `runner/health` |
-| `budget/authorize` | 在 ModelRuntime 上注册 Looper 自己的 provider（`registerProvider(id, {api, streamSimple, models, ...})`，`pi:dist/core/model-runtime.d.ts:117`），它的 `streamSimple` 先授权，再委托给 pi-ai 对这个协议的实现；spike 用同样的注册方式接上了假 provider（第 2.3 节）。`createAgentSession` 把 `streamFn` 绑定到这个 runtime（`pi:dist/core/sdk.js:253`、`:303`）。压缩、分支摘要、自动重试是否都经过它，需要验证（spike 关掉了压缩和重试）；不经过的话改用扩展事件 `before_provider_request`（`pi:dist/core/extensions/types.d.ts:692-696`），它能否中止请求也需要验证 |
+| `budget/authorize` | 在 ModelRuntime 上注册 Looper 自己的 provider（`registerProvider(id, {api, streamSimple, models, ...})`，`pi:dist/core/model-runtime.d.ts:117`），它的 `streamSimple` 先授权，再委托给 pi-ai 对这个协议的实现；spike 用同样的注册方式接上了假 provider（第 2.3 节）。`createAgentSession` 把 `streamFn` 绑定到这个 runtime（`pi:dist/core/sdk.js:253`、`:303`）。自动压缩、自动重试均从这里授权和归属（第 9.6 节），拒绝发生在请求发送前；分支摘要仍待后续 fork 路径验证 |
 
 ### 9.3 隔离
 
@@ -510,9 +511,13 @@ Node 进程，导入已安装的 `@earendil-works/pi-coding-agent`：从探测�
 | `PiStream` 翻译 JSON 事件（`pi.py:422-597`） | 运行器映射成 `session/update`，Looper 一侧一份通用翻译 |
 | 生成 `models.json`、`settings.json`，key 在 `LOOPER_PROVIDER_API_KEY`（`pi.py:741-884`） | 内存里的 ModelRuntime、SettingsManager；key 在 `session/new` |
 
-### 9.6 已知缺口（需要验证）
+### 9.6 实现进展与验证缺口
 
-离线实测已证明同进程并发、每会话 cwd 与干净环境、同一次运行内的引导、按会话取消（第 2.3 节）。仍需验证：每会话各一个 ModelRuntime、各自的 `setRuntimeApiKey` 互不影响；压缩、重试是否经过 Looper 注册的 provider；`before_provider_request` 能否中止请求；SIGTERM 时 Pi 的信号处理器的行为；引导进入模型的事件名；与结束竞争的引导是否会在同一次运行里继续；持久化会话的续接；长上下文、长时间运行的内存和事件循环延迟；thinking 钳制和全部生产 schema 普查（沿用 pi 运行时 RFC 第 6 节）。
+Pi 1.3.0 配 loopback provider 的定向测试已覆盖每会话 ModelRuntime/key 隔离及独立取消、owner JSONL 的一次续接、路径与 bash 环境隔离；SIGTERM 接管后等待清理 hooks，runner 丢失时回收工具进程。重试和自动压缩经过注册 provider，分别以 `retry`、`compaction` 授权和记账；被拒重试不发请求，压缩不能归属时明确报 `usage_unattributed`，不冒充完整用量。
+
+引导从用户消息事件跟踪，但只有该消息进入真实 provider 请求才发 `steer_applied`；与结束、取消或关闭竞争时必须发 `steer_applied` 或 `steer_dropped`，被丢弃的消息同时从持久上下文省略，不能漏到下一轮。空闲引导仍拒绝，不宣称 `idle_start`；独立的 compaction 通知更新仍待补。
+
+本分支增加 ops-file opt-in：`[runtimes] pi = "runner"` 仅切换 Manager/Planner，默认 `"cli"`，启动读取一次；一个 runner、10 会话后 `CAPACITY`，provider env 拒绝、无 CLI fallback。隔离 serve、真实 CPA smoke 和 CLI/runner 对话评测的结果另记计划台账，未验证项不计通过；长上下文、长期内存/事件循环延迟、thinking 钳制和全部生产 schema 普查仍开放。
 
 ## 10. DSH 运行器（TypeScript）
 
@@ -731,7 +736,7 @@ v0 的告警进服务日志（固定事件名）和 system status 的标志；�
 | 阶段 | 卡片 | 完成标准（另加上面的通用标准） |
 |---|---|---|
 | **S0 协议与 Looper 一侧** | ① 协议说明、JSON Schema 与一致性测试（M）；② RunnerSupervisor：起停、放置、健康、重启（M）；③ 准入控制与整机名额：内存、健康、硬上限、`exec/acquire`、负载保护（M）；④ RunnerBridge 会话控制、RunnerSession、RunnerChannel、内部事件、trace（L）；⑤ `tools/call` 分派与共用的 100 KB 截断（S）；⑥ `budget/authorize`、provider 并发、对账（M）；⑦ 总线 `lease`/`ack`、两种新消息类型、投递与去重（M）；⑧ `llm_records` 的三列与日志字段（S）；⑨ 假运行器（M） | 第 15.1–15.3 节在假运行器上全绿；隔离服务上，假运行器（只在测试里登记的运行时类型）跑完一轮管家对话并调用平台工具；没有用户可见变化 |
-| **S1 Pi 运行器** | ① 运行器骨架：握手、版本门禁、会话表、读写、健康（M）；② `session/new`、`load` 与隔离：cwd、路径拦截、bash 的 `spawnHook`/`operations`、私有 agentDir、内存设置（L）；③ 包装 ModelRuntime：`authorize`、`request_end`、事件映射（M）；④ 平台工具代理、内联扩展、`skill_dir`（M）；⑤ 管家、规划者改由运行器承载，`pi` 类型切换（M）；⑥ 执行者、评审者：RunnerChannel、trace 内引导、取消、咨询分叉（L）；⑦ `WorkerPool` 的运行句柄抽象（M）；⑧ 验证、容量数字、评测、运行时卡（M）；⑨ 删除按轮起 CLI 的 Pi 路径（S） | 已安装的 pi 1.3.0 配假 provider 跑通四个角色、只读、用量、trace 内引导和取消；真实 Responses 烟测；与原 CLI 路径的评测对照；运行时卡截图一张 |
+| **S1 Pi 运行器**（本分支：①–④ 的核心路径及⑤ opt-in 已实现，验证结论见 §9.6；⑥–⑨ 未完成） | ① 运行器骨架：握手、版本门禁、会话表、读写、健康（M）；② `session/new`、`load` 与隔离：cwd、路径拦截、bash 的 `spawnHook`/`operations`、私有 agentDir、内存设置（L）；③ 包装 ModelRuntime：`authorize`、`request_end`、事件映射（M）；④ 平台工具代理、内联扩展、`skill_dir`（M）；⑤ 管家、规划者改由运行器承载，`pi` 类型切换（M）；⑥ 执行者、评审者：RunnerChannel、trace 内引导、取消、咨询分叉（L）；⑦ `WorkerPool` 的运行句柄抽象（M）；⑧ 验证、容量数字、评测、运行时卡（M）；⑨ 删除按轮起 CLI 的 Pi 路径（S） | 已安装的 pi 1.3.0 配假 provider 跑通四个角色、只读、用量、trace 内引导和取消；真实 Responses 烟测；与原 CLI 路径的评测对照；运行时卡截图一张 |
 | **S2 DSH 运行器** | ① 运行器骨架、一次 `runProfile`、兼容门禁（M）；② `agents.create`、`resume` 与 `setup`：工具、prompt section、guard、bash 执行器（L）；③ `llm/stream` 授权、用量、请求归属（M）；④ 常驻与运行两类角色、引导、取消、快照咨询（M）；⑤ 按 provider 绑定分运行器（S）；⑥ 验证、容量数字、DeepSeek 真实烟测（M）；⑦ 删除 CLI 的 DSH 路径（S） | 第 10.5 节的缺口逐项给出结论或保留为开放项；DeepSeek 真实烟测 |
 | **S3 Norma 运行器** | ① 上游：每会话收件箱与 trace 内引导，带测试（M）；② 上游：干净环境的 bash、子 agent 环境、`http.Client`、panic recover、任务目录清理、MCP cwd（M）；③ `api` 的 Python `AgentLoop` 移植同一收件箱（M）；④ Go 运行器：协议、会话 goroutine、读写、准入、健康（L）；⑤ 工具：路径包装、干净环境执行器、平台工具代理、Looper 摘要器，以及上游合入前的 `Compactor.Pre` 过渡引导（M）；⑥ provider 包装：`authorize` 与用量（S）；⑦ `norma` 运行时类型、Profile、registry、运行时卡（M）；⑧ 构建与发布二进制、`install.sh`（M）；⑨ 验证与三种运行器的容量对比（M） | 第 11.6 节的行为兼容表在同一个假服务上逐项核对；四个平台的安装烟测；三种运行器的容量对比写进本 RFC，替换第 5.3 节的暂定值 |
 | 之后 | WebSocket 远程运行器；外部 broker；Looper 拥有的中性历史（Norma 与 `api` 互换会话）；能力目录里的 MCP、扩展与 Pi package；按项目划分信任域；Go 版 Looper（loopgo）驱动同一套运行器 | 各自另立 RFC 或在本 RFC 补节 |
