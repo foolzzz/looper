@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.198] - 2026-10-28
+
+### Added
+
+- **Pi Workers, Reviewers and consults on the runner.** Under `[runtimes] pi = "runner"` (default `"cli"`, restart required) the opt-in now covers every Pi role. `RunnerChannel` runs one Worker, Reviewer or consult on a runner session as the run handle: a full runner (`CAPACITY`) or an unavailable one fails the step with a named reason, steers are never cancelled and answer accepted, rejected or unknown, and dropped steers reach the Planner as `missed_messages`. Runs get the CLI tool sets, `max_turns` as the request limit and the run timeout as the bash ceiling; consults fork a read-only (0400) copy of the run's saved session; the Pi CLI methods are refused under the opt-in. The generated ops file gains one comment line. ([#842](https://github.com/foolzzz/looper/pull/842))
+
 ## [2.13.197] - 2026-10-28
 
 ### Added
