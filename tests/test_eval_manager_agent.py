@@ -202,6 +202,7 @@ def test_switch_profile_check_uses_id_when_display_name_has_effort_suffix(
     ([{}], None, "fail"),  # No rows returned at all.
     ([{}], 0, "fail"),
     ([{}, {}], 1, "fail"),
+    ([{}, {}], [2], "fail"),  # A later answer to identical text cannot fill turn 1.
     ([{}, {}], 2, "pass"),
     ([{"code_only": True}], None, "pass"),
     ([{"code_only": True}, {"stop": True}, {"withdraw": True}, {}], 1, "pass"),
@@ -209,10 +210,18 @@ def test_switch_profile_check_uses_id_when_display_name_has_effort_suffix(
 def test_api_dialog_requires_completed_model_turns(steps, completed, outcome, monkeypatch):
     import asyncpg
 
+    asked = 0
+    model_steps = [i for i, flags in enumerate(steps, 1)
+                   if not (flags.get("code_only") or flags.get("stop") or flags.get("withdraw"))]
+    completed_steps = completed if isinstance(completed, list) else model_steps[:completed or 0]
+
     class Connection:
-        async def fetch(self, *_):
+        async def fetch(self, query, *_):
+            if "SELECT input_text" in query:
+                return [{"input_text": "step", "id": i} for i in completed_steps]
             return [] if completed is None else [{
-                "completed_turns": completed, "turns": completed, "stored_turns": completed,
+                "completed_turns": len(completed_steps), "turns": len(completed_steps),
+                "stored_turns": len(completed_steps),
                 "protocol": "openai-responses", "expected_protocol": "openai-responses", "has_items": True,
             }]
 
@@ -227,21 +236,86 @@ def test_api_dialog_requires_completed_model_turns(steps, completed, outcome, mo
             assert path == "/api/v1/tasks/page"
             return {"result": {"tasks": []}}
 
+    def ask(*_, **__):
+        nonlocal asked
+        asked += 1
+        return "ok"
+
     monkeypatch.setattr(asyncpg, "connect", connect)
-    monkeypatch.setattr(dialogs, "_newest_run", lambda *_: 0)
+    monkeypatch.setattr(dialogs, "_newest_run", lambda *_: asked)
     monkeypatch.setattr(dialogs, "_last_action", lambda *_: 0)
     monkeypatch.setattr(dialogs, "_trail", lambda *_: [])
     monkeypatch.setattr(dialogs, "_stop_leftovers", lambda *_: None)
-    monkeypatch.setattr(dialogs, "_ask", lambda *_, **__: "ok")
+    monkeypatch.setattr(dialogs, "_ask", ask)
     case = dialogs.Dialog("readback", tuple(dialogs.Say("step", lambda _: None, **flags) for flags in steps))
     row = dialogs.run_dialog(Api(), case, database_url="unused", project_id="p", scenarios=None,
                              mode="real", timeout=1, manager_profile={"runtime_type": "api"})
     assert row["outcome"] == outcome, row
     if outcome == "fail":
+        missing = next(i for i in model_steps if i not in completed_steps)
         assert row["problems"] == [
-            f"expected at least {len(steps)} completed API Manager turns, read back {completed or 0}"]
+            f"no completed API Manager record for user turn {missing}: 'step'"]
     else:
         assert row["problems"] == []
+
+
+@pytest.mark.parametrize("manager_runtime,switch_runtime,api_turns", [
+    ("api", "codex", [5]),
+    ("api", "api", [3, 5]),
+    ("api", None, [3, 5]),  # The default real switch retains the Manager runtime.
+    ("codex", "api", [3]),
+    ("codex", "codex", []),
+])
+def test_switch_dialog_requires_only_api_answered_user_turns(
+    manager_runtime, switch_runtime, api_turns, monkeypatch,
+):
+    import asyncpg
+
+    case = dialogs.select(["session_profile_switch"])[0]
+    # The profile behavior has its own checks; keep the actual switch points and readback here.
+    case = replace(case, says=tuple(replace(say, check=lambda _: None, text_from=None) for say in case.says))
+    reads = []
+    asked = 0
+
+    class Connection:
+        async def fetch(self, query, *_):
+            reads.append(query)
+            if "SELECT input_text" in query:
+                return [{"input_text": "[RESUME] Earlier context.\n\n" + case.says[i - 1].text, "id": i}
+                        for i in api_turns]
+            assert manager_runtime == "api", "retired API transcripts have no active API session"
+            return [{"completed_turns": len(api_turns), "turns": len(api_turns), "stored_turns": len(api_turns),
+                     "protocol": "openai-responses", "expected_protocol": "openai-responses", "has_items": True}]
+
+        async def close(self):
+            pass
+
+    async def connect(_):
+        return Connection()
+
+    def ask(*_, **__):
+        nonlocal asked
+        asked += 1
+        return "ok"
+
+    api = DialogApi()
+    post = api.post
+    monkeypatch.setattr(api, "post", lambda path, body: {"result": {"tasks": []}}
+                        if path == "/api/v1/tasks/page" else post(path, body))
+    monkeypatch.setenv("LOOPER_EVAL_API_KEY", "test-key")
+    monkeypatch.setattr(asyncpg, "connect", connect)
+    monkeypatch.setattr(dialogs, "_newest_run", lambda *_: asked)
+    monkeypatch.setattr(dialogs, "_last_action", lambda *_: 0)
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: [])
+    monkeypatch.setattr(dialogs, "_stop_leftovers", lambda *_: None)
+    monkeypatch.setattr(dialogs, "_ask", ask)
+    profile = {**api.registry["profiles"][0], "runtime_type": manager_runtime}
+    switch = json.loads(Path(f"evals/agents/{switch_runtime}-cpa.example.json").read_text()) if switch_runtime else None
+    row = dialogs.run_dialog(api, case, database_url="unused", project_id="p", scenarios=None,
+                             mode="real", timeout=1, manager_profile=profile, switch_spec=switch)
+    assert row["outcome"] == "pass", row
+    assert len(row["turns"]) == 5 and row["problems"] == []
+    assert bool(reads) == bool(api_turns)
 
 
 def test_cpa_eval_instructions_distinguish_measured_gate_results_from_pending_checks():

@@ -77,7 +77,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from looper.agents.ops import API_CHANNEL
 from looper.agents.tiers.manager import _looper_call
@@ -159,6 +159,7 @@ class Say:
     # The text computed from the previous turn's Look (``text`` is then only a label).
     text_from: Callable[[Look], str] | None = None
     code_only: bool = False  # Looper answers the step without calling the model (for example, /profile).
+    profile_after: Literal["switch", "settings"] | None = None  # A code-only session profile selection.
 
 
 @dataclass(frozen=True)
@@ -1771,10 +1772,10 @@ DIALOGS: tuple[Dialog, ...] = (
     ), seed=lambda api, project_id: _make_schedule(api, project_id)),
     Dialog("session_profile_switch", (
         Say("/profile", _profile_listed, code_only=True),
-        Say("/profile <number>", _switch_selected, text_from=_switch_text, code_only=True),
+        Say("/profile <number>", _switch_selected, text_from=_switch_text, code_only=True, profile_after="switch"),
         Say("记住暗号 TEAL-42。然后告诉我现在有几个项目。", _answered_on_the_switch_profile,
             (("looper_projects", {"action": "list"}),)),
-        Say("/profile 0", _follows_settings, code_only=True),
+        Say("/profile 0", _follows_settings, code_only=True, profile_after="settings"),
         Say("刚才的暗号是什么？", _remembered_after_switching_back, (("looper_projects", {"action": "list"}),)),
     ), seed=_make_switch_profile),
     Dialog("session_profile_ask", (
@@ -2153,16 +2154,35 @@ def _root_overrun(api: Api, seen: dict[int, float]) -> float:
             return sum(seen.values())
 
 
-def _api_session_check(database_url: str, agent: str, since: int, expected_turns: int) -> str | None:
-    """Completed API Manager turns in its current session must have protocol metadata and neutral history."""
+def _api_session_check(database_url: str, agent: str, since: int, expected_turns: list[tuple[int, str, int]], *,
+                       active_api: bool = True) -> str | None:
+    """Match each API user turn (number, text, preceding run id), then check the active API transcript."""
     import asyncpg
+
+    if not expected_turns:
+        return None
 
     async def read() -> str | None:
         conn = await asyncpg.connect(database_url)
         try:
-            # Profile switches retire old API transcripts. Count all completed API turns before selecting
-            # the current session, so a missing active session or transcript still fails.
-            # Earlier or interrupted items cannot fill a turn.
+            answers = await conn.fetch(
+                "SELECT input_text, id FROM llm_records WHERE agent_id = $1 AND id > $2 "
+                "AND status = 'completed' AND metadata->'profile'->'runtime'->>'type' = 'api' "
+                "AND NOT (metadata ? 'session_profile') "
+                "AND NOT coalesce((metadata->>'autonomous')::boolean, false) "
+                "AND input_text NOT LIKE '[HANDOFF]%' ORDER BY id", agent, since)
+            for offset, (number, text, before) in enumerate(expected_turns):
+                until = expected_turns[offset + 1][2] if offset + 1 < len(expected_turns) else None
+                # A resume brief or gate note precedes the user's message. The run boundaries keep
+                # a later answer to identical text from filling a missing earlier record.
+                if not any(row["id"] > before and (until is None or row["id"] <= until)
+                           and (row["input_text"] == text or row["input_text"].endswith("\n\n" + text))
+                           for row in answers):
+                    return f"no completed API Manager record for user turn {number}: {text!r}"
+            if not active_api:
+                return None  # Switching away retires the API transcript, but its answer records must survive.
+            # Profile switches retire old API transcripts. Validate the current session separately
+            # from the user-answer coverage above; internal turns still need neutral history here.
             rows = await conn.fetch(
                 "WITH completed AS ("
                 "SELECT r.session_id, metadata->'llm_model'->>'protocol' AS protocol, count(*) AS turns, "
@@ -2180,9 +2200,6 @@ def _api_session_check(database_url: str, agent: str, since: int, expected_turns
                 "LEFT JOIN api_sessions s USING (session_id) "
                 "LEFT JOIN api_session_items i ON i.session_id = s.session_id "
                 "GROUP BY t.turns, c.session_id, c.protocol, s.protocol, c.turns, c.has_items", agent, since)
-            completed_turns = int(rows[0]["completed_turns"]) if rows else 0
-            if completed_turns < expected_turns:
-                return f"expected at least {expected_turns} completed API Manager turns, read back {completed_turns}"
             for row in rows:
                 if not row["completed_turns"]:
                     continue
@@ -2213,7 +2230,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
     turns: list[dict[str, Any]] = []
     error: dict[str, Any] = {}
     problems: list[str] = []
-    expected_turns = 0
+    expected_turns: list[tuple[int, str, int]] = []
 
     overrun: dict[int, float] = {}
 
@@ -2243,6 +2260,10 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
         elif dialog.seed is not None:
             dialog.seed(api, project_id)
         api_manager = (manager_profile or {}).get("runtime_type") == "api"
+        api_turn = api_manager
+        last_model_api = api_manager
+        switch_api = (switch_spec["runtime"]["type"] == "api" if switch_spec is not None
+                      else api_manager and mode != "fake")
         agent = f"manager-{dialog.manager}" if dialog.manager else "manager"
         if api_manager or dialog.seed is _make_switch_profile or any(say.stop or say.withdraw for say in dialog.says):
             runs_since = _newest_run(api, agent)
@@ -2263,7 +2284,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
         # Setup uses audited operator operations too; only the dialog's actions belong to its checks.
         since = _last_action(database_url)
         previous: Look | None = None
-        for say in dialog.says:
+        for number, say in enumerate(dialog.says, 1):
             text = say.text_from(previous) if say.text_from and previous else say.text
             text = text.replace("<task>", task or "")
             if mode == "fake":
@@ -2272,14 +2293,20 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                     "<task>", task or ""))] for name, arguments in say.fake]
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             before = _last_action(database_url, agent)
+            expects_api = api_turn and not (say.code_only or say.stop or say.withdraw)
+            before_run = _newest_run(api, agent) if expects_api else 0
             if client_api is not None:
                 reply, conversation = _ask_client(client_api, api, conversation, text, timeout=timeout,
                                                   database_url=database_url, **budget_args)
             else:
                 reply = _ask(api, session, text, timeout=timeout, stop=say.stop, withdraw=say.withdraw,
                              database_url=database_url, manager=dialog.manager, **budget_args)
-            if not (say.code_only or say.stop or say.withdraw):
-                expected_turns += 1
+            if expects_api:
+                expected_turns.append((number, text, before_run))
+            if not (say.code_only or say.withdraw):
+                last_model_api = api_turn
+            if say.profile_after is not None:
+                api_turn = switch_api if say.profile_after == "switch" else api_manager
             previous = Look(api, task, reply, database_url, since, known, fake=mode == "fake",
                             runtime_root=runtime_root, registry_before=registry_before, runs_since=runs_since,
                             manager_id=agent if dialog.manager else None, conversation=conversation,
@@ -2295,8 +2322,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             if problem:
                 break
         check_budget()
-        if api_manager:
-            problem = _api_session_check(database_url, agent, runs_since, expected_turns)
+        if expected_turns:
+            problem = _api_session_check(database_url, agent, runs_since, expected_turns, active_api=last_model_api)
             if problem:
                 problems.append(problem)
     except SpendingCap as exc:
