@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.200] - 2026-10-28
+
+### Fixed
+
+- **The Pi runner accounts for every authorised model request exactly once.** A budget authorisation that is still pending when a turn is cancelled is now awaited, and an `allow` that arrives afterwards ends with one aborted `request_end` that sent nothing, before the turn settles. A request that was sent but failed before response headers now reports `complete=false` instead of complete zero usage, and a completed request reports usage only from validated terminal counts. ([#832](https://github.com/foolzzz/looper/pull/832))
+
 ## [2.13.199] - 2026-10-28
 
 ### Fixed
