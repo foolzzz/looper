@@ -547,12 +547,17 @@ class WorkerPool:
     async def _deliver_kill(self, envelope: MessageEnvelope) -> None:
         """Stop one running worker and tell the sender whether it was running."""
         assert self._bus is not None
+        wp = self._active.get(envelope.target.agent_id)
         killed = await self.kill(envelope.target.agent_id)
+        payload: dict[str, Any] = {"killed": killed}
+        # Cancellation releases the active entry; retain its handle until the runner has ended and reported drops.
+        if killed and wp is not None and wp.handle is not None and (missed := wp.handle.dropped_input()):
+            payload["missed_input"] = missed
         await self._bus.publish(MessageEnvelope.create(
             source=envelope.target,
             target=envelope.source,
             message_type=MessageType.KILL_WORK_RESULT,
-            payload={"killed": killed},
+            payload=payload,
             correlation_id=envelope.correlation_id,
             reply_to=envelope.message_id,
         ))
@@ -803,6 +808,12 @@ class WorkerPool:
             result = await self._execute(envelope, is_verify=is_verify, started_at=wp.since)
             wp.status = "completed"
             wp.result = result
+        except asyncio.CancelledError:
+            # A pool stop has no kill reply. Preserve dropped steers through the normal result path instead.
+            if self._running or wp.handle is None or not wp.handle.dropped_input():
+                raise
+            wp.status = "stopped"
+            wp.result = {"status": "stopped", "summary": "The worker pool stopped this run"}
         except asyncio.TimeoutError as exc:
             wp.status = "failed"
             wp.result = {"status": "failed", "error": str(exc) or "worker timeout"}
@@ -1065,6 +1076,8 @@ class WorkerPool:
                     if isinstance(handle, ProcessRun):
                         wp.process = handle.process
             except RunStartError as exc:
+                if hosted:
+                    await handle.end()
                 logger.error("worker %s failed to start run: %s", worker_id, exc)
                 error = f"Cannot start {runtime.label}: {exc}"
                 await recorder.finish(output_text=None, result_event=None, error=error,
