@@ -7,20 +7,26 @@ import hashlib
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from looper import ops_config as ops
 from looper.agents import serve
 from looper.agents.agent_settings import AgentType
+from looper.agents.bus import MessageBus
 from looper.agents.knowledge import AgentKnowledge
+from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
 from looper.agents.profile_registry import CatalogModel
 from looper.agents.runtimes import ADAPTERS, ApiProtocol, RuntimeUnsupported
 from looper.agents.runtimes.pi import KEY_ENV, PiRuntime, ResidentPi
 from looper.agents.runtimes import pi_runner
 from looper.agents.runtimes.pi_runner import PiRunnerRuntime
+from looper.agents.runtimes.runner.bridge import RpcFailure
+from looper.agents.runtimes.runner.protocol import ErrorCode, ProtocolError
 from looper.agents.runtimes.runner.session import Descriptor, RunnerSession
 from looper.agents.system_prompt_mode import SystemPromptMode
+from looper.agents.tiers.planner import PlannerAgent
 from tests.pi_runtime_support import KEY, launch, provider
 
 
@@ -210,3 +216,48 @@ def test_enable_installs_one_ten_session_supervisor(tmp_path, monkeypatch, versi
     assert seen["commands"]["pi"][0] == "/node" and seen["commands"]["pi"][-2:] == ["--pi", "/pi"]
     assert seen["env"] == {"pi": pi_runner.pi_command.ENV}
     assert seen["connect"] is pi_runner.pi_command.connect
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "provider_env", "capacity", "rpc", "oserror"])
+def test_planner_launch_failure_records_run_and_fails_task(tmp_path, monkeypatch, agent_db, runtime, failure):
+    adapter, executable = runtime
+    account = provider(env=(("HTTPS_PROXY", "private-provider-value"),)) if failure == "provider_env" else provider()
+    settings = launch(account).settings
+    settings = replace(settings, profile=replace(settings.profile,
+        runtime=replace(settings.profile.runtime, executable=executable)))
+    if failure == "unavailable":
+        adapter.unavailable = "the Pi runner requires node 22.19+ and pi on PATH"
+        expected = adapter.unavailable
+    elif failure == "provider_env":
+        expected = "provider's environment"
+    else:
+        error = {"capacity": ProtocolError(ErrorCode.CAPACITY),
+                 "rpc": RpcFailure({"code": ErrorCode.PROVIDER_UNAVAILABLE, "message": "runner open failed"}),
+                 "oserror": OSError("runner start failed")}[failure]
+        adapter.supervisor.acquire = AsyncMock(side_effect=error)
+        expected = str(error)
+
+    async def run():
+        agent = PlannerAgent(task_id="pi-failed-plan", runtime_root=tmp_path)
+        agent._bus = MessageBus(runtime_root=tmp_path)
+        monkeypatch.setattr(agent, "_load_agent_settings", AsyncMock(return_value=settings))
+        request = MessageEnvelope.create(source=TASK_ROUTER_ADDRESS, target=agent.agent_address,
+            message_type=MessageType.TASK_REQUEST,
+            payload={"requirement": "Inspect the project", "work_dir": str(tmp_path / "work")})
+        try:
+            await asyncio.wait_for(agent._handle(request), timeout=5)
+            assert agent_db.store.plans["pi-failed-plan"]["status"] == "failed"
+            assert [call.args[1] for call in agent_db.update_task_phase.await_args_list] == ["planning", "failed"]
+            status = agent._bus.get_queue(TASK_ROUTER_ADDRESS.agent_id).get_nowait()
+            assert status.message_type is MessageType.GOAL_STATUS and status.payload["status"] == "failed"
+            assert expected in status.payload["summary"]
+            (started,) = agent_db.start_record.await_args_list
+            assert started.kwargs["task_id"] == "pi-failed-plan"
+            assert started.kwargs["input_text"].startswith("[PLAN]")
+            (finished,) = agent_db.finish_record.await_args_list
+            assert finished.kwargs["status"] == "failed" and expected in finished.kwargs["error"]
+            assert "private-provider-value" not in str(finished.kwargs)
+        finally:
+            await agent._claude.stop()
+
+    asyncio.run(run())

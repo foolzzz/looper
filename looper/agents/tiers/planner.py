@@ -139,7 +139,9 @@ from ..log_redaction import redact
 from ..project_execution import LessonsMode, ProjectExecution, TaskBudgetAction, format_usd
 from ..run_usage import Usage
 from ..room import REF_MAX_CHARS, seat_key
-from ..runtimes import CLAUDE_CODE, InProcessTools, ReadOnly
+from ..runtimes import CLAUDE_CODE, InProcessTools, ReadOnly, RuntimeUnsupported
+from ..runtimes.runner.bridge import RpcFailure
+from ..runtimes.runner.protocol import ProtocolError as RunnerProtocolError
 from ..session_switch import SessionSwitch
 from ..step_workspaces import MergeError, MergeResult, Repo, StepWorkspace, StepWorkspaceState, Unusable
 from ..task_roles import RoleKind, TaskRole
@@ -3334,7 +3336,15 @@ class PlannerAgent:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:
             raise PlannerTurnError(f"cannot write the system prompt file: {exc}") from None
-        base = self._claude_command(prompt_file, settings, launch, plan.work_dir)
+        try:
+            base = self._claude_command(prompt_file, settings, launch, plan.work_dir)
+        except (OSError, RuntimeUnsupported) as exc:
+            error = f"cannot start {launch.runtime.label}: {exc}"
+            # A rejected launch has no command yet, but still belongs in this task's run history.
+            recorder = self._recorder(plan, message, _Process([], None, system_prompt, launch))
+            await recorder.start()
+            await recorder.finish(output_text=None, result_event=None, error=error)
+            raise PlannerTurnError(error) from None
         # The command carries the model, the effort, the installed items' directories (each named by its
         # content's hash) and the knowledge's; the file is named by its content's hash (the knowledge
         # index included), kept beside it all the same; the environment and the installed items are
@@ -3394,7 +3404,7 @@ class PlannerAgent:
                                          totals=plan.session_totals if plan.session_id else None,
                                          autonomous=self._autonomous_turns(plan, command, system_prompt, launch),
                                          price=launch.price)
-            except OSError as exc:
+            except (OSError, RuntimeUnsupported, RunnerProtocolError, RpcFailure) as exc:
                 error = f"cannot start {launch.runtime.label}: {exc}"
                 recorder = self._recorder(plan, f"{brief}\n\n{message}" if brief else message, process)
                 await recorder.start()
