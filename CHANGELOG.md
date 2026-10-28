@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.184] - 2026-10-28
+
+### Fixed
+
+- **The fake runner settles a turn exactly once when `session/close` follows its prompt.** `runners/fake/main.py` moves the settle step into `Fake.settle`, guarded by `Session.settled`, and `session/close` calls it after cancelling the turn, so a turn cancelled before its first step still sends one `settled` and the host's close wait completes. ([#807](https://github.com/foolzzz/looper/pull/807))
+
 ## [2.13.183] - 2026-10-27
 
 ### Changed
