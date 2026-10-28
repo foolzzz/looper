@@ -15,7 +15,7 @@ export type Turn = {
   steers: Steer[]; steerIds: Set<string>; forwarding: Promise<void>; initialUserEnded: boolean;
   lastRequestId: string | null; afterToolBatch: boolean;
 };
-type Steer = { message_id: string; text: string; forwarded: boolean; message?: any };
+type Steer = { message_id: string; text: string; forwarded: boolean; dropped?: boolean; message?: any };
 type Failure = { kind: string; message: string };
 async function within(promise: Promise<unknown>, ms: number): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout>;
@@ -92,22 +92,30 @@ function forwardSteers(record: Session, turn: Turn): void {
 }
 function dropSteers(record: Session, turn: Turn, reason: 'turn_ended' | 'cancelled' | 'session_closed'): void {
   record.agent.clearQueue();
-  for (const pending of turn.steers.splice(0)) {
+  for (const pending of [...turn.steers]) {
     if (pending.message) {
       // Queue removal cannot undo a steer already drained into SDK history. Persist
       // an omission too, because Pi rebuilds context from the session on later turns.
       const manager = record.agent.sessionManager;
       const entry = manager.getBranch().find((entry: any) => entry.type === 'message' && entry.message === pending.message);
-      if (entry) manager.appendContextEdit(entry.id, null);
+      if (entry) {
+        manager.appendContextEdit(entry.id, null);
+        turn.steers.splice(turn.steers.indexOf(pending), 1);
+      }
       record.agent.agent.state.messages = record.agent.messages.filter((message: any) => message !== pending.message);
     }
-    void update(record.id, turn.trace, 'steer_dropped', { message_id: pending.message_id, reason });
+    // Pi may have drained this steer before awaiting compaction, but append it only
+    // after abort. Keep tracking it until settlement can persist its context edit.
+    if (!pending.dropped) {
+      pending.dropped = true;
+      void update(record.id, turn.trace, 'steer_dropped', { message_id: pending.message_id, reason });
+    }
   }
 }
 export function steersSent(record: Session, turn: Turn, messages: any[]): void {
   for (const pending of [...turn.steers]) {
     // Pi clones messages for request-time context hooks, preserving content and timestamp.
-    if (!pending.message || !messages.some(message => message.role === 'user'
+    if (pending.dropped || !pending.message || !messages.some(message => message.role === 'user'
         && message.timestamp === pending.message.timestamp
         && JSON.stringify(message.content) === JSON.stringify(pending.message.content))) continue;
     turn.steers.splice(turn.steers.indexOf(pending), 1);

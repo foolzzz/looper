@@ -138,7 +138,7 @@ def bind_pi_turn(session, tools):
 
 
 @asynccontextmanager
-async def pi_session(tmp_path, api, tools):
+async def pi_session(tmp_path, api, tools, *, context_window=None):
     """Run the production resident-session path against a loopback model API."""
     from looper.agents.runtimes import ApiProtocol
     from looper.agents.runtimes.api.adapter import KEY_ENV
@@ -149,7 +149,7 @@ async def pi_session(tmp_path, api, tools):
     async with pi_supervisor(tmp_path) as supervisor:
         session = RunnerSession("manager", supervisor, "pi")
         descriptor = Descriptor("pi", "manager", "account", ApiProtocol.OPENAI_RESPONSES,
-            api.base_url, "test-model", None, None, str(prompt))
+            api.base_url, "test-model", None, context_window, str(prompt))
         try:
             await session.start(descriptor.to_argv(), cwd=str(tmp_path), signature=1,
                 env={KEY_ENV: api.api_key})

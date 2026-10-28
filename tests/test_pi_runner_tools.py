@@ -270,6 +270,68 @@ def test_steer_waits_for_request_send_and_cannot_leak_after_denial(tmp_path, mon
     run(exercise())
 
 
+@pytest.mark.parametrize("ending", ["cancel", "close"])
+def test_dropped_steer_is_omitted_after_aborted_compaction(tmp_path, ending):
+    async def exercise():
+        tool_gate, summary_gate = asyncio.Event(), asyncio.Event()
+        tools = Tools("x" * 100000, gate=tool_gate)
+        summary = answer("Checkpoint", gate=summary_gate)
+        scripts = [tool_reply(), summary, answer("Clean checkpoint"), answer("Next clean turn")]
+        async with FakeModelAPI(scripts, api_key=KEY) as api, pi_session(
+            tmp_path, api, tools, context_window=40000
+        ) as session:
+            events = []
+            task = asyncio.create_task(session.run_turn("Inspect tasks", events.append))
+            closing = None
+            try:
+                await tools.entered.wait()
+                queued = await session.steer(STEER, message_id="m1")
+                tool_gate.set()
+                await summary.gate_reached.wait()
+                assert len(api.requests) == 2
+                assert "summar" in api.requests[1].body["instructions"].lower()
+                native = [json.loads(line) for file in session._lease.state_dir.glob("*.jsonl")
+                    for line in file.read_text().splitlines()]
+                assert any(row.get("type") == "message" and row["message"]["role"] == "toolResult"
+                    for row in native)
+                assert STEER not in json.dumps(native)  # Drained, but not appended yet.
+                turn, lease = session._turn, session._lease
+                if ending == "close":
+                    closing = asyncio.create_task(lease.bridge.close_session(turn.session_id))
+                else:
+                    await lease.bridge.cancel_turn(turn.session_id, turn.trace_id)
+                result = await task  # Abort must unblock compaction without opening its gate.
+                assert not summary_gate.is_set()
+            finally:
+                tool_gate.set()
+                summary_gate.set()
+                await task
+                if closing is not None:
+                    await closing
+            assert result.result_event["runner"]["outcome"] == "cancelled"
+            notice, = steer_events(events)
+            assert notice["trace_id"] == queued["trace_id"]
+            assert notice["subtype"] == "steer_dropped" and notice["runner"]["message_id"] == "m1"
+            assert notice["runner"]["reason"] == ("session_closed" if ending == "close" else "cancelled")
+            assert events.index(notice) < next(i for i, e in enumerate(events) if e["type"] == "result")
+            native = [json.loads(line) for file in lease.state_dir.glob("*.jsonl")
+                for line in file.read_text().splitlines()]
+            steered, = [row for row in native if row.get("type") == "message"
+                and row["message"]["role"] == "user" and STEER in json.dumps(row["message"]["content"])]
+            edit, = [row for row in native if row.get("type") == "context_edit"
+                and row["targetId"] == steered["id"] and row["replacement"] is None]
+            assert native.index(edit) > native.index(steered)
+            if ending == "close":
+                assert (await lease.bridge.health())["sessions"] == 0
+                return
+            bind_pi_turn(session, tools)
+            assert not (await session.run_turn("Next turn", [].append)).result_event["is_error"]
+            assert len(api.requests) > 2
+            assert all(STEER not in json.dumps(request.body) for request in api.requests[2:])
+            assert any("Inspect tasks" in json.dumps(request.body) for request in api.requests[2:])
+    run(exercise())
+
+
 @pytest.mark.parametrize("ending", ["cancel", "close", "final-answer"])
 def test_steer_is_dropped_never_lost(tmp_path, ending):
     async def exercise():
