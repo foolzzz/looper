@@ -73,11 +73,10 @@ def test_custom_prompt_config_round_trip(monkeypatch: pytest.MonkeyPatch) -> Non
     run_db(run, monkeypatch)
 
 
-def test_custom_prompt_schema_upgrade_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_custom_prompt_default_and_second_start_preserves_custom_text(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.db import connection
 
     async def run(pool: Any) -> None:
-        await pool.execute("ALTER TABLE agent_profiles DROP COLUMN custom_prompt")
         await connection.ensure_schema(pool)
         assert await pool.fetchval("SELECT custom_prompt FROM agent_profiles LIMIT 1") == ""
         await pool.execute("UPDATE agent_profiles SET custom_prompt = 'CUSTOM'")

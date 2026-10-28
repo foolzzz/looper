@@ -13,6 +13,7 @@ import pytest
 
 from looper.db import channel_configs, chat, connection, managers
 from tests.db_support import DSN, fresh_schema, run_db
+from tests.bridge_schema_support import bridge_source as bridge_source, initialize_bridge
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -42,26 +43,17 @@ async def _put(pool: Any, chat_id: str = "7", manager_id: str = TARGET, channel_
         return await store.put_binding(channel_id, chat_id, manager_id, conn=conn)
 
 
-def test_schema_upgrade_preserves_existing_bot_and_transcript(tmp_path, monkeypatch):
-    source = connection.SCHEMA_PATH
-    sql = source.read_text(encoding="utf-8")
-    start = sql.index("-- Durable per-bot chat bindings and metadata (no routing is enabled here).")
-    end = sql.index("-- End durable chat storage.", start) + len("-- End durable chat storage.")
-    old_schema = tmp_path / "schema-before-chat-storage.sql"
-    old_schema.write_text(sql[:start] + sql[end:], encoding="utf-8")
-
+def test_schema_upgrade_preserves_existing_bot_and_transcript(bridge_source):
     async def run():
         async with fresh_schema() as pool:
-            monkeypatch.setattr(connection, "SCHEMA_PATH", old_schema)
-            await connection.ensure_schema(pool)
+            await initialize_bridge(pool, bridge_source, seed=False)
             await _seed(pool)
             await chat.save_message(session_id="telegram-7", message_id="message-one", role="user",
                                     content="Synthetic public example", channel="telegram", pool=pool)
             before = dict(await pool.fetchrow("SELECT * FROM channel_configs WHERE channel_id = $1", BOT))
-            monkeypatch.setattr(connection, "SCHEMA_PATH", source)
             await connection.ensure_schema(pool)
             after = dict(await pool.fetchrow("SELECT * FROM channel_configs WHERE channel_id = $1", BOT))
-            assert after.pop("bound_chats_only") is False
+            assert after["bound_chats_only"] is False
             assert after == before
             assert (await chat.list_messages("telegram-7", pool=pool))[0]["content"] == "Synthetic public example"
             for table in ("channel_seen_chats", "channel_unbound_chats"):

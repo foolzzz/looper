@@ -71,39 +71,6 @@ def test_agent_teams_are_on_by_default_for_claude_code_and_only_claude_code_take
     run_db(_test, monkeypatch)
 
 
-def test_the_upgrade_turns_agent_teams_on_once_for_every_claude_code_profile(monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.db.connection import ensure_schema
-
-    async def _test(pool: Any) -> None:
-        await _runtime("codex")
-        await pool.execute("INSERT INTO llm_providers (id, name, vendor_type, auth) "
-                           "VALUES ('prov-cpa', 'cpa', 'cpa', 'api_key')")
-        await pool.execute("INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url) "
-                           "VALUES ('prov-cpa', 'openai-responses', 'http://127.0.0.1:8317/v1')")
-        await pool.execute("INSERT INTO llm_models (id, provider_id, name, protocol) "
-                           "VALUES ('model-cpa-gpt', 'prov-cpa', 'gpt-5.5', 'openai-responses')")
-        # A database from before agent teams, with a profile on each runtime type.
-        await pool.execute("ALTER TABLE agent_profiles DROP COLUMN agent_teams; "
-                           "DELETE FROM schema_migrations WHERE name = 'agent_profiles_agent_teams_on'")
-        await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id) VALUES "
-                           "('agent-cc', 'cc/sonnet', 'rt-claude-code', (SELECT id FROM llm_models "
-                           "WHERE provider_id = 'prov-claude-subscription' AND name = 'sonnet')), "
-                           "('agent-cx', 'codex/gpt', 'rt-codex', 'model-cpa-gpt')")
-
-        async def teams() -> dict[str, bool]:
-            rows = await pool.fetch("SELECT name, agent_teams FROM agent_profiles")
-            return {r["name"]: r["agent_teams"] for r in rows}
-
-        await ensure_schema(pool)
-        assert await teams() == {"claude-code/opus": True, "cc/sonnet": True, "codex/gpt": False}
-        # Turned off since: a later start leaves it off.
-        await pool.execute("UPDATE agent_profiles SET agent_teams = false WHERE id = 'agent-cc'")
-        await ensure_schema(pool)
-        assert await teams() == {"claude-code/opus": True, "cc/sonnet": False, "codex/gpt": False}
-
-    run_db(_test, monkeypatch)
-
-
 async def _seen(role: str, task_id: str, root: Path) -> dict[str, Any]:
     """What ``role`` started its stand-in claude with (``argv``, ``env``), run the way the server runs it."""
     if role != "manager":

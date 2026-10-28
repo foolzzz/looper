@@ -14,7 +14,7 @@ from looper.agents.message import MessageEnvelope, MessageType, TASK_ROUTER_ADDR
 from looper.agents.run_usage import Usage
 from looper.agents.session_switch import session_lost
 from looper.agents.tiers.planner import PlannerAgent
-from looper.db import agent_sessions, connection, projects, schedules, tasks
+from looper.db import agent_sessions, projects, schedules, tasks
 from tests.db_support import DSN
 from tests.schedule_support import run_scheduled
 from tests.test_planner_agent import plan, step
@@ -307,25 +307,6 @@ def test_active_holder_is_not_stolen_and_handoff_replacement_survives_edits_and_
         assert (await _row(env, sid))["planner_session_task_id"] is None
         assert (await _row(env, sid))["planner_session_id"] == "replacement-session"
         assert (await schedules.claim_planner_session("task-replan"))["session_id"] == "replacement-session"
-
-    run_scheduled(test, monkeypatch, tmp_path)
-
-
-def test_migration_is_idempotent_and_keeps_saved_sessions(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    async def test(env: Any) -> None:
-        sid = (await env.schedule())["schedule_id"]
-        await _task(env, sid, "task-holder")
-        assert not await env.pool.fetchval("SELECT continues_schedule_session FROM tasks WHERE id = 'task-holder'")
-        assert (await _row(env, sid))["planner_session_id"] is None
-        await schedules.claim_planner_session("task-holder")
-        await _store("task-holder", "keep-me")
-        before = await _row(env, sid)
-        await connection.ensure_schema(env.pool)
-        await connection.ensure_schema(env.pool)
-        assert await _row(env, sid) == before
-        assert await env.pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name = 'schedule_planner_session'") == 1
 
     run_scheduled(test, monkeypatch, tmp_path)
 

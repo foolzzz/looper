@@ -15,21 +15,6 @@ from tests.db_support import DSN, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
-# The block an older binary runs at start (looper/db/schema.sql of v2.13.22).
-_OLD_SESSION_BLOCK = """
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint
-                   WHERE conname = 'agent_sessions_selected_profile_manager'
-                     AND conrelid = 'agent_sessions'::regclass) THEN
-        ALTER TABLE agent_sessions ADD CONSTRAINT agent_sessions_selected_profile_manager
-            CHECK (selected_profile_id IS NULL OR agent_id = 'manager');
-    END IF;
-END $$;
-"""
-_OLD_VIA_COLUMN = ("ALTER TABLE task_roles ADD COLUMN IF NOT EXISTS via TEXT NOT NULL DEFAULT 'planner' "
-                   "CONSTRAINT task_roles_via_check CHECK (via IN ('planner', 'user'))")
-
 
 async def _profile_id(pool: Any) -> str:
     return await pool.fetchval("SELECT id FROM agent_profiles WHERE builtin ORDER BY id LIMIT 1")
@@ -354,52 +339,5 @@ def test_template_write_vs_delete(monkeypatch: pytest.MonkeyPatch) -> None:
         await pool.release(conn)
         assert await asyncio.wait_for(deleting, 5) == "deleted"
         assert await pool.fetchval("SELECT count(*) FROM manager_task_templates WHERE manager_id = 'manager-yy'") == 0
-
-    run_db(body, monkeypatch)
-
-
-def test_upgraded_database(monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.db import agent_sessions, connection
-
-    async def definition(pool: Any, name: str) -> list[str]:
-        return await pool.fetch(
-            "SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = $1 "
-            "AND conrelid = to_regclass(current_schema() || '.' || $2)", name, "agent_sessions"
-            if name.startswith("agent_sessions") else "task_roles")
-
-    async def body(pool: Any) -> None:
-        await pool.execute("ALTER TABLE agent_sessions DROP CONSTRAINT agent_sessions_selected_profile_manager")
-        await pool.execute("ALTER TABLE agent_sessions ADD CONSTRAINT agent_sessions_selected_profile_manager "
-                           "CHECK (selected_profile_id IS NULL OR agent_id = 'manager')")
-        await pool.execute("ALTER TABLE task_roles DROP CONSTRAINT task_roles_via_check")
-        await pool.execute("ALTER TABLE task_roles ADD CONSTRAINT task_roles_via_check "
-                           "CHECK (via IN ('planner', 'user'))")
-        await connection.ensure_schema(pool)
-        rows = await definition(pool, "agent_sessions_selected_profile_manager")
-        assert len(rows) == 1 and "manager-%" in rows[0]["d"]
-        rows = await definition(pool, "task_roles_via_check")
-        assert len(rows) == 1 and "template" in rows[0]["d"]
-        profile = await _profile_id(pool)
-        await agent_sessions.select_profile("manager-xx", profile)
-        with pytest.raises(asyncpg.CheckViolationError):
-            await agent_sessions.select_profile("planner-t", profile)
-
-    run_db(body, monkeypatch)
-
-
-def test_downgrade_guard(monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.db import agent_sessions
-
-    async def body(pool: Any) -> None:
-        await agent_sessions.select_profile("manager-review", await _profile_id(pool))
-        await pool.execute(_OLD_SESSION_BLOCK)
-        definition = await pool.fetchval(
-            "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = "
-            "'agent_sessions_selected_profile_manager' AND conrelid = 'agent_sessions'::regclass")
-        assert "manager-%" in definition
-        await _task(pool, "t1")
-        await pool.execute("INSERT INTO task_roles (task_id, role_key, version, kind, role_prompt, via) "
-                           "VALUES ('t1', 'r', 1, 'work', 'p', 'template')")
-        await pool.execute(_OLD_VIA_COLUMN)
 
     run_db(body, monkeypatch)

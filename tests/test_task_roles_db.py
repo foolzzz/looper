@@ -345,59 +345,6 @@ def test_a_steps_roles_and_its_review_roles_are_saved_and_read_back(monkeypatch:
     run_db(test, monkeypatch)
 
 
-def test_a_v2_7_0_steps_one_review_role_becomes_a_list_of_one_and_its_columns_go(monkeypatch: pytest.MonkeyPatch,
-                                                                                 ) -> None:
-    """A step of a v2.7.0 database had one review role (``review_role_key``, ``review_role_required``,
-    ``review_role_version``) and its result one verdict (``role_review``): the schema makes each a list of one, keeps
-    which review a step in review waits for, and drops the columns and their constraint."""
-    from looper.db import steps
-    from looper.db.connection import ensure_schema
-
-    async def test(pool: Any) -> None:
-        project = await _project(pool)
-        await _task(pool, "task-a", "running", project)
-        await pool.execute("ALTER TABLE task_steps DROP CONSTRAINT task_steps_review_roles_reviewed, "
-                           "DROP COLUMN review_roles, DROP COLUMN review_position, "
-                           "ADD COLUMN review_role_key TEXT, "
-                           "ADD COLUMN review_role_required BOOLEAN NOT NULL DEFAULT true, "
-                           "ADD COLUMN review_role_version INTEGER, "
-                           "ADD CONSTRAINT task_steps_review_role_reviewed CHECK (review_role_key IS NULL OR review)")
-        verdict = {"role": "style", "version": 1, "passed": False, "findings": ["no docstring"], "summary": "no",
-                   "learnings": []}
-        for step_id, index, review_role, required, stage, result in (
-                ("step-a", 0, "style", False, "role", {"status": "completed", "role_review": verdict}),
-                ("step-b", 1, "security", True, "builtin", {"status": "completed"}),
-                ("step-c", 2, None, True, None, None)):
-            await pool.execute(
-                "INSERT INTO task_steps (id, task_id, step_index, step_key, instruction, review, status, result, "
-                "review_role_key, review_role_required, review_role_version, review_stage) VALUES ($1, 'task-a', $2, "
-                "$1, 'do it', $3, 'completed', $4::jsonb, $5, $6, $7, $8)", step_id, index, review_role is not None,
-                None if result is None else json.dumps(result), review_role, required,
-                1 if review_role else None, stage)
-
-        await ensure_schema(pool)
-
-        rows = {s["id"]: s for s in await steps.list_steps("task-a", pool=pool)}
-        assert (rows["step-a"]["review_roles"], rows["step-a"]["review_position"]) == (
-            [{"role": "style", "required": False, "version": 1}], 0)
-        assert rows["step-a"]["result"] == {"status": "completed", "role_reviews": [{**verdict, "required": False}]}
-        assert (rows["step-b"]["review_roles"], rows["step-b"]["review_position"]) == (
-            [{"role": "security", "required": True, "version": 1}], None)
-        assert rows["step-b"]["result"] == {"status": "completed"}
-        assert (rows["step-c"]["review_roles"], rows["step-c"]["result"]) == ([], None)
-        columns = {r["column_name"] for r in await pool.fetch(
-            "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() "
-            "AND table_name = 'task_steps'")}
-        assert not columns & {"review_role_key", "review_role_required", "review_role_version"}
-        constraints = {r["conname"] for r in await pool.fetch(
-            "SELECT conname FROM pg_constraint WHERE conrelid = to_regclass('task_steps')")}
-        assert "task_steps_review_roles_reviewed" in constraints
-        assert "task_steps_review_role_reviewed" not in constraints
-        await ensure_schema(pool)  # and again, a no-op
-
-    run_db(test, monkeypatch)
-
-
 def test_planning_anew_restores_the_roles_of_the_tasks_template(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.db import tasks
 

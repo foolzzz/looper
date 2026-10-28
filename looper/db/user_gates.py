@@ -322,12 +322,10 @@ async def record_post(message_id: int, task_id: str, state: str, *, error: str |
     async with pool.acquire() as conn, conn.transaction():
         if external_ids:
             bot = channel_id or (f"channel-{channel}" if channel else None)
-            # channel only for a built-in bot's posts: schema.sql, task_user_gate_posts_bot_key.
-            builtin = channel if bot == f"channel-{channel}" else None
             await conn.executemany(
                 "INSERT INTO task_user_gate_posts (message_id, task_id, channel, channel_id, chat, external_id) "
                 "VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
-                [(message_id, task_id, builtin, bot, chat, external_id) for external_id in external_ids])
+                [(message_id, task_id, channel, bot, chat, external_id) for external_id in external_ids])
         await conn.execute("UPDATE task_user_gate_messages SET post_state = $2, post_error = $3, "
                            "post_attempts = post_attempts + 1, post_retry_at = NULL WHERE id = $1",
                            message_id, state, error)

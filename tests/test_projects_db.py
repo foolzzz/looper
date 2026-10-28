@@ -1,9 +1,4 @@
-"""Projects against a real PostgreSQL: the backfill, CRUD and task creation.
-
-Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
-test works in a new schema of its own, dropped afterwards, so the backfill can
-start from a database that predates projects.
-"""
+"""Current projects, CRUD and task creation on disposable PostgreSQL."""
 
 from __future__ import annotations
 
@@ -18,96 +13,21 @@ from tests.db_support import DSN, fresh_schema
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
-# The tasks table as it was before projects.
-OLD_TASKS_TABLE = """
-CREATE TABLE tasks (
-    id                TEXT PRIMARY KEY,
-    requirement       TEXT NOT NULL,
-    goal_id           TEXT NOT NULL DEFAULT '',
-    status            TEXT NOT NULL DEFAULT 'pending',
-    phase             TEXT NOT NULL DEFAULT 'pending',
-    planner_id        TEXT,
-    correlation_id    TEXT NOT NULL DEFAULT '',
-    origin_channel_id TEXT NOT NULL DEFAULT '',
-    result_summary    TEXT,
-    error             TEXT,
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    completed_at      TIMESTAMPTZ,
-    work_dir          TEXT NOT NULL DEFAULT '',
-    config            JSONB NOT NULL DEFAULT '{}'
-)
-"""
 
-
-def _run(test: Callable[[Any], Awaitable[None]], *, old_tasks: bool = False) -> None:
+def _run(test: Callable[[Any], Awaitable[None]]) -> None:
     from looper.db.connection import ensure_schema
 
     async def _main() -> None:
         async with fresh_schema(max_size=2) as pool:
-            if old_tasks:
-                await pool.execute(OLD_TASKS_TABLE)
-            else:
-                await ensure_schema(pool)
+            await ensure_schema(pool)
             await test(pool)
 
     asyncio.run(_main())
 
 
-async def _projects_by_task(pool: Any) -> dict[str, tuple[str, str, str]]:
-    rows = await pool.fetch(
-        "SELECT t.id, p.id AS project_id, p.name, p.work_dir FROM tasks t JOIN projects p ON p.id = t.project_id"
-    )
-    return {r["id"]: (r["project_id"], r["name"], r["work_dir"]) for r in rows}
-
-
-def test_backfill_gives_every_old_task_a_project() -> None:
-    from looper.db.connection import ensure_schema
-
-    async def _test(pool: Any) -> None:
-        # Older directories keep the plain name; a clash, ignoring case, gets -2, -3, ...
-        for task_id, work_dir, hours_ago in [
-            ("task-a1", "/a/tetris", 5), ("task-e", "", 4), ("task-b", "/b/Tetris/", 3),
-            ("task-root", "/", 2), ("task-a2", "/a/tetris", 1),
-        ]:
-            await pool.execute(
-                "INSERT INTO tasks (id, requirement, work_dir, created_at) VALUES ($1, 'r', $2, now() - $3 * interval '1 hour')",
-                task_id, work_dir, hours_ago,
-            )
-
-        await ensure_schema(pool)
-
-        placed = await _projects_by_task(pool)
-        assert {task: (name, work_dir) for task, (_, name, work_dir) in placed.items()} == {
-            "task-a1": ("tetris", "/a/tetris"),
-            "task-a2": ("tetris", "/a/tetris"),
-            "task-e": ("default", ""),
-            "task-b": ("Tetris-2", "/b/Tetris/"),
-            "task-root": ("default-2", "/"),
-        }
-        assert placed["task-a1"][0] == placed["task-a2"][0]
-        assert await pool.fetchval("SELECT count(*) FROM projects") == 4
-        assert all(re.fullmatch(r"proj-[0-9a-f]{12}", project_id) for project_id, _, _ in placed.values())
-        nullable = await pool.fetchval(
-            "SELECT is_nullable FROM information_schema.columns "
-            "WHERE table_schema = current_schema() AND table_name = 'tasks' AND column_name = 'project_id'"
-        )
-        assert nullable == "NO"
-        assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name = 'tasks_project_backfill'") == 1
-
-        # Applying the schema again changes nothing.
-        projects = await pool.fetch("SELECT * FROM projects ORDER BY id")
-        await ensure_schema(pool)
-        assert await _projects_by_task(pool) == placed
-        assert await pool.fetch("SELECT * FROM projects ORDER BY id") == projects
-
-    _run(_test, old_tasks=True)
-
-
 def test_a_new_database_starts_with_no_projects() -> None:
     async def _test(pool: Any) -> None:
         assert await pool.fetchval("SELECT count(*) FROM projects") == 0
-        assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name = 'tasks_project_backfill'") == 1
 
     _run(_test)
 
@@ -218,31 +138,6 @@ def test_task_with_a_new_project_is_one_transaction(monkeypatch: pytest.MonkeyPa
     _run(_test)
 
 
-def test_background_column_is_added_to_an_existing_projects_table() -> None:
-    from looper.db.connection import ensure_schema
-
-    async def _main() -> None:
-        async with fresh_schema(max_size=2) as pool:
-            # A database from before backgrounds, holding a project.
-            await ensure_schema(pool)
-            await pool.execute("ALTER TABLE projects DROP COLUMN background")
-            await pool.execute("INSERT INTO projects (id, name) VALUES ('proj-old', 'old')")
-
-            await ensure_schema(pool)
-
-            column = await pool.fetchrow(
-                "SELECT data_type, is_nullable, column_default FROM information_schema.columns "
-                "WHERE table_schema = current_schema() AND table_name = 'projects' AND column_name = 'background'"
-            )
-            assert column is not None
-            assert (column["data_type"], column["is_nullable"], column["column_default"]) == ("text", "NO", "''::text")
-            assert await pool.fetchval("SELECT background FROM projects WHERE id = 'proj-old'") == ""
-            await ensure_schema(pool)  # applying the schema again changes nothing
-            assert await pool.fetchval("SELECT count(*) FROM projects") == 1
-
-    asyncio.run(_main())
-
-
 def test_background_round_trips_and_is_read_through_the_task() -> None:
     from looper.db import projects, tasks
 
@@ -306,39 +201,6 @@ def test_execution_settings_are_stored_through_the_task_and_cleared() -> None:
         assert plain["distill_lessons"] == "off"  # never unset
         with pytest.raises(asyncpg.CheckViolationError):  # the table refuses what validation would
             await projects.update_project(plain["id"], execution={"review_policy": "some"}, pool=pool)
-
-    _run(_test)
-
-
-def test_distill_lessons_from_before_the_modes_becomes_write_or_off() -> None:
-    """The boolean from before the three modes: true becomes write, false and NULL off; new projects are off."""
-    import asyncpg
-
-    from looper.db.connection import ensure_schema
-
-    async def _modes(pool: Any) -> dict[str, str]:
-        return {r["id"]: r["distill_lessons"] for r in await pool.fetch("SELECT id, distill_lessons FROM projects")}
-
-    async def _test(pool: Any) -> None:
-        # The column as it was before the modes.
-        await pool.execute("DELETE FROM schema_migrations WHERE name = 'distill_lessons_modes'")
-        await pool.execute("ALTER TABLE projects DROP COLUMN distill_lessons")
-        await pool.execute("ALTER TABLE projects ADD COLUMN distill_lessons BOOLEAN")
-        for project_id, value in [("proj-on", True), ("proj-off", False), ("proj-unset", None)]:
-            await pool.execute("INSERT INTO projects (id, name, distill_lessons) VALUES ($1, $1, $2)", project_id, value)
-
-        await ensure_schema(pool)
-
-        assert await _modes(pool) == {"proj-on": "write", "proj-off": "off", "proj-unset": "off"}
-        await pool.execute("INSERT INTO projects (id, name) VALUES ('proj-new', 'new')")
-        await pool.execute("UPDATE projects SET distill_lessons = 'draft' WHERE id = 'proj-off'")
-        for value, refused in [("on", asyncpg.CheckViolationError), (None, asyncpg.NotNullViolationError)]:
-            with pytest.raises(refused):
-                await pool.execute("UPDATE projects SET distill_lessons = $1 WHERE id = 'proj-new'", value)
-
-        # Applying the schema again changes nothing.
-        await ensure_schema(pool)
-        assert await _modes(pool) == {"proj-on": "write", "proj-off": "draft", "proj-unset": "off", "proj-new": "off"}
 
     _run(_test)
 

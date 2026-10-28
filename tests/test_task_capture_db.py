@@ -1,11 +1,7 @@
-"""The task journal's kinds and the Manager's recent chats in a real PostgreSQL (M7c).
+"""The task journal's current kinds and the Manager's recent chats on disposable PostgreSQL.
 
-Every kind an entry can have is saved with the change it records and read
-back in order, an entry of the whole task without a step; a journal from
-before M7c, whose check held ``step_accepted`` alone, accepts the other kinds
-after one migration. The Manager's new sessions read the recent chats from
-the stored chat messages, never a task's Planner thread. Runs only when
-LOOPER_TEST_DATABASE_URL points at a disposable database.
+Every kind is saved with its change and read back in order. The Manager's new
+sessions read stored chat messages, never a task's Planner thread.
 """
 
 from __future__ import annotations
@@ -50,32 +46,6 @@ def test_every_kind_is_saved_and_read_back_in_order(monkeypatch: pytest.MonkeyPa
         with pytest.raises(asyncpg.CheckViolationError):
             await plans.save("task-a", journal=[{"step_id": "", "kind": "rumor", "summary": "", "learnings": []}],
                              pool=pool)
-
-    run_db(test, monkeypatch)
-
-
-def test_a_journal_from_before_takes_the_new_kinds_after_one_migration(monkeypatch: pytest.MonkeyPatch) -> None:
-    import asyncpg
-
-    from looper.db import connection, plans
-
-    decision = [{"step_id": "", "kind": "decision", "summary": "replan", "learnings": []}]
-
-    async def test(pool: Any) -> None:
-        await _task(pool)
-        await pool.execute("""
-            ALTER TABLE task_journal DROP CONSTRAINT task_journal_kind_check;
-            ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN ('step_accepted'));
-            DELETE FROM schema_migrations WHERE name = 'task_journal_kinds_m7c';
-        """)
-        with pytest.raises(asyncpg.CheckViolationError):
-            await plans.save("task-a", journal=decision, pool=pool)
-        await connection.ensure_schema(pool)
-        await plans.save("task-a", journal=decision, pool=pool)
-        await connection.ensure_schema(pool)  # once only
-        assert await pool.fetchval(
-            "SELECT count(*) FROM schema_migrations WHERE name = 'task_journal_kinds_m7c'") == 1
-        assert await pool.fetchval("SELECT count(*) FROM task_journal") == 1
 
     run_db(test, monkeypatch)
 

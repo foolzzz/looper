@@ -1,4 +1,4 @@
-"""Target registry constraints, legacy upgrades and version guards on disposable PostgreSQL."""
+"""Target registry constraints and bridge-only version guards on disposable PostgreSQL."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def test_fresh_target_schema_and_second_initialization() -> None:
     async def test(conn: asyncpg.Connection) -> None:
         assert await connection.schema_change_pending(conn) is False
         await connection.ensure_schema(conn)
-        assert await conn.fetchval("SELECT version FROM registry_schema_version") == 3
+        assert await conn.fetchval("SELECT version FROM registry_schema_version") == 4
         columns = await conn.fetch("SELECT table_name, column_name FROM information_schema.columns "
                                    "WHERE table_schema = current_schema()")
         profile = {r['column_name'] for r in columns if r['table_name'] == 'agent_profiles'}
@@ -187,32 +187,8 @@ def test_migration_map_is_a_snapshot_without_live_foreign_keys() -> None:
 
     _run(test)
 
-
-def test_historical_profile_mode_cleanup_preserves_role_and_task_modes() -> None:
-    async def test(conn: asyncpg.Connection) -> None:
-        await conn.execute("ALTER TABLE agent_profiles ADD COLUMN system_prompt_mode TEXT; "
-                           "UPDATE agent_profiles SET system_prompt_mode = 'replace'; "
-                           "INSERT INTO agent_setting_layers (scope, role, system_prompt_mode) "
-                           "VALUES ('role', 'worker', 'append'); "
-                           "INSERT INTO projects (id, name) VALUES ('proj-test', 'test'); "
-                           "INSERT INTO tasks (id, requirement, project_id) VALUES ('task-test', 'test', 'proj-test'); "
-                           "INSERT INTO task_system_prompt_modes (task_id, role, system_prompt_mode) "
-                           "VALUES ('task-test', 'worker', 'replace')")
-        await connection.ensure_schema(conn)
-        assert not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM information_schema.columns "
-                                       "WHERE table_schema = current_schema() AND table_name = 'agent_profiles' "
-                                       "AND column_name = 'system_prompt_mode')")
-        roles = await conn.fetch("SELECT role, system_prompt_mode FROM agent_setting_layers ORDER BY role")
-        assert [tuple(row) for row in roles] == [('reviewer', 'replace'), ('worker', 'append')]
-        assert await conn.fetchval("SELECT system_prompt_mode FROM task_system_prompt_modes "
-                                   "WHERE task_id = 'task-test' AND role = 'worker'") == 'replace'
-        await connection.ensure_schema(conn)
-        assert await conn.fetch("SELECT role, system_prompt_mode FROM agent_setting_layers ORDER BY role") == roles
-
-    _run(test)
-
-
-def test_v2_forward_guard_accepts_its_own_version_and_empty_marker_is_refused() -> None:
+@pytest.mark.parametrize('entry', ['ensure_schema', 'schema_change_pending'])
+def test_v2_forward_guard_accepts_its_own_version_and_empty_marker_is_refused(entry: str) -> None:
     async def test(conn: asyncpg.Connection) -> None:
         await conn.execute("CREATE TABLE registry_schema_version (id BOOLEAN PRIMARY KEY CHECK(id), "
                            "version INTEGER NOT NULL CHECK(version > 0)); "
@@ -220,7 +196,7 @@ def test_v2_forward_guard_accepts_its_own_version_and_empty_marker_is_refused() 
         assert await connection.check_registry_schema_version(conn, supported_version=2) == 2
         await conn.execute("DELETE FROM registry_schema_version")
         with pytest.raises(connection.RegistrySchemaVersionError, match='missing'):
-            await connection.ensure_schema(conn)
+            await getattr(connection, entry)(conn)
         assert await conn.fetchval("SELECT to_regclass('schema_migrations')") is None
 
     _run(test, initialize=False)
@@ -249,7 +225,7 @@ def test_forward_guard_rejects_v3_before_ddl_with_v2_support(entry: str, monkeyp
 
 @pytest.mark.parametrize('version', [None, 2])
 @pytest.mark.parametrize('entry', ['ensure_schema', 'schema_change_pending'])
-def test_legacy_upgrade_applies_and_pending_check_is_read_only(version: int | None, entry: str) -> None:
+def test_pre_bridge_database_is_refused_without_mutation(version: int | None, entry: str) -> None:
     async def test(conn: asyncpg.Connection) -> None:
         await conn.execute((Path(__file__).parent / 'fixtures' / 'schema_v2_6_0.sql').read_text())
         if version is not None:
@@ -257,22 +233,12 @@ def test_legacy_upgrade_applies_and_pending_check_is_read_only(version: int | No
                                "version INTEGER NOT NULL CHECK(version > 0)); "
                                "INSERT INTO registry_schema_version VALUES (TRUE, 2)")
         before = await conn.fetch("SELECT * FROM llm_providers ORDER BY id")
-        if entry == 'schema_change_pending':
-            assert await connection.schema_change_pending(conn) is True
-            assert await conn.fetch("SELECT * FROM llm_providers ORDER BY id") == before
-            assert await conn.fetchval("SELECT to_regclass('agents') IS NOT NULL")
-            for table in ('llm_models', 'llm_provider_endpoints', 'llm_model_migration_map', 'schema_fingerprint'):
-                assert await conn.fetchval('SELECT to_regclass($1)', table) is None
-            if version is None:
-                assert await conn.fetchval("SELECT to_regclass('registry_schema_version')") is None
-            else:
-                assert await conn.fetchval("SELECT version FROM registry_schema_version") == version
-        else:
-            await connection.ensure_schema(conn)
-            assert await conn.fetchval("SELECT version FROM registry_schema_version") == 3
-            row = await conn.fetchrow("SELECT m.provider_id, m.name, m.protocol FROM agent_profiles p "
-                                      "JOIN llm_models m ON m.id = p.model_id WHERE p.id = 'agent-claude-code-opus'")
-            assert tuple(row) == ('prov-claude-subscription', 'opus', 'anthropic-messages')
-            assert await connection.schema_change_pending(conn) is False
+        with pytest.raises(connection.RegistrySchemaVersionError, match=r'v2\.13\.165'):
+            await getattr(connection, entry)(conn)
+        assert await conn.fetch("SELECT * FROM llm_providers ORDER BY id") == before
+        assert await conn.fetchval("SELECT to_regclass('agents') IS NOT NULL")
+        for table in ('llm_models', 'llm_provider_endpoints', 'llm_model_migration_map', 'schema_fingerprint'):
+            assert await conn.fetchval('SELECT to_regclass($1)', table) is None
+        assert await conn.fetchval("SELECT to_regclass('registry_schema_version') IS NOT NULL") == (version is not None)
 
     _run(test, initialize=False)

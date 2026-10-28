@@ -148,9 +148,9 @@ def test_a_task_asked_for_in_a_lark_group_tells_the_group_and_its_requester(
     run_db(test, monkeypatch)
 
 
-def test_the_tasks_from_before_groups_keep_who_they_tell(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_explicit_current_notification_targets_keep_who_they_tell(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.agents.task_notice import NotifyTarget, TargetKind
-    from looper.db import connection, tasks
+    from looper.db import tasks
 
     async def test(pool: Any) -> None:
         project = await _project(pool)
@@ -158,12 +158,11 @@ def test_the_tasks_from_before_groups_keep_who_they_tell(monkeypatch: pytest.Mon
                                        ("task-tele0000001", "channel-telegram", "-1001234"),
                                        ("task-web00000001", "channel-web", None)):
             await tasks.create_task(task_id=task_id, requirement="r", project_id=project["id"], pool=pool,
-                                    origin_channel_id=channel, chat_id=chat)
-        await pool.execute("ALTER TABLE tasks DROP COLUMN chat_kind")
-        await connection.ensure_schema(pool)
+                                    origin_channel_id=channel, chat_id=chat,
+                                    chat_kind="user" if channel == "channel-lark" else "chat" if chat else None)
         targets = {task_id: NotifyTarget.from_columns(await tasks.get_task(task_id, pool=pool))
                    for task_id in ("task-lark0000001", "task-tele0000001", "task-web00000001")}
-        # A Lark task told its sender, a Telegram task its chat; a web task, nobody.
+        # A Lark task tells its sender, a Telegram task its chat; a web task, nobody.
         assert targets == {"task-lark0000001": NotifyTarget(TargetKind.USER, "ou_1"),
                            "task-tele0000001": NotifyTarget(TargetKind.CHAT, "-1001234"),
                            "task-web00000001": None}

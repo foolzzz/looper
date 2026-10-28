@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 from tests.db_support import DSN, fresh_schema
-from tests.test_catalog_db import _call, _Writer
+from tests.test_catalog_db import _call
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -474,19 +474,19 @@ def test_a_preview_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     asyncio.run(_test())
 
 
-def test_an_import_leaves_a_schema_about_to_change_to_serve(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Applying the newer schema drops columns; ``looper serve`` backs the database up before it does."""
+def test_an_import_refuses_an_unrecognized_schema_without_writes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The import shares the startup admission gate and never repairs unknown schemas."""
     async def _test() -> None:
         async with _installation() as (_, source_url), _installation() as (target, target_url):
             exported = tmp_path / "config.json"
             assert (await _transfer_file(source_url, "export", str(exported)))[0] == 0
-            await target.execute("UPDATE schema_fingerprint SET sha256 = 'an older schema.sql'")
-            await target.execute("ALTER TABLE role_configs ADD COLUMN permission_mode TEXT")
+            await target.execute("UPDATE registry_schema_version SET version = 3; "
+                                 "UPDATE schema_fingerprint SET sha256 = 'an older schema.sql'")
             before = await _rows(target)
 
             code, _, err = await _transfer_file(target_url, "import", str(exported), apply=True)
 
-            assert code == 1 and "start `looper serve` once" in err, err
+            assert code == 1 and "v2.13.165" in err, err
             assert await _rows(target) == before
             assert await target.fetchval("SELECT sha256 FROM schema_fingerprint") == "an older schema.sql"
 

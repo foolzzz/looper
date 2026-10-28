@@ -140,15 +140,8 @@ def test_config_import_rejects_incompatible_runtime_model_and_effort(
 
 
 @needs_db
-def test_existing_database_upgrades_profile_efforts_for_pi(monkeypatch):
+def test_current_profiles_accept_pi_efforts_only_for_pi(monkeypatch):
     async def test(pool):
-        # Recreate the pre-pi constraint and migration state on this disposable schema.
-        await pool.execute("ALTER TABLE agent_profiles DROP CONSTRAINT agent_profiles_effort_check; "
-                           "ALTER TABLE agent_profiles ADD CONSTRAINT agent_profiles_effort_check "
-                           "CHECK (effort IN ('low', 'medium', 'high', 'xhigh', 'max')); "
-                           "DELETE FROM schema_migrations WHERE name = 'profile_runtime_effort_levels'")
-        await connection.ensure_schema(pool)
-        await connection.ensure_schema(pool)
         await pool.execute("INSERT INTO agent_runtimes (id, name, type, executable, capabilities) "
                            "VALUES ('rt-pi', 'pi', 'pi', 'pi', '{}')")
         mid = (await service.create_model(_body(protocol="openai-chat")))["model"]["model_id"]

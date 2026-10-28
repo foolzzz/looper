@@ -157,36 +157,13 @@ def test_a_row_moves_from_a_previous_default(role: str, before: str) -> None:
     assert asyncio.run(_run()) == [(new, new), (new, new), (edited, new)]
 
 
-def test_permission_mode_is_dropped_and_an_update_that_sends_it_still_applies() -> None:
-    """No role ever applied permission_mode (all run with --dangerously-skip-permissions): the startup
-    schema drops the column, also from a database that still has it, and an update from an older
-    dashboard that still sends the field changes the rest."""
-    import asyncpg
-
+def test_current_role_max_turns_updates() -> None:
     from looper.db import role_configs
-    from looper.db.connection import ensure_schema
+    from tests.db_support import run_db
 
-    role = f"test-role-{uuid.uuid4().hex[:8]}"
+    async def run(pool) -> None:
+        await role_configs.seed_defaults([{"role": "test-current"}], pool=pool)
+        updated = await role_configs.set_config("test-current", {"max_turns": 7}, pool=pool)
+        assert updated["max_turns"] == 7
 
-    async def _columns(pool: asyncpg.Pool) -> set[str]:
-        rows = await pool.fetch("SELECT column_name FROM information_schema.columns "
-                                "WHERE table_schema = current_schema() AND table_name = 'role_configs'")
-        return {row["column_name"] for row in rows}
-
-    async def _run() -> None:
-        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
-        try:
-            await pool.execute("ALTER TABLE IF EXISTS role_configs ADD COLUMN IF NOT EXISTS permission_mode TEXT")
-            await ensure_schema(pool)
-            await ensure_schema(pool)  # idempotent
-            assert "permission_mode" not in await _columns(pool)
-
-            await role_configs.seed_defaults([{"role": role}], pool=pool)
-            updated = await role_configs.set_config(
-                role, {"permission_mode": "plan", "max_turns": 7}, pool=pool)
-            assert updated["max_turns"] == 7 and "permission_mode" not in updated
-        finally:
-            await pool.execute("DELETE FROM role_configs WHERE role = $1", role)
-            await pool.close()
-
-    asyncio.run(_run())
+    run_db(run)
