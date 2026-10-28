@@ -10,7 +10,9 @@ export function endRequest(record: Session, turn: Turn, id: string, status: stri
   if (turn.settled || !turn.inflight.delete(id)) return;
   turn.ended++;
   turn.complete &&= complete;
-  void update(record.id, turn.trace, 'request_end', { request_id: id, request_kind: 'turn', model: record.model,
+  const kind = turn.requestKinds?.get(id) ?? 'turn';
+  turn.requestKinds?.delete(id);
+  void update(record.id, turn.trace, 'request_end', { request_id: id, request_kind: kind, model: record.model,
     status, input_uncached: usage?.input ?? 0, output: usage?.output ?? 0,
     cache_read: usage?.cacheRead ?? 0, cache_write: usage?.cacheWrite ?? 0, reasoning: null, complete });
   if (!turn.inflight.size) turn.drained?.();
@@ -22,8 +24,10 @@ export async function authorizingStream(record: Session, model: any, context: an
     throw new Error('model request has no active turn');
   }
   const id = `q-${++counter}`;
+  const kind = turn.compacting ? 'compaction' : turn.retryPending ? 'retry' : 'turn';
+  turn.retryPending = false;
   const authorization = await request('budget/authorize', { session_id: record.id, trace_id: turn.trace,
-    request_id: id, kind: 'turn', estimated_input_tokens: Math.ceil(JSON.stringify(context).length / 4),
+    request_id: id, kind, estimated_input_tokens: Math.ceil(JSON.stringify(context).length / 4),
     max_output_tokens: options.maxTokens ?? model.maxTokens ?? 32000,
     provider: record.accountId, model: record.model }, { signal: options.signal }) as { allow: boolean; reason?: string };
   if (!authorization.allow) {
@@ -32,6 +36,7 @@ export async function authorizingStream(record: Session, model: any, context: an
     throw new Error(`Looper denied this model request (${turn.denial})`);
   }
   turn.inflight.add(id);
+  (turn.requestKinds ??= new Map()).set(id, kind);
   const output = sdk!.ai.createAssistantMessageEventStream();
   let started = false, hasUsage = false, status: number | undefined;
   turn.httpStatus = undefined;

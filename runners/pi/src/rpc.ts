@@ -98,9 +98,10 @@ function dispatch(value: unknown): void {
         } });
       }
     };
-    const sessionKey = name === 'session/new' ? params.session_key : params.session_id;
+    const composing = name === 'session/new' || name === 'session/load';
+    const sessionKey = composing ? params.session_key : params.session_id;
     if (registered?.session && typeof sessionKey === 'string') {
-      const sid = `${name === 'session/new' ? 'key' : 'id'}:${sessionKey}`;
+      const sid = `${composing ? 'key' : 'id'}:${sessionKey}`;
       const next = (chains.get(sid) ?? Promise.resolve()).then(execute);
       chains.set(sid, next);
       void next.finally(() => { if (chains.get(sid) === next) chains.delete(sid); });

@@ -10,7 +10,8 @@ clean = rpc.scrub;
 format = (await import('node:util')).format;
 const { monitorEventLoopDelay } = await import('node:perf_hooks');
 const { load } = await import('./sdk.ts');
-const { sessions, newSession, closeSession } = await import('./session.ts');
+const { sessions, newSession, loadSession, closeSession } = await import('./session.ts');
+const { toolProcesses } = await import('./exec.ts');
 const { prompt, cancel } = await import('./turn.ts');
 const args = process.argv.slice(2);
 if (args.length !== 2 || args[0] !== '--pi' || !args[1]) {
@@ -38,11 +39,12 @@ rpc.method('initialize', async params => {
     } };
 });
 rpc.method('session/new', newSession, { session: true });
+rpc.method('session/load', loadSession, { session: true });
 rpc.method('session/close', closeSession, { session: true });
 rpc.method('session/prompt', prompt, { session: true });
 rpc.method('session/cancel', cancel, { session: true });
 rpc.method('runner/health', () => ({ sessions: sessions.size,
   running: [...sessions.values()].filter(r => r.turn && !r.turn.settled).length,
-  inflight_requests: [...sessions.values()].reduce((n, r) => n + (r.turn?.inflight.size ?? 0), 0), tool_processes: 0,
+  inflight_requests: [...sessions.values()].reduce((n, r) => n + (r.turn?.inflight.size ?? 0), 0), tool_processes: toolProcesses(),
   rss_bytes: process.memoryUsage().rss, event_loop_lag_ms: Math.ceil(delay.percentile(99) / 1e6) }));
 rpc.start();
