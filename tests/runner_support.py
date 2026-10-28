@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import time
+from typing import Literal
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,9 +119,11 @@ async def _bootstrap(port: int, runtime_root: Path, work_dir: Path) -> None:
             raise
         return bridge
 
-    supervisor = RunnerSupervisor(runtime_root,
-        {"fake": [sys.executable, "-u", str(ROOT / "runners/fake/main.py")]}, connect=connect)
-    _register(supervisor)
+    supervisor = None
+    if os.environ.get("PYTEST_LOOPER_RUNNER", "fake") == "fake":
+        supervisor = RunnerSupervisor(runtime_root,
+            {"fake": [sys.executable, "-u", str(ROOT / "runners/fake/main.py")]}, connect=connect)
+        _register(supervisor)
 
     async def no_bots():
         return []
@@ -134,14 +137,15 @@ async def _bootstrap(port: int, runtime_root: Path, work_dir: Path) -> None:
     ops = ops_config.load(ops_config.Flags(runtime_root=runtime_root, host="127.0.0.1", port=port))
     _disposable_url(ops.database_url)
     serve._configure_logging("info")
+    kwargs = {"runner_supervisor": supervisor} if supervisor is not None else {}
     await serve._run_agent_system(ops=ops, runtime_root=runtime_root,
-                                 work_dir=work_dir, skip_backup=True, runner_supervisor=supervisor)
+                                 work_dir=work_dir, skip_backup=True, **kwargs)
 
 
 @contextmanager
 def serving(*, database_url: str, runtime_root: Path, home: Path, work_dir: Path,
-            log_path: Path, startup_timeout: float = 45):
-    """Run the real serve system with exactly one test-owned runner supervisor."""
+            log_path: Path, startup_timeout: float = 45, runner: Literal["fake", "pi"] = "fake"):
+    """Run the real serve system with a fake peer or the production Pi opt-in."""
     _disposable_url(database_url)
     runtime_root, home, work_dir = (Path(p).absolute() for p in (runtime_root, home, work_dir))
     for directory in (runtime_root, home, work_dir):
@@ -150,12 +154,18 @@ def serving(*, database_url: str, runtime_root: Path, home: Path, work_dir: Path
     assert port != 8767
     ops = ops_config.OpsConfig(runtime_root=runtime_root, path=runtime_root / ops_config.FILE,
         database_url=database_url, host="127.0.0.1", port=port,
-        operator_notes_root=str(home / "notes"))
+        operator_notes_root=str(home / "notes"), **({"pi_runtime": "runner"} if runner == "pi" else {}))
     ops_config.write_private(ops.path, ops_config.render(ops))
     guard = ROOT / "tests/runtime_root_guard"
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home),
            "PYTHONPATH": os.pathsep.join((str(guard), str(ROOT))), "PYTHONUNBUFFERED": "1",
            **{k: v for k, v in os.environ.items() if k.startswith("PYTEST_LOOPER_")}}
+    if runner == "pi":
+        from tests.pi_runner_support import require_pi
+
+        node, pi = require_pi()
+        env["PATH"] = os.pathsep.join((str(Path(node).parent), str(Path(pi).parent), env["PATH"]))
+        env["PYTEST_LOOPER_RUNNER"] = "pi"
     with log_path.open("w", encoding="utf-8") as log:
         process = subprocess.Popen([sys.executable, "-u", str(Path(__file__).resolve()),
             str(port), str(runtime_root), str(work_dir)], cwd=work_dir, env=env,

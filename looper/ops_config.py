@@ -11,6 +11,9 @@
     public_url = "https://looper.example.com"   # the dashboard's address in chat links
     log_level = "info"                          # debug, info, warning or error
 
+    [runtimes]
+    pi = "cli"                                 # opt in to "runner" for Manager and Planner; restart required
+
     [backup]                                    # how the database is backed up before a schema change
     pg_dump = "/usr/lib/postgresql/17/bin/pg_dump"
     command = ["docker", "exec", "pg", "pg_dump", "--format=custom", "-U", "{user}", "{dbname}"]
@@ -33,7 +36,7 @@ stops the command with a message that names the key and never shows the value. N
 no ``~``, no include.
 
 Environment and ``.env`` settings remain readable until the ops file names them. Only deployment settings are
-read from ``.env``; its contents are never added to the process environment.
+read from ``.env``; its contents are never added to the process environment. ``runtimes.pi`` is file-only.
 """
 
 from __future__ import annotations
@@ -109,6 +112,7 @@ class OpsConfig:
     backup_command: tuple[str, ...] = ()
     backup_verify_command: tuple[str, ...] = ()
     operator_notes_root: str = ""
+    pi_runtime: str = "cli"
     sources: Mapping[str, Source] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
 
@@ -159,6 +163,12 @@ def _log_level(value: Any, where: str) -> str:
     return value
 
 
+def _pi_runtime(value: Any, where: str) -> str:
+    if value not in ("cli", "runner"):
+        raise OpsConfigError(f"{where} must be cli or runner")
+    return value
+
+
 def _command(value: Any, where: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not value or not all(isinstance(word, str) and word for word in value):
         raise OpsConfigError(f"{where} must be a non-empty array of non-empty strings, the program first")
@@ -205,6 +215,7 @@ class _Setting:
 
 
 SETTINGS = (
+    _Setting("pi_runtime", "runtimes", "pi", _pi_runtime),
     _Setting("database_url", "database", "url", _database_url, variable="LOOPER_DATABASE_URL"),
     _Setting("host", "server", "host", _text, flag="host"),
     _Setting("port", "server", "port", _port, flag="port"),
@@ -429,6 +440,9 @@ def render(config: OpsConfig) -> str:
         f"public_url = {_toml_string(config.public_url)}" if config.public_url
         else '# public_url = "https://looper.example.com"',
         f"log_level = {_toml_string(config.log_level)}" if config.log_level != "info" else '# log_level = "info"',
+        "",
+        "[runtimes]",
+        'pi = "runner"' if config.pi_runtime == "runner" else '# pi = "cli"',
         "",
         "[backup]",
         f"pg_dump = {_toml_string(config.pg_dump)}" if config.pg_dump else '# pg_dump = "/path/to/pg_dump"',
