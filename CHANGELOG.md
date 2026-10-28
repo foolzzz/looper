@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.187] - 2026-10-28
+
+### Changed
+
+- **The runner protocol and host support Pi sessions (host side only).** The protocol adds `session/load` (answered with `{session_id, resumed: true}`), a provider `account_id` and `reasoning` flag, named builtin tools (`tools.builtin`, no longer required to be empty) and a nullable `after_request_id` on `steer_applied`. `RunnerBridge.load_session` and `RunnerLease.load_session` are new; `RunnerSupervisor.acquire(kind, owner=...)` gives a lease a stable per-owner state directory that survives release and restarts; `RunnerSession` resumes a saved session through `session/load` and forwards the tool environment. The runner descriptor gains `reasoning`, `system_prompt_mode` and `--builtin`. ([#813](https://github.com/foolzzz/looper/pull/813))
+
 ## [2.13.186] - 2026-10-28
 
 ### Fixed
