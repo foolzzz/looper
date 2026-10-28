@@ -1,4 +1,4 @@
-"""How a Worker talks to one runtime process during a run."""
+"""A run's lifecycle and how a Worker talks to it."""
 
 from __future__ import annotations
 
@@ -7,10 +7,46 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from . import RuntimeAdapter
+
+
+class RunStartError(Exception):
+    """A run could not start; the message is the reason (no process, no free runner session)."""
+
+
+@dataclass(frozen=True)
+class Fork:
+    """A consult's source session and directory, and its own directory for the copy it removes."""
+
+    session_id: str
+    session_dir: Path | None
+    fork_dir: Path
+
+
+class RunHandle(Protocol):
+    """One Worker, Reviewer or consult run: its own process, or a shared runner's session."""
+
+    @property
+    def command(self) -> list[str]: ...  # record-safe argv or runner session descriptor
+    @property
+    def pid(self) -> int | None: ...  # hosted sessions never enter process-tree cleanup
+    @property
+    def channel(self) -> RunChannel: ...  # valid after launch()
+    async def launch(self) -> None:
+        """Spawn or open the session; raises RunStartError with the reason on failure."""
+        ...
+    async def end(self) -> None:
+        """Stop now and release everything; idempotent and never raises."""
+        ...
+    async def wait(self) -> int:
+        """After events ended: the process exit code, or close the session and return zero."""
+        ...
+    async def error_output(self) -> str: ...  # stderr for a failed process; empty for a session
+    def dropped_input(self) -> list[str]: ...  # accepted input dropped before reaching the model
 
 
 class DeliveryResult(Enum):

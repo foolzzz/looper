@@ -21,6 +21,7 @@ from looper.agents.room import FallbackReason, RoomService
 from looper.agents.system_prompt import REVIEW_CONTRACT, WORK_CONTRACT
 from tests.db_support import DSN, run_db, until
 from tests.fake_claude import fake_claude
+from tests.run_handle_support import ScriptedRun
 from tests.test_room_consult import _repo
 from tests.test_room_db import FE, PLANNER, _Pool, _room_task
 
@@ -139,6 +140,38 @@ def _service(tmp_path: Path, room: RoomService, pool_runs: _Pool) -> Any:
     return service
 
 
+def _host_consults(monkeypatch: pytest.MonkeyPatch, handle: ScriptedRun) -> list[dict[str, Any]]:
+    from looper.agents import consult, proc_tree
+    from looper.agents.agent_settings import AgentSettings
+    from looper.agents.profile_registry import builtin_resolved_profile
+    from looper.agents.runtimes import ADAPTERS
+    from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+
+    calls: list[dict[str, Any]] = []
+
+    class HostedRuntime(ClaudeCodeRuntime):
+        hosts_runs = True
+
+        def hosted_run(self, executable: str, **kwargs: Any) -> ScriptedRun:
+            calls.append({"executable": executable, **kwargs})
+            # As a real adapter does, copy the source before the second current-record check.
+            fork_dir = kwargs["fork"].fork_dir
+            fork_dir.mkdir(parents=True)
+            (fork_dir / "session").write_text("consult fork")
+            return handle
+
+    async def settings(*args: Any, **kwargs: Any) -> AgentSettings:
+        return AgentSettings(profile=builtin_resolved_profile())
+
+    async def no_process(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("a hosted consult must not spawn a process")
+
+    monkeypatch.setitem(ADAPTERS, "claude-code", HostedRuntime())
+    monkeypatch.setattr(consult, "load_agent_settings", settings)
+    monkeypatch.setattr(proc_tree, "spawn", no_process)
+    return calls
+
+
 async def _settled(pool: Any, *, noted: bool = True) -> dict[str, Any]:
     """The last consult once it ended: its row moved, its answers and escalations posted, and (``noted``, all but a
     consult that never started) the outcome noted in the task's activity, last."""
@@ -150,6 +183,100 @@ async def _settled(pool: Any, *, noted: bool = True) -> dict[str, Any]:
             return dict(row)
         await asyncio.sleep(0.02)
     raise AssertionError("the consult did not end")
+
+
+def test_hosted_consult_answers_from_a_fork(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from looper.agents.consult import CONSULT_MAX_TURNS
+    from looper.agents.runtimes.channel import Fork
+
+    async def test(pool: Any) -> None:
+        await _room_task(pool)
+        await _ran(pool, tmp_path / "work")
+        question = await _question(pool, "qty?")
+        handle = ScriptedRun([
+            {"type": "system", "subtype": "init", "session_id": "consult-fork"},
+            {"type": "result", "subtype": "success", "total_cost_usd": 0.01,
+             "result": json.dumps({"answers": [{"reply_to": question["id"], "body": "the field is qty"}]})},
+        ])
+        calls = _host_consults(monkeypatch, handle)
+        room = RoomService(batch_seconds=0)
+        service = _service(tmp_path, room, _Pool({"worker-2": "running"}))
+        # Exercise the source directory passed through to the adapter independently of its runtime's storage.
+        session_dir = tmp_path / "source-session"
+        session_dir.mkdir()
+        (session_dir / "session").write_text("original")
+        monkeypatch.setattr(service, "_session_dir", lambda *args: session_dir)
+        try:
+            member = (await room._context("task-r")).member("backend_rd@s1")
+            assert await service.ask("task-r", member, question) is None
+            row = await _settled(pool)
+            await until(lambda: not service._running, "the hosted consult's end")
+            assert row["state"] == "answered"
+            assert len(calls) == 1
+            call = calls[0]
+            assert call["fork"] == Fork("s-1", session_dir, call["fork"].fork_dir)
+            assert call["fork"].fork_dir.name == row["consult_run"]
+            assert call["tools"] is None and call["session_dir"] is None
+            assert call["launch"].consult and call["max_turns"] == CONSULT_MAX_TURNS
+            assert await call["limits"]() == {"run_cap": call["launch"].max_budget_usd,
+                                              "task_cap": None, "task_spent": 0}
+            assert not call["fork"].fork_dir.exists()
+            assert (session_dir / "session").read_text() == "original"
+            answer = await pool.fetchrow("SELECT * FROM room_messages WHERE kind = 'answer'")
+            assert answer["reply_to"] == question["id"] and answer["body"] == "the field is qty"
+            record = await pool.fetchrow("SELECT * FROM llm_records WHERE agent_id = $1", row["consult_run"])
+            assert record["status"] == "completed"
+            assert json.loads(record["metadata"])["command"] == handle.command
+            assert handle.launch_calls == handle.wait_calls == handle.end_calls == 1
+            assert f"#{question['id']} from" in handle.prompt
+        finally:
+            await service.stop()
+
+    run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("failure", ["timeout", "start"])
+def test_hosted_consult_timeout_and_start_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str,
+) -> None:
+    from looper.agents.runtimes.channel import RunStartError
+
+    async def test(pool: Any) -> None:
+        await _room_task(pool)
+        await _ran(pool, tmp_path / "work")
+        handle = ScriptedRun(
+            [{"type": "system", "subtype": "init", "session_id": "consult-fork"}], hold=failure == "timeout",
+            launch_error=RunStartError("the pi runner has no free session (CAPACITY)") if failure == "start" else None)
+        calls = _host_consults(monkeypatch, handle)
+        room = RoomService(batch_seconds=0)
+        service = _service(tmp_path, room, _Pool({"worker-2": "running"}))
+        execute = service._execute_hosted
+
+        async def bounded(*args: Any) -> Any:
+            return await execute(*args[:-1], 1)
+
+        monkeypatch.setattr(service, "_execute_hosted", bounded)
+        try:
+            question = await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd@s1"])
+            row = await _settled(pool)
+            await until(lambda: not service._running, "the failed hosted consult's end")
+            assert (row["state"], row["fallback_reason"]) == (
+                ("failed", "timeout") if failure == "timeout" else ("fallback", "runtime_cannot"))
+            if failure == "start":
+                assert "CAPACITY" in row["detail"]
+            else:
+                assert "room_consult_timeout_seconds" in row["detail"]
+            record = await pool.fetchrow("SELECT * FROM llm_records WHERE agent_id = $1", row["consult_run"])
+            assert record["status"] == "failed"
+            assert handle.launch_calls == handle.end_calls == 1 and handle.wait_calls == 0
+            assert not calls[0]["fork"].fork_dir.exists()
+            escalation = await pool.fetchrow("SELECT * FROM room_messages WHERE kind = 'escalation'")
+            assert escalation["reply_to"] == question["id"] and escalation["planner_pending"]
+            assert service.worker_pool.active_count() == 0
+        finally:
+            await service.stop()
+
+    run_db(test, monkeypatch)
 
 
 def test_a_consult_waits_for_recovery_then_answers_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

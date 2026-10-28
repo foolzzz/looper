@@ -68,6 +68,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, runtime_chec
 
 from ..system_prompt_mode import SystemPromptMode as SystemPromptMode
 from .channel import RunChannel as RunChannel, StreamChannel as StreamChannel
+from .channel import Fork, RunHandle
 
 if TYPE_CHECKING:
     from ..profile_registry import LegacyProviderSpec as ProviderSpec
@@ -76,6 +77,8 @@ if TYPE_CHECKING:
     from ..run_usage import Price, Usage
     from .cancel import TurnCancel
     from .instructions import InstructionFile
+    from .api.loop import TurnTools
+    from .runner.turn import TurnLimits
 
 
 class ApiProtocol(str, Enum):
@@ -320,6 +323,9 @@ class RuntimeAdapter(ABC):
     # Runs and calls tools inside looper serve, with no executable to find or probe.
     in_process: ClassVar[bool] = False
     platform_tools_in_process: ClassVar[bool] = False
+    # Worker, Reviewer and consult runs use hosted_run instead of their own process. Their platform tools
+    # are passed in process by the caller, without an MCP entry.
+    hosts_runs: ClassVar[bool] = False
     protocols: ClassVar[frozenset[ApiProtocol]]
     # The provider auth kinds it can be started with now; OAUTH is the type's own login.
     auth_kinds: ClassVar[frozenset[AuthKind]]
@@ -417,6 +423,15 @@ class RuntimeAdapter(ABC):
                       max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
         """The command of a run that can be steered; arguments have the same meaning as ``run_command``."""
         raise RuntimeUnsupported(f"a {self.label} run cannot be steered")
+
+    def hosted_run(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
+                   max_turns: int, timeout_s: int, session_dir: Path | None, tools: TurnTools | None,
+                   limits: Callable[[], Awaitable[TurnLimits]], fork: Fork | None = None) -> RunHandle:
+        """The run as a hosted session, only when hosts_runs; never falls back to a process.
+
+        Raises RuntimeUnsupported when this launch cannot be hosted.
+        """
+        raise RuntimeUnsupported(f"a {self.label} run cannot be hosted in a runner session")
 
     def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
                     session_dir: Path | None = None) -> RunChannel:
