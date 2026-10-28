@@ -106,6 +106,52 @@ def test_read_only_session_cannot_escape_or_write(tmp_path):
     run(exercise())
 
 
+@pytest.mark.parametrize("name,alias,filename", [
+    ("read", "linked\u00a0dir", "secret.txt"),
+    ("write", "linked\u00a0dir", "secret.txt"),
+    ("write", "linked\u00a0dir", "new/created.txt"),
+    ("edit", "linked\u00a0dir", "secret.txt"),
+    ("read", "quoted'dir", "secret.txt"),
+])
+def test_sdk_resolved_paths_cannot_escape(tmp_path, name, alias, filename):
+    async def exercise():
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        secret = "SECRET-MUST-NEVER-REACH-MODEL"
+        (outside / "secret.txt").write_text(secret)
+        async with pi_supervisor(tmp_path) as supervisor:
+            lease = await supervisor.acquire("pi")
+            cwd = lease.directory
+            link = "quoted\u2019dir" if alias == "quoted'dir" else "linked dir"
+            (cwd / link).symlink_to(outside, target_is_directory=True)
+            (cwd / "inside dir").mkdir()
+            (cwd / "inside dir/allowed.txt").write_text("inside-content")
+            arguments = {"path": f"{alias}/{filename}"}
+            if name == "write":
+                arguments["content"] = "overwritten"
+            elif name == "edit":
+                arguments["edits"] = [{"oldText": "SECRET", "newText": "overwritten"}]
+            scripts = [call("read", path="inside\u00a0dir/allowed.txt"),
+                call("write", path="inside\u00a0dir/new.txt", content="written"),
+                call(name, **arguments), answer()]
+            async with FakeModelAPI(scripts, api_key=KEY) as api:
+                sid = await lease.open_session(session_params(lease, base_url=api.base_url, key=KEY,
+                    tools={"builtin": MANAGER, "platform": [], "read_only": False}))
+                _, events = await begin(lease.bridge, sid, "resolved-path")
+                assert (await lease.bridge.wait_settled(sid, "resolved-path")).outcome == "completed"
+                results = tool_results(events)
+                assert len(results) == 3
+                assert "inside-content" in results[0]["content"] and not results[0]["is_error"]
+                assert not results[1]["is_error"]
+                assert (cwd / "inside dir/new.txt").read_text() == "written"
+                assert results[2]["is_error"] and "Looper blocked" in results[2]["content"]
+                assert (outside / "secret.txt").read_text() == secret
+                assert not (outside / "new").exists()
+                assert secret not in json.dumps([r.body for r in api.requests])
+            await lease.release()
+    run(exercise())
+
+
 def test_manager_bash_sees_only_its_session_environment(tmp_path):
     async def exercise():
         outside = tmp_path / "outside.txt"

@@ -51,7 +51,14 @@ export async function builtinTools(params: { cwd: string; add_dirs: string[]; ho
       const blocked = () => new Error(`Looper blocked ${name}: ${path} is outside the task directory and its added directories`);
       if (path.startsWith('~')) throw blocked();
       const target = await canonical(resolve(params.cwd, path));
-      if (!roots.some(root => target === root || target.startsWith(root.endsWith(sep) ? root : root + sep))) throw blocked();
+      const allowed = (path: string) => roots.some(root => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep));
+      if (!allowed(target)) throw blocked();
+      // Pi normalizes even absolute paths (Unicode spaces and read filename variants).
+      // Check what its resolver will actually access, using the same input as execute.
+      const actual = name === 'read'
+        ? await sdk!.paths.resolveReadPathAsync(target, params.cwd)
+        : sdk!.paths.resolveToCwd(target, params.cwd);
+      if (!allowed(await canonical(actual))) throw blocked();
       // Execute the checked absolute path, so Pi cannot reinterpret @ or file: prefixes.
       return execute(id, { ...input, path: target }, signal, onUpdate, ctx);
     };
