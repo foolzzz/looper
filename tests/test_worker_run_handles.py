@@ -22,6 +22,7 @@ from looper.agents.runtimes.channel import RunStartError
 from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
 from looper.agents.runtimes.pricing import usage_event
 from looper.agents.tiers import worker
+from looper.agents.tiers.planner import PlanStep, PlannerAgent, TaskPlan
 from looper.agents.tiers.worker import WorkerConfig, WorkerPool
 from tests.run_handle_support import ScriptedRun
 from tests.runtime_model_helpers import builtin_launch
@@ -125,19 +126,22 @@ def test_hosted_run_is_ended_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     asyncio.run(asyncio.wait_for(scenario(), 5))
 
 
+@pytest.mark.parametrize("error", ["the pi runner has no free session (CAPACITY)", "session handshake failed"])
 def test_hosted_start_failure_fails_like_a_missing_executable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-                                                           agent_db: Any) -> None:
-    failed = ScriptedRun([], launch_error=RunStartError("the pi runner has no free session (CAPACITY)"))
+                                                           agent_db: Any, error: str) -> None:
+    failed = ScriptedRun([], launch_error=RunStartError(error))
     next_run = ScriptedRun(_events())
 
     async def scenario() -> None:
         async with _pool(tmp_path, monkeypatch, failed, next_run) as (pool, _, results):
             await _finish(pool, tmp_path)
             assert results[0].payload["status"] == "failed"
-            assert results[0].payload["error"] == "Cannot start Claude Code: the pi runner has no free session (CAPACITY)"
+            assert results[0].payload["error"] == f"Cannot start Claude Code: {error}"
             assert agent_db.finish_record.await_args.kwargs["status"] == "failed"
+            assert failed.end_calls == 1 and failed.release.is_set()
             await _finish(pool, tmp_path, "w2")
             assert results[1].payload["status"] == "completed" and next_run.launch_calls == 1
+        assert failed.end_calls == 1
 
     asyncio.run(asyncio.wait_for(scenario(), 5))
 
@@ -208,6 +212,82 @@ def test_pool_stop_ends_hosted_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPa
             await pool.stop()
             assert run.end_calls == 1 and not pool._slots and not pool._active and results == []
         assert run.end_calls == 1
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+
+
+@pytest.mark.parametrize("stop", ["kill", "pool_stop"])
+def test_stopped_hosted_run_keeps_dropped_steers_for_the_next_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any, stop: str,
+) -> None:
+    class DroppingRun(ScriptedRun):
+        async def end(self) -> None:
+            # The runner reports accepted steers as dropped while releasing the session.
+            self._dropped.extend(self.inputs)
+            await super().end()
+
+    run = DroppingRun(_events(), hold=True)
+
+    async def scenario() -> None:
+        async with _pool(tmp_path, monkeypatch, run) as (pool, _, results):
+            planner = PlannerAgent(task_id="t1", runtime_root=tmp_path)
+            step = PlanStep(step_id="s1", index=0, instruction="do it", status="dispatched", worker_id="w1")
+            plan = TaskPlan(plan_id="p1", goal_id="g1", requirement="build it", work_dir=str(tmp_path),
+                            steps=[step], status="executing")
+            planner._bus, planner._plan = pool._bus, plan
+            turn = AsyncMock(return_value='```json\n{"decision": "fail", "reason": "stopped"}\n```')
+            monkeypatch.setattr(planner, "_turn", turn)
+            monkeypatch.setattr(planner, "_apply_decision", AsyncMock())
+            kills: list[MessageEnvelope] = []
+            pool._bus.subscribe_topic(MessageType.KILL_WORK_RESULT, kills.append)
+            await asyncio.sleep(0)  # register the pool's real bus consumers
+            await pool._dispatch(_item(tmp_path))
+            await run.started.wait()
+            await planner._nudge_worker(plan, step, "use the public API")
+            assert len(run.inputs) == 1 and step.missed_messages == []
+            if stop == "kill":
+                await planner._kill_and_decide(plan, step, "wrong direction")
+                assert kills[0].payload == {"killed": True, "missed_input": run.inputs}
+                assert results == []
+            else:
+                await pool.stop()
+                assert len(results) == 1
+                assert results[0].payload["status"] == "stopped"
+                assert results[0].payload["missed_input"] == run.inputs
+                await planner._handle_work_result(results[0])
+            turn.assert_awaited_once()
+            message = turn.await_args.args[0]
+            assert message.startswith("[DECISION]") and "use the public API" in message
+            assert agent_db.store.steps["t1"]["s1"]["missed_messages"] == run.inputs
+            assert agent_db.finish_record.await_args.kwargs["status"] == "interrupted"
+            assert run.end_calls == 1 and not pool._active and not pool._slots
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+
+
+def test_process_start_failure_keeps_its_result_and_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+) -> None:
+    monkeypatch.setattr(proc_tree, "spawn", AsyncMock(side_effect=FileNotFoundError("missing executable")))
+    end = AsyncMock()
+    monkeypatch.setattr(worker.ProcessRun, "end", end)
+
+    async def scenario() -> None:
+        bus = MessageBus(runtime_root=tmp_path)
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        results: list[MessageEnvelope] = []
+        bus.subscribe_topic(MessageType.WORK_RESULT, results.append)
+        await pool.start(bus)
+        try:
+            await _finish(pool, tmp_path)
+            assert results[0].payload["status"] == "failed"
+            assert results[0].payload["error"] == "Cannot start Claude Code: missing executable"
+            assert "missed_input" not in results[0].payload
+            assert agent_db.finish_record.await_args.kwargs["status"] == "failed"
+        finally:
+            await pool.stop()
+            await bus.shutdown()
+        end.assert_not_awaited()
 
     asyncio.run(asyncio.wait_for(scenario(), 5))
 
