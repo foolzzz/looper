@@ -126,7 +126,7 @@ async def _classify_schema(conn: asyncpg.Connection, sql: str) -> str:
         if (version == 3 and set(BRIDGE_MIGRATIONS).issubset(ledger)
                 and shape in BRIDGE_CATALOGS.get(fingerprint, ())):
             return "bridge"
-        if version == 4 and BASELINE in ledger and shape == "166a9177ddab7d7a280377bdf1b6caccced3d8dce4c6cb1374828ca4abbd13fe":
+        if version == 4 and BASELINE in ledger and shape == "3c6db1e85e01aca062135bbbdb2fffe9eff7c707e1f6221892ce74c145e6d05e":
             return "current"
         raise RegistrySchemaVersionError(reason + "; bridge identity, final structure or current baseline marker missing")
     except RegistrySchemaVersionError as exc:

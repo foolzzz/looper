@@ -3,12 +3,12 @@
 import json
 
 BRIDGE_FINGERPRINT = "b2bca629d4d68b756f42bc6d4567b9883985343c120f2543a0f9cda9da6732a3"
-_SNAPSHOT_STRUCTURE = "88a80ca66b593f8f82e4cb343549bc61b31e057ad5c62e86a7acb8188bae056a"
+_SNAPSHOT_STRUCTURE = "242146a4f16ef11f710e6b8ed7d97c0d0437daaa18666a4c64ffedd64eeb73f0"
 # v2.13.165–174 and v2.13.175–184 differ only by execution_snapshot.
 # Replaying the older release keeps that column but rewrites the fingerprint.
 BRIDGE_CATALOGS = {
     BRIDGE_FINGERPRINT: {
-        "832d2e5a33a54552b5cc9fec313df28364e9b5eb4adc3ad5c3c1101f47b1ce94",
+        "5f65ac1439de35108b830a598a22d86e6fb8d2d0bab383038d5ae9a52dcef5b4",
         _SNAPSHOT_STRUCTURE,
     },
     "0c0f43ae1efc09fc486d6dd773f36bca737547b3660d4b6925896b8f306ef6fe": {_SNAPSHOT_STRUCTURE},
@@ -135,5 +135,8 @@ async def structure(conn):
     }
     schema = await conn.fetchval("SELECT current_schema()")
     quoted = '"' + schema.replace('"', '""') + '".'
-    return {kind: [tuple(value.replace(quoted, "").replace(schema + ".", "") if isinstance(value, str) else value for value in row)
-                   for row in await conn.fetch(sql)] for kind, sql in queries.items()}
+    # Sort normalized identities in Python's code point order, independently of
+    # the database collation used by SQL ORDER BY.
+    return {kind: sorted(
+        [tuple(value.replace(quoted, "").replace(schema + ".", "") if isinstance(value, str) else value for value in row)
+         for row in await conn.fetch(sql)], key=lambda row: row[:2]) for kind, sql in queries.items()}

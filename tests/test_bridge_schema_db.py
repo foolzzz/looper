@@ -1,6 +1,8 @@
 """Only authentic bridge databases cross the schema upgrade boundary."""
 import asyncio
 import json
+from urllib.parse import urlsplit, urlunsplit
+import uuid
 
 import pytest
 
@@ -16,6 +18,60 @@ pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST
 
 def run(test):
     asyncio.run(asyncio.wait_for(test(), 90))
+
+
+@pytest.mark.parametrize("locale,expected_order", [
+    ("LOCALE_PROVIDER libc LOCALE 'C'", ["task_steps", "tasks"]),
+    ("LOCALE_PROVIDER libc LOCALE 'en_US.utf8'", ["tasks", "task_steps"]),
+], ids=["C", "en_US.utf8"])
+@pytest.mark.parametrize("source", [None, "bridge_source", "snapshot_bridge_source"],
+                         ids=["fresh", "v2.13.165", "v2.13.180"])
+def test_schema_admission_is_independent_of_database_locale(request, source, locale, expected_order):
+    import asyncpg
+
+    released = request.getfixturevalue(source) if source else None
+
+    async def test():
+        name = f"looper_test_locale_{uuid.uuid4().hex}"
+        url = urlunsplit(urlsplit(DSN)._replace(path=f"/{name}"))
+        admin = await asyncpg.connect(DSN, command_timeout=15)
+        try:
+            await admin.execute(f'CREATE DATABASE "{name}" TEMPLATE template0 {locale}')
+            try:
+                conn = await asyncpg.connect(url, command_timeout=15)
+                try:
+                    # Positive control: these databases really sort catalog names differently.
+                    assert await conn.fetchval("""
+                        SELECT array_agg(value ORDER BY value COLLATE "default")
+                        FROM unnest(ARRAY['tasks', 'task_steps']) AS value
+                    """) == expected_order
+                    if released:
+                        await initialize_bridge(conn, released, url=url)
+                    else:
+                        await connection.ensure_schema(conn)
+                    before, shape = await witness(conn), await structure(conn)
+                    assert await connection.schema_change_pending(conn) is bool(released)
+                    assert await witness(conn) == before and await structure(conn) == shape
+                    await connection.ensure_schema(conn)
+                    assert await conn.fetchval("SELECT version FROM registry_schema_version") == 4
+                    after, shape = await witness(conn), await structure(conn)
+                    await connection.ensure_schema(conn)
+                    assert not await connection.schema_change_pending(conn)
+                    assert await witness(conn) == after and await structure(conn) == shape
+                    # Locale independence must retain the structural integrity check.
+                    await conn.execute("ALTER TABLE tasks ALTER COLUMN requirement DROP NOT NULL")
+                    damaged, shape = await witness(conn), await structure(conn)
+                    for operation in (connection.schema_change_pending, connection.ensure_schema):
+                        with pytest.raises(connection.RegistrySchemaVersionError):
+                            await operation(conn)
+                        assert await witness(conn) == damaged and await structure(conn) == shape
+                finally:
+                    await conn.close()
+            finally:
+                await admin.execute(f'DROP DATABASE "{name}"')
+        finally:
+            await admin.close()
+    run(test)
 
 
 @pytest.mark.parametrize("source", [None, "bridge_source", "snapshot_bridge_source"],
