@@ -2124,6 +2124,9 @@ class PlannerAgent:
             return
 
         step.result = result
+        missed = result.get("missed_input")
+        if isinstance(missed, list):
+            step.missed_messages.extend(text for text in missed if isinstance(text, str))
         await self._capture_project_learnings(plan, step, result.get("learnings"), "Worker")
         succeeded = result.get("status") == "completed"
         await self._activity(
@@ -3157,6 +3160,9 @@ class PlannerAgent:
             ), timeout=WORKER_INPUT_TIMEOUT)
         except asyncio.TimeoutError:
             return False
+        missed = ack.payload.get("missed_input")
+        if isinstance(missed, list):
+            step.missed_messages.extend(text for text in missed if isinstance(text, str))
         return bool(ack.payload.get("killed"))
 
     async def _kill_running_workers(self) -> None:

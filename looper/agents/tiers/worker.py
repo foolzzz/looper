@@ -1,7 +1,6 @@
-"""Worker tier: subprocess-isolated task execution.
+"""Worker tier: isolated task execution.
 
-Each Worker runs as a subprocess (Claude Code, Codex or OMP) with limited
-permissions. The WorkerPool manages lifecycle, concurrency, and result
+Each Worker runs through its runtime, in its own process or a hosted session. The WorkerPool manages lifecycle, concurrency, and result
 collection, reporting back to the Planner via the Bus. A run starts once
 fewer Workers (or Reviewers) run in its task than the task's limit
 (``agent_settings.load_task_limit``, read each time it checks); until then it
@@ -40,12 +39,12 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..agent_settings import AgentType, Launch, load_agent_settings, load_task_limit
 from ..bus import MessageBus
@@ -57,8 +56,9 @@ from ..knowledge import documents_label, load_knowledge
 from ..operator_notes import notes_note
 from ..project_execution import ProjectExecution
 from ..library import items_label, load_installed
-from ..runtimes import RunChannel, RuntimeUnsupported
-from ..runtimes.channel import DeliveryResult
+from ..runtimes import ADAPTERS, RunChannel, RuntimeAdapter, RuntimeUnsupported
+from ..runtimes.channel import DeliveryResult, RunHandle, RunStartError
+from ..runtimes.api.tools import RoomTurnTools
 from ..task_roles import TaskRole, run_role
 from ..room import room_section, run_seat, run_session_dir
 from ..message import (
@@ -78,7 +78,11 @@ from ..system_prompt import (
     work_task_section,
 )
 
+if TYPE_CHECKING:
+    from ..runtimes.runner.turn import TurnLimits
+
 from ...db import activity as db_activity
+from ...db import llm_records as db_llm_records
 from ...db import role_configs as db_role_configs
 from ...db import projects as db_projects
 
@@ -334,14 +338,75 @@ def answers_only_reminders(result_event: dict[str, Any], reminders: set[str]) ->
     return bool(answered) and bool(reminders) and all(u in reminders for u in answered)
 
 
+class ProcessRun:
+    """One runtime process, with its channel and process-tree cleanup owned together."""
+
+    def __init__(self, runtime: RuntimeAdapter, command: list[str], *, launch: Launch,
+                 cwd: str | Path, session_dir: Path | None, label: str) -> None:
+        self._runtime, self._command, self._launch = runtime, command, launch
+        self._cwd, self._session_dir, self._label = cwd, session_dir, label
+        self.process: asyncio.subprocess.Process | None = None
+        self._channel: RunChannel | None = None
+        self._ended = False
+
+    @property
+    def command(self) -> list[str]:
+        return self._command
+
+    @property
+    def pid(self) -> int | None:
+        return self.process.pid if self.process is not None else None
+
+    @property
+    def channel(self) -> RunChannel:
+        assert self._channel is not None
+        return self._channel
+
+    async def launch(self) -> None:
+        try:
+            self.process = await proc_tree.spawn(
+                *self.command, cwd=self._cwd, env=self._launch.environment(),
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        except OSError as exc:
+            raise RunStartError(str(exc)) from exc
+        try:
+            self._channel = self._runtime.run_channel(self.process, launch=self._launch, cwd=self._cwd,
+                                                       session_dir=self._session_dir)
+        except BaseException:
+            await self.end()
+            raise
+
+    async def end(self) -> None:
+        if not self._ended:
+            self._ended = True
+            if self.process is not None:
+                await proc_tree.end(self.process, label=self._label)
+
+    async def wait(self) -> int:
+        assert self.process is not None
+        await self.process.wait()
+        return self.process.returncode or 0
+
+    async def error_output(self) -> str:
+        assert self.process is not None
+        if self.process.stderr:
+            data = await self.process.stderr.read()
+            return data.decode("utf-8", errors="replace") if data else ""
+        return ""
+
+    def dropped_input(self) -> list[str]:
+        return []
+
+
 @dataclass
 class WorkerProcess:
-    """Tracks a single Worker subprocess."""
+    """Tracks a single Worker or Reviewer run."""
 
     worker_id: str
     task_id: str
     plan_id: str
     process: asyncio.subprocess.Process | None = None
+    handle: RunHandle | None = None
     status: str = "pending"  # "pending" (waiting for room in its task) | "running" | "completed" | "failed"
     result: dict[str, Any] | None = None
     role: AgentType = AgentType.WORKER  # or REVIEWER
@@ -354,7 +419,7 @@ class WorkerProcess:
 
 
 class WorkerPool:
-    """Manages a pool of Worker subprocesses.
+    """Manages a pool of Worker runs.
 
     Each Worker receives a WORK_ITEM or VERIFY_REQUEST, runs a Claude Code
     subprocess to do the work, and publishes the result back to the Planner.
@@ -422,8 +487,7 @@ class WorkerPool:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         self._tasks.clear()
 
-        await asyncio.gather(*(proc_tree.end(wp.process, label=f"worker {wp.worker_id}")
-                               for wp in self._active.values() if wp.process and wp.process.returncode is None))
+        await asyncio.gather(*(wp.handle.end() for wp in self._active.values() if wp.handle is not None))
         self._active.clear()
 
     def is_healthy(self) -> bool:
@@ -483,12 +547,17 @@ class WorkerPool:
     async def _deliver_kill(self, envelope: MessageEnvelope) -> None:
         """Stop one running worker and tell the sender whether it was running."""
         assert self._bus is not None
+        wp = self._active.get(envelope.target.agent_id)
         killed = await self.kill(envelope.target.agent_id)
+        payload: dict[str, Any] = {"killed": killed}
+        # Cancellation releases the active entry; retain its handle until the runner has ended and reported drops.
+        if killed and wp is not None and wp.handle is not None and (missed := wp.handle.dropped_input()):
+            payload["missed_input"] = missed
         await self._bus.publish(MessageEnvelope.create(
             source=envelope.target,
             target=envelope.source,
             message_type=MessageType.KILL_WORK_RESULT,
-            payload={"killed": killed},
+            payload=payload,
             correlation_id=envelope.correlation_id,
             reply_to=envelope.message_id,
         ))
@@ -739,6 +808,12 @@ class WorkerPool:
             result = await self._execute(envelope, is_verify=is_verify, started_at=wp.since)
             wp.status = "completed"
             wp.result = result
+        except asyncio.CancelledError:
+            # A pool stop has no kill reply. Preserve dropped steers through the normal result path instead.
+            if self._running or wp.handle is None or not wp.handle.dropped_input():
+                raise
+            wp.status = "stopped"
+            wp.result = {"status": "stopped", "summary": "The worker pool stopped this run"}
         except asyncio.TimeoutError as exc:
             wp.status = "failed"
             wp.result = {"status": "failed", "error": str(exc) or "worker timeout"}
@@ -756,6 +831,9 @@ class WorkerPool:
                     await self.room_ops.room.presence_changed(parent_task_id, seat, online=False)
                 except Exception:
                     logger.exception("worker %s could not announce it left task %s's room", worker_id, parent_task_id)
+
+        if wp.handle is not None and (missed := wp.handle.dropped_input()):
+            wp.result = {**(wp.result or {}), "missed_input": missed}
 
         result_type = MessageType.VERIFY_RESULT if is_verify else MessageType.WORK_RESULT
         await self._bus.publish(MessageEnvelope.create(
@@ -779,7 +857,7 @@ class WorkerPool:
         is_verify: bool = False,
         started_at: datetime | None = None,
     ) -> dict[str, Any]:
-        """Run Claude Code as a subprocess with streaming progress; ``started_at`` is the run's start (now without
+        """Execute a runtime run with streaming progress; ``started_at`` is the run's start (now without
         one): commits made since count as its work (``judge_result``)."""
         started_at = started_at or datetime.now(timezone.utc)
         payload = envelope.payload
@@ -840,6 +918,9 @@ class WorkerPool:
                 return {"passed": False, "findings": [agent_settings.profile_error],
                         "summary": agent_settings.profile_error}
             return {"status": "failed", "error": agent_settings.profile_error}
+        profile_runtime = ADAPTERS.get(agent_settings.profile.runtime.type)
+        hosted = profile_runtime is not None and profile_runtime.hosts_runs
+        token: str | None = None
         # The task's room and knowledge vault share the run's token and MCP entry.
         execution = ProjectExecution.from_row(project)
         room_on = execution.room_on
@@ -849,7 +930,8 @@ class WorkerPool:
             seat = run_seat(payload, is_verify=is_verify, run=worker_id)
             try:
                 token = self.room_ops.issue(parent_task_id, seat, room=room_on, vault=vault_config)
-                library = await self.room_ops.library_with_server(library, self._runtime_root, token, worker_id)
+                if not hosted:
+                    library = await self.room_ops.library_with_server(library, self._runtime_root, token, worker_id)
                 if room_on:
                     prompt = f"{prompt}\n\n{await self.room_ops.room.first_turn(parent_task_id, seat)}"
                     room_text = room_section(seat)
@@ -859,7 +941,7 @@ class WorkerPool:
                 unavailable = "the task's room" if room_on else "the knowledge vault"
                 logger.warning("worker %s: %s is unavailable", worker_id, unavailable, exc_info=True)
                 self.room_ops.revoke_run(worker_id)
-                seat = None
+                seat, token = None, None
                 await self._activity(parent_task_id, worker_id, "error",
                                      f"Warning: {unavailable} is unavailable ({type(exc).__name__}: {exc}); this "
                                      "run goes without it"[:500])
@@ -938,9 +1020,18 @@ class WorkerPool:
             if seat is not None else None
         run_command = runtime.steer_command if launch.steers else runtime.run_command
         try:
-            command = run_command(launch.executable(self._config.claude_bin), cwd=work_dir,
-                                  prompt_file=prompt_file, launch=launch, max_turns=max_turns,
-                                  session_dir=session_dir)
+            if hosted:
+                handle = runtime.hosted_run(
+                    launch.executable(self._config.claude_bin), cwd=work_dir, prompt_file=prompt_file,
+                    launch=launch, max_turns=max_turns, timeout_s=run_timeout, session_dir=session_dir,
+                    tools=RoomTurnTools(self.room_ops, token) if token else None,
+                    limits=self._run_limits(launch, project, parent_task_id))
+            else:
+                command = run_command(launch.executable(self._config.claude_bin), cwd=work_dir,
+                                      prompt_file=prompt_file, launch=launch, max_turns=max_turns,
+                                      session_dir=session_dir)
+                handle = ProcessRun(runtime, command, launch=launch, cwd=work_dir, session_dir=session_dir,
+                                    label=f"worker {worker_id}")
         except (RuntimeUnsupported, OSError) as exc:
             problem = f"Cannot prepare {runtime.label}: {exc}"
             logger.error("worker %s: %s", worker_id, problem)
@@ -948,6 +1039,7 @@ class WorkerPool:
                 await self._activity(parent_task_id, worker_id, "error", problem[:500])
             return _verify_failed(problem) if is_verify else _work_failed(problem)
 
+        command = handle.command
         if parent_task_id:
             prompt_input = "over the runtime's protocol" if launch.steers else "on stdin"
             cmd_display = _display_command(command) + f"  (prompt {prompt_input}, {len(prompt)} chars)"
@@ -974,41 +1066,33 @@ class WorkerPool:
             whole_process=True,
         )
         async with recorder:  # whatever ends the run (a kill, its task or the server stopping) ends its record
-            logger.info("worker %s starting subprocess: %s (cwd=%s)", worker_id, command[0], work_dir)
+            logger.info("worker %s starting run: %s (cwd=%s)", worker_id, command[0], work_dir)
             try:
-                process = await proc_tree.spawn(
-                    *command,
-                    cwd=work_dir,
-                    env=launch.environment(),
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                logger.info("worker %s subprocess started (pid=%s)", worker_id, process.pid)
+                await handle.launch()
+                logger.info("worker %s run started (pid=%s)", worker_id, handle.pid)
                 wp = self._active.get(worker_id)
                 if wp is not None:
-                    wp.process = process
-            except OSError as exc:
-                logger.error("worker %s failed to start subprocess: %s", worker_id, exc)
+                    wp.handle = handle
+                    if isinstance(handle, ProcessRun):
+                        wp.process = handle.process
+            except RunStartError as exc:
+                if hosted:
+                    await handle.end()
+                logger.error("worker %s failed to start run: %s", worker_id, exc)
                 error = f"Cannot start {runtime.label}: {exc}"
                 await recorder.finish(output_text=None, result_event=None, error=error,
                                       outcome=RunOutcome.RUN_FAILED.value)
                 return {"status": "failed", "error": error}
 
-            channel = runtime.run_channel(process, launch=launch, cwd=work_dir, session_dir=session_dir)
-            try:
-                await channel.start(prompt)
-                self._inputs[worker_id] = channel
-                if ready := self._input_ready.get(worker_id):
-                    ready.set()
-                if seat is not None and runtime.run_input:
-                    self._reminders[worker_id] = _Reminders()
-            except (BrokenPipeError, ConnectionResetError):
-                # Claude exited before reading; its output decides the outcome.
-                logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
-            if (ready := self._input_ready.get(worker_id)) is not None:
-                ready.set()
+            waited, ended = False, False
 
+            async def _end_run() -> None:
+                nonlocal ended
+                if not ended:
+                    ended = True
+                    await handle.end()
+
+            channel = handle.channel
             input_ended = False
 
             def _end_input() -> None:
@@ -1035,10 +1119,21 @@ class WorkerPool:
                         result_event = capped.result_event
                         await recorder.record(result_event)
                         _end_input()
-                        await proc_tree.end(process, label=f"worker {worker_id}")
+                        await _end_run()
                         return
 
                     event_type = event.get("type", "")
+
+                    if event_type == "system" and parent_task_id:
+                        runner = event.get("runner") or {}
+                        if event.get("subtype") == "steer_applied":
+                            await self._activity(parent_task_id, worker_id, "phase",
+                                                 "Planner message reached the model in the run's turn "
+                                                 f"(after request {runner.get('after_request_id')})")
+                        elif event.get("subtype") == "steer_dropped":
+                            await self._activity(parent_task_id, worker_id, "phase",
+                                                 f"Planner message dropped ({runner.get('reason')}); "
+                                                 "kept for the Planner's decision")
 
                     if event_type == "assistant":
                         msg = event.get("message", {})
@@ -1127,13 +1222,27 @@ class WorkerPool:
                         logger.debug("failed to insert result activity", exc_info=True)
 
             try:
+                try:
+                    await channel.start(prompt)
+                    self._inputs[worker_id] = channel
+                    if ready := self._input_ready.get(worker_id):
+                        ready.set()
+                    if seat is not None and runtime.run_input:
+                        self._reminders[worker_id] = _Reminders()
+                except (BrokenPipeError, ConnectionResetError):
+                    # Claude exited before reading; its output decides the outcome.
+                    logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
+                if (ready := self._input_ready.get(worker_id)) is not None:
+                    ready.set()
+
                 await asyncio.wait_for(_read_stream(), timeout=run_timeout if run_timeout > 0 else None)
                 _end_input()
-                await process.wait()
+                return_code = await handle.wait()
+                waited = True
             except BaseException as exc:
                 _end_input()
                 # Never leave Claude, or anything it started, running unsupervised once the worker gives up.
-                await proc_tree.end(process, label=f"worker {worker_id}")
+                await _end_run()
                 timed_out = isinstance(exc, asyncio.TimeoutError)
                 error = (
                     f"Claude ran longer than the {run_timeout} s limit (timeout_seconds)" if timed_out
@@ -1144,13 +1253,16 @@ class WorkerPool:
                 if timed_out:
                     raise asyncio.TimeoutError(error) from exc
                 raise
+            finally:
+                self._inputs.pop(worker_id, None)
+                if not waited:
+                    await _end_run()
             if finished is not None and finished in (result_event, last_result):
                 await _report_finished(finished)
             # The cost is the last result's (the session's totals); the outcome is result_event's.
             recorded = last_result or result_event
 
             final_text = str((result_event or {}).get("result") or "") or None
-            return_code = process.returncode or 0
             # A successful result decides the outcome even when the process then
             # exits non-zero: Claude Code can exit 1 for reasons unrelated to the
             # work (an MCP server or hook erroring on teardown, for example). Only
@@ -1160,14 +1272,11 @@ class WorkerPool:
                 and not result_event.get("is_error")
                 and result_event.get("subtype") == "success"
             )
-            detail = (runtime.failure_detail(result_event, launch=launch, command=command, pid=process.pid)
+            detail = (runtime.failure_detail(result_event, launch=launch, command=command, pid=handle.pid)
                       if not result_ok else None)
             # A run stopped at its spend cap exits non-zero too; its result says why.
             if return_code != 0 and not result_ok and runtime.budget_error(result_event) is None and not detail:
-                stderr = ""
-                if process.stderr:
-                    stderr_bytes = await process.stderr.read()
-                    stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
+                stderr = await handle.error_output()
                 error = f"{runtime.label} exited with code {return_code}"
                 await recorder.finish(output_text=final_text, result_event=recorded, error=error,
                                       outcome=RunOutcome.RUN_FAILED.value)
@@ -1195,6 +1304,19 @@ class WorkerPool:
             await recorder.finish(output_text=final_text, result_event=recorded, error=error,
                                   outcome=run_outcome(result_event, outcome, is_verify=is_verify).value)
             return outcome
+
+    @staticmethod
+    def _run_limits(launch: Launch, project: dict[str, Any] | None,
+                    task_id: str) -> Callable[[], Awaitable[TurnLimits]]:
+        async def limits() -> TurnLimits:
+            task_cap = ProjectExecution.from_row(project).task_budget_usd if task_id else None
+            spent: float | None = 0
+            if task_cap is not None:
+                costs = (await db_llm_records.task_costs([task_id]))[task_id]
+                spent = float(costs["cost_usd"]) if costs["cost_usd"] is not None else None
+            return {"run_cap": launch.max_budget_usd, "task_cap": task_cap, "task_spent": spent}
+
+        return limits
 
     @staticmethod
     def _task_section(payload: dict[str, Any], work_dir: str, *, is_verify: bool) -> str:

@@ -2,6 +2,7 @@
 import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import get_args
 
 import pytest
 
@@ -12,7 +13,7 @@ from looper.agents.runtimes.api.loop import ToolSpec
 from looper.agents.runtimes.runner import protocol as p
 from looper.agents.runtimes.runner.session import Descriptor, RunnerSession
 from looper.agents.runtimes.runner.bridge import RpcFailure
-from test_runner_bridge import connection, send
+from runner_pipe_support import connection, send
 
 def run(coro):
     asyncio.run(asyncio.wait_for(coro, 10))
@@ -28,7 +29,7 @@ def bind(session):
     session.set_turn_tools(Tools())
     session.set_turn_budget(provider_id="account", model="model", price=lambda m, u: 0.01, limits=limits)
 
-async def opened(tmp_path, bridge, reader, writer, *, changes=None, env=None, refusal=None, check=None):
+async def opened(tmp_path, bridge, reader, writer, *, changes=None, env=None, refusal=None, check=None, session_options=None):
     prompt = tmp_path / "prompt.md"
     prompt.write_text("unchanged prompt")
     async def release():
@@ -43,10 +44,12 @@ async def opened(tmp_path, bridge, reader, writer, *, changes=None, env=None, re
     async def load_session(params):
         return await bridge.load_session({**params, "session_key": "private", "home": str(tmp_path), "state_dir": str(tmp_path)})
     lease.load_session = load_session
-    async def acquire(kind, *, owner=None):
-        assert kind == "fake" and owner == "manager"
+    async def acquire(kind, *, owner=None, state_dir=None):
+        options = session_options or {}
+        assert kind == "fake" and owner == ("manager" if options.get("owned", True) else None)
+        assert state_dir == options.get("state_dir")
         return lease
-    session = RunnerSession("manager", SimpleNamespace(acquire=acquire), "fake")
+    session = RunnerSession("manager", SimpleNamespace(acquire=acquire), "fake", **(session_options or {}))
     descriptor = Descriptor("fake", "manager", "account", ApiProtocol.OPENAI_RESPONSES,
         "https://example.invalid", "model", None, 200000, str(prompt), read_only=True)
     descriptor = replace(descriptor, **(changes or {}))
@@ -250,7 +253,7 @@ def test_tool_environment_and_account_id(tmp_path, caplog):
 
 
 @pytest.mark.parametrize(("flag", "value"), [("--system-prompt-mode", "invalid"), ("--reasoning", "true"),
-    ("--builtin", ""), ("--builtin", "Read"), ("--builtin", "read-file"), ("--builtin", "read1")])
+    ("--tool-timeout-s", "0"), ("--builtin", ""), ("--builtin", "Read"), ("--builtin", "read-file"), ("--builtin", "read1")])
 def test_descriptor_rejects_invalid_options(flag, value):
     descriptor = Descriptor("fake", "manager", "account", ApiProtocol.OPENAI_RESPONSES,
         "https://example.invalid", "model", None, None, "prompt.md", builtin=("read",))
@@ -258,3 +261,97 @@ def test_descriptor_rejects_invalid_options(flag, value):
     argv[argv.index(flag) + 1] = value
     with pytest.raises(ValueError):
         Descriptor.parse(argv)
+
+
+
+def test_run_session_opens_without_owner_state(tmp_path):
+    async def exercise():
+        async with connection() as (bridge, reader, writer, _):
+            def check(params):
+                assert params["role"] == "worker"
+                assert params["limits"] == {"max_requests_per_turn": 7,
+                    "tool_timeout_s": 3600, "tool_output_bytes": 102400}
+            session, _ = await opened(tmp_path, bridge, reader, writer,
+                changes={"role": "worker", "max_requests": 7, "tool_timeout_s": 3600}, check=check,
+                session_options={"owned": False, "state_dir": tmp_path / "run"})
+            await close(session, reader, writer)
+    run(exercise())
+
+
+def fork_handshake():
+    return {"capabilities": {"fork": True, "cancel": True, "usage": {"per_request": True},
+        "authorize_covers": list(get_args(p.RequestKind))}}
+
+
+def test_fork_opens_a_new_session_from_the_saved_id(tmp_path):
+    async def exercise():
+        async with connection(fork_handshake()) as (bridge, reader, writer, _):
+            def check(params):
+                assert params["fork_from"] == {"session_id": "source"}
+                assert "session_id" not in params
+                assert params["tools"]["read_only"]
+            session, _ = await opened(tmp_path, bridge, reader, writer,
+                changes={"role": "reviewer", "fork_from": "source"}, check=check)
+            task, turn = await begin(session, reader, writer, [])
+            assert turn["session_id"] == "s"
+            await charged(reader, writer, turn, 1)
+            await settle(writer, turn)
+            result = await task
+            assert result.session_started and result.prompt_sent and result.usage.cost_usd == 0.01
+            await close(session, reader, writer)
+    run(exercise())
+
+
+@pytest.mark.parametrize("code", [p.ErrorCode.SESSION_NOT_FOUND, p.ErrorCode.SESSION_OWNED,
+    p.ErrorCode.INVALID_PARAMS])
+def test_fork_refusal_takes_the_resume_failure_path(tmp_path, code):
+    async def exercise():
+        async with connection(fork_handshake()) as (bridge, reader, writer, _):
+            opening = opened(tmp_path, bridge, reader, writer,
+                changes={"role": "worker", "fork_from": "source"}, refusal=code)
+            if code == p.ErrorCode.INVALID_PARAMS:
+                with pytest.raises(RpcFailure) as error:
+                    await opening
+                assert error.value.code == code
+            else:
+                session, _ = await opening
+                result = await session.run_turn("consult", [].append)
+                assert not result.session_started and not result.prompt_sent
+                assert result.result_event["errors"] == [
+                    "runner saved session is unavailable; could not be resumed"]
+                assert session._lease is None
+                await session.stop()
+            assert not bridge.sessions and not reader._buffer
+    run(exercise())
+
+
+def test_fork_without_capability_is_unsupported(tmp_path):
+    async def exercise():
+        async with connection() as (bridge, reader, writer, _):
+            released = []
+            async def release():
+                released.append(True)
+            async def acquire(kind, *, owner=None, state_dir=None):
+                return SimpleNamespace(bridge=bridge, release=release)
+            prompt = tmp_path / "prompt.md"
+            prompt.write_text("consult")
+            descriptor = Descriptor("fake", "worker", "account", ApiProtocol.OPENAI_RESPONSES,
+                "https://example.invalid", "model", None, None, str(prompt), fork_from="source")
+            session = RunnerSession("w", SimpleNamespace(acquire=acquire), "fake", owned=False)
+            with pytest.raises(p.ProtocolError) as error:
+                await session.start(descriptor.to_argv(), cwd=str(tmp_path), signature=1, env={KEY_ENV: "key"})
+            assert error.value.code == p.ErrorCode.UNSUPPORTED
+            assert released == [True] and not reader._buffer and not bridge.sessions
+    run(exercise())
+
+
+def test_descriptor_fork_round_trip_and_exclusive_saved_session():
+    descriptor = Descriptor("fake", "reviewer", "account", ApiProtocol.OPENAI_RESPONSES,
+        "https://example.invalid", "model", None, None, "prompt.md", tool_timeout_s=3600, fork_from="source")
+    argv = descriptor.to_argv()
+    assert Descriptor.parse(argv) == descriptor
+    assert argv[-2:] == ["--fork-from", "source"]
+    with pytest.raises(ValueError):
+        Descriptor.parse(argv + ["--session", "saved"])
+    with pytest.raises(ValueError):
+        replace(descriptor, session="saved")

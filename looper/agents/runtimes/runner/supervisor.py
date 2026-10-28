@@ -207,7 +207,12 @@ class RunnerSupervisor:
         while state.failures and state.failures[0] <= time.monotonic() - FAILURE_WINDOW:
             state.failures.popleft()
 
-    async def acquire(self, kind: str, *, owner: str | None = None) -> RunnerLease:
+    async def acquire(self, kind: str, *, owner: str | None = None,
+                      state_dir: Path | None = None) -> RunnerLease:
+        if owner is not None and state_dir is not None:
+            raise ValueError("runner owner and state_dir are mutually exclusive")
+        if state_dir is not None and not Path(state_dir).is_absolute():
+            raise ValueError("runner state_dir must be absolute")
         if self._stopped:
             raise RunnerUnavailable("runner supervisor is stopped")
         if kind not in self._kinds:
@@ -238,9 +243,14 @@ class RunnerSupervisor:
             key = uuid.uuid4().hex
             directory = _private(generation.directory / "sessions" / key)
             try:
-                state_dir = _private(directory / "native")
-                if owner_name is not None:
+                if state_dir is not None:
+                    state_dir = Path(state_dir)
+                    state_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    state_dir = _private(state_dir)
+                elif owner_name is not None:
                     state_dir = _private(_private(_private(self.root / "state") / kind) / owner_name)
+                else:
+                    state_dir = _private(directory / "native")
                 lease = RunnerLease(generation.bridge, generation.directory.name, key, directory,
                     _private(directory / "home"), state_dir, _private(directory / "agent"),
                     self, generation)

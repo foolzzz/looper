@@ -1,11 +1,13 @@
-"""The Manager's and Planner's platform tools, called in the server's process."""
+"""Platform tools called in the server's process."""
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ...ops.planner import PlannerOps
-from ...ops.service import ManagerOps
+if TYPE_CHECKING:
+    from ...ops.planner import PlannerOps
+    from ...ops.room import RoomOps
+    from ...ops.service import ManagerOps
 from .loop import ToolCall, ToolOutcome, ToolSpec
 
 
@@ -58,6 +60,22 @@ class PlannerTurnTools:
     async def specs(self) -> list[ToolSpec]:
         return [ToolSpec(tool["name"], tool["description"], tool["inputSchema"])
                 for tool in await self._ops.listing("Bearer " + self._token)]
+
+    async def call(self, call: ToolCall) -> ToolOutcome:
+        arguments = object_arguments(call.arguments)
+        if arguments is None:
+            return invalid_arguments()
+        return tool_outcome(await self._ops.call("Bearer " + self._token, call.name, arguments))
+
+
+class RoomTurnTools:
+    def __init__(self, ops: RoomOps, token: str) -> None:
+        self._ops = ops
+        self._token = token
+
+    async def specs(self) -> list[ToolSpec]:
+        return [ToolSpec(tool["name"], tool["description"], tool["inputSchema"])
+                for tool in self._ops.listing("Bearer " + self._token)]
 
     async def call(self, call: ToolCall) -> ToolOutcome:
         arguments = object_arguments(call.arguments)

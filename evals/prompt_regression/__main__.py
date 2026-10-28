@@ -101,7 +101,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--baseline", metavar="RUN.json|previous", help=_BASELINE_HELP)
     run.add_argument("--task-timeout", type=float, help="seconds before a task is cancelled")
     run.add_argument("--keep-work-dirs", action="store_true", help="keep the temporary root for inspection")
-    run.add_argument("--pi-runner", action="store_true", help="opt Pi Manager and Planner into the SDK runner")
+    run.add_argument("--pi-runner", action="store_true", help="opt every Pi role into the SDK runner")
     run.add_argument("--step-workspaces", choices=("shared", "worktree"),
                      help="make each working directory a git repository and give the task's project this "
                           "step_workspaces setting")
@@ -135,7 +135,7 @@ def _parser() -> argparse.ArgumentParser:
     talk.add_argument("--out-dir", type=Path, default=runner.DEFAULT_OUT_DIR)
     talk.add_argument("--timeout", type=float, help="seconds to wait for each reply and each check")
     talk.add_argument("--keep-work-dirs", action="store_true")
-    talk.add_argument("--pi-runner", action="store_true", help="opt Pi Manager and Planner into the SDK runner")
+    talk.add_argument("--pi-runner", action="store_true", help="opt every Pi role into the SDK runner")
 
     cmp = sub.add_parser("compare", help="Print the comparison table of two run files.")
     cmp.add_argument("new", type=Path)

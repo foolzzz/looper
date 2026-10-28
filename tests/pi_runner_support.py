@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from types import SimpleNamespace
 
 import pytest
 
@@ -94,6 +95,15 @@ async def raw_runner(tmp_path: Path, pi):
         except TimeoutError:
             pass
         await proc_tree.end(process, label="test Pi runner")
+
+
+def raw_lease(tmp_path: Path, session_key="key"):
+    """Create session-owned directories below a running raw runner's root."""
+    directory = next(tmp_path.glob("pi-runner-*")) / "sessions" / session_key
+    for name in ("agent", "native", "home"):
+        (directory / name).mkdir(parents=True)
+    return SimpleNamespace(session_key=session_key, directory=directory,
+        home=directory / "home", state_dir=directory / "native")
 
 
 def session_params(lease, *, base_url, key, role="manager", **override):

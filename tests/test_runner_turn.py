@@ -324,3 +324,13 @@ def test_finish_checks_actual_cap_after_request_end_limits_read_failed(cap_key, 
         assert cancelled == [cap_key]
         assert (await t.authorize(authorize("next")))["reason"] == "stopped"
     asyncio.run(test())
+
+
+
+@pytest.mark.parametrize("role", ["worker", "reviewer"])
+def test_run_roles_keep_the_task_cap(role):
+    async def exercise():
+        t = turn(role=role, caps={"run_cap": None, "task_cap": 0.100019, "task_spent": 0.1})
+        result = await t.authorize(authorize())
+        assert not result["allow"] and result["reason"] == "task_cap"
+    asyncio.run(exercise())

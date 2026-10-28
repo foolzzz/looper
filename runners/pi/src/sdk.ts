@@ -66,6 +66,9 @@ export async function load(pi: string): Promise<Sdk> {
     };
     const agent = await importFile(root, 'dist/index.js', pkg.name);
     requireExports(agent, agentExports, pkg.name);
+    if (typeof agent.SessionManager.forkFrom !== 'function') {
+      throw new RpcError(-32009, 'missing exports: SessionManager.forkFrom');
+    }
     const toolPaths = await importFile(root, 'dist/core/tools/path-utils.js', pkg.name);
     requireExports(toolPaths, ['resolveToCwd', 'resolveReadPathAsync'], 'Pi path resolver');
     const ai = await importFile(aiRoot, 'dist/index.js', '@earendil-works/pi-ai');

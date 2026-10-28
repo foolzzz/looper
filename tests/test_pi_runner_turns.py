@@ -1,11 +1,14 @@
 """Installed Pi sessions exercise the real Responses client and host accounting."""
 import asyncio
 import json
+import socket
+import ssl
+import subprocess
 from types import SimpleNamespace
 
 import pytest
 
-from fake_model_api import FakeModelAPI, ResponseScript, completed, event, text_item
+from fake_model_api import FakeModelAPI, ResponseScript, completed, event, failed, text_item
 from pi_runner_support import begin, pi_supervisor, raw_runner, require_pi, session_params
 
 pytestmark = pytest.mark.installed
@@ -14,6 +17,13 @@ OFFER = {"protocol_versions": ["0.1"], "looper_version": "test", "host_capabilit
     "tools_call": True, "budget_authorize": True, "bus": False, "exec_slots": False}}
 USAGE = {"input_tokens": 1300, "input_tokens_details": {"cached_tokens": 300},
     "output_tokens": 200, "output_tokens_details": {"reasoning_tokens": 50}, "total_tokens": 1500}
+CHAT_USAGE = {"prompt_tokens": 1300, "prompt_tokens_details": {"cached_tokens": 300},
+    "completion_tokens": 200, "completion_tokens_details": {"reasoning_tokens": 50}, "total_tokens": 1500}
+
+
+def chat_chunk(choices, **fields):
+    return {"id": "chat_1", "object": "chat.completion.chunk", "created": 0,
+        "model": "test-model", "choices": choices, **fields}
 
 
 def reply():
@@ -171,7 +181,7 @@ def test_close_right_after_prompt_settles_once(tmp_path, control):
     run(exercise())
 
 
-def test_cancel_does_not_wait_for_authorization(tmp_path, monkeypatch):
+def test_cancel_ack_does_not_wait_for_authorization(tmp_path, monkeypatch):
     from looper.agents.runtimes.runner.turn import RunnerTurn
 
     async def exercise():
@@ -190,7 +200,8 @@ def test_cancel_does_not_wait_for_authorization(tmp_path, monkeypatch):
             try:
                 _, events = await begin(lease.bridge, sid, "held")
                 await entered.wait()
-                await lease.bridge.cancel_turn(sid, "held")
+                await asyncio.wait_for(lease.bridge.cancel_turn(sid, "held"), 1)
+                release.set()
                 summary = await asyncio.wait_for(lease.bridge.wait_settled(sid, "held"), 1)
                 assert summary.outcome == "cancelled" and summary.usage_complete
                 assert events[-1]["num_turns"] == 0 and not api.requests
@@ -198,6 +209,394 @@ def test_cancel_does_not_wait_for_authorization(tmp_path, monkeypatch):
                 release.set()
             # Processing the late denial must preserve the connection.
             assert (await lease.bridge.health())["running"] == 0
+            await lease.release()
+    run(exercise())
+
+
+@pytest.mark.parametrize("allow,delay", [(True, 0.1), (False, 0.1), (True, 4.2)],
+    ids=["allow-after-abort", "deny-after-abort", "allow-after-cancel-deadline"])
+def test_cancel_accounts_for_late_authorization_before_settled(tmp_path, allow, delay):
+    async def exercise():
+        _, pi = require_pi()
+        async with FakeModelAPI([], api_key=KEY) as api, raw_runner(tmp_path, pi) as (_, send, receive):
+            root = next(tmp_path.glob("pi-runner-*"))
+            directory = root / "sessions/key"
+            for name in ("agent", "native", "home"):
+                (directory / name).mkdir(parents=True)
+            lease = SimpleNamespace(session_key="key", directory=directory, home=directory / "home", state_dir=directory / "native")
+            await send("initialize", OFFER)
+            await receive()
+            await send("session/new", session_params(lease, base_url=api.base_url, key=KEY), id="l-2")
+            sid = (await receive())["result"]["session_id"]
+            await send("session/prompt", {"session_id": sid, "trace_id": "late", "text": "hi", "tools": []}, id="l-3")
+            assert (await receive())["result"]["accepted"]
+            authorization = await receive()
+            assert authorization["method"] == "budget/authorize"
+            await send("session/cancel", {"session_id": sid, "trace_id": "late"}, id="l-4")
+            assert (await receive())["id"] == "l-4"
+            # Let cancellation reach the SDK before the host releases its reply.
+            await asyncio.sleep(delay)
+            await send({"jsonrpc": "2.0", "id": authorization["id"], "result": {
+                "session_id": sid, "trace_id": "late", "allow": allow, **({} if allow else {"reason": "stopped"})}})
+            updates = []
+            while True:
+                frame = await receive()
+                updates.append(frame["params"])
+                if updates[-1]["kind"] == "settled":
+                    break
+            ended = [p for p in updates if p["kind"] == "request_end"]
+            assert len(ended) == int(allow)
+            if allow:
+                assert ended[0]["request_id"] == authorization["params"]["request_id"]
+                assert ended[0]["status"] == "aborted" and ended[0]["complete"]
+                assert all(ended[0][field] == 0 for field in ("input_uncached", "output", "cache_read", "cache_write"))
+            assert updates[-1]["outcome"] == "cancelled" and updates[-1]["usage_complete"]
+            assert updates[-1]["requests"] == int(allow)
+            # A barrier also catches duplicate or late accounting after settled.
+            await send("runner/health", {}, id="l-5")
+            health = await receive()
+            assert health["id"] == "l-5"
+            assert health["result"]["running"] == health["result"]["inflight_requests"] == 0
+            assert not api.requests
+    run(exercise())
+
+
+@pytest.mark.parametrize("disconnect", [True, False], ids=["body-sent", "connection-refused"])
+def test_transport_failure_accounts_for_every_attempt(tmp_path, monkeypatch, disconnect):
+    from looper.agents.runtimes.runner.turn import RunnerTurn
+
+    async def exercise():
+        ended, original = [], RunnerTurn.request_end
+
+        async def request_end(self, params):
+            ended.append(dict(params))
+            return await original(self, params)
+
+        monkeypatch.setattr(RunnerTurn, "request_end", request_end)
+        scripts = [ResponseScript(disconnect_before_headers=True) for _ in range(4)]
+        async with FakeModelAPI(scripts, api_key=KEY) as api, pi_supervisor(tmp_path) as supervisor:
+            # Close an ephemeral socket so connect fails before any HTTP bytes are sent.
+            with socket.socket() as refused:
+                refused.bind(("127.0.0.1", 0))
+                base_url = api.base_url if disconnect else f"http://127.0.0.1:{refused.getsockname()[1]}/v1"
+            lease = await supervisor.acquire("pi")
+            sid = await lease.open_session(session_params(lease, base_url=base_url, key=KEY))
+            await begin(lease.bridge, sid, "transport")
+            summary = await lease.bridge.wait_settled(sid, "transport")
+            assert summary.outcome == "failed"
+            assert len(ended) == 4 and len({p["request_id"] for p in ended}) == 4
+            assert all(p["complete"] is (not disconnect) for p in ended)
+            assert all(p[field] == 0 for p in ended for field in ("input_uncached", "output", "cache_read", "cache_write"))
+            assert summary.usage_complete is (not disconnect)
+            assert summary.usage.cost_usd is None if disconnect else summary.usage.cost_usd == 0
+            assert len(api.requests) == (4 if disconnect else 0)
+            await lease.release()
+    run(exercise())
+
+
+@pytest.mark.parametrize("ending", ["disconnect", "eof", "error"])
+def test_nonterminal_response_usage_leaves_sent_requests_incomplete(tmp_path, monkeypatch, ending):
+    from looper.agents.runtimes.runner.turn import RunnerTurn
+
+    async def exercise():
+        ended, original = [], RunnerTurn.request_end
+
+        async def request_end(self, params):
+            ended.append(dict(params))
+            return await original(self, params)
+
+        monkeypatch.setattr(RunnerTurn, "request_end", request_end)
+        events = [event("response.created", response={"usage": USAGE})]
+        if ending == "error":
+            events.append(event("error", code="server_error", message="scripted failure"))
+        scripts = [ResponseScript(events=events, disconnect_after=1 if ending == "disconnect" else None)
+            for _ in range(4)]
+        async with FakeModelAPI(scripts, api_key=KEY) as api, pi_supervisor(tmp_path) as supervisor:
+            lease = await supervisor.acquire("pi")
+            sid = await lease.open_session(session_params(lease, base_url=api.base_url, key=KEY))
+            await begin(lease.bridge, sid, "nonterminal-usage")
+            summary = await lease.bridge.wait_settled(sid, "nonterminal-usage")
+            assert summary.outcome == "failed"
+            assert len(ended) == len(api.requests) == 4
+            assert len({p["request_id"] for p in ended}) == 4
+            assert all(p["status"] == "error" and not p["complete"] for p in ended)
+            assert all(p[field] == 0 for p in ended for field in ("input_uncached", "output", "cache_read", "cache_write"))
+            assert not summary.usage_complete and summary.usage.cost_usd is None
+            assert (await lease.bridge.health())["inflight_requests"] == 0
+            await lease.release()
+    run(exercise())
+
+
+@pytest.mark.parametrize("ending", ["disconnect", "eof", "finish"])
+@pytest.mark.parametrize("location,usage", [("chunk", {}), ("chunk", CHAT_USAGE), ("choice", CHAT_USAGE)],
+    ids=["placeholder", "cumulative", "choice-cumulative"])
+def test_nonterminal_chat_usage_leaves_sent_requests_incomplete(tmp_path, monkeypatch, ending, location, usage):
+    from looper.agents.runtimes.runner.turn import RunnerTurn
+
+    async def exercise():
+        ended, original = [], RunnerTurn.request_end
+
+        async def request_end(self, params):
+            ended.append(dict(params))
+            return await original(self, params)
+
+        monkeypatch.setattr(RunnerTurn, "request_end", request_end)
+        choice = {"index": 0, "delta": {"content": "Hello"}, "finish_reason": None}
+        events = [chat_chunk([{**choice, **({"usage": usage} if location == "choice" else {})}],
+            **({"usage": usage} if location == "chunk" else {}))]
+        if ending == "finish":
+            events += [chat_chunk([{**choice, "delta": {}, "finish_reason": "stop"}]), "[DONE]"]
+        attempts = 1 if ending == "finish" else 4
+        scripts = [ResponseScript(events=events, disconnect_after=1 if ending == "disconnect" else None)
+            for _ in range(attempts)]
+        async with FakeModelAPI(scripts, api_key=KEY) as api, pi_supervisor(tmp_path) as supervisor:
+            lease = await supervisor.acquire("pi")
+            params = session_params(lease, base_url=api.base_url, key=KEY)
+            params["provider"]["protocol"] = "openai-chat"
+            sid = await lease.open_session(params)
+            await begin(lease.bridge, sid, "chat-nonterminal")
+            summary = await lease.bridge.wait_settled(sid, "chat-nonterminal")
+            assert summary.outcome == ("completed" if ending == "finish" else "failed")
+            assert len(ended) == len(api.requests) == attempts
+            assert len({p["request_id"] for p in ended}) == attempts
+            assert all(not p["complete"] for p in ended)
+            assert not summary.usage_complete and summary.usage.cost_usd is None
+            assert all(r.path == "/v1/chat/completions" for r in api.requests)
+            assert (await lease.bridge.health())["inflight_requests"] == 0
+            await lease.release()
+    run(exercise())
+
+
+@pytest.mark.parametrize("usage,location,counts", [
+    (CHAT_USAGE, "chunk", (1000, 200, 300, 0)),
+    (CHAT_USAGE, "choice", (1000, 200, 300, 0)),
+    ({**CHAT_USAGE, "prompt_tokens_details": {"cached_tokens": 300, "cache_write_tokens": 100}}, "chunk", (900, 200, 300, 100)),
+    ({"prompt_tokens": 1300, "completion_tokens": 200, "prompt_cache_hit_tokens": 300}, "chunk", (1000, 200, 300, 0)),
+    ({"prompt_tokens": 0, "completion_tokens": 0}, "chunk", (0, 0, 0, 0)),
+    (None, "chunk", None), ({}, "chunk", None),
+    ({**CHAT_USAGE, "completion_tokens": "200"}, "chunk", None),
+    ({**CHAT_USAGE, "prompt_tokens": -1}, "chunk", None),
+    ({**CHAT_USAGE, "completion_tokens": 0.5}, "chunk", None),
+    ({**CHAT_USAGE, "prompt_tokens_details": {"cached_tokens": 1400}}, "chunk", None),
+    ({**CHAT_USAGE, "total_tokens": 1400}, "chunk", None),
+    ({**CHAT_USAGE, "completion_tokens_details": {"reasoning_tokens": 201}}, "chunk", None),
+], ids=["charged", "choice", "cache-write", "deepseek-cache", "zero", "missing", "empty",
+    "string", "negative", "fraction", "cache-exceeds-input", "total-mismatch", "reasoning-exceeds-output"])
+def test_chat_accounts_only_for_valid_terminal_usage(tmp_path, monkeypatch, usage, location, counts):
+    from looper.agents.runtimes.runner.turn import RunnerTurn
+
+    async def exercise():
+        ended, original = [], RunnerTurn.request_end
+
+        async def request_end(self, params):
+            ended.append(dict(params))
+            return await original(self, params)
+
+        monkeypatch.setattr(RunnerTurn, "request_end", request_end)
+        choice = {"index": 0, "delta": {}, "finish_reason": "stop"}
+        events = [chat_chunk([{**choice, "delta": {"content": "Hello"}, "finish_reason": None}], usage=CHAT_USAGE)]
+        if location == "choice":
+            events.append(chat_chunk([{**choice, "usage": usage}]))
+        else:
+            events += [chat_chunk([choice]), chat_chunk([], usage=usage)]
+        events.append("[DONE]")
+        async with FakeModelAPI([ResponseScript(events=events)], api_key=KEY) as api, pi_supervisor(tmp_path) as supervisor:
+            lease = await supervisor.acquire("pi")
+            params = session_params(lease, base_url=api.base_url, key=KEY)
+            params["provider"]["protocol"] = "openai-chat"
+            sid = await lease.open_session(params)
+            await begin(lease.bridge, sid, "chat-terminal")
+            summary = await lease.bridge.wait_settled(sid, "chat-terminal")
+            assert summary.outcome == "completed"
+            assert len(ended) == len(api.requests) == 1
+            assert ended[0]["complete"] is (counts is not None)
+            assert summary.usage_complete is (counts is not None)
+            if counts is None:
+                assert summary.usage.cost_usd is None
+            else:
+                assert tuple(ended[0][field] for field in ("input_uncached", "output", "cache_read", "cache_write")) == counts
+                assert (summary.usage.input_tokens, summary.usage.output_tokens,
+                    summary.usage.cache_read_tokens, summary.usage.cache_creation_tokens) == counts
+                assert summary.usage.cost_usd == round(sum(n * price for n, price in zip(counts, (1, 2, 3, 4))) / 1_000_000, 10)
+            await lease.release()
+    run(exercise())
+
+
+@pytest.mark.parametrize("terminal_type", ["failed", "completed", "incomplete"])
+@pytest.mark.parametrize("usage,counts", [
+    (USAGE, (1000, 200, 300, 0)),
+    ({**USAGE, "input_tokens_details": {"cached_tokens": 300, "cache_write_tokens": 100}}, (900, 200, 300, 100)),
+    ({"input_tokens": 0, "output_tokens": 0}, (0, 0, 0, 0)),
+    (None, None), ({}, None),
+    ({**USAGE, "output_tokens": "200"}, None),
+    ({**USAGE, "input_tokens": -1}, None),
+    ({**USAGE, "output_tokens": 0.5}, None),
+    ({**USAGE, "input_tokens_details": {"cached_tokens": 1400}}, None),
+], ids=["charged", "cache-write", "zero", "missing", "empty", "string", "negative", "fraction", "cache-exceeds-input"])
+def test_response_accounts_for_terminal_usage(tmp_path, monkeypatch, usage, counts, terminal_type):
+    from looper.agents.runtimes.runner.turn import RunnerTurn
+
+    async def exercise():
+        ended, original = [], RunnerTurn.request_end
+
+        async def request_end(self, params):
+            ended.append(dict(params))
+            return await original(self, params)
+
+        monkeypatch.setattr(RunnerTurn, "request_end", request_end)
+        terminal = failed()
+        terminal["type"] = f"response.{terminal_type}"
+        terminal["response"]["status"] = terminal_type
+        if terminal_type == "incomplete":
+            terminal["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
+        terminal["response"]["usage"] = usage
+        # An earlier usage object must not make a missing/invalid terminal one complete.
+        attempts = 4 if terminal_type == "failed" else 1
+        scripts = [ResponseScript(events=[event("response.created", response={"usage": USAGE}), terminal]) for _ in range(attempts)]
+        async with FakeModelAPI(scripts, api_key=KEY) as api, pi_supervisor(tmp_path) as supervisor:
+            lease = await supervisor.acquire("pi")
+            sid = await lease.open_session(session_params(lease, base_url=api.base_url, key=KEY))
+            await begin(lease.bridge, sid, "failed-usage")
+            summary = await lease.bridge.wait_settled(sid, "failed-usage")
+            assert summary.outcome == ("completed" if terminal_type == "completed" else "failed")
+            assert len(ended) == len(api.requests) == attempts
+            assert len({p["request_id"] for p in ended}) == attempts
+            assert all(p["complete"] is (counts is not None) for p in ended)
+            assert summary.usage_complete is (counts is not None)
+            if counts is None:
+                assert summary.usage.cost_usd is None
+            else:
+                fields = ("input_uncached", "output", "cache_read", "cache_write")
+                assert all(tuple(p[field] for field in fields) == counts for p in ended)
+                assert (summary.usage.input_tokens, summary.usage.output_tokens,
+                    summary.usage.cache_read_tokens, summary.usage.cache_creation_tokens) == tuple(attempts * n for n in counts)
+                assert summary.usage.cost_usd == round(attempts * sum(n * price for n, price in zip(counts, (1, 2, 3, 4))) / 1_000_000, 10)
+            await lease.release()
+    run(exercise())
+
+
+@pytest.mark.parametrize("protocol", ["openai-responses", "openai-chat"])
+def test_https_to_http_port_preserves_complete_zero_usage(tmp_path, monkeypatch, protocol):
+    from looper.agents.runtimes.runner.turn import RunnerTurn
+
+    received = []
+
+    class PlainHTTPModelAPI(FakeModelAPI):
+        async def _handle(self, reader, writer):
+            task = asyncio.current_task()
+            self._handlers.add(task)
+            self._writers.add(writer)
+            try:
+                received.append(await reader.read(4096))
+                writer.write(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                self._writers.discard(writer)
+                self._handlers.discard(task)
+
+    async def exercise():
+        ended, original = [], RunnerTurn.request_end
+
+        async def request_end(self, params):
+            ended.append(dict(params))
+            return await original(self, params)
+
+        monkeypatch.setattr(RunnerTurn, "request_end", request_end)
+        async with PlainHTTPModelAPI([]) as api, pi_supervisor(tmp_path) as supervisor:
+            # Positive control: the same port accepts plaintext HTTP requests.
+            reader, writer = await asyncio.open_connection("127.0.0.1", api._server.sockets[0].getsockname()[1])
+            try:
+                writer.write(b"POST /v1/responses HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}")
+                await writer.drain()
+                assert b"400 Bad Request" in await reader.read()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+            assert len(received) == 1 and received[0].startswith(b"POST ")
+            received.clear()
+            lease = await supervisor.acquire("pi")
+            params = session_params(lease, base_url=api.base_url.replace("http://", "https://"), key=KEY)
+            params["provider"]["protocol"] = protocol
+            sid = await lease.open_session(params)
+            await begin(lease.bridge, sid, "tls-protocol", cap=1)
+            summary = await lease.bridge.wait_settled(sid, "tls-protocol")
+            assert summary.outcome == "failed" and summary.cap_reason is None
+            assert len(ended) == len(received) == 4
+            assert len({p["request_id"] for p in ended}) == 4
+            assert all(data.startswith(b"\x16\x03") and KEY.encode() not in data for data in received)
+            assert all(p["complete"] for p in ended)
+            assert all(p[field] == 0 for p in ended for field in ("input_uncached", "output", "cache_read", "cache_write"))
+            assert summary.usage_complete and summary.usage.cost_usd == 0
+            await lease.release()
+    run(exercise())
+
+
+@pytest.mark.parametrize("expired", [False, True], ids=["untrusted", "expired"])
+def test_tls_certificate_failure_preserves_complete_zero_usage(tmp_path, monkeypatch, expired):
+    from looper.agents.runtimes.runner.turn import RunnerTurn
+
+    key, cert = tmp_path / "key.pem", tmp_path / "cert.pem"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+        "-nodes", "-keyout", str(key), "-out", str(cert), "-days", "1", "-subj", "/CN=localhost"],
+        check=True, capture_output=True, timeout=5)
+    if expired:
+        csr, config = tmp_path / "request.csr", tmp_path / "ca.cnf"
+        (tmp_path / "index").touch()
+        (tmp_path / "serial").write_text("01\n")
+        config.write_text(f"[ca]\ndefault_ca=test\n[test]\ndatabase={tmp_path}/index\n"
+            f"serial={tmp_path}/serial\nnew_certs_dir={tmp_path}\ndefault_md=sha256\n"
+            "policy=subject\n[subject]\ncommonName=supplied\n")
+        subprocess.run(["openssl", "req", "-new", "-key", str(key), "-out", str(csr), "-subj", "/CN=localhost"],
+            check=True, capture_output=True, timeout=5)
+        expired_cert = tmp_path / "expired.pem"
+        subprocess.run(["openssl", "ca", "-batch", "-selfsign", "-config", str(config), "-cert", str(cert),
+            "-keyfile", str(key), "-in", str(csr), "-out", str(expired_cert),
+            "-startdate", "20000101000000Z", "-enddate", "20000102000000Z"],
+            check=True, capture_output=True, timeout=5)
+        cert = expired_cert
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+
+    class TLSModelAPI(FakeModelAPI):
+        async def __aenter__(self):
+            self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0, ssl=context)
+            self.base_url = f"https://127.0.0.1:{self._server.sockets[0].getsockname()[1]}/v1"
+            return self
+
+    async def exercise():
+        ended, original = [], RunnerTurn.request_end
+
+        async def request_end(self, params):
+            ended.append(dict(params))
+            return await original(self, params)
+
+        monkeypatch.setattr(RunnerTurn, "request_end", request_end)
+        environment = {"NODE_EXTRA_CA_CERTS": str(cert)} if expired else {}
+        async with TLSModelAPI([ResponseScript(status=401)], api_key=KEY) as api, pi_supervisor(tmp_path, env=environment) as supervisor:
+            # Positive control: the TLS listener accepts and records HTTP when certificate validation is disabled.
+            reader, writer = await asyncio.open_connection("127.0.0.1", api._server.sockets[0].getsockname()[1],
+                ssl=ssl._create_unverified_context())
+            try:
+                writer.write(f"POST /v1/responses HTTP/1.1\r\nAuthorization: Bearer {KEY}\r\nContent-Length: 2\r\n\r\n{{}}".encode())
+                await writer.drain()
+                assert b"401" in await reader.read()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+            assert len(api.requests) == 1
+            api.requests.clear()
+            lease = await supervisor.acquire("pi")
+            sid = await lease.open_session(session_params(lease, base_url=api.base_url, key=KEY))
+            await begin(lease.bridge, sid, "tls", cap=1)
+            summary = await lease.bridge.wait_settled(sid, "tls")
+            assert summary.outcome == "failed" and summary.cap_reason is None
+            assert len(ended) == 4 and len({p["request_id"] for p in ended}) == 4
+            assert all(p["complete"] for p in ended)
+            assert all(p[field] == 0 for p in ended for field in ("input_uncached", "output", "cache_read", "cache_write"))
+            assert summary.usage_complete and summary.usage.cost_usd == 0
+            assert not api.requests
             await lease.release()
     run(exercise())
 

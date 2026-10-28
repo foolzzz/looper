@@ -14,12 +14,12 @@ pytestmark = pytest.mark.installed
 OFFER = {"protocol_versions": ["0.1"], "looper_version": "test", "host_capabilities": {
     "tools_call": True, "budget_authorize": True, "bus": False, "exec_slots": False}}
 CAPABILITIES = {"max_sessions": 10, "per_session_isolation": True, "per_session_credentials": True,
-    "cancel": True, "steer": {"in_trace": True, "boundary": "after_tool_batch", "idle_start": False},
+    "cancel": True, "fork": True, "steer": {"in_trace": True, "boundary": "after_tool_batch", "idle_start": False},
     "usage": {"per_request": True, "buckets": True, "reasoning_in_output": True},
     "authorize_covers": ["turn", "retry", "compaction"]}
 
 
-def fake_package(tmp_path, version="1.3.0", *, ai_version="1.3.0", missing=False):
+def fake_package(tmp_path, version="1.3.0", *, ai_version="1.3.0", missing=False, missing_fork=False):
     root = tmp_path / "fake-pi"
     (root / "dist").mkdir(parents=True)
     (root / "package.json").write_text(json.dumps({
@@ -30,7 +30,8 @@ def fake_package(tmp_path, version="1.3.0", *, ai_version="1.3.0", missing=False
         "DefaultResourceLoader", "createReadToolDefinition", "createGrepToolDefinition", "createFindToolDefinition",
         "createLsToolDefinition", "createEditToolDefinition", "createWriteToolDefinition", "createBashToolDefinition"]
     (root / "dist/index.js").write_text("console.log('sdk diagnostic');\n" + "\n".join(
-        f"export function {name}() {{}}" for name in names if not (missing and name == "createAgentSession")))
+        f"export function {name}() {{}}" for name in names if not (missing and name == "createAgentSession"))
+        + ("" if missing_fork else "\nSessionManager.forkFrom = () => {};"))
     paths = root / "dist/core/tools/path-utils.js"
     paths.parent.mkdir(parents=True)
     paths.write_text("export function resolveToCwd() {}\nexport function resolveReadPathAsync() {}")
@@ -66,13 +67,15 @@ def test_initialize_reports_the_gated_sdk(tmp_path):
 @pytest.mark.parametrize("case,diagnostic", [
     ("version", "1.4.0"), ("missing", "createAgentSession"), ("protocol", "0.1"),
     ("old", "1.2.9"), ("ai", "1.4.0"), ("outside", "not inside"),
+    ("fork", "missing exports: SessionManager.forkFrom"),
 ])
 def test_unverified_sdk_is_refused(tmp_path, case, diagnostic):
     async def exercise():
         _, installed_pi = require_pi()
         pi = installed_pi if case == "protocol" else fake_package(tmp_path,
             "1.4.0" if case == "version" else "1.2.9" if case == "old" else "1.3.0",
-            ai_version="1.4.0" if case == "ai" else "1.3.0", missing=case == "missing")
+            ai_version="1.4.0" if case == "ai" else "1.3.0", missing=case == "missing",
+            missing_fork=case == "fork")
         if case == "outside":
             pi = tmp_path / "outside-cli"
             pi.write_text("")

@@ -12,7 +12,7 @@
     log_level = "info"                          # debug, info, warning or error
 
     [runtimes]
-    pi = "cli"                                 # opt in to "runner" for Manager and Planner; restart required
+    pi = "cli"                                 # opt in to "runner" for every Pi role; restart required
 
     [backup]                                    # how the database is backed up before a schema change
     pg_dump = "/usr/lib/postgresql/17/bin/pg_dump"
@@ -441,6 +441,7 @@ def render(config: OpsConfig) -> str:
         else '# public_url = "https://looper.example.com"',
         f"log_level = {_toml_string(config.log_level)}" if config.log_level != "info" else '# log_level = "info"',
         "",
+        '# Opt in to "runner" for every Pi role; restart required.',
         "[runtimes]",
         'pi = "runner"' if config.pi_runtime == "runner" else '# pi = "cli"',
         "",

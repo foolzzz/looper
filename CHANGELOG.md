@@ -18,6 +18,48 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.200] - 2026-10-28
+
+### Fixed
+
+- **The Pi runner accounts for every authorised model request exactly once.** A budget authorisation that is still pending when a turn is cancelled is now awaited, and an `allow` that arrives afterwards ends with one aborted `request_end` that sent nothing, before the turn settles. A request that was sent but failed before response headers now reports `complete=false` instead of complete zero usage, and a completed request reports usage only from validated terminal counts. ([#832](https://github.com/foolzzz/looper/pull/832))
+
+## [2.13.199] - 2026-10-28
+
+### Fixed
+
+- **Hosted Worker runs that stop early keep their dropped steers and session.** A Worker run on a runner session killed by the Planner now returns the steers it dropped as `missed_input` on the kill reply, which the Planner adds to `missed_messages`; a run cancelled by a pool stop ends as `stopped` with the same drops; and a hosted launch that fails with `RunStartError` ends its handle so the session is released. ([#844](https://github.com/foolzzz/looper/pull/844))
+
+## [2.13.198] - 2026-10-28
+
+### Added
+
+- **Pi Workers, Reviewers and consults on the runner.** Under `[runtimes] pi = "runner"` (default `"cli"`, restart required) the opt-in now covers every Pi role. `RunnerChannel` runs one Worker, Reviewer or consult on a runner session as the run handle: a full runner (`CAPACITY`) or an unavailable one fails the step with a named reason, steers are never cancelled and answer accepted, rejected or unknown, and dropped steers reach the Planner as `missed_messages`. Runs get the CLI tool sets, `max_turns` as the request limit and the run timeout as the bash ceiling; consults fork a read-only (0400) copy of the run's saved session; the Pi CLI methods are refused under the opt-in. The generated ops file gains one comment line. ([#842](https://github.com/foolzzz/looper/pull/842))
+
+## [2.13.197] - 2026-10-28
+
+### Added
+
+- **Run handle for Worker, Reviewer and consult runs.** `WorkerPool` and consults run through a `RunHandle` that is a process (`ProcessRun`, today's code) or a hosted runner session. `RuntimeAdapter.hosts_runs` (`False` for every current runtime) and `hosted_run` declare the hosted path; it uses in-process room and vault tools (`RoomTurnTools`), per-authorization run and task caps, and records `steer_applied` and `steer_dropped`; input a session dropped reaches the Planner as `missed_messages`. No current runtime hosts runs, so behavior is unchanged. ([#836](https://github.com/foolzzz/looper/pull/836))
+
+## [2.13.196] - 2026-10-28
+
+### Added
+
+- **Pi runner opens Worker, Reviewer and forked sessions.** The Pi runner accepts the `worker` and `reviewer` roles, requires `limits.tool_timeout_s` (positive integer) and `limits.max_requests_per_turn` (non-negative integer), and handles `session/new` with `fork_from` through `SessionManager.forkFrom` (the saved session must match exactly one file; the source is not written; `session/load` with `fork_from` is refused). `initialize` reports the `fork` capability and the SDK gate requires `SessionManager.forkFrom`. The opt-in runner path only; no host path starts these sessions yet. ([#835](https://github.com/foolzzz/looper/pull/835))
+
+## [2.13.195] - 2026-10-28
+
+### Added
+
+- **Runner protocol and host sessions for Worker, Reviewer and consult runs.** `session/new` and `session/load` accept the `worker` and `reviewer` roles; `limits.tool_timeout_s` is any positive integer instead of fixed 120; `session/new` takes an optional `fork_from` to open a session from a saved one (the runner reports a `fork` capability, and the host refuses to fork without it); `RunnerSupervisor.acquire` takes an absolute `state_dir` that survives release; `Descriptor`, `RunnerSession` and `RunnerTurn` carry the new roles, tool timeout and fork source, and run sessions open without owner state. Python host side only; the Pi runner is unchanged and the default 120 seconds is unchanged. ([#834](https://github.com/foolzzz/looper/pull/834))
+
+## [2.13.194] - 2026-10-28
+
+### Fixed
+
+- **Pi runner `bash` now obeys the host tool timeout.** The runner applies `limits.tool_timeout_s` (120 seconds) when the model gives no timeout or a non-positive one, and caps a larger model timeout at it; on expiry the command's process group ends and the model gets `Command timed out after N seconds` with the output so far. Only affects the opt-in `pi = "runner"` path. ([#831](https://github.com/foolzzz/looper/pull/831))
+
 ## [2.13.193] - 2026-10-28
 
 ### Added
