@@ -98,7 +98,7 @@ async def check_registry_schema_version(conn: asyncpg.Connection, *, supported_v
 
 async def _classify_schema(conn: asyncpg.Connection, sql: str) -> str:
     """Read-only admission gate, always called under _SCHEMA_LOCK."""
-    from .bridge_upgrade import BASELINE, BRIDGE_FINGERPRINT, BRIDGE_MIGRATIONS, structure
+    from .bridge_upgrade import BASELINE, BRIDGE_CATALOGS, BRIDGE_MIGRATIONS, structure
 
     reason = "unsupported or incomplete Looper database; upgrade to v2.13.165 first"
     try:
@@ -123,8 +123,8 @@ async def _classify_schema(conn: asyncpg.Connection, sql: str) -> str:
         ledger = {r["name"] for r in await conn.fetch("SELECT name FROM schema_migrations")}
         # Frozen catalog witnesses keep identity independent of schema.sql cleanup.
         shape = hashlib.sha256(json.dumps(await structure(conn), sort_keys=True).encode()).hexdigest()
-        if (version == 3 and fingerprint == BRIDGE_FINGERPRINT and set(BRIDGE_MIGRATIONS).issubset(ledger)
-                and shape == "832d2e5a33a54552b5cc9fec313df28364e9b5eb4adc3ad5c3c1101f47b1ce94"):
+        if (version == 3 and set(BRIDGE_MIGRATIONS).issubset(ledger)
+                and shape in BRIDGE_CATALOGS.get(fingerprint, ())):
             return "bridge"
         if version == 4 and BASELINE in ledger and shape == "166a9177ddab7d7a280377bdf1b6caccced3d8dce4c6cb1374828ca4abbd13fe":
             return "current"

@@ -1,4 +1,4 @@
-"""Authentic, immutable v2.13.165 initialization and shared database witnesses."""
+"""Authentic, immutable schema-3 releases and shared database witnesses."""
 import asyncio
 import hashlib
 import io
@@ -14,19 +14,32 @@ from tests.db_support import DSN
 
 COMMIT = "f2935092d44c4707d92d4b60c32a334a934d4db9"
 FINGERPRINT = "b2bca629d4d68b756f42bc6d4567b9883985343c120f2543a0f9cda9da6732a3"
+SNAPSHOT_COMMIT = "ea35b5825d8be0fdcfee47de1185e8d8c8e3d3d5"  # v2.13.180
+SNAPSHOT_FINGERPRINT = "0c0f43ae1efc09fc486d6dd773f36bca737547b3660d4b6925896b8f306ef6fe"
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _archive_source(tmp_path_factory, commit):
+    source = tmp_path_factory.mktemp("bridge-source")
+    result = subprocess.run(["git", "archive", commit, "looper"], cwd=ROOT, capture_output=True, timeout=30)
+    assert result.returncode == 0, "Required released source missing; fetch the pinned tag first"
+    with tarfile.open(fileobj=io.BytesIO(result.stdout)) as archive:
+        archive.extractall(source, filter="data")
+    return source
 
 
 @pytest.fixture(scope="session")
 def bridge_source(tmp_path_factory):
     external = os.environ.get("LOOPER_TEST_BRIDGE_SOURCE")
-    source = Path(external).resolve() if external else tmp_path_factory.mktemp("bridge-source")
-    if not external:
-        result = subprocess.run(["git", "archive", COMMIT, "looper"], cwd=ROOT, capture_output=True, timeout=30)
-        assert result.returncode == 0, "Required v2.13.165 source missing; fetch the pinned tag first"
-        with tarfile.open(fileobj=io.BytesIO(result.stdout)) as archive:
-            archive.extractall(source, filter="data")
+    source = Path(external).resolve() if external else _archive_source(tmp_path_factory, COMMIT)
     assert hashlib.sha256((source / "looper/db/schema.sql").read_bytes()).hexdigest() == FINGERPRINT
+    return source
+
+
+@pytest.fixture(scope="session")
+def snapshot_bridge_source(tmp_path_factory):
+    source = _archive_source(tmp_path_factory, SNAPSHOT_COMMIT)
+    assert hashlib.sha256((source / "looper/db/schema.sql").read_bytes()).hexdigest() == SNAPSHOT_FINGERPRINT
     return source
 
 
@@ -38,7 +51,10 @@ sys.path.insert(0, source)
 import looper
 from looper.db import connection
 assert Path(looper.__file__).resolve() == Path(source).resolve() / 'looper/__init__.py'
-assert hashlib.sha256(connection.SCHEMA_PATH.read_bytes()).hexdigest() == 'b2bca629d4d68b756f42bc6d4567b9883985343c120f2543a0f9cda9da6732a3'
+assert hashlib.sha256(connection.SCHEMA_PATH.read_bytes()).hexdigest() in {
+    'b2bca629d4d68b756f42bc6d4567b9883985343c120f2543a0f9cda9da6732a3',
+    '0c0f43ae1efc09fc486d6dd773f36bca737547b3660d4b6925896b8f306ef6fe',
+}
 async def main():
     import asyncpg
     conn = await asyncpg.connect(url, server_settings={'search_path': schema}, command_timeout=20)

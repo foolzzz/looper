@@ -5,7 +5,10 @@ import json
 import pytest
 
 from looper.db import bridge_upgrade, connection
-from tests.bridge_schema_support import bridge_source as bridge_source, initialize_bridge, run_bridge, structure, witness
+from tests.bridge_schema_support import (
+    bridge_source as bridge_source, snapshot_bridge_source as snapshot_bridge_source,
+    initialize_bridge, run_bridge, structure, witness,
+)
 from tests.db_support import DSN, fresh_connection, fresh_schema
 
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
@@ -60,6 +63,76 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
             assert not await connection.schema_change_pending(conn)
             await run_bridge(bridge_source, DSN, await conn.fetchval("SELECT current_schema()"), refuse=True)
             assert await witness(conn) == after
+    run(test)
+
+
+@pytest.mark.parametrize("replay_old_bridge", [False, True])
+def test_released_bridge_preserves_execution_snapshot(snapshot_bridge_source, bridge_source, replay_old_bridge):
+    async def test():
+        async with fresh_connection() as conn, fresh_connection() as fresh:
+            await initialize_bridge(conn, snapshot_bridge_source)
+            snapshot = {"requirement": "Claimed before the schedule edit", "config": {"max_turns": 9}}
+            await conn.execute("UPDATE schedule_runs SET execution_snapshot=$1::jsonb", json.dumps(snapshot))
+            if replay_old_bridge:
+                # The older release rewrites the fingerprint but keeps the newer column and its data.
+                await run_bridge(bridge_source, DSN, await conn.fetchval("SELECT current_schema()"))
+            before, shape = await witness(conn), await structure(conn)
+            assert await conn.fetchval("SELECT version FROM registry_schema_version") == 3
+            assert await connection.schema_change_pending(conn)
+            assert await witness(conn) == before and await structure(conn) == shape
+            await connection.ensure_schema(conn)
+            after = await witness(conn)
+            assert after["schedule_runs"] == before["schedule_runs"]
+            assert json.loads(after["schedule_runs"][0]["execution_snapshot"]) == snapshot
+            assert await conn.fetchval("SELECT version FROM registry_schema_version") == 4
+            await connection.ensure_schema(fresh)
+            assert await structure(conn) == await structure(fresh)
+            await connection.ensure_schema(conn)
+            assert await witness(conn) == after
+            assert not await connection.schema_change_pending(conn)
+    run(test)
+
+
+@pytest.mark.parametrize("damage", [
+    "ALTER TABLE schedule_runs DROP COLUMN execution_snapshot",
+    "ALTER TABLE schedule_runs ALTER COLUMN execution_snapshot TYPE text USING execution_snapshot::text",
+])
+def test_incomplete_released_bridge_is_refused_without_mutation(snapshot_bridge_source, damage):
+    async def test():
+        async with fresh_connection() as conn:
+            await initialize_bridge(conn, snapshot_bridge_source)
+            await conn.execute(damage)
+            before, shape = await witness(conn), await structure(conn)
+            for operation in (connection.schema_change_pending, connection.ensure_schema):
+                with pytest.raises(connection.RegistrySchemaVersionError):
+                    await operation(conn)
+                assert await witness(conn) == before and await structure(conn) == shape
+    run(test)
+
+
+def test_deleted_custom_bot_preserves_gate_posts_and_reply_identity(bridge_source):
+    from looper.db import user_gates
+
+    async def test():
+        async with fresh_connection() as conn:
+            await initialize_bridge(conn, bridge_source)
+            await conn.execute("DELETE FROM channel_configs WHERE channel_id='channel-telegram-201'")
+            before = await witness(conn)
+            assert before["task_user_gate_posts"][0]["channel"] is None
+            assert before["task_user_gate_posts"][0]["channel_id"] == "channel-telegram-201"
+            assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(conn)
+            after = await witness(conn)
+            assert after["task_user_gate_posts"] == before["task_user_gate_posts"]
+            assert after["task_user_gate_messages"] == before["task_user_gate_messages"]
+            gate = await user_gates.find_reference("telegram", "7", ["11"],
+                                                  channel_id="channel-telegram-201", pool=conn)
+            assert gate is not None and gate["step_id"] == "step-bridge"
+            assert await user_gates.find_reference("telegram", "7", ["11"],
+                                                   channel_id="channel-telegram", pool=conn) is None
+            await connection.ensure_schema(conn)
+            assert await witness(conn) == after
+            assert not await connection.schema_change_pending(conn)
     run(test)
 
 

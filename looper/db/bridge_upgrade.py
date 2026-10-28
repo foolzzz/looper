@@ -1,8 +1,18 @@
-"""The only supported upgrade: the completed v2.13.165 database to schema 4."""
+"""Upgrade completed schema-3 releases to schema 4."""
 
 import json
 
 BRIDGE_FINGERPRINT = "b2bca629d4d68b756f42bc6d4567b9883985343c120f2543a0f9cda9da6732a3"
+_SNAPSHOT_STRUCTURE = "88a80ca66b593f8f82e4cb343549bc61b31e057ad5c62e86a7acb8188bae056a"
+# v2.13.165–174 and v2.13.175–184 differ only by execution_snapshot.
+# Replaying the older release keeps that column but rewrites the fingerprint.
+BRIDGE_CATALOGS = {
+    BRIDGE_FINGERPRINT: {
+        "832d2e5a33a54552b5cc9fec313df28364e9b5eb4adc3ad5c3c1101f47b1ce94",
+        _SNAPSHOT_STRUCTURE,
+    },
+    "0c0f43ae1efc09fc486d6dd773f36bca737547b3660d4b6925896b8f306ef6fe": {_SNAPSHOT_STRUCTURE},
+}
 BASELINE = "post_bridge_baseline"
 # SQL and Python ledger entries of the pinned bridge; file_state_import belongs
 # to serve, not schema initialization, and is deliberately not required here.
@@ -100,10 +110,11 @@ async def upgrade_from_bridge(conn):
         await conn.execute(f"UPDATE {table} SET channel_id = 'channel-' || channel WHERE channel_id IS NULL "
                            "AND channel IN ('lark', 'lark_bot', 'telegram')")
     # The old binary wrote NULL for custom bot posts; only an extant bot proves its type.
+    # A deleted bot's channel stays NULL: channel_id still identifies its historical replies.
     await conn.execute("UPDATE task_user_gate_posts p SET channel = c.channel_type FROM channel_configs c "
                        "WHERE p.channel IS NULL AND p.channel_id = c.channel_id")
     for table, condition in (
-        ("task_user_gate_posts", "channel IS NULL OR channel_id IS NULL"),
+        ("task_user_gate_posts", "channel_id IS NULL"),
         ("task_user_gate_messages", "channel_id IS NULL AND external_id IS NOT NULL AND coalesce(channel, '') <> 'web'"),
     ):
         bad = await conn.fetchval(f"SELECT id FROM {table} WHERE {condition} LIMIT 1")
