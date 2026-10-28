@@ -33,7 +33,7 @@ async function canonical(path: string): Promise<string> {
   }
 }
 export async function builtinTools(params: { cwd: string; add_dirs: string[]; home: string;
-    env: Record<string, string>; tools: { builtin: string[] } }): Promise<any[]> {
+    env: Record<string, string>; tools: { builtin: string[] }; limits: { tool_timeout_s: number } }): Promise<any[]> {
   const roots = await Promise.all([params.cwd, ...params.add_dirs].map(path => realpath(path)));
   return params.tools.builtin.map(name => {
     const factory = sdk!.agent[factories[name as keyof typeof factories]];
@@ -43,8 +43,10 @@ export async function builtinTools(params: { cwd: string; add_dirs: string[]; ho
     const execute = tool.execute;
     tool.execute = async (id: string, input: any, signal: AbortSignal, onUpdate: any, ctx: any) => {
       if (name === 'bash') {
+        // Pi treats absent/nonpositive timeouts as unlimited; always enforce the host ceiling.
+        const timeout = input.timeout > 0 ? Math.min(input.timeout, params.limits.tool_timeout_s) : params.limits.tool_timeout_s;
         running++;
-        try { return await execute(id, input, signal, onUpdate, ctx); }
+        try { return await execute(id, { ...input, timeout }, signal, onUpdate, ctx); }
         finally { running--; }
       }
       const path = input.path ?? '.';
