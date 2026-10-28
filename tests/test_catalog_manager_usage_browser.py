@@ -83,7 +83,10 @@ def test_catalog_manager_usage_delete_cancel_and_recalculation(tmp_path, width, 
                     return
                 request.fulfill(json={"status": "ok", "result": result})
             page.route("**/*", route)
-            page.goto("http://catalog.example/#settings/catalog")
+            opened = page.goto("http://catalog.example/#settings/catalog")
+            staged = (staged_dashboard_dir / "index.html").read_text()
+            assert opened is not None and opened.text() == staged
+            expect(page).to_have_title(staged.split("<title>", 1)[1].split("</title>", 1)[0])
             row = page.get_by_role("listitem").filter(has_text="personal:example-capability")
             expect(row).to_contain_text("Managers: 1")
             if width == 1280:
