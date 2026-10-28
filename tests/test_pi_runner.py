@@ -14,7 +14,7 @@ pytestmark = pytest.mark.installed
 OFFER = {"protocol_versions": ["0.1"], "looper_version": "test", "host_capabilities": {
     "tools_call": True, "budget_authorize": True, "bus": False, "exec_slots": False}}
 CAPABILITIES = {"max_sessions": 10, "per_session_isolation": True, "per_session_credentials": True,
-    "cancel": True, "steer": {"in_trace": False, "boundary": "after_tool_batch", "idle_start": False},
+    "cancel": True, "steer": {"in_trace": True, "boundary": "after_tool_batch", "idle_start": False},
     "usage": {"per_request": True, "buckets": True, "reasoning_in_output": True},
     "authorize_covers": ["turn", "retry", "compaction"]}
 

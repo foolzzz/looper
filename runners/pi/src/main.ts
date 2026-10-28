@@ -12,7 +12,7 @@ const { monitorEventLoopDelay } = await import('node:perf_hooks');
 const { load } = await import('./sdk.ts');
 const { sessions, newSession, loadSession, closeSession } = await import('./session.ts');
 const { toolProcesses } = await import('./exec.ts');
-const { prompt, cancel } = await import('./turn.ts');
+const { prompt, cancel, steer } = await import('./turn.ts');
 const args = process.argv.slice(2);
 if (args.length !== 2 || args[0] !== '--pi' || !args[1]) {
   rpc.diagnostic('runner requires --pi <path>'); process.exit(2);
@@ -33,7 +33,7 @@ rpc.method('initialize', async params => {
   return { protocol_version: '0.1', runner: { kind: 'pi', version: '0.1.0' },
     sdk: { name: '@earendil-works/pi-coding-agent', version: sdk.version }, capabilities: {
       max_sessions: 10, per_session_isolation: true, per_session_credentials: true, cancel: true,
-      steer: { in_trace: false, boundary: 'after_tool_batch', idle_start: false },
+      steer: { in_trace: true, boundary: 'after_tool_batch', idle_start: false },
       usage: { per_request: true, buckets: true, reasoning_in_output: true },
       authorize_covers: ['turn', 'retry', 'compaction'],
     } };
@@ -43,6 +43,7 @@ rpc.method('session/load', loadSession, { session: true });
 rpc.method('session/close', closeSession, { session: true });
 rpc.method('session/prompt', prompt, { session: true });
 rpc.method('session/cancel', cancel, { session: true });
+rpc.method('session/steer', steer, { session: true });
 rpc.method('runner/health', () => ({ sessions: sessions.size,
   running: [...sessions.values()].filter(r => r.turn && !r.turn.settled).length,
   inflight_requests: [...sessions.values()].reduce((n, r) => n + (r.turn?.inflight.size ?? 0), 0), tool_processes: toolProcesses(),

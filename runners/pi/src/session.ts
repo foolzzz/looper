@@ -7,11 +7,13 @@ import { sdk } from './sdk.ts';
 import { authorizingStream } from './provider.ts';
 import { cancelTurn, onEvent } from './turn.ts';
 import type { Turn } from './turn.ts';
+import type { PlatformTool } from './tools.ts';
 import { builtinTools, validateBuiltin } from './exec.ts';
 
 export type Session = {
   id: string; key: string; role: string; cwd: string; accountId: string; model: string;
   agent: any; runtime: any; turn: Turn | null; closing: boolean;
+  extensionApi: any; builtinTools: string[]; platformTools: Map<string, PlatformTool>;
 };
 export const sessions = new Map<string, Session>();
 const opening = new Set<string>();
@@ -113,16 +115,21 @@ async function compose(params: Record<string, any>, resumed: boolean): Promise<o
       prompts: [], themes: [], retry: { provider: { maxRetries: 0 } } });
     const sessionManager = resumed ? (SessionManager as any).open(file, params.state_dir, params.cwd)
       : (SessionManager as any).create(params.cwd, params.state_dir);
+    let extensionApi: any;
     const resourceLoader = new (DefaultResourceLoader as any)({ cwd: params.cwd, agentDir, settingsManager,
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+      extensionFactories: [(api: any) => { extensionApi = api; }],
       ...(prompt.mode === 'replace' ? { systemPrompt: prompt.text } : { appendSystemPrompt: [prompt.text] }) });
     await resourceLoader.reload();
+    // tools: [] is a permanent allowlist in Pi; noTools keeps later proxy registration possible.
     ({ session: agent } = await createAgentSession({ cwd: params.cwd, agentDir, modelRuntime: runtime,
       model: runtime.getModel('looper', provider.model), thinkingLevel: provider.effort ?? undefined,
-      tools: [...params.tools.builtin], customTools: await builtinTools(params as any), sessionManager, settingsManager, resourceLoader }));
+      noTools: 'builtin', customTools: await builtinTools(params as any), sessionManager, settingsManager, resourceLoader }));
     if (resumed && agent.sessionId !== params.session_id) throw new RpcError(-32603, 'loaded session id mismatch');
     record = { id: agent.sessionId, key: params.session_key, role: params.role, cwd: params.cwd,
-      accountId: provider.account_id, model: provider.model, agent, runtime, turn: null, closing: false };
+      accountId: provider.account_id, model: provider.model, agent, runtime, turn: null, closing: false,
+      extensionApi, builtinTools: [...params.tools.builtin], platformTools: new Map() };
+    if (!extensionApi) throw new RpcError(-32008, 'platform tool extension was not loaded');
     agent.subscribe((event: any) => onEvent(record, event));
     const active = new Set(agent.getActiveToolNames());
     if (active.size !== new Set(params.tools.builtin).size || params.tools.builtin.some((name: string) => !active.has(name))) {
