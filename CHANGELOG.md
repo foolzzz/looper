@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.192] - 2026-10-28
+
+### Added
+
+- **Pi runner sessions can use platform tools and be steered mid-turn (not yet reachable).** `runners/pi` registers the tools of each `session/prompt` snapshot (validated first, no renaming) and runs them through the host's `tools/call`, returning its result unchanged. The new `session/steer` queues text into the running turn and reports `steer_applied` or `steer_dropped`; `initialize` declares `steer.in_trace`. Cancel and close drop pending steers, and a provider request started after cancellation is refused. Nothing registers the runner with the service yet. ([#823](https://github.com/foolzzz/looper/pull/823))
+
 ## [2.13.191] - 2026-10-28
 
 ### Added
