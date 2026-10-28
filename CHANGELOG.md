@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.183] - 2026-10-27
+
+### Changed
+
+- **The Manager's `looper_catalog` list reports Manager-only installs.** `_item_listed` in `looper/agents/ops/config.py` now returns `manager_install_count` for each item, as the dashboard catalog does, and `COMPACT_ITEM` in `looper/agents/v1_domains/catalog.py` adds it to the result schema (also for the `item` of install, update and uninstall results). A skill installed only on the Manager no longer looks installed nowhere. ([#801](https://github.com/foolzzz/looper/pull/801))
+
 ## [2.13.182] - 2026-10-27
 
 ### Changed
