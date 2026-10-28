@@ -29,11 +29,16 @@ async function directory(path: unknown): Promise<boolean> {
   try { return (await stat(path)).isDirectory(); } catch { return false; }
 }
 async function validate(params: Record<string, any>): Promise<void> {
-  const provider = params.provider, prompt = params.system_prompt, tools = params.tools;
+  const provider = params.provider, prompt = params.system_prompt, tools = params.tools, limits = params.limits;
   // Register even rejected keys before any SDK diagnostic or error can expose them.
   if (typeof provider?.api_key === 'string') addSecret(provider.api_key);
   if (!nonempty(params.session_key) || !/^[A-Za-z0-9_-]+$/.test(params.session_key)
-      || !['manager', 'planner'].includes(params.role)
+      || !['manager', 'planner', 'worker', 'reviewer'].includes(params.role)
+      || !limits || typeof limits !== 'object' || Array.isArray(limits)
+      || !Number.isInteger(limits.tool_timeout_s) || limits.tool_timeout_s <= 0
+      || !Number.isInteger(limits.max_requests_per_turn) || limits.max_requests_per_turn < 0
+      || ('fork_from' in params && (!params.fork_from || typeof params.fork_from !== 'object'
+        || Array.isArray(params.fork_from) || !nonempty(params.fork_from.session_id)))
       || !await directory(params.cwd) || !await directory(params.state_dir)
       || !await directory(params.home)
       || !Array.isArray(params.add_dirs) || !(await Promise.all(params.add_dirs.map(directory))).every(Boolean)
@@ -78,10 +83,12 @@ export function newSession(params: Record<string, any>): Promise<object> { retur
 export function loadSession(params: Record<string, any>): Promise<object> { return compose(params, true); }
 async function compose(params: Record<string, any>, resumed: boolean): Promise<object> {
   await validate(params);
+  if (resumed && 'fork_from' in params) throw new RpcError(-32602, 'invalid session parameters');
   if (resumed && !nonempty(params.session_id)) throw new RpcError(-32602, 'invalid session id');
   if (resumed && (sessions.has(params.session_id) || loading.has(params.session_id))) {
     throw new RpcError(-32002, 'session is already owned');
   }
+  const source = params.fork_from ? await sessionFile(params.state_dir, params.fork_from.session_id) : undefined;
   // Reserve atomically after the last filesystem await, including concurrent new sessions.
   if (opening.has(params.session_key) || [...sessions.values()].some(r => r.key === params.session_key)) {
     throw new RpcError(-32002, 'session key is already owned');
@@ -114,7 +121,8 @@ async function compose(params: Record<string, any>, resumed: boolean): Promise<o
       enableInstallTelemetry: false, defaultProjectTrust: 'never', packages: [], extensions: [], skills: [],
       prompts: [], themes: [], retry: { provider: { maxRetries: 0 } } });
     const sessionManager = resumed ? (SessionManager as any).open(file, params.state_dir, params.cwd)
-      : (SessionManager as any).create(params.cwd, params.state_dir);
+      : source ? (SessionManager as any).forkFrom(source, params.cwd, params.state_dir)
+        : (SessionManager as any).create(params.cwd, params.state_dir);
     let extensionApi: any;
     const resourceLoader = new (DefaultResourceLoader as any)({ cwd: params.cwd, agentDir, settingsManager,
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
@@ -126,6 +134,7 @@ async function compose(params: Record<string, any>, resumed: boolean): Promise<o
       model: runtime.getModel('looper', provider.model), thinkingLevel: provider.effort ?? undefined,
       noTools: 'builtin', customTools: await builtinTools(params as any), sessionManager, settingsManager, resourceLoader }));
     if (resumed && agent.sessionId !== params.session_id) throw new RpcError(-32603, 'loaded session id mismatch');
+    if (source && agent.sessionId === params.fork_from.session_id) throw new RpcError(-32603, 'fork returned source session id');
     record = { id: agent.sessionId, key: params.session_key, role: params.role, cwd: params.cwd,
       accountId: provider.account_id, model: provider.model, agent, runtime, turn: null, closing: false,
       extensionApi, builtinTools: [...params.tools.builtin], platformTools: new Map() };
