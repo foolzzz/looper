@@ -209,7 +209,12 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError, runner.EvalError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    _report(result, path, args, is_dialogs=False)
+    try:
+        _report(result, path, args, is_dialogs=False)
+    except runner.EvalError as exc:
+        print(f"Run written to {path}", file=sys.stderr)
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     return exit_code(result)
 
 
@@ -234,7 +239,12 @@ def _dialogs(args: argparse.Namespace) -> int:
     except (ValueError, runner.EvalError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    _report(result, path, args, is_dialogs=True)
+    try:
+        _report(result, path, args, is_dialogs=True)
+    except runner.EvalError as exc:
+        print(f"Run written to {path}", file=sys.stderr)
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     print("\n" + dialogs.markdown(result))
     return exit_code(result)
 
