@@ -59,13 +59,13 @@ def _add(before: Usage, current: Usage) -> Usage:
 
 
 class RunnerTurn:
-    def __init__(self, *, session_id: str, trace_id: str, role: Literal["manager", "planner"],
+    def __init__(self, *, session_id: str, trace_id: str, role: Literal["manager", "planner", "worker", "reviewer"],
                  tools: TurnTools, provider_id: str, model: str, price: Price | None,
                  limits: Callable[[], Awaitable[TurnLimits]], max_requests: int = 30,
                  prior_totals: Usage | None = None, prior_model_usage: Mapping[str, Usage] | None = None,
                  cancel: Callable[[str], Awaitable[None]] | None = None) -> None:
-        if role not in ("manager", "planner"):
-            raise ValueError("a runner turn must be Manager or Planner")
+        if role not in ("manager", "planner", "worker", "reviewer"):
+            raise ValueError("a runner turn must be Manager, Planner, Worker or Reviewer")
         if type(max_requests) is not int or max_requests <= 0:
             raise ValueError("max_requests must be a positive integer")
         self.session_id, self.trace_id, self.role = session_id, trace_id, role

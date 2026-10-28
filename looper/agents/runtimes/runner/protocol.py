@@ -14,6 +14,7 @@ from typing import Annotated, Any, Literal, NotRequired, TypedDict, Union, cast,
 PROTOCOL_VERSION = "0.1"
 MAX_FRAME_BYTES = 4 * 1024 * 1024
 Count = Annotated[int, "nonnegative"]
+Positive = Annotated[int, "positive"]
 Name = Annotated[str, "nonempty"]
 RpcId = Annotated[str, r"[lr]-[0-9]+"]
 Version = Annotated[str, r"[0-9]+\.[0-9]+"]
@@ -28,7 +29,7 @@ UsageCapability = TypedDict("UsageCapability", {
     "per_request": bool, "buckets": bool, "reasoning_in_output": bool}, total=False)
 Capabilities = TypedDict("Capabilities", {
     "per_session_isolation": bool, "per_session_credentials": bool, "max_sessions": Count,
-    "cancel": bool, "steer": SteerCapability, "usage": UsageCapability, "authorize_covers": list[RequestKind]}, total=False)
+    "cancel": bool, "fork": bool, "steer": SteerCapability, "usage": UsageCapability, "authorize_covers": list[RequestKind]}, total=False)
 RunnerIdentity = TypedDict("RunnerIdentity", {"kind": Name, "version": Name})
 SdkIdentity = TypedDict("SdkIdentity", {"name": Name, "version": Name})
 InitializeResult = TypedDict("InitializeResult", {
@@ -40,13 +41,15 @@ SystemPrompt = TypedDict("SystemPrompt", {"mode": Name, "text": str})
 PlatformTool = TypedDict("PlatformTool", {"name": Name, "description": str, "inputSchema": dict[str, Any]})
 Tools = TypedDict("Tools", {"builtin": list[Name], "read_only": bool, "platform": list[PlatformTool]})
 Limits = TypedDict("Limits", {
-    "max_requests_per_turn": Count, "tool_timeout_s": Literal[120], "tool_output_bytes": Literal[102400]})
+    "max_requests_per_turn": Count, "tool_timeout_s": Positive, "tool_output_bytes": Literal[102400]})
+ForkFrom = TypedDict("ForkFrom", {"session_id": Name})
 NewSessionParams = TypedDict("NewSessionParams", {
-    "session_key": Annotated[str, r"[A-Za-z0-9_-]+"], "role": Literal["manager", "planner"], "cwd": Name,
+    "session_key": Annotated[str, r"[A-Za-z0-9_-]+"], "role": Literal["manager", "planner", "worker", "reviewer"], "cwd": Name,
     "add_dirs": list[str], "env": dict[str, str], "home": Name, "state_dir": Name, "provider": Provider,
-    "system_prompt": SystemPrompt, "tools": Tools, "limits": Limits})
+    "system_prompt": SystemPrompt, "tools": Tools, "limits": Limits, "fork_from": NotRequired[ForkFrom]})
 Session = TypedDict("Session", {"session_id": Name})
-LoadSessionParams = TypedDict("LoadSessionParams", {**NewSessionParams.__annotations__, "session_id": Name})
+_load_session_fields = {key: value for key, value in NewSessionParams.__annotations__.items() if key != "fork_from"}
+LoadSessionParams = TypedDict("LoadSessionParams", {**_load_session_fields, "session_id": Name})
 Loaded = TypedDict("Loaded", {"session_id": Name, "resumed": Literal[True]})
 Turn = TypedDict("Turn", {"session_id": Name, "trace_id": Name})
 CloseParams = TypedDict("CloseParams", {"session_id": Name, "trace_id": NotRequired[Name]})
@@ -170,9 +173,9 @@ def _decode(shape, value):
     if origin in (Annotated, NotRequired):
         decoded = _decode(args[0], value)
         rule = args[1] if origin is Annotated else None
-        if ((rule == "nonnegative" and decoded < 0) or (rule == "nonempty" and not decoded)
-                or (rule == "empty" and decoded) or
-                (rule not in {None, "nonnegative", "nonempty", "empty"} and not re.fullmatch(rule, decoded))):
+        if ((rule == "nonnegative" and decoded < 0) or (rule == "positive" and decoded <= 0)
+                or (rule == "nonempty" and not decoded) or (rule == "empty" and decoded) or
+                (rule not in {None, "nonnegative", "positive", "nonempty", "empty"} and not re.fullmatch(rule, decoded))):
             raise ValueError
         return decoded
     if origin in (types.UnionType, Union):
