@@ -101,6 +101,49 @@ def test_inputs_only_update_displays_real_before_after_including_removed_values(
     run_db(test, monkeypatch, timeout=120)
 
 
+@pytest.mark.parametrize("cap", ["run_budget_usd", "daily_budget_usd"])
+@pytest.mark.parametrize("patch,key,values", [
+    ({"template_inputs": {**VALUES, "note": "Include subtotals"}}, "report", {**VALUES, "note": "Include subtotals"}),
+    ({"template_key": "empty"}, "empty", {}),
+    ({"template_key": None}, None, {}),
+    ({}, "report", VALUES),
+], ids=["inputs", "template", "clear", "cap-only"])
+def test_cap_raise_confirmation_shows_every_committed_template_change(monkeypatch, tmp_path, cap, patch, key, values):
+    async def test(pool):
+        chat, _ = await _setup(pool, tmp_path)
+        sid = await _create(chat)
+        if key is None:
+            await pool.execute("UPDATE managers SET task_policy='free' WHERE id=$1", OWNER)
+        await schedules.update_schedule(sid, {cap: 1})
+        before = await _read(sid)
+        (asked,) = await chat.say("Raise cap and update selection", (TOOL, {
+            "action": "update", "schedule": sid, "fields": {cap: 2, **patch}}))
+        assert asked["status"] == "needs_confirmation", asked
+        assert await _read(sid) == before
+        block = "\n".join(chat.turns[-1].blocks)
+        lines = [line for line in block.splitlines() if line.startswith("- ")]
+        assert "$1 → $2" in lines[0]
+        if patch:
+            inputs = next(line for line in lines if line.startswith("- 模板静态输入："))
+            old, new = inputs.split(" → ")
+            assert VALUES["note"] in old and VALUES["note"] not in new
+            if key != "report":
+                assert "- 任务模板：Source report（report） → " + (
+                    "Empty report（empty）" if key else "没有") in lines
+                assert new == "没有"
+            else:
+                assert values["note"] in new
+        assert len(lines) == (1 if not patch else 2 if key == "report" else 3)
+        confirmed = await _confirm(chat, asked)
+        assert confirmed["status"] == "ok", confirmed
+        expected_changes = [cap, *(["template_key"] if key != "report" else []),
+                            *(["template_inputs"] if patch else [])]
+        assert confirmed["result"]["changed"] == expected_changes
+        stored = await _read(sid)
+        assert stored[cap] == 2 and (stored["template_key"], stored["template_inputs"]) == (key, values)
+    run_db(test, monkeypatch, timeout=120)
+
+
 @pytest.mark.parametrize("patch,key,values", [({"name": "renamed"}, "report", VALUES),
     ({"template_key": "empty"}, "empty", {}), ({"template_key": None}, None, {})])
 def test_selection_omission_replacement_and_explicit_clear(monkeypatch, tmp_path, patch, key, values):
@@ -126,14 +169,18 @@ def test_selection_omission_replacement_and_explicit_clear(monkeypatch, tmp_path
     ({"template_inputs": {"url": 7}}, "static strings"),
     ({"template_inputs": {"url": "file:///tmp/source"}}, "http or https"),
     ({"template_inputs": None}, "static strings"), ({"manager_id": "manager"}, "unknown key")])
-def test_invalid_owner_template_input_combinations_leave_schedule_unchanged(monkeypatch, tmp_path, patch, reason):
+@pytest.mark.parametrize("raise_cap", [False, True], ids=["immediate", "confirmation"])
+def test_invalid_owner_template_input_combinations_leave_schedule_unchanged(monkeypatch, tmp_path, patch, reason,
+                                                                          raise_cap):
     async def test(pool):
         chat, _ = await _setup(pool, tmp_path)
         await managers.put_template("manager", "foreign", {"name": "Private foreign report"})
         await managers.put_template("manager", "report", {"name": "Different owner report"})
         sid = await _create(chat)
+        await schedules.update_schedule(sid, {"daily_budget_usd": 1})
         before = await _read(sid)
-        (answer,) = await chat.say("Change selection", (TOOL, {"action": "update", "schedule": sid, "fields": patch}))
+        fields = {**patch, **({"daily_budget_usd": 2} if raise_cap else {})}
+        (answer,) = await chat.say("Change selection", (TOOL, {"action": "update", "schedule": sid, "fields": fields}))
         assert _error(answer) in {"invalid", "conflict"} and reason in answer["error"]["message"]
         assert await _read(sid) == before
         assert "Private foreign report" not in str(answer) and "Different owner report" not in str(chat.turns)
@@ -159,7 +206,8 @@ def test_scoped_manager_does_not_display_another_owners_template_selection(monke
     run_db(test, monkeypatch, timeout=120)
 
 
-def test_scoped_manager_refuses_another_owners_template_change_before_writing(monkeypatch, tmp_path):
+@pytest.mark.parametrize("raise_cap", [False, True], ids=["immediate", "confirmation"])
+def test_scoped_manager_refuses_another_owners_template_change_before_writing(monkeypatch, tmp_path, raise_cap):
     """A real template change on another owner's schedule must not commit and then read back as no change."""
     async def test(pool):
         chat, project = await _setup(pool, tmp_path)
@@ -169,10 +217,12 @@ def test_scoped_manager_refuses_another_owners_template_change_before_writing(mo
         foreign = (await schedules.create_schedule(project["id"], {**FIELDS, "name": "foreign",
             "template_key": "foreign", "template_inputs": {"note": "Private static value"}}))["schedule"]
         sid = foreign["schedule_id"]
+        await schedules.update_schedule(sid, {"daily_budget_usd": 1})
         before = await _read(sid)
         patches = ({"template_inputs": {"note": "Replaced private value"}}, {"template_key": "optional"},
                    {"name": "should-not-stick", "template_inputs": {"note": "Replaced private value"}})
         for patch in patches:
+            patch = {**patch, **({"daily_budget_usd": 2} if raise_cap else {})}
             (answer,) = await chat.say("Change the other owner's template", (TOOL, {
                 "action": "update", "schedule": sid, "fields": patch}))
             assert _error(answer) == "forbidden" and "another Manager" in answer["error"]["message"]
