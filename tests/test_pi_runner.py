@@ -35,7 +35,8 @@ def fake_package(tmp_path, version="1.3.0", *, ai_version="1.3.0", missing=False
     (ai / "dist/api").mkdir(parents=True)
     (ai / "package.json").write_text(json.dumps({"name": "@earendil-works/pi-ai",
         "version": ai_version, "type": "module"}))
-    (ai / "dist/index.js").write_text("export class InMemoryCredentialStore {}")
+    (ai / "dist/index.js").write_text("export class InMemoryCredentialStore {}\n"
+        "export function createAssistantMessageEventStream() {}\nexport function isContextOverflow() {}")
     for name in ("openai-responses", "openai-completions"):
         (ai / f"dist/api/{name}.js").write_text("export function streamSimple() {}")
     return executable
@@ -123,7 +124,7 @@ def test_health_and_unknown_methods(tmp_path):
             assert error == {"code": -32601, "message": "method not found",
                 "data": {"session_id": "s", "trace_id": "t"}}
             await send("session/new", {}, id="l-3")
-            assert (await receive())["error"]["code"] == -32601
+            assert (await receive())["error"]["code"] == -32602
             await send("runner/health", {}, id="l-4")
             assert (await receive())["result"]["sessions"] == 0
     asyncio.run(exercise())
