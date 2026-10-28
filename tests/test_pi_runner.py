@@ -31,6 +31,9 @@ def fake_package(tmp_path, version="1.3.0", *, ai_version="1.3.0", missing=False
         "createLsToolDefinition", "createEditToolDefinition", "createWriteToolDefinition", "createBashToolDefinition"]
     (root / "dist/index.js").write_text("console.log('sdk diagnostic');\n" + "\n".join(
         f"export function {name}() {{}}" for name in names if not (missing and name == "createAgentSession")))
+    paths = root / "dist/core/tools/path-utils.js"
+    paths.parent.mkdir(parents=True)
+    paths.write_text("export function resolveToCwd() {}\nexport function resolveReadPathAsync() {}")
     ai = root / "node_modules/@earendil-works/pi-ai"
     (ai / "dist/api").mkdir(parents=True)
     (ai / "package.json").write_text(json.dumps({"name": "@earendil-works/pi-ai",

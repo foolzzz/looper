@@ -10,7 +10,8 @@ export type Turn = {
   trace: string; text: string; started: boolean; settled: boolean; cancel: null | 'cancel' | 'close';
   denial: string | null; ended: number; complete: boolean; inflight: Set<string>; httpStatus?: number;
   transport: boolean; last?: any; settling?: Promise<void>; drained?: () => void;
-  failure?: Failure; forced?: boolean;
+  failure?: Failure; forced?: boolean; compacting?: boolean; retryPending?: boolean;
+  requestKinds?: Map<string, 'turn' | 'retry' | 'compaction'>;
   finished: Promise<void>; finish: () => void;
   steers: Steer[]; steerIds: Set<string>; forwarding: Promise<void>; initialUserEnded: boolean;
   lastRequestId: string | null; afterToolBatch: boolean;
@@ -140,7 +141,10 @@ export function onEvent(record: Session, event: any): void {
   if (!turn || turn.settled || turn.settling) return;
   if (event.type === 'agent_start') {
     forwardSteers(record, turn);
-  } else if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') {
+  } else if (event.type === 'auto_retry_start') turn.retryPending = true;
+  else if (event.type === 'compaction_start') turn.compacting = true;
+  else if (event.type === 'compaction_end') turn.compacting = false;
+  else if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') {
     void update(record.id, turn.trace, 'text_delta', { text: event.assistantMessageEvent.delta });
   } else if (event.type === 'message_end') {
     const message = event.message;

@@ -15,6 +15,10 @@ export type Sdk = {
   ai: { InMemoryCredentialStore: Handle; createAssistantMessageEventStream: Handle; isContextOverflow: Handle };
   responses: { streamSimple: Handle };
   completions: { streamSimple: Handle };
+  paths: {
+    resolveToCwd: (path: string, cwd: string) => string;
+    resolveReadPathAsync: (path: string, cwd: string) => Promise<string>;
+  };
 };
 export let sdk: Sdk | undefined;
 async function manifest(root: string): Promise<{ name: string; version: string }> {
@@ -62,13 +66,15 @@ export async function load(pi: string): Promise<Sdk> {
     };
     const agent = await importFile(root, 'dist/index.js', pkg.name);
     requireExports(agent, agentExports, pkg.name);
+    const toolPaths = await importFile(root, 'dist/core/tools/path-utils.js', pkg.name);
+    requireExports(toolPaths, ['resolveToCwd', 'resolveReadPathAsync'], 'Pi path resolver');
     const ai = await importFile(aiRoot, 'dist/index.js', '@earendil-works/pi-ai');
     requireExports(ai, ['InMemoryCredentialStore', 'createAssistantMessageEventStream', 'isContextOverflow'], '@earendil-works/pi-ai');
     const responses = await importFile(aiRoot, 'dist/api/openai-responses.js', '@earendil-works/pi-ai');
     const completions = await importFile(aiRoot, 'dist/api/openai-completions.js', '@earendil-works/pi-ai');
     requireExports(responses, ['streamSimple'], 'openai-responses');
     requireExports(completions, ['streamSimple'], 'openai-completions');
-    sdk = { version: pkg.version, agent, ai, responses, completions };
+    sdk = { version: pkg.version, agent, ai, responses, completions, paths: toolPaths };
     return sdk;
   } catch (error) {
     if (error instanceof RpcError) throw error;

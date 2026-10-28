@@ -237,7 +237,7 @@ def test_running_session_rejects_conflicting_controls(tmp_path):
     ("cwd", "relative", -32602), ("state_dir", "/nonexistent-runner-state", -32602),
     ("provider.protocol", "anthropic", -32602), ("provider.api_key", "", -32602),
     ("system_prompt.mode", "unknown", -32602),
-    ("tools.builtin", ["read"], -32007), ("tools.platform", [{"name": "lookup"}], -32007),
+    ("tools.builtin", ["unknown"], -32602), ("tools.platform", [{"name": "lookup"}], -32007),
     ("agent", "missing", -32008), ("agent", "symlink", -32008),
 ])
 def test_session_new_rejects_invalid_composition(tmp_path, field, value, code):
