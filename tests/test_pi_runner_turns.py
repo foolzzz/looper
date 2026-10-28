@@ -287,6 +287,40 @@ def test_transport_failure_accounts_for_every_attempt(tmp_path, monkeypatch, dis
     run(exercise())
 
 
+@pytest.mark.parametrize("ending", ["disconnect", "eof", "error"])
+def test_nonterminal_response_usage_leaves_sent_requests_incomplete(tmp_path, monkeypatch, ending):
+    from looper.agents.runtimes.runner.turn import RunnerTurn
+
+    async def exercise():
+        ended, original = [], RunnerTurn.request_end
+
+        async def request_end(self, params):
+            ended.append(dict(params))
+            return await original(self, params)
+
+        monkeypatch.setattr(RunnerTurn, "request_end", request_end)
+        events = [event("response.created", response={"usage": USAGE})]
+        if ending == "error":
+            events.append(event("error", code="server_error", message="scripted failure"))
+        scripts = [ResponseScript(events=events, disconnect_after=1 if ending == "disconnect" else None)
+            for _ in range(4)]
+        async with FakeModelAPI(scripts, api_key=KEY) as api, pi_supervisor(tmp_path) as supervisor:
+            lease = await supervisor.acquire("pi")
+            sid = await lease.open_session(session_params(lease, base_url=api.base_url, key=KEY))
+            await begin(lease.bridge, sid, "nonterminal-usage")
+            summary = await lease.bridge.wait_settled(sid, "nonterminal-usage")
+            assert summary.outcome == "failed"
+            assert len(ended) == len(api.requests) == 4
+            assert len({p["request_id"] for p in ended}) == 4
+            assert all(p["status"] == "error" and not p["complete"] for p in ended)
+            assert all(p[field] == 0 for p in ended for field in ("input_uncached", "output", "cache_read", "cache_write"))
+            assert not summary.usage_complete and summary.usage.cost_usd is None
+            assert (await lease.bridge.health())["inflight_requests"] == 0
+            await lease.release()
+    run(exercise())
+
+
+@pytest.mark.parametrize("terminal_type", ["failed", "completed", "incomplete"])
 @pytest.mark.parametrize("usage,counts", [
     (USAGE, (1000, 200, 300, 0)),
     ({**USAGE, "input_tokens_details": {"cached_tokens": 300, "cache_write_tokens": 100}}, (900, 200, 300, 100)),
@@ -297,7 +331,7 @@ def test_transport_failure_accounts_for_every_attempt(tmp_path, monkeypatch, dis
     ({**USAGE, "output_tokens": 0.5}, None),
     ({**USAGE, "input_tokens_details": {"cached_tokens": 1400}}, None),
 ], ids=["charged", "cache-write", "zero", "missing", "empty", "string", "negative", "fraction", "cache-exceeds-input"])
-def test_failed_response_accounts_for_terminal_usage(tmp_path, monkeypatch, usage, counts):
+def test_response_accounts_for_terminal_usage(tmp_path, monkeypatch, usage, counts, terminal_type):
     from looper.agents.runtimes.runner.turn import RunnerTurn
 
     async def exercise():
@@ -309,17 +343,22 @@ def test_failed_response_accounts_for_terminal_usage(tmp_path, monkeypatch, usag
 
         monkeypatch.setattr(RunnerTurn, "request_end", request_end)
         terminal = failed()
+        terminal["type"] = f"response.{terminal_type}"
+        terminal["response"]["status"] = terminal_type
+        if terminal_type == "incomplete":
+            terminal["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
         terminal["response"]["usage"] = usage
         # An earlier usage object must not make a missing/invalid terminal one complete.
-        scripts = [ResponseScript(events=[event("response.created", response={"usage": USAGE}), terminal]) for _ in range(4)]
+        attempts = 4 if terminal_type == "failed" else 1
+        scripts = [ResponseScript(events=[event("response.created", response={"usage": USAGE}), terminal]) for _ in range(attempts)]
         async with FakeModelAPI(scripts, api_key=KEY) as api, pi_supervisor(tmp_path) as supervisor:
             lease = await supervisor.acquire("pi")
             sid = await lease.open_session(session_params(lease, base_url=api.base_url, key=KEY))
             await begin(lease.bridge, sid, "failed-usage")
             summary = await lease.bridge.wait_settled(sid, "failed-usage")
-            assert summary.outcome == "failed"
-            assert len(ended) == len(api.requests) == 4
-            assert len({p["request_id"] for p in ended}) == 4
+            assert summary.outcome == ("completed" if terminal_type == "completed" else "failed")
+            assert len(ended) == len(api.requests) == attempts
+            assert len({p["request_id"] for p in ended}) == attempts
             assert all(p["complete"] is (counts is not None) for p in ended)
             assert summary.usage_complete is (counts is not None)
             if counts is None:
@@ -328,8 +367,8 @@ def test_failed_response_accounts_for_terminal_usage(tmp_path, monkeypatch, usag
                 fields = ("input_uncached", "output", "cache_read", "cache_write")
                 assert all(tuple(p[field] for field in fields) == counts for p in ended)
                 assert (summary.usage.input_tokens, summary.usage.output_tokens,
-                    summary.usage.cache_read_tokens, summary.usage.cache_creation_tokens) == tuple(4 * n for n in counts)
-                assert summary.usage.cost_usd == round(4 * sum(n * price for n, price in zip(counts, (1, 2, 3, 4))) / 1_000_000, 10)
+                    summary.usage.cache_read_tokens, summary.usage.cache_creation_tokens) == tuple(attempts * n for n in counts)
+                assert summary.usage.cost_usd == round(attempts * sum(n * price for n, price in zip(counts, (1, 2, 3, 4))) / 1_000_000, 10)
             await lease.release()
     run(exercise())
 

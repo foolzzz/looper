@@ -71,7 +71,7 @@ export async function authorizingStream(record: Session, model: any, context: an
   }
   const output = sdk!.ai.createAssistantMessageEventStream();
   let started = false, dispatched = false, hasUsage = false, status: number | undefined;
-  let responseFailed = false, failedUsage: ReturnType<typeof responseUsage>;
+  let terminalUsage: ReturnType<typeof responseUsage>;
   turn.httpStatus = undefined;
   turn.transport = false;
   // onResponse only runs for successful responses in Pi 1.3, so capture HTTP errors in fetch as well.
@@ -87,12 +87,13 @@ export async function authorizingStream(record: Session, model: any, context: an
       return await options.onPayload?.(payload, payloadModel) ?? payload;
     },
     onProviderStreamEvent: async (event: any, eventModel: any) => {
-      if (event.response?.usage || event.usage || event.choices?.some((choice: any) => choice.usage)) hasUsage = true;
-      if (event.type === 'response.failed') {
-        // Pi 1.3 throws on this terminal event before copying its usage to the message.
-        responseFailed = true;
-        failedUsage = responseUsage(event.response?.usage);
-      }
+      if (model.api === 'openai-responses') {
+        // Earlier events may carry usage that Pi never extracts. Trust only validated
+        // terminal counts, including response.failed, which Pi throws before copying.
+        if (event.type === 'response.completed' || event.type === 'response.incomplete' || event.type === 'response.failed') {
+          terminalUsage = responseUsage(event.response?.usage);
+        }
+      } else if (event.response?.usage || event.usage || event.choices?.some((choice: any) => choice.usage)) hasUsage = true;
       await options.onProviderStreamEvent?.(event, eventModel);
     },
     fetch: async (...args: Parameters<typeof globalThis.fetch>) => {
@@ -124,16 +125,18 @@ export async function authorizingStream(record: Session, model: any, context: an
       for await (const event of source) {
         if (event.type === 'done' || event.type === 'error') {
           const message = event.type === 'done' ? event.message : event.error;
-          if (failedUsage) message.usage = { ...message.usage, ...failedUsage };
+          if (terminalUsage) message.usage = { ...message.usage, ...terminalUsage };
           // Pi persists these same objects. Scrub before either SDK storage or protocol output.
           if (message.errorMessage) message.errorMessage = scrub(message.errorMessage).slice(0, 512);
           const aborted = options.signal?.aborted || message.stopReason === 'aborted' || turn.cancel;
           const requestStatus = event.type === 'done' ? 'completed'
             : aborted ? 'aborted' : status && status >= 400 ? `http_${status}` : 'error';
-          const complete = responseFailed ? failedUsage !== undefined : event.type === 'done' ? hasUsage
-            : hasUsage || !dispatched || (!started && !aborted && status !== undefined && status >= 400);
+          const usage = model.api === 'openai-responses' ? terminalUsage : message.usage;
+          const usageComplete = model.api === 'openai-responses' ? terminalUsage !== undefined : hasUsage;
+          const complete = event.type === 'done' ? usageComplete
+            : usageComplete || !dispatched || (!started && !aborted && status !== undefined && status >= 400);
           // Let Pi publish message_end first; settlement waits for this accounting frame.
-          setImmediate(() => endRequest(record, turn, id, requestStatus, complete, message.usage));
+          setImmediate(() => endRequest(record, turn, id, requestStatus, complete, usage));
           output.push(event);
           output.end();
           return;
