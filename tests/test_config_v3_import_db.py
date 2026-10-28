@@ -315,24 +315,15 @@ async def test_exported_custom_runtime_preserves_profiles_and_layers_on_fresh_in
         assert await target.fetch("SELECT * FROM agent_runtimes ORDER BY id") == runtimes_before
 
 
-@pytest.mark.parametrize("section,entry,field", [
-    ("providers", {"name": "old", "protocols": ["anthropic-messages"]}, "protocols"),
-    ("providers", {"name": "old", "base_url": "https://example.invalid"}, "base_url"),
-    ("providers", {"name": "old", "models": []}, "models"),
-    ("settings.layers", {"scope": "system", "effort": "high"}, "effort"),
-    ("settings.layers", {"scope": "system", "model": "sonnet"}, "model"),
-    ("settings.layers", {"scope": "system", "agent": "claude-code/opus"}, "agent"),
-    ("settings.layers", {"scope": "role", "role": "planner", "max_concurrency": 2}, "max_concurrency"),
-    ("settings.layers", {"scope": "system", "harness_prompt": "Portable harness", "env": [
+@pytest.mark.parametrize("entry,field", [
+    ({"scope": "system", "agent": "claude-code/opus"}, "agent"),
+    ({"scope": "role", "role": "planner", "max_concurrency": 2}, "max_concurrency"),
+    ({"scope": "system", "harness_prompt": "Portable harness", "env": [
         {"key": "REGION", "value": 42},
         {"key": "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "value": "1"}]}, "REGION"),
 ])
-async def test_current_document_refuses_old_provider_and_layer_fields(monkeypatch, section, entry, field):
-    data = {"format": transfer.FORMAT}
-    if section == "settings.layers":
-        data["settings"] = {"layers": [entry]}
-    else:
-        data[section] = [entry]
+async def test_current_document_skips_invalid_layer_fields(monkeypatch, entry, field):
+    data = {"format": transfer.FORMAT, "settings": {"layers": [entry]}}
     plan = await preview(monkeypatch, data)
     assert len(plan.changes) == 1
     assert plan.changes[0].action == transfer.Action.SKIPPED

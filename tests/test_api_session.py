@@ -1,7 +1,7 @@
 """Manager session contracts through the loopback Responses API.
 
-Prompt composition is also covered by tests/test_model_launch_parity_db.py;
-its CLI fixtures deliberately remain unchanged.
+Prompt composition is also covered by tests/test_current_tier_launch_db.py;
+the current contract reads real tier launches and persisted records.
 """
 import asyncio
 import logging

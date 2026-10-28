@@ -65,8 +65,10 @@ class DialogApi(RegistryApi):
 
 
 @pytest.mark.parametrize("runtime", ["api", "codex"])
-def test_manager_spec_registers_once_per_case_and_only_selects_the_manager(runtime, monkeypatch, tmp_path):
+@pytest.mark.parametrize("budget", [None, 0.17])
+def test_manager_spec_registers_once_per_case_and_only_selects_the_manager(runtime, budget, monkeypatch, tmp_path):
     apis = {}
+    expected_budget = 0.25 if budget is None else budget
 
     @contextmanager
     def database(_):
@@ -82,7 +84,7 @@ def test_manager_spec_registers_once_per_case_and_only_selects_the_manager(runti
     def answer(api, dialog, **_):
         # This is what every case observes before sending its first message.
         assert api.settings == [{"profile_id": "agent-0"}]
-        assert api.roles == [{"role": "manager", "values": {"profile_id": "agent-1"}}]
+        assert api.roles == [{"role": "manager", "values": {"profile_id": "agent-1", "run_budget_usd": expected_budget}}]
         return {"id": dialog.id, "outcome": "pass", "success": True, "turns": [], "problems": []}
 
     monkeypatch.setenv("LOOPER_EVAL_API_KEY", "test-key")
@@ -100,6 +102,7 @@ def test_manager_spec_registers_once_per_case_and_only_selects_the_manager(runti
         "--manager-agent", str(spec_path), "--dialogs", "status,ask_project",
         "--reps", "2", "--jobs", "2", "--out-dir", str(tmp_path),
         "--case-budget-usd", "1.0", "--total-cap-usd", "4",
+        *(["--max-budget-usd", str(budget)] if budget is not None else []),
     ]) == 0
     result = json.loads(next(tmp_path.glob("*-dialogs-real.json")).read_text())
     assert result["aborted"] is None and not result["stopped_by_cap"]
@@ -111,7 +114,7 @@ def test_manager_spec_registers_once_per_case_and_only_selects_the_manager(runti
         profiles = [body for path, body in api.posts if path == "/api/v1/profiles/create"]
         assert len(profiles) == 1 and profiles[0]["name"] == spec["agent"]["name"]
         assert api.settings == [{"profile_id": "agent-0"}]
-        assert api.roles == [{"role": "manager", "values": {"profile_id": "agent-1"}}]
+        assert api.roles == [{"role": "manager", "values": {"profile_id": "agent-1", "run_budget_usd": expected_budget}}]
     assert "test-key" not in json.dumps(result)
 
 
@@ -170,7 +173,7 @@ def test_real_profile_switch_keeps_the_manager_binding_unless_explicitly_overrid
         for field in ("runtime_id", "provider_id", "model_id", "model", "effort", "agent_teams", "custom_prompt"):
             assert selected.get(field) == manager.get(field), field
         assert len(api.registry["providers"]) == 2 and len(api.registry["models"]) == 2
-    assert api.roles == [{"role": "manager", "values": {"profile_id": manager["profile_id"]}}]
+    assert api.roles == [{"role": "manager", "values": {"profile_id": manager["profile_id"], "run_budget_usd": None}}]
     assert api.settings == [{"profile_id": "agent-0"}]
 
 

@@ -4,6 +4,7 @@ import contextlib
 import copy
 import json
 import os
+import re
 import sys
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -34,6 +35,9 @@ from lark_cli_stand_in import lark_cli_stand_in  # noqa: E402,F401 (a fixture fo
 import worker_database  # noqa: E402
 
 
+_TEST_SHARD = pytest.StashKey[tuple[int, int]]()
+
+
 @pytest.fixture(scope="session")
 def staged_dashboard_dir() -> Path:
     """Use the wheel's dashboard, built once before pytest, never rebuild it in workers."""
@@ -43,8 +47,38 @@ def staged_dashboard_dir() -> Path:
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    if (shard := os.environ.get("LOOPER_TEST_SHARD")) is not None:
+        match = re.fullmatch(r"([1-9][0-9]*)/([1-9][0-9]*)", shard)
+        if match is None or int(match[1]) > int(match[2]):
+            raise pytest.UsageError("LOOPER_TEST_SHARD must be N/TOTAL with 1 <= N <= TOTAL")
+        config.stash[_TEST_SHARD] = (int(match[1]), int(match[2]))
     # Before any test module is imported (several read the URL at import): an xdist worker gets a database of its own.
     worker_database.start(getattr(config, "workerinput", {}).get("workerid"))
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if _TEST_SHARD not in config.stash:
+        return
+    shard, total = config.stash[_TEST_SHARD]
+    weights: dict[str, int] = {}
+    for item in items:
+        path = item.path.relative_to(config.rootpath).as_posix()
+        # Prompt eval exercises whole fake-agent flows; counting cases alone underweights it.
+        weights[path] = weights.get(path, 0) + (4 if path == "tests/test_prompt_eval.py" else 1)
+    loads = [0] * total
+    assigned = {}
+    # Largest files first, with stable ties so every xdist worker collects the same node IDs.
+    for path in sorted(weights, key=lambda path: (-weights[path], path)):
+        group = min(range(total), key=loads.__getitem__)
+        assigned[path] = group + 1
+        loads[group] += weights[path]
+    selected, deselected = [], []
+    for item in items:
+        path = item.path.relative_to(config.rootpath).as_posix()
+        (selected if assigned[path] == shard else deselected).append(item)
+    items[:] = selected
+    config.hook.pytest_deselected(items=deselected)
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:

@@ -131,7 +131,8 @@ import sys
 source, dest, base, key_env = sys.argv[1:]
 key = os.environ[key_env]
 spec = json.loads(open(source, encoding="utf-8").read())
-spec["provider"]["base_url"] = base
+for endpoint in spec["provider"]["endpoints"]:
+    endpoint["base_url"] = base
 spec["provider"]["api_key_env"] = key_env
 text = json.dumps(spec, indent=2) + "\n"
 if key in text:

@@ -9,13 +9,12 @@ import pytest
 
 
 @pytest.fixture
-def page(tmp_path, monkeypatch, staged_dashboard_dir):
+def page(tmp_path, staged_dashboard_dir):
     playwright = pytest.importorskip("playwright.sync_api")
     with playwright.sync_playwright() as driver:
-        executable = driver.chromium.executable_path
-    monkeypatch.setenv("HOME", str(tmp_path))
-    with playwright.sync_playwright() as driver:
-        browser = driver.chromium.launch(headless=True, executable_path=executable)
+        # Let the driver locate its headless shell before isolating the browser's HOME.
+        # chromium.executable_path names the full browser, even for a headless launch.
+        browser = driver.chromium.launch(headless=True, env={**os.environ, "HOME": str(tmp_path)}, timeout=15000)
         server = ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(
             SimpleHTTPRequestHandler, directory=str(staged_dashboard_dir)))
         thread = threading.Thread(target=server.serve_forever)
