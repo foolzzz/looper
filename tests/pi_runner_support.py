@@ -123,3 +123,37 @@ async def begin(bridge, sid, trace, *, cap=None, max_requests=30):
     events = []
     await bridge.begin_turn(sid, trace, events.append, turn, text="Say hello.")
     return turn, events
+
+
+def bind_pi_turn(session, tools):
+    """Bind the same per-turn host contracts used by Manager and Planner."""
+    from looper.agents.runtimes.pricing import ModelPrice
+
+    async def limits():
+        return dict(run_cap=None, task_cap=None, task_spent=0)
+
+    session.set_turn_tools(tools)
+    session.set_turn_budget(provider_id="account", model="test-model",
+        price=lambda _, usage: ModelPrice(1, 2, 3, 4).cost(usage), limits=limits)
+
+
+@asynccontextmanager
+async def pi_session(tmp_path, api, tools):
+    """Run the production resident-session path against a loopback model API."""
+    from looper.agents.runtimes import ApiProtocol
+    from looper.agents.runtimes.api.adapter import KEY_ENV
+    from looper.agents.runtimes.runner.session import Descriptor, RunnerSession
+
+    prompt = tmp_path / "system-prompt.md"
+    prompt.write_text("Only the injected instructions.")
+    async with pi_supervisor(tmp_path) as supervisor:
+        session = RunnerSession("manager", supervisor, "pi")
+        descriptor = Descriptor("pi", "manager", "account", ApiProtocol.OPENAI_RESPONSES,
+            api.base_url, "test-model", None, None, str(prompt))
+        try:
+            await session.start(descriptor.to_argv(), cwd=str(tmp_path), signature=1,
+                env={KEY_ENV: api.api_key})
+            bind_pi_turn(session, tools)
+            yield session
+        finally:
+            await session.stop()

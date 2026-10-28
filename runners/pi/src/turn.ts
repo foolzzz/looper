@@ -4,6 +4,7 @@ import { sdk } from './sdk.ts';
 import { getSession, release } from './session.ts';
 import type { Session } from './session.ts';
 import { endRequest } from './provider.ts';
+import { applyTools } from './tools.ts';
 
 export type Turn = {
   trace: string; text: string; started: boolean; settled: boolean; cancel: null | 'cancel' | 'close';
@@ -11,7 +12,10 @@ export type Turn = {
   transport: boolean; last?: any; settling?: Promise<void>; drained?: () => void;
   failure?: Failure; forced?: boolean;
   finished: Promise<void>; finish: () => void;
+  steers: Steer[]; steerIds: Set<string>; forwarding: Promise<void>; initialUserEnded: boolean;
+  lastRequestId: string | null; afterToolBatch: boolean;
 };
+type Steer = { message_id: string; text: string; forwarded: boolean };
 type Failure = { kind: string; message: string };
 async function within(promise: Promise<unknown>, ms: number): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout>;
@@ -24,11 +28,13 @@ export function prompt(params: Record<string, any>): object {
   if (typeof params.trace_id !== 'string' || !params.trace_id || typeof params.text !== 'string' || !Array.isArray(params.tools)) {
     throw new RpcError(-32602, 'invalid prompt parameters');
   }
-  if (params.tools.length) throw new RpcError(-32007, 'platform tools are not enabled in this runner');
+  applyTools(record, params.tools);
   let finish!: () => void;
   const finished = new Promise<void>(resolve => { finish = resolve; });
   const turn: Turn = { trace: params.trace_id, text: params.text, started: false, settled: false,
-    cancel: null, denial: null, ended: 0, complete: true, inflight: new Set(), transport: false, finished, finish };
+    cancel: null, denial: null, ended: 0, complete: true, inflight: new Set(), transport: false, finished, finish,
+    steers: [], steerIds: new Set(), forwarding: Promise.resolve(), initialUserEnded: false,
+    lastRequestId: null, afterToolBatch: false };
   record.turn = turn;
   setImmediate(() => { void run(record, turn); });
   return { session_id: record.id, trace_id: turn.trace, accepted: true };
@@ -50,13 +56,50 @@ export function cancel(params: Record<string, unknown>): object {
   if (!turn || turn.settled) throw new RpcError(-32004, 'turn is not running');
   if (params.trace_id !== turn.trace) throw new RpcError(-32005, 'trace mismatch');
   turn.cancel = 'cancel';
+  dropSteers(record, turn, 'cancelled');
   setImmediate(() => { void cancelTurn(record, turn); });
   return { session_id: record.id, trace_id: turn.trace };
 }
+export async function steer(params: Record<string, unknown>): Promise<object> {
+  const record = getSession(params), turn = record.turn;
+  if (!turn || turn.settled || turn.settling || turn.cancel) throw new RpcError(-32004, 'turn is not running');
+  if (params.trace_id !== turn.trace) throw new RpcError(-32005, 'trace mismatch');
+  if (typeof params.message_id !== 'string' || !params.message_id || typeof params.text !== 'string'
+      || params.if_idle !== 'reject') throw new RpcError(-32602, 'invalid steer parameters');
+  if (!turn.steerIds.has(params.message_id)) {
+    turn.steerIds.add(params.message_id);
+    turn.steers.push({ message_id: params.message_id, text: params.text, forwarded: false });
+    if (record.agent.isStreaming) forwardSteers(record, turn);
+  }
+  await turn.forwarding;
+  return { session_id: record.id, trace_id: turn.trace, status: 'queued' };
+}
+function forwardSteers(record: Session, turn: Turn): void {
+  for (const pending of turn.steers) {
+    if (pending.forwarded) continue;
+    pending.forwarded = true;
+    turn.forwarding = turn.forwarding.then(async () => {
+      if (turn.cancel || turn.settling || turn.settled) return;
+      try { await record.agent.steer(pending.text); }
+      catch (error) {
+        void settle(record, turn, { kind: 'INTERNAL_ERROR', message: scrub(error instanceof Error ? error.message : 'steer failed') });
+      } finally {
+        // steer() crosses an async input hook; cancellation can clear its queue before it appends.
+        if (turn.cancel || turn.settling || turn.settled) record.agent.clearQueue();
+      }
+    });
+  }
+}
+function dropSteers(record: Session, turn: Turn, reason: 'turn_ended' | 'cancelled' | 'session_closed'): void {
+  record.agent.clearQueue();
+  for (const pending of turn.steers.splice(0)) {
+    void update(record.id, turn.trace, 'steer_dropped', { message_id: pending.message_id, reason });
+  }
+}
 export async function cancelTurn(record: Session, turn: Turn, deadlineMs = 4000): Promise<void> {
   if (turn.settled) return;
+  dropSteers(record, turn, turn.cancel === 'close' ? 'session_closed' : 'cancelled');
   if (!turn.started) { await settle(record, turn); return; }
-  record.agent.clearQueue();
   void record.agent.abort().catch(() => {});
   if (await within(turn.finished, deadlineMs)) return;
   turn.failure = { kind: 'INTERNAL_ERROR', message: 'cancel did not settle; the session was released' };
@@ -68,19 +111,32 @@ export async function cancelTurn(record: Session, turn: Turn, deadlineMs = 4000)
 export function onEvent(record: Session, event: any): void {
   const turn = record.turn;
   if (!turn || turn.settled || turn.settling) return;
-  if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') {
+  if (event.type === 'agent_start') {
+    forwardSteers(record, turn);
+  } else if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') {
     void update(record.id, turn.trace, 'text_delta', { text: event.assistantMessageEvent.delta });
   } else if (event.type === 'message_end') {
     const message = event.message;
     if (message.role === 'assistant') {
       if (message.errorMessage) message.errorMessage = scrub(message.errorMessage).slice(0, 512);
       turn.last = message;
+      turn.afterToolBatch = message.content.some((block: any) => block.type === 'toolCall');
       const content = message.content.flatMap((block: any) => block.type === 'text' ? [{ type: 'text', text: block.text }]
         : block.type === 'toolCall' ? [{ type: 'tool_use', id: block.id, name: block.name, input: block.arguments }] : []);
       void update(record.id, turn.trace, 'message', { model: record.model, content });
     } else if (message.role === 'toolResult') {
       void update(record.id, turn.trace, 'tool_result', { call_id: message.toolCallId,
         text: message.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n'), is_error: message.isError });
+    } else if (message.role === 'user') {
+      const text = typeof message.content === 'string' ? message.content
+        : message.content.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('');
+      const pending = turn.steers[0];
+      if (turn.initialUserEnded && pending?.forwarded && text === pending.text) {
+        turn.steers.shift();
+        void update(record.id, turn.trace, 'steer_applied', { message_id: pending.message_id,
+          after_request_id: turn.lastRequestId, after_tool_batch: turn.afterToolBatch, new_turn: false });
+      }
+      turn.initialUserEnded = true;
     }
   } else if (event.type === 'agent_settled') void settle(record, turn);
 }
@@ -88,6 +144,8 @@ export function settle(record: Session, turn: Turn, failure?: Failure): Promise<
   if (failure && !turn.settled) turn.failure = failure;
   if (turn.settling) return turn.settling;
   turn.settling = (async () => {
+    await turn.forwarding;
+    dropSteers(record, turn, turn.cancel === 'close' ? 'session_closed' : turn.cancel ? 'cancelled' : 'turn_ended');
     if (turn.inflight.size) {
       await within(new Promise<void>(resolve => { turn.drained = resolve; }), 1000);
       for (const id of turn.inflight) endRequest(record, turn, id, 'aborted', false);

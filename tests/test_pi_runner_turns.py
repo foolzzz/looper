@@ -211,9 +211,9 @@ def test_running_session_rejects_conflicting_controls(tmp_path):
             lease = await supervisor.acquire("pi")
             sid = await lease.open_session(session_params(lease, base_url=api.base_url, key=KEY))
             with pytest.raises(RpcFailure) as error:
-                await lease.bridge.request("session/prompt", {"session_id": sid, "trace_id": "unsupported",
-                    "text": "hello", "tools": [{"name": "lookup", "description": "read", "inputSchema": {"type": "object"}}]})
-            assert error.value.code == -32007
+                await lease.bridge.request("session/prompt", {"session_id": sid, "trace_id": "invalid",
+                    "text": "hello", "tools": [{"name": "lookup", "description": "read", "inputSchema": {"type": "array"}}]})
+            assert error.value.code == -32602
             await begin(lease.bridge, sid, "active")
             await script.gate_reached.wait()
             for method, params, code in [

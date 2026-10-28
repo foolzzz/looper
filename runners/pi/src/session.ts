@@ -6,10 +6,12 @@ import { sdk } from './sdk.ts';
 import { authorizingStream } from './provider.ts';
 import { cancelTurn, onEvent } from './turn.ts';
 import type { Turn } from './turn.ts';
+import type { PlatformTool } from './tools.ts';
 
 export type Session = {
   id: string; key: string; role: string; cwd: string; accountId: string; model: string;
   agent: any; runtime: any; turn: Turn | null; closing: boolean;
+  extensionApi: any; builtinTools: string[]; platformTools: Map<string, PlatformTool>;
 };
 export const sessions = new Map<string, Session>();
 const opening = new Set<string>();
@@ -70,15 +72,20 @@ export async function newSession(params: Record<string, any>): Promise<object> {
       enableInstallTelemetry: false, defaultProjectTrust: 'never', packages: [], extensions: [], skills: [],
       prompts: [], themes: [], retry: { provider: { maxRetries: 0 } } });
     const sessionManager = (SessionManager as any).create(params.cwd, params.state_dir);
+    let extensionApi: any;
     const resourceLoader = new (DefaultResourceLoader as any)({ cwd: params.cwd, agentDir, settingsManager,
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+      extensionFactories: [(api: any) => { extensionApi = api; }],
       ...(prompt.mode === 'replace' ? { systemPrompt: prompt.text } : { appendSystemPrompt: [prompt.text] }) });
     await resourceLoader.reload();
+    // tools: [] is a permanent allowlist in Pi; noTools keeps later proxy registration possible.
     ({ session: agent } = await createAgentSession({ cwd: params.cwd, agentDir, modelRuntime: runtime,
       model: runtime.getModel('looper', provider.model), thinkingLevel: provider.effort ?? undefined,
-      tools: [], sessionManager, settingsManager, resourceLoader }));
+      noTools: 'builtin', sessionManager, settingsManager, resourceLoader }));
     record = { id: agent.sessionId, key: params.session_key, role: params.role, cwd: params.cwd,
-      accountId: provider.account_id, model: provider.model, agent, runtime, turn: null, closing: false };
+      accountId: provider.account_id, model: provider.model, agent, runtime, turn: null, closing: false,
+      extensionApi, builtinTools: [...tools.builtin], platformTools: new Map() };
+    if (!extensionApi) throw new RpcError(-32008, 'platform tool extension was not loaded');
     agent.subscribe((event: any) => onEvent(record, event));
     if (agent.getActiveToolNames().length) throw new RpcError(-32008, 'session contains unexpected tools');
     sessions.set(record.id, record);

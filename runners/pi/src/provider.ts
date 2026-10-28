@@ -8,6 +8,7 @@ let counter = 0;
 export function endRequest(record: Session, turn: Turn, id: string, status: string,
     complete: boolean, usage?: any): void {
   if (turn.settled || !turn.inflight.delete(id)) return;
+  turn.lastRequestId = id;
   turn.ended++;
   turn.complete &&= complete;
   void update(record.id, turn.trace, 'request_end', { request_id: id, request_kind: 'turn', model: record.model,
