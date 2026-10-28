@@ -1360,11 +1360,13 @@ _SWITCH_NUMBER = re.compile(r"^\s*(\d+)\.\s*" + re.escape(SWITCH) + r"\b", re.MU
 
 
 def _make_switch_profile(api: Api, project_id: str, *, fake: bool = True, spec: dict[str, Any] | None = None,
-                         manager_profile: dict[str, Any] | None = None) -> None:
+                         manager_profile: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Register SWITCH. Fake: Claude Code on a provider of its own (the stand-in ignores it, and another provider
-    makes the switch start a new session). Real: reuse the Manager's binding; ``spec`` replaces both."""
+    makes the switch start a new session). Real: reuse the Manager's binding; ``spec`` replaces both.
+    With ``spec``, return the profile ``register_agent`` registered. Its ``runtime_type`` is the runtime that
+    registration resolved, including a name-only ``runtime.name``."""
     if spec is not None:
-        register_agent(api, {**spec, "agent": {**spec["agent"], "name": SWITCH}})
+        return register_agent(api, {**spec, "agent": {**spec["agent"], "name": SWITCH}})
     elif fake:
         provider = api.post("/api/v1/provider_accounts/create", {"name": "eval-switch", "vendor_type": "custom", "api_key": FAKE_KEY,
             "endpoints": [{"protocol": "anthropic-messages", "base_url": "https://switch.example.invalid"}]})["result"]["provider"]
@@ -2254,15 +2256,17 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
         if dialog.schedule:
             _make_schedule(api, project_id)
         runs_since = 0
+        switch_profile: dict[str, Any] | None = None
         if dialog.seed is _make_switch_profile:
-            _make_switch_profile(api, project_id, fake=mode == "fake", spec=switch_spec,
-                                 manager_profile=manager_profile)
+            switch_profile = _make_switch_profile(api, project_id, fake=mode == "fake", spec=switch_spec,
+                                                  manager_profile=manager_profile)
         elif dialog.seed is not None:
             dialog.seed(api, project_id)
         api_manager = (manager_profile or {}).get("runtime_type") == "api"
         api_turn = api_manager
         last_model_api = api_manager
-        switch_api = (switch_spec["runtime"]["type"] == "api" if switch_spec is not None
+        # A name-only runtime spec has no type key. The registered profile carries the resolved runtime_type.
+        switch_api = ((switch_profile or {}).get("runtime_type") == "api" if switch_spec is not None
                       else api_manager and mode != "fake")
         agent = f"manager-{dialog.manager}" if dialog.manager else "manager"
         if api_manager or dialog.seed is _make_switch_profile or any(say.stop or say.withdraw for say in dialog.says):

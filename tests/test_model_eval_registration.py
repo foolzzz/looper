@@ -55,9 +55,11 @@ class RegistryApi:
         assert path == "/api/v1/profiles/create"
         assert set(body) <= {"name", "runtime_id", "model_id", "effort", "agent_teams", "custom_prompt"}
         model = next(m for m in self.registry["models"] if m["model_id"] == body["model_id"])
+        runtime = next(r for r in self.registry["runtimes"] if r["runtime_id"] == body["runtime_id"])
         profile = {**body, "profile_id": f"agent-{len(self.registry['profiles'])}", "builtin": False,
                    "model": {k: model[k] for k in ("model_id", "name", "protocol", "provider_id")},
                    "provider_id": model["provider_id"],
+                   "runtime_type": runtime["type"],
                    "cost": {"source": "provider_price", "equivalent": False, "unpriced": []}}
         self.registry["profiles"].append(profile)
         return {"status": "ok", "result": {"profile": deepcopy(profile), "warnings": []}}

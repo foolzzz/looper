@@ -269,6 +269,21 @@ def test_api_dialog_requires_completed_model_turns(steps, completed, outcome, mo
 def test_switch_dialog_requires_only_api_answered_user_turns(
     manager_runtime, switch_runtime, api_turns, monkeypatch,
 ):
+    _assert_switch_readback(manager_runtime, switch_runtime, api_turns, monkeypatch, name_only=False)
+
+
+@pytest.mark.parametrize("manager_runtime,switch_runtime,api_turns", [
+    ("api", "codex", [5]),  # name selects codex; the switched answer is not an API turn
+    ("codex", "api", [3]),  # name selects api; the switched answer is an API turn
+])
+def test_name_only_switch_runtime_uses_the_registered_profile(
+    manager_runtime, switch_runtime, api_turns, monkeypatch,
+):
+    """``runtime: {"name": ...}`` has no ``type`` key. Registration still resolves it, and readback follows that."""
+    _assert_switch_readback(manager_runtime, switch_runtime, api_turns, monkeypatch, name_only=True)
+
+
+def _assert_switch_readback(manager_runtime, switch_runtime, api_turns, monkeypatch, *, name_only: bool) -> None:
     import asyncpg
 
     case = dialogs.select(["session_profile_switch"])[0]
@@ -311,8 +326,14 @@ def test_switch_dialog_requires_only_api_answered_user_turns(
     monkeypatch.setattr(dialogs, "_ask", ask)
     profile = {**api.registry["profiles"][0], "runtime_type": manager_runtime}
     switch = json.loads(Path(f"evals/agents/{switch_runtime}-cpa.example.json").read_text()) if switch_runtime else None
+    if name_only:
+        assert switch is not None and set(switch["runtime"]) == {"type"}
+        switch["runtime"] = {"name": switch["runtime"]["type"]}
     row = dialogs.run_dialog(api, case, database_url="unused", project_id="p", scenarios=None,
                              mode="real", timeout=1, manager_profile=profile, switch_spec=switch)
+    if name_only:
+        registered = next(p for p in api.registry["profiles"] if p["name"] == dialogs.SWITCH)
+        assert registered["runtime_type"] == switch_runtime and "type" not in switch["runtime"]
     assert row["outcome"] == "pass", row
     assert len(row["turns"]) == 5 and row["problems"] == []
     assert bool(reads) == bool(api_turns)
