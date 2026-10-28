@@ -1,4 +1,4 @@
-"""Resident Manager/Planner sessions owned by a shared runner supervisor."""
+"""Host sessions managed by a shared runner supervisor."""
 from __future__ import annotations
 
 import asyncio
@@ -31,7 +31,7 @@ class Descriptor:
     """Record-safe description, never an executable command or credential store."""
 
     kind: str
-    role: Literal["manager", "planner"]
+    role: Literal["manager", "planner", "worker", "reviewer"]
     provider_id: str
     protocol: ApiProtocol
     base_url: str
@@ -46,12 +46,18 @@ class Descriptor:
     system_prompt_mode: Literal["replace", "append"] = "replace"
     reasoning: bool = False
     builtin: tuple[str, ...] = ()
+    tool_timeout_s: int = 120
+    fork_from: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.session is not None and self.fork_from is not None:
+            raise ValueError("session and fork_from are mutually exclusive")
 
     def to_argv(self) -> list[str]:
         argv = ["looper-runner"]
         for f in fields(self):
             value = getattr(self, f.name)
-            if f.name in {"session", "add_dirs", "builtin"}:
+            if f.name in {"session", "fork_from", "add_dirs", "builtin"}:
                 continue
             argv.extend(["--" + f.name.replace("_", "-"),
                          value.value if isinstance(value, ApiProtocol) else
@@ -60,12 +66,14 @@ class Descriptor:
             argv.extend(["--builtin", name])
         for directory in self.add_dirs:
             argv.extend(["--add-dir", directory])
-        return argv + ["--session", self.session] if self.session else argv
+        if self.session is not None:
+            return argv + ["--session", self.session]
+        return argv + ["--fork-from", self.fork_from] if self.fork_from is not None else argv
 
     @classmethod
     def parse(cls, argv: list[str]) -> Descriptor:
         try:
-            names = [f.name for f in fields(cls) if f.name not in {"session", "add_dirs", "builtin"}]
+            names = [f.name for f in fields(cls) if f.name not in {"session", "fork_from", "add_dirs", "builtin"}]
             size = 1 + 2 * len(names)
             if (not all(isinstance(v, str) for v in argv) or len(argv) < size or argv[0] != "looper-runner"
                     or argv[1:size:2] != ["--" + n.replace("_", "-") for n in names]):
@@ -75,7 +83,9 @@ class Descriptor:
             values["effort"] = values["effort"] or None
             values["context_window"] = int(values["context_window"]) if values["context_window"] else None
             values["max_requests"] = int(values["max_requests"])
-            if (values["role"] not in {"manager", "planner"} or values["max_requests"] <= 0
+            values["tool_timeout_s"] = int(values["tool_timeout_s"])
+            if (values["role"] not in {"manager", "planner", "worker", "reviewer"} or values["max_requests"] <= 0
+                    or values["tool_timeout_s"] <= 0
                     or values["read_only"] not in {"True", "False"}
                     or values["reasoning"] not in {"True", "False"}
                     or values["system_prompt_mode"] not in {"replace", "append"}
@@ -94,9 +104,10 @@ class Descriptor:
             while len(tail) >= 2 and tail[0] == "--add-dir":
                 directories.append(tail[1])
                 tail = tail[2:]
-            if tail and (len(tail) != 2 or tail[0] != "--session" or not tail[1]):
+            if tail and (len(tail) != 2 or tail[0] not in {"--session", "--fork-from"} or not tail[1]):
                 raise ValueError
-            return cls(**values, builtin=tuple(builtin), add_dirs=tuple(directories), session=tail[1] if tail else None)
+            saved = {tail[0][2:].replace("-", "_"): tail[1]} if tail else {}
+            return cls(**values, builtin=tuple(builtin), add_dirs=tuple(directories), **saved)
         except (ValueError, TypeError, IndexError):
             raise ValueError("not a runner session description") from None
 
@@ -105,8 +116,10 @@ class RunnerSession:
     shares_bridge = False
     pid = None  # A shared process must never enter a tier's process cleanup.
 
-    def __init__(self, label: str, supervisor: RunnerSupervisor, kind: str):
+    def __init__(self, label: str, supervisor: RunnerSupervisor, kind: str, *,
+                 owned: bool = True, state_dir: Path | None = None):
         self.label, self.supervisor, self.kind = label, supervisor, kind
+        self._owned, self._state_dir = owned, state_dir
         self._descriptor: Descriptor | None = None
         self._lease = None
         self._signature = None
@@ -163,7 +176,8 @@ class RunnerSession:
         self._signature, self._totals = signature, totals if totals is not None else Usage(cost_usd=0)
         self._models = {}
         self._resume_lost = False
-        lease = await self.supervisor.acquire(self.kind, owner=self.label)
+        lease = await self.supervisor.acquire(self.kind, owner=self.label if self._owned else None,
+                                              state_dir=self._state_dir)
         params = {"role": descriptor.role, "cwd": cwd,
             "add_dirs": list(descriptor.add_dirs), "env": {k: v for k, v in (env or {}).items() if k != KEY_ENV},
             "provider": {"account_id": descriptor.provider_id, "reasoning": descriptor.reasoning,
@@ -173,15 +187,20 @@ class RunnerSession:
             "system_prompt": {"mode": descriptor.system_prompt_mode, "text": prompt},
             "tools": {"builtin": list(descriptor.builtin), "platform": [], "read_only": descriptor.read_only},
             "limits": {"max_requests_per_turn": descriptor.max_requests,
-                "tool_timeout_s": 120, "tool_output_bytes": 102400}}
+                "tool_timeout_s": descriptor.tool_timeout_s, "tool_output_bytes": 102400}}
         try:
-            if descriptor.session is None:
-                await lease.open_session(params)
-            else:
+            if descriptor.session is not None:
                 await lease.load_session({**params, "session_id": descriptor.session})
+            elif descriptor.fork_from is not None:
+                if lease.bridge.capabilities.get("fork") is not True:
+                    raise ProtocolError(ErrorCode.UNSUPPORTED)
+                await lease.open_session({**params, "fork_from": {"session_id": descriptor.fork_from}})
+            else:
+                await lease.open_session(params)
         except RpcFailure as error:
             await lease.release()
-            if descriptor.session is None or error.code not in {ErrorCode.SESSION_NOT_FOUND, ErrorCode.SESSION_OWNED}:
+            if ((descriptor.session is None and descriptor.fork_from is None)
+                    or error.code not in {ErrorCode.SESSION_NOT_FOUND, ErrorCode.SESSION_OWNED}):
                 raise
             self._resume_lost = True
         except BaseException:

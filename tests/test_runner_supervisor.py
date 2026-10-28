@@ -883,3 +883,40 @@ def test_owner_name_cannot_escape(runners, name):
                 await owner.acquire("fake", owner=name)
             assert not processes
     run(exercise())
+
+
+
+def test_run_state_directory_survives_release(runners, tmp_path):
+    async def exercise():
+        async with runners() as (owner, processes):
+            state_dir = tmp_path / "runs/t/r"
+            lease = await owner.acquire("fake", state_dir=state_dir)
+            assert lease.state_dir == state_dir
+            for directory in (state_dir, state_dir.parent):
+                assert directory.stat().st_mode & 0o777 == 0o700
+            await lease.open_session(NEW)
+            (state_dir / "saved").write_text("native state")
+            await lease.release()
+            assert not lease.directory.exists() and (state_dir / "saved").read_text() == "native state"
+            active = await owner.acquire("fake", state_dir=state_dir)
+            generation = active._generation
+            processes[0].kill()
+            await until(lambda: owner._kinds["fake"].generation is not None
+                        and owner._kinds["fake"].generation is not generation)
+            assert not active.directory.exists() and (state_dir / "saved").read_text() == "native state"
+    run(exercise())
+
+
+@pytest.mark.parametrize("rule", ["owner", "relative", "symlink"])
+def test_run_state_directory_rules(runners, tmp_path, rule):
+    async def exercise():
+        async with runners() as (owner, processes):
+            state_dir = tmp_path / "run"
+            if rule == "relative":
+                state_dir = Path("relative")
+            elif rule == "symlink":
+                state_dir.symlink_to(tmp_path, target_is_directory=True)
+            with pytest.raises(ValueError):
+                await owner.acquire("fake", owner="manager" if rule == "owner" else None, state_dir=state_dir)
+            assert owner._kinds["fake"].generation is None or not owner._kinds["fake"].generation.leases
+    run(exercise())
