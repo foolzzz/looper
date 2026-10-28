@@ -25,7 +25,7 @@ from typing import Any
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents.agent_settings import AgentSettings, Launch
+from looper.agents.agent_settings import Launch
 from looper.agents.profile_registry import (
     CatalogModel, LegacyProviderSpec as ProviderSpec, RegistryError, RuntimeSpec, servable_roles,
 )
@@ -34,6 +34,7 @@ from looper.agents.runtimes import (
     ADAPTERS, ApiProtocol, AuthKind, Capability, Probe, RuntimeAdapter, RuntimeUnsupported, adapter,
 )
 from looper.agents.runtimes.pi import PROBE_HELP_TOKENS, PiRuntime
+from tests.pi_runtime_support import KEY, launch as _launch, provider as _provider
 
 PI = PiRuntime()
 
@@ -262,20 +263,6 @@ def test_a_probe_uses_a_private_offline_home_and_only_version_and_help(
 def test_an_unsupported_or_missing_session_path_is_refused(call: object) -> None:
     with pytest.raises(RuntimeUnsupported, match="pi"):
         call()  # type: ignore[operator]
-
-
-KEY = "sk-test-pi-provider-only"
-
-
-def _provider(**fields: Any) -> ProviderSpec:
-    return ProviderSpec(**{"id": "prov-test", "name": "arbitrary", "auth": AuthKind.API_KEY,
-                           "protocols": frozenset({ApiProtocol.OPENAI_RESPONSES}),
-                           "base_url": "https://endpoint.example.invalid/v1", "api_key": KEY, **fields})
-
-
-def _launch(provider: ProviderSpec, model: str = "selected", effort: str = "high") -> Launch:
-    profile = resolved_profile("agent-pi", "pi/test", RuntimeSpec("rt-pi", "pi", "pi"), provider, model, effort)
-    return Launch(AgentSettings(profile=profile))
 
 
 def _command(tmp_path: Path, launch: Launch | None = None, session_dir: Path | None = None) -> list[str]:

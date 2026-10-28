@@ -778,8 +778,9 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
         loop = asyncio.get_running_loop()
         monkeypatch.setattr(loop, "add_signal_handler", lambda sig, callback: (
             loop.call_soon(callback) if sig == serve.signal.SIGINT else None))
+        # The ops default: the Pi runner stays off, so this composition starts no runner child.
         ops = SimpleNamespace(host="127.0.0.1", port=9876, public_url="https://looper.example.com",
-                              operator_notes_root=tmp_path, database_url=DSN)
+                              operator_notes_root=tmp_path, database_url=DSN, pi_runtime="cli")
         await asyncio.wait_for(serve._run_agent_system(ops=ops, runtime_root=tmp_path,
                                                       work_dir=tmp_path), 3)
         assert events[:3] == ["scheduler.load", "waits.load", "waits.created"]

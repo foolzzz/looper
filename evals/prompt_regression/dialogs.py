@@ -2422,6 +2422,7 @@ def run(
     manager_model: str | None = None, manager_effort: str | None = None, reps: int = 1, jobs: int = 1,
     case_budget_usd: float | None = None, switch_agent: dict[str, Any] | None = None,
     manager_agent: dict[str, Any] | None = None,
+    pi_runtime: str = "cli",
 ) -> tuple[dict[str, Any], Path]:
     """Run ``dialogs`` ``reps`` times each in ``mode``, rep-major, ``jobs`` at a time, each (dialog, rep) on a
     database, a server, a working directory and a project of its own (``runner.run``'s setup); the run and the JSON file written to
@@ -2469,7 +2470,8 @@ def run(
                 home.mkdir()
             with fresh_database(admin_url) as (database_url, _):
                 with running_server(database_url=database_url, runtime_root=case / "runtime", bin_dir=case / "bin",
-                                    log_path=logs / f"{dialog.id}-{rep}.log", home=home) as api:
+                                    log_path=logs / f"{dialog.id}-{rep}.log", home=home,
+                                    pi_runtime=pi_runtime) as api:
                     named = register_agent(api, register)["name"] if register is not None else agent
                     picked = select_agent(api, agent=named, model=model)
                     if register is not None:

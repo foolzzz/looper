@@ -295,7 +295,8 @@ sys.exit(1)
 def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_path: Path,
                    home: Path | None = None, notes_root: Path | None = None,
                    gh_diffs: dict[str, str] | None = None,
-                   startup_timeout: float = 90.0, env: dict[str, str] | None = None) -> Iterator[Api]:
+                   startup_timeout: float = 90.0, env: dict[str, str] | None = None,
+                   pi_runtime: str = "cli") -> Iterator[Api]:
     """``looper serve`` on a free port, with an ops file of its own in ``runtime_root`` naming ``database_url``;
     stopped with SIGINT, as the operator would. ``notes_root`` stands in for the operator's ``~/.claude/projects``
     (the operator's notes). ``env``: variables the server gets on top of this process's (a key read for it alone)."""
@@ -304,7 +305,8 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
     manager_dir = runtime_root / "manager"
     manager_dir.mkdir(parents=True, exist_ok=True)
     ops = ops_config.OpsConfig(runtime_root=runtime_root, path=runtime_root / ops_config.FILE,
-                               database_url=database_url, operator_notes_root=str(notes_root) if notes_root else "")
+                               database_url=database_url, operator_notes_root=str(notes_root) if notes_root else "",
+                               pi_runtime=pi_runtime)
     ops_config.write_private(ops.path, ops_config.render(ops))
     # None of the operator's ops variables: the file names the eval's database.
     server_env = {**{k: v for k, v in os.environ.items() if k not in ops_config.VARIABLES},
@@ -949,6 +951,7 @@ def run(
     user_gates: str | None = None,
     jobs: int = 1,
     case_budget_usd: float | None = None,
+    pi_runtime: str = "cli",
 ) -> tuple[dict[str, Any], Path]:
     """Run ``tasks`` ``reps`` times each in ``mode`` (``fake`` or ``real``), ``jobs`` at a time on the one server
     (each in a project, a working directory and a task of its own); returns the run and the JSON file
@@ -1010,7 +1013,7 @@ def run(
             init_repository(vault_dir)
         with fresh_database(admin_url) as (database_url, clock_offset), running_server(
             database_url=database_url, runtime_root=root / "runtime", bin_dir=root / "bin", log_path=log_path,
-            home=home, notes_root=notes_root,
+            home=home, notes_root=notes_root, pi_runtime=pi_runtime,
             gh_diffs={pr: diff for task in tasks for pr, diff in task.gh_pr_diffs.items()},
         ) as api:
             if any(task.gh_pr_fix_files for task in tasks):

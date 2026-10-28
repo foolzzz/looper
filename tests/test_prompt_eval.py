@@ -1197,6 +1197,12 @@ def test_reps_must_be_a_whole_number_of_at_least_one(value: str) -> None:
 
 
 @pytest.mark.parametrize("command", ["run", "dialogs"])
+def test_pi_runner_is_an_explicit_eval_opt_in(command: str) -> None:
+    assert not cli._parser().parse_args([command]).pi_runner
+    assert cli._parser().parse_args([command, "--pi-runner"]).pi_runner
+
+
+@pytest.mark.parametrize("command", ["run", "dialogs"])
 @pytest.mark.parametrize("value", ["-0.4", "0", "nan", "inf", "-inf"])
 def test_case_budget_must_be_finite_and_positive(
     command: str, value: str, capsys: pytest.CaptureFixture[str],

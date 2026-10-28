@@ -718,6 +718,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 2026-10-27 | 假 runner（本分支）：协议基线覆盖握手、工具、宿主计费、拒绝、取消和引导；隔离 PostgreSQL/serve 的 Manager HTTP 对话经 `looper_tasks` 读回任务、审计与同一 trace，四类 token 精确计费 $0.003900，请求前预算拒绝为零请求/零工具；服务和 runner 正常退出，启动即退出的独立进程组子进程清理回归通过。Planner serve 未测，S0 其余范围不在本次验收内。 |
 | 2026-10-27 | Pi SDK runner turn（本分支）：实现独立会话的新建/关闭、prompt/cancel、请求前预算授权、逐请求用量与唯一结算，尚未接入服务入口，也未启用 builtin/platform 工具。真实 Pi 1.3.0 Responses 客户端配 loopback provider 的定向测试 39 项通过，覆盖精确计费、拒绝零请求、HTTP 错误脱敏、取消、强制释放与迟到事件；确认 SSE 无需 `event:` 行，`retry.provider.maxRetries: 0` 经 SDK 传到客户端，模型存储保持内存。Dashboard、Telegram、Lark 和 CLI 无变更；工具、加载会话及 retry/compaction 请求分类留待后续阶段。 |
+| 2026-10-28 | Pi Manager/Planner runner opt-in（本分支）：ops 文件 `[runtimes] pi = "runner"` 在启动时切换这两个角色，默认 CLI，Worker/Reviewer/consults 保持 CLI；单 runner、10 会话后 CAPACITY，provider env 拒绝且无 CLI fallback。Dashboard 无新增入口，Telegram/Lark `/stop` 沿用中断路径，`config init-ops` 输出设置；eval `run`/`dialogs --pi-runner` 给隔离服务写入相同设置。定向测试及已安装 Pi 配 loopback Responses 的隔离 serve 均通过，覆盖工具审计、精确计费、stop、重启恢复后的会话续接和 Planner→CLI Worker 完成任务；重启退避窗口仍 fail-fast，真实 CPA smoke 和 CLI/runner 对照缺可用 endpoint/key，未验证不计通过，后续范围见 §5.2。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -821,6 +822,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - ~~**dashboard 在非安全上下文里白屏**~~（✅ 已修复 looper #213）（looper #207 的真实浏览器检查发现，早于 #207）：`web/src/pages/chat.tsx` 用 `crypto.randomUUID()`，浏览器只在 https 或 localhost 下提供它；用 http 从别的机器（`--host 0.0.0.0` 加局域网地址）打开时，登录成功后页面在首次渲染就抛 `TypeError` 而白屏。现在非安全上下文里生成 id 已回退到 `crypto.getRandomValues`，从别的机器通过普通 http 打开 dashboard 也能正常渲染。
 
 ### 5.2 工程待办
+
+- **Pi SDK runner 的后续**（[RFC §16](../architecture/rfcs/agent-sdk-runner-v0.zh-CN.md#16-阶段)）：S1 尚余 Worker/Reviewer 的 RunnerChannel、咨询分叉与取消、`WorkerPool` 运行句柄、容量测量与运行时卡，以及完成门禁后切换默认值、删除 Pi CLI 路径；本次 opt-in 不提前交付这些。S0 的周期健康检查与 runner pool 仍待实现；compaction 的独立更新事件、`runners/state/pi/<owner>` 的删除与过期清扫亦待补齐。
 
 - **把 Grok 的 ACP 常驻会话移植到 Go 版（loopgo）**（Python 版合入 main 之后做）：照 Grok 运行时 RFC 第 14 节：命令翻译、`session/new`/`session/load`、`session/prompt` 事件翻译、取消、回落逐轮续接、用量口径（ACP `inputTokens` 含缓存）。
 - **Profile 自定义提示词与分块预览**（RFC 第 6 节，已实现，验证待完成）：`custom_prompt` 默认空，放在 harness 前；贯通 Profile、配置导入导出、派生 Profile、管家工具与四种运行时。Agent Profiles 提供自定义文本编辑和按角色加载的只读预览，预览与启动共用 prompt builder 和适配器文本布局；任务段、依赖运行目录的知识索引及其他启动上下文在预览中标明。已补定向 Python/数据库与 Web 测试；指定验证入口受当前执行环境写权限限制，测试及类型检查尚未运行，真实 CLI 与浏览器验证待补。
