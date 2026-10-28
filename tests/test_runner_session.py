@@ -13,7 +13,7 @@ from looper.agents.runtimes.api.loop import ToolSpec
 from looper.agents.runtimes.runner import protocol as p
 from looper.agents.runtimes.runner.session import Descriptor, RunnerSession
 from looper.agents.runtimes.runner.bridge import RpcFailure
-from test_runner_bridge import connection, send
+from runner_pipe_support import connection, send
 
 def run(coro):
     asyncio.run(asyncio.wait_for(coro, 10))

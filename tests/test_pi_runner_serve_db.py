@@ -89,9 +89,9 @@ class Responses(ThreadingHTTPServer):
             if "List the tasks" in wire:
                 return call_item('{"action":"list"}', name="looper_tasks")
             return text_item("Manager continued with " + FACT)
-        if any(name.startswith("mcp__looper__") for name in tools):
+        if {"read", "bash", "edit", "write"} <= tools:
             return text_item('Done.\n```json\n' + json.dumps({"status": "completed", "changed_files": {},
-                "deleted_files": [], "summary": "Worker on Pi CLI completed"}) + '\n```')
+                "deleted_files": [], "summary": "Worker on Pi runner completed"}) + '\n```')
         assert tools - {"read", "grep", "find", "ls"}
         assert tools - {name for name in tools if name.startswith("looper_")} == {"read", "grep", "find", "ls"}
         if SENTINEL not in body["instructions"]:
@@ -274,7 +274,9 @@ def test_pi_runner_manager_stop_and_restart(isolated_pi, tmp_path):
         assert len({event["trace_id"] for event in saved_events(url, record)}) == 1
 
 
-def test_pi_runner_planner_and_cli_worker(isolated_pi, tmp_path):
+def test_pi_runner_planner_and_worker(isolated_pi, tmp_path):
+    from looper.agents.runtimes.runner.session import Descriptor
+
     url, api, provider = isolated_pi
     work = tmp_path / "project"
     work.mkdir()
@@ -286,7 +288,8 @@ def test_pi_runner_planner_and_cli_worker(isolated_pi, tmp_path):
                         lambda row: row["status"] in {"completed", "failed", "stopped"}, timeout=45)
     assert detail["status"] == "completed", (detail.get("error"), (tmp_path / "serve.log").read_text()[-3000:])
     offered = [{tool["name"] for tool in request.get("tools", [])} for request in provider.requests]
-    assert any(any(name.startswith("mcp__looper__") for name in tools) for tools in offered)
+    assert any({"read", "bash", "edit", "write"} <= tools for tools in offered)
+    assert not any(name.startswith("mcp__looper__") for tools in offered for name in tools)
     planner = [tools for tools in offered if "read" in tools and "bash" not in tools]
     assert planner and all(tools - {name for name in tools if name.startswith("looper_")} == {"read", "grep", "find", "ls"} for tools in planner)
     runs = query(url, "SELECT * FROM llm_records WHERE task_id=$1 ORDER BY id", task)
@@ -294,7 +297,8 @@ def test_pi_runner_planner_and_cli_worker(isolated_pi, tmp_path):
     assert len([row for row in runs if row["agent_id"].startswith("worker")]) == 1
     assert not any(row["agent_id"].startswith("reviewer") for row in runs)
     worker = next(row for row in runs if row["agent_id"].startswith("worker"))
-    assert json.loads(worker["metadata"])["command"][0] != "looper-runner"
+    descriptor = Descriptor.parse(json.loads(worker["metadata"])["command"])
+    assert descriptor.kind == "pi" and descriptor.role == "worker"
     for row in runs:
         events = saved_events(url, row)
         traces = {event["trace_id"] for event in events if "trace_id" in event}
