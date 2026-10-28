@@ -11,6 +11,7 @@ from looper.agents.runtimes.cancel import TurnCancel
 from looper.agents.runtimes.api.loop import ToolSpec
 from looper.agents.runtimes.runner import protocol as p
 from looper.agents.runtimes.runner.session import Descriptor, RunnerSession
+from looper.agents.runtimes.runner.bridge import RpcFailure
 from test_runner_bridge import connection, send
 
 def run(coro):
@@ -27,34 +28,47 @@ def bind(session):
     session.set_turn_tools(Tools())
     session.set_turn_budget(provider_id="account", model="model", price=lambda m, u: 0.01, limits=limits)
 
-async def opened(tmp_path, bridge, reader, writer):
+async def opened(tmp_path, bridge, reader, writer, *, changes=None, env=None, refusal=None, check=None):
     prompt = tmp_path / "prompt.md"
     prompt.write_text("unchanged prompt")
     async def release():
         lease.valid = False
-        await bridge.close_session(lease.session_id)
+        if lease.session_id in bridge.sessions:
+            await bridge.close_session(lease.session_id)
     lease = SimpleNamespace(bridge=bridge, runner_id="fake-1", valid=True, session_id="s",
                             release=release)
     async def open_session(params):
         return await bridge.open_session({**params, "session_key": "private", "home": str(tmp_path), "state_dir": str(tmp_path)})
     lease.open_session = open_session
-    async def acquire(kind):
-        assert kind == "fake"
+    async def load_session(params):
+        return await bridge.load_session({**params, "session_key": "private", "home": str(tmp_path), "state_dir": str(tmp_path)})
+    lease.load_session = load_session
+    async def acquire(kind, *, owner=None):
+        assert kind == "fake" and owner == "manager"
         return lease
     session = RunnerSession("manager", SimpleNamespace(acquire=acquire), "fake")
     descriptor = Descriptor("fake", "manager", "account", ApiProtocol.OPENAI_RESPONSES,
         "https://example.invalid", "model", None, 200000, str(prompt), read_only=True)
+    descriptor = replace(descriptor, **(changes or {}))
     assert Descriptor.parse(descriptor.to_argv()) == descriptor
     assert "key-sentinel" not in repr(descriptor) + str(descriptor.to_argv())
     starting = asyncio.create_task(session.start(descriptor.to_argv(), cwd=str(tmp_path), signature=1,
-                                               env={KEY_ENV: "key-sentinel"}))
+                                               env={KEY_ENV: "key-sentinel", **(env or {})}))
     request = await p.read_frame(reader)
-    assert request.method == "session/new" and "trace_id" not in request.params
-    assert request.params["tools"] == {"builtin": [], "platform": [], "read_only": True}
+    assert request.method == ("session/load" if descriptor.session is not None else "session/new")
+    assert "trace_id" not in request.params
+    if descriptor.session is not None:
+        assert request.params["session_id"] == descriptor.session
+    assert request.params["tools"] == {"builtin": list(descriptor.builtin), "platform": [], "read_only": True}
     assert request.params["provider"]["api_key"] == "key-sentinel"
-    await send(writer, p.Response(request.id, result={"session_id": "s"}))
+    if check:
+        check(request.params)
+    if refusal is not None:
+        await send(writer, p.Response(request.id, error={"code": int(refusal), "message": "load refused"}))
+    else:
+        await send(writer, p.Response(request.id, result={"session_id": "s", **({"resumed": True} if descriptor.session else {})}))
     await starting
-    assert session.started and session.pid is None and not session.shares_bridge and session.can_interrupt
+    assert session.started and session.pid is None and not session.shares_bridge and session.can_interrupt == (refusal is None)
     assert isinstance(session, InProcessTools)
     return session, descriptor
 
@@ -155,7 +169,7 @@ def test_cancel_and_steer_preserve_trace_and_close_admission(tmp_path):
     run(exercise())
 
 @pytest.mark.parametrize("before_prompt", [False, True])
-def test_loss_never_replays_and_saved_resume_fails_before_prompt(tmp_path, before_prompt):
+def test_loss_never_replays(tmp_path, before_prompt):
     async def exercise():
         async with connection() as (bridge, reader, writer, _):
             session, descriptor = await opened(tmp_path, bridge, reader, writer)
@@ -174,12 +188,73 @@ def test_loss_never_replays_and_saved_resume_fails_before_prompt(tmp_path, befor
                 result = await task
                 assert result.result_event["runner"]["outcome"] == "lost"
             assert not result.usage_complete and not session.started and result.prompt_sent != before_prompt
-            # No new session/load or prompt may be sent for an unavailable native id.
-            session._descriptor = None
-            await session.start(replace(descriptor, session="saved").to_argv(), cwd=str(tmp_path), signature=2,
-                                env={KEY_ENV: "key-sentinel"})
-            bind(session)
-            resumed = await session.run_turn("resume", [].append)
-            assert not resumed.session_started and not resumed.prompt_sent
-            assert "could not be resumed" in resumed.result_event["errors"][0]
     run(exercise())
+
+
+
+def test_resume_loads_the_saved_session(tmp_path):
+    async def exercise():
+        async with connection() as (bridge, reader, writer, _):
+            session, _ = await opened(tmp_path, bridge, reader, writer, changes={"session": "s"})
+            events = []
+            task, turn = await begin(session, reader, writer, events)
+            await charged(reader, writer, turn, 1)
+            await settle(writer, turn)
+            result = await task
+            assert result.session_started and result.prompt_sent and result.usage.cost_usd == 0.01
+            assert all(e["session_id"] == "s" for e in events)
+            await close(session, reader, writer)
+            assert not session.started
+    run(exercise())
+
+
+@pytest.mark.parametrize("code", [p.ErrorCode.SESSION_NOT_FOUND, p.ErrorCode.SESSION_OWNED, p.ErrorCode.INVALID_PARAMS])
+def test_resume_not_found_takes_the_resume_failure_path(tmp_path, code):
+    async def exercise():
+        async with connection() as (bridge, reader, writer, _):
+            opening = opened(tmp_path, bridge, reader, writer, changes={"session": "s"}, refusal=code)
+            if code == p.ErrorCode.INVALID_PARAMS:
+                with pytest.raises(RpcFailure) as error:
+                    await opening
+                assert error.value.code == code
+            else:
+                session, _ = await opening
+                result = await session.run_turn("resume", [].append)
+                assert not result.session_started and not result.prompt_sent
+                assert "could not be resumed" in result.result_event["errors"][0]
+                assert session._lease is None
+                await session.stop()
+                assert not session.started
+            assert not bridge.sessions and not bridge._error
+    run(exercise())
+
+
+def test_tool_environment_and_account_id(tmp_path, caplog):
+    async def exercise():
+        async with connection() as (bridge, reader, writer, _):
+            env = {"LANG": "C", "TOOL_SETTING": "value"}
+            def check(params):
+                assert params["env"] == env
+                assert params["provider"] == {"account_id": "account", "reasoning": True,
+                    "protocol": "openai-responses", "base_url": "https://example.invalid", "model": "model",
+                    "effort": None, "context_window": 200000, "api_key": "key-sentinel"}
+                assert params["system_prompt"] == {"mode": "append", "text": "unchanged prompt"}
+                assert params["tools"]["builtin"] == ["read", "bash"]
+            session, descriptor = await opened(tmp_path, bridge, reader, writer,
+                changes={"system_prompt_mode": "append", "reasoning": True, "builtin": ("read", "bash")},
+                env=env, check=check)
+            assert "key-sentinel" not in repr(descriptor) + str(descriptor.to_argv()) + caplog.text
+            assert env == {"LANG": "C", "TOOL_SETTING": "value"}
+            await close(session, reader, writer)
+    run(exercise())
+
+
+@pytest.mark.parametrize(("flag", "value"), [("--system-prompt-mode", "invalid"), ("--reasoning", "true"),
+    ("--builtin", ""), ("--builtin", "Read"), ("--builtin", "read-file"), ("--builtin", "read1")])
+def test_descriptor_rejects_invalid_options(flag, value):
+    descriptor = Descriptor("fake", "manager", "account", ApiProtocol.OPENAI_RESPONSES,
+        "https://example.invalid", "model", None, None, "prompt.md", builtin=("read",))
+    argv = descriptor.to_argv()
+    argv[argv.index(flag) + 1] = value
+    with pytest.raises(ValueError):
+        Descriptor.parse(argv)
