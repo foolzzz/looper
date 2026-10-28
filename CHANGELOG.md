@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.185] - 2026-10-28
+
+### Fixed
+
+- **The eval's API Manager readback expects one completed API turn per user turn.** `evals/prompt_regression/dialogs.py` matches each user turn the API runtime answered to its own completed record, bounded by run ids, ignores `[HANDOFF]`, autonomous and session-profile records, and expects none for turns a switched non-API runtime answered, so a `--switch-agent` dialog is no longer a false failure. ([#804](https://github.com/foolzzz/looper/pull/804))
+
 ## [2.13.184] - 2026-10-28
 
 ### Fixed
