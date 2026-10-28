@@ -256,6 +256,18 @@ class RunnerBridge:
         self.sessions[sid] = entry
         return sid
 
+    async def load_session(self, params: p.LoadSessionParams) -> str:
+        sid = params["session_id"]
+        if sid in self.sessions:
+            raise p.ProtocolError(p.ErrorCode.SESSION_OWNED)
+        result = await self.request("session/load", params)
+        if result["session_id"] != sid:
+            self._fail(ConnectionLost("runner protocol-error: load returned another session"))
+            raise self._error
+        self.tombstones.pop(sid, None)
+        self.sessions[sid] = SessionEntry(params["session_key"], params["role"], sid, State.IDLE)
+        return sid
+
     def _entry(self, session_id, trace_id=None):
         entry = self.sessions[session_id]
         if trace_id is not None and entry.trace_id != trace_id:

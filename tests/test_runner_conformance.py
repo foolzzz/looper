@@ -64,7 +64,7 @@ class Tools:
 
 async def begin(bridge, *, script=None, cap=None, gate=None, role="manager", cancel_on_cap=False, held_authorization=None):
     new = dict(CASES["new"]["message"]["params"], role=role)
-    new["env"] = {"LOOPER_PROVIDER_ACCOUNT_ID": "account"}
+    new["provider"] = {**new["provider"], "account_id": "account"}
     sid = await bridge.open_session(new)
     tools = Tools(gate)
     async def limits():

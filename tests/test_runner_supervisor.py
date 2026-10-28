@@ -51,7 +51,7 @@ def fake_runner():
                     "per_session_isolation": options.get("isolation", True),
                     "cancel": True, "usage": {"per_request": True},
                     "authorize_covers": ["turn", "retry", "compaction", "subagent", "tool", "title", "other"]}}
-        elif method == "session/new":
+        elif method in {"session/new", "session/load"}:
             Path("opening").touch()
             Path("session-paths.json").write_text(json.dumps({key: params[key]
                 for key in ("cwd", "add_dirs", "home", "state_dir", "session_key")}))
@@ -64,7 +64,8 @@ def fake_runner():
                     "error": {"code": -32602, "message": "invalid session"}}), flush=True)
                 continue
             count += 1
-            result = {"session_id": f"../native-{count}"}
+            result = ({"session_id": params["session_id"], "resumed": True} if method == "session/load"
+                      else {"session_id": f"../native-{count}"})
         elif method == "session/close":
             closes += 1
             if options.get("timeout_close_once") and closes == 1:
@@ -200,7 +201,8 @@ def runners(tmp_path, monkeypatch):
     return make
 
 
-def test_private_process_environment_and_session_paths(runners, tmp_path, monkeypatch):
+@pytest.mark.parametrize("load", [False, True])
+def test_private_process_environment_and_session_paths(runners, tmp_path, monkeypatch, load):
     for key in ("OPENAI_API_KEY", "LOOPER_TOKEN", "PGPASSWORD", "PYTHONPATH", "CLAUDE_CONFIG_DIR", "LC_SECRET", "__CF_USER_TEXT_ENCODING"):
         monkeypatch.setenv(key, "must-not-inherit")
     for key, value in {"PATH": os.environ["PATH"], "LANG": "C", "LC_ALL": "C", "LANGUAGE": "C", "TZ": "UTC"}.items():
@@ -225,7 +227,10 @@ def test_private_process_environment_and_session_paths(runners, tmp_path, monkey
             automatic = {"__CF_USER_TEXT_ENCODING"} if sys.platform == "darwin" else set()
             assert not (set(env) - s._ENV - {"HOME", "TMPDIR"} - automatic)
             assert "must-not-inherit" not in env.values()
-            sid = await lease.open_session(NEW)
+            sid = (await lease.load_session({**NEW, "session_id": "../native-saved"}) if load
+                   else await lease.open_session(NEW))
+            with pytest.raises(RuntimeError, match="only one session"):
+                await lease.load_session({**NEW, "session_id": "another"})
             paths = json.loads((lease._generation.directory / "session-paths.json").read_text())
             assert paths == {"cwd": NEW["cwd"], "add_dirs": NEW["add_dirs"],
                 "home": str(lease.home), "state_dir": str(lease.state_dir), "session_key": lease.session_key}
@@ -261,11 +266,13 @@ def test_open_reservation_is_bounded_without_pool_expansion(runners, options, ca
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
-def test_failed_or_cancelled_open_reclaims_reservation_and_directory(runners, cancelled):
+@pytest.mark.parametrize("load", [False, True])
+def test_failed_or_cancelled_open_reclaims_reservation_and_directory(runners, cancelled, load):
     async def exercise():
         async with runners(session_cap=1, slow_open=cancelled, reject_open=not cancelled) as (owner, processes):
             lease = await owner.acquire("fake")
-            opening = asyncio.create_task(lease.open_session(NEW))
+            opening = asyncio.create_task(lease.load_session({**NEW, "session_id": "saved"}) if load
+                                          else lease.open_session(NEW))
             try:
                 if cancelled:
                     await until(lambda: (lease._generation.directory / "opening").exists())
@@ -807,4 +814,41 @@ def test_release_after_close_ack_and_prompt_rejection_settles_locally(runners, c
             replacement = await owner.acquire("fake")
             assert replacement.bridge is lease.bridge and len(processes) == 1
             assert not replacement._generation.failed and processes[0].returncode is None
+    run(exercise())
+
+
+def test_owner_state_directory_survives_release_and_restart(runners, tmp_path):
+    async def exercise():
+        async with runners() as (owner, processes):
+            lease = await owner.acquire("fake", owner="manager")
+            await lease.open_session(NEW)
+            state_dir = lease.state_dir
+            assert state_dir == tmp_path / "runners/state/fake/manager"
+            for directory in (state_dir, *list(state_dir.parents)[:3]):
+                assert directory.stat().st_mode & 0o777 == 0o700
+            (state_dir / "saved").write_text("native state")
+            await lease.release()
+            assert not lease.directory.exists() and (state_dir / "saved").read_text() == "native state"
+            active = await owner.acquire("fake", owner="manager")
+            assert active.state_dir == state_dir
+            generation = lease._generation
+            processes[0].kill()
+            await until(lambda: owner._kinds["fake"].generation is not None
+                        and owner._kinds["fake"].generation is not generation)
+            again = await owner.acquire("fake", owner="manager")
+            assert not active.directory.exists()
+            assert again.runner_id != lease.runner_id and again.state_dir == state_dir
+            assert (again.state_dir / "saved").read_text() == "native state"
+            await again.release()
+            assert not again.directory.exists() and state_dir.exists()
+    run(exercise())
+
+
+@pytest.mark.parametrize("name", ["..", ".x", ""])
+def test_owner_name_cannot_escape(runners, name):
+    async def exercise():
+        async with runners() as (owner, processes):
+            with pytest.raises(ValueError, match="owner"):
+                await owner.acquire("fake", owner=name)
+            assert not processes
     run(exercise())
