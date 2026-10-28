@@ -159,6 +159,7 @@ class _Generation:
 class RunnerSupervisor:
     def __init__(self, runtime_root: Path, commands: Mapping[str, Sequence[str | Path]], *,
                  session_cap: int = 4,
+                 env: Mapping[str, Mapping[str, str]] | None = None,
                  connect: Callable[[asyncio.subprocess.Process, str], Awaitable[RunnerBridge]]):
         if type(session_cap) is not int or session_cap <= 0:
             raise ValueError("runner session cap must be positive")
@@ -175,6 +176,21 @@ class RunnerSupervisor:
             # Path arguments explicitly declare files relative to the launch cwd; strings are opaque argv.
             command = tuple(str(a.absolute()) if isinstance(a, Path) else a for a in argv)
             self._kinds[kind] = _Kind(command)
+        self._env: dict[str, dict[str, str]] = {}
+        if env is not None and not isinstance(env, Mapping):
+            raise ValueError("runner environment must be a per-kind mapping")
+        for kind, values in (env or {}).items():
+            if kind not in self._kinds:
+                raise ValueError("runner environment kind is not configured")
+            if not isinstance(values, Mapping):
+                raise ValueError("runner environment must be a mapping")
+            for name, value in values.items():
+                if (not isinstance(name, str) or not re.fullmatch(r"[A-Z_][A-Z0-9_]*", name)
+                        or name in {"PATH", "HOME", "TMPDIR", "TZ"} or name.startswith(("LANG", "LC_"))):
+                    raise ValueError("runner environment name is invalid or reserved")
+                if not isinstance(value, str) or "\0" in value:
+                    raise ValueError("runner environment value must be a string without NUL")
+            self._env[kind] = dict(values)
         self._stopped = False
         self._shutdown = asyncio.Event()
         self._stop_task: asyncio.Task | None = None
@@ -253,6 +269,7 @@ class RunnerSupervisor:
             _private(directory / "sessions")
             tmp = _private(directory / "tmp")
             environment = {k: v for k, v in os.environ.items() if k in _ENV}
+            environment.update(self._env.get(kind, {}))
             environment.update(HOME=str(directory), TMPDIR=str(tmp))
             process = await proc_tree.spawn(*state.command, env=environment, cwd=directory,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,

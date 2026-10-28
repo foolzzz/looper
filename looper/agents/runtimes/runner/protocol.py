@@ -94,13 +94,16 @@ Denied = TypedDict("Denied", {
     "reason": Literal["run_cap", "turn_cap", "task_cap", "max_requests", "stopped", "budget_unverifiable"]})
 RpcError = TypedDict("RpcError", {"code": int, "message": str, "data": NotRequired[dict[str, Any]]})
 Empty = TypedDict("Empty", {})
-Params = InitializeParams | NewSessionParams | LoadSessionParams | PromptParams | SteerParams | Turn | CloseParams | ToolCallParams | AuthorizeParams | Update
-Result = InitializeResult | Session | Loaded | Accepted | Queued | Turn | Empty | ToolResult | Allowed | Denied
-PARAMS = {"initialize": InitializeParams, "session/new": NewSessionParams, "session/load": LoadSessionParams,
-          "session/prompt": PromptParams,
+Health = TypedDict("Health", {
+    "sessions": Count, "running": Count, "inflight_requests": Count, "tool_processes": Count,
+    "rss_bytes": Count, "event_loop_lag_ms": Count})
+Params = InitializeParams | NewSessionParams | LoadSessionParams | PromptParams | SteerParams | Turn | CloseParams | ToolCallParams | AuthorizeParams | Update | Empty
+Result = InitializeResult | Session | Loaded | Accepted | Queued | Turn | Empty | ToolResult | Allowed | Denied | Health
+PARAMS = {"initialize": InitializeParams, "runner/health": Empty, "session/new": NewSessionParams,
+          "session/load": LoadSessionParams, "session/prompt": PromptParams,
           "session/steer": SteerParams, "session/cancel": Turn, "session/close": CloseParams,
           "session/update": Update, "tools/call": ToolCallParams, "budget/authorize": AuthorizeParams}
-RESULTS = {"initialize": InitializeResult, "session/new": Session, "session/load": Loaded,
+RESULTS = {"initialize": InitializeResult, "runner/health": Health, "session/new": Session, "session/load": Loaded,
            "session/prompt": Accepted,
            "session/steer": Queued, "session/cancel": Turn, "session/close": Empty,
            "tools/call": ToolResult, "budget/authorize": Allowed | Denied}

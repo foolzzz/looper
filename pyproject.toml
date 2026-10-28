@@ -47,6 +47,7 @@ include = ["looper*"]
 "looper.db" = ["*.sql"]
 "looper.agents.runtimes.api" = ["THIRD_PARTY_NOTICES.txt"]
 "looper.agents.runtimes" = ["*.mjs", "pi_extension/looper.ts"]
+"looper.agents.runtimes.runner" = ["pi_runner/package.json", "pi_runner/src/*.ts"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
