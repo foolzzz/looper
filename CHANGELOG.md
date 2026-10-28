@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.186] - 2026-10-28
+
+### Fixed
+
+- **The nightly installed browser tests pass again.** The browser tests serve the dashboard staged once by `scripts/stage-dashboard.sh` (new `staged_dashboard_dir` fixture) instead of rebuilding `web/dist`, the task restart tests wait for the first detail response instead of sleeping, the browser's `HOME` is isolated through its launch `env`, and the dashboard configuration flow selects a Runtime. Tests only. ([#806](https://github.com/foolzzz/looper/pull/806))
+
 ## [2.13.185] - 2026-10-28
 
 ### Fixed
