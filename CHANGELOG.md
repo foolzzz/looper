@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.199] - 2026-10-28
+
+### Fixed
+
+- **Hosted Worker runs that stop early keep their dropped steers and session.** A Worker run on a runner session killed by the Planner now returns the steers it dropped as `missed_input` on the kill reply, which the Planner adds to `missed_messages`; a run cancelled by a pool stop ends as `stopped` with the same drops; and a hosted launch that fails with `RunStartError` ends its handle so the session is released. ([#844](https://github.com/foolzzz/looper/pull/844))
+
 ## [2.13.198] - 2026-10-28
 
 ### Added
