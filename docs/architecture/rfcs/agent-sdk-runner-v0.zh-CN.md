@@ -151,8 +151,8 @@ Looper 现在通过 CLI 驱动 Pi 和 DSH。管家和规划者每一轮都起一
 
 ```text
 looper serve（宿主，Python）
-  tiers：ManagerAgent / PlannerAgent / WorkerPool —— 现有的 ResidentSession / RunChannel 接口
-    RunnerSession（ResidentSession）    RunnerChannel（RunChannel）
+  tiers：ManagerAgent / PlannerAgent / WorkerPool —— ResidentSession / RunHandle 接口
+    RunnerSession（ResidentSession）    ProcessRun / RunnerChannel（RunHandle，各自提供 RunChannel）
       RunnerBridge（每条运行器连接一个）
         ├─ 会话控制：session/*；把 session/update 翻成内部事件，按 trace_id 记录
         ├─ tools/call → ManagerOps / PlannerOps / RoomOps（与 HTTP 处理器同一个函数）
@@ -165,8 +165,9 @@ looper serve（宿主，Python）
   包装过的 provider 层（authorize + 每请求用量）、Looper 工具代理、隔离执行器、扩展加载
 ```
 
-- **RunnerSession** 实现 `ResidentSession`（`looper/agents/runtimes/__init__.py:225-255`），给管家和规划者用：`start` 解析描述行（同 `api` 的 `resident_command`，只在进程内解析）；`run_turn` 分配 `trace_id`，发 `session/prompt`，等这个 trace 的 `settled`；`interrupt` 是 `session/cancel`；`stop` 是 `session/close`。`shares_bridge = False`。`pid` 返回 `None`：运行器进程是多个会话共用的，不能交给按 pid 清扫进程树的逻辑；运行记录改记 `runner_id`。它另有一个 `steer(text, *, if_idle)`：运行中返回「已在本 trace 排队」；空闲时，调用方先登记一个新轮次（新 `trace_id`、回合绑定、记录器），再让引导开出这一轮。
-- **RunnerChannel** 实现 `RunChannel`（`looper/agents/runtimes/channel.py:45-61`），给执行者和评审者用：`start` 是 `session/new` 加 `session/prompt`；`send` 是 `if_idle=reject` 的 `session/steer`，返回 `DeliveryResult`；之后若收到 `steer_dropped`，把消息交回 `missed_messages` 路径，补上 Worker 引导 RFC 第 6 节「运行结束瞬间到达的引导可能丢」的缺口。`WorkerPool` 现在假定每次运行有一个进程对象（`run_channel(process, ...)`），S1 要把它抽成「进程或运行器会话」两种运行句柄：超时和花费上限改用 `session/cancel`，不再杀进程树。
+- **RunnerSession** 实现 `ResidentSession`（`looper/agents/runtimes/runner/session.py`），给管家和规划者用：`start` 解析 `Descriptor` 并申请会话；`run_turn` 分配 `trace_id`，发 `session/prompt`，等这个 trace 的 `settled`；`interrupt` 是 `session/cancel`；`stop` 是 `session/close`。`shares_bridge = False`，`pid=None`：共用运行器不进入 owner 的进程树清理，运行记录另记 `runner_id`。Pi 当前的 `steer(text, *, message_id, if_idle="reject")` 只接受运行中同 trace 的引导；空闲拒绝，不支持自动开新轮。
+- **RunHandle**（`looper/agents/runtimes/channel.py`）统一执行者、评审者和咨询的生命周期：`command`、`pid`、`channel`、`launch/end/wait`、错误输出和丢弃输入。`ProcessRun` 封装 CLI 进程与进程树清理；`RunnerChannel` 同时实现 `RunHandle` 和 `RunChannel`，`pid=None`，不把共用运行器交给单次运行的进程树清理。`RuntimeAdapter.hosts_runs` 默认 false；为 true 时 `WorkerPool` 和咨询直接用 `hosted_run`，启动失败也不回退 CLI。
+- **RunnerChannel** 的 `launch` 新建或分叉会话，`start` 发 `session/prompt`；超时、取消和花费上限用 `session/cancel`，`end/wait` 关闭并释放会话。`send` 是 `if_idle=reject` 的 `session/steer`，返回 `DeliveryResult`；`steer_dropped` 经 `dropped_input` 回到 `missed_messages`，由规划者在下一次决策中处理。运行记录的 `command` 是可解析的 runner `Descriptor`，不是 CLI 命令。
 - **RunnerBridge** 是协议的 Looper 一端，每条连接一个。它持有每个会话的绑定（管家的回合绑定、规划者或运行的令牌、总线地址、预算范围、当前 trace），这些都不发给运行器。
 - **RunnerSupervisor** 起停运行器进程，做放置、准入、健康检查和重启。
 
@@ -276,7 +277,8 @@ Go 移植版（loopgo-main）
 | `usage` | `{per_request, buckets, reasoning_in_output}` |
 | `authorize_covers` | 运行器保证会先授权的请求种类，如 `["turn", "retry", "compaction", "subagent", "tool"]`；不在列表里的种类，Looper 视为预算缺口（第 14 节） |
 | `exec_slots` | 起工具进程前是否先 `exec/acquire` |
-| `resume`、`fork` | 能否从持久化续接、能否从副本分叉（agent room 咨询用） |
+| `resume` | 能否从持久化续接 |
+| `fork` | 能否以 `session/new.fork_from` 从只读副本创建新会话（agent room 咨询用）；Pi 已声明 true，宿主在启动咨询前检查 |
 | `extensions` | 支持的扩展种类，如 `["skill_dir", "runner_extension"]` |
 | `tools` | `{custom: true, builtin: [...]}` |
 
@@ -299,14 +301,16 @@ Go 移植版（loopgo-main）
 
 | 方法 | 主要参数 | 结果 | 说明 |
 |---|---|---|---|
-| `session/new` | `session_key`、`role`、`address`（总线地址）、`cwd`、`add_dirs`、`env`（白名单之后的完整环境）、`home`、`state_dir`、`provider: {protocol, base_url, model, api_key, effort, context_window}`、`system_prompt: {mode, text}`、`tools: {builtin, read_only, platform}`、`extensions`、`limits: {max_requests_per_turn, tool_timeout_s, tool_output_bytes}` | `{session_id}`（SDK 原生的 id） | `api_key` 只在内存里，任何一端都不写日志 |
-| `session/load` | 同上，加 `session_id`；可选 `fork_from: {session_id}`（咨询用：先复制再打开，不写源会话） | `{session_id, resumed: true}` | 找不到或已被占用回 `SESSION_NOT_FOUND`、`SESSION_OWNED`，Looper 走现有的续接失败路径 |
+| `session/new` | `session_key`、`role`、`address`（总线地址）、`cwd`、`add_dirs`、`env`（白名单之后的完整环境）、`home`、`state_dir`、`provider: {protocol, base_url, model, api_key, effort, context_window}`、`system_prompt: {mode, text}`、`tools: {builtin, read_only, platform}`、`extensions`、`limits: {max_requests_per_turn, tool_timeout_s, tool_output_bytes}`、可选 `fork_from: {session_id}` | `{session_id}`（SDK 原生的新 id） | `api_key` 只在内存里，任何一端都不写日志；分叉从 `state_dir` 中的源副本新建会话 |
+| `session/load` | 同上，加 `session_id`，不允许 `fork_from` | `{session_id, resumed: true}` | 找不到或已被占用回 `SESSION_NOT_FOUND`、`SESSION_OWNED`，Looper 走现有的续接失败路径 |
 | `session/prompt` | `session_id`、`trace_id`、`text`、可选 `tools`（这一轮的平台工具快照，变了才带）、可选 `cause_message_id` | `{accepted: true}` | 这一轮以 `settled` 更新结束（第 6.5 节）；正在跑时回 `SESSION_BUSY` |
 | `session/steer` | `session_id`、`trace_id`（Looper 认为正在跑的那一轮）、`message_id`、`text`、`if_idle`、`new_trace_id` | `{status: "queued"}` 或 `{status: "started"}` | 按 `message_id` 去重；结果只说明已接受，进没进模型看 `steer_applied` |
 | `session/follow_up` | `session_id`、`trace_id`、`message_id`、`text`、`new_trace_id` | `{status: "queued"}` 或 `{status: "started"}`（空闲时立即开始） | 当前这一轮静止后开始 |
 | `session/cancel` | `session_id`、`trace_id` | `{}` | 这一轮以 `cancelled` 静止；5 秒内没有静止，运行器强制释放这个实例（`forced: true`），会话记为 poisoned |
 | `session/compact` | `session_id` | `{tokens_before, tokens_after}` | 只在 `compaction.manual` 时可用 |
 | `session/close` | `session_id` | `{}` | 释放 SDK 实例，持久化保留，空出名额 |
+
+咨询是新 owner 和新会话 id，所以 `fork_from` 属于 `session/new`，而不是保持原 id、恢复原 owner 的 `session/load`；二者互斥。宿主先把保留会话复制成只读源文件，Pi 用 `SessionManager.forkFrom` 创建自己的可写历史；咨询结束删除整个 fork 目录。`limits.tool_timeout_s` 是每会话的 bash 上限：工具传入更短的 timeout 可进一步收紧，省略或非正数也不能绕过宿主上限。
 
 ### 6.5 流式更新（运行器 → Looper 的通知 `session/update`）
 
@@ -472,9 +476,10 @@ Node 进程，导入已安装的 `@earendil-works/pi-coding-agent`：从探测�
 
 | 协议 | Pi 1.3.0 |
 |---|---|
-| `initialize` | 核对 1.3.x 和用到的导出；能力：`per_session_isolation: true`（第 9.3 节）、`per_session_credentials: true`（每会话一个 ModelRuntime 加 `setRuntimeApiKey`，隔离验证见第 9.6 节）、`steer: {in_trace: true, boundary: "after_tool_batch", idle_start: false}`、`cancel`、`authorize_covers: [turn, retry, compaction]`；follow_up、manual compaction/events 与 fork 仍待做 |
+| `initialize` | 核对 1.3.x 和用到的导出；能力：`per_session_isolation: true`（第 9.3 节）、`per_session_credentials: true`（每会话一个 ModelRuntime 加 `setRuntimeApiKey`，隔离验证见第 9.6 节）、`steer: {in_trace: true, boundary: "after_tool_batch", idle_start: false}`、`cancel`、`fork: true`、`authorize_covers: [turn, retry, compaction]`；follow_up、manual compaction/events 仍待做 |
 | `session/new` | `createAgentSession({cwd, agentDir, modelRuntime, model, thinkingLevel, sessionManager, settingsManager, resourceLoader, tools, customTools})`（`pi:dist/core/sdk.d.ts:10-64`）：每会话自己的 ModelRuntime、`SessionManager.create(cwd, state_dir)`、内存 SettingsManager（关掉 cache warming、遥测）、`DefaultResourceLoader`（`noContextFiles`，只加载 Looper 给的扩展和 skill，`systemPrompt` 或 `appendSystemPrompt`）；`customTools` 是平台工具代理和运行器包装过的内置工具 |
-| `session/load` | `SessionManager.open(<state_dir 里唯一匹配的文件>)` 后同上；`fork_from` 先复制源文件再打开副本 |
+| `session/load` | `SessionManager.open(<state_dir 里唯一匹配的文件>)` 后同上；保持原 session id，不允许 `fork_from` |
+| `session/new.fork_from` | 从宿主在 `state_dir` 准备的只读副本，经 `SessionManager.forkFrom(source, cwd, state_dir)` 创建不同 id 的会话；源会话不写，咨询结束清理 fork 目录 |
 | `session/prompt` | `session.prompt(text)`；`agent_settled` 发 `settled`，`agent_end` 之后还可能重试或继续（`pi:docs/sdk.md:72-94`） |
 | `session/steer` | 运行中 `session.steer(text)`（`pi:dist/core/agent-session.d.ts:570`）：当前回合的工具结束后、下一次请求前进入，同一 trace。离线实测：bash 运行中调用，下一次 provider 请求就带上了这条消息，全程只有一次 `agent_start`/`agent_end`（第 2.3 节）。`message_end` 的 user 消息用于跟踪，进入 provider 请求后才发 `steer_applied`；空闲时拒绝，结束竞争见第 9.6 节 |
 | `session/follow_up` | 运行器排队，见第 7.3 节 |
@@ -483,7 +488,7 @@ Node 进程，导入已安装的 `@earendil-works/pi-coding-agent`：从探测�
 | `session/close` | `session.dispose()`（`:387`）：停止工作、使扩展上下文失效、移除订阅 |
 | 事件 | `session.subscribe`（`:380`）：`message_update` 的 `text_delta` → delta；`message_end` → `message`、`tool_result`；`compaction_end` → `compaction`；`auto_retry` → `retry` |
 | 用量 | 每条 assistant `message_end.usage`、`compaction_end` 的用量、toolResult 里嵌套的用量各记一次 `request_end`；input 已是未缓存的，cacheRead、cacheWrite 分列，reasoning 含在 output（`looper/agents/runtimes/pi.py:415-418`）。`getSessionStats()` 是累计值，只进 `runner/health` |
-| `budget/authorize` | 在 ModelRuntime 上注册 Looper 自己的 provider（`registerProvider(id, {api, streamSimple, models, ...})`，`pi:dist/core/model-runtime.d.ts:117`），它的 `streamSimple` 先授权，再委托给 pi-ai 对这个协议的实现；spike 用同样的注册方式接上了假 provider（第 2.3 节）。`createAgentSession` 把 `streamFn` 绑定到这个 runtime（`pi:dist/core/sdk.js:253`、`:303`）。自动压缩、自动重试均从这里授权和归属（第 9.6 节），拒绝发生在请求发送前；分支摘要仍待后续 fork 路径验证 |
+| `budget/authorize` | 在 ModelRuntime 上注册 Looper 自己的 provider（`registerProvider(id, {api, streamSimple, models, ...})`，`pi:dist/core/model-runtime.d.ts:117`），它的 `streamSimple` 先授权，再委托给 pi-ai 对这个协议的实现；spike 用同样的注册方式接上了假 provider（第 2.3 节）。`createAgentSession` 把 `streamFn` 绑定到这个 runtime（`pi:dist/core/sdk.js:253`、`:303`）。自动压缩、自动重试均从这里授权和归属（第 9.6 节），拒绝发生在请求发送前；咨询分叉只复制已存历史，不生成分支摘要 |
 
 ### 9.3 隔离
 
@@ -497,7 +502,9 @@ Node 进程，导入已安装的 `@earendil-works/pi-coding-agent`：从探测�
 ### 9.4 角色与会话
 
 - **管家、规划者：** 常驻的 RunnerSession，一个 owner 一个 Pi 会话，跨轮不重启；服务或运行器重启后 `session/load`。规划者用只读工具（read、grep、find、ls 加平台工具）。
-- **执行者、评审者：** RunnerChannel；普通运行保留 Pi 默认的 read、bash、edit、write 加平台工具；规划者的引导经 `session/steer` 在同一 trace 内生效。agent room 要保留会话时 `state_dir` 由 room 管理；咨询用 `fork_from` 和只读工具，不写源会话（与现在 `pi.py:293-311` 复制再 `--fork` 等价）。
+- **执行者、评审者：** RunnerChannel；两者均保留 read、bash、edit、write 加平台工具，与 CLI 路径同组工具。文件工具只能访问任务目录与 `add_dirs`（含真实路径检查）；bash 不受路径约束，上限为该角色的 `timeout_seconds`。`max_turns` 在运行器路径限制模型请求数，未设置时 1000；每次请求前检查运行和任务花费上限。规划者的引导经 `session/steer` 在同一 trace 内生效；丢弃的引导交回规划者决策。
+- **咨询：** 以 Worker 角色、`read_only=true` 分叉保留会话，只提供 read、grep、find、ls，不给 bash、edit、write 或平台工具；源 JSONL 保留不变，结束后删除副本和 fork 会话。agent room 的保留目录为 `.local/pi/run-sessions/<task>/<run>/`。
+- **共享容量：** 四类角色与咨询共用一个 runner 的 10 个会话，`CAPACITY` 按启动失败结束步骤；没有 CLI fallback。
 - **一个会话文件只有一个活动 owner。** 全局的文件写队列只保证同一文件串行写（`pi:dist/core/tools/file-mutation-queue.js:1`），不保证多个 agent 改同一工作树时业务正确，这由步骤的工作目录隔离负责。
 
 ### 9.5 取代 `pi.py` 里的哪些路径（S1 完成时删除）
@@ -517,7 +524,9 @@ Pi 1.3.0 配 loopback provider 的定向测试已覆盖每会话 ModelRuntime/ke
 
 引导从用户消息事件跟踪，但只有该消息进入真实 provider 请求才发 `steer_applied`；与结束、取消或关闭竞争时必须发 `steer_applied` 或 `steer_dropped`，被丢弃的消息同时从持久上下文省略，不能漏到下一轮。空闲引导仍拒绝，不宣称 `idle_start`；独立的 compaction 通知更新仍待补。
 
-本分支增加 ops-file opt-in：`[runtimes] pi = "runner"` 仅切换 Manager/Planner，默认 `"cli"`，启动读取一次；一个 runner、10 会话后 `CAPACITY`，provider env 拒绝、无 CLI fallback。隔离 serve、真实 CPA smoke 和 CLI/runner 对话评测的结果另记计划台账，未验证项不计通过；长上下文、长期内存/事件循环延迟、thinking 钳制和全部生产 schema 普查仍开放。
+ops-file opt-in `[runtimes] pi = "runner"` 已覆盖 Manager、Planner、Worker、Reviewer 与咨询，默认仍为 `"cli"`，启动读取一次；一个 runner、10 会话后 `CAPACITY`，provider env 拒绝、无 CLI fallback。新增 installed 隔离 serve 验证覆盖两步任务、同 trace 引导、Reviewer、只读咨询分叉、逐请求计费，以及 Worker 请求前预算拒绝、会话级取消、运行器崩溃与重启后的任务收敛；本轮在 Pi 1.3.0、Node 24.20.0 上的两项 SDK 工具集/只读分叉测试通过；serve 文件的 4 项测试因未设置一次性 `LOOPER_TEST_DATABASE_URL` 跳过（包括本卡两项），serve 结论仍未验证，不能计为通过。
+
+Pi CLI 与 runner 的真实任务对照命令及门禁已在 [evals/README.md](../../../evals/README.md#pi) 准备；待 lead 通过本地 CPA、`gpt-6-astra` 跑 9 个任务各 2 次，逐任务要求 runner 通过数至少为 CLI 减一，错误单列并重跑一次，花费上限截断须提高上限重跑。此次尚未运行，结果未验证；`reviewer_*` 用 Claude Code Reviewer，不能比较 Pi Reviewer，后者由 installed 测试覆盖。容量数字、运行时卡、长上下文、长期内存/事件循环延迟、thinking 钳制和全部生产 schema 普查仍开放。
 
 ## 10. DSH 运行器（TypeScript）
 
@@ -736,7 +745,7 @@ v0 的告警进服务日志（固定事件名）和 system status 的标志；�
 | 阶段 | 卡片 | 完成标准（另加上面的通用标准） |
 |---|---|---|
 | **S0 协议与 Looper 一侧** | ① 协议说明、JSON Schema 与一致性测试（M）；② RunnerSupervisor：起停、放置、健康、重启（M）；③ 准入控制与整机名额：内存、健康、硬上限、`exec/acquire`、负载保护（M）；④ RunnerBridge 会话控制、RunnerSession、RunnerChannel、内部事件、trace（L）；⑤ `tools/call` 分派与共用的 100 KB 截断（S）；⑥ `budget/authorize`、provider 并发、对账（M）；⑦ 总线 `lease`/`ack`、两种新消息类型、投递与去重（M）；⑧ `llm_records` 的三列与日志字段（S）；⑨ 假运行器（M） | 第 15.1–15.3 节在假运行器上全绿；隔离服务上，假运行器（只在测试里登记的运行时类型）跑完一轮管家对话并调用平台工具；没有用户可见变化 |
-| **S1 Pi 运行器**（本分支：①–④ 的核心路径及⑤ opt-in 已实现，验证结论见 §9.6；⑥–⑨ 未完成） | ① 运行器骨架：握手、版本门禁、会话表、读写、健康（M）；② `session/new`、`load` 与隔离：cwd、路径拦截、bash 的 `spawnHook`/`operations`、私有 agentDir、内存设置（L）；③ 包装 ModelRuntime：`authorize`、`request_end`、事件映射（M）；④ 平台工具代理、内联扩展、`skill_dir`（M）；⑤ 管家、规划者改由运行器承载，`pi` 类型切换（M）；⑥ 执行者、评审者：RunnerChannel、trace 内引导、取消、咨询分叉（L）；⑦ `WorkerPool` 的运行句柄抽象（M）；⑧ 验证、容量数字、评测、运行时卡（M）；⑨ 删除按轮起 CLI 的 Pi 路径（S） | 已安装的 pi 1.3.0 配假 provider 跑通四个角色、只读、用量、trace 内引导和取消；真实 Responses 烟测；与原 CLI 路径的评测对照；运行时卡截图一张 |
+| **S1 Pi 运行器**（本分支：①–⑦ 已实现；⑧ 的验证与评测已准备、待 lead 实跑，容量数字和运行时卡未完成；⑨ 未完成，见 §9.6） | ① 运行器骨架：握手、版本门禁、会话表、读写、健康（M）；② `session/new`、`load` 与隔离：cwd、路径拦截、bash 的 `spawnHook`/`operations`、私有 agentDir、内存设置（L）；③ 包装 ModelRuntime：`authorize`、`request_end`、事件映射（M）；④ 平台工具代理、内联扩展、`skill_dir`（M）；⑤ 管家、规划者改由运行器承载，`pi` 类型切换（M）；⑥ 执行者、评审者：RunnerChannel、trace 内引导、取消、咨询分叉（L）；⑦ `WorkerPool` 的运行句柄抽象（M）；⑧ 验证、容量数字、评测、运行时卡（M）；⑨ 删除按轮起 CLI 的 Pi 路径（S） | 已安装的 pi 1.3.0 配假 provider 跑通四个角色、只读、用量、trace 内引导和取消；真实 Responses 烟测；与原 CLI 路径的评测对照；运行时卡截图一张 |
 | **S2 DSH 运行器** | ① 运行器骨架、一次 `runProfile`、兼容门禁（M）；② `agents.create`、`resume` 与 `setup`：工具、prompt section、guard、bash 执行器（L）；③ `llm/stream` 授权、用量、请求归属（M）；④ 常驻与运行两类角色、引导、取消、快照咨询（M）；⑤ 按 provider 绑定分运行器（S）；⑥ 验证、容量数字、DeepSeek 真实烟测（M）；⑦ 删除 CLI 的 DSH 路径（S） | 第 10.5 节的缺口逐项给出结论或保留为开放项；DeepSeek 真实烟测 |
 | **S3 Norma 运行器** | ① 上游：每会话收件箱与 trace 内引导，带测试（M）；② 上游：干净环境的 bash、子 agent 环境、`http.Client`、panic recover、任务目录清理、MCP cwd（M）；③ `api` 的 Python `AgentLoop` 移植同一收件箱（M）；④ Go 运行器：协议、会话 goroutine、读写、准入、健康（L）；⑤ 工具：路径包装、干净环境执行器、平台工具代理、Looper 摘要器，以及上游合入前的 `Compactor.Pre` 过渡引导（M）；⑥ provider 包装：`authorize` 与用量（S）；⑦ `norma` 运行时类型、Profile、registry、运行时卡（M）；⑧ 构建与发布二进制、`install.sh`（M）；⑨ 验证与三种运行器的容量对比（M） | 第 11.6 节的行为兼容表在同一个假服务上逐项核对；四个平台的安装烟测；三种运行器的容量对比写进本 RFC，替换第 5.3 节的暂定值 |
 | 之后 | WebSocket 远程运行器；外部 broker；Looper 拥有的中性历史（Norma 与 `api` 互换会话）；能力目录里的 MCP、扩展与 Pi package；按项目划分信任域；Go 版 Looper（loopgo）驱动同一套运行器 | 各自另立 RFC 或在本 RFC 补节 |

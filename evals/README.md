@@ -604,6 +604,38 @@ resume, the cancel tree, a raw Responses readback of optional parameters and
 `strict`, the `operator_notes_stale` and `schedule_*` dialogs, and a shared
 prompt or contract comparison against the baseline commit.
 
+For the SDK runner opt-in, `run --pi-runner` and `dialogs --pi-runner`
+write `[runtimes] pi = "runner"` into the isolated server's ops file. This
+covers every Pi role, including Worker, Reviewer and room consults, with no
+CLI fallback. The default remains the Pi CLI path.
+
+For the task comparison, keep a spec based on
+`evals/agents/pi-cpa.example.json` in ignored `.local/pi-cpa.json`, selecting
+`gpt-6-astra` and the operator's local CPA Responses endpoint. Keep only
+`api_key_env: "LOOPER_EVAL_API_KEY"` in it. Read the key at runtime into that
+environment variable for each command only; never echo it or write it into a
+spec, file, log or pull request. Use a disposable PostgreSQL server and set
+`EVAL_CAP_USD` high enough for all 18 cases:
+
+```bash
+uv run --extra test python -m evals.prompt_regression run --mode real --register-agent .local/pi-cpa.json \
+  --tasks single_step,dependent_steps,parallel_parts,reviewed_step,retry_after_failure,chat_correction,supplement_replan,room_consult,planner_plan_file \
+  --reps 2 --jobs 2 --max-budget-usd 1.0 --case-budget-usd 2.0 \
+  --total-cap-usd "$EVAL_CAP_USD" --pg-url "$LOOPER_EVAL_DATABASE_URL"
+```
+
+Save the CLI run JSON path as `PI_CLI_RUN_JSON`, then run the same command
+with `--pi-runner --baseline "$PI_CLI_RUN_JSON"`. Each task's runner pass
+count must be at least the CLI count minus one. Report errors separately
+from failures, rerun an errored task once and report both attempts. If a cap
+stops a run, raise it and rerun before claiming the gate. The `reviewer_*`
+cases run their Reviewer on Claude Code and do not compare the Pi Reviewer;
+`tests/test_pi_runner_serve_db.py` covers the Pi Reviewer on the installed path.
+For one runner case, check without printing the key that its server log does
+not contain it, and parse its Worker record commands as runner Descriptors.
+The task comparison is prepared but has not been run; no real-model gate is
+claimed by these instructions.
+
 #### Running cases in parallel
 
 `--jobs N` (default 1, one case after another) runs N cases (task or dialog,
