@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.197] - 2026-10-28
+
+### Added
+
+- **Run handle for Worker, Reviewer and consult runs.** `WorkerPool` and consults run through a `RunHandle` that is a process (`ProcessRun`, today's code) or a hosted runner session. `RuntimeAdapter.hosts_runs` (`False` for every current runtime) and `hosted_run` declare the hosted path; it uses in-process room and vault tools (`RoomTurnTools`), per-authorization run and task caps, and records `steer_applied` and `steer_dropped`; input a session dropped reaches the Planner as `missed_messages`. No current runtime hosts runs, so behavior is unchanged. ([#836](https://github.com/foolzzz/looper/pull/836))
+
 ## [2.13.196] - 2026-10-28
 
 ### Added
