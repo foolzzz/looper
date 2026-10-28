@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.181] - 2026-10-27
+
+### Changed
+
+- **A runner started by the supervisor has its initialization children owned before it is published.** `RunnerSupervisor` in `looper/agents/runtimes/runner/supervisor.py` now refreshes the process tree once (`generation.tree.refresh(force=True)`) after the bridge connects and before the generation is published. A child that a runner starts while it handles `initialize` is therefore recorded even if the runner is killed at once, and is reaped with the group; before, such a child could be missed until the periodic observation ran. The pull request also adds a test-only deterministic fake runner (`runners/fake/main.py`) with a conformance suite and an isolated `looper serve` acceptance test, which are not part of the product runtime. ([#782](https://github.com/foolzzz/looper/pull/782))
+
 ## [2.13.180] - 2026-10-27
 
 ### Changed
