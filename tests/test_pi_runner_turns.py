@@ -17,6 +17,13 @@ OFFER = {"protocol_versions": ["0.1"], "looper_version": "test", "host_capabilit
     "tools_call": True, "budget_authorize": True, "bus": False, "exec_slots": False}}
 USAGE = {"input_tokens": 1300, "input_tokens_details": {"cached_tokens": 300},
     "output_tokens": 200, "output_tokens_details": {"reasoning_tokens": 50}, "total_tokens": 1500}
+CHAT_USAGE = {"prompt_tokens": 1300, "prompt_tokens_details": {"cached_tokens": 300},
+    "completion_tokens": 200, "completion_tokens_details": {"reasoning_tokens": 50}, "total_tokens": 1500}
+
+
+def chat_chunk(choices, **fields):
+    return {"id": "chat_1", "object": "chat.completion.chunk", "created": 0,
+        "model": "test-model", "choices": choices, **fields}
 
 
 def reply():
@@ -320,6 +327,101 @@ def test_nonterminal_response_usage_leaves_sent_requests_incomplete(tmp_path, mo
     run(exercise())
 
 
+@pytest.mark.parametrize("ending", ["disconnect", "eof", "finish"])
+@pytest.mark.parametrize("location,usage", [("chunk", {}), ("chunk", CHAT_USAGE), ("choice", CHAT_USAGE)],
+    ids=["placeholder", "cumulative", "choice-cumulative"])
+def test_nonterminal_chat_usage_leaves_sent_requests_incomplete(tmp_path, monkeypatch, ending, location, usage):
+    from looper.agents.runtimes.runner.turn import RunnerTurn
+
+    async def exercise():
+        ended, original = [], RunnerTurn.request_end
+
+        async def request_end(self, params):
+            ended.append(dict(params))
+            return await original(self, params)
+
+        monkeypatch.setattr(RunnerTurn, "request_end", request_end)
+        choice = {"index": 0, "delta": {"content": "Hello"}, "finish_reason": None}
+        events = [chat_chunk([{**choice, **({"usage": usage} if location == "choice" else {})}],
+            **({"usage": usage} if location == "chunk" else {}))]
+        if ending == "finish":
+            events += [chat_chunk([{**choice, "delta": {}, "finish_reason": "stop"}]), "[DONE]"]
+        attempts = 1 if ending == "finish" else 4
+        scripts = [ResponseScript(events=events, disconnect_after=1 if ending == "disconnect" else None)
+            for _ in range(attempts)]
+        async with FakeModelAPI(scripts, api_key=KEY) as api, pi_supervisor(tmp_path) as supervisor:
+            lease = await supervisor.acquire("pi")
+            params = session_params(lease, base_url=api.base_url, key=KEY)
+            params["provider"]["protocol"] = "openai-chat"
+            sid = await lease.open_session(params)
+            await begin(lease.bridge, sid, "chat-nonterminal")
+            summary = await lease.bridge.wait_settled(sid, "chat-nonterminal")
+            assert summary.outcome == ("completed" if ending == "finish" else "failed")
+            assert len(ended) == len(api.requests) == attempts
+            assert len({p["request_id"] for p in ended}) == attempts
+            assert all(not p["complete"] for p in ended)
+            assert not summary.usage_complete and summary.usage.cost_usd is None
+            assert all(r.path == "/v1/chat/completions" for r in api.requests)
+            assert (await lease.bridge.health())["inflight_requests"] == 0
+            await lease.release()
+    run(exercise())
+
+
+@pytest.mark.parametrize("usage,location,counts", [
+    (CHAT_USAGE, "chunk", (1000, 200, 300, 0)),
+    (CHAT_USAGE, "choice", (1000, 200, 300, 0)),
+    ({**CHAT_USAGE, "prompt_tokens_details": {"cached_tokens": 300, "cache_write_tokens": 100}}, "chunk", (900, 200, 300, 100)),
+    ({"prompt_tokens": 1300, "completion_tokens": 200, "prompt_cache_hit_tokens": 300}, "chunk", (1000, 200, 300, 0)),
+    ({"prompt_tokens": 0, "completion_tokens": 0}, "chunk", (0, 0, 0, 0)),
+    (None, "chunk", None), ({}, "chunk", None),
+    ({**CHAT_USAGE, "completion_tokens": "200"}, "chunk", None),
+    ({**CHAT_USAGE, "prompt_tokens": -1}, "chunk", None),
+    ({**CHAT_USAGE, "completion_tokens": 0.5}, "chunk", None),
+    ({**CHAT_USAGE, "prompt_tokens_details": {"cached_tokens": 1400}}, "chunk", None),
+    ({**CHAT_USAGE, "total_tokens": 1400}, "chunk", None),
+    ({**CHAT_USAGE, "completion_tokens_details": {"reasoning_tokens": 201}}, "chunk", None),
+], ids=["charged", "choice", "cache-write", "deepseek-cache", "zero", "missing", "empty",
+    "string", "negative", "fraction", "cache-exceeds-input", "total-mismatch", "reasoning-exceeds-output"])
+def test_chat_accounts_only_for_valid_terminal_usage(tmp_path, monkeypatch, usage, location, counts):
+    from looper.agents.runtimes.runner.turn import RunnerTurn
+
+    async def exercise():
+        ended, original = [], RunnerTurn.request_end
+
+        async def request_end(self, params):
+            ended.append(dict(params))
+            return await original(self, params)
+
+        monkeypatch.setattr(RunnerTurn, "request_end", request_end)
+        choice = {"index": 0, "delta": {}, "finish_reason": "stop"}
+        events = [chat_chunk([{**choice, "delta": {"content": "Hello"}, "finish_reason": None}], usage=CHAT_USAGE)]
+        if location == "choice":
+            events.append(chat_chunk([{**choice, "usage": usage}]))
+        else:
+            events += [chat_chunk([choice]), chat_chunk([], usage=usage)]
+        events.append("[DONE]")
+        async with FakeModelAPI([ResponseScript(events=events)], api_key=KEY) as api, pi_supervisor(tmp_path) as supervisor:
+            lease = await supervisor.acquire("pi")
+            params = session_params(lease, base_url=api.base_url, key=KEY)
+            params["provider"]["protocol"] = "openai-chat"
+            sid = await lease.open_session(params)
+            await begin(lease.bridge, sid, "chat-terminal")
+            summary = await lease.bridge.wait_settled(sid, "chat-terminal")
+            assert summary.outcome == "completed"
+            assert len(ended) == len(api.requests) == 1
+            assert ended[0]["complete"] is (counts is not None)
+            assert summary.usage_complete is (counts is not None)
+            if counts is None:
+                assert summary.usage.cost_usd is None
+            else:
+                assert tuple(ended[0][field] for field in ("input_uncached", "output", "cache_read", "cache_write")) == counts
+                assert (summary.usage.input_tokens, summary.usage.output_tokens,
+                    summary.usage.cache_read_tokens, summary.usage.cache_creation_tokens) == counts
+                assert summary.usage.cost_usd == round(sum(n * price for n, price in zip(counts, (1, 2, 3, 4))) / 1_000_000, 10)
+            await lease.release()
+    run(exercise())
+
+
 @pytest.mark.parametrize("terminal_type", ["failed", "completed", "incomplete"])
 @pytest.mark.parametrize("usage,counts", [
     (USAGE, (1000, 200, 300, 0)),
@@ -369,6 +471,64 @@ def test_response_accounts_for_terminal_usage(tmp_path, monkeypatch, usage, coun
                 assert (summary.usage.input_tokens, summary.usage.output_tokens,
                     summary.usage.cache_read_tokens, summary.usage.cache_creation_tokens) == tuple(attempts * n for n in counts)
                 assert summary.usage.cost_usd == round(attempts * sum(n * price for n, price in zip(counts, (1, 2, 3, 4))) / 1_000_000, 10)
+            await lease.release()
+    run(exercise())
+
+
+@pytest.mark.parametrize("protocol", ["openai-responses", "openai-chat"])
+def test_https_to_http_port_preserves_complete_zero_usage(tmp_path, monkeypatch, protocol):
+    from looper.agents.runtimes.runner.turn import RunnerTurn
+
+    received = []
+
+    class PlainHTTPModelAPI(FakeModelAPI):
+        async def _handle(self, reader, writer):
+            task = asyncio.current_task()
+            self._handlers.add(task)
+            self._writers.add(writer)
+            try:
+                received.append(await reader.read(4096))
+                writer.write(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                self._writers.discard(writer)
+                self._handlers.discard(task)
+
+    async def exercise():
+        ended, original = [], RunnerTurn.request_end
+
+        async def request_end(self, params):
+            ended.append(dict(params))
+            return await original(self, params)
+
+        monkeypatch.setattr(RunnerTurn, "request_end", request_end)
+        async with PlainHTTPModelAPI([]) as api, pi_supervisor(tmp_path) as supervisor:
+            # Positive control: the same port accepts plaintext HTTP requests.
+            reader, writer = await asyncio.open_connection("127.0.0.1", api._server.sockets[0].getsockname()[1])
+            try:
+                writer.write(b"POST /v1/responses HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}")
+                await writer.drain()
+                assert b"400 Bad Request" in await reader.read()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+            assert len(received) == 1 and received[0].startswith(b"POST ")
+            received.clear()
+            lease = await supervisor.acquire("pi")
+            params = session_params(lease, base_url=api.base_url.replace("http://", "https://"), key=KEY)
+            params["provider"]["protocol"] = protocol
+            sid = await lease.open_session(params)
+            await begin(lease.bridge, sid, "tls-protocol", cap=1)
+            summary = await lease.bridge.wait_settled(sid, "tls-protocol")
+            assert summary.outcome == "failed" and summary.cap_reason is None
+            assert len(ended) == len(received) == 4
+            assert len({p["request_id"] for p in ended}) == 4
+            assert all(data.startswith(b"\x16\x03") and KEY.encode() not in data for data in received)
+            assert all(p["complete"] for p in ended)
+            assert all(p[field] == 0 for p in ended for field in ("input_uncached", "output", "cache_read", "cache_write"))
+            assert summary.usage_complete and summary.usage.cost_usd == 0
             await lease.release()
     run(exercise())
 

@@ -11,6 +11,8 @@ const preRequestErrors = new Set([
   'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN',
   'UNABLE_TO_GET_ISSUER_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
   'CERT_REVOKED', 'CERT_UNTRUSTED', 'CERT_REJECTED', 'ERR_TLS_CERT_ALTNAME_INVALID',
+  // A plaintext HTTP reply to a TLS handshake also precedes any HTTP request.
+  'ERR_SSL_WRONG_VERSION_NUMBER',
 ]);
 
 function responseUsage(usage: any) {
@@ -23,6 +25,15 @@ function responseUsage(usage: any) {
       || (usage.total_tokens != null && usage.total_tokens !== input + output)) return;
   return { input: input - cacheRead - cacheWrite, output, cacheRead, cacheWrite, reasoning,
     totalTokens: input + output };
+}
+
+function chatUsage(usage: any) {
+  return responseUsage({ input_tokens: usage?.prompt_tokens, output_tokens: usage?.completion_tokens,
+    input_tokens_details: {
+      cached_tokens: usage?.prompt_tokens_details?.cached_tokens ?? usage?.prompt_cache_hit_tokens ?? usage?.cached_tokens,
+      cache_write_tokens: usage?.prompt_tokens_details?.cache_write_tokens },
+    output_tokens_details: { reasoning_tokens: usage?.completion_tokens_details?.reasoning_tokens },
+    total_tokens: usage?.total_tokens });
 }
 
 let counter = 0;
@@ -70,7 +81,7 @@ export async function authorizingStream(record: Session, model: any, context: an
     throw new Error('request aborted');
   }
   const output = sdk!.ai.createAssistantMessageEventStream();
-  let started = false, dispatched = false, hasUsage = false, status: number | undefined;
+  let started = false, dispatched = false, chatFinished = false, status: number | undefined;
   let terminalUsage: ReturnType<typeof responseUsage>;
   turn.httpStatus = undefined;
   turn.transport = false;
@@ -93,7 +104,13 @@ export async function authorizingStream(record: Session, model: any, context: an
         if (event.type === 'response.completed' || event.type === 'response.incomplete' || event.type === 'response.failed') {
           terminalUsage = responseUsage(event.response?.usage);
         }
-      } else if (event.response?.usage || event.usage || event.choices?.some((choice: any) => choice.usage)) hasUsage = true;
+      } else {
+        // Chat may report placeholder or cumulative counts before finishing. Only
+        // a terminal choice or its trailing usage chunk can establish final counts.
+        const choice = event.choices?.[0];
+        if (choice) chatFinished = typeof choice.finish_reason === 'string' && choice.finish_reason.length > 0;
+        terminalUsage = chatFinished && Array.isArray(event.choices) ? chatUsage(event.usage ?? choice?.usage) : undefined;
+      }
       await options.onProviderStreamEvent?.(event, eventModel);
     },
     fetch: async (...args: Parameters<typeof globalThis.fetch>) => {
@@ -131,8 +148,8 @@ export async function authorizingStream(record: Session, model: any, context: an
           const aborted = options.signal?.aborted || message.stopReason === 'aborted' || turn.cancel;
           const requestStatus = event.type === 'done' ? 'completed'
             : aborted ? 'aborted' : status && status >= 400 ? `http_${status}` : 'error';
-          const usage = model.api === 'openai-responses' ? terminalUsage : message.usage;
-          const usageComplete = model.api === 'openai-responses' ? terminalUsage !== undefined : hasUsage;
+          const usage = terminalUsage;
+          const usageComplete = terminalUsage !== undefined;
           const complete = event.type === 'done' ? usageComplete
             : usageComplete || !dispatched || (!started && !aborted && status !== undefined && status >= 400);
           // Let Pi publish message_end first; settlement waits for this accounting frame.
