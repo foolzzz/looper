@@ -1,7 +1,6 @@
 """Explicit Manager installs in full catalog readback and existing dashboard controls."""
 import base64
 import json
-from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 import pytest
@@ -48,10 +47,8 @@ def test_full_catalog_manager_usage_readback(monkeypatch, tmp_path, mixed):
     run_db(check, monkeypatch, timeout=25)
 @pytest.mark.installed
 @pytest.mark.parametrize("width", [1280, 390])
-def test_catalog_manager_usage_delete_cancel_and_recalculation(tmp_path, width):
+def test_catalog_manager_usage_delete_cancel_and_recalculation(tmp_path, width, staged_dashboard_dir):
     from playwright.sync_api import expect, sync_playwright
-    dist = Path(__file__).resolve().parents[1] / "web/dist"
-    assert (dist / "index.html").exists(), "Run npm run build in web before browser validation"
     item = {"item_id": "example", "kind": "skill", "name": "example-capability",
             "qualified_name": "personal:example-capability", "origin": "ui", "description": "Example",
             "size_bytes": 32, "mcp": None,
@@ -72,7 +69,7 @@ def test_catalog_manager_usage_delete_cancel_and_recalculation(tmp_path, width):
             def route(request):
                 path = urlsplit(request.request.url).path
                 if not path.startswith("/api/"):
-                    file = dist / (path.lstrip("/") or "index.html")
+                    file = staged_dashboard_dir / (path.lstrip("/") or "index.html")
                     request.fulfill(path=str(file))
                     return
                 calls.append(path)
@@ -86,7 +83,10 @@ def test_catalog_manager_usage_delete_cancel_and_recalculation(tmp_path, width):
                     return
                 request.fulfill(json={"status": "ok", "result": result})
             page.route("**/*", route)
-            page.goto("http://catalog.example/#settings/catalog")
+            opened = page.goto("http://catalog.example/#settings/catalog")
+            staged = (staged_dashboard_dir / "index.html").read_text()
+            assert opened is not None and opened.text() == staged
+            expect(page).to_have_title(staged.split("<title>", 1)[1].split("</title>", 1)[0])
             row = page.get_by_role("listitem").filter(has_text="personal:example-capability")
             expect(row).to_contain_text("Managers: 1")
             if width == 1280:

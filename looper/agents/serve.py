@@ -776,9 +776,13 @@ async def _run_agent_system(
     skip_backup: bool = False,
     runner_supervisor: RunnerSupervisor | None = None,
 ) -> None:
-    """Own an explicitly supplied runner, including when startup only partly completes."""
+    """Own an opted-in or supplied runner, including when startup only partly completes."""
     kwargs = dict(ops=ops, runtime_root=runtime_root, work_dir=work_dir,
                   claude_bin=claude_bin, skip_backup=skip_backup)
+    if runner_supervisor is None and ops.pi_runtime == "runner":
+        from .runtimes import pi_runner
+
+        runner_supervisor = pi_runner.enable(runtime_root)
     if runner_supervisor is None:
         await _run_agent_system_owned(**kwargs)
         return

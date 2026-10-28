@@ -34,10 +34,11 @@ SdkIdentity = TypedDict("SdkIdentity", {"name": Name, "version": Name})
 InitializeResult = TypedDict("InitializeResult", {
     "protocol_version": Version, "runner": RunnerIdentity, "sdk": SdkIdentity, "capabilities": NotRequired[Capabilities]})
 Provider = TypedDict("Provider", {
+    "account_id": Name, "reasoning": bool,
     "protocol": Name, "base_url": Name, "model": Name, "api_key": str, "effort": str | None, "context_window": Count | None})
 SystemPrompt = TypedDict("SystemPrompt", {"mode": Name, "text": str})
 PlatformTool = TypedDict("PlatformTool", {"name": Name, "description": str, "inputSchema": dict[str, Any]})
-Tools = TypedDict("Tools", {"builtin": Annotated[list[str], "empty"], "read_only": bool, "platform": list[PlatformTool]})
+Tools = TypedDict("Tools", {"builtin": list[Name], "read_only": bool, "platform": list[PlatformTool]})
 Limits = TypedDict("Limits", {
     "max_requests_per_turn": Count, "tool_timeout_s": Literal[120], "tool_output_bytes": Literal[102400]})
 NewSessionParams = TypedDict("NewSessionParams", {
@@ -45,6 +46,8 @@ NewSessionParams = TypedDict("NewSessionParams", {
     "add_dirs": list[str], "env": dict[str, str], "home": Name, "state_dir": Name, "provider": Provider,
     "system_prompt": SystemPrompt, "tools": Tools, "limits": Limits})
 Session = TypedDict("Session", {"session_id": Name})
+LoadSessionParams = TypedDict("LoadSessionParams", {**NewSessionParams.__annotations__, "session_id": Name})
+Loaded = TypedDict("Loaded", {"session_id": Name, "resumed": Literal[True]})
 Turn = TypedDict("Turn", {"session_id": Name, "trace_id": Name})
 CloseParams = TypedDict("CloseParams", {"session_id": Name, "trace_id": NotRequired[Name]})
 PromptParams = TypedDict("PromptParams", {"session_id": Name, "trace_id": Name, "text": str, "tools": list[PlatformTool]})
@@ -73,7 +76,7 @@ RequestEnd = TypedDict("RequestEnd", {
     "reasoning": Count | None, "complete": bool})
 SteerApplied = TypedDict("SteerApplied", {
     "session_id": Name, "trace_id": Name, "kind": Literal["steer_applied"], "message_id": Name,
-    "after_request_id": Name, "after_tool_batch": bool, "new_turn": Literal[False]})
+    "after_request_id": Name | None, "after_tool_batch": bool, "new_turn": Literal[False]})
 SteerDropped = TypedDict("SteerDropped", {
     "session_id": Name, "trace_id": Name, "kind": Literal["steer_dropped"], "message_id": Name,
     "reason": Literal["cancelled", "turn_ended", "session_closed"]})
@@ -91,12 +94,17 @@ Denied = TypedDict("Denied", {
     "reason": Literal["run_cap", "turn_cap", "task_cap", "max_requests", "stopped", "budget_unverifiable"]})
 RpcError = TypedDict("RpcError", {"code": int, "message": str, "data": NotRequired[dict[str, Any]]})
 Empty = TypedDict("Empty", {})
-Params = InitializeParams | NewSessionParams | PromptParams | SteerParams | Turn | CloseParams | ToolCallParams | AuthorizeParams | Update
-Result = InitializeResult | Session | Accepted | Queued | Turn | Empty | ToolResult | Allowed | Denied
-PARAMS = {"initialize": InitializeParams, "session/new": NewSessionParams, "session/prompt": PromptParams,
+Health = TypedDict("Health", {
+    "sessions": Count, "running": Count, "inflight_requests": Count, "tool_processes": Count,
+    "rss_bytes": Count, "event_loop_lag_ms": Count})
+Params = InitializeParams | NewSessionParams | LoadSessionParams | PromptParams | SteerParams | Turn | CloseParams | ToolCallParams | AuthorizeParams | Update | Empty
+Result = InitializeResult | Session | Loaded | Accepted | Queued | Turn | Empty | ToolResult | Allowed | Denied | Health
+PARAMS = {"initialize": InitializeParams, "runner/health": Empty, "session/new": NewSessionParams,
+          "session/load": LoadSessionParams, "session/prompt": PromptParams,
           "session/steer": SteerParams, "session/cancel": Turn, "session/close": CloseParams,
           "session/update": Update, "tools/call": ToolCallParams, "budget/authorize": AuthorizeParams}
-RESULTS = {"initialize": InitializeResult, "session/new": Session, "session/prompt": Accepted,
+RESULTS = {"initialize": InitializeResult, "runner/health": Health, "session/new": Session, "session/load": Loaded,
+           "session/prompt": Accepted,
            "session/steer": Queued, "session/cancel": Turn, "session/close": Empty,
            "tools/call": ToolResult, "budget/authorize": Allowed | Denied}
 

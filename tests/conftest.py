@@ -36,6 +36,23 @@ import worker_database  # noqa: E402
 
 
 _TEST_SHARD = pytest.StashKey[tuple[int, int]]()
+_STAGED_DASHBOARD_DIR = REPO_ROOT / "looper" / "web" / "dashboard"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _staged_dashboard_environment():
+    # All serve subprocesses must inherit this, including independent installed smokes.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("PYTEST_LOOPER_STATIC_DIR", str(_STAGED_DASHBOARD_DIR))
+        yield
+
+
+@pytest.fixture(scope="session")
+def staged_dashboard_dir() -> Path:
+    """Use the wheel's dashboard, built once before pytest, never rebuild it in workers."""
+    directory = _STAGED_DASHBOARD_DIR
+    assert (directory / "index.html").is_file(), "Run scripts/stage-dashboard.sh before browser tests"
+    return directory
 
 
 def pytest_configure(config: pytest.Config) -> None:

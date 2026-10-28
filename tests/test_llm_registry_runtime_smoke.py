@@ -293,20 +293,23 @@ def test_bridge_current_profile_is_preserved_before_launch(tmp_path, bridge_sour
 
 @pytest.mark.installed
 @pytest.mark.parametrize("migrated", ["fresh", "bridge"], indirect=True)
-def test_migrated_dashboard_screenshot(migrated, tmp_path, monkeypatch):
+def test_migrated_dashboard_screenshot(migrated, tmp_path, monkeypatch, staged_dashboard_dir):
     playwright = pytest.importorskip("playwright.sync_api", reason="not-run: Playwright missing")
     with playwright.sync_playwright() as driver:
         executable = Path(driver.chromium.executable_path)
     if not executable.exists():
         pytest.skip("not-run: Chromium missing")
     with server(tmp_path, migrated) as running:
+        assert running.env.get("PYTEST_LOOPER_STATIC_DIR") == str(staged_dashboard_dir)
         # Browser profile and HOME are disposable too.
         monkeypatch.setenv("HOME", str(running.home))
         with playwright.sync_playwright() as driver:
             browser = driver.chromium.launch(executable_path=str(executable), headless=True)
             try:
                 page = browser.new_page(viewport={"width": 1440, "height": 1000})
-                page.goto(running.api.base_url + "/#settings/profiles", wait_until="domcontentloaded", timeout=15000)
+                response = page.goto(running.api.base_url + "/#settings/profiles", wait_until="domcontentloaded", timeout=15000)
+                assert response is not None and response.status == 200
+                assert response.text() == (staged_dashboard_dir / "index.html").read_text()
                 page.get_by_text("claude-code/opus", exact=True).first.wait_for(timeout=15000)
                 page.screenshot(path=str(tmp_path / "migrated-dashboard.png"), full_page=True)
             finally:

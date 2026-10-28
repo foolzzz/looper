@@ -16,6 +16,7 @@ import uuid
 
 from ... import proc_tree
 from ...log_redaction import add_secret, redact
+from ..per_turn import session_dir_name
 from .bridge import CloseState, ConnectionLost, RpcFailure, RunnerBridge
 from .protocol import ErrorCode, MAX_FRAME_BYTES, ProtocolError
 
@@ -93,6 +94,12 @@ class RunnerLease:
     _release_task: asyncio.Task | None = field(default=None, repr=False)
 
     async def open_session(self, params: Mapping) -> str:
+        return await self._open_session(params, self.bridge.open_session)
+
+    async def load_session(self, params: Mapping) -> str:
+        return await self._open_session(params, self.bridge.load_session)
+
+    async def _open_session(self, params: Mapping, method: Callable) -> str:
         """Inject host paths; cwd/add_dirs remain the caller's task worktree."""
         if not self.valid:
             raise RunnerUnavailable("runner lease is no longer available; resume was lost")
@@ -102,7 +109,7 @@ class RunnerLease:
         if isinstance(key, str):
             add_secret(key)
         try:
-            self._open_task = self._owner._own(self.bridge.open_session({**params, "session_key": self.session_key,
+            self._open_task = self._owner._own(method({**params, "session_key": self.session_key,
                 "home": str(self.home), "state_dir": str(self.state_dir)}))
             self.session_id = await self._open_task
             if not self.valid:
@@ -152,6 +159,7 @@ class _Generation:
 class RunnerSupervisor:
     def __init__(self, runtime_root: Path, commands: Mapping[str, Sequence[str | Path]], *,
                  session_cap: int = 4,
+                 env: Mapping[str, Mapping[str, str]] | None = None,
                  connect: Callable[[asyncio.subprocess.Process, str], Awaitable[RunnerBridge]]):
         if type(session_cap) is not int or session_cap <= 0:
             raise ValueError("runner session cap must be positive")
@@ -168,6 +176,21 @@ class RunnerSupervisor:
             # Path arguments explicitly declare files relative to the launch cwd; strings are opaque argv.
             command = tuple(str(a.absolute()) if isinstance(a, Path) else a for a in argv)
             self._kinds[kind] = _Kind(command)
+        self._env: dict[str, dict[str, str]] = {}
+        if env is not None and not isinstance(env, Mapping):
+            raise ValueError("runner environment must be a per-kind mapping")
+        for kind, values in (env or {}).items():
+            if kind not in self._kinds:
+                raise ValueError("runner environment kind is not configured")
+            if not isinstance(values, Mapping):
+                raise ValueError("runner environment must be a mapping")
+            for name, value in values.items():
+                if (not isinstance(name, str) or not re.fullmatch(r"[A-Z_][A-Z0-9_]*", name)
+                        or name in {"PATH", "HOME", "TMPDIR", "TZ"} or name.startswith(("LANG", "LC_"))):
+                    raise ValueError("runner environment name is invalid or reserved")
+                if not isinstance(value, str) or "\0" in value:
+                    raise ValueError("runner environment value must be a string without NUL")
+            self._env[kind] = dict(values)
         self._stopped = False
         self._shutdown = asyncio.Event()
         self._stop_task: asyncio.Task | None = None
@@ -184,11 +207,14 @@ class RunnerSupervisor:
         while state.failures and state.failures[0] <= time.monotonic() - FAILURE_WINDOW:
             state.failures.popleft()
 
-    async def acquire(self, kind: str) -> RunnerLease:
+    async def acquire(self, kind: str, *, owner: str | None = None) -> RunnerLease:
         if self._stopped:
             raise RunnerUnavailable("runner supervisor is stopped")
         if kind not in self._kinds:
             raise ValueError("runner kind is not configured")
+        owner_name = session_dir_name(owner) if owner is not None else None
+        if owner is not None and (not owner or not owner_name or owner_name.startswith(".")):
+            raise ValueError("runner owner must name a safe state directory")
         state = self._kinds[kind]
         async with state.lock:
             if self._stopped:
@@ -212,8 +238,11 @@ class RunnerSupervisor:
             key = uuid.uuid4().hex
             directory = _private(generation.directory / "sessions" / key)
             try:
+                state_dir = _private(directory / "native")
+                if owner_name is not None:
+                    state_dir = _private(_private(_private(self.root / "state") / kind) / owner_name)
                 lease = RunnerLease(generation.bridge, generation.directory.name, key, directory,
-                    _private(directory / "home"), _private(directory / "native"), _private(directory / "agent"),
+                    _private(directory / "home"), state_dir, _private(directory / "agent"),
                     self, generation)
             except BaseException:
                 shutil.rmtree(directory)
@@ -240,6 +269,7 @@ class RunnerSupervisor:
             _private(directory / "sessions")
             tmp = _private(directory / "tmp")
             environment = {k: v for k, v in os.environ.items() if k in _ENV}
+            environment.update(self._env.get(kind, {}))
             environment.update(HOME=str(directory), TMPDIR=str(tmp))
             process = await proc_tree.spawn(*state.command, env=environment, cwd=directory,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,

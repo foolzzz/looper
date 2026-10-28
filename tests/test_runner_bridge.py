@@ -58,6 +58,20 @@ async def send(writer, message):
     await writer.drain()
 
 
+def test_health_round_trip():
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            pending = asyncio.create_task(bridge.health())
+            request = await p.read_frame(reader)
+            assert request.method == "runner/health" and request.params == {}
+            health = {"sessions": 0, "running": 0, "inflight_requests": 0, "tool_processes": 0,
+                      "rss_bytes": 1024, "event_loop_lag_ms": 11}
+            await send(writer, p.Response(request.id, result=health))
+            assert await pending == health
+            assert not failures
+    asyncio.run(asyncio.wait_for(exercise(), 5))
+
+
 async def update(writer, kind, **fields):
     await send(writer, p.Notification("session/update", dict(session_id="s", trace_id="t", kind=kind, **fields)))
 
@@ -1313,4 +1327,74 @@ def test_closed_tombstones_are_bounded_by_count_and_age(monkeypatch):
             await update(writer, "text_delta", text="expired")
             await open_peer(bridge, reader, writer)  # A read barrier also prunes expired ids.
             assert not bridge.tombstones and not failures
+    run(exercise())
+
+
+def test_load_registers_the_requested_session_and_clears_its_tombstone():
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            opening = asyncio.create_task(bridge.open_session(NEW))
+            request = await p.read_frame(reader)
+            await send(writer, p.Response(request.id, result={"session_id": "s"}))
+            await opening
+            closing = asyncio.create_task(bridge.close_session("s"))
+            request = await p.read_frame(reader)
+            await send(writer, p.Response(request.id, result={}))
+            await closing
+            assert "s" in bridge.tombstones
+            loading = asyncio.create_task(bridge.load_session({**NEW, "session_id": "s"}))
+            request = await p.read_frame(reader)
+            assert request.method == "session/load" and request.params == {**NEW, "session_id": "s"}
+            await send(writer, p.Response(request.id, result={"session_id": "s", "resumed": True}))
+            assert await loading == "s" and "s" not in bridge.tombstones
+            assert not bridge.sessions["s"].traces
+            # Observe receipt while idle before starting a new turn.
+            received = asyncio.Event()
+            enqueue = bridge._enqueue
+            def observe(update):
+                enqueue(update)
+                received.set()
+            bridge._enqueue = observe
+            await update(writer, "request_end", request_id="old", request_kind="turn", model="m", status="ok",
+                         input_uncached=0, output=0, cache_read=0, cache_write=0, reasoning=None, complete=True)
+            await received.wait()
+            bridge._enqueue = enqueue
+            with pytest.raises(p.ProtocolError) as error:
+                await bridge.load_session({**NEW, "session_id": "s"})
+            assert error.value.code == p.ErrorCode.SESSION_OWNED
+            events = []
+            beginning = asyncio.create_task(bridge.begin_turn("s", "fresh", events.append, Turn(), text="hello"))
+            request = await p.read_frame(reader)
+            assert request.method == "session/prompt"  # Duplicate load wrote nothing.
+            await send(writer, p.Response(request.id, result={"session_id": "s", "trace_id": "fresh", "accepted": True}))
+            await beginning
+            await send(writer, p.Notification("session/update", dict(session_id="s", trace_id="fresh", kind="settled",
+                outcome="completed", final_text="resumed", requests=0, usage_complete=True)))
+            assert (await bridge.wait_settled("s", "fresh")).outcome == "completed"
+            assert not failures and all(e["trace_id"] == "fresh" for e in events)
+    run(exercise())
+
+
+def test_load_returning_another_id_fails_the_connection():
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            loading = asyncio.create_task(bridge.load_session({**NEW, "session_id": "saved"}))
+            request = await p.read_frame(reader)
+            await send(writer, p.Response(request.id, result={"session_id": "other", "resumed": True}))
+            with pytest.raises(ConnectionError, match="load returned another session"):
+                await loading
+            assert len(failures) == 1 and not bridge.sessions
+    run(exercise())
+
+
+def test_load_refusal_registers_nothing():
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            loading = asyncio.create_task(bridge.load_session({**NEW, "session_id": "missing"}))
+            request = await p.read_frame(reader)
+            await send(writer, p.Response(request.id, error={"code": int(p.ErrorCode.SESSION_NOT_FOUND), "message": "not found"}))
+            with pytest.raises(RpcFailure) as error:
+                await loading
+            assert error.value.code == p.ErrorCode.SESSION_NOT_FOUND
+            assert not bridge.sessions and not bridge._error and not failures
     run(exercise())

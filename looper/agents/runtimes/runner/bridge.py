@@ -195,6 +195,9 @@ class RunnerBridge:
         self._initialized = True
         return result
 
+    async def health(self):
+        return await self.request("runner/health", {})
+
     async def _write(self, message, entry=None):
         frame = p.encode_frame(message)
         async with self._write_lock:
@@ -254,6 +257,18 @@ class RunnerBridge:
             raise self._error
         entry.session_id, entry.state = sid, State.IDLE
         self.sessions[sid] = entry
+        return sid
+
+    async def load_session(self, params: p.LoadSessionParams) -> str:
+        sid = params["session_id"]
+        if sid in self.sessions:
+            raise p.ProtocolError(p.ErrorCode.SESSION_OWNED)
+        result = await self.request("session/load", params)
+        if result["session_id"] != sid:
+            self._fail(ConnectionLost("runner protocol-error: load returned another session"))
+            raise self._error
+        self.tombstones.pop(sid, None)
+        self.sessions[sid] = SessionEntry(params["session_key"], params["role"], sid, State.IDLE)
         return sid
 
     def _entry(self, session_id, trace_id=None):

@@ -1131,7 +1131,7 @@ Manager tools.
   `library.load_installed` and `knowledge.load_knowledge`. `CodexRuntime`,
   `OmpRuntime`, `GrokRuntime` and `PiRuntime` (`codex`, `omp`, `grok`, `pi`,
   below) translate
-  them at launch; Codex, OMP and Pi keep the Manager's and a Planner's session
+  them at launch; Codex, OMP and, by default, Pi keep the Manager's and a Planner's session
   with one process per turn (`runtimes/per_turn.py`), Grok with one process
   over ACP (`runtimes/grok_acp.py`, `RuntimeAdapter.resident_transport`).
   Capabilities:
@@ -1389,7 +1389,22 @@ Manager tools.
   skipped while no Agent Profile uses the login.
 - **Pi** (`looper/agents/runtimes/pi.py`, the `pi` CLI, minimum 1.3.0,
   verified against pi 1.3.0 in the [pi runtime RFC](rfcs/pi-runtime-v0.zh-CN.md))
-  runs Manager, Planner, Worker and Reviewer. A Worker or Reviewer is
+  runs Manager, Planner, Worker and Reviewer. With `[runtimes] pi = "runner"`
+  in the ops file, `PiRunnerRuntime` runs only Manager and Planner through
+  one shared Node >= 22.19 SDK runner; Worker, Reviewer and consults keep
+  the CLI path below. The opt-in is read once at startup and needs a restart;
+  there is no environment-variable override or dashboard control.
+  The runner has 10 session slots; further acquisition returns `CAPACITY`,
+  with no runner pool or automatic CLI fallback. Missing prerequisites fail
+  Pi Manager and Planner turns with the startup reason. Turns submitted during
+  restart backoff fail fast; after recovery the resident session loads its saved history.
+  Provider environment
+  entries are refused because they would change process-wide settings.
+  Platform tools use `looper_*` directly, without Manager MCP setup or probing;
+  Planner offers read, grep, find and ls plus those platform tools.
+  Dashboard Stop and Telegram/Lark `/stop` use the existing interrupt path.
+  The following describes the default `[runtimes] pi = "cli"` path.
+  A Worker or Reviewer is
   `pi -p --mode json`; a Worker that can steer drops `-p` and uses
   `--mode rpc` (`pi_steer`), without OMP's `--no-ui`. Providers are API keys
   only, speaking `openai-responses` or `openai-chat` (pi's
@@ -3199,7 +3214,7 @@ contract 4.9 KB (4,865 bytes of `TOOLS_CONTRACT`).
 | `looper_agent_profiles` | `list`, `create`, `update`, `delete`; create selects `runtime` and `model` (model id or exact `{provider, name, protocol}`), plus `name`, `effort`, `agent_teams`, `custom_prompt`; no profile system-prompt mode. Returns derived account/model information; selected profiles cannot be deleted | list reads; write; delete is high |
 | `looper_providers` | `list` accounts and vendor suggestions; `register` an API-key account with `name`, `vendor_type`, `endpoints`, `env`, `max_concurrency`, without a key. The user enters the key in Settings | list reads; write |
 | `looper_models` | `list` (optional provider/runtime filter), `create` an exact provider/name/protocol entry, `update` its settings, `delete` an unused model; no key arguments | list reads; write; delete is high |
-| `looper_catalog` | `list` the items (kind, qualified name, description) with their installs, or with `project` the installs that reach it (`catalog.project_view`); `install` an item (by id or qualified name) globally or in a project for `roles`, `update` an install's `roles` or `enabled`, `uninstall` (`catalog.install`, `update_install`, `uninstall`) | list reads; write |
+| `looper_catalog` | `list` the items (kind, qualified name, description, `manager_install_count`) with their installs, or with `project` the installs that reach it (`catalog.project_view`); `install` an item (by id or qualified name) globally or in a project for `roles`, `update` an install's `roles` or `enabled`, `uninstall` (`catalog.install`, `update_install`, `uninstall`) | list reads; write |
 | `looper_costs` | One task's cost (`task_id`: `GET /api/tasks/:id`'s `cost`), or what the runs started in a range cost (`period` `today`, `this_week` or `this_month` from the server's local midnight, or `since` and `until`, a day or an ISO date-time, a day as `until` counting whole; all time by default), money and subscription equivalent apart as the overview's today: by project (their tasks' runs; the total also counts the Manager's), or with `project` its total and its 10 costliest tasks (`llm_records.spend_since`, `task_spend`) | read |
 | `looper_settings` | `view` the shared defaults and each role's layer, what applies to each role with its source and its timeout, or with `project` its layer, its roles' layers and its allowed profiles; `set` `values` on one layer (neither `role` nor `project`: the shared defaults; `role`; `project`; both: the role in the project): `profile` by id or name, `harness_prompt`, `env` (the layer's whole `{NAME: value}`), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` role: the default for every task), `timeout_seconds` (a role alone, as Settings → Roles saves it), null clearing one, written by `agent_settings.update_system`, `update_role` or `update_project` and letting what waits check again after a limit; `allowed_profiles`: `add` profiles to a project's list or `remove` some (one not on it is refused), then the whole list is set by `projects.set_allowed_profiles`, which checks each. The answer gives each value before and after and what now applies | view reads; write; the shared defaults, a role's default concurrency limit and a higher or removed spend cap (any run of the layer's roles, resolved through the layers) are high, shown before → after |
 | `looper_schedules` | `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, enabled, next fire, last run, failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `create` one in an existing `project` from `fields` (the `fields` that `POST /api/v1/schedule_admin/create` takes, `profiles` being its `profile_overrides`, and `task_limits`), always disabled (`created_via` `manager`): Looper adds its configuration (project, directory, the rule in words and its next 3 fires in its zone, overlap, gate, caps, notify, profiles, task limits) and 「要启用吗？回复「启用」就启用」 to the reply, and the turn that created it may neither `enable` nor `run` it (`conflict`: the user has not seen it); made from a Telegram or Lark chat without a `notify_target`, it tells whoever asked when their channel's allowlist lets them; `update` the `fields` given (`schedules.update_schedule`; null clears one, `profiles` and `task_limits` are replaced whole), and Looper adds each change before → after (and the next 3 fires for a new rule or zone); `enable` one (as its switch does; the answer says when it was so already) or `run` it now (`schedules.run_now`: the dashboard's Run now, through the overlap check, its next fire time left; the answer is the run), each asking first: the call answers `needs_confirmation` and does nothing until the user's next message confirms (a schedule already enabled is not asked), and the turn that created a schedule may do neither (`conflict`); `disable` one; `delete` one (`schedules.delete_schedule`); `reset_planner_session` clears its stored Planner session and holder after the user confirms in their next message. The reset confirmation says whether a session is stored, that the next run starts fresh, and that a run in flight keeps its own session until it ends and cannot write back. A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The delete confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (a running task goes on and ends normally, a queued or gating run starts no task) and that its tasks stay while its run history and messages are deleted | list and get read; write; enable, run now, delete, reset_planner_session, and an update that raises or removes the run or daily spend cap (checked as the update would be before anything is asked, shown before → after), are high |
@@ -4149,7 +4164,8 @@ another file. The keys are `[database] url`, `[server]` `host`, `port`,
 `public_url` and `log_level` (`debug`, `info`, `warning`, `error`), `[backup]`
 `pg_dump`, `command` (an argv array; `{dbname}` and `{user}` are filled
 in) and `verify_command` (an argv array that lists the dump read on stdin like
-`pg_restore --list`), and `[operator_notes] root` (an absolute path). Nothing is expanded: no
+`pg_restore --list`), `[operator_notes] root` (an absolute path), and
+`[runtimes] pi` (`"cli"` by default, or `"runner"`; file only). Nothing is expanded: no
 variable, no `~`, no include. An unknown key, a wrong type or a bad value
 stops the command; the message names the key and never shows the value. The
 file must be a regular file (not a symlink), owned by the user, mode 0600, in
@@ -4174,7 +4190,8 @@ database) or in the server's environment (`looper service install --env
 NAME`).
 
 `looper config init-ops` writes the file once from the values in effect, mode
-0600, and refuses to overwrite a file that exists. With nothing configured it
+0600, including `[runtimes]` with the commented Pi CLI default (or the explicit
+runner opt-in), and refuses to overwrite a file that exists. With nothing configured it
 writes `postgresql://localhost:5432/loopx` and says so. Remove the old
 variables from the shell and `.env`, then run `looper service install` again
 if the service is used. Until then `looper serve` keeps working from the

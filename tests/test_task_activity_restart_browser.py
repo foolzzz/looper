@@ -4,22 +4,19 @@ import json
 import os
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 import pytest
 
 
 @pytest.fixture
-def page(tmp_path, monkeypatch):
+def page(tmp_path, staged_dashboard_dir):
     playwright = pytest.importorskip("playwright.sync_api")
-    dist = Path(__file__).resolve().parents[1] / "web" / "dist"
-    assert (dist / "index.html").exists(), "Build web before running this browser regression"
     with playwright.sync_playwright() as driver:
-        executable = driver.chromium.executable_path
-    monkeypatch.setenv("HOME", str(tmp_path))
-    with playwright.sync_playwright() as driver:
-        browser = driver.chromium.launch(headless=True, executable_path=executable)
-        server = ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(SimpleHTTPRequestHandler, directory=str(dist)))
+        # Let the driver locate its headless shell before isolating the browser's HOME.
+        # chromium.executable_path names the full browser, even for a headless launch.
+        browser = driver.chromium.launch(headless=True, env={**os.environ, "HOME": str(tmp_path)}, timeout=15000)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(
+            SimpleHTTPRequestHandler, directory=str(staged_dashboard_dir)))
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
         try:
@@ -118,8 +115,9 @@ def test_sessions_resume_after_async_restart(page, outcome):
     if start_over:
         page.get_by_role("button", name="Start over", exact=True).click()
         expect(page.get_by_text("Delete its steps?", exact=True)).to_be_visible()
-    page.get_by_role("button", name="Start over" if start_over else "Start", exact=True).click()
+    start_button = page.get_by_role("button", name="Start over" if start_over else "Start", exact=True)
     if refused:
+        start_button.click()
         expect(page.get_by_role("alert")).to_have_text("Start refused")
         expect(page.get_by_role("button", name="Start", exact=True)).to_be_enabled()
         expect(page.get_by_role("button", name="Start over", exact=True)).to_be_enabled()
@@ -127,11 +125,16 @@ def test_sessions_resume_after_async_restart(page, outcome):
         page.wait_for_timeout(2300)
         assert state["reads"] == 0 and state["streams"] == initial_streams
     else:
+        # Disabled controls only acknowledge the click. Wait through the baseline read
+        # and restart request for the first post-acceptance detail response.
+        with page.expect_response(lambda response: response.url.endswith("/api/v1/tasks/detail")
+                                  and state["reads"] == 1) as first_read:
+            start_button.click()
+        first_read.value.finished()
         if start_over:
             expect(page.get_by_text("Delete its steps?", exact=True)).to_have_count(0)
         expect(page.get_by_role("button", name="Start", exact=True)).to_be_disabled()
         expect(page.get_by_role("button", name="Start over", exact=True)).to_be_disabled()
-        page.wait_for_timeout(300)
         assert state["reads"] == 1 and state["streams"] == initial_streams
         if outcome == "mixed" and (screenshot := os.environ.get("LOOPER_RESTART_PENDING_SCREENSHOT")):
             page.set_viewport_size({"width": 768, "height": 800})
@@ -225,10 +228,12 @@ def test_restart_completes_with_a_historical_running_record(page, outcome, reset
     if reset_plan:
         start_over.click()
     control = start_over if reset_plan else start
-    control.evaluate("button => { button.click(); button.click(); }")
+    with page.expect_response(lambda response: response.url.endswith("/api/v1/tasks/detail")
+                              and state["reads"] == 1) as first_read:
+        control.evaluate("button => { button.click(); button.click(); }")
+    first_read.value.finished()
     expect(start).to_be_disabled()
     expect(start_over).to_be_disabled()
-    page.wait_for_timeout(300)
     assert state["starts"] == 1 and state["reads"] == 1
     assert state["streams"] == 1  # An unchanged old completion cannot acknowledge Start.
 

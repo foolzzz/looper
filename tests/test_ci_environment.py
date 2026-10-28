@@ -22,6 +22,16 @@ def test_python_tests_job_fetches_the_full_history() -> None:
     assert checkout and re.search(r"fetch-depth:\s*0\b", checkout.group(0)), job
 
 
+def test_python_tests_job_stages_dashboard_before_pytest() -> None:
+    text = (ROOT / ".github/workflows/python-tests.yml").read_text()
+    job = text[text.index("  agent-system:"):text.index("  agent-system-result:")]
+    node = re.search(r"uses: actions/setup-node@\S+", job)
+    stage = re.search(r"^\s+run: scripts/stage-dashboard\.sh\s*$", job, re.MULTILINE)
+    tests = re.search(r"^\s+run: .*python -m pytest\b", job, re.MULTILINE)
+    assert node and stage and tests, job
+    assert node.start() < stage.start() < tests.start(), job
+
+
 @pytest.mark.parametrize("ancestors", [("/private/tmp", "/private", ""), ("/tmp", "")])
 def test_settings_comparison_ignores_the_hosts_temp_root_ancestors(ancestors: tuple[str, ...]) -> None:
     root = "/tmp/looper-x"

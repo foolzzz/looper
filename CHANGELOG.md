@@ -18,6 +18,84 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.193] - 2026-10-28
+
+### Added
+
+- **Opt-in: Pi Manager and Planner on the shared Pi runner.** The ops file gains `[runtimes] pi = "cli" | "runner"` (default `cli`; file only, read once at startup, restart required). With `runner`, `looper serve` starts one Pi runner (10 session slots) and `PiRunnerRuntime` runs only the Manager and Planner of a Pi profile through it; Workers, Reviewers and consults stay on the CLI. Missing prerequisites (Node 22.19+, `pi` on PATH) fail those turns with the reason and never fall back to the CLI. The prompt-regression evals gain `--pi-runner`. ([#829](https://github.com/foolzzz/looper/pull/829))
+
+## [2.13.192] - 2026-10-28
+
+### Added
+
+- **Pi runner sessions can use platform tools and be steered mid-turn (not yet reachable).** `runners/pi` registers the tools of each `session/prompt` snapshot (validated first, no renaming) and runs them through the host's `tools/call`, returning its result unchanged. The new `session/steer` queues text into the running turn and reports `steer_applied` or `steer_dropped`; `initialize` declares `steer.in_trace`. Cancel and close drop pending steers, and a provider request started after cancellation is refused. Nothing registers the runner with the service yet. ([#823](https://github.com/foolzzz/looper/pull/823))
+
+## [2.13.191] - 2026-10-28
+
+### Added
+
+- **Pi runner sessions get isolated builtin tools and can be resumed (not yet reachable).** `runners/pi` now builds `read`, `grep`, `find`, `ls`, `edit`, `write` and `bash` for a session: file tools refuse paths outside `cwd` and `add_dirs` (including `..`, `~` and symlinks), `bash` runs with the session `env` and a private `HOME`, and read-only sessions refuse `bash`, `edit` and `write`. `session/new` validates `home`, `add_dirs`, `env` and `tools.read_only`; the new `session/load` resumes a session from its state directory (`-32001` not found, `-32002` already owned); budget and usage reports mark retry and compaction requests; `runner/health` reports running bash commands. Nothing registers the runner with the service yet. ([#824](https://github.com/foolzzz/looper/pull/824))
+
+## [2.13.190] - 2026-10-28
+
+### Added
+
+- **The Pi runner answers session methods (not yet reachable).** `runners/pi` now handles `session/new`, `session/close`, `session/prompt` and `session/cancel`. Each session gets its own model runtime with an in-memory key, in-memory settings and no resource discovery, and no builtin or platform tools. A Looper provider asks `budget/authorize` before every model request and reports exactly one `request_end` per allowed request; Pi events map to `session/update`, and each accepted prompt ends with exactly one `settled` carrying a typed outcome (`completed`, `cancelled`, `capped`, `max_requests`, `failed`). `runner/health` reports live session, running-turn and in-flight request counts. Nothing registers the runner with the service yet. ([#818](https://github.com/foolzzz/looper/pull/818))
+
+## [2.13.189] - 2026-10-28
+
+### Changed
+
+- **Every browser test serves the staged dashboard.** `default_static_dir()` honors a `PYTEST_LOOPER_STATIC_DIR` override, which the test session sets to `looper/web/dashboard`, so a leftover `web/dist` build can no longer be served in tests; unset (every install), the lookup is unchanged. The browser tests assert the served page is the staged `index.html`, and the Python tests job now sets up Node and runs `scripts/stage-dashboard.sh` before pytest. ([#816](https://github.com/foolzzz/looper/pull/816))
+
+## [2.13.188] - 2026-10-28
+
+### Added
+
+- **A Pi runner skeleton ships in the wheel (not yet reachable).** `runners/pi` holds a TypeScript runner process with line-delimited JSON-RPC framing, per-session ordered dispatch, reverse requests, a single stdout writer, an `initialize` handshake gated on Node 22.19+ and an installed `@earendil-works/pi-coding-agent` and `pi-ai` 1.3.x with the exports it needs, `runner/health` and orderly shutdown. It answers no session methods yet. The protocol gains `runner/health` (`RunnerBridge.health`), `RunnerSupervisor` accepts a fixed per-kind environment (`env=`), and `looper/agents/runtimes/runner/pi_command.py` builds the launch command and handshake without registering a runtime. ([#814](https://github.com/foolzzz/looper/pull/814))
+
+## [2.13.187] - 2026-10-28
+
+### Changed
+
+- **The runner protocol and host support Pi sessions (host side only).** The protocol adds `session/load` (answered with `{session_id, resumed: true}`), a provider `account_id` and `reasoning` flag, named builtin tools (`tools.builtin`, no longer required to be empty) and a nullable `after_request_id` on `steer_applied`. `RunnerBridge.load_session` and `RunnerLease.load_session` are new; `RunnerSupervisor.acquire(kind, owner=...)` gives a lease a stable per-owner state directory that survives release and restarts; `RunnerSession` resumes a saved session through `session/load` and forwards the tool environment. The runner descriptor gains `reasoning`, `system_prompt_mode` and `--builtin`. ([#813](https://github.com/foolzzz/looper/pull/813))
+
+## [2.13.186] - 2026-10-28
+
+### Fixed
+
+- **The nightly installed browser tests pass again.** The browser tests serve the dashboard staged once by `scripts/stage-dashboard.sh` (new `staged_dashboard_dir` fixture) instead of rebuilding `web/dist`, the task restart tests wait for the first detail response instead of sleeping, the browser's `HOME` is isolated through its launch `env`, and the dashboard configuration flow selects a Runtime. Tests only. ([#806](https://github.com/foolzzz/looper/pull/806))
+
+## [2.13.185] - 2026-10-28
+
+### Fixed
+
+- **The eval's API Manager readback expects one completed API turn per user turn.** `evals/prompt_regression/dialogs.py` matches each user turn the API runtime answered to its own completed record, bounded by run ids, ignores `[HANDOFF]`, autonomous and session-profile records, and expects none for turns a switched non-API runtime answered, so a `--switch-agent` dialog is no longer a false failure. ([#804](https://github.com/foolzzz/looper/pull/804))
+
+## [2.13.184] - 2026-10-28
+
+### Fixed
+
+- **The fake runner settles a turn exactly once when `session/close` follows its prompt.** `runners/fake/main.py` moves the settle step into `Fake.settle`, guarded by `Session.settled`, and `session/close` calls it after cancelling the turn, so a turn cancelled before its first step still sends one `settled` and the host's close wait completes. ([#807](https://github.com/foolzzz/looper/pull/807))
+
+## [2.13.183] - 2026-10-27
+
+### Changed
+
+- **The Manager's `looper_catalog` list reports Manager-only installs.** `_item_listed` in `looper/agents/ops/config.py` now returns `manager_install_count` for each item, as the dashboard catalog does, and `COMPACT_ITEM` in `looper/agents/v1_domains/catalog.py` adds it to the result schema (also for the `item` of install, update and uninstall results). A skill installed only on the Manager no longer looks installed nowhere. ([#801](https://github.com/foolzzz/looper/pull/801))
+
+## [2.13.182] - 2026-10-27
+
+### Changed
+
+- **A Manager's cap-raising schedule update confirms its whole change.** `_confirming` in `looper/agents/ops/schedules.py` now builds the confirmed "after" view from the full update (merged template selection, effective template, `schedules.schedule_view`) instead of the schedule plus only the spend-cap fields, so a `template_key` or `template_inputs` change sent with a cap is shown before it is committed. A template selection that the update would reject is refused with `invalid` or `conflict` before the question is asked. The reply after an update compares the stored schedule before and after without the scope filter; a scoped Manager is still refused with `forbidden` before anything is written when it changes another owner's template. ([#800](https://github.com/foolzzz/looper/pull/800))
+
+## [2.13.181] - 2026-10-27
+
+### Changed
+
+- **A runner started by the supervisor has its initialization children owned before it is published.** `RunnerSupervisor` in `looper/agents/runtimes/runner/supervisor.py` now refreshes the process tree once (`generation.tree.refresh(force=True)`) after the bridge connects and before the generation is published. A child that a runner starts while it handles `initialize` is therefore recorded even if the runner is killed at once, and is reaped with the group; before, such a child could be missed until the periodic observation ran. The pull request also adds a test-only deterministic fake runner (`runners/fake/main.py`) with a conformance suite and an isolated `looper serve` acceptance test, which are not part of the product runtime. ([#782](https://github.com/foolzzz/looper/pull/782))
+
 ## [2.13.180] - 2026-10-27
 
 ### Changed

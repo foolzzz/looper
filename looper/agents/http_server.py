@@ -59,6 +59,9 @@ _PACKAGED_DASHBOARD = Path(__file__).resolve().parents[1] / "web" / "dashboard"
 
 
 def default_static_dir() -> Path:
+    # Tests set PYTEST_LOOPER_STATIC_DIR to the staged dashboard; installs leave it unset.
+    if override := os.environ.get("PYTEST_LOOPER_STATIC_DIR", "").strip():
+        return Path(override)
     if (_CHECKOUT_DASHBOARD / "index.html").is_file():
         return _CHECKOUT_DASHBOARD
     return _PACKAGED_DASHBOARD

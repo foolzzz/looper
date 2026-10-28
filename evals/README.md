@@ -263,9 +263,13 @@ reference belonging to that account. The `agent` layer holds only its name
 and runtime options; profile system-prompt mode is not an option. Role/task
 mode selection continues to apply.
 
-Older specs with provider `protocols`/`base_url`/`models` and `agent.model`
-still use the shared legacy converter. Ambiguous or unresolvable bindings fail
-rather than selecting a different model. API writes use `model_id`, and the
+Older specs are rejected with `EvalError`: a missing top-level `model` reports
+`an eval spec needs a top-level model`; `agent.model` reports
+`put the model reference in the model layer, not the agent layer`; provider
+`protocols`/`base_url`/`models` report
+`eval provider declarations must use endpoints, not a legacy catalog`.
+Ambiguous or unresolvable bindings fail rather than selecting a different model.
+API writes use `model_id`, and the
 profile view's `model` is structured. Registration coverage is in
 [the registration contract tests](../tests/test_model_eval_registration.py);
 the [delivery ledger](../docs/plans/2026-10-13-long-horizon-agent-context.zh-CN.md#54-验证缺口)

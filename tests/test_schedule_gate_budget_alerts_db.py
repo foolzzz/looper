@@ -608,8 +608,12 @@ def test_disabling_and_enabling_again_starts_the_clock_again(monkeypatch: pytest
 
 def test_changing_the_rule_to_every_minute_raises_no_alert_at_once(monkeypatch: pytest.MonkeyPatch,
                                                                     tmp_path: Path) -> None:
+    from looper.agents import schedules
+
     async def test(env: ScheduleEnv) -> None:
         with_sender(env)
+        env.clock.now = NOON
+        monkeypatch.setattr(schedules, "_utcnow", env.clock)
         (tmp_path / "items.txt").write_text("")
         sid = (await env.enabled(gate_command="cat items.txt"))["schedule_id"]  # every 5 minutes
         assert (await _fire(env, sid))["status"] == "skipped_gate"
@@ -618,7 +622,8 @@ def test_changing_the_rule_to_every_minute_raises_no_alert_at_once(monkeypatch: 
                                "enabled_at = enabled_at - interval '2 days' WHERE id = $1", sid)
         changed = (await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"cron": "* * * * *"}}))["schedule"]
         assert changed["cron"] == "* * * * *"
-        at = datetime.fromisoformat(changed["updated_at"])  # when the rule changed
+        # The alert counts from the application's rule-change time; updated_at uses the database clock.
+        at = await env.pool.fetchval("SELECT rule_changed_at FROM schedules WHERE id = $1", sid)
         await env.pool.execute("UPDATE schedules SET next_fire_at = $2 WHERE id = $1", sid, at + timedelta(days=1))
         # The new rule's window counts from the change: nothing at once, the alert only once it has passed.
         due = cron.next_fire(cron.parse("* * * * *"), LA, at) + timedelta(minutes=15)

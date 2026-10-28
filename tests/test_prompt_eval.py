@@ -1197,6 +1197,12 @@ def test_reps_must_be_a_whole_number_of_at_least_one(value: str) -> None:
 
 
 @pytest.mark.parametrize("command", ["run", "dialogs"])
+def test_pi_runner_is_an_explicit_eval_opt_in(command: str) -> None:
+    assert not cli._parser().parse_args([command]).pi_runner
+    assert cli._parser().parse_args([command, "--pi-runner"]).pi_runner
+
+
+@pytest.mark.parametrize("command", ["run", "dialogs"])
 @pytest.mark.parametrize("value", ["-0.4", "0", "nan", "inf", "-inf"])
 def test_case_budget_must_be_finite_and_positive(
     command: str, value: str, capsys: pytest.CaptureFixture[str],
@@ -1761,6 +1767,36 @@ def test_report_file_boundaries_reject_retired_schemas(tmp_path, capsys, dialogs
         good.write_text(json.dumps(current))
     assert cli.main(["compare", str(good), str(good)]) == 0
     assert "total" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", ["run", "dialogs"])
+@pytest.mark.parametrize("baseline", ["explicit", "previous"])
+def test_cli_preserves_written_results_when_baseline_is_retired(tmp_path, monkeypatch, capsys, command, baseline):
+    is_dialogs = command == "dialogs"
+    rows = "dialogs" if is_dialogs else "tasks"
+    result = {"schema": "looper-manager-dialogs/v2" if is_dialogs else runner.SCHEMA,
+              "mode": "fake", "model": None, "total_cost_usd": 0.0,
+              rows: [{"id": "status" if is_dialogs else "single_step", "outcome": "pass"}]}
+    path = tmp_path / "20261016T110000Z-fake.json"
+    original = (json.dumps(result, indent=2) + "\n").encode()
+
+    def run(**kwargs):
+        assert kwargs["mode"] == "fake"
+        path.write_bytes(original)
+        return result, path
+
+    monkeypatch.setattr(cli.dialogs if is_dialogs else runner, "run", run)
+    retired = tmp_path / "20261016T100000Z-fake.json"
+    retired.write_text(json.dumps({**result, "schema": "loopx-prompt-eval/v1"}))
+    code = cli.main([command, "--mode", "fake", "--pg-url", "unused", "--out-dir", str(tmp_path),
+                     "--baseline", str(retired) if baseline == "explicit" else "previous"])
+
+    assert code == 2
+    shown = capsys.readouterr()
+    assert f"Run written to {path}" in shown.err
+    assert "error: unsupported report schema 'loopx-prompt-eval/v1'" in shown.err
+    assert "Traceback" not in shown.err
+    assert path.read_bytes() == original
 
 
 def test_recorded_sonnet_baseline_preserves_every_original_measurement():
