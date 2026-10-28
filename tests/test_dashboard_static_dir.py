@@ -23,8 +23,17 @@ def _dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, checkout_built: bo
 
 @pytest.mark.parametrize("checkout_built", [True, False])
 def test_checkout_build_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkout_built: bool) -> None:
+    monkeypatch.delenv("PYTEST_LOOPER_STATIC_DIR", raising=False)
     checkout, packaged = _dirs(tmp_path, monkeypatch, checkout_built=checkout_built)
     # An installed wheel has no checkout build and serves its packaged copy.
     assert http_server.default_static_dir() == (checkout if checkout_built else packaged)
 
 
+def test_static_dir_override_beats_checkout_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    checkout, _packaged = _dirs(tmp_path, monkeypatch, checkout_built=True)
+    override = tmp_path / "staged"
+    override.mkdir()
+    monkeypatch.setenv("PYTEST_LOOPER_STATIC_DIR", str(override))
+    assert http_server.default_static_dir() == override
+    monkeypatch.delenv("PYTEST_LOOPER_STATIC_DIR")
+    assert http_server.default_static_dir() == checkout

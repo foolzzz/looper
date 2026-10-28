@@ -143,13 +143,13 @@ def _running_dashboard(tmp_path, admin_url):
 
 
 @pytest.fixture
-def dashboard_server(tmp_path, database_admin_url):
+def dashboard_server(tmp_path, database_admin_url, staged_dashboard_dir):
     with _running_dashboard(tmp_path, database_admin_url) as server:
         yield server
 
 
 @pytest.fixture
-def chromium_browser(dashboard_server, tmp_path, monkeypatch, staged_dashboard_dir):
+def chromium_browser(dashboard_server, tmp_path, monkeypatch):
     # Keep the server outside Playwright's sync event loop: fresh_database uses
     # asyncio.run() both to create the database and to drop it on teardown.
     playwright = pytest.importorskip(
@@ -182,7 +182,7 @@ def dashboard_page(chromium_browser, dashboard_server):
         context.close()
 
 
-def test_dashboard_server_is_isolated(dashboard_server, tmp_path):
+def test_dashboard_server_is_isolated(dashboard_server, tmp_path, staged_dashboard_dir):
     server = dashboard_server
     assert urlsplit(server.api.base_url).port != 8767
     assert server.database_url != os.environ["LOOPER_TEST_DATABASE_URL"]
@@ -191,6 +191,7 @@ def test_dashboard_server_is_isolated(dashboard_server, tmp_path):
     assert server.home != server.runtime_root
     for key in ("HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "GROK_HOME", "XDG_CONFIG_HOME"):
         assert Path(server.env[key]).is_relative_to(tmp_path)
+    assert server.env["PYTEST_LOOPER_STATIC_DIR"] == str(staged_dashboard_dir)
     assert not any(key.startswith(("LOOPER_", "LOOPX_")) for key in server.env)
     assert server.env["PATH"] == str(tmp_path / "bin")
     projects = server.api.post("/api/v1/project_admin/list", {})["result"]["projects"]
@@ -203,13 +204,16 @@ def test_dashboard_server_is_isolated(dashboard_server, tmp_path):
 
 
 @pytest.mark.installed
-def test_browser_opens_own_dashboard_and_reads_seed(dashboard_page, dashboard_server):
+def test_browser_opens_own_dashboard_and_reads_seed(dashboard_page, dashboard_server, staged_dashboard_dir):
     expect = pytest.importorskip("playwright.sync_api", reason="UNTESTED: optional Playwright package missing").expect
 
     # Readiness is the rendered database seed; background dashboard requests
     # must not make the smoke wait for the whole page's network to become idle.
     response = dashboard_page.goto(dashboard_server.api.base_url, wait_until="domcontentloaded")
     assert response is not None and response.status == 200
+    staged = (staged_dashboard_dir / "index.html").read_text()
+    assert response.text() == staged
+    expect(dashboard_page).to_have_title(staged.split("<title>", 1)[1].split("</title>", 1)[0])
     assert urlsplit(dashboard_page.url).netloc == urlsplit(dashboard_server.api.base_url).netloc
     expect(dashboard_page.get_by_role("region", name="Projects").get_by_text(SEED_NAME, exact=True)).to_be_visible()
 
