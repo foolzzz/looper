@@ -30,8 +30,12 @@ class SeedApi(RegistryApi):
 
 @pytest.mark.parametrize("mutation,problem", [
     (None, None),
-    ("missing_records", "expected at least 2 completed API Manager turns, read back 0"),
-    ("missing_completed_turn", "expected at least 2 completed API Manager turns, read back 1"),
+    ("missing_records", "user turn 1: 'First question.'"),
+    ("missing_completed_turn", "user turn 2: 'Second question.'"),
+    ("missing_first_user_record", "user turn 1: 'First question.'"),
+    ("missing_last_user_record", "user turn 2: 'Second question.'"),
+    ("missing_repeated_user_record", "user turn 1: 'First question.'"),
+    ("autonomous_replaces_user_record", "user turn 1: 'First question.'"),
     ("missing_agent_session", "active session"),
     ("null_agent_session", "active session"),
     ("different_agent_session", "active session"),
@@ -88,10 +92,12 @@ def test_fake_api_manager_dialog_reads_back_each_completed_turn(
                 await chat.manager._handle(_message("/profile 0", -1))
                 _replies(chat.bus)
             index = 0
+            user_records = []
 
             async def answer(text):
                 nonlocal index
                 await chat.manager._handle(_message(text, index))
+                user_records.append(await pool.fetchval("SELECT max(id) FROM llm_records WHERE agent_id = 'manager'"))
                 index += 1
                 if index == 2:
                     sid = await pool.fetchval("SELECT session_id FROM api_sessions")
@@ -112,6 +118,18 @@ def test_fake_api_manager_dialog_reads_back_each_completed_turn(
                         await pool.execute("UPDATE llm_records SET status = 'failed' WHERE agent_id = 'manager' "
                                            "AND id != (SELECT min(id) FROM llm_records WHERE session_id = $1 "
                                            "AND status = 'completed' AND NOT (metadata ? 'session_profile'))", sid)
+                    elif mutation in {"missing_first_user_record", "missing_last_user_record", "missing_repeated_user_record"}:
+                        if cross_provider:
+                            assert await pool.fetchval(
+                                "SELECT count(*) FROM llm_records WHERE status = 'completed' "
+                                "AND input_text LIKE '[HANDOFF]%'") == 1
+                        missing = user_records[1 if mutation == "missing_last_user_record" else 0]
+                        assert await pool.execute("DELETE FROM llm_records WHERE id = $1", missing) == "DELETE 1"
+                    elif mutation == "autonomous_replaces_user_record":
+                        # Even identical input from an autonomous turn cannot answer a user turn.
+                        assert await pool.execute(
+                            "UPDATE llm_records SET metadata = metadata || '{\"autonomous\": true}'::jsonb "
+                            "WHERE id = $1", user_records[0]) == "UPDATE 1"
                     elif mutation == "missing_agent_session":
                         await pool.execute("DELETE FROM agent_sessions WHERE agent_id = 'manager'")
                     elif mutation == "null_agent_session":
@@ -139,6 +157,11 @@ def test_fake_api_manager_dialog_reads_back_each_completed_turn(
             def ask(_api, _session, text, **_):
                 return asyncio.run_coroutine_threadsafe(answer(text), loop).result(timeout=15)
 
+            def newest(*_):
+                return asyncio.run_coroutine_threadsafe(
+                    pool.fetchval("SELECT coalesce(max(id), 0) FROM llm_records WHERE agent_id = 'manager'"),
+                    loop).result(timeout=15)
+
             class Api:
                 def post(self, path, body):
                     assert path == "/api/v1/tasks/page"
@@ -146,14 +169,15 @@ def test_fake_api_manager_dialog_reads_back_each_completed_turn(
 
             monkeypatch.setattr(asyncpg, "connect", case_connection)
             monkeypatch.setattr(dialogs, "_ask", ask)
-            monkeypatch.setattr(dialogs, "_newest_run", lambda *_: 0)
+            monkeypatch.setattr(dialogs, "_newest_run", newest)
             monkeypatch.setattr(dialogs, "_last_action", lambda *_: 0)
             monkeypatch.setattr(dialogs, "_trail", lambda *_: [])
             monkeypatch.setattr(dialogs, "_stop_leftovers", lambda *_: None)
             scenarios = tmp_path / "scenarios.json"
             scenarios.write_text("{}")
+            second = "First question." if mutation == "missing_repeated_user_record" else "Second question."
             case = dialogs.Dialog("api_history", (dialogs.Say("First question.", lambda _: None),
-                                                   dialogs.Say("Second question.", lambda _: None)))
+                                                   dialogs.Say(second, lambda _: None)))
             row = await asyncio.to_thread(
                 dialogs.run_dialog, Api(), case, database_url=DSN, project_id="eval-project",
                 scenarios=scenarios, mode="fake", timeout=15, manager_profile={"runtime_type": "api"})
