@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.193] - 2026-10-28
+
+### Added
+
+- **Opt-in: Pi Manager and Planner on the shared Pi runner.** The ops file gains `[runtimes] pi = "cli" | "runner"` (default `cli`; file only, read once at startup, restart required). With `runner`, `looper serve` starts one Pi runner (10 session slots) and `PiRunnerRuntime` runs only the Manager and Planner of a Pi profile through it; Workers, Reviewers and consults stay on the CLI. Missing prerequisites (Node 22.19+, `pi` on PATH) fail those turns with the reason and never fall back to the CLI. The prompt-regression evals gain `--pi-runner`. ([#829](https://github.com/foolzzz/looper/pull/829))
+
 ## [2.13.192] - 2026-10-28
 
 ### Added
