@@ -102,7 +102,7 @@ def _wait_ready(server):
 
 
 @contextmanager
-def _running_dashboard(tmp_path, admin_url, static_dir=None):
+def _running_dashboard(tmp_path, admin_url):
     home, root, work, bin_dir = (tmp_path / name for name in ("home", "runtime", "work", "bin"))
     for directory in (home, root, work, bin_dir):
         directory.mkdir()
@@ -114,8 +114,6 @@ def _running_dashboard(tmp_path, admin_url, static_dir=None):
                PYTHONPATH=os.pathsep.join((str(REPO_ROOT / "tests/runtime_root_guard"), str(REPO_ROOT))),
                CLAUDE_CONFIG_DIR=str(home / ".claude"), CODEX_HOME=str(home / ".codex"),
                GROK_HOME=str(home / ".grok"), XDG_CONFIG_HOME=str(home / ".config"))
-    if static_dir is not None:
-        env["PYTEST_LOOPER_STATIC_DIR"] = str(static_dir)
     with fresh_database(admin_url) as (url, _):
         _seed(url, work)
         port = free_port()
@@ -146,7 +144,7 @@ def _running_dashboard(tmp_path, admin_url, static_dir=None):
 
 @pytest.fixture
 def dashboard_server(tmp_path, database_admin_url, staged_dashboard_dir):
-    with _running_dashboard(tmp_path, database_admin_url, staged_dashboard_dir) as server:
+    with _running_dashboard(tmp_path, database_admin_url) as server:
         yield server
 
 
