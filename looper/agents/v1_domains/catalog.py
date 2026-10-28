@@ -70,7 +70,8 @@ MCP_PATCH = {**_object({"name": _STR, "description": _STR, "transport": MCP_TRAN
              "minProperties": 1}
 
 COMPACT_ITEM = _object({"item_id": _STR, "kind": LIBRARY_KIND, "name": _STR,
-                        "description": _NULL_STR, "project": _NULL_STR})
+                        "description": _NULL_STR, "project": _NULL_STR,
+                        "manager_install_count": _INT})
 COMPACT_INSTALL = _object({"install_id": _STR, "scope": _STR, "project": _NULL_STR,
                            "roles": _STRINGS, "enabled": _BOOL})
 _COMPACT_CHANGE = _object({"install": COMPACT_INSTALL, "item": COMPACT_ITEM})

@@ -890,7 +890,8 @@ def test_a_catalog_item_is_installed_changed_and_uninstalled_as_the_dashboard_do
         chat = _Chat(tmp_path)
         (listed,) = await chat.say("有哪些 MCP", ("looper_catalog", {"action": "list"}))
         assert listed["result"]["items"] == [{"item_id": server["item_id"], "kind": "mcp", "name": "search",
-                                              "description": None, "project": None, "installs": []}]
+                                              "description": None, "project": None, "manager_install_count": 0,
+                                              "installs": []}]
         assert SECRET not in json.dumps(listed)
         (installed,) = await chat.say("calc 的 Worker 装上 search", ("looper_catalog", {
             "action": "install", "item": "search", "project": "calc", "roles": ["worker"]}))
@@ -913,6 +914,33 @@ def test_a_catalog_item_is_installed_changed_and_uninstalled_as_the_dashboard_do
         (gone,) = await chat.say("卸掉", ("looper_catalog", {"action": "uninstall", "install_id": install_id}))
         assert gone["status"] == "ok"
         assert (await _ok("POST", "/api/v1/installs/project", {"project_id": project['id']}))["installs"] == []
+
+    run_db(test, monkeypatch)
+
+
+def test_a_skill_installed_only_on_one_manager_lists_its_manager_install_count(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def test(pool: Any) -> None:
+        from looper.db import manager_installs
+
+        used = (await _ok("POST", "/api/v1/catalog_sources/create_skill", {
+            "name": "manager-only", "description": "Only a Manager.", "content": "Reply carefully."}))["item"]
+        unused = (await _ok("POST", "/api/v1/catalog_sources/create_skill", {
+            "name": "unused-skill", "description": "Installed nowhere.", "content": "Stay quiet."}))["item"]
+        await manager_installs.put_install("manager", used["item_id"])
+        assert await pool.fetchval("SELECT count(*) FROM library_installs WHERE item_id = ANY($1::text[])",
+                                   [used["item_id"], unused["item_id"]]) == 0
+        assert await pool.fetchval("SELECT count(*) FROM manager_library_installs WHERE item_id = $1",
+                                   used["item_id"]) == 1
+        (listed,) = await _Chat(tmp_path).say("有哪些技能", ("looper_catalog", {"action": "list"}))
+        assert listed["status"] == "ok", listed
+        by_id = {item["item_id"]: item for item in listed["result"]["items"]}
+        assert by_id[used["item_id"]]["name"] == "personal:manager-only"
+        assert by_id[used["item_id"]]["installs"] == []
+        assert by_id[used["item_id"]]["manager_install_count"] == 1
+        assert by_id[unused["item_id"]]["installs"] == []
+        assert by_id[unused["item_id"]]["manager_install_count"] == 0
 
     run_db(test, monkeypatch)
 
