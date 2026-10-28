@@ -480,7 +480,8 @@ def test_an_import_refuses_an_unrecognized_schema_without_writes(monkeypatch: py
         async with _installation() as (_, source_url), _installation() as (target, target_url):
             exported = tmp_path / "config.json"
             assert (await _transfer_file(source_url, "export", str(exported)))[0] == 0
-            await target.execute("UPDATE schema_fingerprint SET sha256 = 'an older schema.sql'")
+            await target.execute("UPDATE registry_schema_version SET version = 3; "
+                                 "UPDATE schema_fingerprint SET sha256 = 'an older schema.sql'")
             before = await _rows(target)
 
             code, _, err = await _transfer_file(target_url, "import", str(exported), apply=True)

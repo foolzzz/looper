@@ -273,7 +273,15 @@ def test_without_a_usable_pg_dump_serve_refuses(tmp_path: Path, bridge_source: P
 
 
 @needs_database
-def test_unsupported_database_is_refused_before_backup(tmp_path, bridge_source):
+@pytest.mark.parametrize("damage,reason", [
+    ("UPDATE registry_schema_version SET version=2", "upgrade to v2.13.165 or a later 2.13 release first, start it once, then upgrade to this version"),
+    ("DROP TABLE registry_schema_version", "v2.13.165"),
+    ("UPDATE schema_fingerprint SET sha256='bd5a7811772598c69932522ab65c7ffd46c2fbfe52967ad2a3f8ce20d4502dd8'", "v2.13.165"),  # v2.13.150
+    ("UPDATE registry_schema_version SET version=5", "exceeds supported"),
+    ("UPDATE registry_schema_version SET version=4", "post_bridge_baseline"),
+    ("ALTER TABLE tasks DROP COLUMN config", "tasks.config"),
+])
+def test_unsupported_database_is_refused_before_backup(tmp_path, bridge_source, damage, reason):
     calls = _install(tmp_path / "bin")
     with fresh_database(str(DSN)) as (url, _):
         _bridge(url, bridge_source)
@@ -281,15 +289,51 @@ def test_unsupported_database_is_refused_before_backup(tmp_path, bridge_source):
             import asyncpg
             conn = await asyncpg.connect(url)
             try:
-                await conn.execute("UPDATE schema_fingerprint SET sha256 = 'unsupported'")
+                await conn.execute(damage)
             finally:
                 await conn.close()
         asyncio.run(invalidate())
         before = _state(url, rows=True)
         code, log = _serve(tmp_path, url)
         assert _state(url, rows=True) == before
-    assert code == 1 and "v2.13.165" in log
+    assert code == 1 and reason in log, log
     assert not calls.exists() and _backups(tmp_path) == []
+
+
+@needs_database
+@pytest.mark.parametrize("environment", ["pgcrypto", "nested-config"])
+def test_bridge_with_environment_variations_starts_and_restarts(tmp_path, bridge_source, environment):
+    calls = _install(tmp_path / "bin")
+    with fresh_database(str(DSN)) as (url, _):
+        _bridge(url, bridge_source)
+        async def prepare():
+            import asyncpg
+            conn = await asyncpg.connect(url)
+            try:
+                if environment == "pgcrypto":
+                    await conn.execute("CREATE EXTENSION pgcrypto WITH SCHEMA public")
+                    assert await conn.fetchval("SELECT length(gen_random_bytes(8))") == 8
+                else:
+                    value = {"worker": {"max_turns": 12}}
+                    for _ in range(9):
+                        value = json.dumps(value)
+                    await conn.execute("UPDATE tasks SET config=$1::jsonb WHERE id='task-bridge'", json.dumps(value))
+            finally:
+                await conn.close()
+        asyncio.run(prepare())
+        code, log = _serve(tmp_path, url)
+        assert code is None, log
+        assert _state(url) == MIGRATED
+        if environment == "nested-config":
+            assert "task-bridge" in log and "WARNING" in log
+            assert json.loads(_state(url, rows=True)["tasks"][0]["config"]) == {}
+        after = _state(url, rows=True)
+        dump_calls = calls.read_text()
+        code, log = _serve(tmp_path, url)
+        assert code is None, log
+        assert _state(url, rows=True) == after
+        assert calls.read_text() == dump_calls
+        assert len(_backups(tmp_path)) == 1
 
 
 @needs_database

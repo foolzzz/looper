@@ -145,4 +145,13 @@ async def witness(conn):
             for table in TABLES if await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", table)}
 
 
-from looper.db.bridge_upgrade import structure  # noqa: E402,F401
+async def structure(conn):
+    """Test-only DDL witness for rollback and fresh/upgrade parity; never admission."""
+    schema = await conn.fetchval("SELECT current_schema()")
+    quoted = '"' + schema.replace('"', '""') + '".'
+    return [tuple(value.replace(quoted, "").replace(schema + ".", "") if isinstance(value, str) else value
+                  for value in row) for row in await conn.fetch("""
+        SELECT table_name, column_name, udt_name, is_nullable, column_default
+        FROM information_schema.columns WHERE table_schema = current_schema()
+        ORDER BY table_name COLLATE "C", column_name COLLATE "C"
+    """)]

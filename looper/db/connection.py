@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import json
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -48,9 +47,8 @@ async def transaction() -> AsyncIterator[asyncpg.Connection]:
         yield conn
 
 
-# The fingerprint of the schema.sql last applied: ``schema_change_pending``
-# compares it with the current file, so ``looper serve`` can back the database
-# up before the file's migrations (some drop columns and tables) change it.
+# The schema.sql text last applied. Schema 3 uses this stable release marker
+# for admission; schema 4 uses its version and post_bridge_baseline marker.
 _RECORD_FINGERPRINT = """
 CREATE TABLE IF NOT EXISTS schema_fingerprint (
     id          BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
@@ -97,44 +95,56 @@ async def check_registry_schema_version(conn: asyncpg.Connection, *, supported_v
 
 
 async def _classify_schema(conn: asyncpg.Connection, sql: str) -> str:
-    """Read-only admission gate, always called under _SCHEMA_LOCK."""
-    from .bridge_upgrade import BASELINE, BRIDGE_CATALOGS, BRIDGE_MIGRATIONS, structure
+    """Read-only admission and bridge preconditions, always under _SCHEMA_LOCK."""
+    from .bridge_upgrade import BASELINE, BRIDGE_ERA_FINGERPRINTS, BRIDGE_PRECONDITIONS
 
-    reason = "unsupported or incomplete Looper database; upgrade to v2.13.165 first"
-    try:
-        version = await check_registry_schema_version(conn, supported_version=REGISTRY_SCHEMA_VERSION)
-        names = re.findall(r"(?im)^\s*CREATE TABLE IF NOT EXISTS\s+(\w+)", sql)
-        names.extend(("agents", "agent_configs", "task_agent_overrides", "schema_fingerprint", "llm_profiles"))
-        # Do not initialize shadow tables over a visible installation in another namespace.
-        if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM unnest($1::text[]) t(name) "
-                "JOIN pg_class c ON c.oid = to_regclass(t.name) "
-                "WHERE c.relnamespace <> quote_ident(current_schema())::regnamespace)", names):
-            raise RegistrySchemaVersionError(reason + "; Looper tables span namespaces")
-        if not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM pg_class WHERE relnamespace = "
-                "quote_ident(current_schema())::regnamespace AND relkind IN ('r', 'p', 'v', 'm', 'S', 'f')) "
-                "OR EXISTS (SELECT 1 FROM pg_proc WHERE pronamespace = quote_ident(current_schema())::regnamespace) "
-                "OR EXISTS (SELECT 1 FROM pg_type WHERE typnamespace = quote_ident(current_schema())::regnamespace)"):
-            return "empty"
-        if version not in (3, 4):
-            raise RegistrySchemaVersionError(reason)
-        fingerprint = await conn.fetchval("SELECT sha256 FROM schema_fingerprint WHERE id = TRUE")
-        if not fingerprint or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
-            raise RegistrySchemaVersionError(reason + "; missing or invalid fingerprint")
-        ledger = {r["name"] for r in await conn.fetch("SELECT name FROM schema_migrations")}
-        # Frozen catalog witnesses keep identity independent of schema.sql cleanup.
-        shape = hashlib.sha256(json.dumps(await structure(conn), sort_keys=True).encode()).hexdigest()
-        if (version == 3 and set(BRIDGE_MIGRATIONS).issubset(ledger)
-                and shape in BRIDGE_CATALOGS.get(fingerprint, ())):
-            return "bridge"
-        if version == 4 and BASELINE in ledger and shape == "3c6db1e85e01aca062135bbbdb2fffe9eff7c707e1f6221892ce74c145e6d05e":
-            return "current"
-        raise RegistrySchemaVersionError(reason + "; bridge identity, final structure or current baseline marker missing")
-    except RegistrySchemaVersionError as exc:
-        if "exceeds supported" in str(exc) or "v2.13.165" in str(exc):
-            raise
-        raise RegistrySchemaVersionError(f"{reason}; {exc}") from exc
-    except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError, TypeError, ValueError) as exc:
-        raise RegistrySchemaVersionError(reason) from exc
+    older = ("unsupported Looper database; upgrade to v2.13.165 or a later 2.13 release first, "
+             "start it once, then upgrade to this version")
+    names = re.findall(r"(?im)^\s*CREATE TABLE IF NOT EXISTS\s+(\w+)", sql)
+    # The version marker must be recognized even if schema.sql is incomplete.
+    names.extend(("agents", "agent_configs", "task_agent_overrides", "schema_fingerprint", "llm_profiles",
+                  "registry_schema_version"))
+    # Do not initialize shadow tables over a visible installation in another namespace.
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM unnest($1::text[]) t(name) "
+            "JOIN pg_class c ON c.oid = to_regclass(t.name) "
+            "WHERE c.relnamespace <> quote_ident(current_schema())::regnamespace)", names):
+        raise RegistrySchemaVersionError(older + "; Looper tables span namespaces")
+    tables = {r["relname"] for r in await conn.fetch(
+        "SELECT relname FROM pg_class WHERE relnamespace = quote_ident(current_schema())::regnamespace "
+        "AND relname = ANY($1::text[])", names)}
+    if not tables:
+        return "empty"
+    version = (await conn.fetchval("SELECT version FROM registry_schema_version WHERE id = TRUE")
+               if "registry_schema_version" in tables else None)
+    if "registry_schema_version" in tables and version is None:
+        raise RegistrySchemaVersionError(older + "; registry schema version is missing; initialization refused")
+    await check_registry_schema_version(conn, supported_version=REGISTRY_SCHEMA_VERSION)
+    if version == REGISTRY_SCHEMA_VERSION:
+        if "schema_migrations" not in tables or not await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", BASELINE
+        ):
+            raise RegistrySchemaVersionError(f"registry schema version {version} is missing the {BASELINE} marker; "
+                                             "startup refused")
+        return "current"
+    if version != 3:
+        raise RegistrySchemaVersionError(older)
+    fingerprint = (await conn.fetchval("SELECT sha256 FROM schema_fingerprint WHERE id = TRUE")
+                   if "schema_fingerprint" in tables else None)
+    if fingerprint not in BRIDGE_ERA_FINGERPRINTS:
+        raise RegistrySchemaVersionError(older)
+    # Check only the names the conversion needs, before serve makes a backup
+    # and again before ensure_schema executes any DDL. No catalog definitions.
+    columns = {(r["table_name"], r["column_name"]) for r in await conn.fetch(
+        "SELECT table_name, column_name FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = ANY($1::text[])",
+        [table for table, _ in BRIDGE_PRECONDITIONS])}
+    for table, required in BRIDGE_PRECONDITIONS:
+        if table not in tables:
+            raise RegistrySchemaVersionError(f"bridge upgrade requires table {table}; startup refused")
+        for column in required:
+            if (table, column) not in columns:
+                raise RegistrySchemaVersionError(f"bridge upgrade requires column {table}.{column}; startup refused")
+    return "bridge"
 
 
 def _schema_phases(sql: str) -> dict[str, str]:
@@ -183,7 +193,4 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
     async with conn.transaction():
         await conn.execute(f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK})")
         state = await _classify_schema(conn, sql)
-        if state == "empty":
-            return False
-        return state == "bridge" or await conn.fetchval(
-            "SELECT sha256 FROM schema_fingerprint WHERE id = TRUE") != schema_fingerprint(sql)
+        return state == "bridge"

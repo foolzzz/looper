@@ -21,7 +21,7 @@ def run(test):
 
 
 @pytest.mark.parametrize("locale,expected_order", [
-    ("LOCALE_PROVIDER libc LOCALE 'C'", ["task_steps", "tasks"]),
+    ("LC_COLLATE 'C' LC_CTYPE 'C'", ["task_steps", "tasks"]),
     ("LOCALE_PROVIDER libc LOCALE 'en_US.utf8'", ["tasks", "task_steps"]),
 ], ids=["C", "en_US.utf8"])
 @pytest.mark.parametrize("source", [None, "bridge_source", "snapshot_bridge_source"],
@@ -58,66 +58,12 @@ def test_schema_admission_is_independent_of_database_locale(request, source, loc
                     await connection.ensure_schema(conn)
                     assert not await connection.schema_change_pending(conn)
                     assert await witness(conn) == after and await structure(conn) == shape
-                    # Locale independence must retain the structural integrity check.
-                    await conn.execute("ALTER TABLE tasks ALTER COLUMN requirement DROP NOT NULL")
-                    damaged, shape = await witness(conn), await structure(conn)
-                    for operation in (connection.schema_change_pending, connection.ensure_schema):
-                        with pytest.raises(connection.RegistrySchemaVersionError):
-                            await operation(conn)
-                        assert await witness(conn) == damaged and await structure(conn) == shape
                 finally:
                     await conn.close()
             finally:
                 await admin.execute(f'DROP DATABASE "{name}"')
         finally:
             await admin.close()
-    run(test)
-
-
-@pytest.mark.parametrize("source", [None, "bridge_source", "snapshot_bridge_source"],
-                         ids=["fresh", "v2.13.165", "v2.13.180"])
-def test_pg18_not_null_catalog_allows_upgrade_and_restart(request, source):
-    released = request.getfixturevalue(source) if source else None
-
-    async def test():
-        async with fresh_connection() as conn:
-            if released:
-                await initialize_bridge(conn, released)
-            else:
-                await connection.ensure_schema(conn)
-            if conn.get_server_version().major < 18:
-                # Exercise the added catalog rows on older CI servers too. The
-                # temporary view leaves persistent schema and column metadata intact.
-                await conn.execute("""
-                    CREATE TEMP VIEW pg_constraint AS
-                    SELECT oid, connamespace, conrelid, conname, contype FROM pg_catalog.pg_constraint
-                    UNION ALL
-                    SELECT 0::oid, c.relnamespace, a.attrelid,
-                           (c.relname || '_' || a.attname || '_not_null')::name, 'n'::"char"
-                    FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
-                    WHERE c.relnamespace = current_schema()::regnamespace
-                        AND a.attnum > 0 AND NOT a.attisdropped AND a.attnotnull
-                """)
-            # Positive control: native PG18 rows, or the injected rows on PG16/17,
-            # must actually be visible to the admission gate's unqualified query.
-            assert await conn.fetchval("SELECT count(*) FROM pg_constraint WHERE contype = 'n' "
-                                       "AND connamespace = current_schema()::regnamespace") > 0
-            before = await witness(conn)
-            assert await connection.schema_change_pending(conn) is bool(released)
-            assert await witness(conn) == before
-            await connection.ensure_schema(conn)
-            assert await conn.fetchval("SELECT version FROM registry_schema_version") == 4
-            upgraded, shape = await witness(conn), await structure(conn)
-            await connection.ensure_schema(conn)
-            assert await witness(conn) == upgraded and await structure(conn) == shape
-            assert not await connection.schema_change_pending(conn)
-            # Ignoring redundant NOT NULL catalog entries must not hide real damage.
-            await conn.execute("ALTER TABLE tasks ALTER COLUMN requirement DROP NOT NULL")
-            damaged = await witness(conn)
-            for operation in (connection.schema_change_pending, connection.ensure_schema):
-                with pytest.raises(connection.RegistrySchemaVersionError):
-                    await operation(conn)
-                assert await witness(conn) == damaged
     run(test)
 
 
@@ -196,23 +142,6 @@ def test_released_bridge_preserves_execution_snapshot(snapshot_bridge_source, br
     run(test)
 
 
-@pytest.mark.parametrize("damage", [
-    "ALTER TABLE schedule_runs DROP COLUMN execution_snapshot",
-    "ALTER TABLE schedule_runs ALTER COLUMN execution_snapshot TYPE text USING execution_snapshot::text",
-])
-def test_incomplete_released_bridge_is_refused_without_mutation(snapshot_bridge_source, damage):
-    async def test():
-        async with fresh_connection() as conn:
-            await initialize_bridge(conn, snapshot_bridge_source)
-            await conn.execute(damage)
-            before, shape = await witness(conn), await structure(conn)
-            for operation in (connection.schema_change_pending, connection.ensure_schema):
-                with pytest.raises(connection.RegistrySchemaVersionError):
-                    await operation(conn)
-                assert await witness(conn) == before and await structure(conn) == shape
-    run(test)
-
-
 def test_deleted_custom_bot_preserves_gate_posts_and_reply_identity(bridge_source):
     from looper.db import user_gates
 
@@ -239,22 +168,19 @@ def test_deleted_custom_bot_preserves_gate_posts_and_reply_identity(bridge_sourc
     run(test)
 
 
-@pytest.mark.parametrize("current,damage,match", [(False, damage, "v2.13.165") for damage in [
-    "UPDATE registry_schema_version SET version=2",
-    "UPDATE schema_fingerprint SET sha256='unknown'",
-    "DELETE FROM registry_schema_version",
-    "DROP TABLE registry_schema_version",
-    "DELETE FROM schema_fingerprint",
-    "DROP TABLE schema_fingerprint",
-    "DELETE FROM schema_migrations WHERE name='llm_model_registry_v3'",
-    "ALTER TABLE agent_sessions DROP COLUMN selected_profile_id",
-    "ALTER TABLE channel_configs DISABLE TRIGGER channel_configs_manager_fixed",
-    "ALTER TABLE agent_sessions ALTER COLUMN updated_at TYPE timestamptz(0)",
-    "ALTER TABLE agent_sessions DROP COLUMN session_totals",
-    "ALTER TABLE schedules DROP CONSTRAINT schedules_notify_check",
-]] + [
+@pytest.mark.parametrize("current,damage,match", [(False, damage,
+    "upgrade to v2.13.165 or a later 2.13 release first, start it once, then upgrade to this version")
+    for damage in [
+        "UPDATE registry_schema_version SET version=2",
+        "UPDATE schema_fingerprint SET sha256='unknown'",
+        "DELETE FROM registry_schema_version",
+        "DROP TABLE registry_schema_version",
+        "DELETE FROM schema_fingerprint",
+        "DROP TABLE schema_fingerprint",
+    ]
+] + [
     (True, "UPDATE registry_schema_version SET version=5", "exceeds supported"),
-    (True, "DELETE FROM schema_migrations WHERE name='post_bridge_baseline'", "v2.13.165"),
+    (True, "DELETE FROM schema_migrations WHERE name='post_bridge_baseline'", "post_bridge_baseline"),
     (True, "UPDATE registry_schema_version SET version=3", "v2.13.165"),
 ])
 def test_partial_or_unsupported_identity_is_refused_without_mutation(bridge_source, current, damage, match):
@@ -273,13 +199,7 @@ def test_partial_or_unsupported_identity_is_refused_without_mutation(bridge_sour
     run(test)
 
 
-@pytest.mark.parametrize("damage,match", [
-    (None, "injected failure"), ("UPDATE tasks SET config='[]'", "bridge task task-bridge"),
-    ("UPDATE llm_records SET metadata='[]'", "metadata must be an object"),
-    ("UPDATE channel_configs SET config='{\"allowed_user_ids\":[true]}'", "bridge channel"),
-    ("UPDATE task_user_gate_posts SET channel_id=NULL", "bot identity cannot be recovered"),
-])
-def test_failed_upgrade_rolls_back_all_rows_and_constraints(bridge_source, monkeypatch, damage, match):
+def test_failed_upgrade_rolls_back_all_rows_and_constraints(bridge_source, monkeypatch):
     original = bridge_upgrade.upgrade_from_bridge
 
     async def fail(conn):
@@ -289,14 +209,14 @@ def test_failed_upgrade_rolls_back_all_rows_and_constraints(bridge_source, monke
     async def test():
         async with fresh_connection() as conn:
             await initialize_bridge(conn, bridge_source)
-            if damage:
-                await conn.execute(damage)
             before, shape = await witness(conn), await structure(conn)
-            if damage is None:
-                monkeypatch.setattr(bridge_upgrade, "upgrade_from_bridge", fail)
-            with pytest.raises(ValueError, match=match):
+            monkeypatch.setattr(bridge_upgrade, "upgrade_from_bridge", fail)
+            with pytest.raises(ValueError, match="injected failure"):
                 await connection.ensure_schema(conn)
             assert await witness(conn) == before and await structure(conn) == shape
+            assert await conn.fetchval("SELECT EXISTS (SELECT 1 FROM pg_constraint "
+                "WHERE conrelid='task_user_gate_posts'::regclass "
+                "AND conname='task_user_gate_posts_channel_chat_external_id_key')")
     run(test)
 
 
@@ -336,4 +256,94 @@ def test_current_baseline_does_not_replay_pruned_history():
             await connection.ensure_schema(conn)
             assert await witness(conn) == before
             assert not await conn.fetchval("SELECT bool_or(agent_teams) FROM agent_profiles")
+    run(test)
+
+
+@pytest.mark.parametrize("layers", [3, 6, 7, 9])
+def test_nested_task_config_keeps_bridge_reading(bridge_source, caplog, layers):
+    from looper.db.tasks import get_task
+
+    async def test():
+        async with fresh_connection() as conn:
+            await initialize_bridge(conn, bridge_source)
+            value = {"worker": {"max_turns": 12}}
+            for _ in range(layers):
+                value = json.dumps(value)
+            await conn.execute("UPDATE tasks SET config=$1::jsonb WHERE id='task-bridge'", json.dumps(value))
+            await connection.ensure_schema(conn)
+            assert (await get_task("task-bridge", pool=conn))["config"] == (
+                {"worker": {"max_turns": 12}} if layers < 7 else {})
+            warnings = [r for r in caplog.records if r.levelname == "WARNING" and "task-bridge" in r.message]
+            assert len(warnings) == (0 if layers < 7 else 1)
+            before = await witness(conn)
+            await connection.ensure_schema(conn)
+            assert await witness(conn) == before
+    run(test)
+
+
+@pytest.mark.parametrize("damage,identity,table,column", [
+    ("ALTER TABLE tasks DROP COLUMN config", "tasks.config", "tasks", "config"),
+    ("DROP TABLE channel_configs CASCADE", "channel_configs", "channel_configs", None),
+])
+def test_missing_bridge_precondition_is_refused_before_ddl(bridge_source, damage, identity, table, column):
+    async def test():
+        async with fresh_connection() as conn:
+            await initialize_bridge(conn, bridge_source)
+            await conn.execute(damage)
+            before, shape = await witness(conn), await structure(conn)
+            for operation in (connection.schema_change_pending, connection.ensure_schema):
+                queries = []
+                with conn.query_logger(lambda q: queries.append(q.query)):
+                    with pytest.raises(connection.RegistrySchemaVersionError, match=identity):
+                        await operation(conn)
+                assert all(q.lstrip().split()[0] in {"SELECT", "BEGIN;", "COMMIT;", "ROLLBACK;"} for q in queries)
+                assert await witness(conn) == before and await structure(conn) == shape
+            assert not await conn.fetchval("SELECT EXISTS(SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema=current_schema() AND table_name=$1 AND column_name=$2)", table, column)
+    run(test)
+
+
+@pytest.mark.parametrize("damage,table,identity", [
+    ("UPDATE tasks SET config='[]'", "tasks", "task-bridge"),
+    ("UPDATE llm_records SET metadata='[]'", "llm_records", "1"),
+    ("UPDATE channel_configs SET config='[]'", "channel_configs", "channel-telegram"),
+    ("UPDATE channel_configs SET config='{\"allowed_user_ids\":[true]}'", "channel_configs", "channel-telegram"),
+    ("UPDATE task_user_gate_posts SET channel_id=NULL", "task_user_gate_posts", "1"),
+])
+def test_unusual_rows_warn_and_keep_bridge_reading(bridge_source, caplog, damage, table, identity):
+    async def test():
+        async with fresh_connection() as conn:
+            await initialize_bridge(conn, bridge_source)
+            await conn.execute(damage)
+            before = (await witness(conn))[table]
+            await connection.ensure_schema(conn)
+            after = (await witness(conn))[table]
+            if table == "tasks":
+                assert json.loads(after[0]["config"]) == {}
+            else:
+                assert after == before
+            assert any(r.levelname == "WARNING" and identity in r.message for r in caplog.records)
+            assert await conn.fetchval("SELECT version FROM registry_schema_version") == 4
+    run(test)
+
+
+def test_unowned_objects_do_not_make_an_empty_database_nonempty():
+    async def test():
+        async with fresh_connection() as conn:
+            await conn.execute("CREATE TABLE unrelated (id integer); INSERT INTO unrelated VALUES (7)")
+            assert not await connection.schema_change_pending(conn)
+            await connection.ensure_schema(conn)
+            assert await conn.fetchval("SELECT id FROM unrelated") == 7
+            assert await conn.fetchval("SELECT version FROM registry_schema_version") == 4
+    run(test)
+
+
+def test_current_marker_does_not_require_a_recorded_text_fingerprint():
+    async def test():
+        async with fresh_connection() as conn:
+            await connection.ensure_schema(conn)
+            await conn.execute("DROP TABLE schema_fingerprint")
+            assert not await connection.schema_change_pending(conn)
+            await connection.ensure_schema(conn)
+            assert await conn.fetchval("SELECT version FROM registry_schema_version") == 4
     run(test)

@@ -187,7 +187,8 @@ def test_migration_map_is_a_snapshot_without_live_foreign_keys() -> None:
 
     _run(test)
 
-def test_v2_forward_guard_accepts_its_own_version_and_empty_marker_is_refused() -> None:
+@pytest.mark.parametrize('entry', ['ensure_schema', 'schema_change_pending'])
+def test_v2_forward_guard_accepts_its_own_version_and_empty_marker_is_refused(entry: str) -> None:
     async def test(conn: asyncpg.Connection) -> None:
         await conn.execute("CREATE TABLE registry_schema_version (id BOOLEAN PRIMARY KEY CHECK(id), "
                            "version INTEGER NOT NULL CHECK(version > 0)); "
@@ -195,7 +196,7 @@ def test_v2_forward_guard_accepts_its_own_version_and_empty_marker_is_refused() 
         assert await connection.check_registry_schema_version(conn, supported_version=2) == 2
         await conn.execute("DELETE FROM registry_schema_version")
         with pytest.raises(connection.RegistrySchemaVersionError, match='missing'):
-            await connection.ensure_schema(conn)
+            await getattr(connection, entry)(conn)
         assert await conn.fetchval("SELECT to_regclass('schema_migrations')") is None
 
     _run(test, initialize=False)
