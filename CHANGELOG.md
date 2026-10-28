@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.190] - 2026-10-28
+
+### Added
+
+- **The Pi runner answers session methods (not yet reachable).** `runners/pi` now handles `session/new`, `session/close`, `session/prompt` and `session/cancel`. Each session gets its own model runtime with an in-memory key, in-memory settings and no resource discovery, and no builtin or platform tools. A Looper provider asks `budget/authorize` before every model request and reports exactly one `request_end` per allowed request; Pi events map to `session/update`, and each accepted prompt ends with exactly one `settled` carrying a typed outcome (`completed`, `cancelled`, `capped`, `max_requests`, `failed`). `runner/health` reports live session, running-turn and in-flight request counts. Nothing registers the runner with the service yet. ([#818](https://github.com/foolzzz/looper/pull/818))
+
 ## [2.13.189] - 2026-10-28
 
 ### Changed
