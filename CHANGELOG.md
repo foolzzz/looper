@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.188] - 2026-10-28
+
+### Added
+
+- **A Pi runner skeleton ships in the wheel (not yet reachable).** `runners/pi` holds a TypeScript runner process with line-delimited JSON-RPC framing, per-session ordered dispatch, reverse requests, a single stdout writer, an `initialize` handshake gated on Node 22.19+ and an installed `@earendil-works/pi-coding-agent` and `pi-ai` 1.3.x with the exports it needs, `runner/health` and orderly shutdown. It answers no session methods yet. The protocol gains `runner/health` (`RunnerBridge.health`), `RunnerSupervisor` accepts a fixed per-kind environment (`env=`), and `looper/agents/runtimes/runner/pi_command.py` builds the launch command and handshake without registering a runtime. ([#814](https://github.com/foolzzz/looper/pull/814))
+
 ## [2.13.187] - 2026-10-28
 
 ### Changed
