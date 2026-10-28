@@ -31,6 +31,7 @@ from ...db import tasks as db_tasks
 from .. import cron, schedules
 from ..message import is_lark, parse_channel_id
 from ..project_execution import format_usd
+from ..schedule_templates import MissingDirectory, effective_schedule, merge_selection
 from ..tiers.journal import clip
 from . import Call, ErrorCode, OpError, Risk, Tool
 from .config import _PROJECT, _required, answered, project_named
@@ -231,7 +232,7 @@ async def _update(call: Call, row: Mapping[str, Any]) -> dict[str, Any]:
     _refuse_other_owner_template(call, row, data)
     before = (await answered(schedules.get_schedule(row["id"])))["schedule"]
     view = (await answered(schedules.update_schedule(row["id"], data)))["schedule"]
-    changed = await _changes(await _in_scope(call, before), await _in_scope(call, view))
+    changed = await _changes(before, view)
     call.turn.blocks.append("\n".join([f"已修改定时任务「{view['name']}」（项目 {view['project_name']}）：",
                                        *(changed.values() or ["- 没有变化"]), *_next_line(before, view),
                                        f"它现在{'已启用' if view['enabled'] else '是停用的'}。"]))
@@ -277,7 +278,7 @@ async def _confirming(call: Call) -> str | None:
     data = _fields(call.arguments, "update")
     _refuse_other_owner_template(call, row, data)
     # Refused as the update would refuse it, before anything is asked.
-    fields = (await answered(schedules._fields(data, update=True)))[0]
+    fields, profiles, task_limits = await answered(schedules._fields(data, update=True))
     gated = bool(fields.get("gate_command", row["gate_command"]))
     try:
         schedules.checked_rule(fields.get("cron", row["cron"]), fields.get("timezone", row["timezone"]),
@@ -287,10 +288,22 @@ async def _confirming(call: Call) -> str | None:
     project = await db_projects.get_project(row["project_id"])
     if not _raises_a_cap(row, data, project["task_budget_usd"] if project else None):
         return None
+    try:
+        fields.update(merge_selection(row, fields))
+    except ValueError as exc:
+        raise OpError(ErrorCode.INVALID, str(exc)) from None
+    selected = {**row, **fields,
+                "profile_overrides": profiles if profiles is not None else row["profile_overrides"],
+                "task_limits": task_limits if task_limits is not None else row["task_limits"]}
+    try:
+        effective = await effective_schedule(None, selected, enabled=row["enabled"])
+    except ValueError as exc:
+        raise OpError(ErrorCode.INVALID if isinstance(exc, MissingDirectory) else ErrorCode.CONFLICT, str(exc)) from None
+    selected["template_name"] = effective.template.name if effective.template else None
     before = (await answered(schedules.get_schedule(row["id"])))["schedule"]
-    after = {**before, **{key: data[key] for key in CAPS if key in data}}
+    after = schedules.schedule_view(selected, default_timeout=await schedules.default_run_timeout())
     return "\n".join([f"要修改定时任务「{row['name']}」（项目 {row['project_name']}）吗？",
-                      *(await _changes(before, after, only=data)).values(), "这会提高（或取消）它的花费上限。"])
+                      *(await _changes(before, after)).values(), "这会提高（或取消）它的花费上限。"])
 
 
 async def _starting(call: Call) -> str | None:
