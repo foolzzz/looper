@@ -5,6 +5,26 @@ import type { Session } from './session.ts';
 import type { Turn } from './turn.ts';
 import { steersSent } from './turn.ts';
 
+const preRequestErrors = new Set([
+  'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT',
+  // Certificate validation fails during the TLS handshake, before HTTP is sent.
+  'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_GET_ISSUER_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'CERT_REVOKED', 'CERT_UNTRUSTED', 'CERT_REJECTED', 'ERR_TLS_CERT_ALTNAME_INVALID',
+]);
+
+function responseUsage(usage: any) {
+  const input = usage?.input_tokens, output = usage?.output_tokens;
+  const cacheRead = usage?.input_tokens_details?.cached_tokens ?? 0;
+  const cacheWrite = usage?.input_tokens_details?.cache_write_tokens ?? 0;
+  const reasoning = usage?.output_tokens_details?.reasoning_tokens ?? 0;
+  if (![input, output, cacheRead, cacheWrite, reasoning].every(n => Number.isSafeInteger(n) && n >= 0)
+      || cacheRead + cacheWrite > input || reasoning > output
+      || (usage.total_tokens != null && usage.total_tokens !== input + output)) return;
+  return { input: input - cacheRead - cacheWrite, output, cacheRead, cacheWrite, reasoning,
+    totalTokens: input + output };
+}
+
 let counter = 0;
 export function endRequest(record: Session, turn: Turn, id: string, status: string,
     complete: boolean, usage?: any): void {
@@ -51,6 +71,7 @@ export async function authorizingStream(record: Session, model: any, context: an
   }
   const output = sdk!.ai.createAssistantMessageEventStream();
   let started = false, dispatched = false, hasUsage = false, status: number | undefined;
+  let responseFailed = false, failedUsage: ReturnType<typeof responseUsage>;
   turn.httpStatus = undefined;
   turn.transport = false;
   // onResponse only runs for successful responses in Pi 1.3, so capture HTTP errors in fetch as well.
@@ -67,6 +88,11 @@ export async function authorizingStream(record: Session, model: any, context: an
     },
     onProviderStreamEvent: async (event: any, eventModel: any) => {
       if (event.response?.usage || event.usage || event.choices?.some((choice: any) => choice.usage)) hasUsage = true;
+      if (event.type === 'response.failed') {
+        // Pi 1.3 throws on this terminal event before copying its usage to the message.
+        responseFailed = true;
+        failedUsage = responseUsage(event.response?.usage);
+      }
       await options.onProviderStreamEvent?.(event, eventModel);
     },
     fetch: async (...args: Parameters<typeof globalThis.fetch>) => {
@@ -83,7 +109,7 @@ export async function authorizingStream(record: Session, model: any, context: an
         // These connection failures establish that no HTTP request was sent. Other
         // failures (including a socket closing before headers) leave usage unknown.
         const code = (error as { cause?: { code?: string } })?.cause?.code;
-        if (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'EAI_AGAIN' || code === 'UND_ERR_CONNECT_TIMEOUT') dispatched = false;
+        if (code && preRequestErrors.has(code)) dispatched = false;
         throw error;
       }
     },
@@ -98,12 +124,13 @@ export async function authorizingStream(record: Session, model: any, context: an
       for await (const event of source) {
         if (event.type === 'done' || event.type === 'error') {
           const message = event.type === 'done' ? event.message : event.error;
+          if (failedUsage) message.usage = { ...message.usage, ...failedUsage };
           // Pi persists these same objects. Scrub before either SDK storage or protocol output.
           if (message.errorMessage) message.errorMessage = scrub(message.errorMessage).slice(0, 512);
           const aborted = options.signal?.aborted || message.stopReason === 'aborted' || turn.cancel;
           const requestStatus = event.type === 'done' ? 'completed'
             : aborted ? 'aborted' : status && status >= 400 ? `http_${status}` : 'error';
-          const complete = event.type === 'done' ? hasUsage
+          const complete = responseFailed ? failedUsage !== undefined : event.type === 'done' ? hasUsage
             : hasUsage || !dispatched || (!started && !aborted && status !== undefined && status >= 400);
           // Let Pi publish message_end first; settlement waits for this accounting frame.
           setImmediate(() => endRequest(record, turn, id, requestStatus, complete, message.usage));
