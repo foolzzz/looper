@@ -371,7 +371,8 @@ def _install_listed(view: Mapping[str, Any]) -> dict[str, Any]:
 
 def _item_listed(view: Mapping[str, Any]) -> dict[str, Any]:
     return {"item_id": view["item_id"], "kind": view["kind"], "name": view["qualified_name"],
-            "description": clip(view["description"] or "", 160) or None, "project": view["owner_project_name"]}
+            "description": clip(view["description"] or "", 160) or None, "project": view["owner_project_name"],
+            "manager_install_count": view["manager_install_count"]}
 
 
 async def _catalog(call: Call) -> dict[str, Any]:
