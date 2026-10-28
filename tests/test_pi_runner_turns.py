@@ -1,6 +1,7 @@
 """Installed Pi sessions exercise the real Responses client and host accounting."""
 import asyncio
 import json
+import socket
 from types import SimpleNamespace
 
 import pytest
@@ -171,7 +172,7 @@ def test_close_right_after_prompt_settles_once(tmp_path, control):
     run(exercise())
 
 
-def test_cancel_does_not_wait_for_authorization(tmp_path, monkeypatch):
+def test_cancel_ack_does_not_wait_for_authorization(tmp_path, monkeypatch):
     from looper.agents.runtimes.runner.turn import RunnerTurn
 
     async def exercise():
@@ -190,7 +191,8 @@ def test_cancel_does_not_wait_for_authorization(tmp_path, monkeypatch):
             try:
                 _, events = await begin(lease.bridge, sid, "held")
                 await entered.wait()
-                await lease.bridge.cancel_turn(sid, "held")
+                await asyncio.wait_for(lease.bridge.cancel_turn(sid, "held"), 1)
+                release.set()
                 summary = await asyncio.wait_for(lease.bridge.wait_settled(sid, "held"), 1)
                 assert summary.outcome == "cancelled" and summary.usage_complete
                 assert events[-1]["num_turns"] == 0 and not api.requests
@@ -198,6 +200,87 @@ def test_cancel_does_not_wait_for_authorization(tmp_path, monkeypatch):
                 release.set()
             # Processing the late denial must preserve the connection.
             assert (await lease.bridge.health())["running"] == 0
+            await lease.release()
+    run(exercise())
+
+
+@pytest.mark.parametrize("allow,delay", [(True, 0.1), (False, 0.1), (True, 4.2)],
+    ids=["allow-after-abort", "deny-after-abort", "allow-after-cancel-deadline"])
+def test_cancel_accounts_for_late_authorization_before_settled(tmp_path, allow, delay):
+    async def exercise():
+        _, pi = require_pi()
+        async with FakeModelAPI([], api_key=KEY) as api, raw_runner(tmp_path, pi) as (_, send, receive):
+            root = next(tmp_path.glob("pi-runner-*"))
+            directory = root / "sessions/key"
+            for name in ("agent", "native", "home"):
+                (directory / name).mkdir(parents=True)
+            lease = SimpleNamespace(session_key="key", directory=directory, home=directory / "home", state_dir=directory / "native")
+            await send("initialize", OFFER)
+            await receive()
+            await send("session/new", session_params(lease, base_url=api.base_url, key=KEY), id="l-2")
+            sid = (await receive())["result"]["session_id"]
+            await send("session/prompt", {"session_id": sid, "trace_id": "late", "text": "hi", "tools": []}, id="l-3")
+            assert (await receive())["result"]["accepted"]
+            authorization = await receive()
+            assert authorization["method"] == "budget/authorize"
+            await send("session/cancel", {"session_id": sid, "trace_id": "late"}, id="l-4")
+            assert (await receive())["id"] == "l-4"
+            # Let cancellation reach the SDK before the host releases its reply.
+            await asyncio.sleep(delay)
+            await send({"jsonrpc": "2.0", "id": authorization["id"], "result": {
+                "session_id": sid, "trace_id": "late", "allow": allow, **({} if allow else {"reason": "stopped"})}})
+            updates = []
+            while True:
+                frame = await receive()
+                updates.append(frame["params"])
+                if updates[-1]["kind"] == "settled":
+                    break
+            ended = [p for p in updates if p["kind"] == "request_end"]
+            assert len(ended) == int(allow)
+            if allow:
+                assert ended[0]["request_id"] == authorization["params"]["request_id"]
+                assert ended[0]["status"] == "aborted" and ended[0]["complete"]
+                assert all(ended[0][field] == 0 for field in ("input_uncached", "output", "cache_read", "cache_write"))
+            assert updates[-1]["outcome"] == "cancelled" and updates[-1]["usage_complete"]
+            assert updates[-1]["requests"] == int(allow)
+            # A barrier also catches duplicate or late accounting after settled.
+            await send("runner/health", {}, id="l-5")
+            health = await receive()
+            assert health["id"] == "l-5"
+            assert health["result"]["running"] == health["result"]["inflight_requests"] == 0
+            assert not api.requests
+    run(exercise())
+
+
+@pytest.mark.parametrize("disconnect", [True, False], ids=["body-sent", "connection-refused"])
+def test_transport_failure_accounts_for_every_attempt(tmp_path, monkeypatch, disconnect):
+    from looper.agents.runtimes.runner.turn import RunnerTurn
+
+    async def exercise():
+        ended, original = [], RunnerTurn.request_end
+
+        async def request_end(self, params):
+            ended.append(dict(params))
+            return await original(self, params)
+
+        monkeypatch.setattr(RunnerTurn, "request_end", request_end)
+        scripts = [ResponseScript(disconnect_before_headers=True) for _ in range(4)]
+        async with FakeModelAPI(scripts, api_key=KEY) as api, pi_supervisor(tmp_path) as supervisor:
+            # Close an ephemeral socket so connect fails before any HTTP bytes are sent.
+            with socket.socket() as refused:
+                refused.bind(("127.0.0.1", 0))
+                base_url = api.base_url if disconnect else f"http://127.0.0.1:{refused.getsockname()[1]}/v1"
+            lease = await supervisor.acquire("pi")
+            sid = await lease.open_session(session_params(lease, base_url=base_url, key=KEY))
+            await begin(lease.bridge, sid, "transport")
+            summary = await lease.bridge.wait_settled(sid, "transport")
+            assert summary.outcome == "failed"
+            assert len(ended) == 4 and len({p["request_id"] for p in ended}) == 4
+            assert all(p["complete"] is (not disconnect) for p in ended)
+            assert all(p[field] == 0 for p in ended for field in ("input_uncached", "output", "cache_read", "cache_write"))
+            assert summary.usage_complete is (not disconnect)
+            assert summary.usage.cost_usd is None if disconnect else summary.usage.cost_usd == 0
+            assert len(api.requests) == (4 if disconnect else 0)
             await lease.release()
     run(exercise())
 

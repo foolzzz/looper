@@ -28,19 +28,29 @@ export async function authorizingStream(record: Session, model: any, context: an
   const id = `q-${++counter}`;
   const kind = turn.compacting ? 'compaction' : turn.retryPending ? 'retry' : 'turn';
   turn.retryPending = false;
-  const authorization = await request('budget/authorize', { session_id: record.id, trace_id: turn.trace,
+  // Authorization cannot be abandoned on abort: the host may already have reserved budget.
+  const pending = request('budget/authorize', { session_id: record.id, trace_id: turn.trace,
     request_id: id, kind, estimated_input_tokens: Math.ceil(JSON.stringify(context).length / 4),
     max_output_tokens: options.maxTokens ?? model.maxTokens ?? 32000,
-    provider: record.accountId, model: record.model }, { signal: options.signal }) as { allow: boolean; reason?: string };
+    provider: record.accountId, model: record.model });
+  (turn.authorizations ??= new Map()).set(id, pending);
+  let authorization: { allow: boolean; reason?: string };
+  try { authorization = await pending as typeof authorization; }
+  finally { turn.authorizations.delete(id); }
   if (!authorization.allow) {
+    if (turn.cancel || options.signal?.aborted) throw new Error('request aborted');
     turn.denial = authorization.reason ?? 'budget_unverifiable';
     void record.agent.abort();
     throw new Error(`Looper denied this model request (${turn.denial})`);
   }
   turn.inflight.add(id);
   (turn.requestKinds ??= new Map()).set(id, kind);
+  if (turn.cancel || turn.settling || options.signal?.aborted) {
+    endRequest(record, turn, id, 'aborted', true);
+    throw new Error('request aborted');
+  }
   const output = sdk!.ai.createAssistantMessageEventStream();
-  let started = false, hasUsage = false, status: number | undefined;
+  let started = false, dispatched = false, hasUsage = false, status: number | undefined;
   turn.httpStatus = undefined;
   turn.transport = false;
   // onResponse only runs for successful responses in Pi 1.3, so capture HTTP errors in fetch as well.
@@ -62,11 +72,20 @@ export async function authorizingStream(record: Session, model: any, context: an
     fetch: async (...args: Parameters<typeof globalThis.fetch>) => {
       if (turn.cancel || turn.settled || turn.settling || options.signal?.aborted) throw new Error('request aborted');
       turn.transport = true;
-      const responsePromise = fetch(...args);
-      steersSent(record, turn, context.messages);
-      const response = await responsePromise;
-      turn.httpStatus = status = response.status;
-      return response;
+      dispatched = true;
+      try {
+        const responsePromise = fetch(...args);
+        steersSent(record, turn, context.messages);
+        const response = await responsePromise;
+        turn.httpStatus = status = response.status;
+        return response;
+      } catch (error) {
+        // These connection failures establish that no HTTP request was sent. Other
+        // failures (including a socket closing before headers) leave usage unknown.
+        const code = (error as { cause?: { code?: string } })?.cause?.code;
+        if (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'EAI_AGAIN' || code === 'UND_ERR_CONNECT_TIMEOUT') dispatched = false;
+        throw error;
+      }
     },
     onResponse: async (response: any, responseModel: any) => {
       turn.httpStatus = status = response.status;
@@ -84,7 +103,8 @@ export async function authorizingStream(record: Session, model: any, context: an
           const aborted = options.signal?.aborted || message.stopReason === 'aborted' || turn.cancel;
           const requestStatus = event.type === 'done' ? 'completed'
             : aborted ? 'aborted' : status && status >= 400 ? `http_${status}` : 'error';
-          const complete = event.type === 'done' ? hasUsage : !started && !aborted;
+          const complete = event.type === 'done' ? hasUsage
+            : hasUsage || !dispatched || (!started && !aborted && status !== undefined && status >= 400);
           // Let Pi publish message_end first; settlement waits for this accounting frame.
           setImmediate(() => endRequest(record, turn, id, requestStatus, complete, message.usage));
           output.push(event);
@@ -97,7 +117,8 @@ export async function authorizingStream(record: Session, model: any, context: an
       throw new Error('provider stream ended without a terminal event');
     } catch (error) {
       const aborted = !!(options.signal?.aborted || turn.cancel);
-      setImmediate(() => endRequest(record, turn, id, aborted ? 'aborted' : status && status >= 400 ? `http_${status}` : 'error', !started && !aborted));
+      setImmediate(() => endRequest(record, turn, id, aborted ? 'aborted' : status && status >= 400 ? `http_${status}` : 'error',
+        !dispatched || (!started && !aborted && status !== undefined && status >= 400)));
       const message = { role: 'assistant', content: [], api: model.api, provider: model.provider, model: model.id,
         stopReason: aborted ? 'aborted' : 'error', errorMessage: scrub(error instanceof Error ? error.message : 'provider failed').slice(0, 512),
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,

@@ -15,6 +15,7 @@ class ResponseScript:
     error: dict[str, Any] | None = None
     headers: dict[str, str] | None = None
     disconnect_after: int | None = None
+    disconnect_before_headers: bool = False
     gate: asyncio.Event | None = None
     gate_reached: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     closed: asyncio.Event = field(default_factory=asyncio.Event, init=False)
@@ -77,6 +78,9 @@ class FakeModelAPI:
             script = self.scripts[index]
             if headers.get("authorization") != f"Bearer {self.api_key}":
                 self._errors.append("Fake model requires the synthetic test key")
+            if script.disconnect_before_headers:
+                writer.transport.abort()
+                return
             response_headers = {"Connection": "close", **(script.headers or {})}
             if script.status != 200:
                 payload = json.dumps(script.error or {"error": {"message": "scripted error"}}).encode()
