@@ -1911,6 +1911,7 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
 );
 -- S2: what the gate printed (clipped), and the earlier run whose unfinished input this run was given.
 ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS gate_output TEXT;
+ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS execution_snapshot JSONB;
 ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS carried_from TEXT REFERENCES schedule_runs(id) ON DELETE SET NULL;
 -- Once: a schedule's run timeout is typed. 'inherit' follows the system default (system_settings
 -- scheduler.run_timeout_seconds), 'seconds' is run_timeout_seconds, 'none' no limit. Schedules from before keep

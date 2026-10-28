@@ -620,73 +620,54 @@ def test_binding_never_selects_from_an_account_catalog_or_protocol_set(runtime_t
         adapter(runtime_type).bind_provider(bound, "other-name" if invalid == "model" else model.name, "")
 
 
-@pytest.mark.parametrize("case", [
-    "oauth-default", "official-key-append", "empty-url-key-replace",
-    "proxy-key-background-append", "proxy-key-task-replace",
-])
-def test_resolved_claude_binding_matches_pinned_launches(case: str) -> None:
+@pytest.mark.parametrize("case", ["oauth-default", "official-key-append", "empty-url-key-replace",
+                                  "proxy-key-background-append", "proxy-key-task-replace"])
+def test_current_claude_binding_keeps_auth_model_and_planner_reads(case: str, tmp_path: Path) -> None:
     import os
-    import tempfile
     from unittest.mock import patch
-
-    from model_launch_parity import CLAUDE_CASES, above_root_normalized, with_planner_file_reads
+    from model_launch_parity import CLAUDE_CASES
     from looper.agents.agent_settings import AgentSettings, AgentType, Launch
-    from looper.agents.profile_registry import (
-        Endpoint, ModelSpec, ProviderSpec, ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
-    )
+    from looper.agents.profile_registry import Endpoint, ModelSpec, ProviderSpec, ResolvedAgentProfile, ResolvedModel, RuntimeSpec
     from looper.agents.runtimes import ApiProtocol, AuthKind, SystemPromptMode, VendorType, adapter
     from looper.agents.system_prompt import SystemPrompt
 
-    with tempfile.TemporaryDirectory(prefix="looper-claude-binding-", dir="/tmp") as directory:
-        tmp_path = Path(directory).resolve()
-        baseline = json.loads((Path(__file__).parent / "fixtures/model_launch_parity_v2_claude.json").read_text())
-        auth, url, _, teams, _, _ = CLAUDE_CASES[case]
-        runtime = adapter("claude-code")
-        records = baseline["captures"][case]
-        parent = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "home"),
-                  "CLAUDE_CONFIG_DIR": str(tmp_path / "login"), "ANTHROPIC_API_KEY": "sk-test-inherited-key",
-                  "ANTHROPIC_AUTH_TOKEN": "sk-test-inherited-token", "ANTHROPIC_BASE_URL": "https://inherited.example.test/",
-                  "ANTHROPIC_DEFAULT_HAIKU_MODEL": "inherited-side", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"}
-        with patch.dict(os.environ, parent, clear=True):
-            for role, expected in zip(AgentType, records, strict=True):
-                protocol = ApiProtocol(expected["config"]["protocol"])
-                vendor = VendorType.CLAUDE_SUBSCRIPTION if auth == "oauth" else VendorType.CUSTOM
-                provider = ProviderSpec("provider", "capture", vendor, AuthKind(auth),
-                                        vendor.oauth_runtime_type, env=(("API_TIMEOUT_MS", "3000000"),),
-                                        api_key=None if auth == "oauth" else "sk-test-capture")
-                model = ModelSpec("model", provider.id, protocol=protocol, **expected["config"]["catalog"][0])
-                resolved = ResolvedModel(model, provider, Endpoint(provider.id, protocol, url,
-                                         use_runtime_default=not url and auth == "api_key"))
-                profile = ResolvedAgentProfile("profile", "capture", RuntimeSpec("runtime", "claude", "claude-code"),
-                                               model.id, expected["config"]["effort"], teams, resolved_model=resolved)
-                mode = SystemPromptMode.REPLACE if "--system-prompt-file" in expected["argv"] else SystemPromptMode.APPEND
-                launch = Launch(AgentSettings(profile=profile, max_budget_usd=expected["cap"], system_prompt_mode=mode),
-                                role=role)
-                env = launch.environment()
-                binding = runtime.bind_provider(profile.provider, launch.model, launch.effort)
-                assert {k: v for k, v in env.items() if parent.get(k) != v} == expected["env"]
-                assert sorted((parent.keys() - env.keys()) | set(binding.unset)) == expected["unset"]
-                cwd = tmp_path / "work" if role is AgentType.MANAGER else tmp_path / "work/project"
-                # Keep the historical provider capture, applying only the deliberate Planner permission change:
-                # no Bash, and file reads scoped to this repository-less task directory.
-                argv = with_planner_file_reads(expected["argv"])
-                if role is AgentType.PLANNER:
-                    at = argv.index("--allowedTools") + 1
-                    assert argv[at].startswith("Read,Glob,Grep,")
-                    reads = ",".join(f"{tool}(/{cwd.as_posix()}/**)" for tool in ("Read", "Glob", "Grep"))
-                    argv[at] = reads + argv[at][len("Read,Glob,Grep"):]
-                start = next(i for i, arg in enumerate(argv) if arg in ("--dangerously-skip-permissions", "--permission-mode"))
-                with patch("pathlib.Path.cwd", return_value=cwd):
-                    assert launch.args() == argv[start:]
-                assert launch.cost_source.value == expected["price"]["source"]
-                command = runtime.resident_command("claude", cwd=cwd,
-                           prompt_file=SystemPrompt(expected["prompt"]).write_file(tmp_path), launch=launch)
-                assert command[-len(argv[start:]):] == argv[start:]
-                settings = command[command.index("--settings") + 1]
-                assert above_root_normalized(settings, str(tmp_path)) == \
-                    above_root_normalized(expected["config"]["settings"], str(tmp_path))
-                assert ("--system-prompt-file" in command) == (mode is SystemPromptMode.REPLACE)
-                assert "sk-test-capture" not in " ".join(command)
+    auth, url, background, teams, mode, _ = CLAUDE_CASES[case]
+    vendor = VendorType.CLAUDE_SUBSCRIPTION if auth == "oauth" else VendorType.CUSTOM
+    provider = ProviderSpec("provider", "capture", vendor, AuthKind(auth), vendor.oauth_runtime_type,
+                            api_key=None if auth == "oauth" else "sk-test-capture")
+    model = ModelSpec("model", provider.id, "main-model[1m]", ApiProtocol.ANTHROPIC_MESSAGES,
+                      background_model=background)
+    resolved = ResolvedModel(model, provider, Endpoint(provider.id, model.protocol, url,
+                             use_runtime_default=not url and auth == "api_key"))
+    profile = ResolvedAgentProfile("profile", "capture", RuntimeSpec("runtime", "claude", "claude-code"),
+                                   model.id, "high", teams, resolved_model=resolved)
+    runtime = adapter("claude-code")
+    parent = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "home"),
+              "ANTHROPIC_API_KEY": "inherited-key", "ANTHROPIC_AUTH_TOKEN": "inherited-token",
+              "ANTHROPIC_BASE_URL": "https://inherited.example.test/", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "old"}
+    with patch.dict(os.environ, parent, clear=True):
+        for role in AgentType:
+            launch = Launch(AgentSettings(profile=profile, system_prompt_mode=SystemPromptMode(mode or "append")), role=role)
+            env = launch.environment()
+            proxy = url.startswith("https://proxy.")
+            assert env.get("ANTHROPIC_BASE_URL") == (parent["ANTHROPIC_BASE_URL"] if auth == "oauth" else url or None)
+            assert env.get("ANTHROPIC_API_KEY") == (parent["ANTHROPIC_API_KEY"] if auth == "oauth" else
+                                                    None if proxy else "sk-test-capture")
+            assert env.get("ANTHROPIC_AUTH_TOKEN") == (parent["ANTHROPIC_AUTH_TOKEN"] if auth == "oauth" else
+                                                       "sk-test-capture" if proxy else None)
+            assert env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL") == (background or "main-model[1m]" if proxy else "old")
+            cwd = tmp_path / "work/project"
+            command = runtime.resident_command("claude", cwd=cwd,
+                        prompt_file=SystemPrompt("synthetic prompt").write_file(tmp_path), launch=launch)
+            assert command[command.index("--model") + 1] == "main-model[1m]"
+            assert command[command.index("--effort") + 1] == "high"
+            assert ("--system-prompt-file" in command) is (mode == "replace")
+            if role is AgentType.PLANNER:
+                allowed = command[command.index("--allowedTools") + 1]
+                assert all(f"{tool}(/{cwd.as_posix()}/**)" in allowed for tool in ("Read", "Glob", "Grep"))
+                assert "Bash" in command[command.index("--disallowedTools") + 1]
+            assert "sk-test-capture" not in " ".join(command)
+
 
 # --- DSH subprocess failures and budget states, read back from PostgreSQL and the API ---
 

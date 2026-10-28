@@ -48,6 +48,11 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
             assert after["task_user_gate_posts"][0] == {**before["task_user_gate_posts"][0], "channel": "telegram"}
             assert {r["name"] for r in before["schema_migrations"]} <= {r["name"] for r in after["schema_migrations"]}
             assert await conn.fetchval("SELECT planner_session_runtime FROM schedules") == "claude-code"
+            # The bridge predates execution snapshots; adding the column preserves every historical run field.
+            runs = [dict(row) for row in after["schedule_runs"]]
+            assert len(runs) == 1
+            assert all(row.pop("execution_snapshot") is None for row in runs)
+            assert runs == before["schedule_runs"]
             await connection.ensure_schema(fresh)
             assert await structure(conn) == await structure(fresh)
             await connection.ensure_schema(conn)

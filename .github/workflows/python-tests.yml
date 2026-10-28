@@ -16,10 +16,14 @@ concurrency:
 
 jobs:
   agent-system:
-    name: Agent system tests
+    name: Agent system tests (shard ${{ matrix.shard }}/4)
     # Keep the runner's PostgreSQL 16 client package available alongside the service.
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     services:
       postgres:
         image: postgres:16
@@ -34,6 +38,7 @@ jobs:
           --health-retries 10
     env:
       LOOPER_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      LOOPER_TEST_SHARD: ${{ matrix.shard }}/4
     steps:
       - uses: actions/checkout@v7
         with:
@@ -64,6 +69,19 @@ jobs:
 
       - name: Run the tests
         run: uv run --extra test python -m pytest -q -n auto -rs --durations=25 -m "not installed and not provenance"
+
+  agent-system-result:
+    name: Agent system tests
+    needs: agent-system
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every shard to succeed
+        env:
+          SHARDS_RESULT: ${{ needs.agent-system.result }}
+        run: |
+          echo "Agent system shards: $SHARDS_RESULT"
+          test "$SHARDS_RESULT" = success
 
   dashboard:
     name: Dashboard tests

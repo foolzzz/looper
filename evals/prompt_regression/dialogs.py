@@ -30,8 +30,10 @@ changed (``task_cost``); a provider registered without the key the user pasted
 (``provider_key``). The schedules tool: a schedule listed, disabled, and
 deleted only on the user's word (``schedules``, on a schedule made first);
 one created disabled at once, enabled only after 「启用」 and then 「确认」
-(``schedule_create``) and left disabled when the user does not confirm
-(``schedule_enable_declined``), none created without a project
+(``schedule_create``); one created from the ``pr_review`` template with that
+template, its title and the PR link in the reply (``schedule_template_create``);
+one left disabled when the user does not confirm
+(``schedule_enable_declined``); none created without a project
 (``schedule_ask_project``), one changed at once but its spend cap raised only
 on the user's word (``schedule_modify``), one read without running it, then
 run now only after 「确认」 (``schedule_run``), the schedules' default run timeout
@@ -156,6 +158,7 @@ class Say:
     withdraw: bool = False
     # The text computed from the previous turn's Look (``text`` is then only a label).
     text_from: Callable[[Look], str] | None = None
+    code_only: bool = False  # Looper answers the step without calling the model (for example, /profile).
 
 
 @dataclass(frozen=True)
@@ -190,6 +193,23 @@ def _seed_review_manager(api: Api, project_id: str) -> None:
     api.post("/api/v1/manager_templates/put",
              {"manager_id": f"manager-{example['manager']['key']}", "key": "pr_review",
               **example["templates"]["pr_review"], "project_id": project_id})
+
+
+def _seed_schedule_template_manager(api: Api, project_id: str) -> None:
+    example = json.loads(REVIEW_EXAMPLE.read_text(encoding="utf-8"))
+    api.post("/api/v1/managers/create", {**example["manager"], "tools": "all"})
+    api.post("/api/v1/manager_templates/put", {"manager_id": "manager-code-review", "key": "pr_review",
+             **example["templates"]["pr_review"], "project_id": project_id})
+
+
+def _template_schedule_shown(look: Look) -> str | None:
+    problem = _schedule_created_disabled(look)
+    if problem:
+        return problem
+    for value in ("pr_review", "Pull request review", TEMPLATE_PR_URL):
+        if value not in look.reply:
+            return f"the schedule configuration omits {value}"
+    return None
 
 
 def _seed_manager_capabilities(api: Api, project_id: str) -> None:
@@ -1647,6 +1667,15 @@ DIALOGS: tuple[Dialog, ...] = (
         Say("启用。", _schedule_enable_asked, (("looper_schedules", {"action": "enable", "schedule": DEPS}),)),
         Say("确认。", _schedule_enabled_on_confirmation, (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
     )),
+    Dialog("schedule_template_create", (
+        Say(f"在 {PROJECT} 项目里建一个定时任务 {DEPS}：每个工作日早上 9 点（Asia/Shanghai 时区），"
+            "使用 pr_review 模板评审这个 PR：" + TEMPLATE_PR_URL + "。目录用项目默认的，先创建停用的定时任务。",
+            _template_schedule_shown, (("looper_schedules", {"action": "create", "project": PROJECT, "fields": {
+                "name": DEPS, "cron": "0 9 * * 1-5", "timezone": "Asia/Shanghai", "requirement": "Review the PR",
+                "template_key": "pr_review", "template_inputs": {"pr_url": TEMPLATE_PR_URL}}}),)),
+        Say("启用。", _schedule_enable_asked, (("looper_schedules", {"action": "enable", "schedule": DEPS}),)),
+        Say("确认。", _schedule_enabled_on_confirmation, (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
+    ), seed=_seed_schedule_template_manager, manager="code-review", tags=("manager", "schedules", "templates")),
     Dialog("scheduler_settings", (
         Say("所有定时任务默认的运行超时改成 30 分钟。", _default_timeout_change_asked,
             (("looper_settings", {"action": "scheduler", "scheduler": {"run_timeout_seconds": 1800}}),)),
@@ -1741,11 +1770,11 @@ DIALOGS: tuple[Dialog, ...] = (
              ("looper_config_export", {"include_projects": True}))),
     ), seed=lambda api, project_id: _make_schedule(api, project_id)),
     Dialog("session_profile_switch", (
-        Say("/profile", _profile_listed),
-        Say("/profile <number>", _switch_selected, text_from=_switch_text),
+        Say("/profile", _profile_listed, code_only=True),
+        Say("/profile <number>", _switch_selected, text_from=_switch_text, code_only=True),
         Say("记住暗号 TEAL-42。然后告诉我现在有几个项目。", _answered_on_the_switch_profile,
             (("looper_projects", {"action": "list"}),)),
-        Say("/profile 0", _follows_settings),
+        Say("/profile 0", _follows_settings, code_only=True),
         Say("刚才的暗号是什么？", _remembered_after_switching_back, (("looper_projects", {"action": "list"}),)),
     ), seed=_make_switch_profile),
     Dialog("session_profile_ask", (
@@ -2124,7 +2153,7 @@ def _root_overrun(api: Api, seen: dict[int, float]) -> float:
             return sum(seen.values())
 
 
-def _api_session_check(database_url: str, agent: str, since: int) -> str | None:
+def _api_session_check(database_url: str, agent: str, since: int, expected_turns: int) -> str | None:
     """Completed API Manager turns in its current session must have protocol metadata and neutral history."""
     import asyncpg
 
@@ -2151,6 +2180,9 @@ def _api_session_check(database_url: str, agent: str, since: int) -> str | None:
                 "LEFT JOIN api_sessions s USING (session_id) "
                 "LEFT JOIN api_session_items i ON i.session_id = s.session_id "
                 "GROUP BY t.turns, c.session_id, c.protocol, s.protocol, c.turns, c.has_items", agent, since)
+            completed_turns = int(rows[0]["completed_turns"]) if rows else 0
+            if completed_turns < expected_turns:
+                return f"expected at least {expected_turns} completed API Manager turns, read back {completed_turns}"
             for row in rows:
                 if not row["completed_turns"]:
                     continue
@@ -2181,6 +2213,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
     turns: list[dict[str, Any]] = []
     error: dict[str, Any] = {}
     problems: list[str] = []
+    expected_turns = 0
 
     overrun: dict[int, float] = {}
 
@@ -2245,6 +2278,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             else:
                 reply = _ask(api, session, text, timeout=timeout, stop=say.stop, withdraw=say.withdraw,
                              database_url=database_url, manager=dialog.manager, **budget_args)
+            if not (say.code_only or say.stop or say.withdraw):
+                expected_turns += 1
             previous = Look(api, task, reply, database_url, since, known, fake=mode == "fake",
                             runtime_root=runtime_root, registry_before=registry_before, runs_since=runs_since,
                             manager_id=agent if dialog.manager else None, conversation=conversation,
@@ -2261,7 +2296,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                 break
         check_budget()
         if api_manager:
-            problem = _api_session_check(database_url, agent, runs_since)
+            problem = _api_session_check(database_url, agent, runs_since, expected_turns)
             if problem:
                 problems.append(problem)
     except SpendingCap as exc:

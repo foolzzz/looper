@@ -18,6 +18,44 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.180] - 2026-10-27
+
+### Changed
+
+- **A configuration with retired fields is refused before an import touches the target.** `validate_document` refuses the whole file when `settings.layers[]` or a project's `layers[]` carries `model` or `effort`, or `providers[]` carries `protocols`, `base_url` or `models`; before, the retired entry was skipped. An API client (client policy) may now import a file it exported when its `managers` list holds only the unchanged default Manager: the entry is dropped from execution and nothing is written for it, while any other Manager change is still refused as FORBIDDEN. ([#790](https://github.com/foolzzz/looper/pull/790))
+- **The dialog eval readback fails without completed API turns.** The api Manager session check in `evals/prompt_regression/dialogs.py` counts the steps that need the model (not code-only steps such as `/profile`, stopped or withdrawn ones) and reports a failure when fewer completed API Manager turns are read back, instead of passing on an empty query. No product runtime change. ([#793](https://github.com/foolzzz/looper/pull/793))
+
+## [2.13.179] - 2026-10-27
+
+### Changed
+
+- **Managers can select a schedule template and read it back.** The `looper_schedules` tool accepts `template_key` and `template_inputs` (static string values) on create and update; the list, the configuration shown on creation, the enable/run confirmation and the before/after of a change now name the template and its inputs. A scoped Manager sees another owner's template selection blanked and is refused when it tries to change it, before anything is written. A new `schedule_template_create` dialog covers it, so the dialog selection grows from 47 to 48. ([#774](https://github.com/foolzzz/looper/pull/774))
+
+## [2.13.178] - 2026-10-27
+
+### Changed
+
+- **PR Python tests run in four CI shards.** The `Agent system tests` job is a four-shard matrix (`LOOPER_TEST_SHARD=N/4`, whole files assigned by weight in `tests/conftest.py`) behind one final job named `Agent system tests` that passes only when every shard passed; the job timeout drops from 20 to 15 minutes. No test is dropped and no production code changed. ([#786](https://github.com/foolzzz/looper/pull/786))
+- **Eval tooling accepts only current formats.** `register_agent` requires explicit provider `endpoints` and a top-level `model` and refuses the legacy `agent.model`, `provider.protocols`, `provider.base_url` and `provider.models`; `compare` and baseline lookup accept only `looper-prompt-eval/v2` (`looper-manager-dialogs/v2` for dialogs) reports and exit 2 otherwise. The committed real-Sonnet baseline is migrated to v2, launch parity checks the current four-tier contracts, and the historical pinned captures and the `launch-provenance.yml` workflow are removed. No product runtime or prompt change. ([#765](https://github.com/foolzzz/looper/pull/765))
+
+## [2.13.177] - 2026-10-27
+
+### Fixed
+
+- **Manager capability changes are visible; deleting an active Manager is refused.** When a changed skill set cannot be applied because the resident runtime is not idle, the turn carries the notice `能力变更待应用` and the change takes effect after `/new`. Catalog items report `manager_install_count`; the catalog card counts Manager-only installations as installed and its delete confirmation names them. Deleting a Manager that has active or admitted work, queued messages or a runtime that cannot prove it is idle now returns 409 instead of cancelling it; Manager tool executions are admitted under the retirement lock and refused while the Manager is retiring. No schema change. ([#773](https://github.com/foolzzz/looper/pull/773))
+
+## [2.13.176] - 2026-10-27
+
+### Fixed
+
+- **Interactive template tasks fall back; schedule imports check dependencies.** A task created from a template through `looper_task_create` uses the built-in profile when a role template's Agent Profile is off the project's list or fails the capability check, drops items that are no longer installed, and lists each fallback in the returned configuration block (`模板角色回退`). Schedules stay strict. Configuration import preview and apply now check a schedule's profiles, role templates and items against the import's final graph and skip a schedule that could not run; installs are processed before schedules. No schema change. ([#779](https://github.com/foolzzz/looper/pull/779))
+
+## [2.13.175] - 2026-10-27
+
+### Fixed
+
+- **Schedules: a claimed gate's output survives a rename or notification edit.** A schedule's execution fingerprint now covers only execution settings (not the name, notifications or the `enabled` flag, which is checked separately), a gate run's stdout is saved before the configuration check, and each gating run records its fingerprint in the new `schedule_runs.execution_snapshot` column (also in the run view). Carried input skips earlier runs whose snapshot differs from the current execution settings. No prompt or tool change. ([#777](https://github.com/foolzzz/looper/pull/777))
+
 ## [2.13.174] - 2026-10-27
 
 ### Changed

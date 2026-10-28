@@ -114,11 +114,13 @@ INSERT INTO chat_messages (session_id, message_id, role, content, channel) VALUE
  ('telegram-7', 'bridge-message', 'user', 'Synthetic public example', 'telegram');
 INSERT INTO schedules (id, project_id, name, cron, timezone, requirement, planner_session_id) VALUES
  ('schedule-bridge', 'proj-bridge', 'Bridge schedule', '0 0 * * *', 'UTC', 'Preserve', 'planner-bridge');
+INSERT INTO schedule_runs (id, schedule_id, scheduled_for, trigger, status, task_id, summary) VALUES
+ ('run-bridge', 'schedule-bridge', '2026-10-20T00:00:00Z', 'scheduled', 'completed', 'task-bridge', 'Keep the run');
 '''
 
 TABLES = ("projects", "tasks", "task_plans", "system_settings", "agent_setting_layers", "library_items",
           "library_files", "library_installs", "agent_sessions", "llm_records", "channel_configs",
-          "chat_messages", "schedules", "task_user_gate_messages", "task_user_gate_posts",
+          "chat_messages", "schedules", "schedule_runs", "task_user_gate_messages", "task_user_gate_posts",
           "llm_model_migration_map", "schema_migrations", "registry_schema_version", "schema_fingerprint")
 
 

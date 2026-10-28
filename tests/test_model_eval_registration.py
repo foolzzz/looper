@@ -7,7 +7,6 @@ import json
 import pytest
 
 from evals.prompt_regression import runner
-from looper.agents import registry_migration
 from looper.agents.profile_registry import ModelSpec
 from looper.agents.provider_presets import presets_view
 
@@ -18,7 +17,7 @@ class RegistryApi:
     def __init__(self):
         self.registry = {
             "runtimes": [{"runtime_id": f"rt-{name}", "name": name, "type": name, "builtin": True}
-                         for name in ("claude-code", "omp", "codex")],
+                         for name in ("claude-code", "omp", "codex", "pi")],
             "providers": [{"provider_id": "prov-claude-subscription", "name": "subscription",
                            "vendor_type": "claude-subscription", "auth": "oauth",
                            "oauth_runtime_type": "claude-code", "env": [],
@@ -140,59 +139,46 @@ def test_model_id_from_another_account_is_rejected(api):
     assert not api.posts
 
 
-def legacy_spec(runtime="omp", protocols=None):
-    return {"runtime": {"type": runtime},
-            "provider": {"name": "old account", "auth": "api_key", "api_key_env": "EVAL_TEST_KEY",
-                         "base_url": "https://example.invalid/v1",
-                         "protocols": protocols or ["anthropic-messages", "openai-chat", "openai-responses"],
-                         "models": [{"name": "Exact.Model", "context_window": 32000,
-                                     "input_usd_per_mtok": 1.5}]},
-            "agent": {"name": "old agent", "model": "Exact.Model", "effort": "high"}}
+@pytest.mark.parametrize("layer,field", [("spec", "model"), ("agent", "model"),
+    ("agent", "provider_id"), ("agent", "model_id"), ("provider", "protocols"),
+    ("provider", "base_url"), ("provider", "models")])
+def test_retired_eval_shapes_are_rejected_before_registration_writes(api, layer, field):
+    spec = explicit_spec()
+    if layer == "spec":
+        spec.pop(field)
+    else:
+        spec[layer][field] = "retired"
+    original = deepcopy(spec)
+    with pytest.raises(runner.EvalError, match="model layer|top-level model|provider.*endpoints"):
+        runner.register_agent(api, spec)
+    assert not api.posts and spec == original
 
 
-@pytest.mark.parametrize("runtime,protocol", [("omp", "openai-responses"),
-    ("codex", "openai-responses"), ("claude-code", "anthropic-messages")])
-def test_legacy_registration_uses_shared_converter_and_patched_protocol_priority(api, monkeypatch, runtime, protocol):
-    calls = []
-    original = registry_migration.convert
-
-    def convert(*args, **kwargs):
-        result = original(*args, **kwargs)
-        calls.append(result)
-        return result
-
-    monkeypatch.setattr(registry_migration, "convert", convert)
-    profile = runner.register_agent(api, legacy_spec(runtime))
-    assert len(calls) == 1
-    assert profile["model"]["protocol"] == protocol
-    models = api.post("/api/v1/registry/view", {})["result"]["models"]
-    assert {m["protocol"] for m in models} == {"anthropic-messages", "openai-chat", "openai-responses"}
-    assert all(m["context_window"] == 32000 and m["input_usd_per_mtok"] == 1.5 for m in models)
-    assert "model" not in api.posts[-1][1] and "provider_id" not in api.posts[-1][1]
-
-
-def test_incompatible_legacy_protocol_is_rejected_before_writes(api):
-    with pytest.raises(runner.EvalError, match="incompatible_protocol"):
-        runner.register_agent(api, legacy_spec("codex", ["openai-chat"]))
-    assert not api.posts
-
-
-def test_legacy_runtime_default_url_becomes_an_explicit_endpoint(api):
-    spec = legacy_spec("codex", ["openai-responses"])
-    spec["provider"]["base_url"] = ""
-    profile = runner.register_agent(api, spec)
-    assert profile["model"]["protocol"] == "openai-responses"
-    assert api.posts[0][1]["endpoints"] == [{"protocol": "openai-responses",
-                                           "base_url": "https://api.openai.com/v1"}]
-
-
-def test_legacy_spec_can_reference_saved_login_account(api):
+def test_current_spec_can_reference_saved_login_account(api):
     profile = runner.register_agent(api, {
         "runtime": {"type": "claude-code"}, "provider": {"provider_id": "prov-claude-subscription"},
-        "agent": {"name": "legacy login", "model": "sonnet", "effort": "high"}})
+        "model": {"name": "sonnet", "protocol": "anthropic-messages"},
+        "agent": {"name": "saved login", "effort": "high"}})
     assert profile["model"]["name"] == "sonnet"
     assert profile["model"]["protocol"] == "anthropic-messages"
     assert [path for path, _ in api.posts] == ["/api/v1/ops/models/create", "/api/v1/profiles/create"]
+
+
+@pytest.mark.parametrize("filename,protocol,model", [
+    ("omp-deepseek.example.json", "openai-chat", "deepseek-flash"),
+    ("pi-cpa.example.json", "openai-responses", "gpt-6.1-sol"),
+    ("pi-deepseek.example.json", "openai-chat", "deepseek-flash")])
+def test_current_examples_register_and_read_back(api, monkeypatch, filename, protocol, model):
+    monkeypatch.setenv("LOOPER_EVAL_API_KEY", "synthetic-example-secret")
+    spec = json.loads((runner.REPO_ROOT / "evals/agents" / filename).read_text())
+    registered = runner.register_agent(api, spec)
+    saved = api.post("/api/v1/registry/view", {})["result"]
+    assert saved["profiles"] == [registered]
+    assert saved["providers"][-1]["vendor_type"] == "custom"
+    assert saved["providers"][-1]["endpoints"] == spec["provider"]["endpoints"]
+    assert registered["model"]["name"] == model
+    assert registered["model"]["protocol"] == protocol
+    assert "synthetic-example-secret" not in json.dumps(saved)
 
 
 def test_missing_key_fails_without_writing_or_mutating_spec(api, monkeypatch):

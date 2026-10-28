@@ -2,15 +2,13 @@
   "runtime": {"type": "dsh"},
   "provider": {
     "name": "dsh-validation",
-    "auth": "api_key",
-    "protocols": ["anthropic-messages"],
-    "base_url": "https://api.deepseek.com/anthropic",
-    "api_key_env": "LOOPER_EVAL_API_KEY",
-    "models": [{"name": "deepseek-flash"}]
+    "vendor_type": "custom",
+    "endpoints": [{"protocol": "anthropic-messages", "base_url": "https://api.deepseek.com/anthropic"}],
+    "api_key_env": "LOOPER_EVAL_API_KEY"
   },
+  "model": {"name": "deepseek-flash", "protocol": "anthropic-messages"},
   "agent": {
     "name": "dsh-validation/deepseek-flash",
-    "model": "deepseek-flash",
     "effort": "high"
   }
 }

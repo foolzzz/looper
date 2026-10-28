@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -453,7 +454,7 @@ def _concurrency_chat(tmp: Path, **parts: Any) -> _Chat:
     chat = _Chat(tmp, **parts)
     chat.router = _Rechecks(has_planner=lambda task_id: False)
     chat.workers = _Rechecks()
-    chat.ops._platform = SimpleNamespace(bus=chat.bus, task_router=chat.router, worker_pool=chat.workers)
+    chat.ops._platform = replace(chat.ops.platform, task_router=chat.router, worker_pool=chat.workers)
     return chat
 
 
@@ -493,8 +494,7 @@ def test_a_tasks_limit_changes_at_once_and_reads_back(monkeypatch: pytest.Monkey
         chat.router.running_planners = lambda: [{"planner_id": "planner-task-a", "task_id": "task-a",
                                                  "project_id": project["id"], "requirement": "r", "name": "a"}]
         chat.workers.runs = lambda: []
-        chat.ops._platform.manager = None
-        chat.ops._platform.supervisor = SimpleNamespace(agent_status=lambda: {})
+        chat.ops._platform = replace(chat.ops.platform, supervisor=SimpleNamespace(agent_status=lambda: {}))
         (overview,) = await chat.say("现在怎么样", ("looper_overview", {}))
         assert overview["result"]["running_tasks"] == [
             {"task_id": "task-a", "name": "a", "project": "calc", "concurrency": {"reviewer": 5, "worker": 1}}]
