@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.191] - 2026-10-28
+
+### Added
+
+- **Pi runner sessions get isolated builtin tools and can be resumed (not yet reachable).** `runners/pi` now builds `read`, `grep`, `find`, `ls`, `edit`, `write` and `bash` for a session: file tools refuse paths outside `cwd` and `add_dirs` (including `..`, `~` and symlinks), `bash` runs with the session `env` and a private `HOME`, and read-only sessions refuse `bash`, `edit` and `write`. `session/new` validates `home`, `add_dirs`, `env` and `tools.read_only`; the new `session/load` resumes a session from its state directory (`-32001` not found, `-32002` already owned); budget and usage reports mark retry and compaction requests; `runner/health` reports running bash commands. Nothing registers the runner with the service yet. ([#824](https://github.com/foolzzz/looper/pull/824))
+
 ## [2.13.190] - 2026-10-28
 
 ### Added
