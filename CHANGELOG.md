@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.196] - 2026-10-28
+
+### Added
+
+- **Pi runner opens Worker, Reviewer and forked sessions.** The Pi runner accepts the `worker` and `reviewer` roles, requires `limits.tool_timeout_s` (positive integer) and `limits.max_requests_per_turn` (non-negative integer), and handles `session/new` with `fork_from` through `SessionManager.forkFrom` (the saved session must match exactly one file; the source is not written; `session/load` with `fork_from` is refused). `initialize` reports the `fork` capability and the SDK gate requires `SessionManager.forkFrom`. The opt-in runner path only; no host path starts these sessions yet. ([#835](https://github.com/foolzzz/looper/pull/835))
+
 ## [2.13.195] - 2026-10-28
 
 ### Added
