@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.194] - 2026-10-28
+
+### Fixed
+
+- **Pi runner `bash` now obeys the host tool timeout.** The runner applies `limits.tool_timeout_s` (120 seconds) when the model gives no timeout or a non-positive one, and caps a larger model timeout at it; on expiry the command's process group ends and the model gets `Command timed out after N seconds` with the output so far. Only affects the opt-in `pi = "runner"` path. ([#831](https://github.com/foolzzz/looper/pull/831))
+
 ## [2.13.193] - 2026-10-28
 
 ### Added
