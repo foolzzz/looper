@@ -144,7 +144,7 @@ def test_preview_without_channel_schema_still_requires_lark_identity(
 
 
 @pytest.mark.parametrize("command", ["export", "import"])
-def test_export_and_preview_read_channels_before_the_manager_migration(
+def test_export_and_preview_read_current_channels_without_mutation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: str,
 ) -> None:
     # The retired offline CLI is gone; exercise the shared implementation through v1 without running migrations.
@@ -152,7 +152,6 @@ def test_export_and_preview_read_channels_before_the_manager_migration(
         from looper.agents.serve import seed_channel_configs
 
         await seed_channel_configs(pool)
-        await pool.execute("ALTER TABLE channel_configs DROP COLUMN manager_id CASCADE")
         await pool.execute("UPDATE channel_configs SET display_name = 'Saved Telegram' "
                            "WHERE channel_id = 'channel-telegram'")
         before, rows = await _dump(pool), await _rows(pool)

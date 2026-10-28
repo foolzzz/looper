@@ -1,14 +1,4 @@
-"""``looper serve`` backs the database up with pg_dump before it changes the schema.
-
-The serve cases run the real ``looper serve`` (``python -m looper.cli serve``)
-with PATH holding only a stand-in ``pg_dump`` (and ``pg_restore``), against a
-database created beside LOOPER_TEST_DATABASE_URL. The stand-in writes a
-custom-format header followed by what it read from the database: whether the
-column that a migration in schema.sql drops was still there.
-
-A database "about to change" is one set up by ``ensure_schema`` whose recorded
-fingerprint is then replaced, with that dropped column added back.
-"""
+"""Verified backups precede genuine bridge upgrades and restore independently."""
 
 from __future__ import annotations
 
@@ -16,11 +6,13 @@ import asyncio
 import json
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import time
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -28,6 +20,7 @@ from evals.prompt_regression.runner import fresh_database, free_port
 from looper import ops_config
 from looper.agents import db_backup, operator_auth
 from tests.db_support import DSN
+from tests.bridge_schema_support import bridge_source as bridge_source, initialize_bridge, witness, run_bridge
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 needs_database = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -49,14 +42,17 @@ if @MODE@ == "offline":
     sys.stdout.buffer.write(b"PGDMP offline")
     sys.exit(0)
 import asyncpg
-async def dropped_column():
+async def bridge_state():
     conn = await asyncpg.connect(args[-1].split("=", 1)[1], password=os.environ.get("PGPASSWORD"))
     try:
-        return await conn.fetchval("SELECT count(*) FROM information_schema.columns "
-                                   "WHERE table_name = 'role_configs' AND column_name = 'permission_mode'")
+        return {"version": await conn.fetchval("SELECT version FROM registry_schema_version"),
+                "config_type": await conn.fetchval("SELECT jsonb_typeof(config) FROM tasks WHERE id='task-bridge'"),
+                "old_key": await conn.fetchval("SELECT EXISTS (SELECT 1 FROM pg_constraint "
+                    "WHERE conrelid = 'task_user_gate_posts'::regclass AND contype = 'u' "
+                    "AND pg_get_constraintdef(oid) = 'UNIQUE (channel, chat, external_id)')")}
     finally:
         await conn.close()
-sys.stdout.buffer.write(b"PGDMP" + json.dumps({"permission_mode": asyncio.run(dropped_column())}).encode())
+sys.stdout.buffer.write(b"PGDMP" + json.dumps(asyncio.run(bridge_state())).encode())
 '''
 
 _PG_RESTORE = r'''#!/bin/sh
@@ -154,34 +150,41 @@ def _db(url: str, *statements: str) -> None:
     asyncio.run(run())
 
 
-_OLD_SCHEMA = ("UPDATE schema_fingerprint SET sha256 = 'an older schema.sql'",
-               "ALTER TABLE role_configs ADD COLUMN permission_mode TEXT")
-
-
-def _state(url: str) -> dict[str, object]:
-    """Whether the dropped column is there, and whether the fingerprint is the current schema.sql's."""
-    async def read() -> dict[str, object]:
+def _bridge(url: str, source: Path) -> dict:
+    async def prepare():
         import asyncpg
-
-        from looper.db.connection import SCHEMA_PATH, schema_fingerprint
-
         conn = await asyncpg.connect(url)
         try:
+            await initialize_bridge(conn, source, url=url)
+            return await witness(conn)
+        finally:
+            await conn.close()
+    return asyncio.run(prepare())
+
+
+def _state(url: str, *, rows: bool = False) -> dict[str, object]:
+    async def read() -> dict[str, object]:
+        import asyncpg
+        from looper.db.connection import SCHEMA_PATH, schema_fingerprint
+        conn = await asyncpg.connect(url)
+        try:
+            if rows:
+                return await witness(conn)
             return {
-                "permission_mode": await conn.fetchval(
-                    "SELECT count(*) FROM information_schema.columns "
-                    "WHERE table_name = 'role_configs' AND column_name = 'permission_mode'"),
+                "version": await conn.fetchval("SELECT version FROM registry_schema_version"),
+                "old_key": await conn.fetchval("SELECT EXISTS (SELECT 1 FROM pg_constraint "
+                    "WHERE conrelid = 'task_user_gate_posts'::regclass AND contype = 'u' "
+                    "AND pg_get_constraintdef(oid) = 'UNIQUE (channel, chat, external_id)')"),
                 "current": await conn.fetchval("SELECT sha256 FROM schema_fingerprint")
                 == schema_fingerprint(SCHEMA_PATH.read_text(encoding="utf-8")),
             }
         finally:
             await conn.close()
-
     return asyncio.run(read())
 
 
-MIGRATED = {"permission_mode": 0, "current": True}
-UNTOUCHED = {"permission_mode": 1, "current": False}
+MIGRATED = {"version": 4, "old_key": False, "current": True}
+UNTOUCHED = {"version": 3, "old_key": True, "current": False}
 
 
 def _backups(tmp_path: Path) -> list[Path]:
@@ -190,24 +193,45 @@ def _backups(tmp_path: Path) -> list[Path]:
 
 
 @needs_database
-def test_a_schema_change_is_backed_up_before_it_is_applied(tmp_path: Path) -> None:
+def test_a_schema_change_is_backed_up_before_it_is_applied(tmp_path: Path, bridge_source: Path) -> None:
     _install(tmp_path / "bin")
 
     with fresh_database(str(DSN)) as (url, _):
-        _db(url, *_OLD_SCHEMA)
+        _bridge(url, bridge_source)
         code, log = _serve(tmp_path, url)
         state = _state(url)
 
     assert code is None, log
     [backup] = _backups(tmp_path)
-    # The dump was taken while the column the migration drops was still there.
-    assert backup.read_bytes() == b"PGDMP" + json.dumps({"permission_mode": 1}).encode()
+    assert backup.read_bytes() == b"PGDMP" + json.dumps({"version": 3, "config_type": "string", "old_key": True}).encode()
     assert backup.stat().st_mode & 0o777 == 0o600
     assert state == MIGRATED
     listed = (tmp_path / "restore-calls").read_text().split()  # before it took its final name
     assert listed[0] == "--list" and listed[1].startswith(str(backup))
+    assert "version=3 target_version=4 phase=backup" in log
+    assert "phase=backup_verified" in log
     assert f"pg_restore --no-owner --dbname '<isolated-database-url>' '{backup}'" in log
     assert "preserving the migrated database and new writes" in log
+
+
+@needs_database
+def test_a_real_bridge_dump_restores_all_rows_for_the_bridge_binary(tmp_path, bridge_source):
+    dump, restore = shutil.which("pg_dump"), shutil.which("pg_restore")
+    if not dump or not restore:
+        pytest.skip("actual pg_dump and pg_restore are required")
+    with fresh_database(str(DSN)) as (url, _), fresh_database(str(DSN)) as (restored, _):
+        before = _bridge(url, bridge_source)
+        archive, _ = db_backup.back_up(db_backup.Dumper((dump,), False, "test"),
+                                       url, tmp_path / "backups")
+        _db(url)
+        assert _state(url) == MIGRATED
+        bare, password, _, _ = db_backup._connection(restored)
+        subprocess.run([restore, "--exit-on-error", "--no-owner", "--dbname", bare, str(archive)],
+                       env={**os.environ, **({"PGPASSWORD": password} if password else {})},
+                       capture_output=True, check=True, timeout=45)
+        assert _state(restored, rows=True) == before
+        asyncio.run(run_bridge(bridge_source, restored))
+        assert _state(restored)["version"] == 3
 
 
 @needs_database
@@ -230,13 +254,14 @@ def test_no_backup_without_a_schema_change(tmp_path: Path, old: bool) -> None:
     [(None, "`pg_dump` is not on PATH"), ("9.6.24", "pg_dump (PostgreSQL) 9.6.24")],
     ids=["missing", "older-than-the-server"],
 )
-def test_without_a_usable_pg_dump_serve_refuses(tmp_path: Path, version: str | None, reason: str) -> None:
+def test_without_a_usable_pg_dump_serve_refuses(tmp_path: Path, bridge_source: Path, version: str | None, reason: str) -> None:
     _install(tmp_path / "bin", version=version)
 
     with fresh_database(str(DSN)) as (url, _):
-        _db(url, *_OLD_SCHEMA)
+        before = _bridge(url, bridge_source)
         code, log = _serve(tmp_path, url)
         state = _state(url)
+        assert _state(url, rows=True) == before
 
     assert code == 1, log
     assert state == UNTOUCHED
@@ -248,18 +273,54 @@ def test_without_a_usable_pg_dump_serve_refuses(tmp_path: Path, version: str | N
 
 
 @needs_database
-def test_skip_backup_changes_the_schema_with_a_warning(tmp_path: Path) -> None:
-    _install(tmp_path / "bin", version=None)
-
+def test_unsupported_database_is_refused_before_backup(tmp_path, bridge_source):
+    calls = _install(tmp_path / "bin")
     with fresh_database(str(DSN)) as (url, _):
-        _db(url, *_OLD_SCHEMA)
-        code, log = _serve(tmp_path, url, "--skip-backup")
-        state = _state(url)
+        _bridge(url, bridge_source)
+        async def invalidate():
+            import asyncpg
+            conn = await asyncpg.connect(url)
+            try:
+                await conn.execute("UPDATE schema_fingerprint SET sha256 = 'unsupported'")
+            finally:
+                await conn.close()
+        asyncio.run(invalidate())
+        before = _state(url, rows=True)
+        code, log = _serve(tmp_path, url)
+        assert _state(url, rows=True) == before
+    assert code == 1 and "v2.13.165" in log
+    assert not calls.exists() and _backups(tmp_path) == []
 
-    assert code is None, log
-    assert state == MIGRATED
-    assert "WARNING BACKUP SKIPPED (--skip-backup)" in log
+
+@needs_database
+def test_skip_backup_cannot_bypass_the_bridge_upgrade(tmp_path: Path, bridge_source: Path) -> None:
+    _install(tmp_path / "bin", version=None)
+    with fresh_database(str(DSN)) as (url, _):
+        _bridge(url, bridge_source)
+        code, log = _serve(tmp_path, url, "--skip-backup")
+        assert _state(url) == UNTOUCHED
+    assert code == 1 and "--skip-backup is not allowed" in log
     assert _backups(tmp_path) == []
+
+
+@needs_database
+def test_skip_backup_for_a_current_schema_change_warns(tmp_path, monkeypatch):
+    from looper.agents.serve import _back_up_before_schema_change
+    from looper.db import connection
+    from tests.db_support import fresh_schema
+
+    async def pending(conn):
+        return True
+
+    async def run():
+        async with fresh_schema() as pool:
+            await connection.ensure_schema(pool)
+            monkeypatch.setattr(connection, "schema_change_pending", pending)
+            await _back_up_before_schema_change(pool, _ops(tmp_path), tmp_path, skip_backup=True)
+
+    with patch('looper.agents.serve.logger.warning') as warning:
+        asyncio.run(run())
+    assert "BACKUP SKIPPED (--skip-backup)" in warning.call_args.args[0]
 
 
 @needs_database
@@ -272,17 +333,18 @@ def test_skip_backup_changes_the_schema_with_a_warning(tmp_path: Path) -> None:
     ],
     ids=["dump-fails", "empty-dump", "unreadable-dump"],
 )
-def test_a_failed_backup_stops_serve_before_any_ddl(tmp_path: Path, mode: str, restore_ok: bool, reason: str) -> None:
+def test_a_failed_backup_stops_serve_before_any_ddl(tmp_path: Path, bridge_source: Path, mode: str, restore_ok: bool, reason: str) -> None:
     _install(tmp_path / "bin", mode=mode, restore_ok=restore_ok)
 
     with fresh_database(str(DSN)) as (url, _):
-        _db(url, *_OLD_SCHEMA)
+        before = _bridge(url, bridge_source)
         code, log = _serve(tmp_path, url)
         state = _state(url)
+        assert _state(url, rows=True) == before
 
     assert code == 1, log
     assert state == UNTOUCHED
-    assert reason in next(line for line in log.splitlines() if line.startswith("fail  pg_dump backup"))
+    assert "backup verification failed" in log and reason in log
     assert _backups(tmp_path) == []  # nor a partial file
 
 

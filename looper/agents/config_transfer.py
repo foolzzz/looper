@@ -2224,9 +2224,13 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
     transaction. Raises ``ConfigFileError`` when the result would break a catalog cap."""
     validate_document(data)
     if apply:
-        from ..db.connection import ensure_schema, schema_change_pending
+        from ..db.connection import RegistrySchemaVersionError, ensure_schema, schema_change_pending
 
-        if await schema_change_pending(conn):
+        try:
+            pending = await schema_change_pending(conn)
+        except RegistrySchemaVersionError as exc:
+            raise SchemaChangePending(str(exc)) from exc
+        if pending:
             raise SchemaChangePending(
                 "the database schema is older than this Looper; start `looper serve` once (it backs the database up "
                 "before changing the schema), then import again")

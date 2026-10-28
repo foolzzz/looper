@@ -202,36 +202,6 @@ def test_a_gate_is_told_the_timeout_its_run_started_with(monkeypatch: pytest.Mon
     assert gate_env({"id": "sched-a"}, "run-a", firing, None)["LOOPER_SCHEDULE_RUN_TIMEOUT_SECONDS"] == ""
 
 
-def test_schedules_from_before_keep_their_meaning(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(env: ScheduleEnv) -> None:
-        from looper.db import connection
-
-        # The database as the previous version left it: no mode, a number or none on each schedule, runs in progress.
-        await env.pool.execute("ALTER TABLE schedules DROP COLUMN run_timeout_mode")
-        await env.pool.execute("ALTER TABLE schedule_runs DROP COLUMN run_timeout_seconds")
-        await env.pool.execute("DELETE FROM schema_migrations WHERE name = 'schedules_run_timeout_mode'")
-        for name, timeout in (("numbered", 300), ("unlimited", None)):
-            await env.pool.execute(
-                "INSERT INTO schedules (id, project_id, name, cron, timezone, requirement, run_timeout_seconds) "
-                "VALUES ($1, $2, $1, '*/5 * * * *', 'UTC', 'Look.', $3)", f"sched-{name}", env.project_id, timeout)
-            await env.pool.execute(
-                "INSERT INTO schedule_runs (id, schedule_id, scheduled_for, trigger, status) "
-                "VALUES ($1, $2, now(), 'manual', 'running')", f"run-{name}", f"sched-{name}")
-        await connection.ensure_schema(env.pool)
-        await connection.ensure_schema(env.pool)  # once
-
-        rows = await env.pool.fetch("SELECT id, run_timeout_mode, run_timeout_seconds FROM schedules ORDER BY id")
-        assert [tuple(r.values()) for r in rows] == [("sched-numbered", "seconds", 300), ("sched-unlimited", "none", None)]
-        runs = await env.pool.fetch("SELECT id, run_timeout_seconds FROM schedule_runs ORDER BY id")
-        assert [tuple(r.values()) for r in runs] == [("run-numbered", 300), ("run-unlimited", None)]
-        view = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": 'sched-numbered'}))["schedule"]
-        assert (view["run_timeout_seconds"], view["run_timeout_effective_seconds"]) == (300, 300)
-        # A schedule created afterwards follows the default.
-        assert (await env.schedule())["run_timeout_seconds"] == "default"
-
-    run_scheduled(test, monkeypatch, tmp_path)
-
-
 # --- The configuration file ---
 
 

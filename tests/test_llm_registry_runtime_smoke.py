@@ -26,13 +26,12 @@ import pytest
 from evals.prompt_regression import dialogs
 from evals.prompt_regression.runner import fresh_database, free_port
 from looper import ops_config
-from looper.agents.registry_migration import plan
 from looper.agents.runtimes import ADAPTERS, ApiProtocol, AuthKind
-from looper.db import connection, registry_migration
+from looper.db import connection
+from tests.bridge_schema_support import bridge_source as bridge_source, initialize_bridge, witness
 from tests.test_llm_models_dashboard import DashboardServer, _wait_ready
 
 ROOT = Path(__file__).resolve().parents[1]
-SEED = ROOT / "tests" / "fixtures" / "llm_registry_v2_seed.sql"
 RUNTIMES = {"claude-code": "claude", "codex": "codex", "omp": "omp", "grok": "grok"}
 
 
@@ -71,37 +70,34 @@ def query(url, sql, *args):
     return asyncio.run(asyncio.wait_for(run(), 20))
 
 
-def migrate(url, real=None):
+def migrate(url, source, real=None):
     async def run():
         conn = await asyncpg.connect(url, timeout=5, command_timeout=15)
         try:
-            await conn.execute(SEED.read_text())
+            await initialize_bridge(conn, source, url=url)
             if real is not None:
-                # Put the selected live combination into v2, so the CLI uses
-                # migrated rows rather than a newly registered v3 substitute.
-                await conn.execute("INSERT INTO llm_providers (id,name,protocols,auth,base_url,models) "
-                    "VALUES ('prov-smoke-real','Runtime smoke',$1,'api_key',$2,$3::jsonb)",
-                    [real["protocol"]], real["base_url"], json.dumps([{"name": real["model"]}]))
+                await conn.execute("INSERT INTO llm_providers (id,name,vendor_type,auth) "
+                    "VALUES ('prov-smoke-real','Runtime smoke','custom','api_key')")
+                await conn.execute("INSERT INTO llm_provider_endpoints (provider_id,protocol,base_url) "
+                    "VALUES ('prov-smoke-real',$1,$2)", real["protocol"], real["base_url"])
+                await conn.execute("INSERT INTO llm_models (id,provider_id,name,protocol) "
+                    "VALUES ('model-smoke-real','prov-smoke-real',$1,$2)", real["model"], real["protocol"])
                 await conn.execute("INSERT INTO llm_provider_secrets (provider_id,api_key) "
                     "VALUES ('prov-smoke-real',$1)", os.environ[real["key_env"]])
-                await conn.execute("INSERT INTO agent_profiles (id,name,runtime_id,provider_id,model,agent_teams) "
-                    "VALUES ('agent-smoke-real','Runtime smoke',$1,'prov-smoke-real',$2,false)",
-                    {"claude-code": "rt-claude-code", "codex": "rt-seed-codex", "omp": "rt-seed-omp"}[real["runtime"]],
-                    real["model"])
-            # Quiesce the synthetic workload before starting a real scheduler.
-            # Keep references and historical usage; do not resume fixture tasks.
-            await conn.execute("UPDATE tasks SET status = 'completed'; UPDATE schedules SET enabled = false")
-            report = plan(await registry_migration.read_snapshot(conn)).report
+                runtime_id = await conn.fetchval("SELECT id FROM agent_runtimes WHERE type=$1 AND builtin", real["runtime"])
+                await conn.execute("INSERT INTO agent_profiles (id,name,runtime_id,model_id,agent_teams) "
+                    "VALUES ('agent-smoke-real','Runtime smoke',$1,'model-smoke-real',false)", runtime_id)
+            before = await witness(conn)
             await connection.ensure_schema(conn)
-            assert await conn.fetchval("SELECT version FROM registry_schema_version") == 3
-            assert await conn.fetchval("SELECT count(*) FROM agent_profiles") == report["profiles_after"]
-            assert await conn.fetchval("SELECT count(*) FROM llm_records") == 144
-            assert await conn.fetchval("SELECT count(*) FROM llm_models") == report["models_after"] + 11
-            assert all(report[k] == 0 for k in ("unresolved_profiles", "binding_mismatches", "pricing_mismatches"))
-            return report
+            assert await conn.fetchval("SELECT version FROM registry_schema_version") == 4
+            after = await witness(conn)
+            for table in ("task_plans", "system_settings", "library_items", "library_files", "library_installs"):
+                assert after[table] == before[table], table
+            return {"profiles_after": await conn.fetchval("SELECT count(*) FROM agent_profiles"),
+                    "historical_records": len(after["llm_records"])}
         finally:
             await conn.close()
-    return asyncio.run(asyncio.wait_for(run(), 45))
+    return asyncio.run(asyncio.wait_for(run(), 60))
 
 
 @contextmanager
@@ -183,7 +179,7 @@ def server(case, url, *, real=None):
 
 
 @pytest.fixture
-def migrated(tmp_path):
+def migrated(tmp_path, bridge_source, request):
     import looper
     assert Path(looper.__file__).resolve() == ROOT / "looper/__init__.py"
     assert Path(sys.executable).parent == ROOT / ".venv/bin"
@@ -191,7 +187,7 @@ def migrated(tmp_path):
     if not admin:
         pytest.skip("not-run: disposable LOOPER_TEST_DATABASE_URL required")
     with fresh_database(admin) as (url, _):
-        report = migrate(url)
+        report = migrate(url, bridge_source) if getattr(request, "param", "bridge") == "bridge" else {"kind": "fresh"}
         (tmp_path / "migration-report.json").write_text(json.dumps(report, indent=2))
         yield url
 
@@ -218,17 +214,20 @@ def test_inventory_distinguishes_credentials_and_missing_cli(monkeypatch, tmp_pa
         combinations({"LOOPER_REGISTRY_SMOKE_COMBINATIONS": '[{"runtime":"typo"}]'})
 
 
+@pytest.mark.parametrize("migrated", ["fresh", "bridge"], indirect=True)
 def test_migrated_service_manager_creates_dashboard_reads(migrated, tmp_path):
     with server(tmp_path, migrated) as running:
         api = running.api
+        cli = subprocess.run([sys.executable, "-m", "looper.loopercli", "--json", "config", "export", "-",
+                              "--url", api.base_url, "--operator-token-file", str(running.runtime_root / "operator-token")],
+                             cwd=ROOT, env=running.env, capture_output=True, text=True, timeout=15)
+        assert cli.returncode == 0, cli.stderr
+        assert "looper-config/v4" in cli.stdout
         registry = api.post("/api/v1/registry/view", {})["result"]
-        assert len(registry["profiles"]) == 20
-        profile = next(p for p in registry["profiles"] if p["profile_id"] == "agent-seed-dual-claude")
-        assert profile["model"]["name"] == "seed-dual"
+        assert registry["profiles"]
+        profile = next(p for p in registry["profiles"] if p["profile_id"] == "agent-claude-code-opus")
+        assert profile["model"]["name"] == "opus"
         assert profile["model"]["protocol"] == "anthropic-messages"
-        unknown = next(p for p in registry["profiles"] if p["profile_id"] == "agent-seed-custom")
-        assert unknown["cost"]["unpriced"] == ["seed-open-model"]
-        assert unknown["warnings"]
         api.post("/api/v1/agent_settings/update_role", {"role": "manager", "values": {"profile_id": profile["profile_id"]}})
         project = api.post("/api/v1/project_admin/create", {"name": "runtime smoke", "work_dir": str(running.home.parent / "work")})["result"]["project"]
         dialog = dialogs.select(["model_custom"])[0]
@@ -244,22 +243,22 @@ def test_migrated_service_manager_creates_dashboard_reads(migrated, tmp_path):
         assert rows[0]["session_id"] == rows[1]["session_id"]
         for row in rows:
             metadata = json.loads(row["metadata"])
-            assert metadata["llm_model"]["name"] == "seed-dual"
+            assert metadata["llm_model"]["name"] == "opus"
             assert metadata["llm_model"]["protocol"] == "anthropic-messages"
-            assert metadata["system_prompt_mode"] == "append"
-            assert metadata["pricing"]["cost_source"] == row["cost_source"] == "provider_price"
+            assert metadata["system_prompt_mode"] == "replace"
+            assert metadata["pricing"]["cost_source"] == row["cost_source"] == "runtime"
             assert (row["input_tokens"], row["output_tokens"], row["cache_read_tokens"],
                     row["cache_creation_tokens"]) == (10, 5, 2, 1)
-            assert row["model"] == "fake" and row["cost_usd"] is None  # unknown reported price
+            assert row["model"] == "fake" and row["cost_usd"] == 0.01
             assert "sk-synthetic" not in json.dumps(metadata)
             prompt = metadata["system_prompt"]
             digest = hashlib.sha256(prompt.encode()).hexdigest()
             assert digest == metadata["system_prompt_sha256"]
             assert (running.runtime_root / ".local/prompts" / f"{digest}.md").read_text() == prompt
             current_role = query(migrated, "SELECT system_prompt FROM role_configs WHERE role='manager'")[0]["system_prompt"]
-            assert "Synthetic system harness." in prompt and current_role in prompt
+            assert current_role in prompt
             assert "## Looper's tools (required)" in prompt
-            assert "seed-dual" in metadata["command"]
+            assert "opus" in metadata["command"]
         saved = query(migrated, "SELECT * FROM agent_sessions WHERE agent_id = 'manager'")[0]
         assert saved["session_id"] == rows[-1]["session_id"]
         assert json.loads(saved["session_totals"])["input_tokens"] == 20
@@ -273,30 +272,27 @@ def test_migrated_service_manager_creates_dashboard_reads(migrated, tmp_path):
         assert totals["input_tokens"] == 30 and totals["output_tokens"] == 15
 
 
-def test_explicit_combination_is_migrated_before_launch(tmp_path, monkeypatch):
+def test_bridge_current_profile_is_preserved_before_launch(tmp_path, bridge_source):
     admin = os.environ.get("LOOPER_TEST_DATABASE_URL")
     if not admin:
         pytest.skip("not-run: disposable LOOPER_TEST_DATABASE_URL required")
-    item = {"runtime": "claude-code", "model": "Exact.Smoke[1m]", "protocol": "anthropic-messages",
-            "base_url": "https://smoke.example.invalid/messages", "key_env": "REGISTRY_SMOKE_TEST_KEY"}
-    monkeypatch.setenv(item["key_env"], "synthetic-smoke-key")
     with fresh_database(admin) as (url, _):
-        report = migrate(url, real=item)
-        assert report["profiles_mapped"] == 21 and report["models_after"] == 28
+        report = migrate(url, bridge_source)
+        assert report["historical_records"] == 1
         with server(tmp_path, url) as running:
-            running.api.post("/api/v1/agent_settings/update_role", {"role": "manager", "values": {"profile_id": "agent-smoke-real"}})
+            running.api.post("/api/v1/agent_settings/update_role", {"role": "manager", "values": {"profile_id": "agent-claude-code-opus"}})
             dialogs._ask(running.api, "smoke-combination", "Reply OK without tools", timeout=30)
             record = query(url, "SELECT * FROM llm_records WHERE agent_id='manager' AND task_id IS NULL")[0]
             metadata = json.loads(record["metadata"])
-            assert metadata["llm_model"]["name"] == item["model"]
-            assert metadata["llm_model"]["protocol"] == item["protocol"]
-            assert record["status"] == "completed" and "synthetic-smoke-key" not in json.dumps(metadata)
+            assert metadata["llm_model"]["name"] == "opus"
+            assert metadata["llm_model"]["protocol"] == "anthropic-messages"
+            assert record["status"] == "completed"
             capture = json.loads((tmp_path / "launch-capture.jsonl").read_text().splitlines()[-1])
-            assert capture["base_url"] == item["base_url"]
-            assert capture["argv"][capture["argv"].index("--model") + 1] == item["model"]
+            assert capture["argv"][capture["argv"].index("--model") + 1] == "opus"
 
 
 @pytest.mark.installed
+@pytest.mark.parametrize("migrated", ["fresh", "bridge"], indirect=True)
 def test_migrated_dashboard_screenshot(migrated, tmp_path, monkeypatch):
     playwright = pytest.importorskip("playwright.sync_api", reason="not-run: Playwright missing")
     with playwright.sync_playwright() as driver:
@@ -311,8 +307,7 @@ def test_migrated_dashboard_screenshot(migrated, tmp_path, monkeypatch):
             try:
                 page = browser.new_page(viewport={"width": 1440, "height": 1000})
                 page.goto(running.api.base_url + "/#settings/profiles", wait_until="domcontentloaded", timeout=15000)
-                page.get_by_text("Synthetic dual Claude", exact=True).first.wait_for(timeout=15000)
-                page.get_by_text("No price for seed-open-model", exact=False).first.wait_for(timeout=10000)
+                page.get_by_text("claude-code/opus", exact=True).first.wait_for(timeout=15000)
                 page.screenshot(path=str(tmp_path / "migrated-dashboard.png"), full_page=True)
             finally:
                 browser.close()
@@ -320,7 +315,7 @@ def test_migrated_dashboard_screenshot(migrated, tmp_path, monkeypatch):
 
 @pytest.mark.installed
 @pytest.mark.parametrize("runtime", RUNTIMES)
-def test_selected_real_runtime_request_and_continuation(runtime, tmp_path):
+def test_selected_real_runtime_request_and_continuation(runtime, tmp_path, bridge_source):
     rows = inventory(os.environ)
     (tmp_path / "runtime-inventory.json").write_text(json.dumps(rows, indent=2))
     chosen = [i for i in combinations(os.environ) if i["runtime"] == runtime]
@@ -338,7 +333,7 @@ def test_selected_real_runtime_request_and_continuation(runtime, tmp_path):
             pytest.skip("not-run: disposable LOOPER_TEST_DATABASE_URL required")
         case = tmp_path / str(index)
         with fresh_database(admin) as (url, _):
-            report = migrate(url, real=item)
+            report = migrate(url, bridge_source, real=item)
             case.mkdir(parents=True)
             (case / "migration-report.json").write_text(json.dumps(report, indent=2))
             try:
@@ -375,7 +370,7 @@ def _real_continuation(case, url, item, status, rows, evidence):
             assert record["status"] == "completed" and record["input_tokens"] > 0
             assert metadata["llm_model"]["name"] == item["model"]
             assert metadata["llm_model"]["protocol"] == item["protocol"]
-            assert metadata["system_prompt_mode"] == "append"
+            assert metadata["system_prompt_mode"] == "replace"
             assert metadata["pricing"]["cost_source"] == record["cost_source"]
             assert hashlib.sha256(metadata["system_prompt"].encode()).hexdigest() == metadata["system_prompt_sha256"]
             assert os.environ[item["key_env"]] not in json.dumps(metadata)

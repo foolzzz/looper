@@ -177,28 +177,21 @@ def test_a_bot_is_not_added_to_a_manager_being_deleted(monkeypatch: pytest.Monke
     run_with_channel_configs(test, monkeypatch)
 
 
-def test_gate_posts_are_keyed_by_bot_and_an_old_binary_still_writes(monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.db import connection, user_gates
+def test_gate_posts_are_keyed_by_bot_and_each_bot_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.db import user_gates
 
     async def test(pool: Any) -> None:
         await _task_with_gate(pool)
         mid = await pool.fetchval("SELECT id FROM task_user_gate_messages LIMIT 1")
-        old_sql = ("INSERT INTO task_user_gate_posts (message_id, task_id, channel, chat, external_id) "
-                   "VALUES ($1, 'task-a', 'telegram', $2, $3) ON CONFLICT (channel, chat, external_id) DO NOTHING")
-        await pool.execute(old_sql, mid, "1", "1")
-        assert await pool.fetchval("SELECT channel_id FROM task_user_gate_posts") is None
-        await connection.ensure_schema(pool)
-        assert await pool.fetchval("SELECT channel_id FROM task_user_gate_posts") == "channel-telegram"
-        await pool.execute("DELETE FROM task_user_gate_posts")
-
         await user_gates.record_post(mid, "task-a", "sent", channel="telegram", channel_id="channel-telegram-2",
                                      chat="42", external_ids=["7"], pool=pool)
         await user_gates.record_post(mid, "task-a", "sent", channel="telegram", channel_id="channel-telegram",
                                      chat="42", external_ids=["7"], pool=pool)
-        # Two bots' message 7 in chat 42 are two posts; the old key holds only the built-in bot's.
+        # Two bots' message 7 in chat 42 are two posts.
         rows = await pool.fetch("SELECT channel, channel_id FROM task_user_gate_posts ORDER BY id")
-        assert [tuple(r) for r in rows] == [(None, "channel-telegram-2"), ("telegram", "channel-telegram")]
-        await pool.execute(old_sql, mid, "42", "7")
+        assert [tuple(r) for r in rows] == [("telegram", "channel-telegram-2"), ("telegram", "channel-telegram")]
+        await user_gates.record_post(mid, "task-a", "sent", channel="telegram", channel_id="channel-telegram-2",
+                                     chat="42", external_ids=["7"], pool=pool)
         assert await pool.fetchval("SELECT count(*) FROM task_user_gate_posts") == 2
         await user_gates.record_post(mid, "task-a", "sent", channel="lark", chat="c", external_ids=["9"], pool=pool)
         assert await pool.fetchval("SELECT channel_id FROM task_user_gate_posts WHERE external_id = '9'") \

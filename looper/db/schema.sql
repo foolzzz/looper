@@ -1554,8 +1554,7 @@ CREATE TABLE IF NOT EXISTS task_user_gate_posts (
     channel      TEXT NOT NULL CHECK (channel IN ('lark', 'telegram')),
     chat         TEXT NOT NULL,
     external_id  TEXT NOT NULL,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (channel, chat, external_id)
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_message ON task_user_gate_posts (message_id);
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_external ON task_user_gate_posts (channel, external_id);
@@ -2187,19 +2186,10 @@ CREATE TRIGGER channel_configs_manager_fixed BEFORE UPDATE OF manager_id ON chan
     FOR EACH ROW WHEN (OLD.manager_id IS DISTINCT FROM NEW.manager_id) EXECUTE FUNCTION channel_configs_manager_fixed();
 CREATE INDEX IF NOT EXISTS idx_channel_configs_manager ON channel_configs (manager_id);
 
--- The bot a gate's channel message went through or came from (channel_configs.channel_id): two bots of one type
--- share chat ids (a Telegram private chat's id is the user's) and count message ids apart, so a reply is matched by
--- bot, not by type. Rows an older binary wrote have none and get it here, at every start.
+-- A gate post is keyed by bot, chat and external message id.
 ALTER TABLE task_user_gate_posts ADD COLUMN IF NOT EXISTS channel_id TEXT;
 ALTER TABLE task_user_gate_messages ADD COLUMN IF NOT EXISTS channel_id TEXT;
-UPDATE task_user_gate_posts SET channel_id = 'channel-' || channel WHERE channel_id IS NULL;
-UPDATE task_user_gate_messages SET channel_id = 'channel-' || channel WHERE channel_id IS NULL AND channel IS NOT NULL;
--- A post is one bot's message: (channel_id, chat, external_id) is its key. UNIQUE (channel, chat, external_id)
--- stays for an older binary, whose ON CONFLICT names it and which knows only the built-in bots: the posts of a
--- Manager's own bot keep channel NULL, so the built-in bot's and the other bots' posts of one chat and message id
--- never meet in it (NULLs are distinct). For a built-in bot's posts the two keys are the same.
 ALTER TABLE task_user_gate_posts ALTER COLUMN channel DROP NOT NULL;
-UPDATE task_user_gate_posts SET channel = NULL WHERE channel_id <> 'channel-' || channel;
 CREATE UNIQUE INDEX IF NOT EXISTS task_user_gate_posts_bot_key ON task_user_gate_posts (channel_id, chat, external_id);
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_bot ON task_user_gate_posts (channel_id, external_id);
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_messages_bot ON task_user_gate_messages (channel_id, external_id)

@@ -395,24 +395,6 @@ def test_notify_alerts_sends_the_alerts_and_their_recoveries_and_no_run_message(
     run_scheduled(test, monkeypatch, tmp_path)
 
 
-def test_a_database_from_before_takes_notify_alerts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from looper.db import connection
-
-    async def test(env: ScheduleEnv) -> None:
-        with_sender(env)
-        sid = (await env.enabled())["schedule_id"]
-        await env.pool.execute("ALTER TABLE schedules DROP CONSTRAINT schedules_notify_check")
-        await env.pool.execute("ALTER TABLE schedules ADD CONSTRAINT schedules_notify_check "
-                               "CHECK (notify IN ('failures', 'always', 'never'))")
-        await env.pool.execute("DELETE FROM schema_migrations WHERE name = 'schedules_notify_alerts'")
-        await connection.ensure_schema(env.pool)
-        assert (await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"notify": "alerts"}}))["schedule"]["notify"] == "alerts"
-        status, answer = await env.call("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"notify": "quiet"}})
-        assert status == 400 and answer["error"]["code"] == "invalid"
-
-    run_scheduled(test, monkeypatch, tmp_path)
-
-
 MINUTE = timedelta(minutes=1)
 
 
@@ -620,24 +602,6 @@ def test_disabling_and_enabling_again_starts_the_clock_again(monkeypatch: pytest
         # Enabling an enabled schedule changes nothing.
         await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"enabled": True}})
         assert await env.pool.fetchval("SELECT enabled_at FROM schedules WHERE id = $1", sid) == enabled_at
-
-    run_scheduled(test, monkeypatch, tmp_path)
-
-
-def test_a_schedule_from_before_counts_from_its_last_change(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(env: ScheduleEnv) -> None:
-        from looper.db import connection
-
-        sid = (await env.enabled())["schedule_id"]
-        # A database from before enabled_at, whose schedule was last changed three days ago.
-        await env.pool.execute("ALTER TABLE schedules DROP COLUMN enabled_at")
-        await env.pool.execute("UPDATE schedules SET updated_at = updated_at - interval '3 days' WHERE id = $1", sid)
-        for _ in range(2):  # the migration runs once
-            await connection.ensure_schema(env.pool)
-            row = await env.pool.fetchrow("SELECT enabled_at, updated_at FROM schedules WHERE id = $1", sid)
-            assert row["enabled_at"] == row["updated_at"]
-        created = (await env.schedule())["schedule_id"]
-        assert await env.pool.fetchval("SELECT enabled_at IS NOT NULL FROM schedules WHERE id = $1", created)
 
     run_scheduled(test, monkeypatch, tmp_path)
 
@@ -857,30 +821,6 @@ def test_two_parallel_runs_that_fail_before_the_next_gate_both_hand_their_input_
         # Handed on once: while that run is in progress, the next gate finds nothing new and nothing is carried.
         await env.pool.execute("UPDATE tasks SET status = 'running' WHERE id = $1", carrying["task_id"])
         assert _shape(await _next_minute(env, sid))[0] == ("skipped_gate", 1)
-
-    run_scheduled(test, monkeypatch, tmp_path)
-
-
-def test_runs_from_before_hand_on_only_what_the_old_rule_would_have(monkeypatch: pytest.MonkeyPatch,
-                                                                     tmp_path: Path) -> None:
-    from looper.db import connection
-
-    async def test(env: ScheduleEnv) -> None:
-        sid = (await env.enabled(gate_command="cat items.txt"))["schedule_id"]
-        rows = [("srun-old0000001", "failed", 3, None), ("srun-old0000002", "running", 2, "srun-old0000001"),
-                ("srun-old0000003", "failed", 1, None), ("srun-old0000004", "skipped_overlap", 0, None)]
-        for run_id, status, minutes_ago, carried_from in rows:
-            ended = status not in ("running",)
-            await env.pool.execute(
-                "INSERT INTO schedule_runs (id, schedule_id, scheduled_for, fired_at, trigger, status, gate_output, "
-                "finished_at, carried_from, created_at) VALUES ($1, $2, now() - $3::interval, now() - $3::interval, "
-                "'scheduled', $4, 'alert', CASE WHEN $5 THEN now() - $3::interval END, $6, now() - $3::interval)",
-                run_id, sid, timedelta(minutes=minutes_ago), status, ended, carried_from)
-        await env.pool.execute("ALTER TABLE schedule_runs DROP COLUMN carried_on")
-        await connection.ensure_schema(env.pool)
-        handed = dict(await env.pool.fetch("SELECT id, carried_on FROM schedule_runs WHERE schedule_id = $1", sid))
-        # The one carried on already is; the latest to end that ran something may still hand its input on.
-        assert (handed["srun-old0000001"], handed["srun-old0000003"]) == (True, False)
 
     run_scheduled(test, monkeypatch, tmp_path)
 

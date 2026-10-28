@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import json
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -70,9 +71,7 @@ def schema_fingerprint(sql: str) -> str:
 # this lock first, so two processes starting together cannot both create a table or migrate.
 _SCHEMA_LOCK = 0x6C6F6F70  # "loop"
 
-# Backport the guard (with support set to 2) to the old-layout patch release
-# before deploying v3. Unpatched v2.12.2 binaries cannot protect a v3 database.
-REGISTRY_SCHEMA_VERSION = 3
+REGISTRY_SCHEMA_VERSION = 4
 
 
 class RegistrySchemaVersionError(RuntimeError):
@@ -97,12 +96,45 @@ async def check_registry_schema_version(conn: asyncpg.Connection, *, supported_v
     return version
 
 
-async def _has_schema_tables(conn: asyncpg.Connection, sql: str) -> bool:
-    tables = re.findall(r"(?im)^\s*CREATE TABLE IF NOT EXISTS\s+(\w+)", sql)
-    # Earlier releases called agent_profiles/role_configs by these names.
-    tables.extend(("agents", "agent_configs", "task_agent_overrides", "schema_fingerprint"))
-    return await conn.fetchval(
-        "SELECT EXISTS (SELECT 1 FROM unnest($1::text[]) AS t(name) WHERE to_regclass(t.name) IS NOT NULL)", tables)
+async def _classify_schema(conn: asyncpg.Connection, sql: str) -> str:
+    """Read-only admission gate, always called under _SCHEMA_LOCK."""
+    from .bridge_upgrade import BASELINE, BRIDGE_FINGERPRINT, BRIDGE_MIGRATIONS, structure
+
+    reason = "unsupported or incomplete Looper database; upgrade to v2.13.165 first"
+    try:
+        version = await check_registry_schema_version(conn, supported_version=REGISTRY_SCHEMA_VERSION)
+        names = re.findall(r"(?im)^\s*CREATE TABLE IF NOT EXISTS\s+(\w+)", sql)
+        names.extend(("agents", "agent_configs", "task_agent_overrides", "schema_fingerprint", "llm_profiles"))
+        # Do not initialize shadow tables over a visible installation in another namespace.
+        if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM unnest($1::text[]) t(name) "
+                "JOIN pg_class c ON c.oid = to_regclass(t.name) "
+                "WHERE c.relnamespace <> quote_ident(current_schema())::regnamespace)", names):
+            raise RegistrySchemaVersionError(reason + "; Looper tables span namespaces")
+        if not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM pg_class WHERE relnamespace = "
+                "quote_ident(current_schema())::regnamespace AND relkind IN ('r', 'p', 'v', 'm', 'S', 'f')) "
+                "OR EXISTS (SELECT 1 FROM pg_proc WHERE pronamespace = quote_ident(current_schema())::regnamespace) "
+                "OR EXISTS (SELECT 1 FROM pg_type WHERE typnamespace = quote_ident(current_schema())::regnamespace)"):
+            return "empty"
+        if version not in (3, 4):
+            raise RegistrySchemaVersionError(reason)
+        fingerprint = await conn.fetchval("SELECT sha256 FROM schema_fingerprint WHERE id = TRUE")
+        if not fingerprint or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            raise RegistrySchemaVersionError(reason + "; missing or invalid fingerprint")
+        ledger = {r["name"] for r in await conn.fetch("SELECT name FROM schema_migrations")}
+        # Frozen catalog witnesses keep identity independent of schema.sql cleanup.
+        shape = hashlib.sha256(json.dumps(await structure(conn), sort_keys=True).encode()).hexdigest()
+        if (version == 3 and fingerprint == BRIDGE_FINGERPRINT and set(BRIDGE_MIGRATIONS).issubset(ledger)
+                and shape == "832d2e5a33a54552b5cc9fec313df28364e9b5eb4adc3ad5c3c1101f47b1ce94"):
+            return "bridge"
+        if version == 4 and BASELINE in ledger and shape == "e29d721439fd9ade1a9d1882a7c1bde369e4f1bdea90286eefb58c551f7e0cdf":
+            return "current"
+        raise RegistrySchemaVersionError(reason + "; bridge identity, final structure or current baseline marker missing")
+    except RegistrySchemaVersionError as exc:
+        if "exceeds supported" in str(exc) or "v2.13.165" in str(exc):
+            raise
+        raise RegistrySchemaVersionError(f"{reason}; {exc}") from exc
+    except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError, TypeError, ValueError) as exc:
+        raise RegistrySchemaVersionError(reason) from exc
 
 
 def _schema_phases(sql: str) -> dict[str, str]:
@@ -114,31 +146,21 @@ def _schema_phases(sql: str) -> dict[str, str]:
 
 
 async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
-    from ..agents import layer_effort
-    from . import registry_migration, task_concurrency
+    from .bridge_upgrade import final_constraints, upgrade_from_bridge
 
     pool = pool or get_pool()
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
-    # Keep the old columns through every historical SQL/Python migration.
-    # Version and fingerprint commit only with the complete target schema.
     async with _connection(pool) as conn, conn.transaction():
         await conn.execute(f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK})")
-        version = await check_registry_schema_version(conn, supported_version=REGISTRY_SCHEMA_VERSION)
-        upgrading = version != REGISTRY_SCHEMA_VERSION and await _has_schema_tables(conn, sql)
-        phases = _schema_phases(sql)
-        await conn.execute(phases["expand"])
-        if upgrading:
-            await registry_migration.seed_legacy_builtin(conn)
-        await conn.execute(phases["legacy"])
-        await layer_effort.migrate(conn, legacy_registry=upgrading)
-        await task_concurrency.migrate(conn)
-        if upgrading:
-            await registry_migration.apply(conn)
-        await conn.execute(phases["convert"])
-        await conn.execute(phases["contract"])
-        await conn.execute(phases["builtin"])
-        await conn.execute('INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING',
-                           registry_migration.MIGRATION)
+        state = await _classify_schema(conn, sql)
+        # Fill missing builtins on every start without resetting saved choices.
+        for name, phase in _schema_phases(sql).items():
+            if state != "current" or name == "builtin":
+                await conn.execute(phase)
+        if state != "current":
+            await final_constraints(conn)
+            if state == "bridge":
+                await upgrade_from_bridge(conn)
         await conn.execute("INSERT INTO registry_schema_version (id, version) VALUES (TRUE, $1) "
                            "ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version "
                            "WHERE registry_schema_version.version <> EXCLUDED.version", REGISTRY_SCHEMA_VERSION)
@@ -156,23 +178,12 @@ async def _connection(pool: asyncpg.Pool | asyncpg.Connection) -> AsyncIterator[
 
 
 async def schema_change_pending(conn: asyncpg.Connection) -> bool:
-    """Would ``ensure_schema`` change a database that already holds Looper tables?
-
-    True when one of schema.sql's tables exists but the recorded fingerprint
-    is missing or differs from the current file's. A database without Looper
-    tables is new: applying the schema loses nothing.
-
-    Unsupported versions are refused before requesting a backup, using the
-    same locked, read-only gate as ``ensure_schema``.
-    """
+    """Read-only admission and backup decision, before ensure_schema rechecks under its write lock."""
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
     async with conn.transaction():
         await conn.execute(f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK})")
-        version = await check_registry_schema_version(conn, supported_version=REGISTRY_SCHEMA_VERSION)
-        if not await _has_schema_tables(conn, sql):
+        state = await _classify_schema(conn, sql)
+        if state == "empty":
             return False
-        if version != REGISTRY_SCHEMA_VERSION:
-            return True
-        if not await conn.fetchval("SELECT to_regclass('schema_fingerprint') IS NOT NULL"):
-            return True
-        return await conn.fetchval("SELECT sha256 FROM schema_fingerprint") != schema_fingerprint(sql)
+        return state == "bridge" or await conn.fetchval(
+            "SELECT sha256 FROM schema_fingerprint WHERE id = TRUE") != schema_fingerprint(sql)

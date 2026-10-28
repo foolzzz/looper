@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.bridge_schema_support import bridge_source as bridge_source, initialize_bridge
+
 from looper import __version__, ops_config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -446,20 +448,18 @@ def test_doctor_reports_the_pg_dump_that_backs_up_before_a_schema_change(
 @pytest.mark.parametrize(("pg_dump", "status", "code"), [(None, "fail", 1), ("9.6.24", "fail", 1), ("99.0", "ok", 0)],
                          ids=["missing", "older-than-the-server", "usable"])
 def test_doctor_fails_without_a_usable_pg_dump_when_the_schema_is_about_to_change(
-    tmp_path: Path, pg_dump: str | None, status: str, code: int,
+    tmp_path: Path, pg_dump: str | None, status: str, code: int, bridge_source: Path,
 ) -> None:
     import asyncio
 
     import asyncpg
 
     from evals.prompt_regression.runner import fresh_database
-    from looper.db.connection import ensure_schema
 
     async def set_up(url: str) -> None:
         conn = await asyncpg.connect(url)
         try:
-            await ensure_schema(conn)
-            await conn.execute("UPDATE schema_fingerprint SET sha256 = 'an older schema.sql'")
+            await initialize_bridge(conn, bridge_source, url=url)
         finally:
             await conn.close()
 

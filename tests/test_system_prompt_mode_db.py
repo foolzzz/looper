@@ -1,4 +1,4 @@
-"""The system prompt mode as a role setting: the settings API, the migration from profiles, configuration transfer
+"""The system prompt mode as a role setting: the settings API, configuration transfer
 and what a real launch records."""
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from tests.db_support import DSN, run_db
-from tests.test_profile_registry_db import _call, _model_id, _ok, _runtime
+from tests.test_profile_registry_db import _call, _model_id, _ok
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -74,106 +74,9 @@ def test_mode_is_set_only_on_a_role_layer_and_a_profile_has_none(monkeypatch: py
     run_db(run, monkeypatch)
 
 
-async def _old_shape(pool: Any) -> None:
-    """The schema before the role setting applied to every runtime: the mode on the profiles, not on the layers."""
-    await pool.execute("ALTER TABLE agent_setting_layers DROP COLUMN system_prompt_mode")
-    await pool.execute("ALTER TABLE agent_profiles ADD COLUMN system_prompt_mode TEXT NOT NULL DEFAULT 'append' "
-                       "CHECK (system_prompt_mode IN ('append', 'replace'))")
-
-
-async def _profile_row(pool: Any, profile_id: str, mode: str, runtime: str = "claude-code") -> None:
-    provider = {"claude-code": "prov-claude-subscription", "codex": "prov-codex-login"}[runtime]
-    model = await _model_id(provider, "sonnet" if runtime == "claude-code" else "gpt-6.1-sol",
-                            "anthropic-messages" if runtime == "claude-code" else "openai-responses")
-    await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id, system_prompt_mode) "
-                       "VALUES ($1, $1, $2, $3, $4)", profile_id, f"rt-{runtime}", model, mode)
-
-
 async def _layer_modes(pool: Any) -> dict[str, str | None]:
     rows = await pool.fetch("SELECT role, system_prompt_mode FROM agent_setting_layers WHERE scope = 'role'")
     return {row["role"]: row["system_prompt_mode"] for row in rows}
-
-
-async def _profile_column(pool: Any) -> bool:
-    return bool(await pool.fetchval(
-        "SELECT count(*) FROM pg_attribute WHERE attrelid = to_regclass('agent_profiles') "
-        "AND attname = 'system_prompt_mode' AND NOT attisdropped"))
-
-
-async def _profile_checks(pool: Any) -> int:
-    return await pool.fetchval("SELECT count(*) FROM pg_constraint WHERE conrelid = to_regclass('agent_profiles') "
-                               "AND pg_get_constraintdef(oid) LIKE '%system_prompt_mode%'")
-
-
-def test_migration_carries_a_replace_profile_of_any_runtime_to_the_roles_that_used_it_once(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from looper.db.connection import ensure_schema
-
-    async def run(pool: Any) -> None:
-        await _runtime("codex")
-        await _old_shape(pool)
-        await _profile_row(pool, "rep", "replace", "codex")
-        await _profile_row(pool, "app", "append", "codex")
-        # The worker role selects the replacing codex profile; the reviewer inherits the shared defaults' appending
-        # one; the Planner's replacing profile carries nothing (its built-in value is replace).
-        await pool.execute("INSERT INTO agent_setting_layers (scope, role, profile_id) VALUES ('role', 'worker', 'rep')")
-        await pool.execute("INSERT INTO agent_setting_layers (scope, role, profile_id) VALUES ('role', 'planner', 'rep')")
-        await pool.execute("INSERT INTO agent_setting_layers (scope, profile_id) VALUES ('system', 'app')")
-        await ensure_schema(pool)
-        assert await _layer_modes(pool) == {"worker": "replace", "planner": None}
-        assert not await _profile_column(pool) and await _profile_checks(pool) == 0
-        assert await _modes() == {**BUILTIN, "worker": "replace"}
-        # Once: a later explicit append on the worker stays through the next startup, and nothing else changes.
-        await _ok("PUT", "/api/agent-settings/roles/worker", {"system_prompt_mode": "append"})
-        await ensure_schema(pool)
-        assert await _layer_modes(pool) == {"worker": "append", "planner": None}
-        assert not await _profile_column(pool)
-
-    run_db(run, monkeypatch)
-
-
-def test_migration_keeps_a_mode_the_layer_already_has(monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.db.connection import ensure_schema
-
-    async def run(pool: Any) -> None:
-        await _old_shape(pool)
-        await _profile_row(pool, "rep", "replace")
-        await pool.execute("ALTER TABLE agent_setting_layers ADD COLUMN system_prompt_mode TEXT")
-        await pool.execute("INSERT INTO agent_setting_layers (scope, role, profile_id, system_prompt_mode) "
-                           "VALUES ('role', 'worker', 'rep', 'append')")
-        await ensure_schema(pool)
-        assert (await _layer_modes(pool))["worker"] == "append"
-
-    run_db(run, monkeypatch)
-
-
-def test_migration_follows_the_shared_defaults_and_the_builtin_profile(monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.db.connection import ensure_schema
-
-    async def run(pool: Any) -> None:
-        await _old_shape(pool)
-        await _profile_row(pool, "rep", "replace")
-        await pool.execute("INSERT INTO agent_setting_layers (scope, profile_id) VALUES ('system', 'rep')")
-        await pool.execute("INSERT INTO agent_setting_layers (scope, role, profile_id) VALUES ('role', 'reviewer', "
-                           "'agent-claude-code-opus')")
-        await ensure_schema(pool)
-        # The worker follows the shared defaults' replacing profile, the reviewer its own appending one.
-        assert await _layer_modes(pool) == {"worker": "replace", "reviewer": None}
-
-    run_db(run, monkeypatch)
-
-
-def test_migration_on_a_database_without_the_old_column_changes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.db.connection import ensure_schema
-
-    async def run(pool: Any) -> None:
-        assert not await _profile_column(pool)
-        await ensure_schema(pool)
-        await ensure_schema(pool)
-        assert await _layer_modes(pool) == {} and await _modes() == BUILTIN and not await _profile_column(pool)
-
-    run_db(run, monkeypatch)
 
 
 def test_config_transfer_carries_role_modes(

@@ -108,13 +108,9 @@ def test_two_bots_posting_the_same_message_id_to_the_same_chat_keep_both(
             found = await user_gates.find_reference("telegram", "42", ["7"], channel_id=bot)
             assert found is not None and found["task_id"] == task, bot
             assert await user_gates.first_post(posts[bot], bot, "42") == "7"
-        # An older binary's insert (it knows only the built-in bots) still finds the key its ON CONFLICT names.
-        message_id = await pool.fetchval("SELECT message_id FROM task_user_gate_posts WHERE channel_id = "
-                                         "'channel-telegram'")
-        await pool.execute("INSERT INTO task_user_gate_posts (message_id, task_id, channel, chat, external_id) "
-                           "VALUES ($1, 'task-a', 'telegram', '42', '7') ON CONFLICT (channel, chat, external_id) "
-                           "DO NOTHING", message_id)
+        await _post(pool, "step-g1", "telegram", "channel-telegram", "42", ["7"])
         assert await pool.fetchval("SELECT count(*) FROM task_user_gate_posts") == 2
+        assert await pool.fetchval("SELECT count(*) FROM task_user_gate_posts WHERE channel = 'telegram'") == 2
 
     run_db(test, monkeypatch)
 
@@ -150,8 +146,7 @@ def test_the_courier_posts_through_the_gates_bot(monkeypatch: pytest.MonkeyPatch
             ("channel-lark-5", NotifyTarget(TargetKind.USER, "ou_me")),
             ("channel-telegram", NotifyTarget(TargetKind.CHAT, "42"))]
         rows = await pool.fetch("SELECT task_id, channel, channel_id, chat FROM task_user_gate_posts ORDER BY task_id")
-        # A Manager's own bot's posts keep channel NULL (schema.sql, task_user_gate_posts_bot_key).
-        assert [tuple(row.values()) for row in rows] == [("task-a", None, "channel-lark-5", "ou_me"),
+        assert [tuple(row.values()) for row in rows] == [("task-a", "lark", "channel-lark-5", "ou_me"),
                                                          ("task-b", "telegram", "channel-telegram", "42")]
 
     run_db(test, monkeypatch)
