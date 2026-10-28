@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.182] - 2026-10-27
+
+### Changed
+
+- **A Manager's cap-raising schedule update confirms its whole change.** `_confirming` in `looper/agents/ops/schedules.py` now builds the confirmed "after" view from the full update (merged template selection, effective template, `schedules.schedule_view`) instead of the schedule plus only the spend-cap fields, so a `template_key` or `template_inputs` change sent with a cap is shown before it is committed. A template selection that the update would reject is refused with `invalid` or `conflict` before the question is asked. The reply after an update compares the stored schedule before and after without the scope filter; a scoped Manager is still refused with `forbidden` before anything is written when it changes another owner's template. ([#800](https://github.com/foolzzz/looper/pull/800))
+
 ## [2.13.181] - 2026-10-27
 
 ### Changed
