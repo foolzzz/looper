@@ -98,8 +98,9 @@ function dispatch(value: unknown): void {
         } });
       }
     };
-    if (registered?.session && typeof params.session_id === 'string') {
-      const sid = params.session_id;
+    const sessionKey = name === 'session/new' ? params.session_key : params.session_id;
+    if (registered?.session && typeof sessionKey === 'string') {
+      const sid = `${name === 'session/new' ? 'key' : 'id'}:${sessionKey}`;
       const next = (chains.get(sid) ?? Promise.resolve()).then(execute);
       chains.set(sid, next);
       void next.finally(() => { if (chains.get(sid) === next) chains.delete(sid); });

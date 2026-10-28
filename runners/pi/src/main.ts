@@ -10,6 +10,8 @@ clean = rpc.scrub;
 format = (await import('node:util')).format;
 const { monitorEventLoopDelay } = await import('node:perf_hooks');
 const { load } = await import('./sdk.ts');
+const { sessions, newSession, closeSession } = await import('./session.ts');
+const { prompt, cancel } = await import('./turn.ts');
 const args = process.argv.slice(2);
 if (args.length !== 2 || args[0] !== '--pi' || !args[1]) {
   rpc.diagnostic('runner requires --pi <path>'); process.exit(2);
@@ -35,6 +37,12 @@ rpc.method('initialize', async params => {
       authorize_covers: ['turn', 'retry', 'compaction'],
     } };
 });
-rpc.method('runner/health', () => ({ sessions: 0, running: 0, inflight_requests: 0, tool_processes: 0,
+rpc.method('session/new', newSession, { session: true });
+rpc.method('session/close', closeSession, { session: true });
+rpc.method('session/prompt', prompt, { session: true });
+rpc.method('session/cancel', cancel, { session: true });
+rpc.method('runner/health', () => ({ sessions: sessions.size,
+  running: [...sessions.values()].filter(r => r.turn && !r.turn.settled).length,
+  inflight_requests: [...sessions.values()].reduce((n, r) => n + (r.turn?.inflight.size ?? 0), 0), tool_processes: 0,
   rss_bytes: process.memoryUsage().rss, event_loop_lag_ms: Math.ceil(delay.percentile(99) / 1e6) }));
 rpc.start();

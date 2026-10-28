@@ -717,6 +717,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-24 | Worker 输入接受状态（本分支，未合入）：通道、Worker 回执及 Planner 聊天纠偏与监督转发区分接受、明确拒绝和未知，只有明确拒绝进入恢复消息；写后超时及不完整 ACK 不自动重放，办公台提醒超时保留 UUID 抑制且不终止事件读取。验证：6 个相关测试文件 246 通过，另有办公台提醒 6 项通过，0 失败、0 跳过，覆盖真实管道与本地 Codex/OMP/Pi 协议替身；独立临时数据库上的 `looper serve` 启动并经 `system/status` HTTP 读回后正常退出，未调用真实模型或外部账号，Dashboard/Lark/Telegram 与 CLI 沿用共同后端结果，无独立界面改动。 |
 
 | 2026-10-27 | 假 runner（本分支）：协议基线覆盖握手、工具、宿主计费、拒绝、取消和引导；隔离 PostgreSQL/serve 的 Manager HTTP 对话经 `looper_tasks` 读回任务、审计与同一 trace，四类 token 精确计费 $0.003900，请求前预算拒绝为零请求/零工具；服务和 runner 正常退出，启动即退出的独立进程组子进程清理回归通过。Planner serve 未测，S0 其余范围不在本次验收内。 |
+| 2026-10-27 | Pi SDK runner turn（本分支）：实现独立会话的新建/关闭、prompt/cancel、请求前预算授权、逐请求用量与唯一结算，尚未接入服务入口，也未启用 builtin/platform 工具。真实 Pi 1.3.0 Responses 客户端配 loopback provider 的定向测试 39 项通过，覆盖精确计费、拒绝零请求、HTTP 错误脱敏、取消、强制释放与迟到事件；确认 SSE 无需 `event:` 行，`retry.provider.maxRetries: 0` 经 SDK 传到客户端，模型存储保持内存。Dashboard、Telegram、Lark 和 CLI 无变更；工具、加载会话及 retry/compaction 请求分类留待后续阶段。 |
 
 ## 5. 不属于本 RFC 的待办
 

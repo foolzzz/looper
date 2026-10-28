@@ -12,7 +12,7 @@ type Handle = (...args: any[]) => any;
 export type Sdk = {
   version: string;
   agent: Record<typeof agentExports[number], Handle>;
-  ai: { InMemoryCredentialStore: Handle };
+  ai: { InMemoryCredentialStore: Handle; createAssistantMessageEventStream: Handle; isContextOverflow: Handle };
   responses: { streamSimple: Handle };
   completions: { streamSimple: Handle };
 };
@@ -63,7 +63,7 @@ export async function load(pi: string): Promise<Sdk> {
     const agent = await importFile(root, 'dist/index.js', pkg.name);
     requireExports(agent, agentExports, pkg.name);
     const ai = await importFile(aiRoot, 'dist/index.js', '@earendil-works/pi-ai');
-    requireExports(ai, ['InMemoryCredentialStore'], '@earendil-works/pi-ai');
+    requireExports(ai, ['InMemoryCredentialStore', 'createAssistantMessageEventStream', 'isContextOverflow'], '@earendil-works/pi-ai');
     const responses = await importFile(aiRoot, 'dist/api/openai-responses.js', '@earendil-works/pi-ai');
     const completions = await importFile(aiRoot, 'dist/api/openai-completions.js', '@earendil-works/pi-ai');
     requireExports(responses, ['streamSimple'], 'openai-responses');

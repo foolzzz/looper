@@ -29,8 +29,9 @@ class CapturedRequest:
 
 
 class FakeModelAPI:
-    def __init__(self, scripts: Sequence[ResponseScript]):
+    def __init__(self, scripts: Sequence[ResponseScript], *, api_key="test-key"):
         self.scripts = list(scripts)
+        self.api_key = api_key
         self.requests: list[CapturedRequest] = []
         self.closed: asyncio.Queue[int] = asyncio.Queue()
         self._handlers: set[asyncio.Task[Any]] = set()
@@ -74,7 +75,7 @@ class FakeModelAPI:
                 await writer.drain()
                 return
             script = self.scripts[index]
-            if headers.get("authorization") != "Bearer test-key":
+            if headers.get("authorization") != f"Bearer {self.api_key}":
                 self._errors.append("Fake model requires the synthetic test key")
             response_headers = {"Connection": "close", **(script.headers or {})}
             if script.status != 200:
