@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.195] - 2026-10-28
+
+### Added
+
+- **Runner protocol and host sessions for Worker, Reviewer and consult runs.** `session/new` and `session/load` accept the `worker` and `reviewer` roles; `limits.tool_timeout_s` is any positive integer instead of fixed 120; `session/new` takes an optional `fork_from` to open a session from a saved one (the runner reports a `fork` capability, and the host refuses to fork without it); `RunnerSupervisor.acquire` takes an absolute `state_dir` that survives release; `Descriptor`, `RunnerSession` and `RunnerTurn` carry the new roles, tool timeout and fork source, and run sessions open without owner state. Python host side only; the Pi runner is unchanged and the default 120 seconds is unchanged. ([#834](https://github.com/foolzzz/looper/pull/834))
+
 ## [2.13.194] - 2026-10-28
 
 ### Fixed
