@@ -15,12 +15,17 @@ def fake_runner():
     """A standalone stdlib peer: no server import or PYTHONPATH is needed."""
     import subprocess
     options = json.loads(sys.argv[1])
+
+    def start_child():
+        return subprocess.Popen([sys.executable, "-c",
+            "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"],
+            start_new_session=not options.get("pipe_child", False))
+
     child = None
     if options.get("uncooperative") or options.get("pipe_child"):
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        child = subprocess.Popen([sys.executable, "-c",
-            "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"],
-            start_new_session=not options.get("pipe_child", False))
+        if not options.get("initialize_child"):
+            child = start_child()
     Path("observed.json").write_text(json.dumps({"cwd": os.getcwd(), "env": dict(os.environ),
         "child": child.pid if child else None}))
     if options.get("stderr"):
@@ -34,6 +39,10 @@ def fake_runner():
             continue
         method, params = request["method"], request["params"]
         if method == "initialize":
+            if options.get("initialize_child"):
+                child = start_child()
+                observed = json.loads(Path("observed.json").read_text())
+                Path("observed.json").write_text(json.dumps({**observed, "child": child.pid}))
             if options.get("slow_initialize"):
                 time.sleep(0.25)
             result = {"protocol_version": options.get("version", "0.1"),
@@ -554,20 +563,20 @@ def test_temporary_initialize_io_error_is_retryable(runners):
 
 
 @pytest.mark.parametrize("shutdown", [False, True], ids=["recover", "shutdown"])
-def test_reparented_child_in_separate_group_is_reaped(runners, shutdown):
+def test_immediate_generation_loss_reaps_startup_child_in_separate_group(runners, monkeypatch, shutdown):
+    # No periodic observation has run when a caller kills a just-started runner.
+    monkeypatch.setattr(proc_tree.TurnTree, "start_ticker", lambda self: None)
     async def exercise():
-        async with runners(uncooperative=True) as (owner, processes):
+        async with runners(uncooperative=True, initialize_child=True) as (owner, processes):
             lease = await owner.acquire("fake")
             generation = lease._generation
             child = json.loads((generation.directory / "observed.json").read_text())["child"]
             started = proc_tree._start_time(child)
-            assert started and child in proc_tree.tree_of(processes[0])
             stopping = None
             try:
-                # Synchronize on an observed identity before making the child unreachable from its parent.
-                await until(lambda: generation.tree.seen.get(child) == started)
                 processes[0].kill()
                 await generation.exited.wait()
+                assert started
                 assert child in proc_tree._snapshot() and child not in proc_tree.tree_of(processes[0])
                 if shutdown:
                     stopping = asyncio.create_task(owner.stop())
