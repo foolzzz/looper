@@ -18,6 +18,19 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.180] - 2026-10-27
+
+### Changed
+
+- **A configuration with retired fields is refused before an import touches the target.** `validate_document` refuses the whole file when `settings.layers[]` or a project's `layers[]` carries `model` or `effort`, or `providers[]` carries `protocols`, `base_url` or `models`; before, the retired entry was skipped. An API client (client policy) may now import a file it exported when its `managers` list holds only the unchanged default Manager: the entry is dropped from execution and nothing is written for it, while any other Manager change is still refused as FORBIDDEN. ([#790](https://github.com/foolzzz/looper/pull/790))
+- **The dialog eval readback fails without completed API turns.** The api Manager session check in `evals/prompt_regression/dialogs.py` counts the steps that need the model (not code-only steps such as `/profile`, stopped or withdrawn ones) and reports a failure when fewer completed API Manager turns are read back, instead of passing on an empty query. No product runtime change. ([#793](https://github.com/foolzzz/looper/pull/793))
+
+## [2.13.179] - 2026-10-27
+
+### Changed
+
+- **Managers can select a schedule template and read it back.** The `looper_schedules` tool accepts `template_key` and `template_inputs` (static string values) on create and update; the list, the configuration shown on creation, the enable/run confirmation and the before/after of a change now name the template and its inputs. A scoped Manager sees another owner's template selection blanked and is refused when it tries to change it, before anything is written. A new `schedule_template_create` dialog covers it, so the dialog selection grows from 47 to 48. ([#774](https://github.com/foolzzz/looper/pull/774))
+
 ## [2.13.178] - 2026-10-27
 
 ### Changed

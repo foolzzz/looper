@@ -198,6 +198,52 @@ def test_switch_profile_check_uses_id_when_display_name_has_effort_suffix(
     assert (dialogs._switch_selected(look) is None) is ok
 
 
+@pytest.mark.parametrize("steps,completed,outcome", [
+    ([{}], None, "fail"),  # No rows returned at all.
+    ([{}], 0, "fail"),
+    ([{}, {}], 1, "fail"),
+    ([{}, {}], 2, "pass"),
+    ([{"code_only": True}], None, "pass"),
+    ([{"code_only": True}, {"stop": True}, {"withdraw": True}, {}], 1, "pass"),
+])
+def test_api_dialog_requires_completed_model_turns(steps, completed, outcome, monkeypatch):
+    import asyncpg
+
+    class Connection:
+        async def fetch(self, *_):
+            return [] if completed is None else [{
+                "completed_turns": completed, "turns": completed, "stored_turns": completed,
+                "protocol": "openai-responses", "expected_protocol": "openai-responses", "has_items": True,
+            }]
+
+        async def close(self):
+            pass
+
+    async def connect(_):
+        return Connection()
+
+    class Api:
+        def post(self, path, body):
+            assert path == "/api/v1/tasks/page"
+            return {"result": {"tasks": []}}
+
+    monkeypatch.setattr(asyncpg, "connect", connect)
+    monkeypatch.setattr(dialogs, "_newest_run", lambda *_: 0)
+    monkeypatch.setattr(dialogs, "_last_action", lambda *_: 0)
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: [])
+    monkeypatch.setattr(dialogs, "_stop_leftovers", lambda *_: None)
+    monkeypatch.setattr(dialogs, "_ask", lambda *_, **__: "ok")
+    case = dialogs.Dialog("readback", tuple(dialogs.Say("step", lambda _: None, **flags) for flags in steps))
+    row = dialogs.run_dialog(Api(), case, database_url="unused", project_id="p", scenarios=None,
+                             mode="real", timeout=1, manager_profile={"runtime_type": "api"})
+    assert row["outcome"] == outcome, row
+    if outcome == "fail":
+        assert row["problems"] == [
+            f"expected at least {len(steps)} completed API Manager turns, read back {completed or 0}"]
+    else:
+        assert row["problems"] == []
+
+
 def test_cpa_eval_instructions_distinguish_measured_gate_results_from_pending_checks():
     readme = Path("evals/README.md").read_text()
     cpa = readme.split("#### The api runtime on CPA\n", 1)[1].split("#### Pi\n", 1)[0]
