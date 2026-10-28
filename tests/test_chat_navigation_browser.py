@@ -3,7 +3,6 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import json
-import subprocess
 from threading import Thread
 
 import pytest
@@ -19,14 +18,12 @@ def session(sid, channel="web"):
 
 
 @pytest.fixture(scope="module")
-def dashboard_url():
-    subprocess.run(["npm", "run", "build"], cwd=ROOT / "web", check=True, timeout=180, capture_output=True)
-
+def dashboard_url(staged_dashboard_dir):
     class QuietHandler(SimpleHTTPRequestHandler):
         def log_message(self, *_args):
             pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(QuietHandler, directory=str(ROOT / "web/dist")))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(QuietHandler, directory=str(staged_dashboard_dir)))
     thread = Thread(target=server.serve_forever)
     thread.start()
     try:

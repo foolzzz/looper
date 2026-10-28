@@ -38,6 +38,14 @@ import worker_database  # noqa: E402
 _TEST_SHARD = pytest.StashKey[tuple[int, int]]()
 
 
+@pytest.fixture(scope="session")
+def staged_dashboard_dir() -> Path:
+    """Use the wheel's dashboard, built once before pytest, never rebuild it in workers."""
+    directory = REPO_ROOT / "looper" / "web" / "dashboard"
+    assert (directory / "index.html").is_file(), "Run scripts/stage-dashboard.sh before browser tests"
+    return directory
+
+
 def pytest_configure(config: pytest.Config) -> None:
     if (shard := os.environ.get("LOOPER_TEST_SHARD")) is not None:
         match = re.fullmatch(r"([1-9][0-9]*)/([1-9][0-9]*)", shard)
