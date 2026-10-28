@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, fields
 import logging
 from pathlib import Path
+import re
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
@@ -23,7 +24,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 SETTLE_TIMEOUT = 5.0
-PROVIDER_ID_ENV = "LOOPER_PROVIDER_ACCOUNT_ID"
 
 
 @dataclass(frozen=True, repr=False)
@@ -43,16 +43,21 @@ class Descriptor:
     session: str | None = None
     add_dirs: tuple[str, ...] = ()
     read_only: bool = False
+    system_prompt_mode: Literal["replace", "append"] = "replace"
+    reasoning: bool = False
+    builtin: tuple[str, ...] = ()
 
     def to_argv(self) -> list[str]:
         argv = ["looper-runner"]
         for f in fields(self):
             value = getattr(self, f.name)
-            if f.name in {"session", "add_dirs"}:
+            if f.name in {"session", "add_dirs", "builtin"}:
                 continue
             argv.extend(["--" + f.name.replace("_", "-"),
                          value.value if isinstance(value, ApiProtocol) else
                          "" if value is None else str(value)])
+        for name in self.builtin:
+            argv.extend(["--builtin", name])
         for directory in self.add_dirs:
             argv.extend(["--add-dir", directory])
         return argv + ["--session", self.session] if self.session else argv
@@ -60,7 +65,7 @@ class Descriptor:
     @classmethod
     def parse(cls, argv: list[str]) -> Descriptor:
         try:
-            names = [f.name for f in fields(cls) if f.name not in {"session", "add_dirs"}]
+            names = [f.name for f in fields(cls) if f.name not in {"session", "add_dirs", "builtin"}]
             size = 1 + 2 * len(names)
             if (not all(isinstance(v, str) for v in argv) or len(argv) < size or argv[0] != "looper-runner"
                     or argv[1:size:2] != ["--" + n.replace("_", "-") for n in names]):
@@ -72,17 +77,26 @@ class Descriptor:
             values["max_requests"] = int(values["max_requests"])
             if (values["role"] not in {"manager", "planner"} or values["max_requests"] <= 0
                     or values["read_only"] not in {"True", "False"}
+                    or values["reasoning"] not in {"True", "False"}
+                    or values["system_prompt_mode"] not in {"replace", "append"}
                     or any(not values[n] for n in ("kind", "provider_id", "base_url", "model", "system_prompt_file"))):
                 raise ValueError
             values["read_only"] = values["read_only"] == "True"
+            values["reasoning"] = values["reasoning"] == "True"
+            builtin = []
             directories = []
             tail = argv[size:]
+            while len(tail) >= 2 and tail[0] == "--builtin":
+                if not re.fullmatch(r"[a-z][a-z_]*", tail[1]):
+                    raise ValueError
+                builtin.append(tail[1])
+                tail = tail[2:]
             while len(tail) >= 2 and tail[0] == "--add-dir":
                 directories.append(tail[1])
                 tail = tail[2:]
             if tail and (len(tail) != 2 or tail[0] != "--session" or not tail[1]):
                 raise ValueError
-            return cls(**values, add_dirs=tuple(directories), session=tail[1] if tail else None)
+            return cls(**values, builtin=tuple(builtin), add_dirs=tuple(directories), session=tail[1] if tail else None)
         except (ValueError, TypeError, IndexError):
             raise ValueError("not a runner session description") from None
 
@@ -105,11 +119,12 @@ class RunnerSession:
         self._cancelling: asyncio.Task | None = None
         self._done: asyncio.Event | None = None
         self._closing = False
+        self._resume_lost = False
 
     @property
     def started(self) -> bool:
         return (self._descriptor is not None and not self._closing and
-                (self._descriptor.session is not None or self._lease is not None and self._lease.valid
+                (self._resume_lost or self._lease is not None and self._lease.valid
                  and not self._lease.bridge._error))
 
     @property
@@ -147,23 +162,32 @@ class RunnerSession:
         self._closing = False
         self._signature, self._totals = signature, totals if totals is not None else Usage(cost_usd=0)
         self._models = {}
-        # S0a has no session/load. Preserve the unavailable id for the owner's
-        # established resume-failure path; never silently create a replacement.
-        if descriptor.session is None:
-            lease = await self.supervisor.acquire(self.kind)
-            try:
-                await lease.open_session({"role": descriptor.role, "cwd": cwd,
-                    "add_dirs": list(descriptor.add_dirs), "env": {PROVIDER_ID_ENV: descriptor.provider_id},
-                    "provider": {"protocol": descriptor.protocol.value, "base_url": descriptor.base_url,
-                        "model": descriptor.model, "effort": descriptor.effort,
-                        "context_window": descriptor.context_window, "api_key": key},
-                    "system_prompt": {"mode": "replace", "text": prompt},
-                    "tools": {"builtin": [], "platform": [], "read_only": descriptor.read_only},
-                    "limits": {"max_requests_per_turn": descriptor.max_requests,
-                        "tool_timeout_s": 120, "tool_output_bytes": 102400}})
-            except BaseException:
-                await lease.release()
+        self._resume_lost = False
+        lease = await self.supervisor.acquire(self.kind, owner=self.label)
+        params = {"role": descriptor.role, "cwd": cwd,
+            "add_dirs": list(descriptor.add_dirs), "env": {k: v for k, v in (env or {}).items() if k != KEY_ENV},
+            "provider": {"account_id": descriptor.provider_id, "reasoning": descriptor.reasoning,
+                "protocol": descriptor.protocol.value, "base_url": descriptor.base_url,
+                "model": descriptor.model, "effort": descriptor.effort,
+                "context_window": descriptor.context_window, "api_key": key},
+            "system_prompt": {"mode": descriptor.system_prompt_mode, "text": prompt},
+            "tools": {"builtin": list(descriptor.builtin), "platform": [], "read_only": descriptor.read_only},
+            "limits": {"max_requests_per_turn": descriptor.max_requests,
+                "tool_timeout_s": 120, "tool_output_bytes": 102400}}
+        try:
+            if descriptor.session is None:
+                await lease.open_session(params)
+            else:
+                await lease.load_session({**params, "session_id": descriptor.session})
+        except RpcFailure as error:
+            await lease.release()
+            if descriptor.session is None or error.code not in {ErrorCode.SESSION_NOT_FOUND, ErrorCode.SESSION_OWNED}:
                 raise
+            self._resume_lost = True
+        except BaseException:
+            await lease.release()
+            raise
+        else:
             self._lease = lease
         self._descriptor = descriptor
 
@@ -216,7 +240,7 @@ class RunnerSession:
             descriptor, budget, tools = self._descriptor, self._budget, self._tools
             if descriptor is None:
                 raise RuntimeError("runner session has not started")
-            if descriptor.session:
+            if self._resume_lost:
                 return self._failure("runner saved session is unavailable; could not be resumed", trace)
             if budget is None or tools is None:
                 return self._failure("runner turn requires host tools and budget context before prompting", trace)

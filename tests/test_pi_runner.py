@@ -194,6 +194,13 @@ rpc.method('abort', async p => {{
   try {{ await reply; }} catch {{ return {{aborted: true}}; }}
 }});
 rpc.method('error', () => {{ throw new rpc.RpcError(-32003, 'test-secret ' + 'x'.repeat(700)); }});
+rpc.method('burst', async p => {{
+  await Promise.all([
+    rpc.notify('test/update', p),
+    rpc.notify('test/update', {{tag: 'after-large'}}),
+  ]);
+  return {{}};
+}});
 rpc.start();
 ''')
     monkeypatch.setattr(pi_command, "entry", lambda: harness)
@@ -222,12 +229,20 @@ rpc.start();
             assert (await receive())["id"] == "r-2"
             assert (await receive())["result"] == {"aborted": True}
             await send({"jsonrpc": "2.0", "id": "r-2", "result": {}})
-            # A large reply crosses Node's write high-water mark; the next reply stays whole.
+            # Independent requests may finish in either order; correlate replies by id.
             await send("work", {"text": "é" * 40000}, id="l-7")
             await send("error", {}, id="l-8")
-            assert (await receive())["result"]["text"] == "é" * 40000
-            error = (await receive())["error"]
+            replies = [await receive(), await receive()]
+            assert {reply["id"] for reply in replies} == {"l-7", "l-8"}
+            by_id = {reply["id"]: reply for reply in replies}
+            assert by_id["l-7"]["result"]["text"] == "é" * 40000
+            error = by_id["l-8"]["error"]
             assert len(error["message"]) == 512 and error["message"].startswith("[redacted]")
+            # Queue both writes together so the second must wait for the large frame's drain.
+            await send("burst", {"text": "é" * 200000}, id="l-9")
+            assert (await receive())["params"] == {"text": "é" * 200000}
+            assert (await receive())["params"] == {"tag": "after-large"}
+            assert (await receive()) == {"jsonrpc": "2.0", "id": "l-9", "result": {}}
             await send({"jsonrpc": "2.0", "id": "r-999", "result": {}})
             assert await asyncio.wait_for(process.wait(), 5) == 2
             assert b"never issued" in await process.stderr.read()

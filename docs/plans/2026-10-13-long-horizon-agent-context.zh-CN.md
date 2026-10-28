@@ -718,8 +718,6 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 2026-10-27 | 假 runner（本分支）：协议基线覆盖握手、工具、宿主计费、拒绝、取消和引导；隔离 PostgreSQL/serve 的 Manager HTTP 对话经 `looper_tasks` 读回任务、审计与同一 trace，四类 token 精确计费 $0.003900，请求前预算拒绝为零请求/零工具；服务和 runner 正常退出，启动即退出的独立进程组子进程清理回归通过。Planner serve 未测，S0 其余范围不在本次验收内。 |
 
-| 2026-10-27 | Pi runner 骨架（本分支）：随 wheel 分发直接由 Node 执行的 TypeScript，提供 0.1 stdio、SDK 1.3.x 门禁、health、固定环境变量与有序关闭，尚未注册运行时，session 方法继续拒绝。已在安装后的 wheel 上使用 Node 24.20.0 / Pi 1.3.0 完成隔离 supervisor 握手，Node 22.19 的直接执行尚未实测；Dashboard、Telegram、飞书和 CLI 无入口改动。 |
-
 ## 5. 不属于本 RFC 的待办
 
 这些问题在开发过程中发现，独立排期，不阻塞 M1–M6。

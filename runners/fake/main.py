@@ -92,7 +92,7 @@ class Fake:
                 outcome = "cancelled"
                 return
             allowed = await self.reverse("budget/authorize", dict(correlation, request_id=request_id,
-                kind="turn", provider=session.params["env"].get("LOOPER_PROVIDER_ACCOUNT_ID", "account"),
+                kind="turn", provider=provider["account_id"],
                 model=provider["model"], estimated_input_tokens=2000, max_output_tokens=1000))
             self.evidence("authorization", dict(correlation, request_id=request_id),
                           **{k: allowed[k] for k in ("allow", "reason") if k in allowed})
