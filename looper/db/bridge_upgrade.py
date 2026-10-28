@@ -123,9 +123,11 @@ async def upgrade_from_bridge(conn):
 
 
 async def structure(conn):
+    # PG18 also records NOT NULL in pg_constraint; columns.is_nullable already
+    # captures it, so exclude the redundant rows to keep witnesses portable.
     queries = {
         "columns": "SELECT table_name,column_name,udt_name,character_maximum_length,numeric_precision,numeric_scale,datetime_precision,collation_name,is_nullable,column_default FROM information_schema.columns WHERE table_schema=current_schema() ORDER BY 1,2",
-        "constraints": "SELECT conrelid::regclass::text,conname,pg_get_constraintdef(oid) FROM pg_constraint WHERE connamespace=quote_ident(current_schema())::regnamespace ORDER BY 1,2",
+        "constraints": "SELECT conrelid::regclass::text,conname,pg_get_constraintdef(oid) FROM pg_constraint WHERE connamespace=quote_ident(current_schema())::regnamespace AND contype <> 'n' ORDER BY 1,2",
         "indexes": "SELECT i.tablename,i.indexname,i.indexdef,x.indisvalid,x.indisready FROM pg_indexes i JOIN pg_class c ON c.relname=i.indexname AND c.relnamespace=quote_ident(current_schema())::regnamespace JOIN pg_index x ON x.indexrelid=c.oid WHERE i.schemaname=current_schema() ORDER BY 1,2",
         "functions": "SELECT proname,pg_get_functiondef(oid) FROM pg_proc WHERE pronamespace=quote_ident(current_schema())::regnamespace ORDER BY 1,2",
         "triggers": "SELECT tgname,pg_get_triggerdef(oid),tgenabled::text FROM pg_trigger WHERE tgrelid IN (SELECT oid FROM pg_class WHERE relnamespace=quote_ident(current_schema())::regnamespace) AND NOT tgisinternal ORDER BY 1,2",

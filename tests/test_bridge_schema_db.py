@@ -18,6 +18,53 @@ def run(test):
     asyncio.run(asyncio.wait_for(test(), 90))
 
 
+@pytest.mark.parametrize("source", [None, "bridge_source", "snapshot_bridge_source"],
+                         ids=["fresh", "v2.13.165", "v2.13.180"])
+def test_pg18_not_null_catalog_allows_upgrade_and_restart(request, source):
+    released = request.getfixturevalue(source) if source else None
+
+    async def test():
+        async with fresh_connection() as conn:
+            if released:
+                await initialize_bridge(conn, released)
+            else:
+                await connection.ensure_schema(conn)
+            if conn.get_server_version().major < 18:
+                # Exercise the added catalog rows on older CI servers too. The
+                # temporary view leaves persistent schema and column metadata intact.
+                await conn.execute("""
+                    CREATE TEMP VIEW pg_constraint AS
+                    SELECT oid, connamespace, conrelid, conname, contype FROM pg_catalog.pg_constraint
+                    UNION ALL
+                    SELECT 0::oid, c.relnamespace, a.attrelid,
+                           (c.relname || '_' || a.attname || '_not_null')::name, 'n'::"char"
+                    FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+                    WHERE c.relnamespace = current_schema()::regnamespace
+                        AND a.attnum > 0 AND NOT a.attisdropped AND a.attnotnull
+                """)
+            # Positive control: native PG18 rows, or the injected rows on PG16/17,
+            # must actually be visible to the admission gate's unqualified query.
+            assert await conn.fetchval("SELECT count(*) FROM pg_constraint WHERE contype = 'n' "
+                                       "AND connamespace = current_schema()::regnamespace") > 0
+            before = await witness(conn)
+            assert await connection.schema_change_pending(conn) is bool(released)
+            assert await witness(conn) == before
+            await connection.ensure_schema(conn)
+            assert await conn.fetchval("SELECT version FROM registry_schema_version") == 4
+            upgraded, shape = await witness(conn), await structure(conn)
+            await connection.ensure_schema(conn)
+            assert await witness(conn) == upgraded and await structure(conn) == shape
+            assert not await connection.schema_change_pending(conn)
+            # Ignoring redundant NOT NULL catalog entries must not hide real damage.
+            await conn.execute("ALTER TABLE tasks ALTER COLUMN requirement DROP NOT NULL")
+            damaged = await witness(conn)
+            for operation in (connection.schema_change_pending, connection.ensure_schema):
+                with pytest.raises(connection.RegistrySchemaVersionError):
+                    await operation(conn)
+                assert await witness(conn) == damaged
+    run(test)
+
+
 def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source):
     async def test():
         async with fresh_connection() as conn, fresh_connection() as fresh:
