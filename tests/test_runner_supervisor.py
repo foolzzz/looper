@@ -172,7 +172,7 @@ def runners(tmp_path, monkeypatch):
     processes = []
 
     @asynccontextmanager
-    async def make(*, session_cap=4, kinds=("fake",), control_timeouts=(10.0,), **options):
+    async def make(*, session_cap=4, kinds=("fake",), control_timeouts=(10.0,), env=None, **options):
         async def connect(process, kind):
             processes.append(process)
             timeout = control_timeouts[min(len(processes) - 1, len(control_timeouts) - 1)]
@@ -185,7 +185,7 @@ def runners(tmp_path, monkeypatch):
             return bridge
         supervisor = s.RunnerSupervisor(tmp_path, {kind: [sys.executable,
             Path("tests/test_runner_supervisor.py"), json.dumps({**options, "kind": kind})] for kind in kinds},
-            session_cap=session_cap, connect=connect)
+            session_cap=session_cap, connect=connect, env=env)
         try:
             yield supervisor, processes
         finally:
@@ -199,6 +199,37 @@ def runners(tmp_path, monkeypatch):
             if children:
                 await until(lambda: not children & proc_tree._snapshot().keys())
     return make
+
+
+def test_kind_environment_reaches_only_its_runner(runners, monkeypatch):
+    monkeypatch.setenv("PI_OFFLINE", "must-not-inherit")
+    async def exercise():
+        fixed = {"fake": {"PI_OFFLINE": "1"}}
+        async with runners(kinds=("fake", "other"), env=fixed) as (owner, _):
+            fixed["fake"]["PI_OFFLINE"] = "changed-after-construction"
+            first, second = await owner.acquire("fake"), await owner.acquire("other")
+            for lease, expected in ((first, "1"), (second, None)):
+                observed = json.loads((lease._generation.directory / "observed.json").read_text())
+                assert observed["env"].get("PI_OFFLINE") == expected
+                assert observed["env"]["HOME"] == str(lease._generation.directory)
+            await first.release()
+            await second.release()
+    run(exercise())
+
+
+@pytest.mark.parametrize("env", [
+    {"unknown": {"PI_OFFLINE": "1"}},
+    {"fake": {"lowercase": "1"}},
+    {"fake": {"1BAD": "1"}},
+    *({"fake": {name: "1"}} for name in ("PATH", "HOME", "TMPDIR", "TZ", "LANG", "LANGUAGE", "LC_ALL")),
+    {"fake": {"PI_OFFLINE": 1}},
+    {"fake": {"PI_OFFLINE": "bad\0value"}},
+    {"fake": []},
+    [],
+])
+def test_invalid_kind_environment_is_rejected(tmp_path, env):
+    with pytest.raises(ValueError):
+        s.RunnerSupervisor(tmp_path, {"fake": [sys.executable]}, connect=None, env=env)
 
 
 @pytest.mark.parametrize("load", [False, True])

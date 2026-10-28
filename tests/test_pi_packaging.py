@@ -216,13 +216,16 @@ def build_wheel(work: Path) -> tuple[Path, dict[str, str]]:
     names = _run(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
                  cwd=ROOT, env=env).stdout.split("\0")
     for name in names:
-        if name and (name.startswith("looper/") or name in
+        if name and (name.startswith(("looper/", "runners/pi/")) or name in
                      {"pyproject.toml", "README.md", "LICENSE", "NOTICE", "LICENSE-MIT"}):
             source = ROOT / name
-            if source.is_file():
+            if source.is_symlink() or source.is_file():
                 target = src / name
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
+                if source.is_symlink():
+                    os.symlink(os.readlink(source), target)
+                else:
+                    shutil.copy2(source, target)
     _run(["uv", "build", "--wheel", "--out-dir", str(work / "dist")], cwd=src, env=env, timeout=90)
     wheel, = (work / "dist").glob("*.whl")
     # Delete the build source so a repository-relative lookup cannot accidentally pass.
@@ -234,6 +237,18 @@ def test_wheel_contains_the_tool_bridge(tmp_path: Path) -> None:
     wheel, _ = build_wheel(tmp_path)
     with zipfile.ZipFile(wheel) as archive:
         assert RESOURCE in archive.namelist(), "the wheel must carry the tool bridge explicitly"
+
+
+def test_wheel_contains_the_pi_runner(tmp_path: Path) -> None:
+    wheel, _ = build_wheel(tmp_path)
+    prefix = "looper/agents/runtimes/runner/pi_runner/"
+    with zipfile.ZipFile(wheel) as archive:
+        names = archive.namelist()
+        assert prefix + "package.json" in names
+        assert prefix + "src/main.ts" in names
+        assert not any(name.startswith("runners/") for name in names)
+        assert all(name == prefix + "package.json" or name.startswith(prefix + "src/")
+                   for name in names if name.startswith(prefix))
 
 
 def test_wheel_contains_every_v1_domain(tmp_path: Path) -> None:
@@ -251,6 +266,50 @@ def install_wheel(work: Path) -> tuple[Path, Path, dict[str, str]]:
     _run(["uv", "venv", "--python", sys.executable, str(python.parent.parent)], cwd=work, env=env)
     _run(["uv", "pip", "install", "--python", str(python), str(wheel)], cwd=work, env=env)
     return work, python, env
+
+
+@pytest.mark.installed
+def test_installed_wheel_launches_the_pi_runner(installed: tuple[Path, Path, dict[str, str]]) -> None:
+    from pi_runner_support import require_pi
+
+    node, pi = require_pi()
+    work, python, env = installed
+    done = _run([str(python), "-I", "-c", '''
+import asyncio, json, sys, sysconfig
+from pathlib import Path
+from looper.agents.runtimes.runner import pi_command
+from looper.agents.runtimes.runner.bridge import RunnerBridge
+from looper.agents.runtimes.runner.supervisor import RunnerSupervisor
+
+assert pi_command.entry().is_relative_to(Path(sysconfig.get_path('purelib')))
+
+async def main():
+    handshakes = []
+    async def connect(process, kind):
+        bridge = RunnerBridge(process.stdout, process.stdin, kind, control_timeout=10)
+        try:
+            handshakes.append(await bridge.initialize(permitted=pi_command.PERMITTED))
+        except BaseException:
+            await bridge.close()
+            raise
+        return bridge
+    supervisor = RunnerSupervisor(Path('runner-wheel-runtime'), {
+        'pi': pi_command.command(sys.argv[1], sys.argv[2])},
+        session_cap=10, env={'pi': pi_command.ENV}, connect=connect)
+    try:
+        lease = await supervisor.acquire('pi')
+        assert (await lease.bridge.health())['sessions'] == 0
+        await lease.release()
+    finally:
+        await supervisor.stop()
+    print(json.dumps(handshakes[0], sort_keys=True))
+
+asyncio.run(main())
+''', node, pi], cwd=work, env=env, timeout=30)
+    handshake = json.loads(done.stdout)
+    assert handshake["protocol_version"] == "0.1"
+    assert handshake["sdk"]["version"].startswith("1.3.")
+    print("Installed wheel Pi runner handshake: " + json.dumps(handshake, sort_keys=True))
 
 
 @pytest.mark.installed
