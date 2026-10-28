@@ -1,4 +1,4 @@
-"""Pi's opt-in leaves CLI launches intact and binds resident runner descriptors safely."""
+"""Pi's opt-in hosts every role and binds runner descriptors safely."""
 from __future__ import annotations
 
 import asyncio
@@ -21,6 +21,7 @@ from looper.agents.profile_registry import CatalogModel
 from looper.agents.runtimes import ADAPTERS, ApiProtocol, RuntimeUnsupported
 from looper.agents.runtimes.pi import KEY_ENV, PiRuntime, ResidentPi
 from looper.agents.runtimes import pi_runner
+from looper.agents.runtimes.channel import Fork
 from looper.agents.runtimes.pi_runner import PiRunnerRuntime
 from looper.agents.runtimes.runner.bridge import RpcFailure
 from looper.agents.runtimes.runner.protocol import ErrorCode, ProtocolError
@@ -46,6 +47,7 @@ def test_ops_default_has_no_environment_variable(tmp_path):
                       dotenv=tmp_path / "absent")
     assert config.pi_runtime == "cli"
     assert type(ADAPTERS["pi"]) is PiRuntime
+    assert not ADAPTERS["pi"].hosts_runs
     assert isinstance(ADAPTERS["pi"].resident_session("test"), ResidentPi)
 
 
@@ -159,21 +161,117 @@ def test_resident_launch_rejects_mismatch_provider_env_and_unavailable(tmp_path,
         adapter.resident_command(executable, **{**kwargs, "launch": replace(selected, role=AgentType.WORKER)})
 
 
-@pytest.mark.parametrize("role,consult", [(AgentType.WORKER, False), (AgentType.REVIEWER, False),
-                                         (AgentType.WORKER, True)])
-def test_other_roles_keep_cli_commands_environment_and_notes(tmp_path, runtime, role, consult):
+@pytest.mark.parametrize("role", [AgentType.WORKER, AgentType.REVIEWER])
+@pytest.mark.parametrize("max_turns,timeout_s,requests,tool_timeout", [(7, 360, 7, 360), (0, 0, 1000, 86400)])
+def test_hosted_run_descriptor_environment_and_session(tmp_path, monkeypatch, runtime, role,
+                                                       max_turns, timeout_s, requests, tool_timeout):
     adapter, executable = runtime
-    selected = replace(launch(provider()), role=role, consult=consult)
+    selected = replace(launch(provider()), role=role,
+                       knowledge=AgentKnowledge(add_dirs=(str(tmp_path / "knowledge"),)),
+                       read_dirs=(str(tmp_path / "readable"),))
+    monkeypatch.setenv("LOOPER_AGENT_URL", "http://private-agent.invalid")
+    monkeypatch.setenv("LOOPER_AGENT_TOKEN", "private-agent-token")
     prompt = tmp_path / ".local" / "prompts" / "input.md"
     prompt.parent.mkdir(parents=True)
     prompt.write_text("Looper prompt")
-    kwargs = dict(cwd=tmp_path, prompt_file=prompt, launch=selected, session_dir=tmp_path / "sessions")
-    plain = PiRuntime()
-    assert adapter.run_command(executable, **kwargs) == plain.run_command(executable, **kwargs)
-    assert adapter.environment(selected) == plain.environment(selected)
-    assert adapter.prompt_blocks(selected, "prompt", cwd=tmp_path) == plain.prompt_blocks(selected, "prompt", cwd=tmp_path)
-    for name in ("run_command", "steer_command", "run_channel", "consult_command"):
-        assert getattr(PiRunnerRuntime, name) is getattr(PiRuntime, name)
+    session_dir = tmp_path / "sessions"
+    handle = adapter.hosted_run(executable, cwd=tmp_path, prompt_file=prompt, launch=selected,
+        session_dir=session_dir, max_turns=max_turns, timeout_s=timeout_s, tools=None, limits=AsyncMock())
+    descriptor = Descriptor.parse(handle.command)
+    assert adapter.hosts_runs and descriptor.role == role.value
+    assert descriptor.builtin == ("read", "bash", "edit", "write")
+    assert not descriptor.read_only and descriptor.fork_from is None
+    assert descriptor.max_requests == requests and descriptor.tool_timeout_s == tool_timeout
+    assert descriptor.add_dirs == (*selected.knowledge.add_dirs, *selected.read_dirs)
+    written = Path(descriptor.system_prompt_file)
+    text = written.read_text()
+    assert "Looper prompt" in text and "platform tools are named looper_*" in text
+    assert "mcp__looper__" not in text and KEY not in " ".join(handle.command)
+    assert written.stat().st_mode & 0o777 == 0o600
+    environment = adapter.environment(selected)
+    assert environment[KEY_ENV] == KEY
+    assert not {"LOOPER_AGENT_URL", "LOOPER_AGENT_TOKEN"} & environment.keys()
+    assert isinstance(handle.session, RunnerSession)
+    assert not handle.session._owned and handle.session._state_dir == session_dir
+
+
+@pytest.mark.parametrize("role", [AgentType.WORKER, AgentType.REVIEWER])
+def test_hosted_consult_forks_read_only_snapshot(tmp_path, runtime, role):
+    adapter, executable = runtime
+    selected = replace(launch(provider()), role=role, consult=True)
+    prompt = tmp_path / ".local" / "prompts" / "input.md"
+    prompt.parent.mkdir(parents=True)
+    prompt.write_text("Consult prompt")
+    source = tmp_path / "sessions" / "saved.jsonl"
+    source.parent.mkdir()
+    original = b'{"type":"session","id":"saved"}\n{"type":"message","content":"history"}\n'
+    source.write_bytes(original)
+    fork = Fork(session_id="saved", session_dir=source.parent, fork_dir=tmp_path / "forks" / "consult")
+    handle = adapter.hosted_run(executable, cwd=tmp_path, prompt_file=prompt, launch=selected,
+        session_dir=None, max_turns=0, timeout_s=0, tools=None, limits=AsyncMock(), fork=fork)
+    descriptor = Descriptor.parse(handle.command)
+    assert descriptor.builtin == ("read", "grep", "find", "ls")
+    assert descriptor.read_only and descriptor.system_prompt_mode == "append"
+    assert descriptor.fork_from == "saved"
+    copied = fork.fork_dir / source.name
+    assert copied.read_bytes() == original and copied.stat().st_mode & 0o777 == 0o400
+    assert source.read_bytes() == original
+    assert handle.session._state_dir == fork.fork_dir and not handle.session._owned
+
+
+def test_hosted_consult_missing_source_leaves_no_fork(tmp_path, runtime):
+    adapter, executable = runtime
+    selected = replace(launch(provider()), role=AgentType.REVIEWER, consult=True)
+    prompt = tmp_path / ".local" / "prompts" / "input.md"
+    prompt.parent.mkdir(parents=True)
+    prompt.write_text("Consult prompt")
+    fork = Fork(session_id="missing", session_dir=tmp_path / "sessions", fork_dir=tmp_path / "fork")
+    with pytest.raises(RuntimeUnsupported, match="saved session has no unique file"):
+        adapter.hosted_run(executable, cwd=tmp_path, prompt_file=prompt, launch=selected,
+            session_dir=None, max_turns=0, timeout_s=0, tools=None, limits=AsyncMock(), fork=fork)
+    assert not fork.fork_dir.exists()
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "executable", "provider_env", "manager"])
+def test_hosted_run_refuses_invalid_launch_before_writes(tmp_path, runtime, failure):
+    adapter, executable = runtime
+    selected = replace(launch(provider()), role=AgentType.WORKER)
+    expected = "launch executable"
+    if failure == "unavailable":
+        adapter.unavailable = expected = "fixture missing runner"
+    elif failure == "executable":
+        executable = "missing-other-pi"
+    elif failure == "provider_env":
+        selected = replace(selected, settings=launch(provider(env=(("HTTPS_PROXY", "private-provider-value"),))).settings)
+        expected = "provider's environment"
+    else:
+        selected = replace(selected, role=AgentType.MANAGER)
+        expected = "Worker, Reviewer and consult"
+    with pytest.raises(RuntimeUnsupported, match=expected) as caught:
+        adapter.hosted_run(executable, cwd=tmp_path, prompt_file=tmp_path / "absent", launch=selected,
+            session_dir=None, max_turns=0, timeout_s=0, tools=None, limits=AsyncMock())
+    assert "private-provider-value" not in str(caught.value)
+    assert not (tmp_path / "pi-runner").exists()
+
+
+@pytest.mark.parametrize("method", ["run_command", "steer_command", "consult_command"])
+def test_opt_in_refuses_cli_run_commands(tmp_path, runtime, method):
+    adapter, executable = runtime
+    kwargs = dict(cwd=tmp_path, prompt_file=tmp_path / "absent",
+                  launch=replace(launch(provider()), role=AgentType.WORKER))
+    if method == "consult_command":
+        kwargs.update(session_id="saved", session_dir=None, fork_dir=tmp_path / "fork")
+    with pytest.raises(RuntimeUnsupported, match="hosts this run; there is no Pi CLI command"):
+        getattr(adapter, method)(executable, **kwargs)
+
+
+@pytest.mark.parametrize("errors,expected", [([], None), (["generation lost", "prompt rejected"],
+    "generation lost; prompt rejected"), (["x" * 600], "x" * 500)])
+def test_runner_failure_detail_preserves_bounded_reason(runtime, errors, expected):
+    adapter, _ = runtime
+    selected = replace(launch(provider()), role=AgentType.WORKER)
+    assert adapter.failure_detail({"type": "result", "errors": errors}, launch=selected,
+                                  command=["looper-runner"]) == expected
 
 
 @pytest.mark.parametrize("node,pi,version", [(None, "/pi", None), ("/node", None, None),

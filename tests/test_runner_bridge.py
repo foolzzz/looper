@@ -1,61 +1,18 @@
 """Transport proofs use real pipes and the production wire codec."""
 import asyncio
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 import json
-import os
 from pathlib import Path
 import weakref
-from typing import get_args
 
 import pytest
 
 from looper.agents.run_usage import Usage
 from looper.agents.runtimes.pricing import ModelPrice, usage_event
 from looper.agents.runtimes.runner import protocol as p
-from looper.agents.runtimes.runner.bridge import RpcFailure, RunnerBridge
+from looper.agents.runtimes.runner.bridge import RpcFailure
 from looper.agents.runtimes.runner.turn import RunnerTurn
-
-
-async def pipe():
-    read_fd, write_fd = os.pipe()
-    loop = asyncio.get_running_loop()
-    reader = asyncio.StreamReader()
-    read_transport, _ = await loop.connect_read_pipe(
-        lambda: asyncio.StreamReaderProtocol(reader), os.fdopen(read_fd, "rb"))
-    protocol = asyncio.StreamReaderProtocol(asyncio.StreamReader())
-    transport, _ = await loop.connect_write_pipe(lambda: protocol, os.fdopen(write_fd, "wb"))
-    return reader, asyncio.StreamWriter(transport, protocol, None, loop), read_transport
-
-
-@asynccontextmanager
-async def connection(handshake=None, **options):
-    host_reader, runner_writer, rt = await pipe()
-    runner_reader, host_writer, ht = await pipe()
-    failures = []
-    bridge = RunnerBridge(host_reader, host_writer, "fake", on_failure=failures.append, **options)
-    try:
-        init = asyncio.create_task(bridge.initialize())
-        req = await p.read_frame(runner_reader)
-        caps = {"cancel": True, "usage": {"per_request": True}, "authorize_covers": list(get_args(p.RequestKind)),
-                "steer": {"in_trace": True, "boundary": "after_tool_batch", "idle_start": False}}
-        result = {"protocol_version": "0.1",
-            "runner": {"kind": "fake", "version": "1"}, "sdk": {"name": "fake", "version": "1"},
-            "capabilities": caps, **(handshake or {})}
-        await send(runner_writer, p.Response(req.id, result=result))
-        await init
-        yield bridge, runner_reader, runner_writer, failures
-    finally:
-        runner_writer.close()
-        await bridge.close()
-        rt.close()
-        ht.close()
-        await runner_writer.wait_closed()
-
-
-async def send(writer, message):
-    writer.write(p.encode_frame(message))
-    await writer.drain()
+from runner_pipe_support import connection, send
 
 
 def test_health_round_trip():
