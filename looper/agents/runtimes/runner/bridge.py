@@ -195,6 +195,9 @@ class RunnerBridge:
         self._initialized = True
         return result
 
+    async def health(self):
+        return await self.request("runner/health", {})
+
     async def _write(self, message, entry=None):
         frame = p.encode_frame(message)
         async with self._write_lock:

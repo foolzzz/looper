@@ -58,6 +58,20 @@ async def send(writer, message):
     await writer.drain()
 
 
+def test_health_round_trip():
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            pending = asyncio.create_task(bridge.health())
+            request = await p.read_frame(reader)
+            assert request.method == "runner/health" and request.params == {}
+            health = {"sessions": 0, "running": 0, "inflight_requests": 0, "tool_processes": 0,
+                      "rss_bytes": 1024, "event_loop_lag_ms": 11}
+            await send(writer, p.Response(request.id, result=health))
+            assert await pending == health
+            assert not failures
+    asyncio.run(asyncio.wait_for(exercise(), 5))
+
+
 async def update(writer, kind, **fields):
     await send(writer, p.Notification("session/update", dict(session_id="s", trace_id="t", kind=kind, **fields)))
 
