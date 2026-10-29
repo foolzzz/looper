@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.206] - 2026-10-28
+
+### Fixed
+
+- **The Pi runner decides whether a request was sent from the HTTP client's own event.** The runner subscribes to undici's `undici:client:sendHeaders` event and matches it to the admitted request through an `x-looper-request-id` header, replacing the list of connection error codes. Every request that was not sent is reported as zero usage and complete. Usage is trusted only from a validated terminal event: the Responses `response.completed` event, or the Chat final usage chunk after `[DONE]` or a clean end of stream. A stream that drops after interim usage is reported incomplete. A sent request that fails, including one answered with an HTTP error status, is now reported incomplete. No prompt, tool or message text changes. ([#851](https://github.com/foolzzz/looper/pull/851))
+
 ## [2.13.205] - 2026-10-28
 
 ### Fixed
