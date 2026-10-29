@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.203] - 2026-10-28
+
+### Changed
+
+- **The historical schema migrations are replaced by one final baseline.** `looper/db/schema.sql` now defines the complete fresh schema directly and `looper/db/seeds.sql` holds the builtin rows, inserted on every start without changing saved choices. An empty database runs the schema once, a schema-3 bridge database (v2.13.165 or later) runs one guarded conversion, and a current database never replays initialization DDL. The phase split, `final_constraints`, `registry_migration.py`, `task_concurrency.py` and `layer_effort.migrate` are removed; the admission rule is unchanged. ([#850](https://github.com/foolzzz/looper/pull/850))
+
 ## [2.13.202] - 2026-10-28
 
 ### Changed
