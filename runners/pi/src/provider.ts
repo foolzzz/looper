@@ -52,10 +52,10 @@ function responseUsage(usage: any) {
   const cacheRead = usage?.input_tokens_details?.cached_tokens ?? 0;
   const cacheWrite = usage?.input_tokens_details?.cache_write_tokens ?? 0;
   const reasoning = usage?.output_tokens_details?.reasoning_tokens ?? 0;
-  if (![input, output, cacheRead, cacheWrite, reasoning].every(n => Number.isSafeInteger(n) && n >= 0)
-      || cacheRead + cacheWrite > input || reasoning > output
-      || (usage.total_tokens != null && usage.total_tokens !== input + output)) return;
-  return { input: input - cacheRead - cacheWrite, output, cacheRead, cacheWrite, reasoning,
+  if (![input, output, cacheRead, cacheWrite, reasoning].every(n => Number.isSafeInteger(n) && n >= 0)) return;
+  // Compatible providers can disagree on aggregate totals and detail subsets.
+  // Keep the billable buckets; reasoning is already included in output.
+  return { input: Math.max(0, input - cacheRead - cacheWrite), output, cacheRead, cacheWrite, reasoning,
     totalTokens: input + output };
 }
 

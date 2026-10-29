@@ -719,7 +719,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-27 | 假 runner（本分支）：协议基线覆盖握手、工具、宿主计费、拒绝、取消和引导；隔离 PostgreSQL/serve 的 Manager HTTP 对话经 `looper_tasks` 读回任务、审计与同一 trace，四类 token 精确计费 $0.003900，请求前预算拒绝为零请求/零工具；服务和 runner 正常退出，启动即退出的独立进程组子进程清理回归通过。Planner serve 未测，S0 其余范围不在本次验收内。 |
 | 2026-10-27 | Pi SDK runner turn（本分支）：实现独立会话的新建/关闭、prompt/cancel、请求前预算授权、逐请求用量与唯一结算，尚未接入服务入口，也未启用 builtin/platform 工具。真实 Pi 1.3.0 Responses 客户端配 loopback provider 的定向测试 39 项通过，覆盖精确计费、拒绝零请求、HTTP 错误脱敏、取消、强制释放与迟到事件；确认 SSE 无需 `event:` 行，`retry.provider.maxRetries: 0` 经 SDK 传到客户端，模型存储保持内存。Dashboard、Telegram、Lark 和 CLI 无变更；工具、加载会话及 retry/compaction 请求分类留待后续阶段。 |
 | 2026-10-28 | Pi Manager/Planner runner opt-in（本分支）：ops 文件 `[runtimes] pi = "runner"` 在启动时切换这两个角色，默认 CLI，Worker/Reviewer/consults 保持 CLI；单 runner、10 会话后 CAPACITY，provider env 拒绝且无 CLI fallback。Dashboard 无新增入口，Telegram/Lark `/stop` 沿用中断路径，`config init-ops` 输出设置；eval `run`/`dialogs --pi-runner` 给隔离服务写入相同设置。定向测试及已安装 Pi 配 loopback Responses 的隔离 serve 均通过，覆盖工具审计、精确计费、stop、重启恢复后的会话续接和 Planner→CLI Worker 完成任务；重启退避窗口仍 fail-fast，真实 CPA smoke 和 CLI/runner 对照缺可用 endpoint/key，未验证不计通过，后续范围见 §5.2。 |
-| 2026-10-28 | Pi 请求发送与用量判定（本分支，#846）：通过 Node 内置 undici 的 `sendHeaders` 和逐请求 header 关联实际发送，删除发送前错误码列表；未发送为完整零用量，已发送仅在正常结束且有协议最终 usage 时完整，Chat 还须收到 `[DONE]`，保留取消后迟到授权的结算顺序。安装型契约测试给冷初始化 60 秒预算，握手后恢复普通控制的 10 秒预算，整体防挂上限设为 120 秒，取消期限保持不变。验证：真实 Pi 子进程配 loopback HTTP/TLS/SSE 的 turn、tool 定向测试以 `-n 2` 运行，120 项通过、0 失败、0 跳过，覆盖发送前失败、发送后断流、终态 usage、SSE 换行及迟到授权取消；Dashboard、Telegram、Lark 与 CLI 共用此计费路径，无独立入口改动，未运行真实模型账单验证。 |
+| 2026-10-28 | Pi 全角色 runner 验证（本分支）：补齐 installed 隔离 serve 的两步任务、Planner 引导、Reviewer、只读咨询分叉、逐请求计费与 Worker 预算拒绝、取消、崩溃收敛断言，更新架构、RFC 和 eval 指南。通过：Pi 1.3.0、Node 24.20.0 的两项 SDK 工具集/只读分叉测试；失败：0；未验证：serve 文件的 4 项测试因未设一次性 `LOOPER_TEST_DATABASE_URL` 跳过（含本卡两项），CPA `gpt-6-astra` 的 Pi CLI/runner 九任务各两次对照待 lead 实跑，门禁保持开放。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -824,7 +824,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
-- **Pi SDK runner 的后续**（[RFC §16](../architecture/rfcs/agent-sdk-runner-v0.zh-CN.md#16-阶段)）：S1 尚余 Worker/Reviewer 的 RunnerChannel、咨询分叉与取消、`WorkerPool` 运行句柄、容量测量与运行时卡，以及完成门禁后切换默认值、删除 Pi CLI 路径；本次 opt-in 不提前交付这些。S0 的周期健康检查与 runner pool 仍待实现；compaction 的独立更新事件、`runners/state/pi/<owner>` 的删除与过期清扫亦待补齐。
+- **Pi SDK runner 的后续**（[RFC §16](../architecture/rfcs/agent-sdk-runner-v0.zh-CN.md#16-阶段)）：S1 的 Worker/Reviewer RunnerChannel、咨询分叉与取消、`WorkerPool` 运行句柄已实现；隔离 serve 验证与 CLI/runner 真实任务对照已准备，待 lead 实跑，不能计通过。尚余容量测量及数字、运行时卡、完成门禁后切换默认值和删除 Pi CLI 路径；runner 重启退避期间的 fail-fast 重试、服务崩溃后遗留 `runners/pi-N/` generation 目录清扫、`runners/state/pi/<owner>` 的 owner 状态删除与过期清理需分别补齐。S0 的周期健康检查、runner pool 和 compaction 的独立更新事件仍待实现。
 
 - **把 Grok 的 ACP 常驻会话移植到 Go 版（loopgo）**（Python 版合入 main 之后做）：照 Grok 运行时 RFC 第 14 节：命令翻译、`session/new`/`session/load`、`session/prompt` 事件翻译、取消、回落逐轮续接、用量口径（ACP `inputTokens` 含缓存）。
 - **Profile 自定义提示词与分块预览**（RFC 第 6 节，已实现，验证待完成）：`custom_prompt` 默认空，放在 harness 前；贯通 Profile、配置导入导出、派生 Profile、管家工具与四种运行时。Agent Profiles 提供自定义文本编辑和按角色加载的只读预览，预览与启动共用 prompt builder 和适配器文本布局；任务段、依赖运行目录的知识索引及其他启动上下文在预览中标明。已补定向 Python/数据库与 Web 测试；指定验证入口受当前执行环境写权限限制，测试及类型检查尚未运行，真实 CLI 与浏览器验证待补。

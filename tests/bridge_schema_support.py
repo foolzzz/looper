@@ -99,7 +99,18 @@ INSERT INTO tasks (id, requirement, project_id, status, config) VALUES
 INSERT INTO task_plans (task_id, plan_id, status, final_summary) VALUES
  ('task-bridge', 'plan-bridge', 'completed', 'Keep the plan');
 INSERT INTO system_settings (key, value) VALUES ('bridge-choice', 'preserved');
+INSERT INTO agent_runtimes (id, name, type, executable, capabilities)
+ SELECT 'rt-bridge-custom', 'bridge-custom', type, '', capabilities FROM agent_runtimes WHERE id='rt-claude-code';
+INSERT INTO agent_profiles (id, name, runtime_id, model_id, effort, agent_teams, custom_prompt)
+ SELECT 'agent-bridge-custom', 'Bridge custom', 'rt-bridge-custom', model_id, 'high', false,
+ 'Synthetic custom prompt.' FROM agent_profiles WHERE id='agent-claude-code-opus';
 INSERT INTO agent_setting_layers (scope, harness_prompt) VALUES ('system', 'Synthetic system harness.');
+INSERT INTO agent_setting_layers (scope, role, profile_id, max_concurrency, system_prompt_mode)
+ VALUES ('role', 'worker', 'agent-bridge-custom', 3, 'replace');
+UPDATE agent_profiles SET agent_teams=false WHERE id='agent-claude-code-opus';
+INSERT INTO api_sessions (session_id, protocol, context_tokens) VALUES ('bridge-api', 'openai-responses', 23);
+INSERT INTO api_session_items (session_id, seq, turn, model, item)
+ VALUES ('bridge-api', 1, 1, 'synthetic-model', '{"role":"user","content":"Keep the API transcript"}');
 INSERT INTO agent_sessions (agent_id, session_id, session_totals, selected_profile_id, pending_handoff) VALUES
  ('manager-bridge', 'bridge-session', '{"input_tokens":17,"cost_usd":0.25}', NULL, 'Keep the handoff'),
  ('manager-empty', '', '{}', 'agent-claude-code-opus', NULL);
@@ -128,30 +139,71 @@ INSERT INTO task_user_gate_posts (message_id, task_id, channel, channel_id, chat
  SELECT id, task_id, NULL, 'channel-telegram-201', '7', '11' FROM task_user_gate_messages;
 INSERT INTO chat_messages (session_id, message_id, role, content, channel) VALUES
  ('telegram-7', 'bridge-message', 'user', 'Synthetic public example', 'telegram');
+INSERT INTO chat_threads (session_id, manager_id) VALUES ('telegram-7', 'manager');
+SELECT setval('channel_bot_seq', 201);
 INSERT INTO schedules (id, project_id, name, cron, timezone, requirement, planner_session_id) VALUES
  ('schedule-bridge', 'proj-bridge', 'Bridge schedule', '0 0 * * *', 'UTC', 'Preserve', 'planner-bridge');
 INSERT INTO schedule_runs (id, schedule_id, scheduled_for, trigger, status, task_id, summary) VALUES
  ('run-bridge', 'schedule-bridge', '2026-10-20T00:00:00Z', 'scheduled', 'completed', 'task-bridge', 'Keep the run');
 '''
 
-TABLES = ("projects", "tasks", "task_plans", "system_settings", "agent_setting_layers", "library_items",
-          "library_files", "library_installs", "agent_sessions", "llm_records", "channel_configs",
-          "chat_messages", "schedules", "schedule_runs", "task_user_gate_messages", "task_user_gate_posts",
-          "llm_model_migration_map", "schema_migrations", "registry_schema_version", "schema_fingerprint")
-
-
 async def witness(conn):
-    return {table: [dict(row) for row in await conn.fetch(f'SELECT * FROM {table} ORDER BY 1')]
-            for table in TABLES if await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", table)}
+    tables = await conn.fetch("SELECT tablename FROM pg_tables WHERE schemaname=current_schema() ORDER BY tablename")
+    result = {table: [dict(row) for row in await conn.fetch(
+                'SELECT * FROM "' + table.replace('"', '""') + '" t ORDER BY to_jsonb(t)::text COLLATE "C"')]
+              for table in (row["tablename"] for row in tables)}
+    result["sequence_state"] = [dict(row) for row in await conn.fetch(
+        "SELECT sequencename, last_value FROM pg_sequences WHERE schemaname=current_schema() "
+        "ORDER BY sequencename COLLATE \"C\"")]
+    return result
 
 
 async def structure(conn):
     """Test-only DDL witness for rollback and fresh/upgrade parity; never admission."""
     schema = await conn.fetchval("SELECT current_schema()")
     quoted = '"' + schema.replace('"', '""') + '".'
-    return [tuple(value.replace(quoted, "").replace(schema + ".", "") if isinstance(value, str) else value
-                  for value in row) for row in await conn.fetch("""
-        SELECT table_name, column_name, udt_name, is_nullable, column_default
-        FROM information_schema.columns WHERE table_schema = current_schema()
-        ORDER BY table_name COLLATE "C", column_name COLLATE "C"
-    """)]
+    queries = {
+        "columns": """
+            SELECT table_name, column_name, data_type, udt_name, is_nullable, column_default,
+                   character_maximum_length, numeric_precision, numeric_scale, datetime_precision,
+                   collation_name, is_identity, identity_generation, is_generated, generation_expression
+            FROM information_schema.columns WHERE table_schema=current_schema()
+        """,
+        "relations": """
+            SELECT relname, relkind::text, relpersistence::text, reloptions, relreplident::text
+            FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind IN ('r','p','v','m')
+        """,
+        "constraints": """
+            SELECT c.relname, k.conname, k.contype::text, pg_get_constraintdef(k.oid), k.convalidated
+            FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid
+            WHERE k.connamespace=current_schema()::regnamespace
+        """,
+        "indexes": """
+            SELECT c.relname, pg_get_indexdef(i.indexrelid), i.indisvalid, i.indisclustered, c.reloptions
+            FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid
+            WHERE c.relnamespace=current_schema()::regnamespace
+        """,
+        "functions": """
+            SELECT proname, pg_get_function_identity_arguments(oid), pg_get_functiondef(oid)
+            FROM pg_proc WHERE pronamespace=current_schema()::regnamespace
+        """,
+        "triggers": """
+            SELECT c.relname, t.tgname, t.tgenabled::text, pg_get_triggerdef(t.oid)
+            FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+            WHERE c.relnamespace=current_schema()::regnamespace AND NOT t.tgisinternal
+        """,
+        "sequences": """
+            SELECT c.relname, format_type(s.seqtypid, NULL), s.seqstart, s.seqincrement,
+                   s.seqmax, s.seqmin, s.seqcache, s.seqcycle, owner.relname, a.attname, d.deptype::text
+            FROM pg_sequence s JOIN pg_class c ON c.oid=s.seqrelid
+            LEFT JOIN pg_depend d ON d.objid=c.oid AND d.classid='pg_class'::regclass
+                AND d.refclassid='pg_class'::regclass AND d.deptype IN ('a','i')
+            LEFT JOIN pg_class owner ON owner.oid=d.refobjid
+            LEFT JOIN pg_attribute a ON a.attrelid=d.refobjid AND a.attnum=d.refobjsubid
+            WHERE c.relnamespace=current_schema()::regnamespace
+        """,
+    }
+    return {kind: sorted((tuple(value.replace(quoted, "").replace(schema + ".", "")
+                                if isinstance(value, str) else value for value in row)
+                          for row in await conn.fetch(query)), key=repr)
+            for kind, query in queries.items()}
