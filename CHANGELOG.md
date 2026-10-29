@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.12] - 2026-10-29
+
+### Fixed
+
+- **A DSH runner consult now carries the same context as the CLI consult.** A room consult forked on the DSH runner (`[runtimes] dsh = "runner"`) used to lack the DSH default system guidance and tool declarations that the CLI consult has, and sometimes answered in the Worker report format. The fork now gets the default guidance and the default tool declarations from a declaration-only copy of the installed DSH composition. Only `read`, `glob` and `grep` execute; every other declared tool refuses with `LOOPER_READ_ONLY`. The fork seed also keeps standalone events (for example a session title) after the ended turn, so a dropped-steer replacement is no longer cut off. The first consult request grows: in a synthetic measurement it went from 4,035 to 8,621 input tokens. The answer-format failure itself was not reproduced. ([#895](https://github.com/foolzzz/looper/pull/895))
+
 ## [2.14.11] - 2026-10-29
 
 ### Added
