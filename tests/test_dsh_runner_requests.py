@@ -139,10 +139,11 @@ while (data.length) {
 
 
 @pytest.mark.parametrize("control", ["cancel", "close"])
-def test_cancel_deadline_includes_pending_authorization(tmp_path, control):
+@pytest.mark.parametrize("decision", ["allow", "deny", "error"])
+def test_cancel_deadline_includes_pending_authorization(tmp_path, control, decision):
     async def exercise():
         _, installed = require_dsh()
-        with peer.MessagesServer([["Must remain unsent"]]) as server:
+        with peer.MessagesServer([["Resumed answer"]]) as server:
             async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
                 client = Client(send, receive)
                 client.auto_authorize = False
@@ -160,16 +161,34 @@ def test_cancel_deadline_includes_pending_authorization(tmp_path, control):
                 assert time.monotonic() - started < 5.5
                 assert result["outcome"] == "cancelled"
                 assert not result["usage_complete"]
+                # Load the same durable id before replying to authorization:
+                # removing only the runner registry leaves DSH's writer locked.
+                assert await client.call("session/load", {**params, "session_id": sid}) == {
+                    "session_id": sid, "resumed": True}
                 health = await client.call("runner/health")
-                assert health["sessions"] == health["running"] == health["inflight_requests"] == 0
-                await send({"jsonrpc": "2.0", "id": auth["id"], "result": {"allow": True}})
-                # A replacement with the same key proves the old session was released;
-                # RPC ordering also gives the late authorization a chance to run.
-                replacement = (await client.call("session/new", params))["session_id"]
-                await client.call("session/close", {"session_id": replacement})
+                assert health["sessions"] == 1
+                assert health["running"] == health["inflight_requests"] == 0
+                reply = {"error": {"code": -32603, "message": "Synthetic authorization failure"}} if decision == "error" else {
+                    "result": {"allow": decision == "allow"}}
+                await send({"jsonrpc": "2.0", "id": auth["id"], **reply})
+                await client.call("runner/health")
                 assert not server.requests
                 assert len(client.updates(sid, kind="settled")) == 1
-                assert not client.updates(sid, kind="request_end")
+                ends = assert_accounted(client, sid, count=1 if decision == "allow" else 0)
+                if ends:
+                    end, = ends
+                    assert end["status"] == "aborted" and end["complete"]
+                    assert [end[k] for k in ("input_uncached", "output", "cache_read", "cache_write")] == [0, 0, 0, 0]
+                    assert end["request_id"] == auth["params"]["request_id"]
+                client.auto_authorize = True
+                await client.prompt(sid, "resumed", "Continue")
+                resumed = await client.settled(sid, "resumed")
+                assert resumed["outcome"] == "completed" and resumed["final_text"] == "Resumed answer"
+                resumed_end, = assert_accounted(client, sid, trace="resumed")
+                assert [request["request_id"] for request in server.requests] == [resumed_end["request_id"]]
+                await client.call("session/close", {"session_id": sid})
+                assert len(client.updates(sid, kind="request_end")) == len(ends)
+                assert len(client.updates(sid, kind="settled")) == 1
 
     run(exercise())
 

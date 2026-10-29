@@ -165,6 +165,9 @@ export function settle(record: Session, turn: Turn, failure?: Failure): Promise<
       } else error = { kind: 'INTERNAL_ERROR', message: 'agent stopped without a completed response' };
     }
     if (outcome === 'cancelled' || turn.forced) killProcesses(record);
+    // Expiring authorization lets dispose finish and close the SDK writer.
+    // Both the normal run loop and cancel must cross this barrier before settled.
+    if (turn.forced) await release(record, true).catch(() => { diagnostic('forced session disposal failed'); });
     try { await ctx!.sessionPersistence.flush(); }
     catch {
       outcome = 'failed';
@@ -205,8 +208,6 @@ export async function cancelTurn(record: Session, turn: Turn, deadline = 4000): 
     turn.complete = false;
   } else turn.failure = { kind: 'INTERNAL_ERROR', message: 'cancel did not settle; the session was released' };
   turn.authorizationExpired.resolve();
-  const releasing = release(record, true).catch(() => { diagnostic('forced session disposal failed'); });
   for (const id of turn.inflight) endRequest(record, turn, id, 'aborted', false);
   await settle(record, turn);
-  await releasing;
 }
