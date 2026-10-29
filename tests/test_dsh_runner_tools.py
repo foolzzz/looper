@@ -412,10 +412,20 @@ rpc.method('test/history', p => ({{messages: sessions.get(p.session_id).agent.se
     run(exercise())
 
 
-def test_fork_keeps_a_dropped_steer_out_of_the_consult(tmp_path, monkeypatch):
+@pytest.mark.parametrize("cleanup_gap", [False, True], ids=["adjacent", "standalone-event"])
+def test_fork_keeps_a_dropped_steer_out_of_the_consult(tmp_path, monkeypatch, cleanup_gap):
     session_file = dsh_command.entry().resolve().parent / "session.ts"
     harness(tmp_path, monkeypatch, f"""const {{sessions}} = await import({json.dumps(session_file.as_uri())});
-rpc.method('test/history', p => ({{messages: sessions.get(p.session_id).agent.session.deriveMessages()}}));""")
+rpc.method('test/history', p => ({{messages: sessions.get(p.session_id).agent.session.deriveMessages()}}));
+rpc.method('test/cleanup-gap', p => {{
+  const r = sessions.get(p.session_id), append = r.agent.session.append.bind(r.agent.session);
+  r.agent.session.append = (type, ...args) => {{
+    const event = append(type, ...args);
+    if (type === 'turn/end') append('session/title', {{title: 'Ended Worker', messageSeqs: [], source: {{kind: 'user'}}}});
+    return event;
+  }};
+  return {{}};
+}});""")
 
     async def exercise():
         _, installed = require_dsh()
@@ -428,6 +438,8 @@ rpc.method('test/history', p => ({{messages: sessions.get(p.session_id).agent.se
                 params = writable(params_for(tmp_path, server))
                 params["role"] = "worker"
                 sid = (await client.call("session/new", params))["session_id"]
+                if cleanup_gap:
+                    await client.call("test/cleanup-gap", {"session_id": sid})
                 cwd = Path(params["cwd"])
                 await client.prompt(sid, text="ORIGINAL-PROMPT")
                 await client.requested(server)
@@ -468,7 +480,24 @@ rpc.method('test/history', p => ({{messages: sessions.get(p.session_id).agent.se
     run(exercise())
 
 
-def test_fork_continues_a_copy_without_writing_it(tmp_path):
+@pytest.mark.parametrize("pending", [None, "user", "turn"], ids=["ended", "pending-user", "open-turn"])
+def test_fork_continues_a_copy_without_writing_it(tmp_path, monkeypatch, pending):
+    session_file = dsh_command.entry().resolve().parent / "session.ts"
+    harness(tmp_path, monkeypatch, f"""const {{sessions}} = await import({json.dumps(session_file.as_uri())});
+rpc.method('test/ended-tail', p => {{
+  const session = sessions.get(p.session_id).agent.session;
+  const original = session.snapshotEvents().find(e => e.type === 'user/message');
+  session.append('session/title', {{title: 'Ended Worker', messageSeqs: [], source: {{kind: 'user'}}}});
+  session.append('user/message', sdk.dsh.llm.createUserMessage({{
+    content: [{{type: 'text', text: 'ORIGINAL-USER-TEXT POST-TURN-FACT'}}], source: {{kind: 'looper'}}
+  }}), {{surfaceOp: {{op: 'replace', startSeq: original.seq, endSeq: original.seq}}, sourceEventSeqs: [original.seq]}});
+  if (p.pending === 'turn') session.append('turn/start', {{turn: 2}});
+  if (p.pending) session.append('user/message', sdk.dsh.llm.createUserMessage({{
+    content: [{{type: 'text', text: 'UNFINISHED-NEXT-TURN'}}], source: {{kind: 'looper'}}
+  }}), {{surfaceOp: 'append'}});
+  return {{}};
+}});""")
+
     async def exercise():
         _, installed = require_dsh()
         with MessagesServer([["Original done"], ["Consult done"]]) as server:
@@ -480,6 +509,7 @@ def test_fork_continues_a_copy_without_writing_it(tmp_path):
                 sid = (await client.call("session/new", params))["session_id"]
                 await client.prompt(sid, text="ORIGINAL-USER-TEXT")
                 assert (await client.settled(sid))["outcome"] == "completed"
+                await client.call("test/ended-tail", {"session_id": sid, "pending": pending})
                 await client.call("session/close", {"session_id": sid})
                 state = dsh_command.state_root(Path(params["cwd"]).parents[1])
                 directory = stored(state, sid)
@@ -497,6 +527,9 @@ def test_fork_continues_a_copy_without_writing_it(tmp_path):
                 await client.prompt(consult, text="Consult the finished run")
                 assert (await client.settled(consult))["outcome"] == "completed"
                 assert "ORIGINAL-USER-TEXT" in request_text(server.requests[1])
+                assert "Original done" in request_text(server.requests[1])
+                assert "POST-TURN-FACT" in request_text(server.requests[1])
+                assert "UNFINISHED-NEXT-TURN" not in request_text(server.requests[1])
                 await client.call("session/close", {"session_id": consult})
                 assert not fork_directory.exists() and hashes() == before
                 await client.call("session/new", {**fork, "fork_from": {"session_id": "unknown"}}, code=-32001)
@@ -604,4 +637,38 @@ rpc.method('test/wake-prompt', p => {{
                     assert settled["outcome"] == ("cancelled" if ending == "close" else "capped")
                 await client.call("runner/health")
                 assert len(client.updates(sid, kind="settled")) == 1
+    run(exercise())
+
+
+def test_consult_default_declarations_keep_execution_read_only(tmp_path):
+    async def exercise():
+        _, installed = require_dsh()
+        calls = [tool("write", {"file_path": "created.txt", "content": "must not run"}),
+                 tool("bash", {"description": "Must be denied", "command": "touch created.txt"}),
+                 tool("subagent", {"prompt": "Must not start another model"}),
+                 tool("web_fetch", {"url": "https://example.com"})]
+        with MessagesServer([["Worker ended"], calls, ["Consult done"]]) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
+                client = Client(send, receive)
+                await client.start()
+                params = params_for(tmp_path, server)
+                params["role"] = "worker"
+                source = (await client.call("session/new", params))["session_id"]
+                await client.prompt(source)
+                assert (await client.settled(source))["outcome"] == "completed"
+                await client.call("session/close", {"session_id": source})
+                fork = (await client.call("session/new", {**params, "session_key": "consult",
+                    "fork_from": {"session_id": source}}))["session_id"]
+                await client.prompt(fork)
+                assert (await client.settled(fork))["outcome"] == "completed"
+                declared = {entry["name"] for entry in server.requests[1]["body"]["tools"]}
+                assert {call["name"] for call in calls} <= declared
+                results = client.updates(fork, kind="tool_result")
+                assert len(results) == len(calls)
+                assert all(result["is_error"] and "LOOPER_READ_ONLY" in result["text"] for result in results)
+                assert not (Path(params["cwd"]) / "created.txt").exists()
+                assert not client.calls
+                assert len(server.requests) == 3
+                assert (await client.call("runner/health"))["tool_processes"] == 0
+                await client.call("session/close", {"session_id": fork})
     run(exercise())

@@ -321,6 +321,11 @@ uv run python -m evals.prompt_regression compare evals/runs/<new>.json [evals/ru
 
 ### DSH validation
 
+For a fixed ended Worker history, `python -m evals.dsh_consult_replay` records real
+consult requests, token usage and final answer shape. See the
+[before/after measurement and replay instructions](../docs/plans/2026-10-29-dsh-consult-validation.md).
+This opt-in check uses synthetic serve-test captures and never runs in the default tests.
+
 [DSH's RFC](../docs/architecture/rfcs/dsh-runtime-v0.zh-CN.md#9-验收与边界)
 tracks passed, failed and untested separately. Local fake responses and the
 installed package's offline checks do not establish real-model acceptance.

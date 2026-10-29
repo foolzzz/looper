@@ -23,6 +23,7 @@ PACKAGES = {"dsh-launch-environment": ["createLaunchEnvironmentSnapshot"],
     "dsh-llm": ["createUserMessage", "isAgentLoopRequest"],
     "dsh-llm-deepseek": ["registerDeepSeekProvider", "resolveAdapterOptions", "catalogModelInfo"],
     "dsh-session": ["buildForkSeed"],
+    "dsh-system-prompt": ["renderPrompt"],
     "dsh-session-persistence": ["SessionPersistenceNotFoundError", "SessionAlreadyOwnedError"],
     **{name: [] for name in ("dsh-session-persistence-jsonl", "dsh-agent", "dsh-agent-loop", "dsh-tools",
                             "dsh-tool-fs", "dsh-tool-fs-search", "cordis")}}
@@ -45,7 +46,7 @@ import {writeFileSync} from 'node:fs';
 export async function runProfile() {
   writeFileSync('boot.started', 'yes');
 ''' + ("  await new Promise(resolve => setTimeout(resolve, 30000));\n" if delay else "") + '''
-  const ctx = {on() {}, agents: {}, llm: {}, sessionPersistence: {}, tools: {}, systemPrompt: {},
+  const ctx = {on() {}, agents: {}, llm: {}, sessionPersistence: {}, tools: {}, systemPrompt: {async assemble() {return {sections: [], tools: [], variables: {}};}},
     fiber: {async dispose() {}}};
   return {ctx, shutdown: {shutdown() {process.exit(99);}}};
 }

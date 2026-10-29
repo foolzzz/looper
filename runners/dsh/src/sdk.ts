@@ -1,5 +1,5 @@
 /** Import only after initialize; the installed composition is pinned, never vendored. */
-import { access, readFile, realpath, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
@@ -8,7 +8,7 @@ import { RpcError } from '../../common/rpc.ts';
 const VERSION = '0.2.1-rc.2';
 const packages = ['dsh-launch-environment', 'dsh-llm', 'dsh-llm-deepseek', 'dsh-session',
   'dsh-session-persistence', 'dsh-session-persistence-jsonl', 'dsh-agent', 'dsh-agent-loop',
-  'dsh-tools', 'dsh-tool-fs', 'dsh-tool-fs-search', 'cordis'] as const;
+  'dsh-tools', 'dsh-tool-fs', 'dsh-tool-fs-search', 'dsh-system-prompt', 'cordis'] as const;
 type Handle = (...args: any[]) => any;
 export type Dsh = {
   version: string;
@@ -18,6 +18,7 @@ export type Dsh = {
     CONTEXT_WINDOW_EXCEEDED_CODE: string };
   deepseek: { registerDeepSeekProvider: Handle; resolveAdapterOptions: Handle; catalogModelInfo: Handle; DEFAULT_MAX_TOKENS?: number };
   session: { buildForkSeed: Handle };
+  systemPrompt: { renderPrompt: Handle };
   persistence: { SessionPersistenceNotFoundError: new (...args: any[]) => Error; SessionAlreadyOwnedError: new (...args: any[]) => Error };
 };
 export let dsh: Dsh;
@@ -95,6 +96,7 @@ export async function load(executable: string): Promise<Dsh> {
       llm: await exports('dsh-llm', ['createUserMessage', 'isAgentLoopRequest']),
       deepseek: await exports('dsh-llm-deepseek', ['registerDeepSeekProvider', 'resolveAdapterOptions', 'catalogModelInfo']),
       session: await exports('dsh-session', ['buildForkSeed']),
+      systemPrompt: await exports('dsh-system-prompt', ['renderPrompt']),
       persistence: await exports('dsh-session-persistence', ['SessionPersistenceNotFoundError', 'SessionAlreadyOwnedError']),
     };
     return dsh;
@@ -117,10 +119,67 @@ const disabled = ['hmr', 'settings', 'config-editor', 'plugin-manager', 'tool-pl
   'tool-subagent-list-agents', 'tool-subagent', 'tool-subagent-fork', 'ptc-runtime', 'workflow-ptc', 'tool-workflow',
   'web', 'web-search-deepseek', 'web-deepseek-api', 'web-fetch-http', 'tool-web',
   'skill', 'skill-filesystem', 'tool-skill', 'goal', 'goal-round-driver', 'command-goal', 'tool-goal'];
+type ConsultDefaults = { text: string; tools: any[] };
+let defaults: Promise<any> | undefined;
+/** Copy model-visible CLI defaults, never its executors or live services. */
+async function captureConsultDefaults(): Promise<any> {
+  const root = join(process.cwd(), 'consult-defaults');
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const overlay = join(root, 'overlay.json');
+  const templateDisabled = ['hmr', 'settings', 'config-editor', 'plugin-manager', 'tool-plugin-manager',
+    'credentials', 'authorization', 'deepseek-account', 'llm-deepseek-account', 'llm-pi-ai', 'llm-deepseek',
+    'otel', 'session-telemetry-otel', 'session-log-deepseek', 'plugin-package-inventory-deepseek',
+    'session-title', 'session-title-llm', 'agent-instructions', 'headless-startup', 'headless-runner',
+    'web-search-deepseek', 'web-deepseek-api', 'goal-round-driver', 'command-goal',
+    'compaction-basic', 'command-compact'];
+  const config = {
+    tools: { mode: 'native' },
+    'sandbox-policy': { mode: 'danger-full-access', workspaceRoot: process.cwd() },
+    approval: { policy: 'never' },
+    'session-persistence-jsonl': { root: join(root, 'sessions') },
+    'skill-filesystem': { includeDefaultRoots: false, customSkillDirs: [], watch: false },
+    'tool-web': { fetch: true, search: false, searchTimeoutMs: 60000, fetchTimeoutMs: 30000,
+      fetchMaxOutputChars: 200000, searchMaxQueries: 4, searchMaxResults: 8 },
+  };
+  await writeFile(overlay, JSON.stringify([
+    ...templateDisabled.map(id => ({ id, disabled: true })),
+    ...Object.entries(config).map(([id, config]) => ({ id, config })),
+  ]), { mode: 0o600 });
+  let template: Context | undefined;
+  const signals = ['SIGINT', 'SIGTERM'] as const;
+  const listeners = new Map(signals.map(signal => [signal, process.listeners(signal)]));
+  try {
+    // This composition only assembles declarations. No agent or turn is created,
+    // and inherited proxies are unnecessary for this entirely local snapshot.
+    const values = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(?:https?|all|no)_proxy$/i.test(name)));
+    const snapshot = dsh.environment.createLaunchEnvironmentSnapshot([{ source: 'process', values }]);
+    ({ ctx: template } = await dsh.profile.runProfile({ environment: snapshot, profile: 'headless', patchFiles: [overlay], args: [] }));
+    if (!template?.systemPrompt || !template.tools) throw new Error();
+    return structuredClone(await template.systemPrompt.assemble());
+  } finally {
+    // runProfile installs process shutdown hooks in addition to its fiber.
+    // The template must never exit the process before the live runner flushes.
+    for (const signal of signals) for (const listener of process.listeners(signal)) {
+      if (!listeners.get(signal)!.includes(listener)) process.removeListener(signal, listener);
+    }
+    await template?.fiber.dispose();
+  }
+}
+export async function consultDefaults(model: string, provider: string): Promise<ConsultDefaults> {
+  try {
+    const assembly = await (defaults ??= captureConsultDefaults());
+    return { text: dsh.systemPrompt.renderPrompt({ ...assembly,
+      variables: { ...assembly.variables, model, provider } }), tools: structuredClone(assembly.tools) };
+  } catch {
+    throw new RpcError(-32603, 'DSH consult defaults failed to load');
+  }
+}
 let booting: Promise<Context> | undefined;
 export function boot(stateRoot: string): Promise<Context> {
   return booting ??= (async () => {
     try {
+      // Dispose the declaration-only profile before booting the live composition.
+      await (defaults ??= captureConsultDefaults());
       const config = {
         tools: { mode: 'native' },
         'sandbox-policy': { mode: 'danger-full-access', workspaceRoot: process.cwd() },
