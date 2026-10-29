@@ -107,12 +107,14 @@ subscribe('undici:client:sendHeaders', ({headers}) => {
         json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
 
-@pytest.mark.parametrize("protocol,blocked,line_ending", [
-    ("openai-responses", False, "\n"), ("openai-chat", False, "\n"),
-    ("openai-chat", False, "\r\n"), ("openai-chat", False, "\r"),
-    ("openai-responses", True, "\n"), ("openai-chat", True, "\n"),
-], ids=["responses", "chat", "chat-crlf", "chat-cr", "bad-port-responses", "bad-port-chat"])
-def test_send_headers_correlates_real_http_attempts(tmp_path, monkeypatch, sent_headers, protocol, blocked, line_ending):
+@pytest.mark.parametrize("protocol,blocked,line_ending,final_ending", [
+    ("openai-responses", False, "\n", None), ("openai-chat", False, "\n", None),
+    ("openai-chat", False, "\r\n", None), ("openai-chat", False, "\r", None),
+    ("openai-chat", False, "\n", "\n"), ("openai-chat", False, "\n", ""),
+    ("openai-responses", True, "\n", None), ("openai-chat", True, "\n", None),
+], ids=["responses", "chat", "chat-crlf", "chat-cr", "chat-eof-line", "chat-eof-no-newline",
+    "bad-port-responses", "bad-port-chat"])
+def test_send_headers_correlates_real_http_attempts(tmp_path, monkeypatch, sent_headers, protocol, blocked, line_ending, final_ending):
     from looper.agents.runtimes.runner.turn import RunnerTurn
 
     async def exercise():
@@ -127,7 +129,7 @@ def test_send_headers_correlates_real_http_attempts(tmp_path, monkeypatch, sent_
         choices = [{"index": 0, "delta": {"content": "Hello"}, "finish_reason": "stop"}]
         events = reply() if protocol == "openai-responses" else [
             chat_chunk(choices), chat_chunk([], usage=CHAT_USAGE), "[DONE]"]
-        async with FakeModelAPI([ResponseScript(events=events, sse_line_ending=line_ending)], api_key=KEY) as api, pi_supervisor(tmp_path, env=environment) as supervisor:
+        async with FakeModelAPI([ResponseScript(events=events, sse_line_ending=line_ending, sse_final_ending=final_ending)], api_key=KEY) as api, pi_supervisor(tmp_path, env=environment) as supervisor:
             lease = await supervisor.acquire("pi")
             params = session_params(lease, base_url="http://127.0.0.1:6000/v1" if blocked else api.base_url, key=KEY)
             params["provider"]["protocol"] = protocol

@@ -21,8 +21,7 @@ function chatEnd(onDone: () => void): TransformStream<Uint8Array, Uint8Array> {
   const decoder = new TextDecoder();
   let pending = '', data: string[] = [];
   let afterCR = false;
-  return new TransformStream({ transform(chunk, controller) {
-    let text = decoder.decode(chunk, { stream: true });
+  function consume(text: string) {
     if (text) {
       // Process CR immediately, including at EOF; a following LF belongs to it.
       const skipLF = afterCR && text.startsWith('\n');
@@ -38,7 +37,13 @@ function chatEnd(onDone: () => void): TransformStream<Uint8Array, Uint8Array> {
         data = [];
       } else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
     }
+  }
+  return new TransformStream({ transform(chunk, controller) {
+    consume(decoder.decode(chunk, { stream: true }));
     controller.enqueue(chunk);
+  }, flush() {
+    // A clean EOF can terminate the final data line and event without a blank line.
+    consume(decoder.decode() + '\n\n');
   } });
 }
 
