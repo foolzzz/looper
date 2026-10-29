@@ -1287,11 +1287,23 @@ Manager tools.
   Looper's prompt is appended literally to DSH's built-in prompt; replace is
   unavailable. Private homes under the runtime root import no operator login.
 
+  SDK runner pools place new leases on the member with the most free slots.
+  Each lease keeps its bridge for prompts, steering, cancellation and close;
+  a crash fails only that member's sessions. Replacements start on demand;
+  a lease needing a new member waits for crash backoff, then rechecks free
+  slots before starting one. Empty extra members stop after
+  300 seconds; the last member stays. Member starts and stops log the kind,
+  member index and session counts. Pi owner directories and DSH's shared
+  `runners/state/dsh-native` root survive member replacement: a closed saved
+  session can load on any member. DSH close awaits native writer disposal
+  before another member takes ownership; Pi's native ownership checks are
+  process-local, so callers must serialize access to the same saved session.
+
   Set `[runtimes] dsh = "runner"` in the ops file to put Manager, Planner,
-  Worker, Reviewer and consults on one installed DSH SDK runner (Node 22.19+).
+  Worker, Reviewer and consults on a pool of installed DSH SDK runners (Node 22.19+).
   The default remains `"cli"`; runner startup, capacity or request failures
-  never fall back to the CLI. Its 20 sessions are shared by all roles;
-  `CAPACITY` fails a start until a session is released. Records store
+  never fall back to the CLI. Each member has 20 session slots shared by all roles;
+  the pool grows on demand to four members (80 slots), then returns `CAPACITY`. Records store
   `looper-runner` Descriptors of kind `dsh`, rather than DSH CLI commands.
 
   Manager, Workers and Reviewers have `read`, `glob`, `grep`, `write`, `edit`
@@ -1387,12 +1399,14 @@ Manager tools.
   verified against pi 1.3.0 in the [pi runtime RFC](rfcs/pi-runtime-v0.zh-CN.md))
   runs Manager, Planner, Worker and Reviewer. With `[runtimes] pi = "runner"`
   in the ops file, `PiRunnerRuntime` runs all four roles and consults through
-  one shared Node >= 22.19 SDK runner. The opt-in is read once at startup and
+  a pool of Node >= 22.19 SDK runners. The opt-in is read once at startup and
   needs a restart; there is no environment-variable override or dashboard control.
-  All roles share 10 session slots; further acquisition returns `CAPACITY`,
-  failing a step like any other start failure. There is no runner pool or CLI fallback.
+  Each member has 10 session slots shared by all roles. The pool grows on demand
+  to four members (40 slots); only a full pool returns `CAPACITY`, failing a step
+  like any other start failure. There is no CLI fallback.
   Missing prerequisites fail with the startup reason. Turns submitted during
-  restart backoff fail fast; after recovery the resident session loads its saved history.
+  restart backoff fail fast when no healthy member has room; replacement happens
+  on the next acquisition after backoff, and the resident session loads its saved history.
   Provider environment entries are refused because they would change process-wide settings.
   Platform tools use `looper_*` directly, without Manager MCP setup or probing;
   Planner offers read, grep, find and ls plus those platform tools. Worker and

@@ -38,6 +38,8 @@ def fake_runner():
         if "method" not in request:
             continue
         method, params = request["method"], request["params"]
+        with Path("requests.jsonl").open("a") as log:
+            log.write(json.dumps({"method": method, "params": params, "member": os.getpid()}) + "\n")
         if method == "initialize":
             if options.get("initialize_child"):
                 child = start_child()
@@ -51,6 +53,8 @@ def fake_runner():
                     "per_session_isolation": options.get("isolation", True),
                     "cancel": True, "usage": {"per_request": True},
                     "authorize_covers": ["turn", "retry", "compaction", "subagent", "tool", "title", "other"]}}
+            if options.get("steer"):
+                result["capabilities"]["steer"] = {"in_trace": True}
         elif method in {"session/new", "session/load"}:
             Path("opening").touch()
             Path("session-paths.json").write_text(json.dumps({key: params[key]
@@ -66,6 +70,8 @@ def fake_runner():
             count += 1
             result = ({"session_id": params["session_id"], "resumed": True} if method == "session/load"
                       else {"session_id": f"../native-{count}"})
+        elif method == "session/steer":
+            result = {"session_id": params["session_id"], "trace_id": params["trace_id"], "status": "queued"}
         elif method == "session/close":
             closes += 1
             if options.get("timeout_close_once") and closes == 1:
@@ -282,12 +288,13 @@ def test_private_process_environment_and_session_paths(runners, tmp_path, monkey
 
 
 @pytest.mark.parametrize("options,cap", [({}, 4), ({"session_cap": 1}, 1), ({"cap": 2}, 2), ({"isolation": False}, 1)])
-def test_open_reservation_is_bounded_without_pool_expansion(runners, options, cap):
+def test_open_reservation_is_bounded_by_pool_capacity(runners, options, cap):
     async def exercise():
         async with runners(**options) as (owner, processes):
-            results = await asyncio.gather(*(owner.acquire("fake") for _ in range(6)), return_exceptions=True)
+            pool_cap = cap * s.MAX_RUNNERS_PER_KIND
+            results = await asyncio.gather(*(owner.acquire("fake") for _ in range(pool_cap + 2)), return_exceptions=True)
             leases = [r for r in results if isinstance(r, s.RunnerLease)]
-            assert len(leases) == cap and len(processes) == 1
+            assert len(leases) == pool_cap and len(processes) == s.MAX_RUNNERS_PER_KIND
             assert all(isinstance(r, p.ProtocolError) and r.code == p.ErrorCode.CAPACITY
                        for r in results if r not in leases)
             await leases[0].release()
@@ -323,7 +330,7 @@ def test_failed_or_cancelled_open_reclaims_reservation_and_directory(runners, ca
 
 @pytest.mark.parametrize("options", [{}, {"corrupt": True}, {"pipe_child": True}],
                          ids=["crash", "corrupt-live-stdout", "child-holds-pipes"])
-def test_generation_loss_reaps_old_group_and_restarts_once(runners, options):
+def test_generation_loss_reaps_old_group_and_replaces_on_demand(runners, options):
     async def exercise():
         async with runners(**options) as (owner, processes):
             old = await owner.acquire("fake")
@@ -334,12 +341,13 @@ def test_generation_loss_reaps_old_group_and_restarts_once(runners, options):
             if not options.get("corrupt"):
                 processes[0].kill()
             assert (await old.bridge.wait_settled(sid, "trace")).outcome == "lost"
-            # Join recovery and its replacement handshake. The outer deadline
-            # bounds the operation without treating process-table latency as loss.
+            # Recovery reaps the old member; demand starts its replacement only
+            # after the bounded backoff has completed.
             await asyncio.shield(old._generation.failure)
             await asyncio.shield(owner._kinds["fake"].restart)
-            assert len(processes) == 2 and owner._kinds["fake"].generation is not None
+            assert len(processes) == 1 and not owner._kinds["fake"].members
             current = await owner.acquire("fake")
+            assert len(processes) == 2
             assert current.runner_id != old.runner_id and current.bridge is not old.bridge
             assert processes[0].returncode < 0 and not proc_tree.tree_of(processes[0])
             assert len(owner._kinds["fake"].failures) == 1 and turn.finishes == 1
@@ -363,7 +371,7 @@ def test_version_mismatch_is_terminal_and_never_restarts(runners):
     run(exercise())
 
 
-def test_connection_loss_during_initialize_restarts_runner(runners):
+def test_connection_loss_during_initialize_retries_on_demand(runners):
     async def exercise():
         async with runners() as (owner, processes):
             connect = owner.connect
@@ -377,10 +385,12 @@ def test_connection_loss_during_initialize_restarts_runner(runners):
             owner.connect = crash_once
             with pytest.raises(s.RunnerUnavailable, match="restart is bounded"):
                 await owner.acquire("fake")
-            assert not owner._kinds["fake"].fatal
-            await until(lambda: len(processes) == 2 and owner._kinds["fake"].generation is not None)
+            state = owner._kinds["fake"]
+            assert not state.fatal
+            await asyncio.shield(state.restart)
+            assert len(processes) == 1 and not state.members
             lease = await owner.acquire("fake")
-            assert lease.valid and processes[0].returncode is not None
+            assert lease.valid and len(processes) == 2 and processes[0].returncode is not None
             assert len(owner._kinds["fake"].failures) == 1
     run(exercise())
 
@@ -463,15 +473,15 @@ def test_release_closes_one_active_session_and_joins_its_tools(runners):
     run(exercise())
 
 
-def test_fifth_failure_stops_restart_loop_and_returns_unavailable(runners, monkeypatch):
+def test_fifth_failure_stops_demand_retries_and_returns_unavailable(runners, monkeypatch):
     monkeypatch.setattr(s, "BACKOFF_MAX", 0.01)
     async def exercise():
         async with runners() as (owner, processes):
-            await owner.acquire("fake")
+            lease = await owner.acquire("fake")
             for number in range(1, 6):
                 current = processes[-1]
                 state = owner._kinds["fake"]
-                generation = state.generation
+                generation = lease._generation
                 current.kill()
                 await generation.exited.wait()
                 await asyncio.shield(generation.failure)
@@ -479,7 +489,9 @@ def test_fifth_failure_stops_restart_loop_and_returns_unavailable(runners, monke
                 assert current.returncode is not None and not proc_tree.tree_of(current)
                 if number < 5:
                     await asyncio.shield(state.restart)
-                    assert len(processes) == number + 1 and state.generation is not None
+                    assert len(processes) == number and not state.members
+                    lease = await owner.acquire("fake")
+                    assert len(processes) == number + 1
             with pytest.raises(s.RunnerUnavailable, match="five failures"):
                 await owner.acquire("fake")
             assert len(processes) == 5 and (state.restart is None or state.restart.done())
@@ -490,13 +502,16 @@ def test_stop_interrupts_backoff_without_spawning_a_replacement(runners, monkeyp
     monkeypatch.setattr(s, "BACKOFF_BASE", 60)
     async def exercise():
         async with runners() as (owner, processes):
-            await owner.acquire("fake")
-            await owner.invalidate("fake", p.ProtocolError(p.ErrorCode.PARSE_ERROR))
+            lease = await owner.acquire("fake")
+            await owner.invalidate(lease, p.ProtocolError(p.ErrorCode.PARSE_ERROR))
             state = owner._kinds["fake"]
             assert not state.fatal and state.restart is not None
-            with pytest.raises(s.RunnerUnavailable):
-                await owner.acquire("fake")
+            acquiring = asyncio.create_task(owner.acquire("fake"))
+            await asyncio.sleep(0)
+            assert not acquiring.done()
             await owner.stop()
+            with pytest.raises(s.RunnerUnavailable, match="stopped"):
+                await acquiring
             assert state.restart.done() and len(processes) == 1 and not owner._tasks
     run(exercise())
 
@@ -595,7 +610,8 @@ def test_temporary_initialize_io_error_is_retryable(runners):
                 await owner.acquire("fake")
             state = owner._kinds["fake"]
             assert not state.fatal
-            await until(lambda: state.generation is not None)
+            await asyncio.shield(state.restart)
+            assert not state.members and len(processes) == 1
             assert (await owner.acquire("fake")).valid and len(processes) == 2
     run(exercise())
 
@@ -623,8 +639,9 @@ def test_immediate_generation_loss_reaps_startup_child_in_separate_group(runners
                 else:
                     await asyncio.shield(generation.failure)
                     await asyncio.shield(owner._kinds["fake"].restart)
-                    assert len(processes) == 2 and owner._kinds["fake"].generation is not None
+                    assert len(processes) == 1 and not owner._kinds["fake"].members
                     assert (await owner.acquire("fake")).valid and not lease.valid
+                    assert len(processes) == 2
                 assert child not in proc_tree._snapshot()
             finally:
                 # A regression must not strand the real child or keep fixture shutdown on its pipe.
@@ -659,7 +676,8 @@ def test_stalled_diagnostic_drain_does_not_block_cleanup(runners, monkeypatch, s
                     await lease._generation.exited.wait()
                     await asyncio.shield(lease._generation.failure)
                     await asyncio.shield(owner._kinds["fake"].restart)
-                    assert len(processes) == 2 and owner._kinds["fake"].generation is not None
+                    assert len(processes) == 1 and not owner._kinds["fake"].members
+                    assert (await owner.acquire("fake")).valid and len(processes) == 2
                 assert lease._generation.stderr.done()
             finally:
                 gate.set()
@@ -702,7 +720,7 @@ def test_reused_child_identity_is_not_signalled_or_allowed_to_hold_shutdown(runn
 
 
 @pytest.mark.parametrize("recovers", [True, False], ids=["retry-succeeds", "bounded-failures"])
-def test_initialize_timeout_uses_bounded_restart(runners, monkeypatch, recovers):
+def test_initialize_timeout_uses_bounded_demand_retries(runners, monkeypatch, recovers):
     monkeypatch.setattr(s, "BACKOFF_MAX", 0.01)
     async def exercise():
         timeouts = (0.1, 10.0) if recovers else (0.1,)
@@ -712,11 +730,18 @@ def test_initialize_timeout_uses_bounded_restart(runners, monkeypatch, recovers)
             state = owner._kinds["fake"]
             assert not state.fatal
             await asyncio.shield(state.restart)
+            assert not state.members and len(processes) == 1
             if recovers:
-                assert state.generation is not None
                 lease = await owner.acquire("fake")
                 assert lease.valid and len(processes) == 2 and len(state.failures) == 1
             else:
+                for number in range(2, s.MAX_FAILURES + 1):
+                    with pytest.raises(s.RunnerUnavailable, match="restart is bounded"):
+                        await owner.acquire("fake")
+                    assert len(processes) == number and len(state.failures) == number
+                    if number < s.MAX_FAILURES:
+                        await asyncio.shield(state.restart)
+                    assert not state.members
                 assert len(state.failures) == s.MAX_FAILURES
                 with pytest.raises(s.RunnerUnavailable, match="five failures"):
                     await owner.acquire("fake")
@@ -727,7 +752,8 @@ def test_initialize_timeout_uses_bounded_restart(runners, monkeypatch, recovers)
 
 @pytest.mark.parametrize("active", [False, True], ids=["idle", "running"])
 @pytest.mark.parametrize("failure", ["reject_close_once", "timeout_close_once"], ids=["rejected", "timeout"])
-def test_failed_close_retains_lease_capacity_until_retry_succeeds(runners, active, failure):
+def test_failed_close_retains_lease_capacity_until_retry_succeeds(runners, monkeypatch, active, failure):
+    monkeypatch.setattr(s, "MAX_RUNNERS_PER_KIND", 1)
     async def exercise():
         async with runners(**{failure: True}, session_cap=2) as (owner, processes):
             lease, other = await owner.acquire("fake"), await owner.acquire("fake")
@@ -798,7 +824,8 @@ def test_generation_end_cleans_lease_retained_after_rejected_close(runners):
 
 
 @pytest.mark.parametrize("cancel_caller", [False, True], ids=["internal", "caller"])
-def test_release_after_close_ack_and_prompt_rejection_settles_locally(runners, cancel_caller):
+def test_release_after_close_ack_and_prompt_rejection_settles_locally(runners, monkeypatch, cancel_caller):
+    monkeypatch.setattr(s, "MAX_RUNNERS_PER_KIND", 1)
     async def exercise():
         async with runners(close_before_prompt=True, session_cap=1) as (owner, processes):
             lease = await owner.acquire("fake")
@@ -864,8 +891,10 @@ def test_owner_state_directory_survives_release_and_restart(runners, tmp_path):
             assert active.state_dir == state_dir
             generation = lease._generation
             processes[0].kill()
-            await until(lambda: owner._kinds["fake"].generation is not None
-                        and owner._kinds["fake"].generation is not generation)
+            await generation.exited.wait()
+            await asyncio.shield(generation.failure)
+            await asyncio.shield(owner._kinds["fake"].restart)
+            assert len(processes) == 1 and not owner._kinds["fake"].members
             again = await owner.acquire("fake", owner="manager")
             assert not active.directory.exists()
             assert again.runner_id != lease.runner_id and again.state_dir == state_dir
@@ -901,8 +930,12 @@ def test_run_state_directory_survives_release(runners, tmp_path):
             active = await owner.acquire("fake", state_dir=state_dir)
             generation = active._generation
             processes[0].kill()
-            await until(lambda: owner._kinds["fake"].generation is not None
-                        and owner._kinds["fake"].generation is not generation)
+            await generation.exited.wait()
+            await asyncio.shield(generation.failure)
+            await asyncio.shield(owner._kinds["fake"].restart)
+            assert len(processes) == 1 and not owner._kinds["fake"].members
+            replacement = await owner.acquire("fake", state_dir=state_dir)
+            assert replacement.state_dir == state_dir and replacement.runner_id != active.runner_id
             assert not active.directory.exists() and (state_dir / "saved").read_text() == "native state"
     run(exercise())
 
@@ -918,5 +951,5 @@ def test_run_state_directory_rules(runners, tmp_path, rule):
                 state_dir.symlink_to(tmp_path, target_is_directory=True)
             with pytest.raises(ValueError):
                 await owner.acquire("fake", owner="manager" if rule == "owner" else None, state_dir=state_dir)
-            assert owner._kinds["fake"].generation is None or not owner._kinds["fake"].generation.leases
+            assert all(not member.leases for member in owner._kinds["fake"].members)
     run(exercise())
