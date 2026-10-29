@@ -16,10 +16,14 @@ import pytest
 
 from looper.agents import proc_tree
 from looper.agents.runtimes.runner import pi_command
+from looper.agents.runtimes.runner.bridge import RunnerBridge
 from looper.agents.runtimes.runner.protocol import MAX_FRAME_BYTES
 from looper.agents.runtimes.runner.supervisor import RunnerSupervisor, _ENV
 
 _REQUIRED = "installed pi 1.3.x and Node 22.19+ are required; the Pi runner was not run"
+# Installed contract tests include cold SDK imports, retries and OS tree cleanup;
+# this bounds hangs, not startup or turn latency. Explicit cancel deadlines stay local.
+TEST_TIMEOUT = 120
 
 
 def require_pi() -> tuple[str, str]:
@@ -28,7 +32,7 @@ def require_pi() -> tuple[str, str]:
         if not node or not pi:
             pytest.skip(_REQUIRED)
         version = subprocess.run([node, "--version"], capture_output=True, text=True,
-                                 check=True, timeout=5).stdout.strip().removeprefix("v")
+                                 check=True, timeout=30).stdout.strip().removeprefix("v")
         if tuple(map(int, version.split("."))) < (22, 19, 0):
             pytest.skip(_REQUIRED)
         parent = Path(pi).resolve().parent
@@ -49,9 +53,21 @@ def require_pi() -> tuple[str, str]:
 @asynccontextmanager
 async def pi_supervisor(tmp_path: Path, *, pi=None, env=None):
     node, installed_pi = require_pi()
+
+    async def connect(process, kind):
+        # Cold SDK imports under parallel installed tests are not a startup SLO.
+        bridge = RunnerBridge(process.stdout, process.stdin, kind, control_timeout=60)
+        try:
+            await bridge.initialize(permitted=pi_command.PERMITTED)
+        except BaseException:
+            await bridge.close()
+            raise
+        bridge.control_timeout = 10
+        return bridge
+
     supervisor = RunnerSupervisor(tmp_path / "runtime", {
         "pi": pi_command.command(node, str(pi if pi is not None else installed_pi))},
-        session_cap=10, env={"pi": {**pi_command.ENV, **(env or {})}}, connect=pi_command.connect)
+        session_cap=10, env={"pi": {**pi_command.ENV, **(env or {})}}, connect=connect)
     try:
         yield supervisor
     finally:
@@ -59,7 +75,7 @@ async def pi_supervisor(tmp_path: Path, *, pi=None, env=None):
 
 
 @asynccontextmanager
-async def raw_runner(tmp_path: Path, pi):
+async def raw_runner(tmp_path: Path, pi, *, env=None):
     node, _ = require_pi()
     root = Path(tempfile.mkdtemp(prefix="pi-runner-", dir=tmp_path))
     home, temporary = root / "home", root / "tmp"
@@ -67,6 +83,7 @@ async def raw_runner(tmp_path: Path, pi):
     temporary.mkdir(mode=0o700)
     environment = {name: value for name, value in os.environ.items() if name in _ENV}
     environment.update(pi_command.ENV)
+    environment.update(env or {})
     environment.update(HOME=str(home), TMPDIR=str(temporary))
     process = await asyncio.create_subprocess_exec(*pi_command.command(node, str(pi)), cwd=root,
         env=environment, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,

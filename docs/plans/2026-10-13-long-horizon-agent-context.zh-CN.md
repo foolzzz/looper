@@ -719,6 +719,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-27 | 假 runner（本分支）：协议基线覆盖握手、工具、宿主计费、拒绝、取消和引导；隔离 PostgreSQL/serve 的 Manager HTTP 对话经 `looper_tasks` 读回任务、审计与同一 trace，四类 token 精确计费 $0.003900，请求前预算拒绝为零请求/零工具；服务和 runner 正常退出，启动即退出的独立进程组子进程清理回归通过。Planner serve 未测，S0 其余范围不在本次验收内。 |
 | 2026-10-27 | Pi SDK runner turn（本分支）：实现独立会话的新建/关闭、prompt/cancel、请求前预算授权、逐请求用量与唯一结算，尚未接入服务入口，也未启用 builtin/platform 工具。真实 Pi 1.3.0 Responses 客户端配 loopback provider 的定向测试 39 项通过，覆盖精确计费、拒绝零请求、HTTP 错误脱敏、取消、强制释放与迟到事件；确认 SSE 无需 `event:` 行，`retry.provider.maxRetries: 0` 经 SDK 传到客户端，模型存储保持内存。Dashboard、Telegram、Lark 和 CLI 无变更；工具、加载会话及 retry/compaction 请求分类留待后续阶段。 |
 | 2026-10-28 | Pi Manager/Planner runner opt-in（本分支）：ops 文件 `[runtimes] pi = "runner"` 在启动时切换这两个角色，默认 CLI，Worker/Reviewer/consults 保持 CLI；单 runner、10 会话后 CAPACITY，provider env 拒绝且无 CLI fallback。Dashboard 无新增入口，Telegram/Lark `/stop` 沿用中断路径，`config init-ops` 输出设置；eval `run`/`dialogs --pi-runner` 给隔离服务写入相同设置。定向测试及已安装 Pi 配 loopback Responses 的隔离 serve 均通过，覆盖工具审计、精确计费、stop、重启恢复后的会话续接和 Planner→CLI Worker 完成任务；重启退避窗口仍 fail-fast，真实 CPA smoke 和 CLI/runner 对照缺可用 endpoint/key，未验证不计通过，后续范围见 §5.2。 |
+| 2026-10-28 | Pi 请求发送与用量判定（本分支，#846）：通过 Node 内置 undici 的 `sendHeaders` 和逐请求 header 关联实际发送，删除发送前错误码列表；未发送为完整零用量，已发送仅在正常结束且有协议最终 usage 时完整，Chat 还须收到 `[DONE]`，保留取消后迟到授权的结算顺序。安装型契约测试给冷初始化 60 秒预算，握手后恢复普通控制的 10 秒预算，整体防挂上限设为 120 秒，取消期限保持不变。验证：真实 Pi 子进程配 loopback HTTP/TLS/SSE 的 turn、tool 定向测试以 `-n 2` 运行，120 项通过、0 失败、0 跳过，覆盖发送前失败、发送后断流、终态 usage、SSE 换行及迟到授权取消；Dashboard、Telegram、Lark 与 CLI 共用此计费路径，无独立入口改动，未运行真实模型账单验证。 |
 
 ## 5. 不属于本 RFC 的待办
 

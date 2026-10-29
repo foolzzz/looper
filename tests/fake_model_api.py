@@ -16,6 +16,7 @@ class ResponseScript:
     headers: dict[str, str] | None = None
     disconnect_after: int | None = None
     disconnect_before_headers: bool = False
+    sse_line_ending: str = "\n"
     gate: asyncio.Event | None = None
     gate_reached: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     closed: asyncio.Event = field(default_factory=asyncio.Event, init=False)
@@ -109,7 +110,7 @@ class FakeModelAPI:
                         disconnected.cancel()
                         await asyncio.gather(opened, disconnected, return_exceptions=True)
                 data = envelope if isinstance(envelope, str) else json.dumps(envelope)
-                chunk = f"data: {data}\n\n".encode()
+                chunk = f"data: {data}{script.sse_line_ending * 2}".encode()
                 writer.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
                 await writer.drain()
             if script.disconnect_after is not None and len(script.events) >= script.disconnect_after:
