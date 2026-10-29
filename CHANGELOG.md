@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.7] - 2026-10-29
+
+### Fixed
+
+- **The DSH runner releases the session lock when a cancel times out during authorization.** The agent's wait for `budget/authorize` now ends with the cancel deadline, and a forced settle releases the session before `settled`, so the same session can be resumed right after it. A late allow is still accounted once (aborted, complete, zero tokens), now possibly after `settled`; a late deny or error is accounted as no request. Affects only installations with `[runtimes] dsh = "runner"`. ([#882](https://github.com/foolzzz/looper/pull/882))
+
 ## [2.14.6] - 2026-10-29
 
 ### Fixed
