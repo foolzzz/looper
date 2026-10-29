@@ -134,10 +134,10 @@ export async function authorizingStream(record: Session, model: any, context: an
           terminalUsage = responseUsage(event.response?.usage);
         }
       } else {
-        // Final Chat usage is a separate, empty-choices chunk after the last choice.
+        // Final Chat usage accompanies the terminal choice or follows in an empty-choices chunk.
         if (event.choices?.length) {
           chatFinished = event.choices.every((choice: any) => typeof choice.finish_reason === 'string' && choice.finish_reason.length > 0);
-          terminalUsage = undefined;
+          terminalUsage = chatFinished ? chatUsage(event.usage) : undefined;
         } else if (chatFinished && Array.isArray(event.choices)) terminalUsage = chatUsage(event.usage);
       }
       await options.onProviderStreamEvent?.(event, eventModel);

@@ -149,9 +149,11 @@ def test_send_headers_correlates_real_http_attempts(tmp_path, monkeypatch, sent_
     run(exercise())
 
 
-@pytest.mark.parametrize("protocol", ["openai-responses", "openai-chat"])
+@pytest.mark.parametrize("protocol,usage_location", [
+    ("openai-responses", "separate"), ("openai-chat", "separate"), ("openai-chat", "terminal"),
+], ids=["responses", "chat-separate-usage", "chat-terminal-usage"])
 @pytest.mark.parametrize("ending", ["disconnect", "missing-sentinel"])
-def test_final_usage_requires_normal_protocol_end(tmp_path, monkeypatch, protocol, ending):
+def test_final_usage_requires_normal_protocol_end(tmp_path, monkeypatch, protocol, usage_location, ending):
     from looper.agents.runtimes.runner.turn import RunnerTurn
 
     async def exercise():
@@ -165,6 +167,8 @@ def test_final_usage_requires_normal_protocol_end(tmp_path, monkeypatch, protoco
         events = reply() if protocol == "openai-responses" else [
             chat_chunk([{"index": 0, "delta": {"content": "Hello"}, "finish_reason": "stop"}]),
             chat_chunk([], usage=CHAT_USAGE)]
+        if protocol == "openai-chat" and usage_location == "terminal":
+            events = [chat_chunk(events[0]["choices"], usage=CHAT_USAGE)]
         # Responses ends with its completed event; Chat requires the trailing [DONE].
         expected_complete = ending == "missing-sentinel" and protocol == "openai-responses"
         attempts = 1 if ending == "missing-sentinel" else 4
@@ -471,6 +475,7 @@ def test_nonterminal_chat_usage_leaves_sent_requests_incomplete(tmp_path, monkey
     run(exercise())
 
 
+@pytest.mark.parametrize("usage_location", ["separate", "terminal"])
 @pytest.mark.parametrize("usage,location,counts", [
     (CHAT_USAGE, "chunk", (1000, 200, 300, 0)),
     (CHAT_USAGE, "choice", None),
@@ -486,7 +491,7 @@ def test_nonterminal_chat_usage_leaves_sent_requests_incomplete(tmp_path, monkey
     ({**CHAT_USAGE, "completion_tokens_details": {"reasoning_tokens": 201}}, "chunk", None),
 ], ids=["charged", "choice", "cache-write", "deepseek-cache", "zero", "missing", "empty",
     "string", "negative", "fraction", "cache-exceeds-input", "total-mismatch", "reasoning-exceeds-output"])
-def test_chat_accounts_only_for_valid_terminal_usage(tmp_path, monkeypatch, usage, location, counts):
+def test_chat_accounts_only_for_valid_terminal_usage(tmp_path, monkeypatch, usage, location, counts, usage_location):
     from looper.agents.runtimes.runner.turn import RunnerTurn
 
     async def exercise():
@@ -501,6 +506,8 @@ def test_chat_accounts_only_for_valid_terminal_usage(tmp_path, monkeypatch, usag
         events = [chat_chunk([{**choice, "delta": {"content": "Hello"}, "finish_reason": None}], usage=CHAT_USAGE)]
         if location == "choice":
             events.append(chat_chunk([{**choice, "usage": usage}]))
+        elif usage_location == "terminal":
+            events.append(chat_chunk([choice], usage=usage))
         else:
             events += [chat_chunk([choice]), chat_chunk([], usage=usage)]
         events.append("[DONE]")
@@ -509,7 +516,7 @@ def test_chat_accounts_only_for_valid_terminal_usage(tmp_path, monkeypatch, usag
             params = session_params(lease, base_url=api.base_url, key=KEY)
             params["provider"]["protocol"] = "openai-chat"
             sid = await lease.open_session(params)
-            await begin(lease.bridge, sid, "chat-terminal")
+            await begin(lease.bridge, sid, "chat-terminal", cap=1 if counts is not None else None)
             summary = await lease.bridge.wait_settled(sid, "chat-terminal")
             assert summary.outcome == "completed"
             assert len(ended) == len(api.requests) == 1
