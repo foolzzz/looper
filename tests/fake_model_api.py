@@ -16,6 +16,7 @@ class ResponseScript:
     headers: dict[str, str] | None = None
     disconnect_after: int | None = None
     disconnect_before_headers: bool = False
+    error_body_bytes: int | None = None
     sse_line_ending: str = "\n"
     sse_final_ending: str | None = None
     gate: asyncio.Event | None = None
@@ -91,7 +92,7 @@ class FakeModelAPI:
                 payload = b""
                 response_headers.update({"Content-Type": "text/event-stream", "Transfer-Encoding": "chunked"})
             wire_head = f"HTTP/1.1 {script.status} Scripted\r\n" + "".join(f"{k}: {v}\r\n" for k, v in response_headers.items())
-            writer.write(wire_head.encode() + b"\r\n" + payload)
+            writer.write(wire_head.encode() + b"\r\n" + payload[:script.error_body_bytes])
             await writer.drain()
             if script.status != 200:
                 return

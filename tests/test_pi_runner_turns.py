@@ -298,11 +298,96 @@ def test_provider_auth_failure_is_typed(tmp_path, status, kind):
             assert summary.outcome == "failed" and len(api.requests) == 1
             assert events[-1]["runner"]["error_kind"] == kind
             assert events[-1]["num_turns"] == 1
-            assert not summary.usage_complete and summary.usage.cost_usd is None
+            assert summary.usage_complete and summary.usage.cost_usd == 0
             assert KEY not in json.dumps(events, default=str)
             assert all(KEY not in file.read_text() for file in lease.state_dir.glob("*.jsonl"))
             await lease.release()
         assert KEY.encode() not in b"".join(generation.diagnostics)
+    run(exercise())
+
+
+@pytest.mark.parametrize("protocol", ["openai-responses", "openai-chat"])
+@pytest.mark.parametrize("status", [429, 500])
+@pytest.mark.parametrize("truncated", [False, True], ids=["complete-body", "truncated-body"])
+def test_provider_rejection_retry_under_run_and_task_caps(tmp_path, monkeypatch, protocol, status, truncated):
+    from looper.agents.runtimes.pricing import ModelPrice
+    from looper.agents.runtimes.runner.turn import RunnerTurn
+
+    async def exercise():
+        rejection = ResponseScript(status=status, error={"error": {"message": "scripted rejection"}},
+            error_body_bytes=10 if truncated else None)
+        success = reply() if protocol == "openai-responses" else [
+            chat_chunk([{"index": 0, "delta": {"content": "Hello"}, "finish_reason": "stop"}]),
+            chat_chunk([], usage=CHAT_USAGE), "[DONE]"]
+        async with FakeModelAPI([rejection, ResponseScript(events=success)], api_key=KEY) as api, pi_supervisor(tmp_path) as supervisor:
+            lease = await supervisor.acquire("pi")
+            params = session_params(lease, base_url=api.base_url, key=KEY, role="planner")
+            params["provider"]["protocol"] = protocol
+            sid = await lease.open_session(params)
+
+            async def limits():
+                return dict(run_cap=1.0, task_cap=2.0, task_spent=0.5)
+
+            async def cancel(_):
+                await lease.bridge.cancel_turn(sid, "rejection")
+
+            turn = RunnerTurn(session_id=sid, trace_id="rejection", role="planner", tools=None,
+                provider_id="account", model="test-model", price=lambda _, usage: ModelPrice(1, 2, 3, 4).cost(usage),
+                limits=limits, cancel=cancel)
+            ended, original = [], turn.request_end
+
+            async def request_end(frame):
+                ended.append(dict(frame))
+                return await original(frame)
+
+            monkeypatch.setattr(turn, "request_end", request_end)
+            events = []
+            await lease.bridge.begin_turn(sid, "rejection", events.append, turn, text="Say hello.")
+            summary = await lease.bridge.wait_settled(sid, "rejection")
+            assert len(ended) == len(api.requests) == (1 if truncated else 2)
+            assert ended[0]["status"] == f"http_{status}"
+            assert ended[0]["complete"] is (not truncated)
+            fields = ("input_uncached", "output", "cache_read", "cache_write")
+            assert all(ended[0][field] == 0 for field in fields)
+            assert summary.usage_complete is (not truncated)
+            if truncated:
+                assert summary.outcome == "capped" and summary.cap_reason == "budget_unverifiable"
+                assert summary.usage.cost_usd is None
+            else:
+                assert summary.outcome == "completed" and summary.cap_reason is None
+                assert ended[1]["status"] == "completed" and ended[1]["complete"]
+                assert ended[1]["request_kind"] == "retry"
+                assert ended[0]["request_id"] != ended[1]["request_id"]
+                assert tuple(ended[1][field] for field in fields) == (1000, 200, 300, 0)
+                assert (summary.usage.input_tokens, summary.usage.output_tokens,
+                    summary.usage.cache_read_tokens, summary.usage.cache_creation_tokens) == (1000, 200, 300, 0)
+                assert summary.usage.cost_usd == 0.0023 and events[-1]["result"] == "Hello"
+            await lease.release()
+    run(exercise())
+
+
+def test_response_failure_after_output_keeps_usage_incomplete(tmp_path, monkeypatch):
+    from looper.agents.runtimes.runner.turn import RunnerTurn
+
+    async def exercise():
+        ended, original = [], RunnerTurn.request_end
+
+        async def request_end(self, params):
+            ended.append(dict(params))
+            return await original(self, params)
+
+        monkeypatch.setattr(RunnerTurn, "request_end", request_end)
+        frames = [*reply()[:-1], failed()]
+        async with FakeModelAPI([ResponseScript(events=frames) for _ in range(4)], api_key=KEY) as api, pi_supervisor(tmp_path) as supervisor:
+            lease = await supervisor.acquire("pi")
+            sid = await lease.open_session(session_params(lease, base_url=api.base_url, key=KEY))
+            await begin(lease.bridge, sid, "output-failed")
+            summary = await lease.bridge.wait_settled(sid, "output-failed")
+            assert summary.outcome == "failed" and not summary.usage_complete
+            assert summary.usage.cost_usd is None
+            assert len(ended) == len(api.requests) == 4
+            assert all(frame["status"] == "error" and not frame["complete"] for frame in ended)
+            await lease.release()
     run(exercise())
 
 

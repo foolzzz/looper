@@ -117,6 +117,8 @@ export async function authorizingStream(record: Session, model: any, context: an
   const attempt = { sent: false };
   requests.set(id, attempt);
   let chatFinished = false, chatDone = false, status: number | undefined;
+  let rejectionRead = false, modelOutput = false;
+  const rejected = () => status !== undefined && status >= 400 && rejectionRead && !modelOutput;
   let terminalUsage: ReturnType<typeof responseUsage>;
   turn.httpStatus = undefined;
   turn.transport = false;
@@ -156,6 +158,15 @@ export async function authorizingStream(record: Session, model: any, context: an
       steersSent(record, turn, context.messages);
       const response = await responsePromise;
       turn.httpStatus = status = response.status;
+      if (status >= 400) {
+        // A rejection proves zero spend only after its body reaches a clean EOF.
+        // flush is never called when the body errors or is cancelled.
+        if (!response.body) rejectionRead = true;
+        else return new Response(response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+          transform(chunk, controller) { controller.enqueue(chunk); },
+          flush() { rejectionRead = true; },
+        })), { status, statusText: response.statusText, headers: response.headers });
+      }
       if (model.api !== 'openai-responses' && response.ok && response.body) {
         return new Response(response.body.pipeThrough(chatEnd(() => { chatDone = true; })), {
           status: response.status, statusText: response.statusText, headers: response.headers });
@@ -179,8 +190,8 @@ export async function authorizingStream(record: Session, model: any, context: an
           const aborted = options.signal?.aborted || message.stopReason === 'aborted' || turn.cancel;
           const requestStatus = event.type === 'done' ? 'completed'
             : aborted ? 'aborted' : status && status >= 400 ? `http_${status}` : 'error';
-          const usage = attempt.sent ? terminalUsage : undefined;
-          const complete = !attempt.sent || (event.type === 'done' && !aborted && terminalUsage !== undefined
+          const usage = attempt.sent && !rejected() ? terminalUsage : undefined;
+          const complete = !attempt.sent || rejected() || (event.type === 'done' && !aborted && terminalUsage !== undefined
             && (model.api === 'openai-responses' || chatDone));
           // Let Pi publish message_end first; settlement waits for this accounting frame.
           setImmediate(() => endRequest(record, turn, id, requestStatus, complete, usage));
@@ -188,13 +199,14 @@ export async function authorizingStream(record: Session, model: any, context: an
           output.end();
           return;
         }
+        if (event.type !== 'start') modelOutput = true;
         output.push(event);
       }
       throw new Error('provider stream ended without a terminal event');
     } catch (error) {
       const aborted = !!(options.signal?.aborted || turn.cancel);
       setImmediate(() => endRequest(record, turn, id, aborted ? 'aborted' : status && status >= 400 ? `http_${status}` : 'error',
-        !attempt.sent));
+        !attempt.sent || rejected()));
       const message = { role: 'assistant', content: [], api: model.api, provider: model.provider, model: model.id,
         stopReason: aborted ? 'aborted' : 'error', errorMessage: scrub(error instanceof Error ? error.message : 'provider failed').slice(0, 512),
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
