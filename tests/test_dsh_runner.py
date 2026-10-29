@@ -15,7 +15,7 @@ from looper.agents.runtimes.runner.bridge import RunnerBridge
 from looper.agents.runtimes.runner.supervisor import RunnerUnavailable
 
 pytestmark = pytest.mark.installed
-CAPABILITIES = {"max_sessions": 20, "per_session_isolation": True, "per_session_credentials": True,
+CAPABILITIES = {"max_sessions": 32, "per_session_isolation": True, "per_session_credentials": True,
     "cancel": True, "usage": {"per_request": True, "buckets": True, "reasoning_in_output": True},
     "authorize_covers": ["turn", "compaction"],
     "steer": {"in_trace": True, "boundary": "next_step", "idle_start": False}, "fork": True}

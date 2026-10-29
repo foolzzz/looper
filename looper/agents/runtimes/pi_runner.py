@@ -238,7 +238,8 @@ def enable(runtime_root: Path) -> RunnerSupervisor | None:
         return None
     resolved = Path(pi).resolve()
     supervisor = RunnerSupervisor(runtime_root, {"pi": pi_command.command(node, pi)},
-                                  env={"pi": pi_command.ENV}, session_cap=SESSION_CAP, connect=pi_command.connect)
+                                  env={"pi": pi_command.ENV}, session_cap=SESSION_CAP,
+                                  startup_error=_opt_out, connect=pi_command.connect)
     ADAPTERS["pi"] = PiRunnerRuntime(supervisor, pi=resolved)
     logger.info("Pi runner enabled for every Pi role (one runner, %s sessions)", SESSION_CAP)
     return supervisor

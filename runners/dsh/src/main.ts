@@ -12,7 +12,7 @@ const { lstat } = await import('node:fs/promises');
 const { isAbsolute } = await import('node:path');
 const { monitorEventLoopDelay } = await import('node:perf_hooks');
 const { load, boot } = await import('./sdk.ts');
-const { configureSessions, sessions, newSession, loadSession, closeSession } = await import('./session.ts');
+const { SESSION_CAP, configureSessions, sessions, newSession, loadSession, closeSession } = await import('./session.ts');
 const { installProvider } = await import('./provider.ts');
 const { prompt, cancel, steer } = await import('./turn.ts');
 const args = process.argv.slice(2);
@@ -48,7 +48,7 @@ rpc.method('initialize', async params => {
   ownSignals();
   return { protocol_version: '0.1', runner: { kind: 'dsh', version: '0.1.0' },
     sdk: { name: '@deepseek-ai/dsh', version: sdk.version }, capabilities: {
-      max_sessions: 20, per_session_isolation: true, per_session_credentials: true, cancel: true,
+      max_sessions: SESSION_CAP, per_session_isolation: true, per_session_credentials: true, cancel: true,
       usage: { per_request: true, buckets: true, reasoning_in_output: true },
       authorize_covers: ['turn', 'compaction'],
       steer: { in_trace: true, boundary: 'next_step', idle_start: false }, fork: true,

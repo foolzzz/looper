@@ -29,6 +29,7 @@ SHUTDOWN_TIMEOUT = 5.0
 DIAGNOSTIC_BYTES = 8192
 STDERR_LINES_PER_SECOND = 10
 STDERR_DRAIN_TIMEOUT = 1.0
+_CONFIGURATION_ERROR = "runner configuration or protocol version is invalid"
 _KIND = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,63}")
 _ENV = frozenset({"PATH", "LANG", "LANGUAGE", "TZ", "LC_ALL", "LC_CTYPE", "LC_NUMERIC",
     "LC_TIME", "LC_COLLATE", "LC_MONETARY", "LC_MESSAGES", "LC_PAPER", "LC_NAME",
@@ -133,7 +134,7 @@ class _Kind:
     generation: _Generation | None = None
     number: int = 0
     failures: deque = field(default_factory=deque)
-    fatal: bool = False
+    fatal: str | None = None
     restart: asyncio.Task | None = None
 
 
@@ -160,11 +161,13 @@ class RunnerSupervisor:
     def __init__(self, runtime_root: Path, commands: Mapping[str, Sequence[str | Path]], *,
                  session_cap: int = 4,
                  env: Mapping[str, Mapping[str, str]] | None = None,
+                 startup_error: Callable[[str], str] | None = None,
                  connect: Callable[[asyncio.subprocess.Process, str], Awaitable[RunnerBridge]]):
         if type(session_cap) is not int or session_cap <= 0:
             raise ValueError("runner session cap must be positive")
         self.root = Path(runtime_root).absolute() / "runners"
         self.session_cap, self.connect = session_cap, connect
+        self._startup_error = startup_error
         self._kinds: dict[str, _Kind] = {}
         for kind, argv in commands.items():
             if not isinstance(kind, str) or not _KIND.fullmatch(kind):
@@ -226,7 +229,7 @@ class RunnerSupervisor:
                 raise RunnerUnavailable("runner supervisor is stopped")
             self._trim(state)
             if state.fatal:
-                raise RunnerUnavailable("runner configuration or protocol version is invalid")
+                raise RunnerUnavailable(state.fatal)
             if len(state.failures) >= MAX_FAILURES:
                 raise RunnerUnavailable("runner unavailable: five failures within ten minutes")
             if state.generation is None:
@@ -305,12 +308,18 @@ class RunnerSupervisor:
             generation.waiter = self._own(self._wait(generation))
         except BaseException as error:
             # Timeouts and transient I/O failures use the same bounded restart path as a crash.
-            state.fatal = (isinstance(error, (ValueError, ProtocolError)) or
+            fatal = (isinstance(error, (ValueError, ProtocolError)) or
                 generation is None and isinstance(error, OSError) and error.errno in {
                     errno.ENOENT, errno.EACCES, errno.ENOEXEC} or
                 isinstance(error, RpcFailure) and error.code in {
                     ErrorCode.VERSION_MISMATCH, ErrorCode.INVALID_PARAMS, ErrorCode.UNSUPPORTED,
                     ErrorCode.ISOLATION_REFUSED})
+            if fatal:
+                state.fatal = _CONFIGURATION_ERROR
+                if generation is None and isinstance(error, OSError):
+                    cause = redact(str(error)).replace("\r", " ").replace("\n", " ")[:240]
+                    state.fatal = (self._startup_error(cause) if self._startup_error else
+                                   f"{_CONFIGURATION_ERROR}: {cause}")
             if generation is not None:
                 generation.stopping = True
                 await self._dispose(generation)
@@ -318,8 +327,7 @@ class RunnerSupervisor:
             self._restart(kind, state)
             if isinstance(error, asyncio.CancelledError):
                 raise
-            raise RunnerUnavailable("runner configuration or protocol version is invalid" if state.fatal else
-                                    "runner failed to initialize; restart is bounded") from None
+            raise RunnerUnavailable(state.fatal or "runner failed to initialize; restart is bounded") from None
 
     async def _wait(self, generation: _Generation) -> None:
         await generation.exited.wait()
@@ -345,7 +353,7 @@ class RunnerSupervisor:
                 return
             if (isinstance(cause, ValueError) and not isinstance(cause, ProtocolError)) or (
                     isinstance(cause, (ProtocolError, RpcFailure)) and cause.code == ErrorCode.VERSION_MISMATCH):
-                state.fatal = True
+                state.fatal = _CONFIGURATION_ERROR
             self._failed(generation)
         if generation.failure:
             await _joined(generation.failure)

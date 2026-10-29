@@ -1,6 +1,7 @@
 """Pi and DSH profiles use their SDK runners unless the ops file sets cli."""
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 import subprocess
@@ -8,7 +9,7 @@ import subprocess
 import pytest
 
 from looper import ops_config as ops
-from looper.agents.runtimes import ADAPTERS
+from looper.agents.runtimes import ADAPTERS, ApiProtocol
 from looper.agents.runtimes import dsh as dsh_runtime
 from looper.agents.runtimes import dsh_runner, pi_runner
 from looper.agents.runtimes.dsh import DshRuntime
@@ -16,6 +17,13 @@ from looper.agents.runtimes.dsh_runner import DshRunnerRuntime
 from looper.agents.runtimes.pi import PiRuntime
 from looper.agents.runtimes.pi_runner import PiRunnerRuntime
 from looper.agents.runtimes import RuntimeUnsupported
+from looper.agents.runtimes.api.adapter import KEY_ENV
+from looper.agents.runtimes.channel import RunStartError
+from looper.agents.runtimes.runner.bridge import RpcFailure, RunnerBridge
+from looper.agents.runtimes.runner.channel import RunnerChannel
+from looper.agents.runtimes.runner.protocol import ErrorCode, ProtocolError
+from looper.agents.runtimes.runner.session import Descriptor, RunnerSession
+from looper.agents.runtimes.runner.supervisor import RunnerUnavailable
 
 
 def _load(tmp_path, **environ):
@@ -189,6 +197,122 @@ def test_supported_sdk_versions_still_install_the_runner(tmp_path, monkeypatch):
     assert dsh_runner.enable(tmp_path) is not None
     assert ADAPTERS["dsh"].unavailable is None and seen["caps"] == [32, dsh_runner.SESSION_CAP]
     assert pi_runner.SESSION_CAP == dsh_runner.SESSION_CAP == 32
+
+
+@pytest.mark.installed
+@pytest.mark.parametrize("kind", ["pi", "dsh"])
+def test_default_runner_admits_32_sdk_sessions(tmp_path, monkeypatch, kind):
+    from dsh_runner_support import guard_env, require_dsh, session_params as dsh_params
+    from pi_runner_support import require_pi, session_params as pi_params
+
+    node, executable = require_pi() if kind == "pi" else require_dsh()
+    module = pi_runner if kind == "pi" else dsh_runner
+    monkeypatch.setitem(ADAPTERS, kind, ADAPTERS[kind])
+    which = module.shutil.which
+    monkeypatch.setattr(module.shutil, "which", lambda name:
+        node if name == "node" else executable if name == kind else which(name))
+    if kind == "pi":
+        async def connect(process, kind):
+            # Match the installed-test cold-import bound; this test checks admission, not latency.
+            bridge = RunnerBridge(process.stdout, process.stdin, kind, control_timeout=60)
+            try:
+                await bridge.initialize(permitted=module.pi_command.PERMITTED)
+            except BaseException:
+                await bridge.close()
+                raise
+            bridge.control_timeout = 10
+            return bridge
+        monkeypatch.setattr(module.pi_command, "connect", connect)
+    supervisor = module.enable(tmp_path / "runtime")
+    assert supervisor is not None
+    supervisor._env.setdefault(kind, {}).update(guard_env(tmp_path))
+
+    def params(lease):
+        values = (pi_params(lease, base_url="http://127.0.0.1:1", key="synthetic-pi-runner-key")
+                  if kind == "pi" else dsh_params(lease))
+        values["limits"]["tool_output_bytes"] = 102400
+        values["provider"]["reasoning"] = kind == "dsh"
+        return values
+
+    async def exercise():
+        leases = []
+        try:
+            # Retain every SDK session: no model turns, provider traffic or load generation.
+            for _ in range(32):
+                lease = await supervisor.acquire(kind)
+                leases.append(lease)
+                await lease.open_session(params(lease))
+            bridge = leases[0].bridge
+            assert bridge.capabilities["max_sessions"] == 32
+            assert (await bridge.health())["sessions"] == 32
+            with pytest.raises(ProtocolError) as host_full:
+                await supervisor.acquire(kind)
+            assert host_full.value.code == ErrorCode.CAPACITY
+            # Bypass host admission to exercise the SDK runner's independent hard cap.
+            (leases[0].directory.parent / "overflow" / "agent").mkdir(parents=True)
+            with pytest.raises(RpcFailure) as runner_full:
+                await bridge.open_session({**params(leases[0]), "session_key": "overflow"})
+            assert runner_full.value.code == ErrorCode.CAPACITY
+            await leases.pop().release()
+            replacement = await supervisor.acquire(kind)
+            leases.append(replacement)
+            await replacement.open_session(params(replacement))
+            assert (await bridge.health())["sessions"] == 32
+            for lease in leases:
+                await lease.release()
+            assert (await bridge.health())["sessions"] == 0
+        finally:
+            await supervisor.stop()
+
+    asyncio.run(asyncio.wait_for(exercise(), 120))
+
+
+@pytest.mark.parametrize("kind", ["pi", "dsh"])
+@pytest.mark.parametrize("role", ["manager", "worker"])
+def test_lazy_spawn_failure_retains_cause_and_opt_out(tmp_path, monkeypatch, kind, role):
+    module = pi_runner if kind == "pi" else dsh_runner
+    package, version = (("@earendil-works/pi-coding-agent", "1.3.2") if kind == "pi"
+                        else ("@deepseek-ai/dsh", "0.2.1-rc.2"))
+    executable = _package(tmp_path, package, version)
+    node = tmp_path / "node"
+    node.write_text("#!/bin/sh\nprintf 'v24.20.0\\n'\n")
+    node.chmod(0o755)
+    monkeypatch.setitem(ADAPTERS, kind, ADAPTERS[kind])
+    which = module.shutil.which
+    monkeypatch.setattr(module.shutil, "which", lambda name:
+        str(node) if name == "node" else executable if name == kind else which(name))
+    supervisor = module.enable(tmp_path / "runtime")
+    assert supervisor is not None and ADAPTERS[kind].unavailable is None
+    node.unlink()  # Startup checks succeeded; the captured Node disappears before first use.
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Disposable instructions.")
+    descriptor = Descriptor(kind=kind, role=role, provider_id="test",
+        protocol=ApiProtocol.ANTHROPIC_MESSAGES if kind == "dsh" else ApiProtocol.OPENAI_RESPONSES,
+        base_url="http://127.0.0.1:1", model="test-model", effort=None,
+        context_window=None, system_prompt_file=str(prompt))
+
+    async def exercise():
+        try:
+            session = (ADAPTERS[kind].resident_session("test") if role == "manager" else
+                       RunnerSession("worker-run", supervisor, kind, owned=False))
+            channel = RunnerChannel(session, descriptor, cwd=str(tmp_path), env={KEY_ENV: "synthetic-key"},
+                tools=None, provider_id="test", model="test-model", price=None, limits=None)
+            for _ in range(2):  # The terminal refusal must retain the diagnostic on later attempts too.
+                with pytest.raises(RunnerUnavailable if role == "manager" else RunStartError) as caught:
+                    if role == "manager":
+                        await session.start(descriptor.to_argv(), cwd=str(tmp_path), signature=None,
+                                            env={KEY_ENV: "synthetic-key"})
+                    else:
+                        await channel.launch()
+                message = str(caught.value)
+                assert "No such file or directory" in message
+                assert str(node) in message
+                assert f'[runtimes] {kind} = "cli" in the ops file' in message
+            assert supervisor._kinds[kind].restart is None
+        finally:
+            await supervisor.stop()
+
+    asyncio.run(asyncio.wait_for(exercise(), 10))
 
 
 @pytest.mark.parametrize("command", ["run", "dialogs"])

@@ -156,8 +156,8 @@ def test_capacity(tmp_path):
             await client.start()
             params = session_params(raw_lease(tmp_path))
             ids = [(await client.call("session/new", {**params, "session_key": f"key-{index}"}))["session_id"]
-                for index in range(20)]
-            assert (await client.call("runner/health"))["sessions"] == 20
+                for index in range(32)]
+            assert (await client.call("runner/health"))["sessions"] == 32
             await client.call("session/new", {**params, "session_key": "overflow"}, code=-32006)
             await client.call("session/close", {"session_id": ids.pop()})
             ids.append((await client.call("session/new", {**params, "session_key": "overflow"}))["session_id"])

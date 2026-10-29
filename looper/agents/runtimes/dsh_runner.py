@@ -250,7 +250,7 @@ def enable(runtime_root: Path) -> RunnerSupervisor | None:
         try:
             state = dsh_command.state_root(runtime_root)
             supervisor = RunnerSupervisor(runtime_root, {"dsh": dsh_command.command(node, dsh, state)},
-                                          session_cap=SESSION_CAP, connect=dsh_command.connect)
+                                          session_cap=SESSION_CAP, startup_error=_opt_out, connect=dsh_command.connect)
             resolved = Path(dsh).resolve()
         except (OSError, ValueError) as exc:
             unavailable = _opt_out(f"could not initialize ({exc}); node 22.19+ and dsh are required")
