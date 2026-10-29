@@ -213,9 +213,10 @@ def test_old_and_new_records_keep_identical_task_costs_and_model_groups(monkeypa
     async def test(pool: Any) -> None:
         project = await projects.create_project(name="history", pool=pool)
         launch_metadata = _model_launch().record()
-        # Old profile, old agent, and pre-profile records, including precedence when both keys exist.
+        # Historical rows after the bridge upgrade, including its explicit pre-profile accounting evidence
+        # and profile precedence when both identity keys exist.
         cases = [
-            ("planner-history", "glm-5.3[1m]", 0.12, "runtime", None),
+            ("planner-history", "glm-5.3[1m]", 0.12, "runtime", {"accounting_basis": "subscription_equivalent"}),
             ("worker-1", "glm-5.3[1m]", 0.3, "provider_price", {"agent": {"provider": {"auth": "api_key"}}}),
             ("reviewer-1", "glm-5.3", 0.07, "provider_price", {"profile": {"provider": {"auth": "oauth"}}}),
             ("worker-2", "unknown", None, "provider_price", {"profile": {"provider": {"auth": "api_key"}}}),

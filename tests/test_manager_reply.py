@@ -298,7 +298,7 @@ def _converse(
     between: Any = None,
     saved_session: str | None = None,
     saved_totals: dict[str, Any] | None = None,
-    saved_runtime: str | None = None,
+    saved_runtime: str | None = "claude-code",
 ) -> dict[str, Any]:
     """Send ``messages`` one at a time to one Manager backed by a fake claude, then stop it.
 
@@ -319,14 +319,15 @@ def _converse(
     sessions: dict[str, dict[str, Any]] = {}
     if saved_session is not None:  # a session saved by an earlier run of the server
         sessions["manager"] = {"session_id": saved_session, "session_totals": dict(saved_totals or {}),
-                               "runtime_type": saved_runtime}
+                               "runtime_type": saved_runtime, "provider_id": "prov-claude-subscription"}
 
     async def _get_session(agent_id: str, **_: Any) -> dict[str, Any] | None:
         return sessions.get(agent_id)
 
     async def _save_session(agent_id: str, session_id: str | None, totals: Any, *, runtime_type: str | None = None,
-                            **_: Any) -> None:
-        sessions[agent_id] = {"session_id": session_id, "session_totals": dict(totals), "runtime_type": runtime_type}
+                            provider_id: str | None = None, **_: Any) -> None:
+        sessions[agent_id] = {"session_id": session_id, "session_totals": dict(totals), "runtime_type": runtime_type,
+                              "provider_id": provider_id}
 
     monkeypatch.setattr(agent_sessions, "get_session", _get_session)
     monkeypatch.setattr(agent_sessions, "save_session", _save_session)
@@ -547,16 +548,20 @@ class TestManagerResidentClaude:
         assert "session.json" not in chat["files"]
 
     @pytest.mark.parametrize(("saved_runtime", "resumed"), [
-        (None, "sess-1"),  # a session from before agents: Claude Code ran it
+        (None, None),  # unknown runtime: only the bridge upgrade fills historical identities
         ("claude-code", "sess-1"),
         ("codex", None),  # another runtime's session: a new one starts
     ])
     def test_only_a_session_of_the_same_runtime_is_resumed(
-        self, monkeypatch: pytest.MonkeyPatch, saved_runtime: str | None, resumed: str | None,
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, saved_runtime: str | None, resumed: str | None,
     ) -> None:
-        chat = _converse(monkeypatch, _resident(), ["hello"], saved_session="sess-1", saved_runtime=saved_runtime)
+        chat = _converse(monkeypatch, _resident(), ["hello"], saved_session="sess-1", saved_runtime=saved_runtime,
+                         saved_totals={"cost_usd": 0.5})
         ((argv, _),) = chat["spawned"]
         assert _flag(argv, "--resume") == resumed
+        assert chat["replies"] == ["turn 1: hello"]
+        assert [call.kwargs["cost_usd"] for call in agent_db.finish_record.await_args_list] == [0.25]
+        assert chat["saved_totals"] == {"cost_usd": 0.75 if resumed else 0.25}
         assert chat["saved_runtime"] == "claude-code"  # the session now belongs to the agent's runtime
 
     @pytest.mark.parametrize(("ignore_eof", "returncode"), [(False, 0), (True, -signal.SIGTERM)])
