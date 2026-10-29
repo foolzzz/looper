@@ -1,4 +1,4 @@
-"""Every Pi role uses the SDK runner (one runner, 32 sessions) unless the ops file sets cli."""
+"""Every Pi role uses the SDK runner pool unless the ops file sets cli."""
 from __future__ import annotations
 
 import hashlib
@@ -38,8 +38,7 @@ RUN_TOOL_TIMEOUT_SEC = 86400
 _NO_CLI = ('the Pi runner hosts this run; there is no Pi CLI command under [runtimes] pi = "runner"')
 _PROVIDER_ENV = ("the Pi runner cannot apply a provider's environment variables; clear them or use "
                  'the CLI path ([runtimes] pi = "cli")')
-# Every Pi role shares this runner. 32 covers a few concurrent tasks; an offline
-# spike ran 50 sessions at about 147 MiB. Past this, acquisition still fails with CAPACITY.
+# Per-member cap; the supervisor starts another runner when existing members are full.
 SESSION_CAP = 32
 _PI_PACKAGE = "@earendil-works/pi-coding-agent"
 _PI_VERSION = re.compile(r"^1\.3\.\d+$")
@@ -83,8 +82,8 @@ class PiRunnerRuntime(PiRuntime):
     def _check_executable(self, executable: str) -> None:
         resolved = shutil.which(executable)
         if resolved is None or Path(resolved).resolve() != self.pi:
-            raise RuntimeUnsupported(f"the Pi runner uses {self.pi}; the launch executable {executable} "
-                                     f"resolves to {resolved}; restart with the same pi executable")
+            raise RuntimeUnsupported(_opt_out(f"the Pi runner uses {self.pi}; the launch executable {executable} "
+                                              f"resolves to {resolved}; restart with the same pi executable"))
 
     def _runner_prompt(self, prompt_file: Path, launch: Launch, cwd: str | Path) -> Path:
         text = _prompt_text(Path(prompt_file).read_text(encoding="utf-8"), launch, cwd=cwd)
@@ -241,5 +240,5 @@ def enable(runtime_root: Path) -> RunnerSupervisor | None:
                                   env={"pi": pi_command.ENV}, session_cap=SESSION_CAP,
                                   startup_error=_opt_out, connect=pi_command.connect)
     ADAPTERS["pi"] = PiRunnerRuntime(supervisor, pi=resolved)
-    logger.info("Pi runner enabled for every Pi role (one runner, %s sessions)", SESSION_CAP)
+    logger.info("Pi runner pool enabled for every Pi role (%s sessions per member)", SESSION_CAP)
     return supervisor

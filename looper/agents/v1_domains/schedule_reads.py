@@ -30,6 +30,7 @@ _SCHEDULE_FIELDS = {
     "template_inputs": {"type": "object", "additionalProperties": _STR},
     "enabled": _BOOL, "overlap": _enum("skip", "queue", "parallel"), "catch_up": _enum("once", "skip"),
     "notify": _enum("failures", "alerts", "always", "never"),
+    "user_gates": _enum("off", "on"),
     "max_parallel_runs": _INT, "consecutive_failures": _INT,
     **dict.fromkeys(("next_fire_at", "last_fired_at", "last_success_at"), _NULL_STR),
     "run_timeout_seconds": {"anyOf": [_NULL_INT, {"const": "default"}]},
@@ -67,6 +68,7 @@ LISTED_RUN = _object({
     ["run_id", "status", "trigger", "at", "task_id", "summary", "cost_usd"])
 LISTED_SCHEDULE = _object({
     **dict.fromkeys(("schedule_id", "name", "project", "cron", "timezone", "description"), _STR),
+    "user_gates": _enum("off", "on"),
     "enabled": _BOOL, "next_fire_at": _NULL_STR, "consecutive_failures": _INT, "last_run": _nullable(LISTED_RUN)})
 RESULTS = {
     "schedules.list": _object({"schedules": _array(LISTED_SCHEDULE)}),

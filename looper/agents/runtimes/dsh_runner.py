@@ -1,4 +1,4 @@
-"""Every DSH role uses the SDK runner (one runner, 32 sessions) unless the ops file sets cli."""
+"""Every DSH role uses the SDK runner pool unless the ops file sets cli."""
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
@@ -40,8 +40,7 @@ RUN_TOOL_TIMEOUT_SEC = 86400
 _NO_CLI = ('the DSH runner hosts this run; there is no DSH CLI command under [runtimes] dsh = "runner"')
 _PROVIDER_ENV = ("the DSH runner cannot apply a provider's environment variables; clear them or use "
                  'the CLI path ([runtimes] dsh = "cli")')
-# Every DSH role shares this runner. 32 covers a few concurrent tasks; an offline
-# spike ran 50 sessions at about 85 MiB. Past this, acquisition still fails with CAPACITY.
+# Per-member cap; the supervisor starts another runner when existing members are full.
 SESSION_CAP = 32
 _DSH_PACKAGE = "@deepseek-ai/dsh"
 _DSH_VERSION = "0.2.1-rc.2"
@@ -90,8 +89,8 @@ class DshRunnerRuntime(DshRuntime):
     def _check_executable(self, executable: str) -> None:
         resolved = shutil.which(executable)
         if resolved is None or Path(resolved).resolve() != self.dsh:
-            raise RuntimeUnsupported(f"the DSH runner uses {self.dsh}; the launch executable {executable} "
-                                     f"resolves to {resolved}; restart with the same dsh executable")
+            raise RuntimeUnsupported(_opt_out(f"the DSH runner uses {self.dsh}; the launch executable {executable} "
+                                              f"resolves to {resolved}; restart with the same dsh executable"))
 
     def _runner_prompt(self, prompt_file: Path, launch: Launch, cwd: str | Path) -> Path:
         text = _prompt_text(Path(prompt_file).read_text(encoding="utf-8"), launch, cwd=cwd)
@@ -258,5 +257,5 @@ def enable(runtime_root: Path) -> RunnerSupervisor | None:
         ADAPTERS["dsh"] = DshRunnerRuntime(None, dsh=None, unavailable=unavailable)
         return None
     ADAPTERS["dsh"] = DshRunnerRuntime(supervisor, dsh=resolved)
-    logger.info("DSH runner enabled for every DSH role (one runner, %s sessions)", SESSION_CAP)
+    logger.info("DSH runner pool enabled for every DSH role (%s sessions per member)", SESSION_CAP)
     return supervisor

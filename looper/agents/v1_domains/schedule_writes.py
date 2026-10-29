@@ -27,6 +27,7 @@ _FIELDS = {
     "gate_timeout_seconds": _nullable({"type": "integer", "minimum": 1,
                                         "maximum": schedules.GATE_TIMEOUT_MAX_SECONDS}),
     "notify": _enum("failures", "alerts", "always", "never"),
+    "user_gates": _enum("off", "on"),
     "notify_target": _nullable(_object({"channel": _STR, "chat": _STR}, closed=True)),
     "profile_overrides": _nullable(_object(dict.fromkeys(("planner", "worker", "reviewer"), _NULL_STR),
                                             [], closed=True)),

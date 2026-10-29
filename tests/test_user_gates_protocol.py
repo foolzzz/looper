@@ -354,10 +354,16 @@ def test_the_contract_with_gates_says_how_to_open_discuss_change_and_close_them(
     assert text.index("[RESTART]:") < text.index("[GATE]: the user") < text.index("[SUPERVISE]:")
 
 
-def test_a_task_a_schedule_started_never_opens_a_gate_whatever_its_project_says() -> None:
-    assert gate_policy(gates_on=True, scheduled=True) is GatePolicy.UNATTENDED
-    assert gate_policy(gates_on=False, scheduled=False) is GatePolicy.OFF
-    assert gate_policy(gates_on=True, scheduled=False) is GatePolicy.ALLOWED
+@pytest.mark.parametrize("gates_on", [False, True])
+@pytest.mark.parametrize("scheduled", [False, True])
+@pytest.mark.parametrize("schedule_gates", ["off", "on"])
+def test_gate_policy_requires_the_project_and_a_schedules_opt_in(
+    gates_on: bool, scheduled: bool, schedule_gates: str,
+) -> None:
+    expected = (GatePolicy.OFF if not gates_on else
+                GatePolicy.UNATTENDED if scheduled and schedule_gates == "off" else GatePolicy.ALLOWED)
+    assert gate_policy(gates_on=gates_on, scheduled=scheduled, schedule_gates=schedule_gates) is expected
+    assert gate_policy(gates_on=True, scheduled=True) is GatePolicy.UNATTENDED  # old callers default to off
 
 
 def test_new_agenda_items_are_numbered_after_the_highest_id() -> None:

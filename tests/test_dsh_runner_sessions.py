@@ -1,13 +1,12 @@
 """Installed DSH session ownership, persistence and isolation without model traffic."""
 import asyncio
 import json
-from pathlib import Path
 import signal
 import subprocess
 
 import pytest
 
-from dsh_runner_support import OFFER, raw_lease, raw_runner, require_dsh, session_params
+from dsh_runner_support import OFFER, dsh_supervisor, raw_lease, raw_runner, require_dsh, session_params
 from looper.agents.runtimes.runner import dsh_command
 from test_dsh_runner import harness
 
@@ -63,6 +62,38 @@ def test_session_round_trip_and_single_owner(tmp_path):
             assert (await client.call("runner/health"))["sessions"] == 1
             await client.call("session/close", {"session_id": sid})
             await client.call("session/close", {"session_id": sid}, code=-32001)
+    run(exercise())
+
+
+def test_saved_session_resumes_on_another_live_pool_member(tmp_path):
+    async def exercise():
+        async with dsh_supervisor(tmp_path) as supervisor:
+            supervisor.session_cap = 1
+            lease = await supervisor.acquire("dsh", owner="manager")
+            params = session_params(lease, cwd=str(tmp_path))
+            params["provider"]["reasoning"] = True
+            params["limits"]["tool_output_bytes"] = 102400
+            sid = await lease.open_session(params)
+            directory = stored(dsh_command.state_root(tmp_path / "runtime"), sid)
+
+            second = await supervisor.acquire("dsh")
+            first_member, second_member = lease._generation, second._generation
+            assert first_member is not second_member
+            await lease.release()
+            filler = await supervisor.acquire("dsh")
+            assert filler._generation is first_member
+            await second.release()
+
+            resumed = await supervisor.acquire("dsh", owner="manager")
+            assert resumed._generation is second_member
+            assert resumed.state_dir == lease.state_dir
+            assert first_member.process.returncode is second_member.process.returncode is None
+            assert directory.is_dir()
+            assert await resumed.load_session({**params, "session_id": sid}) == sid
+            assert (await first_member.bridge.health())["sessions"] == 0
+            assert (await second_member.bridge.health())["sessions"] == 1
+            await resumed.release()
+            await filler.release()
     run(exercise())
 
 

@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AsyncExitStack
 import json
 from pathlib import Path
+import shlex
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,8 +24,9 @@ from looper.agents.runtimes.api.adapter import KEY_ENV
 from looper.agents.runtimes.channel import RunStartError
 from looper.agents.runtimes.runner.bridge import RpcFailure, RunnerBridge
 from looper.agents.runtimes.runner.channel import RunnerChannel
-from looper.agents.runtimes.runner.protocol import ErrorCode, ProtocolError
+from looper.agents.runtimes.runner.protocol import ErrorCode
 from looper.agents.runtimes.runner.session import Descriptor, RunnerSession
+from looper.agents.runtimes.runner import supervisor as supervisor_module
 from looper.agents.runtimes.runner.supervisor import RunnerUnavailable
 
 
@@ -61,8 +65,8 @@ def test_explicit_cli_keeps_the_cli_adapters(tmp_path):
     assert type(ADAPTERS["dsh"]) is DshRuntime and not ADAPTERS["dsh"].hosts_runs
 
 
-def test_claude_code_is_untouched_by_either_setting(tmp_path, monkeypatch):
-    claude = ADAPTERS["claude-code"]
+def test_other_runtimes_are_untouched_by_either_setting(tmp_path, monkeypatch):
+    others = {kind: ADAPTERS[kind] for kind in ("claude-code", "codex", "omp", "grok", "api")}
     monkeypatch.setitem(ADAPTERS, "pi", ADAPTERS["pi"])
     monkeypatch.setitem(ADAPTERS, "dsh", ADAPTERS["dsh"])
     assert _load(tmp_path).pi_runtime == "runner"
@@ -70,7 +74,7 @@ def test_claude_code_is_untouched_by_either_setting(tmp_path, monkeypatch):
     monkeypatch.setattr(dsh_runner.shutil, "which", lambda name: None)
     assert pi_runner.enable(tmp_path) is None
     assert dsh_runner.enable(tmp_path) is None
-    assert ADAPTERS["claude-code"] is claude
+    assert all(ADAPTERS[kind] is adapter for kind, adapter in others.items())
     assert type(ADAPTERS["pi"]) is PiRunnerRuntime
     assert type(ADAPTERS["dsh"]) is DshRunnerRuntime
 
@@ -201,9 +205,13 @@ def test_supported_sdk_versions_still_install_the_runner(tmp_path, monkeypatch):
 
 @pytest.mark.installed
 @pytest.mark.parametrize("kind", ["pi", "dsh"])
-def test_default_runner_admits_32_sdk_sessions(tmp_path, monkeypatch, kind):
+def test_default_runner_pools_35_sdk_sessions_and_stops_idle_extra(tmp_path, monkeypatch, kind):
     from dsh_runner_support import guard_env, require_dsh, session_params as dsh_params
     from pi_runner_support import require_pi, session_params as pi_params
+    from dsh_installed_stand_in import MessagesServer
+    from fake_model_api import FakeModelAPI, ResponseScript
+    from looper.agents.runtimes.runner.turn import RunnerTurn
+    from test_pi_runner_turns import reply
 
     node, executable = require_pi() if kind == "pi" else require_dsh()
     module = pi_runner if kind == "pi" else dsh_runner
@@ -225,44 +233,92 @@ def test_default_runner_admits_32_sdk_sessions(tmp_path, monkeypatch, kind):
         monkeypatch.setattr(module.pi_command, "connect", connect)
     supervisor = module.enable(tmp_path / "runtime")
     assert supervisor is not None
-    supervisor._env.setdefault(kind, {}).update(guard_env(tmp_path))
+    monkeypatch.setattr(supervisor_module, "IDLE_STOP_SECONDS", 0.05)
 
-    def params(lease):
+    def params(lease, role="worker"):
         values = (pi_params(lease, base_url="http://127.0.0.1:1", key="synthetic-pi-runner-key")
                   if kind == "pi" else dsh_params(lease))
+        values["role"] = role
         values["limits"]["tool_output_bytes"] = 102400
         values["provider"]["reasoning"] = kind == "dsh"
         return values
 
     async def exercise():
-        leases = []
-        try:
-            # Retain every SDK session: no model turns, provider traffic or load generation.
-            for _ in range(32):
-                lease = await supervisor.acquire(kind)
-                leases.append(lease)
-                await lease.open_session(params(lease))
-            bridge = leases[0].bridge
-            assert bridge.capabilities["max_sessions"] == 32
-            assert (await bridge.health())["sessions"] == 32
-            with pytest.raises(ProtocolError) as host_full:
-                await supervisor.acquire(kind)
-            assert host_full.value.code == ErrorCode.CAPACITY
-            # Bypass host admission to exercise the SDK runner's independent hard cap.
-            (leases[0].directory.parent / "overflow" / "agent").mkdir(parents=True)
-            with pytest.raises(RpcFailure) as runner_full:
-                await bridge.open_session({**params(leases[0]), "session_key": "overflow"})
-            assert runner_full.value.code == ErrorCode.CAPACITY
-            await leases.pop().release()
-            replacement = await supervisor.acquire(kind)
-            leases.append(replacement)
-            await replacement.open_session(params(replacement))
-            assert (await bridge.health())["sessions"] == 32
-            for lease in leases:
-                await lease.release()
-            assert (await bridge.health())["sessions"] == 0
-        finally:
-            await supervisor.stop()
+        members = []
+        async with AsyncExitStack() as peers:
+            if kind == "pi":
+                api = await peers.enter_async_context(FakeModelAPI([
+                    ResponseScript(events=reply()) for _ in range(2)]))
+                base_url, key = api.base_url, api.api_key
+            else:
+                api = peers.enter_context(MessagesServer([["Hello"] for _ in range(2)]))
+                base_url, key = api.url, "synthetic-dsh-runner-key"
+            port = int(base_url.split(":")[2].split("/")[0])
+            supervisor._env.setdefault(kind, {}).update(guard_env(tmp_path, port))
+            leases = []
+            try:
+                # Keep the actual SDK sessions open, with the default per-member cap.
+                roles = ["manager", "planner", "planner", *(["worker"] * 32)]
+                for role in roles:
+                    lease = await supervisor.acquire(kind)
+                    leases.append(lease)
+                    values = params(lease, role)
+                    values["provider"].update(base_url=base_url, api_key=key)
+                    await lease.open_session(values)
+                    if len(leases) == 32:
+                        bridge = lease.bridge
+                        assert bridge.capabilities["max_sessions"] == 32
+                        assert (await bridge.health())["sessions"] == 32
+                        # Bypass host admission to verify the independent runner cap.
+                        (lease.directory.parent / "overflow" / "agent").mkdir(parents=True)
+                        with pytest.raises(RpcFailure) as runner_full:
+                            await bridge.open_session({**values, "session_key": "overflow"})
+                        assert runner_full.value.code == ErrorCode.CAPACITY
+                members = list(supervisor._kinds[kind].members)
+                assert len(members) == len({lease.runner_id for lease in leases}) == 2
+                assert [member.cap for member in members] == [32, 32]
+                assert [len(member.leases) for member in members] == [32, 3]
+                assert [(await member.bridge.health())["sessions"] for member in members] == [32, 3]
+                assert all(member.process.returncode is None for member in members)
+
+                # One bounded fake-provider turn per process proves both SDK paths work.
+                async def limits():
+                    return dict(run_cap=None, task_cap=None, task_spent=0)
+
+                for index in (0, 32):
+                    lease, trace = leases[index], f"pool-{index}"
+                    async def cancel(_, lease=lease, trace=trace):
+                        await lease.bridge.cancel_turn(lease.session_id, trace)
+                    turn = RunnerTurn(session_id=lease.session_id, trace_id=trace, role=roles[index],
+                        tools=None, provider_id="account", model=params(lease)["provider"]["model"],
+                        price=lambda model, usage: 0,
+                        limits=limits, max_requests=1, cancel=cancel)
+                    events = []
+                    await lease.bridge.begin_turn(lease.session_id, trace, events.append, turn,
+                                                   text="Say hello.")
+                    settled = await lease.bridge.wait_settled(lease.session_id, trace)
+                    assert settled.outcome == "completed" and settled.usage_complete, events
+                    assert events[-1]["result"] == "Hello"
+                assert len(api.requests) == 2
+                await leases.pop().release()
+                replacement = await supervisor.acquire(kind)
+                leases.append(replacement)
+                assert replacement._generation is members[1]
+                await replacement.open_session(params(replacement))
+                assert (await replacement.bridge.health())["sessions"] == 3
+                for lease in leases:
+                    await lease.release()
+                assert all(not member.leases for member in members)
+                # Join both patched idle timers, including the last member's no-op timer.
+                timers = [member.idle for member in members if member.idle is not None]
+                await asyncio.gather(*timers)
+                remaining = supervisor._kinds[kind].members
+                assert len(remaining) == 1 and remaining[0].process.returncode is None
+                assert sum(member.process.returncode is not None for member in members) == 1
+                assert (await remaining[0].bridge.health())["sessions"] == 0
+            finally:
+                await supervisor.stop()
+                assert all(member.process.returncode is not None for member in members)
 
     asyncio.run(asyncio.wait_for(exercise(), 120))
 
@@ -309,6 +365,132 @@ def test_lazy_spawn_failure_retains_cause_and_opt_out(tmp_path, monkeypatch, kin
                 assert str(node) in message
                 assert f'[runtimes] {kind} = "cli" in the ops file' in message
             assert supervisor._kinds[kind].restart is None
+        finally:
+            await supervisor.stop()
+
+    asyncio.run(asyncio.wait_for(exercise(), 10))
+
+
+@pytest.mark.installed
+@pytest.mark.parametrize("kind", ["pi", "dsh"])
+@pytest.mark.parametrize("member", ["first", "additional"])
+@pytest.mark.parametrize("change", ["sdk-upgrade", "sdk-downgrade", "node", "resolve-executable"])
+def test_lazy_handshake_failure_retains_cause_and_opt_out(tmp_path, monkeypatch, kind, member, change):
+    from dsh_runner_support import require_node
+    from test_dsh_runner import fake_package as dsh_package
+    from test_pi_runner import fake_package as pi_package
+
+    real_node = require_node()
+    executable = (pi_package if kind == "pi" else dsh_package)(tmp_path)
+    executable.chmod(0o755)
+    node = tmp_path / "node"
+    node.write_text(f'#!/bin/sh\nexec {shlex.quote(real_node)} "$@"\n')
+    node.chmod(0o755)
+    module = pi_runner if kind == "pi" else dsh_runner
+    monkeypatch.setitem(ADAPTERS, kind, ADAPTERS[kind])
+    which = module.shutil.which
+    monkeypatch.setattr(module.shutil, "which", lambda name:
+        str(node) if name == "node" else str(executable) if name == kind else which(name))
+    processes = []
+    spawn = supervisor_module.proc_tree.spawn
+
+    async def track(*args, **kwargs):
+        process = await spawn(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(supervisor_module.proc_tree, "spawn", track)
+    supervisor = module.enable(tmp_path / "runtime")
+    assert supervisor is not None and ADAPTERS[kind].unavailable is None
+    adapter = ADAPTERS[kind]
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Disposable instructions.")
+    descriptor = Descriptor(kind=kind, role="manager", provider_id="test",
+        protocol=ApiProtocol.ANTHROPIC_MESSAGES if kind == "dsh" else ApiProtocol.OPENAI_RESPONSES,
+        base_url="http://127.0.0.1:1", model="test-model", effort=None,
+        context_window=None, system_prompt_file=str(prompt))
+
+    async def exercise():
+        try:
+            if member == "additional":
+                # Reserve the first member's 32 slots; its SDK handshake must succeed.
+                for _ in range(32):
+                    await supervisor.acquire(kind)
+                assert len(processes) == 1 and processes[0].returncode is None
+            if change.startswith("sdk-"):
+                manifest = executable.parent.parent / "package.json"
+                metadata = json.loads(manifest.read_text())
+                version = (("1.4.0" if change == "sdk-upgrade" else "1.2.9") if kind == "pi" else
+                           ("0.2.1-rc.3" if change == "sdk-upgrade" else "0.2.0"))
+                metadata["version"] = version
+                manifest.write_text(json.dumps(metadata))
+                cause = f'{metadata["name"]} version {version} is unsupported'
+            elif change == "node":
+                preload = tmp_path / "old-node.mjs"
+                preload.write_text("Object.defineProperty(process.versions, 'node', {value: '22.18.0'});")
+                node.write_text(f'#!/bin/sh\nexec {shlex.quote(real_node)} --import {shlex.quote(str(preload))} "$@"\n')
+                cause = "Node version 22.18.0 is unsupported"
+            else:
+                executable.unlink()
+                cause = f"resolve {'Pi' if kind == 'pi' else 'dsh'} executable failed"
+            session = adapter.resident_session("test")
+            for _ in range(2):
+                with pytest.raises(RunnerUnavailable) as caught:
+                    await session.start(descriptor.to_argv(), cwd=str(tmp_path), signature=None,
+                                        env={KEY_ENV: "synthetic-key"})
+                message = str(caught.value)
+                assert cause in message
+                assert f'[runtimes] {kind} = "cli" in the ops file' in message
+            assert ADAPTERS[kind] is adapter and adapter.hosts_runs and not session.started
+            state = supervisor._kinds[kind]
+            assert state.fatal == message and state.restart is None
+            assert state.number == (1 if member == "first" else 2)
+            assert len(processes) == state.number and processes[-1].returncode is not None
+            if member == "additional":
+                assert processes[0].returncode is None and len(state.members) == 1
+                assert all(lease.valid for lease in state.members[0].leases)
+        finally:
+            await supervisor.stop()
+            assert all(process.returncode is not None for process in processes)
+
+    asyncio.run(asyncio.wait_for(exercise(), 30))
+
+
+@pytest.mark.parametrize("kind", ["pi", "dsh"])
+@pytest.mark.parametrize("role", ["manager", "worker"])
+def test_executable_removed_after_enable_names_cause_and_opt_out(tmp_path, monkeypatch, kind, role):
+    from looper.agents.agent_settings import AgentType
+
+    module = pi_runner if kind == "pi" else dsh_runner
+    package, version = (("@earendil-works/pi-coding-agent", "1.3.2") if kind == "pi"
+                        else ("@deepseek-ai/dsh", "0.2.1-rc.2"))
+    executable = _package(tmp_path, package, version)
+    node = tmp_path / "node"
+    node.write_text("#!/bin/sh\nprintf 'v24.20.0\\n'\n")
+    node.chmod(0o755)
+    monkeypatch.setitem(ADAPTERS, kind, ADAPTERS[kind])
+    which = module.shutil.which
+    monkeypatch.setattr(module.shutil, "which", lambda name:
+        str(node) if name == "node" else which(executable) if name == kind else which(name))
+    supervisor = module.enable(tmp_path / "runtime")
+    assert supervisor is not None and ADAPTERS[kind].unavailable is None
+    adapter = ADAPTERS[kind]
+    Path(executable).unlink()
+
+    async def exercise():
+        try:
+            launch = SimpleNamespace(role=AgentType(role))
+            with pytest.raises(RuntimeUnsupported) as caught:
+                if role == "manager":
+                    adapter.resident_command(kind, cwd=tmp_path, prompt_file=tmp_path / "absent", launch=launch)
+                else:
+                    adapter.hosted_run(kind, cwd=tmp_path, prompt_file=tmp_path / "absent", launch=launch,
+                        max_turns=0, timeout_s=0, session_dir=None, tools=None, limits=None)
+            message = str(caught.value)
+            assert executable in message and "resolves to None" in message
+            assert f'[runtimes] {kind} = "cli" in the ops file' in message
+            assert ADAPTERS[kind] is adapter and adapter.hosts_runs
+            assert supervisor._kinds[kind].number == 0
         finally:
             await supervisor.stop()
 

@@ -731,6 +731,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-29 | DSH consult 上下文：runner consult 复用已安装 CLI 的完整默认 guidance 和 24 个工具声明，只读执行仍限 read/glob/grep；隔离 serve 对同一已结束 Worker 逐项比较完整 system、工具及历史，旧实现先红、修复后通过，并覆盖声明存在但写入/shell/子代理/联网拒绝。真实 DeepSeek 对同一合成历史与问题前后各两次完整 consult：首请求输入 token 从 4,035 增至 8,621，前后均 2/2 通过生产 answers 解析、无 Worker report，因此偶发格式故障尚未复现，不能宣称其根因已修复；[完整测量与复现方法](2026-10-29-dsh-consult-validation.md)。fork 截点保留独立事件的修复单独保留，不作为上述问题的修复证据。Dashboard、Telegram、Lark 共用后端，CLI 为对照路径；指定 DSH runner 定向测试 `-n 2` 共 171 项通过，0 失败、0 跳过。 |
 | 2026-10-29 | Pi 与 DSH 默认走 SDK runner（本分支）：`[runtimes] pi` 与 `dsh` 默认 `"runner"`，显式 `"cli"` 仍生效，启动读取一次；Claude Code 不变。两家会话上限改为 32，超出仍是 `CAPACITY`。runner 起不来（Node 旧于 22.19、SDK 不在门禁 pi 1.3.x / dsh 0.2.1-rc.2、可执行文件缺失）时 `RuntimeUnsupported` 写明原因和 `[runtimes] pi = "cli"` / `dsh = "cli"` 退路。eval 与 `examples/dsh/validate.py` 无 flag 走 runner，`--pi-cli` / `--dsh-cli` 走 CLI，`--pi-runner` / `--dsh-runner` 仍显式选择 runner。维护者已用真实模型验收：Pi 经 CPA，dialogs 8/8、tasks 17/18 对照 CLI；DSH 经 DeepSeek，对照都在门禁内，当前 main 上真实 smoke 5/5。本卡未重跑真实模型；合并前 lead 对每个运行时无 flag 再跑一次真实 smoke。Dashboard、Telegram、Lark 无新入口。 |
 
+| 2026-10-29 | 定时任务按项开启用户关卡：新增 `schedules.user_gates`（默认 `off`），仅在项目和定时任务都开启时允许规划者开关卡；未开启时完整 Planner prompt 与原策略逐字节相同。API、管家列表/配置/差异/启用确认、v4 配置导入导出和项目定时表单/详情均携带该字段；v4 缺省导入为关闭。关卡优先发到定时任务通知对象，否则用系统 dashboard target，再否则仅任务页，复用渠道白名单与 `/gates` 路由。等待计入运行超时，重叠跳过、补跑和预算规则不变。一次性数据库的定向 pytest 以 `-n 2` 验证策略、升级、投递、API 回复恢复、超时和导入导出；隔离 serve 配 fake runtime 与本地 Lark 替身完整跑通。Web 36 项测试及构建通过，1280/390 浏览器验证开关、保存读回和超时提示；无真实渠道发送。 |
+
 ## 5. 不属于本 RFC 的待办
 
 这些问题在开发过程中发现，独立排期，不阻塞 M1–M6。

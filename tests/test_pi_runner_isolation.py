@@ -211,6 +211,38 @@ def test_session_new_refuses_unsafe_isolation(tmp_path, case, code):
     run(exercise())
 
 
+def test_saved_session_resumes_on_another_live_pool_member(tmp_path):
+    async def exercise():
+        async with FakeModelAPI([answer("first-answer"), answer("second-answer")], api_key=KEY) as api, pi_supervisor(tmp_path) as supervisor:
+            supervisor.session_cap = 1
+            lease = await supervisor.acquire("pi", owner="manager")
+            params = session_params(lease, base_url=api.base_url, key=KEY, cwd=str(tmp_path))
+            sid = await lease.open_session(params)
+            await begin(lease.bridge, sid, "first")
+            assert (await lease.bridge.wait_settled(sid, "first")).outcome == "completed"
+            assert list(lease.state_dir.glob("*.jsonl")), "the first member must persist the owner session"
+
+            second = await supervisor.acquire("pi")
+            first_member, second_member = lease._generation, second._generation
+            assert first_member is not second_member
+            await lease.release()
+            filler = await supervisor.acquire("pi")
+            assert filler._generation is first_member
+            await second.release()
+
+            resumed = await supervisor.acquire("pi", owner="manager")
+            assert resumed._generation is second_member
+            assert resumed.state_dir == lease.state_dir
+            assert first_member.process.returncode is second_member.process.returncode is None
+            assert await resumed.load_session({**params, "session_id": sid}) == sid
+            await begin(resumed.bridge, sid, "second")
+            assert (await resumed.bridge.wait_settled(sid, "second")).outcome == "completed"
+            assert "first-answer" in json.dumps(api.requests[1].body)
+            await resumed.release()
+            await filler.release()
+    run(exercise())
+
+
 def test_saved_session_resumes_once(tmp_path):
     async def exercise():
         async with FakeModelAPI([answer("first-answer"), answer("second-answer")], api_key=KEY) as api, pi_supervisor(tmp_path) as supervisor:
@@ -221,9 +253,12 @@ def test_saved_session_resumes_once(tmp_path):
             generation = lease._generation
             await lease.release()
             generation.process.kill()
-            await until(lambda: supervisor._kinds["pi"].generation is not None
-                and supervisor._kinds["pi"].generation is not generation)
+            await until(lambda: generation.failure is not None)
+            await asyncio.shield(generation.failure)
+            await asyncio.shield(supervisor._kinds["pi"].restart)
+            assert not supervisor._kinds["pi"].members
             resumed = await supervisor.acquire("pi", owner="manager")
+            assert resumed._generation is not generation
             params = session_params(resumed, base_url=api.base_url, key=KEY, session_id=sid)
             assert await resumed.load_session(params) == sid
             await begin(resumed.bridge, sid, "second")
@@ -343,8 +378,13 @@ def test_runner_loss_leaves_no_tool_process(tmp_path, mode):
                     process.send_signal(signal.SIGKILL)
                     summary = await lease.bridge.wait_settled(sid, "crash")
                     assert summary.outcome == "lost"
-                    await until(lambda: supervisor._kinds["pi"].generation is not None
-                        and supervisor._kinds["pi"].generation is not lease._generation)
+                    await until(lambda: lease._generation.failure is not None)
+                    await asyncio.shield(lease._generation.failure)
+                    await asyncio.shield(supervisor._kinds["pi"].restart)
+                    assert not supervisor._kinds["pi"].members
+                    replacement = await supervisor.acquire("pi")
+                    assert replacement._generation is not lease._generation
+                    await replacement.release()
                 else:
                     await supervisor.stop()
                     assert process.returncode == 0

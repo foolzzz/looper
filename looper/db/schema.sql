@@ -1038,6 +1038,7 @@ CREATE TABLE IF NOT EXISTS schedules (
     CHECK (notify IN ('failures', 'alerts', 'always', 'never')),
     notify_channel TEXT CHECK (notify_channel IN ('telegram', 'lark', 'lark_bot')),
     notify_chat TEXT,
+    user_gates TEXT NOT NULL DEFAULT 'off' CHECK (user_gates IN ('off', 'on')),
     last_ok_at TIMESTAMPTZ,
     failures_alert_at TIMESTAMPTZ,
     stale_alert_at TIMESTAMPTZ,

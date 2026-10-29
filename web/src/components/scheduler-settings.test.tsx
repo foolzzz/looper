@@ -100,11 +100,11 @@ describe("Settings → Scheduler", () => {
       manager_id: "manager", manager_name: "Manager", template_key: null, template_inputs: {}, template_name: null,
       schedule_id: "schedule", project_id: "project", project_name: "Project", name: "Scheduled task",
       cron: "0 9 * * *", timezone: "UTC", description: "Every morning", requirement: "Check changes", work_dir: "",
-      overlap: "skip", max_parallel_runs: 1, catch_up: "skip", run_timeout_seconds: null,
-      run_timeout_effective_seconds: null, run_budget_usd: null, profile_overrides: override ? { worker: "p" } : {},
+      overlap: "skip", max_parallel_runs: 1, catch_up: "skip", run_timeout_seconds: override ? "default" : null,
+      run_timeout_effective_seconds: override ? 60 : null, run_budget_usd: null, profile_overrides: override ? { worker: "p" } : {},
       task_limits: { worker: null, reviewer: null }, enabled: false, next_fire_at: null, last_fired_at: null,
       last_success_at: null, consecutive_failures: 0, created_via: "dashboard", created_at: "", updated_at: "",
-      last_run: null, gate_command: null, gate_timeout_seconds: null, daily_budget_usd: null, notify: "never",
+      last_run: null, gate_command: null, gate_timeout_seconds: null, daily_budget_usd: null, notify: "never", user_gates: override ? "on" : "off",
       notify_target: null, spent_today_usd: 0, alerts: { failures_since: null, stale_since: null },
       planner_session: { active: false, runtime: null, profile: null, last_task_id: null, last_task_title: null, updated_at: null },
     };
@@ -125,6 +125,9 @@ describe("Settings → Scheduler", () => {
     expect(container.textContent).toContain(override
       ? "Schedule profile · high — Runtime · Schedule account / Exact model / openai-responses"
       : "As the project sets them");
+    const gates = [...container.querySelectorAll("dt")].find((item) => item.textContent === "User gates")?.nextElementSibling;
+    expect(gates?.textContent).toContain(override ? "On" : "Off");
+    expect(gates?.textContent?.includes("The gate's wait counts against the run timeout.")).toBe(override);
     expect(container.querySelector("[role=alert]")).toBeNull();
   });
 

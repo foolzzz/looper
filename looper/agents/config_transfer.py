@@ -131,7 +131,7 @@ SECTIONS = ("runtimes", "providers", "models", "profiles", "settings.layers", "s
 # ``notify_target``, ``profiles`` (by name) and ``task_limits``.
 _SCHEDULE_FIELDS = ("name", "cron", "timezone", "requirement", "overlap", "max_parallel_runs", "catch_up",
                     "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds", "daily_budget_usd",
-                    "notify")
+                    "notify", "user_gates")
 
 
 @dataclass(frozen=True)
@@ -2123,7 +2123,8 @@ class _Importer:
         owner = entry.get("manager", "manager")
         if not isinstance(owner, str) or owner not in managers:
             raise _Skip(f"Manager owner conflict: no nondeleted Manager {owner!r} here or in the file")
-        defaults = {"overlap": "skip", "max_parallel_runs": 3, "catch_up": "once", "notify": "failures"}
+        defaults = {"overlap": "skip", "max_parallel_runs": 3, "catch_up": "once", "notify": "failures",
+                    "user_gates": "off"}
         values: dict[str, Any] = {"manager_id": owner}
         try:
             from .schedule_templates import selection_patch

@@ -1280,9 +1280,9 @@ Manager tools.
   `https://api.deepseek.com/anthropic`; an explicit Messages-compatible
   gateway is preserved. Other runtimes' defaults and profiles are unchanged.
 
-  By default DSH profiles run on one installed DSH SDK runner (Node 22.19+,
+  By default DSH profiles run on a pool of installed DSH SDK runners (Node 22.19+,
   `@deepseek-ai/dsh` exactly 0.2.1-rc.2): Manager, Planner, Worker, Reviewer
-  and consults share it. `[runtimes] dsh` is file only, read once at startup,
+  and consults share the pool. `[runtimes] dsh` is file only, read once at startup,
   and needs a restart. Set `[runtimes] dsh = "cli"` to opt out onto the CLI
   path: headless JSONL, one process per turn, persisted owner Sessions, an MCP
   bootstrap for Looper tools and read-only snapshots for consults. Catalog
@@ -1291,13 +1291,28 @@ Manager tools.
   literally to DSH's built-in prompt; replace is unavailable. Private homes
   under the runtime root import no operator login.
 
-  A runner that cannot start stays failed. The cases are Node older than
-  22.19, an SDK version other than 0.2.1-rc.2, and `dsh` missing from `PATH`.
-  The launch then raises `RuntimeUnsupported`. The message names the cause and
-  the fix: install the supported version, or set `[runtimes] dsh = "cli"` in
-  the ops file and restart. All roles share 32 sessions; `CAPACITY` fails a
-  start until a session is released. Records store `looper-runner` Descriptors
-  of kind `dsh`, rather than DSH CLI commands.
+  SDK runner pools place new leases on the member with the most free slots.
+  Each lease keeps its bridge for prompts, steering, cancellation and close;
+  a crash fails only that member's sessions. Replacements start on demand;
+  a lease needing a new member waits for crash backoff, then rechecks free
+  slots before starting one. Empty extra members stop after
+  300 seconds; the last member stays. Member starts and stops log the kind,
+  member index and session counts. Pi owner directories and DSH's shared
+  `runners/state/dsh-native` root survive member replacement: a closed saved
+  session can load on any member. DSH close awaits native writer disposal
+  before another member takes ownership; Pi's native ownership checks are
+  process-local, so callers must serialize access to the same saved session.
+
+  Each DSH member has 32 session slots shared by all roles; the pool grows
+  on demand to four members (128 slots), then returns `CAPACITY`. Runner
+  startup, capacity or request failures never fall back to the CLI. A fatal
+  startup failure names the cause: unsupported
+  Node (22.19+ required), an SDK version other than 0.2.1-rc.2, or a missing
+  `dsh` executable. This includes the first member and later pool members,
+  even when prerequisites change after service startup. The message says to
+  install the supported version, or set `[runtimes] dsh = "cli"` in the ops
+  file and restart. Records store `looper-runner` Descriptors of kind `dsh`,
+  rather than DSH CLI commands.
 
   Manager, Workers and Reviewers have `read`, `glob`, `grep`, `write`, `edit`
   and `bash`; Planner and consults have only `read`, `glob` and `grep` with
@@ -1393,17 +1408,22 @@ Manager tools.
 - **Pi** (`looper/agents/runtimes/pi.py`, the `pi` CLI, minimum 1.3.0,
   verified against pi 1.3.0 in the [pi runtime RFC](rfcs/pi-runtime-v0.zh-CN.md))
   runs Manager, Planner, Worker and Reviewer. By default `PiRunnerRuntime`
-  runs all four roles and consults through one shared Node >= 22.19 SDK runner
+  runs all four roles and consults through a pool of Node >= 22.19 SDK runners
   (`@earendil-works/pi-coding-agent` 1.3.x). `[runtimes] pi` is file only, read
-  once at startup, and needs a restart. Set `[runtimes] pi = "cli"` in the ops
-  file to opt out onto the CLI path. All roles share 32 session slots; further
-  acquisition returns `CAPACITY`, failing a step like any other start failure.
-  There is no runner pool. A runner that cannot start stays failed. The cases
-  are Node older than 22.19, an SDK version outside 1.3.x, and `pi` missing
-  from `PATH`. The launch then raises `RuntimeUnsupported`. The message names
-  the cause and the fix: install the supported version, or set
-  `[runtimes] pi = "cli"` in the ops file and restart. Turns submitted during
-  restart backoff fail fast; after recovery the resident session loads its saved history.
+  once at startup, and needs a restart; there is no environment-variable
+  override or dashboard control. Set `[runtimes] pi = "cli"` in the ops file
+  to opt out onto the CLI path. Each member has 32 session slots shared by all
+  roles. The pool grows on demand to four members (128 slots); only a full
+  pool returns `CAPACITY`, failing a step like any other start failure.
+  There is no CLI fallback. A fatal startup failure names the cause:
+  unsupported Node (22.19+ required),
+  an SDK version outside 1.3.x, or a missing `pi` executable. This includes
+  the first member and later pool members, even when prerequisites change
+  after service startup. The message says to install the supported version,
+  or set `[runtimes] pi = "cli"` in the ops file and restart. Turns submitted
+  during restart backoff fail fast when no healthy member has room;
+  replacement happens on the next acquisition after backoff, and the resident
+  session loads its saved history.
   Provider environment entries are refused because they would change process-wide settings.
   Platform tools use `looper_*` directly, without Manager MCP setup or probing;
   Planner offers read, grep, find and ls plus those platform tools. Worker and
@@ -2558,9 +2578,10 @@ evaluation is required before the original schedule requirement is complete.
   is the schedule's followed by a section the code writes, `## 定时运行上下文`:
   the schedule's name, rule and its words, this run's fire time in the zone,
   how it fired, the missed fires and since when, the latest 3 runs (time,
-  status, summary clipped at 300 characters), and that the run is unattended:
-  do not wait for the user, make reasonable assumptions and write them into
-  the result. A firing whose task cannot be created (no work directory) is a
+  status, summary clipped at 300 characters), and whether user gates are
+  allowed. By default the run is unattended: do not wait for the user, make
+  reasonable assumptions and write them into the result. With the schedule's
+  `user_gates` `on`, it may wait at user gates when the project also allows them. A firing whose task cannot be created (no work directory) is a
   `failed` run. "Run now" (`trigger` `manual`) fires the same way, also while
   the schedule is disabled, and leaves `next_fire_at` alone.
 - **The schedule's Planner session** ([RFC](rfcs/schedule-planner-session-v0.zh-CN.md)).
@@ -2917,9 +2938,10 @@ exported; a path document is a reference relative to its project's directory,
 flagged `repoint`. A profile carries its `effort`; a layer does not. Tasks are
 not exported, so neither are their profile overrides.
 
+In v4, an omitted schedule `user_gates` imports as `off`.
 A project's schedules carry their settings (`name`, `cron`, `timezone`,
 `requirement`, `overlap`, `max_parallel_runs`, `catch_up`, the timeouts, the
-caps, the gate, `notify` and `notify_target`), their Agent Profiles by name
+caps, the pre-run gate, `user_gates`, `notify` and `notify_target`), their Agent Profiles by name
 (`profiles`) and their `task_limits`, immutable `manager` reference (omitted
 for the default), `template_key` and static `template_inputs`; not whether
 they are enabled, their runs, messages, counters or alerts, nor their own directory: a schedule that had one
@@ -3220,7 +3242,7 @@ contract 4.9 KB (4,865 bytes of `TOOLS_CONTRACT`).
 | `looper_catalog` | `list` the items (kind, qualified name, description, `manager_install_count`) with their installs, or with `project` the installs that reach it (`catalog.project_view`); `install` an item (by id or qualified name) globally or in a project for `roles`, `update` an install's `roles` or `enabled`, `uninstall` (`catalog.install`, `update_install`, `uninstall`) | list reads; write |
 | `looper_costs` | One task's cost (`task_id`: `GET /api/tasks/:id`'s `cost`), or what the runs started in a range cost (`period` `today`, `this_week` or `this_month` from the server's local midnight, or `since` and `until`, a day or an ISO date-time, a day as `until` counting whole; all time by default), money and subscription equivalent apart as the overview's today: by project (their tasks' runs; the total also counts the Manager's), or with `project` its total and its 10 costliest tasks (`llm_records.spend_since`, `task_spend`) | read |
 | `looper_settings` | `view` the shared defaults and each role's layer, what applies to each role with its source and its timeout, or with `project` its layer, its roles' layers and its allowed profiles; `set` `values` on one layer (neither `role` nor `project`: the shared defaults; `role`; `project`; both: the role in the project): `profile` by id or name, `harness_prompt`, `env` (the layer's whole `{NAME: value}`), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` role: the default for every task), `timeout_seconds` (a role alone, as Settings → Roles saves it), null clearing one, written by `agent_settings.update_system`, `update_role` or `update_project` and letting what waits check again after a limit; `allowed_profiles`: `add` profiles to a project's list or `remove` some (one not on it is refused), then the whole list is set by `projects.set_allowed_profiles`, which checks each. The answer gives each value before and after and what now applies | view reads; write; the shared defaults, a role's default concurrency limit and a higher or removed spend cap (any run of the layer's roles, resolved through the layers) are high, shown before → after |
-| `looper_schedules` | `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, enabled, next fire, last run, failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `create` one in an existing `project` from `fields` (the `fields` that `POST /api/v1/schedule_admin/create` takes, `profiles` being its `profile_overrides`, and `task_limits`), always disabled (`created_via` `manager`): Looper adds its configuration (project, directory, the rule in words and its next 3 fires in its zone, overlap, gate, caps, notify, profiles, task limits) and 「要启用吗？回复「启用」就启用」 to the reply, and the turn that created it may neither `enable` nor `run` it (`conflict`: the user has not seen it); made from a Telegram or Lark chat without a `notify_target`, it tells whoever asked when their channel's allowlist lets them; `update` the `fields` given (`schedules.update_schedule`; null clears one, `profiles` and `task_limits` are replaced whole), and Looper adds each change before → after (and the next 3 fires for a new rule or zone); `enable` one (as its switch does; the answer says when it was so already) or `run` it now (`schedules.run_now`: the dashboard's Run now, through the overlap check, its next fire time left; the answer is the run), each asking first: the call answers `needs_confirmation` and does nothing until the user's next message confirms (a schedule already enabled is not asked), and the turn that created a schedule may do neither (`conflict`); `disable` one; `delete` one (`schedules.delete_schedule`); `reset_planner_session` clears its stored Planner session and holder after the user confirms in their next message. The reset confirmation says whether a session is stored, that the next run starts fresh, and that a run in flight keeps its own session until it ends and cannot write back. A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The delete confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (a running task goes on and ends normally, a queued or gating run starts no task) and that its tasks stay while its run history and messages are deleted | list and get read; write; enable, run now, delete, reset_planner_session, and an update that raises or removes the run or daily spend cap (checked as the update would be before anything is asked, shown before → after), are high |
+| `looper_schedules` | `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, enabled, user gates, next fire, last run, failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `create` one in an existing `project` from `fields` (the `fields` that `POST /api/v1/schedule_admin/create` takes, `profiles` being its `profile_overrides`, and `task_limits`), always disabled (`created_via` `manager`): Looper adds its configuration (project, directory, the rule in words and its next 3 fires in its zone, overlap, pre-run gate, user gates, caps, notify, profiles, task limits) and 「要启用吗？回复「启用」就启用」 to the reply, and the turn that created it may neither `enable` nor `run` it (`conflict`: the user has not seen it); made from a Telegram or Lark chat without a `notify_target`, it tells whoever asked when their channel's allowlist lets them; `update` the `fields` given (`schedules.update_schedule`; null clears one, `profiles` and `task_limits` are replaced whole), and Looper adds each change before → after (and the next 3 fires for a new rule or zone); `enable` one (as its switch does; the answer says when it was so already) or `run` it now (`schedules.run_now`: the dashboard's Run now, through the overlap check, its next fire time left; the answer is the run), each asking first: the call answers `needs_confirmation` and does nothing until the user's next message confirms (a schedule already enabled is not asked), and the turn that created a schedule may do neither (`conflict`); `disable` one; `delete` one (`schedules.delete_schedule`); `reset_planner_session` clears its stored Planner session and holder after the user confirms in their next message. The reset confirmation says whether a session is stored, that the next run starts fresh, and that a run in flight keeps its own session until it ends and cannot write back. A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The delete confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (a running task goes on and ends normally, a queued or gating run starts no task) and that its tasks stay while its run history and messages are deleted | list and get read; write; enable, run now, delete, reset_planner_session, and an update that raises or removes the run or daily spend cap (checked as the update would be before anything is asked, shown before → after), are high |
 | `looper_config_export` | Write the portable configuration file (`include_projects`: `--include-projects`), never with secrets (no argument takes them; a secrets argument is `forbidden`), to `<runtime root>/exports/looper-config-<UTC time>-<id>.json`, never to a path from chat; the answer gives its path, format, size, the counts per section, the secret values left as placeholders, the path documents to re-point and how to import it (`loopercli config import`, or Settings → Import / Export) | read |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
 
@@ -3574,10 +3596,16 @@ See the [wait-step RFC](rfcs/plan-wait-step-v0.zh-CN.md).
 In a project with `user_gates` `on`, also when unset (the default), a task's
 Planner may make a step of its plan a gate, where it discusses with the user
 what only the user can decide ([User gates RFC](rfcs/user-gate-v0.zh-CN.md);
-`looper/agents/user_gates.py`). A task a schedule started never may (it runs
-unattended: `GatePolicy`), and nothing changes in a project that turned them
-`off`: the reply contract is byte for byte as before, and a gate step is
-refused with the reason and what to do instead.
+`looper/agents/user_gates.py`). A task a schedule started also needs that
+schedule's `user_gates` `on`; schedules default to `off` and keep the previous
+unattended behavior and byte-identical Planner prompt. A project with gates
+`off` always refuses new gates. The refusal says why and what to do instead.
+
+A scheduled gate's wait counts against `run_timeout_seconds`; it does not
+pause the run timeout or budgets. The task stays active while waiting, so
+`overlap=skip` skips later firings. Overlap, catch-up and spend limits keep
+their existing behavior. These user gates are unrelated to `gate_command`
+and `gate_timeout_seconds`, which check a schedule before a run starts.
 
 - **The step.** `{"id", "kind": "gate", "topic", "agenda": [{"question",
   "options"?}], "depends_on", "findings"?}` in a `[PLAN]` reply or any
@@ -3621,6 +3649,12 @@ refused with the reason and what to do instead.
   that the next `[CHAT]` turn gives the Planner, with a `late` note in the
   discussion. When that close would complete the task, the `[CHAT]` turn comes
   first, and its reply may add steps instead.
+- **Scheduled delivery.** A scheduled task's gate messages go to its schedule's
+  `notify_channel` and `notify_chat` when set, else to the system setting
+  `user_gates.dashboard_target`, else only to the task page. The existing
+  channel allowlist and courier checks apply; a configured target removed
+  from the allowlist gets no delivery. `/gates` and `/gate N` answer these
+  gates through the same channel commands and gate API as attended tasks.
 - **Answering from a chat.** In a Lark or Telegram chat the user can answer
   without the Manager's model (`looper/agents/gate_commands.py`; the Manager
   takes these before the gate routing, and neither they nor the replies are
@@ -4087,7 +4121,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_concurrency_limits` | A task's own concurrency limit per role (`worker`, `reviewer`): `max_concurrency` (1–64), going with its task |
 | `task_planner_profiles` | A task's Planner's choice of Agent Profile for its `worker` or `reviewer`: for the rest of the task (`step_id` NULL) or one step, going with its task and step (and with the profile); it counts only while the task's project allows the profile |
 | `project_allowed_profiles` | The Agent Profiles a project's Planners may choose (project, profile), going with the project; none allows every profile; a profile on a list is not deleted |
-| `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap` (`skip`, `queue`, `parallel`), `max_parallel_runs` (1–10, default 3: a parallel schedule's runs at once), `catch_up`, `run_timeout_mode` (`inherit`, `seconds` or `none`) and `run_timeout_seconds` (with `seconds`), `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via` (`dashboard`, `manager` or `import`); a project with schedules is not deleted |
+| `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap` (`skip`, `queue`, `parallel`), `max_parallel_runs` (1–10, default 3: a parallel schedule's runs at once), `catch_up`, `run_timeout_mode` (`inherit`, `seconds` or `none`) and `run_timeout_seconds` (with `seconds`), `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `user_gates` (`off` by default, or `on` to opt its tasks into user gates), `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via` (`dashboard`, `manager` or `import`); a project with schedules is not deleted |
 | `schedule_profile_overrides` | A schedule's Agent Profile per task role, copied into each task it fires; a profile a schedule chose is not deleted |
 | `schedule_task_limits` | A schedule's `task_limits`: per role (`worker`, `reviewer`), `max_concurrency` (1–64), copied into each task it fires (`task_concurrency_limits`); going with its schedule |
 | `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `run_timeout_seconds` (the timeout it started with; null: none), `carried_from` (the latest run whose unfinished input it was given), `carried_on` (its own unfinished input was handed on to a later run), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
