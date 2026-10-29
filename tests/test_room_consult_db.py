@@ -18,6 +18,7 @@ import pytest
 from looper import child_env
 from looper.agents.consult import CONSULT_CONTRACT
 from looper.agents.room import FallbackReason, RoomService
+from looper.agents.runtimes.runner.protocol import ErrorCode
 from looper.agents.system_prompt import REVIEW_CONTRACT, WORK_CONTRACT
 from tests.db_support import DSN, run_db, until
 from tests.fake_claude import fake_claude
@@ -233,6 +234,61 @@ def test_hosted_consult_answers_from_a_fork(monkeypatch: pytest.MonkeyPatch, tmp
             await service.stop()
 
     run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("refusal", [ErrorCode.SESSION_NOT_FOUND, ErrorCode.SESSION_OWNED, None])
+def test_hosted_consult_distinguishes_unopened_fork_from_invalid_answer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, refusal: ErrorCode | None,
+) -> None:
+    from looper.agents.runtimes import ApiProtocol
+    from looper.agents.runtimes.api.adapter import KEY_ENV
+    from looper.agents.runtimes.runner import protocol as p
+    from looper.agents.runtimes.runner.session import Descriptor, RunnerSession
+    from runner_pipe_support import FakeSupervisor, connection, send
+    from typing import get_args
+
+    async def test(pool: Any) -> None:
+        await _room_task(pool)
+        await _ran(pool, tmp_path / "work")
+        events = []
+        if refusal is not None:
+            handshake = {"capabilities": {"fork": True, "cancel": True,
+                "usage": {"per_request": True}, "authorize_covers": list(get_args(p.RequestKind))}}
+            async with connection(handshake) as (bridge, reader, writer, _):
+                prompt = tmp_path / "prompt.md"
+                prompt.write_text("consult instructions")
+                descriptor = Descriptor("fake", "worker", "account", ApiProtocol.OPENAI_RESPONSES,
+                    "https://example.invalid", "model", None, None, str(prompt), fork_from="s-1")
+                session = RunnerSession("consult", FakeSupervisor(bridge, tmp_path), "fake", owned=False)
+                starting = asyncio.create_task(session.start(descriptor.to_argv(), cwd=str(tmp_path),
+                    signature=1, env={KEY_ENV: "synthetic-key"}))
+                request = await p.read_frame(reader)
+                assert request.method == "session/new" and request.params["fork_from"] == {"session_id": "s-1"}
+                await send(writer, p.Response(request.id, error={"code": int(refusal), "message": "fork refused"}))
+                await starting
+                turn = await session.run_turn("consult", events.append)
+                events.append(turn.result_event)
+                await session.stop()
+        else:
+            events = [
+                {"type": "system", "subtype": "init", "session_id": "consult-fork", "model": "model"},
+                {"type": "result", "subtype": "success", "total_cost_usd": 0.01, "result": "plain prose"},
+            ]
+        handle = ScriptedRun(events)
+        _host_consults(monkeypatch, handle)
+        room = RoomService(batch_seconds=0)
+        service = _service(tmp_path, room, _Pool({"worker-2": "running"}))
+        try:
+            question = await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd@s1"])
+            row = await _settled(pool)
+            await until(lambda: not service._running, "the hosted consult's end")
+            assert row["fallback_reason"] == ("session_gone" if refusal is not None else "contract")
+            escalation = await pool.fetchrow("SELECT * FROM room_messages WHERE kind = 'escalation'")
+            assert escalation["reply_to"] == question["id"] and escalation["planner_pending"]
+        finally:
+            await service.stop()
+
+    run_db(test, monkeypatch, timeout=30)
 
 
 @pytest.mark.parametrize("failure", ["timeout", "start"])

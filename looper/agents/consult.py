@@ -571,7 +571,8 @@ class ConsultService:
                     await handle.end()
                     ended = True
                     break
-                if event.get("type") == "system" and event.get("subtype") == "init":
+                if (event.get("type") == "system" and event.get("subtype") == "init"
+                        and event.get("session_id")):
                     started = True
                 if event.get("type") == "result":
                     result = event

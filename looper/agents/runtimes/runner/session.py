@@ -259,17 +259,27 @@ class RunnerSession:
             descriptor, budget, tools = self._descriptor, self._budget, self._tools
             if descriptor is None:
                 raise RuntimeError("runner session has not started")
+            initialized = False
+            async def init():
+                nonlocal initialized
+                if not initialized:
+                    initialized = True
+                    await _value(on_event({"type": "system", "subtype": "init",
+                        "session_id": self._lease.session_id if self._lease else descriptor.session,
+                        "model": descriptor.model, "trace_id": trace}))
+
+            async def failure(message):
+                await init()
+                return self._failure(message, trace)
+
             if self._resume_lost:
-                # No runner turn will emit init; retain the failed resume's record identity.
-                await _value(on_event({"type": "system", "subtype": "init", "session_id": descriptor.session,
-                    "model": descriptor.model, "trace_id": trace}))
-                return self._failure("runner saved session is unavailable; could not be resumed", trace)
+                return await failure("runner saved session is unavailable; could not be resumed")
             if budget is None or tools is None:
-                return self._failure("runner turn requires host tools and budget context before prompting", trace)
+                return await failure("runner turn requires host tools and budget context before prompting")
             if budget["provider_id"] != descriptor.provider_id or budget["model"] != descriptor.model:
-                return self._failure("runner turn budget does not match the bound provider/model", trace)
+                return await failure("runner turn budget does not match the bound provider/model")
             if not self.started:
-                return self._failure("runner generation was lost", trace)
+                return await failure("runner generation was lost")
             try:
                 specs = await self._cancel.race(tools.specs())
             except TurnCancelled:
@@ -285,10 +295,13 @@ class RunnerSession:
             self._turn = RunnerTurn(session_id=sid, trace_id=trace, role=descriptor.role, tools=tools,
                 prior_totals=self._totals, prior_model_usage=self._models, cancel=capped, **budget)
             async def emit(event):
+                nonlocal initialized
                 if event.get("type") == "system" and event.get("subtype") == "init":
+                    initialized = True
                     event["model"] = descriptor.model  # The recorder's record model, as on the CLI paths.
                 # Internal recorder events need the ordinary JSON modelUsage shape.
                 if event.get("type") == "result":
+                    await init()  # A lost trace may settle before the prompt was accepted.
                     event["modelUsage"] = {model: {"inputTokens": u.input_tokens, "outputTokens": u.output_tokens,
                         "cacheReadInputTokens": u.cache_read_tokens, "cacheCreationInputTokens": u.cache_creation_tokens,
                         "costUSD": u.cost_usd} for model, u in event["modelUsage"].items()}
@@ -312,14 +325,14 @@ class RunnerSession:
                 await beginning
             except (RpcFailure, ProtocolError):
                 entry = bridge.sessions[sid]
-                failed = self._failure("runner rejected the prompt", trace)
+                failed = await failure("runner rejected the prompt")
                 return claude_cli.ResidentTurn(failed.result_event, session_started=entry.session_started,
                     usage_complete=False, prompt_sent=entry.prompt_sent)
             except (ConnectionLost, TimeoutError):
                 entry = bridge.sessions.get(sid)
                 if entry is None or entry.trace_id != trace or entry.settled is None:
                     outcome = "lost"
-                    return self._failure("runner generation was lost before prompting", trace)
+                    return await failure("runner generation was lost before prompting")
                 # An installed trace owns a single lost settlement, never replay.
             entry = bridge.sessions[sid]
             if entry.prompt_sent:
