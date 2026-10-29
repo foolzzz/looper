@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.6] - 2026-10-29
+
+### Fixed
+
+- **The DSH runner now accounts, cancels and types model requests correctly.** Usage counts as complete only when the provider's terminal event carries real input and output token counts (the SDK fills absent counts with zero, which no longer passes as complete). A cancel while an authorization is pending settles within the same cancel deadline; if the host allows the request late, it is accounted before `settled`, and a forced settle with an unanswered authorization reports usage as incomplete and invents no `request_end`. In-band DSH stream errors `AUTH`, `RATE_LIMIT` and `SERVER` map to `PROVIDER_AUTH` and `PROVIDER_UNAVAILABLE`. The session is flushed before `settled`; a failed flush reports the turn as failed. Affects only installations with `[runtimes] dsh = "runner"`. ([#880](https://github.com/foolzzz/looper/pull/880))
+
 ## [2.14.5] - 2026-10-29
 
 ### Added
