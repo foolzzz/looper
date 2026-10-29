@@ -40,7 +40,7 @@ describe("sendChat", () => {
 
 describe("session source", () => {
   it("labels a run whose profile was chosen for the session", () => {
-    expect(sourceName("session")).toContain("chosen for this session");
+    expect(sourceName({ code: "session", label: null })).toContain("chosen for this session");
   });
 });
 

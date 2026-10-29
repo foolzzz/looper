@@ -53,108 +53,15 @@ def test_default_prompt_tracks_recommendation_and_reset() -> None:
 
             # Reset the edited row back to the recommended prompt.
             reset = await role_configs.reset_prompt(edited, pool=pool)
-            assert reset["system_prompt"] == "recommended v2"
-            assert (await role_configs.get_config(edited, pool=pool))["system_prompt"] == "recommended v2"
+            assert reset["system_prompt"] == reset["default_prompt"] == "recommended v2"
+            await role_configs.seed_defaults([{ "role": edited, "system_prompt": "recommended v3"}], pool=pool)
+            assert (await role_configs.get_config(edited, pool=pool))["system_prompt"] == "recommended v3"
+            assert (await role_configs.get_config(edited, pool=pool))["system_prompt"] == "recommended v3"
         finally:
             await pool.execute("DELETE FROM role_configs WHERE role = ANY($1::text[])", [unedited, edited])
             await pool.close()
 
     asyncio.run(_run())
-
-
-def test_worker_rows_move_to_the_new_recommended_prompt() -> None:
-    """The worker prompt now applies, so its old default moves to the new one:
-    a tracked row through seed, a row from before tracking through the
-    startup replacement; an edited row is kept."""
-    import asyncpg
-
-    from looper.agents.serve import _WORKER_PROMPT_BEFORE_CONTRACTS
-    from looper.agents.tiers.worker import DEFAULT_SYSTEM_PROMPT
-    from looper.db import role_configs
-    from looper.db.connection import ensure_schema
-
-    tracked, untracked, edited = (f"test-worker-{uuid.uuid4().hex[:8]}" for _ in range(3))
-    old, new = _WORKER_PROMPT_BEFORE_CONTRACTS, DEFAULT_SYSTEM_PROMPT
-
-    async def _run() -> None:
-        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
-        try:
-            await ensure_schema(pool)
-            await role_configs.seed_defaults([
-                {"role": tracked, "system_prompt": old},
-                {"role": edited, "system_prompt": old},
-            ], pool=pool)
-            await role_configs.set_config(edited, {"system_prompt": "My own worker prompt."}, pool=pool)
-            # A row seeded before the recommended prompt was tracked.
-            await pool.execute(
-                "INSERT INTO role_configs (role, system_prompt) VALUES ($1, $2)", untracked, old,
-            )
-
-            # What startup does: seed the new recommendation, then replace the old default.
-            await role_configs.seed_defaults(
-                [{"role": a, "system_prompt": new} for a in (tracked, untracked, edited)],
-                pool=pool,
-            )
-            for role in (tracked, untracked, edited):
-                await role_configs.replace_default_prompt(role, old=old, new=new, pool=pool)
-
-            for role, expected in ((tracked, new), (untracked, new), (edited, "My own worker prompt.")):
-                row = await role_configs.get_config(role, pool=pool)
-                assert (row["system_prompt"], row["default_prompt"]) == (expected, new)
-            # Once replaced, the next startup leaves it alone.
-            assert not await role_configs.replace_default_prompt(tracked, old=old, new=new, pool=pool)
-        finally:
-            await pool.execute(
-                "DELETE FROM role_configs WHERE role = ANY($1::text[])", [tracked, untracked, edited],
-            )
-            await pool.close()
-
-    asyncio.run(_run())
-
-
-@pytest.mark.parametrize(("role", "before"), [
-    ("manager", "_MANAGER_PROMPT_BEFORE_READY_TASKS"),
-    ("manager", "_MANAGER_PROMPT_BEFORE_CURRENT_MESSAGE"),
-    ("manager", "_MANAGER_PROMPT_BEFORE_TITLE"),
-    ("planner", "_PLANNER_PROMPT_BEFORE_PARALLEL"),
-])
-def test_a_row_moves_from_a_previous_default(role: str, before: str) -> None:
-    """Startup (``seed_role_configs``) gives a row still holding one of its role's previous defaults (the Manager's
-    from before ready tasks, before it answered only the current message or before the task JSON's title, the
-    Planner's from before parallel steps) the current one, whether that default was tracked or not; an edited prompt
-    is kept."""
-    import asyncpg
-
-    from looper.agents import serve
-    from looper.agents.serve import seed_role_configs
-    from looper.agents.tiers import manager, planner
-    from looper.db import role_configs
-    from looper.db.connection import ensure_schema
-
-    old = getattr(serve, before)
-    new = {"manager": manager.DEFAULT_SYSTEM_PROMPT, "planner": planner.DEFAULT_SYSTEM_PROMPT}[role]
-    edited = f"My own {role} prompt."
-
-    async def _run() -> list[tuple[str, str]]:
-        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
-        seen = []
-        try:
-            await ensure_schema(pool)
-            await seed_role_configs(pool)
-            for system_prompt, default_prompt in ((old, old), (old, ""), (edited, old)):
-                await pool.execute("UPDATE role_configs SET system_prompt = $1, default_prompt = $2 "
-                                   "WHERE role = $3", system_prompt, default_prompt, role)
-                await seed_role_configs(pool)
-                row = await role_configs.get_config(role, pool=pool)
-                seen.append((row["system_prompt"], row["default_prompt"]))
-        finally:
-            await pool.execute("UPDATE role_configs SET system_prompt = $1, default_prompt = $1 WHERE role = $2",
-                               new, role)
-            await pool.close()
-        return seen
-
-    assert old != new
-    assert asyncio.run(_run()) == [(new, new), (new, new), (edited, new)]
 
 
 def test_current_role_max_turns_updates() -> None:

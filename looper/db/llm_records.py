@@ -29,6 +29,61 @@ class RecordStatus(str, Enum):
 UNFINISHED_AT_START = "the server stopped before this run ended; it was found still running at the next start"
 
 
+def normalize_record_metadata(metadata: Any) -> Any:
+    """Add a read-only presentation of bridge-era evidence; never repair the stored record."""
+    from ..agents.agent_settings import Layer
+
+    if not isinstance(metadata, dict):
+        return metadata
+    def obj(value):
+        return value if isinstance(value, dict) else {}
+
+    def array(value):
+        return value if isinstance(value, list) else []
+
+    sources = obj(metadata.get("settings_sources"))
+    layers = obj(metadata.get("prompt_layers"))
+    profile, model = obj(metadata.get("profile")), obj(metadata.get("model_choice"))
+    labels = {"builtin_default": "built-in default", "system_default": "Settings default",
+              "manager_override": "Manager override", "agent_override": "agent override",
+              "project_override": "project override", "agent": "the Agent Profile's default"}
+    codes = {layer.value for layer in Layer}
+    def source(value):
+        return {"code": value if isinstance(value, str) and value in codes else None,
+                "label": labels.get(value, value) if isinstance(value, str) and value not in codes else None}
+
+    selected = {
+        "harness": sources.get("harness", obj(layers.get("harness")).get("source")),
+        "profile": sources.get("profile", profile.get("source", sources.get("agent"))),
+        "model": model.get("source", sources.get("model")),
+        "effort": sources.get("effort"), "run_budget_usd": sources.get("run_budget_usd"),
+    }
+    prompt = {key: metadata.get(field) for key, field in
+              (("text", "system_prompt"), ("mode", "system_prompt_mode"), ("sha256", "system_prompt_sha256"))}
+    command = metadata.get("command")
+    if isinstance(command, list) and "--append-system-prompt" in command:
+        at = command.index("--append-system-prompt") + 1
+        if at < len(command) and isinstance(command[at], str):
+            if "system_prompt" not in metadata:
+                prompt["text"] = command[at]
+            if "system_prompt_mode" not in metadata:
+                prompt["mode"] = "append"
+    library, project = obj(metadata.get("library")), obj(metadata.get("project_skills"))
+    fields = ("kind", "name", "plugin", "scope", "project_id", "sha256")
+    items = [{key: item.get(key) for key in fields} for item in array(library.get("items")) if isinstance(item, dict)]
+    for item in items:
+        if item["scope"] == "project" and item["project_id"] is None:
+            item["project_id"] = library.get("project_id")
+    for skill in array(project.get("skills")):
+        if isinstance(skill, dict) and not any(i["kind"] == "skill" and i["name"] == skill.get("name")
+                and i["plugin"] in (None, project.get("plugin", "project")) for i in items):
+            items.append({"kind": "skill", "name": skill.get("name"), "plugin": project.get("plugin", "project"),
+                          "scope": "project", "project_id": project.get("project_id"), "sha256": skill.get("sha256")})
+    return {**metadata, "presentation": {"sources": {key: source(value) for key, value in selected.items()},
+            "system_prompt": prompt, "library": {"items": items, "sha256": library.get("sha256"),
+                "error": library.get("error"), "project_error": project.get("error")}}}
+
+
 def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
     d = dict(row)
     for key in ("created_at", "finished_at", "last_output_at"):
@@ -37,6 +92,8 @@ def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
     for key in ("metadata", "compactions"):
         if d.get(key) is not None:
             d[key] = json.loads(d[key])
+    if "metadata" in d:
+        d["metadata"] = normalize_record_metadata(d["metadata"])
     return d
 
 
@@ -296,7 +353,7 @@ async def task_run_rows(task_id: str, *, pool: asyncpg.Pool | None = None) -> li
     ``model`` (the one the run reported, else the one it chose or its profile named), ``effort`` and ``profile``
     ({name, source}) and ``task_role`` (the role its Planner defined that it ran as, else None); a run recorded before Agent Profiles has None for what it did not record."""
     pool = pool or get_pool()
-    profile = "COALESCE(metadata->'profile', metadata->'agent')"
+    profile = "(metadata->'profile')"
     rows = await pool.fetch(
         f"""
         SELECT id, {_TASK_ROLE} AS role, agent_id, metadata->>'step_id' AS step_id, status, created_at,
@@ -375,10 +432,9 @@ async def get_record(
 
 # A run with a runtime's own login (a subscription: Claude Code's, priced by Claude Code; Codex's, priced by Looper
 # at the built-in prices): what that usage would cost at API prices, not money spent. A run names its Agent Profile
-# in metadata.profile; one recorded before the rename names it in metadata.agent, and one recorded before Agent
-# Profiles names none: it ran with Claude Code's login.
-EQUIVALENT = ("COALESCE(metadata->'profile'->'provider'->>'auth', metadata->'agent'->'provider'->>'auth', "
-              "'oauth') = 'oauth'")
+# in metadata.profile; the bridge materialized the basis of runs predating authentication evidence.
+EQUIVALENT = ("COALESCE(metadata->>'accounting_basis' = 'subscription_equivalent', "
+              "metadata->'profile'->'provider'->>'auth' = 'oauth', false)")
 
 
 async def task_costs(
@@ -514,7 +570,6 @@ async def spend_since(since: datetime | None, *, until: datetime | None = None, 
     a cost.
     """
     pool = pool or get_pool()
-    # Without a Manager the query is the one before Managers had tasks, so a database not migrated yet reads too.
     by_manager, args = (("", ()) if manager_id is None
                         else (" AND (r.agent_id = $4 OR t.manager_id = $4)", (manager_id,)))
     row = await pool.fetchrow(

@@ -369,6 +369,7 @@ def check_pg_dump(server_version_num: int | None, pending: bool | None,
 
 @dataclass(frozen=True)
 class _DatabaseFacts:
+    schema_error: str | None = None
     lark_enabled: bool | None = None
     server_version_num: int | None = None
     schema_change_pending: bool | None = None
@@ -382,7 +383,7 @@ class _DatabaseFacts:
 async def _database_facts(dsn: str) -> _DatabaseFacts:
     import asyncpg
 
-    from ..db.connection import schema_change_pending
+    from ..db.connection import RegistrySchemaVersionError, schema_change_pending
     from ..db.profile_registry import login_profile_count
     from .runtimes import grok_login
     from ..db.projects import worktree_projects
@@ -394,6 +395,10 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
         return _DatabaseFacts()
     try:
         try:
+            pending = await schema_change_pending(conn)
+        except RegistrySchemaVersionError as exc:
+            return _DatabaseFacts(schema_error=str(exc))
+        try:
             lark_enabled = bool(await conn.fetchval(
                 "SELECT EXISTS (SELECT 1 FROM channel_configs WHERE channel_type = 'lark' AND enabled)"))
         except asyncpg.UndefinedTableError:  # a database `looper serve` has not set up yet
@@ -403,18 +408,16 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
             problem = await recorded_problem(pool=conn)
             grok_profiles: int | None = await login_profile_count("grok", pool=conn)
             grok_problem = await grok_login.recorded_problem(pool=conn)
-        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError):  # set up by an older `looper serve`
+        except asyncpg.UndefinedTableError:  # a genuinely empty database
             profiles, problem, grok_profiles, grok_problem = 0, None, 0, None
         try:
             worktrees: list[dict[str, Any]] | None = await worktree_projects(pool=conn)
         except asyncpg.UndefinedTableError:
             worktrees = []
-        except asyncpg.UndefinedColumnError:  # set up by a `looper serve` from before step workspaces
-            worktrees = None
         return _DatabaseFacts(
             lark_enabled=lark_enabled,
             server_version_num=int(await conn.fetchval("SELECT current_setting('server_version_num')")),
-            schema_change_pending=await schema_change_pending(conn),
+            schema_change_pending=pending,
             codex_login_profiles=profiles,
             codex_login_problem=problem,
             grok_login_profiles=grok_profiles,
@@ -430,6 +433,8 @@ async def run_checks(ops: OpsConfig, *, claude_bin: str = "claude") -> list[Chec
     need the database."""
     database = await check_database(ops.database_url)
     facts = await _database_facts(ops.database_url) if database.status == OK else _DatabaseFacts()
+    if facts.schema_error:
+        database = Check("database", "PostgreSQL", FAIL, facts.schema_error)
     from .runtimes import grok_login
     from .runtimes.codex_login import probe_login
 

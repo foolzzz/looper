@@ -24,7 +24,7 @@ from typing import Any
 
 from ..db import tasks as db_tasks
 from .links import task_link
-from .message import builtin_channel_id, is_lark, parse_channel_id
+from .message import is_lark, parse_channel_id
 
 NAME_CHARS = 40
 LEAD_CHARS = 300
@@ -87,12 +87,13 @@ class Notice:
     channel: NotifyChannel
     target: NotifyTarget
     text: str
-    channel_id: str = ""  # the bot's channel id; empty means the built-in row of ``channel``
+    channel_id: str  # the bot's explicit channel id
 
     def __post_init__(self) -> None:
-        if not self.channel_id:
-            object.__setattr__(self, "channel_id", builtin_channel_id(self.channel.value))
-            return
+        if not isinstance(self.channel, NotifyChannel):
+            raise ValueError("notice channel must be a NotifyChannel")
+        if not isinstance(self.channel_id, str) or not self.channel_id:
+            raise ValueError("notice channel_id must be a nonempty string")
         parsed = parse_channel_id(self.channel_id)
         if parsed is None or parsed.channel_type != self.channel.value:
             raise ValueError(f"channel id {self.channel_id!r} is not a {self.channel.value} bot")
@@ -114,8 +115,6 @@ class Notice:
         if target is None or not (isinstance(text, str) and text):
             return None
         channel_id = raw.get("channel_id")
-        if channel_id is None:
-            channel_id = builtin_channel_id(channel.value)
         parsed = parse_channel_id(channel_id) if isinstance(channel_id, str) else None
         if parsed is None or parsed.channel_type != channel.value:
             return None

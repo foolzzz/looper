@@ -336,14 +336,12 @@ def forget() -> None:
 
 # --- The channel's configuration ---
 
-# Keys of the Lark channel's configuration from before lark-cli chose the app; dropped (``lark_config``).
-LEGACY_KEYS = ("app_id_env", "app_secret_env")
-
-
 def lark_config(config: Mapping[str, Any]) -> dict[str, Any]:
-    """The Lark channel's configuration as stored: ``profile`` checked, the legacy keys dropped. Raises
-    ``ValueError``."""
-    stored = {key: value for key, value in config.items() if key not in LEGACY_KEYS}
+    """Validate the current Lark configuration, rejecting retired app settings."""
+    for key in ("app_id_env", "app_secret_env"):
+        if key in config:
+            raise ValueError(f"unsupported Lark setting {key!r}; lark-cli's profile chooses the app")
+    stored = dict(config)
     stored["profile"] = profile_name(stored.get("profile"))
     return stored
 

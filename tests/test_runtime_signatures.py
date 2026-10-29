@@ -222,3 +222,11 @@ def test_missing_or_unreadable_key_fails_launch_without_leaking_secrets(failure,
     with pytest.raises(ValueError):
         Launch(settings).environment()
     assert 'synthetic-secret' not in caplog.text + repr(settings)
+
+
+@pytest.mark.parametrize("session_id", [None, ""])
+def test_an_empty_session_with_a_selected_profile_starts_clean(session_id):
+    from looper.agents.session_switch import profile_switch
+    launch = Launch(AgentSettings(profile=bound_profile()))
+    assert profile_switch(session_id, None, launch.profile.id, launch, session_provider=None) is None
+    assert not can_resume(None, None, adapter("claude-code"), "prov-claude-subscription")

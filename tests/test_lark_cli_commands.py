@@ -252,7 +252,7 @@ def test_people_search_refuses_an_empty_or_long_query() -> None:
 ])
 def test_the_allowlist_is_bound_to_an_app(lark_cli_stand_in: Path, before: dict[str, Any], after: dict[str, Any],
                                           bound: str | None) -> None:
-    stored = asyncio.run(lark_settings.bound_config(before, {**after, "app_id_env": "LARK_APP_ID"}))
+    stored = asyncio.run(lark_settings.bound_config(before, after))
     assert stored.get("allowlist_app_id") == bound
     assert "app_id_env" not in stored and "profile" in stored
 
@@ -285,3 +285,9 @@ def test_a_cancelled_call_leaves_no_lark_cli_behind(tmp_path: Path) -> None:
     asyncio.run(asyncio.wait_for(main(), timeout=20))
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_file.read_text()), 0)
+
+
+@pytest.mark.parametrize("key", ["app_id_env", "app_secret_env"])
+def test_retired_app_settings_are_rejected(key: str) -> None:
+    with pytest.raises(ValueError, match="unsupported Lark setting"):
+        lark_cli.lark_config({key: "OLD"})

@@ -123,14 +123,8 @@ async def read_installs(conn: asyncpg.Connection) -> list[dict[str, Any]]:
 
 
 async def read_channels(conn: asyncpg.Connection) -> list[dict[str, Any]]:
-    # Offline preview/export also supports databases from before the Manager migration.
-    columns = {row["attname"] for row in await conn.fetch(
-        "SELECT attname FROM pg_attribute WHERE attrelid = 'channel_configs'::regclass "
-        "AND attnum > 0 AND NOT attisdropped")}
-    owner = "manager_id" if "manager_id" in columns else "'manager'::text AS manager_id"
-    policy = "bound_chats_only" if "bound_chats_only" in columns else "false AS bound_chats_only"
     rows = await conn.fetch(
-        f"SELECT channel_id, channel_type, {owner}, {policy}, display_name, enabled, config "
+        "SELECT channel_id, channel_type, manager_id, bound_chats_only, display_name, enabled, config "
         "FROM channel_configs ORDER BY channel_id"
     )
     return [{**dict(row), "config": _json(row["config"])} for row in rows]
@@ -138,8 +132,6 @@ async def read_channels(conn: asyncpg.Connection) -> list[dict[str, Any]]:
 
 async def read_bot_sequence(conn: asyncpg.Connection) -> tuple[int, bool]:
     """The allocation boundary, without allocating an id (including a never-called sequence)."""
-    if not await conn.fetchval("SELECT to_regclass('channel_bot_seq') IS NOT NULL"):
-        return (1, False)
     row = await conn.fetchrow("SELECT last_value, is_called FROM channel_bot_seq")
     return (row["last_value"], row["is_called"])
 

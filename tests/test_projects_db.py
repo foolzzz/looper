@@ -205,10 +205,7 @@ def test_execution_settings_are_stored_through_the_task_and_cleared() -> None:
     _run(_test)
 
 
-@pytest.mark.parametrize("wraps", [0, 1, 2])
-def test_task_config_is_written_as_an_object_and_a_string_wrapped_one_reads_back(wraps: int) -> None:
-    """Saves from the task page used to wrap the object in one more JSON string each time."""
-    import json
+def test_task_config_is_written_and_read_as_an_object() -> None:
 
     from looper.db import projects, tasks
 
@@ -219,10 +216,6 @@ def test_task_config_is_written_as_an_object_and_a_string_wrapped_one_reads_back
         await tasks.update_task_config("task-1", config={"a": 2}, pool=pool)
         assert await pool.fetchval("SELECT jsonb_typeof(config) FROM tasks") == "object"
 
-        stored: Any = {"a": 2}
-        for _ in range(wraps):
-            stored = json.dumps(stored)
-        await pool.execute("UPDATE tasks SET config = $1", json.dumps(stored))
         assert (await tasks.get_task("task-1", pool=pool))["config"] == {"a": 2}
         assert (await tasks.get_task_with_steps("task-1", pool=pool))["config"] == {"a": 2}
         assert [t["config"] for t in await tasks.list_tasks(pool=pool)] == [{"a": 2}]

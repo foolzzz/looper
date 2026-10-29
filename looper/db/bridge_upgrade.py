@@ -12,12 +12,21 @@ BRIDGE_ERA_FINGERPRINTS = (
     "0c0f43ae1efc09fc486d6dd773f36bca737547b3660d4b6925896b8f306ef6fe",
 )
 BASELINE = "post_bridge_baseline"
+# Recommendations written by a completed bridge startup; custom role text is independent.
+BRIDGE_ROLE_PROMPTS = {
+    "manager": "1865988cfb1370533337e02f494aaeeb8c49f3907b07520f35a1870a820b683d",
+    "planner": "35b66a88bdf0b2c362962fea2e15b45603fcb5e064278cf83676c2df56b329bc",
+    "worker": "78e7f6473c3f142409005695b519f260275613296a77cfc4557f4c432c3cce74",
+    "reviewer": "96576c1151158425082afbf670c02bfa2cb640e98d445d2076c47b4dcb1fa176",
+}
 
 
 # Only names read or written by upgrade_from_bridge; optional historic columns,
 # constraints, indexes, functions and objects owned by extensions are irrelevant.
 BRIDGE_PRECONDITIONS = (
     ("tasks", ("id", "config")),
+    ("role_configs", ("role", "default_prompt")),
+    ("schema_migrations", ("name",)),
     ("llm_records", ("id", "metadata")),
     ("projects", ("task_workspaces",)),
     ("agent_sessions", ("session_id", "runtime_type", "provider_id")),
@@ -31,9 +40,8 @@ BRIDGE_PRECONDITIONS = (
 
 async def upgrade_from_bridge(conn):
     """Called only after locked bridge classification, inside ensure_schema's transaction."""
-    from ..agents.agent_settings import DEFAULT_HARNESS_PROMPT, _BUILTIN_HARNESS_BEFORE_RENAME
+    from ..agents.agent_settings import DEFAULT_HARNESS_PROMPT
     from ..agents.channels.allowlist import SENDER_ID_FORMATS, sender_ids
-    from .tasks import _CONFIG_UNWRAP_LIMIT, _read_config
 
     # Both admitted schema-3 releases already have the final registry, layers
     # and channel storage. Only the earlier release lacks execution snapshots.
@@ -58,10 +66,20 @@ async def upgrade_from_bridge(conn):
                 value = json.loads(value)
             except ValueError:
                 break
-        if not isinstance(value, dict) or depth >= _CONFIG_UNWRAP_LIMIT:
+        if not isinstance(value, dict) or depth >= 8:
             logger.warning("bridge task %s: config is not an object within the bridge reading limit; keeping {}",
                            row["id"])
-        value = _read_config(row["config"])
+        value = row["config"]
+        for _ in range(8):
+            if not isinstance(value, str):
+                break
+            try:
+                value = json.loads(value)
+            except ValueError:
+                value = None
+        else:
+            value = None
+        value = value if isinstance(value, dict) else {}
         await conn.execute("UPDATE tasks SET config = $2::jsonb WHERE id = $1 AND config IS DISTINCT FROM $2::jsonb",
                            row["id"], json.dumps(value))
     await conn.execute("UPDATE projects SET task_workspaces = 'in_place' WHERE task_workspaces IS NULL")
@@ -84,7 +102,12 @@ async def upgrade_from_bridge(conn):
         fmt = SENDER_ID_FORMATS.get(row["channel_type"])
         if fmt and config.get(fmt.field) is not None:
             try:
-                config[fmt.field] = list(sender_ids(row["channel_type"], config[fmt.field]))
+                raw = config[fmt.field]
+                if isinstance(raw, str):
+                    raw = raw.split(",")
+                if row["channel_type"] == "telegram" and isinstance(raw, list):
+                    raw = [str(i) if isinstance(i, int) and not isinstance(i, bool) else i for i in raw]
+                config[fmt.field] = list(sender_ids(row["channel_type"], raw))
             except ValueError as exc:
                 logger.warning("bridge channel %s: keeping invalid sender allowlist unchanged: %s",
                                row["channel_id"], exc)
@@ -96,8 +119,13 @@ async def upgrade_from_bridge(conn):
         if config != original:
             await conn.execute("UPDATE channel_configs SET config = $2::jsonb WHERE channel_id = $1",
                                row["channel_id"], json.dumps(config))
-    await conn.execute("UPDATE agent_setting_layers SET harness_prompt = $1 WHERE harness_prompt = $2",
-                       DEFAULT_HARNESS_PROMPT, _BUILTIN_HARNESS_BEFORE_RENAME)
+    await conn.execute("UPDATE channel_configs SET display_name = 'Lark (lark-cli)' "
+                       "WHERE channel_type='lark' AND display_name='Lark (飞书) Bot'")
+    old_harness = DEFAULT_HARNESS_PROMPT.replace("the agents Looper runs", "the agents LoopX runs").strip()
+    for row in await conn.fetch("SELECT harness_prompt FROM agent_setting_layers WHERE scope='system' AND harness_prompt IS NOT NULL"):
+        if row["harness_prompt"].strip() == old_harness:
+            await conn.execute("UPDATE agent_setting_layers SET harness_prompt = $1 WHERE scope='system' AND harness_prompt = $2",
+                               DEFAULT_HARNESS_PROMPT, row["harness_prompt"])
     await conn.execute("""
         UPDATE llm_records SET metadata = metadata || jsonb_build_object('profile', metadata->'agent')
         WHERE jsonb_typeof(metadata) = 'object'

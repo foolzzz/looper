@@ -62,7 +62,8 @@ def test_a_task_names_its_workspace_and_is_told_what_it_will_run_in(
     (memory / "MEMORY.md").write_text("Staging listens on 59322.\n")
 
     async def test(pool: Any) -> None:
-        project = await projects.create_project(name="calc", work_dir=str(project_dir), pool=pool)
+        project = await projects.create_project(name="calc", work_dir=str(project_dir),
+                                                execution={"task_workspaces": "in_place"}, pool=pool)
         server, _, _ = _setup()
         await tasks.create_task(task_id="task-run", requirement="r", project_id=project["id"], status="running",
                                 work_dir=str(workspace), pool=pool)
@@ -90,9 +91,9 @@ def test_a_task_names_its_workspace_and_is_told_what_it_will_run_in(
             status, refused = await _call(server, "POST", "/api/v1/tasks/create", {
                 "requirement": "x", "project_id": project["id"], "work_dir": str(workspace), **bad})
             assert status == 400 and says in refused["error"], refused
-        # A new project's tasks run in worktrees; one made before keeps running in place.
+        # A new project defaults to worktrees; an explicit in_place setting is preserved.
         status, made = await _call(server, "POST", "/api/v1/project_admin/create", {"name": "fresh", "work_dir": str(workspace)})
-        assert made["task_workspaces"] == "worktree" and project.get("task_workspaces") is None
+        assert made["task_workspaces"] == "worktree" and project["task_workspaces"] == "in_place"
 
     run_db(test, monkeypatch)
 

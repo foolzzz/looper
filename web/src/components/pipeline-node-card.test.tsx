@@ -16,12 +16,12 @@ const card: NodeCard = {
 };
 
 describe("NodeCardView", () => {
-  it("draws an Agent fact with the runtime and model", () => {
+  it.each(["Codex", "Custom runtime"])("draws an Agent fact with %s and the model", (runtime) => {
     const result = renderToStaticMarkup(<NodeCardView card={{ ...card, sections: [
-      { kind: "facts", title: "Runs", facts: [{ label: "Agent", value: "Codex · gpt-5 · high" }] },
+      { kind: "facts", title: "Runs", facts: [{ label: "Agent", value: `${runtime} · gpt-5 · high` }] },
     ] }} />);
     expect(result).toContain("Agent");
-    expect(result).toContain("Codex · gpt-5 · high");
+    expect(result).toContain(`${runtime} · gpt-5 · high`);
   });
 
   it("draws the task's result as Markdown, and a failure's title in the destructive color", () => {

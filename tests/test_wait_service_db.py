@@ -674,7 +674,7 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
     import looper.db as db
     from looper.agents import (
         consult, managers, operator_auth, operator_notes, proc_tree, profile_registry, read_only_copies, room,
-        scheduler_settings, serve, state_import, step_workspaces, task_workspaces,
+        scheduler_settings, serve, step_workspaces, task_workspaces,
     )
     from looper.agents.ops import planner as planner_ops, room as room_ops, service as manager_ops
     from looper.agents.runtimes import codex_login, grok_login
@@ -703,9 +703,10 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
         router = SimpleNamespace(has_planner=lambda task_id: task_id == "task-active")
         for name in ("Broadcaster", "ManagerConfig", "WorkerConfig"):
             monkeypatch.setattr(serve, name, MagicMock())
+        # Serve builds the Managers through ManagerFleet, imported inside the composition function.
         for name, value in (("MessageBus", bus), ("AgentSupervisor", fake("supervisor")),
                             ("ChannelRegistry", fake("registry")), ("WebChannelAdapter", fake("web")),
-                            ("ManagerAgent", fake("manager")), ("Scheduler", fake("scheduler")),
+                            ("Scheduler", fake("scheduler")),
                             ("GateReminders", fake("gates")), ("GateCourier", fake("courier")),
                             ("TaskRouter", router), ("WorkerPool", fake("workers")),
                             ("AgentHTTPServer", fake("http"))):
@@ -742,7 +743,7 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
         for module, name, result in (
             (serve, "_back_up_before_schema_change", None), (serve, "seed_role_configs", None),
             (serve, "seed_channel_configs", None), (profile_registry, "register_found_runtimes", []),
-            (state_import, "import_file_state", None), (proc_tree, "sweep", None),
+            (proc_tree, "sweep", None),
             (serve, "tasks_left_running", SimpleNamespace(resumable=[], starting=[])),
             (llm_records, "end_unfinished_records", 0), (step_workspaces, "sweep", 0),
             (task_workspaces, "sweep", 0), (codex_login, "inspect_at_start", None),

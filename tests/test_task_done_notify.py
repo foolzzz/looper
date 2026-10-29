@@ -82,7 +82,7 @@ class TestTheNotice:
         (passed,) = _passed_on(router, _status("task-n1", "completed", FINAL_RESULT))
         assert Notice.from_payload(passed["notice"]) == Notice(NotifyChannel.TELEGRAM, TELEGRAM_CHAT, (
             "✅ 任务完成 · 给 calc 加上除法\n## Delivered\ncalc.py with add and its tests\n"
-            f"{DASHBOARD}/#tasks/task-n1"))
+            f"{DASHBOARD}/#tasks/task-n1"), channel_id="channel-telegram")
 
     @pytest.mark.parametrize("target", [LARK_USER, LARK_GROUP])
     def test_a_failed_lark_task_says_why_once_with_a_markdown_link(self, tmp_path: Path,
@@ -197,7 +197,7 @@ def test_the_notify_channels_are_the_adapters_that_implement_notify(tmp_path: Pa
 # --- The Manager: the notice instead of the final summary, on the progress' path ---
 
 
-_NOTICE = Notice(NotifyChannel.TELEGRAM, TELEGRAM_CHAT, "✅ 任务完成 · x\n/#tasks/t1")
+_NOTICE = Notice(NotifyChannel.TELEGRAM, TELEGRAM_CHAT, "✅ 任务完成 · x\n/#tasks/t1", channel_id="channel-telegram")
 
 
 @pytest.mark.usefixtures("agent_db")
@@ -251,7 +251,7 @@ def test_lark_sends_the_notice_as_markdown_to_who_the_task_recorded(tmp_path: Pa
 
     lark = LarkChannelAdapter(profile="other", runtime_root=tmp_path,
                               allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})))
-    notice = Notice(NotifyChannel.LARK, target, "✅ 任务完成 · x\n## Delivered\ncalc")
+    notice = Notice(NotifyChannel.LARK, target, "✅ 任务完成 · x\n## Delivered\ncalc", channel_id="channel-lark")
     receipt = asyncio.run(lark.deliver(MessageEnvelope.create(
         source=MANAGER_ADDRESS, target=channel_address("lark"), message_type=MessageType.CHAT_NOTICE,
         payload=notice.payload(), correlation_id="never-seen")))

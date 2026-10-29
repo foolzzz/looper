@@ -292,18 +292,9 @@ class TestServeChannelWiring:
         adapter = _telegram_adapter_from_config({"allowed_user_ids": ["7"]}, "db-token")
         assert adapter is not None and adapter._bot_token == "db-token"
 
-    def test_telegram_keeps_reading_a_comma_separated_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # How the setting was stored before it became a list.
-        from looper.agents.serve import _telegram_adapter_from_config
-        monkeypatch.setenv("LOOPER_TELEGRAM_BOT_TOKEN", "default-token")
-        adapter = _telegram_adapter_from_config({"allowed_user_ids": "7, 8"})
-        assert adapter is not None
-        assert adapter._bot_token == "default-token"
-        assert adapter._allowlist.ids == {"7", "8"}
-
     @pytest.mark.parametrize(("config", "problem"), [
         ({}, "allowlist is empty"),
-        ({"allowed_user_ids": ""}, "allowlist is empty"),
+        ({"allowed_user_ids": None}, "allowlist is empty"),
         ({"allowed_user_ids": []}, "allowlist is empty"),
         # Fail closed: a malformed allowlist must not fall back to "allow all".
         ({"allowed_user_ids": "12,abc"}, "allowlist is invalid"),
@@ -456,8 +447,6 @@ class TestSenderIds:
         ([], ()),
         (["123456789"], ("123456789",)),
         ([" 42 ", "", "7", "42"], ("42", "7")),  # trimmed, blanks and repeats dropped, order kept
-        ("7, 8,,", ("7", "8")),  # one comma-separated string, as the setting was stored before
-        ([123456789], ("123456789",)),  # a number from a JSON client
     ])
     def test_telegram_user_ids(self, raw: Any, expected: tuple[str, ...]) -> None:
         from looper.agents.channels.allowlist import sender_ids
@@ -482,7 +471,7 @@ class TestSenderIds:
         with pytest.raises(AllowlistError, match="is not a Lark open_id; .*starts with ou_"):
             sender_ids("lark", [bad])
 
-    @pytest.mark.parametrize("raw", [{"id": "7"}, 7, [True], [["7"]]])
+    @pytest.mark.parametrize("raw", [{"id": "7"}, 7, [True], [["7"]], "7,8", [123456789]])
     def test_a_list_holds_strings(self, raw: Any) -> None:
         from looper.agents.channels.allowlist import AllowlistError, sender_ids
         with pytest.raises(AllowlistError):
@@ -496,8 +485,8 @@ class TestSenderIds:
 
     @pytest.mark.parametrize(("channel_type", "config", "problem"), [
         ("telegram", {}, "allowlist is empty"),
-        ("telegram", {"allowed_user_ids": ""}, "allowlist is empty"),
-        ("telegram", {"allowed_user_ids": "7,abc"}, "allowlist is invalid: 'abc' is not a Telegram user ID"),
+        ("telegram", {"allowed_user_ids": None}, "allowlist is empty"),
+        ("telegram", {"allowed_user_ids": "7,abc"}, "allowlist is invalid"),
         ("telegram", {"allowed_user_ids": ["7"]}, None),
         ("lark", {"profile": ""}, "allowlist is empty"),
         ("lark", {"allowed_open_ids": [OPEN_ID]}, None),
@@ -510,8 +499,9 @@ class TestSenderIds:
 
     def test_a_stored_config_holds_the_validated_list(self) -> None:
         from looper.agents.channels.allowlist import AllowlistError, normalized_config
-        assert normalized_config("telegram", {"bot_token_env": "T", "allowed_user_ids": " 7, 8 "}) == {
+        assert normalized_config("telegram", {"bot_token_env": "T", "allowed_user_ids": [" 7", "8 "]}) == {
             "bot_token_env": "T", "allowed_user_ids": ["7", "8"]}
+        assert normalized_config("telegram", {"allowed_user_ids": None}) == {"allowed_user_ids": None}
         assert normalized_config("lark", {"profile": "A"}) == {"profile": "A"}
         with pytest.raises(AllowlistError, match="must be a JSON object"):
             normalized_config("lark", ["ou_x"])

@@ -43,18 +43,19 @@ def _make_envelope(
 
 
 class TestMessageJournal:
-    def test_corrupt_entry_skipped(self, tmp_path: Path) -> None:
-        bus_dir = tmp_path / "bus"
-        bus_dir.mkdir()
-        journal_path = bus_dir / "journal.jsonl"
-        env = _make_envelope()
-        journal_path.write_text(
-            "not-json\n" + json.dumps(env.to_dict()) + "\n",
-            encoding="utf-8",
-        )
-        journal = MessageJournal(bus_dir)
-        undelivered = journal.undelivered()
-        assert len(undelivered) == 1
+    @pytest.mark.parametrize("broken", ["not-json", "[]", '{"message_id": "x"}',
+                                       json.dumps({**_make_envelope().to_dict(),
+                                                   "source": {"agent_type": "channel", "agent_id": "x", "channel": 7}})])
+    def test_corrupt_entries_refuse_replay_and_compaction(self, tmp_path: Path, broken: str) -> None:
+        journal = MessageJournal(tmp_path / "bus")
+        journal.append(_make_envelope())
+        with journal._journal_path.open("a") as stream:
+            stream.write(broken + "\n")
+        before = journal._journal_path.read_bytes()
+        for operation in (journal.transition, journal.undelivered, journal.compact):
+            with pytest.raises(ValueError, match="invalid journal envelope.*:2:"):
+                operation()
+            assert journal._journal_path.read_bytes() == before
 
     def test_crash_recovery(self, tmp_path: Path) -> None:
         journal = MessageJournal(tmp_path / "bus")
@@ -255,24 +256,80 @@ class TestReplay:
 
         asyncio.run(_run())
 
-    def test_legacy_status_updates_are_dropped(self, tmp_path: Path) -> None:
-        journal_dir = tmp_path / ".local" / "agent-bus"
-        status = _make_envelope(
-            source=MANAGER_ADDRESS,
-            target=channel_address("web"),
-            message_type=MessageType.STATUS_UPDATE,
-            payload={"text": "stale", "delta": True},
-        )
-        MessageJournal(journal_dir).append(status)
+    @pytest.mark.parametrize("checkpoint,after", [("journal.jsonl", False), ("journal.jsonl", True),
+                                                  ("notice-identities-v1", False), ("notice-identities-v1", True)])
+    def test_notice_transition_survives_every_replace_boundary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpoint: str, after: bool,
+    ) -> None:
+        from looper.agents.task_notice import Notice, NotifyChannel, NotifyTarget, TargetKind
 
-        async def _run() -> None:
+        journal = MessageJournal(tmp_path / ".local" / "agent-bus")
+        notice = Notice(NotifyChannel.TELEGRAM, NotifyTarget(TargetKind.CHAT, "7"), "done",
+                        channel_id="channel-telegram")
+        current = _make_envelope(source=MANAGER_ADDRESS, target=channel_address("telegram"),
+                                 message_type=MessageType.CHAT_NOTICE, payload=notice.payload())
+        historical = _make_envelope(source=MANAGER_ADDRESS, target=channel_address("telegram"),
+                                    message_type=MessageType.CHAT_NOTICE,
+                                    payload={key: value for key, value in notice.payload().items() if key != "channel_id"})
+        stale = _make_envelope(message_type=MessageType.STATUS_UPDATE)
+        delivered = _make_envelope()
+        for envelope in (delivered, current, stale, historical):
+            journal.append(envelope)
+        journal.mark_delivered(delivered.message_id)
+        before = journal._journal_path.read_bytes()
+        tracking = journal._delivered_path().read_bytes()
+        replace = Path.replace
+
+        def interrupted(path: Path, target: Path) -> Path:
+            if target.name == checkpoint:
+                if after:
+                    replace(path, target)
+                raise OSError("interrupted")
+            return replace(path, target)
+
+        async def run() -> None:
+            bus = MessageBus(tmp_path)
+            with monkeypatch.context() as patch:
+                patch.setattr(Path, "replace", interrupted)
+                with pytest.raises(OSError, match="interrupted"):
+                    await bus.start()
+            assert journal._delivered_path().read_bytes() == tracking
+            if checkpoint == "journal.jsonl" and not after:
+                assert journal._journal_path.read_bytes() == before
+            # The only transport is a fake consuming subscriber; no channel login or network.
+            sent = []
             for _ in range(2):
-                bus = MessageBus(tmp_path)
-                await bus.start()
-                assert bus.pending_count(status.target.agent_id) == 0
-                assert (journal_dir / "journal.jsonl").read_text() == ""
+                restarted = MessageBus(tmp_path)
+                restarted.subscribe_topic(MessageType.CHAT_NOTICE, lambda envelope: sent.append(envelope) or True,
+                                          consumes=True)
+                await restarted.start()
+                assert restarted.pending_count(delivered.target.agent_id) == 0
+                await restarted.shutdown()
+            assert [envelope.message_id for envelope in sent] == [current.message_id, historical.message_id]
+            assert sent[0] == current and sent[1].payload == notice.payload()
+            assert Notice.from_payload(sent[1].payload) == notice
 
-        asyncio.run(_run())
+        asyncio.run(run())
+
+    @pytest.mark.parametrize("change", [{"channel": "unknown"}, {"channel_id": "channel-lark"},
+                                         {"channel_id": None}, {"text": ""}])
+    def test_invalid_notice_keeps_the_complete_journal(self, tmp_path: Path, change: dict) -> None:
+        journal = MessageJournal(tmp_path / ".local" / "agent-bus")
+        journal.append(_make_envelope())
+        journal.append(_make_envelope(target=channel_address("telegram"), message_type=MessageType.CHAT_NOTICE,
+                                     payload={"channel": "telegram", "kind": "chat", "chat": "7", "text": "done", **change}))
+        before = journal._journal_path.read_bytes()
+        async def run() -> None:
+            bus = MessageBus(tmp_path)
+            try:
+                with pytest.raises(ValueError, match="invalid journal notice.*:2:"):
+                    await bus.start()
+            finally:
+                await bus.shutdown()
+
+        asyncio.run(run())
+        assert journal._journal_path.read_bytes() == before
+        assert not (journal._dir / "notice-identities-v1").exists()
 
     def test_messages_for_per_task_agents_are_dropped(self, tmp_path: Path) -> None:
         """Planners and Workers do not survive a restart; their tasks are stopped."""

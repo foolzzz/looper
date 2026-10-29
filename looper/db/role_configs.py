@@ -87,26 +87,6 @@ async def list_configs(*, pool: asyncpg.Pool | None = None) -> list[dict[str, An
     return [_row_to_dict(r) for r in rows]
 
 
-async def replace_default_prompt(
-    role: str,
-    *,
-    old: str,
-    new: str,
-    pool: asyncpg.Pool | None = None,
-) -> bool:
-    """Give a row the ``new`` default system prompt if it still holds the ``old`` one.
-
-    A prompt someone edited is kept. Returns whether the row changed.
-    """
-    pool = pool or get_pool()
-    result = await pool.execute(
-        "UPDATE role_configs SET system_prompt = $3, updated_at = now() "
-        "WHERE role = $1 AND system_prompt = $2",
-        role, old, new,
-    )
-    return result == "UPDATE 1"
-
-
 async def reset_prompt(
     role: str,
     *,

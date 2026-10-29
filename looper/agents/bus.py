@@ -10,11 +10,10 @@ import asyncio
 import json
 import logging
 import os
-import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
-from .message import MessageEnvelope, MessageType
+from .message import BOT_CHANNEL_TYPES, MessageEnvelope, MessageType
 
 logger = logging.getLogger(__name__)
 
@@ -66,44 +65,96 @@ class MessageJournal:
             f.write(message_id + "\n")
             f.flush()
 
-    def undelivered(self) -> list[MessageEnvelope]:
+    def _entries(self) -> list[tuple[int, dict[str, Any]]]:
         if not self._journal_path.exists():
             return []
-        result: list[MessageEnvelope] = []
-        with open(self._journal_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    d = json.loads(line)
-                    mid = d.get("message_id", "")
-                    if mid not in self._delivered:
-                        result.append(MessageEnvelope.from_dict(d))
-                except (json.JSONDecodeError, KeyError, ValueError):
-                    logger.warning("skipping corrupt journal entry")
+        result = []
+        for number, line in enumerate(self._journal_path.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                raw = json.loads(line)
+                envelope = MessageEnvelope.from_dict(raw)
+                for value in (envelope.message_id, envelope.correlation_id, envelope.timestamp,
+                              envelope.source.agent_type, envelope.source.agent_id,
+                              envelope.target.agent_type, envelope.target.agent_id):
+                    if not isinstance(value, str) or not value:
+                        raise ValueError("identity fields must be nonempty strings")
+                for address in (envelope.source, envelope.target):
+                    if address.channel is not None and address.channel not in ("web", "api", *BOT_CHANNEL_TYPES):
+                        raise ValueError("unknown or malformed address channel")
+                if not isinstance(envelope.payload, dict) or not isinstance(envelope.metadata, dict):
+                    raise ValueError("payload and metadata must be objects")
+                if envelope.reply_to is not None and not isinstance(envelope.reply_to, str):
+                    raise ValueError("reply_to must be a string or null")
+            except (TypeError, AttributeError, json.JSONDecodeError, KeyError, ValueError) as exc:
+                raise ValueError(f"invalid journal envelope at {self._journal_path}:{number}: {exc}") from exc
+            result.append((number, raw))
         return result
 
+    def _replace(self, path: Path, text: str) -> None:
+        temporary = path.with_name(path.name + ".tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(path)
+            directory = os.open(self._dir, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def transition(self) -> None:
+        """Once per runtime, seal bridge journal identities before any message can replay.
+
+        The startup owner is single-server. Validate the complete input before either
+        replacement; repeating after a crash between journal and marker is harmless.
+        """
+        from .message import builtin_channel_id
+        from .task_notice import Notice, NotifyChannel
+
+        marker = self._dir / "notice-identities-v1"
+        if marker.exists():
+            return
+        kept = []
+        for number, raw in self._entries():
+            if raw["message_id"] not in self._delivered:
+                if raw["message_type"] in _TRANSIENT:
+                    continue  # Historical progress ended with its turn, exactly as before.
+                payload = raw["payload"]
+                notice = payload if raw["message_type"] == MessageType.CHAT_NOTICE.value else payload.get("notice")
+                if notice is not None or "notice" in payload:
+                    try:
+                        if isinstance(notice, dict) and "channel_id" not in notice:
+                            notice["channel_id"] = builtin_channel_id(NotifyChannel(notice.get("channel")).value)
+                        parsed = Notice.from_payload(notice)
+                        if parsed is None:
+                            raise ValueError("missing or mismatched notice channel identity")
+                        target = raw["target"]
+                        if raw["message_type"] == MessageType.CHAT_NOTICE.value and (
+                                target["agent_type"] != "channel" or target["agent_id"] != parsed.channel_id
+                                or target.get("channel") != parsed.channel.value):
+                            raise ValueError("notice target does not match its channel identity")
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(f"invalid journal notice at {self._journal_path}:{number}: {exc}") from exc
+            kept.append(json.dumps(raw, ensure_ascii=False) + "\n")
+        self._replace(self._journal_path, "".join(kept))
+        self._replace(marker, "complete\n")
+
+    def undelivered(self) -> list[MessageEnvelope]:
+        return [MessageEnvelope.from_dict(raw) for _, raw in self._entries() if raw["message_id"] not in self._delivered]
+
     def compact(self) -> None:
-        """Remove delivered entries from the journal file to save disk."""
+        """Remove delivered entries only after validating the complete journal."""
         if not self._journal_path.exists():
             return
-        kept: list[str] = []
-        with open(self._journal_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    d = json.loads(line)
-                    if d.get("message_id", "") not in self._delivered:
-                        kept.append(line)
-                except (json.JSONDecodeError, KeyError):
-                    pass
-        tmp = self._journal_path.with_suffix(".tmp")
-        tmp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-        tmp.replace(self._journal_path)
-        # Reset delivered tracker
+        kept = [json.dumps(raw, ensure_ascii=False) + "\n" for _, raw in self._entries()
+                if raw["message_id"] not in self._delivered]
+        self._replace(self._journal_path, "".join(kept))
         self._delivered.clear()
         self._delivered_path().unlink(missing_ok=True)
 
@@ -134,16 +185,13 @@ class MessageBus:
         Messages for per-task agents are dropped instead: replaying them would
         re-run work for tasks that were stopped when the server restarted.
         """
+        self._journal.transition()
         replay: list[MessageEnvelope] = []
         dropped = 0
         for envelope in self._journal.undelivered():
             # Channels can receive during startup checks, before journal replay.
             # Keep their queued messages durable without delivering them a second time.
             if envelope.message_id in self._queued_before_start:
-                continue
-            # Older versions journaled statuses, but their turns ended at restart.
-            if not _journaled(envelope):
-                self._journal.mark_delivered(envelope.message_id)
                 continue
             if envelope.target.agent_type in _PER_TASK_AGENT_TYPES:
                 self._journal.mark_delivered(envelope.message_id)
@@ -294,5 +342,6 @@ class MessageBus:
 
     async def shutdown(self) -> None:
         """Graceful shutdown: compact journal."""
+        if self._started:
+            self._journal.compact()
         self._started = False
-        self._journal.compact()

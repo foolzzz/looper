@@ -92,7 +92,7 @@ async def check_registry_schema_version(conn: asyncpg.Connection, *, supported_v
 
 async def _classify_schema(conn: asyncpg.Connection, sql: str) -> str:
     """Read-only admission and bridge preconditions, always under _SCHEMA_LOCK."""
-    from .bridge_upgrade import BASELINE, BRIDGE_ERA_FINGERPRINTS, BRIDGE_PRECONDITIONS
+    from .bridge_upgrade import BASELINE, BRIDGE_ERA_FINGERPRINTS, BRIDGE_PRECONDITIONS, BRIDGE_ROLE_PROMPTS
 
     older = ("unsupported Looper database; upgrade to v2.13.165 or a later 2.13 release first, "
              "start it once, then upgrade to this version")
@@ -140,6 +140,13 @@ async def _classify_schema(conn: asyncpg.Connection, sql: str) -> str:
         for column in required:
             if (table, column) not in columns:
                 raise RegistrySchemaVersionError(f"bridge upgrade requires column {table}.{column}; startup refused")
+    if not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name='file_state_import')"):
+        raise RegistrySchemaVersionError(older + "; bridge file-state import has not completed")
+    prompts = {r["role"]: hashlib.sha256(r["default_prompt"].encode()).hexdigest()
+               for r in await conn.fetch("SELECT role, default_prompt FROM role_configs WHERE role = ANY($1::text[])",
+                                         list(BRIDGE_ROLE_PROMPTS))}
+    if prompts != BRIDGE_ROLE_PROMPTS:
+        raise RegistrySchemaVersionError(older + "; bridge role-prompt seeding has not completed")
     return "bridge"
 
 

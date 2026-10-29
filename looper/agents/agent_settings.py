@@ -23,8 +23,7 @@ Planner's choice for its Workers or Reviewers, made with its tool from the proje
 (``Layer.PLANNER_TASK``). The **Agent Profile** is a runtime, an LLM
 provider, a model and an effort (``profile_registry``): a run's model and
 effort are its profile's (``Layer.PROFILE``; no effort is the runtime's own),
-and no layer sets either (``layer_effort`` moved the effort layers set before
-onto profiles). A field a layer leaves unset (NULL) inherits; with no layer
+and no layer sets either. A field a layer leaves unset (NULL) inherits; with no layer
 setting it, the built-in default applies (``Layer.BUILTIN``):
 ``DEFAULT_HARNESS_PROMPT``, ``BUILTIN_PROFILE`` (Claude Code, its own login,
 ``DEFAULT_MODEL``, the runtime's own effort), no extra environment and no cap. The environment merges
@@ -312,12 +311,8 @@ def concurrency(raw: Any) -> int:
     return raw
 
 
-# The built-in harness as it read before the rename (LoopX): a system layer that stored it still follows the built-in.
-_BUILTIN_HARNESS_BEFORE_RENAME = DEFAULT_HARNESS_PROMPT.replace("the agents Looper runs", "the agents LoopX runs")
-
-
 def _is_builtin_harness(text: str) -> bool:
-    return text.strip() in (DEFAULT_HARNESS_PROMPT.strip(), _BUILTIN_HARNESS_BEFORE_RENAME.strip())
+    return text.strip() == DEFAULT_HARNESS_PROMPT.strip()
 
 
 def _is_builtin_boundaries(text: str) -> bool:
@@ -816,11 +811,10 @@ async def _with_api_key(settings: AgentSettings) -> tuple[AgentSettings, str | N
     if not key:
         return settings, f"Agent Profile {profile.name!r} cannot run: provider {provider.name!r} has no API key; " \
                          "set one in Settings"
-    if isinstance(profile, ResolvedAgentProfile):
-        resolved = profile.resolved_model
-        return replace(settings, profile=replace(profile, resolved_model=replace(
-            resolved, provider=replace(resolved.provider, api_key=key)))), None
-    return replace(settings, profile=replace(profile, provider=replace(provider, api_key=key))), None
+    resolved = profile.resolved_model
+    return replace(settings, profile=replace(profile, resolved_model=replace(
+        resolved, provider=replace(resolved.provider, api_key=key)))), None
+
 
 
 def profile_problem(profile: AgentProfile, role: AgentType) -> str | None:

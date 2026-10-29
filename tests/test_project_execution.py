@@ -137,6 +137,8 @@ class TestProjectApi:
         ("supervise_interval_seconds", 1.5, "declared schema"),
         ("supervise_interval_seconds", 86_401, "86400"),
         ("distill_lessons", "sometimes", "declared schema"),
+        ("distill_lessons", True, "distill_lessons"),
+        ("distill_lessons", False, "distill_lessons"),
         ("step_workspaces", "per-step", "declared schema"),
         ("workspace_links", ".venv", "declared schema"),
         ("workspace_links", [".venv", 3], "declared schema"),
@@ -167,7 +169,6 @@ class TestProjectApi:
 
     @pytest.mark.parametrize("value, mode", [
         ("draft", "draft"), ("write", "write"), ("off", "off"), (None, "off"), ("", "off"),
-        (True, "write"), (False, "off"),  # from before the three modes
     ])
     def test_distill_lessons_is_one_of_three_modes(self, store: _Store, value: Any, mode: str) -> None:
         store.add_project("proj-a", "calc")
@@ -481,3 +482,9 @@ def test_a_project_without_settings_runs_as_before(
     task_costs.assert_not_awaited()
     metadata = agent_db.start_record.await_args.kwargs["metadata"]
     assert metadata["model_choice"]["source"] == "builtin" and "max_budget_usd" not in metadata
+
+
+@pytest.mark.parametrize("stored,expected", [(None, "worktree"), ("worktree", "worktree"), ("in_place", "in_place")])
+def test_task_workspace_defaults_keep_explicit_in_place(stored, expected):
+    assert ProjectExecution.from_row({"task_workspaces": stored}).task_mode.value == expected
+    assert ProjectExecution.from_row({}).view()["task_workspaces"] is None

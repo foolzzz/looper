@@ -49,6 +49,5 @@ export function costBasis(cost: TaskCost): string {
 /** How one run's cost was priced, in a word or two; "" for an Anthropic API key's actual spend. */
 export function runCostLabel(record: Pick<LlmRecord, "cost_source" | "metadata">): string {
   if (record.cost_source === "provider_price") return "provider price";
-  // Claude Code's own figure for its own login (runs recorded before Agent Profiles ran with it too).
-  return (runProfile(record)?.provider.auth ?? "oauth") === "oauth" ? "equivalent" : "";
+  return record.metadata?.accounting_basis === "subscription_equivalent" || runProfile(record)?.provider?.auth === "oauth" ? "equivalent" : "";
 }

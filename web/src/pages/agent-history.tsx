@@ -40,6 +40,7 @@ import {
   type ProjectInstructionFile,
   type PromptLayers,
   type RunRole,
+  type RecordSource,
 } from "@/lib/api";
 
 // A run with no output for this long is flagged as possibly stuck.
@@ -212,23 +213,15 @@ function LaunchCommand({ record }: { record: LlmRecord }) {
   );
 }
 
-/** The value after ``flag`` in an argv, if any. */
-function argAfter(command: string[], flag: string) {
-  const at = command.indexOf(flag);
-  return at >= 0 && at + 1 < command.length ? command[at + 1] : undefined;
-}
-
 function shortSha(sha: string | null | undefined) {
   return sha ? sha.slice(0, 12) : "";
 }
 
-/** Where a run's settings came from: the settings layers, then the names runs recorded before the layers used. */
+/** Current setting source labels. Historical wording comes from the record DTO. */
 const SETTING_SOURCES: Record<string, string> = {
   builtin: "built-in default",
   session: "chosen for this session (/profile)",
   profile: `the ${AGENT_PROFILE.name}'s default`,
-  // Runs recorded before Agent Profiles were named.
-  agent: `the ${AGENT_PROFILE.name}'s default`,
   system: "shared defaults (Settings → Roles)",
   role: "role (Settings → Roles)",
   project: "project",
@@ -237,13 +230,10 @@ const SETTING_SOURCES: Record<string, string> = {
   planner_task: "Planner's choice for the rest of the task",
   planner_step: "Planner's choice for this step",
   task_role: "role the Planner defined",
-  builtin_default: "built-in default",
-  system_default: "Settings default",
-  manager_override: "Manager override",
-  agent_override: "agent override",
-  project_override: "project override",
+  manager: "Manager definition",
 };
-export const sourceName = (source: string) => SETTING_SOURCES[source] ?? source;
+export const sourceName = (source?: RecordSource | null) =>
+  source?.label ?? (source?.code ? SETTING_SOURCES[source.code] ?? "unknown" : "unknown");
 
 /** One of the repository's instruction files the run was given, and how. */
 function instructionFile(file: ProjectInstructionFile) {
@@ -261,11 +251,12 @@ function instructionFile(file: ProjectInstructionFile) {
 function PromptLayerSummary({ layers, metadata }: { layers: PromptLayers; metadata: LlmRecord["metadata"] }) {
   const { harness, role, project, task, contract } = layers;
   const rows: [string, string][] = [];
+  const sources = metadata?.presentation?.sources;
   if (harness) {
     rows.push([
       "Harness",
       [
-        sourceName(harness.source) + (harness.from_role ? ` (the ${harness.from_role}'s)` : ""),
+        sourceName(sources?.harness) + (harness.from_role ? ` (the ${harness.from_role}'s)` : ""),
         harness.project_id,
         shortSha(harness.sha256),
       ]
@@ -301,36 +292,23 @@ function PromptLayerSummary({ layers, metadata }: { layers: PromptLayers; metada
   if (profile) {
     rows.push([
       AGENT_PROFILE.name,
-      `${profile.name} · ${profile.runtime.name} (${profile.runtime.type}) · ${profile.provider.name} · ${sourceName(profile.source)}`,
+      `${profile.name ?? "unknown"} · ${profile.runtime?.name ?? "unknown runtime"} (${profile.runtime?.type ?? "unknown"}) · ${profile.provider?.name ?? "unknown provider"} · ${sourceName(sources?.profile)}`,
     ]);
   }
   const choice = metadata?.model_choice;
   if (choice) {
     rows.push([
       "Model",
-      [choice.model, sourceName(choice.source), choice.effort && `effort ${choice.effort}`]
+      [choice.model, sourceName(sources?.model), choice.effort && `effort ${choice.effort}`]
         .filter(Boolean)
         .join(" · "),
     ]);
   }
-  const sources = metadata?.settings_sources;
   if (metadata?.env) {
-    const keys = Object.keys(metadata.env.keys).map((key) =>
-      sources?.env?.[key] ? `${key} (${sourceName(sources.env[key])})` : key,
-    );
-    rows.push(["Env", `${keys.join(", ")} · ${shortSha(metadata.env.sha256)}`]);
+    rows.push(["Env", `${Object.keys(metadata.env.keys).join(", ")} · ${shortSha(metadata.env.sha256)}`]);
   }
   if (sources) {
-    // Runs recorded before Agent Profiles were named call the profile's source `agent`; runs before Agent Profiles
-    // name the model's source.
-    const profileSource = sources.profile ?? sources.agent;
-    const selected = profileSource ? `${AGENT_PROFILE.name} ${sourceName(profileSource)}` : sources.model ? `model ${sourceName(sources.model)}` : "";
-    rows.push([
-      "Sources",
-      [selected, `effort ${sourceName(sources.effort)}`, `run cap ${sourceName(sources.run_budget_usd)}`]
-        .filter(Boolean)
-        .join(" · "),
-    ]);
+    rows.push(["Sources", `${AGENT_PROFILE.name} ${sourceName(sources.profile)} · effort ${sourceName(sources.effort)} · run cap ${sourceName(sources.run_budget_usd)}`]);
   }
   return (
     <dl className="mb-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 font-mono text-[11px]">
@@ -347,19 +325,19 @@ function PromptLayerSummary({ layers, metadata }: { layers: PromptLayers; metada
 /** The system prompt Looper supplied to the runtime for this run. */
 function SystemPrompt({ record }: { record: LlmRecord }) {
   const metadata = record.metadata;
-  // Runs recorded before metadata.system_prompt existed may still carry it in their command.
-  const text = metadata?.system_prompt ?? argAfter(metadata?.command ?? [], "--append-system-prompt");
+  const prompt = metadata?.presentation?.system_prompt;
+  const text = prompt?.text;
   if (text == null) return null;
-  const sha = metadata?.system_prompt_sha256;
+  const sha = prompt?.sha256;
   const layers = metadata?.prompt_layers;
-  const replaced = metadata?.system_prompt_mode === "replace";
+  const replaced = prompt?.mode === "replace";
   return (
     <Collapsible
       icon={<ScrollText className="h-3 w-3" />}
       title={
         <span className="flex items-center gap-1.5">
           <span className="truncate">
-            System prompt · {text.length} chars{sha ? ` · ${shortSha(sha)}` : replaced ? "" : " · appended by Looper"}
+            System prompt · {text.length} chars{sha ? ` · ${shortSha(sha)}` : " · hash unknown"}{prompt?.mode === "append" ? " · appended by Looper" : !replaced ? " · mode unknown" : ""}
           </span>
           {replaced && (
             <Badge
@@ -382,7 +360,7 @@ function SystemPrompt({ record }: { record: LlmRecord }) {
         </span>
       }
     >
-      {layers && <PromptLayerSummary layers={layers} metadata={metadata} />}
+      <PromptLayerSummary layers={layers ?? {}} metadata={metadata} />
       {sha && (
         <div className="mb-2 flex items-center gap-2">
           <span className="min-w-0 break-all font-mono text-[11px] text-muted-foreground">sha256 {sha}</span>
@@ -392,35 +370,29 @@ function SystemPrompt({ record }: { record: LlmRecord }) {
       <p className="mb-2 text-[11px] text-muted-foreground">
         {replaced
           ? "The prompt Looper used to replace the runtime's default system prompt."
-          : "The part Looper appends to the runtime's system prompt; its built-in system prompt is not included."}
+          : prompt?.mode === "append" ? "The part Looper appends to the runtime's system prompt; its built-in system prompt is not included."
+          : "The stored prompt; whether it replaced or appended to the runtime default is unknown."}
       </p>
       <Pre text={text} />
     </Collapsible>
   );
 }
 
-/**
- * The plugins and skills this run loaded: the catalog items installed for its role, globally or in its project, with
- * their versions. Runs recorded before the catalog list their project's skills apart (`project_skills`).
- */
+/** The normalized evidence of plugins and skills this run loaded. */
 function LoadedLibrary({ record }: { record: LlmRecord }) {
-  const library = record.metadata?.library;
-  const project = record.metadata?.project_skills;
-  if (!library && !project) return null;
-  const items = library?.items ?? [];
-  // A skill is named <plugin>:<name>; runs recorded before the catalog give only its name.
+  const library = record.metadata?.presentation?.library;
+  if (!library || (!library.items.length && !library.sha256 && !library.error && !library.project_error)) return null;
+  const items = library.items;
   const named = (item: (typeof items)[number]) => ({
-    name: item.kind === "skill" && item.plugin ? `${item.plugin}:${item.name}` : item.name,
+    name: `${item.kind === "skill" ? `${item.plugin ?? "unknown plugin"}:` : ""}${item.name ?? "unknown"}`,
     sha256: item.sha256,
   });
   const plugins = items.filter((item) => item.kind === "plugin").map(named);
   const skills = items.filter((item) => item.kind === "skill");
   const servers = items.filter((item) => item.kind === "mcp").map(named);
-  const globalSkills = skills.filter((item) => item.scope !== "project").map(named);
-  const projectSkills = [
-    ...skills.filter((item) => item.scope === "project").map(named),
-    ...(project?.skills ?? []).map((skill) => ({ name: `${project?.plugin ?? "project"}:${skill.name}`, sha256: skill.sha256 })),
-  ];
+  const globalSkills = skills.filter((item) => item.scope === "global" || item.scope === "manager").map(named);
+  const projectSkills = skills.filter((item) => item.scope === "project").map(named);
+  const unknown = items.filter((item) => !item.kind || (item.kind === "skill" && !item.scope)).map(named);
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
   const parts = [
     library &&
@@ -428,21 +400,21 @@ function LoadedLibrary({ record }: { record: LlmRecord }) {
         ? `not loaded: ${library.error}`
         : `${plural(plugins.length, "plugin")}, ${plural(skills.length, "skill")}${
             servers.length ? `, ${plural(servers.length, "MCP server")}` : ""
-          } · ${shortSha(library.sha256)}`),
-    project &&
-      (project.error ? `project skills not loaded: ${project.error}` : plural(project.skills.length, "project skill")),
+          } · ${shortSha(library.sha256) || "hash unknown"}`),
+    library.project_error && `project skills not loaded: ${library.project_error}`,
   ].filter(Boolean);
   const groups = [
     ["Plugins", plugins],
     ["Skills (global)", globalSkills],
     ["Skills (project)", projectSkills],
     ["MCP servers", servers],
+    ["Unknown scope or kind", unknown],
   ] as const;
   return (
     <Collapsible
       icon={<Library className="h-3 w-3" />}
       title={`Plugins & skills · ${parts.join(" · ")}`}
-      tone={library?.error || project?.error ? "error" : undefined}
+      tone={library.error || library.project_error ? "error" : undefined}
     >
       {library?.sha256 && (
         <div className="mb-2 flex items-center gap-2">
@@ -458,7 +430,7 @@ function LoadedLibrary({ record }: { record: LlmRecord }) {
               {group.map((item) => (
                 <li key={item.name} className="flex min-w-0 justify-between gap-2">
                   <span className="truncate" title={item.name}>{item.name}</span>
-                  <span className="shrink-0 text-muted-foreground">{shortSha(item.sha256)}</span>
+                  <span className="shrink-0 text-muted-foreground">{shortSha(item.sha256) || "hash unknown"}</span>
                 </li>
               ))}
             </ul>

@@ -369,9 +369,9 @@ class _PlanStore:
 
     async def save_session(self, agent_id: str, session_id: str | None, totals: Any, *,
                            runtime_type: str | None = None, profile_id: str | None = None,
-                           clean_start: bool = False, **_: object) -> None:
+                           provider_id: str | None = None, clean_start: bool = False, **_: object) -> None:
         self.sessions[agent_id] = {"session_id": session_id, "session_totals": dict(totals),
-                                   "runtime_type": runtime_type, "profile_id": profile_id,
+                                   "runtime_type": runtime_type, "profile_id": profile_id, "provider_id": provider_id,
                                    "clean_start": clean_start,
                                    "selected_profile_id": self.selected_profile_id.get(agent_id)}
 

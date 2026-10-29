@@ -108,10 +108,6 @@ class FailKind(str, Enum):
     TASK_BUDGET = "task_budget"  # it reached its project's task spend cap (task_budget_usd)
 
 
-# The most times a stored config is unwrapped from a JSON string (see _read_config).
-_CONFIG_UNWRAP_LIMIT = 8
-
-
 def _config_json(config: Mapping[str, Any] | None) -> str:
     """``config`` for the JSONB ``config`` column: an object, never a string."""
     if config is None:
@@ -122,23 +118,13 @@ def _config_json(config: Mapping[str, Any] | None) -> str:
 
 
 def _read_config(value: Any) -> dict[str, Any]:
-    """A stored config as an object.
-
-    asyncpg reads JSONB as its JSON text. Rows saved from the task page before
-    configs were checked hold the object as a JSON string, wrapped once more
-    on every save, so strings are unwrapped; anything that is not an object
-    in the end reads as ``{}``.
-    """
-    for _ in range(_CONFIG_UNWRAP_LIMIT):
-        if isinstance(value, dict):
-            return value
-        if not isinstance(value, str):
-            break
+    """Decode asyncpg's JSONB text once and require an object."""
+    if isinstance(value, str):
         try:
             value = json.loads(value)
         except ValueError:
-            break
-    return {}
+            return {}
+    return value if isinstance(value, dict) else {}
 
 
 TITLE_MAX_CHARS = 60

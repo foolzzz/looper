@@ -360,3 +360,50 @@ def test_both_built_in_lark_channels_of_one_app_are_imported(
                                        "WHERE channel_id = 'channel-lark_bot'") == "cli_main"
 
     asyncio.run(_test())
+
+
+def test_partial_channel_schema_is_refused_without_mutation(monkeypatch):
+    import asyncpg
+    from looper.db.config_transfer import read_channels
+
+    async def test(pool):
+        async with pool.acquire() as conn:
+            transaction = conn.transaction()
+            await transaction.start()
+            await conn.execute("ALTER TABLE channel_configs DROP COLUMN manager_id CASCADE")
+            before = await conn.fetch("SELECT * FROM channel_configs")
+            with pytest.raises(asyncpg.UndefinedColumnError):
+                async with conn.transaction():
+                    await read_channels(conn)
+            assert await conn.fetch("SELECT * FROM channel_configs") == before
+            await transaction.rollback()
+
+    run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("kind,config", [
+    ("telegram", {"allowed_user_ids": "123,456"}),
+    ("telegram", {"allowed_user_ids": [123]}),
+    ("lark", {"app_id_env": "OLD"}),
+    ("lark", {"app_secret_env": "OLD"}),
+])
+def test_retired_channel_inputs_fail_api_and_import_without_mutation(monkeypatch, tmp_path, kind, config):
+    from looper.agents.config_transfer import ConfigFileError, run_import
+    from looper.agents.serve import seed_channel_configs
+    from tests.db_support import call_v1
+
+    async def test(pool):
+        await seed_channel_configs(pool)
+        before = await _dump(pool)
+        document = {"format": "looper-config/v4", "channels": [
+            {"channel_id": f"channel-{kind}", "channel_type": kind, "config": config}]}
+        async with pool.acquire() as conn:
+            with pytest.raises(ConfigFileError):
+                await run_import(conn, document, apply=True)
+        async with _serving(tmp_path) as server:
+            status, _ = await call_v1(server, "/api/v1/channel_configs/update", {
+                "channel_id": f"channel-{kind}", "fields": {"config": config}})
+            assert status == 400
+        assert await _dump(pool) == before
+
+    run_db(test, monkeypatch, timeout=30)

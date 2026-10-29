@@ -73,23 +73,17 @@ SENDER_ID_FORMATS["lark_bot"] = SENDER_ID_FORMATS["lark"]
 def sender_ids(channel_type: str, raw: Any) -> tuple[str, ...]:
     """The validated ids of a channel's allowlist field, in order, without blanks or repeats.
 
-    ``raw`` is a list of ids, or one comma-separated string as Telegram
-    settings were stored before; a Telegram id may also be a number. ``None``
-    is an empty list. Raises ``AllowlistError`` naming the first bad id.
+    ``raw`` is a list of strings. ``None`` is an empty list. Raises ``AllowlistError`` naming the first bad id.
     """
     fmt = SENDER_ID_FORMATS[channel_type]
     if raw is None:
         entries: list[Any] = []
-    elif isinstance(raw, str):
-        entries = raw.split(",")
     elif isinstance(raw, list):
         entries = raw
     else:
         raise AllowlistError(f"{fmt.field} must be a list of {fmt.label}s")
     ids: dict[str, None] = {}
     for entry in entries:
-        if channel_type == "telegram" and isinstance(entry, int) and not isinstance(entry, bool):
-            entry = str(entry)
         if not isinstance(entry, str):
             raise AllowlistError(f"{fmt.field}: each entry is a {fmt.label} written as a string")
         text = entry.strip()
@@ -131,7 +125,7 @@ def normalized_config(channel_type: str, config: Any) -> dict[str, Any]:
     fmt = SENDER_ID_FORMATS.get(channel_type)
     if fmt is None or fmt.field not in config:
         return dict(config)
-    return {**config, fmt.field: list(sender_ids(channel_type, config[fmt.field]))}
+    return {**config, fmt.field: (None if config[fmt.field] is None else list(sender_ids(channel_type, config[fmt.field])))}
 
 
 def channel_view(row: Mapping[str, Any]) -> dict[str, Any]:

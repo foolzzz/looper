@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from .runtimes import CLAUDE_CODE, LEGACY_SESSION_PROVIDER_ID, can_resume
+from .runtimes import can_resume
 
 if TYPE_CHECKING:
     from .agent_settings import Launch
@@ -73,13 +73,12 @@ def profile_switch(
     session_provider: str | None,
 ) -> SessionSwitch | None:
     """The switch a turn about to run with ``launch`` makes from the session saved with ``session_runtime``,
-    ``session_provider`` and ``session_profile`` (None runtime: from before Agent Profiles, which Claude Code ran;
-    None provider: from before sessions recorded it, Claude Code's own login); None when there is no saved session
+    ``session_provider`` and ``session_profile``; None when there is no saved session
     or the turn's profile resumes it."""
     provider = launch.profile.provider.id
     if not session_id or can_resume(session_runtime, session_provider, launch.runtime, provider):
         return None
-    old, old_provider = session_runtime or CLAUDE_CODE.type, session_provider or LEGACY_SESSION_PROVIDER_ID
+    old, old_provider = session_runtime, session_provider
     detail = (f"a {launch.runtime.type} process cannot resume a {old} session" if old != launch.runtime.type
               else f"a session of provider {old_provider} cannot go on with provider {provider}")
     return SessionSwitch(

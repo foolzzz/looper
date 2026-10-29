@@ -44,7 +44,7 @@ def snapshot_bridge_source(tmp_path_factory):
 
 
 _DRIVER = r'''
-import asyncio, hashlib, sys
+import asyncio, hashlib, sys, tempfile
 from pathlib import Path
 source, url, schema, refuse = sys.argv[1:]
 sys.path.insert(0, source)
@@ -65,6 +65,15 @@ async def main():
             if refuse != 'True': raise
         else:
             assert refuse != 'True', 'bridge binary accepted schema 4'
+            from looper.agents.serve import seed_role_configs
+            from looper.agents.state_import import import_file_state
+            await seed_role_configs(conn)
+            pool = await asyncpg.create_pool(url, min_size=1, max_size=1, server_settings={'search_path': schema})
+            try:
+                with tempfile.TemporaryDirectory(dir=source) as root:
+                    await import_file_state(Path(root), pool=pool)
+            finally:
+                await pool.close()
     finally:
         await conn.close()
 asyncio.run(asyncio.wait_for(main(), 40))

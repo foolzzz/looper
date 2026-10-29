@@ -30,7 +30,7 @@ export function agentFact(records: LlmRecord[] | undefined, stepId?: string, key
       (best, r) => (!best || (r.created_at.localeCompare(best.created_at) || r.id - best.id) > 0 ? r : best), undefined);
   if (!latest) return undefined;
   const choice = latest.metadata?.model_choice;
-  const parts = [runProfile(latest)?.runtime.name, latest.model || choice?.model, choice?.effort].filter(Boolean);
+  const parts = [runProfile(latest)?.runtime?.name, latest.model || choice?.model, choice?.effort].filter(Boolean);
   return parts.length ? { key, label: "Agent", value: parts.join(" · ") } : undefined;
 }
 

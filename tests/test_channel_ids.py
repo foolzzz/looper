@@ -51,16 +51,18 @@ def test_builtin_channel_id() -> None:
 
 
 def test_the_notice_carries_its_channel_id() -> None:
-    notice = Notice(NotifyChannel.TELEGRAM, CHAT, "t")
+    notice = Notice(NotifyChannel.TELEGRAM, CHAT, "t", channel_id="channel-telegram")
     assert notice.channel_id == "channel-telegram" and notice.payload()["channel_id"] == "channel-telegram"
     added = Notice(NotifyChannel.TELEGRAM, CHAT, "t", channel_id="channel-telegram-2")
     assert Notice.from_payload(added.payload()) == added
 
 
-def test_a_payload_from_before_the_upgrade_is_the_builtin_bot() -> None:
+@pytest.mark.parametrize("channel_id", ["", None, 7])
+def test_a_notice_requires_an_explicit_bot_identity(channel_id: Any) -> None:
     payload = {"channel": "lark", "chat": "oc_x", "kind": "chat", "mention": None, "text": "t"}
-    notice = Notice.from_payload(payload)
-    assert notice is not None and notice.channel_id == "channel-lark"
+    assert Notice.from_payload(payload) is None
+    with pytest.raises(ValueError):
+        Notice(NotifyChannel.LARK, CHAT, "t", channel_id=channel_id)
 
 
 def test_a_notice_of_another_type_is_malformed() -> None:

@@ -69,18 +69,16 @@ def _forms(path: Path) -> tuple[str, ...]:
     return tuple(dict.fromkeys((str(path), os.path.realpath(path))))
 
 
-def _named(lines: str, path: str, *, inside: bool) -> bool:
-    """Whether a command line names ``path`` (or, with ``inside``, a path in it) as one argument."""
-    return re.search(re.escape(path) + (r"(?=$|[/\s'\"])" if inside else r"(?=$|[\s'\"])"), lines) is not None
+def _named(lines: str, path: str) -> bool:
+    """Whether a command line names ``path`` or a path in it as one argument."""
+    return re.search(re.escape(path) + r"(?=$|[/\s'\"])", lines) is not None
 
 
 def _used(directories: list[Path], keep: Iterable[str | Path], command_lines: list[str]) -> set[Path]:
     """The directories in use.
 
     One is in use when a kept path is in it, when a command line names it or
-    a path in it, or names its parent itself (the whole knowledge directory
-    was mounted before it had a directory per set), and when a directory in
-    use links into it.
+    a path in it, and when a directory in use links into it.
     """
     kept = [os.path.realpath(path) for path in keep]
     lines = "\n".join(command_lines)
@@ -88,8 +86,7 @@ def _used(directories: list[Path], keep: Iterable[str | Path], command_lines: li
 
     def in_use(real: str, directory: Path) -> bool:
         return (any(path == real or path.startswith(real + os.sep) for path in kept)
-                or any(_named(lines, form, inside=True) for form in _forms(directory))
-                or any(_named(lines, form, inside=False) for form in _forms(directory.parent)))
+                or any(_named(lines, form) for form in _forms(directory)))
 
     used = {directory for real, directory in by_real.items() if in_use(real, directory)}
     pending = list(used)
@@ -200,7 +197,7 @@ def reclaim_sessions(runtime_root: Path, *, saved: Iterable[tuple[str, str | Non
         for directory in sorted(sessions.iterdir()) if sessions.is_dir() else []:
             if (runtime_type, directory.name) in keep or not directory.is_dir() or directory.is_symlink():
                 continue
-            if any(_named(lines, form, inside=True) for form in _forms(directory)):
+            if any(_named(lines, form) for form in _forms(directory)):
                 continue
             try:
                 _remove(directory)

@@ -139,3 +139,33 @@ def test_the_step_worktrees_check_reads_each_project_s_directory(tmp_path: Path)
         "alarm: main, 0 B checkout, nothing to link at .env",
         "web: the task directory's HEAD is detached (its steps run one at a time)",
         "notes: the task directory is not in a git repository (its steps share the task directory)"]
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+@pytest.mark.parametrize("partial", [False, True], ids=["empty", "unsupported-partial"])
+def test_database_facts_classify_before_reading_required_columns(monkeypatch, partial):
+    import asyncio
+    import asyncpg
+    from tests.db_support import fresh_schema
+
+    async def test():
+        async with fresh_schema() as pool:
+            if partial:
+                await pool.execute("CREATE TABLE tasks (id TEXT)")
+            schema = await pool.fetchval("SELECT current_schema()")
+            connect = asyncpg.connect
+
+            async def isolated_connect(dsn, **kwargs):
+                return await connect(dsn, **kwargs, server_settings={"search_path": schema})
+
+            monkeypatch.setattr(asyncpg, "connect", isolated_connect)
+            before = await pool.fetch("SELECT tablename FROM pg_tables WHERE schemaname = $1", schema)
+            facts = await self_check._database_facts(str(DSN))
+            if partial:
+                assert "upgrade to v2.13.165" in facts.schema_error
+                assert facts.lark_enabled is None
+            else:
+                assert facts.schema_error is None and facts.lark_enabled is False
+            assert await pool.fetch("SELECT tablename FROM pg_tables WHERE schemaname = $1", schema) == before
+
+    asyncio.run(test())

@@ -124,7 +124,7 @@ class CatalogModel:
 
 @dataclass(frozen=True)
 class LegacyProviderSpec:
-    """The v2 provider shape, retained only for the pre-migration persistence and launch path."""
+    """The runtime adapter projection of an explicitly resolved provider and model."""
 
     id: str
     name: str
@@ -149,35 +149,16 @@ class LegacyProviderSpec:
 
 @dataclass(frozen=True)
 class LegacyAgentProfile:
-    """The v2 resolved profile, retained until model references are migrated."""
+    """The resolved runtime projection used by bindings, accounting and warnings."""
 
     id: str
     name: str
     runtime: RuntimeSpec
     provider: LegacyProviderSpec
     model: str
-    effort: str | None = None  # its default effort; a layer's effort wins
+    effort: str | None = None  # its default effort
     agent_teams: bool = False  # Claude Code's agent teams in its runs (runtimes.claude_code)
     custom_prompt: str = ""
-
-    @classmethod
-    def from_row(cls, row: Mapping[str, Any]) -> LegacyAgentProfile:
-        """A profile from ``db.profile_registry.PROFILE_JSON``."""
-        known = {c.value for c in Capability}
-        return cls(
-            id=row["id"], name=row["name"], model=row["model"], effort=row.get("effort"),
-            agent_teams=bool(row.get("agent_teams")),
-            custom_prompt=row.get("custom_prompt", ""),
-            runtime=RuntimeSpec(row["runtime_id"], row["runtime_name"], row["runtime_type"],
-                                row.get("runtime_executable") or "",
-                                frozenset(Capability(c) for c in row.get("runtime_capabilities") or () if c in known)),
-            provider=LegacyProviderSpec(
-                row["provider_id"], row["provider_name"], AuthKind(row["provider_auth"]),
-                frozenset(ApiProtocol(p) for p in row.get("provider_protocols") or ()),
-                row.get("provider_oauth_runtime_type"), row.get("provider_base_url") or "",
-                _catalog(row.get("provider_models")), _env(row.get("provider_env")),
-            ),
-        )
 
     def record(self) -> dict[str, Any]:
         """Its entry in a run's record: what it is made of, by id and name."""
@@ -398,10 +379,7 @@ class AgentProfile:
         return cls(**_entry_values(cls, entry))
 
     @classmethod
-    def from_row(cls, row: Mapping[str, Any]) -> AgentProfile | LegacyAgentProfile:
-        # The v2 database remains readable until the schema migration is applied.
-        if "model_id" not in row:
-            return LegacyAgentProfile.from_row(row)
+    def from_row(cls, row: Mapping[str, Any]) -> AgentProfile:
         known = {c.value for c in Capability}
         runtime = RuntimeSpec(row["runtime_id"], row["runtime_name"], row["runtime_type"],
                               row.get("runtime_executable") or "",

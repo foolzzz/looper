@@ -68,36 +68,6 @@ async def _call(method: str, path: str, body: Any = None, query: dict[str, str] 
     return status, answer["result"] if path.startswith("/api/v1/") and status == 200 else answer
 
 
-def test_a_lark_row_from_before_loses_its_app_keys_and_old_name(monkeypatch: pytest.MonkeyPatch,
-                                                                caplog: pytest.LogCaptureFixture) -> None:
-    from looper.agents.serve import seed_channel_configs
-
-    async def test(pool: Any) -> None:
-        await pool.execute(
-            "INSERT INTO channel_configs (channel_id, channel_type, display_name, enabled, config) VALUES "
-            "('channel-lark', 'lark', 'Lark (飞书) Bot', true, $1::jsonb)",
-            json.dumps({"app_id_env": "LARK_APP_ID", "app_secret_env": "LARK_APP_SECRET",
-                        "allowed_open_ids": [OPEN_ID], "description": "mine"}))
-        with caplog.at_level("INFO"):
-            await seed_channel_configs(pool)
-            await seed_channel_configs(pool)  # once: nothing more to drop
-        row = await pool.fetchrow("SELECT display_name, enabled, config FROM channel_configs "
-                                  "WHERE channel_id = 'channel-lark'")
-        assert (row["display_name"], row["enabled"]) == ("Lark (lark-cli)", True)
-        # It gets the empty profile a new row has, so Settings → Channels shows the field.
-        assert json.loads(row["config"]) == {"profile": "", "allowed_open_ids": [OPEN_ID], "description": "mine"}
-        assert caplog.text.count("dropped app_id_env and app_secret_env") == 1
-
-        # A profile chosen since is kept at the next startup.
-        await pool.execute("UPDATE channel_configs SET config = config || '{\"profile\": \"work\"}'::jsonb "
-                           "WHERE channel_id = 'channel-lark'")
-        await seed_channel_configs(pool)
-        assert json.loads(await pool.fetchval("SELECT config FROM channel_configs WHERE channel_id = 'channel-lark'")
-                          )["profile"] == "work"
-
-    run_db(test, monkeypatch)
-
-
 def test_saving_binds_the_allowlist_and_the_status_names_people(monkeypatch: pytest.MonkeyPatch,
                                                                 lark_cli_stand_in: Path) -> None:
     from looper.agents.serve import seed_channel_configs
@@ -106,7 +76,7 @@ def test_saving_binds_the_allowlist_and_the_status_names_people(monkeypatch: pyt
     async def test(pool: Any) -> None:
         await seed_channel_configs(pool)
         status, view = await _call("PUT", "channel-lark", {
-            "enabled": True, "config": {"profile": "", "allowed_open_ids": [OPEN_ID], "app_id_env": "X"}})
+            "enabled": True, "config": {"profile": "", "allowed_open_ids": [OPEN_ID]}})
         assert status == 200, view
         assert view["config"]["allowlist_app_id"] == "cli_main" and "app_id_env" not in view["config"]
 
