@@ -14,17 +14,6 @@ BRIDGE_ERA_FINGERPRINTS = (
 BASELINE = "post_bridge_baseline"
 
 
-async def final_constraints(conn):
-    """Fresh and upgraded databases have the same final constraints."""
-    await conn.execute("""
-        ALTER TABLE agent_setting_layers DROP COLUMN IF EXISTS effort;
-        ALTER TABLE task_user_gate_posts DROP CONSTRAINT IF EXISTS task_user_gate_posts_channel_chat_external_id_key;
-    """)
-    await conn.executemany("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING",
-                          [(name,) for name in ("layer_effort_on_profiles", "concurrency_per_task",
-                                                "llm_model_registry_v3", BASELINE)])
-
-
 # Only names read or written by upgrade_from_bridge; optional historic columns,
 # constraints, indexes, functions and objects owned by extensions are irrelevant.
 BRIDGE_PRECONDITIONS = (
@@ -45,6 +34,13 @@ async def upgrade_from_bridge(conn):
     from ..agents.agent_settings import DEFAULT_HARNESS_PROMPT, _BUILTIN_HARNESS_BEFORE_RENAME
     from ..agents.channels.allowlist import SENDER_ID_FORMATS, sender_ids
     from .tasks import _CONFIG_UNWRAP_LIMIT, _read_config
+
+    # Both admitted schema-3 releases already have the final registry, layers
+    # and channel storage. Only the earlier release lacks execution snapshots.
+    await conn.execute("""
+        ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS execution_snapshot JSONB;
+        ALTER TABLE task_user_gate_posts DROP CONSTRAINT IF EXISTS task_user_gate_posts_channel_chat_external_id_key;
+    """)
 
     for row in await conn.fetch(
         "SELECT id FROM llm_records WHERE jsonb_typeof(metadata) NOT IN ('object','null')"
