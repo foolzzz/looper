@@ -446,22 +446,6 @@ def test_a_telegram_reply_is_matched_within_its_chat_only(monkeypatch: pytest.Mo
     run_db(test, monkeypatch)
 
 
-def test_the_discussions_from_before_gates_reached_channels_are_not_posted(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def test(pool: Any) -> None:
-        from looper.agents.gate_courier import GateCourier
-        from looper.db import connection
-
-        await _task_with_gate(pool, origin="channel-lark", chat=LARK_USER, kind="user")
-        # As the migration found them: written before the column was there.
-        await pool.execute("UPDATE task_user_gate_messages SET post_state = NULL")
-        await pool.execute("DELETE FROM schema_migrations WHERE name = "
-                           "'task_user_gate_messages_posted_before_channels'")
-        await connection.ensure_schema(pool)
-        poster = _Poster()
-        assert await GateCourier(poster).run_once() == 0 and poster.posts == []
-
-    run_db(test, monkeypatch)
-
 
 def _tool_turn(text: str, *, channel: str = "lark", group: bool = False) -> Any:
     """A Manager turn answering ``text`` in a Lark chat (the user's message om_turn), or the dashboard chat."""

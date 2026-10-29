@@ -12,27 +12,13 @@ import pytest
 
 from looper.agents import managers_api, schedules
 from looper.agents.projects import RequestError
-from looper.db import connection, managers, schedules as db_schedules, tasks
+from looper.db import managers, schedules as db_schedules, tasks
 from tests.db_support import DSN
 from tests.schedule_support import (
     TELEGRAM_CHAT, ScheduleEnv, allow_telegram, run_scheduled, with_sender,
 )
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-
-
-def test_migration_backfills_existing_schedules_and_is_idempotent(monkeypatch: pytest.MonkeyPatch,
-                                                                 tmp_path: Path) -> None:
-    async def test(env: ScheduleEnv) -> None:
-        schedule = await env.schedule()
-        await env.pool.execute("ALTER TABLE schedules DROP COLUMN manager_id CASCADE")
-        await connection.ensure_schema(env.pool)
-        await connection.ensure_schema(env.pool)
-        assert await env.pool.fetchval("SELECT manager_id FROM schedules WHERE id = $1", schedule["schedule_id"]) == "manager"
-        assert await env.pool.fetchval("SELECT count(*) FROM pg_class WHERE relnamespace = current_schema()::regnamespace "
-                                      "AND relname = 'idx_schedules_manager' AND relkind = 'i'") == 1
-
-    run_scheduled(test, monkeypatch, tmp_path)
 
 
 def test_omitting_owner_uses_default_manager(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -11,7 +11,7 @@ import asyncpg
 import pytest
 
 from looper.agents import config_transfer as transfer, managers_api
-from looper.db import agent_sessions, connection, managers
+from looper.db import agent_sessions, managers
 from tests.db_support import DSN, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -24,29 +24,6 @@ async def _create(**fields: Any) -> dict[str, Any]:
 async def _import(pool: Any, entry: dict[str, Any], *, apply: bool = True) -> Any:
     async with pool.acquire() as conn:
         return await transfer.run_import(conn, {"format": transfer.V4_FORMAT, "managers": [entry]}, apply=apply)
-
-
-def test_idle_migration_defaults_and_named_constraint_are_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def test(pool: Any) -> None:
-        await _create()
-        await pool.execute("ALTER TABLE managers DROP COLUMN idle_timeout_seconds CASCADE")
-        await pool.execute("ALTER TABLE managers ADD CONSTRAINT managers_default_check CHECK (id <> 'manager' OR "
-                           "(system_prompt IS NULL AND profile_id IS NULL AND tools = 'all' AND task_scope = 'all' "
-                           "AND enabled AND deleted_at IS NULL))")
-        await connection.ensure_schema(pool)
-        assert dict(await pool.fetchrow("SELECT idle_timeout_seconds FROM managers WHERE id = 'manager'")) == {
-            "idle_timeout_seconds": 0}
-        assert (await managers.get_manager("manager-idle"))["idle_timeout_seconds"] == 1800
-        constraint = await pool.fetchrow("SELECT oid, pg_get_constraintdef(oid) AS definition FROM pg_constraint "
-                                        "WHERE conname = 'managers_default_check' AND conrelid = 'managers'::regclass")
-        assert "idle_timeout_seconds" in constraint["definition"]
-        await pool.execute("UPDATE managers SET idle_timeout_seconds = 60 WHERE id = 'manager-idle'")
-        await connection.ensure_schema(pool)
-        assert await pool.fetchval("SELECT oid FROM pg_constraint WHERE conname = 'managers_default_check' "
-                                  "AND conrelid = 'managers'::regclass") == constraint["oid"]
-        assert (await managers.get_manager("manager-idle"))["idle_timeout_seconds"] == 60
-
-    run_db(test, monkeypatch, timeout=20)
 
 
 @pytest.mark.parametrize("timeout", [0, 60, 86400])

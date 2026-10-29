@@ -237,37 +237,6 @@ def test_a_message_a_turn_failed_on_waits_for_the_user_and_reminders_come_again(
     run_db(test, monkeypatch)
 
 
-def test_gate_tables_from_an_earlier_schema_gain_the_failure_columns_and_the_late_kind(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def test(pool: Any) -> None:
-        import asyncpg
-
-        from looper.db import connection
-
-        # As an earlier build of this schema left them.
-        await pool.execute(
-            "ALTER TABLE task_user_gates DROP COLUMN failures, DROP COLUMN failed_through, DROP COLUMN failed_at; "
-            "ALTER TABLE task_user_gate_messages DROP CONSTRAINT task_user_gate_messages_kind_check; "
-            "ALTER TABLE task_user_gate_messages ADD CONSTRAINT task_user_gate_messages_kind_check CHECK (kind IN "
-            "('message', 'end', 'reply', 'opened', 'updated', 'reminder', 'cancelled', 'closed', 'resumed', 'error')); "
-            "DELETE FROM schema_migrations WHERE name = 'task_user_gate_messages_kind_late'")
-        project = await _project(pool)
-        await _task(pool, "task-a", "waiting_user", project)
-        with pytest.raises(asyncpg.UndefinedColumnError):
-            await _plan_with_gate(pool, state="open")
-
-        await connection.ensure_schema(pool)
-        await connection.ensure_schema(pool)  # once is enough; again changes nothing
-        await _plan_with_gate(pool, state="open", failures=1, failed_through=7)
-        await pool.execute("INSERT INTO task_user_gate_messages (step_id, task_id, role, kind) "
-                           "VALUES ('step-g1', 'task-a', 'looper', 'late')")
-        row = await pool.fetchrow("SELECT failures, failed_through FROM task_user_gates")
-        assert (row["failures"], row["failed_through"]) == (1, 7)
-
-    run_db(test, monkeypatch)
-
-
 def test_reminders_come_at_the_projects_interval_while_the_gate_waits_for_the_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

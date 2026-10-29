@@ -218,19 +218,13 @@ def test_importing_from_this_machine_reads_its_user_mcp_servers(
     run_db(_test, monkeypatch)
 
 
-def test_a_catalog_from_before_mcp_servers_accepts_them(monkeypatch: pytest.MonkeyPatch) -> None:
-    before = """
-    CREATE TABLE library_items (
-        id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('plugin', 'skill')), name TEXT NOT NULL,
-        source TEXT NOT NULL DEFAULT '', version TEXT NOT NULL DEFAULT '', sha256 TEXT NOT NULL,
-        size_bytes BIGINT NOT NULL, file_count INTEGER NOT NULL,
-        imported_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
-    """
+def test_current_catalog_accepts_mcp_and_refuses_unknown_kinds(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncpg
 
     async def _test(pool: Any) -> None:
         assert (await _server("marker"))["kind"] == "mcp"
-        with pytest.raises(Exception, match="library_items_kind_check"):
+        with pytest.raises(asyncpg.CheckViolationError, match="library_items_kind_check"):
             await pool.execute("INSERT INTO library_items (id, kind, name, sha256, size_bytes, file_count) "
                                "VALUES ('x', 'agent', 'x', 'x', 0, 0)")
 
-    run_db(_test, monkeypatch, before=before)
+    run_db(_test, monkeypatch)

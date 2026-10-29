@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.201] - 2026-10-28
+
+### Changed
+
+- **Looper upgrades a database only from a completed v2.13.165 or later schema-3 release.** Startup classifies the database under the schema lock as empty, current (schema 4 with the `post_bridge_baseline` marker), or a schema-3 bridge database recognised by one of two recorded `schema.sql` fingerprints (v2.13.165–192) and checked for the tables and columns the conversion reads. Anything else is refused with "unsupported Looper database; upgrade to v2.13.165 or a later 2.13 release first". A bridge database is converted once to schema 4 (`looper/db/bridge_upgrade.py`) after a verified backup; the historical migrations and the `UNIQUE (channel, chat, external_id)` constraint on gate posts were removed. ([#808](https://github.com/foolzzz/looper/pull/808))
+
 ## [2.13.200] - 2026-10-28
 
 ### Fixed

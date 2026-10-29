@@ -153,20 +153,3 @@ def test_only_the_newest_refused_senders_are_kept(monkeypatch: pytest.MonkeyPatc
         assert len(kept) == REJECTED_KEPT and kept[0]["sender_id"] == f"ou_sender{REJECTED_KEPT + 4:06d}"
 
     run_db(test, monkeypatch)
-
-
-def test_a_table_from_before_loses_what_refused_senders_wrote(monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.db import connection
-    from looper.db.channel_configs import rejected_senders
-
-    async def test(pool: Any) -> None:
-        await pool.execute("ALTER TABLE channel_rejected_senders ADD COLUMN snippet TEXT NOT NULL DEFAULT ''")
-        await pool.execute("INSERT INTO channel_rejected_senders (channel_id, sender_id, snippet) "
-                           "VALUES ('channel-lark', $1, 'what they wrote')", OTHER)
-        await connection.ensure_schema(pool)
-        assert await pool.fetchval("SELECT count(*) FROM information_schema.columns WHERE table_schema = "
-                                   "current_schema() AND table_name = 'channel_rejected_senders' "
-                                   "AND column_name = 'snippet'") == 0
-        assert [r["sender_id"] for r in await rejected_senders("channel-lark")] == [OTHER]
-
-    run_db(test, monkeypatch)

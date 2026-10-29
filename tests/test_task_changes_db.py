@@ -84,30 +84,6 @@ def test_a_title_is_set_in_any_status_and_a_delivered_note_is_not_pending(monkey
     run_db(test, monkeypatch)
 
 
-def test_user_instructions_from_before_become_delivered_supplements(monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.db import connection, journal, task_changes
-
-    async def test(pool: Any) -> None:
-        await _task(pool)
-        await pool.execute("""
-            ALTER TABLE task_journal DROP CONSTRAINT task_journal_kind_check;
-            ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
-                'step_accepted', 'step_failed', 'step_retry', 'decision', 'user_instruction', 'session_switch',
-                'handoff', 'progress'));
-            INSERT INTO task_journal (task_id, step_id, kind, summary) VALUES ('task-a', '', 'user_instruction', 'old');
-            UPDATE task_journal SET via = '', delivered_at = NULL;
-            DELETE FROM schema_migrations WHERE name = 'task_journal_supplements';
-        """)
-        await connection.ensure_schema(pool)
-        await connection.ensure_schema(pool)  # once only
-        (row,) = await journal.list_entries("task-a", pool=pool)
-        assert (row["kind"], row["summary"], row["via"], row["delivered_at"]) == (
-            "supplement", "old", "chat", row["created_at"])
-        assert (await task_changes.pending("task-a", pool=pool)).empty
-
-    run_db(test, monkeypatch)
-
-
 @pytest.mark.parametrize("status", ["planning", "verifying", "stopping", "pending"])
 def test_the_requirement_of_a_task_in_any_running_status_can_be_edited(monkeypatch: pytest.MonkeyPatch,
                                                                        tmp_path: Any, status: str) -> None:

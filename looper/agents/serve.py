@@ -670,7 +670,7 @@ async def _back_up_before_schema_change(pool: Any, ops: OpsConfig, runtime_root:
     started = time.monotonic()
     if registry_upgrade:
         logger.info("registry migration version=%s target_version=%s phase=backup rollback=not_needed",
-                    version or 2, REGISTRY_SCHEMA_VERSION)
+                    version, REGISTRY_SCHEMA_VERSION)
     else:
         logger.info("the database schema is about to change; backing up %s with %s", shown, dumper.detail)
     try:
@@ -679,20 +679,19 @@ async def _back_up_before_schema_change(pool: Any, ops: OpsConfig, runtime_root:
     except db_backup.BackupFailed as exc:
         if registry_upgrade:
             logger.error("registry migration version=%s phase=backup_failed elapsed_seconds=%.3f rollback=not_needed",
-                         version or 2, time.monotonic() - started)
-            raise StartupCheckFailed("registry schema backup verification failed; the schema was not changed") from None
+                         version, time.monotonic() - started)
+            raise StartupCheckFailed(f"registry schema backup verification failed: {exc}; the schema was not changed") from None
         raise StartupCheckFailed(self_check.format_checks([self_check.Check(
             "pg_dump", "pg_dump backup", self_check.FAIL, f"{exc}; the schema was not changed",
             "fix the problem above and start again, or migrate once without a backup: looper serve --skip-backup",
         )])) from None
     if registry_upgrade:
         logger.info("registry migration version=%s phase=backup_verified elapsed_seconds=%.3f bytes=%d rollback=not_needed",
-                    version or 2, time.monotonic() - started, path.stat().st_size)
-    else:
-        logger.info("backed up the database to %s (%d bytes, %s); restore only into a new isolated database, "
-                    "preserving the migrated database and new writes: "
-                    "pg_restore --no-owner --dbname '<isolated-database-url>' '%s'",
-                    path, path.stat().st_size, checked, path)
+                    version, time.monotonic() - started, path.stat().st_size)
+    logger.info("backed up the database to %s (%d bytes, %s); restore only into a new isolated database, "
+                "preserving the migrated database and new writes: "
+                "pg_restore --no-owner --dbname '<isolated-database-url>' '%s'",
+                path, path.stat().st_size, checked, path)
 
 
 @dataclass(frozen=True)

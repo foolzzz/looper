@@ -401,43 +401,6 @@ def test_re_detect_probes_a_runtime_and_adds_a_type_found_on_path_since(
     run_db(_test, monkeypatch)
 
 
-# Runtimes registered by hand before runtimes were built in: "claude-beta" runs a profile, "claude-old" none.
-_CUSTOM_RUNTIMES = """
-INSERT INTO agent_runtimes (id, name, type, executable, capabilities)
-VALUES ('rt-custom-beta', 'claude-beta', 'claude-code', '/opt/claude-beta/bin/claude', ARRAY['run']),
-       ('rt-custom-old', 'claude-old', 'claude-code', 'claude-old', ARRAY['run']);
-INSERT INTO agent_profiles (id, name, runtime_id, model_id)
-SELECT 'agent-beta', 'beta/haiku', 'rt-custom-beta', id FROM llm_models
-WHERE provider_id = 'prov-claude-subscription' AND name = 'haiku' AND protocol = 'anthropic-messages';
-"""
-
-
-def test_the_upgrade_drops_custom_runtimes_no_profile_uses_once_and_keeps_the_others(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from looper.db.connection import ensure_schema
-
-    async def _test(pool: Any) -> None:
-        # A database from before: the custom rows, and the migration not run yet.
-        await _model_id("prov-claude-subscription", "haiku")
-        await pool.execute(_CUSTOM_RUNTIMES)
-        await pool.execute("DELETE FROM schema_migrations WHERE name = 'agent_runtimes_unused_custom_removed'")
-        await ensure_schema(pool)
-
-        runtimes = {r["name"]: r for r in (await _registry())["runtimes"]}
-        assert set(runtimes) == {"claude-code", "claude-beta"}
-        assert (runtimes["claude-beta"]["builtin"], runtimes["claude-beta"]["executable"],
-                runtimes["claude-beta"]["profile_count"]) == (False, "/opt/claude-beta/bin/claude", 1)
-        assert _by_name((await _registry())["profiles"], "beta/haiku")["runtime_id"] == "rt-custom-beta"
-
-        # Once: a later run of the schema leaves the rows as they are.
-        await pool.execute("INSERT INTO agent_runtimes (id, name, type) VALUES ('rt-custom-new', 'x', 'claude-code')")
-        await ensure_schema(pool)
-        assert {r["name"] for r in (await _registry())["runtimes"]} == {"claude-code", "claude-beta", "x"}
-
-    run_db(_test, monkeypatch)
-
-
 # --- Providers: secrets stored apart and masked ---
 
 
@@ -1082,45 +1045,6 @@ def test_a_change_that_would_break_a_profile_is_refused_and_one_in_use_is_kept(
     run_db(_test, monkeypatch)
 
 
-# --- LLM profiles are gone ---
-
-# What a database had before Agent Profiles: LLM profiles and the two agent config columns that pointed at them.
-_BEFORE_AGENTS = """
-CREATE TABLE llm_profiles (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL UNIQUE, provider_kind TEXT NOT NULL,
-                           model TEXT NOT NULL DEFAULT '');
-CREATE TABLE agent_configs (agent_id TEXT PRIMARY KEY, display_name TEXT NOT NULL DEFAULT '',
-                            role TEXT NOT NULL DEFAULT '', runtime TEXT NOT NULL DEFAULT 'claude-code',
-                            llm_profile_id BIGINT REFERENCES llm_profiles(id), enabled BOOLEAN NOT NULL DEFAULT true,
-                            system_prompt TEXT NOT NULL DEFAULT '', max_turns INTEGER NOT NULL DEFAULT 0,
-                            timeout_seconds INTEGER NOT NULL DEFAULT 1200, max_concurrency INTEGER NOT NULL DEFAULT 1,
-                            extra_args JSONB, metadata JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                            updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
-INSERT INTO llm_profiles (name, provider_kind, model) VALUES ('anthropic-default', 'anthropic', 'claude-sonnet-4');
-INSERT INTO agent_configs (agent_id, role, runtime, llm_profile_id, system_prompt)
-VALUES ('worker', 'worker', 'codex-cli', 1, 'Work.');
-"""
-
-
-def test_the_upgrade_removes_llm_profiles_and_keeps_the_role_configs(monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.db.connection import ensure_schema
-
-    async def _test(pool: Any) -> None:
-        await ensure_schema(pool)  # once only
-        assert await pool.fetchval("SELECT to_regclass('llm_profiles')") is None
-        columns = {r["column_name"] for r in await pool.fetch(
-            "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() "
-            "AND table_name = 'role_configs'")}
-        assert not columns & {"runtime", "llm_profile_id"}
-        assert await pool.fetchval("SELECT system_prompt FROM role_configs WHERE role = 'worker'") == "Work."
-        assert await pool.fetchval("SELECT 1 FROM schema_migrations WHERE name = 'llm_profiles_removed'")
-
-        assert (await _call("GET", "/api/llm-profiles"))[0] == 404
-        status, payload = await _call("PUT", "/api/roles/worker", {"runtime": "codex-cli"})
-        assert status == 400 and "runtime was removed" in payload["error"]
-
-    run_db(_test, monkeypatch, before=_BEFORE_AGENTS)
-
-
 # --- Selecting a profile: the layers and a task's overrides, checked for the roles they reach ---
 
 
@@ -1328,65 +1252,6 @@ def test_a_profile_that_can_no_longer_run_fails_the_run_instead_of_another_profi
         assert "runs on a 'stand-in' runtime, which this version cannot run" in result["outcome"]["error"]
 
     run_db(_test, monkeypatch)
-
-
-# --- The upgrade: each layer's model becomes an Agent Profile ---
-
-_BEFORE_LAYER_PROFILES = """
-CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());
-INSERT INTO schema_migrations (name) VALUES ('agent_setting_layers');
-CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
-                       work_dir TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                       updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
-CREATE TABLE agent_setting_layers (
-    scope TEXT NOT NULL, role TEXT, project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
-    harness_prompt TEXT, model TEXT, effort TEXT, env JSONB NOT NULL DEFAULT '[]'::jsonb,
-    run_budget_usd DOUBLE PRECISION, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
-CREATE UNIQUE INDEX idx_agent_setting_layers_place
-    ON agent_setting_layers (scope, COALESCE(role, ''), COALESCE(project_id, ''));
-INSERT INTO projects (id, name) VALUES ('proj-a', 'calc');
-INSERT INTO agent_setting_layers (scope, role, project_id, model, effort) VALUES
-    ('system', NULL, NULL, 'sonnet', 'high'),
-    ('role', 'manager', NULL, 'opus', NULL),
-    ('role', 'planner', NULL, ' haiku ', NULL),
-    ('role', 'worker', NULL, 'sonnet', NULL),
-    ('role', 'reviewer', NULL, '--resume', NULL),
-    ('project', NULL, 'proj-a', 'opus[1m]', NULL);
-"""
-
-
-def test_the_upgrade_turns_each_layer_model_into_a_profile(monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.db.connection import ensure_schema
-
-    async def _layers(pool: Any) -> list[tuple[Any, ...]]:
-        return [tuple(r) for r in await pool.fetch(
-            "SELECT l.scope, l.role, l.project_id, a.name, m.name, a.runtime_id, m.provider_id, a.effort "
-            "FROM agent_setting_layers l LEFT JOIN agent_profiles a ON a.id = l.profile_id "
-            "LEFT JOIN llm_models m ON m.id = a.model_id ORDER BY 1, 2, 3")]
-
-    async def _test(pool: Any) -> None:
-        columns = {r["column_name"] for r in await pool.fetch(
-            "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() "
-            "AND table_name = 'agent_setting_layers'")}
-        assert "model" not in columns and "profile_id" in columns
-        builtin = ("rt-claude-code", "prov-claude-subscription")
-        # Each model's profile, then (the effort's upgrade) the one of each with the system's effort, which every
-        # role ran with.
-        assert await _layers(pool) == [
-            ("project", None, "proj-a", "claude-code/opus[1m] · high", "opus[1m]", *builtin, "high"),
-            ("role", "manager", None, "claude-code/opus · high", "opus", *builtin, "high"),
-            ("role", "planner", None, "claude-code/haiku · high", "haiku", *builtin, "high"),
-            ("role", "worker", None, "claude-code/sonnet · high", "sonnet", *builtin, "high"),
-            ("system", None, None, "claude-code/sonnet · high", "sonnet", *builtin, "high"),
-        ]  # the reviewer's model no longer validated (it was ignored): its layer held nothing else
-        assert await pool.fetchval("SELECT count(*) FROM agent_profiles") == 8  # the built-in opus among them
-        before = await _layers(pool), [tuple(r) for r in await pool.fetch("SELECT * FROM agent_profiles ORDER BY id")]
-        await ensure_schema(pool)
-        assert (await _layers(pool),
-                [tuple(r) for r in await pool.fetch("SELECT * FROM agent_profiles ORDER BY id")]) \
-            == before
-
-    run_db(_test, monkeypatch, before=_BEFORE_LAYER_PROFILES)
 
 
 # --- A provider's model catalog and concurrency: stored and checked ---

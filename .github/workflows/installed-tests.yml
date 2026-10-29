@@ -35,6 +35,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - name: Fetch the required database bridge source
+        run: |
+          git fetch --no-tags origin refs/tags/v2.13.165:refs/tags/v2.13.165
+          test "$(git rev-parse v2.13.165^{commit})" = f2935092d44c4707d92d4b60c32a334a934d4db9
+          git cat-file -e f2935092d44c4707d92d4b60c32a334a934d4db9:looper/db/schema.sql
+
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
