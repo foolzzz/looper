@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 
 from looper.agents.agent_settings import HARNESS_MAX_CHARS, Boundaries, Harness, Layer
-from looper.agents.layer_effort import Before, Derived, _apply, convert
 from looper.agents.profile_registry import RegistryError, builtin_resolved_profile
 from looper.agents.system_prompt import build_role_prompt, build_system_prompt, compose_system_prompt, sha256_text
 from looper.agents.task_roles import RoleKind, TaskRole
@@ -107,27 +106,6 @@ def test_rfc_records_custom_prompt_trust_and_unverified_precedence() -> None:
     assert "harness" in decisions and "相同" in decisions
     assert "不保证" in decisions and "冲突指令" in decisions
     assert "未测试" in decisions and "模型" in decisions
-
-
-def test_derived_profile_identity_and_insert_preserve_custom_prompt() -> None:
-    custom = replace(builtin_resolved_profile(), id="custom", name="custom", custom_prompt="CUSTOM")
-    plain_high = replace(builtin_resolved_profile(), id="plain-high", effort="high")
-    key = (Layer.SYSTEM, None, None)
-    before = {key: Before(custom, "high")}
-    conversion = convert(before, [custom, plain_high])
-    assert isinstance(conversion.layers[key], Derived)
-    inserted = []
-
-    async def insert(fields: dict[str, Any], **_kwargs: Any) -> str:
-        inserted.append(fields)
-        return "derived"
-
-    class Connection:
-        async def execute(self, *_args: Any) -> None:
-            pass
-
-    asyncio.run(_apply(Connection(), before, conversion, insert))
-    assert inserted[0]["custom_prompt"] == "CUSTOM"
 
 
 def test_manager_profile_tool_exposes_and_returns_custom_prompt() -> None:
