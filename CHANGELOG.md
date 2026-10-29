@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.204] - 2026-10-28
+
+### Changed
+
+- **The unused registry preflight and converter module is removed.** `looper/agents/registry_migration.py`, `tests/test_registry_migration.py` and one converter-only test in `tests/test_custom_prompt.py` are deleted; nothing imports the module. `layer_effort.py` and its tests remain. No runtime behavior changes. ([#855](https://github.com/foolzzz/looper/pull/855))
+
 ## [2.13.203] - 2026-10-28
 
 ### Changed
