@@ -282,6 +282,7 @@ def test_pi_runner_manager_stop_and_restart(isolated_pi, tmp_path):
     assert runner_processes(tmp_path) and pid not in runner_processes(tmp_path)
     for record in records(url):
         assert len({event["trace_id"] for event in saved_events(url, record)}) == 1
+        assert record["model"] == "test-model"
 
 
 @pytest.mark.parametrize("usage,counts,cost", [
@@ -489,6 +490,7 @@ def test_pi_runner_task_with_every_role(isolated_pi, tmp_path):
     planner_requests = 0
     for row in runs:
         assert row["status"] == "completed", (row["agent_id"], row["error"])
+        assert row["model"] == "test-model"
         descriptor = Descriptor.parse(json.loads(row["metadata"])["command"])
         assert descriptor.kind == "pi"
         role = ("planner" if row["agent_id"].startswith("planner") else

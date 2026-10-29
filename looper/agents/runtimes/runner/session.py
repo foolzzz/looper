@@ -282,6 +282,8 @@ class RunnerSession:
             self._turn = RunnerTurn(session_id=sid, trace_id=trace, role=descriptor.role, tools=tools,
                 prior_totals=self._totals, prior_model_usage=self._models, cancel=capped, **budget)
             async def emit(event):
+                if event.get("type") == "system" and event.get("subtype") == "init":
+                    event["model"] = descriptor.model  # The recorder's record model, as on the CLI paths.
                 # Internal recorder events need the ordinary JSON modelUsage shape.
                 if event.get("type") == "result":
                     event["modelUsage"] = {model: {"inputTokens": u.input_tokens, "outputTokens": u.output_tokens,

@@ -121,6 +121,9 @@ def test_multiturn_charge_trace_and_cleared_context(tmp_path):
                 assert session.totals.cost_usd == index * 0.01
                 assert session._tools is session._budget is None
             assert len(set(traces)) == 2 and all(e["trace_id"] in traces for e in events)
+            # The recorder takes a run's model from its init; a resident session's every turn is a record.
+            inits = [e for e in events if e["type"] == "system" and e.get("subtype") == "init"]
+            assert [(e["trace_id"], e.get("model")) for e in inits] == [(trace, "model") for trace in traces]
             failed = await session.run_turn("missing context", events.append)
             assert not failed.prompt_sent and "budget context" in failed.result_event["errors"][0]
             cancel = TurnCancel()

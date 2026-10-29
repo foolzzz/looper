@@ -287,6 +287,7 @@ class RunnerBridge:
         entry.state, entry.trace_id, entry.turn, entry.on_event = State.RUNNING, trace_id, turn, on_event
         entry.traces.add(trace_id)
         entry.prompt_sent = entry.session_started = entry.accepted = entry.stopped = entry.settled_received = False
+        entry.initialized = False  # Every trace is a record; each opens with its own init.
         entry.summary = entry.result_event = None
         entry.requests_ended = 0
         entry.authorized.clear()
