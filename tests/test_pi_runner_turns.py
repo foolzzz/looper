@@ -151,7 +151,8 @@ def test_send_headers_correlates_real_http_attempts(tmp_path, monkeypatch, sent_
 
 @pytest.mark.parametrize("protocol,usage_location", [
     ("openai-responses", "separate"), ("openai-chat", "separate"), ("openai-chat", "terminal"),
-], ids=["responses", "chat-separate-usage", "chat-terminal-usage"])
+    ("openai-chat", "choice"),
+], ids=["responses", "chat-separate-usage", "chat-terminal-usage", "chat-choice-usage"])
 @pytest.mark.parametrize("ending", ["disconnect", "missing-sentinel"])
 def test_final_usage_requires_normal_protocol_end(tmp_path, monkeypatch, protocol, usage_location, ending):
     from looper.agents.runtimes.runner.turn import RunnerTurn
@@ -169,6 +170,8 @@ def test_final_usage_requires_normal_protocol_end(tmp_path, monkeypatch, protoco
             chat_chunk([], usage=CHAT_USAGE)]
         if protocol == "openai-chat" and usage_location == "terminal":
             events = [chat_chunk(events[0]["choices"], usage=CHAT_USAGE)]
+        elif protocol == "openai-chat" and usage_location == "choice":
+            events = [chat_chunk([{**events[0]["choices"][0], "usage": CHAT_USAGE}])]
         # Responses ends with its completed event; Chat requires the trailing [DONE].
         expected_complete = ending == "missing-sentinel" and protocol == "openai-responses"
         attempts = 1 if ending == "missing-sentinel" else 4
@@ -478,7 +481,7 @@ def test_nonterminal_chat_usage_leaves_sent_requests_incomplete(tmp_path, monkey
 @pytest.mark.parametrize("usage_location", ["separate", "terminal"])
 @pytest.mark.parametrize("usage,location,counts", [
     (CHAT_USAGE, "chunk", (1000, 200, 300, 0)),
-    (CHAT_USAGE, "choice", None),
+    (CHAT_USAGE, "choice", (1000, 200, 300, 0)),
     ({**CHAT_USAGE, "prompt_tokens_details": {"cached_tokens": 300, "cache_write_tokens": 100}}, "chunk", (900, 200, 300, 100)),
     ({"prompt_tokens": 1300, "completion_tokens": 200, "prompt_cache_hit_tokens": 300}, "chunk", (1000, 200, 300, 0)),
     ({"prompt_tokens": 0, "completion_tokens": 0}, "chunk", (0, 0, 0, 0)),
