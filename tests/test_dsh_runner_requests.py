@@ -1,0 +1,233 @@
+"""Real DSH subprocess regressions for provider accounting and turn settlement."""
+import asyncio
+import json
+import subprocess
+import time
+
+import pytest
+
+import dsh_installed_stand_in as peer
+from dsh_runner_support import guard_env, raw_runner, require_dsh
+from looper.agents.runtimes.runner import dsh_command
+from test_dsh_runner import harness
+from test_dsh_runner_turns import Client, assert_accounted, params_for, run
+
+pytestmark = pytest.mark.installed
+
+
+def rewrite_events(monkeypatch, transform):
+    original = peer.messages_wire
+
+    def wire(reply, index):
+        events = [json.loads(frame.split("data: ", 1)[1])
+                  for frame in original(reply, index).strip().split("\n\n")]
+        return "".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
+                       for event in transform(events))
+
+    monkeypatch.setattr(peer, "messages_wire", wire)
+
+
+@pytest.mark.parametrize("counts", [{}, {"input_tokens": 0}, {"output_tokens": 0},
+    {"input_tokens": 0, "output_tokens": 0}, {"input_tokens": 0, "interim_output_tokens": 2}])
+def test_terminal_usage_requires_provider_counts(tmp_path, monkeypatch, counts):
+    def transform(events):
+        events[0]["message"]["usage"] = {"output_tokens": 0,
+            **{k: v for k, v in counts.items() if k == "input_tokens"}}
+        events[-2]["usage"] = {k: v for k, v in counts.items() if k == "output_tokens"}
+        events[-1]["usage"] = {}
+        if "interim_output_tokens" in counts:
+            events.insert(-2, {"type": "message_delta", "delta": {},
+                              "usage": {"output_tokens": counts["interim_output_tokens"]}})
+        return events
+
+    rewrite_events(monkeypatch, transform)
+
+    async def exercise():
+        _, installed = require_dsh()
+        with peer.MessagesServer([["Provider response"]]) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
+                client = Client(send, receive)
+                await client.start()
+                sid = (await client.call("session/new", params_for(tmp_path, server)))["session_id"]
+                await client.prompt(sid)
+                result = await client.settled(sid)
+                end, = assert_accounted(client, sid)
+                complete = {"input_tokens", "output_tokens"} <= counts.keys()
+                assert result["outcome"] == "completed" and result["final_text"] == "Provider response"
+                assert end["complete"] is complete and result["usage_complete"] is complete
+                assert end["input_uncached"] == 0
+                assert end["output"] == counts.get("output_tokens", counts.get("interim_output_tokens", 0))
+                assert len(server.requests) == 1
+
+    run(exercise())
+
+
+@pytest.mark.parametrize("error_type,kind", [("authentication_error", "PROVIDER_AUTH"),
+    ("rate_limit_error", "PROVIDER_UNAVAILABLE"), ("api_error", "PROVIDER_UNAVAILABLE")])
+def test_in_band_provider_errors_have_protocol_types(tmp_path, monkeypatch, error_type, kind):
+    rewrite_events(monkeypatch, lambda events: events[:1] + [{"type": "error", "error": {
+        "type": error_type, "message": "Synthetic stream failure"}}])
+
+    async def exercise():
+        _, installed = require_dsh()
+        with peer.MessagesServer([["unused"]]) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
+                client = Client(send, receive)
+                await client.start()
+                sid = (await client.call("session/new", params_for(tmp_path, server)))["session_id"]
+                await client.prompt(sid)
+                result = await client.settled(sid)
+                end, = assert_accounted(client, sid)
+                assert result["outcome"] == "failed" and result["error"]["kind"] == kind
+                assert end["status"] == "error" and not end["complete"]
+                assert len(server.requests) == 1
+
+    run(exercise())
+
+
+def test_settled_assistant_is_already_on_disk_and_survives_kill(tmp_path, monkeypatch):
+    # Keep the writer's batch timer and the SDK's incidental step checkpoints
+    # from hiding a missing runner barrier. The real writer still buffers,
+    # compresses and fsyncs through sessionPersistence.flush().
+    harness(tmp_path, monkeypatch, """rpc.method('test/hold-batching', () => {
+  const timer = globalThis.setTimeout;
+  globalThis.setTimeout = (callback, ms, ...args) => timer(callback, ms === 200 ? 30000 : ms, ...args);
+  sdk.ctx.sessions.flush = async () => true;
+  return {};
+});""")
+
+    async def exercise():
+        node, installed = require_dsh()
+        state = dsh_command.state_root(tmp_path / "durable-runtime")
+        answer = "Assistant answer must survive immediate termination"
+        with peer.MessagesServer([[answer], ["Resumed answer"]]) as server:
+            env = guard_env(tmp_path, server.port)
+            async with raw_runner(tmp_path, installed, env=env, state_root=state) as (process, send, receive):
+                client = Client(send, receive)
+                await client.start()
+                params = params_for(tmp_path, server)
+                sid = (await client.call("session/new", params))["session_id"]
+                await client.call("test/hold-batching")
+                await client.prompt(sid)
+                assert (await client.settled(sid))["final_text"] == answer
+                # Read immediately, before any close, subsequent RPC or timer wait.
+                snapshots = [path.read_bytes() for path in state.rglob("*.jsonl.zstd")]
+                process.kill()
+                assert await asyncio.wait_for(process.wait(), 5) < 0
+                assert snapshots, "positive control: a session log was created"
+                # Each durable append is its own Zstd frame; Node decodes one
+                # frame per call, so inspect the whole captured generation.
+                decode = """let data = require('node:fs').readFileSync(0);
+while (data.length) {
+  const {buffer, engine} = require('node:zlib').zstdDecompressSync(data, {info: true});
+  process.stdout.write(buffer);
+  data = data.subarray(engine.bytesWritten);
+}"""
+                logs = [subprocess.run([node, "-e", decode],
+                    input=data, capture_output=True, check=True, timeout=5).stdout.decode() for data in snapshots]
+                assert any('"assistant/message"' in log and answer in log for log in logs)
+            async with raw_runner(tmp_path, installed, env=env, state_root=state) as (_, send, receive):
+                client = Client(send, receive)
+                await client.start()
+                await client.call("session/load", {**params, "session_id": sid})
+                await client.prompt(sid, "resumed", "Continue")
+                assert (await client.settled(sid, "resumed"))["outcome"] == "completed"
+                assert len(server.requests) == 2
+                assert answer in json.dumps(server.requests[-1]["body"])
+
+    run(exercise())
+
+
+@pytest.mark.parametrize("control", ["cancel", "close"])
+def test_cancel_deadline_includes_pending_authorization(tmp_path, control):
+    async def exercise():
+        _, installed = require_dsh()
+        with peer.MessagesServer([["Must remain unsent"]]) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
+                client = Client(send, receive)
+                client.auto_authorize = False
+                await client.start()
+                params = params_for(tmp_path, server)
+                sid = (await client.call("session/new", params))["session_id"]
+                await client.prompt(sid)
+                while not client.authorized:
+                    await client.read()
+                auth = next(frame for frame in client.frames if frame.get("method") == "budget/authorize")
+                started = time.monotonic()
+                await asyncio.wait_for(client.call(f"session/{control}", {
+                    "session_id": sid, "trace_id": "trace"}), 5.5)
+                result = await asyncio.wait_for(client.settled(sid), 5.5)
+                assert time.monotonic() - started < 5.5
+                assert result["outcome"] == "cancelled"
+                assert not result["usage_complete"]
+                health = await client.call("runner/health")
+                assert health["sessions"] == health["running"] == health["inflight_requests"] == 0
+                await send({"jsonrpc": "2.0", "id": auth["id"], "result": {"allow": True}})
+                # A replacement with the same key proves the old session was released;
+                # RPC ordering also gives the late authorization a chance to run.
+                replacement = (await client.call("session/new", params))["session_id"]
+                await client.call("session/close", {"session_id": replacement})
+                assert not server.requests
+                assert len(client.updates(sid, kind="settled")) == 1
+                assert not client.updates(sid, kind="request_end")
+
+    run(exercise())
+
+
+@pytest.mark.parametrize("decision", ["allow", "deny", "error"])
+def test_authorization_after_cancel_is_reconciled_before_settled(tmp_path, decision):
+    async def exercise():
+        _, installed = require_dsh()
+        with peer.MessagesServer([["Must remain unsent"]]) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
+                client = Client(send, receive)
+                client.auto_authorize = False
+                await client.start()
+                sid = (await client.call("session/new", params_for(tmp_path, server)))["session_id"]
+                await client.prompt(sid)
+                while not client.authorized:
+                    await client.read()
+                auth = next(frame for frame in client.frames if frame.get("method") == "budget/authorize")
+                await client.call("session/cancel", {"session_id": sid, "trace_id": "trace"})
+                await asyncio.sleep(.1)
+                reply = {"error": {"code": -32603, "message": "Synthetic authorization failure"}} if decision == "error" else {
+                    "result": {"allow": decision == "allow"}}
+                await send({"jsonrpc": "2.0", "id": auth["id"], **reply})
+                result = await asyncio.wait_for(client.settled(sid), 4)
+                assert result["outcome"] == "cancelled" and result["usage_complete"]
+                expected = 1 if decision == "allow" else 0
+                assert result["requests"] == expected
+                ends = assert_accounted(client, sid, count=expected)
+                if ends:
+                    end, = ends
+                    assert end["status"] == "aborted" and end["complete"]
+                    assert [end[k] for k in ("input_uncached", "output", "cache_read", "cache_write")] == [0, 0, 0, 0]
+                    kinds = [event["kind"] for event in client.updates(sid)]
+                    assert kinds.index("request_end") < kinds.index("settled")
+                await client.call("session/close", {"session_id": sid})
+                assert not server.requests and len(client.updates(sid, kind="request_end")) == expected
+
+    run(exercise())
+
+
+def test_failed_flush_cannot_report_a_completed_turn(tmp_path, monkeypatch):
+    harness(tmp_path, monkeypatch, """rpc.method('test/fail-flush', () => {
+  sdk.ctx.sessionPersistence.flush = async () => { throw new Error('Synthetic flush failure'); };
+  return {};
+});""")
+
+    async def exercise():
+        _, installed = require_dsh()
+        with peer.MessagesServer([["Unflushed answer"]]) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
+                client = Client(send, receive)
+                await client.start()
+                sid = (await client.call("session/new", params_for(tmp_path, server)))["session_id"]
+                await client.call("test/fail-flush")
+                await client.prompt(sid)
+                result = await client.settled(sid)
+                assert result["outcome"] == "failed" and result["error"]["kind"] == "INTERNAL_ERROR"
+                assert len(server.requests) == 1
+                assert_accounted(client, sid)
+
+    run(exercise())

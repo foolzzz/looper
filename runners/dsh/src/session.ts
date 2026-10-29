@@ -201,7 +201,7 @@ export async function closeSession(params: Record<string, unknown>): Promise<obj
   const trace = turn?.trace ?? (params.trace_id === record.turn?.trace ? record.turn?.trace : undefined);
   record.closing = true;
   if (turn) { turn.cancel = 'close'; await cancelTurn(record, turn); }
-  await release(record);
+  if (sessions.has(record.id)) await release(record);
   return trace ? { session_id: record.id, trace_id: trace } : {};
 }
 export function release(record: Session, bounded = false): Promise<void> {
