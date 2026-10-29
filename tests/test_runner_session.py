@@ -121,6 +121,9 @@ def test_multiturn_charge_trace_and_cleared_context(tmp_path):
                 assert session.totals.cost_usd == index * 0.01
                 assert session._tools is session._budget is None
             assert len(set(traces)) == 2 and all(e["trace_id"] in traces for e in events)
+            # The recorder takes a run's model from its init; a resident session's every turn is a record.
+            inits = [e for e in events if e["type"] == "system" and e.get("subtype") == "init"]
+            assert [(e["trace_id"], e.get("model")) for e in inits] == [(trace, "model") for trace in traces]
             failed = await session.run_turn("missing context", events.append)
             assert not failed.prompt_sent and "budget context" in failed.result_event["errors"][0]
             cancel = TurnCancel()
@@ -222,9 +225,12 @@ def test_resume_not_found_takes_the_resume_failure_path(tmp_path, code):
                 assert error.value.code == code
             else:
                 session, _ = await opening
-                result = await session.run_turn("resume", [].append)
+                events = []
+                result = await session.run_turn("resume", events.append)
                 assert not result.session_started and not result.prompt_sent
                 assert "could not be resumed" in result.result_event["errors"][0]
+                assert events == [{"type": "system", "subtype": "init", "session_id": "s",
+                    "model": "model", "trace_id": result.result_event["trace_id"]}]
                 assert session._lease is None
                 await session.stop()
                 assert not session.started

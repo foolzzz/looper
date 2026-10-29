@@ -260,6 +260,9 @@ class RunnerSession:
             if descriptor is None:
                 raise RuntimeError("runner session has not started")
             if self._resume_lost:
+                # No runner turn will emit init; retain the failed resume's record identity.
+                await _value(on_event({"type": "system", "subtype": "init", "session_id": descriptor.session,
+                    "model": descriptor.model, "trace_id": trace}))
                 return self._failure("runner saved session is unavailable; could not be resumed", trace)
             if budget is None or tools is None:
                 return self._failure("runner turn requires host tools and budget context before prompting", trace)
@@ -282,6 +285,8 @@ class RunnerSession:
             self._turn = RunnerTurn(session_id=sid, trace_id=trace, role=descriptor.role, tools=tools,
                 prior_totals=self._totals, prior_model_usage=self._models, cancel=capped, **budget)
             async def emit(event):
+                if event.get("type") == "system" and event.get("subtype") == "init":
+                    event["model"] = descriptor.model  # The recorder's record model, as on the CLI paths.
                 # Internal recorder events need the ordinary JSON modelUsage shape.
                 if event.get("type") == "result":
                     event["modelUsage"] = {model: {"inputTokens": u.input_tokens, "outputTokens": u.output_tokens,

@@ -282,6 +282,34 @@ def test_pi_runner_manager_stop_and_restart(isolated_pi, tmp_path):
     assert runner_processes(tmp_path) and pid not in runner_processes(tmp_path)
     for record in records(url):
         assert len({event["trace_id"] for event in saved_events(url, record)}) == 1
+        assert record["model"] == "test-model"
+
+
+def test_pi_runner_missing_manager_session_records_failed_resume(isolated_pi, tmp_path):
+    url, api, provider = isolated_pi
+    send(api, "initial", "Start a conversation")
+    assert FACT in reply(api, "initial")
+    (initial,) = records(url)
+    assert initial["status"] == "completed"
+    session = initial["session_id"]
+    assert session
+    (saved,) = (tmp_path / "runtime/runners/state/pi/manager").glob(f"*_{session}.jsonl")
+    saved.unlink()  # Keep the database's saved session, but lose the runner's history.
+    (pid,) = runner_processes(tmp_path)
+    os.kill(pid, signal.SIGKILL)
+    wait_until(lambda: runner_processes(tmp_path), lambda pids: bool(pids) and pid not in pids, timeout=10)
+
+    before = len(provider.requests)
+    send(api, "missing", "Continue after losing the saved session")
+    assert FACT in reply(api, "missing")
+    _, failed, recovered = records(url)
+    assert failed["status"] == "failed" and "could not be resumed" in failed["error"]
+    assert (failed["session_id"], failed["model"]) == (session, "test-model")
+    (init,) = [e for e in saved_events(url, failed) if e.get("subtype") == "init"]
+    assert (init["session_id"], init["model"]) == (session, "test-model")
+    assert recovered["status"] == "completed" and recovered["model"] == "test-model"
+    assert recovered["session_id"] and recovered["session_id"] != session
+    assert len(provider.requests) == before + 1  # The failed load never prompts the provider.
 
 
 @pytest.mark.parametrize("usage,counts,cost", [
@@ -489,6 +517,7 @@ def test_pi_runner_task_with_every_role(isolated_pi, tmp_path):
     planner_requests = 0
     for row in runs:
         assert row["status"] == "completed", (row["agent_id"], row["error"])
+        assert row["model"] == "test-model"
         descriptor = Descriptor.parse(json.loads(row["metadata"])["command"])
         assert descriptor.kind == "pi"
         role = ("planner" if row["agent_id"].startswith("planner") else
