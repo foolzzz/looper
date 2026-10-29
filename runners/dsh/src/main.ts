@@ -65,4 +65,4 @@ rpc.method('runner/health', () => ({ sessions: sessions.size,
   inflight_requests: [...sessions.values()].reduce((n, record) => n + (record.turn?.inflight.size ?? 0), 0),
   tool_processes: [...sessions.values()].reduce((n, record) => n + record.processes.size, 0),
   rss_bytes: process.memoryUsage().rss, event_loop_lag_ms: Math.ceil(delay.percentile(99) / 1e6) }));
-rpc.start();
+rpc.start({ ignoreUnknownResponses: true });

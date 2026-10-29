@@ -106,15 +106,18 @@ export function installProvider(): void {
       request_id: id, kind, provider: record.accountId, model: record.model,
       estimated_input_tokens: Math.ceil(JSON.stringify([options.messages, options.tools ?? []]).length / 4),
       max_output_tokens: options.maxTokens ?? dsh.deepseek.DEFAULT_MAX_TOKENS ?? 32000 }).then((authorization: any) => {
-      // Keep the RPC alive for accounting, even after the agent's wait expires.
+      const owner = turn.authorizations.get(id);
+      if (!owner || owner.trace !== turn.trace || turn.settled) return { allow: false };
+      // Reconcile a late allowance only while this trace can still emit updates.
       if (expired && authorization.allow === true) {
         turn.inflight.add(id);
         turn.requestKinds.set(id, kind);
         endRequest(record, turn, id, 'aborted', true);
       }
       return authorization;
-    });
-    turn.authorizations.set(id, pending);
+    }).finally(() => { turn.authorizations.delete(id); });
+    // The SDK wait may expire first; retain the owner until the RPC is consumed.
+    turn.authorizations.set(id, { trace: turn.trace, pending });
     let authorization: any;
     try { authorization = await Promise.race([pending, turn.authorizationExpired.promise.then(() => {
       expired = true;
@@ -124,7 +127,7 @@ export function installProvider(): void {
       void settle(record, turn, { kind: 'INTERNAL_ERROR', message: 'Looper could not authorize the model request' });
       yield finish('error', 'Looper could not authorize the model request', 'LOOPER_AUTHORIZATION_ERROR');
       return;
-    } finally { turn.authorizations.delete(id); }
+    }
     if (authorization.allow !== true) {
       const reason = authorization.reason ?? 'budget_unverifiable';
       if (!turn.cancel) {

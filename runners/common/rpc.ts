@@ -22,6 +22,7 @@ const received = new Set<string>();
 const pending = new Map<string, Pending>();
 const hooks: Array<() => unknown | Promise<unknown>> = [];
 let initialized = false, attempted = false, counter = 0, stopped = false;
+let ignoreUnknownResponses = false, unknownResponseLogged = false;
 let output = Promise.resolve();
 let buffer = Buffer.alloc(0);
 const MAX_FRAME = 4 * 1024 * 1024;
@@ -110,11 +111,18 @@ function dispatch(value: unknown): void {
   }
   if (!/^r-\d+$/.test(id) || 'params' in value || ('result' in value) === ('error' in value)
       || ('result' in value && !object(value.result))) fatal('runner protocol violation: invalid response');
-  const waiter = pending.get(id);
-  if (!waiter) fatal('runner protocol violation: response id was never issued');
   if ('error' in value && (!object(value.error) || !Number.isInteger(value.error.code) || typeof value.error.message !== 'string'
       || ('data' in value.error && !object(value.error.data)))) {
     fatal('runner protocol violation: invalid error');
+  }
+  const waiter = pending.get(id);
+  if (!waiter) {
+    if (!ignoreUnknownResponses) fatal('runner protocol violation: response id was never issued');
+    if (!unknownResponseLogged) {
+      diagnostic(`runner ignored unknown response id=${id}`);
+      unknownResponseLogged = true;
+    }
+    return;
   }
   pending.delete(id);
   waiter.cleanup();
@@ -140,7 +148,8 @@ function read(chunk: Buffer): void {
   if (buffer.length + chunk.length - start > MAX_FRAME) fatal('runner protocol violation: frame exceeds 4 MiB');
   if (start < chunk.length) buffer = Buffer.concat([buffer, chunk.subarray(start)]);
 }
-export function start(): void {
+export function start(options: { ignoreUnknownResponses?: boolean } = {}): void {
+  ignoreUnknownResponses = options.ignoreUnknownResponses ?? false;
   process.stdout.on('error', () => fatal('runner stdout unavailable', 1));
   process.stdout.on('close', () => fatal('runner stdout closed', 1));
   process.stdin.on('error', () => fatal('runner stdin unavailable'));
