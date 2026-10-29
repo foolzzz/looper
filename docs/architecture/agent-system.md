@@ -1390,19 +1390,26 @@ Manager tools.
 - **Pi** (`looper/agents/runtimes/pi.py`, the `pi` CLI, minimum 1.3.0,
   verified against pi 1.3.0 in the [pi runtime RFC](rfcs/pi-runtime-v0.zh-CN.md))
   runs Manager, Planner, Worker and Reviewer. With `[runtimes] pi = "runner"`
-  in the ops file, `PiRunnerRuntime` runs only Manager and Planner through
-  one shared Node >= 22.19 SDK runner; Worker, Reviewer and consults keep
-  the CLI path below. The opt-in is read once at startup and needs a restart;
-  there is no environment-variable override or dashboard control.
-  The runner has 10 session slots; further acquisition returns `CAPACITY`,
-  with no runner pool or automatic CLI fallback. Missing prerequisites fail
-  Pi Manager and Planner turns with the startup reason. Turns submitted during
+  in the ops file, `PiRunnerRuntime` runs all four roles and consults through
+  one shared Node >= 22.19 SDK runner. The opt-in is read once at startup and
+  needs a restart; there is no environment-variable override or dashboard control.
+  All roles share 10 session slots; further acquisition returns `CAPACITY`,
+  failing a step like any other start failure. There is no runner pool or CLI fallback.
+  Missing prerequisites fail with the startup reason. Turns submitted during
   restart backoff fail fast; after recovery the resident session loads its saved history.
-  Provider environment
-  entries are refused because they would change process-wide settings.
+  Provider environment entries are refused because they would change process-wide settings.
   Platform tools use `looper_*` directly, without Manager MCP setup or probing;
-  Planner offers read, grep, find and ls plus those platform tools.
-  Dashboard Stop and Telegram/Lark `/stop` use the existing interrupt path.
+  Planner offers read, grep, find and ls plus those platform tools. Worker and
+  Reviewer keep read, bash, edit and write. File tools stay inside the task
+  directory and its added directories; bash is not path-confined, and its timeout
+  is capped by the role's `timeout_seconds`. For these runs, `max_turns` limits
+  model requests (1000 when unset); run and task spend caps are checked before
+  every request. Planner messages steer a Worker in the same trace; a dropped
+  steer returns to the Planner's decision. Consults fork a read-only copy of
+  the kept run session, leaving the source untouched and removing the fork afterwards.
+  Run records store a runner Descriptor as their command. Dashboard task controls
+  and Telegram/Lark task stop cancel the session; Planner chat forwards into the
+  running Worker in the same trace, using the existing channel paths.
   The following describes the default `[runtimes] pi = "cli"` path.
   A Worker or Reviewer is
   `pi -p --mode json`; a Worker that can steer drops `-p` and uses
