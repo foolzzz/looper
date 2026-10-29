@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.208] - 2026-10-28
+
+### Changed
+
+- **Stored-input, record and journal boundaries are consolidated.** Startup no longer carries the fallbacks for stored input older than the admitted upgrade path: the one-time import of the pre-PostgreSQL planner and Manager state files (`state_import.py`), the Lark configuration and default-prompt migrations in `looper serve`, the pre-rename LoopX harness match, the legacy provider-less session assumption for non-Claude runtimes, the multi-level unwrapping of a stored task config (now one JSON decode) and the pre-Manager column probes in configuration export. A retired Lark setting (`app_id_env`, `app_secret_env`) is now rejected instead of dropped. Historical run records are normalized at one read boundary (`metadata.presentation`, never written back), and the run history page renders that record instead of interpreting old field names. Bridge-era databases are admitted only when the file-state import and role-prompt seeding completed, and the message journal seals its notice identities once per runtime and refuses a malformed journal instead of skipping entries. No prompt text of the current release changes. ([#857](https://github.com/foolzzz/looper/pull/857))
+
 ## [2.13.207] - 2026-10-28
 
 ### Fixed
