@@ -14,9 +14,7 @@ named ``<profile> · <effort>``. A project layer applies to three roles that may
 need different profiles; it selects the one most of them need, and each other
 role gets its own on its role-in-project layer.
 
-Two callers use it: the upgrade of a database whose layers still have an
-``effort`` column (``migrate``, from ``connection.ensure_schema``), and the
-import of a configuration file whose layers carry one (``config_transfer``).
+The pure conversion remains available for legacy configuration projections.
 """
 
 from __future__ import annotations
@@ -26,12 +24,10 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from .agent_settings import TASK_ROLES, AgentType, Layer, SettingsError, effort_level
+from .agent_settings import TASK_ROLES, AgentType, Layer
 from .profile_registry import BUILTIN_PROFILE, AgentProfile, LegacyAgentProfile, RegistryError, check_roles
 
 logger = logging.getLogger(__name__)
-
-MIGRATION = "layer_effort_on_profiles"
 
 Key = tuple[Layer, AgentType | None, str | None]  # a layer: its scope, its role and its project
 SYSTEM: Key = (Layer.SYSTEM, None, None)
@@ -229,59 +225,7 @@ def place_text(key: Key) -> str:
             Layer.ROLE_PROJECT: f"the {role.value if role else ''} layer in project {project}"}[scope]
 
 
-# --- The upgrade ---
-
-
-def _stored(raw: Any, parse: Any, what: str, place: str) -> Any:
-    """A stored value as the old rule read it: one that no longer validates was ignored, as if unset."""
-    if raw is None:
-        return None
-    try:
-        return parse(raw)
-    except (SettingsError, KeyError, TypeError, ValueError, AttributeError) as exc:
-        logger.warning("ignoring the stored %s of %s, as before: %s", what, place, exc)
-        return None
-
-
-async def migrate(conn: Any, *, legacy_registry: bool = False) -> None:
-    """Once (``schema_migrations`` ``MIGRATION``), in the schema's transaction: move each layer's effort onto the
-    profiles its roles run (``convert``), log each profile added and each layer and task changed, then drop the
-    column and the layers left with nothing set."""
-    from ..db.profile_registry import PROFILE_JOIN, PROFILE_JSON, _json, insert_profile
-
-    if legacy_registry:
-        from ..db.registry_migration import LEGACY_PROFILE_JOIN, LEGACY_PROFILE_JSON, insert_legacy_profile
-
-        PROFILE_JOIN, PROFILE_JSON, insert_profile = LEGACY_PROFILE_JOIN, LEGACY_PROFILE_JSON, insert_legacy_profile
-
-    if await conn.fetchval("SELECT 1 FROM schema_migrations WHERE name = $1", MIGRATION):
-        return
-    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = "
-                           "current_schema() AND table_name = 'agent_setting_layers' AND column_name = 'effort')"):
-        layers: dict[Key, Before] = {}
-        for row in await conn.fetch(
-            f"SELECT l.scope, l.role, l.project_id, l.effort, (SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} "
-            "WHERE a.id = l.profile_id) AS profile FROM agent_setting_layers l"
-        ):
-            key = (Layer(row["scope"]), AgentType(row["role"]) if row["role"] else None, row["project_id"])
-            place = place_text(key)
-            layers[key] = Before(_stored(_json(row["profile"]), AgentProfile.from_row, "Agent Profile", place),
-                                 _stored(row["effort"], lambda raw: effort_level(raw) or None, "effort", place))
-        profiles = [AgentProfile.from_row(_json(row["profile"]))
-                    for row in await conn.fetch(f"SELECT {PROFILE_JSON} AS profile FROM {PROFILE_JOIN}")]
-        tasks: dict[str, tuple[str | None, dict[AgentType, AgentProfile]]] = {}
-        for row in await conn.fetch(
-            f"SELECT o.task_id, t.project_id, o.role, (SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} "
-            "WHERE a.id = o.profile_id) AS profile FROM task_profile_overrides o JOIN tasks t ON t.id = o.task_id"
-        ):
-            tasks.setdefault(row["task_id"], (row["project_id"], {}))[1][AgentType(row["role"])] = \
-                AgentProfile.from_row(_json(row["profile"]))
-        await _apply(conn, layers, convert(layers, profiles, tasks), insert_profile)
-        await conn.execute("ALTER TABLE agent_setting_layers DROP COLUMN effort")
-        await conn.execute(
-            "DELETE FROM agent_setting_layers WHERE harness_prompt IS NULL AND profile_id IS NULL "
-            "AND env = '[]'::jsonb AND run_budget_usd IS NULL AND max_concurrency IS NULL AND system_prompt_mode IS NULL")
-    await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", MIGRATION)
+# --- Applying a conversion ---
 
 
 async def _apply(conn: Any, layers: Mapping[Key, Before], conversion: Conversion, insert_profile: Any) -> None:

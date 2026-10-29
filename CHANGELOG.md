@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.203] - 2026-10-28
+
+### Changed
+
+- **The historical schema migrations are replaced by one final baseline.** `looper/db/schema.sql` now defines the complete fresh schema directly and `looper/db/seeds.sql` holds the builtin rows, inserted on every start without changing saved choices. An empty database runs the schema once, a schema-3 bridge database (v2.13.165 or later) runs one guarded conversion, and a current database never replays initialization DDL. The phase split, `final_constraints`, `registry_migration.py`, `task_concurrency.py` and `layer_effort.migrate` are removed; the admission rule is unchanged. ([#850](https://github.com/foolzzz/looper/pull/850))
+
+## [2.13.202] - 2026-10-28
+
+### Changed
+
+- **The Pi SDK runner opt-in is validated for every role and documented.** A new installed-Pi test (`tests/test_pi_runner_serve_db.py`) runs one task end to end on an isolated `looper serve` with the Planner, two Workers, a Reviewer and a read-only consult fork on the runner, plus cancel, a runner SIGKILL and a pre-request budget denial. The architecture doc, the runner RFC, the plan and `evals/README.md` now describe `[runtimes] pi = "runner"` as covering all four roles and consults, and the README gives the Pi CLI versus runner task comparison, which has not been run. No production code changed. ([#848](https://github.com/foolzzz/looper/pull/848))
+
 ## [2.13.201] - 2026-10-28
 
 ### Changed
