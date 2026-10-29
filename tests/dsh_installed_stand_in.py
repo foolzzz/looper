@@ -7,6 +7,7 @@ import os
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -19,12 +20,25 @@ def tool(name: str, arguments: dict) -> dict:
     return {"type": "tool_use", "name": name, "input": arguments}
 
 
-def messages_wire(blocks: list[str | dict], index: int) -> str:
+@dataclass
+class Reply:
+    blocks: list[str | dict] = field(default_factory=list)
+    usage: dict[str, int] = field(default_factory=lambda: {
+        "input": 11, "output": 5, "cache_read": 0, "cache_write": 0})
+    status: int = 200
+    cut: bool = False
+    hold: threading.Event | None = None
+
+
+def messages_wire(blocks: list[str | dict] | Reply, index: int) -> str:
+    reply = blocks if isinstance(blocks, Reply) else Reply(blocks)
+    blocks, usage = reply.blocks, reply.usage
     events = [{"type": "message_start", "message": {
         "id": f"synthetic-{index}", "type": "message", "role": "assistant",
         "model": "deepseek-flash", "content": [], "usage": {
-            "input_tokens": 11, "output_tokens": 0,
-            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}]
+            "input_tokens": usage.get("input", 11), "output_tokens": 0,
+            "cache_read_input_tokens": usage.get("cache_read", 0),
+            "cache_creation_input_tokens": usage.get("cache_write", 0)}}}]
     for number, block in enumerate(blocks):
         content = ({"type": "text", "text": block} if isinstance(block, str)
                    else {**block, "id": f"synthetic-tool-{index}-{number}", "input": {}})
@@ -35,7 +49,7 @@ def messages_wire(blocks: list[str | dict], index: int) -> str:
         events.append({"type": "content_block_stop", "index": number})
     events.extend([{"type": "message_delta", "delta": {
         "stop_reason": "tool_use" if any(isinstance(block, dict) for block in blocks) else "end_turn"},
-        "usage": {"output_tokens": 5}}, {"type": "message_stop"}])
+        "usage": {"output_tokens": usage.get("output", 5)}}, {"type": "message_stop"}])
     return "".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events)
 
 
@@ -65,10 +79,11 @@ class FetchMessages:
 class MessagesServer:
     """Bounded scripted SSE replies; unexpected requests are counted and fail visibly."""
 
-    def __init__(self, replies: list[list[str | dict]]):
+    def __init__(self, replies: list[list[str | dict] | Reply]):
         self.requests: list[dict] = []
         self.replies = replies
         self.received = threading.Event()
+        self._lock = threading.Lock()
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -77,19 +92,36 @@ class MessagesServer:
 
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
-                index = len(owner.requests)
-                owner.requests.append({"path": self.path, "body": body, "at": time.monotonic_ns(),
-                                       "api_key": self.headers.get("x-api-key")})
+                with owner._lock:
+                    index = len(owner.requests)
+                    owner.requests.append({"path": self.path, "body": body, "at": time.monotonic_ns(),
+                                           "api_key": self.headers.get("x-api-key"),
+                                           "request_id": self.headers.get("x-looper-request-id")})
                 owner.received.set()
                 if self.path != "/v1/messages" or index >= len(owner.replies):
                     self.send_error(409, "Unexpected local request")
                     return
-                wire = messages_wire(owner.replies[index], index).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
+                reply = owner.replies[index]
+                reply = reply if isinstance(reply, Reply) else Reply(reply)
+                if reply.hold is not None and not reply.hold.wait(30):
+                    return
+                if reply.status != 200:
+                    wire = json.dumps({"type": "error", "error": {
+                        "type": "authentication_error" if reply.status in (401, 403) else "api_error",
+                        "message": "Synthetic provider rejection"}}).encode()
+                else:
+                    wire = messages_wire(reply, index).encode()
+                self.send_response(reply.status)
+                self.send_header("Content-Type", "text/event-stream" if reply.status == 200 else "application/json")
                 self.send_header("Content-Length", str(len(wire)))
                 self.end_headers()
-                self.wfile.write(wire)
+                try:
+                    self.wfile.write(wire.split(b"event: message_stop")[0] if reply.cut else wire)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                if reply.cut:
+                    self.close_connection = True
 
         self.http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
@@ -101,6 +133,9 @@ class MessagesServer:
         return self
 
     def __exit__(self, *args):
+        for reply in self.replies:
+            if isinstance(reply, Reply) and reply.hold is not None:
+                reply.hold.set()
         self.http.shutdown()
         self.http.server_close()
         self.thread.join(timeout=3)

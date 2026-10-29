@@ -17,7 +17,8 @@ from looper.agents.runtimes.runner.supervisor import RunnerUnavailable
 pytestmark = pytest.mark.installed
 CAPABILITIES = {"max_sessions": 20, "per_session_isolation": True, "per_session_credentials": True,
     "cancel": True, "usage": {"per_request": True, "buckets": True, "reasoning_in_output": True},
-    "authorize_covers": ["turn", "compaction"]}
+    "authorize_covers": ["turn", "compaction"],
+    "steer": {"in_trace": True, "boundary": "next_step", "idle_start": False}, "fork": True}
 PACKAGES = {"dsh-launch-environment": ["createLaunchEnvironmentSnapshot"],
     "dsh-llm": ["createUserMessage", "isAgentLoopRequest"],
     "dsh-llm-deepseek": ["registerDeepSeekProvider", "resolveAdapterOptions", "catalogModelInfo"],
@@ -44,7 +45,7 @@ import {writeFileSync} from 'node:fs';
 export async function runProfile() {
   writeFileSync('boot.started', 'yes');
 ''' + ("  await new Promise(resolve => setTimeout(resolve, 30000));\n" if delay else "") + '''
-  const ctx = {agents: {}, llm: {}, sessionPersistence: {}, tools: {}, systemPrompt: {},
+  const ctx = {on() {}, agents: {}, llm: {}, sessionPersistence: {}, tools: {}, systemPrompt: {},
     fiber: {async dispose() {}}};
   return {ctx, shutdown: {shutdown() {process.exit(99);}}};
 }
@@ -93,7 +94,7 @@ def test_initialize_reports_the_gated_sdk(tmp_path):
                 "sdk": {"name": "@deepseek-ai/dsh", "version": "0.2.1-rc.2"}, "capabilities": CAPABILITIES}
             await send("initialize", OFFER, id="l-2")
             assert (await receive())["error"]["code"] == -32600
-            for index, method in enumerate(("nope/x", "session/new", "shutdown"), 3):
+            for index, method in enumerate(("nope/x", "shutdown"), 3):
                 await send(method, id=f"l-{index}")
                 assert (await receive())["error"]["code"] == -32601
     run(exercise())
