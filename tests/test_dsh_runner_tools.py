@@ -155,6 +155,8 @@ def test_cancel_and_runner_loss_end_tool_processes(tmp_path, end):
                         await wait_until(lambda: not any(alive(pid) for pid in pids), 5)
                     else:
                         lease._generation.process.kill()
+                        # Executor cleanup can finish before the host observes runner loss.
+                        assert (await lease.bridge.wait_settled(sid, "trace")).outcome == "lost"
                         await wait_until(lambda: not any(alive(pid) for pid in pids), 10)
                         replacement = None
                         deadline = time.monotonic() + 10
@@ -164,6 +166,7 @@ def test_cancel_and_runner_loss_end_tool_processes(tmp_path, end):
                             except RunnerUnavailable:
                                 await asyncio.sleep(.1)
                         assert replacement is not None, "supervisor must recover after runner loss"
+                        assert replacement.runner_id != lease.runner_id
                         assert (await replacement.bridge.health())["tool_processes"] == 0
                         await replacement.release()
                 finally:

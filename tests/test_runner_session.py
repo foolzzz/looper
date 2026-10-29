@@ -34,7 +34,7 @@ async def opened(tmp_path, bridge, reader, writer, *, changes=None, env=None, re
     prompt.write_text("unchanged prompt")
     async def release():
         lease.valid = False
-        if lease.session_id in bridge.sessions:
+        if not bridge._error and lease.session_id in bridge.sessions:
             await bridge.close_session(lease.session_id)
     lease = SimpleNamespace(bridge=bridge, runner_id="fake-1", valid=True, session_id="s",
                             release=release)
@@ -124,6 +124,7 @@ def test_multiturn_charge_trace_and_cleared_context(tmp_path):
             # The recorder takes a run's model from its init; a resident session's every turn is a record.
             inits = [e for e in events if e["type"] == "system" and e.get("subtype") == "init"]
             assert [(e["trace_id"], e.get("model")) for e in inits] == [(trace, "model") for trace in traces]
+            assert all(e["session_started"] is True for e in inits)
             failed = await session.run_turn("missing context", events.append)
             assert not failed.prompt_sent and "budget context" in failed.result_event["errors"][0]
             cancel = TurnCancel()
@@ -133,6 +134,133 @@ def test_multiturn_charge_trace_and_cleared_context(tmp_path):
             assert cancelled.stopped == StopMethod.CANCEL and cancelled.result_event["trace_id"] not in traces
             await close(session, reader, writer, kill=True)
             assert not bridge._error and await session.interrupt() is None
+    run(exercise())
+
+
+@pytest.mark.parametrize("failure", ["timeout", "refused"])
+def test_failed_prompt_records_model_and_current_session(tmp_path, monkeypatch, failure):
+    from looper.agents.claude_cli import ClaudeRunRecorder
+    from tests.db_support import run_db
+
+    async def exercise(pool):
+        async with connection(control_timeout=0.1) as (bridge, reader, writer, _):
+            session, descriptor = await opened(tmp_path, bridge, reader, writer)
+            recorder = ClaudeRunRecorder(agent_id="manager", task_id=None, command=descriptor.to_argv(),
+                cwd=str(tmp_path), input_text="hello", session_id="s")
+            await recorder.start()
+            bind(session)
+            task = asyncio.create_task(session.run_turn("hello", recorder.record))
+            request = await p.read_frame(reader)
+            if failure == "refused":
+                await send(writer, p.Response(request.id, error={"code": int(p.ErrorCode.INVALID_PARAMS),
+                    "message": "prompt refused", "data": {k: request.params[k] for k in ("session_id", "trace_id")}}))
+            result = await task
+            # A hosted channel emits a returned failure only when the bridge did not emit it.
+            if failure == "refused":
+                await recorder.record(result.result_event)
+            await recorder.finish(output_text=None, result_event=result.result_event)
+            row = await pool.fetchrow("SELECT * FROM llm_records WHERE id = $1", recorder.record_id)
+            assert row["status"] == "failed"
+            assert (row["model"], row["session_id"]) == (descriptor.model, "s")
+            from looper.db.llm_records import list_events
+            events = [row["event"] for row in await list_events(recorder.record_id)]
+            assert [event["type"] for event in events] == ["system", "result"]
+            assert events[0]["session_id"] == "s" and events[0]["model"] == descriptor.model
+            assert events[0]["trace_id"] == result.result_event["trace_id"]
+            assert events[0]["session_started"] is False
+            assert not result.session_started and not result.usage_complete
+            if failure == "refused":
+                await close(session, reader, writer)
+            else:
+                await session.stop()
+
+    run_db(exercise, monkeypatch, timeout=20)
+
+
+@pytest.mark.parametrize("role", ["manager", "planner"])
+def test_rejected_first_prompt_keeps_handoff_until_accepted(tmp_path, monkeypatch, agent_db, role):
+    from unittest.mock import AsyncMock
+    from looper.agents.bus import MessageBus
+    from looper.agents.tiers import manager as manager_module, planner as planner_module
+    from tests.db_support import until
+    from tests.test_manager_new_session import _web
+    from tests.runtime_model_helpers import builtin_launch
+
+    async def exercise():
+        launch = builtin_launch()
+        async with connection() as (bridge, reader, writer, _):
+            session, descriptor = await opened(tmp_path, bridge, reader, writer, changes={
+                "role": role, "model": launch.model, "provider_id": launch.profile.provider.id})
+            monkeypatch.setattr(session, "stale", lambda signature: False)
+            bus = MessageBus(runtime_root=tmp_path)
+            if role == "manager":
+                agent = manager_module.ManagerAgent(
+                    config=manager_module.ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+                agent._session_loaded = True
+                agent._session_runtime = launch.runtime.type
+                agent._bus = bus
+                async def exchange(first):
+                    return await agent._run_turn("Continue", _web("Continue"))
+                def session_id():
+                    return agent._session_id
+            else:
+                agent = planner_module.PlannerAgent(task_id="handoff-task", runtime_root=tmp_path)
+                agent._plan = planner_module.TaskPlan("plan", "goal", "Continue", str(tmp_path), steps=[
+                    planner_module.PlanStep(step_id="one", index=0, instruction="Continue")],
+                    session_runtime=launch.runtime.type, session_profile=launch.profile.id,
+                    session_provider=launch.profile.provider.id)
+                agent._process = planner_module._Process(descriptor.to_argv(), None,
+                                                        planner_module.SystemPrompt("Continue"), launch)
+                monkeypatch.setattr(agent, "_claude_command", lambda *args: descriptor.to_argv())
+                monkeypatch.setattr(planner_module, "load_agent_settings", AsyncMock(return_value=launch.settings))
+                monkeypatch.setattr(planner_module.db_llm_records, "task_costs",
+                                    AsyncMock(return_value={"handoff-task": {"cost_usd": 0}}))
+                async def exchange(first):
+                    if first:
+                        return await agent._exchange(agent._resume_brief(agent._plan) + "\n\nContinue",
+                                                     agent._process, 2)
+                    return await agent._run_turn("Continue")
+                def session_id():
+                    return agent._plan.session_id
+            agent._claude = session
+            agent._claude_runtime = launch.runtime
+            session.label = agent.agent_id
+            agent._pending_switch = switch = manager_module.session_switch.session_lost("previous session lost")
+            agent._pending_handoff = handoff = "Continue checking the uncommitted parser change."
+            # Keep tier preparation real; supply external settings, costs and platform tools.
+            monkeypatch.setattr(agent, "_load_agent_settings", AsyncMock(return_value=launch.settings))
+            try:
+                for accepted in (False, True, True):
+                    session.set_turn_tools(Tools())
+                    task = asyncio.create_task(exchange(first=not accepted))
+                    request = await p.read_frame(reader)
+                    assert request.method == "session/prompt"
+                    assert (handoff in request.params["text"]) is (agent._pending_handoff is not None)
+                    turn = {k: request.params[k] for k in ("session_id", "trace_id")}
+                    if not accepted:
+                        assert handoff in request.params["text"]
+                        await send(writer, p.Response(request.id, error={"code": int(p.ErrorCode.INVALID_PARAMS),
+                            "message": "prompt refused", "data": turn}))
+                        with pytest.raises(RuntimeError if role == "manager" else planner_module.PlannerTurnError):
+                            await task
+                        assert session_id() is None
+                        assert agent._pending_handoff == handoff and agent._pending_switch == switch
+                        assert agent_db.save_session.await_args_list
+                        assert all(call.args[1] is None for call in agent_db.save_session.await_args_list)
+                    else:
+                        await send(writer, p.Response(request.id, result={**turn, "accepted": True}))
+                        # Acceptance owns the brief even if the model has not answered yet.
+                        await until(lambda: session_id() == "s")
+                        assert agent._pending_handoff is None and agent._pending_switch is None
+                        await settle(writer, turn, requests=0)
+                        assert await task == "answer"
+                        assert agent_db.store.sessions[agent.agent_id]["session_id"] == "s"
+            finally:
+                if bridge._error:
+                    await session.stop()
+                else:
+                    await close(session, reader, writer)
+                await bus.shutdown()
     run(exercise())
 
 def test_cancel_and_steer_preserve_trace_and_close_admission(tmp_path):
@@ -230,7 +358,7 @@ def test_resume_not_found_takes_the_resume_failure_path(tmp_path, code):
                 assert not result.session_started and not result.prompt_sent
                 assert "could not be resumed" in result.result_event["errors"][0]
                 assert events == [{"type": "system", "subtype": "init", "session_id": "s",
-                    "model": "model", "trace_id": result.result_event["trace_id"]}]
+                    "model": "model", "trace_id": result.result_event["trace_id"], "session_started": False}]
                 assert session._lease is None
                 await session.stop()
                 assert not session.started

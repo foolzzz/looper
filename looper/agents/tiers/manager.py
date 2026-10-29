@@ -1689,7 +1689,8 @@ class ManagerAgent:
             # The session is taken at once, not as the event is handled: a stop that cuts the handling short (a
             # slow persistence) still saves it, and the next process resumes it.
             session_id = payload.get("session_id")
-            if isinstance(session_id, str) and session_id and session_id != self._session_id:
+            if (payload.get("session_started") is not False and isinstance(session_id, str)
+                    and session_id and session_id != self._session_id):
                 self._session_id, self._clean_start = session_id, False
                 if self._session_runtime != "api" or not self._pending_handoff:
                     self._pending_switch = self._pending_handoff = None  # CLI sessions own the prompt at init
