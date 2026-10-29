@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import threading
@@ -114,6 +115,9 @@ class Handler(BaseHTTPRequestHandler):
             assert self.headers.get("x-api-key") == KEY
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             self.server.requests.append(body)
+            if hasattr(self.server, "request_log"):
+                with self.server.request_log.open("a") as log:
+                    log.write(json.dumps(body) + "\n")
             key = request_role(body)
             assert self.headers.get("x-looper-request-id")
             # The display input_text can differ from the SDK's wire messages.
@@ -174,6 +178,7 @@ def isolated_dsh(tmp_path):
         with model_api(tmp_path) as provider, serving(database_url=url, runtime_root=tmp_path / "runtime",
                 home=tmp_path / "home", work_dir=tmp_path / "work", log_path=tmp_path / "serve.log", runner="dsh") as api:
             provider.database_url = url
+            provider.request_log = tmp_path / "requests.jsonl"
             row = api.post("/api/v1/provider_accounts/create", {"name": "Synthetic DSH account", "vendor_type": "custom",
                 "api_key": KEY, "endpoints": [{"protocol": "anthropic-messages",
                 "base_url": f"http://127.0.0.1:{provider.server_port}/v1"}]})["result"]["provider"]
@@ -224,6 +229,50 @@ def reply(api, message_id, *, timeout=30):
 
 def records(url):
     return query(url, "SELECT * FROM llm_records WHERE agent_id='manager' ORDER BY id")
+
+
+def cli_consult_request(tmp_path, *, state, source, system_prompt, cwd, prompt):
+    """Replay the exact ended Worker history via the installed CLI consult path."""
+    from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+    from looper.agents.consult import consult_prompt
+    from looper.agents.profile_registry import LegacyProviderSpec, RuntimeSpec
+    from looper.agents.runtimes import ApiProtocol, AuthKind, dsh
+    from tests.dsh_installed_stand_in import MessagesServer
+    from tests.dsh_runner_support import guard_env
+    from tests.runtime_model_helpers import resolved_profile
+
+    _, executable = require_dsh()
+    owner = tmp_path / "cli-source"
+    shutil.copytree(state, owner / "dsh/sessions")
+    (owner / ".session.lock").touch()
+    file = tmp_path / ".local/prompts/cli-consult.md"
+    file.parent.mkdir(parents=True, exist_ok=True)
+    file.write_text(consult_prompt(system_prompt))
+    runtime = dsh.DshRuntime()
+    with MessagesServer([[json_answer({"answers": []})]]) as server:
+        provider = LegacyProviderSpec("offline", "Synthetic", AuthKind.API_KEY,
+            frozenset({ApiProtocol.ANTHROPIC_MESSAGES}), base_url=server.url, api_key=KEY)
+        profile = resolved_profile("offline", "Synthetic", RuntimeSpec("offline", "DSH", "dsh", executable,
+            runtime.capabilities), provider, "deepseek-flash", "high")
+        launch = Launch(AgentSettings(profile=profile), role=AgentType.WORKER, consult=True)
+        command = runtime.consult_command(executable, cwd=cwd, prompt_file=file, launch=launch,
+            session_id=source, session_dir=owner, fork_dir=tmp_path / "cli-fork")
+        process = subprocess.Popen(command, cwd=cwd, env={"PATH": os.environ["PATH"],
+            "DEEPSEEK_API_KEY": KEY, **guard_env(tmp_path / "cli-guard", server.port)},
+            text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            stdout, stderr = process.communicate(prompt, timeout=30)
+            assert process.returncode == 0, stderr + stdout
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate(timeout=5)
+        assert len(server.requests) == 1
+        body = server.requests[0]["body"]
+        (tmp_path / "cli-consult-request.json").write_text(json.dumps(body))
+        return body
 
 
 def test_dsh_runner_manager_turn_stop_and_restart(isolated_dsh, tmp_path):
@@ -415,6 +464,34 @@ def test_dsh_runner_task_with_every_role(isolated_dsh, tmp_path):
     assert not list(state.glob(f"*/{fork_session}"))
     fork = tmp_path / "runtime/.local/dsh/consult-sessions" / task / consult["consult_run"]
     assert not fork.exists()
+    runner_request = next(body for body in provider.requests if request_role(body) == "consult")
+    cli_request = cli_consult_request(tmp_path, state=state, source=source["session_id"],
+        system_prompt=json.loads(source["metadata"])["system_prompt"], cwd=work, prompt=current_prompt(runner_request))
+    (tmp_path / "runner-consult-request.json").write_text(json.dumps(runner_request))
+    from looper.agents.consult import CONSULT_CONTRACT, consult_prompt
+    from looper.agents.system_prompt import WORK_CONTRACT
+
+    # Compare complete history, not presence of a few markers: tool ids, results,
+    # applied steering, the final Worker report and the question stay in order.
+    assert runner_request["messages"][:-1] == cli_request["messages"][:-1]
+    assert runner_request["messages"][-2]["content"][0]["text"] == report("one.txt")
+    question = runner_request["messages"][-1]
+    assert question["role"] == "user"
+    assert cli_request["messages"][-1]["content"][:len(question["content"])] == question["content"]
+    # Replaying a runner-owned source through the CLI changes provider route.
+    # DSH records that change beside the question; it isn't forked user history.
+    (notice,) = cli_request["messages"][-1]["content"][len(question["content"]):]
+    assert notice["type"] == "text" and re.fullmatch(
+        r"\[model changed: assistant turns above this point were generated by looper-[^/]+/deepseek-flash; "
+        r"the session continues with deepseek-official/deepseek-flash\]", notice["text"])
+    for body in (runner_request, cli_request):
+        assert body["system"].count(CONSULT_CONTRACT) == 1
+        assert WORK_CONTRACT not in body["system"]
+        assert consult_prompt(json.loads(source["metadata"])["system_prompt"]) in body["system"]
+    cli_tools = {entry["name"]: entry for entry in cli_request["tools"]}
+    assert {entry["name"]: entry for entry in runner_request["tools"]} == {
+        name: cli_tools[name] for name in ("read", "glob", "grep")}
+    assert hashes() == digest, "CLI replay must also leave the original session untouched"
 
 
 def test_dsh_runner_worker_budget_cancel_and_crash(isolated_dsh, tmp_path):

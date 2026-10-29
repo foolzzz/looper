@@ -26,15 +26,13 @@ function nonempty(value: unknown): value is string { return typeof value === 'st
 function forkSeed(events: readonly any[]): { seed: any[]; inheritedEventCount: number } {
   const ended = events.findLast(event => event.type === 'turn/end')?.seq;
   if (ended === undefined) throw new RpcError(-32001, 'source session has no completed turn');
-  // dropSteers replaces a claimed steer after turn/end. A seed that stops on
-  // that marker copies the discarded instruction into the consult.
+  // Match DSH's completed-prefix boundary: standalone events still belong to
+  // the ended history. In particular, keep dropSteers replacements even when
+  // another standalone event separates them from turn/end.
   let boundary = ended;
-  for (const event of events) {
-    if (event.seq <= boundary) continue;
-    const op = event.surfaceOp;
-    if (event.seq !== boundary + 1 || op?.op !== 'replace'
-        || !Number.isSafeInteger(op.startSeq) || !Number.isSafeInteger(op.endSeq)
-        || op.startSeq > ended || op.endSeq > ended) break;
+  for (const event of events.slice(ended + 1)) {
+    if (event.type === 'turn/start' || event.type === 'agent/inbox/spliced'
+        || (event.type === 'user/message' && event.surfaceOp === 'append')) break;
     boundary = event.seq;
   }
   return { seed: dsh.session.buildForkSeed(events, boundary), inheritedEventCount: boundary + 1 };
