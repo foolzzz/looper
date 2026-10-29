@@ -1,6 +1,6 @@
 /** One host trace owns one DSH turn and exactly one settled update. */
 import { diagnostic, RpcError, scrub, update } from '../../common/rpc.ts';
-import { dsh } from './sdk.ts';
+import { ctx, dsh } from './sdk.ts';
 import { getSession, release, type Session } from './session.ts';
 import { endRequest } from './provider.ts';
 import { killProcesses } from './exec.ts';
@@ -21,7 +21,7 @@ export type Turn = {
   requestKinds: Map<string, 'turn' | 'compaction'>; lastRequestId: string | null; afterToolBatch: boolean;
   endReason?: any; last?: any; opened: ReturnType<typeof deferred>; closed: ReturnType<typeof deferred>;
   finished: ReturnType<typeof deferred>; settling?: Promise<void>; drained?: () => void;
-  forced?: boolean; failure?: Failure;
+  authorizationExpired: ReturnType<typeof deferred>; forced?: boolean; failure?: Failure;
   steers: Map<string, Steer>;
 };
 async function within(promise: Promise<unknown>, ms: number): Promise<boolean> {
@@ -40,7 +40,8 @@ export function prompt(params: Record<string, any>): object {
   const turn: Turn = { trace: params.trace_id, promptId: message.id, number: null, started: false,
     settled: false, cancel: null, denial: null, overflow: false, ended: 0, complete: true,
     inflight: new Set(), authorizations: new Map(), requestKinds: new Map(), lastRequestId: null,
-    afterToolBatch: false, opened: deferred(), closed: deferred(), finished: deferred(), steers: new Map() };
+    afterToolBatch: false, opened: deferred(), closed: deferred(), finished: deferred(),
+    authorizationExpired: deferred(), steers: new Map() };
   record.turn = turn;
   // Start after the acceptance frame; controls can cancel an input still in the inbox.
   record.agent.followup(message);
@@ -140,7 +141,7 @@ export function settle(record: Session, turn: Turn, failure?: Failure): Promise<
   if (turn.settling) return turn.settling;
   turn.settling = (async () => {
     dropSteers(record, turn);
-    await Promise.allSettled(turn.authorizations.values());
+    await Promise.race([Promise.allSettled(turn.authorizations.values()), turn.authorizationExpired.promise]);
     if (turn.inflight.size) {
       await within(new Promise<void>(resolve => { turn.drained = resolve; }), 1000);
       for (const id of turn.inflight) endRequest(record, turn, id, 'aborted', false);
@@ -148,7 +149,7 @@ export function settle(record: Session, turn: Turn, failure?: Failure): Promise<
     let outcome = 'failed', error = turn.failure;
     if (!turn.forced && turn.denial) outcome = turn.denial === 'max_requests' ? 'max_requests'
       : turn.denial === 'stopped' ? 'cancelled' : 'capped';
-    else if (!turn.forced && turn.cancel) outcome = 'cancelled';
+    else if (turn.cancel && (!turn.forced || !error)) outcome = 'cancelled';
     else if (!error) {
       const reason = turn.endReason;
       if (reason?.kind === 'completed') outcome = 'completed';
@@ -156,14 +157,19 @@ export function settle(record: Session, turn: Turn, failure?: Failure): Promise<
       else if (reason?.kind === 'max-tokens') error = { kind: 'OUTPUT_TRUNCATED', message: 'model response reached its output limit' };
       else if (reason?.kind === 'error') {
         const f = reason.error;
-        const kind = f.status === 401 || f.status === 403 || ['INVALID_CREDENTIAL', 'MISSING_CREDENTIAL'].includes(f.code) ? 'PROVIDER_AUTH'
+        const kind = f.status === 401 || f.status === 403 || ['AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL'].includes(f.code) ? 'PROVIDER_AUTH'
           : f.code === dsh.llm.CONTEXT_WINDOW_EXCEEDED_CODE ? 'CONTEXT_OVERFLOW'
-            : f.status === 429 || f.status >= 500
+            : f.status === 429 || f.status >= 500 || ['RATE_LIMIT', 'SERVER'].includes(f.code)
               || (f.status === undefined && ['TRANSPORT', 'TIMEOUT', 'STREAM_CLOSED'].includes(f.code)) ? 'PROVIDER_UNAVAILABLE' : 'INTERNAL_ERROR';
         error = { kind, message: f.message };
       } else error = { kind: 'INTERNAL_ERROR', message: 'agent stopped without a completed response' };
     }
     if (outcome === 'cancelled' || turn.forced) killProcesses(record);
+    try { await ctx!.sessionPersistence.flush(); }
+    catch {
+      outcome = 'failed';
+      error = { kind: 'INTERNAL_ERROR', message: 'session persistence flush failed' };
+    }
     turn.settled = true;
     await update(record.id, turn.trace, 'settled', { outcome,
       final_text: (turn.last ?? []).filter((b: any) => b.type === 'text').map((b: any) => b.text).join(''),
@@ -190,13 +196,17 @@ export async function cancelTurn(record: Session, turn: Turn, deadline = 4000): 
     turn.closed.resolve();
   }
   record.agent.cancel({ kind: 'user' }, { keepInbox: false });
-  await Promise.allSettled(turn.authorizations.values());
   if (await within(turn.finished.promise, deadline)) return;
   turn.forced = true;
   killProcesses(record);
-  turn.failure = { kind: 'INTERNAL_ERROR', message: 'cancel did not settle; the session was released' };
-  try { await release(record, true); }
-  catch { diagnostic('forced session disposal failed'); }
+  if (turn.authorizations.size) {
+    // No allowance is known yet. Do not invent an authorized request_end or
+    // keep the session hostage to a host callback that may never return.
+    turn.complete = false;
+  } else turn.failure = { kind: 'INTERNAL_ERROR', message: 'cancel did not settle; the session was released' };
+  turn.authorizationExpired.resolve();
+  const releasing = release(record, true).catch(() => { diagnostic('forced session disposal failed'); });
   for (const id of turn.inflight) endRequest(record, turn, id, 'aborted', false);
   await settle(record, turn);
+  await releasing;
 }

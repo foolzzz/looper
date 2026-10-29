@@ -5,7 +5,7 @@ import { ctx, dsh } from './sdk.ts';
 import { sessions, type Session } from './session.ts';
 import { settle, type Turn } from './turn.ts';
 
-type Attempt = { sent: boolean; bodyDone: boolean; status?: number; onSent: () => void };
+type Attempt = { sent: boolean; bodyDone: boolean; status?: number; terminalUsage?: any; onSent: () => void };
 const attempts = new Map<string, Attempt>();
 const owners = new WeakMap<object, string>();
 let installed = false, counter = 0;
@@ -19,9 +19,61 @@ function validUsage(usage: any): boolean {
 function finish(kind: string, message: string, code: string): any {
   return { type: 'finish', reason: { kind, failure: { message, code } } };
 }
+// The SDK fills absent counts with zero. Observe the provider's fields before
+// translation so a successful stream alone cannot establish complete usage.
+function providerUsage(attempt: Attempt): TransformStream<Uint8Array, Uint8Array> {
+  const decoder = new TextDecoder(), usage: Record<string, unknown> = {};
+  let pending = '', data: string[] = [], afterCR = false, stopped = false;
+  function event() {
+    if (stopped) return;
+    let value: any;
+    try { value = JSON.parse(data.join('\n')); } catch { return; }
+    if (!value || typeof value !== 'object') return;
+    const fields = value.type === 'message_start' ? value.message?.usage : value.usage;
+    const finalDelta = value.type === 'message_delta' && value.delta?.stop_reason != null;
+    if (['message_start', 'message_delta', 'message_stop'].includes(value.type) && fields) {
+      for (const [wire, local] of Object.entries({ input_tokens: 'inputTokens', output_tokens: 'outputTokens',
+        cache_read_input_tokens: 'cacheReadTokens', cache_creation_input_tokens: 'cacheWriteTokens' })) {
+        if (wire === 'output_tokens' && value.type !== 'message_stop' && !finalDelta) continue;
+        if (Object.hasOwn(fields, wire)) usage[local] = fields[wire];
+      }
+    }
+    if (value.type === 'message_stop') {
+      stopped = true;
+      if (validUsage(usage)) attempt.terminalUsage = { ...usage };
+    }
+  }
+  function consume(text: string) {
+    if (text) {
+      const skipLF = afterCR && text.startsWith('\n');
+      afterCR = text.endsWith('\r');
+      if (skipLF) text = text.slice(1);
+    }
+    pending += text;
+    const lines = pending.split(/\r\n|[\r\n]/);
+    pending = lines.pop()!;
+    for (const line of lines) {
+      if (!line) { event(); data = []; }
+      else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+    }
+  }
+  return new TransformStream({ transform(chunk, controller) {
+    consume(decoder.decode(chunk, { stream: true }));
+    controller.enqueue(chunk);
+  }, flush() { consume(decoder.decode() + '\n\n'); } });
+}
 export function installProvider(): void {
   if (installed) return;
   installed = true;
+  const fetch = globalThis.fetch;
+  globalThis.fetch = async (input, options) => {
+    const headers = new Headers(options?.headers ?? (input instanceof Request ? input.headers : undefined));
+    const attempt = attempts.get(headers.get('x-looper-request-id')!);
+    const response = await fetch(input, options);
+    if (!attempt || !response.ok || !response.body) return response;
+    return new Response(response.body.pipeThrough(providerUsage(attempt)), {
+      status: response.status, statusText: response.statusText, headers: response.headers });
+  };
   subscribe('undici:client:sendHeaders', (message: any) => {
     const id = /^x-looper-request-id:\s*([^\r\n]+)\r?$/im.exec(message.headers)?.[1];
     const attempt = id && attempts.get(id);
@@ -70,9 +122,10 @@ export function installProvider(): void {
       yield finish('aborted', `Looper denied this model request (${reason})`, 'LOOPER_DENIED');
       return;
     }
+    if (turn.settled) return;
     turn.inflight.add(id);
     turn.requestKinds.set(id, kind);
-    if (turn.cancel || options.signal?.aborted) {
+    if (turn.cancel || turn.settling || options.signal?.aborted) {
       endRequest(record, turn, id, 'aborted', true);
       yield finish('aborted', 'request aborted', 'LOOPER_CANCELLED');
       return;
@@ -87,7 +140,7 @@ export function installProvider(): void {
     } };
     attempts.set(id, attempt);
     record.activeRequest = id;
-    let usage: any, terminalUsage: any, terminal: string | undefined, modelOutput = false;
+    let usage: any, terminal: string | undefined, modelOutput = false;
     try {
       for await (const chunk of next()) {
         if (['block-start', 'text-delta', 'reasoning-delta', 'tool-call-delta', 'block-end'].includes(chunk.type)) modelOutput = true;
@@ -95,19 +148,19 @@ export function installProvider(): void {
           void update(record.id, turn.trace, 'text_delta', { text: chunk.text });
         }
         if (chunk.type === 'usage' && validUsage(chunk.usage)) usage = { ...chunk.usage };
-        if (chunk.type === 'finish') { terminal = chunk.reason.kind; terminalUsage = usage; }
+        if (chunk.type === 'finish') terminal = chunk.reason.kind;
         yield chunk;
       }
     } finally {
       record.activeRequest = null;
       const rejected = attempt.status !== undefined && attempt.status >= 400 && attempt.bodyDone && !modelOutput;
       const successful = terminal !== undefined && ['stop', 'tool-calls', 'max-tokens'].includes(terminal);
-      const complete = !attempt.sent || rejected || (successful && terminalUsage !== undefined && attempt.bodyDone);
+      const complete = !attempt.sent || rejected || (successful && attempt.terminalUsage !== undefined && attempt.bodyDone);
       const status = turn.cancel || options.signal?.aborted || terminal === 'aborted' ? 'aborted'
         : attempt.status !== undefined && attempt.status >= 400 ? `http_${attempt.status}`
           : successful ? 'completed' : 'error';
       setImmediate(() => endRequest(record, turn, id, status, complete,
-        attempt.sent && !rejected ? usage : undefined));
+        attempt.sent && !rejected ? attempt.terminalUsage ?? usage : undefined));
     }
   })());
 }
