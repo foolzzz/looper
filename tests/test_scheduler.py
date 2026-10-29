@@ -216,3 +216,14 @@ def test_a_rule_change_starts_the_no_success_clock_again() -> None:
     changed = stale_deadline(rule, tz, last_ok=old_ok, first_run=old_ok, enabled_at=ENABLED_LONG_AGO,
                              rule_changed_at=NOW)
     assert changed == NOW.replace(second=0) + 16 * MINUTE
+
+
+def test_user_gate_opt_in_changes_only_the_scheduled_runs_attendance_instruction() -> None:
+    firing = Firing(Trigger.SCHEDULED, NOW)
+    before = run_context(SCHEDULE, firing, [], description="Every 30 minutes")
+    off = run_context({**SCHEDULE, "user_gates": "off"}, firing, [], description="Every 30 minutes")
+    assert off.encode() == before.encode()
+    on = run_context({**SCHEDULE, "user_gates": "on"}, firing, [], description="Every 30 minutes")
+    assert on.rsplit("\n", 1)[0] == before.rsplit("\n", 1)[0]
+    assert on.endswith("- 这次运行允许用户关卡：项目也允许时，可通过关卡等待用户决定；等待计入运行超时。")
+    assert "不要等待用户回答" not in on

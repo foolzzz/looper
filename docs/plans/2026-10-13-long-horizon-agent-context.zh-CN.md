@@ -730,6 +730,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-29 | DSH runner 终止计量（本分支）：2xx 流在 `message_stop` 的最终用量校验通过后完成计量，不再等待 HTTP EOF；拒绝仍须完整响应且无模型输出，未完成请求向 stderr 输出缺失条件且不含请求内容。真实 SDK 配 loopback 服务确认原实现立即 EOF 通过、延迟 EOF 因 `terminal_usage=true` / `body_done=false` 误报不完整；新增回归覆盖延迟 EOF、断流、空用量和拒绝，wheel 验证复用 uv 依赖缓存以避免重复下载构建后端。DSH runner 164 项与打包 29 项均以 `-n 2` 通过，无失败或跳过；Dashboard、Telegram、Lark 和 CLI 共用修复，无需入口改动，真实模型对比尚未重跑。 |
 | 2026-10-29 | DSH consult 上下文：runner consult 复用已安装 CLI 的完整默认 guidance 和 24 个工具声明，只读执行仍限 read/glob/grep；隔离 serve 对同一已结束 Worker 逐项比较完整 system、工具及历史，旧实现先红、修复后通过，并覆盖声明存在但写入/shell/子代理/联网拒绝。真实 DeepSeek 对同一合成历史与问题前后各两次完整 consult：首请求输入 token 从 4,035 增至 8,621，前后均 2/2 通过生产 answers 解析、无 Worker report，因此偶发格式故障尚未复现，不能宣称其根因已修复；[完整测量与复现方法](2026-10-29-dsh-consult-validation.md)。fork 截点保留独立事件的修复单独保留，不作为上述问题的修复证据。Dashboard、Telegram、Lark 共用后端，CLI 为对照路径；指定 DSH runner 定向测试 `-n 2` 共 171 项通过，0 失败、0 跳过。 |
 
+| 2026-10-29 | 定时任务按项开启用户关卡：新增 `schedules.user_gates`（默认 `off`），仅在项目和定时任务都开启时允许规划者开关卡；未开启时完整 Planner prompt 与原策略逐字节相同。API、管家列表/配置/差异/启用确认、v4 配置导入导出和项目定时表单/详情均携带该字段；v4 缺省导入为关闭。关卡优先发到定时任务通知对象，否则用系统 dashboard target，再否则仅任务页，复用渠道白名单与 `/gates` 路由。等待计入运行超时，重叠跳过、补跑和预算规则不变。一次性数据库的定向 pytest 以 `-n 2` 验证策略、升级、投递、API 回复恢复、超时和导入导出；隔离 serve 配 fake runtime 与本地 Lark 替身完整跑通。Web 36 项测试及构建通过，1280/390 浏览器验证开关、保存读回和超时提示；无真实渠道发送。 |
+
 ## 5. 不属于本 RFC 的待办
 
 这些问题在开发过程中发现，独立排期，不阻塞 M1–M6。
