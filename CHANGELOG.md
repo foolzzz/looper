@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.1] - 2026-10-29
+
+### Added
+
+- **A DSH runner skeleton, not yet reachable from any runtime.** `runners/dsh` is a packaged TypeScript runner that speaks protocol 0.1: `initialize` gates the installed DSH, every `@deepseek-ai` package it uses and the exports later work needs on exactly `0.2.1-rc.2` (`cordis` on `4.0.x`, Node 22.19.0 or later) and answers `-32009` otherwise, boots one `headless` profile with a runner overlay (native bash, jobs, subagent, workflow, web and skill tools, the headless driver, the environment-key DeepSeek route and retry off; `danger-full-access` sandbox, approval `never`), serves `runner/health` and exits on signals or stdin EOF. `looper/agents/runtimes/runner/dsh_command.py` provides `entry`, `state_root`, `command` and `connect`, but nothing registers it and no setting or user-visible entry exists. The Pi runner's stdio transport moved unchanged to the shared `runners/common/rpc.ts`, and the wheel packages `common/` and `dsh_runner/`. No model-visible change. ([#867](https://github.com/foolzzz/looper/pull/867))
+
 ## [2.14.0] - 2026-10-29
 
 ### Changed
