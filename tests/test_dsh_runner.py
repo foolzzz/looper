@@ -345,8 +345,8 @@ def test_state_root_is_private_and_shared_across_generations(tmp_path):
 
 
 @pytest.mark.parametrize("part", ["runtime", "runners", "state", "dsh-native"])
-@pytest.mark.parametrize("kind", ["file", "symlink"])
-def test_state_root_refuses_unsafe_directories(tmp_path, part, kind):
+@pytest.mark.parametrize("kind", ["file", "symlink", "dangling_symlink"])
+def test_state_root_directory_boundaries(tmp_path, part, kind):
     root = tmp_path / "runtime"
     target = root / "runners/state/dsh-native"
     invalid = next(path for path in (root, *target.parents[:2], target) if path.name == part)
@@ -355,8 +355,13 @@ def test_state_root_refuses_unsafe_directories(tmp_path, part, kind):
         invalid.write_text("do not replace")
     else:
         outside = tmp_path / "outside"
-        outside.mkdir()
+        if kind == "symlink":
+            outside.mkdir()
         invalid.symlink_to(outside, target_is_directory=True)
+    if part == "runtime" and kind == "symlink":
+        assert dsh_command.state_root(root) == target
+        assert target.resolve() == outside / "runners/state/dsh-native"
+        return
     with pytest.raises(ValueError, match="directory"):
         dsh_command.state_root(root)
 

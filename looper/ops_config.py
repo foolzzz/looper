@@ -12,7 +12,9 @@
     log_level = "info"                          # debug, info, warning or error
 
     [runtimes]
-    pi = "cli"                                 # opt in to "runner" for every Pi role; restart required
+    # Opt in to "runner" for every Pi or DSH role; restart required.
+    pi = "cli"
+    dsh = "cli"
 
     [backup]                                    # how the database is backed up before a schema change
     pg_dump = "/usr/lib/postgresql/17/bin/pg_dump"
@@ -36,7 +38,7 @@ stops the command with a message that names the key and never shows the value. N
 no ``~``, no include.
 
 Environment and ``.env`` settings remain readable until the ops file names them. Only deployment settings are
-read from ``.env``; its contents are never added to the process environment. ``runtimes.pi`` is file-only.
+read from ``.env``; its contents are never added to the process environment. ``runtimes.pi`` and ``runtimes.dsh`` are file-only.
 """
 
 from __future__ import annotations
@@ -113,6 +115,7 @@ class OpsConfig:
     backup_verify_command: tuple[str, ...] = ()
     operator_notes_root: str = ""
     pi_runtime: str = "cli"
+    dsh_runtime: str = "cli"
     sources: Mapping[str, Source] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
 
@@ -163,7 +166,7 @@ def _log_level(value: Any, where: str) -> str:
     return value
 
 
-def _pi_runtime(value: Any, where: str) -> str:
+def _runtime_choice(value: Any, where: str) -> str:
     if value not in ("cli", "runner"):
         raise OpsConfigError(f"{where} must be cli or runner")
     return value
@@ -215,7 +218,8 @@ class _Setting:
 
 
 SETTINGS = (
-    _Setting("pi_runtime", "runtimes", "pi", _pi_runtime),
+    _Setting("pi_runtime", "runtimes", "pi", _runtime_choice),
+    _Setting("dsh_runtime", "runtimes", "dsh", _runtime_choice),
     _Setting("database_url", "database", "url", _database_url, variable="LOOPER_DATABASE_URL"),
     _Setting("host", "server", "host", _text, flag="host"),
     _Setting("port", "server", "port", _port, flag="port"),
@@ -441,9 +445,10 @@ def render(config: OpsConfig) -> str:
         else '# public_url = "https://looper.example.com"',
         f"log_level = {_toml_string(config.log_level)}" if config.log_level != "info" else '# log_level = "info"',
         "",
-        '# Opt in to "runner" for every Pi role; restart required.',
+        '# Opt in to "runner" for every Pi or DSH role; restart required.',
         "[runtimes]",
         'pi = "runner"' if config.pi_runtime == "runner" else '# pi = "cli"',
+        'dsh = "runner"' if config.dsh_runtime == "runner" else '# dsh = "cli"',
         "",
         "[backup]",
         f"pg_dump = {_toml_string(config.pg_dump)}" if config.pg_dump else '# pg_dump = "/path/to/pg_dump"',

@@ -75,10 +75,10 @@ def test_serve_reads_opt_in_before_ownership_and_cleans_partial_start(tmp_path, 
 
     async def owned(**kwargs):
         if value == "runner":
-            assert kwargs["runner_supervisor"] is supervisor
+            assert kwargs["runner_supervisors"] == (supervisor,)
             kwargs["ownership"].push_async_callback(stopped, "agents stopped")
         else:
-            assert "runner_supervisor" not in kwargs
+            assert "runner_supervisors" not in kwargs
         raise serve.StartupCheckFailed("fixture startup failure")
 
     monkeypatch.setattr(pi_runner, "enable", enable)

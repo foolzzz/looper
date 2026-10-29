@@ -295,7 +295,7 @@ def test_run_failure_still_emits_one_terminal_event(tmp_path, failure, monkeypat
                     "message": "private rejection details", "data": turn}))
             output = await events(handle)
             assert len(output) == 1 and output[0]["type"] == "result" and output[0]["is_error"]
-            assert output[0]["errors"] == (["the pi runner run failed (ValueError)"] if failure == "exception"
+            assert output[0]["errors"] == (["the fake runner run failed (ValueError)"] if failure == "exception"
                                            else ["runner rejected the prompt"])
             with pytest.raises(RuntimeError, match="the run has ended"):
                 await handle.wait_input_ready()
