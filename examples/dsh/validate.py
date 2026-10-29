@@ -192,14 +192,14 @@ def read_key() -> str:
         raise ValidationError("API key 捕获失败或为空") from None
 
 
-def eval_argv(command: str, pg_url: str, out_dir: Path) -> list[str]:
+def eval_argv(command: str, pg_url: str, out_dir: Path, *, dsh_runner: bool = False) -> list[str]:
     manager = command == "manager"
     return [sys.executable, "-m", "evals.prompt_regression", "dialogs" if manager else "run",
             "--mode", "real", "--register-agent", str(SPEC), "--pg-url", pg_url,
             "--dialogs" if manager else "--tasks", CASES[command], "--jobs", "1", "--reps",
             "2",
             "--max-budget-usd", f"{RUN_SOFT_CAP_USD:.2f}", "--total-cap-usd", str(TOTAL_OBSERVED_CAP_USD),
-            "--timeout" if manager else "--task-timeout", str(STAGE_TIMEOUT), "--out-dir", str(out_dir)]
+            "--timeout" if manager else "--task-timeout", str(STAGE_TIMEOUT), "--out-dir", str(out_dir)] + (["--dsh-runner"] if dsh_runner else [])
 
 
 def baseline_status(base: dict[str, Any] | None, cases: tuple[str, ...], *, dialogs: bool) -> dict[str, Any]:
@@ -262,13 +262,19 @@ def isolated_env(home: Path, temporary: Path, key: str) -> dict[str, str]:
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
 
 
-def basic_evidence_gaps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _runtime_matches(evidence: dict[str, Any], *, dsh_runner: bool) -> bool:
+    return (evidence.get("runtime") == "dsh" and
+            evidence.get("executable") == ("looper-runner" if dsh_runner else "dsh") and
+            (not dsh_runner or evidence.get("runner_kind") == "dsh"))
+
+
+def basic_evidence_gaps(rows: list[dict[str, Any]], *, dsh_runner: bool = False) -> list[dict[str, Any]]:
     gaps = []
     for row in rows:
         reasons = []
         evidence = row.get("runtime_evidence") or []
         if not {"planner", "worker"}.issubset({r.get("role") for r in evidence}) or any(
-            r.get("runtime") != "dsh" or r.get("executable") != "dsh" or
+            not _runtime_matches(r, dsh_runner=dsh_runner) or
             r.get("system_prompt_mode") != "append" or r.get("session_present") is not True for r in evidence
         ):
             reasons.append("缺少每角色实际 dsh/append/session 证据")
@@ -286,8 +292,8 @@ def basic_evidence_gaps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return gaps
 
 
-def review_evidence_gaps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    gaps = basic_evidence_gaps(rows)
+def review_evidence_gaps(rows: list[dict[str, Any]], *, dsh_runner: bool = False) -> list[dict[str, Any]]:
+    gaps = basic_evidence_gaps(rows, dsh_runner=dsh_runner)
     for row in rows:
         workers = [run for run in row.get("runtime_evidence") or [] if run.get("role") == "worker"]
         if not any(run.get("status") == "completed" and run.get("report_valid") is True for run in workers):
@@ -303,7 +309,7 @@ def review_evidence_gaps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return gaps
 
 
-def manager_evidence_gaps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def manager_evidence_gaps(rows: list[dict[str, Any]], *, dsh_runner: bool = False) -> list[dict[str, Any]]:
     gaps = []
     for row in rows:
         reasons = []
@@ -312,7 +318,7 @@ def manager_evidence_gaps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         expected = 1 if row.get("id") == "status" else 3
         # Starting the task can leave its Planner awaiting its first result/Session.
         if len(managers) != expected or any(
-            run.get("runtime") != "dsh" or run.get("executable") != "dsh" or
+            not _runtime_matches(run, dsh_runner=dsh_runner) or
             run.get("system_prompt_mode") != "append" for run in evidence
         ) or any(run.get("status") != "completed" or not run.get("session_id") for run in managers):
             reasons.append("缺少每轮实际 dsh/append/Session 成功证据")
@@ -330,7 +336,22 @@ def manager_evidence_gaps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return gaps
 
 
-def execute(command: str, pg_url: str, key: str, baseline: Path | None) -> tuple[dict[str, Any], int]:
+def _server_log_key_absent(out_dir: Path, key: str) -> bool | str:
+    """Check private server logs in memory, exporting only the verification result."""
+    logs = [*out_dir.glob("*.server.log"), *out_dir.glob("*.server-logs/*.log")]
+    if not logs or not key:
+        return "unverified"
+    unreadable = False
+    for log in logs:
+        try:
+            if key.encode() in log.read_bytes():
+                return False
+        except OSError:
+            unreadable = True
+    return "unverified" if unreadable else True
+
+
+def execute(command: str, pg_url: str, key: str, baseline: Path | None, *, dsh_runner: bool = False) -> tuple[dict[str, Any], int]:
     # Fixed ignored destination: callers cannot redirect real artifacts into tracked paths.
     ARTIFACTS.mkdir(parents=True, exist_ok=True, mode=0o700)
     out_dir = Path(tempfile.mkdtemp(prefix=f"{command}-", dir=ARTIFACTS)).resolve()
@@ -347,15 +368,17 @@ def execute(command: str, pg_url: str, key: str, baseline: Path | None) -> tuple
     except (OSError, ValueError):
         base = None
     baseline_check = baseline_status(base, cases, dialogs=command == "manager")
-    result = asyncio.run(run_process(eval_argv(command, pg_url, out_dir), timeout=OUTER_TIMEOUT,
+    result = asyncio.run(run_process(eval_argv(command, pg_url, out_dir, dsh_runner=dsh_runner), timeout=OUTER_TIMEOUT,
                                      env=env, capture=False))
     paths = list(out_dir.glob("*-real.json"))
     run = json.loads(paths[0].read_text()) if len(paths) == 1 else {}
     summary = summarize(run, cases, reps=reps)
     summary["baseline"] = baseline_check
+    if dsh_runner:
+        summary["server_log_key_absent"] = _server_log_key_absent(out_dir, key)
     evidence_checks = {"task-basic": basic_evidence_gaps, "task-review": review_evidence_gaps,
                        "manager": manager_evidence_gaps}
-    summary["evidence_gaps"] = evidence_checks[command](compare.rows(run)) if command in evidence_checks else []
+    summary["evidence_gaps"] = evidence_checks[command](compare.rows(run), dsh_runner=dsh_runner) if command in evidence_checks else []
     if command in evidence_checks:
         summary["effective_system_prompt_mode"] = None if summary["evidence_gaps"] or not compare.rows(run) else "append"
     if summary["baseline"]["comparable"]:
@@ -364,7 +387,8 @@ def execute(command: str, pg_url: str, key: str, baseline: Path | None) -> tuple
     summary["outer_timeout"] = result.timed_out
     summary["eval_exit_code"] = result.returncode
     passed = (result.returncode == 0 and not result.timed_out and not summary["aborted"] and
-              not summary["sample_gaps"] and not summary["evidence_gaps"] and summary["outcomes"] == {
+              not summary["sample_gaps"] and not summary["evidence_gaps"] and
+              (not dsh_runner or summary["server_log_key_absent"] is True) and summary["outcomes"] == {
                   "pass": len(cases) * reps, "fail": 0, "error": 0, "skipped": 0, "untested": 0})
     summary["status"] = "pass" if passed else "error" if result.timed_out or not run else "fail"
     summary["real_validation"] = summary["status"]
@@ -555,14 +579,14 @@ def _session_accounting(records: list[dict[str, Any]], runtime: Path) -> dict[st
     return result
 
 
-def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
+def _smoke_workflow(pg_url: str, root: Path, *, dsh_runner: bool = False) -> tuple[dict[str, Any], int]:
     from evals.prompt_regression import runner
     from looper.agents.runtimes.dsh import DshRuntime
 
     summary: dict[str, Any] = {"status": "error", "stage": "checkout", "observed_cost_usd": None,
         "auxiliary_cost_coverage": "unknown", "hard_billing_cap": False,
         "per_run_soft_cap_usd": RUN_SOFT_CAP_USD, "total_observed_cap_usd": TOTAL_OBSERVED_CAP_USD,
-        "real_validation": "error"}
+        "real_validation": "error", **({"path": "runner"} if dsh_runner else {})}
     try:
         root = disposable_root(root)
         _require(Path(looper.__file__ or "").resolve() == ROOT / "looper/__init__.py")
@@ -585,7 +609,8 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
             with runner.fresh_database(pg_url) as (database_url, _):
                 summary["stage"] = "serve"
                 with runner.running_server(database_url=database_url, runtime_root=runtime, home=home,
-                        bin_dir=bin_dir, log_path=root / "serve.log", startup_timeout=30) as api:
+                        bin_dir=bin_dir, log_path=root / "serve.log", startup_timeout=30,
+                        dsh_runtime="runner" if dsh_runner else "cli") as api:
                     api.timeout = 10
                     request = api.request
                     stage, began = summary["stage"], time.monotonic()
@@ -620,10 +645,12 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
                         for record in api.post("/api/v1/runs/list", {"limit": 200})["result"]["records"]:
                             if record["id"] in observed:
                                 continue
+                            if dsh_runner:
+                                record = api.post("/api/v1/runs/get", {"record_id": record["id"]})["result"]["record"]
                             events = runner._all_events(api, record["id"])
                             results = [e["event"] for e in events if e["event"].get("type") == "result"]
                             if results:
-                                amount = results[-1].get("observed_cost_usd")
+                                amount = record.get("cost_usd") if dsh_runner else results[-1].get("observed_cost_usd")
                                 if isinstance(amount, (int, float)) and math.isfinite(amount) and amount >= 0:
                                     observed[record["id"]] = amount
                         if observed:
@@ -689,9 +716,17 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
                         events = runner._all_events(api, row["id"])
                         results = [e["event"] for e in events if e["event"].get("type") == "result"]
                         _require(results and results[-1].get("is_error") is False)
-                        owner = DshRuntime().kept_session_dir(metadata.get("command", []))
-                        _require(owner is not None and owner.resolve().is_relative_to(runtime.resolve()))
-                        _require(homes.setdefault(record["agent_id"], owner) == owner)
+                        if dsh_runner:
+                            from looper.agents.runtimes.runner.session import Descriptor
+
+                            _require(Descriptor.parse(metadata.get("command", [])).kind == "dsh")
+                            _require(results[-1].get("usage_complete") is True)
+                            amount = record.get("cost_usd")
+                            _require(isinstance(amount, (int, float)) and math.isfinite(amount) and amount >= 0)
+                        else:
+                            owner = DshRuntime().kept_session_dir(metadata.get("command", []))
+                            _require(owner is not None and owner.resolve().is_relative_to(runtime.resolve()))
+                            _require(homes.setdefault(record["agent_id"], owner) == owner)
                         persisted.append(record)
                     for agent in ("manager", *(f"planner-{task}" for task in tasks)):
                         rows = [r for r in persisted if r["agent_id"] == agent]
@@ -726,8 +761,18 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
                     _require(consult["state"] == "answered")
                     source = by_id[consult["source_record"]]
                     answers = [r for r in persisted if r["agent_id"] == consult["consult_run"]]
-                    _require(answers and all(r["session_id"] == source["session_id"] for r in answers))
-                accounting = _session_accounting(persisted, runtime)
+                    _require(answers)
+                    for answer in answers:
+                        if dsh_runner:
+                            descriptor = Descriptor.parse(answer["metadata"]["command"])
+                            _require(descriptor.role == "worker" and descriptor.read_only)
+                            _require(descriptor.fork_from == source["session_id"])
+                            _require(answer["session_id"] != source["session_id"])
+                        else:
+                            _require(answer["session_id"] == source["session_id"])
+                accounting = ({"coverage": "complete", "root_observed_cost_usd":
+                               sum(r["cost_usd"] for r in persisted)} if dsh_runner else
+                              _session_accounting(persisted, runtime))
                 accounting["headless_observed_cost_usd"] = summary["observed_cost_usd"]
                 amounts = [accounting.get(f"{kind}_observed_cost_usd") for kind in ("root", "child", "summary")]
                 known = [amount for amount in amounts if amount is not None]
@@ -736,6 +781,8 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
                 summary["session_accounting"] = accounting
         finally:
             os.environ["PATH"] = old_path
+        if dsh_runner:
+            summary["auxiliary_cost_coverage"] = "complete"
         summary.update(status="pass", stage="completed", roles=list(ROLES), tasks=2,
                        manager_turns=2, database_readback=True, real_validation="pass")
         return summary, 0
@@ -744,7 +791,7 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
         return summary, 2 if summary["timeout"] else 1
 
 
-def smoke(pg_url: str, key: str) -> tuple[dict[str, Any], int]:
+def smoke(pg_url: str, key: str, *, dsh_runner: bool = False) -> tuple[dict[str, Any], int]:
     # An isolated process keeps serve's inherited environment and all private
     # artifacts disposable. The outer supervisor also reaps owned descendants.
     with tempfile.TemporaryDirectory(prefix="looper-dsh-smoke-") as directory:
@@ -753,7 +800,7 @@ def smoke(pg_url: str, key: str) -> tuple[dict[str, Any], int]:
             (root / name).mkdir(mode=0o700)
         script = ("import json,sys; from pathlib import Path; "
                   "from examples.dsh.validate import _smoke_workflow; "
-                  "summary,code=_smoke_workflow(sys.argv[1],Path(sys.argv[2])); "
+                  f"summary,code=_smoke_workflow(sys.argv[1],Path(sys.argv[2]),dsh_runner={dsh_runner!r}); "
                   "print(json.dumps(summary)); sys.exit(code)")
         result = asyncio.run(run_process([sys.executable, "-c", script, pg_url, str(root)],
             timeout=OUTER_TIMEOUT, env=isolated_env(root / "launch-home", root / "tmp", key), capture=True))
@@ -778,6 +825,7 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--disposable-pg-url", help="显式声明为可丢弃的本机 PG 实例（仅 postgres 管理库）")
         if name != "preflight":
             command.add_argument("--real", action="store_true", help="明确授权读取 key 并运行付费模型")
+            command.add_argument("--dsh-runner", action="store_true", help="所有 DSH 角色使用 SDK runner")
         if name not in ("preflight", "smoke"):
             command.add_argument("--baseline", type=Path, help="显式 real eval JSON；需有效 append 证据")
     args = parser.parse_args(argv)
@@ -791,9 +839,9 @@ def main(argv: list[str] | None = None) -> int:
             key = read_key()
             began = True
             if args.command == "smoke":
-                summary, code = smoke(args.disposable_pg_url, key)
+                summary, code = smoke(args.disposable_pg_url, key, dsh_runner=args.dsh_runner)
             else:
-                summary, code = execute(args.command, args.disposable_pg_url, key, args.baseline)
+                summary, code = execute(args.command, args.disposable_pg_url, key, args.baseline, dsh_runner=args.dsh_runner)
     except ValidationError as exc:
         summary, code = {"status": "error", "reason": str(exc), "real_validation": "untested"}, 2
     except Exception:

@@ -83,6 +83,7 @@ from looper.agents.ops import API_CHANNEL
 from looper.agents.tiers.manager import _looper_call
 
 from .compare import outcome
+from .metrics import runner_evidence
 from .runner import (
     INTERRUPTED, Api, ErrorClass, EvalError, Outcome, _git, aborted_reason, check_case_budget, error_row,
     _all_events, fresh_database, install_claude, model_name, register_agent, run_suite, running_server, select_agent, write_result,
@@ -2395,6 +2396,7 @@ def runtime_evidence(api: Api) -> list[dict[str, Any]]:
         evidence.append({"role": record["agent_id"].split("-", 1)[0],
             "runtime": ((metadata.get("profile") or {}).get("runtime") or {}).get("type"),
             "executable": Path(command[0]).name if command else None,
+            **runner_evidence(command),
             "system_prompt_mode": metadata.get("system_prompt_mode"),
             "session_id": record.get("session_id"), "status": record.get("status"),
             "cost_usd": record.get("cost_usd"),
@@ -2423,6 +2425,7 @@ def run(
     case_budget_usd: float | None = None, switch_agent: dict[str, Any] | None = None,
     manager_agent: dict[str, Any] | None = None,
     pi_runtime: str = "cli",
+    dsh_runtime: str = "cli",
 ) -> tuple[dict[str, Any], Path]:
     """Run ``dialogs`` ``reps`` times each in ``mode``, rep-major, ``jobs`` at a time, each (dialog, rep) on a
     database, a server, a working directory and a project of its own (``runner.run``'s setup); the run and the JSON file written to
@@ -2471,7 +2474,7 @@ def run(
             with fresh_database(admin_url) as (database_url, _):
                 with running_server(database_url=database_url, runtime_root=case / "runtime", bin_dir=case / "bin",
                                     log_path=logs / f"{dialog.id}-{rep}.log", home=home,
-                                    pi_runtime=pi_runtime) as api:
+                                    pi_runtime=pi_runtime, dsh_runtime=dsh_runtime) as api:
                     named = register_agent(api, register)["name"] if register is not None else agent
                     picked = select_agent(api, agent=named, model=model)
                     if register is not None:

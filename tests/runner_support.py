@@ -144,8 +144,8 @@ async def _bootstrap(port: int, runtime_root: Path, work_dir: Path) -> None:
 
 @contextmanager
 def serving(*, database_url: str, runtime_root: Path, home: Path, work_dir: Path,
-            log_path: Path, startup_timeout: float = 45, runner: Literal["fake", "pi"] = "fake"):
-    """Run the real serve system with a fake peer or the production Pi opt-in."""
+            log_path: Path, startup_timeout: float = 45, runner: Literal["fake", "pi", "dsh"] = "fake"):
+    """Run the real serve system with a fake peer or a production runner opt-in."""
     _disposable_url(database_url)
     runtime_root, home, work_dir = (Path(p).absolute() for p in (runtime_root, home, work_dir))
     for directory in (runtime_root, home, work_dir):
@@ -154,18 +154,21 @@ def serving(*, database_url: str, runtime_root: Path, home: Path, work_dir: Path
     assert port != 8767
     ops = ops_config.OpsConfig(runtime_root=runtime_root, path=runtime_root / ops_config.FILE,
         database_url=database_url, host="127.0.0.1", port=port,
-        operator_notes_root=str(home / "notes"), **({"pi_runtime": "runner"} if runner == "pi" else {}))
+        operator_notes_root=str(home / "notes"),
+        **({f"{runner}_runtime": "runner"} if runner in {"pi", "dsh"} else {}))
     ops_config.write_private(ops.path, ops_config.render(ops))
     guard = ROOT / "tests/runtime_root_guard"
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home),
            "PYTHONPATH": os.pathsep.join((str(guard), str(ROOT))), "PYTHONUNBUFFERED": "1",
            **{k: v for k, v in os.environ.items() if k.startswith("PYTEST_LOOPER_")}}
-    if runner == "pi":
-        from tests.pi_runner_support import require_pi
-
-        node, pi = require_pi()
-        env["PATH"] = os.pathsep.join((str(Path(node).parent), str(Path(pi).parent), env["PATH"]))
-        env["PYTEST_LOOPER_RUNNER"] = "pi"
+    if runner in {"pi", "dsh"}:
+        if runner == "pi":
+            from tests.pi_runner_support import require_pi as require_runtime
+        else:
+            from tests.dsh_runner_support import require_dsh as require_runtime
+        node, executable = require_runtime()
+        env["PATH"] = os.pathsep.join((str(Path(node).parent), str(Path(executable).parent), env["PATH"]))
+        env["PYTEST_LOOPER_RUNNER"] = runner
     with log_path.open("w", encoding="utf-8") as log:
         process = subprocess.Popen([sys.executable, "-u", str(Path(__file__).resolve()),
             str(port), str(runtime_root), str(work_dir)], cwd=work_dir, env=env,

@@ -1197,9 +1197,10 @@ def test_reps_must_be_a_whole_number_of_at_least_one(value: str) -> None:
 
 
 @pytest.mark.parametrize("command", ["run", "dialogs"])
-def test_pi_runner_is_an_explicit_eval_opt_in(command: str) -> None:
-    assert not cli._parser().parse_args([command]).pi_runner
-    assert cli._parser().parse_args([command, "--pi-runner"]).pi_runner
+@pytest.mark.parametrize("runtime", ["pi", "dsh"])
+def test_pi_runner_is_an_explicit_eval_opt_in(command: str, runtime: str) -> None:
+    assert not getattr(cli._parser().parse_args([command]), runtime + "_runner")
+    assert getattr(cli._parser().parse_args([command, f"--{runtime}-runner"]), runtime + "_runner")
 
 
 @pytest.mark.parametrize("command", ["run", "dialogs"])
@@ -3308,3 +3309,36 @@ def test_start_no_wait_matches_child_and_parent_audit_outcomes(
     look = dataclasses.replace(start_no_wait_look(events, trail), fake=False,
                                reply="任务已启动，后续问题会转给你确认。")
     assert dialogs._started_without_waiting(look) == problem
+
+
+@pytest.mark.parametrize("dsh_runtime", ["cli", "runner"])
+def test_eval_server_renders_dsh_runner_only_when_requested(tmp_path, monkeypatch, dsh_runtime):
+    from looper import ops_config
+
+    def disabled(*args, **kwargs):
+        ops = (tmp_path / "runtime" / ops_config.FILE).read_text()
+        assert ('dsh = "runner"' in ops) is (dsh_runtime == "runner")
+        raise RuntimeError("server deliberately disabled")
+
+    monkeypatch.setattr(runner, "free_port", lambda: 49152)
+    monkeypatch.setattr(runner.subprocess, "Popen", disabled)
+    with pytest.raises(RuntimeError, match="server deliberately disabled"), runner.running_server(
+        database_url="unused", runtime_root=tmp_path / "runtime", bin_dir=tmp_path / "bin",
+        log_path=tmp_path / "serve.log", **({"dsh_runtime": "runner"} if dsh_runtime == "runner" else {}),
+    ):
+        pytest.fail("no server may start")
+
+
+@pytest.mark.parametrize("command", ["run", "dialogs"])
+@pytest.mark.parametrize("requested", [False, True])
+def test_dsh_eval_flag_reaches_selected_harness(monkeypatch, command, requested):
+    from evals.prompt_regression import dialogs
+
+    def run(**kwargs):
+        assert kwargs["dsh_runtime"] == ("runner" if requested else "cli")
+        return {}, Path("unused.json")
+
+    monkeypatch.setattr(runner if command == "run" else dialogs, "run", run)
+    monkeypatch.setattr(cli, "_report", lambda *a, **kw: None)
+    monkeypatch.setattr(dialogs, "markdown", lambda _: "")
+    assert cli.main([command, "--pg-url", "unused", *(["--dsh-runner"] if requested else [])]) == 0

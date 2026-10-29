@@ -33,6 +33,19 @@ from looper.agents.runtimes.omp import edited_paths as omp_edited_paths
 from looper.agents.tiers.planner_protocol import FINAL_HEADINGS
 from looper.agents.tiers.worker import extract_report
 
+
+def runner_evidence(command: list[str]) -> dict[str, Any]:
+    """Validate the record descriptor without exporting its private arguments."""
+    if command[:1] != ["looper-runner"]:
+        return {}
+    from looper.agents.runtimes.runner.session import Descriptor
+
+    try:
+        return {"runner_kind": Descriptor.parse(command).kind}
+    except ValueError:
+        return {"runner_kind": None}
+
+
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "stopped"})
 # The status a run's record ends with when the run failed (``llm_records.RecordStatus``; one Looper stopped is
 # ``interrupted`` instead).
@@ -633,6 +646,7 @@ def task_metrics(
         runtime_evidence.append({
             "role": name, "runtime": ((metadata.get("profile") or {}).get("runtime") or {}).get("type"),
             "executable": Path(command[0]).name if command else None,
+            **runner_evidence(command),
             "system_prompt_mode": metadata.get("system_prompt_mode"),
             "session_present": bool(record.get("session_id")),
             "root_usage_complete": finals[-1].get("root_usage_complete") if finals else None,
