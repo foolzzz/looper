@@ -20,15 +20,16 @@ def entry() -> Path:
 def state_root(runtime_root: Path) -> Path:
     root = Path(runtime_root).absolute()
     # Create ancestors individually: mkdir(parents=True) gives intermediate
-    # directories default permissions and can silently traverse a symlink.
+    # directories default permissions. Existing directory symlinks are allowed
+    # through runtime_root (e.g. the OS temp directory), never in our suffix.
     path = Path(root.anchor)
-    for part in (*root.parts[1:], "runners", "state", "dsh-native"):
+    for index, part in enumerate((*root.parts[1:], "runners", "state", "dsh-native")):
         path /= part
         try:
             path.mkdir(mode=0o700, exist_ok=True)
         except FileExistsError:
             raise ValueError("DSH state root must be a real directory") from None
-        if path.is_symlink() or not path.is_dir():
+        if not path.is_dir() or (index >= len(root.parts) - 1 and path.is_symlink()):
             raise ValueError("DSH state root must be a real directory")
     return path
 
