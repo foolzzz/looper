@@ -78,8 +78,10 @@ async def get_task_project(task_id: str, *, pool: asyncpg.Pool | None = None) ->
     pool = pool or get_pool()
     row = await pool.fetchrow(
         "SELECT p.*, t.budget_usd AS task_own_budget_usd, t.schedule_id AS task_schedule_id, "
-        "t.planner_session_label AS task_planner_session_label, t.template AS task_template "
-        "FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = $1", task_id,
+        "t.planner_session_label AS task_planner_session_label, t.template AS task_template, "
+        "s.user_gates AS task_schedule_user_gates "
+        "FROM tasks t JOIN projects p ON p.id = t.project_id LEFT JOIN schedules s ON s.id = t.schedule_id "
+        "WHERE t.id = $1", task_id,
     )
     if row is None:
         return None

@@ -247,6 +247,15 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
                 : " → the dashboard only")}
             {notifyOption && <p className="text-xs text-muted-foreground">{notifyOption.hint}</p>}
           </Field>
+          <Field label="User gates">
+            {schedule.user_gates === "on" ? "On" : "Off"}
+            <p className="text-xs text-muted-foreground">
+              Requires user gates to be enabled for the project.
+            </p>
+            {schedule.user_gates === "on" && schedule.run_timeout_effective_seconds != null && (
+              <p className="text-xs text-warning">The gate&apos;s wait counts against the run timeout.</p>
+            )}
+          </Field>
           <Field label="Budgets">
             <span className="block">
               Per run: {schedule.run_budget_usd != null ? formatUsd(schedule.run_budget_usd) : "the project's task cap"}

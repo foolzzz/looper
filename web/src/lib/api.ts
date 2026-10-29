@@ -994,6 +994,7 @@ export type ScheduleRunStatus =
 /** "failures": failed runs and the two alerts with their recoveries; "alerts": the alerts and their recoveries
  * only; "always": every run that ran a task, and the alerts; "never": nothing is sent. */
 export type ScheduleNotify = "failures" | "alerts" | "always" | "never";
+export type ScheduleUserGates = "off" | "on";
 
 /** A chat of a channel the notifications go to. */
 export interface ScheduleNotifyTarget {
@@ -1100,6 +1101,8 @@ export interface ScheduleInfo {
   /** Null: no daily cap. */
   daily_budget_usd: number | null;
   notify: ScheduleNotify;
+  /** Whether this schedule's tasks may open user gates (also requires the project's permission). */
+  user_gates: ScheduleUserGates;
   /** Null: dashboard only. */
   notify_target: ScheduleNotifyTarget | null;
   /** This schedule's runs since the server's local midnight (running ones at their cost so far). */
@@ -1168,6 +1171,7 @@ export interface ScheduleFields {
   gate_timeout_seconds?: number | null;
   daily_budget_usd?: number | null;
   notify?: ScheduleNotify;
+  user_gates?: ScheduleUserGates;
   notify_target?: ScheduleNotifyTarget | null;
 }
 

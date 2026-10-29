@@ -75,6 +75,7 @@ def test_a_schedule_is_created_disabled_with_its_configuration_and_enabled_only_
         assert lines[4:] == [
             f"- 目录：项目的默认目录（{tmp_path}）", "- 需求：33 字：Check the deps and write deps.md.",
             "- 上一次还在运行时：跳过这次触发；错过的触发：补跑一次", "- 前置检查：没有",
+            "- 用户确认：关闭",
             "- 花费上限：每次运行 项目的每任务上限，每天 不限", "- 通知：失败时 → 只在控制台",
             "- 运行超时：系统默认（不限）", "",
             "要启用吗？回复「启用」就启用，之后按规则无人值守地运行；也可以稍后在 Schedules 页打开它的开关。"]
@@ -86,6 +87,39 @@ def test_a_schedule_is_created_disabled_with_its_configuration_and_enabled_only_
         assert (await _view("deps"))["enabled"] is True
         assert await _trail(pool) == [(TOOL, "write", "ok"), (TOOL, "write", "error"), (TOOL, "write", "error"),
                                       (TOOL, "high", "needs_confirmation"), (TOOL, "high", "ok")]
+
+    run_db(test, monkeypatch)
+
+
+def test_user_gates_are_configured_listed_changed_and_shown_before_enabling(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def test(pool: Any) -> None:
+        await _project(pool, "calc", str(tmp_path))
+        chat = _Chat(tmp_path)
+        (created,) = await chat.say("创建允许用户确认的定时任务", _create(user_gates="on"))
+        assert created["status"] == "ok", created
+        assert created["result"]["schedule"]["user_gates"] == "on"
+        assert "- 用户确认：开启" in chat.turns[-1].blocks[0]
+        (listed,) = await chat.say("列出定时任务", (TOOL, {"action": "list"}))
+        assert listed["result"]["schedules"][0]["user_gates"] == "on"
+        (got,) = await chat.say("查看定时任务", (TOOL, {"action": "get", "schedule": "deps"}))
+        assert got["result"]["schedule"]["user_gates"] == "on"
+        (changed,) = await chat.say("关闭用户确认", (TOOL, {
+            "action": "update", "schedule": "deps", "fields": {"user_gates": "off"}}))
+        assert changed["status"] == "ok", changed
+        assert changed["result"]["changed"] == ["user_gates"]
+        assert "- 用户确认：开启 → 关闭" in chat.turns[-1].blocks[0]
+        assert (await _view("deps"))["user_gates"] == "off"
+        await chat.say("开启用户确认", (TOOL, {
+            "action": "update", "schedule": "deps", "fields": {"user_gates": "on"}}))
+        (asked,) = await chat.say("启用", (TOOL, {"action": "enable", "schedule": "deps"}))
+        assert asked["status"] == "needs_confirmation", asked
+        assert "- 用户确认：开启" in chat.turns[-1].blocks[0]
+        enabled = await _confirm(chat, asked)
+        assert enabled["status"] == "ok", enabled
+        assert enabled["result"]["schedule"]["user_gates"] == "on"
+        assert (await _view("deps"))["user_gates"] == "on"
 
     run_db(test, monkeypatch)
 

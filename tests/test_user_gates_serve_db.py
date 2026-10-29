@@ -18,6 +18,7 @@ beside it).
 from __future__ import annotations
 
 import json
+import asyncio
 import re
 import shlex
 import sys
@@ -93,6 +94,9 @@ for line in sys.stdin:
     content = json.loads(line)["message"]["content"]
     text = content if isinstance(content, str) else "".join(b.get("text", "") for b in content)
     log("turns.jsonl", {"text": text})
+    # A schedule's shared Planner session prepends the current run's requirement.
+    if text.startswith("This run's requirement"):
+        text = text[text.index("[PLAN]"):]
     plans = [t for t in logged("turns.jsonl") if t["text"].startswith("[PLAN] Plan the task")]
     if "Your last reply broke the reply contract" in text:
         reply = {"steps": [spec("s1")]}
@@ -150,6 +154,81 @@ def _until(check: Any, what: str, seconds: float = 120) -> Any:
 
 
 ENDED = ("completed", "failed", "stopped", "cancelled")
+
+
+def test_scheduled_gate_posts_to_its_allowlisted_notify_chat_and_api_answer_resumes(
+    tmp_path: Path, lark_cli_stand_in: Path,
+) -> None:
+    """Real serve/scheduler/Planner/courier/API; only the model and chat transport are synthetic."""
+    import asyncpg
+
+    from looper.agents.serve import seed_channel_configs
+    from looper.db import connection
+    from lark_cli_stand_in import OPEN_ID
+
+    # No inbound messages: this transport only records the gate's outbound delivery.
+    world = tmp_path / "world.json"
+    value = json.loads(world.read_text())
+    value["events"] = []
+    world.write_text(json.dumps(value))
+    root = tmp_path / "scheduled"
+    root.mkdir()
+    bin_dir, state = _install(root)
+    runtime, home, work = root / "runtime", root / "home", root / "work"
+    for path in (runtime, home, work):
+        path.mkdir()
+
+    with fresh_database(str(DSN)) as (database_url, _):
+        async def seed():
+            pool = await asyncpg.create_pool(database_url, min_size=1, max_size=2)
+            try:
+                await connection.ensure_schema(pool)
+                await seed_channel_configs(pool)
+                await pool.execute("UPDATE channel_configs SET enabled=TRUE, config=$1::jsonb "
+                                   "WHERE channel_id='channel-lark'", json.dumps({
+                    "profile": "cli_main", "allowed_open_ids": [OPEN_ID], "allowlist_app_id": "cli_main"}))
+            finally:
+                await pool.close()
+        asyncio.run(asyncio.wait_for(seed(), 30))
+        with running_server(database_url=database_url, runtime_root=runtime, bin_dir=bin_dir, home=home,
+                            log_path=root / "serve.log") as api:
+            project = api.post("/api/v1/project_admin/create", {
+                "name": "Scheduled gates", "work_dir": str(work)})["result"]["project"]
+            api.post("/api/v1/project_admin/update", {"project_id": project["project_id"],
+                "fields": {"task_workspaces": "in_place"}})
+            schedule = api.post("/api/v1/schedule_admin/create", {"project_id": project["project_id"], "fields": {
+                "name": "Reports", "cron": "0 * * * *", "timezone": "UTC", "user_gates": "on",
+                "requirement": "build calc variant=pass", "notify": "never", "run_timeout_seconds": 90,
+                "notify_target": {"channel": "lark", "chat": OPEN_ID}}})["result"]["schedule"]
+            sid = schedule["schedule_id"]
+            fired = api.post("/api/v1/schedule_admin/run", {"schedule_id": sid})["result"]
+            task_id = fired["run"]["task_id"]
+
+            def detail():
+                return api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"]
+
+            waiting = _until(lambda: (d := detail())["status"] == "waiting_user" and d["gates"] and d,
+                             "the scheduled gate to open", seconds=60)
+            assert waiting["gates"][0]["state"] == "open"
+
+            def sent():
+                rows = [json.loads(line) for line in lark_cli_stand_in.read_text().splitlines()]
+                return [argv for argv in rows if "+messages-send" in argv and OPEN_ID in argv]
+
+            posts = _until(sent, "the scheduled gate's channel post", seconds=30)
+            assert any("storage" in argv[argv.index("--markdown") + 1] for argv in posts)
+            gate = _until(lambda: (g := detail()["gates"][0])["channel_posts"]
+                          and g["channel_posts"]["sent"] >= 1 and g, "the gate's recorded receipt", 10)
+            assert gate["channel_posts"]["channel"] == "lark" and gate["channel_posts"]["sent"] >= 1
+            skipped = api.post("/api/v1/schedule_admin/run", {"schedule_id": sid})["result"]["run"]
+            assert skipped["status"] == "skipped_overlap"
+            answer = api.post("/api/v1/ops/gates/reply", {
+                "task_id": task_id, "gate": "g1", "text": "PostgreSQL"})["result"]
+            assert answer["delivered"] == "queued"
+            completed = _until(lambda: (d := detail())["status"] in ENDED and d, "the scheduled task to end", 60)
+            assert completed["status"] == "completed", (root / "serve.log").read_text()[-3000:]
+            assert completed["gates"][0]["summary"]["decisions"] == ["PostgreSQL"]
+            assert "[GATE]: the user wrote in a gate's discussion" in _log(state, "planner.jsonl", "pass")[0]["prompt"]
 
 
 @pytest.fixture(scope="module")

@@ -209,8 +209,8 @@ def run_context(schedule: Mapping[str, Any], firing: Firing, recent: list[Mappin
                 room: int | None = None) -> str:
     """The section the scheduler appends to a run's requirement: which schedule and firing this is, the fires it
     stands in for, what the gate printed, the unfinished input of the runs that handed it on (``carried``, oldest
-    first, one block each), the latest runs' outcomes, and that nobody is there to answer. The gate outputs share
-    ``room`` characters (at least ``GATE_CONTEXT_MIN_CHARS``), the current one two thirds of it when there are
+    first, one block each), the latest runs' outcomes, and whether its schedule allows user gates. The gate outputs
+    share ``room`` characters (at least ``GATE_CONTEXT_MIN_CHARS``), the current one two thirds of it when there are
     earlier ones; those that do not fit at ``CARRIED_MIN_CHARS`` each are left out, the oldest first, and
     counted."""
     tz = cron.zone(schedule["timezone"])
@@ -256,7 +256,10 @@ def run_context(schedule: Mapping[str, Any], firing: Firing, recent: list[Mappin
             lines.append(f"  - {_local(moment, tz)}{how} · {status}" + (f" · {text}" if text else ""))
     else:
         lines.append("- 最近的运行：没有，这是第一次。")
-    lines.append("- 这是无人值守的运行：不要等待用户回答；需要做假设时选择合理的做法，并把假设写进结果。")
+    if schedule.get("user_gates") == "on":
+        lines.append("- 这次运行允许用户关卡：项目也允许时，可通过关卡等待用户决定；等待计入运行超时。")
+    else:
+        lines.append("- 这是无人值守的运行：不要等待用户回答；需要做假设时选择合理的做法，并把假设写进结果。")
     return "\n".join(lines)
 
 

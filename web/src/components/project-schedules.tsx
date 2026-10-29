@@ -26,6 +26,7 @@ import {
   type ScheduleInfo,
   type ScheduleLimits,
   type ScheduleNotify,
+  type ScheduleUserGates,
   type ScheduleNotifyTarget,
   type ScheduleOverlap,
   type SchedulePreview,
@@ -253,6 +254,7 @@ interface Draft {
   /** USD; "" = no daily cap. */
   dailyBudget: string;
   notify: ScheduleNotify;
+  userGates: ScheduleUserGates;
   /** `targetKey` of the target; "" = dashboard only. */
   notifyTarget: string;
 }
@@ -289,6 +291,7 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
       gateTimeout: "",
       dailyBudget: "",
       notify: "failures",
+      userGates: "off",
       notifyTarget: "",
     };
   return {
@@ -313,6 +316,7 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
     gateTimeout: schedule.gate_timeout_seconds == null ? "" : String(schedule.gate_timeout_seconds),
     dailyBudget: schedule.daily_budget_usd == null ? "" : String(schedule.daily_budget_usd),
     notify: schedule.notify,
+    userGates: schedule.user_gates,
     notifyTarget: targetKey(schedule.notify_target),
   };
 }
@@ -346,6 +350,7 @@ function fieldsOf(draft: Draft, limits: ScheduleLimits): Required<ScheduleFields
     gate_timeout_seconds: numberOf(draft.gateTimeout),
     daily_budget_usd: numberOf(draft.dailyBudget),
     notify: draft.notify,
+    user_gates: draft.userGates,
     notify_target: targetOf(draft.notifyTarget),
   };
 }
@@ -357,7 +362,7 @@ const sameProfiles = (a: Partial<Record<TaskRole, string>>, b: Partial<Record<Ta
  * field as null. */
 function changesOf(fields: Required<ScheduleFields>, schedule: ScheduleInfo): ScheduleUpdate {
   const changes: ScheduleUpdate = {};
-  for (const key of ["name", "cron", "requirement", "timezone", "work_dir", "overlap", "catch_up", "notify"] as const) {
+  for (const key of ["name", "cron", "requirement", "timezone", "work_dir", "overlap", "catch_up", "notify", "user_gates"] as const) {
     if (fields[key] !== schedule[key]) (changes as Record<string, unknown>)[key] = fields[key];
   }
   if (fields.template_key !== (schedule.template_key ?? null)) changes.template_key = fields.template_key;
@@ -1006,7 +1011,7 @@ function ScheduleForm({
             {
               value: "parallel",
               label: "Parallel (reentrant)",
-              hint: "Start it beside the runs in progress, up to the most below. Gates never run at once.",
+              hint: "Start it beside the runs in progress, up to the most below. Pre-run checks never run at once.",
             },
           ]}
         />
@@ -1101,6 +1106,28 @@ function ScheduleForm({
               : "Empty: the project's spend cap per task applies (its Settings tab)."}
           </p>
         </div>
+      </div>
+
+      <div className="space-y-1">
+        <label className="flex min-h-11 cursor-pointer items-center gap-2 text-xs">
+          <Switch
+            checked={draft.userGates === "on"}
+            onChange={(on) => set("userGates", on ? "on" : "off")}
+            label="User gates"
+          />
+          <span className="font-medium">User gates</span>
+          <span className="text-muted-foreground">{draft.userGates === "on" ? "On" : "Off"}</span>
+        </label>
+        <p className="text-xs text-muted-foreground">
+          Allow these tasks to wait for your answers when user gates are enabled for the project.
+        </p>
+        {draft.userGates === "on" && (draft.timeoutMode === "limit" ||
+          (draft.timeoutMode === "default" && limits.run_timeout_default_seconds != null)) && (
+          <p className="flex items-start gap-1 text-xs text-warning">
+            <AlertCircle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            The gate&apos;s wait counts against the run timeout.
+          </p>
+        )}
       </div>
 
       <fieldset className="space-y-2">

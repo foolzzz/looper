@@ -21,6 +21,31 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 FIELDS = {"name": "Hourly", "cron": "0 * * * *", "timezone": "UTC", "requirement": "Read reports"}
 
 
+@pytest.mark.parametrize("initial", [None, "off", "on"])
+def test_user_gates_create_update_get_and_lists(tmp_path, monkeypatch, initial):
+    async def run(pool):
+        project = await projects.create_project(name="Reports", work_dir="/srv/reports")
+        fields = {**FIELDS, **({"user_gates": initial} if initial is not None else {})}
+        async with _api(tmp_path, pool) as call:
+            status, answer = await call("create", {"project_id": project["id"], "fields": fields})
+            assert status == 200, answer
+            sid = answer["schedule"]["schedule_id"]
+            assert answer["schedule"]["user_gates"] == (initial or "off")
+            for value in ("on", "off"):
+                status, result = await call("update", {"schedule_id": sid, "fields": {"user_gates": value}})
+                assert status == 200 and result["schedule"]["user_gates"] == value
+                for action, body in (("get", {"schedule_id": sid}), ("list", {}),
+                                     ("project_list", {"project_id": project["id"]})):
+                    _, result = await call(action, body)
+                    view = result["schedule"] if action == "get" else result["schedules"][0]
+                    assert view["user_gates"] == value
+            for invalid in (None, True, "yes"):
+                status, _ = await call("update", {"schedule_id": sid, "fields": {"user_gates": invalid}})
+                assert status == 400
+                assert (await db_schedules.get_schedule(sid))["user_gates"] == "off"
+    run_db(run, monkeypatch, timeout=30)
+
+
 @asynccontextmanager
 async def _api(tmp_path, pool, *, scheduler=True):
     _, token = await api_clients.create("Schedule writes", pool=pool)

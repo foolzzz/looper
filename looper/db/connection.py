@@ -66,6 +66,12 @@ def schema_fingerprint(sql: str) -> str:
 _SCHEMA_LOCK = 0x6C6F6F70  # "loop"
 
 REGISTRY_SCHEMA_VERSION = 4
+_SCHEDULE_USER_GATES = "schedule_user_gates"
+
+
+async def _schedule_user_gates_pending(conn: asyncpg.Connection) -> bool:
+    return not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                                   _SCHEDULE_USER_GATES)
 
 
 class RegistrySchemaVersionError(RuntimeError):
@@ -162,6 +168,13 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute(sql)
         elif state == "bridge":
             await upgrade_from_bridge(conn)
+        # One additive upgrade for existing baselines, including the bridge.
+        # Once recorded, reopening never tries to repair missing columns.
+        if await _schedule_user_gates_pending(conn):
+            if state != "empty":
+                await conn.execute("ALTER TABLE schedules ADD COLUMN IF NOT EXISTS user_gates "
+                                   "TEXT NOT NULL DEFAULT 'off' CHECK (user_gates IN ('off', 'on'))")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_USER_GATES)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -192,4 +205,4 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
     async with conn.transaction():
         await conn.execute(f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK})")
         state = await _classify_schema(conn, sql)
-        return state == "bridge"
+        return state == "bridge" or (state == "current" and await _schedule_user_gates_pending(conn))
