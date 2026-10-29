@@ -13,6 +13,8 @@ const { isAbsolute } = await import('node:path');
 const { monitorEventLoopDelay } = await import('node:perf_hooks');
 const { load, boot } = await import('./sdk.ts');
 const { configureSessions, sessions, newSession, loadSession, closeSession } = await import('./session.ts');
+const { installProvider } = await import('./provider.ts');
+const { prompt, cancel } = await import('./turn.ts');
 const args = process.argv.slice(2);
 try {
   if (args.length !== 4 || args[0] !== '--dsh' || !args[1] || args[2] !== '--state-root'
@@ -41,6 +43,7 @@ rpc.method('initialize', async params => {
   }
   const sdk = await load(args[1]);
   await boot(args[3]);
+  installProvider();
   // runProfile installs CLI exit handlers; the transport owns process lifetime.
   ownSignals();
   return { protocol_version: '0.1', runner: { kind: 'dsh', version: '0.1.0' },
@@ -53,6 +56,10 @@ rpc.method('initialize', async params => {
 rpc.method('session/new', newSession, { session: true });
 rpc.method('session/load', loadSession, { session: true });
 rpc.method('session/close', closeSession, { session: true });
-rpc.method('runner/health', () => ({ sessions: sessions.size, running: 0, inflight_requests: 0, tool_processes: 0,
+rpc.method('session/prompt', prompt, { session: true });
+rpc.method('session/cancel', cancel, { session: true });
+rpc.method('runner/health', () => ({ sessions: sessions.size,
+  running: [...sessions.values()].filter(record => record.turn && !record.turn.settled).length,
+  inflight_requests: [...sessions.values()].reduce((n, record) => n + (record.turn?.inflight.size ?? 0), 0), tool_processes: 0,
   rss_bytes: process.memoryUsage().rss, event_loop_lag_ms: Math.ceil(delay.percentile(99) / 1e6) }));
 rpc.start();

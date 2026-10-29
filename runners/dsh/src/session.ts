@@ -4,13 +4,14 @@ import { lstat, stat, realpath, readdir, rm } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { addSecret, diagnostic, onShutdown, RpcError, scrub } from '../../common/rpc.ts';
 import { ctx, dsh, environment } from './sdk.ts';
+import { cancelTurn, onEvent, type Turn } from './turn.ts';
 
 export type Session = {
   id: string; key: string; role: string; cwd: string; roots: string[]; env: Record<string, string>;
   home: string; limits: { tool_timeout_s: number; max_requests_per_turn: number };
   accountId: string; model: string; wireModel: string; route: string; routeOwner: any;
   handle: any; agent: any; agentCtx: any; builtin: string[]; readOnly: boolean;
-  ephemeral: boolean; allowed: Set<string>; turn: null; closing: boolean;
+  ephemeral: boolean; allowed: Set<string>; turn: Turn | null; activeRequest: string | null; closing: boolean;
 };
 export const sessions = new Map<string, Session>();
 const opening = new Set<string>(), loading = new Set<string>();
@@ -82,7 +83,7 @@ async function compose(params: Record<string, any>, resumed: boolean): Promise<o
     limits: { ...params.limits }, accountId: provider.account_id, model: provider.model, wireModel,
     route: 'looper-' + params.session_key, routeOwner: undefined, handle: undefined, agent: undefined,
     agentCtx: undefined, builtin: [...params.tools.builtin], readOnly: params.tools.read_only,
-    allowed: new Set(params.tools.builtin), turn: null, closing: false };
+    allowed: new Set(params.tools.builtin), turn: null, activeRequest: null, closing: false };
   let started = false;
   try {
     let connection: any;
@@ -95,10 +96,14 @@ async function compose(params: Record<string, any>, resumed: boolean): Promise<o
     const setup = (agentCtx: any, agent: any) => {
       record.agentCtx = agentCtx;
       record.agent = agent;
+      agentCtx.on('session/event', (_session: any, event: any) => onEvent(record, event));
       dsh.deepseek.registerDeepSeekProvider(agentCtx, record.route, { providerName: 'DeepSeek',
         options: () => connection,
         discoverModels: async (p: string) => connection.models.map((m: any) => dsh.deepseek.catalogModelInfo(p, m)),
-        resolveAuth: async () => ({ headers: { 'x-api-key': key } }) });
+        resolveAuth: async () => {
+          if (record.activeRequest === null) throw new dsh.llm.LlmError('Looper did not authorize this request', 'LOOPER_UNAUTHORIZED');
+          return { headers: { 'x-api-key': key, 'x-looper-request-id': record.activeRequest } };
+        } });
       agentCtx.systemPrompt.section({ name: 'looper', order: 20000, text: params.system_prompt.text, interpolate: false });
       agentCtx.tools.restrict({ allow: record.builtin.filter(name => name !== 'bash') });
       agentCtx.tools.guard((e: { name: string }) => record.allowed.has(e.name) ? undefined
@@ -151,27 +156,47 @@ async function removeStored(id: string): Promise<void> {
 }
 export async function closeSession(params: Record<string, unknown>): Promise<object> {
   const record = getSession(params);
+  const turn = record.turn && !record.turn.settled ? record.turn : null;
+  if (turn && params.trace_id !== turn.trace) throw new RpcError(-32005, 'trace mismatch');
+  // Cancellation may settle between its acknowledgement and this close. The
+  // host still decodes a Turn response when closing that same trace.
+  const trace = turn?.trace ?? (params.trace_id === record.turn?.trace ? record.turn?.trace : undefined);
   record.closing = true;
+  if (turn) { turn.cancel = 'close'; await cancelTurn(record, turn); }
+  await release(record);
+  return trace ? { session_id: record.id, trace_id: trace } : {};
+}
+export function release(record: Session, bounded = false): Promise<void> {
+  const existing = closing.get(record.id);
+  if (existing) return existing;
+  record.closing = true;
+  if (bounded) sessions.delete(record.id);
   const operation = (async () => {
-    await record.handle.dispose();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const disposing = record.handle.dispose();
+      if (!bounded) await disposing;
+      else await Promise.race([disposing, new Promise<void>(resolve => { timer = setTimeout(resolve, 1000); })]);
+    } finally { clearTimeout(timer); }
     await record.routeOwner?.dispose();
     if (record.ephemeral) await removeStored(record.id);
     sessions.delete(record.id);
   })();
   closing.set(record.id, operation);
-  try {
-    await operation;
-  } catch (error) { record.closing = false; throw error; }
-  finally { closing.delete(record.id); }
-  return {};
+  return operation.catch(error => { record.closing = false; throw error; })
+    .finally(() => { closing.delete(record.id); });
 }
 onShutdown(async () => {
   await Promise.all([...sessions.values()].map(async record => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
+      if (record.turn && !record.turn.settled) {
+        record.turn.cancel = 'close';
+        await cancelTurn(record, record.turn, 3000);
+      }
       // EOF can arrive while an explicit close is still draining persistence.
-      await Promise.race([closing.get(record.id) ?? closeSession({ session_id: record.id }), new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error('session close timed out')), 3000);
+      await Promise.race([release(record, true), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('session close timed out')), 1000);
       })]);
     } catch { diagnostic('session shutdown failed'); }
     finally { clearTimeout(timer); }
