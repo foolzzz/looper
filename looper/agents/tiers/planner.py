@@ -3390,19 +3390,19 @@ class PlannerAgent:
             await self._claude.stop()
         brief = ""
         resuming: str | None = None  # the session this turn's new process resumes, if any
+        if not plan.session_id and plan.steps:
+            # Keep sending the brief until the runtime accepts it, even if the session is already open.
+            if self._pending_switch is None:
+                await self._drop_session(plan, session_switch.session_lost(
+                    "the Planner has no saved session for this task", runtime=launch.runtime.type,
+                    profile=launch.profile.id))
+            brief = self._resume_brief(plan, await self._gate_threads(plan))
         if self._claude.started and self._process is not None:
             process = self._process
         else:
             plan.session_runtime, plan.session_profile = launch.runtime.type, launch.profile.id
             plan.session_provider = launch.profile.provider.id
             resuming = plan.session_id
-            if not resuming and plan.steps:
-                # A new session for a plan under way: its first turn starts with the resume brief.
-                if self._pending_switch is None:
-                    await self._drop_session(plan, session_switch.session_lost(
-                        "the Planner has no saved session for this task", runtime=launch.runtime.type,
-                        profile=launch.profile.id))
-                brief = self._resume_brief(plan, await self._gate_threads(plan))
             command = base + (launch.runtime.resume_args(plan.session_id) if plan.session_id else [])
             process = _Process(command, signature, system_prompt, launch)
             try:
@@ -3468,7 +3468,8 @@ class PlannerAgent:
             async def on_event(event: dict[str, Any]) -> None:
                 await recorder.record(event)
                 session_id = event.get("session_id")
-                if isinstance(session_id, str) and session_id and session_id != plan.session_id:
+                if (event.get("session_started") is not False and isinstance(session_id, str)
+                        and session_id and session_id != plan.session_id):
                     plan.session_id = session_id
                     await self._save_session(plan)
                     # The new session has its resume brief.

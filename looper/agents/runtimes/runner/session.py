@@ -266,7 +266,7 @@ class RunnerSession:
                     initialized = True
                     await _value(on_event({"type": "system", "subtype": "init",
                         "session_id": self._lease.session_id if self._lease else descriptor.session,
-                        "model": descriptor.model, "trace_id": trace}))
+                        "model": descriptor.model, "trace_id": trace, "session_started": False}))
 
             async def failure(message):
                 await init()
@@ -296,6 +296,8 @@ class RunnerSession:
                 prior_totals=self._totals, prior_model_usage=self._models, cancel=capped, **budget)
             async def emit(event):
                 nonlocal initialized
+                # An opened session owns the resume brief only after accepting this prompt.
+                event["session_started"] = bridge.sessions[sid].session_started
                 if event.get("type") == "system" and event.get("subtype") == "init":
                     initialized = True
                     event["model"] = descriptor.model  # The recorder's record model, as on the CLI paths.
