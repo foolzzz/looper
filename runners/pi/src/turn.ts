@@ -1,5 +1,5 @@
 /** An accepted trace has a single terminal update, after every admitted request. */
-import { RpcError, scrub, update } from './rpc.ts';
+import { RpcError, scrub, update } from '../../common/rpc.ts';
 import { sdk } from './sdk.ts';
 import { getSession, release } from './session.ts';
 import type { Session } from './session.ts';

@@ -162,7 +162,7 @@ def test_invalid_parameters_are_refused_before_session_sdk_work(tmp_path, monkey
 
     main = pi_command.entry().resolve()
     harness = tmp_path / "guard-sdk.ts"
-    harness.write_text(f'''import * as rpc from {json.dumps((main.parent / 'rpc.ts').as_uri())};
+    harness.write_text(f'''import * as rpc from {json.dumps((main.parents[2] / 'common/rpc.ts').as_uri())};
 import {{sdk}} from {json.dumps((main.parent / 'sdk.ts').as_uri())};
 rpc.method('test/block-sdk', () => {{
   sdk.agent.ModelRuntime.create = () => {{ throw new Error('session SDK was touched'); }};

@@ -3,7 +3,7 @@ import { readFile, realpath, access } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
-import { RpcError } from './rpc.ts';
+import { RpcError } from '../../common/rpc.ts';
 
 const agentExports = ['createAgentSession', 'ModelRuntime', 'SessionManager', 'SettingsManager',
   'DefaultResourceLoader', 'createReadToolDefinition', 'createGrepToolDefinition', 'createFindToolDefinition',

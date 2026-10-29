@@ -216,7 +216,7 @@ def build_wheel(work: Path) -> tuple[Path, dict[str, str]]:
     names = _run(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
                  cwd=ROOT, env=env).stdout.split("\0")
     for name in names:
-        if name and (name.startswith(("looper/", "runners/pi/")) or name in
+        if name and (name.startswith(("looper/", "runners/pi/", "runners/common/", "runners/dsh/")) or name in
                      {"pyproject.toml", "README.md", "LICENSE", "NOTICE", "LICENSE-MIT"}):
             source = ROOT / name
             if source.is_symlink() or source.is_file():
@@ -246,6 +246,7 @@ def test_wheel_contains_the_pi_runner(tmp_path: Path) -> None:
         names = archive.namelist()
         assert prefix + "package.json" in names
         assert prefix + "src/main.ts" in names
+        assert "looper/agents/runtimes/runner/common/rpc.ts" in names
         assert not any(name.startswith("runners/") for name in names)
         assert all(name == prefix + "package.json" or name.startswith(prefix + "src/")
                    for name in names if name.startswith(prefix))

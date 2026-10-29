@@ -184,7 +184,7 @@ def test_sdk_console_output_uses_stderr(tmp_path):
 def test_transport_orders_sessions_and_settles_reverse_requests(tmp_path, monkeypatch):
     from looper.agents.runtimes.runner import pi_command
 
-    rpc_url = (Path(__file__).resolve().parents[1] / "runners/pi/src/rpc.ts").as_uri()
+    rpc_url = (Path(__file__).resolve().parents[1] / "runners/common/rpc.ts").as_uri()
     harness = tmp_path / "transport.ts"
     harness.write_text(f'''import * as rpc from {json.dumps(rpc_url)};
 rpc.addSecret('test-secret');
@@ -260,7 +260,7 @@ def test_sigterm_waits_for_hooks_after_sdk_import(tmp_path, monkeypatch):
     from looper.agents.runtimes.runner import pi_command
 
     main = pi_command.entry().resolve().as_uri()
-    rpc_url = (Path(__file__).resolve().parents[1] / "runners/pi/src/rpc.ts").as_uri()
+    rpc_url = (Path(__file__).resolve().parents[1] / "runners/common/rpc.ts").as_uri()
     marker = tmp_path / "hook-finished"
     harness = tmp_path / "shutdown.ts"
     harness.write_text(f'''import {{onShutdown}} from {json.dumps(rpc_url)};

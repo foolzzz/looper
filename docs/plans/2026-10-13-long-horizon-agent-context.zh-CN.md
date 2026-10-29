@@ -722,6 +722,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-28 | Pi 全角色 runner 验证（本分支）：补齐 installed 隔离 serve 的两步任务、Planner 引导、Reviewer、只读咨询分叉、逐请求计费与 Worker 预算拒绝、取消、崩溃收敛断言，更新架构、RFC 和 eval 指南。通过：Pi 1.3.0、Node 24.20.0 的两项 SDK 工具集/只读分叉测试；失败：0；未验证：serve 文件的 4 项测试因未设一次性 `LOOPER_TEST_DATABASE_URL` 跳过（含本卡两项），CPA `gpt-6-astra` 的 Pi CLI/runner 九任务各两次对照待 lead 实跑，门禁保持开放。 |
 | 2026-10-28 | 桥接边界文档：v2.13.165 含全部历史迁移并保持为固定桥；更早的安装必须先升到 v2.13.165 并启动一次；移除后的第一版定为 v2.14.0（2026-10-27 维护者决定，版本号由发布工具写入，规划时的 v2.13.166 不移动边界）。实现完成以已发布变更说明为准（#761、#762、#808、#850、#855、#857 / v2.13.208）。凭据、真实 CLI、dialogs 全量基线、DSH installed bootstrap、Pi 真实协议、飞书群和 Telegram 真实流量仍未测；五任务一次重复不是完整基线。 |
 
+| 2026-10-29 | DSH runner 骨架（本分支）：固定 `0.2.1-rc.2` 的 SDK/依赖与导出门禁、隔离 headless composition、protocol 0.1 握手/健康/退出及 wheel 启动已实现，Pi 共用 stdio transport；尚无 session 方法、运行时注册或设置，Dashboard、Telegram、Lark 和 CLI 入口不变。已安装 DSH/Node 的隔离验证通过握手、composition、零联网、退出和 wheel 启动；禁用 `llm-retry` 后瞬时 provider 错误将终止 turn，session 能力留待后续阶段。 |
+
 ## 5. 不属于本 RFC 的待办
 
 这些问题在开发过程中发现，独立排期，不阻塞 M1–M6。
