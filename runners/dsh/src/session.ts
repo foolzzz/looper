@@ -23,6 +23,22 @@ const builtins = new Set(['read', 'glob', 'grep', 'write', 'edit', 'bash']);
 let stateRoot: string;
 export function configureSessions(root: string): void { stateRoot = root; }
 function nonempty(value: unknown): value is string { return typeof value === 'string' && value.trim().length > 0; }
+function forkSeed(events: readonly any[]): { seed: any[]; inheritedEventCount: number } {
+  const ended = events.findLast(event => event.type === 'turn/end')?.seq;
+  if (ended === undefined) throw new RpcError(-32001, 'source session has no completed turn');
+  // dropSteers replaces a claimed steer after turn/end. A seed that stops on
+  // that marker copies the discarded instruction into the consult.
+  let boundary = ended;
+  for (const event of events) {
+    if (event.seq <= boundary) continue;
+    const op = event.surfaceOp;
+    if (event.seq !== boundary + 1 || op?.op !== 'replace'
+        || !Number.isSafeInteger(op.startSeq) || !Number.isSafeInteger(op.endSeq)
+        || op.startSeq > ended || op.endSeq > ended) break;
+    boundary = event.seq;
+  }
+  return { seed: dsh.session.buildForkSeed(events, boundary), inheritedEventCount: boundary + 1 };
+}
 async function directory(path: unknown, noLink = false): Promise<boolean> {
   if (typeof path !== 'string' || !isAbsolute(path)) return false;
   try { return (await (noLink ? lstat(path) : stat(path))).isDirectory(); } catch { return false; }
@@ -128,10 +144,8 @@ async function compose(params: Record<string, any>, resumed: boolean): Promise<o
       const source = await ctx!.sessionPersistence.open(params.fork_from.session_id, 'read');
       let events: any[];
       try { ({ events } = await source.read()); } finally { await source.close(); }
-      const boundary = events.findLast(event => event.type === 'turn/end')?.seq;
-      if (boundary === undefined) throw new RpcError(-32001, 'source session has no completed turn');
       // Like dsh-subagent's seeded child: a new id owns a copied, balanced prefix.
-      inherited = { seed: dsh.session.buildForkSeed(events, boundary), inheritedEventCount: boundary + 1 };
+      inherited = forkSeed(events);
     }
     started = true;
     record.handle = resumed

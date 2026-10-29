@@ -412,6 +412,62 @@ rpc.method('test/history', p => ({{messages: sessions.get(p.session_id).agent.se
     run(exercise())
 
 
+def test_fork_keeps_a_dropped_steer_out_of_the_consult(tmp_path, monkeypatch):
+    session_file = dsh_command.entry().resolve().parent / "session.ts"
+    harness(tmp_path, monkeypatch, f"""const {{sessions}} = await import({json.dumps(session_file.as_uri())});
+rpc.method('test/history', p => ({{messages: sessions.get(p.session_id).agent.session.deriveMessages()}}));""")
+
+    async def exercise():
+        _, installed = require_dsh()
+        replies = [[bash("echo ready > started; while [ ! -f gate ]; do sleep .05; done")],
+                   ["Consult done"]]
+        with MessagesServer(replies) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
+                client = Client(send, receive)
+                await client.start()
+                params = writable(params_for(tmp_path, server))
+                params["role"] = "worker"
+                sid = (await client.call("session/new", params))["session_id"]
+                cwd = Path(params["cwd"])
+                await client.prompt(sid, text="ORIGINAL-PROMPT")
+                await client.requested(server)
+                await wait_until(lambda: (cwd / "started").exists())
+                await client.steer(sid, text="DROPPED-STEER")
+                client.auto_authorize = False
+                (cwd / "gate").touch()
+                while len(client.authorized) < 2:
+                    await client.read()
+                # Positive control: the real SDK admitted this steer before the
+                # host refused the request that would have sent it.
+                history = await client.call("test/history", {"session_id": sid})
+                assert "DROPPED-STEER" in json.dumps(history)
+                authorization = next(frame for frame in reversed(client.frames)
+                    if frame.get("method") == "budget/authorize")
+                await send({"jsonrpc": "2.0", "id": authorization["id"],
+                            "result": {"allow": False, "reason": "run_cap"}})
+                assert (await client.settled(sid))["outcome"] == "capped"
+                dropped, = client.updates(sid, kind="steer_dropped")
+                assert dropped["message_id"] == "steer-1" and dropped["reason"] == "turn_ended"
+                assert not client.updates(sid, kind="steer_applied")
+                assert len(server.requests) == 1
+                await client.call("session/close", {"session_id": sid})
+                fork = {**params, "session_key": "fork", "tools": {
+                    "builtin": ["read", "glob", "grep"], "platform": [], "read_only": True},
+                    "fork_from": {"session_id": sid}}
+                consult = (await client.call("session/new", fork))["session_id"]
+                assert consult != sid
+                client.auto_authorize = True
+                await client.prompt(consult, text="CONSULT-QUESTION")
+                assert (await client.settled(consult))["outcome"] == "completed"
+                assert len(server.requests) == 2
+                context = request_text(server.requests[1])
+                assert "ORIGINAL-PROMPT" in context and "CONSULT-QUESTION" in context
+                assert "exit code 0" in context
+                assert "DROPPED-STEER" not in context
+                await client.call("session/close", {"session_id": consult})
+    run(exercise())
+
+
 def test_fork_continues_a_copy_without_writing_it(tmp_path):
     async def exercise():
         _, installed = require_dsh()
