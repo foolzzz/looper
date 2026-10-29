@@ -28,6 +28,7 @@ class Reply:
     status: int = 200
     cut: bool = False
     hold: threading.Event | None = None
+    eof_delay: float = 0
 
 
 def messages_wire(blocks: list[str | dict] | Reply, index: int) -> str:
@@ -113,11 +114,18 @@ class MessagesServer:
                     wire = messages_wire(reply, index).encode()
                 self.send_response(reply.status)
                 self.send_header("Content-Type", "text/event-stream" if reply.status == 200 else "application/json")
-                self.send_header("Content-Length", str(len(wire)))
+                # A trailing SSE comment separates message_stop from HTTP EOF.
+                tail = b": eof\n\n" if reply.eof_delay else b""
+                self.send_header("Content-Length", str(len(wire) + len(tail)))
                 self.end_headers()
                 try:
-                    self.wfile.write(wire.split(b"event: message_stop")[0] if reply.cut else wire)
+                    self.wfile.write((wire.split(b"event: message_stop")[0] if reply.status == 200 else wire[:-1])
+                                     if reply.cut else wire)
                     self.wfile.flush()
+                    if tail and not reply.cut:
+                        time.sleep(reply.eof_delay)
+                        self.wfile.write(tail)
+                        self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     pass
                 if reply.cut:

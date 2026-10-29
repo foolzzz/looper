@@ -726,6 +726,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-29 | DSH runner 请求与 turn（本分支）：新增 `session/prompt/cancel`、带 trace 的 close、请求发送前预算授权、逐请求分桶计量和单次 settled；平台工具快照支持见后续记录；Dashboard、Telegram、Lark 和 CLI 入口不变。已安装 `0.2.1-rc.2` / Node 24 的目标回归验证 HTTP 拒绝、断流、取消、双 session 隔离、compaction 与 SIGKILL 恢复；Node 22.19 和 24 的独立 fetch 正控均确认 `undici:client:sendHeaders`、`undici:request:headers`、`undici:request:trailers`，无需替代通道；未连接真实模型或运行共享服务。 |
 | 2026-10-29 | DSH runner 工具与会话控制（本分支）：逐 prompt 平台工具快照通过 reverse `tools/call` 执行，`call_id` 使用 SDK 的 `exec.callId`；会话 bash 使用独立执行器与 IPC 断开清理，避免 runner 丢失时依赖进程树采样，严格使用会话环境和超时上限。文件 guard 镜像 `dsh-tool-fs` 所用 `dsh-fs-local.localDisplayPath/resolveLocalTarget`，保留物理父目录遍历并检查最长存在前缀；禁用 SDK 二次 spill 截断，保留 Looper 的输出上限。支持同 trace steer 的 applied/dropped 与只读 completed-turn consult fork，fork 关闭删除副本、源会话保持不变。已安装 `0.2.1-rc.2` 的 15 项工具专项通过；既有 runner/turn/session 定向回归 72 项通过，可写工具列表遗漏 bash 的旧断言仍未通过，不计为全绿。Dashboard、Telegram、Lark 和 CLI 入口不变；未连接真实模型或启动共享服务。 |
 
+| 2026-10-29 | DSH runner 终止计量（本分支）：2xx 流在 `message_stop` 的最终用量校验通过后完成计量，不再等待 HTTP EOF；拒绝仍须完整响应且无模型输出，未完成请求向 stderr 输出缺失条件且不含请求内容。真实 SDK 配 loopback 服务确认原实现立即 EOF 通过、延迟 EOF 因 `terminal_usage=true` / `body_done=false` 误报不完整；新增回归覆盖延迟 EOF、断流、空用量和拒绝，wheel 验证复用 uv 依赖缓存以避免重复下载构建后端。DSH runner 164 项与打包 29 项均以 `-n 2` 通过，无失败或跳过；Dashboard、Telegram、Lark 和 CLI 共用修复，无需入口改动，真实模型对比尚未重跑。 |
+
 ## 5. 不属于本 RFC 的待办
 
 这些问题在开发过程中发现，独立排期，不阻塞 M1–M6。
