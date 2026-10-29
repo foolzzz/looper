@@ -101,13 +101,25 @@ export function installProvider(): void {
     const steers = kind === 'turn' ? [...turn.steers.values()].filter(s => !s.applied && !s.dropped
       && s.dshId !== null && options.messages.some((message: any) => message.id === s.dshId)) : [];
     const afterRequest = turn.lastRequestId, afterToolBatch = turn.afterToolBatch;
+    let expired = false;
     const pending = request('budget/authorize', { session_id: record.id, trace_id: turn.trace,
       request_id: id, kind, provider: record.accountId, model: record.model,
       estimated_input_tokens: Math.ceil(JSON.stringify([options.messages, options.tools ?? []]).length / 4),
-      max_output_tokens: options.maxTokens ?? dsh.deepseek.DEFAULT_MAX_TOKENS ?? 32000 });
+      max_output_tokens: options.maxTokens ?? dsh.deepseek.DEFAULT_MAX_TOKENS ?? 32000 }).then((authorization: any) => {
+      // Keep the RPC alive for accounting, even after the agent's wait expires.
+      if (expired && authorization.allow === true) {
+        turn.inflight.add(id);
+        turn.requestKinds.set(id, kind);
+        endRequest(record, turn, id, 'aborted', true);
+      }
+      return authorization;
+    });
     turn.authorizations.set(id, pending);
     let authorization: any;
-    try { authorization = await pending; }
+    try { authorization = await Promise.race([pending, turn.authorizationExpired.promise.then(() => {
+      expired = true;
+      return { allow: false };
+    })]); }
     catch {
       void settle(record, turn, { kind: 'INTERNAL_ERROR', message: 'Looper could not authorize the model request' });
       yield finish('error', 'Looper could not authorize the model request', 'LOOPER_AUTHORIZATION_ERROR');
@@ -167,7 +179,7 @@ export function installProvider(): void {
 
 export function endRequest(record: Session, turn: Turn, id: string, status: string,
     complete: boolean, usage?: any): void {
-  if (turn.settled || !turn.inflight.delete(id)) return;
+  if (!turn.inflight.delete(id)) return;
   attempts.delete(id);
   const kind = turn.requestKinds.get(id)!;
   turn.requestKinds.delete(id);
