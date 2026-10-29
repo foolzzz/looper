@@ -7,7 +7,7 @@ import pytest
 
 from fake_model_api import FakeModelAPI, ResponseScript, call_events, completed, event, text_item
 from looper.agents.runtimes.api.loop import ToolOutcome, ToolSpec
-from pi_runner_support import bind_pi_turn, pi_session, require_pi
+from pi_runner_support import TEST_TIMEOUT, bind_pi_turn, pi_session, require_pi
 
 pytestmark = pytest.mark.installed
 KEY = "!literal-platform-secret"
@@ -16,7 +16,7 @@ STEER = "Include the newly supplied task requirement."
 
 
 def run(coroutine):
-    asyncio.run(asyncio.wait_for(coroutine, 30))
+    asyncio.run(asyncio.wait_for(coroutine, TEST_TIMEOUT))
 
 
 def tool_reply(name="looper_tasks", call_id="call_tasks"):
