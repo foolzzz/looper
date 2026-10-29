@@ -12,6 +12,7 @@ const { lstat } = await import('node:fs/promises');
 const { isAbsolute } = await import('node:path');
 const { monitorEventLoopDelay } = await import('node:perf_hooks');
 const { load, boot } = await import('./sdk.ts');
+const { configureSessions, sessions, newSession, loadSession, closeSession } = await import('./session.ts');
 const args = process.argv.slice(2);
 try {
   if (args.length !== 4 || args[0] !== '--dsh' || !args[1] || args[2] !== '--state-root'
@@ -19,6 +20,7 @@ try {
 } catch {
   rpc.diagnostic('runner requires --dsh <path> --state-root <absolute real directory>'); process.exit(2);
 }
+configureSessions(args[3]);
 const delay = monitorEventLoopDelay({ resolution: 10 });
 delay.enable();
 rpc.onShutdown(() => delay.disable());
@@ -48,6 +50,9 @@ rpc.method('initialize', async params => {
       authorize_covers: ['turn', 'compaction'],
     } };
 });
-rpc.method('runner/health', () => ({ sessions: 0, running: 0, inflight_requests: 0, tool_processes: 0,
+rpc.method('session/new', newSession, { session: true });
+rpc.method('session/load', loadSession, { session: true });
+rpc.method('session/close', closeSession, { session: true });
+rpc.method('runner/health', () => ({ sessions: sessions.size, running: 0, inflight_requests: 0, tool_processes: 0,
   rss_bytes: process.memoryUsage().rss, event_loop_lag_ms: Math.ceil(delay.percentile(99) / 1e6) }));
 rpc.start();

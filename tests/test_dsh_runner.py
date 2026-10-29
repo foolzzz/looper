@@ -93,7 +93,7 @@ def test_initialize_reports_the_gated_sdk(tmp_path):
                 "sdk": {"name": "@deepseek-ai/dsh", "version": "0.2.1-rc.2"}, "capabilities": CAPABILITIES}
             await send("initialize", OFFER, id="l-2")
             assert (await receive())["error"]["code"] == -32600
-            for index, method in enumerate(("nope/x", "session/new", "shutdown"), 3):
+            for index, method in enumerate(("nope/x", "shutdown"), 3):
                 await send(method, id=f"l-{index}")
                 assert (await receive())["error"]["code"] == -32601
     run(exercise())

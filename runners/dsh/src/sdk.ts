@@ -3,7 +3,7 @@ import { access, readFile, realpath, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
-import { onShutdown, RpcError } from '../../common/rpc.ts';
+import { RpcError } from '../../common/rpc.ts';
 
 const VERSION = '0.2.1-rc.2';
 const packages = ['dsh-launch-environment', 'dsh-llm', 'dsh-llm-deepseek', 'dsh-session',
@@ -23,6 +23,7 @@ export let dsh: Dsh;
 type Context = { agents: any; llm: any; sessionPersistence: any; tools: any; systemPrompt: any;
   fiber: { dispose: () => Promise<void> } };
 export let ctx: Context | undefined;
+export let environment: any;
 type Manifest = { name: string; version: string; main?: string; exports?: { '.': string | { default?: string } } };
 async function manifest(root: string): Promise<Manifest> {
   return JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
@@ -114,8 +115,6 @@ const disabled = ['hmr', 'settings', 'config-editor', 'plugin-manager', 'tool-pl
   'web', 'web-search-deepseek', 'web-deepseek-api', 'web-fetch-http', 'tool-web',
   'skill', 'skill-filesystem', 'tool-skill', 'goal', 'goal-round-driver', 'command-goal', 'tool-goal'];
 let booting: Promise<Context> | undefined;
-// Dispose the context rather than DSH's shutdown controller, which exits first.
-onShutdown(async () => { await ctx?.fiber.dispose(); });
 export function boot(stateRoot: string): Promise<Context> {
   return booting ??= (async () => {
     try {
@@ -133,7 +132,7 @@ export function boot(stateRoot: string): Promise<Context> {
         ...disabled.map(id => ({ id, disabled: true })),
         ...Object.entries(config).map(([id, config]) => ({ id, config })),
       ]), { mode: 0o600 });
-      const environment = dsh.environment.createLaunchEnvironmentSnapshot([{ source: 'process', values: { ...process.env } }]);
+      environment = dsh.environment.createLaunchEnvironmentSnapshot([{ source: 'process', values: { ...process.env } }]);
       ({ ctx } = await dsh.profile.runProfile({ environment, profile: 'headless', patchFiles: [overlay], args: [] }));
       if (!ctx?.agents || !ctx.llm || !ctx.sessionPersistence || !ctx.tools || !ctx.systemPrompt) throw new Error();
       return ctx;
