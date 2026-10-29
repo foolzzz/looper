@@ -1280,19 +1280,24 @@ Manager tools.
   `https://api.deepseek.com/anthropic`; an explicit Messages-compatible
   gateway is preserved. Other runtimes' defaults and profiles are unchanged.
 
-  By default DSH uses the CLI path: headless JSONL, one process per turn,
-  persisted owner Sessions, an MCP bootstrap for Looper tools and read-only
-  snapshots for consults. Catalog skills and external MCP are available on
-  that path; root usage alone does not establish complete auxiliary billing.
-  Looper's prompt is appended literally to DSH's built-in prompt; replace is
-  unavailable. Private homes under the runtime root import no operator login.
+  By default DSH profiles run on one installed DSH SDK runner (Node 22.19+,
+  `@deepseek-ai/dsh` exactly 0.2.1-rc.2): Manager, Planner, Worker, Reviewer
+  and consults share it. `[runtimes] dsh` is file only, read once at startup,
+  and needs a restart. Set `[runtimes] dsh = "cli"` to opt out onto the CLI
+  path: headless JSONL, one process per turn, persisted owner Sessions, an MCP
+  bootstrap for Looper tools and read-only snapshots for consults. Catalog
+  skills and external MCP are available on that CLI path; root usage alone
+  does not establish complete auxiliary billing. Looper's prompt is appended
+  literally to DSH's built-in prompt; replace is unavailable. Private homes
+  under the runtime root import no operator login.
 
-  Set `[runtimes] dsh = "runner"` in the ops file to put Manager, Planner,
-  Worker, Reviewer and consults on one installed DSH SDK runner (Node 22.19+).
-  The default remains `"cli"`; runner startup, capacity or request failures
-  never fall back to the CLI. Its 20 sessions are shared by all roles;
-  `CAPACITY` fails a start until a session is released. Records store
-  `looper-runner` Descriptors of kind `dsh`, rather than DSH CLI commands.
+  A runner that cannot start stays failed. The cases are Node older than
+  22.19, an SDK version other than 0.2.1-rc.2, and `dsh` missing from `PATH`.
+  The launch then raises `RuntimeUnsupported`. The message names the cause and
+  the fix: install the supported version, or set `[runtimes] dsh = "cli"` in
+  the ops file and restart. All roles share 32 sessions; `CAPACITY` fails a
+  start until a session is released. Records store `looper-runner` Descriptors
+  of kind `dsh`, rather than DSH CLI commands.
 
   Manager, Workers and Reviewers have `read`, `glob`, `grep`, `write`, `edit`
   and `bash`; Planner and consults have only `read`, `glob` and `grep` with
@@ -1316,9 +1321,11 @@ Manager tools.
   search, catalog skills, catalog plugins or MCP servers. Telemetry, session
   upload, title requests and autonomous subagents are disabled.
 
-  See the [bounded validation commands](../../evals/README.md#dsh-validation)
-  for installed stand-in validation and the pending real DeepSeek smoke and
-  CLI/runner comparisons. Dashboard needs no new controls: its records show
+  See the [bounded validation commands](../../evals/README.md#dsh-validation).
+  The maintainer accepted the runner on real DeepSeek: the comparisons met the
+  gate, and the real smoke was 5/5 on current main. This change did not re-run
+  those models. Before merge the lead runs one real smoke with no flag.
+  Dashboard needs no new controls: its records show
   Descriptors and its existing task/chat controls stop runs. Telegram and Lark
   use the same chat-stop and Planner-forward APIs; stand-ins do not establish
   delivery to real accounts. `looper config init-ops` writes the `dsh` runtime
@@ -1385,13 +1392,17 @@ Manager tools.
   skipped while no Agent Profile uses the login.
 - **Pi** (`looper/agents/runtimes/pi.py`, the `pi` CLI, minimum 1.3.0,
   verified against pi 1.3.0 in the [pi runtime RFC](rfcs/pi-runtime-v0.zh-CN.md))
-  runs Manager, Planner, Worker and Reviewer. With `[runtimes] pi = "runner"`
-  in the ops file, `PiRunnerRuntime` runs all four roles and consults through
-  one shared Node >= 22.19 SDK runner. The opt-in is read once at startup and
-  needs a restart; there is no environment-variable override or dashboard control.
-  All roles share 10 session slots; further acquisition returns `CAPACITY`,
-  failing a step like any other start failure. There is no runner pool or CLI fallback.
-  Missing prerequisites fail with the startup reason. Turns submitted during
+  runs Manager, Planner, Worker and Reviewer. By default `PiRunnerRuntime`
+  runs all four roles and consults through one shared Node >= 22.19 SDK runner
+  (`@earendil-works/pi-coding-agent` 1.3.x). `[runtimes] pi` is file only, read
+  once at startup, and needs a restart. Set `[runtimes] pi = "cli"` in the ops
+  file to opt out onto the CLI path. All roles share 32 session slots; further
+  acquisition returns `CAPACITY`, failing a step like any other start failure.
+  There is no runner pool. A runner that cannot start stays failed. The cases
+  are Node older than 22.19, an SDK version outside 1.3.x, and `pi` missing
+  from `PATH`. The launch then raises `RuntimeUnsupported`. The message names
+  the cause and the fix: install the supported version, or set
+  `[runtimes] pi = "cli"` in the ops file and restart. Turns submitted during
   restart backoff fail fast; after recovery the resident session loads its saved history.
   Provider environment entries are refused because they would change process-wide settings.
   Platform tools use `looper_*` directly, without Manager MCP setup or probing;
@@ -1406,7 +1417,7 @@ Manager tools.
   Run records store a runner Descriptor as their command. Dashboard task controls
   and Telegram/Lark task stop cancel the session; Planner chat forwards into the
   running Worker in the same trace, using the existing channel paths.
-  The following describes the default `[runtimes] pi = "cli"` path.
+  The following describes the CLI path selected with `[runtimes] pi = "cli"`.
   A Worker or Reviewer is
   `pi -p --mode json`; a Worker that can steer drops `-p` and uses
   `--mode rpc` (`pi_steer`), without OMP's `--no-ui`. Providers are API keys
@@ -4149,7 +4160,8 @@ another file. The keys are `[database] url`, `[server]` `host`, `port`,
 `pg_dump`, `command` (an argv array; `{dbname}` and `{user}` are filled
 in) and `verify_command` (an argv array that lists the dump read on stdin like
 `pg_restore --list`), `[operator_notes] root` (an absolute path), and
-`[runtimes] pi` (`"cli"` by default, or `"runner"`; file only). Nothing is expanded: no
+`[runtimes] pi` and `[runtimes] dsh` (`"runner"` by default, or `"cli"` to opt
+out; file only, read once at startup). Nothing is expanded: no
 variable, no `~`, no include. An unknown key, a wrong type or a bad value
 stops the command; the message names the key and never shows the value. The
 file must be a regular file (not a symlink), owned by the user, mode 0600, in
@@ -4176,8 +4188,9 @@ database) or in the server's environment (`looper service install --env
 NAME`).
 
 `looper config init-ops` writes the file once from the values in effect, mode
-0600, including `[runtimes]` with the commented Pi CLI default (or the explicit
-runner opt-in), and refuses to overwrite a file that exists. With nothing configured it
+0600, including `[runtimes]` with the commented runner defaults
+(`# pi = "runner"` and `# dsh = "runner"`, or the explicit `"cli"` opt-out),
+and refuses to overwrite a file that exists. With nothing configured it
 writes `postgresql://localhost:5432/loopx` and says so. Remove the old
 variables from the shell and `.env`, then run `looper service install` again
 if the service is used. Until then `looper serve` keeps working from the

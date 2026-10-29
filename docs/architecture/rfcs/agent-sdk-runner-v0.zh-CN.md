@@ -19,7 +19,7 @@ Looper 现在通过 CLI 驱动 Pi 和 DSH。管家和规划者每一轮都起一
 2. **每种 SDK 用它自己的语言。** Pi、DSH 是 Node 上的 TypeScript/JavaScript，Norma 是 Go。不把 Pi、DSH 移植成 Python。Norma 在 API 运行时里已有的 Python 移植保留，两者的分工见第 11.6 节。
 3. **Looper 用 JSON-RPC 2.0 驱动运行器进程。** 传输用 stdio：运行器是子进程，按行分隔 JSON，stdout 只走协议，stderr 放诊断；不用 HTTP。消息格式与传输无关，以后可以为远程运行器加 WebSocket。
 4. **进程模型（方案 1）：** 每种 SDK 一个运行器进程，复用多个 agent 会话。运行器在握手时声明能否按会话隔离（cwd、env、HOME、工具层权限）；每个运行器有会话上限，限制一次崩溃的影响面；满了，Looper 再起一个同种的运行器（每种 SDK 一个小池子）。每个 agent 单独一个进程是按需选择的放置，用于对隔离敏感的情形：信任域不同（如运行不可信代码）、进程级的网络或插件配置不同、实测事件循环延迟过高；不能隔离的运行器也退回这种放置。两种放置用同一个协议，切换只是配置。
-5. **并发上限是准入控制，不只取决于机器快慢**（第 5.3 节）。每个运行器取三项的最小值：内存预算 ÷ 实测的每会话 RSS；事件循环或调度器的健康；硬性的会话上限。另有 Looper 跨所有运行器执行的整机上限：每个 provider 账号的并发模型请求数、并发工具进程数（加负载保护）、花费预算。默认值来自参考机器上的压测；在那之前的暂定值是每运行器 Pi 10、DSH 20、Norma 50 个会话（推测，需要压测验证），压测之后用实测值替换。
+5. **并发上限是准入控制，不只取决于机器快慢**（第 5.3 节）。每个运行器取三项的最小值：内存预算 ÷ 实测的每会话 RSS；事件循环或调度器的健康；硬性的会话上限。另有 Looper 跨所有运行器执行的整机上限：每个 provider 账号的并发模型请求数、并发工具进程数（加负载保护）、花费预算。默认值来自参考机器上的压测。Pi 与 DSH 的实现硬上限现为每运行器 32 个会话（离线 50 个并发会话约 147 MiB 与 85 MiB；超出仍是 `CAPACITY`）。Norma 仍为暂定 50，压测之后替换。
 6. **所有 agent 将来共用一条消息总线。** 每个由 SDK 承载的 agent 都是总线上的一等参与者：每条运行器连接有一个 RunnerBridge，它在总线上替每个托管 agent 订阅并转发信封；托管 agent 发出的信封经 RunnerBridge 回到总线。两个 agent 即使在同一个运行器里，它们之间的消息也一律经过 Looper 的总线。投递语义：载荷是 `MessageEnvelope` 的 JSON；运行器按 `message_id` 确认之后，日志才把它记为已送达（至少一次，运行器按 `message_id` 去重）；同一目标内保序；每个运行器的在途窗口有界（背压）；重连后重投。运行器之间从不直连，所以总线核心以后可以换成外部 broker（如 PostgreSQL 表加 LISTEN/NOTIFY，或 NATS），信封、RunnerBridge 和运行器都不用改。
 7. **引导在同一个 trace 里生效**（第 6.3 节）。每一轮有 Looper 分配的 `trace_id`；运行中送达的引导在下一个安全边界注入这一轮，不开新轮、不换 trace；只有 agent 空闲时，引导才开出新的一轮和新的 trace。Looper 的运行记录、用量记录和日志都以 `trace_id` 为键，控制台和日志能看到引导落在它改变的那一轮里。
 8. **以后会给 SDK agent 加 skill 和 extension。** 协议和运行器要给 Looper 提供的 skill、extension 留扩展点，对 Pi 映射到它原生的 extension、skill、package。
@@ -131,7 +131,7 @@ Looper 现在通过 CLI 驱动 Pi 和 DSH。管家和规划者每一轮都起一
 | D3 | SDK 提供能力，运行器提供机制，Looper 决定策略。运行器不保存策略状态，只执行 Looper 给出的值 | 维护者已定 |
 | D4 | Looper runner protocol：JSON-RPC 2.0，一条连接上三类消息（会话控制、反向请求、总线信封）；stdio，不用 HTTP；格式与传输无关（第 6 节） | 维护者已定 |
 | D5 | 进程模型方案 1：每种 SDK 一个运行器进程复用多个会话，满了起同种的下一个；每 agent 一个进程是按需选择的放置；同一协议，切换只是配置。证据：三家都是「有前提地支持」同进程多会话（第 2.2 节），离线实测通过（第 2.3 节）；每个会话串行跑轮次，不同会话并发 | 维护者已定 |
-| D6 | 准入控制取多项上限的最小值（第 5.3 节）；暂定值 Pi 10、DSH 20、Norma 50，压测后替换 | 维护者已定；阈值为本 RFC 建议 |
+| D6 | 准入控制取多项上限的最小值（第 5.3 节）；Pi、DSH 的实现硬上限为 32，Norma 暂定 50，压测后替换 | 维护者已定；Pi/DSH 上限按离线 50 会话实测，Norma 仍为本 RFC 建议 |
 | D7 | 统一总线：托管 agent 是一等参与者；agent 间消息必经总线；按 `message_id` 确认后才记已送达；同一目标保序；在途窗口有界；重连后重投；运行器之间不直连 | 维护者已定 |
 | D8 | 每一轮一个 Looper 分配的 `trace_id`，贯穿这一轮的所有消息；运行中的引导在同一 trace 内的下一个安全边界生效；空闲时的引导、follow-up 开新 trace，分别记下起因 `cause_message_id` 和 `parent_trace_id`；`llm_records` 加这三列（第 6.3 节） | 维护者已定；列与字段为本 RFC 建议 |
 | D9 | 托管 agent 有自己的总线地址；总线加显式的 `lease`/`ack`；新消息类型 `AGENT_MESSAGE`、`AGENT_NOTICE`；忙时按消息类型投成 steer 或 follow-up，空闲时开一轮，轮次由所属 tier 登记（第 7 节） | 维护者已定方向；细节为本 RFC 建议 |
@@ -186,7 +186,7 @@ looper serve（宿主，Python）
 |---|---|---|---|
 | (a) 内存 | 每运行器 | 会话数 < 运行器内存预算 ÷ 实测的每会话 RSS | 运行器内存预算：整机内存的 50% 按运行器数平分 |
 | (b) 调度健康 | 每运行器 | Node 事件循环延迟 p99、Go 调度延迟 p99 低于阈值才接新会话；超过就停止接，已有会话不受影响 | Node 100 ms；Go 20 ms |
-| (c) 崩溃影响面 | 每运行器 | 会话数 < 硬上限，资源够也不超过 | Pi 10、DSH 20、Norma 50 |
+| (c) 崩溃影响面 | 每运行器 | 会话数 < 硬上限，资源够也不超过 | Pi 32、DSH 32、Norma 50 |
 | (d) 模型并发 | 每个 provider 账号，整机 | `budget/authorize` 在并发请求达到 provider 的配额时排队等待，名额空出来再放行 | provider 的可选设置 `max_concurrent_requests`，空表示不限 |
 | (e) 工具进程 | 整机 | `exec/acquire` 在名额用满或 1 分钟负载均值超过阈值时排队 | 名额 = max(1, 核数 ÷ 2)；负载阈值 = 核数 |
 | (f) 花费 | 每轮、每次运行、每任务 | `budget/authorize`（第 8.4 节） | 现有的各级上限 |
@@ -194,8 +194,7 @@ looper serve（宿主，Python）
 - 每运行器的上限 = (a)、(b)、(c) 的最小值。池里没有运行器能准入时，在整机内存预算允许的范围内再起一个；仍不行就让会话的启动排队，排队超过 120 秒以 `CAPACITY` 失败，原因写明是哪一项。
 - (d) 的配额来自上游的速率和并发限制，由操作者在 LLM Providers 里填；不填就不限，与现在一样。
 - (e) 只管 SDK 运行器起的工具进程（bash、测试、构建，这些才是真正吃 CPU 的）；CLI 运行时的工具不在 Looper 的控制里。SDK 内部不经运行器执行器的子进程（如 Norma 的 ripgrep、DSH 的 sandbox 探测）不计入，列为已知缺口。
-- 离线实测里 50 个会话各跑一轮的数字（Pi 事件循环 p99 18.0 ms、DSH 38.6 ms，每会话 RSS 0.18–0.55 MiB，第 2.3 节）都在这些暂定阈值之内；它们是短时单次测量，不含长上下文和子进程，不能据此提高默认值。
-- 所有默认值都由第 15.5 节在参考机器上的压测替换；发布说明写明当时的取值和依据。
+- 离线实测里 50 个会话各跑一轮的数字（Pi 事件循环 p99 18.0 ms、DSH 38.6 ms，每会话 RSS 0.18–0.55 MiB，第 2.3 节）是短时单次测量，不含长上下文和子进程。Pi 与 DSH 的硬上限已按另一次离线 50 会话实测改为 32（约 147 MiB 与 85 MiB）；Norma 的 50 与其余阈值仍待第 15.5 节压测替换。发布说明写明当时的取值和依据。
 
 ### 5.4 生命周期
 
@@ -504,7 +503,7 @@ Node 进程，导入已安装的 `@earendil-works/pi-coding-agent`：从探测�
 - **管家、规划者：** 常驻的 RunnerSession，一个 owner 一个 Pi 会话，跨轮不重启；服务或运行器重启后 `session/load`。规划者用只读工具（read、grep、find、ls 加平台工具）。
 - **执行者、评审者：** RunnerChannel；两者均保留 read、bash、edit、write 加平台工具，与 CLI 路径同组工具。文件工具只能访问任务目录与 `add_dirs`（含真实路径检查）；bash 不受路径约束，上限为该角色的 `timeout_seconds`。`max_turns` 在运行器路径限制模型请求数，未设置时 1000；每次请求前检查运行和任务花费上限。规划者的引导经 `session/steer` 在同一 trace 内生效；丢弃的引导交回规划者决策。
 - **咨询：** 以 Worker 角色、`read_only=true` 分叉保留会话，只提供 read、grep、find、ls，不给 bash、edit、write 或平台工具；源 JSONL 保留不变，结束后删除副本和 fork 会话。agent room 的保留目录为 `.local/pi/run-sessions/<task>/<run>/`。
-- **共享容量：** 四类角色与咨询共用一个 runner 的 10 个会话，`CAPACITY` 按启动失败结束步骤；没有 CLI fallback。
+- **共享容量：** 四类角色与咨询共用一个 runner 的 32 个会话，`CAPACITY` 按启动失败结束步骤；显式 `[runtimes] pi = "cli"` 才走 CLI。
 - **一个会话文件只有一个活动 owner。** 全局的文件写队列只保证同一文件串行写（`pi:dist/core/tools/file-mutation-queue.js:1`），不保证多个 agent 改同一工作树时业务正确，这由步骤的工作目录隔离负责。
 
 ### 9.5 取代 `pi.py` 里的哪些路径（S1 完成时删除）
@@ -524,9 +523,9 @@ Pi 1.3.0 配 loopback provider 的定向测试已覆盖每会话 ModelRuntime/ke
 
 引导从用户消息事件跟踪，但只有该消息进入真实 provider 请求才发 `steer_applied`；与结束、取消或关闭竞争时必须发 `steer_applied` 或 `steer_dropped`，被丢弃的消息同时从持久上下文省略，不能漏到下一轮。空闲引导仍拒绝，不宣称 `idle_start`；独立的 compaction 通知更新仍待补。
 
-ops-file opt-in `[runtimes] pi = "runner"` 已覆盖 Manager、Planner、Worker、Reviewer 与咨询，默认仍为 `"cli"`，启动读取一次；一个 runner、10 会话后 `CAPACITY`，provider env 拒绝、无 CLI fallback。新增 installed 隔离 serve 验证覆盖两步任务、同 trace 引导、Reviewer、只读咨询分叉、逐请求计费，以及 Worker 请求前预算拒绝、会话级取消、运行器崩溃与重启后的任务收敛；本轮在 Pi 1.3.0、Node 24.20.0 上的两项 SDK 工具集/只读分叉测试通过；serve 文件的 4 项测试因未设置一次性 `LOOPER_TEST_DATABASE_URL` 跳过（包括本卡两项），serve 结论仍未验证，不能计为通过。
+`[runtimes] pi` 默认 `"runner"`，覆盖 Manager、Planner、Worker、Reviewer 与咨询，启动读取一次；显式 `"cli"` 是退路。一个 runner、32 会话后 `CAPACITY`。runner 起不来（Node 旧于 22.19、`@earendil-works/pi-coding-agent` 不在 1.3.x 门禁、可执行文件缺失）时 `RuntimeUnsupported` 写明原因，并说明安装支持的版本，或在 ops 文件设置 `[runtimes] pi = "cli"` 后重启。provider env 拒绝。
 
-Pi CLI 与 runner 的真实任务对照命令及门禁已在 [evals/README.md](../../../evals/README.md#pi) 准备；待 lead 通过本地 CPA、`gpt-6-astra` 跑 9 个任务各 2 次，逐任务要求 runner 通过数至少为 CLI 减一，错误单列并重跑一次，花费上限截断须提高上限重跑。此次尚未运行，结果未验证；`reviewer_*` 用 Claude Code Reviewer，不能比较 Pi Reviewer，后者由 installed 测试覆盖。容量数字、运行时卡、长上下文、长期内存/事件循环延迟、thinking 钳制和全部生产 schema 普查仍开放。
+维护者已用真实模型经 CPA 验收：dialogs 8/8，tasks 17/18 对照 CLI。本卡未重跑真实模型；合并前 lead 对无 flag 的 runner 再跑一次真实 smoke。`reviewer_*` 用 Claude Code Reviewer，不能比较 Pi Reviewer，后者由 installed 测试覆盖。运行时卡、长上下文、长期内存与事件循环延迟、thinking 钳制、全部生产 schema 普查，以及第 15.5 节的参考机器压测仍开放。⑨（删除 CLI 路径）未完成。对照命令见 [evals/README.md](../../../evals/README.md#pi)。
 
 ## 10. DSH 运行器（TypeScript）
 
@@ -584,7 +583,7 @@ Pi CLI 与 runner 的真实任务对照命令及门禁已在 [evals/README.md](.
 - **引导进入模型的信号：** `steer_applied` 对应含 steer 消息的模型 HTTP 请求实际发送，留在原 trace；尚未发送就结束的消息标为 dropped，fork seed 不继承它。
 - **仍开放：** 完整 composition 的长期内存与容量数字、进程级 exit hook 的长期影响、RC 后接口变化。版本门禁保持精确匹配，短时专项通过不代替这些结论。
 
-全角色隔离 `looper serve` 的 installed 验证和真实命令已准备；serve 结果以计划 §4 为准。真实 DeepSeek runner smoke、三组 CLI/runner 各两次对照仍待 lead 执行，不能计为通过。
+全角色默认走 SDK runner，显式 `[runtimes] dsh = "cli"` 是退路，启动读取一次。一个 runner、32 会话后 `CAPACITY`。runner 起不来（Node 旧于 22.19、`@deepseek-ai/dsh` 不是 0.2.1-rc.2、可执行文件缺失）时 `RuntimeUnsupported` 写明原因，并说明安装支持的版本，或在 ops 文件设置 `[runtimes] dsh = "cli"` 后重启。维护者已用真实 DeepSeek 验收：对照都在门禁内，当前 main 上真实 smoke 5/5。本卡未重跑真实模型；合并前 lead 对无 flag 的 runner 再跑一次真实 smoke。⑤（按 provider binding 分运行器）和 ⑦（删除 CLI 路径）未完成。对照命令见 [evals/README.md](../../../evals/README.md#dsh-validation)。
 
 ## 11. Norma 运行器（Go）
 
@@ -760,8 +759,8 @@ v0 的告警进服务日志（固定事件名）和 system status 的标志；�
 | 阶段 | 卡片 | 完成标准（另加上面的通用标准） |
 |---|---|---|
 | **S0 协议与 Looper 一侧** | ① 协议说明、JSON Schema 与一致性测试（M）；② RunnerSupervisor：起停、放置、健康、重启（M）；③ 准入控制与整机名额：内存、健康、硬上限、`exec/acquire`、负载保护（M）；④ RunnerBridge 会话控制、RunnerSession、RunnerChannel、内部事件、trace（L）；⑤ `tools/call` 分派与共用的 100 KB 截断（S）；⑥ `budget/authorize`、provider 并发、对账（M）；⑦ 总线 `lease`/`ack`、两种新消息类型、投递与去重（M）；⑧ `llm_records` 的三列与日志字段（S）；⑨ 假运行器（M） | 第 15.1–15.3 节在假运行器上全绿；隔离服务上，假运行器（只在测试里登记的运行时类型）跑完一轮管家对话并调用平台工具；没有用户可见变化 |
-| **S1 Pi 运行器**（本分支：①–⑦ 已实现；⑧ 的验证与评测已准备、待 lead 实跑，容量数字和运行时卡未完成；⑨ 未完成，见 §9.6） | ① 运行器骨架：握手、版本门禁、会话表、读写、健康（M）；② `session/new`、`load` 与隔离：cwd、路径拦截、bash 的 `spawnHook`/`operations`、私有 agentDir、内存设置（L）；③ 包装 ModelRuntime：`authorize`、`request_end`、事件映射（M）；④ 平台工具代理、内联扩展、`skill_dir`（M）；⑤ 管家、规划者改由运行器承载，`pi` 类型切换（M）；⑥ 执行者、评审者：RunnerChannel、trace 内引导、取消、咨询分叉（L）；⑦ `WorkerPool` 的运行句柄抽象（M）；⑧ 验证、容量数字、评测、运行时卡（M）；⑨ 删除按轮起 CLI 的 Pi 路径（S） | 已安装的 pi 1.3.0 配假 provider 跑通四个角色、只读、用量、trace 内引导和取消；真实 Responses 烟测；与原 CLI 路径的评测对照；运行时卡截图一张 |
-| **S2 DSH 运行器**（本分支：①–④ 已实现；⑥ 的验证与真实命令已准备、待 lead 实跑，容量数字仍待测；⑤、⑦ 未完成，见 §10.6） | ① 运行器骨架、一次 `runProfile`、兼容门禁（M）；② `agents.create`、`resume` 与 `setup`：工具、prompt section、guard、bash 执行器（L）；③ `llm/stream` 授权、用量、请求归属（M）；④ 常驻与运行两类角色、引导、取消、快照咨询（M）；⑤ 按 provider 绑定分运行器（S）；⑥ 验证、容量数字、DeepSeek 真实烟测（M）；⑦ 删除 CLI 的 DSH 路径（S） | 第 10.6 节逐项结论与开放缺口；DeepSeek 真实烟测和 CLI/runner 对照 |
+| **S1 Pi 运行器**（本分支：①–⑦ 已实现；⑧ 已由维护者用 CPA 验收，dialogs 8/8、tasks 17/18 对照 CLI，本卡未重跑，合并前 lead 对无 flag 的 runner 再跑一次真实 smoke；会话上限 32；运行时卡与第 15.5 节压测未完成；⑨ 未完成，显式 `"cli"` 仍是退路，见 §9.6） | ① 运行器骨架：握手、版本门禁、会话表、读写、健康（M）；② `session/new`、`load` 与隔离：cwd、路径拦截、bash 的 `spawnHook`/`operations`、私有 agentDir、内存设置（L）；③ 包装 ModelRuntime：`authorize`、`request_end`、事件映射（M）；④ 平台工具代理、内联扩展、`skill_dir`（M）；⑤ 管家、规划者改由运行器承载，`pi` 类型切换（M）；⑥ 执行者、评审者：RunnerChannel、trace 内引导、取消、咨询分叉（L）；⑦ `WorkerPool` 的运行句柄抽象（M）；⑧ 验证、容量数字、评测、运行时卡（M）；⑨ 删除按轮起 CLI 的 Pi 路径（S） | 已安装的 pi 1.3.0 配假 provider 跑通四个角色、只读、用量、trace 内引导和取消；真实 Responses 烟测；与原 CLI 路径的评测对照；运行时卡截图一张 |
+| **S2 DSH 运行器**（本分支：①–④ 已实现；⑥ 已由维护者用 DeepSeek 验收，对照都在门禁内，当前 main 上真实 smoke 5/5，本卡未重跑，合并前 lead 对无 flag 的 runner 再跑一次真实 smoke；会话上限 32；⑤、⑦ 未完成，显式 `"cli"` 仍是退路，见 §10.6） | ① 运行器骨架、一次 `runProfile`、兼容门禁（M）；② `agents.create`、`resume` 与 `setup`：工具、prompt section、guard、bash 执行器（L）；③ `llm/stream` 授权、用量、请求归属（M）；④ 常驻与运行两类角色、引导、取消、快照咨询（M）；⑤ 按 provider 绑定分运行器（S）；⑥ 验证、容量数字、DeepSeek 真实烟测（M）；⑦ 删除 CLI 的 DSH 路径（S） | 第 10.6 节逐项结论与开放缺口；DeepSeek 真实烟测和 CLI/runner 对照 |
 | **S3 Norma 运行器** | ① 上游：每会话收件箱与 trace 内引导，带测试（M）；② 上游：干净环境的 bash、子 agent 环境、`http.Client`、panic recover、任务目录清理、MCP cwd（M）；③ `api` 的 Python `AgentLoop` 移植同一收件箱（M）；④ Go 运行器：协议、会话 goroutine、读写、准入、健康（L）；⑤ 工具：路径包装、干净环境执行器、平台工具代理、Looper 摘要器，以及上游合入前的 `Compactor.Pre` 过渡引导（M）；⑥ provider 包装：`authorize` 与用量（S）；⑦ `norma` 运行时类型、Profile、registry、运行时卡（M）；⑧ 构建与发布二进制、`install.sh`（M）；⑨ 验证与三种运行器的容量对比（M） | 第 11.6 节的行为兼容表在同一个假服务上逐项核对；四个平台的安装烟测；三种运行器的容量对比写进本 RFC，替换第 5.3 节的暂定值 |
 | 之后 | WebSocket 远程运行器；外部 broker；Looper 拥有的中性历史（Norma 与 `api` 互换会话）；能力目录里的 MCP、扩展与 Pi package；按项目划分信任域；Go 版 Looper（loopgo）驱动同一套运行器 | 各自另立 RFC 或在本 RFC 补节 |
 
@@ -771,7 +770,7 @@ v0 的告警进服务日志（固定事件名）和 system status 的标志；�
 
 ### 17.1 默认行为的变化
 
-- `pi`、`dsh` 两个运行时类型在 S1、S2 完成时改由运行器承载，选了它们的 Profile 不用迁移，但行为会变：
+- `pi`、`dsh` 两个运行时类型默认已由运行器承载。选了它们的 Profile 不用迁移。显式 `[runtimes] pi = "cli"` 或 `dsh = "cli"` 仍走 CLI。runner 上的行为：
   - 管家的停止真正中断这一轮（`can_interrupt = True`），控制台、Telegram、飞书的 `/stop` 都适用；
   - 花费上限在请求之前挡住，可能比现在更早结束一轮（估计按上界算）；
   - 平台工具名从 `mcp__looper__*` 变成 `looper_*`（Pi，模型可见）；
@@ -787,7 +786,7 @@ v0 的告警进服务日志（固定事件名）和 system status 的标志；�
 | # | 问题 | 推荐默认值 |
 |---|---|---|
 | Q1 | 保留 SDK 原生的会话树，还是转成 Looper 的中性历史？ | 原生（D14）。Pi、DSH 一直用原生格式；Norma 在后续阶段改由 Looper 拥有中性历史，以便与 `api` 互换 |
-| Q2 | 每运行器的默认会话上限 | 暂定 Pi 10、DSH 20、Norma 50（推测，需要压测验证）；离线实测的短时数字都在这些值之内（第 2.3 节），但不据此提高；每个运行器阶段的容量数字和 S3 的三者对比之后用实测值替换 |
+| Q2 | 每运行器的默认会话上限 | Pi 32、DSH 32（离线 50 个并发会话约 147 MiB 与 85 MiB；超出仍是 `CAPACITY`）；Norma 50 仍待第 15.5 节压测 |
 | Q3 | S0 之后第一批真实角色 | S1 先上 Pi 的管家和规划者，再上执行者和评审者 |
 | Q4 | 运行时类型 | `pi`、`dsh` 沿用并切到运行器；新增 `norma` |
 | Q5 | 托管 agent 的地址 | `agent_type` 同 tier，`agent_id` 为 tier 的 id 加 `.agent` |

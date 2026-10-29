@@ -192,14 +192,17 @@ def read_key() -> str:
         raise ValidationError("API key 捕获失败或为空") from None
 
 
-def eval_argv(command: str, pg_url: str, out_dir: Path, *, dsh_runner: bool = False) -> list[str]:
+def eval_argv(command: str, pg_url: str, out_dir: Path, *, dsh_runner: bool = True) -> list[str]:
     manager = command == "manager"
+    # The eval's own default is the runner. ``--dsh-runner`` keeps that explicit;
+    # ``--dsh-cli`` is the CLI comparison path.
+    flag = ["--dsh-runner"] if dsh_runner else ["--dsh-cli"]
     return [sys.executable, "-m", "evals.prompt_regression", "dialogs" if manager else "run",
             "--mode", "real", "--register-agent", str(SPEC), "--pg-url", pg_url,
             "--dialogs" if manager else "--tasks", CASES[command], "--jobs", "1", "--reps",
             "2",
             "--max-budget-usd", f"{RUN_SOFT_CAP_USD:.2f}", "--total-cap-usd", str(TOTAL_OBSERVED_CAP_USD),
-            "--timeout" if manager else "--task-timeout", str(STAGE_TIMEOUT), "--out-dir", str(out_dir)] + (["--dsh-runner"] if dsh_runner else [])
+            "--timeout" if manager else "--task-timeout", str(STAGE_TIMEOUT), "--out-dir", str(out_dir)] + flag
 
 
 def baseline_status(base: dict[str, Any] | None, cases: tuple[str, ...], *, dialogs: bool) -> dict[str, Any]:
@@ -268,7 +271,7 @@ def _runtime_matches(evidence: dict[str, Any], *, dsh_runner: bool) -> bool:
             (not dsh_runner or evidence.get("runner_kind") == "dsh"))
 
 
-def basic_evidence_gaps(rows: list[dict[str, Any]], *, dsh_runner: bool = False) -> list[dict[str, Any]]:
+def basic_evidence_gaps(rows: list[dict[str, Any]], *, dsh_runner: bool = True) -> list[dict[str, Any]]:
     gaps = []
     for row in rows:
         reasons = []
@@ -292,7 +295,7 @@ def basic_evidence_gaps(rows: list[dict[str, Any]], *, dsh_runner: bool = False)
     return gaps
 
 
-def review_evidence_gaps(rows: list[dict[str, Any]], *, dsh_runner: bool = False) -> list[dict[str, Any]]:
+def review_evidence_gaps(rows: list[dict[str, Any]], *, dsh_runner: bool = True) -> list[dict[str, Any]]:
     gaps = basic_evidence_gaps(rows, dsh_runner=dsh_runner)
     for row in rows:
         workers = [run for run in row.get("runtime_evidence") or [] if run.get("role") == "worker"]
@@ -309,7 +312,7 @@ def review_evidence_gaps(rows: list[dict[str, Any]], *, dsh_runner: bool = False
     return gaps
 
 
-def manager_evidence_gaps(rows: list[dict[str, Any]], *, dsh_runner: bool = False) -> list[dict[str, Any]]:
+def manager_evidence_gaps(rows: list[dict[str, Any]], *, dsh_runner: bool = True) -> list[dict[str, Any]]:
     gaps = []
     for row in rows:
         reasons = []
@@ -351,7 +354,7 @@ def _server_log_key_absent(out_dir: Path, key: str) -> bool | str:
     return "unverified" if unreadable else True
 
 
-def execute(command: str, pg_url: str, key: str, baseline: Path | None, *, dsh_runner: bool = False) -> tuple[dict[str, Any], int]:
+def execute(command: str, pg_url: str, key: str, baseline: Path | None, *, dsh_runner: bool = True) -> tuple[dict[str, Any], int]:
     # Fixed ignored destination: callers cannot redirect real artifacts into tracked paths.
     ARTIFACTS.mkdir(parents=True, exist_ok=True, mode=0o700)
     out_dir = Path(tempfile.mkdtemp(prefix=f"{command}-", dir=ARTIFACTS)).resolve()
@@ -579,7 +582,7 @@ def _session_accounting(records: list[dict[str, Any]], runtime: Path) -> dict[st
     return result
 
 
-def _smoke_workflow(pg_url: str, root: Path, *, dsh_runner: bool = False) -> tuple[dict[str, Any], int]:
+def _smoke_workflow(pg_url: str, root: Path, *, dsh_runner: bool = True) -> tuple[dict[str, Any], int]:
     from evals.prompt_regression import runner
     from looper.agents.runtimes.dsh import DshRuntime
 
@@ -791,7 +794,7 @@ def _smoke_workflow(pg_url: str, root: Path, *, dsh_runner: bool = False) -> tup
         return summary, 2 if summary["timeout"] else 1
 
 
-def smoke(pg_url: str, key: str, *, dsh_runner: bool = False) -> tuple[dict[str, Any], int]:
+def smoke(pg_url: str, key: str, *, dsh_runner: bool = True) -> tuple[dict[str, Any], int]:
     # An isolated process keeps serve's inherited environment and all private
     # artifacts disposable. The outer supervisor also reaps owned descendants.
     with tempfile.TemporaryDirectory(prefix="looper-dsh-smoke-") as directory:
@@ -825,7 +828,10 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--disposable-pg-url", help="显式声明为可丢弃的本机 PG 实例（仅 postgres 管理库）")
         if name != "preflight":
             command.add_argument("--real", action="store_true", help="明确授权读取 key 并运行付费模型")
-            command.add_argument("--dsh-runner", action="store_true", help="所有 DSH 角色使用 SDK runner")
+            command.add_argument("--dsh-runner", action="store_true",
+                                 help="所有 DSH 角色使用 SDK runner（默认），并按 runner 证据验收")
+            command.add_argument("--dsh-cli", action="store_true",
+                                 help="所有 DSH 角色使用 CLI，并按 CLI 证据验收")
         if name not in ("preflight", "smoke"):
             command.add_argument("--baseline", type=Path, help="显式 real eval JSON；需有效 append 证据")
     args = parser.parse_args(argv)
@@ -836,12 +842,16 @@ def main(argv: list[str] | None = None) -> int:
         summary = preflight(args.disposable_pg_url)
         code = 0
         if args.command != "preflight":
+            if args.dsh_cli and args.dsh_runner:
+                raise ValidationError("只能选择 --dsh-cli 或 --dsh-runner 之一")
+            # No flag uses the runner. --dsh-cli selects CLI evidence.
+            on_runner = not args.dsh_cli
             key = read_key()
             began = True
             if args.command == "smoke":
-                summary, code = smoke(args.disposable_pg_url, key, dsh_runner=args.dsh_runner)
+                summary, code = smoke(args.disposable_pg_url, key, dsh_runner=on_runner)
             else:
-                summary, code = execute(args.command, args.disposable_pg_url, key, args.baseline, dsh_runner=args.dsh_runner)
+                summary, code = execute(args.command, args.disposable_pg_url, key, args.baseline, dsh_runner=on_runner)
     except ValidationError as exc:
         summary, code = {"status": "error", "reason": str(exc), "real_validation": "untested"}, 2
     except Exception:

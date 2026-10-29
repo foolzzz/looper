@@ -371,6 +371,8 @@ never shows the value.
 | `backup.command` | No | An argv array whose stdout is the dump; `{dbname}` and `{user}` are filled in from the database URL |
 | `backup.verify_command` | No | An argv array that reads the dump on stdin and lists it like `pg_restore --list`; derived from `backup.command` when that is `docker exec ... <container> pg_dump ...`, else the local `pg_restore` |
 | `operator_notes.root` | No | Absolute path of the directory where the operator's Claude Code keeps project notes |
+| `runtimes.pi` | No | `"runner"` (default) or `"cli"`. Pi profiles run on the SDK runner (Node 22.19+, pi 1.3.x). `"cli"` opts out onto the Pi CLI. File only, read once at startup; restart to apply. A runner that cannot start names the cause and this opt-out |
+| `runtimes.dsh` | No | `"runner"` (default) or `"cli"`. DSH profiles run on the SDK runner (Node 22.19+, dsh 0.2.1-rc.2). `"cli"` opts out onto the DSH CLI. File only, read once at startup; restart to apply. A runner that cannot start names the cause and this opt-out |
 
 Each setting comes from the first of these: an explicit flag (`--host`,
 `--port`, or `--verbose`, which sets `server.log_level` to `debug`), the
@@ -387,7 +389,9 @@ never its value. The supported installed path is the private ops file plus
 way), else `~/.looper`. The file never names the runtime root. `.env` is not
 put into Looper's environment: only those old settings are read from it, and
 any other key in it (for example a channel token variable) is ignored and
-named in a warning.
+named in a warning. `runtimes.pi` and `runtimes.dsh` are file only: the
+built-in default is `"runner"`, and `"cli"` in the ops file is the opt-out.
+Claude Code uses the Claude Code CLI.
 
 To move an existing install, run `looper config init-ops` once. It writes the
 file from the values in effect, mode 0600, and refuses to overwrite a file
@@ -482,6 +486,12 @@ Settings → Agent Profiles and selected in Settings → Roles.
   server's PATH and probes its version and capabilities; Settings → Agent
   Runtimes shows them and can Re-detect one. A different binary comes from
   the server's PATH.
+- Pi and DSH profiles run on their SDK runners by default (Node 22.19+, pi
+  1.3.x, dsh 0.2.1-rc.2). Claude Code uses the Claude Code CLI. To use the CLI
+  for one of those two, set `[runtimes] pi = "cli"` or
+  `[runtimes] dsh = "cli"` in the ops file and restart. The setting is read
+  once at startup. A runner that cannot start names the cause and that
+  opt-out; the CLI path is only that explicit setting.
 - A **provider** is where the agent's requests go: the protocols it serves,
   its models and their prices, and how it authenticates, with the runtime's
   own login or with an API key, which the API never returns.

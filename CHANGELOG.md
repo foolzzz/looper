@@ -18,6 +18,10 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+### Changed
+
+- **Pi and DSH profiles run on their SDK runners by default.** `[runtimes] pi` and `[runtimes] dsh` default to `"runner"` and are read once at startup. An explicit `"cli"` is the opt-out: set `[runtimes] pi = "cli"` or `[runtimes] dsh = "cli"` in the ops file and restart. Claude Code stays on the Claude Code CLI. Each runner allows 32 sessions; a further session fails with `CAPACITY`. If the runner cannot start because Node is older than 22.19, the SDK is outside the gate (pi 1.3.x, dsh 0.2.1-rc.2), or the executable is missing, the launch fails with `RuntimeUnsupported`. The message names the cause and the same opt-out. `evals.prompt_regression` and `examples/dsh/validate.py` use the runner when no flag is set; `--pi-cli` and `--dsh-cli` select the CLI path, and `--pi-runner` / `--dsh-runner` still select the runner. **Model-visible:** a Pi or DSH role runs in the SDK runner, so its platform tools are `looper_*` in process and the run record stores a runner Descriptor. A Claude Code profile is unchanged.
+
 ## [2.14.13] - 2026-10-29
 
 ### Fixed

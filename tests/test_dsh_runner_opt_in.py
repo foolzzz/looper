@@ -62,8 +62,8 @@ def prompt_file(tmp_path):
 def test_ops_dsh_runtime_round_trip(tmp_path, value):
     config = ops.OpsConfig(runtime_root=tmp_path, path=tmp_path / ops.FILE, dsh_runtime=value)
     text = ops.render(config)
-    assert '[runtimes]\n# pi = "cli"\n' in text
-    assert ('dsh = "runner"' if value == "runner" else '# dsh = "cli"') in text
+    assert '[runtimes]\n# pi = "runner"\n' in text
+    assert ('# dsh = "runner"' if value == "runner" else 'dsh = "cli"') in text
     ops.write_private(config.path, text)
     assert ops.load(ops.Flags(runtime_root=tmp_path), environ={}, dotenv=tmp_path / "absent").dsh_runtime == value
 
@@ -79,7 +79,7 @@ def test_invalid_ops_dsh_runtime_names_only_key(tmp_path, value):
 def test_ops_default_has_no_environment_opt_in(tmp_path):
     config = ops.load(ops.Flags(runtime_root=tmp_path), require_database=False,
         environ={"LOOPER_DSH_RUNTIME": "runner", "LOOPX_DSH_RUNTIME": "runner"}, dotenv=tmp_path / "absent")
-    assert config.dsh_runtime == "cli"
+    assert config.dsh_runtime == "runner"
     assert type(ADAPTERS["dsh"]) is dsh.DshRuntime
     assert not ADAPTERS["dsh"].hosts_runs
     assert isinstance(ADAPTERS["dsh"].resident_session("test"), dsh.ResidentDsh)
@@ -340,7 +340,7 @@ def test_enable_records_unavailability_and_installs_supervisor(tmp_path, monkeyp
         assert not seen
     else:
         assert installed.supervisor is result and installed.dsh == Path(executable).resolve()
-        assert seen["root"] == tmp_path and seen["session_cap"] == 20
+        assert seen["root"] == tmp_path and seen["session_cap"] == 32
         state = tmp_path / "runners" / "state" / "dsh-native"
         assert list(seen["commands"]["dsh"][-4:]) == ["--dsh", str(Path(executable).resolve()), "--state-root", str(state)]
         assert seen["connect"] is dsh_runner.dsh_command.connect and state.stat().st_mode & 0o777 == 0o700

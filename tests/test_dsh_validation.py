@@ -265,7 +265,7 @@ def test_manager_acceptance_requires_runtime_session_and_mcp_evidence(problem):
         row["turns"][1]["calls"] = []
     elif problem == "failed":
         row["runtime_evidence"][0]["status"] = "failed"
-    assert bool(launcher.manager_evidence_gaps([row])) is (problem != "none")
+    assert bool(launcher.manager_evidence_gaps([row], dsh_runner=False)) is (problem != "none")
 
 
 @pytest.mark.parametrize("problem", ["none", "runtime", "executable", "mode"])
@@ -282,7 +282,7 @@ def test_manager_acceptance_allows_started_planner_without_session(problem):
     elif problem == "mode":
         planner["system_prompt_mode"] = "replace"
     row["runtime_evidence"].append(planner)
-    assert bool(launcher.manager_evidence_gaps([row])) is (problem != "none")
+    assert bool(launcher.manager_evidence_gaps([row], dsh_runner=False)) is (problem != "none")
 
 
 def test_manager_execute_accepts_completed_dialog_with_started_planner(tmp_path, monkeypatch):
@@ -300,7 +300,7 @@ def test_manager_execute_accepts_completed_dialog_with_started_planner(tmp_path,
         return launcher.ProcessResult(0, b"", b"")
 
     monkeypatch.setattr(launcher, "run_process", run)
-    summary, code = launcher.execute("manager", PG, "synthetic-private-key", None)
+    summary, code = launcher.execute("manager", PG, "synthetic-private-key", None, dsh_runner=False)
     assert code == 0 and summary["status"] == "pass"
     assert summary["evidence_gaps"] == []
     assert summary["effective_system_prompt_mode"] == "append"
@@ -317,7 +317,7 @@ def test_manager_execute_does_not_accept_dialog_success_without_runtime_evidence
         (out_dir / "test-real.json").write_text(json.dumps({"dialogs": rows}))
         return launcher.ProcessResult(0, b"", b"")
     monkeypatch.setattr(launcher, "run_process", run)
-    summary, code = launcher.execute("manager", PG, "synthetic-private-key", None)
+    summary, code = launcher.execute("manager", PG, "synthetic-private-key", None, dsh_runner=False)
     assert code != 0 and summary["evidence_gaps"]
     assert summary["effective_system_prompt_mode"] is None
 
@@ -414,11 +414,11 @@ def test_basic_acceptance_requires_evidence_beyond_task_pass(problem):
     else:
         row["dependency_order"]["verified"] = 0
         row["dependency_order"]["unknown"] = 1
-    assert launcher.basic_evidence_gaps([row])
+    assert launcher.basic_evidence_gaps([row], dsh_runner=False)
 
 
 def test_basic_acceptance_accepts_observed_runtime_and_order():
-    assert launcher.basic_evidence_gaps([basic_row()]) == []
+    assert launcher.basic_evidence_gaps([basic_row()], dsh_runner=False) == []
 
 
 def review_row(case="reviewed_step", rep=1):
@@ -454,7 +454,7 @@ def test_review_acceptance_requires_execution_and_parsed_verdict(problem):
         row["runtime_evidence"][-1]["runtime"] = "claude-code"
     else:
         row["contract_violations"]["total"] = 1
-    assert launcher.review_evidence_gaps([row])
+    assert launcher.review_evidence_gaps([row], dsh_runner=False)
 
 
 def test_review_acceptance_accepts_both_cases_and_explained_guard_denials():
@@ -462,7 +462,7 @@ def test_review_acceptance_accepts_both_cases_and_explained_guard_denials():
     rows[-1]["planner_denials"] = 1
     rows[-1]["runtime_evidence"][0]["permission_denials"] = [
         {"id": "denied-write", "tool": "write"}]
-    assert launcher.review_evidence_gaps(rows) == []
+    assert launcher.review_evidence_gaps(rows, dsh_runner=False) == []
 
 
 def test_review_execute_rejects_aggregate_pass_without_reviewer_evidence(tmp_path, monkeypatch):
@@ -473,7 +473,7 @@ def test_review_execute_rejects_aggregate_pass_without_reviewer_evidence(tmp_pat
         (out_dir / "test-real.json").write_text(json.dumps({"tasks": rows}))
         return launcher.ProcessResult(0, b"", b"")
     monkeypatch.setattr(launcher, "run_process", run)
-    summary, code = launcher.execute("task-review", PG, "synthetic-private-key", None)
+    summary, code = launcher.execute("task-review", PG, "synthetic-private-key", None, dsh_runner=False)
     assert code != 0 and summary["evidence_gaps"]
     assert summary["effective_system_prompt_mode"] is None
 
@@ -499,7 +499,7 @@ def test_execute_rejects_incomplete_or_invalid_success_rows(command, problem, tm
         (out_dir / "test-real.json").write_text(json.dumps({"tasks": rows}))
         return launcher.ProcessResult(0, b"", b"")
     monkeypatch.setattr(launcher, "run_process", run)
-    summary, code = launcher.execute(command, PG, "synthetic-private-key", None)
+    summary, code = launcher.execute(command, PG, "synthetic-private-key", None, dsh_runner=False)
     assert code != 0
     assert summary["status"] != "pass"
 
@@ -581,7 +581,8 @@ def test_execute_uses_only_eval_key_env_and_ignored_private_root(command, tmp_pa
             for rep in (1, 2)], "total_cost_usd": 0.1}))
         return launcher.ProcessResult(0, b"private eval output", b"private diagnostic")
     monkeypatch.setattr(launcher, "run_process", run)
-    summary, code = launcher.execute(command, PG, "synthetic-private-key", tmp_path / "missing-baseline.json")
+    summary, code = launcher.execute(command, PG, "synthetic-private-key", tmp_path / "missing-baseline.json",
+                                     dsh_runner=False)
     assert code == 0
     assert summary["baseline"]["comparable"] is False
     assert summary["outcomes"]["pass"] == 4
@@ -1011,7 +1012,8 @@ def test_smoke_real_serve_stand_in_keeps_the_room_consult_gap_visible(tmp_path, 
     monkeypatch.setattr(runner.subprocess, "Popen", popen)
     root = tmp_path / "workflow"
     root.mkdir()
-    summary, code = launcher._smoke_workflow(os.environ["LOOPER_TEST_DATABASE_URL"], root)
+    summary, code = launcher._smoke_workflow(
+        os.environ["LOOPER_TEST_DATABASE_URL"], root, dsh_runner=False)
     assert code != 0 and summary["status"] == "error" and summary["stage"] == "room_consult"
     assert owned and all(process.poll() is not None for process in owned)
     calls = read_calls(state)
@@ -1073,14 +1075,15 @@ def dsh_descriptor(role="manager", *, fork_from=None):
     (basic_row, launcher.basic_evidence_gaps), (review_row, launcher.review_evidence_gaps),
     (manager_row, launcher.manager_evidence_gaps),
 ])
-def test_runner_evidence_is_accepted_only_with_explicit_opt_in(make_row, gate):
+def test_runner_evidence_is_the_default_and_cli_is_explicit(make_row, gate):
     from evals.prompt_regression.metrics import runner_evidence
 
     row = make_row()
     for record in row["runtime_evidence"]:
         record.update(executable="looper-runner", **runner_evidence(dsh_descriptor()))
+    assert gate([row]) == []
     assert gate([row], dsh_runner=True) == []
-    assert gate([row])
+    assert gate([row], dsh_runner=False)
     row["runtime_evidence"][0].update(runner_evidence(["looper-runner", "--kind", "dsh"]))
     assert gate([row], dsh_runner=True)
     row["runtime_evidence"][0].update(executable="dsh", runner_kind="dsh")

@@ -1,7 +1,8 @@
-"""Ops-file opt-in for every Pi role (one runner, 10 sessions)."""
+"""Every Pi role uses the SDK runner (one runner, 32 sessions) unless the ops file sets cli."""
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from pathlib import Path
 import re
@@ -37,6 +38,11 @@ RUN_TOOL_TIMEOUT_SEC = 86400
 _NO_CLI = ('the Pi runner hosts this run; there is no Pi CLI command under [runtimes] pi = "runner"')
 _PROVIDER_ENV = ("the Pi runner cannot apply a provider's environment variables; clear them or use "
                  'the CLI path ([runtimes] pi = "cli")')
+# Every Pi role shares this runner. 32 covers a few concurrent tasks; an offline
+# spike ran 50 sessions at about 147 MiB. Past this, acquisition still fails with CAPACITY.
+SESSION_CAP = 32
+_PI_PACKAGE = "@earendil-works/pi-coding-agent"
+_PI_VERSION = re.compile(r"^1\.3\.\d+$")
 
 
 def _prompt_text(looper_prompt: str, launch: Launch, *, cwd: str | Path | None = None) -> str:
@@ -168,26 +174,71 @@ class PiRunnerRuntime(PiRuntime):
         return RunnerSession(label, self.supervisor, "pi")
 
 
+def _opt_out(cause: str) -> str:
+    return (f"the Pi runner cannot start: {cause}; install the supported version, "
+            'or set [runtimes] pi = "cli" in the ops file; restart Looper')
+
+
+def _package_version(executable: str, package: str) -> str | None:
+    """The installed package version, or None when ``executable`` is not a real file.
+
+    A missing file skips this gate (unit-test stand-ins, and a PATH miss already
+    reported). A real executable is walked up at most eight parents for that
+    package's ``package.json``, the same walk the runner's loader uses. ``""``
+    means the file exists and the package was not found.
+    """
+    path = Path(executable)
+    try:
+        if not path.is_file():
+            return None
+        root = path.resolve().parent
+    except OSError:
+        return ""
+    for _depth in range(9):
+        try:
+            text = (root / "package.json").read_text(encoding="utf-8")
+        except OSError:
+            text = None
+        if text is not None:
+            try:
+                data = json.loads(text)
+            except ValueError:
+                data = None
+            if isinstance(data, dict) and data.get("name") == package:
+                version = data.get("version")
+                return version if isinstance(version, str) else ""
+        parent = root.parent
+        if parent == root:
+            break
+        root = parent
+    return ""
+
+
 def enable(runtime_root: Path) -> RunnerSupervisor | None:
     """Install the adapter once at serve startup, retaining failures without a CLI fallback."""
     node, pi = shutil.which("node"), shutil.which("pi")
-    unavailable = None
     if not node or not pi:
-        unavailable = "the Pi runner requires node 22.19+ and pi on PATH; install them and restart Looper"
+        unavailable = _opt_out("node 22.19+ and pi are not both on PATH")
     else:
         try:
             result = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=2, check=True)
             version = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", result.stdout.strip())
             if version is None or tuple(map(int, version.groups())) < (22, 19, 0):
-                unavailable = "the Pi runner requires node 22.19 or newer; upgrade node and restart Looper"
+                unavailable = _opt_out(f"node {result.stdout.strip() or 'unknown'} is older than 22.19")
+            else:
+                unavailable = None
         except (OSError, subprocess.SubprocessError):
-            unavailable = "the Pi runner could not check node --version within 2 seconds; check node and restart Looper"
+            unavailable = _opt_out("node --version did not finish within 2 seconds")
+        if unavailable is None:
+            found = _package_version(pi, _PI_PACKAGE)
+            if found is not None and _PI_VERSION.fullmatch(found) is None:
+                unavailable = _opt_out(f"{_PI_PACKAGE} 1.3.x is required (found {found or 'not inside ' + _PI_PACKAGE})")
     if unavailable:
         ADAPTERS["pi"] = PiRunnerRuntime(None, pi=None, unavailable=unavailable)
         return None
     resolved = Path(pi).resolve()
     supervisor = RunnerSupervisor(runtime_root, {"pi": pi_command.command(node, pi)},
-                                  env={"pi": pi_command.ENV}, session_cap=10, connect=pi_command.connect)
+                                  env={"pi": pi_command.ENV}, session_cap=SESSION_CAP, connect=pi_command.connect)
     ADAPTERS["pi"] = PiRunnerRuntime(supervisor, pi=resolved)
-    logger.info("Pi runner enabled for every Pi role (one runner, 10 sessions)")
+    logger.info("Pi runner enabled for every Pi role (one runner, %s sessions)", SESSION_CAP)
     return supervisor
