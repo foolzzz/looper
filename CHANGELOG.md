@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.9] - 2026-10-29
+
+### Fixed
+
+- **The DSH runner counts a successful request complete at its validated `message_stop`, without waiting for the HTTP body to drain.** Before, a request whose response the SDK stopped reading after `message_stop` was recorded as usage-incomplete, which stopped Manager turns with `budget_unverifiable` at about zero cost. Rejections (HTTP 400 and above) still need a fully read body and no model output. A request that is still incomplete now writes one `usage_incomplete` stderr line naming the missing conditions, without request content. Affects only installations with `[runtimes] dsh = "runner"`. ([#889](https://github.com/foolzzz/looper/pull/889))
+
 ## [2.14.8] - 2026-10-29
 
 ### Fixed
