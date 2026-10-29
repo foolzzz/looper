@@ -70,8 +70,19 @@ _SCHEDULE_USER_GATES = "schedule_user_gates"
 
 
 async def _schedule_user_gates_pending(conn: asyncpg.Connection) -> bool:
-    return not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
-                                   _SCHEDULE_USER_GATES)
+    """An existing baseline still lacks ``schedules.user_gates``.
+
+    The current ``schema.sql`` already creates the column, so an empty database
+    records only ``post_bridge_baseline``. The marker is written only when this
+    upgrade runs; once recorded, a missing column is not repaired.
+    """
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _SCHEDULE_USER_GATES):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('schedules') AND attname = 'user_gates' "
+        "AND attnum > 0 AND NOT attisdropped)")
 
 
 class RegistrySchemaVersionError(RuntimeError):
@@ -168,12 +179,13 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute(sql)
         elif state == "bridge":
             await upgrade_from_bridge(conn)
-        # One additive upgrade for existing baselines, including the bridge.
-        # Once recorded, reopening never tries to repair missing columns.
+        # One additive upgrade for a baseline that predates schedules.user_gates,
+        # including the bridge. An empty database already has the column from
+        # schema.sql and records only post_bridge_baseline. Once this marker is
+        # recorded, reopening never tries to repair a missing column.
         if await _schedule_user_gates_pending(conn):
-            if state != "empty":
-                await conn.execute("ALTER TABLE schedules ADD COLUMN IF NOT EXISTS user_gates "
-                                   "TEXT NOT NULL DEFAULT 'off' CHECK (user_gates IN ('off', 'on'))")
+            await conn.execute("ALTER TABLE schedules ADD COLUMN IF NOT EXISTS user_gates "
+                               "TEXT NOT NULL DEFAULT 'off' CHECK (user_gates IN ('off', 'on'))")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_USER_GATES)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
