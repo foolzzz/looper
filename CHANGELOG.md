@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.2] - 2026-10-29
+
+### Added
+
+- **DSH runner sessions, still not reachable from any runtime.** The runner serves `session/new`, `session/load` and `session/close`: parameters are validated before any SDK work (`anthropic-messages` only, `append` prompt mode only, read-only sessions cannot enable `write`, `edit` or `bash`, platform tools and `fork_from` refused), each session gets one DSH agent with its own `looper-<session_key>` DeepSeek route (key only in memory, the configured model kept for budget and pricing, a trailing `[1m]` dropped from the wire model), a literal Looper prompt section and a restrict-plus-guard tool allowlist. Sessions persist in the runner's state root and resume across runner restarts (ephemeral ones are deleted at close), at most 20 are open, and shutdown closes them in order. `runner/health` reports the open count. No setting or user-visible entry exists; no model-visible change for a running system. ([#870](https://github.com/foolzzz/looper/pull/870))
+
 ## [2.14.1] - 2026-10-29
 
 ### Added
