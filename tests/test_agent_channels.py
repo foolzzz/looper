@@ -447,6 +447,8 @@ class TestSenderIds:
         ([], ()),
         (" 7, 8,,7 ", ("7", "8")),
         (["123456789"], ("123456789",)),
+        ([7, 8], ("7", "8")),
+        ([7, " 8 ", "7"], ("7", "8")),
         ([" 42 ", "", "7", "42"], ("42", "7")),  # trimmed, blanks and repeats dropped, order kept
     ])
     def test_telegram_user_ids(self, raw: Any, expected: tuple[str, ...]) -> None:
@@ -472,11 +474,15 @@ class TestSenderIds:
         with pytest.raises(AllowlistError, match="is not a Lark open_id; .*starts with ou_"):
             sender_ids("lark", [bad])
 
-    @pytest.mark.parametrize("raw", [{"id": "7"}, 7, [True], [["7"]], [123456789]])
-    def test_a_list_holds_strings(self, raw: Any) -> None:
+    @pytest.mark.parametrize("channel_type,raw", [
+        ("telegram", {"id": "7"}), ("telegram", 7), ("telegram", [True]),
+        ("telegram", [7.5]), ("telegram", [["7"]]), ("lark", [True]),
+        ("lark", [123456789]), ("lark_bot", [123456789]),
+    ])
+    def test_malformed_allowlist_types_are_rejected(self, channel_type: str, raw: Any) -> None:
         from looper.agents.channels.allowlist import AllowlistError, sender_ids
         with pytest.raises(AllowlistError):
-            sender_ids("lark" if raw == [True] else "telegram", raw)
+            sender_ids(channel_type, raw)
 
     @pytest.mark.parametrize("channel_type", ["lark", "lark_bot"])
     def test_comma_separated_open_ids(self, channel_type: str) -> None:

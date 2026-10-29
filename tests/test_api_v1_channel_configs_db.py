@@ -69,6 +69,24 @@ def test_crud_readback_preserves_manager_builtin_rows_and_secret_presence(tmp_pa
 
 
 @pytest.mark.parametrize("action", ["create", "update"])
+@pytest.mark.parametrize("senders", [[7, 8], ["7", "8"], "7, 8"])
+def test_telegram_sender_ids_round_trip_as_strings(tmp_path, monkeypatch, action, senders):
+    async def run(pool):
+        async with _api(tmp_path, pool) as call:
+            config = {"allowed_user_ids": senders}
+            request = ({**CREATE, "config": config} if action == "create" else
+                       {"channel_id": "channel-telegram", "fields": {"config": config}})
+            status, answer = await call(action, request)
+            assert status == 200, answer
+            channel_id = answer["result"]["channel_id"]
+            assert answer["result"]["config"]["allowed_user_ids"] == ["7", "8"]
+            status, answer = await call("get", {"channel_id": channel_id}, client=True)
+            assert status == 200 and answer["result"]["config"]["allowed_user_ids"] == ["7", "8"]
+            assert (await channel_configs.get_config(channel_id))["config"]["allowed_user_ids"] == ["7", "8"]
+    _run(run, monkeypatch)
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
 def test_ordinary_channel_saves_cannot_set_bound_only_policy(tmp_path, monkeypatch, action):
     from looper.db import chat_bindings
 
@@ -145,8 +163,13 @@ def test_token_keep_replace_remove_variants_have_database_readback(tmp_path, mon
 @pytest.mark.usefixtures("lark_cli_stand_in")  # Resolve the seeded Lark channel to a distinct app.
 @pytest.mark.parametrize("kind,config", [
     ("telegram", {"allowed_user_ids": ["ou_example123"]}),
+    ("telegram", {"allowed_user_ids": [True]}),
+    ("telegram", {"allowed_user_ids": [7.5]}),
+    ("telegram", {"allowed_user_ids": [0]}),
+    ("telegram", {"allowed_user_ids": [-7]}),
     ("lark_bot", {"app_id": "cli_example", "allowed_open_ids": ["on_example123"]}),
     ("lark_bot", {"app_id": "cli_example", "allowed_open_ids": ["12345"]}),
+    ("lark_bot", {"app_id": "cli_example", "allowed_open_ids": [7]}),
 ])
 def test_invalid_allowlist_cannot_partially_replace_a_secret(tmp_path, monkeypatch, kind, config):
     async def run(pool):

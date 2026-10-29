@@ -383,11 +383,14 @@ def test_partial_channel_schema_is_refused_without_mutation(monkeypatch):
 
 @pytest.mark.parametrize("kind,config", [
     ("telegram", {"allowed_user_ids": "123,abc"}),
-    ("telegram", {"allowed_user_ids": [123]}),
+    ("telegram", {"allowed_user_ids": [True]}),
+    ("telegram", {"allowed_user_ids": [7.5]}),
+    ("telegram", {"allowed_user_ids": [0]}),
+    ("telegram", {"allowed_user_ids": [-7]}),
     ("lark", {"app_id_env": "OLD"}),
     ("lark", {"app_secret_env": "OLD"}),
 ])
-def test_retired_channel_inputs_fail_api_and_import_without_mutation(monkeypatch, tmp_path, kind, config):
+def test_invalid_or_retired_channel_inputs_fail_api_and_import_without_mutation(monkeypatch, tmp_path, kind, config):
     from looper.agents.config_transfer import ConfigFileError, run_import
     from looper.agents.serve import seed_channel_configs
     from tests.db_support import call_v1
@@ -409,7 +412,8 @@ def test_retired_channel_inputs_fail_api_and_import_without_mutation(monkeypatch
     run_db(test, monkeypatch, timeout=30)
 
 
-def test_comma_allowlist_writes_return_and_store_canonical_ids(monkeypatch, tmp_path):
+@pytest.mark.parametrize("api_senders,import_senders", [("7, 8,7", "8, 9"), ([7, 8], [8, 9])])
+def test_allowlist_writes_return_and_store_canonical_ids(monkeypatch, tmp_path, api_senders, import_senders):
     from looper.agents.config_transfer import run_import
     from looper.agents.serve import seed_channel_configs
     from tests.db_support import call_v1
@@ -418,14 +422,14 @@ def test_comma_allowlist_writes_return_and_store_canonical_ids(monkeypatch, tmp_
         await seed_channel_configs(pool)
         async with _serving(tmp_path) as server:
             status, result = await call_v1(server, "/api/v1/channel_configs/update", {
-                "channel_id": "channel-telegram", "fields": {"config": {"allowed_user_ids": "7, 8,7"}}})
+                "channel_id": "channel-telegram", "fields": {"config": {"allowed_user_ids": api_senders}}})
             assert status == 200, result
             assert result["config"]["allowed_user_ids"] == ["7", "8"]
         stored = await pool.fetchval("SELECT config FROM channel_configs WHERE channel_id='channel-telegram'")
         assert json.loads(stored)["allowed_user_ids"] == ["7", "8"]
         document = {"format": "looper-config/v4", "channels": [
             {"channel_id": "channel-telegram", "channel_type": "telegram",
-             "config": {"allowed_user_ids": "8, 9"}}]}
+             "config": {"allowed_user_ids": import_senders}}]}
         async with pool.acquire() as conn:
             await run_import(conn, document, apply=True)
         stored = await pool.fetchval("SELECT config FROM channel_configs WHERE channel_id='channel-telegram'")

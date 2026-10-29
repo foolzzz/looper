@@ -73,7 +73,8 @@ SENDER_ID_FORMATS["lark_bot"] = SENDER_ID_FORMATS["lark"]
 def sender_ids(channel_type: str, raw: Any) -> tuple[str, ...]:
     """The validated ids of a channel's allowlist field, in order, without blanks or repeats.
 
-    ``raw`` is a list of strings or a comma-separated string. ``None`` is an empty list.
+    ``raw`` is a list of strings (or integers for Telegram) or a comma-separated string.
+    ``None`` is an empty list.
     Raises ``AllowlistError`` naming the first bad id.
     """
     fmt = SENDER_ID_FORMATS[channel_type]
@@ -87,6 +88,8 @@ def sender_ids(channel_type: str, raw: Any) -> tuple[str, ...]:
         raise AllowlistError(f"{fmt.field} must be a list of {fmt.label}s or a comma-separated string")
     ids: dict[str, None] = {}
     for entry in entries:
+        if channel_type == "telegram" and type(entry) is int:
+            entry = str(entry)
         if not isinstance(entry, str):
             raise AllowlistError(f"{fmt.field}: each entry is a {fmt.label} written as a string")
         text = entry.strip()

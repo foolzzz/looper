@@ -48,7 +48,7 @@ class TestMessageJournal:
                                                    "source": {"agent_type": "channel", "agent_id": "x", "channel": 7}})])
     def test_corrupt_entries_refuse_replay_and_compaction(self, tmp_path: Path, broken: str) -> None:
         journal = MessageJournal(tmp_path / "bus")
-        journal.append(_make_envelope())
+        journal.append(_make_envelope(payload={"text": "before\u2028middle\u2029after\x85end"}))
         with journal._journal_path.open("a") as stream:
             stream.write(broken + "\n")
         before = journal._journal_path.read_bytes()
@@ -151,6 +151,29 @@ class TestMessageBus:
             await bus2.start()
             received = await bus2.drain_queue("manager")
             assert received == [env]  # the whole envelope survives the journal
+
+        asyncio.run(_run())
+
+    @pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\x85"])
+    def test_unicode_separators_survive_shutdown_and_replay(self, tmp_path: Path, separator: str) -> None:
+        async def _run() -> None:
+            bus = MessageBus(tmp_path)
+            await bus.start()
+            user = _make_envelope(payload={"text": f"before{separator}after"})
+            reply = _make_envelope(source=MANAGER_ADDRESS, target=channel_address("web"),
+                                   message_type=MessageType.AGENT_REPLY,
+                                   payload={"text": "reply\u2029with\x85separators"})
+            await bus.publish(user)
+            await bus.publish(reply)
+            assert await bus.drain_queue(reply.target.agent_id) == [reply]
+            assert bus.journal.undelivered() == [user]
+            await bus.shutdown()
+
+            restarted = MessageBus(tmp_path)
+            await restarted.start()
+            assert await restarted.drain_queue("manager") == [user]
+            assert await restarted.drain_queue(reply.target.agent_id) == []
+            await restarted.shutdown()
 
         asyncio.run(_run())
 

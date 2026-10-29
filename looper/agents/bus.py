@@ -69,7 +69,7 @@ class MessageJournal:
         if not self._journal_path.exists():
             return []
         result = []
-        for number, line in enumerate(self._journal_path.read_text(encoding="utf-8").splitlines(), 1):
+        for number, line in enumerate(self._journal_path.read_text(encoding="utf-8").split("\n"), 1):
             if not line.strip():
                 continue
             try:
