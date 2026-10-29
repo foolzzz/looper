@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.0] - 2026-10-29
+
+### Changed
+
+- **The release documentation gate requires the bridge notice from v2.14.0 on.** `release-readiness-doc-smoke.py` refuses a `vX.Y.Z.md` body at 2.14.0 or later unless it says `upgrade to v2.13.165 first` and its `## 中文摘要` says `先升级到 v2.13.165`; earlier bodies are skipped. The README, the Chinese README, the architecture guide, `evals/README.md` and the long-horizon plan now describe the completed bridge, `looper-config/v4`-only transfer, rollback and the retired eval schemas, and a config-transfer test reads its v4 example from the architecture guide. No production code changes. ([#865](https://github.com/foolzzz/looper/pull/865))
+
 ### Breaking
 
 - **The fixed upgrade bridge stays v2.13.165.** That release contains every historical migration. An installation older than it must upgrade to v2.13.165 and be started once before a removal release accepts the database. A later 2.13 checkout, including the planning checkout at v2.13.166, does not move the boundary. The maintainer decided on 2026-10-27 that the first release after these removals is v2.14.0; the release tooling sets the number. This note does not bump, tag or publish that release. From v2.14.0 on, the release body must say to upgrade to v2.13.165 first ([#780](https://github.com/foolzzz/looper/issues/780) item 5 records the stale v3 and scheduler-variable sentences this note replaces).
