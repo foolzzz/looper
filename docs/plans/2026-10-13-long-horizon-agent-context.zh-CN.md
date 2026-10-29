@@ -727,6 +727,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-29 | DSH runner 工具与会话控制（本分支）：逐 prompt 平台工具快照通过 reverse `tools/call` 执行，`call_id` 使用 SDK 的 `exec.callId`；会话 bash 使用独立执行器与 IPC 断开清理，避免 runner 丢失时依赖进程树采样，严格使用会话环境和超时上限。文件 guard 镜像 `dsh-tool-fs` 所用 `dsh-fs-local.localDisplayPath/resolveLocalTarget`，保留物理父目录遍历并检查最长存在前缀；禁用 SDK 二次 spill 截断，保留 Looper 的输出上限。支持同 trace steer 的 applied/dropped 与只读 completed-turn consult fork，fork 关闭删除副本、源会话保持不变。已安装 `0.2.1-rc.2` 的 15 项工具专项通过；既有 runner/turn/session 定向回归 72 项通过，可写工具列表遗漏 bash 的旧断言仍未通过，不计为全绿。Dashboard、Telegram、Lark 和 CLI 入口不变；未连接真实模型或启动共享服务。 |
 | 2026-10-29 | DSH 全角色 runner 验证（本分支）：准备 installed 隔离 serve 的 Manager 工具/stop/崩溃续接、双 Worker/Reviewer/Planner/只读咨询、同 trace 引导、逐请求计费和 Worker 预算拒绝/取消/崩溃断言，补齐真实 eval 与 smoke 的 `--dsh-runner` 及 CLI/runner 对照命令。通过：DSH installed serve 3 项、fake/Pi serve 回归 31 项、eval/launcher 507 项；最终失败 0；未验证：无数据库的 eval 批次跳过 104 项，数据库扩展批次通过 299 项后触及 300 秒超时、未完成部分不计通过，真实 DeepSeek runner smoke 与三组 CLI/runner 各两次对照待 lead 实跑。入口沿用 Dashboard 记录/停止、Telegram/Lark 的 chat stop 和 Planner forward，CLI ops 模板含 `dsh`；后续见 §5.2。 |
 
+| 2026-10-29 | DSH runner 终止计量（本分支）：2xx 流在 `message_stop` 的最终用量校验通过后完成计量，不再等待 HTTP EOF；拒绝仍须完整响应且无模型输出，未完成请求向 stderr 输出缺失条件且不含请求内容。真实 SDK 配 loopback 服务确认原实现立即 EOF 通过、延迟 EOF 因 `terminal_usage=true` / `body_done=false` 误报不完整；新增回归覆盖延迟 EOF、断流、空用量和拒绝，wheel 验证复用 uv 依赖缓存以避免重复下载构建后端。DSH runner 164 项与打包 29 项均以 `-n 2` 通过，无失败或跳过；Dashboard、Telegram、Lark 和 CLI 共用修复，无需入口改动，真实模型对比尚未重跑。 |
+
 ## 5. 不属于本 RFC 的待办
 
 这些问题在开发过程中发现，独立排期，不阻塞 M1–M6。

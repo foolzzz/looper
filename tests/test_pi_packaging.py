@@ -203,11 +203,12 @@ def installed(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path, dic
 
 
 def build_wheel(work: Path) -> tuple[Path, dict[str, str]]:
+    # Reuse uv's dependency cache while building and installing fresh artifacts.
+    # A cache under the isolated HOME forces every test to download the same
+    # build backend again, making package validation depend on PyPI latency.
+    cache = _run(["uv", "cache", "dir"], cwd=ROOT, env=os.environ).stdout.strip()
     env = {"PATH": os.environ["PATH"], "HOME": str(work / "home"), "TMPDIR": str(work),
-           "LANG": "C.UTF-8", "UV_CACHE_DIR": str(work / "cache")}
-    # Callers can supply a disposable, pre-populated cache for offline validation.
-    if "UV_CACHE_DIR" in os.environ:
-        env["UV_CACHE_DIR"] = os.environ["UV_CACHE_DIR"]
+           "LANG": "C.UTF-8", "UV_CACHE_DIR": cache}
     if "UV_OFFLINE" in os.environ:
         env["UV_OFFLINE"] = os.environ["UV_OFFLINE"]
     (work / "home").mkdir()

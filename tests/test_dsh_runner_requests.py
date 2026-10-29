@@ -27,6 +27,74 @@ def rewrite_events(monkeypatch, transform):
     monkeypatch.setattr(peer, "messages_wire", wire)
 
 
+@pytest.mark.parametrize("eof_delay", [0, 1], ids=["immediate-eof", "delayed-eof"])
+@pytest.mark.parametrize("output_source", ["message_delta", "message_stop"])
+def test_terminal_usage_completes_before_http_eof(tmp_path, monkeypatch, eof_delay, output_source):
+    if output_source == "message_stop":
+        def transform(events):
+            events[-1]["usage"] = events[-2].pop("usage")
+            return events
+        rewrite_events(monkeypatch, transform)
+
+    async def exercise():
+        _, installed = require_dsh()
+        with peer.MessagesServer([peer.Reply(["Provider response"], eof_delay=eof_delay)]) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (process, send, receive):
+                client = Client(send, receive)
+                await client.start()
+                sid = (await client.call("session/new", params_for(tmp_path, server)))["session_id"]
+                await client.prompt(sid)
+                result = await client.settled(sid)
+                end, = assert_accounted(client, sid)
+                assert result["outcome"] == "completed" and result["final_text"] == "Provider response"
+                assert end["status"] == "completed"
+                assert (end["input_uncached"], end["output"]) == (11, 5)
+                assert len(server.requests) == 1
+                process.stdin.close()
+                assert await asyncio.wait_for(process.wait(), 5) == 0
+                diagnostics = (await process.stderr.read()).decode()
+                assert end["complete"] and result["usage_complete"], (end, diagnostics)
+                assert "usage_incomplete" not in diagnostics
+
+    run(exercise())
+
+
+@pytest.mark.parametrize("case", ["drained-without-stop", "dropped-before-stop", "truncated-rejection"])
+def test_incomplete_requests_diagnose_missing_conditions(tmp_path, monkeypatch, case):
+    if case == "drained-without-stop":
+        rewrite_events(monkeypatch, lambda events: events[:-1])
+
+    async def exercise():
+        _, installed = require_dsh()
+        reply = peer.Reply(["Partial response"], cut=case != "drained-without-stop",
+                           status=401 if case == "truncated-rejection" else 200)
+        with peer.MessagesServer([reply]) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (process, send, receive):
+                client = Client(send, receive)
+                await client.start()
+                sid = (await client.call("session/new", params_for(tmp_path, server)))["session_id"]
+                await client.prompt(sid)
+                result = await client.settled(sid)
+                end, = assert_accounted(client, sid)
+                assert not end["complete"] and not result["usage_complete"]
+                assert len(server.requests) == 1
+                process.stdin.close()
+                assert await asyncio.wait_for(process.wait(), 5) == 0
+                diagnostics = (await process.stderr.read()).decode()
+                line, = [line for line in diagnostics.splitlines() if line.startswith("usage_incomplete ")]
+                assert f"request_id={end['request_id']}" in line
+                assert "message_stop=false" in line and "terminal_usage=false" in line
+                missing = line.split("missing=", 1)[1].split()[0].split(",")
+                assert {"message_stop", "terminal_usage"} <= set(missing)
+                if case == "drained-without-stop":
+                    assert "body_done=true" in line
+                else:
+                    assert "body_done=false" in line and "body_drained_on_error" in missing
+                assert "Partial response" not in diagnostics and "Disposable prompt" not in diagnostics
+
+    run(exercise())
+
+
 @pytest.mark.parametrize("counts", [{}, {"input_tokens": 0}, {"output_tokens": 0},
     {"input_tokens": 0, "output_tokens": 0}, {"input_tokens": 0, "interim_output_tokens": 2}])
 def test_terminal_usage_requires_provider_counts(tmp_path, monkeypatch, counts):
@@ -44,8 +112,8 @@ def test_terminal_usage_requires_provider_counts(tmp_path, monkeypatch, counts):
 
     async def exercise():
         _, installed = require_dsh()
-        with peer.MessagesServer([["Provider response"]]) as server:
-            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
+        with peer.MessagesServer([peer.Reply(["Provider response"], eof_delay=1)]) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (process, send, receive):
                 client = Client(send, receive)
                 await client.start()
                 sid = (await client.call("session/new", params_for(tmp_path, server)))["session_id"]
@@ -58,6 +126,13 @@ def test_terminal_usage_requires_provider_counts(tmp_path, monkeypatch, counts):
                 assert end["input_uncached"] == 0
                 assert end["output"] == counts.get("output_tokens", counts.get("interim_output_tokens", 0))
                 assert len(server.requests) == 1
+                process.stdin.close()
+                assert await asyncio.wait_for(process.wait(), 5) == 0
+                diagnostics = (await process.stderr.read()).decode()
+                if not complete:
+                    assert "missing=terminal_usage" in diagnostics and "message_stop=true" in diagnostics
+                else:
+                    assert "usage_incomplete" not in diagnostics
 
     run(exercise())
 
@@ -168,18 +243,15 @@ def test_cancel_deadline_includes_pending_authorization(tmp_path, control, decis
                 health = await client.call("runner/health")
                 assert health["sessions"] == 1
                 assert health["running"] == health["inflight_requests"] == 0
+                boundary = len(client.frames)
                 reply = {"error": {"code": -32603, "message": "Synthetic authorization failure"}} if decision == "error" else {
                     "result": {"allow": decision == "allow"}}
                 await send({"jsonrpc": "2.0", "id": auth["id"], **reply})
                 await client.call("runner/health")
                 assert not server.requests
                 assert len(client.updates(sid, kind="settled")) == 1
-                ends = assert_accounted(client, sid, count=1 if decision == "allow" else 0)
-                if ends:
-                    end, = ends
-                    assert end["status"] == "aborted" and end["complete"]
-                    assert [end[k] for k in ("input_uncached", "output", "cache_read", "cache_write")] == [0, 0, 0, 0]
-                    assert end["request_id"] == auth["params"]["request_id"]
+                ends = assert_accounted(client, sid, count=0)
+                assert not any(frame.get("method") == "session/update" for frame in client.frames[boundary:])
                 client.auto_authorize = True
                 await client.prompt(sid, "resumed", "Continue")
                 resumed = await client.settled(sid, "resumed")

@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.8] - 2026-10-29
+
+### Fixed
+
+- **The DSH runner drops an authorization reply that arrives after its turn settled.** Such a reply (for example an old trace's reply after the same session was resumed) is consumed without sending any update for the old trace, so the host bridge is no longer disconnected and the new turn is unaffected. A late allow is therefore no longer accounted after `settled` (v2.14.7 accounted it as an aborted, complete, zero-token request); one that arrives before `settled` is still accounted once. A response id the runner never issued is ignored with one diagnostic line instead of ending the runner, in the DSH runner only. Affects only installations with `[runtimes] dsh = "runner"`. ([#885](https://github.com/foolzzz/looper/pull/885))
+
 ## [2.14.7] - 2026-10-29
 
 ### Fixed

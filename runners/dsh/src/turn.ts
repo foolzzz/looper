@@ -17,7 +17,7 @@ function deferred() {
 export type Turn = {
   trace: string; promptId: string; number: number | null; started: boolean; settled: boolean;
   cancel: null | 'cancel' | 'close'; denial: string | null; overflow: boolean; ended: number;
-  complete: boolean; inflight: Set<string>; authorizations: Map<string, Promise<unknown>>;
+  complete: boolean; inflight: Set<string>; authorizations: Map<string, { trace: string; pending: Promise<unknown> }>;
   requestKinds: Map<string, 'turn' | 'compaction'>; lastRequestId: string | null; afterToolBatch: boolean;
   endReason?: any; last?: any; opened: ReturnType<typeof deferred>; closed: ReturnType<typeof deferred>;
   finished: ReturnType<typeof deferred>; settling?: Promise<void>; drained?: () => void;
@@ -141,7 +141,7 @@ export function settle(record: Session, turn: Turn, failure?: Failure): Promise<
   if (turn.settling) return turn.settling;
   turn.settling = (async () => {
     dropSteers(record, turn);
-    await Promise.race([Promise.allSettled(turn.authorizations.values()), turn.authorizationExpired.promise]);
+    await Promise.race([Promise.allSettled([...turn.authorizations.values()].map(a => a.pending)), turn.authorizationExpired.promise]);
     if (turn.inflight.size) {
       await within(new Promise<void>(resolve => { turn.drained = resolve; }), 1000);
       for (const id of turn.inflight) endRequest(record, turn, id, 'aborted', false);

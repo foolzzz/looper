@@ -5,7 +5,8 @@ import { ctx, dsh } from './sdk.ts';
 import { sessions, type Session } from './session.ts';
 import { settle, type Turn } from './turn.ts';
 
-type Attempt = { sent: boolean; bodyDone: boolean; status?: number; terminalUsage?: any; onSent: () => void };
+type Attempt = { sent: boolean; bodyDone: boolean; messageStop: boolean;
+  status?: number; terminalUsage?: any; onSent: () => void };
 const attempts = new Map<string, Attempt>();
 const owners = new WeakMap<object, string>();
 let installed = false, counter = 0;
@@ -40,6 +41,7 @@ function providerUsage(attempt: Attempt): TransformStream<Uint8Array, Uint8Array
     }
     if (value.type === 'message_stop') {
       stopped = true;
+      attempt.messageStop = true;
       if (validUsage(usage)) attempt.terminalUsage = { ...usage };
     }
   }
@@ -106,15 +108,18 @@ export function installProvider(): void {
       request_id: id, kind, provider: record.accountId, model: record.model,
       estimated_input_tokens: Math.ceil(JSON.stringify([options.messages, options.tools ?? []]).length / 4),
       max_output_tokens: options.maxTokens ?? dsh.deepseek.DEFAULT_MAX_TOKENS ?? 32000 }).then((authorization: any) => {
-      // Keep the RPC alive for accounting, even after the agent's wait expires.
+      const owner = turn.authorizations.get(id);
+      if (!owner || owner.trace !== turn.trace || turn.settled) return { allow: false };
+      // Reconcile a late allowance only while this trace can still emit updates.
       if (expired && authorization.allow === true) {
         turn.inflight.add(id);
         turn.requestKinds.set(id, kind);
         endRequest(record, turn, id, 'aborted', true);
       }
       return authorization;
-    });
-    turn.authorizations.set(id, pending);
+    }).finally(() => { turn.authorizations.delete(id); });
+    // The SDK wait may expire first; retain the owner until the RPC is consumed.
+    turn.authorizations.set(id, { trace: turn.trace, pending });
     let authorization: any;
     try { authorization = await Promise.race([pending, turn.authorizationExpired.promise.then(() => {
       expired = true;
@@ -124,7 +129,7 @@ export function installProvider(): void {
       void settle(record, turn, { kind: 'INTERNAL_ERROR', message: 'Looper could not authorize the model request' });
       yield finish('error', 'Looper could not authorize the model request', 'LOOPER_AUTHORIZATION_ERROR');
       return;
-    } finally { turn.authorizations.delete(id); }
+    }
     if (authorization.allow !== true) {
       const reason = authorization.reason ?? 'budget_unverifiable';
       if (!turn.cancel) {
@@ -142,7 +147,7 @@ export function installProvider(): void {
       yield finish('aborted', 'request aborted', 'LOOPER_CANCELLED');
       return;
     }
-    const attempt: Attempt = { sent: false, bodyDone: false, onSent: () => {
+    const attempt: Attempt = { sent: false, bodyDone: false, messageStop: false, onSent: () => {
       for (const s of steers) {
         if (s.applied || s.dropped) continue;
         s.applied = true;
@@ -167,10 +172,22 @@ export function installProvider(): void {
       record.activeRequest = null;
       const rejected = attempt.status !== undefined && attempt.status >= 400 && attempt.bodyDone && !modelOutput;
       const successful = terminal !== undefined && ['stop', 'tool-calls', 'max-tokens'].includes(terminal);
-      const complete = !attempt.sent || rejected || (successful && attempt.terminalUsage !== undefined && attempt.bodyDone);
+      // providerUsage observes only 2xx streams. Its validated message_stop is
+      // authoritative even when the SDK finishes before the HTTP body drains.
+      const complete = !attempt.sent || rejected || (successful && attempt.terminalUsage !== undefined);
       const status = turn.cancel || options.signal?.aborted || terminal === 'aborted' ? 'aborted'
         : attempt.status !== undefined && attempt.status >= 400 ? `http_${attempt.status}`
           : successful ? 'completed' : 'error';
+      if (attempt.sent && !complete) {
+        const missing: string[] = [];
+        if (!attempt.messageStop) missing.push('message_stop');
+        if (attempt.terminalUsage === undefined) missing.push('terminal_usage');
+        if (!successful) missing.push('successful_finish');
+        if (!successful && !attempt.bodyDone) missing.push('body_drained_on_error');
+        diagnostic(`usage_incomplete request_id=${id} status=${status} missing=${missing.join(',')}`
+          + ` message_stop=${attempt.messageStop} terminal_usage=${attempt.terminalUsage !== undefined}`
+          + ` body_done=${attempt.bodyDone}`);
+      }
       setImmediate(() => endRequest(record, turn, id, status, complete,
         attempt.sent && !rejected ? attempt.terminalUsage ?? usage : undefined));
     }
