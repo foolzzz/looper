@@ -5,7 +5,8 @@ import { ctx, dsh } from './sdk.ts';
 import { sessions, type Session } from './session.ts';
 import { settle, type Turn } from './turn.ts';
 
-type Attempt = { sent: boolean; bodyDone: boolean; status?: number; terminalUsage?: any; onSent: () => void };
+type Attempt = { sent: boolean; bodyDone: boolean; messageStop: boolean;
+  status?: number; terminalUsage?: any; onSent: () => void };
 const attempts = new Map<string, Attempt>();
 const owners = new WeakMap<object, string>();
 let installed = false, counter = 0;
@@ -40,6 +41,7 @@ function providerUsage(attempt: Attempt): TransformStream<Uint8Array, Uint8Array
     }
     if (value.type === 'message_stop') {
       stopped = true;
+      attempt.messageStop = true;
       if (validUsage(usage)) attempt.terminalUsage = { ...usage };
     }
   }
@@ -145,7 +147,7 @@ export function installProvider(): void {
       yield finish('aborted', 'request aborted', 'LOOPER_CANCELLED');
       return;
     }
-    const attempt: Attempt = { sent: false, bodyDone: false, onSent: () => {
+    const attempt: Attempt = { sent: false, bodyDone: false, messageStop: false, onSent: () => {
       for (const s of steers) {
         if (s.applied || s.dropped) continue;
         s.applied = true;
@@ -170,10 +172,22 @@ export function installProvider(): void {
       record.activeRequest = null;
       const rejected = attempt.status !== undefined && attempt.status >= 400 && attempt.bodyDone && !modelOutput;
       const successful = terminal !== undefined && ['stop', 'tool-calls', 'max-tokens'].includes(terminal);
-      const complete = !attempt.sent || rejected || (successful && attempt.terminalUsage !== undefined && attempt.bodyDone);
+      // providerUsage observes only 2xx streams. Its validated message_stop is
+      // authoritative even when the SDK finishes before the HTTP body drains.
+      const complete = !attempt.sent || rejected || (successful && attempt.terminalUsage !== undefined);
       const status = turn.cancel || options.signal?.aborted || terminal === 'aborted' ? 'aborted'
         : attempt.status !== undefined && attempt.status >= 400 ? `http_${attempt.status}`
           : successful ? 'completed' : 'error';
+      if (attempt.sent && !complete) {
+        const missing: string[] = [];
+        if (!attempt.messageStop) missing.push('message_stop');
+        if (attempt.terminalUsage === undefined) missing.push('terminal_usage');
+        if (!successful) missing.push('successful_finish');
+        if (!successful && !attempt.bodyDone) missing.push('body_drained_on_error');
+        diagnostic(`usage_incomplete request_id=${id} status=${status} missing=${missing.join(',')}`
+          + ` message_stop=${attempt.messageStop} terminal_usage=${attempt.terminalUsage !== undefined}`
+          + ` body_done=${attempt.bodyDone}`);
+      }
       setImmediate(() => endRequest(record, turn, id, status, complete,
         attempt.sent && !rejected ? attempt.terminalUsage ?? usage : undefined));
     }
