@@ -104,6 +104,58 @@ def test_denied_request_never_reaches_the_provider(tmp_path):
     run(exercise())
 
 
+@pytest.mark.parametrize("response", ["completed", "http_error", "disconnected"])
+def test_first_planner_request_with_known_price_and_caps(tmp_path, monkeypatch, caplog, response):
+    from looper.agents.run_usage import Usage
+    from looper.agents.runtimes.pricing import pricer
+    from looper.agents.runtimes.runner.turn import RunnerTurn
+    from tests.pi_runtime_support import provider
+
+    async def exercise():
+        script = {"completed": ResponseScript(events=reply()),
+            "http_error": ResponseScript(status=400),
+            "disconnected": ResponseScript(disconnect_before_headers=True)}[response]
+        async with FakeModelAPI([script], api_key=KEY) as api, pi_supervisor(tmp_path) as supervisor:
+            lease = await supervisor.acquire("pi")
+            params = session_params(lease, base_url=api.base_url, key=KEY, role="planner")
+            params["provider"]["model"] = "gpt-6-astra"
+            sid = await lease.open_session(params)
+
+            async def limits():
+                return dict(run_cap=1.0, task_cap=2.0, task_spent=0.0)
+
+            async def cancel(_):
+                await lease.bridge.cancel_turn(sid, "first")
+
+            t = RunnerTurn(session_id=sid, trace_id="first", role="planner", tools=None,
+                provider_id="account", model="gpt-6-astra", price=pricer(provider()), limits=limits,
+                prior_totals=Usage(cost_usd=None), cancel=cancel)
+            admitted, original = [], t.authorize
+
+            async def authorize(params):
+                result = await original(params)
+                admitted.append(result)
+                return result
+
+            monkeypatch.setattr(t, "authorize", authorize)
+            events = []
+            await lease.bridge.begin_turn(sid, "first", events.append, t, text="Say hello.")
+            summary = await lease.bridge.wait_settled(sid, "first")
+            # Observe admission without replacing the host price or budget check.
+            assert len(api.requests) == len(admitted) == 1 and admitted[0]["allow"]
+            if response == "disconnected":
+                assert summary.cap_reason == "budget_unverifiable"
+                assert summary.outcome == "capped" and not summary.usage_complete
+                assert summary.usage.cost_usd is None
+                assert "phase=request_end cause=usage_incomplete" in caplog.text
+            else:
+                assert summary.cap_reason is None and summary.usage_complete
+                assert summary.outcome == ("completed" if response == "completed" else "failed")
+                assert summary.usage.cost_usd == (0.0203 if response == "completed" else 0)
+            await lease.release()
+    run(exercise())
+
+
 @pytest.mark.parametrize("status,kind", [(401, "PROVIDER_AUTH"), (403, "PROVIDER_AUTH"), (400, "PROVIDER_UNAVAILABLE")])
 def test_provider_auth_failure_is_typed(tmp_path, status, kind):
     async def exercise():

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
@@ -13,6 +14,9 @@ from .. import pricing
 from ..api.loop import ToolCall, ToolOutcome, TurnTools
 from ..api.tools import invalid_arguments
 from .protocol import ErrorCode, ProtocolError, RequestKind
+
+logger = logging.getLogger(__name__)
+BudgetPhase = Literal["authorize", "request_end", "finish"]
 
 
 class TurnLimits(TypedDict):
@@ -134,15 +138,27 @@ class RunnerTurn:
             values.update(task_cap=None, task_spent=0)
         return values
 
-    def _unverifiable(self, limits: TurnLimits, estimate: float | None = 0) -> bool:
+    def _unverifiable(self, limits: TurnLimits, estimate: float | None = 0, *, phase: BudgetPhase) -> bool:
         capped = limits["run_cap"] is not None or limits["task_cap"] is not None
-        return capped and (not self.usage_complete or not _money(self.usage.cost_usd)
-                           or not _money(estimate)
-                           or any(r.raw is None and not _money(r.estimate) for r in self._requests.values())
-                           or (limits["task_cap"] is not None and not _money(limits["task_spent"])))
+        if not capped:
+            return False
+        # Report the first failing predicate, without prompts, credentials or provider errors.
+        cause = next((name for name, unknown in (
+            ("usage_incomplete", not self.usage_complete),
+            ("run_cost", not _money(self.usage.cost_usd)),
+            ("estimate", not _money(estimate)),
+            ("pending_estimate", any(r.raw is None and not _money(r.estimate) for r in self._requests.values())),
+            ("task_spent", limits["task_cap"] is not None and not _money(limits["task_spent"])),
+        ) if unknown), None)
+        if cause is None:
+            return False
+        logger.warning("runner budget unverifiable session_id=%s trace_id=%s phase=%s cause=%s requests=%d ended=%d",
+                       self.session_id, self.trace_id, phase, cause, len(self._requests),
+                       sum(r.raw is not None for r in self._requests.values()))
+        return True
 
-    def _actual_cap_reason(self, limits: TurnLimits) -> CapReason | None:
-        if self._unverifiable(limits):
+    def _actual_cap_reason(self, limits: TurnLimits, *, phase: BudgetPhase) -> CapReason | None:
+        if self._unverifiable(limits, phase=phase):
             return "budget_unverifiable"
         if limits["run_cap"] is not None and self.usage.cost_usd >= limits["run_cap"]:
             return "run_cap"
@@ -175,7 +191,7 @@ class RunnerTurn:
             reason = None
             if len(self._requests) >= self.max_requests:
                 reason = "max_requests"
-            elif self._unverifiable(limits, estimate):
+            elif self._unverifiable(limits, estimate, phase="authorize"):
                 reason = "budget_unverifiable"
             elif limits["run_cap"] is not None and amount > limits["run_cap"]:
                 reason = "run_cap"
@@ -211,7 +227,7 @@ class RunnerTurn:
             self.usage = _add(self.usage, usage)
             self.usage_complete = self.usage_complete and complete
             limits = await self._current_limits()
-            reason = self._actual_cap_reason(limits)
+            reason = self._actual_cap_reason(limits, phase="request_end")
             if reason:
                 self._active = False
         if reason:
@@ -253,7 +269,7 @@ class RunnerTurn:
             reason = None
             if not lost and self.cap_reason is None:
                 try:
-                    reason = self._actual_cap_reason(await self._current_limits())
+                    reason = self._actual_cap_reason(await self._current_limits(), phase="finish")
                 except Exception:
                     if params.get("outcome") != "failed":
                         raise
