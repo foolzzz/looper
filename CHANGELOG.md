@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.4] - 2026-10-29
+
+### Added
+
+- **DSH runner platform tools, session bash, path confinement, steer and consult fork, still not reachable from any runtime.** `session/prompt` accepts a per-prompt platform tool snapshot whose tools run only through reverse `tools/call` (host errors and aborts become tool failures, no `rpc/cancel`). A session `bash` runs in a detached group with exactly the session environment plus a private `HOME`, clamped to `tool_timeout_s`, output capped at 100 KiB, killed on timeout, cancel, close and shutdown. `read`, `write`, `edit`, `glob` and `grep` are confined to the cwd and added directories (symlink, dangling-link, `~` and pattern escapes denied with `LOOPER_PATH`). `session/steer` works in the running trace, with `steer_applied` only when a sent request carries it and `steer_dropped` with a typed reason otherwise. `session/new` accepts `fork_from` for a read-only worker or reviewer consult seeded from the source's completed turns. No setting or user-visible entry exists; no model-visible change for a running system. ([#876](https://github.com/foolzzz/looper/pull/876))
+
 ## [2.14.3] - 2026-10-29
 
 ### Added
