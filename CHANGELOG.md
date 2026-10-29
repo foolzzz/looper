@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.11] - 2026-10-29
+
+### Added
+
+- **DSH runner validation, and an opt-in to run the eval and the DSH validation on it.** `evals.prompt_regression run` and `dialogs` take `--dsh-runner`, which opts every DSH role into the SDK runner, and `examples/dsh/validate.py` takes `--dsh-runner` on `task-basic`, `task-review`, `manager` and `smoke`: its evidence checks then expect the runner descriptor instead of the DSH CLI, and it also checks that the key is absent from the server logs. A new `tests/test_dsh_runner_serve_db.py` runs every role on an isolated `looper serve` with a local Messages stand-in. No production code under `looper/` changes. ([#887](https://github.com/foolzzz/looper/pull/887))
+
 ## [2.14.10] - 2026-10-29
 
 ### Fixed
