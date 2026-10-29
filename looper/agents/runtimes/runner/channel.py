@@ -64,7 +64,7 @@ class RunnerChannel:
         except (RpcFailure, ProtocolError, ConnectionLost, OSError, ValueError) as error:
             code = getattr(error, "code", None)
             if code == ErrorCode.CAPACITY:
-                reason = ("the pi runner has no free session (CAPACITY); "
+                reason = (f"the {self.session.kind} runner has no free session (CAPACITY); "
                           "a session frees when a Manager, Planner or run ends")
             elif isinstance(error, RunnerUnavailable):
                 message = str(error)
@@ -73,12 +73,12 @@ class RunnerChannel:
                 key = self._env.get(KEY_ENV)
                 if key:
                     message = message.replace(key, "[redacted]")
-                reason = f"the pi runner is unavailable: {message}"[:500]
+                reason = f"the {self.session.kind} runner is unavailable: {message}"[:500]
             elif code == ErrorCode.UNSUPPORTED:
-                reason = "the pi runner cannot fork a saved session"
+                reason = f"the {self.session.kind} runner cannot fork a saved session"
             else:
                 name = ErrorCode(code).name if code in ErrorCode._value2member_map_ else type(error).__name__
-                reason = f"the pi runner could not open the run's session ({name})"
+                reason = f"the {self.session.kind} runner could not open the run's session ({name})"
             raise RunStartError(reason) from None
         self._launched = True
 
@@ -98,7 +98,7 @@ class RunnerChannel:
                 self._on_event(turn.result_event)
         except Exception as error:
             self._on_event({"type": "result", "subtype": "error_during_execution", "is_error": True,
-                            "errors": [f"the pi runner run failed ({type(error).__name__})"], "num_turns": 0})
+                            "errors": [f"the {self.session.kind} runner run failed ({type(error).__name__})"], "num_turns": 0})
         finally:
             self._events.put_nowait(None)
             self._ready.set()
@@ -153,7 +153,7 @@ class RunnerChannel:
                 self._sent.pop(message_id, None)
                 return DeliveryResult.REJECTED
             if code == ErrorCode.UNSUPPORTED:
-                raise RuntimeError("the pi runner cannot steer this run") from None
+                raise RuntimeError(f"the {self.session.kind} runner cannot steer this run") from None
             return DeliveryResult.UNKNOWN
         return DeliveryResult.ACCEPTED
 

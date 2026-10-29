@@ -463,18 +463,25 @@ async def _run_agent_system(
     """Own an opted-in or supplied runner, including when startup only partly completes."""
     kwargs = dict(ops=ops, runtime_root=runtime_root, work_dir=work_dir,
                   claude_bin=claude_bin, skip_backup=skip_backup)
-    if runner_supervisor is None and ops.pi_runtime == "runner":
-        from .runtimes import pi_runner
-
-        runner_supervisor = pi_runner.enable(runtime_root)
+    supervisors = [runner_supervisor] if runner_supervisor is not None else []
     if runner_supervisor is None:
+        from .runtimes import pi_runner, dsh_runner
+
+        if ops.pi_runtime == "runner":
+            if supervisor := pi_runner.enable(runtime_root):
+                supervisors.append(supervisor)
+        if ops.dsh_runtime == "runner":
+            if supervisor := dsh_runner.enable(runtime_root):
+                supervisors.append(supervisor)
+    if not supervisors:
         await _run_agent_system_owned(**kwargs)
         return
     from ..db import close_pool
     async with contextlib.AsyncExitStack() as ownership:
         ownership.push_async_callback(close_pool)
-        ownership.push_async_callback(runner_supervisor.stop)
-        await _run_agent_system_owned(**kwargs, runner_supervisor=runner_supervisor, ownership=ownership)
+        for supervisor in supervisors:
+            ownership.push_async_callback(supervisor.stop)
+        await _run_agent_system_owned(**kwargs, runner_supervisors=tuple(supervisors), ownership=ownership)
         ownership.pop_all()  # The normal shutdown already stopped these owners and closed the database.
 
 
@@ -485,7 +492,7 @@ async def _run_agent_system_owned(
     work_dir: Path,
     claude_bin: str = "claude",
     skip_backup: bool = False,
-    runner_supervisor: RunnerSupervisor | None = None,
+    runner_supervisors: tuple[RunnerSupervisor, ...] = (),
     ownership: contextlib.AsyncExitStack | None = None,
 ) -> None:
     """Start the full agent system with the ops settings ``ops`` and run until interrupted."""
@@ -742,7 +749,7 @@ async def _run_agent_system_owned(
         await http_server.stop()
         await fleet.stop()
         await supervisor.stop_all()
-        if runner_supervisor is not None:
+        for runner_supervisor in runner_supervisors:
             await runner_supervisor.stop()
         await registry.stop_all()
         await bus.shutdown()
