@@ -1280,54 +1280,50 @@ Manager tools.
   `https://api.deepseek.com/anthropic`; an explicit Messages-compatible
   gateway is preserved. Other runtimes' defaults and profiles are unchanged.
 
-  DSH declares `run`, `resident_session`, `resume` and `mcp`. It uses headless
-  JSONL, one process per turn, with the complete user turn on stdin. Manager
-  and each Planner resume their own persisted Session; a Worker or Reviewer
-  has its own owner, and an ended session's room consult resumes a separate,
-  read-only snapshot. Each owner has private `HOME`, `DSH_HOME`,
-  `DSH_AGENTS_HOME` and XDG directories under the runtime root; no operator
-  home or login is imported. Configuration refreshes each turn without
-  changing the owner's Session root. Looper's prompt is appended literally
-  to DSH's built-in prompt; replace is unavailable and Prompt Preview explains
-  the effective append mode. There is no busy steer, autonomous-turn or
-  structured-output capability, no compaction event projection and no native
-  `max_turns` enforcement.
+  By default DSH uses the CLI path: headless JSONL, one process per turn,
+  persisted owner Sessions, an MCP bootstrap for Looper tools and read-only
+  snapshots for consults. Catalog skills and external MCP are available on
+  that path; root usage alone does not establish complete auxiliary billing.
+  Looper's prompt is appended literally to DSH's built-in prompt; replace is
+  unavailable. Private homes under the runtime root import no operator login.
 
-  A required bootstrap waits for `dsh-mcp-client` to mount the existing
-  `looper mcp-server` stdio bridge before starting the headless runner. The
-  bridge's HTTP API URL is not an MCP HTTP endpoint. Missing bridge tools or
-  failed bootstrap stop the run before any model request. Planner and consult
-  launches apply an execution guard allowing only `read`, `glob`, `grep` and
-  the exact registered Looper platform tools; shell, file mutations, subagents
-  and external catalog MCP are denied or omitted. This is a tool guard, not
-  a host sandbox. Installed catalog skills are validated by the official skill
-  provider and copied into managed roots with their resources. Claude plugin
-  hooks, commands, agents, output styles and plugin-local MCP discovery are
-  omitted; external catalog MCP uses stdio or Streamable HTTP in writable
-  runs. Unsupported frontmatter, disabled model invocation, duplicate skills
-  and other omissions appear in `metadata.runtime_catalog`. Session upload,
-  telemetry and title requests are disabled; web search is off unless
-  `DSH_ALLOW_WEB_SEARCH=true` is explicitly set.
+  Set `[runtimes] dsh = "runner"` in the ops file to put Manager, Planner,
+  Worker, Reviewer and consults on one installed DSH SDK runner (Node 22.19+).
+  The default remains `"cli"`; runner startup, capacity or request failures
+  never fall back to the CLI. Its 20 sessions are shared by all roles;
+  `CAPACITY` fails a start until a session is released. Records store
+  `looper-runner` Descriptors of kind `dsh`, rather than DSH CLI commands.
 
-  Root step usage is priced with the selected model's effective prices and shown
-  as **observed cost** (`cost_basis=observed`). Missing buckets stay unknown;
-  root observations do not establish the total bill. Auxiliary coverage
-  (compaction summaries, search, child Sessions and consults) remains unknown,
-  so `cost_usd` may be null and a soft cap covers only reported root spend.
-  There is no hard billing cap. See the
-  [bounded validation commands](../../evals/README.md#dsh-validation) for
-  safe preflight and the pending real-model acceptance. The CLI has no DSH
-  flags: PATH discovery and existing Profile selection suffice. Dashboard,
-  Telegram and Lark share the same Manager/runtime adapter; DSH channel checks
-  use stand-ins, with no real account sends. Existing task eval artifacts cover
-  the four task cases at two repetitions each. Manager acceptance remains
-  pending: existing real dialog artifacts have four passing samples with
-  continuous Manager Sessions and successful MCP reads/create/start calls.
-  The acceptance checker now allows the newly started Planner to await its
-  first Session, while retaining dsh/append checks for every role. Rechecking
-  those artifacts finds no evidence gaps; a fresh run remains blocked at
-  process-tree preflight. Explicit run-token rotation, a comparable append
-  baseline and complete auxiliary billing remain unverified.
+  Manager, Workers and Reviewers have `read`, `glob`, `grep`, `write`, `edit`
+  and `bash`; Planner and consults have only `read`, `glob` and `grep` with
+  a read-only guard. Exact `looper_*` platform tools are registered in-process
+  for each turn. File tools stay within the working directory and explicit
+  added directories; bash is not confined to those paths and is not an OS
+  sandbox. Bash uses the session's private HOME and environment, with a
+  ceiling of the run timeout (86,400 seconds when unset); a shorter tool
+  timeout is honored. An unset run request limit becomes 1,000 requests.
+  Spend and request caps are checked before every model request, including
+  compaction, with no provider retry. Per-request token buckets use the saved
+  model's effective prices (`cost_source=provider_price`); these reservations
+  and observed costs are not a hard provider billing cap.
+
+  A running Worker's steer reaches the next model request on the same trace;
+  a dropped steer returns to the Planner's decision. Consults seed a separate
+  read-only session from the run's completed-turn prefix, leaving the source
+  unchanged, and remove the fork on close. Native sessions live in the stable
+  `runners/state/dsh-native/` root so owner sessions survive runner restarts;
+  retained run-session cleanup remains a follow-up. The runner offers no web
+  search, catalog skills, catalog plugins or MCP servers. Telemetry, session
+  upload, title requests and autonomous subagents are disabled.
+
+  See the [bounded validation commands](../../evals/README.md#dsh-validation)
+  for installed stand-in validation and the pending real DeepSeek smoke and
+  CLI/runner comparisons. Dashboard needs no new controls: its records show
+  Descriptors and its existing task/chat controls stop runs. Telegram and Lark
+  use the same chat-stop and Planner-forward APIs; stand-ins do not establish
+  delivery to real accounts. `looper config init-ops` writes the `dsh` runtime
+  setting; ordinary CLI Profile selection is unchanged.
+
 - **Grok** (`looper/agents/runtimes/grok.py`, xAI's `grok` CLI, verified
   against Grok 1.0.62 in the [Grok runtime RFC](rfcs/grok-runtime-v0.zh-CN.md))
   runs headless `grok --prompt-file /dev/stdin --output-format

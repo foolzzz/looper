@@ -541,35 +541,50 @@ Pi CLI 与 runner 的真实任务对照命令及门禁已在 [evals/README.md](.
 
 | 协议 | DSH 0.2.1-rc.2 |
 |---|---|
-| `initialize` | 版本与导出自检；能力：`per_session_isolation: true`（第 10.3 节）、`per_session_credentials: false`（见下）、`steer: {in_trace: true, boundary: "next_step", idle_start: true}`、`follow_up`、`cancel`、`compaction: {auto, manual}`、`fork`（快照复制） |
+| `initialize` | 版本与导出自检；能力：`per_session_isolation: true`（第 10.3 节）、`per_session_credentials: true`（每会话独立路由）、`steer: {in_trace: true, boundary: "next_step", idle_start: false}`（host 没有 idle start）、`cancel`、`authorize_covers: ["turn", "compaction"]`、`fork`（以已完成 turn 的前缀为种子） |
 | `session/new` | `ctx.agents.create({sessionId, meta: {cwd}, agentOptions: {provider, model, reasoningEffort, maxTokens}, setup(agentCtx, agent)})`（`dsh-agent:lib/types/index.d.ts:80-145`）；`setup` 里注册作用域内的平台工具代理、`systemPrompt.section({name: 'looper', order: 20000, text, interpolate: false})`、只读和路径 guard、会话自己的 bash 执行器 |
 | `session/load` | `ctx.agents.resume({resumeSessionId, ...})`；被别的 owner 占用时拒绝（跨进程写锁，`dsh-session-persistence-jsonl:lib/index.js:619`） |
 | `session/prompt` | `agent.followup(message)`（`message` 带 Looper 的 id），`await agent.whenIdle()` 后发 `settled` |
-| `session/steer` | 运行中 `agent.steer(message)`：下一个步边界进入，同一 trace。离线实测：bash 运行中调用 `steer` 和 `inject`，下一次请求都带上了，会话记录里只有一个 turn、两个 step（第 2.3 节）。`steer_applied` 取自 inbox 消费的事件（事件名需要验证）。空闲时按 `start` 处理，不直接调 `steer`（它在空闲时会自己开一轮，`dsh-agent:lib/types/runtime-types.d.ts:194-200`，绕过 Looper 的轮次登记） |
-| `session/follow_up` | 运行器排队，见第 7.3 节；`inject`（只进下一个 pre-step，不唤醒）v0 不用 |
+| `session/steer` | 运行中 `agent.steer(message)`：下一个模型请求进入，同一 trace。请求消息含对应的 DSH message id 且 HTTP 请求已发送时发 `steer_applied`；取消或结算前未进入请求的发 `steer_dropped`，交回 Planner。host 不支持空闲启动，不让 SDK 自行开轮次 |
+| `session/new.fork_from` | 以源会话最后一个 `turn/end` 的前缀构造 seed，并包含紧随其后的撤回替换事件，排除被丢弃的 steer；只允许只读咨询，关闭时删副本，不改源会话 |
 | `session/cancel` | `agent.cancel(cause, {keepInbox: false})`，再 `whenIdle()`；清掉的引导各发 `steer_dropped` |
 | `session/close` | `handle.dispose()`：停止并等 loop 退出，注销 Agent 和 Session，释放作用域 |
 | 事件 | 会话的 durable 事件（`agent/status`、assistant 消息、工具事件），root listener 能看到所有 agent，按 sessionId 路由（`dsh-scope:lib/index.js:288`）；token 级 delta 来自 `llm/stream` 的流块 |
 | 用量 | 在 `llm/stream` 里逐请求取 `TokenUsage`：input 未缓存，cacheRead、cacheWrite 分开，reasoning 已含在 output（`dsh-llm:lib/types/types.d.ts:152-174`；dsh 运行时 RFC 第 7 节） |
-| `budget/authorize` | `llm/stream` 是 waterfall 事件，监听者可以调 `next()`，也可以自己产出块来短路（`dsh-llm:lib/types/index.d.ts:33-45`）：先授权再 `next()`，拒绝就产出中止的结束块。所有走 `llm.stream()` 的请求都经过它，包括压缩摘要；声明的注释写明它包住每一次流式模型调用，含重试、重放和路由。agent loop 发的请求带进程内的身份标记，手工构造的请求（压缩等）没有（同上），它们怎么归到会话和 trace，需要验证；归不到就拒绝并告警 |
+| `budget/authorize` | `llm/stream` waterfall 在 dispatch 前授权，覆盖 turn 和 compaction；按 session id、会话路由、活动 trace 和 request kind 归属，归不到则拒绝并诊断。逐请求分桶计量；重试关闭 |
 
-**provider 路由是进程级的：** LLM adapter 注册在 Cordis root 的服务上，同一路由不能注册两次（`dsh-llm:lib/index.js:1812-1834`），DeepSeek 路由从环境变量读 key。所以按 provider 绑定（key 加 base URL）分运行器：同一绑定的会话共用一个 DSH 运行器。能否在 agent 作用域里注册带自己 key 的路由，需要验证。
+**每会话 provider 路由已实现：** 在 agent 作用域注册独立 DeepSeek 路由，自己的 key 和 base URL 仅保存在闭包，不靠全局环境变量。当前所有角色共享一个运行器；按 provider binding 分运行器仍是 §16 的独立待办。
 
 ### 10.3 隔离
 
-- **cwd：** 创建时给绝对路径的 `meta.cwd`。sandbox 的 workspaceRoot 取会话 header 里原始的 cwd，之后 `workingDirectory.set` 不会移动边界（`dsh-sandbox-policy:lib/index.js:132`），这正好符合「边界就是任务 cwd」；`add_dirs` 怎么进 fs-sandbox 的允许范围，需要验证。
+- **cwd：** 创建时给绝对路径的 `meta.cwd`。sandbox 的 workspaceRoot 取会话 header 里原始的 cwd，之后 `workingDirectory.set` 不会移动边界（`dsh-sandbox-policy:lib/index.js:132`），Looper 的路径 guard 按 cwd 与显式 `add_dirs` 检查文件工具，复用 SDK 的路径解析语义；文件工具的允许根包含 cwd 与 `add_dirs`，只读角色另外禁止写工具。bash 不受文件路径 guard 约束，不构成操作系统沙箱。
 - **env 与 HOME：** bash-local 把 `request.env` 叠在清洗过的父环境上（`dsh-bash-local:lib/index.js:88-107`），没有整个替换的开关，标准的会话创建也没有统一的 env、HOME 字段。离线实测证实原生 shell 仍会带出父进程的哨兵变量；作用域内的自定义工具显式给 env 则不会（第 2.3 节）。所以运行器在 agent 作用域里注册自己的 bash 执行器，显式给出完整的 env（含私有 HOME），并先 `exec/acquire`。`DSH_HOME` 是 composition 级的，进程内所有会话共用；持久化按会话分目录，每个会话只有一个写 owner。
-- **只读：** `tools.guard` 拒绝允许集合之外的工具（同 `dsh_bootstrap.mjs:21-28`）。
+- **状态目录：** 原生持久化固定在 `<runtime_root>/runners/state/dsh-native/`，不放在会随 lease 或 generation 清理的目录里；新 runner 才能按已存 id 续接 owner 和已结束 run 的咨询。普通 run 会话保留，consult fork 关闭即删除；保留 run 的回收策略尚未完成。
+- **只读：** `tools.guard` 拒绝允许集合之外的工具，并对允许的文件工具执行路径检查。
 - **同步阻塞：** sandbox 探测用 `spawnSync`，子进程输出回写用 `openSync`/`writeSync`（`dsh-sandbox-local:lib/index.js:100`、`dsh-subprocess-local:lib/output.js:141`），一个会话的大输出会拖慢同进程的其他会话；限制每会话输出，事件循环延迟参与准入。
 - **子 agent：** DSH 的 spawn/fork 子 agent 在同一进程里经 `ownerCtx.agents.create/resume` 创建（`dsh-subagent:lib/index.js:1793`），默认深度 1、同时 8 个。v0 关掉，等子 agent 的环境传递和授权归属验证之后再开。
 
 ### 10.4 角色与会话
 
-四个角色都能跑，沿用 dsh 运行时 RFC 的 provider 约束：只接 DeepSeek 的 API key 和 Messages 协议，精确的模型白名单和 effort。管家、规划者是常驻会话；执行者、评审者第一次有运行中引导。咨询沿用「复制已结束会话的快照，再只读续接」，不写源会话。`dsh.py` 里每轮一个 headless 进程的 `ResidentDsh` 和一次运行一个进程的 run 由 RunnerSession、RunnerChannel 取代；`dsh_bootstrap.mjs` 的 prompt section、只读 guard 搬进运行器的 `setup`；平台工具不再经 `dsh-mcp-client` 和 `looper mcp-server`。S2 完成时删除这些 CLI 路径。
+四个角色都能跑，沿用 dsh 运行时 RFC 的 provider 约束：只接 DeepSeek 的 API key 和 Messages 协议，精确的模型白名单和 effort。管家、规划者是常驻会话；执行者、评审者第一次有运行中引导。咨询以已完成 turn 的前缀构造独立会话，再只读续接，不写源会话。`dsh.py` 里每轮一个 headless 进程的 `ResidentDsh` 和一次运行一个进程的 run 由 RunnerSession、RunnerChannel 取代；`dsh_bootstrap.mjs` 的 prompt section、只读 guard 搬进运行器的 `setup`；平台工具不再经 `dsh-mcp-client` 和 `looper mcp-server`。S2 完成时删除这些 CLI 路径。
 
-### 10.5 已知缺口（需要验证）
+### 10.5 验证问题清单
 
-离线实测已证明同进程并发、每会话 cwd、作用域工具给出的干净环境、同一 turn 内的引导、按会话取消（第 2.3 节），用的是最小 kernel 组合。仍需验证：完整组合（持久化、终端、压缩、遥测关闭的 overlay）下的行为和内存；子进程模块那个进程级 exit hook 在长时间运行里的影响；手工构造的请求能否归到会话和 trace；压缩摘要、web search、子 agent 的用量是否都经过 `llm/stream`（dsh 运行时 RFC 第 7 节记为未知）；`add_dirs` 怎么进 fs-sandbox；作用域内带 key 的 provider 路由；崩溃后会话的写锁能否被新进程接管；作用域内的事件和工具在多个 agent 之间互不串扰；引导进入模型的事件；RC 之后的接口变化。
+最小 kernel 的离线实测覆盖同进程并发、cwd、干净环境、同 turn 引导和按会话取消（第 2.3 节）；完整运行器仍须逐项核对：完整组合下的行为和长期内存、进程级 exit hook 的长期影响、手工请求的会话和 trace 归属、压缩摘要及 web search/子 agent 的 `llm/stream` 覆盖、`add_dirs`、作用域内独立 key 路由、崩溃后的写锁接管、多 agent 的事件/工具隔离、引导进入模型的信号，以及 RC 后接口变化。当前结论与保留的开放项见第 10.6 节。
+
+### 10.6 实现进展与验证缺口
+
+针对第 10.5 节的问题，当前按固定的 `0.2.1-rc.2` 实现与 installed 专项测试逐项核对：
+
+- **路由和请求归属：** 每会话路由持有自己的 key；请求须同时匹配 session、路由与活动 trace。无法归属的请求在发送前拒绝，多会话专项覆盖不同路由和交叉取消。
+- **压缩：** compaction 经过 `llm/stream`，按独立 request kind 授权、计量；web search 和 SDK 子 agent 当前禁用，它们的覆盖仍未验证，重新启用前必须补测。
+- **`add_dirs`：** 不依赖 SDK sandbox 扩展根，由 Looper 的文件 guard 处理 cwd、附加目录与符号链接；只读和越界拒绝有 installed 覆盖。
+- **写锁接管：** SIGKILL 后新 runner 可加载原 id；损坏状态拒绝加载，活 owner 不能重复占有。
+- **作用域隔离：** installed 专项覆盖并发会话各自的路由、工具、cwd、环境和取消，平台工具按本轮快照注册；不提供同一 OS 用户之间的安全隔离。
+- **引导进入模型的信号：** `steer_applied` 对应含 steer 消息的模型 HTTP 请求实际发送，留在原 trace；尚未发送就结束的消息标为 dropped，fork seed 不继承它。
+- **仍开放：** 完整 composition 的长期内存与容量数字、进程级 exit hook 的长期影响、RC 后接口变化。版本门禁保持精确匹配，短时专项通过不代替这些结论。
+
+全角色隔离 `looper serve` 的 installed 验证和真实命令已准备；serve 结果以计划 §4 为准。真实 DeepSeek runner smoke、三组 CLI/runner 各两次对照仍待 lead 执行，不能计为通过。
 
 ## 11. Norma 运行器（Go）
 
@@ -746,11 +761,11 @@ v0 的告警进服务日志（固定事件名）和 system status 的标志；�
 |---|---|---|
 | **S0 协议与 Looper 一侧** | ① 协议说明、JSON Schema 与一致性测试（M）；② RunnerSupervisor：起停、放置、健康、重启（M）；③ 准入控制与整机名额：内存、健康、硬上限、`exec/acquire`、负载保护（M）；④ RunnerBridge 会话控制、RunnerSession、RunnerChannel、内部事件、trace（L）；⑤ `tools/call` 分派与共用的 100 KB 截断（S）；⑥ `budget/authorize`、provider 并发、对账（M）；⑦ 总线 `lease`/`ack`、两种新消息类型、投递与去重（M）；⑧ `llm_records` 的三列与日志字段（S）；⑨ 假运行器（M） | 第 15.1–15.3 节在假运行器上全绿；隔离服务上，假运行器（只在测试里登记的运行时类型）跑完一轮管家对话并调用平台工具；没有用户可见变化 |
 | **S1 Pi 运行器**（本分支：①–⑦ 已实现；⑧ 的验证与评测已准备、待 lead 实跑，容量数字和运行时卡未完成；⑨ 未完成，见 §9.6） | ① 运行器骨架：握手、版本门禁、会话表、读写、健康（M）；② `session/new`、`load` 与隔离：cwd、路径拦截、bash 的 `spawnHook`/`operations`、私有 agentDir、内存设置（L）；③ 包装 ModelRuntime：`authorize`、`request_end`、事件映射（M）；④ 平台工具代理、内联扩展、`skill_dir`（M）；⑤ 管家、规划者改由运行器承载，`pi` 类型切换（M）；⑥ 执行者、评审者：RunnerChannel、trace 内引导、取消、咨询分叉（L）；⑦ `WorkerPool` 的运行句柄抽象（M）；⑧ 验证、容量数字、评测、运行时卡（M）；⑨ 删除按轮起 CLI 的 Pi 路径（S） | 已安装的 pi 1.3.0 配假 provider 跑通四个角色、只读、用量、trace 内引导和取消；真实 Responses 烟测；与原 CLI 路径的评测对照；运行时卡截图一张 |
-| **S2 DSH 运行器** | ① 运行器骨架、一次 `runProfile`、兼容门禁（M）；② `agents.create`、`resume` 与 `setup`：工具、prompt section、guard、bash 执行器（L）；③ `llm/stream` 授权、用量、请求归属（M）；④ 常驻与运行两类角色、引导、取消、快照咨询（M）；⑤ 按 provider 绑定分运行器（S）；⑥ 验证、容量数字、DeepSeek 真实烟测（M）；⑦ 删除 CLI 的 DSH 路径（S） | 第 10.5 节的缺口逐项给出结论或保留为开放项；DeepSeek 真实烟测 |
+| **S2 DSH 运行器**（本分支：①–④ 已实现；⑥ 的验证与真实命令已准备、待 lead 实跑，容量数字仍待测；⑤、⑦ 未完成，见 §10.6） | ① 运行器骨架、一次 `runProfile`、兼容门禁（M）；② `agents.create`、`resume` 与 `setup`：工具、prompt section、guard、bash 执行器（L）；③ `llm/stream` 授权、用量、请求归属（M）；④ 常驻与运行两类角色、引导、取消、快照咨询（M）；⑤ 按 provider 绑定分运行器（S）；⑥ 验证、容量数字、DeepSeek 真实烟测（M）；⑦ 删除 CLI 的 DSH 路径（S） | 第 10.6 节逐项结论与开放缺口；DeepSeek 真实烟测和 CLI/runner 对照 |
 | **S3 Norma 运行器** | ① 上游：每会话收件箱与 trace 内引导，带测试（M）；② 上游：干净环境的 bash、子 agent 环境、`http.Client`、panic recover、任务目录清理、MCP cwd（M）；③ `api` 的 Python `AgentLoop` 移植同一收件箱（M）；④ Go 运行器：协议、会话 goroutine、读写、准入、健康（L）；⑤ 工具：路径包装、干净环境执行器、平台工具代理、Looper 摘要器，以及上游合入前的 `Compactor.Pre` 过渡引导（M）；⑥ provider 包装：`authorize` 与用量（S）；⑦ `norma` 运行时类型、Profile、registry、运行时卡（M）；⑧ 构建与发布二进制、`install.sh`（M）；⑨ 验证与三种运行器的容量对比（M） | 第 11.6 节的行为兼容表在同一个假服务上逐项核对；四个平台的安装烟测；三种运行器的容量对比写进本 RFC，替换第 5.3 节的暂定值 |
 | 之后 | WebSocket 远程运行器；外部 broker；Looper 拥有的中性历史（Norma 与 `api` 互换会话）；能力目录里的 MCP、扩展与 Pi package；按项目划分信任域；Go 版 Looper（loopgo）驱动同一套运行器 | 各自另立 RFC 或在本 RFC 补节 |
 
-**顺序（维护者已定 Pi → DSH → Norma）的理由：** S0 先做，三个运行器共用它，用假运行器就能把协议、预算、准入和总线的负例测完。Pi 是正式版，控制最全，每会话选项都是显式的，现有的 `pi` CLI 运行时和评测脚本可以直接对照。DSH 的进程内接口原生支持多 agent 和引导，但它是 RC，provider 路由是进程级的。Norma 最后：它要先在上游补收件箱等改动，还要解决 Go 的构建与发布；三种运行器的容量对比放在这一阶段一并完成。
+**顺序（维护者已定 Pi → DSH → Norma）的理由：** S0 先做，三个运行器共用它，用假运行器就能把协议、预算、准入和总线的负例测完。Pi 是正式版，控制最全，每会话选项都是显式的，现有的 `pi` CLI 运行时和评测脚本可以直接对照。DSH 的进程内接口原生支持多 agent、引导和每会话路由，但它是 RC。Norma 最后：它要先在上游补收件箱等改动，还要解决 Go 的构建与发布；三种运行器的容量对比放在这一阶段一并完成。
 
 ## 17. 默认行为的变化与待决问题
 

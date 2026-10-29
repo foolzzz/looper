@@ -348,51 +348,78 @@ the key nor connects to PostgreSQL: `credentials`, `database_connection` and
 `real_validation` remain `untested` even when preflight passes. Missing or
 unsupported dependencies are a failed preflight, not model acceptance.
 
-The following are **pending, paid acceptance commands**, each requiring an
-explicit `--real`; they were not run for this documentation change:
+The lead runs the following **pending, paid acceptance commands** before
+merging. First run the installed stand-in tests with DSH 0.2.1-rc.2,
+Node 22.19+ and a disposable `LOOPER_TEST_DATABASE_URL`:
 
 ```sh
-uv run --extra test python -m examples.dsh.validate task-basic --real \
-  --disposable-pg-url postgresql://eval:password@127.0.0.1:55432/postgres
-uv run --extra test python -m examples.dsh.validate task-review --real \
-  --disposable-pg-url postgresql://eval:password@127.0.0.1:55432/postgres
-uv run --extra test python -m examples.dsh.validate manager --real \
-  --disposable-pg-url postgresql://eval:password@127.0.0.1:55432/postgres
-uv run --extra test python -m examples.dsh.validate smoke --real \
-  --disposable-pg-url postgresql://eval:password@127.0.0.1:55432/postgres
+uv run --extra test python -m pytest tests/test_dsh_runner_serve_db.py
+uv run --extra test python -m examples.dsh.validate smoke --real --dsh-runner \
+  --disposable-pg-url <disposable-/postgres-URL>
 ```
+
+For each comparison, run the CLI baseline first, then pass its ignored real
+run JSON to the runner command. Each command uses `jobs=1`, `reps=2`:
+
+```sh
+uv run --extra test python -m examples.dsh.validate manager --real \
+  --disposable-pg-url <disposable-/postgres-URL>
+uv run --extra test python -m examples.dsh.validate manager --real --dsh-runner \
+  --baseline <manager-CLI-run.json> --disposable-pg-url <disposable-/postgres-URL>
+uv run --extra test python -m examples.dsh.validate task-basic --real \
+  --disposable-pg-url <disposable-/postgres-URL>
+uv run --extra test python -m examples.dsh.validate task-basic --real --dsh-runner \
+  --baseline <task-basic-CLI-run.json> --disposable-pg-url <disposable-/postgres-URL>
+uv run --extra test python -m examples.dsh.validate task-review --real \
+  --disposable-pg-url <disposable-/postgres-URL>
+uv run --extra test python -m examples.dsh.validate task-review --real --dsh-runner \
+  --baseline <task-review-CLI-run.json> --disposable-pg-url <disposable-/postgres-URL>
+```
+
+The cases are Manager dialogs `status,confirm_create_start`, basic tasks
+`single_step,dependent_steps` and reviewed tasks `reviewed_step,planner_plan_file`.
+The comparison gate is **per case: runner passes ≥ CLI passes minus one**.
+The launcher retains its all-samples-pass status and exit code; `--baseline`
+generates the comparison, and the lead separately applies this per-case gate
+to both complete two-repetition results. Report functional failures, errors
+and evidence gaps separately.
+Report errors as errors, rerun an errored case once, and report both attempts.
+If a spending cap stops a run, raise it and rerun before claiming the gate.
+Report each installed run, real smoke and comparison as passed, failed or
+unverified, with the reason; prepared commands are not passing evidence.
 
 Only the launcher captures the key at runtime from the configured interactive
 zsh into memory, then supplies the eval provider through `api_key_env`; do not
 expand, echo or paste it into a shell command, spec, report or artifact. Empty
-or failed capture stops the run. Eval artifacts stay in ignored
+or failed capture stops the run. Runner eval commands check their private server
+logs in memory and report only `server_log_key_absent`; a missing or unreadable
+log is unverified and cannot pass the gate. Eval artifacts stay in ignored
 `evals/runs/dsh/`; smoke uses a disposable root and fresh database, closes
 external channels and starts its own server away from 8767. It checks two
 Manager turns, two tasks, all four roles, room consults and API/DB readback.
 Channel stand-ins do not establish Telegram/Lark delivery to real accounts.
 
-The eval commands select `single_step,dependent_steps`,
-`reviewed_step,planner_plan_file` and Manager `status,confirm_create_start`,
-respectively, each at `jobs=1`, `reps=2`. Manager results include actual launch,
-Session and root usage readback plus the existing per-turn tool audit. Missing
-evidence cannot establish acceptance; repeated MCP success alone does not
-prove a changed run token was applied. Each invocation sets a $0.50 per-run
-soft cap, a $4 total observed-spend cap, 300 seconds per task/dialog (per stage
-for smoke), and 20 minutes outside the workflow plus cleanup grace. With one
-job, **`--case-budget-usd` is not enforced**; the launcher does not pass it or
-promise a per-case cap. Root observed cost is not a complete bill: summary,
-search, child-session and consult coverage remains unknown, including when
-the official Session reader returns observations. These are not hard billing
-limits; unknown cost causing a consult refusal is a failed smoke, not a pass.
+`--dsh-runner` on `task-basic`, `task-review`, `manager` and `smoke` writes
+`[runtimes] dsh = "runner"` into that isolated server's ops file. The underlying
+`evals.prompt_regression run` and `dialogs` commands accept the same opt-in.
+Runner evidence requires `looper-runner` commands parsing as kind `dsh`
+Descriptors; smoke checks each record's complete usage and own cost instead
+of CLI owner-home and Session-reader accounting. Its summary has
+`"path": "runner"`. Without the flag, CLI validation is unchanged.
 
-For an eval command, optional `--baseline path/to/real-append.json` must point
-to an existing real result with the same case and explicit
-`validation.effective_system_prompt_mode=append`. Missing or incompatible
-evidence is a gap; the launcher neither starts Claude/OMP nor updates public
-baselines. Existing Claude/OMP/pi workflows remain independent. The RFC's
-broader two-repetition task/dialog comparison is still pending; these three
-one-case commands do not cover `dependent_steps`, `planner_plan_file` or
-`confirm_create_start`.
+Each invocation sets a $0.50 per-run soft cap, a $4 total observed-spend cap,
+300 seconds per task/dialog (per stage for smoke), and 20 minutes outside the
+workflow plus cleanup grace. With one job, **`--case-budget-usd` is not
+enforced**; the launcher does not promise a per-case cap. These are not hard
+billing limits. CLI root observed cost does not establish summary, search,
+child-session or consult coverage; runner turn and compaction requests are
+authorized and priced per request, while unsupported search and subagents are
+disabled. Unknown cost causing a consult refusal is a failed smoke.
+
+`--baseline` must point to an existing real result with the same cases and
+explicit `validation.effective_system_prompt_mode=append`. Missing or
+incompatible evidence is a gap; the launcher neither starts Claude/OMP nor
+updates public baselines. Existing Claude/OMP/pi workflows remain independent.
 
 ### Which tier to run
 
