@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from types import SimpleNamespace
 
 import pytest
 
@@ -92,7 +93,7 @@ async def dsh_supervisor(tmp_path: Path, *, dsh=None, env=None):
 
 
 @asynccontextmanager
-async def raw_runner(tmp_path: Path, dsh, *, env=None):
+async def raw_runner(tmp_path: Path, dsh, *, env=None, state_root: Path | None = None):
     node = require_node()
     root = Path(tempfile.mkdtemp(prefix="dsh-runner-", dir=tmp_path))
     home, temporary = root / "home", root / "tmp"
@@ -101,7 +102,7 @@ async def raw_runner(tmp_path: Path, dsh, *, env=None):
     environment = {name: value for name, value in os.environ.items() if name in _ENV}
     environment.update(_guarded_env(tmp_path, env))
     environment.update(HOME=str(home), TMPDIR=str(temporary))
-    state = dsh_command.state_root(root)
+    state = state_root if state_root is not None else dsh_command.state_root(root)
     process = await asyncio.create_subprocess_exec(*dsh_command.command(node, str(dsh), state),
         cwd=root, env=environment, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE, start_new_session=True, limit=MAX_FRAME_BYTES + 1)
@@ -127,3 +128,26 @@ async def raw_runner(tmp_path: Path, dsh, *, env=None):
         except TimeoutError:
             pass
         await proc_tree.end(process, label="test DSH runner")
+
+
+def raw_lease(tmp_path: Path, key="key"):
+    """Create a raw-runner lease and a durable owner directory outside it."""
+    root = max(tmp_path.glob("dsh-runner-*"), key=lambda path: path.stat().st_mtime_ns)
+    directory = root / "sessions" / key
+    for name in ("home", "native"):
+        (directory / name).mkdir(parents=True)
+    owner = tmp_path / f"owner-state-{key}"
+    owner.mkdir()
+    return SimpleNamespace(session_key=key, directory=directory, home=directory / "home",
+        state_dir=owner, native_state_dir=directory / "native", runner_root=root)
+
+
+def session_params(lease, **overrides):
+    return {"session_key": lease.session_key, "role": "manager", "cwd": str(lease.directory),
+        "home": str(lease.home), "state_dir": str(lease.state_dir), "add_dirs": [], "env": {},
+        "provider": {"protocol": "anthropic-messages", "base_url": "http://127.0.0.1:1",
+            "model": "deepseek-v4-pro[1m]", "api_key": "synthetic-dsh-runner-key",
+            "account_id": "account", "effort": None, "context_window": None},
+        "system_prompt": {"mode": "append", "text": "Literal Looper instructions: {{unchanged}}."},
+        "tools": {"builtin": ["read", "glob", "grep"], "platform": [], "read_only": True},
+        "limits": {"tool_timeout_s": 120, "max_requests_per_turn": 30}, **overrides}
