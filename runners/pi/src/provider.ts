@@ -1,29 +1,61 @@
 /** Every HTTP attempt is authorized by the host, then ends exactly once. */
+import { subscribe } from 'node:diagnostics_channel';
 import { diagnostic, request, scrub, update } from './rpc.ts';
 import { sdk } from './sdk.ts';
 import type { Session } from './session.ts';
 import type { Turn } from './turn.ts';
 import { steersSent } from './turn.ts';
 
-const preRequestErrors = new Set([
-  'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT',
-  // Certificate validation fails during the TLS handshake, before HTTP is sent.
-  'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN',
-  'UNABLE_TO_GET_ISSUER_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
-  'CERT_REVOKED', 'CERT_UNTRUSTED', 'CERT_REJECTED', 'ERR_TLS_CERT_ALTNAME_INVALID',
-  // A plaintext HTTP reply to a TLS handshake also precedes any HTTP request.
-  'ERR_SSL_WRONG_VERSION_NUMBER',
-]);
+const requests = new Map<string, { sent: boolean }>();
+// Pi's OpenAI client uses our fetch, backed by Node's built-in undici. Subscribe
+// once, and correlate the raw HTTP headers with the admitted request.
+subscribe('undici:client:sendHeaders', (message: any) => {
+  const id = /^x-looper-request-id: ([^\r\n]+)\r?$/im.exec(message.headers)?.[1];
+  const attempt = id && requests.get(id);
+  if (attempt) attempt.sent = true;
+});
+
+// Pi's parsed-event hook omits [DONE], and the SDK also accepts a clean EOF
+// without it. Observe SSE data lines while forwarding the bytes unchanged.
+function chatEnd(onDone: () => void): TransformStream<Uint8Array, Uint8Array> {
+  const decoder = new TextDecoder();
+  let pending = '', data: string[] = [];
+  let afterCR = false;
+  function consume(text: string) {
+    if (text) {
+      // Process CR immediately, including at EOF; a following LF belongs to it.
+      const skipLF = afterCR && text.startsWith('\n');
+      afterCR = text.endsWith('\r');
+      if (skipLF) text = text.slice(1);
+    }
+    pending += text;
+    const lines = pending.split(/\r\n|[\r\n]/);
+    pending = lines.pop()!;
+    for (const line of lines) {
+      if (!line) {
+        if (data.join('\n') === '[DONE]') onDone();
+        data = [];
+      } else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+    }
+  }
+  return new TransformStream({ transform(chunk, controller) {
+    consume(decoder.decode(chunk, { stream: true }));
+    controller.enqueue(chunk);
+  }, flush() {
+    // A clean EOF can terminate the final data line and event without a blank line.
+    consume(decoder.decode() + '\n\n');
+  } });
+}
 
 function responseUsage(usage: any) {
   const input = usage?.input_tokens, output = usage?.output_tokens;
   const cacheRead = usage?.input_tokens_details?.cached_tokens ?? 0;
   const cacheWrite = usage?.input_tokens_details?.cache_write_tokens ?? 0;
   const reasoning = usage?.output_tokens_details?.reasoning_tokens ?? 0;
-  if (![input, output, cacheRead, cacheWrite, reasoning].every(n => Number.isSafeInteger(n) && n >= 0)
-      || cacheRead + cacheWrite > input || reasoning > output
-      || (usage.total_tokens != null && usage.total_tokens !== input + output)) return;
-  return { input: input - cacheRead - cacheWrite, output, cacheRead, cacheWrite, reasoning,
+  if (![input, output, cacheRead, cacheWrite, reasoning].every(n => Number.isSafeInteger(n) && n >= 0)) return;
+  // Compatible providers can disagree on aggregate totals and detail subsets.
+  // Keep the billable buckets; reasoning is already included in output.
+  return { input: Math.max(0, input - cacheRead - cacheWrite), output, cacheRead, cacheWrite, reasoning,
     totalTokens: input + output };
 }
 
@@ -40,6 +72,7 @@ let counter = 0;
 export function endRequest(record: Session, turn: Turn, id: string, status: string,
     complete: boolean, usage?: any): void {
   if (turn.settled || !turn.inflight.delete(id)) return;
+  requests.delete(id);
   turn.lastRequestId = id;
   turn.ended++;
   turn.complete &&= complete;
@@ -81,7 +114,11 @@ export async function authorizingStream(record: Session, model: any, context: an
     throw new Error('request aborted');
   }
   const output = sdk!.ai.createAssistantMessageEventStream();
-  let started = false, dispatched = false, chatFinished = false, status: number | undefined;
+  const attempt = { sent: false };
+  requests.set(id, attempt);
+  let chatFinished = false, chatDone = false, status: number | undefined;
+  let rejectionRead = false, modelOutput = false;
+  const rejected = () => status !== undefined && status >= 400 && rejectionRead && !modelOutput;
   let terminalUsage: ReturnType<typeof responseUsage>;
   turn.httpStatus = undefined;
   turn.transport = false;
@@ -99,37 +136,42 @@ export async function authorizingStream(record: Session, model: any, context: an
     },
     onProviderStreamEvent: async (event: any, eventModel: any) => {
       if (model.api === 'openai-responses') {
-        // Earlier events may carry usage that Pi never extracts. Trust only validated
-        // terminal counts, including response.failed, which Pi throws before copying.
-        if (event.type === 'response.completed' || event.type === 'response.incomplete' || event.type === 'response.failed') {
+        // Interim usage, and failed/incomplete responses, cannot establish final counts.
+        if (event.type === 'response.completed') {
           terminalUsage = responseUsage(event.response?.usage);
         }
       } else {
-        // Chat may report placeholder or cumulative counts before finishing. Only
-        // a terminal choice or its trailing usage chunk can establish final counts.
-        const choice = event.choices?.[0];
-        if (choice) chatFinished = typeof choice.finish_reason === 'string' && choice.finish_reason.length > 0;
-        terminalUsage = chatFinished && Array.isArray(event.choices) ? chatUsage(event.usage ?? choice?.usage) : undefined;
+        // Final Chat usage accompanies the terminal choice or follows in an empty-choices chunk.
+        if (event.choices?.length) {
+          chatFinished = event.choices.every((choice: any) => typeof choice.finish_reason === 'string' && choice.finish_reason.length > 0);
+          terminalUsage = chatFinished ? chatUsage(event.usage ?? event.choices[0]?.usage) : undefined;
+        } else if (chatFinished && Array.isArray(event.choices)) terminalUsage = chatUsage(event.usage);
       }
       await options.onProviderStreamEvent?.(event, eventModel);
     },
     fetch: async (...args: Parameters<typeof globalThis.fetch>) => {
       if (turn.cancel || turn.settled || turn.settling || options.signal?.aborted) throw new Error('request aborted');
       turn.transport = true;
-      dispatched = true;
-      try {
-        const responsePromise = fetch(...args);
-        steersSent(record, turn, context.messages);
-        const response = await responsePromise;
-        turn.httpStatus = status = response.status;
-        return response;
-      } catch (error) {
-        // These connection failures establish that no HTTP request was sent. Other
-        // failures (including a socket closing before headers) leave usage unknown.
-        const code = (error as { cause?: { code?: string } })?.cause?.code;
-        if (code && preRequestErrors.has(code)) dispatched = false;
-        throw error;
+      const headers = new Headers(args[1]?.headers ?? (args[0] instanceof Request ? args[0].headers : undefined));
+      headers.set('x-looper-request-id', id);
+      const responsePromise = fetch(args[0], { ...args[1], headers });
+      steersSent(record, turn, context.messages);
+      const response = await responsePromise;
+      turn.httpStatus = status = response.status;
+      if (status >= 400) {
+        // A rejection proves zero spend only after its body reaches a clean EOF.
+        // flush is never called when the body errors or is cancelled.
+        if (!response.body) rejectionRead = true;
+        else return new Response(response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+          transform(chunk, controller) { controller.enqueue(chunk); },
+          flush() { rejectionRead = true; },
+        })), { status, statusText: response.statusText, headers: response.headers });
       }
+      if (model.api !== 'openai-responses' && response.ok && response.body) {
+        return new Response(response.body.pipeThrough(chatEnd(() => { chatDone = true; })), {
+          status: response.status, statusText: response.statusText, headers: response.headers });
+      }
+      return response;
     },
     onResponse: async (response: any, responseModel: any) => {
       turn.httpStatus = status = response.status;
@@ -148,24 +190,23 @@ export async function authorizingStream(record: Session, model: any, context: an
           const aborted = options.signal?.aborted || message.stopReason === 'aborted' || turn.cancel;
           const requestStatus = event.type === 'done' ? 'completed'
             : aborted ? 'aborted' : status && status >= 400 ? `http_${status}` : 'error';
-          const usage = terminalUsage;
-          const usageComplete = terminalUsage !== undefined;
-          const complete = event.type === 'done' ? usageComplete
-            : usageComplete || !dispatched || (!started && !aborted && status !== undefined && status >= 400);
+          const usage = attempt.sent && !rejected() ? terminalUsage : undefined;
+          const complete = !attempt.sent || rejected() || (event.type === 'done' && !aborted && terminalUsage !== undefined
+            && (model.api === 'openai-responses' || chatDone));
           // Let Pi publish message_end first; settlement waits for this accounting frame.
           setImmediate(() => endRequest(record, turn, id, requestStatus, complete, usage));
           output.push(event);
           output.end();
           return;
         }
-        started = true;
+        if (event.type !== 'start') modelOutput = true;
         output.push(event);
       }
       throw new Error('provider stream ended without a terminal event');
     } catch (error) {
       const aborted = !!(options.signal?.aborted || turn.cancel);
       setImmediate(() => endRequest(record, turn, id, aborted ? 'aborted' : status && status >= 400 ? `http_${status}` : 'error',
-        !dispatched || (!started && !aborted && status !== undefined && status >= 400)));
+        !attempt.sent || rejected()));
       const message = { role: 'assistant', content: [], api: model.api, provider: model.provider, model: model.id,
         stopReason: aborted ? 'aborted' : 'error', errorMessage: scrub(error instanceof Error ? error.message : 'provider failed').slice(0, 512),
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,

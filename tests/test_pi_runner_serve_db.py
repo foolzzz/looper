@@ -74,6 +74,7 @@ class Responses(ThreadingHTTPServer):
 
     def __init__(self, outside):
         self.requests, self.errors = [], []
+        self.usage = USAGE
         self.held, self.release = threading.Event(), threading.Event()
         self.outside = outside
         self.handler = self.default_script
@@ -125,6 +126,7 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             self.server.requests.append(body)
             events = answer_events(self.server.script(body))
+            events[-1]["response"]["usage"] = self.server.usage
             data = b"".join(("data: " + json.dumps(e) + "\n\n").encode() for e in events)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -282,15 +284,21 @@ def test_pi_runner_manager_stop_and_restart(isolated_pi, tmp_path):
         assert len({event["trace_id"] for event in saved_events(url, record)}) == 1
 
 
-def test_pi_runner_planner_and_worker(isolated_pi, tmp_path):
+@pytest.mark.parametrize("usage,counts,cost", [
+    (USAGE, (1000, 200, 300, 0), "0.0023"),
+    ({**USAGE, "total_tokens": 1400, "output_tokens_details": {"reasoning_tokens": 201},
+        "input_tokens_details": {"cached_tokens": 1400}}, (0, 200, 1400, 0), "0.0046"),
+], ids=["charged", "priceable-terminal-buckets"])
+def test_pi_runner_planner_and_worker(isolated_pi, tmp_path, usage, counts, cost):
     from looper.agents.runtimes.runner.session import Descriptor
 
     url, api, provider = isolated_pi
+    provider.usage = usage
     work = tmp_path / "project"
     work.mkdir()
     (work / "AGENTS.md").write_text(SENTINEL)
     task = api.post("/api/v1/tasks/create", {"requirement": "Report completion", "workspace_mode": "in_place", "project": {
-        "name": "Pi task fixture", "work_dir": str(work)}})["result"]["task_id"]
+        "name": "Pi task fixture", "work_dir": str(work), "task_budget_usd": 2}})["result"]["task_id"]
     api.post("/api/v1/ops/task_control/start", {"task_id": task})
     detail = wait_until(lambda: api.post("/api/v1/tasks/detail", {"task_id": task})["result"],
                         lambda row: row["status"] in {"completed", "failed", "stopped"}, timeout=45)
@@ -309,6 +317,13 @@ def test_pi_runner_planner_and_worker(isolated_pi, tmp_path):
     assert descriptor.kind == "pi" and descriptor.role == "worker"
     for row in runs:
         events = saved_events(url, row)
+        (result,) = [event for event in events if event.get("type") == "result"]
+        requests = result["num_turns"]
+        assert result["usage_complete"] and result["runner"]["cap_reason"] is None
+        assert requests > 0 and row["cost_source"] == "provider_price"
+        assert tuple(row[k] for k in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")) == tuple(
+            requests * count for count in counts)
+        assert Decimal(str(row["cost_usd"])) == requests * Decimal(cost)
         traces = {event["trace_id"] for event in events if "trace_id" in event}
         assert len(traces) <= 1
         assert {event["session_id"] for event in events if event.get("session_id")} == {row["session_id"]}

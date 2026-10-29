@@ -18,6 +18,24 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.207] - 2026-10-28
+
+### Fixed
+
+- **The Pi runner accounts a provider rejection as zero spend.** A sent request answered with HTTP status 400 or higher, whose error body was read to a clean end and which streamed no model output, is now reported as zero usage and complete, because the provider rejected it. Pi's retry after a 429 or 5xx is therefore no longer refused as `budget_unverifiable` under a run or task cap. A rejection whose body was cut off, or one that follows streamed model output, stays incomplete. The Chat end-of-stream flush that lets a stream ending in `data: [DONE]` with a single newline or none count as a normal end was already in place; this change adds its test coverage only. No prompt, tool or message text changes. ([#862](https://github.com/foolzzz/looper/pull/862), fixing #860)
+
+## [2.13.206] - 2026-10-28
+
+### Fixed
+
+- **The Pi runner decides whether a request was sent from the HTTP client's own event.** The runner subscribes to undici's `undici:client:sendHeaders` event and matches it to the admitted request through an `x-looper-request-id` header, replacing the list of connection error codes. Every request that was not sent is reported as zero usage and complete. Usage is trusted only from a validated terminal event: the Responses `response.completed` event, or the Chat final usage chunk after `[DONE]` or a clean end of stream. A stream that drops after interim usage is reported incomplete. A sent request that fails, including one answered with an HTTP error status, is now reported incomplete. No prompt, tool or message text changes. ([#851](https://github.com/foolzzz/looper/pull/851))
+
+## [2.13.205] - 2026-10-28
+
+### Fixed
+
+- **The Pi runner no longer stops a capped turn over inconsistent provider usage.** `responseUsage` keeps usage whose `total_tokens`, cache counts or reasoning counts disagree with input and output, so the turn is priced and checked against its caps instead of ending as `budget_unverifiable`. Missing or invalid counts are still capped. A capped turn with an unverifiable budget now logs the phase and first failing cause. No prompt, tool or message text changes. ([#854](https://github.com/foolzzz/looper/pull/854))
+
 ## [2.13.204] - 2026-10-28
 
 ### Changed

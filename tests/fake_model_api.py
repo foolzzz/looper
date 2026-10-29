@@ -16,6 +16,9 @@ class ResponseScript:
     headers: dict[str, str] | None = None
     disconnect_after: int | None = None
     disconnect_before_headers: bool = False
+    error_body_bytes: int | None = None
+    sse_line_ending: str = "\n"
+    sse_final_ending: str | None = None
     gate: asyncio.Event | None = None
     gate_reached: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     closed: asyncio.Event = field(default_factory=asyncio.Event, init=False)
@@ -89,7 +92,7 @@ class FakeModelAPI:
                 payload = b""
                 response_headers.update({"Content-Type": "text/event-stream", "Transfer-Encoding": "chunked"})
             wire_head = f"HTTP/1.1 {script.status} Scripted\r\n" + "".join(f"{k}: {v}\r\n" for k, v in response_headers.items())
-            writer.write(wire_head.encode() + b"\r\n" + payload)
+            writer.write(wire_head.encode() + b"\r\n" + payload[:script.error_body_bytes])
             await writer.drain()
             if script.status != 200:
                 return
@@ -109,7 +112,10 @@ class FakeModelAPI:
                         disconnected.cancel()
                         await asyncio.gather(opened, disconnected, return_exceptions=True)
                 data = envelope if isinstance(envelope, str) else json.dumps(envelope)
-                chunk = f"data: {data}\n\n".encode()
+                ending = script.sse_line_ending * 2
+                if count == len(script.events) - 1 and script.sse_final_ending is not None:
+                    ending = script.sse_final_ending
+                chunk = f"data: {data}{ending}".encode()
                 writer.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
                 await writer.drain()
             if script.disconnect_after is not None and len(script.events) >= script.disconnect_after:
