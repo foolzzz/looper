@@ -260,6 +260,9 @@ class RunnerSession:
             if descriptor is None:
                 raise RuntimeError("runner session has not started")
             if self._resume_lost:
+                # No runner turn will emit init; retain the failed resume's record identity.
+                await _value(on_event({"type": "system", "subtype": "init", "session_id": descriptor.session,
+                    "model": descriptor.model, "trace_id": trace}))
                 return self._failure("runner saved session is unavailable; could not be resumed", trace)
             if budget is None or tools is None:
                 return self._failure("runner turn requires host tools and budget context before prompting", trace)
