@@ -7,7 +7,8 @@ import { killProcesses } from './exec.ts';
 import { applyTools } from './tools.ts';
 
 type Failure = { kind: string; message: string };
-type Steer = { message_id: string; text: string; dshId: string | null; applied: boolean; dropped: boolean };
+type Steer = { message_id: string; text: string; dshId: string | null; historySeq: number | null;
+  applied: boolean; dropped: boolean };
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>(done => { resolve = done; });
@@ -54,7 +55,7 @@ export function steer(params: Record<string, unknown>): object {
       || typeof params.text !== 'string' || !params.text.trim()) throw new RpcError(-32602, 'invalid steer parameters');
   if (!turn.steers.has(params.message_id)) {
     turn.steers.set(params.message_id, { message_id: params.message_id, text: params.text,
-      dshId: null, applied: false, dropped: false });
+      dshId: null, historySeq: null, applied: false, dropped: false });
     forwardSteers(record, turn);
   }
   return { session_id: record.id, trace_id: turn.trace, status: 'queued' };
@@ -73,6 +74,14 @@ export function dropSteers(record: Session, turn: Turn): void {
   for (const s of turn.steers.values()) {
     if (s.applied || s.dropped) continue;
     if (s.dshId !== null) record.agent.inbox.remove(s.dshId);
+    if (s.historySeq !== null) {
+      // Claimed steering has left the inbox. Replace its surface node durably;
+      // empty user content is valid after turn/end and omitted by the adapter.
+      record.agent.session.append('user/message',
+        dsh.llm.createUserMessage({ content: [], source: { kind: 'looper-steer' } }), {
+        surfaceOp: { op: 'replace', startSeq: s.historySeq, endSeq: s.historySeq },
+        sourceEventSeqs: [s.historySeq] });
+    }
     s.dropped = true;
     void update(record.id, turn.trace, 'steer_dropped', { message_id: s.message_id,
       reason: turn.cancel === 'close' ? 'session_closed' : turn.cancel ? 'cancelled' : 'turn_ended' });
@@ -99,6 +108,10 @@ export function onEvent(record: Session, event: any): void {
     turn.opened.resolve();
     // Inbox writes cannot reenter DSH's turn/start event publication.
     setImmediate(() => forwardSteers(record, turn));
+  } else if (event.type === 'user/message') {
+    for (const s of turn.steers.values()) {
+      if (s.dshId === data.id) s.historySeq = event.seq;
+    }
   } else if (data.turn === turn.number) {
     if (event.type === 'assistant/message') {
       const content = data.message.content.flatMap((block: any) => {

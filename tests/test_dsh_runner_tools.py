@@ -351,6 +351,67 @@ def test_steer_is_dropped_never_lost(tmp_path, ending):
     run(exercise())
 
 
+@pytest.mark.parametrize("resume", [False, True])
+def test_dropped_steer_leaves_model_history_across_traces(tmp_path, monkeypatch, resume):
+    session_file = dsh_command.entry().resolve().parent / "session.ts"
+    harness(tmp_path, monkeypatch, f"""const {{sessions}} = await import({json.dumps(session_file.as_uri())});
+rpc.method('test/history', p => ({{messages: sessions.get(p.session_id).agent.session.deriveMessages()}}));""")
+
+    async def exercise():
+        _, installed = require_dsh()
+        replies = [[bash("echo ready > first; while [ ! -f first-gate ]; do sleep .05; done")],
+                   [bash("echo ready > second; while [ ! -f second-gate ]; do sleep .05; done")],
+                   ["Next trace completed"]]
+        with MessagesServer(replies) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
+                client = Client(send, receive)
+                await client.start()
+                params = writable(params_for(tmp_path, server))
+                sid = (await client.call("session/new", params))["session_id"]
+                cwd = Path(params["cwd"])
+                await client.prompt(sid, text="ORIGINAL-PROMPT")
+                await client.requested(server)
+                await wait_until(lambda: (cwd / "first").exists())
+                await client.steer(sid, ident="applied", text="APPLIED-STEER")
+                (cwd / "first-gate").touch()
+                await client.requested(server, 2)
+                await wait_until(lambda: (cwd / "second").exists())
+                assert "APPLIED-STEER" in request_text(server.requests[1])
+                await client.steer(sid, ident="dropped", text="DROPPED-STEER")
+                client.auto_authorize = False
+                (cwd / "second-gate").touch()
+                while len(client.authorized) < 3:
+                    await client.read()
+                # Positive control: the real SDK has admitted this steer into
+                # history before the host refuses the request that would send it.
+                history = await client.call("test/history", {"session_id": sid})
+                assert "DROPPED-STEER" in json.dumps(history)
+                authorization = next(frame for frame in reversed(client.frames)
+                    if frame.get("method") == "budget/authorize")
+                await send({"jsonrpc": "2.0", "id": authorization["id"],
+                            "result": {"allow": False, "reason": "run_cap"}})
+                assert (await client.settled(sid))["outcome"] == "capped"
+                applied, = client.updates(sid, kind="steer_applied")
+                dropped, = client.updates(sid, kind="steer_dropped")
+                assert applied["message_id"] == "applied"
+                assert dropped["message_id"] == "dropped" and dropped["reason"] == "turn_ended"
+                assert len(server.requests) == 2
+                if resume:
+                    await client.call("session/close", {"session_id": sid})
+                    assert await client.call("session/load", {**params, "session_id": sid}) == {
+                        "session_id": sid, "resumed": True}
+                client.auto_authorize = True
+                await client.prompt(sid, trace="next", text="NEXT-PROMPT")
+                assert (await client.settled(sid, "next"))["outcome"] == "completed"
+                assert len(server.requests) == 3
+                context = request_text(server.requests[2])
+                assert "ORIGINAL-PROMPT" in context and "NEXT-PROMPT" in context
+                assert "APPLIED-STEER" in context and "exit code 0" in context
+                assert "DROPPED-STEER" not in context
+                await client.call("session/close", {"session_id": sid})
+    run(exercise())
+
+
 def test_fork_continues_a_copy_without_writing_it(tmp_path):
     async def exercise():
         _, installed = require_dsh()
