@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { lstat, stat, realpath, readdir, rm } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { addSecret, diagnostic, onShutdown, RpcError, scrub } from '../../common/rpc.ts';
-import { ctx, dsh, environment } from './sdk.ts';
+import { consultDefaults, ctx, dsh, environment } from './sdk.ts';
 import { cancelTurn, onEvent, type Turn } from './turn.ts';
 import { killProcesses, pathGuard, registerBash } from './exec.ts';
 import type { Registration } from './tools.ts';
@@ -118,6 +118,7 @@ async function compose(params: Record<string, any>, resumed: boolean): Promise<o
           ...(provider.context_window ? { contextWindow: provider.context_window } : {}) }] }, environment);
     } catch { throw new RpcError(-32602, 'invalid provider endpoint'); }
     const key = provider.api_key;
+    const consult = record.fork ? await consultDefaults(wireModel, record.route) : undefined;
     const setup = (agentCtx: any, agent: any) => {
       record.agentCtx = agentCtx;
       record.agent = agent;
@@ -129,7 +130,19 @@ async function compose(params: Record<string, any>, resumed: boolean): Promise<o
           if (record.activeRequest === null) throw new dsh.llm.LlmError('Looper did not authorize this request', 'LOOPER_UNAUTHORIZED');
           return { headers: { 'x-api-key': key, 'x-looper-request-id': record.activeRequest } };
         } });
-      agentCtx.systemPrompt.section({ name: 'looper', order: 20000, text: params.system_prompt.text, interpolate: false });
+      // A fork has the CLI consult's default guidance and declarations. Keeping
+      // a declaration does not grant execution: non-read tools are inert and
+      // the same session admission guard still checks every call below.
+      agentCtx.systemPrompt.section({ name: 'looper', order: 20000,
+        text: consult ? consult.text + '\n\n' + params.system_prompt.text : params.system_prompt.text,
+        ...(consult ? { complete: true } : {}), interpolate: false });
+      for (const tool of consult?.tools ?? []) {
+        if (record.builtin.includes(tool.name)) continue;
+        agentCtx.tools.register({ ...tool,
+          output: { schema: { type: 'string' }, render: (_args: any, value: string) => [{ type: 'text', text: value }] },
+          isConcurrencySafe: () => true,
+          execute: () => { throw new Error('LOOPER_READ_ONLY: tool is not allowed in a read-only run'); } });
+      }
       agentCtx.tools.restrict({ allow: record.builtin.filter(name => name !== 'bash') });
       registerBash(record);
       agentCtx.tools.guard((e: { name: string; arguments: any }) => record.allowed.has(e.name) ? pathGuard(record, e)

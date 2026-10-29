@@ -638,3 +638,37 @@ rpc.method('test/wake-prompt', p => {{
                 await client.call("runner/health")
                 assert len(client.updates(sid, kind="settled")) == 1
     run(exercise())
+
+
+def test_consult_default_declarations_keep_execution_read_only(tmp_path):
+    async def exercise():
+        _, installed = require_dsh()
+        calls = [tool("write", {"file_path": "created.txt", "content": "must not run"}),
+                 tool("bash", {"description": "Must be denied", "command": "touch created.txt"}),
+                 tool("subagent", {"prompt": "Must not start another model"}),
+                 tool("web_fetch", {"url": "https://example.com"})]
+        with MessagesServer([["Worker ended"], calls, ["Consult done"]]) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
+                client = Client(send, receive)
+                await client.start()
+                params = params_for(tmp_path, server)
+                params["role"] = "worker"
+                source = (await client.call("session/new", params))["session_id"]
+                await client.prompt(source)
+                assert (await client.settled(source))["outcome"] == "completed"
+                await client.call("session/close", {"session_id": source})
+                fork = (await client.call("session/new", {**params, "session_key": "consult",
+                    "fork_from": {"session_id": source}}))["session_id"]
+                await client.prompt(fork)
+                assert (await client.settled(fork))["outcome"] == "completed"
+                declared = {entry["name"] for entry in server.requests[1]["body"]["tools"]}
+                assert {call["name"] for call in calls} <= declared
+                results = client.updates(fork, kind="tool_result")
+                assert len(results) == len(calls)
+                assert all(result["is_error"] and "LOOPER_READ_ONLY" in result["text"] for result in results)
+                assert not (Path(params["cwd"]) / "created.txt").exists()
+                assert not client.calls
+                assert len(server.requests) == 3
+                assert (await client.call("runner/health"))["tool_processes"] == 0
+                await client.call("session/close", {"session_id": fork})
+    run(exercise())

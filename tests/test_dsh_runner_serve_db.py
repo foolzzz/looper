@@ -52,7 +52,7 @@ def request_role(body):
     if "looper_tasks" in tools:
         return "manager"
     if "[CONSULT]" in prompt:
-        assert tools == {"read", "glob", "grep"}
+        assert {"read", "glob", "grep"} <= tools
         return "consult"
     if prompt.startswith("Review the step"):
         assert {"read", "glob", "grep", "write", "edit", "bash"} <= tools
@@ -468,6 +468,11 @@ def test_dsh_runner_task_with_every_role(isolated_dsh, tmp_path):
     cli_request = cli_consult_request(tmp_path, state=state, source=source["session_id"],
         system_prompt=json.loads(source["metadata"])["system_prompt"], cwd=work, prompt=current_prompt(runner_request))
     (tmp_path / "runner-consult-request.json").write_text(json.dumps(runner_request))
+    # Private replay input for the opt-in real-model comparison. No credentials.
+    (tmp_path / "consult-source.json").write_text(json.dumps({
+        "state": str(state), "source": source["session_id"], "cwd": str(work),
+        "system_prompt": runner_request["system"][runner_request["system"].index("# Runtime notes (DSH)"):],
+        "prompt": current_prompt(runner_request)}))
     from looper.agents.consult import CONSULT_CONTRACT, consult_prompt
     from looper.agents.system_prompt import WORK_CONTRACT
 
@@ -488,9 +493,8 @@ def test_dsh_runner_task_with_every_role(isolated_dsh, tmp_path):
         assert body["system"].count(CONSULT_CONTRACT) == 1
         assert WORK_CONTRACT not in body["system"]
         assert consult_prompt(json.loads(source["metadata"])["system_prompt"]) in body["system"]
-    cli_tools = {entry["name"]: entry for entry in cli_request["tools"]}
-    assert {entry["name"]: entry for entry in runner_request["tools"]} == {
-        name: cli_tools[name] for name in ("read", "glob", "grep")}
+    assert runner_request["system"] == cli_request["system"]
+    assert runner_request["tools"] == cli_request["tools"]
     assert hashes() == digest, "CLI replay must also leave the original session untouched"
 
 

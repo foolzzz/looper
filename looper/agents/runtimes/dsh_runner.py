@@ -44,7 +44,9 @@ _PROVIDER_ENV = ("the DSH runner cannot apply a provider's environment variables
 def _prompt_text(looper_prompt: str, launch: Launch, *, cwd: str | Path | None = None) -> str:
     project = (instructions.injected_section(launch.runtime.instruction_files(cwd), launch.runtime.label)
                if cwd is not None else "")
-    notes = dsh.runtime_notes() + "\n- Looper's platform tools are named looper_* (for example looper_tasks)."
+    notes = dsh.runtime_notes()
+    if not launch.consult:
+        notes += "\n- Looper's platform tools are named looper_* (for example looper_tasks)."
     return runtime_prompt_text(launch, looper_prompt, notes, project, keep_empty=False)
 
 
