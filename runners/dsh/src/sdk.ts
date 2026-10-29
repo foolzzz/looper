@@ -14,13 +14,15 @@ export type Dsh = {
   version: string;
   profile: { runProfile: Handle };
   environment: { createLaunchEnvironmentSnapshot: Handle };
-  llm: { createUserMessage: Handle; isAgentLoopRequest: Handle };
-  deepseek: { registerDeepSeekProvider: Handle; resolveAdapterOptions: Handle; catalogModelInfo: Handle };
+  llm: { createUserMessage: Handle; isAgentLoopRequest: Handle; LlmError: new (...args: any[]) => Error;
+    CONTEXT_WINDOW_EXCEEDED_CODE: string };
+  deepseek: { registerDeepSeekProvider: Handle; resolveAdapterOptions: Handle; catalogModelInfo: Handle; DEFAULT_MAX_TOKENS?: number };
   session: { buildForkSeed: Handle };
   persistence: { SessionPersistenceNotFoundError: new (...args: any[]) => Error; SessionAlreadyOwnedError: new (...args: any[]) => Error };
 };
 export let dsh: Dsh;
 type Context = { agents: any; llm: any; sessionPersistence: any; tools: any; systemPrompt: any;
+  on: (...args: any[]) => any;
   fiber: { dispose: () => Promise<void> } };
 export let ctx: Context | undefined;
 export let environment: any;

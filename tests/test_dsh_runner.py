@@ -44,7 +44,7 @@ import {writeFileSync} from 'node:fs';
 export async function runProfile() {
   writeFileSync('boot.started', 'yes');
 ''' + ("  await new Promise(resolve => setTimeout(resolve, 30000));\n" if delay else "") + '''
-  const ctx = {agents: {}, llm: {}, sessionPersistence: {}, tools: {}, systemPrompt: {},
+  const ctx = {on() {}, agents: {}, llm: {}, sessionPersistence: {}, tools: {}, systemPrompt: {},
     fiber: {async dispose() {}}};
   return {ctx, shutdown: {shutdown() {process.exit(99);}}};
 }
