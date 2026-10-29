@@ -1,4 +1,5 @@
 """Only authentic bridge databases cross the schema upgrade boundary."""
+import ast
 import asyncio
 import json
 from urllib.parse import urlsplit, urlunsplit
@@ -78,7 +79,9 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
             await connection.ensure_schema(conn)
             after = await witness(conn)
             for table in ("task_plans", "system_settings", "library_items", "library_files", "library_installs",
-                          "chat_messages", "llm_model_migration_map", "agent_setting_layers"):
+                          "chat_messages", "llm_model_migration_map", "agent_setting_layers", "agent_runtimes",
+                          "agent_profiles", "llm_providers", "llm_provider_endpoints", "llm_models", "role_configs",
+                          "api_sessions", "api_session_items", "chat_threads", "task_user_gates", "sequence_state"):
                 assert after[table] == before[table], table
             assert json.loads(after["tasks"][0]["config"]) == {"worker": {"max_turns": 9}}
             assert {r["id"]: r["task_workspaces"] for r in after["projects"]} == {
@@ -250,12 +253,75 @@ def test_current_baseline_does_not_replay_pruned_history():
     async def test():
         async with fresh_connection() as conn:
             await connection.ensure_schema(conn)
+            assert await conn.fetchval("SELECT array_agg(name) FROM schema_migrations") == [bridge_upgrade.BASELINE]
             await conn.execute("DELETE FROM schema_migrations WHERE name <> 'post_bridge_baseline'; "
                                "UPDATE agent_profiles SET agent_teams=false")
             before = await witness(conn)
-            await connection.ensure_schema(conn)
+            queries = []
+            with conn.query_logger(lambda q: queries.append(q.query)):
+                await connection.ensure_schema(conn)
+            assert not any(verb in query.upper() for query in queries for verb in
+                           ("CREATE TABLE", "ALTER TABLE", "DROP TABLE", "CREATE INDEX", "CREATE SEQUENCE",
+                            "CREATE FUNCTION", "CREATE OR REPLACE", "CREATE TRIGGER"))
             assert await witness(conn) == before
             assert not await conn.fetchval("SELECT bool_or(agent_teams) FROM agent_profiles")
+    run(test)
+
+
+def test_historical_migration_entry_points_are_absent():
+    from looper.agents import layer_effort
+
+    assert not hasattr(layer_effort, "migrate")
+    assert not hasattr(connection, "_schema_phases")
+    assert "registry-phase:" not in connection.SCHEMA_PATH.read_text()
+    for name in ("registry_migration", "task_concurrency"):
+        assert not (connection.SCHEMA_PATH.parent / f"{name}.py").exists()
+    package = connection.SCHEMA_PATH.parents[1]
+    retired = {f"looper.db.{name}" for name in ("registry_migration", "task_concurrency")}
+    for path in package.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Import):
+                modules = {alias.name for alias in node.names}
+            elif isinstance(node, ast.ImportFrom):
+                parents = ("looper", *path.relative_to(package).parent.parts)
+                base = ".".join(parents[:len(parents) - node.level + 1]) if node.level else ""
+                module = ".".join(filter(None, (base, node.module)))
+                modules = {module, *(f"{module}.{alias.name}" for alias in node.names)}
+            else:
+                continue
+            assert not modules & retired, path.relative_to(package)
+
+
+@pytest.mark.parametrize("table", ["agents", "agent_configs", "task_agent_overrides", "llm_profiles", "project_skills"])
+def test_historical_table_alone_is_never_fresh(table):
+    async def test():
+        async with fresh_connection() as conn:
+            await conn.execute(f"CREATE TABLE {table} (id text PRIMARY KEY)")
+            before, shape = await witness(conn), await structure(conn)
+            for operation in (connection.schema_change_pending, connection.ensure_schema):
+                with pytest.raises(connection.RegistrySchemaVersionError, match="v2.13.165"):
+                    await operation(conn)
+                assert await witness(conn) == before and await structure(conn) == shape
+    run(test)
+
+
+@pytest.mark.parametrize("origin,owner,error", [
+    ("project", None, "CheckViolationError"), ("machine", "proj-owner", "CheckViolationError"),
+    ("project", "missing-project", "ForeignKeyViolationError"),
+])
+def test_fresh_catalog_owner_constraints(origin, owner, error):
+    import asyncpg
+
+    async def test():
+        async with fresh_connection() as conn:
+            await connection.ensure_schema(conn)
+            await conn.execute("INSERT INTO projects (id, name) VALUES ('proj-owner', 'Owner')")
+            sql = ("INSERT INTO library_items (id, kind, name, sha256, size_bytes, file_count, origin, owner_project_id) "
+                   "VALUES ($1, 'skill', 'Owned skill', 'synthetic-hash', 0, 0, $2, $3)")
+            await conn.execute(sql, "valid-owned", "project", "proj-owner")
+            await conn.execute(sql, "valid-global", "machine", None)
+            with pytest.raises(getattr(asyncpg, error)):
+                await conn.execute(sql, "invalid", origin, owner)
     run(test)
 
 
@@ -346,4 +412,5 @@ def test_current_marker_does_not_require_a_recorded_text_fingerprint():
             assert not await connection.schema_change_pending(conn)
             await connection.ensure_schema(conn)
             assert await conn.fetchval("SELECT version FROM registry_schema_version") == 4
+            assert not await conn.fetchval("SELECT to_regclass('schema_fingerprint') IS NOT NULL")
     run(test)

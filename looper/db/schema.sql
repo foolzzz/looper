@@ -1,78 +1,19 @@
 -- Looper Agent System Schema
 -- Executed by connection.ensure_schema in a single locked transaction.
 
--- registry-phase: expand
--- One-time data migrations; schema.sql itself runs on every startup.
+-- The applied baseline text, used when deciding whether to make an upgrade backup.
+CREATE TABLE IF NOT EXISTS schema_fingerprint (
+    id          BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+    sha256      TEXT NOT NULL,
+    applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS schema_migrations (
     name        TEXT PRIMARY KEY,
     applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Once (the names the dashboard uses): "agent" names only a running agent. A
--- role's settings (agent_configs, keyed by agent_id) are role_configs keyed by
--- role; what was registered as an agent (agents) is an Agent Profile
--- (agent_profiles), and what selects one names it profile_id: a settings
--- layer, a task's choice (task_agent_overrides, now task_profile_overrides) and
--- a saved session (session_agent_id). The tables and columns are renamed in
--- place (their foreign keys follow), and their constraints take the names a
--- new database gives them. agent_configs.role is dropped first: it repeated
--- the key in every row Looper wrote, and nothing read it. This runs before
--- anything below names the new tables, so a database of any earlier version
--- arrives at them with its rows.
-DO $$
-DECLARE
-    c RECORD;
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'profiles_roles_renamed') THEN
-        IF to_regclass('agent_configs') IS NOT NULL THEN
-            ALTER TABLE agent_configs DROP COLUMN IF EXISTS role;
-            ALTER TABLE agent_configs RENAME COLUMN agent_id TO role;
-            ALTER TABLE agent_configs RENAME TO role_configs;
-        END IF;
-        IF to_regclass('agents') IS NOT NULL THEN
-            ALTER TABLE agents RENAME TO agent_profiles;
-        END IF;
-        IF to_regclass('task_agent_overrides') IS NOT NULL THEN
-            ALTER TABLE task_agent_overrides RENAME COLUMN agent_id TO profile_id;
-            ALTER TABLE task_agent_overrides RENAME TO task_profile_overrides;
-        END IF;
-        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
-                   AND table_name = 'agent_setting_layers' AND column_name = 'agent_id') THEN
-            ALTER TABLE agent_setting_layers RENAME COLUMN agent_id TO profile_id;
-        END IF;
-        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
-                   AND table_name = 'agent_sessions' AND column_name = 'session_agent_id') THEN
-            ALTER TABLE agent_sessions RENAME COLUMN session_agent_id TO profile_id;
-        END IF;
-        FOR c IN
-            SELECT t.tbl, t.old_name, t.new_name
-            FROM (VALUES
-                ('role_configs', 'agent_configs_pkey', 'role_configs_pkey'),
-                ('agent_profiles', 'agents_pkey', 'agent_profiles_pkey'),
-                ('agent_profiles', 'agents_name_key', 'agent_profiles_name_key'),
-                ('agent_profiles', 'agents_runtime_id_fkey', 'agent_profiles_runtime_id_fkey'),
-                ('agent_profiles', 'agents_provider_id_fkey', 'agent_profiles_provider_id_fkey'),
-                ('agent_profiles', 'agents_model_check', 'agent_profiles_model_check'),
-                ('agent_profiles', 'agents_effort_check', 'agent_profiles_effort_check'),
-                ('task_profile_overrides', 'task_agent_overrides_pkey', 'task_profile_overrides_pkey'),
-                ('task_profile_overrides', 'task_agent_overrides_task_id_fkey', 'task_profile_overrides_task_id_fkey'),
-                ('task_profile_overrides', 'task_agent_overrides_role_check', 'task_profile_overrides_role_check'),
-                ('task_profile_overrides', 'task_agent_overrides_agent_id_fkey',
-                 'task_profile_overrides_profile_id_fkey'),
-                ('agent_setting_layers', 'agent_setting_layers_agent_id_fkey', 'agent_setting_layers_profile_id_fkey')
-            ) AS t(tbl, old_name, new_name)
-            JOIN pg_constraint k ON k.conname = t.old_name AND k.conrelid = to_regclass(t.tbl)
-        LOOP
-            EXECUTE format('ALTER TABLE %I RENAME CONSTRAINT %I TO %I', c.tbl, c.old_name, c.new_name);
-        END LOOP;
-        INSERT INTO schema_migrations (name) VALUES ('profiles_roles_renamed');
-    END IF;
-END $$;
-
-
--- Registry expansion keeps the v2 columns until historical SQL and Python
--- migrations finish. ensure_schema compares and applies the conversion before
--- contract, under the same schema lock and transaction.
+-- Runtime, provider, model and profile registry.
 CREATE TABLE IF NOT EXISTS agent_runtimes (
     id            TEXT PRIMARY KEY,
     name          TEXT NOT NULL UNIQUE,
@@ -92,63 +33,17 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
 CREATE TABLE IF NOT EXISTS llm_providers (
     id                  TEXT PRIMARY KEY,
     name                TEXT NOT NULL UNIQUE,
-    protocols           TEXT[] NOT NULL CHECK (cardinality(protocols) > 0
-        AND protocols <@ ARRAY['anthropic-messages', 'openai-responses', 'openai-chat']),
     auth                TEXT NOT NULL CHECK (auth IN ('oauth', 'api_key')),
     oauth_runtime_type  TEXT,
-    base_url            TEXT NOT NULL DEFAULT '',
-    -- The model catalog: [{"name", "context_window", "input_usd_per_mtok", "output_usd_per_mtok",
-    -- "cache_read_usd_per_mtok", "cache_write_usd_per_mtok", "efforts", "background_model"}], each but the name
-    -- null when unknown; [] = any model the provider takes. A null price falls back to the built-in price table.
-    models              JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(models) = 'array'),
     -- At most this many runs at once on the provider; NULL = no limit.
     max_concurrency     INTEGER CHECK (max_concurrency > 0),
     builtin             BOOLEAN NOT NULL DEFAULT false,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CHECK ((auth = 'oauth') = (oauth_runtime_type IS NOT NULL))
-);
--- The provider's own environment variables for the runs that use it, [{"key", "value"}]: not secrets (its key is
--- in llm_provider_secrets), and none a runtime's provider binding sets itself.
-ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS env JSONB NOT NULL DEFAULT '[]'::jsonb
-    CHECK (jsonb_typeof(env) = 'array');
-CREATE TABLE IF NOT EXISTS llm_provider_secrets (
-    provider_id  TEXT PRIMARY KEY REFERENCES llm_providers(id) ON DELETE CASCADE,
-    api_key      TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS agent_profiles (
-    id           TEXT PRIMARY KEY,
-    name         TEXT NOT NULL UNIQUE,
-    runtime_id   TEXT NOT NULL REFERENCES agent_runtimes(id),
-    provider_id  TEXT NOT NULL REFERENCES llm_providers(id),
-    model        TEXT NOT NULL CHECK (model <> ''),
-    -- The effort of the profile's runs (no layer sets one). NULL: the runtime's own default.
-    effort       TEXT CHECK (effort IN ('off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')),
-    builtin      BOOLEAN NOT NULL DEFAULT false,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
-);
--- Claude Code's agent teams for the profile's runs, only on a Claude Code runtime. On by default there: the
--- registry sets a new profile's (profile_registry.default_agent_teams) and a migration below turned them on once
--- for the profiles before; the column's default is for the other runtimes, which have none.
-ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS agent_teams BOOLEAN NOT NULL DEFAULT false;
--- Existing profiles add no custom text and append the Looper prompt by default.
-ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS custom_prompt TEXT NOT NULL DEFAULT '';
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'profile_runtime_effort_levels') THEN
-        ALTER TABLE agent_profiles DROP CONSTRAINT IF EXISTS agent_profiles_effort_check;
-        ALTER TABLE agent_profiles ADD CONSTRAINT agent_profiles_effort_check
-            CHECK (effort IN ('off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'));
-        INSERT INTO schema_migrations (name) VALUES ('profile_runtime_effort_levels');
-    END IF;
-END $$;
-
-CREATE TABLE IF NOT EXISTS registry_schema_version (
-    id       BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
-    version  INTEGER NOT NULL CHECK (version > 0)
-);
-ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS vendor_type TEXT
+    CHECK ((auth = 'oauth') = (oauth_runtime_type IS NOT NULL)),
+    env JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(env) = 'array'),
+    vendor_type TEXT NOT NULL
     CHECK (vendor_type IN ('glm-bigmodel', 'glm-zai', 'deepseek', 'kimi-moonshot-cn', 'kimi-moonshot',
                           'cpa', 'opencode', 'sub2api', 'claude-subscription', 'codex-login', 'grok-login', 'custom'))
     CHECK (
@@ -160,7 +55,17 @@ ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS vendor_type TEXT
             AND oauth_runtime_type = 'grok')
         OR (vendor_type NOT IN ('claude-subscription', 'codex-login', 'grok-login')
             AND auth = 'api_key' AND oauth_runtime_type IS NULL)
-    );
+    )
+);
+CREATE TABLE IF NOT EXISTS llm_provider_secrets (
+    provider_id  TEXT PRIMARY KEY REFERENCES llm_providers(id) ON DELETE CASCADE,
+    api_key      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS registry_schema_version (
+    id       BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+    version  INTEGER NOT NULL CHECK (version > 0)
+);
 CREATE TABLE IF NOT EXISTS llm_provider_endpoints (
     provider_id          TEXT NOT NULL REFERENCES llm_providers(id) ON DELETE CASCADE,
     protocol             TEXT NOT NULL CHECK (protocol IN ('anthropic-messages', 'openai-responses', 'openai-chat')),
@@ -199,7 +104,19 @@ CREATE TABLE IF NOT EXISTS llm_models (
     FOREIGN KEY (provider_id, protocol) REFERENCES llm_provider_endpoints(provider_id, protocol) ON DELETE RESTRICT,
     UNIQUE (provider_id, name, protocol)
 );
-ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS model_id TEXT REFERENCES llm_models(id) ON DELETE RESTRICT;
+CREATE TABLE IF NOT EXISTS agent_profiles (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL UNIQUE,
+    runtime_id   TEXT NOT NULL REFERENCES agent_runtimes(id),
+    -- The effort of the profile's runs (no layer sets one). NULL: the runtime's own default.
+    effort       TEXT CHECK (effort IN ('off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')),
+    builtin      BOOLEAN NOT NULL DEFAULT false,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    agent_teams BOOLEAN NOT NULL DEFAULT false,
+    custom_prompt TEXT NOT NULL DEFAULT '',
+    model_id TEXT NOT NULL REFERENCES llm_models(id) ON DELETE RESTRICT
+);
 
 -- Append-only migration history, intentionally without live-object FKs: normal
 -- deletion of a model/provider must not erase or be blocked by its old mapping.
@@ -212,7 +129,95 @@ CREATE TABLE IF NOT EXISTS llm_model_migration_map (
     PRIMARY KEY (legacy_provider_id, legacy_model, protocol)
 );
 
--- registry-phase: legacy
+-- Every task belongs to one project; a project may give its tasks a default
+-- directory (work_dir, '' = none).
+CREATE TABLE IF NOT EXISTS projects (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    work_dir    TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    background TEXT NOT NULL DEFAULT '',
+    task_budget_usd DOUBLE PRECISION CHECK (task_budget_usd > 0),
+    task_budget_action TEXT
+    CHECK (task_budget_action IN ('wrap_up', 'fail')),
+    supervise_interval_seconds INTEGER
+    CHECK (supervise_interval_seconds >= 0),
+    review_policy TEXT CHECK (review_policy IN ('planner', 'all')),
+    step_workspaces TEXT CHECK (step_workspaces IN ('shared', 'worktree')),
+    workspace_links TEXT[] CHECK (cardinality(workspace_links) <= 20),
+    task_workspaces TEXT CHECK (task_workspaces IN ('in_place', 'worktree')),
+    operator_notes TEXT CHECK (operator_notes IN ('off', 'on')),
+    vault TEXT CHECK (vault IN ('off', 'on')),
+    max_step_retries INTEGER
+    CHECK (max_step_retries >= 0 AND max_step_retries <= 20),
+    planner_roles TEXT CHECK (planner_roles IN ('off', 'on')),
+    role_text_max_chars INTEGER
+    CHECK (role_text_max_chars >= 500 AND role_text_max_chars <= 20000),
+    user_gates TEXT CHECK (user_gates IN ('off', 'on')),
+    gate_reminder_hours INTEGER
+    CHECK (gate_reminder_hours >= 0 AND gate_reminder_hours <= 168),
+    agent_room TEXT CHECK (agent_room IN ('off', 'on')),
+    room_post_per_minute INTEGER
+    CHECK (room_post_per_minute >= 1 AND room_post_per_minute <= 60),
+    room_broadcasts_per_run INTEGER
+    CHECK (room_broadcasts_per_run >= 0 AND room_broadcasts_per_run <= 50),
+    room_message_max_chars INTEGER
+    CHECK (room_message_max_chars >= 500 AND room_message_max_chars <= 20000),
+    room_messages_per_task INTEGER
+    CHECK (room_messages_per_task >= 20 AND room_messages_per_task <= 5000),
+    room_ping_pong_rounds INTEGER
+    CHECK (room_ping_pong_rounds >= 2 AND room_ping_pong_rounds <= 50),
+    room_wait_max_seconds INTEGER
+    CHECK (room_wait_max_seconds >= 0 AND room_wait_max_seconds <= 120),
+    room_consult_budget_usd DOUBLE PRECISION
+    CHECK (room_consult_budget_usd >= 0.01 AND room_consult_budget_usd <= 5),
+    room_consult_timeout_seconds INTEGER
+    CHECK (room_consult_timeout_seconds >= 30 AND room_consult_timeout_seconds <= 1800),
+    room_consults_per_task INTEGER
+    CHECK (room_consults_per_task >= 0 AND room_consults_per_task <= 100),
+    wait_commands TEXT CHECK (wait_commands IN ('off', 'on')),
+    distill_lessons TEXT NOT NULL DEFAULT 'off' CONSTRAINT projects_distill_lessons_check
+        CHECK (distill_lessons IN ('off', 'draft', 'write'))
+);
+
+-- A Manager: the default one ('manager', the one every install had) or a scenario Manager the operator defined
+-- (manager-<key>). Its id is its agent id: its session (agent_sessions), its runs (llm_records.agent_id), its bus
+-- queue. The default Manager's prompt and profile stay in role_configs.manager and Settings → Roles, so its row
+-- holds neither, uses every tool, sees every task and cannot be disabled.
+CREATE TABLE IF NOT EXISTS managers (
+    id            TEXT PRIMARY KEY
+                  CONSTRAINT managers_id_check CHECK (id = 'manager' OR id ~ '^manager-[a-z][a-z0-9-]{1,30}$'),
+    name          TEXT NOT NULL CONSTRAINT managers_name_check CHECK (btrim(name) <> '' AND length(name) <= 60),
+    description   TEXT NOT NULL DEFAULT '' CONSTRAINT managers_description_check CHECK (length(description) <= 300),
+    system_prompt TEXT,
+    profile_id    TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
+    tools         TEXT NOT NULL DEFAULT 'tasks' CONSTRAINT managers_tools_check CHECK (tools IN ('all', 'tasks')),
+    -- Which tasks the Manager sees and may act on (its task tools, overview counts, spend, task-derived reads):
+    -- 'all' every task, 'own' only the tasks it created. Independent of tools; any combination is valid.
+    task_scope    TEXT NOT NULL DEFAULT 'own' CONSTRAINT managers_task_scope_check CHECK (task_scope IN ('all', 'own')),
+    task_policy   TEXT NOT NULL DEFAULT 'free'
+                  CONSTRAINT managers_task_policy_check CHECK (task_policy IN ('free', 'templates_only')),
+    enabled       BOOLEAN NOT NULL DEFAULT true,
+    idle_timeout_seconds INTEGER NOT NULL DEFAULT 1800
+                  CONSTRAINT managers_idle_timeout_seconds_check
+                  CHECK (idle_timeout_seconds = 0 OR idle_timeout_seconds BETWEEN 60 AND 86400),
+    -- Bumped in the same transaction by every write that changes what the Manager may do (tools, task_scope,
+    -- task_policy, enabled, a template saved or removed): ManagerOps compares it at each call.
+    revision      BIGINT NOT NULL DEFAULT 0,
+    -- Deleted on the dashboard: the row stays so its chat threads keep their owner (they never fall to the default
+    -- Manager) and its id is never reused; a deleted row is disabled and hidden from every view.
+    deleted_at    TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT managers_default_check CHECK (id <> 'manager' OR
+        (system_prompt IS NULL AND profile_id IS NULL AND tools = 'all' AND task_scope = 'all' AND enabled
+         AND deleted_at IS NULL AND idle_timeout_seconds = 0)),
+    CONSTRAINT managers_deleted_check CHECK (deleted_at IS NULL OR NOT enabled),
+    CONSTRAINT managers_prompt_check CHECK (id = 'manager' OR btrim(coalesce(system_prompt, '')) <> '')
+);
+
 CREATE TABLE IF NOT EXISTS tasks (
     id                TEXT PRIMARY KEY,
     requirement       TEXT NOT NULL,
@@ -226,26 +231,30 @@ CREATE TABLE IF NOT EXISTS tasks (
     error             TEXT,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    completed_at      TIMESTAMPTZ
+    completed_at      TIMESTAMPTZ,
+    work_dir TEXT NOT NULL DEFAULT '',
+    attempt_ended_at TIMESTAMPTZ,
+    config JSONB NOT NULL DEFAULT '{}',
+    workspace_dir TEXT NOT NULL DEFAULT '',
+    workspace_mode TEXT CHECK (workspace_mode IN ('in_place', 'worktree')),
+    workspace_base TEXT NOT NULL DEFAULT '',
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    fail_kind TEXT CHECK (fail_kind IN ('task_budget')),
+    manager_id TEXT NOT NULL DEFAULT 'manager'
+    REFERENCES managers(id) ON DELETE RESTRICT,
+    template JSONB,
+    origin_thread TEXT,
+    schedule_id TEXT,
+    budget_usd DOUBLE PRECISION CHECK (budget_usd > 0),
+    planner_session_label TEXT,
+    chat_id TEXT,
+    chat_mention TEXT,
+    original_user_text TEXT,
+    title TEXT,
+    client_id TEXT,
+    continues_schedule_session BOOLEAN NOT NULL DEFAULT false,
+    chat_kind TEXT CHECK (chat_kind IN ('user', 'chat'))
 );
-
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT 'pending';
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS work_dir TEXT NOT NULL DEFAULT '';
--- Every ended attempt, including Stop; cleared on restart. Legacy rows remain unknown (NULL).
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS attempt_ended_at TIMESTAMPTZ;
-
--- A task runs in the directory the user chose (work_dir). project_root was a
--- second directory field the dashboard never set; fold it in and drop it.
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.columns
-               WHERE table_schema = current_schema() AND table_name = 'tasks'
-                 AND column_name = 'project_root') THEN
-        UPDATE tasks SET work_dir = project_root WHERE work_dir = '' AND project_root <> '';
-        ALTER TABLE tasks DROP COLUMN project_root;
-    END IF;
-END $$;
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS config JSONB NOT NULL DEFAULT '{}';
 
 CREATE TABLE IF NOT EXISTS activity (
     seq              BIGSERIAL PRIMARY KEY,
@@ -274,33 +283,28 @@ CREATE TABLE IF NOT EXISTS task_steps (
     result           JSONB,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    completed_at     TIMESTAMPTZ
+    completed_at     TIMESTAMPTZ,
+    step_key TEXT NOT NULL DEFAULT '',
+    depends_on TEXT[] NOT NULL DEFAULT '{}',
+    review BOOLEAN NOT NULL DEFAULT false,
+    validation_commands TEXT[] NOT NULL DEFAULT '{}',
+    acceptance_criteria TEXT[] NOT NULL DEFAULT '{}',
+    retries INTEGER NOT NULL DEFAULT 0,
+    feedback TEXT[] NOT NULL DEFAULT '{}',
+    reviewer_id TEXT,
+    missed_messages TEXT[] NOT NULL DEFAULT '{}',
+    started_at TIMESTAMPTZ,
+    role_key TEXT,
+    role_version INTEGER,
+    review_stage TEXT CHECK (review_stage IN ('builtin', 'role')),
+    review_roles JSONB NOT NULL DEFAULT '[]'::jsonb,
+    review_position INTEGER,
+    kind TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'gate', 'wait')),
+    CONSTRAINT task_steps_review_roles_reviewed
+        CHECK (jsonb_typeof(review_roles) = 'array' AND (jsonb_array_length(review_roles) = 0 OR review))
 );
 
 CREATE INDEX IF NOT EXISTS idx_steps_task ON task_steps(task_id, step_index);
-
--- The rest of a Planner's step, so the table is the step's only record:
--- step_key is the Planner's label for it (unique within the task), depends_on
--- the step ids it waits for, review whether a Reviewer must pass it; retries,
--- feedback (one entry per retry) and missed_messages (user text forwarded too
--- late for its Worker) feed the Planner's next decision on it.
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS step_key TEXT NOT NULL DEFAULT '';
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS depends_on TEXT[] NOT NULL DEFAULT '{}';
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review BOOLEAN NOT NULL DEFAULT false;
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS validation_commands TEXT[] NOT NULL DEFAULT '{}';
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS acceptance_criteria TEXT[] NOT NULL DEFAULT '{}';
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS retries INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS feedback TEXT[] NOT NULL DEFAULT '{}';
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS reviewer_id TEXT;
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS missed_messages TEXT[] NOT NULL DEFAULT '{}';
-
--- When the step's run was first dispatched (its first Worker started), kept through its retries and reviews, and
--- through a server restart (its attempt runs again as the same attempt). A step sent back to not started (a
--- restart of the task, or its continue at the spend cap) has none, and gets a new one when it is dispatched again,
--- so the time the task was stopped does not count. Null until then, and for the steps of a server before this
--- column: no start is guessed for them. With completed_at (the last time it went to review or ended) it gives how
--- long the step took.
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
 
 -- A task's plan beside its steps: one row per task, replaced when the task
 -- is planned again. The task's requirement, directory and project stay on
@@ -315,7 +319,9 @@ CREATE TABLE IF NOT EXISTS task_plans (
     final_summary     TEXT NOT NULL DEFAULT '',
     fail_reason       TEXT NOT NULL DEFAULT '',
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    start_branch TEXT NOT NULL DEFAULT '',
+    start_commit TEXT NOT NULL DEFAULT ''
 );
 
 -- The Claude session a resident agent resumes after a restart: 'manager', or
@@ -326,50 +332,23 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     agent_id        TEXT PRIMARY KEY,
     session_id      TEXT,
     session_totals  JSONB NOT NULL DEFAULT '{}',
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    runtime_type TEXT,
+    profile_id TEXT,
+    provider_id TEXT,
+    clean_start BOOLEAN NOT NULL DEFAULT false,
+    pending_handoff TEXT,
+    selected_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
+    CONSTRAINT agent_sessions_selected_profile_manager
+        CHECK (selected_profile_id IS NULL OR agent_id = 'manager' OR agent_id LIKE 'manager-%')
 );
--- The runtime type the session belongs to and the Agent Profile (agent_profiles.id) that ran it
--- last: a process of another runtime type cannot resume it, so the next turn
--- starts a new session. NULL: a session from before Agent Profiles, which Claude Code ran.
-ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS runtime_type TEXT;
-ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS profile_id TEXT;
--- The provider (llm_providers.id) the session ran with: a session resumes only with the same runtime type and
--- the same provider (runtimes.can_resume). NULL: a session from before this column, run with Claude Code's own
--- login.
-ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS provider_id TEXT;
--- The user dropped the session (/new in a chat with the Manager): the next session starts clean, without the
--- resume brief a new session otherwise gets. Cleared once that session has started.
-ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS clean_start BOOLEAN NOT NULL DEFAULT false;
--- Keep the predecessor's summary until the replacement session has committed its context.
-ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS pending_handoff TEXT;
--- The Agent Profile the user chose for the Manager's current session (/profile, the dashboard): it wins over the
--- manager role's and the shared defaults' profile until /new. NULL follows Settings.
-ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS selected_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT;
--- Every Manager's session may hold its own choice ('manager', 'manager-<key>'). The constraint keeps its name
--- (an older binary adds it only when no constraint of that name exists) and only its definition widens.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint
-                   WHERE conname = 'agent_sessions_selected_profile_manager'
-                     AND conrelid = 'agent_sessions'::regclass) THEN
-        ALTER TABLE agent_sessions ADD CONSTRAINT agent_sessions_selected_profile_manager
-            CHECK (selected_profile_id IS NULL OR agent_id = 'manager' OR agent_id LIKE 'manager-%');
-    ELSIF EXISTS (SELECT 1 FROM pg_constraint
-                  WHERE conname = 'agent_sessions_selected_profile_manager'
-                    AND conrelid = 'agent_sessions'::regclass
-                    AND pg_get_constraintdef(oid) NOT LIKE '%manager-%') THEN
-        ALTER TABLE agent_sessions DROP CONSTRAINT agent_sessions_selected_profile_manager;
-        ALTER TABLE agent_sessions ADD CONSTRAINT agent_sessions_selected_profile_manager
-            CHECK (selected_profile_id IS NULL OR agent_id = 'manager' OR agent_id LIKE 'manager-%');
-    END IF;
-END $$;
 
 -- One protocol per api session; agent_sessions keeps the current-session pointer.
 CREATE TABLE IF NOT EXISTS api_sessions (
     session_id  TEXT PRIMARY KEY,
-    protocol    TEXT NOT NULL CHECK (protocol IN ('openai-responses', 'anthropic-messages', 'openai-chat'))
+    protocol    TEXT NOT NULL CHECK (protocol IN ('openai-responses', 'anthropic-messages', 'openai-chat')),
+    context_tokens INTEGER
 );
-ALTER TABLE api_sessions ADD COLUMN IF NOT EXISTS context_tokens INTEGER;
 -- Neutral items, appended per completed request and removed with their session.
 CREATE TABLE IF NOT EXISTS api_session_items (
     session_id  TEXT NOT NULL REFERENCES api_sessions(session_id) ON DELETE CASCADE,
@@ -397,15 +376,14 @@ CREATE TABLE IF NOT EXISTS task_journal (
     kind        TEXT NOT NULL CONSTRAINT task_journal_kind_check CHECK (kind IN (
                     'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement',
                     'session_switch', 'handoff', 'progress', 'profile_choice', 'concurrency_change',
-                    'role_defined', 'gate_opened', 'gate_updated', 'gate_cancelled', 'gate_closed')),
+                    'role_defined', 'gate_opened', 'gate_updated', 'gate_cancelled', 'gate_closed',
+                    'wait_opened', 'wait_extended', 'wait_closed')),
     summary     TEXT NOT NULL DEFAULT '',
     learnings   TEXT[] NOT NULL DEFAULT '{}',
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    via TEXT NOT NULL DEFAULT '',
+    delivered_at TIMESTAMPTZ
 );
--- A supplement's way in ('chat': sent to the Planner on the Chat page; 'manager:<channel>'; 'task_page') and when
--- its task's Planner had it in a turn (NULL: not yet; the Planner's next turn gives it). Unused by other kinds.
-ALTER TABLE task_journal ADD COLUMN IF NOT EXISTS via TEXT NOT NULL DEFAULT '';
-ALTER TABLE task_journal ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_task_journal_task ON task_journal (task_id, id);
 -- A step is accepted once.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_journal_accepted ON task_journal (task_id, step_id)
@@ -442,19 +420,14 @@ CREATE TABLE IF NOT EXISTS step_workspaces (
     CONSTRAINT step_workspaces_unmerged_reason_check CHECK (
         CASE WHEN state = 'unmerged' THEN merge_error IS NOT NULL
              WHEN state IN ('active', 'merging', 'merged') THEN merge_error IS NULL
-             ELSE true END)
+             ELSE true END),
+    links TEXT[] NOT NULL DEFAULT '{}',
+    merge_files TEXT[] NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_step_workspaces_task ON step_workspaces (task_id, id);
 -- A step has one workspace in use at a time.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_step_workspaces_open ON step_workspaces (step_id)
     WHERE state IN ('active', 'merging');
--- A task's workspace: the directory the user named for it (workspace_dir; '' for a task from before, whose
--- work_dir is its workspace), how it runs there (workspace_mode: 'in_place', also when NULL, or 'worktree': in a
--- git worktree of it, on a branch of its own) and where that branch starts (workspace_base; '': the workspace's
--- commit when the task first starts). work_dir is where the task runs: the workspace, or the task's worktree.
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS workspace_dir TEXT NOT NULL DEFAULT '';
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS workspace_mode TEXT CHECK (workspace_mode IN ('in_place', 'worktree'));
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS workspace_base TEXT NOT NULL DEFAULT '';
 -- The git worktree a task runs in, in a worktree workspace: made when the task first starts, removed when it
 -- completes or is deleted (its branch stays in the user's repository), kept while it is stopped or failed.
 -- Code owns the states (looper/agents/task_workspaces.py).
@@ -472,14 +445,6 @@ CREATE TABLE IF NOT EXISTS task_worktrees (
     removed_at     TIMESTAMPTZ,
     CONSTRAINT task_worktrees_removed_check CHECK ((state = 'removed') = (removed_at IS NOT NULL))
 );
--- links: the paths linked back to the task directory in it; merge_files: the files that kept an unmerged one from
--- merging (the conflicting or blocking ones).
-ALTER TABLE step_workspaces ADD COLUMN IF NOT EXISTS links TEXT[] NOT NULL DEFAULT '{}';
-ALTER TABLE step_workspaces ADD COLUMN IF NOT EXISTS merge_files TEXT[] NOT NULL DEFAULT '{}';
--- Where the task's branch was when it dispatched its first step, in a project with step workspaces: going back
--- there undoes the task's commits ('' when not recorded).
-ALTER TABLE task_plans ADD COLUMN IF NOT EXISTS start_branch TEXT NOT NULL DEFAULT '';
-ALTER TABLE task_plans ADD COLUMN IF NOT EXISTS start_commit TEXT NOT NULL DEFAULT '';
 
 -- Every version of a task's requirement once it has been edited (tasks.requirement is always the latest; a task
 -- never edited has none). Version 1 is the text it was created with. delivered_at: when the task's Planner had the
@@ -512,7 +477,9 @@ CREATE TABLE IF NOT EXISTS manager_actions (
     error_code       TEXT,
     result           JSONB,
     confirmation_id  TEXT,
-    task_id          TEXT
+    task_id          TEXT,
+    manager_id TEXT NOT NULL DEFAULT 'manager',
+    client_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_manager_actions_task ON manager_actions (task_id, id) WHERE task_id IS NOT NULL;
 
@@ -527,25 +494,9 @@ CREATE TABLE IF NOT EXISTS role_configs (
     extra_args       JSONB,
     metadata         JSONB,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    default_prompt TEXT NOT NULL DEFAULT ''
 );
--- The system-recommended prompt for this role. seed keeps it current; an
--- unedited row (system_prompt = default_prompt) follows it, an edited row does
--- not, and "reset to recommended" copies it back into system_prompt.
-ALTER TABLE role_configs ADD COLUMN IF NOT EXISTS default_prompt TEXT NOT NULL DEFAULT '';
--- permission_mode was never applied: every agent runs with
--- --dangerously-skip-permissions (claude_cli.permission_args).
-ALTER TABLE role_configs DROP COLUMN IF EXISTS permission_mode;
--- Once: max_concurrency was never enforced. How many of a task's Workers or
--- Reviewers run at once is its own limit, else its role layer's
--- max_concurrency (agent_setting_layers, below).
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'role_configs_max_concurrency_removed') THEN
-        ALTER TABLE role_configs DROP COLUMN IF EXISTS max_concurrency;
-        INSERT INTO schema_migrations (name) VALUES ('role_configs_max_concurrency_removed');
-    END IF;
-END $$;
 
 -- A task's profile overrides: its own choice of Agent Profile for some of its
 -- roles (the Planner, Workers or Reviewers), the only agent setting a task has.
@@ -572,7 +523,6 @@ CREATE TABLE IF NOT EXISTS system_settings (
 -- read-only copy materialized under the runtime root (looper/agents/library.py),
 -- never the operator's ~/.claude. An item's sha256 is the hash of its files; a
 -- re-import replaces a changed item's files and keeps its id and its installs.
--- origin, owner_project_id and description are added below, after projects.
 CREATE TABLE IF NOT EXISTS library_items (
     id           TEXT PRIMARY KEY,
     kind         TEXT NOT NULL CHECK (kind IN ('plugin', 'skill', 'mcp')),
@@ -583,7 +533,13 @@ CREATE TABLE IF NOT EXISTS library_items (
     size_bytes   BIGINT NOT NULL,
     file_count   INTEGER NOT NULL,
     imported_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    origin TEXT NOT NULL DEFAULT 'machine'
+    CHECK (origin IN ('machine', 'upload', 'git', 'ui', 'project')),
+    owner_project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    description TEXT NOT NULL DEFAULT '',
+    modified BOOLEAN NOT NULL DEFAULT false,
+    CONSTRAINT library_items_owner_check CHECK ((origin = 'project') = (owner_project_id IS NOT NULL))
 );
 CREATE TABLE IF NOT EXISTS library_files (
     item_id     TEXT NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
@@ -593,237 +549,7 @@ CREATE TABLE IF NOT EXISTS library_files (
     executable  BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY (item_id, path)
 );
-
--- Once: move the worker's old seeded limit (600 s) to the new default. A value
--- set later, including 600, stays.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'worker_timeout_default_86400') THEN
-        UPDATE role_configs SET timeout_seconds = 86400
-        WHERE role = 'worker' AND timeout_seconds = 600;
-        INSERT INTO schema_migrations (name) VALUES ('worker_timeout_default_86400');
-    END IF;
-END $$;
-
--- Once: a journal from before M7c, which held 'step_accepted' entries only,
--- accepts the other kinds.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_journal_kinds_m7c') THEN
-        ALTER TABLE task_journal DROP CONSTRAINT IF EXISTS task_journal_kind_check;
-        ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
-            'step_accepted', 'step_failed', 'step_retry', 'decision', 'user_instruction', 'session_switch',
-            'handoff'));
-        INSERT INTO schema_migrations (name) VALUES ('task_journal_kinds_m7c');
-    END IF;
-END $$;
-
--- Once (task progress): the Planner's progress notes join the journal kinds. After the block above, which
--- sets the kinds before them, so a new database ends with these too.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_journal_kinds_progress') THEN
-        ALTER TABLE task_journal DROP CONSTRAINT IF EXISTS task_journal_kind_check;
-        ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
-            'step_accepted', 'step_failed', 'step_retry', 'decision', 'user_instruction', 'session_switch',
-            'handoff', 'progress'));
-        INSERT INTO schema_migrations (name) VALUES ('task_journal_kinds_progress');
-    END IF;
-END $$;
-
--- Once (task changes): every chat message to a Planner is a supplement now. The user instructions from before
--- become supplements their Planner already had, sent on the Chat page.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_journal_supplements') THEN
-        ALTER TABLE task_journal DROP CONSTRAINT IF EXISTS task_journal_kind_check;
-        UPDATE task_journal SET kind = 'supplement', via = 'chat', delivered_at = created_at
-        WHERE kind = 'user_instruction';
-        ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
-            'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement', 'session_switch',
-            'handoff', 'progress'));
-        INSERT INTO schema_migrations (name) VALUES ('task_journal_supplements');
-    END IF;
-END $$;
-
--- Once (the Planner's tools): its choices of Agent Profile and its changes of concurrency join the journal kinds.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_journal_kinds_planner_tools') THEN
-        ALTER TABLE task_journal DROP CONSTRAINT IF EXISTS task_journal_kind_check;
-        ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
-            'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement', 'session_switch',
-            'handoff', 'progress', 'profile_choice', 'concurrency_change'));
-        INSERT INTO schema_migrations (name) VALUES ('task_journal_kinds_planner_tools');
-    END IF;
-END $$;
-
--- Once (roles a task's Planner defines): each new version of a role joins the journal kinds.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_journal_kinds_task_roles') THEN
-        ALTER TABLE task_journal DROP CONSTRAINT IF EXISTS task_journal_kind_check;
-        ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
-            'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement', 'session_switch',
-            'handoff', 'progress', 'profile_choice', 'concurrency_change', 'role_defined'));
-        INSERT INTO schema_migrations (name) VALUES ('task_journal_kinds_task_roles');
-    END IF;
-END $$;
-
--- Once (user gates): a gate opening, changing, being cancelled and closing join the journal kinds.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_journal_kinds_user_gates') THEN
-        ALTER TABLE task_journal DROP CONSTRAINT IF EXISTS task_journal_kind_check;
-        ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
-            'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement', 'session_switch',
-            'handoff', 'progress', 'profile_choice', 'concurrency_change', 'role_defined', 'gate_opened',
-            'gate_updated', 'gate_cancelled', 'gate_closed'));
-        INSERT INTO schema_migrations (name) VALUES ('task_journal_kinds_user_gates');
-    END IF;
-END $$;
-
--- Once (Agent Profiles replace LLM profiles): llm_profiles and the role
--- configs' runtime and llm_profile_id were never on any agent's launch path;
--- runtimes, providers and Agent Profiles replace them.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'llm_profiles_removed') THEN
-        ALTER TABLE role_configs DROP COLUMN IF EXISTS llm_profile_id;
-        ALTER TABLE role_configs DROP COLUMN IF EXISTS runtime;
-        DROP TABLE IF EXISTS llm_profiles;
-        INSERT INTO schema_migrations (name) VALUES ('llm_profiles_removed');
-    END IF;
-END $$;
-
--- Once (runtimes are built in): a runtime registered by hand, which no Agent
--- Profile uses, is dropped; one a profile uses stays (read-only), so the
--- profile keeps running the executable it ran.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'agent_runtimes_unused_custom_removed') THEN
-        DELETE FROM agent_runtimes r
-        WHERE NOT r.builtin AND NOT EXISTS (SELECT 1 FROM agent_profiles a WHERE a.runtime_id = r.id);
-        INSERT INTO schema_migrations (name) VALUES ('agent_runtimes_unused_custom_removed');
-    END IF;
-END $$;
-
--- steer: a runtime may list the capability to receive messages while it works. The definition is read only
--- for this schema's table (see library_installs_roles_check below).
-DO $$
-DECLARE def TEXT;
-BEGIN
-    SELECT pg_get_constraintdef(c.oid) INTO def FROM pg_constraint c
-     WHERE c.conrelid = to_regclass('agent_runtimes') AND c.conname = 'agent_runtimes_capabilities_check';
-    IF def IS NULL OR def NOT LIKE '%steer%' THEN
-        ALTER TABLE agent_runtimes DROP CONSTRAINT IF EXISTS agent_runtimes_capabilities_check;
-        ALTER TABLE agent_runtimes ADD CONSTRAINT agent_runtimes_capabilities_check CHECK (capabilities <@ ARRAY[
-            'run', 'resident_session', 'resume', 'structured_output', 'claude_plugins', 'mcp', 'add_dirs',
-            'compaction_events', 'autonomous_turns', 'cost_report', 'read_tools', 'steer']);
-    END IF;
-END $$;
-
--- Every task belongs to one project; a project may give its tasks a default
--- directory (work_dir, '' = none).
-CREATE TABLE IF NOT EXISTS projects (
-    id          TEXT PRIMARY KEY,
-    name        TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    work_dir    TEXT NOT NULL DEFAULT '',
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_name ON projects (lower(name));
--- What every task agent of the project (Planner, Workers, Reviewers) should
--- know about it: added to their system prompt; '' = none.
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS background TEXT NOT NULL DEFAULT '';
--- How the project's task agents run; NULL inherits today's behavior. Code owns
--- the types and validation (looper/agents/project_execution.py).
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_budget_usd DOUBLE PRECISION CHECK (task_budget_usd > 0);
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_budget_action TEXT
-    CHECK (task_budget_action IN ('wrap_up', 'fail'));
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS supervise_interval_seconds INTEGER
-    CHECK (supervise_interval_seconds >= 0);
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS review_policy TEXT CHECK (review_policy IN ('planner', 'all'));
--- Where a step that runs alongside others works: the task directory ('shared', also when NULL) or, in a git
--- checkout, a worktree of its own merged back when it is accepted ('worktree').
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS step_workspaces TEXT CHECK (step_workspaces IN ('shared', 'worktree'));
--- The paths Looper's worktrees of the project link back to the directory they come from (NULL: none). Named
--- step_workspace_links before task worktrees used it too (never released under that name).
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
-               AND table_name = 'projects' AND column_name = 'step_workspace_links') THEN
-        ALTER TABLE projects RENAME COLUMN step_workspace_links TO workspace_links;
-    END IF;
-END $$;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS workspace_links TEXT[] CHECK (cardinality(workspace_links) <= 20);
--- Where a task that names no workspace of its own runs: in the project's directory ('in_place', also when NULL)
--- or in a git worktree of it ('worktree'; what a new project gets), and whether the project's agents get the
--- operator's Claude Code notes for their directory ('on', also when NULL; 'off').
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_workspaces TEXT CHECK (task_workspaces IN ('in_place', 'worktree'));
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS operator_notes TEXT CHECK (operator_notes IN ('off', 'on'));
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS vault TEXT CHECK (vault IN ('off', 'on'));
--- How many times the Planner may retry one step (NULL: 2).
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS max_step_retries INTEGER
-    CHECK (max_step_retries >= 0 AND max_step_retries <= 20);
--- Whether the project's Planners may define the roles their steps run as ('on'; 'off', also when NULL), and how
--- long a role's prompt and its harness may each be (NULL: 8,000 characters).
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS planner_roles TEXT CHECK (planner_roles IN ('off', 'on'));
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS role_text_max_chars INTEGER
-    CHECK (role_text_max_chars >= 500 AND role_text_max_chars <= 20000);
--- Whether the project's Planners may open user gates ('on'; 'off', also when NULL), and how many hours a gate
--- waits for the user between reminders (NULL: 24; 0: no reminders).
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS user_gates TEXT CHECK (user_gates IN ('off', 'on'));
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS gate_reminder_hours INTEGER
-    CHECK (gate_reminder_hours >= 0 AND gate_reminder_hours <= 168);
--- The agent room of each of the project's tasks (looper/agents/room.py): on ('on', also when NULL: on by default) or
--- off; and its limits (NULL: the defaults of looper/agents/project_execution.py): how many messages a run may post a
--- minute and how many to everyone, how long one may be, how many a task holds, how many rounds two seats may trade
--- before the Planner is told, and how long an inbox may wait.
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS agent_room TEXT CHECK (agent_room IN ('off', 'on'));
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_post_per_minute INTEGER
-    CHECK (room_post_per_minute >= 1 AND room_post_per_minute <= 60);
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_broadcasts_per_run INTEGER
-    CHECK (room_broadcasts_per_run >= 0 AND room_broadcasts_per_run <= 50);
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_message_max_chars INTEGER
-    CHECK (room_message_max_chars >= 500 AND room_message_max_chars <= 20000);
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_messages_per_task INTEGER
-    CHECK (room_messages_per_task >= 20 AND room_messages_per_task <= 5000);
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_ping_pong_rounds INTEGER
-    CHECK (room_ping_pong_rounds >= 2 AND room_ping_pong_rounds <= 50);
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_wait_max_seconds INTEGER
-    CHECK (room_wait_max_seconds >= 0 AND room_wait_max_seconds <= 120);
--- The room's consults (a question for a seat no run is in, answered by its last session): how much one may spend,
--- how long it may take, and how many a task may have (NULL: 0.50 USD, 300 s, 10; 0 consults: none).
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_consult_budget_usd DOUBLE PRECISION
-    CHECK (room_consult_budget_usd >= 0.01 AND room_consult_budget_usd <= 5);
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_consult_timeout_seconds INTEGER
-    CHECK (room_consult_timeout_seconds >= 30 AND room_consult_timeout_seconds <= 1800);
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_consults_per_task INTEGER
-    CHECK (room_consults_per_task >= 0 AND room_consults_per_task <= 100);
--- What a task that completes leaves in the project's knowledge, from one more
--- Planner turn over the task journal: nothing ('off'), a draft the user
--- confirms or discards on the project page ('draft'), or a document ('write').
--- Once: the boolean from before the three modes; true becomes 'write', false
--- and NULL 'off'.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'distill_lessons_modes') THEN
-        ALTER TABLE projects ADD COLUMN IF NOT EXISTS distill_lessons BOOLEAN;
-        ALTER TABLE projects ALTER COLUMN distill_lessons TYPE TEXT
-            USING CASE WHEN distill_lessons THEN 'write' ELSE 'off' END;
-        ALTER TABLE projects ALTER COLUMN distill_lessons SET DEFAULT 'off';
-        ALTER TABLE projects ALTER COLUMN distill_lessons SET NOT NULL;
-        ALTER TABLE projects ADD CONSTRAINT projects_distill_lessons_check
-            CHECK (distill_lessons IN ('off', 'draft', 'write'));
-        INSERT INTO schema_migrations (name) VALUES ('distill_lessons_modes');
-    END IF;
-END $$;
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_id TEXT REFERENCES projects(id);
--- Why a failed task failed, when code can tell (looper/db/tasks.py FailKind); NULL
--- otherwise. 'task_budget': it reached its project's task_budget_usd.
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS fail_kind TEXT CHECK (fail_kind IN ('task_budget'));
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks (project_id, created_at DESC);
 
 -- A project's knowledge: reference documents its task agents read on demand
@@ -866,19 +592,6 @@ CREATE TABLE IF NOT EXISTS project_document_drafts (
 );
 CREATE INDEX IF NOT EXISTS idx_project_document_drafts_project
     ON project_document_drafts (project_id, created_at, id);
-
--- How a catalog item was acquired: imported from this machine's Claude Code
--- ('machine'), uploaded, taken from git, written in the UI, or written in a
--- project ('project'). A project-authored item belongs to that project
--- (owner_project_id) and goes with it. Code owns the kinds of origin and what
--- each may do (looper/agents/catalog.py).
-ALTER TABLE library_items ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'machine'
-    CHECK (origin IN ('machine', 'upload', 'git', 'ui', 'project'));
-ALTER TABLE library_items ADD COLUMN IF NOT EXISTS owner_project_id TEXT REFERENCES projects(id) ON DELETE CASCADE;
--- One line on what the item does; '' when it has none (an imported item).
-ALTER TABLE library_items ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
--- An uploaded or git item edited in Looper since it came in; a re-import from its repository clears it.
-ALTER TABLE library_items ADD COLUMN IF NOT EXISTS modified BOOLEAN NOT NULL DEFAULT false;
 -- A name is unique among the items outside projects, and within the project that owns an item.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_library_items_name ON library_items (kind, name)
     WHERE owner_project_id IS NULL;
@@ -904,66 +617,10 @@ CREATE TABLE IF NOT EXISTS library_installs (
     CHECK ((scope = 'project') = (project_id IS NOT NULL)),
     CHECK (scope = 'global' OR NOT 'manager' = ANY (roles))
 );
--- Before 'task_role' (v2.7.0), the roles were the four built-in ones.
--- The definition is read only for this schema's table: another schema's same-named constraint, whose table may be
--- dropped meanwhile, is never looked at.
-DO $$
-DECLARE def TEXT;
-BEGIN
-    SELECT pg_get_constraintdef(c.oid) INTO def FROM pg_constraint c
-     WHERE c.conrelid = to_regclass('library_installs') AND c.conname = 'library_installs_roles_check';
-    IF def IS NULL OR def NOT LIKE '%task_role%' THEN
-        ALTER TABLE library_installs DROP CONSTRAINT IF EXISTS library_installs_roles_check;
-        ALTER TABLE library_installs ADD CONSTRAINT library_installs_roles_check CHECK (cardinality(roles) > 0
-            AND roles <@ ARRAY['manager', 'planner', 'worker', 'reviewer', 'task_role']);
-    END IF;
-END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_library_installs_place
     ON library_installs (item_id, scope, COALESCE(project_id, ''));
 CREATE INDEX IF NOT EXISTS idx_library_installs_project ON library_installs (project_id)
     WHERE project_id IS NOT NULL;
-
--- Once (catalog and installs): the items imported before stay in the catalog,
--- installed nowhere, so they load nowhere until installed. Each project skill
--- (the retired project_skills table) becomes a catalog item owned by its
--- project, keeping its id, name and description, its SKILL.md written the way
--- runs wrote it (frontmatter from the fields, then the body;
--- looper/agents/project_skills.py skill_file), and is installed in its project
--- for the Planner, Workers and Reviewers, enabled as it was.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'library_catalog_installs') THEN
-        ALTER TABLE library_items DROP CONSTRAINT IF EXISTS library_items_kind_name_key;
-        ALTER TABLE library_items DROP COLUMN IF EXISTS enabled;
-        ALTER TABLE library_items ADD CONSTRAINT library_items_owner_check
-            CHECK ((origin = 'project') = (owner_project_id IS NOT NULL));
-        IF to_regclass('project_skills') IS NOT NULL THEN
-            CREATE TEMP TABLE catalog_project_skills AS
-            SELECT s.id, s.project_id, s.name, s.description, s.enabled, s.created_at, s.updated_at, f.text,
-                   encode(sha256(convert_to(f.text, 'UTF8')), 'hex') AS file_sha256
-            FROM project_skills s,
-                 LATERAL (SELECT '---' || E'\n' || 'name: ' || s.name || E'\n'
-                                 || 'description: ' || to_json(s.description)::text || E'\n' || '---' || E'\n' || E'\n'
-                                 || s.content || CASE WHEN right(s.content, 1) = E'\n' THEN '' ELSE E'\n' END
-                                 AS text) f;
-            INSERT INTO library_items (id, kind, name, source, version, sha256, size_bytes, file_count,
-                                       imported_at, updated_at, origin, owner_project_id, description)
-            SELECT id, 'skill', name, '', '',
-                   encode(sha256(convert_to('[["SKILL.md","' || file_sha256 || '",false]]', 'UTF8')), 'hex'),
-                   octet_length(text), 1, created_at, updated_at, 'project', project_id, description
-            FROM catalog_project_skills;
-            INSERT INTO library_files (item_id, path, content, sha256, executable)
-            SELECT id, 'SKILL.md', text, file_sha256, false FROM catalog_project_skills;
-            INSERT INTO library_installs (id, item_id, scope, project_id, roles, enabled, created_at, updated_at)
-            SELECT 'inst-' || left(replace(gen_random_uuid()::text, '-', ''), 12), id, 'project', project_id,
-                   ARRAY['planner', 'worker', 'reviewer'], enabled, created_at, updated_at
-            FROM catalog_project_skills;
-            DROP TABLE catalog_project_skills;
-            DROP TABLE project_skills;
-        END IF;
-        INSERT INTO schema_migrations (name) VALUES ('library_catalog_installs');
-    END IF;
-END $$;
 
 -- Agent settings by layer: system default -> role -> project -> role in a
 -- project, a later layer winning. The Manager spans every project and has only
@@ -985,147 +642,15 @@ CREATE TABLE IF NOT EXISTS agent_setting_layers (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK ((role IS NOT NULL) = (scope IN ('role', 'role_project'))),
     CHECK ((project_id IS NOT NULL) = (scope IN ('project', 'role_project'))),
-    CHECK (scope <> 'role_project' OR role <> 'manager')
+    CHECK (scope <> 'role_project' OR role <> 'manager'),
+    boundaries TEXT
+    CONSTRAINT agent_setting_layers_boundaries_check CHECK (boundaries IS NULL OR scope = 'system'),
+    system_prompt_mode TEXT
+    CONSTRAINT agent_setting_layers_system_prompt_mode_check CHECK (system_prompt_mode IS NULL
+        OR (system_prompt_mode IN ('append', 'replace') AND scope = 'role'))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_setting_layers_place
     ON agent_setting_layers (scope, COALESCE(role, ''), COALESCE(project_id, ''));
-
--- The boundaries every run of a role a task's Planner defines ends with (agent_settings.BOUNDARIES; NULL: the
--- built-in ones): set on the shared defaults only.
-ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS boundaries TEXT
-    CONSTRAINT agent_setting_layers_boundaries_check CHECK (boundaries IS NULL OR scope = 'system');
-
--- Once (layered settings): the values that lived in four places move into
--- their layer, unchanged; the old columns and keys are dropped. The Settings
--- defaults (system_settings agent.*) become the system layer; each role's
--- model, and the Manager's harness (the only one the API took), the role
--- layer; a project's model and per-run cap the project layer; a project's
--- Planner and Worker harness the role-in-project layer (a Reviewer follows its
--- project's Workers at resolution, as before).
-DO $$
-DECLARE
-    env_value JSONB := '[]'::jsonb;
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'agent_setting_layers') THEN
-        -- Layers held a model and an effort then; the profiles' migration below turns the model into an Agent
-        -- Profile, and the effort moves onto profiles after this file (looper/agents/layer_effort.py).
-        ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS model TEXT;
-        ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS effort TEXT;
-        ALTER TABLE role_configs ADD COLUMN IF NOT EXISTS harness_prompt TEXT NOT NULL DEFAULT '';
-        ALTER TABLE role_configs ADD COLUMN IF NOT EXISTS model TEXT;
-        ALTER TABLE projects ADD COLUMN IF NOT EXISTS planner_harness_prompt TEXT NOT NULL DEFAULT '';
-        ALTER TABLE projects ADD COLUMN IF NOT EXISTS worker_harness_prompt TEXT NOT NULL DEFAULT '';
-        ALTER TABLE projects ADD COLUMN IF NOT EXISTS model TEXT;
-        ALTER TABLE projects ADD COLUMN IF NOT EXISTS run_budget_usd DOUBLE PRECISION;
-        BEGIN
-            SELECT value::jsonb INTO env_value FROM system_settings WHERE key = 'agent.env';
-            IF env_value IS NULL OR jsonb_typeof(env_value) <> 'array' THEN
-                env_value := '[]'::jsonb;
-            END IF;
-        EXCEPTION WHEN others THEN
-            env_value := '[]'::jsonb;  -- unreadable: it was ignored at runtime too
-        END;
-        INSERT INTO agent_setting_layers (scope, harness_prompt, model, effort, env)
-        SELECT 'system', h.value, m.value, e.value, env_value
-        FROM (SELECT 1) one
-        LEFT JOIN system_settings h ON h.key = 'agent.harness_prompt'
-        LEFT JOIN system_settings m ON m.key = 'agent.model'
-        LEFT JOIN system_settings e ON e.key = 'agent.effort'
-        WHERE h.value IS NOT NULL OR m.value IS NOT NULL OR e.value IS NOT NULL OR env_value <> '[]'::jsonb;
-        INSERT INTO agent_setting_layers (scope, role, harness_prompt, model)
-        SELECT 'role', role,
-               CASE WHEN role = 'manager' THEN NULLIF(harness_prompt, '') END, NULLIF(btrim(model), '')
-        FROM role_configs
-        WHERE role IN ('manager', 'planner', 'worker', 'reviewer')
-          AND ((role = 'manager' AND harness_prompt <> '') OR NULLIF(btrim(model), '') IS NOT NULL);
-        INSERT INTO agent_setting_layers (scope, project_id, model, run_budget_usd)
-        SELECT 'project', id, model, run_budget_usd FROM projects
-        WHERE model IS NOT NULL OR run_budget_usd IS NOT NULL;
-        INSERT INTO agent_setting_layers (scope, role, project_id, harness_prompt)
-        SELECT 'role_project', 'planner', id, planner_harness_prompt FROM projects WHERE planner_harness_prompt <> ''
-        UNION ALL
-        SELECT 'role_project', 'worker', id, worker_harness_prompt FROM projects WHERE worker_harness_prompt <> '';
-        ALTER TABLE role_configs DROP COLUMN harness_prompt;
-        ALTER TABLE role_configs DROP COLUMN model;
-        ALTER TABLE projects DROP COLUMN planner_harness_prompt;
-        ALTER TABLE projects DROP COLUMN worker_harness_prompt;
-        ALTER TABLE projects DROP COLUMN model;
-        ALTER TABLE projects DROP COLUMN run_budget_usd;
-        DELETE FROM system_settings WHERE key IN ('agent.harness_prompt', 'agent.model', 'agent.effort', 'agent.env');
-        INSERT INTO schema_migrations (name) VALUES ('agent_setting_layers');
-    END IF;
-END $$;
-
--- Once (Agent Profiles select the model): a layer's model becomes the profile
--- of the Claude Code runtime, its own login and that model, named
--- claude-code/<model> (claude-code/opus is the built-in one), so every role
--- resolves the model it did. A stored model that no longer validates was
--- ignored, as if unset: it selects no profile. A layer left with nothing set is
--- removed.
-ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS profile_id TEXT REFERENCES agent_profiles(id);
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'agent_setting_layers_agent') THEN
-        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
-                   AND table_name = 'agent_setting_layers' AND column_name = 'model') THEN
-            CREATE TEMP TABLE layer_models AS
-            SELECT scope, role, project_id, btrim(model, E' \t\n\r\x0b\x0c') AS model FROM agent_setting_layers
-            WHERE model IS NOT NULL;
-            DELETE FROM layer_models
-            WHERE NOT (model ~ '^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*$' AND length(model) <= 200);
-            INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model)
-            SELECT 'agent-' || left(replace(gen_random_uuid()::text, '-', ''), 12), 'claude-code/' || model,
-                   'rt-claude-code', 'prov-claude-subscription', model
-            FROM (SELECT DISTINCT model FROM layer_models) m
-            ON CONFLICT (name) DO NOTHING;
-            UPDATE agent_setting_layers l SET profile_id = a.id
-            FROM layer_models m JOIN agent_profiles a ON a.name = 'claude-code/' || m.model
-            WHERE l.scope = m.scope AND l.role IS NOT DISTINCT FROM m.role
-              AND l.project_id IS NOT DISTINCT FROM m.project_id;
-            DROP TABLE layer_models;
-            ALTER TABLE agent_setting_layers DROP COLUMN model;
-            DELETE FROM agent_setting_layers WHERE harness_prompt IS NULL AND profile_id IS NULL AND effort IS NULL
-                AND env = '[]'::jsonb AND run_budget_usd IS NULL;
-        END IF;
-        INSERT INTO schema_migrations (name) VALUES ('agent_setting_layers_agent');
-    END IF;
-END $$;
--- How many of a task's Workers or Reviewers run at once when the task sets no limit of its own
--- (agent_settings.default_concurrency): set only on the worker or reviewer role layer. A project and the Planner
--- have none: nothing limits how many tasks run. Before, a role in a project and the Planner had one too; the upgrade
--- converted them (looper/db/task_concurrency.py).
-ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS max_concurrency INTEGER
-    CONSTRAINT agent_setting_layers_max_concurrency_check CHECK (max_concurrency IS NULL
-        OR (max_concurrency BETWEEN 1 AND 64 AND scope = 'role' AND role IN ('worker', 'reviewer')));
--- Whether a role replaces its runtime's default system prompt ('replace') or appends Looper's to it ('append'); set
--- only on a role layer, and applied to a run on any runtime (agent_settings.role_system_prompt_mode). NULL: the
--- role's built-in value (the Manager and the Planner replace, the Worker and the Reviewer append). Before, a profile
--- chose it (agent_profiles.system_prompt_mode). So once, while that column still exists: a Worker or Reviewer whose
--- profile (the role layer's, else the shared defaults', else the built-in one) replaced keeps replacing, as its
--- role layer's setting, unless the layer already has a mode; then the column goes. The Manager and the Planner
--- replace by built-in value, so they carry nothing over.
-ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS system_prompt_mode TEXT
-    CONSTRAINT agent_setting_layers_system_prompt_mode_check CHECK (system_prompt_mode IS NULL
-        OR (system_prompt_mode IN ('append', 'replace') AND scope = 'role'));
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('agent_profiles')
-                  AND attname = 'system_prompt_mode' AND NOT attisdropped) THEN
-        INSERT INTO agent_setting_layers (scope, role, system_prompt_mode)
-        SELECT 'role', r.role, 'replace' FROM unnest(ARRAY['worker', 'reviewer']) AS r(role)
-        WHERE EXISTS (SELECT 1 FROM agent_profiles a
-                       WHERE a.system_prompt_mode = 'replace' AND a.id = COALESCE(
-                           (SELECT l.profile_id FROM agent_setting_layers l
-                             WHERE l.scope = 'role' AND l.role = r.role AND l.project_id IS NULL),
-                           (SELECT l.profile_id FROM agent_setting_layers l
-                             WHERE l.scope = 'system' AND l.role IS NULL AND l.project_id IS NULL),
-                           'agent-claude-code-opus'))
-        ON CONFLICT (scope, (COALESCE(role, '')), (COALESCE(project_id, '')))
-        DO UPDATE SET system_prompt_mode = 'replace', updated_at = now()
-            WHERE agent_setting_layers.system_prompt_mode IS NULL;
-        ALTER TABLE agent_profiles DROP COLUMN system_prompt_mode;
-    END IF;
-END $$;
 -- A task's own concurrency limit: at most this many of its Workers or Reviewers run at once
 -- (agent_settings.resolve_task_concurrency). One Planner runs a task, so the Planner has none. With the
 -- task's profile overrides it is the task layer (agent_setting_layers.list_layers).
@@ -1182,16 +707,12 @@ CREATE TABLE IF NOT EXISTS task_roles (
     harness      TEXT,
     reason       TEXT NOT NULL DEFAULT '',
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (task_id, role_key, version)
+    PRIMARY KEY (task_id, role_key, version),
+    via TEXT NOT NULL DEFAULT 'planner'
+    CONSTRAINT task_roles_via_check CHECK (via IN ('planner', 'user', 'template')),
+    template_key TEXT,
+    items TEXT[] NOT NULL DEFAULT '{}'
 );
--- Who wrote a version ('planner' with its tool, 'user' on the task page; a user's current version the Planner may
--- not change) and the project role template it was copied from (NULL: written from scratch).
-ALTER TABLE task_roles ADD COLUMN IF NOT EXISTS via TEXT NOT NULL DEFAULT 'planner'
-    CONSTRAINT task_roles_via_check CHECK (via IN ('planner', 'user'));
-ALTER TABLE task_roles ADD COLUMN IF NOT EXISTS template_key TEXT;
--- The catalog items a version loads besides its kind's built-in role's installs: item ids, each installed for
--- 'task_role' (library_installs) globally or in the task's project.
-ALTER TABLE task_roles ADD COLUMN IF NOT EXISTS items TEXT[] NOT NULL DEFAULT '{}';
 -- A project's role templates: roles its tasks' Planners copy as task roles (looper_task_role_set's template), the
 -- copy a version of the task role of its own. Checked like a task role (looper/agents/role_api.py); its
 -- profile counts only while the project allows it, and its items (as a task role's) only while installed so.
@@ -1204,88 +725,11 @@ CREATE TABLE IF NOT EXISTS project_role_templates (
     harness       TEXT,
     profile_id    TEXT REFERENCES agent_profiles(id) ON DELETE SET NULL,
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (project_id, template_key)
+    PRIMARY KEY (project_id, template_key),
+    items TEXT[] NOT NULL DEFAULT '{}'
 );
-ALTER TABLE project_role_templates ADD COLUMN IF NOT EXISTS items TEXT[] NOT NULL DEFAULT '{}';
-
--- A task role a template set is fixed like the user's: the Planner may not change it. task_roles_via_check gains
--- 'template' (drop and re-add under the same name, guarded by the definition).
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'task_roles_via_check'
-               AND conrelid = 'task_roles'::regclass
-               AND pg_get_constraintdef(oid) NOT LIKE '%''template''%') THEN
-        ALTER TABLE task_roles DROP CONSTRAINT task_roles_via_check;
-        ALTER TABLE task_roles ADD CONSTRAINT task_roles_via_check CHECK (via IN ('planner', 'user', 'template'));
-    END IF;
-END $$;
-
--- A Manager: the default one ('manager', the one every install had) or a scenario Manager the operator defined
--- (manager-<key>). Its id is its agent id: its session (agent_sessions), its runs (llm_records.agent_id), its bus
--- queue. The default Manager's prompt and profile stay in role_configs.manager and Settings → Roles, so its row
--- holds neither, uses every tool, sees every task and cannot be disabled.
-CREATE TABLE IF NOT EXISTS managers (
-    id            TEXT PRIMARY KEY
-                  CONSTRAINT managers_id_check CHECK (id = 'manager' OR id ~ '^manager-[a-z][a-z0-9-]{1,30}$'),
-    name          TEXT NOT NULL CONSTRAINT managers_name_check CHECK (btrim(name) <> '' AND length(name) <= 60),
-    description   TEXT NOT NULL DEFAULT '' CONSTRAINT managers_description_check CHECK (length(description) <= 300),
-    system_prompt TEXT,
-    profile_id    TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
-    tools         TEXT NOT NULL DEFAULT 'tasks' CONSTRAINT managers_tools_check CHECK (tools IN ('all', 'tasks')),
-    -- Which tasks the Manager sees and may act on (its task tools, overview counts, spend, task-derived reads):
-    -- 'all' every task, 'own' only the tasks it created. Independent of tools; any combination is valid.
-    task_scope    TEXT NOT NULL DEFAULT 'own' CONSTRAINT managers_task_scope_check CHECK (task_scope IN ('all', 'own')),
-    task_policy   TEXT NOT NULL DEFAULT 'free'
-                  CONSTRAINT managers_task_policy_check CHECK (task_policy IN ('free', 'templates_only')),
-    enabled       BOOLEAN NOT NULL DEFAULT true,
-    idle_timeout_seconds INTEGER NOT NULL DEFAULT 1800
-                  CONSTRAINT managers_idle_timeout_seconds_check
-                  CHECK (idle_timeout_seconds = 0 OR idle_timeout_seconds BETWEEN 60 AND 86400),
-    -- Bumped in the same transaction by every write that changes what the Manager may do (tools, task_scope,
-    -- task_policy, enabled, a template saved or removed): ManagerOps compares it at each call.
-    revision      BIGINT NOT NULL DEFAULT 0,
-    -- Deleted on the dashboard: the row stays so its chat threads keep their owner (they never fall to the default
-    -- Manager) and its id is never reused; a deleted row is disabled and hidden from every view.
-    deleted_at    TIMESTAMPTZ,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT managers_default_check CHECK (id <> 'manager' OR
-        (system_prompt IS NULL AND profile_id IS NULL AND tools = 'all' AND task_scope = 'all' AND enabled
-         AND deleted_at IS NULL AND idle_timeout_seconds = 0)),
-    CONSTRAINT managers_deleted_check CHECK (deleted_at IS NULL OR NOT enabled),
-    CONSTRAINT managers_prompt_check CHECK (id = 'manager' OR btrim(coalesce(system_prompt, '')) <> '')
-);
-ALTER TABLE managers ADD COLUMN IF NOT EXISTS idle_timeout_seconds INTEGER NOT NULL DEFAULT 1800
-    CONSTRAINT managers_idle_timeout_seconds_check
-    CHECK (idle_timeout_seconds = 0 OR idle_timeout_seconds BETWEEN 60 AND 86400);
--- Existing scenarios inherit the column default; the built-in Manager always stays resident.
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'managers_default_check'
-               AND conrelid = 'managers'::regclass
-               AND pg_get_constraintdef(oid) NOT LIKE '%idle_timeout_seconds%') THEN
-        UPDATE managers SET idle_timeout_seconds = 0 WHERE id = 'manager';
-        ALTER TABLE managers DROP CONSTRAINT managers_default_check;
-        ALTER TABLE managers ADD CONSTRAINT managers_default_check CHECK (id <> 'manager' OR
-            (system_prompt IS NULL AND profile_id IS NULL AND tools = 'all' AND task_scope = 'all' AND enabled
-             AND deleted_at IS NULL AND idle_timeout_seconds = 0));
-    END IF;
-END $$;
 -- A deleted Manager's name is free again; its id is not.
 CREATE UNIQUE INDEX IF NOT EXISTS managers_name_key ON managers (lower(btrim(name))) WHERE deleted_at IS NULL;
-INSERT INTO managers (id, name, tools, task_scope, idle_timeout_seconds)
-    VALUES ('manager', 'Manager', 'all', 'all', 0) ON CONFLICT (id) DO NOTHING;
--- Once: the default Manager keeps the display name it had in Settings → Roles.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'managers_default_name') THEN
-        UPDATE managers SET name = left(btrim(rc.display_name), 60)
-            FROM role_configs rc
-            WHERE managers.id = 'manager' AND managers.name = 'Manager' AND rc.role = 'manager'
-              AND btrim(coalesce(rc.display_name, '')) <> '';
-        INSERT INTO schema_migrations (name) VALUES ('managers_default_name');
-    END IF;
-END $$;
 
 -- A Manager's task templates: the task configuration code applies when the Manager creates a task with one
 -- (looper/agents/task_templates.py checks every field; inputs is a typed list, see TemplateInput).
@@ -1318,91 +762,16 @@ CREATE TABLE IF NOT EXISTS manager_library_installs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (manager_id, item_id)
 );
-
--- The Manager a task belongs to: the one that created it, which hears of its progress and end
--- (the dashboard's and the schedules' tasks belong to the default Manager). template: what the template it was
--- created from said then (key, name, updated_at, inputs, planner_instructions, and roles: each task role it copied,
--- {role_key, kind, profile_id, role_prompt, harness, items, template_key}, so planning anew restores them);
--- NULL without one.
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS manager_id TEXT NOT NULL DEFAULT 'manager'
-    REFERENCES managers(id) ON DELETE RESTRICT;
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS template JSONB;
--- The web chat thread (chat_threads.session_id) a task was asked for in; its progress and end are written there.
--- NULL for a task from elsewhere (Lark, Telegram, the dashboard, a schedule).
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS origin_thread TEXT;
 CREATE INDEX IF NOT EXISTS idx_tasks_manager ON tasks (manager_id, created_at DESC);
-
--- Which Manager made a call (no foreign key: the audit outlives a deleted Manager).
-ALTER TABLE manager_actions ADD COLUMN IF NOT EXISTS manager_id TEXT NOT NULL DEFAULT 'manager';
 
 -- The Manager a chat thread belongs to, for good; a thread without a row (from before, Lark's and Telegram's) is
 -- the default Manager's. A Manager is only ever soft-deleted, so the owner of a thread never changes or vanishes.
 CREATE TABLE IF NOT EXISTS chat_threads (
     session_id  TEXT PRIMARY KEY,
     manager_id  TEXT NOT NULL REFERENCES managers(id) ON DELETE RESTRICT,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    client_id TEXT
 );
--- A step's roles: the work role its Worker runs as (NULL: the built-in Worker) and the version its latest attempt
--- ran with; the review roles that review it after the built-in Reviewer, in order (review_roles, only on a
--- reviewed step: each {role, required, version}, required false for one that only advises the Planner, version
--- the one its latest review ran with); and which review a step in review waits for ('builtin' or 'role', then
--- review_position, the index in review_roles).
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS role_key TEXT;
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS role_version INTEGER;
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_stage TEXT CHECK (review_stage IN ('builtin', 'role'));
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_roles JSONB NOT NULL DEFAULT '[]'::jsonb;
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_position INTEGER;
--- Before a step had a list (v2.7.0), it had one review role: review_role_key, review_role_required and
--- review_role_version, and its result one verdict (role_review). They become a list of one, and go.
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
-               AND table_name = 'task_steps' AND column_name = 'review_role_key') THEN
-        UPDATE task_steps SET review_roles = jsonb_build_array(jsonb_build_object(
-                'role', review_role_key, 'required', review_role_required, 'version', review_role_version)),
-            review_position = CASE WHEN review_stage = 'role' THEN 0 END
-            WHERE review_role_key IS NOT NULL;
-        UPDATE task_steps SET result = (result - 'role_review') || jsonb_build_object('role_reviews',
-                jsonb_build_array((result -> 'role_review') || jsonb_build_object('required', review_role_required)))
-            WHERE jsonb_typeof(result -> 'role_review') = 'object';
-        ALTER TABLE task_steps DROP CONSTRAINT IF EXISTS task_steps_review_role_reviewed;
-        ALTER TABLE task_steps DROP COLUMN review_role_key;
-        ALTER TABLE task_steps DROP COLUMN review_role_required;
-        ALTER TABLE task_steps DROP COLUMN review_role_version;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'task_steps_review_roles_reviewed'
-                   AND conrelid = to_regclass('task_steps')) THEN
-        ALTER TABLE task_steps ADD CONSTRAINT task_steps_review_roles_reviewed
-            CHECK (jsonb_typeof(review_roles) = 'array' AND (jsonb_array_length(review_roles) = 0 OR review));
-    END IF;
-END $$;
-
--- A step's kind: 'work', which a Worker runs, or 'gate', where the user and the task's Planner discuss what only
--- the user can decide before the steps that depend on it run (looper/agents/user_gates.py).
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'gate'));
--- Once (wait steps): a wait joins work and gate as a step kind.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_steps_kind_wait') THEN
-        ALTER TABLE task_steps DROP CONSTRAINT IF EXISTS task_steps_kind_check;
-        ALTER TABLE task_steps ADD CONSTRAINT task_steps_kind_check CHECK (kind IN ('work', 'gate', 'wait'));
-        INSERT INTO schema_migrations (name) VALUES ('task_steps_kind_wait');
-    END IF;
-END $$;
--- Once (waits): a wait opening, being extended and closing join the journal kinds.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_journal_kinds_waits') THEN
-        ALTER TABLE task_journal DROP CONSTRAINT IF EXISTS task_journal_kind_check;
-        ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
-            'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement', 'session_switch',
-            'handoff', 'progress', 'profile_choice', 'concurrency_change', 'role_defined', 'gate_opened',
-            'gate_updated', 'gate_cancelled', 'gate_closed', 'wait_opened', 'wait_extended', 'wait_closed'));
-        INSERT INTO schema_migrations (name) VALUES ('task_journal_kinds_waits');
-    END IF;
-END $$;
--- Whether a project's Planners may run a shell command as a wait's check; NULL, like 'off', refuses it.
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS wait_commands TEXT CHECK (wait_commands IN ('off', 'on'));
 -- A wait step's wait (looper/agents/waits.py). The Planner writes the spec, state, times and resolution;
 -- the loop writes its checks, baseline and notice, and moves 'waiting' to 'ready' or 'timed_out'; the user's
 -- actions move 'waiting' to 'ready' or 'cancel_requested'. Every transition checks the state it read.
@@ -1437,18 +806,6 @@ CREATE TABLE IF NOT EXISTS task_waits (
 );
 CREATE INDEX IF NOT EXISTS idx_task_waits_task ON task_waits (task_id);
 CREATE INDEX IF NOT EXISTS idx_task_waits_due ON task_waits (next_check_at) WHERE state = 'waiting';
--- Once (ready waits carry an outcome): older databases allowed an outcome only when the wait was done.
--- Drop that check before backfilling ready rows, which it forbids an outcome on.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_waits_outcome_ready') THEN
-        ALTER TABLE task_waits DROP CONSTRAINT IF EXISTS task_waits_outcome_done;
-        UPDATE task_waits SET outcome = 'ready' WHERE state = 'ready' AND outcome IS NULL;
-        ALTER TABLE task_waits ADD CONSTRAINT task_waits_outcome_done
-            CHECK ((outcome IS NOT NULL) = (state IN ('ready', 'done')));
-        INSERT INTO schema_migrations (name) VALUES ('task_waits_outcome_ready');
-    END IF;
-END $$;
 -- A gate step's gate. The Planner writes all but first_reply_at, which the user's first message sets with the
 -- state's move from 'open' to 'discussing', and the reminders' columns; a closed gate ('passed', 'cancelled',
 -- 'skipped') stays closed. agenda: [{id, question, options, status, answer}]. summary: what a gate that passed
@@ -1506,40 +863,15 @@ CREATE TABLE IF NOT EXISTS task_user_gate_messages (
     channel      TEXT,
     chat         TEXT,
     external_id  TEXT,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    post_state TEXT
+    CHECK (post_state IN ('sent', 'failed', 'none')),
+    post_error TEXT,
+    post_attempts INT NOT NULL DEFAULT 0,
+    post_retry_at TIMESTAMPTZ,
+    channel_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_messages_step ON task_user_gate_messages (step_id, id);
--- Gate tables made by an earlier build of this schema: the columns of failed turns and the late kind.
-ALTER TABLE task_user_gates ADD COLUMN IF NOT EXISTS failures INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE task_user_gates ADD COLUMN IF NOT EXISTS failed_through BIGINT NOT NULL DEFAULT 0;
-ALTER TABLE task_user_gates ADD COLUMN IF NOT EXISTS failed_at TIMESTAMPTZ;
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_user_gate_messages_kind_late') THEN
-        ALTER TABLE task_user_gate_messages DROP CONSTRAINT IF EXISTS task_user_gate_messages_kind_check;
-        ALTER TABLE task_user_gate_messages ADD CONSTRAINT task_user_gate_messages_kind_check CHECK (kind IN (
-            'message', 'end', 'reply', 'opened', 'updated', 'reminder', 'cancelled', 'closed', 'resumed', 'error',
-            'late'));
-        INSERT INTO schema_migrations (name) VALUES ('task_user_gate_messages_kind_late');
-    END IF;
-END $$;
--- Whether a message of the Planner's or Looper's went to the gate's chat (agents/gate_courier.py): NULL not yet
--- handled, 'sent', 'failed' (post_error says why) or 'none' (the gate has no chat). The user's own messages are
--- 'none'. Once: the discussions written before gate messages went to channels are not sent now.
-ALTER TABLE task_user_gate_messages ADD COLUMN IF NOT EXISTS post_state TEXT
-    CHECK (post_state IN ('sent', 'failed', 'none'));
-ALTER TABLE task_user_gate_messages ADD COLUMN IF NOT EXISTS post_error TEXT;
--- A post that failed is tried again: post_attempts so far, and when the next is due (post_retry_at; NULL: now).
--- While one waits, the gate's later messages wait behind it, so the chat gets them in order.
-ALTER TABLE task_user_gate_messages ADD COLUMN IF NOT EXISTS post_attempts INT NOT NULL DEFAULT 0;
-ALTER TABLE task_user_gate_messages ADD COLUMN IF NOT EXISTS post_retry_at TIMESTAMPTZ;
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_user_gate_messages_posted_before_channels') THEN
-        UPDATE task_user_gate_messages SET post_state = 'none' WHERE post_state IS NULL;
-        INSERT INTO schema_migrations (name) VALUES ('task_user_gate_messages_posted_before_channels');
-    END IF;
-END $$;
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_messages_unposted ON task_user_gate_messages (id)
     WHERE post_state IS NULL;
 -- A user's message that came from a channel, found by the channel message it is (a reply to it is about its gate).
@@ -1551,30 +883,14 @@ CREATE TABLE IF NOT EXISTS task_user_gate_posts (
     id           BIGSERIAL PRIMARY KEY,
     message_id   BIGINT NOT NULL REFERENCES task_user_gate_messages(id) ON DELETE CASCADE,
     task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    channel      TEXT NOT NULL CHECK (channel IN ('lark', 'telegram')),
+    channel      TEXT CHECK (channel IN ('lark', 'lark_bot', 'telegram')),
     chat         TEXT NOT NULL,
     external_id  TEXT NOT NULL,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    channel_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_message ON task_user_gate_posts (message_id);
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_external ON task_user_gate_posts (channel, external_id);
-DO $$
-DECLARE
-    table_oid REGCLASS := to_regclass('task_user_gate_posts');
-    c RECORD;
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_user_gate_posts_lark_bot') THEN
-        FOR c IN SELECT conname FROM pg_constraint
-                 WHERE conrelid = table_oid AND contype = 'c'
-                   AND pg_get_constraintdef(oid) ~ '\mchannel\M[[:space:]]*=[[:space:]]*ANY[[:space:]]*\('
-        LOOP
-            EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I', 'task_user_gate_posts', c.conname);
-        END LOOP;
-        ALTER TABLE task_user_gate_posts ADD CONSTRAINT task_user_gate_posts_channel_check
-            CHECK (channel IN ('lark', 'lark_bot', 'telegram'));
-        INSERT INTO schema_migrations (name) VALUES ('task_user_gate_posts_lark_bot');
-    END IF;
-END $$;
 
 -- A task's agent room (looper/agents/room.py): the messages its Planner and its steps' seats send each other, only
 -- ever added. A seat is '<role>@<step key>' (worker@s2, backend_rd@s2, reviewer@s2); the sender comes from the
@@ -1602,10 +918,9 @@ CREATE TABLE IF NOT EXISTS room_messages (
     planner_pending  BOOLEAN NOT NULL DEFAULT false,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT room_messages_answer_replies CHECK (kind <> 'answer' OR reply_to IS NOT NULL),
-    CONSTRAINT room_messages_audience CHECK (audience_all OR cardinality(audience) > 0)
+    CONSTRAINT room_messages_audience CHECK (audience_all OR cardinality(audience) > 0),
+    answers_ids BIGINT[] NOT NULL DEFAULT '{}'
 );
--- All questions covered by one Planner answer; reply_to keeps its primary thread link.
-ALTER TABLE room_messages ADD COLUMN IF NOT EXISTS answers_ids BIGINT[] NOT NULL DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS idx_room_messages_task ON room_messages (task_id, id);
 CREATE INDEX IF NOT EXISTS idx_room_messages_planner ON room_messages (task_id, id) WHERE planner_pending;
 -- How far each seat of a task has read its room (the ids up to last_read_id); a retry of a step reads on.
@@ -1662,18 +977,6 @@ CREATE TABLE IF NOT EXISTS room_consults (
 );
 CREATE INDEX IF NOT EXISTS idx_room_consults_task ON room_consults (task_id, id);
 
--- Once (agent teams are on by default for Claude Code profiles): every profile on a Claude Code runtime, the
--- built-in one and those the migrations above added included, gets them. Only once, so a profile the user turns
--- off later stays off.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'agent_profiles_agent_teams_on') THEN
-        UPDATE agent_profiles a SET agent_teams = true FROM agent_runtimes r
-        WHERE r.id = a.runtime_id AND r.type = 'claude-code';
-        INSERT INTO schema_migrations (name) VALUES ('agent_profiles_agent_teams_on');
-    END IF;
-END $$;
-
 -- MCP servers are catalog items too (kind 'mcp'), installed the same way. How
 -- Claude Code starts or reaches one is in library_mcp_servers, one row per
 -- item: a command with its arguments and environment (stdio), or a URL with
@@ -1695,48 +998,6 @@ CREATE TABLE IF NOT EXISTS library_mcp_servers (
     CHECK (transport = 'stdio' OR (cardinality(args) = 0 AND env = '{}'::jsonb)),
     CHECK (transport <> 'stdio' OR headers = '{}'::jsonb)
 );
--- Once: a catalog from before MCP servers accepts them.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'library_items_kind_mcp') THEN
-        ALTER TABLE library_items DROP CONSTRAINT IF EXISTS library_items_kind_check;
-        ALTER TABLE library_items ADD CONSTRAINT library_items_kind_check
-            CHECK (kind IN ('plugin', 'skill', 'mcp'));
-        INSERT INTO schema_migrations (name) VALUES ('library_items_kind_mcp');
-    END IF;
-END $$;
-
--- Once: tasks from before projects get one project per directory, named after
--- its last path component ('' and '/' -> 'default'). The oldest directory
--- keeps the plain name; a later clash, ignoring case, gets -2, -3, ...
-DO $$
-DECLARE
-    dir        TEXT;
-    base       TEXT;
-    candidate  TEXT;
-    suffix     INTEGER;
-    new_id     TEXT;
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'tasks_project_backfill') THEN
-        FOR dir IN
-            SELECT work_dir FROM tasks WHERE project_id IS NULL
-            GROUP BY work_dir ORDER BY min(created_at), work_dir
-        LOOP
-            base := left(COALESCE(NULLIF(btrim(substring(rtrim(dir, '/') FROM '[^/]*$')), ''), 'default'), 80);
-            candidate := base;
-            suffix := 1;
-            WHILE EXISTS (SELECT 1 FROM projects WHERE lower(name) = lower(candidate)) LOOP
-                suffix := suffix + 1;
-                candidate := left(base, 80 - length('-' || suffix)) || '-' || suffix;
-            END LOOP;
-            new_id := 'proj-' || left(replace(gen_random_uuid()::text, '-', ''), 12);
-            INSERT INTO projects (id, name, work_dir) VALUES (new_id, candidate, dir);
-            UPDATE tasks SET project_id = new_id WHERE project_id IS NULL AND work_dir = dir;
-        END LOOP;
-        ALTER TABLE tasks ALTER COLUMN project_id SET NOT NULL;
-        INSERT INTO schema_migrations (name) VALUES ('tasks_project_backfill');
-    END IF;
-END $$;
 
 -- A project's schedules: a time rule (5-field cron, wall time in an IANA zone)
 -- and the task each firing creates and starts at once (the scheduler in
@@ -1752,7 +1013,7 @@ CREATE TABLE IF NOT EXISTS schedules (
     timezone             TEXT NOT NULL,
     requirement          TEXT NOT NULL,
     work_dir             TEXT NOT NULL DEFAULT '',
-    overlap              TEXT NOT NULL DEFAULT 'skip' CHECK (overlap IN ('skip', 'queue')),
+    overlap              TEXT NOT NULL DEFAULT 'skip' CHECK (overlap IN ('skip', 'queue', 'parallel')),
     catch_up             TEXT NOT NULL DEFAULT 'once' CHECK (catch_up IN ('once', 'skip')),
     run_timeout_seconds  INTEGER CHECK (run_timeout_seconds > 0),
     run_budget_usd       DOUBLE PRECISION CHECK (run_budget_usd > 0),
@@ -1761,115 +1022,43 @@ CREATE TABLE IF NOT EXISTS schedules (
     last_fired_at        TIMESTAMPTZ,
     last_success_at      TIMESTAMPTZ,
     consecutive_failures INTEGER NOT NULL DEFAULT 0,
-    created_via          TEXT NOT NULL DEFAULT 'dashboard' CHECK (created_via IN ('dashboard', 'manager')),
+    created_via          TEXT NOT NULL DEFAULT 'dashboard' CHECK (created_via IN ('dashboard', 'manager', 'import')),
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CHECK (enabled OR next_fire_at IS NULL)
+    CHECK (enabled OR next_fire_at IS NULL),
+    manager_id TEXT NOT NULL DEFAULT 'manager'
+    REFERENCES managers(id) ON DELETE RESTRICT,
+    template_key TEXT NULL,
+    template_inputs JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(template_inputs) = 'object'),
+    gate_command TEXT,
+    gate_timeout_seconds INTEGER CHECK (gate_timeout_seconds > 0),
+    daily_budget_usd DOUBLE PRECISION CHECK (daily_budget_usd > 0),
+    notify TEXT NOT NULL DEFAULT 'failures'
+    CHECK (notify IN ('failures', 'alerts', 'always', 'never')),
+    notify_channel TEXT CHECK (notify_channel IN ('telegram', 'lark', 'lark_bot')),
+    notify_chat TEXT,
+    last_ok_at TIMESTAMPTZ,
+    failures_alert_at TIMESTAMPTZ,
+    stale_alert_at TIMESTAMPTZ,
+    rule_changed_at TIMESTAMPTZ,
+    max_parallel_runs INTEGER NOT NULL DEFAULT 3
+    CHECK (max_parallel_runs BETWEEN 1 AND 10),
+    enabled_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    run_timeout_mode TEXT NOT NULL DEFAULT 'inherit'
+        CHECK (run_timeout_mode IN ('inherit', 'seconds', 'none')),
+    planner_session_id TEXT,
+    planner_session_totals JSONB NOT NULL DEFAULT '{}',
+    planner_session_runtime TEXT,
+    planner_session_provider TEXT,
+    planner_session_profile TEXT,
+    planner_session_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+    planner_session_since TIMESTAMPTZ,
+    CONSTRAINT schedules_template_fkey FOREIGN KEY (manager_id, template_key)
+        REFERENCES manager_task_templates(manager_id, key) ON DELETE RESTRICT,
+    CONSTRAINT schedules_notify_target_check CHECK ((notify_channel IS NULL) = (notify_chat IS NULL))
 );
--- Ownership is fixed when a schedule is created; old schedules belong to the default Manager.
-ALTER TABLE schedules ADD COLUMN IF NOT EXISTS manager_id TEXT NOT NULL DEFAULT 'manager'
-    REFERENCES managers(id) ON DELETE RESTRICT;
-ALTER TABLE schedules ADD COLUMN IF NOT EXISTS template_key TEXT NULL;
-ALTER TABLE schedules ADD COLUMN IF NOT EXISTS template_inputs JSONB NOT NULL DEFAULT '{}'::jsonb
-    CHECK (jsonb_typeof(template_inputs) = 'object');
-DO $$ BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'schedules'::regclass
-                   AND conname = 'schedules_template_fkey') THEN
-        ALTER TABLE schedules ADD CONSTRAINT schedules_template_fkey FOREIGN KEY (manager_id, template_key)
-            REFERENCES manager_task_templates(manager_id, key) ON DELETE RESTRICT;
-    END IF;
-END $$;
 CREATE INDEX IF NOT EXISTS idx_schedules_manager ON schedules (manager_id);
--- S2: a gate command run in the work directory before each run (nothing printed: skipped; output: given to the
--- task; failure: the run fails), a daily spend cap over the schedule's runs, and whom to tell: notify ('failures',
--- 'alerts', 'always', 'never'; see the block after these) to a chat a channel allows (notify_channel and notify_chat, both or neither; none: the
--- dashboard only). last_ok_at is the last run that completed or whose gate found nothing to do; the two alerts are
--- active while failures_alert_at (3 failures in a row) or stale_alert_at (no success for a while) is set.
-ALTER TABLE schedules ADD COLUMN IF NOT EXISTS gate_command TEXT;
-ALTER TABLE schedules ADD COLUMN IF NOT EXISTS gate_timeout_seconds INTEGER CHECK (gate_timeout_seconds > 0);
-ALTER TABLE schedules ADD COLUMN IF NOT EXISTS daily_budget_usd DOUBLE PRECISION CHECK (daily_budget_usd > 0);
-ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify TEXT NOT NULL DEFAULT 'failures'
-    CHECK (notify IN ('failures', 'always', 'never'));
-ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify_channel TEXT CHECK (notify_channel IN ('telegram', 'lark'));
-DO $$
-DECLARE
-    table_oid REGCLASS := to_regclass('schedules');
-    c RECORD;
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'schedules_notify_channel_lark_bot') THEN
-        FOR c IN SELECT conname FROM pg_constraint
-                 WHERE conrelid = table_oid AND contype = 'c'
-                   AND pg_get_constraintdef(oid) ~ '\mnotify_channel\M[[:space:]]*=[[:space:]]*ANY[[:space:]]*\('
-        LOOP
-            EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I', 'schedules', c.conname);
-        END LOOP;
-        ALTER TABLE schedules ADD CONSTRAINT schedules_notify_channel_check
-            CHECK (notify_channel IN ('telegram', 'lark', 'lark_bot'));
-        INSERT INTO schema_migrations (name) VALUES ('schedules_notify_channel_lark_bot');
-    END IF;
-END $$;
-ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify_chat TEXT;
-ALTER TABLE schedules ADD COLUMN IF NOT EXISTS last_ok_at TIMESTAMPTZ;
-ALTER TABLE schedules ADD COLUMN IF NOT EXISTS failures_alert_at TIMESTAMPTZ;
-ALTER TABLE schedules ADD COLUMN IF NOT EXISTS stale_alert_at TIMESTAMPTZ;
--- Once: notify 'alerts' (the two alerts and their recoveries, no run's own message) joins the choices.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'schedules_notify_alerts') THEN
-        ALTER TABLE schedules DROP CONSTRAINT IF EXISTS schedules_notify_check;
-        ALTER TABLE schedules ADD CONSTRAINT schedules_notify_check
-            CHECK (notify IN ('failures', 'alerts', 'always', 'never'));
-        INSERT INTO schema_migrations (name) VALUES ('schedules_notify_alerts');
-    END IF;
-END $$;
--- Once: a schedule a configuration import created says so (created_via 'import'), beside the dashboard's and the
--- Manager's.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'schedules_created_via_import') THEN
-        ALTER TABLE schedules DROP CONSTRAINT IF EXISTS schedules_created_via_check;
-        ALTER TABLE schedules ADD CONSTRAINT schedules_created_via_check
-            CHECK (created_via IN ('dashboard', 'manager', 'import'));
-        INSERT INTO schema_migrations (name) VALUES ('schedules_created_via_import');
-    END IF;
-END $$;
--- When the schedule was created or last enabled (set when enabled turns true): the no-success alert counts from it
--- or from last_ok_at, whichever is later, so a schedule enabled again after a pause is not stale at once. A schedule
--- from before takes its updated_at, which is at or after its last enabling.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_schema = current_schema() AND table_name = 'schedules'
-                     AND column_name = 'enabled_at') THEN
-        ALTER TABLE schedules ADD COLUMN enabled_at TIMESTAMPTZ;
-        UPDATE schedules SET enabled_at = updated_at;
-        ALTER TABLE schedules ALTER COLUMN enabled_at SET DEFAULT now();
-        ALTER TABLE schedules ALTER COLUMN enabled_at SET NOT NULL;
-    END IF;
-END $$;
--- When the schedule's rule or zone last changed: the no-success alert counts from it too, so a new rule (such as one
--- firing more often) is not stale at once. NULL until a change.
-ALTER TABLE schedules ADD COLUMN IF NOT EXISTS rule_changed_at TIMESTAMPTZ;
--- Reentrant schedules: with overlap 'parallel' a firing starts a run while earlier runs' tasks are in progress, up
--- to max_parallel_runs at once (their gates never run beside each other).
-ALTER TABLE schedules ADD COLUMN IF NOT EXISTS max_parallel_runs INTEGER NOT NULL DEFAULT 3
-    CHECK (max_parallel_runs BETWEEN 1 AND 10);
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'schedules_overlap_parallel') THEN
-        ALTER TABLE schedules DROP CONSTRAINT IF EXISTS schedules_overlap_check;
-        ALTER TABLE schedules ADD CONSTRAINT schedules_overlap_check CHECK (overlap IN ('skip', 'queue', 'parallel'));
-        INSERT INTO schema_migrations (name) VALUES ('schedules_overlap_parallel');
-    END IF;
-END $$;
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'schedules_notify_target_check'
-                   AND conrelid = to_regclass('schedules')) THEN
-        ALTER TABLE schedules ADD CONSTRAINT schedules_notify_target_check
-            CHECK ((notify_channel IS NULL) = (notify_chat IS NULL));
-    END IF;
-END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_schedules_project_name ON schedules (project_id, lower(name));
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules (next_fire_at) WHERE enabled;
 -- The Agent Profile a schedule's tasks run for some of their roles, copied into each task's
@@ -1907,47 +1096,15 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
     cost_usd      DOUBLE PRECISION,
     error         TEXT,
     finished_at   TIMESTAMPTZ,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    gate_output TEXT,
+    execution_snapshot JSONB,
+    carried_from TEXT REFERENCES schedule_runs(id) ON DELETE SET NULL,
+    firings INTEGER NOT NULL DEFAULT 1 CHECK (firings >= 1),
+    run_timeout_seconds INTEGER CHECK (run_timeout_seconds > 0),
+    carried_on BOOLEAN NOT NULL DEFAULT false
 );
--- S2: what the gate printed (clipped), and the earlier run whose unfinished input this run was given.
-ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS gate_output TEXT;
-ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS execution_snapshot JSONB;
-ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS carried_from TEXT REFERENCES schedule_runs(id) ON DELETE SET NULL;
--- Once: a schedule's run timeout is typed. 'inherit' follows the system default (system_settings
--- scheduler.run_timeout_seconds), 'seconds' is run_timeout_seconds, 'none' no limit. Schedules from before keep
--- their meaning (a number stays that number, none stays no limit); new ones inherit. A run records the timeout it
--- started with (schedule_runs.run_timeout_seconds, NULL: no limit), so changing a schedule or the default
--- affects later runs only; runs in progress keep their schedule's number.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'schedules_run_timeout_mode') THEN
-        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS run_timeout_mode TEXT NOT NULL DEFAULT 'none'
-            CHECK (run_timeout_mode IN ('inherit', 'seconds', 'none'));
-        UPDATE schedules SET run_timeout_mode = 'seconds' WHERE run_timeout_seconds IS NOT NULL;
-        ALTER TABLE schedules ALTER COLUMN run_timeout_mode SET DEFAULT 'inherit';
-        ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS run_timeout_seconds INTEGER
-            CHECK (run_timeout_seconds > 0);
-        UPDATE schedule_runs r SET run_timeout_seconds = s.run_timeout_seconds
-            FROM schedules s WHERE s.id = r.schedule_id AND r.status IN ('queued', 'gating', 'running');
-        INSERT INTO schema_migrations (name) VALUES ('schedules_run_timeout_mode');
-    END IF;
-END $$;
--- Once (S2): runs from before the gate and the daily budget accept their statuses ('gating' while the gate runs).
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'schedule_runs_status_s2') THEN
-        ALTER TABLE schedule_runs DROP CONSTRAINT IF EXISTS schedule_runs_status_check;
-        ALTER TABLE schedule_runs ADD CONSTRAINT schedule_runs_status_check CHECK (status IN (
-            'queued', 'gating', 'running', 'completed', 'failed', 'stopped', 'cancelled', 'timed_out',
-            'gate_failed', 'skipped_overlap', 'skipped_missed', 'skipped_gate', 'skipped_budget'));
-        INSERT INTO schema_migrations (name) VALUES ('schedule_runs_status_s2');
-    END IF;
-END $$;
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule ON schedule_runs (schedule_id, created_at DESC);
--- How many firings a run stands for: a skip that repeats the schedule's latest run (the same reason, the same day)
--- is counted on that run instead of a row of its own, so a schedule firing every minute does not add a row a
--- minute while its gate finds nothing new or its task runs.
-ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS firings INTEGER NOT NULL DEFAULT 1 CHECK (firings >= 1);
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_open ON schedule_runs (schedule_id) WHERE status IN ('queued', 'running');
 -- Every message about a schedule, sent or not: a run's outcome, an alert or its recovery. 'dashboard' when the
 -- schedule names no chat (or notify is 'never' for an alert), 'failed' with the reason when sending failed.
@@ -1966,72 +1123,6 @@ CREATE TABLE IF NOT EXISTS schedule_notifications (
 );
 CREATE INDEX IF NOT EXISTS idx_schedule_notifications_schedule ON schedule_notifications (schedule_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_task ON schedule_runs (task_id);
--- Whether a run's unfinished input (an UNFINISHED run's gate output) was handed on to a later run: each goes to the
--- next run only, all of them when several runs of a parallel schedule failed before it. Once, for runs from before:
--- only the run that ran something and ended last in each schedule may still hand its input on, as the rule was then.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_schema = current_schema() AND table_name = 'schedule_runs'
-                     AND column_name = 'carried_on') THEN
-        ALTER TABLE schedule_runs ADD COLUMN carried_on BOOLEAN NOT NULL DEFAULT false;
-        UPDATE schedule_runs r SET carried_on = true
-        WHERE r.finished_at IS NOT NULL AND (
-            EXISTS (SELECT 1 FROM schedule_runs c WHERE c.carried_from = r.id)
-            OR r.id IS DISTINCT FROM (
-                SELECT l.id FROM schedule_runs l
-                WHERE l.schedule_id = r.schedule_id AND l.finished_at IS NOT NULL
-                  AND l.status NOT IN ('queued', 'gating', 'running', 'skipped_overlap', 'skipped_missed',
-                                       'skipped_budget')
-                ORDER BY l.finished_at DESC, l.id DESC LIMIT 1));
-    END IF;
-END $$;
--- The schedule that created the task (NULL once the schedule is deleted), and the task's own spend cap over its
--- project's task_budget_usd (a schedule's run_budget_usd, copied when it fires).
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS schedule_id TEXT REFERENCES schedules(id) ON DELETE SET NULL;
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS budget_usd DOUBLE PRECISION CHECK (budget_usd > 0);
--- One Planner conversation across non-parallel schedule runs. The holder prevents an in-flight run from
--- writing a session back after reset; deleting its task leaves the conversation available for the next run.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'schedule_planner_session') THEN
-        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS planner_session_id TEXT;
-        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS planner_session_totals JSONB NOT NULL DEFAULT '{}';
-        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS planner_session_runtime TEXT;
-        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS planner_session_provider TEXT;
-        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS planner_session_profile TEXT;
-        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS planner_session_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL;
-        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS planner_session_since TIMESTAMPTZ;
-        ALTER TABLE tasks ADD COLUMN IF NOT EXISTS continues_schedule_session BOOLEAN NOT NULL DEFAULT false;
-        INSERT INTO schema_migrations (name) VALUES ('schedule_planner_session');
-    END IF;
-END $$;
--- The storage label a task took when it claimed the schedule conversation (planner-schedule-<id>). NULL until
--- then. Reset clears the schedule's holder and does not clear this: an in-flight run keeps its directory.
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS planner_session_label TEXT;
--- Who is told when the task ends (agents/task_notice.py): chat_id, the Telegram chat id, the Lark sender's open_id
--- or the Lark group's id; NULL for a task asked for elsewhere (the web chat, the dashboard). chat_kind says which:
--- 'user', a person, told in a direct message, or 'chat', a chat; chat_mention is who the notice @-mentions there
--- (in a Lark group, the requester's open_id). Once, for tasks from before groups: a Lark task told its sender, a
--- Telegram task its chat.
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS chat_id TEXT;
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_schema = current_schema() AND table_name = 'tasks'
-                     AND column_name = 'chat_kind') THEN
-        ALTER TABLE tasks ADD COLUMN chat_kind TEXT CHECK (chat_kind IN ('user', 'chat'));
-        UPDATE tasks SET chat_kind = CASE WHEN origin_channel_id = 'channel-lark' THEN 'user' ELSE 'chat' END
-        WHERE chat_id IS NOT NULL;
-    END IF;
-END $$;
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS chat_mention TEXT;
--- The user's message the Manager's task JSON answered (often the confirmation), kept as history. NULL for a task
--- created elsewhere.
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS original_user_text TEXT;
--- A few words naming the task in the user's language, from the Manager's task JSON (db/tasks.py task_name falls
--- back to goal_id, then the requirement). NULL for a task created elsewhere or before.
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS title TEXT;
 CREATE INDEX IF NOT EXISTS idx_tasks_schedule ON tasks (schedule_id, created_at DESC) WHERE schedule_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS llm_records (
@@ -2049,61 +1140,20 @@ CREATE TABLE IF NOT EXISTS llm_records (
     model            TEXT,
     error            TEXT,
     metadata         JSONB,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    status TEXT NOT NULL DEFAULT 'completed',
+    cost_usd DOUBLE PRECISION,
+    finished_at TIMESTAMPTZ,
+    last_output_at TIMESTAMPTZ,
+    cache_read_tokens BIGINT,
+    cache_creation_tokens BIGINT,
+    context_tokens INTEGER,
+    compactions JSONB,
+    cost_source TEXT CHECK (cost_source IN ('runtime', 'provider_price'))
 );
-
-ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS input_text TEXT;
-ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS output_text TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_llm_records_agent ON llm_records(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_llm_records_task ON llm_records(task_id, created_at DESC);
-
--- One row per Claude run: launch command in metadata, outcome when it ends.
-ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed';
-ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION;
-ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ;
--- Heartbeat: last time the run wrote any output (partial deltas included).
-ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS last_output_at TIMESTAMPTZ;
--- The run's own usage beside input_tokens and output_tokens: prompt tokens read from and written to
--- the cache. For one turn of a resident agent these are that turn's share of its session's totals.
-ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS cache_read_tokens BIGINT;
-ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS cache_creation_tokens BIGINT;
--- The context at the run's end: the prompt of its last main-loop model request.
-ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS context_tokens INTEGER;
--- Once: older API sessions kept their last known context only in the run records.
--- Restore it before a restarted Manager decides whether the session needs a handoff;
--- unknown later usage must not erase it, and a live session's own count wins.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'api_sessions_context_tokens_backfill') THEN
-        UPDATE api_sessions AS session SET context_tokens = latest.context_tokens
-        FROM (
-            SELECT DISTINCT ON (session_id) session_id, context_tokens
-            FROM llm_records
-            WHERE session_id IS NOT NULL AND context_tokens IS NOT NULL
-            ORDER BY session_id, created_at DESC, id DESC
-        ) AS latest
-        WHERE session.session_id = latest.session_id AND session.context_tokens IS NULL;
-        INSERT INTO schema_migrations (name) VALUES ('api_sessions_context_tokens_backfill');
-    END IF;
-END $$;
--- The context compactions during the run, each {trigger, pre_tokens, post_tokens, duration_ms};
--- NULL for runs recorded before compactions were.
-ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS compactions JSONB;
--- Where cost_usd comes from: what the runtime reported ('runtime'; Claude Code with its own login), or the
--- run's tokens at its provider's prices ('provider_price'); NULL for runs recorded before Agent Profiles.
-ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS cost_source TEXT CHECK (cost_source IN ('runtime', 'provider_price'));
-
--- Once: runs recorded before `status` existed all defaulted to 'completed';
--- the ones that recorded an error had failed.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'llm_records_status_backfill') THEN
-        UPDATE llm_records SET status = 'failed'
-        WHERE status = 'completed' AND error IS NOT NULL AND finished_at IS NULL;
-        INSERT INTO schema_migrations (name) VALUES ('llm_records_status_backfill');
-    END IF;
-END $$;
 
 -- The run's stream-json events, appended as they arrive.
 CREATE TABLE IF NOT EXISTS llm_record_events (
@@ -2120,17 +1170,12 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     message_id  TEXT NOT NULL,
     role        TEXT NOT NULL,
     content     TEXT NOT NULL DEFAULT '',
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    channel TEXT NOT NULL DEFAULT 'web',
+    delivery_failure TEXT
+    CHECK (delivery_failure IN ('no_chat', 'send_failed')),
+    delivery_error TEXT
 );
-
--- Which channel the turn came from (web, telegram, lark): so the console shows every channel's
--- conversation, each labelled. A non-web session id is "<channel>:<chat_id>".
-ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT 'web';
--- A Telegram or Lark answer is stored once its channel has tried to send it (channels/chat_history.py): one it could
--- not send has why (channels.base.DeliveryFailure) and the channel's error. NULL for everything else.
-ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS delivery_failure TEXT
-    CHECK (delivery_failure IN ('no_chat', 'send_failed'));
-ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS delivery_error TEXT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_msg_unique ON chat_messages(session_id, message_id);
 CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages(session_id, id);
@@ -2142,7 +1187,10 @@ CREATE TABLE IF NOT EXISTS channel_configs (
     enabled      BOOLEAN NOT NULL DEFAULT false,
     config       JSONB NOT NULL DEFAULT '{}',
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    manager_id TEXT NOT NULL DEFAULT 'manager'
+    REFERENCES managers(id) ON DELETE RESTRICT,
+    bound_chats_only BOOLEAN NOT NULL DEFAULT false
 );
 
 -- A channel's bot token, kept out of channel_configs.config so it never leaves
@@ -2163,18 +1211,9 @@ CREATE TABLE IF NOT EXISTS channel_rejected_senders (
     sender_id   TEXT NOT NULL,
     count       INTEGER NOT NULL DEFAULT 1,
     last_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (channel_id, sender_id)
+    PRIMARY KEY (channel_id, sender_id),
+    chat_id TEXT
 );
--- A table from before kept the start of each refused message: dropped, with what it held.
-ALTER TABLE channel_rejected_senders DROP COLUMN IF EXISTS snippet;
-ALTER TABLE channel_rejected_senders ADD COLUMN IF NOT EXISTS chat_id TEXT;
-
--- The Manager a channel's bot belongs to: its messages go to that Manager (RFC scenario-managers §9.1). The three
--- built-in rows (channel-telegram, channel-lark, channel-lark_bot) are the default Manager's; a bot added in Settings
--- → Channels is channel-<type>-<n> and names its Manager when it is added. Never changed afterwards: a thread id is
--- <channel_id>:<chat_id> and a thread's owner never changes (chat_threads).
-ALTER TABLE channel_configs ADD COLUMN IF NOT EXISTS manager_id TEXT NOT NULL DEFAULT 'manager'
-    REFERENCES managers(id) ON DELETE RESTRICT;
 -- <n> of an added bot: only ever grows, never reused (a bot removed and added again gets a new id).
 CREATE SEQUENCE IF NOT EXISTS channel_bot_seq START 2;
 CREATE OR REPLACE FUNCTION channel_configs_manager_fixed() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -2182,22 +1221,13 @@ BEGIN
     RAISE EXCEPTION 'a bot''s Manager cannot change: add a new bot for the other Manager and remove this one'
         USING ERRCODE = 'check_violation';
 END $$;
-DROP TRIGGER IF EXISTS channel_configs_manager_fixed ON channel_configs;
 CREATE TRIGGER channel_configs_manager_fixed BEFORE UPDATE OF manager_id ON channel_configs
     FOR EACH ROW WHEN (OLD.manager_id IS DISTINCT FROM NEW.manager_id) EXECUTE FUNCTION channel_configs_manager_fixed();
 CREATE INDEX IF NOT EXISTS idx_channel_configs_manager ON channel_configs (manager_id);
-
--- A gate post is keyed by bot, chat and external message id.
-ALTER TABLE task_user_gate_posts ADD COLUMN IF NOT EXISTS channel_id TEXT;
-ALTER TABLE task_user_gate_messages ADD COLUMN IF NOT EXISTS channel_id TEXT;
-ALTER TABLE task_user_gate_posts ALTER COLUMN channel DROP NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS task_user_gate_posts_bot_key ON task_user_gate_posts (channel_id, chat, external_id);
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_bot ON task_user_gate_posts (channel_id, external_id);
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_messages_bot ON task_user_gate_messages (channel_id, external_id)
     WHERE external_id IS NOT NULL;
-
--- Durable per-bot chat bindings and metadata (no routing is enabled here).
-ALTER TABLE channel_configs ADD COLUMN IF NOT EXISTS bound_chats_only BOOLEAN NOT NULL DEFAULT false;
 CREATE TABLE IF NOT EXISTS manager_chat_bindings (
     channel_id TEXT NOT NULL REFERENCES channel_configs(channel_id) ON DELETE CASCADE,
     chat_id TEXT NOT NULL CHECK (btrim(chat_id) <> ''),
@@ -2225,75 +1255,6 @@ CREATE TABLE IF NOT EXISTS channel_unbound_chats (
 );
 CREATE INDEX IF NOT EXISTS idx_channel_unbound_chats_latest
     ON channel_unbound_chats (channel_id, last_at DESC, chat_id ASC);
--- End durable chat storage.
-
--- registry-phase: convert
-
--- Python conversion and launch/pricing comparison have completed. Refuse to
--- contract any unmapped row, including when a future migration adds one.
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM llm_providers WHERE vendor_type IS NULL)
-        OR EXISTS (SELECT 1 FROM agent_profiles WHERE model_id IS NULL) THEN
-        RAISE EXCEPTION 'registry conversion left unmapped rows';
-    END IF;
-END $$;
-
--- registry-phase: contract
-
--- Historical migrations above (including layer_effort in Python) must finish
--- before these columns disappear. Role/task prompt-mode storage is unchanged.
-ALTER TABLE llm_providers ALTER COLUMN vendor_type SET NOT NULL;
-ALTER TABLE agent_profiles ALTER COLUMN model_id SET NOT NULL;
-ALTER TABLE agent_profiles DROP COLUMN IF EXISTS provider_id;
-ALTER TABLE agent_profiles DROP COLUMN IF EXISTS model;
-ALTER TABLE llm_providers DROP COLUMN IF EXISTS protocols;
-ALTER TABLE llm_providers DROP COLUMN IF EXISTS base_url;
-ALTER TABLE llm_providers DROP COLUMN IF EXISTS models;
-
--- registry-phase: builtin
-
--- Target-layout builtins run only after contract, including on second startup.
--- Login endpoints use the CLI's own connection; no token or URL is copied.
-INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin)
-VALUES ('rt-claude-code', 'claude-code', 'claude-code', '',
-        ARRAY['add_dirs', 'autonomous_turns', 'claude_plugins', 'compaction_events', 'cost_report', 'mcp',
-              'resident_session', 'resume', 'run'], true)
-ON CONFLICT DO NOTHING;
-INSERT INTO llm_providers (id, name, vendor_type, auth, oauth_runtime_type, builtin)
-VALUES ('prov-claude-subscription', 'claude-subscription', 'claude-subscription', 'oauth', 'claude-code', true),
-       ('prov-codex-login', 'codex-login', 'codex-login', 'oauth', 'codex', true),
-       ('prov-grok-login', 'grok-login', 'grok-login', 'oauth', 'grok', true)
-ON CONFLICT DO NOTHING;
-INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url)
-VALUES ('prov-claude-subscription', 'anthropic-messages', ''),
-       ('prov-codex-login', 'openai-responses', ''),
-       ('prov-grok-login', 'openai-responses', '')
-ON CONFLICT (provider_id, protocol) DO NOTHING;
-
--- Fixed UUIDv5 ids for the pinned login suggestions, matched by the complete
--- natural key on readback; restarting never resets metadata or allocates ids.
-INSERT INTO llm_models (id, provider_id, name, protocol, catalog_order, builtin)
-VALUES
-    ('model-84f4b69e-12a7-5fd7-b665-a9b7d01568eb', 'prov-claude-subscription', 'opus', 'anthropic-messages', 0, true),
-    ('model-c0d66d22-9bfd-5fbe-b6d5-5626efd7d46e', 'prov-claude-subscription', 'sonnet', 'anthropic-messages', 1, true),
-    ('model-47a35ff0-e373-50bc-8633-e0d5f1bfbf53', 'prov-claude-subscription', 'haiku', 'anthropic-messages', 2, true),
-    ('model-7268a107-dade-549c-a62f-d65c2c459488', 'prov-codex-login', 'gpt-6.1-sol', 'openai-responses', 0, true),
-    ('model-c56d0439-b240-5650-aa9d-f1d561e5b577', 'prov-codex-login', 'gpt-6-sol', 'openai-responses', 1, true),
-    ('model-1a5dc62a-a91f-5fe2-bac1-4db37f68854f', 'prov-codex-login', 'gpt-6-astra', 'openai-responses', 2, true),
-    ('model-bc53b78f-8626-5cc6-8114-cc29b2b13c23', 'prov-codex-login', 'gpt-6-luna', 'openai-responses', 3, true),
-    ('model-7bfb6763-93d9-5740-869d-435691e83fcb', 'prov-codex-login', 'gpt-5.6-sol', 'openai-responses', 4, true),
-    ('model-95fdbced-a8cd-5775-80c7-5abeeb1b8be9', 'prov-codex-login', 'gpt-5.6-terra', 'openai-responses', 5, true),
-    ('model-2f901fbc-ea04-5450-ac57-96c8ba5f46ca', 'prov-codex-login', 'gpt-5.6-luna', 'openai-responses', 6, true),
-    ('model-a34a618b-2cfd-5151-966b-6edcfb4e5992', 'prov-grok-login', 'grok-4.7', 'openai-responses', 0, true),
-    ('model-96ad8acd-53da-59e2-859f-829db99b8422', 'prov-grok-login', 'grok-4.7-build-fast', 'openai-responses', 1, true),
-    ('model-600929a8-fd29-521b-ad52-ee5cc69914d8', 'prov-grok-login', 'grok-4.6', 'openai-responses', 2, true),
-    ('model-e1d7d77c-276f-5e28-8a9b-2ecf480f0f91', 'prov-grok-login', 'grok-4.5', 'openai-responses', 3, true)
-ON CONFLICT (provider_id, name, protocol) DO NOTHING;
-INSERT INTO agent_profiles (id, name, runtime_id, model_id, builtin, agent_teams)
-SELECT 'agent-claude-code-opus', 'claude-code/opus', 'rt-claude-code', id, true, true
-FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'opus' AND protocol = 'anthropic-messages'
-ON CONFLICT DO NOTHING;
 
 -- Local agents and scripts that call /api/v1 with a token of their own (Settings → API clients). Only the token's
 -- SHA-256 is stored; a revoked client keeps its row so records still name it.
@@ -2306,7 +1267,6 @@ CREATE TABLE IF NOT EXISTS api_clients (
     revoked_at    TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_clients_active_name ON api_clients (lower(name)) WHERE revoked_at IS NULL;
--- The API client a chat thread, a task or a Manager's call came through (NULL: none). No foreign key, like manager_id.
-ALTER TABLE chat_threads ADD COLUMN IF NOT EXISTS client_id TEXT;
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS client_id TEXT;
-ALTER TABLE manager_actions ADD COLUMN IF NOT EXISTS client_id TEXT;
+
+ALTER TABLE tasks ADD CONSTRAINT tasks_schedule_id_fkey
+    FOREIGN KEY (schedule_id) REFERENCES schedules(id) ON DELETE SET NULL;

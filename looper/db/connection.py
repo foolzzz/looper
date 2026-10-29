@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 _pool: asyncpg.Pool | None = None
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
+SEEDS_PATH = Path(__file__).with_name("seeds.sql")
 
 
 async def init_pool(dsn: str, *, min_size: int = 2, max_size: int = 10) -> asyncpg.Pool:
@@ -50,11 +51,6 @@ async def transaction() -> AsyncIterator[asyncpg.Connection]:
 # The schema.sql text last applied. Schema 3 uses this stable release marker
 # for admission; schema 4 uses its version and post_bridge_baseline marker.
 _RECORD_FINGERPRINT = """
-CREATE TABLE IF NOT EXISTS schema_fingerprint (
-    id          BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
-    sha256      TEXT NOT NULL,
-    applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
 INSERT INTO schema_fingerprint (id, sha256) VALUES (TRUE, '{sha256}')
 ON CONFLICT (id) DO UPDATE SET sha256 = EXCLUDED.sha256, applied_at = now()
 WHERE schema_fingerprint.sha256 <> EXCLUDED.sha256;
@@ -102,7 +98,7 @@ async def _classify_schema(conn: asyncpg.Connection, sql: str) -> str:
              "start it once, then upgrade to this version")
     names = re.findall(r"(?im)^\s*CREATE TABLE IF NOT EXISTS\s+(\w+)", sql)
     # The version marker must be recognized even if schema.sql is incomplete.
-    names.extend(("agents", "agent_configs", "task_agent_overrides", "schema_fingerprint", "llm_profiles",
+    names.extend(("agents", "agent_configs", "task_agent_overrides", "project_skills", "schema_fingerprint", "llm_profiles",
                   "registry_schema_version"))
     # Do not initialize shadow tables over a visible installation in another namespace.
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM unnest($1::text[]) t(name) "
@@ -147,34 +143,30 @@ async def _classify_schema(conn: asyncpg.Connection, sql: str) -> str:
     return "bridge"
 
 
-def _schema_phases(sql: str) -> dict[str, str]:
-    parts = re.split(r"(?m)^-- registry-phase: (\w+)\n", sql)
-    phases = dict(zip(parts[1::2], parts[2::2]))
-    if list(phases) != ["expand", "legacy", "convert", "contract", "builtin"]:
-        raise ValueError("schema.sql must declare expand, legacy, convert, contract and builtin phases in order")
-    return phases
-
-
 async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
-    from .bridge_upgrade import final_constraints, upgrade_from_bridge
+    from .bridge_upgrade import BASELINE, upgrade_from_bridge
 
     pool = pool or get_pool()
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
     async with _connection(pool) as conn, conn.transaction():
         await conn.execute(f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK})")
         state = await _classify_schema(conn, sql)
-        # Fill missing builtins on every start without resetting saved choices.
-        for name, phase in _schema_phases(sql).items():
-            if state != "current" or name == "builtin":
-                await conn.execute(phase)
+        if state == "empty":
+            await conn.execute(sql)
+        elif state == "bridge":
+            await upgrade_from_bridge(conn)
+        # Current databases never replay initialization DDL. Missing builtins
+        # are inserted without changing any saved choice or creation time.
+        await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
         if state != "current":
-            await final_constraints(conn)
-            if state == "bridge":
-                await upgrade_from_bridge(conn)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING", BASELINE)
         await conn.execute("INSERT INTO registry_schema_version (id, version) VALUES (TRUE, $1) "
                            "ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version "
                            "WHERE registry_schema_version.version <> EXCLUDED.version", REGISTRY_SCHEMA_VERSION)
-        await conn.execute(_RECORD_FINGERPRINT.format(sha256=schema_fingerprint(sql)))
+        # The stable current marker is sufficient even when its optional text
+        # fingerprint was pruned. Opening a current database never repairs DDL.
+        if state != "current" or await conn.fetchval("SELECT to_regclass('schema_fingerprint') IS NOT NULL"):
+            await conn.execute(_RECORD_FINGERPRINT.format(sha256=schema_fingerprint(sql)))
     logger.info("schema ensured")
 
 
