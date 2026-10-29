@@ -104,9 +104,7 @@ uv run looper serve
 
 首次启动时会自动建表。飞书和 Telegram 不需要命令行参数，在 Settings 页面开启即可（见[渠道](#渠道)）。
 
-换到新机器：`uv run looper config export looper-config.json` 把 agent 配置导出成一个文件（密钥留作占位符，
-`--include-projects` 连同项目），在新机器上 `uv run looper config import looper-config.json` 先预览，加 `--apply` 才写入。
-Settings 页的「Move to another machine」也能导出和导入。
+换到新机器需要正在运行的服务。`loopercli config export looper-config.json` 写出 `looper-config/v4`（密钥留作占位符，`--include-projects` 连同项目）。`loopercli --json config import looper-config.json` 先预览，`loopercli config import --apply <import_id>` 才写入。两者都要操作者令牌（`--operator-token-file`，默认从标准输入读）。Settings 页的「Move to another machine」也能导出和导入。`looper config` 只写运维文件（`init-ops`）。不是 `looper-config/v4` 的文件在写入前被拒绝。旧文件要在 v2.13.165 上导入，升级那次安装和数据库，再用本版本导出 v4。v2.13.165 仍可能导出 v3，在那里再导出不会得到 v4。一次性的 v2.13.165 安装可以做这次导入。
 
 ### 4. 作为服务常驻
 
@@ -152,30 +150,35 @@ verify_command = ["docker", "exec", "-i", "agentbox-postgres", "pg_restore", "--
 
 `looper doctor` 和启动日志会说明用的是哪个校验器。
 
-没有可用的 `pg_dump` 或备份失败时，serve 在改动任何东西之前退出；`looper serve --skip-backup`
-不备份直接迁移，并记一条警告。回退时先停掉 Looper，把数据库重建为空库，用
-`pg_restore --no-owner --dbname '<database.url>' <文件>`（Docker 里用
-`docker exec -i agentbox-postgres pg_restore --no-owner -U postgres -d loopx < <文件>`）恢复，再运行旧版本。
-`[backup]` 写在运维文件里，改完重启即可；`service install` 不会把它们当成变量复制进去。
+没有可用的 `pg_dump` 或备份失败时，serve 在改动任何东西之前退出。桥接升级拒绝 `looper serve --skip-backup`。不是这次升级的 schema 变化仍可能警告后带着 `--skip-backup` 继续；这里不要用它。升级后的 schema 不能再用旧二进制打开。回退时停掉新服务，保持已升级的数据库不变，把校验过的完整备份恢复到另一个数据库：
 
-### 从 LoopX 升级
+```bash
+pg_restore --no-owner --dbname '<isolated-database-url>' <文件>
+```
 
-Looper 在 v2.5.0 及以前叫 LoopX。改名本身不需要手动操作：
+让受保护的旧版本指向这个恢复出来的数据库。不要覆盖已升级的库，也不要降级它。只有 schema 的 dump，或一份配置导出，恢复不了历史。Docker 里的 `pg_restore` 指向这个单独的数据库，而不是正在使用的 `loopx`。`[backup]` 写在运维文件里，改完重启即可；`service install` 不会把它们当成变量复制进去。
 
-- **命令：**`looper`。`loopx` 再保留一个版本：先打印一行弃用提示，再执行 `looper`。`install.sh`
-  会先卸掉同一工具装的旧 `loopx` 包（数据不动）。
-- **数据目录：**`~/.looper`。第一次运行 `looper serve` 或 `looper service install` 时把 `~/.loopx`
-  移过去（一次重命名，不复制也不删除任何文件），并在原处留一个指向它的链接，保留一个版本。两个目录都在时用
-  `~/.looper` 并记一条警告。
-- **环境变量：**旧的部署变量再读一个版本（`LOOPER_DATABASE_URL`、`LOOPER_PUBLIC_URL`、`LOOPER_PG_DUMP`、
-  `LOOPER_BACKUP_CMD`、`LOOPER_BACKUP_VERIFY_CMD`、`LOOPER_OPERATOR_NOTES_ROOT`，以及除笔记根目录和校验命令外的 `LOOPX_*` 同名；这两项只认 `LOOPER_` 前缀），先看环境变量，再看 `.env`，
-  每次使用都按变量名警告。`looper config init-ops` 把它们写进运维文件。其余的 `LOOPX_*` 在对应 `LOOPER_*` 没设时，
-  `looper.env` 仍会读，并警告，再保留一个版本。
-- **服务：**`com.looper.serve`。`looper service install` 会先停掉并删除旧的 `com.loopx.serve`。
-- **配置文件**：导出写 `looper-config/v2`；以前导出的 `looper-config/v1`、`loopx-config/v1` 文件仍然能导入。
-- **不变的**：已有的数据库保持原名（常常是 `loopx`），里面的数据（比如你自己写的 harness）不会被改写。数据库 URL
-  不再有默认值；什么都没配时，`looper config init-ops` 才写入 `postgresql://localhost:5432/loopx`，并说明这一点。
-  发布 tag 和历史保留原名；[NOTICE](NOTICE) 保留对上游 LoopX 的署名。因为 `schema.sql` 有变化，升级后第一次启动会照常先备份。
+### 跨越 v2.13.165 的升级
+
+v2.13.165 含有全部历史迁移，并保持为固定桥。比它更早的安装必须先升到 v2.13.165，并启动一次。本版本接受那份已完成的桥接库，或当前 schema。更晚的 2.13 checkout 不移动这条边界。这些移除之后的第一版是 v2.14.0；版本号由发布工具写入。
+
+还在 v2.13.165 上时，做完本二进制不再执行的步骤：
+
+- 启动一次 `looper serve`，并导入仍需要的配置，这样桥接标记才会记下。
+- 运行 `looper config init-ops`，再运行 `looper service install`，让单元使用私有运维文件和显式的 `--runtime-root`。
+- 在 v2.13.165 上替换残留的 `~/.loopx` 目录和 `com.loopx.serve` 单元。本版本不移动目录，也不替换那个单元。
+- 设置 `LOOPER_TELEGRAM_BOT_TOKEN`（或渠道的 `bot_token_env`）。`service install` 仍会为这一版复制 `LOOPX_TELEGRAM_BOT_TOKEN`。
+- 在 Settings 里保存定时任务的最小间隔。本版本用已保存的 `scheduler.min_interval_seconds`，没有保存值时用内置的 300 秒。它不读取 `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS`。
+- 切换二进制之前，停掉并排空旧进程。
+- 从同一来源打开一次控制台，让浏览器写完这个来源的缓存。
+
+只通过升级器的数据库不能证明文件系统、服务、提示词或浏览器这些步骤已经做完。已有的用户文件和历史行都保留。升级器是校验过的备份之后的一次转换，不会重放一条历史迁移链。
+
+旧配置文件在 v2.13.165 上导入，升级那次安装和数据库，再由本版本导出 `looper-config/v4`。一次性的 v2.13.165 安装可以做导入。v2.13.165 仍可能导出 v3，在那里再导出不会得到 v4。本版本拒绝任何其他格式，也在写入前拒绝层上已退役的 `model` 或 `effort`，以及提供方已退役的 `protocols`、`base_url` 或 `models`。任务对照只接受 `looper-prompt-eval/v2`，对话对照只接受 `looper-manager-dialogs/v2`。
+
+空库运行一次当前 schema，并记下 `post_bridge_baseline`。当前库不重放那份 DDL。每次启动都应用 `seeds.sql`，它不改变已保存的选择。回退是把校验过的完整备份恢复到另一个数据库，再让受保护的旧版本指向那个库。
+
+控制台、Telegram、飞书和 CLI 继续支持，包括紧凑的 v1 操作和 `loopercli` 别名。功能关闭、shared 和 in-place、未来 schema 拒绝、当前的 `LegacyProviderSpec` 与 `LegacyAgentProfile` 投影、`use_runtime_default`、仍被引用的自定义运行时、能力探测、稳定的对话身份、不完整的用量与输出、`DeliveryResult` 的安全性和隔离都保持原样。已有数据库保持原名（常常是 `loopx`）。数据库 URL 没有默认值；什么都没写时，`looper config init-ops` 才写入 `postgresql://localhost:5432/loopx`，并说明这一点。[NOTICE](NOTICE) 保留对上游 LoopX 的署名。
 
 ## 架构
 
@@ -193,7 +196,7 @@ Looper 在 v2.5.0 及以前叫 LoopX。改名本身不需要手动操作：
 
 ### 数据库
 
-PostgreSQL 是启动的硬性依赖；`looper serve` 每次启动都会应用 `looper/db/schema.sql`。数据表按领域分组：
+PostgreSQL 是启动的硬性依赖。空库只运行一次 `looper/db/schema.sql`。当前库不会再初始化。识别出的 v2.13.165 桥接库升级一次。数据表按领域分组：
 
 | 领域 | 表 | 内容 |
 |---|---|---|
@@ -203,7 +206,7 @@ PostgreSQL 是启动的硬性依赖；`looper serve` 每次启动都会应用 `l
 | Agent 与设置 | `agent_runtimes`、`llm_providers`、`llm_provider_secrets`、`agent_profiles`、`agent_setting_layers`、`role_configs`、`agent_sessions` | 运行时、提供方（API key 单独存放）和 Agent Profile；各设置层；每个角色的 prompt 和限制；Manager 和 Planner 恢复的会话 |
 | 能力目录 | `library_items`、`library_files`、`library_mcp_servers`、`library_installs` | 插件、skill 和 MCP 服务器及其文件或服务器配置，以及各自装在哪里 |
 | 运行与对话 | `llm_records`、`llm_record_events`、`activity`、`chat_messages` | 每次 agent 运行的用量、花费和流事件；每个任务的活动流；对话历史 |
-| 系统 | `system_settings`、`channel_configs`、`schema_migrations`、`schema_fingerprint` | 全局设置、Telegram 和飞书渠道、已执行的一次性迁移，以及上次应用的 schema 的哈希（serve 据此判断改动前是否要备份） |
+| 系统 | `system_settings`、`channel_configs`、`schema_migrations`、`schema_fingerprint` | 全局设置、Telegram 和飞书渠道、当前基线标记（`post_bridge_baseline`；完成桥接的库还有 `file_state_import`），以及上次应用的 schema 的哈希（serve 据此判断改动前是否要备份） |
 
 主要数据表逐列的说明见 [Data Persistence](docs/architecture/agent-system.md#data-persistence)。
 
@@ -248,15 +251,14 @@ PostgreSQL 是启动的硬性依赖；`looper serve` 每次启动都会应用 `l
 
 ### 运维配置文件
 
-部署设置写在 `<runtime root>/ops/server.toml`（默认 `~/.looper/ops/server.toml`）。`looper serve`、`doctor`、
-`config export`、`config import`、`config init-ops` 和 `service install` 的 `--config /path` 指向别的文件。
+部署设置写在 `<runtime root>/ops/server.toml`（默认 `~/.looper/ops/server.toml`）。支持的安装路径是这份私有文件加上显式的 `--runtime-root`。`looper serve`、`doctor`、`config init-ops` 和 `service install` 的 `--config /path` 指向别的文件。Agent 配置的导出和导入是对着正在运行的服务执行的 `loopercli config`。
 改完文件后重启服务才生效。Looper 原子写入。文件必须是普通文件（不能是符号链接），属主是你，权限 0600，
 所在目录也属你、权限 0700。不做展开：没有变量插值，没有 `~`，没有 include。未知的键、类型不对或值不合法会让命令停下；
 报错点名这个键，不显示值。
 
 | 键 | 必需 | 含义 |
 |---|---|---|
-| `database.url` | 是 | PostgreSQL 连接串。没有它时，`looper serve`、`doctor` 和 `config import`、`export` 不会启动，并提示运行 `looper config init-ops` 或编辑该文件 |
+| `database.url` | 是 | PostgreSQL 连接串。没有它时，`looper serve` 和 `doctor` 不会启动，并提示运行 `looper config init-ops` 或编辑该文件。`loopercli config export` 和 `import` 需要这个正在运行的服务 |
 | `server.host` | 否 | 绑定地址（默认 `127.0.0.1`） |
 | `server.port` | 否 | 端口（默认 8767） |
 | `server.public_url` | 否 | 用户打开控制台时用的地址（例如 `https://looper.example.com`），用于任务结束通知和定时任务消息发到 Telegram、飞书里的链接；不设置时用服务自己的 `http://<host>:<port>`。值无效时 `looper serve` 不会启动 |
@@ -266,20 +268,13 @@ PostgreSQL 是启动的硬性依赖；`looper serve` 每次启动都会应用 `l
 | `backup.verify_command` | 否 | 一个 argv 数组，从标准输入读备份，像 `pg_restore --list` 一样列出内容；`backup.command` 是 `docker exec ... <容器> pg_dump ...` 时自动推导，否则用本机 `pg_restore` |
 | `operator_notes.root` | 否 | 操作者的 Claude Code 存放项目笔记的目录，必须是绝对路径 |
 
-每一项按这个顺序取第一个：显式参数（`--host`、`--port`，以及把 `server.log_level` 设为 `debug` 的 `--verbose`）、
-文件、然后仅本版本仍读的旧变量（环境里的 `LOOPER_DATABASE_URL`、`LOOPER_PUBLIC_URL`、`LOOPER_PG_DUMP`、
-`LOOPER_BACKUP_CMD`、`LOOPER_BACKUP_VERIFY_CMD`、`LOOPER_OPERATOR_NOTES_ROOT`，以及除笔记根目录和校验命令外的 `LOOPX_*` 同名；这两项只认 `LOOPER_` 前缀）、再是 checkout 的 `.env` 里的同名、
-最后是内置默认值。数据库 URL 没有默认值。用到旧变量就记一条弃用警告，只写变量名、不写值；下一版删除它们。
-runtime root 是 `--runtime-root`，否则是 `LOOPER_RUNTIME_ROOT`（已弃用，会警告；`LOOPX_RUNTIME_ROOT` 同样），
-否则是 `~/.looper`。文件本身不写 runtime root。`.env` 不再放进 Looper 的环境：只从中读上述旧设置，
-其余的键（例如某个渠道 token 变量）会被忽略，并在警告里点名。
+每一项按这个顺序取第一个：显式参数（`--host`、`--port`，以及把 `server.log_level` 设为 `debug` 的 `--verbose`）、文件、然后在文件还没写这项之前仍读的旧变量（环境里的 `LOOPER_DATABASE_URL`、`LOOPER_PUBLIC_URL`、`LOOPER_PG_DUMP`、`LOOPER_BACKUP_CMD`、`LOOPER_BACKUP_VERIFY_CMD`、`LOOPER_OPERATOR_NOTES_ROOT`，以及前四项的 `LOOPX_*` 同名；笔记根目录和校验命令只认 `LOOPER_` 前缀）、再是 checkout 的 `.env` 里的同名、最后是内置默认值。数据库 URL 没有默认值。用到旧变量就记一条弃用警告，只写变量名、不写值。支持的安装路径是私有运维文件加上 `--runtime-root`。runtime root 是 `--runtime-root`，否则是 `LOOPER_RUNTIME_ROOT`（已弃用，会警告；`LOOPX_RUNTIME_ROOT` 同样），否则是 `~/.looper`。文件本身不写 runtime root。`.env` 不再放进 Looper 的环境：只从中读上述旧设置，其余的键（例如某个渠道 token 变量）会被忽略，并在警告里点名。
 
 已有安装迁过来：跑一次 `looper config init-ops`。它按当前生效的值写成文件，权限 0600，已有文件则拒绝覆盖。
 什么都没配时，写入旧的默认值 `postgresql://localhost:5432/loopx` 并说明。然后从 shell 和 `.env` 里删掉旧变量；
 用了服务的话再跑一次 `looper service install`。在此之前，`looper serve` 仍按这些变量工作，并带上警告。
 
-`LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` 不是运维设置。它只用于测试和验证：定时任务两次触发之间的最小间隔（默认 300 秒），
-`looper serve` 启动时读取。
+定时任务的最小间隔不是运维设置。本版本用已保存的 `scheduler.min_interval_seconds`，没有保存值时用内置的 300 秒。它不读取 `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS`。有前置检查的定时任务用 `min(60, 值)`。下一次保存规则时生效。
 
 **子进程。** 服务启动的每个进程（agent 的运行时和它拉起的 MCP 服务器、定时任务的前置检查、探测，以及 git、ps、lark-cli 这些辅助程序）
 都从服务环境的一份允许名单起步（`looper/child_env.py`：系统路径、locale、XDG、SSH agent、git 身份和配置、代理和证书，

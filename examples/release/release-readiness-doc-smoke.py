@@ -178,6 +178,30 @@ def validate_release_decision(body: str) -> None:
         )
 
 
+_BRIDGE_NOTICE_EN = "upgrade to v2.13.165 first"
+_BRIDGE_NOTICE_ZH = "先升级到 v2.13.165"
+_VERSIONED_NOTES = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+
+
+def _release_version(path: Path) -> tuple[int, int, int] | None:
+    match = _VERSIONED_NOTES.fullmatch(path.stem)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def validate_bridge_upgrade_notice(path: Path, body: str) -> None:
+    """From v2.14.0 on, the body must name the fixed v2.13.165 bridge."""
+    version = _release_version(path)
+    if version is None or version < (2, 14, 0):
+        return
+    if _BRIDGE_NOTICE_EN not in body:
+        raise AssertionError(f"{path.name} must say to upgrade to v2.13.165 first")
+    chinese = section(body, "## 中文摘要")
+    if _BRIDGE_NOTICE_ZH not in chinese:
+        raise AssertionError(f"{path.name} 中文摘要 must say to upgrade to v2.13.165 first")
+
+
 def validate_release_notes(
     path: Path,
     *,
@@ -189,6 +213,7 @@ def validate_release_notes(
     if body.count("```") % 2:
         raise AssertionError("release notes contain an unbalanced fenced code block")
 
+    validate_bridge_upgrade_notice(path, body)
     validate_release_decision(body)
     english = section(body, ENGLISH_USAGE_HEADING)
     chinese_summary = section(body, "## 中文摘要")
@@ -336,6 +361,45 @@ looper example --check
                 1,
             ),
             "release-note gate accepted an unspecified contributor decision",
+        )
+        pre_bridge = tmp_path / "v2.13.208.md"
+        pre_bridge.write_text(no_changes, encoding="utf-8")
+        validate_release_notes(
+            pre_bridge,
+            surfaces=[],
+            expect_no_optional_capability_changes=True,
+        )
+        missing_notice = tmp_path / "v2.14.0.md"
+        missing_notice.write_text(no_changes, encoding="utf-8")
+        try:
+            validate_release_notes(
+                missing_notice,
+                surfaces=[],
+                expect_no_optional_capability_changes=True,
+            )
+        except AssertionError as exc:
+            if "v2.13.165" not in str(exc):
+                raise AssertionError(
+                    "v2.14.0 rejection was not the bridge notice"
+                ) from exc
+        else:
+            raise AssertionError(
+                "release-note gate accepted a v2.14.0 body without the bridge notice"
+            )
+        noticed = no_changes.replace(
+            "**Breaking changes:** No.",
+            "**Breaking changes:** No. Operators older than the bridge must upgrade to v2.13.165 first.",
+            1,
+        ).replace(
+            "**是否有破坏性变更：**无。",
+            "**是否有破坏性变更：**无。早于桥接的安装须先升级到 v2.13.165。",
+            1,
+        )
+        missing_notice.write_text(noticed, encoding="utf-8")
+        validate_release_notes(
+            missing_notice,
+            surfaces=[],
+            expect_no_optional_capability_changes=True,
         )
 
 

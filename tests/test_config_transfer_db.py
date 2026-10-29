@@ -27,13 +27,13 @@ ROLES = ("manager", "planner", "worker", "reviewer")
 
 
 def _documented_v3() -> dict[str, Any]:
-    """Explicit current data until the documentation card updates the architecture example."""
-    return {"format": "looper-config/v4", "providers": [{
-        "name": "Example account", "vendor_type": "custom", "auth": "api_key",
-        "endpoints": {"anthropic-messages": {"base_url": "https://example.invalid"}},
-    }], "models": [{"provider": "Example account", "name": "exact-model", "protocol": "anthropic-messages"}],
-        "profiles": [{"name": "Example profile", "runtime": "claude-code", "model": {
-            "provider": "Example account", "name": "exact-model", "protocol": "anthropic-messages"}}]}
+    """The portable example operators copy from the architecture guide."""
+    import re
+
+    doc = (Path(__file__).resolve().parents[1] / "docs/architecture/agent-system.md").read_text()
+    section = doc.split("### Moving the configuration: export and import", 1)[1].split("\n### ", 1)[0]
+    examples = [json.loads(block) for block in re.findall(r"```json\n(.*?)\n```", section, re.S)]
+    return next(example for example in examples if example.get("format") == "looper-config/v4")
 
 
 def test_documented_v3_example_previews_applies_and_reads_back(monkeypatch, tmp_path):
