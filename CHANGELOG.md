@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.13] - 2026-10-29
+
+### Fixed
+
+- **A runner turn that fails before its prompt is accepted now records its model, and a refused consult fork is classified `session_gone`.** A runner turn that failed before the prompt was accepted (a timeout, a rejected prompt, a lost generation or a budget mismatch) emitted no init, so its failure record had no model. It now emits an init with the Descriptor's model and the current session id. A room consult whose fork is refused (`SESSION_NOT_FOUND` or `SESSION_OWNED`) was classified `contract`; a consult now counts as started only when its init names a session, so a refused fork is `session_gone`. Such an init carries `session_started: false`, so the Manager and the Planner do not save the session or treat the resume brief as delivered until the runner accepts the prompt. ([#896](https://github.com/foolzzz/looper/pull/896))
+
 ## [2.14.12] - 2026-10-29
 
 ### Fixed
