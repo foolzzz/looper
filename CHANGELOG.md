@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.10] - 2026-10-29
+
+### Fixed
+
+- **Every runner-hosted turn records its model.** Records written for DSH and Pi runner turns had `model` NULL, so the runs list showed no model and task costs grouped under none. Each runner trace now opens with its own `system/init` carrying the Descriptor's model, including a failed resume. Model requests are unchanged. ([#891](https://github.com/foolzzz/looper/pull/891))
+
 ## [2.14.9] - 2026-10-29
 
 ### Fixed
