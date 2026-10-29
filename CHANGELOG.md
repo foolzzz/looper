@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.3] - 2026-10-29
+
+### Added
+
+- **DSH runner turns, still not reachable from any runtime.** The runner serves `session/prompt` and `session/cancel`. One `llm/stream` listener attributes each request to its session and trace (loop and compaction requests only; anything else is refused and logged as `usage_unattributed`), sends `budget/authorize` before the request and never sends a denied one (the turn settles `capped` or `max_requests`), and the route's `resolveAuth` refuses unless a request is authorized. Each authorized request ends in exactly one `request_end`, with usage complete only from a validated terminal usage and a fully read body. The turn maps assistant, tool-result and turn events to `session/update`, settles once with a typed outcome and provider error kind, and cancel or close settles within 4 seconds or releases the session. `session/close` takes the running turn's trace. No setting or user-visible entry exists; no model-visible change for a running system. ([#872](https://github.com/foolzzz/looper/pull/872))
+
 ## [2.14.2] - 2026-10-29
 
 ### Added
