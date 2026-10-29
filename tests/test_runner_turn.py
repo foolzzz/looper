@@ -175,6 +175,28 @@ def test_task_aggregate_is_current_trace_only_and_unreadable_fails_closed():
     asyncio.run(test())
 
 
+@pytest.mark.parametrize("phase,cause", [("authorize", "estimate"), ("authorize", "task_spent"),
+    ("request_end", "usage_incomplete"), ("finish", "usage_incomplete")])
+def test_unverifiable_budget_diagnostic_identifies_phase_and_unknown_value(caplog, phase, cause):
+    async def test():
+        caps = {"run_cap": 1, "task_cap": 2, "task_spent": None if cause == "task_spent" else 0}
+        t = turn(price=cause != "estimate", caps=caps)
+        if phase == "authorize":
+            assert (await t.authorize(authorize()))["reason"] == "budget_unverifiable"
+        else:
+            assert (await t.authorize(authorize()))["allow"]
+            if phase == "request_end":
+                await t.request_end(ended(complete=False))
+            else:
+                await t.finish(settled(outcome="failed", usage_complete=False))
+        messages = [r.getMessage() for r in caplog.records if r.name.endswith("runner.turn")]
+        assert len(messages) == 1
+        assert f"phase={phase}" in messages[0]
+        assert f"cause={cause}" in messages[0]
+        assert "session_id=s trace_id=t" in messages[0]
+    asyncio.run(test())
+
+
 def test_stop_and_caller_cancel_drain_started_tool_without_restarting_turn():
     async def test():
         started, release = asyncio.Event(), asyncio.Event()

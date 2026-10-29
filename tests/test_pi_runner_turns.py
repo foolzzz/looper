@@ -104,6 +104,83 @@ def test_denied_request_never_reaches_the_provider(tmp_path):
     run(exercise())
 
 
+@pytest.mark.parametrize("response,usage,counts,cost", [
+    ("completed", USAGE, (1000, 200, 300, 0), 0.0203),
+    ("completed", {**USAGE, "total_tokens": 1400}, (1000, 200, 300, 0), 0.0203),
+    ("completed", {**USAGE, "output_tokens_details": {"reasoning_tokens": 201}}, (1000, 200, 300, 0), 0.0203),
+    ("completed", {**USAGE, "input_tokens_details": {"cached_tokens": 1400}}, (0, 200, 1400, 0), 0.0114),
+    ("completed", {**USAGE, "input_tokens_details": {"cached_tokens": 300, "cache_write_tokens": 1100}},
+        (0, 200, 300, 1100), 0.02405),
+    ("completed", None, None, None),
+    ("completed", {**USAGE, "output_tokens": "200"}, None, None),
+    ("http_error", None, (0, 0, 0, 0), 0),
+    ("disconnected", None, None, None),
+], ids=["charged", "total-mismatch", "reasoning-exceeds-output", "cache-exceeds-input",
+    "cache-write-exceeds-input", "missing-usage", "invalid-count", "http-error", "disconnected"])
+def test_first_planner_request_with_known_price_and_caps(tmp_path, monkeypatch, caplog, response, usage, counts, cost):
+    from looper.agents.run_usage import Usage
+    from looper.agents.runtimes.pricing import pricer
+    from looper.agents.runtimes.runner.turn import RunnerTurn
+    from tests.pi_runtime_support import provider
+
+    async def exercise():
+        frames = reply()
+        frames[-1]["response"]["usage"] = usage
+        script = {"completed": ResponseScript(events=frames),
+            "http_error": ResponseScript(status=400),
+            "disconnected": ResponseScript(disconnect_before_headers=True)}[response]
+        async with FakeModelAPI([script], api_key=KEY) as api, pi_supervisor(tmp_path) as supervisor:
+            lease = await supervisor.acquire("pi")
+            params = session_params(lease, base_url=api.base_url, key=KEY, role="planner")
+            params["provider"]["model"] = "gpt-6-astra"
+            sid = await lease.open_session(params)
+
+            async def limits():
+                return dict(run_cap=1.0, task_cap=2.0, task_spent=0.0)
+
+            async def cancel(_):
+                await lease.bridge.cancel_turn(sid, "first")
+
+            t = RunnerTurn(session_id=sid, trace_id="first", role="planner", tools=None,
+                provider_id="account", model="gpt-6-astra", price=pricer(provider()), limits=limits,
+                prior_totals=Usage(cost_usd=None), cancel=cancel)
+            admitted, original = [], t.authorize
+            ended, original_end = [], t.request_end
+
+            async def authorize(params):
+                result = await original(params)
+                admitted.append(result)
+                return result
+
+            async def request_end(params):
+                ended.append(dict(params))
+                return await original_end(params)
+
+            monkeypatch.setattr(t, "authorize", authorize)
+            monkeypatch.setattr(t, "request_end", request_end)
+            events = []
+            await lease.bridge.begin_turn(sid, "first", events.append, t, text="Say hello.")
+            summary = await lease.bridge.wait_settled(sid, "first")
+            # Observe admission without replacing the host price or budget check.
+            assert len(api.requests) == len(admitted) == 1 and admitted[0]["allow"]
+            assert len(ended) == 1 and ended[0]["complete"] is (counts is not None)
+            if counts is None:
+                assert summary.cap_reason == "budget_unverifiable"
+                assert summary.outcome == "capped" and not summary.usage_complete
+                assert summary.usage.cost_usd is None
+                assert "phase=request_end cause=usage_incomplete" in caplog.text
+            else:
+                assert summary.cap_reason is None and summary.usage_complete
+                assert summary.outcome == ("completed" if response == "completed" else "failed")
+                assert tuple(ended[0][field] for field in ("input_uncached", "output", "cache_read", "cache_write")) == counts
+                assert (summary.usage.input_tokens, summary.usage.output_tokens,
+                    summary.usage.cache_read_tokens, summary.usage.cache_creation_tokens) == counts
+                assert summary.usage.cost_usd == cost
+                assert "budget unverifiable" not in caplog.text
+            await lease.release()
+    run(exercise())
+
+
 @pytest.mark.parametrize("status,kind", [(401, "PROVIDER_AUTH"), (403, "PROVIDER_AUTH"), (400, "PROVIDER_UNAVAILABLE")])
 def test_provider_auth_failure_is_typed(tmp_path, status, kind):
     async def exercise():
@@ -377,9 +454,9 @@ def test_nonterminal_chat_usage_leaves_sent_requests_incomplete(tmp_path, monkey
     ({**CHAT_USAGE, "completion_tokens": "200"}, "chunk", None),
     ({**CHAT_USAGE, "prompt_tokens": -1}, "chunk", None),
     ({**CHAT_USAGE, "completion_tokens": 0.5}, "chunk", None),
-    ({**CHAT_USAGE, "prompt_tokens_details": {"cached_tokens": 1400}}, "chunk", None),
-    ({**CHAT_USAGE, "total_tokens": 1400}, "chunk", None),
-    ({**CHAT_USAGE, "completion_tokens_details": {"reasoning_tokens": 201}}, "chunk", None),
+    ({**CHAT_USAGE, "prompt_tokens_details": {"cached_tokens": 1400}}, "chunk", (0, 200, 1400, 0)),
+    ({**CHAT_USAGE, "total_tokens": 1400}, "chunk", (1000, 200, 300, 0)),
+    ({**CHAT_USAGE, "completion_tokens_details": {"reasoning_tokens": 201}}, "chunk", (1000, 200, 300, 0)),
 ], ids=["charged", "choice", "cache-write", "deepseek-cache", "zero", "missing", "empty",
     "string", "negative", "fraction", "cache-exceeds-input", "total-mismatch", "reasoning-exceeds-output"])
 def test_chat_accounts_only_for_valid_terminal_usage(tmp_path, monkeypatch, usage, location, counts):
@@ -431,8 +508,11 @@ def test_chat_accounts_only_for_valid_terminal_usage(tmp_path, monkeypatch, usag
     ({**USAGE, "output_tokens": "200"}, None),
     ({**USAGE, "input_tokens": -1}, None),
     ({**USAGE, "output_tokens": 0.5}, None),
-    ({**USAGE, "input_tokens_details": {"cached_tokens": 1400}}, None),
-], ids=["charged", "cache-write", "zero", "missing", "empty", "string", "negative", "fraction", "cache-exceeds-input"])
+    ({**USAGE, "input_tokens_details": {"cached_tokens": 1400}}, (0, 200, 1400, 0)),
+    ({**USAGE, "total_tokens": 1400}, (1000, 200, 300, 0)),
+    ({**USAGE, "output_tokens_details": {"reasoning_tokens": 201}}, (1000, 200, 300, 0)),
+], ids=["charged", "cache-write", "zero", "missing", "empty", "string", "negative", "fraction", "cache-exceeds-input",
+    "total-mismatch", "reasoning-exceeds-output"])
 def test_response_accounts_for_terminal_usage(tmp_path, monkeypatch, usage, counts, terminal_type):
     from looper.agents.runtimes.runner.turn import RunnerTurn
 
