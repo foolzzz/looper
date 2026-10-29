@@ -82,6 +82,7 @@ any of the following. [v2.5.0](v2.5.0.md) is a complete example.
   - `### 可选能力启用与使用`, with one `#### <surface>` per surface (`启用`, `验证`,
     `停用 / 回退`, `权限边界`, `文档`), or "本版本未新增可选能力启用入口。".
 - **Balanced code fences**, and no local paths or credential variable names.
+- **Bridge upgrade notice, from v2.14.0 on.** The file name is `vX.Y.Z.md` and the version is at least 2.14.0. The body must contain the English phrase `upgrade to v2.13.165 first`, and `## 中文摘要` must contain `先升级到 v2.13.165`. v2.13.165 is the fixed bridge: an installation older than it upgrades to v2.13.165 and starts once before a later release accepts the database. The release tooling sets the version number. `release-readiness-doc-smoke.py` enforces the notice for those file names and skips it for an earlier body. Do not rewrite an already published body to add the sentence.
 
 Credit community contributors by handle and pull request in both languages.
 When a release has none, say so; the gate requires either.

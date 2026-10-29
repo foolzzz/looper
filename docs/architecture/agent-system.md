@@ -1531,11 +1531,10 @@ Manager tools.
   card per type, found or not, with its path, version, capabilities and the
   roles it can run, and Re-detect (`POST /api/v1/runtimes/probe`) probes it
   again, or looks for a type not found yet and adds its runtime when its
-  probe succeeds. Runtimes registered by hand before (`builtin` false) are dropped
-  once by the schema when no profile uses them (`schema_migrations`
-  `agent_runtimes_unused_custom_removed`); one a profile uses stays,
-  read-only, shown as "custom (legacy)", so the profile keeps running the
-  executable it ran.
+  probe succeeds. A runtime registered by hand before runtimes were built in
+  stays while a profile references it, read-only, so that profile keeps its
+  executable. This binary does not drop unused hand-registered runtimes at
+  startup.
 - **Providers** (`llm_providers`) are accounts: `name`, typed `vendor_type`,
   `auth`, `oauth_runtime_type`, `env`, `max_concurrency` (`null` = no limit,
   stored and checked only), and a separate API key in `llm_provider_secrets`.
@@ -1642,12 +1641,7 @@ appends, and the Manager has no task level. Only a role layer takes it: the shar
 project refuse it (400). An Agent Profile has no mode of its own. A runtime whose adapter cannot replace (the typed
 `can_replace_system_prompt` capability, exposed by `/api/registry` with `replace_system_prompt_refusal`) always gets
 `append`; today all five adapters can replace. `Launch.system_prompt_mode` is the role's value on any runtime (append with
-no role). Configuration export and import carry the role layers' value; an older export's profile `system_prompt_mode`
-is accepted and ignored, with a note. The schema adds the layer column once, and while `agent_profiles.system_prompt_mode`
-still exists, sets the Worker's and the Reviewer's role layer to `replace` where their effective profile (the role layer's,
-else the shared defaults', else the built-in one) replaced and the layer has no mode yet, then drops the profile column.
-The Manager and the Planner carry nothing over: their built-in value is `replace`, so a Manager or Planner profile that
-appended on Codex, Grok or OMP now replaces unless its role layer says `append`.
+no role). Configuration export and import carry the role layers' `system_prompt_mode`. A profile that still has that field is skipped as an unknown field. A historical release copied a replacing Worker or Reviewer mode onto the role layer and then dropped `agent_profiles.system_prompt_mode`. This binary does not replay that write. The Manager and the Planner were not copied: their built-in value is `replace`, so a Manager or Planner profile that appended on Codex, Grok or OMP replaces unless its role layer says `append`.
 
 | Runtime | Append | Replace |
 | --- | --- | --- |
@@ -1670,9 +1664,9 @@ Manager's profile configuration tool has no mode field.
 created without `agent_teams` gets them on a Claude Code runtime and not on
 another (`profile_registry.default_agent_teams`), a change that moves a profile
 to a runtime of another type without saying takes that type's default, and the
-upgrade turned them on once for every profile already on a Claude Code runtime,
-the built-in `claude-code/opus` included (`schema_migrations`
-`agent_profiles_agent_teams_on`), so a profile turned off afterwards stays off.
+historical release turned them on for profiles already on Claude Code,
+including the built-in `claude-code/opus`. This binary does not repeat that
+write, so a profile turned off afterwards stays off.
 The built-in profile is read-only: to run without teams, select a profile with
 them off. Asking for them on another runtime is refused (400). A profile with
 `agent_teams` starts the Manager's, the Workers' and the Reviewers' Claude Code
@@ -2004,24 +1998,21 @@ configs' `max_concurrency`, which nothing enforced, was dropped
 Before, a project limited its tasks too: the Planner's limit (a role in the
 project, else the Planner's role layer, else 8) was how many of a project's
 tasks ran at once, the others waiting as `pending`, and a role in a project
-limited its Workers and Reviewers across its tasks. The upgrade converts those
-values once (`looper/db/task_concurrency.py`, `schema_migrations`
-`concurrency_per_task`, in the schema's transaction, each conversion logged):
-a project's own Worker and Reviewer limits become the `task_limits` of each
-of its schedules that has none; its Planner limit caps each of its parallel
-schedules' `max_parallel_runs` (still 1 to 10); then `max_concurrency` is
-cleared from every role-in-project layer and from the Planner's role layer
-(a layer left with nothing set goes) and the constraint narrowed. A task
-created by hand in such a project runs with the per-task defaults. Some things
-change meaning without being converted: a Worker or Reviewer role layer's
-value, and the built-in 16 and 8, counted a project's runs and now count one
-task's; the tasks there are at the upgrade (running, ready or pending) lose
-their project's limits and run with the per-task defaults, as the migration
-writes only schedules; and a task held back as `pending` for a restart at a
-raised spend cap starts as a continued restart at the next server start (one
-more `[RESTART]` turn, at the upgrade only). An earlier Looper run on the
-database after the upgrade keeps the narrowed constraint, so its project page
-cannot store a project's limit (the write fails).
+limited its Workers and Reviewers across its tasks. A historical release
+converted those values once. This binary does not replay that conversion.
+That release copied a project's Worker and Reviewer limits into the
+`task_limits` of each of its schedules that had none, capped each parallel
+schedule's `max_parallel_runs` with the project's Planner limit (still 1 to
+10), cleared `max_concurrency` from every role-in-project layer and from the
+Planner's role layer, and narrowed the constraint. A task created by hand in
+such a project runs with the per-task defaults. Some things changed meaning
+without a conversion: a Worker or Reviewer role layer's value, and the
+built-in 16 and 8, counted a project's runs and now count one task's. Tasks
+present at that upgrade lost their project's limits, because that release
+wrote only schedules. A task held back as `pending` for a restart at a raised
+spend cap started as a continued restart at the next server start (one more
+`[RESTART]` turn, at that upgrade only). A current database already has the
+narrowed constraint, so its project page cannot store a project's limit.
 
 What bounds the load is now each task's limits and how many tasks start.
 Before, an unconfigured project ran at most 8 Planners, 16 Workers and 8
@@ -2219,11 +2210,11 @@ A name the project already has is a 409. Changes to one project's skills run
 in a transaction that holds the project's row lock, as its knowledge does, so
 two concurrent adds cannot both pass the count cap or take one name.
 
-The `project_skills` table of M4 was moved into the catalog once, at the first
-start of this version (`library_catalog_installs` in `schema_migrations`): each
-row became an item with the same id, project, name and description, its
-`SKILL.md` as runs wrote it, installed in its project for the three task roles
-and enabled as it was; then the table was dropped.
+The `project_skills` table of M4 was moved into the catalog in a historical
+release: each row became an item with the same id, project, name and
+description, its `SKILL.md` as runs wrote it, installed in its project for the
+three task roles and enabled as it was; then the table was dropped. This
+binary does not replay that import.
 
 Verified with Claude Code 2.1.285 under the isolation flags and
 `--dangerously-skip-permissions`, with haiku:
@@ -2517,10 +2508,9 @@ evaluation is required before the original schedule requirement is complete.
   Both follow the system setting `scheduler.min_interval_seconds` (Settings →
   Scheduler, `POST /api/v1/scheduler_settings/get` and `update`; default 300 s, a whole number
   from 1): it applies to the next save at once, and saved schedules are not
-  checked again. With no saved value, the deprecated
-  `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` (or `LOOPX_…`), read from the server's
-  environment and not from `.env`, still applies for this version and logs one warning that names the variable, never its value; once a
-  value is saved the variable is ignored. The system setting
+  checked again. With no saved value the built-in 300 seconds applies. A gated
+  schedule uses `min(60, value)`. `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` and
+  `LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS` are not read. The system setting
   `scheduler.run_timeout_seconds` (default: no limit; 1 second to 30 days) is the run
   timeout of a schedule whose `run_timeout_seconds` is `"default"`
   (`schedules.run_timeout_mode`: `inherit`, `seconds`, `none`; schedules from
@@ -2846,9 +2836,7 @@ tokens, plugin hook context 3.8k).
 
 `loopercli config export <file>` and `loopercli config import <file>`
 (`looper/agents/config_transfer.py`) move an installation's agent configuration
-through one JSON file. A default-only installation with no extra bots or
-Manager installs retains `format: looper-config/v3`; any scenario Manager,
-added bot or own Manager install selects `looper-config/v4`. The registry sections are
+through one JSON file. Every export is `format: looper-config/v4`. The registry sections are
 `runtimes`, `providers` (account settings and endpoints keyed by protocol),
 `models` (settings keyed by provider name, exact model name and protocol), and
 `profiles` (runtime name and a composite `model` reference). Built-ins exist
@@ -2867,9 +2855,9 @@ Missing references, deleted Manager identities, immutable type/owner conflicts
 and already allocated bot suffixes are explicit errors, not omissions or
 reassignments.
 `--include-projects` adds projects, layers, knowledge, skills, installs and
-schedules. Export streams a read-only repeatable-read snapshot, either through
-v1 `config.export` or `GET /api/config/export`; both share the same implementation.
-The CLI needs the running service; catalog files remain UTF-8 text.
+schedules. Export is a read-only repeatable-read snapshot through
+`POST /api/v1/config/export`. The CLI needs the running service; catalog files
+remain UTF-8 text.
 
 This minimal portable example can be previewed with
 `loopercli --json config import portable.json`, applied with
@@ -2882,7 +2870,7 @@ and an API key before any run. Its unknown model prices are deliberately null.
 
 ```json
 {
-  "format": "looper-config/v3",
+  "format": "looper-config/v4",
   "runtimes": [],
   "providers": [{
     "name": "Example account", "vendor_type": "custom", "auth": "api_key",
@@ -2903,29 +2891,24 @@ and an API key before any run. Its unknown model prices are deliberately null.
 }
 ```
 
-v2 files and v1 files (`looper-config/v1`, or `loopx-config/v1` before the
-rename) still import through the shared legacy registry converter; v1's
-`agents` and layer `agent` become profiles. Legacy provider catalogs and
-profile model strings are converted with their original protocol and endpoint
-semantics, not new vendor defaults. Unresolvable or ambiguous entries are
-reported as skipped with reason codes, not silently redirected. Old profile
-`system_prompt_mode` is ignored with a note; v3 profiles reject it. Role/task
-mode choices keep their existing meaning.
+Any other `format` is refused before a destination is read or an import is
+staged: import the old file on v2.13.165, upgrade that installation and
+database, then export v4 with this release. v2.13.165 may export v3, so
+exporting again there does not produce v4. A disposable v2.13.165 installation
+can do the import. A layer `model` or `effort`, and a provider `protocols`,
+`base_url` or `models`, are retired fields and stop the import before it
+writes. Unknown top-level fields are refused the same way. Role and task
+prompt-mode choices keep their existing meaning. Prompt-eval comparisons
+accept only `looper-prompt-eval/v2` for tasks and `looper-manager-dialogs/v2`
+for dialogs.
 
 Secrets (MCP environment and header values, a provider's API key, a channel
 config's keys other than its sender allowlist, `*_env` names and description)
 are `{"secret": "omitted"}` unless `--include-secrets` is requested for the API export. A project's directory,
 an item's source and a runtime's executable that are local paths are not
 exported; a path document is a reference relative to its project's directory,
-flagged `repoint`. A layer of a file written before Agent Profiles gives a
-`model`: the import selects the profile `claude-code/<model>`, adding it as
-the upgrade does. A profile carries its `effort` and a layer has none; a
-layer of an older file that gives an `effort` is converted as the upgrade
-converts a database (`layer_effort.convert`), over this installation's layers
-with the file's in their place: the profiles that takes are added, each layer
-it changes selects its profile (a layer the file does not give included), and
-a note says each. Tasks are not exported, so neither are their profile
-overrides.
+flagged `repoint`. A profile carries its `effort`; a layer does not. Tasks are
+not exported, so neither are their profile overrides.
 
 A project's schedules carry their settings (`name`, `cron`, `timezone`,
 `requirement`, `overlap`, `max_parallel_runs`, `catch_up`, the timeouts, the
@@ -2967,54 +2950,60 @@ items keep their origin. Importing the same file again changes nothing, and
 exporting the new installation gives the same file.
 
 Settings imports too (`looper/agents/config_imports.py`). `POST
-/api/config/imports` is the one route that reads past the 8 MiB request cap:
-it streams up to 256 MiB (twice the catalog's cap) to a 0600 file under
+/api/v1/config/import_upload` is the route that reads past the 8 MiB request
+cap: it streams up to 256 MiB (twice the catalog's cap) to a 0600 file under
 `<runtime root>/config-imports/`, after the Origin and Host checks, and
-answers with an import id and the same preview. `POST
-/api/config/imports/<id>/apply` runs `--apply`'s transaction and deletes the
-file; `DELETE` cancels; an import left alone expires after an hour, and the
-server clears the directory when it starts and stops. After applying, each
-secret to fill in names the provider, MCP server or channel that takes it, and
-Settings links to its form (`#settings/providers/<id>`,
-`#settings/catalog/mcp/<id>`, `#settings/channels/<id>`).
+answers with an import id and the same preview. Apply and cancel use
+`POST /api/v1/config/import_apply` and `POST /api/v1/config/import_cancel`.
+An import left alone expires after an hour, and the server clears the
+directory when it starts and stops. After applying, each secret to fill in
+names the provider, MCP server or channel that takes it, and Settings links
+to its form (`#settings/providers/<id>`, `#settings/catalog/mcp/<id>`,
+`#settings/channels/<id>`).
 
-Before upgrading an existing database, follow the
-[RFC upgrade and rollback gates](rfcs/llm-models-v0.zh-CN.md#9-上线回滚与观测).
-`looper.db.registry_migration.dry_run(pool)` reads the legacy registry in a
-read-only repeatable-read transaction and returns count-only diagnostics;
-it is a Python interface, not a `looper config --dry-run` command. Import
-preview validates a file and is not evidence that a database migration is safe.
-Check `profiles_before == profiles_after == profiles_mapped`, with
-`unresolved_profiles`, `binding_mismatches` and `pricing_mismatches` all zero.
-An offline copy still needs old/new tier launch and pricing comparisons.
+Startup admits a database in one of three ways (`looper/db/connection.py`).
+An empty database runs `schema.sql` once and records `post_bridge_baseline`.
+A current database is schema 4 with that marker and does not replay
+initialization DDL. A schema-3 database is the fixed v2.13.165 bridge when
+its `schema.sql` fingerprint is one of the two recorded hashes
+(v2.13.165–192), the tables and columns the conversion reads are present,
+`schema_migrations` contains `file_state_import`, and the four role default
+prompts match the bridge hashes. `ensure_schema` then runs
+`upgrade_from_bridge` once, after serve has taken a verified full backup.
+Anything else is refused: upgrade to v2.13.165 or a later 2.13 release first,
+start it once, then upgrade. A schema version above 4 is refused by the
+forward guard. `seeds.sql` is inserted on every start and does not change
+saved choices. There is no historical migration chain and no
+`registry_migration` module.
 
-Quiesce writes and scheduling and stop the old process before switching.
-`serve` takes and validates a **full database** custom-format `pg_dump` before
-schema changes; a schema-only dump or config export cannot restore history,
-secrets and references. Backup failure stops the upgrade; `--skip-backup` is
-not acceptable for this gate. The dump is proved readable by, in order,
-`backup.verify_command` (dump on stdin), `docker exec -i <container>
-pg_restore --list` when `backup.command` is exactly `docker exec [options]
-<container> pg_dump ...`, or the local `pg_restore`; with none of these the
-backup fails before any DDL and the message names `backup.verify_command`. The
-check result, the startup self-check and `looper doctor` name the verifier.
-The current branch initializes new databases as
-version 3, but the legacy
-conversion is **not wired into `ensure_schema`**: version 2 and unversioned
-existing databases are refused before DDL with the database unchanged. Do not
-attempt an in-place upgrade yet. The release gate requires wiring conversion
-and its version marker into one transaction and proving rollback on failure.
-The forward-schema guard
-must also be present in the old-layout rollback release: this branch's guard
-cannot protect an older unpatched binary. Never start it against the new schema.
+That database gate does not prove the filesystem, service, prompt or browser
+steps that had to finish while the installation was still on v2.13.165. The
+message journal is a separate local transition: `MessageJournal.transition`
+runs once per runtime root, writes `.local/agent-bus/notice-identities-v1`,
+and seals bridge notice identities before replay. Historical run records are
+not rewritten at read time: `normalize_record_metadata` adds
+`metadata.presentation` in the response and leaves the stored row alone.
+The bridge conversion itself does write, once: a bounded task-config decode,
+channel allowlists, missing Claude session identities, the exact pre-rename
+system harness sentence, accounting basis, and gate channel ids. User files
+and other historical rows stay.
 
-After commit, rollback means stopping the new service, retaining its database,
-restoring the full backup to an isolated replacement database, validating
-profile counts, historical costs and old-version launches, then selecting the
-guarded old release. New writes since the backup require an operator decision
-about data recovery. There is no supported down migration or v3→v2 export.
-**Actual migration and restore rehearsal remains unverified**; synthetic
-regressions do not complete this release gate.
+`serve` takes a verified full custom-format `pg_dump` before that conversion.
+A schema-only dump or a config export cannot restore history. Backup failure
+stops the upgrade. `--skip-backup` is refused for this registry upgrade. The
+dump is proved readable by, in order, `backup.verify_command` (dump on stdin),
+`docker exec -i <container> pg_restore --list` when `backup.command` is
+`docker exec [options] <container> pg_dump ...`, or the local `pg_restore`.
+With none of these the backup fails before any DDL. The upgraded schema must
+not be opened by an older binary: the forward guard in this binary does not
+protect an older one.
+
+Rollback means stopping the new service, leaving the upgraded database
+unchanged, restoring the verified full backup into a separate database, and
+pointing the guarded older release at that database. Do not downgrade or
+mutate the original database. Writes made after the backup stay only in the
+upgraded database. Import preview is not evidence that a database upgrade is
+safe.
 
 ### What a run spent and how large its context grew
 
@@ -4102,41 +4091,33 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `library_installs` | Where an item loads: `scope` (`global` or `project`), `project_id`, `roles` (a non-empty subset of `manager`, `planner`, `worker`, `reviewer`; never `manager` in a project), `enabled`; one per item and place, going with its item and its project |
 | `project_documents` | A project's knowledge: title, one-line summary, `source_kind` (`text`, `upload` or `path`), `filename` and `content` (text and upload) or `path` (relative to the project's default directory), `size_bytes`, `sha256`; a CHECK keeps each kind's columns consistent and the rows go with their project |
 | `channel_configs` | Telegram/Lark settings, one row per bot (top-level `bound_chats_only BOOLEAN NOT NULL DEFAULT false`, separate from JSON settings and preserved by ordinary config import; `manager_id`, fixed when the bot is added; the built-in rows belong to the default Manager; a trigger refuses to delete a Manager that has bots; `channel_bot_seq` numbers the added `channel-<type>-<n>` rows; enabled flag, Telegram's token env var name, Lark's lark-cli `profile`, the sender allowlist, and for Lark the app it was made for) |
-| `task_user_gate_posts`, `task_user_gate_messages` | Each also has `channel_id`, the bot a gate message was posted through or received from; the type-keyed unique constraint of `task_user_gate_posts` stays so a downgrade still works |
+| `task_user_gate_posts`, `task_user_gate_messages` | Each also has `channel_id`, the bot a gate message was posted through or received from. The bridge upgrade removed `UNIQUE (channel, chat, external_id)` on gate posts. There is no downgrade that puts it back |
 | `manager_chat_bindings` | Explicit `(channel_id, chat_id)` → `manager_id` bindings with `created_at`; bot deletion cascades, Manager deletion requires unbinding under the same Manager row lock; off but nondeleted targets are allowed |
 | `channel_seen_chats` | Eligible allowlisted native-message metadata observed since upgrade: nullable `name`, `count`, `last_at`, retained until bot deletion; no transcript backfill or extra account/name lookup; paginated catalog unions explicit bindings |
 | `channel_unbound_chats` | Historical newest 20 bound-only suppressed chat identities per bot, with nullable name, count and last time; binding does not clear them or the complete seen catalog |
 | `channel_rejected_senders` | The latest senders a channel's allowlist refused (the Lark channel records them): `sender_id`, `count`, `last_at` and `chat_id` (the group chat of the latest one; NULL for a direct message), never what they wrote; the 20 newest per channel |
 
 Plans and sessions used to be files (`.local/planner/planner-<task_id>/*.json`,
-`.local/manager/session.json`). The first start with the database holding
-them imports them once (`looper/agents/state_import.py`, recorded as
-`file_state_import` in `schema_migrations`); plan files from before the
-resident Planner are skipped with a log line. Nothing reads the files after
-that, so they can be removed. The bus journal (`.local/agent-bus`) and the
-read-only copies under `.local` stay files.
+`.local/manager/session.json`). A completed bridge database has
+`file_state_import` in `schema_migrations`; that row is a precondition of
+`upgrade_from_bridge`, not an import this process runs. The bus journal
+(`.local/agent-bus`) and the read-only copies under `.local` stay files.
+`MessageJournal.transition` seals notice identities once per runtime root
+before replay. It is not a database migration.
 
-Every task belongs to one project. On the first start after projects were
-added, the one-time migration `tasks_project_backfill` creates one project per
-distinct task directory and assigns those tasks to it. The project is named
-after the directory's last path component (`''` and `/` become `default`);
-the oldest directory keeps the plain name and a later clash, ignoring case,
-gets `-2`, `-3`, .... A task's "active" statuses (`ACTIVE_STATUSES`) are those of
+Every task belongs to one project. Assigning tasks that predated projects was
+a historical migration (`tasks_project_backfill`); this binary does not run
+it. A task's "active" statuses (`ACTIVE_STATUSES`) are those of
 the in progress group (see the status values above), the
 Planner's own `planning`, `verifying` and `stopping` included: they count in
 a project's `active_count`, a task in one cannot be deleted before it is
 stopped, and a server start resumes, starts (`pending`) or stops it. A ready task (`init`) is not
 active.
 
-The names follow the dashboard's, and "agent" names only a running agent:
-the one-time migration `profiles_roles_renamed`, which runs first in
-`schema.sql`, renamed `agent_configs` to `role_configs` (its key `agent_id` to
-`role`, after dropping the `role` column that only repeated it), `agents` to
-`agent_profiles`, `task_agent_overrides` to `task_profile_overrides`, and the
-`agent_id` of a layer and of a task's choice, and a session's
-`session_agent_id`, to `profile_id`. The tables and columns are renamed in
-place (their foreign keys follow) and their constraints take the names a new
-database gives them, so a migrated database is shaped like a new one.
+The names follow the dashboard's, and "agent" names only a running agent.
+`role_configs`, `agent_profiles`, `task_profile_overrides` and `profile_id`
+are the current names. The historical rename is already in the baseline;
+this binary does not run it.
 
 Connection: `[database] url` in the ops file (`<runtime root>/ops/server.toml`,
 or the file `--config` names; `looper/ops_config.py`). There is no default
@@ -4146,22 +4127,22 @@ the rename), because it holds the user's data.
 
 ### Renamed from LoopX
 
-The product was LoopX up to v2.5.0. `looper.ops_config` reads the old
-deployment variables for one release, both prefixes (`LOOPER_DATABASE_URL`,
+The product was LoopX up to v2.5.0. The `loopx` command, the automatic move
+of `~/.loopx` to `~/.looper`, and replacement of `com.loopx.serve` are gone.
+Finish those on v2.13.165 before upgrading. `looper.ops_config` still reads a
+deployment variable from the environment (`LOOPER_DATABASE_URL`,
 `LOOPER_PUBLIC_URL`, `LOOPER_PG_DUMP`, `LOOPER_BACKUP_CMD`,
-`LOOPER_BACKUP_VERIFY_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names except the notes
-root and the verify command, which take only the `LOOPER_` prefix), from the environment and then from the checkout's `.env`, each use
-warned about by name; the next release removes them. `looper.env` still reads
-any other `LOOPER_*` variable's `LOOPX_*` name when the new one is unset, with
-a warning once per name, for one release. The `loopx` command is an alias that
-prints a deprecation note. `looper.paths.settle_runtime_root` moves `~/.loopx`
-to `~/.looper` the first time `looper serve` or `looper service install` uses
-the default runtime root (one `rename`, leaving `~/.loopx` as a link to it;
-both present: `~/.looper` is used, with a warning). `looper service install`
-replaces a `com.loopx.serve` unit with `com.looper.serve`. Data in the database
-(an operator's harness text, a channel's `bot_token_env`) is not rewritten; a
-stored `LOOPX_*` variable name finds its `LOOPER_*` counterpart, and a system
-harness stored as the pre-rename built-in still follows the built-in.
+`LOOPER_BACKUP_VERIFY_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`, and the `LOOPX_*`
+names of the first four) and then from the checkout's `.env`, until the ops
+file names that setting. Each use warns by name and never shows the value.
+`looper.env` still reads another `LOOPER_*` name's `LOOPX_*` counterpart when
+the new name is unset. The supported installed path is the private ops file
+plus an explicit `--runtime-root`: `looper service install` refuses while a
+setting still comes from an environment variable. `service install` still
+copies `LOOPX_TELEGRAM_BOT_TOKEN` for one release; set
+`LOOPER_TELEGRAM_BOT_TOKEN` explicitly. The bridge upgrade rewrites a system
+harness only when it is exactly the pre-rename built-in sentence. Other user
+files and historical rows stay.
 
 ### Ops file and child environment
 
@@ -4179,13 +4160,15 @@ file must be a regular file (not a symlink), owned by the user, mode 0600, in
 a directory of theirs with mode 0700. Looper writes it atomically. Edit it
 and restart the server to apply a change.
 
-Each setting comes from the first of: an explicit flag, the file, then for
-this release only the old variable from the environment (`LOOPER_DATABASE_URL`,
-`LOOPER_PUBLIC_URL`, `LOOPER_PG_DUMP`, `LOOPER_BACKUP_CMD`,
-`LOOPER_BACKUP_VERIFY_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names except the notes
-root and the verify command, which take only the `LOOPER_` prefix), then the same name in the checkout's `.env`, then the built-in
-default. Each use logs a deprecation warning that names the variable and never
-its value; the next release removes them. There is no default database URL:
+Each setting comes from the first of: an explicit flag, the file, then the old
+variable from the environment until the file names that setting
+(`LOOPER_DATABASE_URL`, `LOOPER_PUBLIC_URL`, `LOOPER_PG_DUMP`,
+`LOOPER_BACKUP_CMD`, `LOOPER_BACKUP_VERIFY_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`,
+and the `LOOPX_*` names of the first four; the notes root and the verify
+command take only the `LOOPER_` prefix), then the same name in the checkout's
+`.env`, then the built-in default. Each use logs a deprecation warning that
+names the variable and never its value. The supported installed path is the
+private ops file plus `--runtime-root`. There is no default database URL:
 without one, `looper serve` and `looper doctor` do not start. The runtime root is `--runtime-root`, else `LOOPER_RUNTIME_ROOT`
 (deprecated, and warned; `LOOPX_RUNTIME_ROOT` the same way), else `~/.looper`.
 The file never names it.
@@ -4260,7 +4243,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 - **Schedules** (`#schedules`, below Runs in the sidebar): every project's schedules from `GET /api/schedules`, re-read every 10 s, grouped by project (each group with how many of the project's schedules are on and a link to the project's Schedules tab to add or edit one). A filter bar above it: Project (All, or any project) and Status (All, Enabled, Disabled), which combine and are kept in the address (`#schedules?project=<id>&enabled=true|false`, so a link and a reload keep them; an unknown value is All), filtered in the page; while one is set it says "Showing K of N" with Clear filters, and when nothing matches the list says so, with Clear filters. Each row shows the name (opening its detail view), the rule in words, the next run in the schedule's zone (or Disabled), the last run's status, time and task, "Failing" or "No success lately" while an alert is on, and today's spend (against the daily budget when set); a disabled schedule is dimmed (a dashed edge, a muted name). Beside it, the enable switch (`POST /api/v1/schedule_admin/update` with `schedule_id` and `fields.enabled`: the switch shows the new value while it saves, then "Turned on" or "Turned off"; a refusal puts it back and says why) Run now (its answer, as on the project tab) and Delete schedule, which asks inline first ("Delete <name>? Its tasks stay.", as on the project tab) and takes the row out of the list. Loading, empty and error states, and a failed refresh keeps the last list with the error. **A schedule** (`#schedules/<id>`): back to all schedules; its name, project (a link), rule in words, the switch, Run now, "Edit on the project" (its row on the project's Schedules tab, where it is edited) and Delete schedule (the same inline confirmation; once it is deleted, back to all schedules); the next run, the last run with the alerts, and today's spend against the daily budget; its settings (rule and cron, time zone, work directory, gate and its timeout, notify and to whom, the budgets per run and per day, run timeout, overlap and catch-up, the Agent Profiles it sets, by name) with the requirement folded; and the run history, the same as on the project tab. Re-read every 10 s; an unknown id says it was not found.
 - **Runs** (`#runs/<role>`): each role's sessions and run history, and no configuration. A Runs list shows every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers), a Manager `/new` as a `new session` row, and links each to its agent's history; each role links to its row in Settings → Roles.
 - **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. The Manager's and a Planner's page starts with "Context & cost": the latest context size, the number of compactions, the total cost and the number of turns. Below them is a sparkline of the context at the end of each of the latest 100 turns, scaled between their lowest and highest value, with a dashed marker on each turn that compacted. A list of the compactions follows (turn, time, trigger, context before → after), then a folded table of the turns. The section is re-read every 10 s. For each Claude run it shows status, model, the run's own tokens (uncached input, cache read, cache write, output), its context at the end (`ctx`), a `compacted` badge, its own cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what Looper supplied (the runtime's built-in system prompt is not included): its title shows the prompt's size, its short sha256, an `isolated` badge and, for replace runs, `replaced default`, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. A collapsible Plugins & skills section shows how many plugins and skills the run loaded from the library, with its hash, and how many project skills (from `metadata.project_skills`), and lists each with its short version hash. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, as are a compaction (`Context compacted (auto) · 25.1k → 1.36k tokens`) and a failed compaction attempt. The result line labels Claude's figure as the `session total`. Any other event type is an expandable line. A `/new` is one line, `new session`, with its channel, sender, chat and the session it ended. For a Planner each run is one of its turns, listed above your chat with it and its activity.
-- **Settings**: a folding group at the bottom of the sidebar, one page each (`#settings/<page>`): **LLM Providers** (`providers`: expandable accounts with endpoint editing and model create/edit/delete, price sources and unknown-cost warnings); **Agent Runtimes** (`runtimes`, read-only, as above); **Agent Profiles** (`profiles`: each profile's runtime, provider, model and effort, "agent teams on" when they are, the roles it can run and where it is used, with a form that picks the runtime, then a compatible saved model grouped by provider and labeled with its exact name and protocol; no free-text model fallback, and, for a Claude Code runtime, an "Agent teams" checkbox, checked by default); **Roles** (`roles`: a line naming the roles the server has, then a collapsible row for the Shared defaults (the system layer, which the dashboard calls the shared defaults wherever it names a value's source) and one per role, all closed at first and any number open. Wherever the dashboard names an Agent Profile (these summaries, its dropdowns), it adds " · <effort>" when the profile has an effort its name does not end with already. A closed row is a one-line summary: for the Shared defaults the number of roles, the Agent Profile, spend cap and how many environment variables are set; for a role its job, the Agent Profile in effect and whether it is shared or its own, the Workers' or Reviewers' default limit per task, and "Disabled" or "unsaved" when so. An open role has "Overrides for this role" (its layer, each field saying what applies now and from which layer, with the Workers' "Workers at once in each task (default)" or the Reviewers' "Reviewers at once in each task (default)") and "Role prompt and limits" (the role prompt as one text, with a line saying it is the role layer that Looper combines at launch with the harness, project, task and reply format into the system prompt a run's history shows, reset to the recommended one, max turns, timeout, enabled, and the note that every agent has every tool with `--dangerously-skip-permissions`); closing a row keeps its unsaved edits, and `#settings/roles/<role>` or `#settings/roles/shared` opens that row and scrolls to it); **Skills & MCP** (`catalog`: how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and installs; a change applies to each agent's next run); **Channels** (`channels`: the Telegram and Lark channels, each with its sender allowlist, an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged, and, for an enabled channel that does not start, the reason); **Import / Export** (`transfer`: v3 preview includes Models counts and typed legacy-conversion diagnostics before apply). Wherever an Agent Profile is chosen (Roles, a project's settings, a new task's roles) it is the same dropdown, whose last entry, "+ New Agent Profile", opens the form in place and selects what it saves.
+- **Settings**: a folding group at the bottom of the sidebar, one page each (`#settings/<page>`): **LLM Providers** (`providers`: expandable accounts with endpoint editing and model create/edit/delete, price sources and unknown-cost warnings); **Agent Runtimes** (`runtimes`, read-only, as above); **Agent Profiles** (`profiles`: each profile's runtime, provider, model and effort, "agent teams on" when they are, the roles it can run and where it is used, with a form that picks the runtime, then a compatible saved model grouped by provider and labeled with its exact name and protocol; no free-text model fallback, and, for a Claude Code runtime, an "Agent teams" checkbox, checked by default); **Roles** (`roles`: a line naming the roles the server has, then a collapsible row for the Shared defaults (the system layer, which the dashboard calls the shared defaults wherever it names a value's source) and one per role, all closed at first and any number open. Wherever the dashboard names an Agent Profile (these summaries, its dropdowns), it adds " · <effort>" when the profile has an effort its name does not end with already. A closed row is a one-line summary: for the Shared defaults the number of roles, the Agent Profile, spend cap and how many environment variables are set; for a role its job, the Agent Profile in effect and whether it is shared or its own, the Workers' or Reviewers' default limit per task, and "Disabled" or "unsaved" when so. An open role has "Overrides for this role" (its layer, each field saying what applies now and from which layer, with the Workers' "Workers at once in each task (default)" or the Reviewers' "Reviewers at once in each task (default)") and "Role prompt and limits" (the role prompt as one text, with a line saying it is the role layer that Looper combines at launch with the harness, project, task and reply format into the system prompt a run's history shows, reset to the recommended one, max turns, timeout, enabled, and the note that every agent has every tool with `--dangerously-skip-permissions`); closing a row keeps its unsaved edits, and `#settings/roles/<role>` or `#settings/roles/shared` opens that row and scrolls to it); **Skills & MCP** (`catalog`: how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and installs; a change applies to each agent's next run); **Channels** (`channels`: the Telegram and Lark channels, each with its sender allowlist, an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged, and, for an enabled channel that does not start, the reason); **Import / Export** (`transfer`: a `looper-config/v4` preview, then apply; an older format is refused). Wherever an Agent Profile is chosen (Roles, a project's settings, a new task's roles) it is the same dropdown, whose last entry, "+ New Agent Profile", opens the form in place and selects what it saves.
 
 ### Real-Time Updates
 

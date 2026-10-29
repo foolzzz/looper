@@ -119,11 +119,17 @@ uv run looper serve
 The schema is applied automatically on first startup. Telegram and Lark need
 no flags; turn them on from the Settings page (see [Channels](#channels)).
 
-Moving to a new machine: `uv run looper config export looper-config.json` writes
-the agent configuration to one file (secrets become placeholders;
-`--include-projects` adds projects), and `uv run looper config import
-looper-config.json` on the new machine previews it; add `--apply` to write it.
-Settings does both too, under "Move to another machine".
+Moving to a new machine needs the running service. `loopercli config export
+looper-config.json` writes `looper-config/v4` (secrets become placeholders;
+`--include-projects` adds projects). `loopercli --json config import
+looper-config.json` previews it, and `loopercli config import --apply
+<import_id>` writes it. Both need the operator token (`--operator-token-file`,
+default stdin). Settings does both too, under "Move to another machine".
+`looper config` only writes the ops file (`init-ops`). A file that is not
+`looper-config/v4` is refused before anything is written. Import an older file
+on v2.13.165, upgrade that installation and database, then export v4 with this
+release. v2.13.165 may still export v3, so exporting there again does not
+produce v4. A disposable v2.13.165 installation can do the import.
 
 ### 4. Run as a service
 
@@ -187,42 +193,79 @@ verify_command = ["docker", "exec", "-i", "agentbox-postgres", "pg_restore", "--
 `looper doctor` and the startup log say which verifier is used.
 
 Without a usable `pg_dump`, or when the backup fails, serve exits before it
-changes anything; `looper serve --skip-backup` migrates without a backup and
-logs a warning. To roll back, stop Looper, recreate the database empty, restore
-the file with `pg_restore --no-owner --dbname '<the database.url>' <file>`
-(in Docker: `docker exec -i agentbox-postgres pg_restore --no-owner -U postgres
--d loopx < <file>`), and run the previous Looper version. Set `[backup]` in
-the ops file and restart: `service install` does not copy these as variables.
+changes anything. A bridge upgrade refuses `looper serve --skip-backup`. A
+schema change that is not that upgrade may still warn and proceed with
+`--skip-backup`; do not use it here. The upgraded schema must not be opened by
+an older binary. To roll back, stop the new service, leave the upgraded
+database unchanged, and restore the verified full backup into a separate
+database:
 
-### Upgrading from LoopX
+```bash
+pg_restore --no-owner --dbname '<isolated-database-url>' <file>
+```
 
-Looper was called LoopX up to v2.5.0. The rename itself needs no manual step:
+Point the guarded older release at that restored database. Do not restore over
+the upgraded database and do not downgrade it. A schema-only dump or a config
+export cannot restore history. In Docker, `pg_restore` targets that separate
+database, not the live `loopx` database. Set `[backup]` in the ops file and
+restart: `service install` does not copy these as variables.
 
-- **Command:** `looper`. `loopx` still works for one release: it prints a
-  deprecation note, then runs `looper`. `install.sh` first removes an old
-  `loopx` package installed by the same tool (your data stays).
-- **Data directory:** `~/.looper`. The first `looper serve` or
-  `looper service install` moves `~/.loopx` there (one rename; nothing is
-  copied or deleted) and leaves `~/.loopx` as a link to it for one release.
-  When both exist, Looper uses `~/.looper` and logs a warning.
-- **Environment variables:** the old deployment variables are read for one
-  more release (`LOOPER_DATABASE_URL`, `LOOPER_PUBLIC_URL`, `LOOPER_PG_DUMP`,
-  `LOOPER_BACKUP_CMD`, `LOOPER_BACKUP_VERIFY_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names
-  except the notes root and the verify command, which take only the `LOOPER_` prefix), from the environment and then from `.env`, each use
-  warned about by name. `looper config init-ops` moves them into the ops file.
-  `looper.env` still reads any other `LOOPX_*` name when its `LOOPER_*` name
-  is unset, with a warning, for one release.
-- **Service:** `com.looper.serve`. `looper service install` stops and removes
-  the old `com.loopx.serve` unit first.
-- **Configuration files:** export writes `looper-config/v2`; files exported as
-  `looper-config/v1` or `loopx-config/v1` still import.
-- **Unchanged:** an existing database keeps its name (often `loopx`) and the
-  data in it, such as your own harness text, is not rewritten. There is no
-  default database URL; `looper config init-ops` writes
-  `postgresql://localhost:5432/loopx` only when nothing names one, and says
-  so. Release tags and history keep their names;
-  [NOTICE](NOTICE) keeps the attribution to upstream LoopX. The first start
-  takes the usual pre-migration backup, because `schema.sql` changed.
+### Upgrading across v2.13.165
+
+v2.13.165 contains every historical migration and remains the fixed bridge.
+An installation older than it must upgrade to v2.13.165 first and be started
+once. This release then accepts that completed bridge database, or a current
+schema. A later 2.13 checkout does not move the boundary. The first release
+after these removals is v2.14.0; the release tooling sets the number.
+
+While the installation is still on v2.13.165, finish the steps this binary no
+longer performs:
+
+- Start `looper serve` once, and import any configuration you still need, so
+  the bridge markers are recorded.
+- Run `looper config init-ops`, then `looper service install`, so the unit
+  uses the private ops file and an explicit `--runtime-root`.
+- Replace a leftover `~/.loopx` directory and a `com.loopx.serve` unit on
+  v2.13.165. This release does not move the directory or replace that unit.
+- Set `LOOPER_TELEGRAM_BOT_TOKEN` (or the channel's `bot_token_env`).
+  `service install` still copies `LOOPX_TELEGRAM_BOT_TOKEN` for one release.
+- Save the scheduler minimum in Settings. This release uses the stored
+  `scheduler.min_interval_seconds` or the built-in 300 seconds. It does not
+  read `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS`.
+- Stop and drain the old process before switching binaries.
+- Open the dashboard once from the same origin, so the browser finishes the
+  cache writes for this origin.
+
+A database that only passes the upgrader does not prove those filesystem,
+service, prompt or browser steps. Existing user files and historical rows
+stay. The upgrader is one conversion after the verified backup. It does not
+replay a historical migration chain.
+
+Old configuration files are imported on v2.13.165, that installation and
+database are upgraded, and this release exports `looper-config/v4`. A
+disposable v2.13.165 installation can do the import. v2.13.165 may export v3;
+exporting again there does not produce v4. This release rejects any other
+format, and it rejects a retired layer `model` or `effort` and a retired
+provider `protocols`, `base_url` or `models`, before it writes. A task
+comparison accepts only `looper-prompt-eval/v2`; a dialog comparison accepts
+only `looper-manager-dialogs/v2`.
+
+An empty database runs the current schema once and records
+`post_bridge_baseline`. A current database does not replay that DDL.
+`seeds.sql` is applied on every start and does not change saved choices.
+Rollback is the verified full backup restored into a separate database, then
+the guarded older release pointed at that database.
+
+The dashboard, Telegram, Lark and the CLI stay supported, including compact
+v1 operations and the `loopercli` aliases. Feature-off, shared and in-place
+behavior, the future-schema guard, the current `LegacyProviderSpec` and
+`LegacyAgentProfile` projections, `use_runtime_default`, referenced custom
+runtimes, capability probes, stable conversation identities, incomplete usage
+and output handling, `DeliveryResult` safety and isolation stay as they are.
+An existing database keeps its name (often `loopx`). There is no default
+database URL; `looper config init-ops` writes
+`postgresql://localhost:5432/loopx` only when nothing names one, and says so.
+[NOTICE](NOTICE) keeps the attribution to upstream LoopX.
 
 ## Architecture
 
@@ -241,8 +284,9 @@ All inter-agent communication flows through a typed async **MessageBus** with
 
 ### Database
 
-PostgreSQL is a hard startup dependency; `looper serve` applies
-`looper/db/schema.sql` at every start. Tables by area:
+PostgreSQL is a hard startup dependency. An empty database runs
+`looper/db/schema.sql` once. A current database is not initialized again. A
+recognized v2.13.165 bridge database is upgraded once. Tables by area:
 
 | Area | Tables | What they hold |
 |---|---|---|
@@ -252,7 +296,7 @@ PostgreSQL is a hard startup dependency; `looper serve` applies
 | Agents and settings | `agent_runtimes`, `llm_providers`, `llm_provider_secrets`, `agent_profiles`, `agent_setting_layers`, `role_configs`, `agent_sessions` | Runtimes, providers (their API keys kept apart) and Agent Profiles; the settings layers; each role's prompt and limits; the sessions the Manager and Planners resume |
 | Capability catalog | `library_items`, `library_files`, `library_mcp_servers`, `library_installs` | Plugins, skills and MCP servers with their files or server configuration, and where each is installed |
 | Runs and conversations | `llm_records`, `llm_record_events`, `activity`, `chat_messages` | Every agent run with its usage, cost and stream events; each task's activity feed; chat history |
-| System | `system_settings`, `channel_configs`, `schema_migrations`, `schema_fingerprint` | Shared settings, the Telegram and Lark channels, the one-time migrations already applied, and the hash of the schema last applied (which tells serve to back up before a change) |
+| System | `system_settings`, `channel_configs`, `schema_migrations`, `schema_fingerprint` | Shared settings, the Telegram and Lark channels, the current baseline marker (`post_bridge_baseline`; a completed bridge also has `file_state_import`), and the hash of the schema last applied (which tells serve to back up before a change) |
 
 The main tables are described column by column in
 [Data Persistence](docs/architecture/agent-system.md#data-persistence).
@@ -305,9 +349,11 @@ the endpoints with their fields and errors.
 ### Ops file
 
 Deployment settings live in `<runtime root>/ops/server.toml` (by default
-`~/.looper/ops/server.toml`). `--config /path` on `looper serve`, `doctor`,
-`config export`, `config import`, `config init-ops` and `service install`
-names another file. Edit the file and restart the server to apply a change.
+`~/.looper/ops/server.toml`). The supported installed path is this private
+file plus an explicit `--runtime-root`. `--config /path` on `looper serve`,
+`doctor`, `config init-ops` and `service install` names another file. Agent
+configuration export and import are `loopercli config`, against the running
+service. Edit the file and restart the server to apply a change.
 Looper writes it atomically. It must be a regular file (not a symlink), owned
 by you, mode 0600, in a directory of yours with mode 0700. Nothing is
 expanded: no variable, no `~`, no include. An unknown key, a value of the
@@ -316,7 +362,7 @@ never shows the value.
 
 | Key | Required | Meaning |
 |---|---|---|
-| `database.url` | Yes | PostgreSQL connection string. Without one, `looper serve`, `doctor` and `config import` or `export` do not start, and say to run `looper config init-ops` or edit the file |
+| `database.url` | Yes | PostgreSQL connection string. Without one, `looper serve` and `doctor` do not start, and say to run `looper config init-ops` or edit the file. `loopercli config export` and `import` need that running server |
 | `server.host` | No | Address to bind (default `127.0.0.1`) |
 | `server.port` | No | Port (default 8767) |
 | `server.public_url` | No | The dashboard's address as people open it (for example `https://looper.example.com`), for the links that task-end notices and schedule messages send to Telegram and Lark; unset, the server's own `http://<host>:<port>`. An invalid value stops `looper serve` from starting |
@@ -328,17 +374,19 @@ never shows the value.
 
 Each setting comes from the first of these: an explicit flag (`--host`,
 `--port`, or `--verbose`, which sets `server.log_level` to `debug`), the
-file, then for this release only the old variable from the environment
-(`LOOPER_DATABASE_URL`, `LOOPER_PUBLIC_URL`, `LOOPER_PG_DUMP`,
-`LOOPER_BACKUP_CMD`, `LOOPER_BACKUP_VERIFY_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names
-except the notes root and the verify command, which take only the `LOOPER_` prefix), then the same name in the checkout's `.env`, then the
-built-in default. There is no default database URL. Each use of an old
-variable logs a deprecation warning that names the variable and never its
-value; the next release removes them. The runtime root is `--runtime-root`,
-else `LOOPER_RUNTIME_ROOT` (deprecated, and warned; `LOOPX_RUNTIME_ROOT` the
-same way), else `~/.looper`. The file never names the runtime root. `.env` is
-not put into Looper's environment: only those old settings are read from it,
-and any other key in it (for example a channel token variable) is ignored and
+file, then the old variable from the environment until the file names that
+setting (`LOOPER_DATABASE_URL`, `LOOPER_PUBLIC_URL`, `LOOPER_PG_DUMP`,
+`LOOPER_BACKUP_CMD`, `LOOPER_BACKUP_VERIFY_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`,
+and the `LOOPX_*` names of the first four; the notes root and the verify
+command take only the `LOOPER_` prefix), then the same name in the checkout's
+`.env`, then the built-in default. There is no default database URL. Each use
+of an old variable logs a deprecation warning that names the variable and
+never its value. The supported installed path is the private ops file plus
+`--runtime-root`. The runtime root is `--runtime-root`, else
+`LOOPER_RUNTIME_ROOT` (deprecated, and warned; `LOOPX_RUNTIME_ROOT` the same
+way), else `~/.looper`. The file never names the runtime root. `.env` is not
+put into Looper's environment: only those old settings are read from it, and
+any other key in it (for example a channel token variable) is ignored and
 named in a warning.
 
 To move an existing install, run `looper config init-ops` once. It writes the
@@ -349,9 +397,10 @@ the shell and from `.env`, then run `looper service install` again if you use
 the service. Until then `looper serve` keeps working from the variables, with
 the warnings.
 
-`LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` is not an ops setting. For tests and
-validation only, it is the least time between two fires of a schedule
-(default 300), read when `looper serve` starts.
+The scheduler minimum is not an ops setting. `looper serve` uses the stored
+`scheduler.min_interval_seconds`, or the built-in 300 seconds when none is
+saved. It does not read `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS`. A schedule
+with a gate uses `min(60, value)`. The next save of a rule uses the value.
 
 **Child processes.** Every process the server starts (an agent's runtime and
 the MCP servers it starts, a schedule gate, a probe, and a git, ps or

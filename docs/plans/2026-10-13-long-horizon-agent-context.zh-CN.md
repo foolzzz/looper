@@ -1,10 +1,10 @@
 # 开发计划：长程 Agent 上下文体系（M0–M9）
 
-- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆、M7c 及时沉淀）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付，M9b Claude Code 接 API key 与兼容接口、M9c Codex 运行时、M9e OMP 运行时已交付；M9g Pi 运行时的适配器、界面和假 provider 闭环已在本分支实现，真实 Responses、DeepSeek 与 Claude 对照未验证；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付；其余见第 5 节待办；**v2.6.0 已发布（2026-10-14）**。
+- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆、M7c 及时沉淀）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付，M9b Claude Code 接 API key 与兼容接口、M9c Codex 运行时、M9e OMP 运行时已交付；M9g Pi 运行时的适配器、界面和假 provider 闭环已在本分支实现，真实 Responses、DeepSeek 与 Claude 对照未验证；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付。v2.13.165 是固定桥（2026-10-27）：更早的安装先升到 v2.13.165 并启动一次；规划时的 v2.13.166 不移动边界；移除之后的第一版是 v2.14.0，版本号由发布工具写入。其余见第 5 节待办。
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
-- **最近更新：** 2026-10-20
+- **最近更新：** 2026-10-28
 
 ## 1. 工作方式
 
@@ -57,7 +57,7 @@
 | M9c | Codex 运行时：四类角色都支持（含常驻会话），事件统一、MCP 翻译、API key（Codex 登录在 §5.0 第 3 项交付） | ✅ 已交付（looper #67） | M9a |
 | M9d | SDK 运行时与 Norma 循环移植 | 按 §5.0 第 23 项交付：`api` 运行时，阶段 1 移植 Norma 循环（[RFC](../architecture/rfcs/api-runtime-v0.zh-CN.md)） | M9a |
 | M9e | OMP 运行时：先只读核实能力、填能力矩阵，再写适配器 | ✅ 已交付（looper #70） | M9c |
-| LLM 模型层 | Provider → Endpoint → Model → Profile；配置 v3 | 分支实现中；迁移后隔离服务、Manager/HTTP 读回、浏览器截图已验证；真实 CLI 与两档 dialogs 缺凭据未测，不可发布（§5.4） | M9a、M8e |
+| LLM 模型层 | Provider → Endpoint → Model → Profile；配置为 `looper-config/v4` | 已随 2.13 发布；真实 CLI 凭据与两档 dialogs 仍未测，五任务一次重复不是完整基线（§5.4） | M9a、M8e |
 | M9f | Grok 运行时：Grok 自己的登录（`grok-login`），四类角色都支持 | 进行中 | M9c、M9e |
 | M9g | Pi 运行时：API key 的两种协议，四类角色，自有 HTTP 工具桥 | 本分支已实现（假 provider 闭环）；真实 Responses/DeepSeek 与 Claude 对照未验证 | M9e |
 
@@ -720,6 +720,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-27 | Pi SDK runner turn（本分支）：实现独立会话的新建/关闭、prompt/cancel、请求前预算授权、逐请求用量与唯一结算，尚未接入服务入口，也未启用 builtin/platform 工具。真实 Pi 1.3.0 Responses 客户端配 loopback provider 的定向测试 39 项通过，覆盖精确计费、拒绝零请求、HTTP 错误脱敏、取消、强制释放与迟到事件；确认 SSE 无需 `event:` 行，`retry.provider.maxRetries: 0` 经 SDK 传到客户端，模型存储保持内存。Dashboard、Telegram、Lark 和 CLI 无变更；工具、加载会话及 retry/compaction 请求分类留待后续阶段。 |
 | 2026-10-28 | Pi Manager/Planner runner opt-in（本分支）：ops 文件 `[runtimes] pi = "runner"` 在启动时切换这两个角色，默认 CLI，Worker/Reviewer/consults 保持 CLI；单 runner、10 会话后 CAPACITY，provider env 拒绝且无 CLI fallback。Dashboard 无新增入口，Telegram/Lark `/stop` 沿用中断路径，`config init-ops` 输出设置；eval `run`/`dialogs --pi-runner` 给隔离服务写入相同设置。定向测试及已安装 Pi 配 loopback Responses 的隔离 serve 均通过，覆盖工具审计、精确计费、stop、重启恢复后的会话续接和 Planner→CLI Worker 完成任务；重启退避窗口仍 fail-fast，真实 CPA smoke 和 CLI/runner 对照缺可用 endpoint/key，未验证不计通过，后续范围见 §5.2。 |
 | 2026-10-28 | Pi 全角色 runner 验证（本分支）：补齐 installed 隔离 serve 的两步任务、Planner 引导、Reviewer、只读咨询分叉、逐请求计费与 Worker 预算拒绝、取消、崩溃收敛断言，更新架构、RFC 和 eval 指南。通过：Pi 1.3.0、Node 24.20.0 的两项 SDK 工具集/只读分叉测试；失败：0；未验证：serve 文件的 4 项测试因未设一次性 `LOOPER_TEST_DATABASE_URL` 跳过（含本卡两项），CPA `gpt-6-astra` 的 Pi CLI/runner 九任务各两次对照待 lead 实跑，门禁保持开放。 |
+| 2026-10-28 | 桥接边界文档：v2.13.165 含全部历史迁移并保持为固定桥；更早的安装必须先升到 v2.13.165 并启动一次；移除后的第一版定为 v2.14.0（2026-10-27 维护者决定，版本号由发布工具写入，规划时的 v2.13.166 不移动边界）。实现完成以已发布变更说明为准（#761、#762、#808、#850、#855、#857 / v2.13.208）。凭据、真实 CLI、dialogs 全量基线、DSH installed bootstrap、Pi 真实协议、飞书群和 Telegram 真实流量仍未测；五任务一次重复不是完整基线。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -752,7 +753,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
     - **阶段 1**（✅ 已交付，looper #388）：管家定义与模板、控制台聊天页选管家、Settings → Managers、任务归属和回报给建它的管家（RFC 第 5–8、10–13 节）。
     - **阶段 2**（✅ 已交付，looper #403）：每个管家可以有自己的飞书 / Telegram 机器人：`channel_configs.manager_id`，一种渠道多行（`channel-<type>-<n>`），凭据只在控制台录入，一个机器人一个运行器，添加时不调用 `getMe`；投递按渠道 id 而不是类型（任务结束通知、等待与并发通知、关卡消息），定时任务的通知仍走内置的三行；新机器人的线程 id 为 `<channel_id>:<chat_id>`（RFC 第 9.1 节）。
     - **阶段 3**（✅ 已交付，looper #645、#646、#650、#652、#655、#657、#658、#661、#662、#665）：存储、线程、fleet stop、原生路由、operator 类型化 API/生成 CLI、Managers 和 Channels 已合入；最终卡已验证合成原生消息、真实 Ops 任务写库与汇报、历史归属、策略静默、鉴权、两张 Settings 页及隔离服务重启（RFC 第 9.2 节）。绑定和顶层默认 `false` 的 `bound_chats_only` 热更新，仅管新入站；不追溯过滤已接受回复和任务。绑定/解绑/策略、原生准入/静默/停用目标答复及跨管家停止的结构化边界日志已在 #665 补齐，经定向 caplog 与 PostgreSQL 提交后读回验证；七项推荐语义已由维护者于 2026-10-26 按实现现状确认。未测：完整套件含 PostgreSQL 留 CI；Codex Profile 烟测只用现有 CLI 替身、真实模型缺隔离凭据未测；模型可见字节未变，真实 prompt eval 不适用。
-    - **配置迁移已合入**（[#670](https://github.com/foolzzz/looper/pull/670)、[#681](https://github.com/foolzzz/looper/pull/681)、[#689](https://github.com/foolzzz/looper/pull/689)）：Manager、模板、机器人、所属 Schedule 和独立安装组成可迁移图；有场景定义、附加机器人或独立安装时用 `looper-config/v4`，默认无扩展安装仍用 v3。Dashboard 下载文件与手写 `loopercli config` 别名共用预览/取消/应用实现。含 operator-only 节的文件客户端不能经 confirm 越权；旧的 client 可用节保留同会话两步确认，operator API 单次执行，界面保留确认。绑定、seen、suppression 不迁移，目标 `bound_chats_only` 留在本地；新增/变更机器人保持停用，凭据、策略和重启由目标操作者处理，身份冲突明确拒绝。
+    - **配置迁移已合入**（[#670](https://github.com/foolzzz/looper/pull/670)、[#681](https://github.com/foolzzz/looper/pull/681)、[#689](https://github.com/foolzzz/looper/pull/689)）：Manager、模板、机器人、所属 Schedule 和独立安装组成可迁移图；导出一律是 `looper-config/v4`。旧格式在 v2.13.165 上导入，升级该安装和数据库后，由新版本导出 v4。v2.13.165 仍可能导出 v3。Dashboard 下载文件与手写 `loopercli config` 别名共用预览/取消/应用实现。含 operator-only 节的文件客户端不能经 confirm 越权；旧的 client 可用节保留同会话两步确认，operator API 单次执行，界面保留确认。绑定、seen、suppression 不迁移，目标 `bound_chats_only` 留在本地；新增/变更机器人保持停用，凭据、策略和重启由目标操作者处理，身份冲突明确拒绝。
     - **Schedule 所有权与模板已合入，报告范围验收待维护者确认**（[#695](https://github.com/foolzzz/looper/pull/695)、[#711](https://github.com/foolzzz/looper/pull/711)）：创建时选 owner，之后不可改；手动、到期、排队和 gate 后建任务都保留 owner，模板输入、角色和 Profile 成为任务快照，`start_over` 保留模板角色；迁移保留 owner/template。带任务的汇报给 owner，不重复向来源聊天通知；无任务结果仍是所属运行记录及现有 Dashboard/Notifier 策略。后者是否满足原始报告要求尚未确认；如要求所有无任务结果也进入 Manager 会话，必须另交实现与评测卡，不能视为可选扩展。
     - **任务筛选已合入**（[#705](https://github.com/foolzzz/looper/pull/705)、[#708](https://github.com/foolzzz/looper/pull/708)）：Dashboard 的 URL、计数、cursor 和后退使用相同 Manager 筛选；v1 `tasks.list`、`tasks.page`、`ops.tasks.list` 及生成 CLI 的对应入口一致，不带过滤仍列全部。
     - **闲置退役已合入**（[#719](https://github.com/foolzzz/looper/pull/719)、[#729](https://github.com/foolzzz/looper/pull/729)）：仅运行时能证明空闲才停 resident pid，活动轮、自主轮和后台工作不回收；session、Profile、累计用量保留，下条消息续接。启用但睡眠的 Manager 仍收任务汇报，默认 Manager 豁免；不能证明空闲的适配器不宣称已退役。
@@ -773,7 +774,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
       | Lark Bot token transport | 同上参数化路由及 bot factory 验证，和 CLI transport 分别经过适配器边界 | fake transport，无真实长连接或账号发送 |
 
     - **本次验证**：独立 disposable PostgreSQL 上定向 pytest 最终 **748 passed、0 failed、0 skipped**（后端 632、联合/默认提示词与 Planner 段 19、配置确认与 Lark transport 40、浏览器 57）；前端定向 **65 passed**，构建通过。首次浏览器运行缺依赖有 17 skipped，且闲置/清理旧 fixture 未回答新增安装列表请求造成 4 failed；补齐依赖及两处空安装响应后，上述 57 项全部重跑通过。真实 `looper serve` 源/目标分别用全新数据库和临时 runtime，Codex Profile 仅验证配置、不调用模型，完成实际文件下载、真实 config 别名与 11 项组合读回；desktop/narrow 截图、键盘/焦点和既有空/错误/default-only 状态检查通过，服务、浏览器、替身进程及临时数据库均已收尾。生产代码改动 **0 行**，新增联合测试 **122 行**，另仅适配既有浏览器 fixture；新增测试集中在跨模块契约，未复制各项规则。完整套件含 PostgreSQL 未在本地运行，留 CI；未作真实模型/账号/适配器调用的路径不记通过。
-    - **仍延期、此次范围外**：`task_user_gate_posts` 按类型的唯一约束保持原样，等待是否继续支持降级到阶段 2 之前版本的决定；本次不提出或执行迁移。
+    - **门控帖子唯一约束**：桥接升级已去掉 `task_user_gate_posts` 上的 `UNIQUE (channel, chat, external_id)`。没有把该约束加回去的降级。`channel_id` 保留。
 22. **一个 OpenAPI 接口、`loopercli` 与 `looper-skill`**（2026-10-22 维护者定方向，设计见[RFC](../architecture/rfcs/looper-client-skill.zh-CN.md)，阶段 1、2a、2 已交付并通过最终覆盖审计）：别的 agent 会话经 skill 把讨论好的活交给 Looper 并跟进。只在本机、客户端令牌全部权限（Settings 里建、吊销，只存哈希）、客户端 high 两步确认（按客户端和会话），操作者 high 单次执行并保留控制台既有弹窗；和 Looper 的一切交互走 `/api/v1/` 的 OpenAPI（从 ops 工具的 schema 生成），新程序 `loopercli` 是它的纯客户端（子命令运行时生成，几个手写别名），主路径是 `loopercli chat` 和管家对话。分三个阶段，阶段 2 按独立交付的子阶段拆 PR：
     - **阶段 1**（✅ 已交付，looper #NNN）：客户端令牌、v1 文档与操作（客户端目录、聊天、确认）、管家的 loopercli 渠道行与对话回报、`loopercli`、`looper-skill` 和 Claude Code 插件、两个管家对话评测（sonnet）；对话里回报任务的接受和结束，关卡和进度用 `loopercli wait` 跟进。
     - **阶段 2a**（✅ 已交付）：只认操作者的 `auth.set_password` / `auth.clear_password`、`system.check` 和配置导出、导入预览、应用进入同一 v1 文档，结果类型化；`loopercli` 的对应命令；客户端应用配置需两步确认；配置操作与控制台、工具共用实现。`looper config export/import` 已删除，替代命令需要运行服务；`doctor` 和密码重设留在 `looper` 作离线救援。
@@ -873,7 +874,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.4 验证缺口
 
-- **LLM 模型层（分支实现中，合成副本迁移已验证）**：[迁移演练](../../tests/test_llm_registry_rehearsal_db.py)复用 patched-v2 固定种子，在独立 disposable 源库和模板克隆迁移库验证 count-only dry-run、事务迁移及新连接二次 schema 初始化；20/20 profiles 映射、unresolved/binding/pricing mismatch 均为 0，全部引用层、静态 launch 输入、固定 usage 费用和历史聚合相等，坏引用阻止且事务回滚。dry-run 的 `models_after=27` 仅计转换模型，正常启动额外补齐 11 个内置登录模型（总计 38），测试单独核对新增项；本种子的未知厂商账户保持分离，账户合并及会话重映射由独立 apply/pinned 测试覆盖。[恢复演练](../../tests/test_llm_registry_recovery_db.py)已用真实完整备份恢复第三个 disposable 库，并核对结构/约束/序列、全部行、旧入口绑定/价格夹具和历史费用；固定旧源码最小回移 version=2 guard 的独立入口在 v3 库任何 DDL 前拒绝，提交后的新写入保留在迁移后库，禁止绕过备份或原地反向迁移。仍需待发布旧补丁制品验证、新旧服务副本上真实 CLI 启动/计价/会话续接对照；不能在新 schema 上直接启动未带门禁的旧版。新增迁移后服务 smoke 已在真实 `serve` 上用脚本 CLI 验证 Manager/HTTP 读回及重启续接，并运行浏览器检查迁移 profiles 和未知价提示、保留截图；选择式真实 CLI 入口把显式组合先写入 v2 再迁移，四种 CLI 已安装但本卡无独立凭据，真实请求和 Manager haiku/opus xhigh 两档 comparison 均记为未测，候选版本全量评测亦未运行。HTTP breaking fields（provider 的 `protocols/base_url/models` → `vendor_type/endpoints` 与独立 models，Profile 写入 `model_id`、读回结构化 `model`）必须进入实现 PR 和下次发布说明；门禁未齐不得写已发布或完整交付，详见 [RFC §9](../architecture/rfcs/llm-models-v0.zh-CN.md#9-上线回滚与观测)、[RFC §12](../architecture/rfcs/llm-models-v0.zh-CN.md#12-本次交付状态)与[评测说明](../../evals/README.md)。
+- **LLM 模型层（已随 2.13 发布；凭据和基线缺口仍在）**：2026-10-20 的前序演练（当时的 `tests/test_llm_registry_rehearsal_db.py`，本二进制不再包含该文件）复用 patched-v2 固定种子，在独立 disposable 源库和模板克隆迁移库验证 count-only dry-run、事务迁移及新连接二次 schema 初始化；20/20 profiles 映射、unresolved/binding/pricing mismatch 均为 0，全部引用层、静态 launch 输入、固定 usage 费用和历史聚合相等，坏引用阻止且事务回滚。dry-run 的 `models_after=27` 仅计转换模型，正常启动额外补齐 11 个内置登录模型（总计 38），测试单独核对新增项；本种子的未知厂商账户保持分离，账户合并及会话重映射由独立 apply/pinned 测试覆盖。同日的恢复演练（当时的 `tests/test_llm_registry_recovery_db.py`，本二进制不再包含该文件）已用真实完整备份恢复第三个 disposable 库，并核对结构/约束/序列、全部行、旧入口绑定/价格夹具和历史费用；固定旧源码最小回移 version=2 guard 的独立入口在 v3 库任何 DDL 前拒绝，提交后的新写入保留在迁移后库，禁止绕过备份或原地反向迁移。仍需待发布旧补丁制品验证、新旧服务副本上真实 CLI 启动/计价/会话续接对照；不能在新 schema 上直接启动未带门禁的旧版。新增迁移后服务 smoke 已在真实 `serve` 上用脚本 CLI 验证 Manager/HTTP 读回及重启续接，并运行浏览器检查迁移 profiles 和未知价提示、保留截图；选择式真实 CLI 入口把显式组合先写入 v2 再迁移，四种 CLI 已安装但本卡无独立凭据，真实请求和 Manager haiku/opus xhigh 两档 comparison 均记为未测，候选版本全量评测亦未运行。这些数字是前序证据，不是本二进制仍在执行的 v2→v3 迁移。当前只接受 `looper-config/v4`；空库记 `post_bridge_baseline`，当前库不重放初始化 DDL，精确的 v2.13.165 桥接库只走一次 `upgrade_from_bridge`。退役的 provider `protocols`/`base_url`/`models` 和层上的 `model`/`effort` 在导入时直接拒绝。真实 CLI 凭据、haiku/opus xhigh dialogs 对照仍未测；五任务、一次重复的 Sonnet 基线不是完整基线，对话基线仍缺。不能把模型层写成已无缺口。详见 [评测说明](../../evals/README.md)。
 
 以下行为已实现，但还没有在真实环境中验证过，相关改动或排查时优先补上：
 

@@ -119,9 +119,10 @@ or its flow are wrong) or `error`, which is neither and is not scored.
 API call, the server, a check that raised; the task is cancelled and the run
 goes on with the next), and `error` gives the message. `success` stays, true
 only for a pass. The JSON is written however the run ends; a run that stopped
-midway (an interrupt, a setup that failed) has `aborted` with the reason. Runs
-of the first schema are still read: a row without `rep` is rep 1, and one
-cancelled at its timeout or at the cap is an error.
+midway (an interrupt, a setup that failed) has `aborted` with the reason. A
+comparison accepts only `looper-prompt-eval/v2` for tasks and
+`looper-manager-dialogs/v2` for dialogs. The dialog table shows a row that
+omits `rep` as rep 1. A row cancelled at its timeout or at the cap is an error.
 
 In the table, success is `k/n`, the passes over the scored reps, with ` · e
 err` when some reps are errors; the other columns are means over the scored
@@ -577,9 +578,9 @@ because its model differs. This full comparison does not replace the focused rea
 `--register-agent` can target the built-in runtime type `pi` (API key only:
 `openai-responses`, or `openai-chat`, which pi calls `openai-completions`).
 Example specs are `evals/agents/pi-cpa.example.json` and
-`evals/agents/pi-deepseek.example.json`. These legacy specs use the shared
-converter above; new specs should declare provider endpoints and a separate
-model with an explicit protocol. The selected model fixes the endpoint, whose
+`evals/agents/pi-deepseek.example.json`. Both already declare provider
+endpoints and a separate model with an explicit protocol. Older catalog
+fields are rejected as above. The selected model fixes the endpoint, whose
 `base_url` is passed through. The entry scripts are `examples/pi/eval-responses.sh`,
 `examples/pi/eval-deepseek.sh` and `examples/pi/eval-prompt-comparison.sh`.
 The provider scripts collect their independent target subsets at two reps.
