@@ -168,18 +168,15 @@ def test_cancel_deadline_includes_pending_authorization(tmp_path, control, decis
                 health = await client.call("runner/health")
                 assert health["sessions"] == 1
                 assert health["running"] == health["inflight_requests"] == 0
+                boundary = len(client.frames)
                 reply = {"error": {"code": -32603, "message": "Synthetic authorization failure"}} if decision == "error" else {
                     "result": {"allow": decision == "allow"}}
                 await send({"jsonrpc": "2.0", "id": auth["id"], **reply})
                 await client.call("runner/health")
                 assert not server.requests
                 assert len(client.updates(sid, kind="settled")) == 1
-                ends = assert_accounted(client, sid, count=1 if decision == "allow" else 0)
-                if ends:
-                    end, = ends
-                    assert end["status"] == "aborted" and end["complete"]
-                    assert [end[k] for k in ("input_uncached", "output", "cache_read", "cache_write")] == [0, 0, 0, 0]
-                    assert end["request_id"] == auth["params"]["request_id"]
+                ends = assert_accounted(client, sid, count=0)
+                assert not any(frame.get("method") == "session/update" for frame in client.frames[boundary:])
                 client.auto_authorize = True
                 await client.prompt(sid, "resumed", "Continue")
                 resumed = await client.settled(sid, "resumed")
