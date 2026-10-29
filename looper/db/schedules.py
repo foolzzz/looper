@@ -25,7 +25,7 @@ from . import agent_sessions, tasks
 # The schedule fields a request sets (looper/agents/schedules.py validates them).
 FIELDS = ("name", "cron", "timezone", "requirement", "work_dir", "overlap", "max_parallel_runs", "catch_up",
           "run_timeout_mode", "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds",
-          "daily_budget_usd", "notify", "notify_channel", "notify_chat", "template_key", "template_inputs")
+          "daily_budget_usd", "notify", "notify_channel", "notify_chat", "user_gates", "template_key", "template_inputs")
 
 QUEUED = "queued"
 GATING = "gating"

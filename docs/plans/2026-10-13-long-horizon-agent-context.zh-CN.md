@@ -730,7 +730,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-29 | DSH runner 终止计量（本分支）：2xx 流在 `message_stop` 的最终用量校验通过后完成计量，不再等待 HTTP EOF；拒绝仍须完整响应且无模型输出，未完成请求向 stderr 输出缺失条件且不含请求内容。真实 SDK 配 loopback 服务确认原实现立即 EOF 通过、延迟 EOF 因 `terminal_usage=true` / `body_done=false` 误报不完整；新增回归覆盖延迟 EOF、断流、空用量和拒绝，wheel 验证复用 uv 依赖缓存以避免重复下载构建后端。DSH runner 164 项与打包 29 项均以 `-n 2` 通过，无失败或跳过；Dashboard、Telegram、Lark 和 CLI 共用修复，无需入口改动，真实模型对比尚未重跑。 |
 | 2026-10-29 | DSH consult 上下文：runner consult 复用已安装 CLI 的完整默认 guidance 和 24 个工具声明，只读执行仍限 read/glob/grep；隔离 serve 对同一已结束 Worker 逐项比较完整 system、工具及历史，旧实现先红、修复后通过，并覆盖声明存在但写入/shell/子代理/联网拒绝。真实 DeepSeek 对同一合成历史与问题前后各两次完整 consult：首请求输入 token 从 4,035 增至 8,621，前后均 2/2 通过生产 answers 解析、无 Worker report，因此偶发格式故障尚未复现，不能宣称其根因已修复；[完整测量与复现方法](2026-10-29-dsh-consult-validation.md)。fork 截点保留独立事件的修复单独保留，不作为上述问题的修复证据。Dashboard、Telegram、Lark 共用后端，CLI 为对照路径；指定 DSH runner 定向测试 `-n 2` 共 171 项通过，0 失败、0 跳过。 |
 
-| 2026-10-29 | SDK runner 进程池（本分支）：每 kind 按需最多 4 个成员，以空闲槽位最多者接收新租约，保留会话固定路由、300 秒空闲回收和成员级故障隔离，崩溃成员经退避后按需补充，退避中的租约等待后重新选空闲槽位。fake runner 覆盖容量、成员路由、恢复、回收及并发边界，已安装 Pi、DSH 均验证两个存活成员间的保存会话恢复；使用一次性 PostgreSQL 执行 28 个覆盖文件的定向回归 `-n 2`，共 973 通过、0 失败、0 跳过，含 Pi/DSH 隔离 serve、立即恢复租约及退避期间释放槽位的回归；静态检查通过。Dashboard、Telegram、Lark 和 CLI 共用 supervisor，无需入口改动；未改默认运行时或新增设置、指标。 |
+| 2026-10-29 | 定时任务按项开启用户关卡：新增 `schedules.user_gates`（默认 `off`），仅在项目和定时任务都开启时允许规划者开关卡；未开启时完整 Planner prompt 与原策略逐字节相同。API、管家列表/配置/差异/启用确认、v4 配置导入导出和项目定时表单/详情均携带该字段；v4 缺省导入为关闭。关卡优先发到定时任务通知对象，否则用系统 dashboard target，再否则仅任务页，复用渠道白名单与 `/gates` 路由。等待计入运行超时，重叠跳过、补跑和预算规则不变。一次性数据库的定向 pytest 以 `-n 2` 验证策略、升级、投递、API 回复恢复、超时和导入导出；隔离 serve 配 fake runtime 与本地 Lark 替身完整跑通。Web 36 项测试及构建通过，1280/390 浏览器验证开关、保存读回和超时提示；无真实渠道发送。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -837,7 +837,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 - **DSH SDK runner 的后续**（[RFC §10.6、§16](../architecture/rfcs/agent-sdk-runner-v0.zh-CN.md#106-实现进展与验证缺口)）：全角色与咨询的单 runner opt-in 已实现，installed 隔离 serve 验证及真实 DeepSeek smoke、CLI/runner 对照已准备，真实结果待 lead。尚余按 provider binding 分运行器、容量数字及完整 composition 长期内存/exit hook 验证、运行时卡；完成门禁后切换默认值并删除 DSH CLI 路径；补齐 state root 中保留的 run sessions 的保留期限与回收，以及 runner 的 web fetch 和 skills。
 
-- **Pi SDK runner 的后续**（[RFC §16](../architecture/rfcs/agent-sdk-runner-v0.zh-CN.md#16-阶段)）：S1 的 Worker/Reviewer RunnerChannel、咨询分叉与取消、`WorkerPool` 运行句柄已实现；隔离 serve 验证与 CLI/runner 真实任务对照已准备，待 lead 实跑，不能计通过。尚余容量测量及数字、运行时卡、完成门禁后切换默认值和删除 Pi CLI 路径；服务崩溃后遗留 `runners/pi-N/` generation 目录清扫、`runners/state/pi/<owner>` 的 owner 状态删除与过期清理需分别补齐。共享 RunnerSupervisor 已加入每 kind 最多 4 个成员的按需进程池、会话固定路由、空闲回收和成员级崩溃隔离；S0 的周期健康检查和 compaction 的独立更新事件仍待实现。
+- **Pi SDK runner 的后续**（[RFC §16](../architecture/rfcs/agent-sdk-runner-v0.zh-CN.md#16-阶段)）：S1 的 Worker/Reviewer RunnerChannel、咨询分叉与取消、`WorkerPool` 运行句柄已实现；隔离 serve 验证与 CLI/runner 真实任务对照已准备，待 lead 实跑，不能计通过。尚余容量测量及数字、运行时卡、完成门禁后切换默认值和删除 Pi CLI 路径；runner 重启退避期间的 fail-fast 重试、服务崩溃后遗留 `runners/pi-N/` generation 目录清扫、`runners/state/pi/<owner>` 的 owner 状态删除与过期清理需分别补齐。S0 的周期健康检查、runner pool 和 compaction 的独立更新事件仍待实现。
 
 - **把 Grok 的 ACP 常驻会话移植到 Go 版（loopgo）**（Python 版合入 main 之后做）：照 Grok 运行时 RFC 第 14 节：命令翻译、`session/new`/`session/load`、`session/prompt` 事件翻译、取消、回落逐轮续接、用量口径（ACP `inputTokens` 含缓存）。
 - **Profile 自定义提示词与分块预览**（RFC 第 6 节，已实现，验证待完成）：`custom_prompt` 默认空，放在 harness 前；贯通 Profile、配置导入导出、派生 Profile、管家工具与四种运行时。Agent Profiles 提供自定义文本编辑和按角色加载的只读预览，预览与启动共用 prompt builder 和适配器文本布局；任务段、依赖运行目录的知识索引及其他启动上下文在预览中标明。已补定向 Python/数据库与 Web 测试；指定验证入口受当前执行环境写权限限制，测试及类型检查尚未运行，真实 CLI 与浏览器验证待补。

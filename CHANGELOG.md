@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.14] - 2026-10-29
+
+### Added
+
+- **A schedule can opt its tasks into user gates.** A schedule has a new `user_gates` setting, `off` by default or `on`. A task a schedule started could never open a user gate; it now can when the schedule is `on` and its project also has `user_gates` `on`. The gates of such a task go to the schedule's notify target, else the dashboard gate target, else only the task page. The setting is in the schedule API, the Manager's schedule tool, the dashboard schedule form and configuration export and import (an omitted value imports as `off`). A gate's wait counts against the run timeout. Every existing schedule keeps `off`, its behaviour and its Planner prompt. The change adds one `schedules` column, applied additively at startup. ([#900](https://github.com/foolzzz/looper/pull/900))
+
 ## [2.14.13] - 2026-10-29
 
 ### Fixed

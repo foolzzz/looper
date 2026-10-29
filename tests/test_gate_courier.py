@@ -59,3 +59,21 @@ def test_cards_and_reminders_end_with_the_commands_line() -> None:
     for kind in ("opened", "reminder"):
         assert message_text(_row(kind, state="open"), GROUP).endswith(COMMANDS_LINE)
         assert message_text(_row(kind, state="open"), TELEGRAM).endswith(COMMANDS_LINE)
+
+
+@pytest.mark.parametrize(("channel", "target", "kind"), [
+    ("telegram", "4242", TargetKind.CHAT),
+    ("lark", "ou_test", TargetKind.USER),
+    ("lark_bot", "ou_test", TargetKind.USER),
+])
+def test_a_scheduled_gates_chat_prefers_its_notify_target_then_the_dashboard(
+    channel: str, target: str, kind: TargetKind,
+) -> None:
+    from looper.agents.gate_service import gate_chat
+
+    task = {"schedule_id": "sched-a", "origin_channel_id": "channel-lark", "chat_id": "ou_origin",
+            "chat_kind": "user"}
+    configured = {**task, "schedule_notify_channel": channel, "schedule_notify_chat": target}
+    assert gate_chat(configured, TELEGRAM) == GateChat(NotifyChannel(channel), NotifyTarget(kind, target))
+    assert gate_chat(task, TELEGRAM) == TELEGRAM
+    assert gate_chat(task, None) is None

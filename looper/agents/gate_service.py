@@ -1,7 +1,8 @@
 """The user's side of user gates (``user_gates``): the gates a task page shows, the messages the user writes in
 them (from the dashboard, a channel reply or the Manager), the reminders of the gates that wait for the user, and
-the chat a gate's messages go to (``gate_chat``: the Lark or Telegram chat its task came from, else the system
-setting ``user_gates.dashboard_target``, which ``gate_settings`` shows and changes).
+the chat a gate's messages go to (``gate_chat``: its schedule's notify target, or for an attended task the Lark or
+Telegram chat it came from, else the system setting ``user_gates.dashboard_target``, which ``gate_settings`` shows
+and changes).
 
 A message is stored first (``db.user_gates.add_user_message``, only while the
 gate waits for the user) and its task's Planner is woken (``GATE_MESSAGE``),
@@ -24,7 +25,7 @@ from typing import Any
 import json
 from dataclasses import dataclass
 
-from ..db import activity as db_activity, system_settings as db_settings, tasks as db_tasks
+from ..db import activity as db_activity, schedules as db_schedules, system_settings as db_settings, tasks as db_tasks
 from ..db import user_gates as db_user_gates
 from .bus import MessageBus
 from .message import (AgentAddress, MessageEnvelope, MessageType, builtin_channel_id, is_lark, parse_channel_id,
@@ -82,11 +83,18 @@ def origin_chat(channel: str, chat: str, *, group: bool, sender: str) -> str:
 
 
 def gate_chat(task: Mapping[str, Any], dashboard: GateChat | None) -> GateChat | None:
-    """Where the gates of ``task`` (its row) post: the Lark or Telegram chat it came from (its recorded
-    ``NotifyTarget``), else ``dashboard``, the system setting; None for a task a schedule started (it opens no
-    gate) or one with neither."""
+    """Where a gate posts: its schedule's notify target, or its originating chat for an attended task,
+    else the dashboard setting. A scheduled row includes ``schedule_notify_channel`` and ``schedule_notify_chat``."""
     if task.get("schedule_id"):
-        return None
+        channel, chat = task.get("schedule_notify_channel"), task.get("schedule_notify_chat")
+        if channel and chat:
+            try:
+                channel = NotifyChannel(channel)
+            except ValueError:
+                return None
+            kind = TargetKind.USER if channel.is_lark else TargetKind.CHAT
+            return GateChat(channel, NotifyTarget(kind, chat))
+        return dashboard
     channel = notify_channel(task.get("origin_channel_id"))
     if channel is not None:
         target = NotifyTarget.from_columns(task)
@@ -172,6 +180,14 @@ async def task_gate_chat(task: Mapping[str, Any] | None) -> GateChat | None:
     """``gate_chat`` of a task's row, with the dashboard setting read now."""
     if task is None:
         return None
+    if task.get("schedule_id"):
+        from .schedules import notify_targets
+
+        schedule = await db_schedules.get_schedule(task["schedule_id"])
+        task = {**task, "schedule_notify_channel": schedule.get("notify_channel") if schedule else None,
+                "schedule_notify_chat": schedule.get("notify_chat") if schedule else None}
+        chat = gate_chat(task, await dashboard_target())
+        return chat if chat is None or _offered(chat, await notify_targets()) else None
     return gate_chat(task, await dashboard_target() if notify_channel(task.get("origin_channel_id")) is None
                      else None)
 

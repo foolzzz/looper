@@ -120,10 +120,12 @@ def test_the_user_decides_at_a_gate_while_another_branch_runs_and_closing_it_pla
     assert "[GATE]: the user wrote in a gate's discussion" in claude.prompts()[0]
 
 
+@pytest.mark.parametrize("scheduled", [False, True])
 def test_a_project_that_turned_gates_off_refuses_a_gate_and_its_contract_is_as_before(
-    planner_claude: Any, agent_db: Any,
+    planner_claude: Any, agent_db: Any, scheduled: bool,
 ) -> None:
-    agent_db.get_task_project.return_value = {**_project(), "user_gates": "off"}
+    agent_db.get_task_project.return_value = {**_project(), "user_gates": "off", **(
+        {"task_schedule_id": "sched-1", "task_schedule_user_gates": "on"} if scheduled else {})}
     claude = planner_claude(plan(GATE), plan(step("s1")), decide("accept"))
     h = drive(claude, always(WORK_OK))
 
@@ -162,6 +164,56 @@ def test_a_task_a_schedule_started_may_not_open_a_gate(planner_claude: Any, agen
     assert "this task runs unattended (a schedule started it), so it cannot wait for the user" in \
         claude.turns()[1]["text"]
     assert "[GATE]" not in claude.prompts()[0]
+
+
+def test_a_schedule_with_gates_on_opens_a_gate_and_the_users_answer_resumes_its_task(
+    planner_claude: Any, agent_db: Any,
+) -> None:
+    agent_db.get_task_project.return_value = {**_project(), "user_gates": "on", "task_schedule_id": "sched-1",
+                                               "task_schedule_user_gates": "on"}
+    claude = planner_claude(
+        plan(GATE),
+        gate_reply("PostgreSQL then.", "close", SETTLED, summary=SUMMARY, action="add_steps", steps=[step("s1", "g1")]),
+        decide("accept"),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: (_gate(agent_db) or {}).get("state") == "open" and "waiting_user" in _statuses(h))
+        await _write(h, agent_db, "PostgreSQL")
+        await h.finished()
+
+    h = drive(claude, always(WORK_OK), scenario)
+    assert h.final().payload["status"] == "completed"
+    assert _gate(agent_db)["state"] == "passed"
+    assert reply_contract(2, gates=True) in claude.prompts()[0]
+    assert "Settled with the user at gate g1" in h.work_items[0].payload["supplements"][0]
+
+
+@pytest.mark.parametrize("schedule_gates", [None, "off"])
+def test_a_schedule_with_gates_off_keeps_its_planner_prompt_byte_identical(
+    agent_db: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Any, schedule_gates: str | None,
+) -> None:
+    from looper.agents.agent_settings import AgentSettings
+    from looper.agents.knowledge import EMPTY_KNOWLEDGE
+    from looper.agents.user_gates import GatePolicy
+
+    row = {**_project(), "user_gates": "on", "task_schedule_id": "sched-1"}
+    if schedule_gates is not None:
+        row["task_schedule_user_gates"] = schedule_gates
+    agent_db.get_task_project.return_value = row
+    agent = PlannerAgent(task_id="t1", runtime_root=tmp_path)
+    task = planner_module.TaskPlan("p1", "g1", "Check updates", str(tmp_path))
+    asyncio.run(agent._refresh_project(task))
+    settings = planner_module.PlannerSettings("Plan carefully.", 60, 0, 60)
+    args = (task, settings, EMPTY_KNOWLEDGE, AgentSettings().harness)
+    actual = agent._system_prompt(*args).text
+    # Rebuild the same complete prompt under the previous scheduled-task policy.
+    with monkeypatch.context() as old:
+        old.setattr(planner_module, "gate_policy", lambda **_: GatePolicy.UNATTENDED)
+        before = agent._system_prompt(*args).text
+    assert actual.encode("utf-8") == before.encode("utf-8")
+    assert "[GATE]" not in actual
 
 
 def test_when_the_user_ends_the_discussion_the_planner_closes_it_on_stated_assumptions(

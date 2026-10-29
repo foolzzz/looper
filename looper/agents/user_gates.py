@@ -12,8 +12,8 @@ when what the task found answers it or it no longer matters.
 
 This module owns the types: a gate's states and how each shows as its
 step's status (``STEP_STATUS``), its agenda, whether a task may open gates
-(``GatePolicy``: a task a schedule started runs unattended and may not, and
-a project turns them on with ``user_gates``), the summary a gate closes with
+(``GatePolicy``: a project allows them with ``user_gates``, and a schedule's
+tasks also need its explicit opt-in), the summary a gate closes with
 and the conclusion text kept from it. The rows are ``db.user_gates``'s; the
 Planner keeps one ``Gate`` per gate step; ``gate_service`` takes the user's
 messages from the dashboard and sends the reminders.
@@ -88,7 +88,7 @@ class GatePolicy(str, Enum):
 
     ALLOWED = "allowed"
     OFF = "off"  # its project has user_gates off
-    UNATTENDED = "unattended"  # a schedule started it: no one waits to answer
+    UNATTENDED = "unattended"  # its schedule did not opt into user gates
 
     @property
     def refusal(self) -> str:
@@ -101,12 +101,13 @@ class GatePolicy(str, Enum):
                 "and list your assumptions in the final summary's open_issues")
 
 
-def gate_policy(*, gates_on: bool, scheduled: bool) -> GatePolicy:
-    """The policy of a task whose project has user gates ``gates_on``, and that a schedule started when
-    ``scheduled``."""
-    if scheduled:
+def gate_policy(*, gates_on: bool, scheduled: bool, schedule_gates: str = "off") -> GatePolicy:
+    """A project must allow gates; a scheduled task also needs its schedule's explicit opt-in."""
+    if not gates_on:
+        return GatePolicy.OFF
+    if scheduled and schedule_gates != "on":
         return GatePolicy.UNATTENDED
-    return GatePolicy.ALLOWED if gates_on else GatePolicy.OFF
+    return GatePolicy.ALLOWED
 
 
 class AgendaStatus(str, Enum):

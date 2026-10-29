@@ -78,6 +78,11 @@ class CatchUp(str, Enum):
     SKIP = "skip"  # missed fires are skipped unless the latest is within the grace period
 
 
+class UserGates(str, Enum):
+    OFF = "off"
+    ON = "on"
+
+
 class SkipRows(str, Enum):
     """Whether a list of runs shows the routine skips (``ROUTINE_SKIPS``)."""
 
@@ -200,6 +205,7 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
         "created_via": row["created_via"], "created_at": row["created_at"], "updated_at": row["updated_at"],
         "gate_command": row.get("gate_command"), "gate_timeout_seconds": row.get("gate_timeout_seconds"),
         "daily_budget_usd": row.get("daily_budget_usd"), "notify": row.get("notify") or Notify.FAILURES.value,
+        "user_gates": row.get("user_gates", UserGates.OFF.value),
         "notify_target": target, "spent_today_usd": round(spent_today, 6),
         "alerts": {"failures_since": row.get("failures_alert_at"), "stale_since": row.get("stale_alert_at")},
         "planner_session": {
@@ -355,6 +361,7 @@ _PARSERS = {
     "run_budget_usd": _budget("run_budget_usd"),
     "gate_command": _gate_command, "gate_timeout_seconds": _gate_timeout,
     "daily_budget_usd": _budget("daily_budget_usd"), "notify": lambda raw: _choice("notify", raw, Notify),
+    "user_gates": lambda raw: _choice("user_gates", raw, UserGates),
 }
 _ACCEPTED = (*(name for name in db_schedules.FIELDS
                 if name not in ("notify_channel", "notify_chat", "run_timeout_mode")),

@@ -38,26 +38,33 @@ def test_preview_schedule_owner_resolves_imported_manager_without_writes(monkeyp
     run_db(test, monkeypatch, timeout=20)
 
 
-def test_schedule_owner_roundtrip_uses_full_identity_and_target_project(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("user_gates", [None, "off", "on"])
+def test_schedule_owner_roundtrip_uses_full_identity_and_target_project(
+    monkeypatch: pytest.MonkeyPatch, user_gates: str | None,
+) -> None:
     async def test(pool: Any) -> None:
         async with pool.acquire() as conn:
-            await transfer.run_import(conn, _document(owner="manager-manager"), apply=True)
-        source = await pool.fetchrow("SELECT id, project_id, manager_id, enabled FROM schedules")
+            await transfer.run_import(conn, _document(owner="manager-manager", **(
+                {"user_gates": user_gates} if user_gates is not None else {})), apply=True)
+        source = await pool.fetchrow("SELECT id, project_id, manager_id, enabled, user_gates FROM schedules")
         assert (source["manager_id"], source["enabled"]) == ("manager-manager", False)
+        assert source["user_gates"] == (user_gates or "off")
         async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
             document = json.loads("".join([chunk async for chunk in transfer.export_chunks(
                 conn, include_projects=True, include_secrets=False)]))
         assert document["format"] == transfer.V4_FORMAT
         assert document["projects"][0]["schedules"][0]["manager"] == "manager-manager"
+        assert document["projects"][0]["schedules"][0]["user_gates"] == (user_gates or "off")
         async with fresh_schema() as target:
             await ensure_schema(target)
             async with target.acquire() as conn:
                 await transfer.run_import(conn, {"format": transfer.V4_FORMAT,
                                                  "projects": [{"name": "Example"}]}, apply=True)
                 await transfer.run_import(conn, document, apply=True)
-            stored = await target.fetchrow("SELECT project_id, manager_id, enabled FROM schedules")
+            stored = await target.fetchrow("SELECT project_id, manager_id, enabled, user_gates FROM schedules")
             assert stored["project_id"] != source["project_id"]
             assert (stored["manager_id"], stored["enabled"]) == ("manager-manager", False)
+            assert stored["user_gates"] == (user_gates or "off")
 
     run_db(test, monkeypatch, timeout=30)
 
@@ -77,7 +84,7 @@ def test_omitted_schedule_owner_defaults_and_roundtrips(monkeypatch: pytest.Monk
         assert set(exported["projects"][0]["schedules"][0]) == {
             "name", "cron", "timezone", "requirement", "overlap", "max_parallel_runs", "catch_up",
             "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds",
-            "daily_budget_usd", "notify", "notify_target", "profiles", "task_limits"}
+            "daily_budget_usd", "notify", "user_gates", "notify_target", "profiles", "task_limits"}
 
     run_db(test, monkeypatch, timeout=20)
 
@@ -121,19 +128,23 @@ def test_same_name_different_owner_preserves_planner_session_and_history(monkeyp
     run_db(test, monkeypatch, timeout=20)
 
 
-def test_changed_schedule_is_disabled_and_retains_target_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("patch", [{"requirement": "Review the updated example changes."}, {"user_gates": "on"}])
+def test_changed_schedule_is_disabled_and_retains_target_owner(
+    monkeypatch: pytest.MonkeyPatch, patch: dict[str, Any],
+) -> None:
     async def test(pool: Any) -> None:
         async with pool.acquire() as conn:
             await transfer.run_import(conn, _document(), apply=True)
         await pool.execute("UPDATE schedules SET enabled = true, next_fire_at = now()")
-        document = _document(requirement="Review the updated example changes.")
+        document = _document(**patch)
         del document["managers"]  # Resolve an existing nondeleted target Manager.
         async with pool.acquire() as conn:
             plan = await transfer.run_import(conn, document, apply=True)
         change = next(change for change in plan.changes if change.section == "project.schedules")
-        assert change.action is transfer.Action.CHANGED and change.fields == ("requirement",)
-        row = await pool.fetchrow("SELECT manager_id, enabled, next_fire_at, requirement FROM schedules")
-        assert tuple(row) == ("manager-review", False, None, "Review the updated example changes.")
+        assert change.action is transfer.Action.CHANGED and change.fields == tuple(patch)
+        row = await pool.fetchrow("SELECT manager_id, enabled, next_fire_at, requirement, user_gates FROM schedules")
+        assert tuple(row) == ("manager-review", False, None,
+                              patch.get("requirement", "Review example changes."), patch.get("user_gates", "off"))
 
     run_db(test, monkeypatch, timeout=20)
 

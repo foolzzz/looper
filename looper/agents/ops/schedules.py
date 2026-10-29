@@ -50,6 +50,7 @@ FIELD_WORDS = {
     "overlap": "上一次还在运行时", "max_parallel_runs": "同时运行的上限", "catch_up": "错过的触发",
     "run_timeout_seconds": "运行超时", "gate_command": "前置检查", "gate_timeout_seconds": "前置检查超时",
     "run_budget_usd": "每次运行的花费上限", "daily_budget_usd": "每日花费上限", "notify": "通知",
+    "user_gates": "用户确认",
     "notify_target": "通知对象", "profile_overrides": "Agent Profile", "task_limits": "每次运行的任务并发",
     "template_key": "任务模板", "template_inputs": "模板静态输入",
 }
@@ -75,6 +76,7 @@ def _listed(view: Mapping[str, Any]) -> dict[str, Any]:
     return {"schedule_id": view["schedule_id"], "name": view["name"], "project": view["project_name"],
             "cron": view["cron"], "timezone": view["timezone"], "description": view["description"],
             "enabled": view["enabled"], "next_fire_at": view["next_fire_at"],
+            "user_gates": view["user_gates"],
             "template_key": view.get("template_key"), "template_name": view.get("template_name"),
             "template_inputs": view.get("template_inputs") or {},
             "last_run": _run_listed(view["last_run"]) if view["last_run"] else None,
@@ -318,6 +320,7 @@ async def _starting(call: Call) -> str | None:
     head = f"定时任务「{row['name']}」（项目 {row['project_name']}）"
     lines = [f"- 时间规则：{_shown('cron', view, names)}，时区 {view['timezone']}",
              f"- 需求：{_shown('requirement', view, names)}",
+             f"- 用户确认：{_shown('user_gates', view, names)}",
              f"- 花费上限：每次运行 {_shown('run_budget_usd', view, names)}，每天 {_shown('daily_budget_usd', view, names)}"]
     if view.get("template_key"):
         lines.extend(f"- {FIELD_WORDS[key]}：{_shown(key, view, names)}" for key in ("template_key", "template_inputs"))
@@ -388,6 +391,8 @@ def _shown(key: str, view: Mapping[str, Any], names: Mapping[str, str]) -> str:
         return _money(value, "不限")
     if key == "notify":
         return _NOTIFY_WORDS.get(value, value)
+    if key == "user_gates":
+        return "开启" if value == "on" else "关闭"
     if key == "notify_target":
         return f"{'Telegram' if value['channel'] == 'telegram' else '飞书'} · {value['chat']}" if value else "只在控制台"
     if key == "profile_overrides":
@@ -417,6 +422,7 @@ async def _configuration(view: Mapping[str, Any], project: Mapping[str, Any]) ->
              + (f"，最多 {view['max_parallel_runs']} 个同时运行" if view["overlap"] == "parallel" else "")
              + f"；错过的触发：{_shown('catch_up', view, names)}",
              f"- 前置检查：{_shown('gate_command', view, names)}",
+             f"- 用户确认：{_shown('user_gates', view, names)}",
              f"- 花费上限：每次运行 {_shown('run_budget_usd', view, names)}，每天 {_shown('daily_budget_usd', view, names)}",
              f"- 通知：{_shown('notify', view, names)} → {_shown('notify_target', view, names)}"]
     lines.append(f"- 运行超时：{_shown('run_timeout_seconds', view, names)}")
@@ -463,6 +469,9 @@ _FIELDS = {
         "gate_command": {"type": "string", "description": "Shell; prints each run's input, nothing skips it."},
         "gate_timeout_seconds": {"type": "integer"},
         "notify": {"type": "string", "enum": [n.value for n in schedules.Notify]},
+        "user_gates": {"type": "string", "enum": ["off", "on"],
+                       "description": "Allow this schedule's tasks to ask for user input when the project also "
+                                      "allows user gates. Default off. Waiting counts against the run timeout."},
         "notify_target": {"type": "object", "description": "{channel, chat}; null: dashboard only."},
         "profiles": {"type": "object", "description": "{planner, worker, reviewer}: Agent Profile (id or name) per role; a role left out keeps the project's. Set only what the user asks for: a repetitive schedule's Planner may be a cheaper profile."},
         "task_limits": {"type": "object", "description": "{worker, reviewer}: each run's task's own limits."},

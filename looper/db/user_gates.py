@@ -291,11 +291,13 @@ async def record_reminder(step_id: str, task_id: str, text: str, *, pool: asyncp
 _UNPOSTED = """
 SELECT m.*, g.state, g.topic, g.agenda, g.findings, g.summary, g.resolution, g.plan_change, g.opened_at,
        g.failures, s.step_key, t.status AS task_status, t.title, t.goal_id, t.requirement, t.origin_channel_id,
-       t.chat_id AS task_chat_id, t.chat_kind, t.chat_mention, t.schedule_id
+       t.chat_id AS task_chat_id, t.chat_kind, t.chat_mention, t.schedule_id,
+       sc.notify_channel AS schedule_notify_channel, sc.notify_chat AS schedule_notify_chat
 FROM task_user_gate_messages m
 JOIN task_user_gates g ON g.step_id = m.step_id
 JOIN task_steps s ON s.id = m.step_id
 JOIN tasks t ON t.id = m.task_id
+LEFT JOIN schedules sc ON sc.id = t.schedule_id
 WHERE m.post_state IS NULL AND (m.post_retry_at IS NULL OR m.post_retry_at <= now())
   AND NOT EXISTS (SELECT 1 FROM task_user_gate_messages e WHERE e.step_id = m.step_id AND e.post_state IS NULL
                   AND e.id < m.id AND e.post_retry_at > now())
@@ -404,16 +406,21 @@ async def open_gates(limit: int, *, chat: tuple[str, str] | None = None, dashboa
 
         origins = [chat[0]]
         base = len(args)
-        where += (f" AND t.schedule_id IS NULL AND ((t.origin_channel_id = ANY(${base + 1}::text[]) AND "
+        where += (f" AND ((t.schedule_id IS NULL AND t.origin_channel_id = ANY(${base + 1}::text[]) AND "
                   f"t.chat_id = ${base + 2} AND t.chat_id <> '' AND t.chat_kind = ANY(${base + 3}::text[])) OR "
-                  f"(${base + 4}::boolean AND NOT (COALESCE(t.origin_channel_id, '') ~ ${base + 5}::text)))")
+                  f"(t.schedule_id IS NOT NULL AND 'channel-' || sc.notify_channel = ANY(${base + 1}::text[]) "
+                  f"AND sc.notify_chat = ${base + 2}) OR (${base + 4}::boolean AND "
+                  f"((t.schedule_id IS NOT NULL AND sc.notify_channel IS NULL) OR "
+                  f"(t.schedule_id IS NULL AND NOT (COALESCE(t.origin_channel_id, '') ~ ${base + 5}::text)))))")
         args += [origins, chat[1], [kind.value for kind in TargetKind], dashboard, CHANNEL_ID_PATTERN]
     rows = await pool.fetch(
         _GATES.replace("FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id",
                        ", p.name AS project_name, t.title AS task_title, t.goal_id AS task_goal_id, "
                        "t.requirement AS task_requirement, t.origin_channel_id, t.chat_id, t.chat_kind, t.chat_mention, "
-                       "t.schedule_id, t.manager_id AS task_manager_id FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id "
-                       "JOIN tasks t ON t.id = g.task_id LEFT JOIN projects p ON p.id = t.project_id")
+                       "t.schedule_id, sc.notify_channel AS schedule_notify_channel, sc.notify_chat AS schedule_notify_chat, "
+                       "t.manager_id AS task_manager_id FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id "
+                       "JOIN tasks t ON t.id = g.task_id LEFT JOIN projects p ON p.id = t.project_id "
+                       "LEFT JOIN schedules sc ON sc.id = t.schedule_id")
         + " WHERE g.state = ANY($1::text[]) AND NOT (t.status = ANY($2::text[]))" + where
         + " ORDER BY g.opened_at DESC NULLS LAST LIMIT $3", *args)
     return [_gate(row) for row in rows]

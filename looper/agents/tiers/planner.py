@@ -70,7 +70,7 @@ another, once the built-in Reviewer passed it (``ReviewStage``,
 advisory one's verdict only goes to the decision.
 
 Where its task may (``user_gates.GatePolicy``: its project has ``user_gates``
-``on`` and no schedule started it), a step of its plan may be a user gate: when
+``on`` and its schedule, if any, opted in), a step of its plan may be a user gate: when
 the steps it depends on are done it opens and waits for the user, and the
 steps that depend on it wait with it, while the rest of the plan runs on. The
 user's messages in it (``db.user_gates``, stored first; ``GATE_MESSAGE`` only
@@ -889,8 +889,9 @@ class PlannerAgent:
         # The task's roles by key as last read (after each reply, before it is checked); None while its project lets
         # its Planner define none.
         self._roles: dict[str, RoleKind] | None = None
-        # Whether a schedule started the task (it runs unattended, so it opens no gate), as its project was last read.
+        # Whether a schedule started the task, and its opt-in to user gates, as its project was last read.
         self._scheduled = False
+        self._schedule_gates = "off"
         # This event's scheduled-run stop time (absolute), read once; None when the run does not limit a wait.
         self._run_deadline: datetime | None = None
         self._run_deadline_read = False
@@ -3280,7 +3281,8 @@ class PlannerAgent:
 
     @property
     def _gate_policy(self) -> GatePolicy:
-        return gate_policy(gates_on=self._execution.gates_on, scheduled=self._scheduled)
+        return gate_policy(gates_on=self._execution.gates_on, scheduled=self._scheduled,
+                           schedule_gates=self._schedule_gates)
 
     async def _role(self, key: str, version: int | None = None) -> TaskRole | None:
         """Version ``version`` of the task's role ``key`` (its current one without a version); None when it cannot
@@ -4354,6 +4356,7 @@ class PlannerAgent:
         self._template = project.get("task_template")
         self._scheduled = project.get("task_schedule_id") is not None
         self._schedule_id = project.get("task_schedule_id")
+        self._schedule_gates = project.get("task_schedule_user_gates") or "off"
         if project.get("task_planner_session_label") and not self._own_session_label:
             # Locates an existing session on resume. A fresh start does not run here; see _directory_label.
             self._planner_session_label = str(project["task_planner_session_label"])

@@ -239,7 +239,8 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
         "name": "nightly", "cron": "0 2 * * *", "timezone": "Asia/Shanghai", "requirement": "Check the deps.",
         "work_dir": str(work_dir), "overlap": "parallel", "max_parallel_runs": 2, "catch_up": "skip",
         "run_timeout_seconds": 1800, "run_budget_usd": 1.5, "gate_command": "echo new", "gate_timeout_seconds": 30,
-        "daily_budget_usd": 3, "notify": "always", "notify_target": {"channel": "telegram", "chat": "123456789"},
+        "daily_budget_usd": 3, "notify": "always", "user_gates": "on",
+        "notify_target": {"channel": "telegram", "chat": "123456789"},
         "profile_overrides": {"worker": "claude-code/sonnet"}, "task_limits": {"worker": 2}}}))["schedule"]
     await _ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": nightly['schedule_id'], "fields": {"enabled": True}})
     await _ok("POST", "/api/v1/schedule_admin/create", {"project_id": calc, "fields": {"name": "weekly", "cron": "0 9 * * 1",
@@ -334,7 +335,7 @@ async def _state(pool: Any) -> dict[str, Any]:
 # A schedule's own settings, as its row has them.
 _SCHEDULE_COLUMNS = ("cron", "timezone", "requirement", "overlap", "max_parallel_runs", "catch_up",
                      "run_timeout_mode", "run_timeout_seconds", "run_budget_usd", "gate_command",
-                     "gate_timeout_seconds", "daily_budget_usd", "notify",
+                     "gate_timeout_seconds", "daily_budget_usd", "notify", "user_gates",
                      "notify_channel", "notify_chat")
 
 
@@ -813,6 +814,7 @@ _GOOD = {"name": "good", "cron": "0 9 * * *", "timezone": "UTC", "requirement": 
     ({"cron": "*/2 * * * *"}, "fires 2 minutes apart"),
     ({"timezone": "Mars/Base"}, "unknown time zone"),
     ({"requirement": ""}, "requirement is required"),
+    ({"user_gates": "sometimes"}, "user_gates must be one of off, on"),
     ({"profiles": {"worker": "nope"}}, "profiles.worker: no Agent Profile 'nope' here or in the file"),
     ({"profiles": {"manager": "claude-code/opus"}}, "not 'manager'"),
     ({"task_limits": {"planner": 2}}, "task_limits: one Planner runs a task"),

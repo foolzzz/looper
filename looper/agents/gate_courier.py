@@ -33,7 +33,7 @@ from typing import Any
 
 from ..db import activity as db_activity, tasks as db_tasks, user_gates as db_user_gates
 from .channels.base import PostReceipt
-from .gate_service import GateChat, dashboard_target, gate_chat
+from .gate_service import GateChat, _offered, dashboard_target, gate_chat
 from .links import task_link
 from .task_notice import NAME_CHARS, link_line
 from .user_gates import RETRY_WAIT_SEC, GateState, MessageKind
@@ -155,7 +155,8 @@ def _task_columns(row: Mapping[str, Any]) -> dict[str, Any]:
     """The task's columns ``gate_chat`` reads, from a message's row."""
     return {"origin_channel_id": row.get("origin_channel_id"), "schedule_id": row.get("schedule_id"),
             "chat_id": row.get("task_chat_id"), "chat_kind": row.get("chat_kind"),
-            "chat_mention": row.get("chat_mention")}
+            "chat_mention": row.get("chat_mention"), "schedule_notify_channel": row.get("schedule_notify_channel"),
+            "schedule_notify_chat": row.get("schedule_notify_chat")}
 
 
 class GateCourier:
@@ -204,6 +205,11 @@ class GateCourier:
     async def _handle(self, row: Mapping[str, Any], dashboard: GateChat | None) -> bool:
         """Post one message and note what that did; False when it waits for its next try."""
         chat = gate_chat(_task_columns(row), dashboard)
+        if row.get("schedule_id") and chat is not None:
+            from .schedules import notify_targets
+
+            if not _offered(chat, await notify_targets()):
+                chat = None
         current = await db_user_gates.gate_state(row["step_id"])
         if current is not None:
             row = {**row, "state": current}
