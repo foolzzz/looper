@@ -5,7 +5,7 @@ import { ctx, dsh } from './sdk.ts';
 import { sessions, type Session } from './session.ts';
 import { settle, type Turn } from './turn.ts';
 
-type Attempt = { sent: boolean; bodyDone: boolean; status?: number };
+type Attempt = { sent: boolean; bodyDone: boolean; status?: number; onSent: () => void };
 const attempts = new Map<string, Attempt>();
 const owners = new WeakMap<object, string>();
 let installed = false, counter = 0;
@@ -25,7 +25,7 @@ export function installProvider(): void {
   subscribe('undici:client:sendHeaders', (message: any) => {
     const id = /^x-looper-request-id:\s*([^\r\n]+)\r?$/im.exec(message.headers)?.[1];
     const attempt = id && attempts.get(id);
-    if (attempt) { attempt.sent = true; owners.set(message.request, id); }
+    if (attempt) { attempt.sent = true; owners.set(message.request, id); attempt.onSent(); }
   });
   subscribe('undici:request:headers', (message: any) => {
     const attempt = attempts.get(owners.get(message.request)!);
@@ -46,6 +46,9 @@ export function installProvider(): void {
       return;
     }
     const id = `q-${++counter}`, kind = options.purpose === 'compaction' ? 'compaction' : 'turn';
+    const steers = kind === 'turn' ? [...turn.steers.values()].filter(s => !s.applied && !s.dropped
+      && s.dshId !== null && options.messages.some((message: any) => message.id === s.dshId)) : [];
+    const afterRequest = turn.lastRequestId, afterToolBatch = turn.afterToolBatch;
     const pending = request('budget/authorize', { session_id: record.id, trace_id: turn.trace,
       request_id: id, kind, provider: record.accountId, model: record.model,
       estimated_input_tokens: Math.ceil(JSON.stringify([options.messages, options.tools ?? []]).length / 4),
@@ -74,7 +77,14 @@ export function installProvider(): void {
       yield finish('aborted', 'request aborted', 'LOOPER_CANCELLED');
       return;
     }
-    const attempt: Attempt = { sent: false, bodyDone: false };
+    const attempt: Attempt = { sent: false, bodyDone: false, onSent: () => {
+      for (const s of steers) {
+        if (s.applied || s.dropped) continue;
+        s.applied = true;
+        void update(record.id, turn.trace, 'steer_applied', { message_id: s.message_id,
+          after_request_id: afterRequest, after_tool_batch: afterToolBatch, new_turn: false });
+      }
+    } };
     attempts.set(id, attempt);
     record.activeRequest = id;
     let usage: any, terminalUsage: any, terminal: string | undefined, modelOutput = false;

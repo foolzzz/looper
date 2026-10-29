@@ -136,7 +136,7 @@ rpc.method('test/routes', () => ({routes: sdk.ctx.llm.listProviders().map(p => p
             cases.extend(({"tools": {**params["tools"], "builtin": ["read", name]}}, -32008)
                 for name in ("write", "edit", "bash"))
             cases.append(({"tools": {**params["tools"], "platform": [{"name": "tool"}]}}, -32007))
-            cases.extend(({"fork_from": value}, -32007) for value in (None, {"session_id": "source"}))
+            cases.extend(({"fork_from": value}, -32008) for value in (None, {"session_id": "source"}))
             for override, code in cases:
                 await client.call("session/new", {**params, **override}, code=code)
             assert (await client.call("runner/health"))["sessions"] == 0
@@ -306,7 +306,9 @@ rpc.method('test/tool', async p => {{
             second["provider"]["api_key"] = "another-synthetic-key"
             first_id = (await client.call("session/new", first))["session_id"]
             second_id = (await client.call("session/new", second))["session_id"]
-            for sid, params, names in ((first_id, first, ["edit", "read", "write"]),
+            # bash is the session-scoped replacement for the disabled native plugin,
+            # so a writable builtin that names it is model-visible. The reader has no bash.
+            for sid, params, names in ((first_id, first, ["bash", "edit", "read", "write"]),
                     (second_id, second, ["glob", "grep", "read"])):
                 result = await client.call("test/inspect", {"session_id": sid})
                 sections = [section for section in result["sections"] if section["name"] == "looper"]

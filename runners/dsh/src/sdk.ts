@@ -111,7 +111,8 @@ const disabled = ['hmr', 'settings', 'config-editor', 'plugin-manager', 'tool-pl
   'credentials', 'authorization', 'deepseek-account', 'llm-deepseek-account', 'llm-pi-ai', 'otel',
   'session-telemetry-otel', 'session-log-deepseek', 'plugin-package-inventory-deepseek',
   'session-title', 'session-title-llm', 'agent-instructions', 'headless-startup', 'headless-runner',
-  'llm-deepseek', 'llm-retry', 'tool-bash', 'tool-pwsh', 'tool-jobs', 'jobs',
+  // Looper caps tool output; a second spill policy would rewrite the host's result.
+  'llm-deepseek', 'llm-retry', 'spill-policy', 'tool-bash', 'tool-pwsh', 'tool-jobs', 'jobs',
   'subagent', 'subagent-spawn-in-process', 'subagent-fork-in-process', 'tool-subagent-control',
   'tool-subagent-list-agents', 'tool-subagent', 'tool-subagent-fork', 'ptc-runtime', 'workflow-ptc', 'tool-workflow',
   'web', 'web-search-deepseek', 'web-deepseek-api', 'web-fetch-http', 'tool-web',

@@ -5,13 +5,16 @@ import { isAbsolute, join, relative, sep } from 'node:path';
 import { addSecret, diagnostic, onShutdown, RpcError, scrub } from '../../common/rpc.ts';
 import { ctx, dsh, environment } from './sdk.ts';
 import { cancelTurn, onEvent, type Turn } from './turn.ts';
+import { killProcesses, pathGuard, registerBash } from './exec.ts';
+import type { Registration } from './tools.ts';
 
 export type Session = {
   id: string; key: string; role: string; cwd: string; roots: string[]; env: Record<string, string>;
   home: string; limits: { tool_timeout_s: number; max_requests_per_turn: number };
   accountId: string; model: string; wireModel: string; route: string; routeOwner: any;
   handle: any; agent: any; agentCtx: any; builtin: string[]; readOnly: boolean;
-  ephemeral: boolean; allowed: Set<string>; turn: Turn | null; activeRequest: string | null; closing: boolean;
+  ephemeral: boolean; fork: boolean; processes: Set<number>; platformTools: Map<string, Registration>;
+  allowed: Set<string>; turn: Turn | null; activeRequest: string | null; closing: boolean;
 };
 export const sessions = new Map<string, Session>();
 const opening = new Set<string>(), loading = new Set<string>();
@@ -20,6 +23,22 @@ const builtins = new Set(['read', 'glob', 'grep', 'write', 'edit', 'bash']);
 let stateRoot: string;
 export function configureSessions(root: string): void { stateRoot = root; }
 function nonempty(value: unknown): value is string { return typeof value === 'string' && value.trim().length > 0; }
+function forkSeed(events: readonly any[]): { seed: any[]; inheritedEventCount: number } {
+  const ended = events.findLast(event => event.type === 'turn/end')?.seq;
+  if (ended === undefined) throw new RpcError(-32001, 'source session has no completed turn');
+  // dropSteers replaces a claimed steer after turn/end. A seed that stops on
+  // that marker copies the discarded instruction into the consult.
+  let boundary = ended;
+  for (const event of events) {
+    if (event.seq <= boundary) continue;
+    const op = event.surfaceOp;
+    if (event.seq !== boundary + 1 || op?.op !== 'replace'
+        || !Number.isSafeInteger(op.startSeq) || !Number.isSafeInteger(op.endSeq)
+        || op.startSeq > ended || op.endSeq > ended) break;
+    boundary = event.seq;
+  }
+  return { seed: dsh.session.buildForkSeed(events, boundary), inheritedEventCount: boundary + 1 };
+}
 async function directory(path: unknown, noLink = false): Promise<boolean> {
   if (typeof path !== 'string' || !isAbsolute(path)) return false;
   try { return (await (noLink ? lstat(path) : stat(path))).isDirectory(); } catch { return false; }
@@ -51,7 +70,13 @@ async function validate(params: Record<string, any>): Promise<{ roots: string[];
     throw new RpcError(-32008, 'read-only sessions cannot enable write, edit or bash');
   }
   if (tools.platform.length) throw new RpcError(-32007, 'platform tools arrive with each prompt');
-  if ('fork_from' in params) throw new RpcError(-32007, 'session fork is not supported yet');
+  if ('fork_from' in params) {
+    if (!['worker', 'reviewer'].includes(params.role) || !tools.read_only) {
+      throw new RpcError(-32008, 'consult forks require a read-only worker or reviewer');
+    }
+    if (!params.fork_from || typeof params.fork_from !== 'object' || Array.isArray(params.fork_from)
+        || !nonempty(params.fork_from.session_id)) throw new RpcError(-32602, 'invalid fork source');
+  }
   const roots = await Promise.all([params.cwd, ...params.add_dirs].map(path => realpath(path)));
   const state = await realpath(params.state_dir);
   const leasePath = relative(join(await realpath(process.cwd()), 'sessions'), state);
@@ -66,6 +91,7 @@ export function newSession(params: Record<string, any>): Promise<object> { retur
 export function loadSession(params: Record<string, any>): Promise<object> { return compose(params, true); }
 async function compose(params: Record<string, any>, resumed: boolean): Promise<object> {
   const validated = await validate(params);
+  if (resumed && 'fork_from' in params) throw new RpcError(-32602, 'cannot load a fork');
   if (resumed && !nonempty(params.session_id)) throw new RpcError(-32602, 'invalid session id');
   // Reserve after all filesystem awaits so concurrent keys and loads cannot race admission.
   if (resumed && (sessions.has(params.session_id) || loading.has(params.session_id))) {
@@ -83,6 +109,7 @@ async function compose(params: Record<string, any>, resumed: boolean): Promise<o
     limits: { ...params.limits }, accountId: provider.account_id, model: provider.model, wireModel,
     route: 'looper-' + params.session_key, routeOwner: undefined, handle: undefined, agent: undefined,
     agentCtx: undefined, builtin: [...params.tools.builtin], readOnly: params.tools.read_only,
+    fork: 'fork_from' in params, processes: new Set(), platformTools: new Map(),
     allowed: new Set(params.tools.builtin), turn: null, activeRequest: null, closing: false };
   let started = false;
   try {
@@ -106,15 +133,26 @@ async function compose(params: Record<string, any>, resumed: boolean): Promise<o
         } });
       agentCtx.systemPrompt.section({ name: 'looper', order: 20000, text: params.system_prompt.text, interpolate: false });
       agentCtx.tools.restrict({ allow: record.builtin.filter(name => name !== 'bash') });
-      agentCtx.tools.guard((e: { name: string }) => record.allowed.has(e.name) ? undefined
+      registerBash(record);
+      agentCtx.tools.guard((e: { name: string; arguments: any }) => record.allowed.has(e.name) ? pathGuard(record, e)
         : record.readOnly ? 'LOOPER_READ_ONLY: tool is not allowed in a read-only run'
           : 'LOOPER_TOOL: ' + e.name + ' is not enabled for this session');
     };
     const agentOptions = { provider: record.route, model: wireModel, reasoningEffort: provider.effort ?? 'high' };
+    let inherited: { seed: any[]; inheritedEventCount: number } | undefined;
+    if (record.fork) {
+      const source = await ctx!.sessionPersistence.open(params.fork_from.session_id, 'read');
+      let events: any[];
+      try { ({ events } = await source.read()); } finally { await source.close(); }
+      // Like dsh-subagent's seeded child: a new id owns a copied, balanced prefix.
+      inherited = forkSeed(events);
+    }
     started = true;
     record.handle = resumed
       ? await ctx!.agents.resume({ resumeSessionId: record.id, agentOptions, setup })
-      : await ctx!.agents.create({ sessionId: record.id, meta: { cwd: record.cwd }, agentOptions, setup });
+      : await ctx!.agents.create({ sessionId: record.id, meta: { cwd: record.cwd,
+        ...(record.fork ? { parentSession: params.fork_from.session_id, isSeeded: true } : {}) },
+        ...inherited, agentOptions, setup });
     if (resumed && record.handle.agent.session.header.cwd !== record.cwd) {
       throw new RpcError(-32001, 'saved session belongs to another directory');
     }
@@ -172,6 +210,7 @@ export function release(record: Session, bounded = false): Promise<void> {
   record.closing = true;
   if (bounded) sessions.delete(record.id);
   const operation = (async () => {
+    killProcesses(record);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const disposing = record.handle.dispose();
@@ -179,7 +218,7 @@ export function release(record: Session, bounded = false): Promise<void> {
       else await Promise.race([disposing, new Promise<void>(resolve => { timer = setTimeout(resolve, 1000); })]);
     } finally { clearTimeout(timer); }
     await record.routeOwner?.dispose();
-    if (record.ephemeral) await removeStored(record.id);
+    if (record.ephemeral || record.fork) await removeStored(record.id);
     sessions.delete(record.id);
   })();
   closing.set(record.id, operation);
@@ -188,6 +227,7 @@ export function release(record: Session, bounded = false): Promise<void> {
 }
 onShutdown(async () => {
   await Promise.all([...sessions.values()].map(async record => {
+    killProcesses(record);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       if (record.turn && !record.turn.settled) {

@@ -3,8 +3,12 @@ import { diagnostic, RpcError, scrub, update } from '../../common/rpc.ts';
 import { dsh } from './sdk.ts';
 import { getSession, release, type Session } from './session.ts';
 import { endRequest } from './provider.ts';
+import { killProcesses } from './exec.ts';
+import { applyTools } from './tools.ts';
 
 type Failure = { kind: string; message: string };
+type Steer = { message_id: string; text: string; dshId: string | null; historySeq: number | null;
+  applied: boolean; dropped: boolean };
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>(done => { resolve = done; });
@@ -18,6 +22,7 @@ export type Turn = {
   endReason?: any; last?: any; opened: ReturnType<typeof deferred>; closed: ReturnType<typeof deferred>;
   finished: ReturnType<typeof deferred>; settling?: Promise<void>; drained?: () => void;
   forced?: boolean; failure?: Failure;
+  steers: Map<string, Steer>;
 };
 async function within(promise: Promise<unknown>, ms: number): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -30,17 +35,57 @@ export function prompt(params: Record<string, any>): object {
   if (record.turn && !record.turn.settled) throw new RpcError(-32003, 'session is busy');
   if (typeof params.trace_id !== 'string' || !params.trace_id.trim()
       || typeof params.text !== 'string' || !Array.isArray(params.tools)) throw new RpcError(-32602, 'invalid prompt parameters');
-  if (params.tools.length) throw new RpcError(-32007, 'platform tools are not supported yet');
+  applyTools(record, params.tools);
   const message = dsh.llm.createUserMessage({ content: [{ type: 'text', text: params.text }], source: { kind: 'looper' } });
   const turn: Turn = { trace: params.trace_id, promptId: message.id, number: null, started: false,
     settled: false, cancel: null, denial: null, overflow: false, ended: 0, complete: true,
     inflight: new Set(), authorizations: new Map(), requestKinds: new Map(), lastRequestId: null,
-    afterToolBatch: false, opened: deferred(), closed: deferred(), finished: deferred() };
+    afterToolBatch: false, opened: deferred(), closed: deferred(), finished: deferred(), steers: new Map() };
   record.turn = turn;
   // Start after the acceptance frame; controls can cancel an input still in the inbox.
   record.agent.followup(message);
   setImmediate(() => { void run(record, turn); });
   return { session_id: record.id, trace_id: turn.trace, accepted: true };
+}
+export function steer(params: Record<string, unknown>): object {
+  const record = getSession(params), turn = record.turn;
+  if (!turn || turn.settled || turn.settling || turn.cancel) throw new RpcError(-32004, 'turn is not running');
+  if (params.trace_id !== turn.trace) throw new RpcError(-32005, 'trace mismatch');
+  if (params.if_idle !== 'reject' || typeof params.message_id !== 'string' || !params.message_id.trim()
+      || typeof params.text !== 'string' || !params.text.trim()) throw new RpcError(-32602, 'invalid steer parameters');
+  if (!turn.steers.has(params.message_id)) {
+    turn.steers.set(params.message_id, { message_id: params.message_id, text: params.text,
+      dshId: null, historySeq: null, applied: false, dropped: false });
+    forwardSteers(record, turn);
+  }
+  return { session_id: record.id, trace_id: turn.trace, status: 'queued' };
+}
+function forwardSteers(record: Session, turn: Turn): void {
+  if (record.turn !== turn || !turn.started || turn.settled || turn.settling || turn.cancel
+      || turn.overflow || turn.endReason !== undefined || record.agent.status !== 'running') return;
+  for (const s of turn.steers.values()) {
+    if (s.dshId !== null || s.applied || s.dropped) continue;
+    const message = dsh.llm.createUserMessage({ content: [{ type: 'text', text: s.text }], source: { kind: 'looper-steer' } });
+    record.agent.steer(message);
+    s.dshId = message.id;
+  }
+}
+export function dropSteers(record: Session, turn: Turn): void {
+  for (const s of turn.steers.values()) {
+    if (s.applied || s.dropped) continue;
+    if (s.dshId !== null) record.agent.inbox.remove(s.dshId);
+    if (s.historySeq !== null) {
+      // Claimed steering has left the inbox. Replace its surface node durably;
+      // empty user content is valid after turn/end and omitted by the adapter.
+      record.agent.session.append('user/message',
+        dsh.llm.createUserMessage({ content: [], source: { kind: 'looper-steer' } }), {
+        surfaceOp: { op: 'replace', startSeq: s.historySeq, endSeq: s.historySeq },
+        sourceEventSeqs: [s.historySeq] });
+    }
+    s.dropped = true;
+    void update(record.id, turn.trace, 'steer_dropped', { message_id: s.message_id,
+      reason: turn.cancel === 'close' ? 'session_closed' : turn.cancel ? 'cancelled' : 'turn_ended' });
+  }
 }
 async function run(record: Session, turn: Turn): Promise<void> {
   try {
@@ -61,6 +106,12 @@ export function onEvent(record: Session, event: any): void {
     turn.number = data.turn;
     turn.started = true;
     turn.opened.resolve();
+    // Inbox writes cannot reenter DSH's turn/start event publication.
+    setImmediate(() => forwardSteers(record, turn));
+  } else if (event.type === 'user/message') {
+    for (const s of turn.steers.values()) {
+      if (s.dshId === data.id) s.historySeq = event.seq;
+    }
   } else if (data.turn === turn.number) {
     if (event.type === 'assistant/message') {
       const content = data.message.content.flatMap((block: any) => {
@@ -88,6 +139,7 @@ export function settle(record: Session, turn: Turn, failure?: Failure): Promise<
   if (failure) turn.failure = failure;
   if (turn.settling) return turn.settling;
   turn.settling = (async () => {
+    dropSteers(record, turn);
     await Promise.allSettled(turn.authorizations.values());
     if (turn.inflight.size) {
       await within(new Promise<void>(resolve => { turn.drained = resolve; }), 1000);
@@ -111,6 +163,7 @@ export function settle(record: Session, turn: Turn, failure?: Failure): Promise<
         error = { kind, message: f.message };
       } else error = { kind: 'INTERNAL_ERROR', message: 'agent stopped without a completed response' };
     }
+    if (outcome === 'cancelled' || turn.forced) killProcesses(record);
     turn.settled = true;
     await update(record.id, turn.trace, 'settled', { outcome,
       final_text: (turn.last ?? []).filter((b: any) => b.type === 'text').map((b: any) => b.text).join(''),
@@ -130,6 +183,7 @@ export function cancel(params: Record<string, unknown>): object {
 }
 export async function cancelTurn(record: Session, turn: Turn, deadline = 4000): Promise<void> {
   if (turn.settled) return;
+  dropSteers(record, turn);
   if (!turn.started) {
     record.agent.inbox.remove(turn.promptId);
     turn.opened.resolve();
@@ -139,6 +193,7 @@ export async function cancelTurn(record: Session, turn: Turn, deadline = 4000): 
   await Promise.allSettled(turn.authorizations.values());
   if (await within(turn.finished.promise, deadline)) return;
   turn.forced = true;
+  killProcesses(record);
   turn.failure = { kind: 'INTERNAL_ERROR', message: 'cancel did not settle; the session was released' };
   try { await release(record, true); }
   catch { diagnostic('forced session disposal failed'); }

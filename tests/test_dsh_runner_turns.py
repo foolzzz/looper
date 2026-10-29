@@ -270,7 +270,7 @@ def test_prompt_validation_and_running_turn(tmp_path):
                 valid = {"session_id": sid, "trace_id": "trace", "text": "x", "tools": []}
                 for override in ({"trace_id": ""}, {"trace_id": None}, {"text": 1}, {"tools": None}):
                     await client.call("session/prompt", {**valid, **override}, code=-32602)
-                await client.call("session/prompt", {**valid, "tools": [{"name": "future"}]}, code=-32007)
+                await client.call("session/prompt", {**valid, "tools": [{"name": "future"}]}, code=-32602)
                 await client.call("session/cancel", {"session_id": sid, "trace_id": "trace"}, code=-32004)
                 await client.prompt(sid)
                 await client.requested(server)
@@ -363,9 +363,9 @@ rpc.method('test/stream', async p => {{
 }});
 rpc.method('test/slow-tool', p => {{
   const record = sessions.get(p.session_id);
-  record.allowed.add('slow_probe');
+  record.builtin.push('slow_probe');
   record.agentCtx.tools.register(defineTool({{name: 'slow_probe', description: 'Synthetic slow scoped tool',
-    parameters: {{}}, output: {{schema: {{type: 'string'}}}}, async execute() {{
+    parameters: {{}}, output: {{schema: {{type: 'string'}}, render: (_args, value) => [{{type: 'text', text: value}}]}}, async execute() {{
       await rpc.notify('test/tool-open', {{}});
       await new Promise(resolve => {{ release = resolve; }});
       return 'Synthetic tool finished';
