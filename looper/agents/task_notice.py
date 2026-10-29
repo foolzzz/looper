@@ -24,7 +24,7 @@ from typing import Any
 
 from ..db import tasks as db_tasks
 from .links import task_link
-from .message import is_lark, parse_channel_id
+from .message import builtin_channel_id, is_lark, parse_channel_id
 
 NAME_CHARS = 40
 LEAD_CHARS = 300
@@ -114,7 +114,7 @@ class Notice:
         target, text = NotifyTarget._read(raw.get("kind"), raw.get("chat"), raw.get("mention")), raw.get("text")
         if target is None or not (isinstance(text, str) and text):
             return None
-        channel_id = raw.get("channel_id")
+        channel_id = raw.get("channel_id", builtin_channel_id(channel.value))
         parsed = parse_channel_id(channel_id) if isinstance(channel_id, str) else None
         if parsed is None or parsed.channel_type != channel.value:
             return None

@@ -120,6 +120,18 @@ def test_full_configuration_and_workspace_choice_survive_readback(monkeypatch, t
     run_db(test, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("value, expected", [(True, "write"), (False, "off")])
+def test_new_task_project_preserves_boolean_lessons_compatibility(monkeypatch, tmp_path, value, expected):
+    async def test(pool):
+        async with _serving(tmp_path) as server:
+            code, answer = await post(server, {"requirement": "Build", "project": {
+                "name": "Example", "work_dir": str(tmp_path), "distill_lessons": value}})
+            assert code == 200, answer
+            saved = await projects.get_project(answer["result"]["project_id"], pool=pool)
+            assert saved["distill_lessons"] == expected
+    run_db(test, monkeypatch, timeout=30)
+
+
 @pytest.mark.parametrize("invalid", [
     {"project": None}, {"project": {"name": "Example"}, "project_id": "other"},
     {"requirement": " "}, {"requirement": 7}, {"requirement": "x" * 32_001},
@@ -177,7 +189,7 @@ def test_new_project_waits_for_matching_client_and_session_and_creates_once(monk
 @pytest.mark.parametrize("settings, disclosures", [
     ({"wait_commands": "on", "vault": "on", "task_budget_usd": 1.25, "task_budget_action": "wrap_up",
       "review_policy": "all", "step_workspaces": "worktree", "task_workspaces": "worktree",
-      "workspace_links": ["cache"], "distill_lessons": True, "operator_notes": "off",
+      "workspace_links": ["cache"], "distill_lessons": "write", "operator_notes": "off",
       "planner_roles": "on", "user_gates": "on", "agent_room": "on", "max_step_retries": 3,
       "supervise_interval_seconds": 60, "role_text_max_chars": 900, "gate_reminder_hours": 2,
       "room_post_per_minute": 2, "room_broadcasts_per_run": 1, "room_message_max_chars": 500,
@@ -190,7 +202,7 @@ def test_new_project_waits_for_matching_client_and_session_and_creates_once(monk
       "workspace_links（worktree 链接回原目录的相对路径）：cache"]),
     ({"wait_commands": "off", "vault": "off", "agent_room": "off", "planner_roles": "off",
       "user_gates": "off", "task_workspaces": "in_place", "step_workspaces": "shared",
-      "distill_lessons": False, "workspace_links": [], "max_step_retries": 0,
+      "distill_lessons": "off", "workspace_links": [], "max_step_retries": 0,
       "supervise_interval_seconds": 0, "gate_reminder_hours": 0, "room_broadcasts_per_run": 0,
       "room_wait_max_seconds": 0, "room_consults_per_task": 0},
      ["wait_commands（等待步骤以服务端用户身份执行 shell 命令）：off",
@@ -241,8 +253,7 @@ def test_client_project_impact_discloses_execution_and_preserves_settings(monkey
             assert code == 200, done
             saved = await projects.get_project(done["result"]["project_id"])
             for field, raw in settings.items():
-                expected = ("write" if raw else "off") if field == "distill_lessons" else (
-                    None if raw is None or raw == "" or raw == [] else raw)
+                expected = None if raw is None or raw == "" or raw == [] else raw
                 assert saved[field] == expected, field
             row = await tasks.get_task(done["result"]["task_id"])
             assert row["client_id"] == client["id"] and row["config"] == body["config"]

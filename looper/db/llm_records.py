@@ -353,7 +353,7 @@ async def task_run_rows(task_id: str, *, pool: asyncpg.Pool | None = None) -> li
     ``model`` (the one the run reported, else the one it chose or its profile named), ``effort`` and ``profile``
     ({name, source}) and ``task_role`` (the role its Planner defined that it ran as, else None); a run recorded before Agent Profiles has None for what it did not record."""
     pool = pool or get_pool()
-    profile = "(metadata->'profile')"
+    profile = "COALESCE(metadata->'profile', metadata->'agent')"
     rows = await pool.fetch(
         f"""
         SELECT id, {_TASK_ROLE} AS role, agent_id, metadata->>'step_id' AS step_id, status, created_at,
@@ -432,9 +432,9 @@ async def get_record(
 
 # A run with a runtime's own login (a subscription: Claude Code's, priced by Claude Code; Codex's, priced by Looper
 # at the built-in prices): what that usage would cost at API prices, not money spent. A run names its Agent Profile
-# in metadata.profile; the bridge materialized the basis of runs predating authentication evidence.
+# in metadata.profile, or metadata.agent on historical rows; explicit accounting evidence takes precedence.
 EQUIVALENT = ("COALESCE(metadata->>'accounting_basis' = 'subscription_equivalent', "
-              "metadata->'profile'->'provider'->>'auth' = 'oauth', false)")
+              "COALESCE(metadata->'profile', metadata->'agent')->'provider'->>'auth' = 'oauth', false)")
 
 
 async def task_costs(

@@ -35,7 +35,8 @@ for field, schema in EXECUTION.items():
         schema = {"type": ["number", "string", "null"]}
     elif field == "distill_lessons":
         schema = {"type": ["string", "boolean", "null"],
-                  "enum": ["off", "draft", "write", "", True, False, None]}
+                  "enum": ["off", "draft", "write", "", True, False, None],
+                  "description": "Lessons mode; true maps to write, false, null and empty string map to off."}
     elif "enum" in schema or field == "workspace_links":
         schema = {"anyOf": [schema, {"const": ""}]}
     INPUT_EXECUTION[field] = schema

@@ -7,6 +7,7 @@ schema is applied to it and the test's rows are removed afterwards.
 from __future__ import annotations
 
 import asyncio
+import json
 from decimal import Decimal
 from typing import Any
 
@@ -370,6 +371,27 @@ def test_a_run_with_a_runtimes_own_login_costs_a_subscription_equivalent() -> No
         assert (cost["equivalent_runs"], cost["provider_price_runs"]) == (3, 1)
 
     run_db(test, max_size=2)
+
+
+@pytest.mark.parametrize(("metadata", "equivalent"), [
+    ({"agent": {"provider": {"auth": "oauth"}}}, True),
+    ({"agent": {"provider": {"auth": "api_key"}}}, False),
+    ({"profile": {"provider": {"auth": "api_key"}}, "agent": {"provider": {"auth": "oauth"}}}, False),
+    ({"profile": {}, "agent": {"provider": {"auth": "oauth"}}}, False),
+    ({"accounting_basis": "provider_price", "agent": {"provider": {"auth": "oauth"}}}, False),
+])
+def test_cost_reads_agent_auth_only_without_a_profile(metadata: dict[str, Any], equivalent: bool) -> None:
+    from looper.db import llm_records
+
+    async def test(pool: Any) -> None:
+        record_id = await llm_records.start_record(agent_id="worker-old", task_id="t1", metadata=metadata, pool=pool)
+        await llm_records.finish_record(record_id, status="completed", cost_usd=0.1, cost_source="provider_price", pool=pool)
+        cost = (await llm_records.task_costs(["t1"], pool=pool))["t1"]
+        assert (cost["equivalent_runs"], cost["provider_price_runs"]) == (int(equivalent), int(not equivalent))
+        stored = await pool.fetchval("SELECT metadata FROM llm_records WHERE id = $1", record_id)
+        assert json.loads(stored) == metadata
+
+    run_db(test, max_size=2, timeout=30)
 
 
 def test_a_resident_agents_usage_by_session_day_and_turn() -> None:

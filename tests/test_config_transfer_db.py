@@ -209,7 +209,7 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
     (work_dir / "docs" / "guide.md").write_text("# Guide\n")
     calc = (await _ok("POST", "/api/v1/project_admin/create", {"name": "calc", "work_dir": str(work_dir), "description": "A calc.",
                                                 "background": "Python 3.12.", "review_policy": "all",
-                                                "distill_lessons": True}))["project_id"]
+                                                "distill_lessons": "write"}))["project_id"]
     docs = (await _ok("POST", "/api/v1/project_admin/create", {"name": "docs"}))["project_id"]
     await _ok("PUT", f"/api/projects/{calc}/agent-settings", {"profile_id": beta_haiku})
     await _ok("PUT", f"/api/projects/{calc}/agent-settings/roles/worker", {"harness_prompt": "Test first."})

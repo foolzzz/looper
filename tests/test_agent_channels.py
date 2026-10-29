@@ -445,6 +445,7 @@ class TestSenderIds:
     @pytest.mark.parametrize(("raw", "expected"), [
         (None, ()),
         ([], ()),
+        (" 7, 8,,7 ", ("7", "8")),
         (["123456789"], ("123456789",)),
         ([" 42 ", "", "7", "42"], ("42", "7")),  # trimmed, blanks and repeats dropped, order kept
     ])
@@ -471,11 +472,17 @@ class TestSenderIds:
         with pytest.raises(AllowlistError, match="is not a Lark open_id; .*starts with ou_"):
             sender_ids("lark", [bad])
 
-    @pytest.mark.parametrize("raw", [{"id": "7"}, 7, [True], [["7"]], "7,8", [123456789]])
+    @pytest.mark.parametrize("raw", [{"id": "7"}, 7, [True], [["7"]], [123456789]])
     def test_a_list_holds_strings(self, raw: Any) -> None:
         from looper.agents.channels.allowlist import AllowlistError, sender_ids
         with pytest.raises(AllowlistError):
             sender_ids("lark" if raw == [True] else "telegram", raw)
+
+    @pytest.mark.parametrize("channel_type", ["lark", "lark_bot"])
+    def test_comma_separated_open_ids(self, channel_type: str) -> None:
+        from looper.agents.channels.allowlist import normalized_config
+        assert normalized_config(channel_type, {"allowed_open_ids": "ou_first123, ou_second456,ou_first123"}) == {
+            "allowed_open_ids": ["ou_first123", "ou_second456"]}
 
     def test_a_list_is_bounded(self) -> None:
         from looper.agents.channels.allowlist import MAX_SENDERS, AllowlistError, sender_ids

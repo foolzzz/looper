@@ -12,7 +12,7 @@ import pytest
 
 from looper.agents.profile_registry import BUILTIN_PROFILE, RegistryError, RegistryNotFound
 from looper.agents.runtimes import ApiProtocol, AuthKind, Capability, adapter
-from tests.runtime_model_helpers import resolved_profile
+from tests.runtime_model_helpers import resolved_profile, with_model_name
 from tests.test_agent_settings import _row
 from tests.test_catalog_db import _Writer
 
@@ -37,11 +37,16 @@ def _dependencies(monkeypatch, runtime="claude-code", mode="append", role="worke
                                                     else adapter(runtime).capabilities)),
                       provider=replace(BUILTIN_PROFILE.provider,
                                        auth=AuthKind.OAUTH if runtime == "grok" else AuthKind.API_KEY,
-                                       protocols=frozenset(ApiProtocol), oauth_runtime_type=runtime))
+                                       protocols=adapter(runtime).protocols,
+                                       oauth_runtime_type=runtime if runtime == "grok" else None))
+    profile = resolved_profile(profile.id, profile.name, profile.runtime, profile.provider, profile.model,
+                               custom_prompt=profile.custom_prompt)
     row = {**_row(profile), "custom_prompt": profile.custom_prompt}
     monkeypatch.setattr(module.db_profiles, "get_profile", AsyncMock(return_value=row))
     # The selected launch profile is valid and independent of the profile being previewed.
-    selected = replace(BUILTIN_PROFILE, provider=replace(BUILTIN_PROFILE.provider, auth=AuthKind.API_KEY))
+    selected = resolved_profile(BUILTIN_PROFILE.id, BUILTIN_PROFILE.name, BUILTIN_PROFILE.runtime,
+                               replace(BUILTIN_PROFILE.provider, auth=AuthKind.API_KEY, oauth_runtime_type=None),
+                               BUILTIN_PROFILE.model)
     layers = AsyncMock(return_value=[
         {"scope": "system", "profile": _row(selected), "harness_prompt": "Shared harness"},
         {"scope": "role", "role": role, "system_prompt_mode": mode},
@@ -169,7 +174,7 @@ def test_preview_dsh_uses_bootstrap_builder_and_reports_effective_append(monkeyp
 
     _register_prompt_runtime(monkeypatch)
     module, profile, layers = _dependencies(monkeypatch, "dsh", "replace")
-    profile = replace(profile, model="deepseek-flash")
+    profile = with_model_name(profile, "deepseek-flash")
     module.db_profiles.get_profile.return_value = {**_row(profile), "custom_prompt": profile.custom_prompt}
     (tmp_path / ".git").mkdir()
     (tmp_path / "AGENTS.md").write_text('Project {{unknown}}: 中文 "quote"\nsecond line')
@@ -294,18 +299,48 @@ def test_preview_endpoint_unknown_profile_is_404(monkeypatch):
     assert int(writer.data.split()[1]) == 404
 
 
-@pytest.mark.parametrize("changes,reason", [
-    ({"runtime_type": "unknown-runtime"}, "unknown-runtime"),
-    ({"runtime_capabilities": [Capability.RUN.value]}, "lacks"),
-    ({"provider_protocols": [ApiProtocol.OPENAI_CHAT.value]}, "share no protocol"),
-    ({"provider_auth": "oauth", "provider_oauth_runtime_type": "codex"}, "pairs only"),
-])
-def test_preview_endpoint_refuses_ineligible_profile_with_real_settings(monkeypatch, changes, reason):
+def test_profile_row_without_model_id_is_a_registry_error():
+    from looper.agents.profile_registry import AgentProfile, builtin_resolved_profile
+
+    row = _row(builtin_resolved_profile())
+    del row["model_id"]
+    with pytest.raises(RegistryError, match="model_id"):
+        AgentProfile.from_row(row)
+
+
+def test_preview_endpoint_missing_model_is_400(monkeypatch):
     from looper.agents.http_server import AgentHTTPServer
 
-    module, profile, layers = _dependencies(monkeypatch)
+    module, profile, _ = _dependencies(monkeypatch)
+    del module.db_profiles.get_profile.return_value["model_id"]
+    server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
+                             task_router=SimpleNamespace())
+    writer = _Writer()
+    asyncio.run(_preview_request(server, profile.id, {"role": "worker"}, writer))
+    head, _, data = writer.data.partition(b"\r\n\r\n")
+    assert int(head.split()[1]) == 400
+    assert "model_id" in json.loads(data)["error"]["message"]
+
+
+@pytest.mark.parametrize("runtime,changes,reason", [
+    ("claude-code", {"runtime_type": "unknown-runtime"}, "unknown-runtime"),
+    ("claude-code", {"runtime_capabilities": [Capability.RUN.value]}, "lacks"),
+    ("claude-code", {"model": {"protocol": ApiProtocol.OPENAI_CHAT.value},
+                     "endpoint": {"protocol": ApiProtocol.OPENAI_CHAT.value}}, "exact protocol"),
+    ("codex", {"provider": {"vendor_type": "grok-login", "auth": "oauth", "oauth_runtime_type": "grok"},
+               "endpoint": {"use_runtime_default": False}}, "own runtime"),
+])
+def test_preview_endpoint_refuses_ineligible_profile_with_real_settings(monkeypatch, runtime, changes, reason):
+    from looper.agents.http_server import AgentHTTPServer
+
+    module, profile, layers = _dependencies(monkeypatch, runtime)
     # These rows still parse, but cannot launch as a Planner. Settings resolution is real.
-    row = {**module.db_profiles.get_profile.return_value, **changes}
+    row = dict(module.db_profiles.get_profile.return_value)
+    for key, value in changes.items():
+        if key in ("model", "provider", "endpoint"):
+            row[key] = {**row[key], **value}
+        else:
+            row[key] = value
     module.db_profiles.get_profile.return_value = row
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=SimpleNamespace())

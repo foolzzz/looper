@@ -40,7 +40,8 @@ NEW_PROJECT_FIELDS = _object({
     "task_budget_usd": _inherit("number"),
     "task_budget_action": _choice("fail", "wrap_up"), "review_policy": _choice("planner", "all"),
     "distill_lessons": {"type": ["string", "boolean", "null"],
-                        "enum": ["off", "draft", "write", "", True, False, None]},
+                        "enum": ["off", "draft", "write", "", True, False, None],
+                        "description": "Lessons mode; true maps to write, false, null and empty string map to off."},
     "step_workspaces": _choice("shared", "worktree"), "task_workspaces": _choice("in_place", "worktree"),
     "workspace_links": _inherit("array", items=_STR),
     **{field: _choice("on", "off") for field in (

@@ -568,6 +568,9 @@ def can_resume(session_runtime_type: str | None, session_provider_id: str | None
     protocol fields (thinking signatures, tool_use ids, reasoning items) mean nothing to another provider, so
     every change of provider, in any direction, starts a new session; a change of model alone does not.
     """
+    # Claude Code sessions saved before provider persistence used its subscription login.
+    if session_runtime_type == "claude-code" and session_provider_id is None:
+        session_provider_id = "prov-claude-subscription"
     return session_runtime_type == runtime.type and session_provider_id == provider_id
 
 

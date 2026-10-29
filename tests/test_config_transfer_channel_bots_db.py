@@ -382,7 +382,7 @@ def test_partial_channel_schema_is_refused_without_mutation(monkeypatch):
 
 
 @pytest.mark.parametrize("kind,config", [
-    ("telegram", {"allowed_user_ids": "123,456"}),
+    ("telegram", {"allowed_user_ids": "123,abc"}),
     ("telegram", {"allowed_user_ids": [123]}),
     ("lark", {"app_id_env": "OLD"}),
     ("lark", {"app_secret_env": "OLD"}),
@@ -405,5 +405,30 @@ def test_retired_channel_inputs_fail_api_and_import_without_mutation(monkeypatch
                 "channel_id": f"channel-{kind}", "fields": {"config": config}})
             assert status == 400
         assert await _dump(pool) == before
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_comma_allowlist_writes_return_and_store_canonical_ids(monkeypatch, tmp_path):
+    from looper.agents.config_transfer import run_import
+    from looper.agents.serve import seed_channel_configs
+    from tests.db_support import call_v1
+
+    async def test(pool):
+        await seed_channel_configs(pool)
+        async with _serving(tmp_path) as server:
+            status, result = await call_v1(server, "/api/v1/channel_configs/update", {
+                "channel_id": "channel-telegram", "fields": {"config": {"allowed_user_ids": "7, 8,7"}}})
+            assert status == 200, result
+            assert result["config"]["allowed_user_ids"] == ["7", "8"]
+        stored = await pool.fetchval("SELECT config FROM channel_configs WHERE channel_id='channel-telegram'")
+        assert json.loads(stored)["allowed_user_ids"] == ["7", "8"]
+        document = {"format": "looper-config/v4", "channels": [
+            {"channel_id": "channel-telegram", "channel_type": "telegram",
+             "config": {"allowed_user_ids": "8, 9"}}]}
+        async with pool.acquire() as conn:
+            await run_import(conn, document, apply=True)
+        stored = await pool.fetchval("SELECT config FROM channel_configs WHERE channel_id='channel-telegram'")
+        assert json.loads(stored)["allowed_user_ids"] == ["8", "9"]
 
     run_db(test, monkeypatch, timeout=30)

@@ -102,6 +102,50 @@ async def _check(server: Any, query: dict[str, str]) -> tuple[int, Any]:
     return await _call(server, "POST", "/api/v1/workspaces/check", query)
 
 
+@pytest.mark.parametrize("git_workspace", [True, False], ids=["git-with-uncommitted-work", "non-git"])
+@pytest.mark.parametrize("source", ["stored", "explicit-null"])
+def test_null_project_workspace_runs_in_the_original_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_workspace: bool, source: str,
+) -> None:
+    from looper.agents.schedule_templates import effective_schedule
+    from looper.db import projects, task_worktrees, tasks
+
+    workspace = _repo(tmp_path / "workspace") if git_workspace else tmp_path
+    (workspace / "a.txt").write_text("uncommitted input\n")
+
+    async def test(pool: Any) -> None:
+        server, _, _ = _setup()
+        if source == "stored":
+            project = await projects.create_project(name="calc", work_dir=str(workspace), pool=pool)
+        else:
+            status, created = await _call(server, "POST", "/api/v1/project_admin/create", {
+                "name": "calc", "work_dir": str(workspace), "task_workspaces": None})
+            assert status == 200, created
+            project = await projects.get_project(created["project_id"], pool=pool)
+        assert project["task_workspaces"] is None
+        status, body = await _call(server, "POST", "/api/v1/tasks/create", {
+            "requirement": "use the uncommitted input", "project_id": project["id"]})
+        assert status == 200, body
+        assert body["workspace"]["requested_mode"] == body["workspace"]["mode"] == "in_place"
+        row = await tasks.get_task(body["task_id"], pool=pool)
+        assert row["workspace_mode"] == "in_place"
+
+        async def note(kind: str, text: str) -> None:
+            pass
+
+        work_dir = await tw.prepare(row, runtime_root=tmp_path / "runtime", links=(), note=note)
+        assert work_dir == str(workspace)
+        assert (Path(work_dir) / "a.txt").read_text() == "uncommitted input\n"
+        assert await task_worktrees.get(row["id"], pool=pool) is None
+        effective = await effective_schedule(pool, {
+            "manager_id": "manager", "project_id": project["id"], "requirement": "scheduled work"})
+        assert effective.workspace_mode == "in_place" and effective.work_dir == str(workspace)
+        if git_workspace:
+            assert git(workspace, "branch", "--show-current") == "main"
+
+    run_db(test, monkeypatch, timeout=30)
+
+
 def test_a_worktree_tasks_row_its_page_and_its_deletion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.db import projects, task_worktrees, tasks
 

@@ -51,6 +51,13 @@ def _project(**settings: Any) -> dict[str, Any]:
     return {"id": "proj-1", "name": "calc", "background": "", **UNSET, **settings}
 
 
+@pytest.mark.parametrize("raw, mode", [(True, "write"), (False, "off")])
+def test_stored_boolean_lessons_keep_their_execution_mode(raw: bool, mode: str) -> None:
+    execution = ProjectExecution.from_row(_project(distill_lessons=raw))
+    assert execution.distill_lessons.value == mode
+    assert execution.lessons_on is raw
+
+
 @pytest.mark.parametrize("settings, expected", [
     ({}, 0.50),
     ({"room_consult_budget_usd": None}, 0.50),
@@ -137,8 +144,8 @@ class TestProjectApi:
         ("supervise_interval_seconds", 1.5, "declared schema"),
         ("supervise_interval_seconds", 86_401, "86400"),
         ("distill_lessons", "sometimes", "declared schema"),
-        ("distill_lessons", True, "distill_lessons"),
-        ("distill_lessons", False, "distill_lessons"),
+        ("distill_lessons", 1, "declared schema"),
+        ("distill_lessons", 0, "declared schema"),
         ("step_workspaces", "per-step", "declared schema"),
         ("workspace_links", ".venv", "declared schema"),
         ("workspace_links", [".venv", 3], "declared schema"),
@@ -169,6 +176,7 @@ class TestProjectApi:
 
     @pytest.mark.parametrize("value, mode", [
         ("draft", "draft"), ("write", "write"), ("off", "off"), (None, "off"), ("", "off"),
+        (True, "write"), (False, "off"),
     ])
     def test_distill_lessons_is_one_of_three_modes(self, store: _Store, value: Any, mode: str) -> None:
         store.add_project("proj-a", "calc")
@@ -484,7 +492,8 @@ def test_a_project_without_settings_runs_as_before(
     assert metadata["model_choice"]["source"] == "builtin" and "max_budget_usd" not in metadata
 
 
-@pytest.mark.parametrize("stored,expected", [(None, "worktree"), ("worktree", "worktree"), ("in_place", "in_place")])
-def test_task_workspace_defaults_keep_explicit_in_place(stored, expected):
+@pytest.mark.parametrize("stored,expected", [(None, "in_place"), ("worktree", "worktree"), ("in_place", "in_place")])
+def test_task_workspace_defaults_preserve_null_in_place(stored, expected):
     assert ProjectExecution.from_row({"task_workspaces": stored}).task_mode.value == expected
+    assert ProjectExecution.from_row({}).task_mode.value == "in_place"
     assert ProjectExecution.from_row({}).view()["task_workspaces"] is None

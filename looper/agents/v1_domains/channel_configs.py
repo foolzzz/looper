@@ -10,7 +10,7 @@ from ..projects import RequestError, HTTP_400, HTTP_404, HTTP_409
 
 _ID = {"type": "string", "minLength": 1}
 _TYPE = {"type": "string", "enum": ["telegram", "lark", "lark_bot"]}
-_TELEGRAM_SENDERS = {"anyOf": [{"type": "null"}, _array(_STR)]}
+_TELEGRAM_SENDERS = {"anyOf": [{"type": "null"}, _STR, _array(_STR)]}
 _LARK_SENDERS = _TELEGRAM_SENDERS
 _COMMON = {"description": _STR}
 _LARK = {**_COMMON, "allowed_open_ids": _LARK_SENDERS, "allowlist_app_id": _NULL_STR}

@@ -230,3 +230,14 @@ def test_an_empty_session_with_a_selected_profile_starts_clean(session_id):
     launch = Launch(AgentSettings(profile=bound_profile()))
     assert profile_switch(session_id, None, launch.profile.id, launch, session_provider=None) is None
     assert not can_resume(None, None, adapter("claude-code"), "prov-claude-subscription")
+
+
+@pytest.mark.parametrize("saved_runtime,provider,expected", [
+    ("claude-code", "prov-claude-subscription", True),
+    ("claude-code", "prov-another-account", False),
+    ("codex", "prov-codex-login", False),
+    (None, "prov-claude-subscription", False),
+])
+def test_null_session_provider_only_resumes_claude_subscription(saved_runtime, provider, expected):
+    runtime = adapter(saved_runtime or "claude-code")
+    assert can_resume(saved_runtime, None, runtime, provider) is expected

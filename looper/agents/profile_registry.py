@@ -384,7 +384,7 @@ class AgentProfile:
         runtime = RuntimeSpec(row["runtime_id"], row["runtime_name"], row["runtime_type"],
                               row.get("runtime_executable") or "",
                               frozenset(Capability(c) for c in row.get("runtime_capabilities") or () if c in known))
-        return cls(row["id"], row["name"], runtime, row["model_id"], row.get("effort"),
+        return cls(row["id"], row["name"], runtime, row.get("model_id"), row.get("effort"),
                    row.get("agent_teams", False), row.get("custom_prompt", ""))
 
     def record(self) -> dict[str, Any]:

@@ -24,8 +24,9 @@ Every field is optional, and ``None`` inherits today's behavior, but for ``user_
   link back to the directory they come from (its ignored local state, such
   as ``.venv`` or ``.env``): a task's worktree to its workspace, a step's to
   its task directory; none when unset;
-- ``task_workspaces``: where a task runs: in its workspace (``in_place``) or in a git worktree of it, on a branch of its own
-  (``worktree``, also when unset); a new project gets ``worktree``;
+- ``task_workspaces``: where a task runs: in its workspace (``in_place``, also
+  when unset) or in a git worktree of it, on a branch of its own
+  (``worktree``, ``task_workspaces``); a new project gets ``worktree``;
 - ``operator_notes``: whether the project's Planners, Workers and Reviewers
   get the operator's Claude Code notes for the directory they work in, read
   only (``on``, also when unset; ``off``; ``operator_notes``);
@@ -230,7 +231,7 @@ class ProjectExecution:
     @property
     def task_mode(self) -> TaskWorkspaces:
         """Where a task that names no workspace of its own runs."""
-        return self.task_workspaces or TaskWorkspaces.WORKTREE
+        return self.task_workspaces or TaskWorkspaces.IN_PLACE
 
     @property
     def notes_on(self) -> bool:
@@ -392,9 +393,11 @@ def _parse(field: str, raw: Any) -> Any:
 
 
 def _lessons_mode(raw: Any) -> LessonsMode:
-    """``distill_lessons``: never unset, so null and ``""`` are ``off``; booleans are invalid."""
+    """``distill_lessons``: never unset; booleans retain the pre-mode write/off semantics."""
     if raw is None or raw == "":
         return LessonsMode.OFF
+    if isinstance(raw, bool):
+        return LessonsMode.WRITE if raw else LessonsMode.OFF
     try:
         return LessonsMode(raw)
     except ValueError:

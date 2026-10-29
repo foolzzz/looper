@@ -60,9 +60,16 @@ def test_the_notice_carries_its_channel_id() -> None:
 @pytest.mark.parametrize("channel_id", ["", None, 7])
 def test_a_notice_requires_an_explicit_bot_identity(channel_id: Any) -> None:
     payload = {"channel": "lark", "chat": "oc_x", "kind": "chat", "mention": None, "text": "t"}
-    assert Notice.from_payload(payload) is None
+    assert Notice.from_payload({**payload, "channel_id": channel_id}) is None
     with pytest.raises(ValueError):
         Notice(NotifyChannel.LARK, CHAT, "t", channel_id=channel_id)
+
+
+@pytest.mark.parametrize("channel", list(NotifyChannel))
+def test_a_notice_without_a_channel_id_uses_the_builtin_bot(channel: NotifyChannel) -> None:
+    payload = {"channel": channel.value, "chat": "1000001", "kind": "chat", "text": "done"}
+    assert Notice.from_payload(payload) == Notice(channel, CHAT, "done", channel_id=builtin_channel_id(channel.value))
+    assert "channel_id" not in payload
 
 
 def test_a_notice_of_another_type_is_malformed() -> None:
