@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.205] - 2026-10-28
+
+### Fixed
+
+- **The Pi runner no longer stops a capped turn over inconsistent provider usage.** `responseUsage` keeps usage whose `total_tokens`, cache counts or reasoning counts disagree with input and output, so the turn is priced and checked against its caps instead of ending as `budget_unverifiable`. Missing or invalid counts are still capped. A capped turn with an unverifiable budget now logs the phase and first failing cause. No prompt, tool or message text changes. ([#854](https://github.com/foolzzz/looper/pull/854))
+
 ## [2.13.204] - 2026-10-28
 
 ### Changed
