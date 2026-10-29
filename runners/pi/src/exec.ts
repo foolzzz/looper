@@ -1,7 +1,7 @@
 /** Builtin tools retain Pi's execution backend with session-owned boundaries. */
 import { lstat, realpath } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
-import { RpcError } from './rpc.ts';
+import { RpcError } from '../../common/rpc.ts';
 import { sdk } from './sdk.ts';
 
 const factories = {

@@ -5,7 +5,7 @@ for (const name of ['log', 'info', 'debug', 'warn', 'error'] as const) {
   console[name] = (...args: unknown[]) => { process.stderr.write(clean(format(...args)) + '\n'); };
 }
 export {};
-const rpc = await import('./rpc.ts');
+const rpc = await import('../../common/rpc.ts');
 clean = rpc.scrub;
 format = (await import('node:util')).format;
 const { monitorEventLoopDelay } = await import('node:perf_hooks');

@@ -957,7 +957,7 @@ def test_unresponsive_cancel_releases_session_and_drops_late_events(tmp_path, mo
     main = pi_command.entry().resolve()
     sources = main.parent
     harness = tmp_path / "stalled-abort.ts"
-    harness.write_text(f'''import * as rpc from {json.dumps((sources / 'rpc.ts').as_uri())};
+    harness.write_text(f'''import * as rpc from {json.dumps((main.parents[2] / 'common/rpc.ts').as_uri())};
 import {{sessions}} from {json.dumps((sources / 'session.ts').as_uri())};
 import {{onEvent}} from {json.dumps((sources / 'turn.ts').as_uri())};
 import {{writeFileSync}} from 'node:fs';

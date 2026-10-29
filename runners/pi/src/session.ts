@@ -2,7 +2,7 @@
 import { stat, lstat, readdir, open } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { addSecret, onShutdown, RpcError, scrub } from './rpc.ts';
+import { addSecret, onShutdown, RpcError, scrub } from '../../common/rpc.ts';
 import { sdk } from './sdk.ts';
 import { authorizingStream } from './provider.ts';
 import { cancelTurn, onEvent } from './turn.ts';

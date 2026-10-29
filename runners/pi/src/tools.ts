@@ -1,5 +1,5 @@
 /** Per-prompt platform tools use the host's admission, scope and audit boundary. */
-import { request, RpcError, scrub } from './rpc.ts';
+import { request, RpcError, scrub } from '../../common/rpc.ts';
 import type { Session } from './session.ts';
 
 export type PlatformTool = { name: string; description: string; inputSchema: Record<string, any> };

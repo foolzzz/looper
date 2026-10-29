@@ -1,6 +1,6 @@
 /** Every HTTP attempt is authorized by the host, then ends exactly once. */
 import { subscribe } from 'node:diagnostics_channel';
-import { diagnostic, request, scrub, update } from './rpc.ts';
+import { diagnostic, request, scrub, update } from '../../common/rpc.ts';
 import { sdk } from './sdk.ts';
 import type { Session } from './session.ts';
 import type { Turn } from './turn.ts';
