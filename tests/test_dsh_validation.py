@@ -214,8 +214,10 @@ def test_key_capture_exception_is_not_forwarded(monkeypatch, capsys):
     ("task-review", "--tasks", "reviewed_step,planner_plan_file"),
     ("manager", "--dialogs", "status,confirm_create_start"),
 ])
-def test_eval_arguments_are_bounded_and_register_only_dsh(command, selector, case, tmp_path):
-    argv = launcher.eval_argv(command, PG, tmp_path)
+@pytest.mark.parametrize("dsh_runner", [False, True])
+def test_eval_arguments_are_bounded_and_register_only_dsh(command, selector, case, tmp_path, dsh_runner):
+    argv = launcher.eval_argv(command, PG, tmp_path, dsh_runner=dsh_runner)
+    assert ("--dsh-runner" in argv) is dsh_runner
     assert argv[:3] == [sys.executable, "-m", "evals.prompt_regression"]
     for option, expected in {"--mode": "real", "--jobs": "1", "--reps": "2",
                              "--max-budget-usd": "0.50", "--total-cap-usd": "4", selector: case,
@@ -320,7 +322,8 @@ def test_manager_execute_does_not_accept_dialog_success_without_runtime_evidence
     assert summary["effective_system_prompt_mode"] is None
 
 
-def test_dialog_runtime_readback_keeps_unknown_usage_and_omits_private_command():
+@pytest.mark.parametrize("launch", ["cli", "runner", "invalid-runner"])
+def test_dialog_runtime_readback_keeps_unknown_usage_and_omits_private_command(launch):
     from evals.prompt_regression import dialogs
 
     class Api:
@@ -337,12 +340,15 @@ def test_dialog_runtime_readback_keeps_unknown_usage_and_omits_private_command()
                                                         "root_usage_complete": False}}]}
             return {"record": {"id": 1, "agent_id": "manager", "session_id": "continued",
                 "status": "completed", "input_tokens": 10, "output_tokens": None,
-                "metadata": {"command": ["env", "PRIVATE=synthetic-secret", "/bin/dsh"],
+                "metadata": {"command": (dsh_descriptor() if launch == "runner" else
+                    ["looper-runner", "--kind", "dsh"] if launch == "invalid-runner" else
+                    ["env", "PRIVATE=synthetic-secret", "/bin/dsh"]),
                     "system_prompt_mode": "append", "profile": {"runtime": {"type": "dsh"}}}}}
 
     rows = dialogs.runtime_evidence(Api())
     assert rows[0]["session_id"] == "continued"
-    assert rows[0]["executable"] == "dsh"
+    assert rows[0]["executable"] == ("dsh" if launch == "cli" else "looper-runner")
+    assert rows[0].get("runner_kind") == ("dsh" if launch == "runner" else None)
     assert rows[0]["tokens"]["output_tokens"] is None
     assert rows[0]["root_usage_complete"] is False
     assert rows[0]["observed_cost_usd"] == .02
@@ -635,10 +641,15 @@ def _serve_smoke_stand_in(mode):
         owner = root / "owners" / agent
         command = ["env", *(f"{k}={v}" for k, v in DshHome(owner, owner).paths.items()),
                    "dsh", "--profile", "headless", "--patch", str(owner / "configs" / "hash" / "looper.yml"), "-"]
+        if mode == "runner":
+            if role == "consult":
+                session = "session-" + agent
+            command = dsh_descriptor("worker" if role == "consult" else role,
+                                     fork_from="session-worker-" + task if role == "consult" else None)
         row = {"id": len(state["records"]) + 1, "agent_id": agent, "task_id": task,
                "session_id": session, "status": "completed", "model": "deepseek-flash",
                "input_tokens": 10, "output_tokens": 4, "cache_read_tokens": 7,
-               "cache_creation_tokens": 2, "cost_usd": None,
+               "cache_creation_tokens": 2, "cost_usd": .000008442 if mode.startswith("runner") else None,
                "metadata": {"profile": {"id": "profile", "runtime": {"type": "dsh"},
                                          "provider": {"id": "provider"}}, "system_prompt_mode": "append",
                             "command": command}}
@@ -733,6 +744,7 @@ def _serve_smoke_stand_in(mode):
                 result = {"records": [{"id": r["id"]} for r in state["records"]]}
             elif path == "/api/v1/runs/events":
                 result = {"events": [{"seq": 1, "event": {"type": "result", "is_error": False,
+                    "usage_complete": True,
                     "observed_cost_usd": .6 if mode == "budget" else .000008442}}]}
             elif path == "/api/v1/runs/get":
                 row = dict(state["records"][body["record_id"] - 1])
@@ -861,7 +873,7 @@ def smoke_peer(tmp_path, monkeypatch):
             return {"records": [{k: v for k, v in r.items() if k != "metadata"} for r in state["records"]],
                     "sessions": state["sessions"], "consults": state["consults"]}
         monkeypatch.setattr(launcher, "_smoke_database", readback)
-        result = launcher._smoke_workflow(PG, root)
+        result = launcher._smoke_workflow(PG, root, dsh_runner=mode.startswith("runner"))
         assert owned and (root / "runtime" / "pid").exists()  # positive control: serve really ran
         assert all(p.poll() is not None for p in owned)
         return result, root
@@ -1044,3 +1056,111 @@ def test_a_dialogs_running_check_counts_observed_root_spend():
     seen: dict[int, float] = {}
     assert dialogs._root_overrun(Api(), seen) == pytest.approx(1.2)
     assert dialogs._root_overrun(Api(), seen) == pytest.approx(1.2)
+
+
+def dsh_descriptor(role="manager", *, fork_from=None):
+    from looper.agents.runtimes import ApiProtocol
+    from looper.agents.runtimes.runner.session import Descriptor
+
+    return Descriptor(kind="dsh", role=role, provider_id="provider", protocol=ApiProtocol.ANTHROPIC_MESSAGES,
+        base_url="https://provider.invalid", model="deepseek-flash", effort=None, context_window=None,
+        system_prompt_file="/disposable/prompt.txt", system_prompt_mode="append",
+        read_only=fork_from is not None, fork_from=fork_from,
+        builtin=("read", "glob", "grep") if fork_from else ()).to_argv()
+
+
+@pytest.mark.parametrize("make_row,gate", [
+    (basic_row, launcher.basic_evidence_gaps), (review_row, launcher.review_evidence_gaps),
+    (manager_row, launcher.manager_evidence_gaps),
+])
+def test_runner_evidence_is_accepted_only_with_explicit_opt_in(make_row, gate):
+    from evals.prompt_regression.metrics import runner_evidence
+
+    row = make_row()
+    for record in row["runtime_evidence"]:
+        record.update(executable="looper-runner", **runner_evidence(dsh_descriptor()))
+    assert gate([row], dsh_runner=True) == []
+    assert gate([row])
+    row["runtime_evidence"][0].update(runner_evidence(["looper-runner", "--kind", "dsh"]))
+    assert gate([row], dsh_runner=True)
+    row["runtime_evidence"][0].update(executable="dsh", runner_kind="dsh")
+    assert gate([row], dsh_runner=True)
+
+
+@pytest.mark.parametrize("mode,passed", [("runner", True), ("runner-cli", False)])
+def test_smoke_runner_accepts_descriptors_and_rejects_cli(smoke_peer, mode, passed):
+    (summary, code), _ = smoke_peer(mode)
+    assert (code == 0) is passed, summary
+    assert summary["path"] == "runner"
+    if passed:
+        assert summary["session_accounting"]["coverage"] == "complete"
+        assert summary["auxiliary_cost_coverage"] == "complete"
+        assert summary["session_accounting"]["reader_observed_cost_usd"] == pytest.approx(12 * .000008442)
+    else:
+        assert summary["stage"] == "api_readback"
+
+
+@pytest.mark.parametrize("valid", [False, True])
+def test_task_eval_readback_validates_runner_descriptor(tmp_path, valid):
+    from evals.prompt_regression import metrics
+
+    command = dsh_descriptor("planner") if valid else ["looper-runner", "--kind", "dsh"]
+    record = {"id": 1, "agent_id": "planner-task", "session_id": "session", "status": "completed",
+              "metadata": {"profile": {"runtime": {"type": "dsh"}}, "command": command}}
+    result = metrics.task_metrics(detail={"status": "completed"}, activity=[], records=[record],
+        events={}, changes={}, work_dir=tmp_path, check_problem=None, expect={}, now=0)
+    assert result["runtime_evidence"][0]["runner_kind"] == ("dsh" if valid else None)
+    assert "provider.invalid" not in json.dumps(result["runtime_evidence"])
+
+
+@pytest.mark.parametrize("command", ["task-basic", "manager"])
+@pytest.mark.parametrize("log_state,expected", [("clean", True), ("missing", "unverified"), ("contains", False)])
+def test_runner_execute_checks_private_server_log_without_exporting_key(
+    tmp_path, monkeypatch, command, log_state, expected,
+):
+    monkeypatch.setattr(launcher, "ARTIFACTS", tmp_path / "artifacts")
+    secret = "synthetic-private-key"
+
+    async def run(argv, *, env, **kwargs):
+        assert env["LOOPER_EVAL_API_KEY"] == secret
+        assert secret not in " ".join(argv)
+        assert "--dsh-runner" in argv
+        out_dir = Path(argv[argv.index("--out-dir") + 1])
+        rows = [(manager_row if command == "manager" else basic_row)(case, rep)
+                for case in launcher.CASES[command].split(",") for rep in (1, 2)]
+        for row in rows:
+            for record in row["runtime_evidence"]:
+                record.update(executable="looper-runner", runner_kind="dsh")
+        (out_dir / "test-real.json").write_text(json.dumps({
+            "dialogs" if command == "manager" else "tasks": rows, "total_cost_usd": .1}))
+        if log_state != "missing":
+            log = out_dir / ("test-dialogs-real.server-logs/status-1.log" if command == "manager" else
+                             "test-real.server.log")
+            log.parent.mkdir(exist_ok=True)
+            log.write_text(secret if log_state == "contains" else "server started and stopped normally")
+        return launcher.ProcessResult(0, b"", b"")
+
+    monkeypatch.setattr(launcher, "run_process", run)
+    summary, code = launcher.execute(command, PG, secret, None, dsh_runner=True)
+    assert summary["server_log_key_absent"] == expected
+    assert (code == 0) is (expected is True)
+    assert summary["status"] == ("pass" if expected is True else "fail")
+    assert summary["evidence_gaps"] == []  # Positive control: only the log gate rejects these cases.
+    wire = json.dumps(summary)
+    assert secret not in wire and str(tmp_path) not in wire
+    for path in (tmp_path / "artifacts").rglob("*.json"):
+        assert secret not in path.read_text()
+
+
+def test_runner_log_key_check_marks_unreadable_log_unverified(tmp_path, monkeypatch):
+    log = tmp_path / "test-real.server.log"
+    log.write_text("server started")
+    original = Path.read_bytes
+
+    def read(path):
+        if path == log:
+            raise OSError("synthetic unreadable log")
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read)
+    assert launcher._server_log_key_absent(tmp_path, "synthetic-private-key") == "unverified"

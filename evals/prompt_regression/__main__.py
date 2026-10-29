@@ -102,6 +102,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--task-timeout", type=float, help="seconds before a task is cancelled")
     run.add_argument("--keep-work-dirs", action="store_true", help="keep the temporary root for inspection")
     run.add_argument("--pi-runner", action="store_true", help="opt every Pi role into the SDK runner")
+    run.add_argument("--dsh-runner", action="store_true", help="opt every DSH role into the SDK runner")
     run.add_argument("--step-workspaces", choices=("shared", "worktree"),
                      help="make each working directory a git repository and give the task's project this "
                           "step_workspaces setting")
@@ -136,6 +137,7 @@ def _parser() -> argparse.ArgumentParser:
     talk.add_argument("--timeout", type=float, help="seconds to wait for each reply and each check")
     talk.add_argument("--keep-work-dirs", action="store_true")
     talk.add_argument("--pi-runner", action="store_true", help="opt every Pi role into the SDK runner")
+    talk.add_argument("--dsh-runner", action="store_true", help="opt every DSH role into the SDK runner")
 
     cmp = sub.add_parser("compare", help="Print the comparison table of two run files.")
     cmp.add_argument("new", type=Path)
@@ -208,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
             jobs=args.jobs,
             case_budget_usd=args.case_budget_usd if real else None,
             pi_runtime="runner" if args.pi_runner else "cli",
+            dsh_runtime="runner" if args.dsh_runner else "cli",
         )
     except (ValueError, runner.EvalError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -239,6 +242,7 @@ def _dialogs(args: argparse.Namespace) -> int:
             case_budget_usd=args.case_budget_usd if real else None,
             switch_agent=json.loads(args.switch_agent.read_text(encoding="utf-8")) if args.switch_agent else None,
             pi_runtime="runner" if args.pi_runner else "cli",
+            dsh_runtime="runner" if args.dsh_runner else "cli",
         )
     except (ValueError, runner.EvalError) as exc:
         print(f"error: {exc}", file=sys.stderr)
