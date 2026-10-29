@@ -119,6 +119,78 @@ def test_serve_enables_each_opted_in_runner(tmp_path, monkeypatch, pi_choice, ds
                       *(f"stop {kind}" for kind in reversed(kinds)), "database"] if kinds else [])
 
 
+@pytest.mark.parametrize("failure", ["unsafe_state", "permission", "missing_entry"])
+def test_serve_continues_with_unavailable_dsh_and_owns_pi(tmp_path, monkeypatch, failure):
+    monkeypatch.setitem(ADAPTERS, "dsh", dsh.DshRuntime())
+    monkeypatch.setattr(dsh_runner.shutil, "which", lambda name: f"/{name}")
+    monkeypatch.setattr(dsh_runner.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stdout="v22.19.0"))
+    stopped = []
+
+    async def stop(name):
+        stopped.append(name)
+
+    pi = SimpleNamespace(stop=lambda: stop("pi"))
+    monkeypatch.setattr(pi_runner, "enable", lambda root: pi)
+    monkeypatch.setattr("looper.db.close_pool", lambda: stop("database"))
+    if failure == "unsafe_state":
+        (tmp_path / "runners").mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (tmp_path / "runners/state").symlink_to(outside, target_is_directory=True)
+    else:
+        def failed(*args):
+            if failure == "permission":
+                raise PermissionError("fixture state directory denied")
+            raise RuntimeUnsupported("fixture runner entry missing")
+
+        monkeypatch.setattr(dsh_runner.dsh_command, "state_root" if failure == "permission" else "entry", failed)
+
+    async def owned(*, runner_supervisors, ownership, **kwargs):
+        assert runner_supervisors == (pi,)
+        adapter = ADAPTERS["dsh"]
+        assert isinstance(adapter, DshRunnerRuntime) and adapter.unavailable
+        assert adapter.supervisor is None and adapter.dsh is None
+        for role in AgentType.MANAGER, AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER:
+            with pytest.raises(RuntimeUnsupported, match="DSH runner"):
+                if role in (AgentType.MANAGER, AgentType.PLANNER):
+                    adapter.resident_command("dsh", cwd=tmp_path, prompt_file=tmp_path / "absent", launch=launch(role))
+                else:
+                    adapter.hosted_run("dsh", cwd=tmp_path, prompt_file=tmp_path / "absent", launch=launch(role),
+                        max_turns=0, timeout_s=0, session_dir=None, tools=None, limits=AsyncMock())
+        ownership.push_async_callback(stop, "agents")
+        raise serve.StartupCheckFailed("fixture later startup failure")
+
+    monkeypatch.setattr(serve, "_run_agent_system_owned", owned)
+    config = ops.OpsConfig(runtime_root=tmp_path, path=tmp_path / ops.FILE, pi_runtime="runner", dsh_runtime="runner")
+    with pytest.raises(serve.StartupCheckFailed, match="later startup failure"):
+        asyncio.run(serve._run_agent_system(ops=config, runtime_root=tmp_path, work_dir=tmp_path))
+    assert stopped == ["agents", "pi", "database"]
+    if failure == "unsafe_state":
+        assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("linked_root", [False, True])
+def test_enable_accepts_existing_directory_symlinks_above_state(tmp_path, monkeypatch, linked_root):
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(actual, target_is_directory=True)
+    root = linked if linked_root else linked / "new-runtime"
+    monkeypatch.setitem(ADAPTERS, "dsh", dsh.DshRuntime())
+    monkeypatch.setattr(dsh_runner.shutil, "which", lambda name: f"/{name}")
+    monkeypatch.setattr(dsh_runner.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stdout="v22.19.0"))
+    supervisor = dsh_runner.enable(root)
+    adapter = ADAPTERS["dsh"]
+    assert supervisor is not None and adapter.supervisor is supervisor and adapter.unavailable is None
+    state = dsh_runner.dsh_command.state_root(root)
+    assert state.resolve() == (actual if linked_root else actual / "new-runtime") / "runners/state/dsh-native"
+    for directory in (state.parent.parent, state.parent, state):
+        assert directory.stat().st_mode & 0o777 == 0o700
+    marker = state / "persisted-session.jsonl"
+    marker.write_text("persisted")
+    assert dsh_runner.dsh_command.state_root(root) == state and marker.read_text() == "persisted"
+
+
 @pytest.mark.parametrize("role", [AgentType.MANAGER, AgentType.PLANNER])
 def test_resident_descriptor_prompt_and_environment(tmp_path, monkeypatch, runtime, role):
     adapter, executable = runtime

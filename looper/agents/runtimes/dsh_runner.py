@@ -191,12 +191,17 @@ def enable(runtime_root: Path) -> RunnerSupervisor | None:
                 unavailable = requirement + "; upgrade node and restart Looper"
         except (OSError, subprocess.SubprocessError):
             unavailable = requirement + "; could not check node --version within 2 seconds; check node and restart Looper"
+    if not unavailable:
+        try:
+            state = dsh_command.state_root(runtime_root)
+            supervisor = RunnerSupervisor(runtime_root, {"dsh": dsh_command.command(node, dsh, state)},
+                                          session_cap=20, connect=dsh_command.connect)
+            resolved = Path(dsh).resolve()
+        except (OSError, ValueError) as exc:
+            unavailable = f"the DSH runner could not initialize: {exc}; check the installation and runtime root and restart Looper"
     if unavailable:
         ADAPTERS["dsh"] = DshRunnerRuntime(None, dsh=None, unavailable=unavailable)
         return None
-    state = dsh_command.state_root(runtime_root)
-    supervisor = RunnerSupervisor(runtime_root, {"dsh": dsh_command.command(node, dsh, state)},
-                                  session_cap=20, connect=dsh_command.connect)
-    ADAPTERS["dsh"] = DshRunnerRuntime(supervisor, dsh=Path(dsh).resolve())
+    ADAPTERS["dsh"] = DshRunnerRuntime(supervisor, dsh=resolved)
     logger.info("DSH runner enabled for every DSH role (one runner, 20 sessions)")
     return supervisor
