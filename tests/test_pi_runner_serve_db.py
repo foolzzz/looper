@@ -273,7 +273,8 @@ def test_pi_runner_manager_stop_and_restart(isolated_pi, tmp_path):
     assert runner_processes(tmp_path) == [pid]
 
     os.kill(pid, signal.SIGKILL)
-    wait_until(lambda: runner_processes(tmp_path), lambda pids: bool(pids) and pid not in pids, timeout=10)
+    wait_until(lambda: runner_processes(tmp_path), lambda pids: pid not in pids, timeout=10)
+    # A replacement starts on demand, when the next message needs a lease.
     send(api, "restarted", "Continue after runner restart")
     assert FACT in reply(api, "restarted")
     assert FACT in json.dumps(provider.requests[-1]["input"])
@@ -297,7 +298,7 @@ def test_pi_runner_missing_manager_session_records_failed_resume(isolated_pi, tm
     saved.unlink()  # Keep the database's saved session, but lose the runner's history.
     (pid,) = runner_processes(tmp_path)
     os.kill(pid, signal.SIGKILL)
-    wait_until(lambda: runner_processes(tmp_path), lambda pids: bool(pids) and pid not in pids, timeout=10)
+    wait_until(lambda: runner_processes(tmp_path), lambda pids: pid not in pids, timeout=10)
 
     before = len(provider.requests)
     send(api, "missing", "Continue after losing the saved session")
@@ -633,6 +634,9 @@ def test_pi_runner_worker_cancel_crash_and_budget(isolated_pi, tmp_path):
     step_result = query(url, "SELECT result FROM task_steps WHERE task_id=$1", task)[0]["result"]
     if detail["status"] == "failed":
         assert "runner" in step_result
+    # New work, rather than the crash itself, must start the replacement.
+    recovery_task, _ = start_task(api, tmp_path, "Work after runner crash")
+    assert task_ended(api, recovery_task)["status"] == "completed"
     (restarted,) = wait_until(lambda: runner_processes(tmp_path), lambda pids: len(pids) == 1 and pids[0] != pid, timeout=10)
     assert restarted != pid
     assert not any(row["status"] == "running" for row in task_records(url, task))

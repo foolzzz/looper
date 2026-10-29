@@ -318,7 +318,8 @@ def test_dsh_runner_manager_turn_stop_and_restart(isolated_dsh, tmp_path):
     assert dsh_runner_processes(tmp_path) == [pid]
 
     os.kill(pid, signal.SIGKILL)
-    wait_until(lambda: dsh_runner_processes(tmp_path), lambda pids: bool(pids) and pid not in pids, timeout=10)
+    wait_until(lambda: dsh_runner_processes(tmp_path), lambda pids: pid not in pids, timeout=10)
+    # A replacement starts on demand, when the next message needs a lease.
     send(api, "restarted", "Continue after runner restart")
     assert FACT in reply(api, "restarted")
     assert FACT in json.dumps(provider.requests[-1]["messages"])
@@ -582,9 +583,6 @@ def test_dsh_runner_worker_budget_cancel_and_crash(isolated_dsh, tmp_path):
     step_result = query(url, "SELECT result FROM task_steps WHERE task_id=$1", task)[0]["result"]
     if detail["status"] == "failed":
         assert "runner" in step_result
-    (restarted,) = wait_until(lambda: dsh_runner_processes(tmp_path), lambda pids: len(pids) == 1 and pids[0] != pid, timeout=10)
-    assert restarted != pid
-    if detail["status"] == "failed":
         # Losing the shared runner may fail the idle Planner too. Exercise the
         # operator's retry so a replacement process must actually serve work.
         api.post("/api/v1/ops/task_control/restart", {"task_id": task})
@@ -592,5 +590,7 @@ def test_dsh_runner_worker_budget_cancel_and_crash(isolated_dsh, tmp_path):
             row["agent_id"].startswith("worker") and row["id"] > worker["id"]
             and row["status"] == "completed" for row in rows))
         assert task_ended(api, task)["status"] == "completed"
+    (restarted,) = wait_until(lambda: dsh_runner_processes(tmp_path), lambda pids: len(pids) == 1 and pids[0] != pid, timeout=10)
+    assert restarted != pid
     assert recovered_pids and all(pids == [restarted] for pids in recovered_pids)
     assert not any(row["status"] == "running" for row in task_records(url, task))

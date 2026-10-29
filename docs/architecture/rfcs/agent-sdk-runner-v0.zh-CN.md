@@ -504,7 +504,7 @@ Node 进程，导入已安装的 `@earendil-works/pi-coding-agent`：从探测�
 - **管家、规划者：** 常驻的 RunnerSession，一个 owner 一个 Pi 会话，跨轮不重启；服务或运行器重启后 `session/load`。规划者用只读工具（read、grep、find、ls 加平台工具）。
 - **执行者、评审者：** RunnerChannel；两者均保留 read、bash、edit、write 加平台工具，与 CLI 路径同组工具。文件工具只能访问任务目录与 `add_dirs`（含真实路径检查）；bash 不受路径约束，上限为该角色的 `timeout_seconds`。`max_turns` 在运行器路径限制模型请求数，未设置时 1000；每次请求前检查运行和任务花费上限。规划者的引导经 `session/steer` 在同一 trace 内生效；丢弃的引导交回规划者决策。
 - **咨询：** 以 Worker 角色、`read_only=true` 分叉保留会话，只提供 read、grep、find、ls，不给 bash、edit、write 或平台工具；源 JSONL 保留不变，结束后删除副本和 fork 会话。agent room 的保留目录为 `.local/pi/run-sessions/<task>/<run>/`。
-- **共享容量：** 四类角色与咨询共用一个 runner 的 10 个会话，`CAPACITY` 按启动失败结束步骤；没有 CLI fallback。
+- **共享容量：** 四类角色与咨询共用每成员 10 个会话的 runner 池，按需最多 4 个成员（40 个槽位）；池满后 `CAPACITY` 按启动失败结束步骤，没有 CLI fallback。
 - **一个会话文件只有一个活动 owner。** 全局的文件写队列只保证同一文件串行写（`pi:dist/core/tools/file-mutation-queue.js:1`），不保证多个 agent 改同一工作树时业务正确，这由步骤的工作目录隔离负责。
 
 ### 9.5 取代 `pi.py` 里的哪些路径（S1 完成时删除）
@@ -524,7 +524,7 @@ Pi 1.3.0 配 loopback provider 的定向测试已覆盖每会话 ModelRuntime/ke
 
 引导从用户消息事件跟踪，但只有该消息进入真实 provider 请求才发 `steer_applied`；与结束、取消或关闭竞争时必须发 `steer_applied` 或 `steer_dropped`，被丢弃的消息同时从持久上下文省略，不能漏到下一轮。空闲引导仍拒绝，不宣称 `idle_start`；独立的 compaction 通知更新仍待补。
 
-ops-file opt-in `[runtimes] pi = "runner"` 已覆盖 Manager、Planner、Worker、Reviewer 与咨询，默认仍为 `"cli"`，启动读取一次；一个 runner、10 会话后 `CAPACITY`，provider env 拒绝、无 CLI fallback。新增 installed 隔离 serve 验证覆盖两步任务、同 trace 引导、Reviewer、只读咨询分叉、逐请求计费，以及 Worker 请求前预算拒绝、会话级取消、运行器崩溃与重启后的任务收敛；本轮在 Pi 1.3.0、Node 24.20.0 上的两项 SDK 工具集/只读分叉测试通过；serve 文件的 4 项测试因未设置一次性 `LOOPER_TEST_DATABASE_URL` 跳过（包括本卡两项），serve 结论仍未验证，不能计为通过。
+ops-file opt-in `[runtimes] pi = "runner"` 已覆盖 Manager、Planner、Worker、Reviewer 与咨询，默认仍为 `"cli"`，启动读取一次；runner 池每成员 10 会话、按需最多 4 个成员，满池后 `CAPACITY`，provider env 拒绝、无 CLI fallback。新增 installed 隔离 serve 验证覆盖两步任务、同 trace 引导、Reviewer、只读咨询分叉、逐请求计费，以及 Worker 请求前预算拒绝、会话级取消、运行器崩溃与重启后的任务收敛；本轮在 Pi 1.3.0、Node 24.20.0 上的两项 SDK 工具集/只读分叉测试通过；隔离 serve 验证已在一次性 PostgreSQL 上通过，包含崩溃后按需补建、已有会话续接和恢复状态丢失时的失败记录；真实 provider 任务对照仍按下文门禁执行。
 
 Pi CLI 与 runner 的真实任务对照命令及门禁已在 [evals/README.md](../../../evals/README.md#pi) 准备；待 lead 通过本地 CPA、`gpt-6-astra` 跑 9 个任务各 2 次，逐任务要求 runner 通过数至少为 CLI 减一，错误单列并重跑一次，花费上限截断须提高上限重跑。此次尚未运行，结果未验证；`reviewer_*` 用 Claude Code Reviewer，不能比较 Pi Reviewer，后者由 installed 测试覆盖。容量数字、运行时卡、长上下文、长期内存/事件循环延迟、thinking 钳制和全部生产 schema 普查仍开放。
 
