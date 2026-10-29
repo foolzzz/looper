@@ -10,17 +10,14 @@ from ..projects import RequestError, HTTP_400, HTTP_404, HTTP_409
 
 _ID = {"type": "string", "minLength": 1}
 _TYPE = {"type": "string", "enum": ["telegram", "lark", "lark_bot"]}
-# Preserve legacy comma-separated lists, numeric Telegram ids and null (empty list).
-_TELEGRAM_SENDERS = {"anyOf": [_NULL_STR, _array({"type": ["string", "integer"]})]}
-_LARK_SENDERS = {"anyOf": [_NULL_STR, _array(_STR)]}
+_TELEGRAM_SENDERS = {"anyOf": [{"type": "null"}, _STR, _array({"type": ["string", "integer"]})]}
+_LARK_SENDERS = {"anyOf": [{"type": "null"}, _STR, _array(_STR)]}
 _COMMON = {"description": _STR}
 _LARK = {**_COMMON, "allowed_open_ids": _LARK_SENDERS, "allowlist_app_id": _NULL_STR}
 CONFIGS = {
     "telegram": _object({**_COMMON, "bot_token_env": _NULL_STR,
                           "allowed_user_ids": _TELEGRAM_SENDERS}, [], closed=True),
-    "lark": _object({**_LARK, "profile": _NULL_STR,
-        **{key: {**_NULL_STR, "deprecated": True, "description": "Ignored legacy setting."}
-           for key in ("app_id_env", "app_secret_env")}}, [], closed=True),
+    "lark": _object({**_LARK, "profile": _NULL_STR}, [], closed=True),
     "lark_bot": _object({**_LARK, "app_id": _STR,
                           "domain": {"type": "string", "enum": ["feishu", "lark"]}}, [], closed=True),
 }

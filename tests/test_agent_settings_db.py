@@ -99,7 +99,7 @@ def test_each_layer_round_trips_and_a_deleted_project_takes_its_layers(monkeypat
     run_db(_test, monkeypatch)
 
 
-def test_seeding_moves_unedited_role_prompts_keeps_edited_ones_and_adds_the_reviewer() -> None:
+def test_seeding_keeps_custom_role_prompts_and_adds_the_reviewer() -> None:
     from looper.agents.serve import seed_role_configs
     from looper.agents.tiers.manager import DEFAULT_SYSTEM_PROMPT as MANAGER
     from looper.agents.tiers.planner import DEFAULT_SYSTEM_PROMPT as PLANNER
@@ -107,23 +107,15 @@ def test_seeding_moves_unedited_role_prompts_keeps_edited_ones_and_adds_the_revi
     from looper.db import role_configs
 
     async def _test(pool: Any) -> None:
-        # Rows as the previous release left them: manager and worker unedited, planner edited.
-        for role, prompt, recommended in [
-            ("manager", "previous manager recommendation", "previous manager recommendation"),
-            ("planner", "My own planner prompt.", "previous planner recommendation"),
-            ("worker", "previous worker recommendation", "previous worker recommendation"),
-        ]:
-            await pool.execute(
-                "INSERT INTO role_configs (role, system_prompt, default_prompt, max_turns) "
-                "VALUES ($1, $2, $3, $4)", role, prompt, recommended, 7 if role == "worker" else 0,
-            )
+        await pool.execute("INSERT INTO role_configs (role, system_prompt, default_prompt, max_turns) "
+                           "VALUES ('planner', 'My own planner prompt.', $1, 7)", PLANNER)
         await seed_role_configs(pool)
 
         rows = {role: await role_configs.get_config(role, pool=pool)
                 for role in ("manager", "planner", "worker", "reviewer")}
         assert (rows["manager"]["system_prompt"], rows["manager"]["default_prompt"]) == (MANAGER, MANAGER)
         assert (rows["worker"]["system_prompt"], rows["worker"]["default_prompt"]) == (WORKER, WORKER)
-        assert rows["worker"]["max_turns"] == 7  # other fields stay
+        assert rows["planner"]["max_turns"] == 7  # other fields stay
         assert (rows["planner"]["system_prompt"], rows["planner"]["default_prompt"]) == (
             "My own planner prompt.", PLANNER)
         reviewer = rows["reviewer"]

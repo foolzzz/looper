@@ -35,6 +35,8 @@ const LAYER_LABELS: Record<SettingSource, string> = {
   task: "this task",
   planner_task: "the Planner, for the rest of the task",
   planner_step: "the Planner, for one step",
+  task_role: "the role the Planner defined",
+  manager: "the Manager definition",
 };
 
 /** What a Worker's or Reviewer's role layer limits: how many run at once in each task that sets none of its own. */

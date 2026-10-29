@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { StepRunsTable, TaskAgentsSummary, TaskAgentsTab, stepRuns } from "@/components/task-agents-tab";
-import type { LlmRecord, RunSettingSource, TaskAgents, TaskDetail, TaskStep } from "@/lib/api";
+import type { LlmRecord, SettingSource, TaskAgents, TaskDetail, TaskStep } from "@/lib/api";
 
 const profile = (name: string, effort: string | null = null) => ({
   value: { profile_id: name, name, model: "m", effort, runtime: "r", provider: "p" },
@@ -31,7 +31,7 @@ function record(
   id: number,
   agent_id: string,
   step_id: string,
-  source: RunSettingSource,
+  source: SettingSource,
   extra: { created_at?: string; task_role?: { id: string; kind: "work" | "review"; version: number } } = {},
 ): LlmRecord {
   return {
@@ -41,6 +41,7 @@ function record(
     created_at: extra.created_at ?? `2026-10-16T10:00:0${id}+00:00`,
     metadata: {
       step_id,
+      presentation: { sources: { profile: { code: source, label: null } } },
       profile: {
         id: "codex/gpt-5",
         name: "codex/gpt-5",

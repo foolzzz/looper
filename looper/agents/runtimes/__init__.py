@@ -561,22 +561,17 @@ ADAPTERS: dict[str, RuntimeAdapter] = _adapters()
 CLAUDE_CODE: RuntimeAdapter = ADAPTERS["claude-code"]
 
 
-# The provider of a session saved before sessions recorded one: Claude Code's own login, the only provider a
-# Claude Code agent could run with then (profile_registry.BUILTIN_PROVIDER).
-LEGACY_SESSION_PROVIDER_ID = "prov-claude-subscription"
-
-
 def can_resume(session_runtime_type: str | None, session_provider_id: str | None, runtime: RuntimeAdapter,
                provider_id: str) -> bool:
     """Whether a process of ``runtime`` with provider ``provider_id`` can resume a session saved by
     ``session_runtime_type`` with ``session_provider_id``: only when both are unchanged (RFC P5). A provider's
     protocol fields (thinking signatures, tool_use ids, reasoning items) mean nothing to another provider, so
     every change of provider, in any direction, starts a new session; a change of model alone does not.
-
-    None for the runtime type is a session from before agents (Claude Code ran it); None for the provider is a
-    session from before sessions recorded it (``LEGACY_SESSION_PROVIDER_ID``)."""
-    return ((session_runtime_type or CLAUDE_CODE.type) == runtime.type
-            and (session_provider_id or LEGACY_SESSION_PROVIDER_ID) == provider_id)
+    """
+    # Claude Code sessions saved before provider persistence used its subscription login.
+    if session_runtime_type == "claude-code" and session_provider_id is None:
+        session_provider_id = "prov-claude-subscription"
+    return session_runtime_type == runtime.type and session_provider_id == provider_id
 
 
 def adapter(runtime_type: str) -> RuntimeAdapter:

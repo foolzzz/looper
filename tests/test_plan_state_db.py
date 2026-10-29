@@ -2,14 +2,12 @@
 
 The Planner saves its plan row by row and a Planner started later reads it
 back; the Manager's and the Planner's sessions live in ``agent_sessions``;
-the server resumes the tasks it left running with a live plan; and the plan
-and session files kept before are imported once. Runs only when
+the server resumes the tasks it left running with a live plan. Runs only when
 LOOPER_TEST_DATABASE_URL points at a disposable database.
 """
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -151,87 +149,6 @@ def test_resumable_tasks_and_restart_cleanup(monkeypatch: pytest.MonkeyPatch) ->
 
 
 # --- The one-time import of the state files ---
-
-CURRENT_PLAN = {
-    "plan_id": "plan-new", "goal_id": "g1", "requirement": "build calc", "status": "executing",
-    "project_id": "proj-x", "project_name": "calc", "project_description": "", "project_background": "",
-    "project_planner_harness": "", "project_updated_at": "", "project_work_dir": "/w",
-    "session_id": "sess-file", "session_totals": {"cost_usd": 0.42, "input_tokens": 10},
-    "final_summary": "", "fail_reason": "",
-    "steps": [
-        {"step_id": "step-1", "index": 0, "key": "s1", "instruction": "do s1", "status": "verified",
-         "acceptance_criteria": ["s1 works"], "review": False, "target_files": [], "depends_on": [],
-         "worker_id": "worker-1", "reviewer_id": None, "retries": 0, "feedback": []},
-        {"step_id": "step-2", "index": 1, "key": "s2", "instruction": "do s2", "status": "dispatched",
-         "acceptance_criteria": [], "review": True, "target_files": ["calc.py"], "depends_on": ["step-1"],
-         "worker_id": "worker-2", "reviewer_id": None, "retries": 1, "feedback": ["fix it"]},
-    ],
-    "correlation_id": "corr-1", "origin_channel_id": "channel-web", "work_dir": "/w",
-}
-# A plan file from before the resident Planner.
-OLD_PLAN = {
-    "plan_id": "plan-old", "goal_id": "", "requirement": "x", "status": "completed", "project_root": "/w",
-    "correlation_id": "", "origin_channel_id": "",
-    "steps": [{"step_id": "s", "index": 0, "instruction": "x", "status": "verified", "complexity": "low",
-               "target_files": [], "depends_on": []}],
-}
-
-
-def _write(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data), encoding="utf-8")
-
-
-def test_the_state_files_are_imported_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.agents.state_import import import_file_state
-    from looper.db import agent_sessions, plans
-
-    planner_dir = tmp_path / ".local" / "planner"
-    _write(planner_dir / "planner-task-new" / "plan-new.json", CURRENT_PLAN)
-    _write(planner_dir / "planner-task-old" / "plan-old.json", OLD_PLAN)
-    _write(planner_dir / "planner-task-gone" / "plan-gone.json", {**CURRENT_PLAN, "plan_id": "plan-gone"})
-    _write(tmp_path / ".local" / "manager" / "session.json",
-           {"session_id": "sess-manager", "session_totals": {"cost_usd": 1.5}})
-
-    async def test(pool: Any) -> None:
-        await _task(pool, "task-new")
-        await _task(pool, "task-old")
-        # The step rows the Planner wrote before; the file never held their results.
-        await plans.save("task-new", steps=[{"id": "step-1", "index": 0, "instruction": "do s1", "status": "verified",
-                                             "result": {"status": "completed", "summary": "did s1"}}], pool=pool)
-
-        report = await import_file_state(tmp_path, pool=pool)
-        assert report.to_dict() == {
-            "done_before": False, "plans": 1, "steps": 2, "sessions": 2, "skipped_old_format": 1,
-            "skipped_no_task": 1, "skipped_in_database": 0, "skipped_superseded": 0, "skipped_unreadable": 0}
-        stored = await plans.load("task-new", pool=pool)
-        assert stored is not None
-        assert {k: stored["plan"][k] for k in ("plan_id", "status", "correlation_id", "origin_channel_id")} == {
-            "plan_id": "plan-new", "status": "executing", "correlation_id": "corr-1",
-            "origin_channel_id": "channel-web"}
-        one, two = stored["steps"]
-        assert (one["step_key"], one["result"]) == ("s1", {"status": "completed", "summary": "did s1"})
-        assert (two["step_key"], two["depends_on"], two["review"], two["retries"], two["feedback"]) == (
-            "s2", ["step-1"], True, 1, ["fix it"])
-        # Sessions from files predate agents: Claude Code ran them (no runtime type recorded).
-        before_agents = {"runtime_type": None, "provider_id": None, "profile_id": None, "clean_start": False,
-                         "selected_profile_id": None}
-        assert await agent_sessions.get_session("planner-task-new", pool=pool) == {
-            "session_id": "sess-file", "session_totals": {"cost_usd": 0.42, "input_tokens": 10}, **before_agents}
-        assert await agent_sessions.get_session("manager", pool=pool) == {
-            "session_id": "sess-manager", "session_totals": {"cost_usd": 1.5}, **before_agents}
-        assert await plans.load("task-old", pool=pool) is None
-
-        # Recorded: a second start does nothing, even with a changed file; the files stay.
-        _write(planner_dir / "planner-task-new" / "plan-new.json", {**CURRENT_PLAN, "status": "failed"})
-        assert (await import_file_state(tmp_path, pool=pool)).to_dict() == {
-            "done_before": True, "plans": 0, "steps": 0, "sessions": 0, "skipped_old_format": 0,
-            "skipped_no_task": 0, "skipped_in_database": 0, "skipped_superseded": 0, "skipped_unreadable": 0}
-        assert (await plans.load("task-new", pool=pool))["plan"]["status"] == "executing"  # type: ignore[index]
-        assert len(list(planner_dir.glob("*/*.json"))) == 3
-
-    run_db(test, monkeypatch)
-
 
 def test_a_manager_session_dropped_with_new_stays_clean_after_a_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

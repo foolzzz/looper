@@ -207,9 +207,9 @@ def test_todays_spend_keeps_money_apart_from_the_subscription_equivalent(
 
     async def test(pool: Any) -> None:
         async def record(auth: str | None, source: str | None, cost: float | None, *,
-                         status: str = "completed", at: datetime | None = None, legacy: bool = False) -> None:
-            metadata = {"agent" if legacy else "profile": {"provider": {"auth": auth}}} if auth else {}
-            if model_metadata and not legacy:
+                         status: str = "completed", at: datetime | None = None) -> None:
+            metadata = {"profile": {"provider": {"auth": auth}}} if auth else {"accounting_basis": "subscription_equivalent"}
+            if model_metadata:
                 snapshot = Launch(AgentSettings(profile=builtin_resolved_profile())).record()
                 metadata.update({k: snapshot[k] for k in ("llm_model", "pricing")})
             record_id = await llm_records.start_record(
@@ -224,7 +224,7 @@ def test_todays_spend_keeps_money_apart_from_the_subscription_equivalent(
         await record("oauth", "provider_price", 0.5)  # Codex's login, at the built-in prices
         await record(None, "runtime", 0.25)  # a run from before Agent Profiles: Claude Code's login
         await record("api_key", "runtime", 0.2)  # Anthropic's API
-        await record("api_key", "provider_price", 0.1, legacy=True)  # old metadata.agent stays compatible
+        await record("api_key", "provider_price", 0.1)  # canonical profile evidence
         await record("api_key", "provider_price", None)  # ended without a cost
         await record("api_key", None, None, status="running")
         await record("api_key", "provider_price", 9.0, at=local_midnight() - timedelta(minutes=1))  # yesterday

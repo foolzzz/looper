@@ -245,29 +245,6 @@ def test_an_mcp_config_a_running_process_mounts_or_the_next_run_uses_is_kept(
     assert hashed_directories(tmp_path) == [current]
 
 
-def test_a_process_that_mounts_a_whole_knowledge_directory_keeps_every_set_in_it(
-    tmp_path: Path, content: _Content,
-) -> None:
-    """Before a directory per set, a run mounted the project's whole knowledge directory."""
-    calc = content.project("proj-calc", documents=[("Glossary", "v1")], skills=[])
-    first = _hashed(asyncio.run(load_knowledge(tmp_path, calc, str(tmp_path))).add_dirs[0])
-    content.project("proj-calc", documents=[("Glossary", "v2")], skills=[])
-    second = _hashed(asyncio.run(load_knowledge(tmp_path, calc, str(tmp_path))).add_dirs[0])
-    content.projects = []
-    agent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "--add-dir", str(first.parent)])
-    content.processes.append(agent)
-    try:
-        deadline = time.monotonic() + 10
-        while not any(str(first.parent) in line for line in read_only_copies.command_lines()):
-            assert time.monotonic() < deadline, "the process did not show up"
-            time.sleep(0.05)
-        assert asyncio.run(reclaim_unused(tmp_path)) == []
-        assert set(hashed_directories(tmp_path)) == {first, second}
-    finally:
-        agent.kill()
-        agent.wait()
-
-
 @pytest.mark.parametrize("unreadable", ["processes", "content"])
 def test_nothing_is_reclaimed_when_the_processes_or_the_content_cannot_be_read(
     tmp_path: Path, content: _Content, monkeypatch: pytest.MonkeyPatch, unreadable: str,

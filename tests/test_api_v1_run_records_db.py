@@ -62,12 +62,15 @@ def test_list_filters_and_paging_read_the_matching_records(tmp_path, monkeypatch
     run_db(run, monkeypatch, timeout=30)
 
 
-def test_task_rows_keep_profile_and_role_without_record_bodies(tmp_path, monkeypatch):
+@pytest.mark.parametrize("profile_key", ["profile", "agent"])
+def test_task_rows_keep_profile_and_role_without_record_bodies(tmp_path, monkeypatch, profile_key):
     async def run(pool):
         role = {"id": "specialist", "kind": "work", "version": 2, "role_prompt": "Recorded role prompt"}
-        metadata = {"step_id": "step-one", "profile": {"name": "Example", "source": "project",
+        metadata = {"step_id": "step-one", profile_key: {"name": "Example", "source": "project",
                     "runtime": {"type": "codex", "name": "Local"}, "model": "example-model"},
                     "model_choice": {"effort": "high"}, "prompt_layers": {"task_role": role}}
+        if profile_key == "profile":
+            metadata["agent"] = {"name": "Superseded", "model": "old", "runtime": {"type": "old", "name": "Old"}}
         rid = await _record(pool, metadata=metadata, output_text="Recorded output")
         await _record(pool, "manager", "task-one")
         await llm_records.append_events(rid, [(1, {"text": "Transcript"})], pool=pool)
@@ -83,13 +86,13 @@ def test_task_rows_keep_profile_and_role_without_record_bodies(tmp_path, monkeyp
 
 def test_record_get_preserves_historical_metadata_and_interrupted_status(tmp_path, monkeypatch):
     async def run(pool):
-        metadata = {"agent": {"name": "Legacy profile"}, "historical": {"nested": [None, {"value": 3}]},
+        metadata = {"profile": {"name": "Legacy profile"}, "historical": {"nested": [None, {"value": 3}]},
                     "prompt_layers": {"task_role": {"id": "specialist", "kind": "work", "version": 1}}}
         rid = await _record(pool, status="interrupted", metadata=metadata, error="Stopped before completion")
         before = await llm_records.get_record(rid, pool=pool)
         async with _api(tmp_path, pool) as call:
             row = (await call("get", {"record_id": rid}))["record"]
-            assert row["status"] == "interrupted" and row["metadata"] == metadata
+            assert row["status"] == "interrupted" and row["metadata"] == llm_records.normalize_record_metadata(metadata)
             assert row["task_role"] == metadata["prompt_layers"]["task_role"]
             assert row["cost_source"] is None and row["context_tokens"] is None and row["compactions"] is None
             assert {key: row[key] for key in before} == before

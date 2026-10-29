@@ -2372,7 +2372,7 @@ export interface TaskRunRow {
   runtime: { type: string | null; name: string | null };
   model: string | null;
   effort: string | null;
-  profile: { name: string | null; source: string | null };
+  profile: { name: string | null; source: SettingSource | null };
   /** The role its task's Planner defined that it ran as; null for a built-in role's run. */
   task_role?: RunRole | null;
 }
@@ -2444,23 +2444,13 @@ export interface RoleConfig {
   updated_at: string;
 }
 
-/** Where a run's harness came from: a settings layer, or (runs recorded before the layers) the old source names. */
-export type HarnessSource =
-  | SettingLayer
-  | "builtin_default"
-  | "system_default"
-  | "manager_override"
-  | "project_override";
-/** Where a run's model came from: a settings layer, or (older runs) the old source names. */
-export type ModelSource =
-  | RunSettingSource
-  | "builtin_default"
-  | "system_default"
-  | "agent_override"
-  | "project_override";
-/** Where a run's setting came from: "task_role" is the profile of the role its task's Planner defined that it ran as;
- * runs recorded before Agent Profiles were named say "agent" for "profile". */
-export type RunSettingSource = SettingSource | "task_role" | "agent";
+/** A source resolved at the record read boundary; historical labels retain their exact wording. */
+export interface RecordSource { code: SettingSource | null; label: string | null }
+export interface RecordPresentation {
+  sources: Record<"harness" | "profile" | "model" | "effort" | "run_budget_usd", RecordSource>;
+  system_prompt: { text: string | null; mode: SystemPromptMode | null; sha256: string | null };
+  library: RunLibrary;
+}
 /** The Agent Profile a run used and where it was selected. */
 export interface RunProfile {
   id: string;
@@ -2468,13 +2458,13 @@ export interface RunProfile {
   model: string;
   runtime: { id: string; name: string; type: string };
   provider: { id: string; name: string; auth: ProviderAuth };
-  source: RunSettingSource;
+  source?: string;
 }
 
 /** Where each layer of a run's system prompt came from (absent on runs recorded before it existed). */
 export interface PromptLayers {
   /** from_role "worker": a Reviewer without a harness of its own at that layer ran with the Worker's. */
-  harness?: { source: HarnessSource; sha256: string; project_id?: string; from_role?: "worker" } | null;
+  harness?: { source: string; sha256: string; project_id?: string; from_role?: "worker" } | null;
   role?: { config_id: string; sha256: string; recommended: boolean };
   project?: { id: string; background_sha256: string | null; updated_at: string | null } | null;
   task?: { kind: "plan" | "work" | "review"; task_id: string | null; step_id: string | null; sha256: string } | null;
@@ -2534,37 +2524,19 @@ export interface LlmRecord {
     /** The system prompt Looper supplied to the runtime. */
     system_prompt?: string;
     system_prompt_sha256?: string;
-    /** Missing on older runs, which appended to the runtime's default. */
+    /** Raw evidence of the selected prompt mode, when recorded. */
     system_prompt_mode?: SystemPromptMode;
     prompt_layers?: PromptLayers;
     /** The Agent Profile the run used and where it was selected (`runProfile` reads it for every run). */
     profile?: RunProfile;
-    /** Runs recorded before Agent Profiles were named: the profile under its old name (runs before Agent
-     * Profiles lack both). */
-    agent?: RunProfile;
     /** The model asked for (an alias or full name) and where it came from. */
-    model_choice?: { model: string; source: ModelSource; effort: string | null };
+    model_choice?: { model: string; source?: string; effort: string | null };
     /** The environment variables from the agent settings: their names, with each value's sha256. */
     env?: { sha256: string; keys: Record<string, string> };
-    /** The settings layer each setting of the run came from (runs recorded before the layers lack it). */
-    settings_sources?: {
-      harness: SettingLayer;
-      profile?: RunSettingSource;
-      /** Runs recorded before Agent Profiles were named name the profile's layer `agent`; runs before Agent
-       * Profiles name the model's layer instead. */
-      agent?: RunSettingSource;
-      model?: RunSettingSource;
-      effort: RunSettingSource;
-      run_budget_usd: SettingLayer;
-      env: Record<string, SettingLayer>;
-    };
     /** The repository's own CLAUDE.md and AGENTS.md the runtime was given (runs recorded before it lack it). */
     project_instructions?: ProjectInstructionFile[];
-    /** The catalog items installed for the run (plugins and skills) and their hash; error when it went without
-     * them. */
-    library?: RunLibrary;
-    /** Runs recorded before the catalog: the project skills a task agent loaded. */
-    project_skills?: RunProjectSkills;
+    presentation?: RecordPresentation;
+    accounting_basis?: "subscription_equivalent";
     /** Not a Claude run: the user sent /new and the Manager dropped this session (sender: Lark open_id or
      * Telegram user id; none from the web chat). */
     session_reset?: { channel: string; sender: string | null; chat: string | null; previous_session_id: string | null };
@@ -2577,10 +2549,9 @@ export interface LlmRecord {
   task_role?: RunRole;
 }
 
-/** The Agent Profile a run used: `metadata.profile`, or `metadata.agent` on a run recorded before Agent Profiles were
- * named; null for a run recorded before Agent Profiles. */
+/** The canonical Agent Profile supplied by the record read boundary. */
 export function runProfile(record: Pick<LlmRecord, "metadata">): RunProfile | null {
-  return record.metadata?.profile ?? record.metadata?.agent ?? null;
+  return record.metadata?.profile ?? null;
 }
 
 /** One context compaction (Claude Code's compact_boundary): automatic or /compact, with its context before and after. */
@@ -3068,7 +3039,7 @@ export async function deleteAgentProfile(profileId: string): Promise<{ deleted: 
 export type SettingLayer = "builtin" | "system" | "role" | "project" | "role_project";
 /** Where a value came from: a layer, the selected profile itself (its effort), a task's choice of profile, or its
  * Planner's choice of its Workers' or Reviewers' profile, for the rest of the task or for one step. */
-export type SettingSource = SettingLayer | "session" | "profile" | "task" | "planner_task" | "planner_step";
+export type SettingSource = SettingLayer | "session" | "profile" | "task" | "planner_task" | "planner_step" | "task_role" | "manager";
 /** The roles a project's agents have: the Manager spans every project. */
 export type ProjectRole = Exclude<AgentRole, "manager">;
 
@@ -3475,21 +3446,10 @@ export interface InstallChange {
 
 export interface RunLibrary {
   sha256: string | null;
-  role?: AgentRole | null;
-  project_id?: string | null;
-  /** `plugin` and `scope` are absent in runs recorded before the catalog. */
-  items: { kind: LibraryKind; name: string; sha256: string; plugin?: string; scope?: InstallScope | "manager" }[];
-  /** The MCP servers the run mounted, by name. */
-  mcp_servers?: string[];
-  error?: string;
-}
-
-export interface RunProjectSkills {
-  project_id: string | null;
-  sha256: string | null;
-  plugin: string;
-  skills: { name: string; sha256: string }[];
-  error?: string;
+  items: { kind: LibraryKind | null; name: string | null; sha256: string | null; plugin: string | null;
+           scope: InstallScope | "manager" | null; project_id: string | null }[];
+  error: string | null;
+  project_error: string | null;
 }
 
 export async function fetchCatalog(): Promise<Catalog> {

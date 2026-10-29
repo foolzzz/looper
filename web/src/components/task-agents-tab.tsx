@@ -98,7 +98,7 @@ export function stepRuns(steps: TaskStep[], records: Record<TaskLimitRole, LlmRe
         role: defined ? `${defined.id} · ${defined.kind}` : roleLabel(role),
         definedRole: !!defined,
         profile: profile && profileName({ name: profile.name, effort: record.metadata?.model_choice?.effort ?? null }),
-        source: profile && sourceName(profile.source),
+        source: profile && sourceName(record.metadata?.presentation?.sources.profile),
         status: record.status,
       };
     });

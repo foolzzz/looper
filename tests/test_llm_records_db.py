@@ -7,6 +7,7 @@ schema is applied to it and the test's rows are removed afterwards.
 from __future__ import annotations
 
 import asyncio
+import json
 from decimal import Decimal
 from typing import Any
 
@@ -15,6 +16,38 @@ import pytest
 from tests.db_support import DSN, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+
+@pytest.mark.parametrize("canonical", [False, True])
+def test_record_presentation_preserves_only_evidenced_values(canonical):
+    import copy
+    from looper.db.llm_records import normalize_record_metadata
+
+    raw = {"profile": {"source": "project"}, "settings_sources": {"agent": "role"},
+           "prompt_layers": {"harness": {"source": "manager_override"}},
+           "command": ["claude", "--append-system-prompt", "Inline evidence"],
+           "library": {"items": [{"kind": "skill", "name": "same", "sha256": "stored"}], "error": "global error"},
+           "project_skills": {"skills": [{"name": "same"}, {"name": "other"}], "error": "project error"}}
+    if canonical:
+        raw.update(system_prompt="Current text", system_prompt_mode="replace", system_prompt_sha256="current hash")
+    before = copy.deepcopy(raw)
+    result = normalize_record_metadata(raw)
+    assert raw == before and normalize_record_metadata(result) == result
+    presentation = result["presentation"]
+    assert presentation["sources"]["harness"] == {"code": None, "label": "Manager override"}
+    assert presentation["sources"]["profile"] == {"code": "project", "label": None}
+    assert presentation["system_prompt"] == ({"text": "Current text", "mode": "replace", "sha256": "current hash"}
+        if canonical else {"text": "Inline evidence", "mode": "append", "sha256": None})
+    library = presentation["library"]
+    assert library == {"items": [
+        {"kind": "skill", "name": "same", "plugin": None, "scope": None, "project_id": None, "sha256": "stored"},
+        {"kind": "skill", "name": "other", "plugin": "project", "scope": "project", "project_id": None, "sha256": None}],
+        "sha256": None, "error": "global error", "project_error": "project error"}
+    assert set(result) == set(raw) | {"presentation"}
+    assert normalize_record_metadata({"library": {"items": None}, "project_skills": {"skills": None}})[
+        "presentation"]["library"]["items"] == []
+    assert normalize_record_metadata({"command": ["claude", "--append-system-prompt-file", "file"]})[
+        "presentation"]["system_prompt"] == dict.fromkeys(("text", "mode", "sha256"))
 
 
 def test_run_is_recorded_end_to_end() -> None:
@@ -54,7 +87,7 @@ def test_run_is_recorded_end_to_end() -> None:
             assert done["status"] == "completed"
             assert (done["output_text"], done["session_id"], done["cost_usd"]) == ("done", "s-1", 0.25)
             assert done["finished_at"] is not None
-            assert done["metadata"] == {"command": ["claude", "--print", "do it"], "cwd": "/tmp/p"}
+            assert done["metadata"] == llm_records.normalize_record_metadata({"command": ["claude", "--print", "do it"], "cwd": "/tmp/p"})
 
             # What a run was refused is added to its metadata, beside its outcome.
             refused_id = await llm_records.start_record(agent_id="planner-task-test", task_id="task-test",
@@ -63,7 +96,7 @@ def test_run_is_recorded_end_to_end() -> None:
             await llm_records.finish_record(refused_id, status="completed", outcome="passed",
                                             metadata={"permission_denials": denials}, pool=pool)
             refused = await llm_records.get_record(refused_id, pool=pool)
-            assert refused["metadata"] == {"cwd": "/tmp/p", "outcome": "passed", "permission_denials": denials}
+            assert refused["metadata"] == llm_records.normalize_record_metadata({"cwd": "/tmp/p", "outcome": "passed", "permission_denials": denials})
             await llm_records.add_metadata(refused_id, {"read_only_check": "compared",
                                                        "planner_changed_files": ["笔记.md"]}, pool=pool)
             annotated = await llm_records.get_record(refused_id, pool=pool)
@@ -330,7 +363,7 @@ def test_a_run_with_a_runtimes_own_login_costs_a_subscription_equivalent() -> No
                                        ("worker-key", "api_key", "provider_price"), ("worker-old", None, None)):
             record_id = await llm_records.start_record(
                 agent_id=agent_id, task_id="t1", pool=pool,
-                metadata={"profile": {"provider": {"auth": auth}}} if auth else {})
+                metadata={"profile": {"provider": {"auth": auth}}} if auth else {"accounting_basis": "subscription_equivalent"})
             await llm_records.finish_record(record_id, status="completed", cost_usd=0.1, cost_source=source, pool=pool)
         cost = (await llm_records.task_costs(["t1"], pool=pool))["t1"]
         # Claude Code's subscription and Codex's ChatGPT login (and a run from before Agent Profiles) are
@@ -338,6 +371,27 @@ def test_a_run_with_a_runtimes_own_login_costs_a_subscription_equivalent() -> No
         assert (cost["equivalent_runs"], cost["provider_price_runs"]) == (3, 1)
 
     run_db(test, max_size=2)
+
+
+@pytest.mark.parametrize(("metadata", "equivalent"), [
+    ({"agent": {"provider": {"auth": "oauth"}}}, True),
+    ({"agent": {"provider": {"auth": "api_key"}}}, False),
+    ({"profile": {"provider": {"auth": "api_key"}}, "agent": {"provider": {"auth": "oauth"}}}, False),
+    ({"profile": {}, "agent": {"provider": {"auth": "oauth"}}}, False),
+    ({"accounting_basis": "provider_price", "agent": {"provider": {"auth": "oauth"}}}, False),
+])
+def test_cost_reads_agent_auth_only_without_a_profile(metadata: dict[str, Any], equivalent: bool) -> None:
+    from looper.db import llm_records
+
+    async def test(pool: Any) -> None:
+        record_id = await llm_records.start_record(agent_id="worker-old", task_id="t1", metadata=metadata, pool=pool)
+        await llm_records.finish_record(record_id, status="completed", cost_usd=0.1, cost_source="provider_price", pool=pool)
+        cost = (await llm_records.task_costs(["t1"], pool=pool))["t1"]
+        assert (cost["equivalent_runs"], cost["provider_price_runs"]) == (int(equivalent), int(not equivalent))
+        stored = await pool.fetchval("SELECT metadata FROM llm_records WHERE id = $1", record_id)
+        assert json.loads(stored) == metadata
+
+    run_db(test, max_size=2, timeout=30)
 
 
 def test_a_resident_agents_usage_by_session_day_and_turn() -> None:

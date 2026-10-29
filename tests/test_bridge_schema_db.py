@@ -68,10 +68,17 @@ def test_schema_admission_is_independent_of_database_locale(request, source, loc
     run(test)
 
 
-def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source):
+@pytest.mark.parametrize("builtin_harness", [False, True])
+def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source, builtin_harness):
     async def test():
         async with fresh_connection() as conn, fresh_connection() as fresh:
             await initialize_bridge(conn, bridge_source)
+            if builtin_harness:
+                from looper.agents.agent_settings import DEFAULT_HARNESS_PROMPT
+                await conn.execute("UPDATE agent_setting_layers SET harness_prompt=$1 WHERE scope='system'",
+                    " \n" + DEFAULT_HARNESS_PROMPT.replace("the agents Looper runs", "the agents LoopX runs") + "\t")
+                await conn.execute("UPDATE agent_setting_layers SET harness_prompt=(SELECT harness_prompt "
+                                   "FROM agent_setting_layers WHERE scope='system') WHERE scope='role'")
             before = await witness(conn)
             shape = await structure(conn)
             assert await connection.schema_change_pending(conn)
@@ -82,7 +89,12 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                           "chat_messages", "llm_model_migration_map", "agent_setting_layers", "agent_runtimes",
                           "agent_profiles", "llm_providers", "llm_provider_endpoints", "llm_models", "role_configs",
                           "api_sessions", "api_session_items", "chat_threads", "task_user_gates", "sequence_state"):
-                assert after[table] == before[table], table
+                if table == "agent_setting_layers" and builtin_harness:
+                    expected = [{**r, "harness_prompt": DEFAULT_HARNESS_PROMPT} if r["scope"] == "system" else r
+                                for r in before[table]]
+                    assert after[table] == expected
+                else:
+                    assert after[table] == before[table], table
             assert json.loads(after["tasks"][0]["config"]) == {"worker": {"max_turns": 9}}
             assert {r["id"]: r["task_workspaces"] for r in after["projects"]} == {
                 "proj-bridge": "in_place", "proj-explicit": "worktree"}
@@ -180,6 +192,8 @@ def test_deleted_custom_bot_preserves_gate_posts_and_reply_identity(bridge_sourc
         "DROP TABLE registry_schema_version",
         "DELETE FROM schema_fingerprint",
         "DROP TABLE schema_fingerprint",
+        "DELETE FROM schema_migrations WHERE name='file_state_import'",
+        "UPDATE role_configs SET default_prompt='previous recommendation' WHERE role='worker'",
     ]
 ] + [
     (True, "UPDATE registry_schema_version SET version=5", "exceeds supported"),

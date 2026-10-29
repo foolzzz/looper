@@ -380,6 +380,17 @@ def test_dsh_manager_replaces_missing_session_with_fresh_session_and_resume_brie
 
 @pytest.mark.usefixtures("agent_db")
 class TestNewSession:
+    def test_saved_claude_subscription_without_provider_resumes_after_restart(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+    ) -> None:
+        _saved(agent_db)
+        chat = _chat(monkeypatch, agent_db, ["first", "follow-up"], restart_before=1)
+        first, resumed = chat.argvs
+        assert _flag(first, "--resume") == "sess-0"
+        assert _flag(resumed, "--resume") == "sess-1"
+        assert chat.replies == ["turn 1: first", "turn 1: follow-up"]
+        assert chat.runs == ["first", "follow-up"]
+
     @pytest.mark.parametrize("restart", [False, True], ids=["same-server", "after-a-restart"])
     def test_the_message_after_new_starts_a_clean_session(
         self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, restart: bool,

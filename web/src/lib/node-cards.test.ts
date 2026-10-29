@@ -108,9 +108,9 @@ describe("stepCard agent lines", () => {
     expect(factsOf(s1, {}).some((f) => f.label === "Agent")).toBe(false);
   });
 
-  it("shows the effort, and the chosen model when the run reported none", () => {
-    const facts = factsOf(s1, { worker: [run(1, { step: "s1", model: null, choice: "sonnet", effort: "high" })] });
-    expect(facts.find((f) => f.label === "Agent")?.value).toBe("Codex · sonnet · high");
+  it.each(["Codex", "Custom runtime"])("shows %s, effort and chosen model when none was reported", (runtime) => {
+    const facts = factsOf(s1, { worker: [run(1, { step: "s1", model: null, choice: "sonnet", effort: "high", runtime })] });
+    expect(facts.find((f) => f.label === "Agent")?.value).toBe(`${runtime} · sonnet · high`);
   });
 });
 

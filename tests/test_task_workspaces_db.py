@@ -62,7 +62,8 @@ def test_a_task_names_its_workspace_and_is_told_what_it_will_run_in(
     (memory / "MEMORY.md").write_text("Staging listens on 59322.\n")
 
     async def test(pool: Any) -> None:
-        project = await projects.create_project(name="calc", work_dir=str(project_dir), pool=pool)
+        project = await projects.create_project(name="calc", work_dir=str(project_dir),
+                                                execution={"task_workspaces": "in_place"}, pool=pool)
         server, _, _ = _setup()
         await tasks.create_task(task_id="task-run", requirement="r", project_id=project["id"], status="running",
                                 work_dir=str(workspace), pool=pool)
@@ -90,15 +91,59 @@ def test_a_task_names_its_workspace_and_is_told_what_it_will_run_in(
             status, refused = await _call(server, "POST", "/api/v1/tasks/create", {
                 "requirement": "x", "project_id": project["id"], "work_dir": str(workspace), **bad})
             assert status == 400 and says in refused["error"], refused
-        # A new project's tasks run in worktrees; one made before keeps running in place.
+        # A new project defaults to worktrees; an explicit in_place setting is preserved.
         status, made = await _call(server, "POST", "/api/v1/project_admin/create", {"name": "fresh", "work_dir": str(workspace)})
-        assert made["task_workspaces"] == "worktree" and project.get("task_workspaces") is None
+        assert made["task_workspaces"] == "worktree" and project["task_workspaces"] == "in_place"
 
     run_db(test, monkeypatch)
 
 
 async def _check(server: Any, query: dict[str, str]) -> tuple[int, Any]:
     return await _call(server, "POST", "/api/v1/workspaces/check", query)
+
+
+@pytest.mark.parametrize("git_workspace", [True, False], ids=["git-with-uncommitted-work", "non-git"])
+@pytest.mark.parametrize("source", ["stored", "explicit-null"])
+def test_null_project_workspace_runs_in_the_original_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_workspace: bool, source: str,
+) -> None:
+    from looper.agents.schedule_templates import effective_schedule
+    from looper.db import projects, task_worktrees, tasks
+
+    workspace = _repo(tmp_path / "workspace") if git_workspace else tmp_path
+    (workspace / "a.txt").write_text("uncommitted input\n")
+
+    async def test(pool: Any) -> None:
+        server, _, _ = _setup()
+        if source == "stored":
+            project = await projects.create_project(name="calc", work_dir=str(workspace), pool=pool)
+        else:
+            status, created = await _call(server, "POST", "/api/v1/project_admin/create", {
+                "name": "calc", "work_dir": str(workspace), "task_workspaces": None})
+            assert status == 200, created
+            project = await projects.get_project(created["project_id"], pool=pool)
+        assert project["task_workspaces"] is None
+        status, body = await _call(server, "POST", "/api/v1/tasks/create", {
+            "requirement": "use the uncommitted input", "project_id": project["id"]})
+        assert status == 200, body
+        assert body["workspace"]["requested_mode"] == body["workspace"]["mode"] == "in_place"
+        row = await tasks.get_task(body["task_id"], pool=pool)
+        assert row["workspace_mode"] == "in_place"
+
+        async def note(kind: str, text: str) -> None:
+            pass
+
+        work_dir = await tw.prepare(row, runtime_root=tmp_path / "runtime", links=(), note=note)
+        assert work_dir == str(workspace)
+        assert (Path(work_dir) / "a.txt").read_text() == "uncommitted input\n"
+        assert await task_worktrees.get(row["id"], pool=pool) is None
+        effective = await effective_schedule(pool, {
+            "manager_id": "manager", "project_id": project["id"], "requirement": "scheduled work"})
+        assert effective.workspace_mode == "in_place" and effective.work_dir == str(workspace)
+        if git_workspace:
+            assert git(workspace, "branch", "--show-current") == "main"
+
+    run_db(test, monkeypatch, timeout=30)
 
 
 def test_a_worktree_tasks_row_its_page_and_its_deletion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -393,7 +393,7 @@ def _parse(field: str, raw: Any) -> Any:
 
 
 def _lessons_mode(raw: Any) -> LessonsMode:
-    """``distill_lessons``: never unset, so null and ``""`` are ``off``; a boolean is from before the modes."""
+    """``distill_lessons``: never unset; booleans retain the pre-mode write/off semantics."""
     if raw is None or raw == "":
         return LessonsMode.OFF
     if isinstance(raw, bool):

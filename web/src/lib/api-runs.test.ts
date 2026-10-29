@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, expect, it, vi } from "vitest";
-import { fetchTaskRuns, fetchLlmRecords, fetchLlmRecord, fetchLlmRecordEvents, fetchAgentUsage } from "@/lib/api";
+import { type LlmRecord, fetchTaskRuns, fetchLlmRecords, fetchLlmRecord, fetchLlmRecordEvents, fetchAgentUsage } from "@/lib/api";
+import { runCostLabel } from "@/lib/usage";
 import { installSessionGuard, resetSessionGuard, SessionEndedError } from "@/lib/session";
 
 afterEach(() => { resetSessionGuard(); vi.unstubAllGlobals(); });
@@ -43,4 +44,11 @@ it("preserves typed failures, aborts and ended-session handling", async () => {
   await expect(fetchLlmRecordEvents(3)).rejects.toBeInstanceOf(SessionEndedError);
   await expect(fetchTaskRuns("task-example")).rejects.toBeInstanceOf(SessionEndedError);
   expect(fetcher).toHaveBeenCalledTimes(3);
+});
+
+it.each([
+  [{}, ""], [{ accounting_basis: "subscription_equivalent" }, "equivalent"],
+  [{ profile: { provider: { auth: "oauth" } } }, "equivalent"], [{ profile: { provider: { auth: "api_key" } } }, ""],
+])("prices only explicit accounting evidence: %j", (metadata, expected) => {
+  expect(runCostLabel({ metadata } as LlmRecord)).toBe(expected);
 });
