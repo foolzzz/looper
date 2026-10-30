@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Menu } from "lucide-react";
 import { Sidebar, SIDEBAR_ID, type Page } from "@/components/sidebar";
 import { ClaudeCheckBanner } from "@/components/claude-check-banner";
+import { DrainBanner } from "@/components/drain-banner";
 import { SessionEndedBanner } from "@/components/session-ended-banner";
 import { useSessionEnded } from "@/lib/session";
 import { DashboardPage } from "@/pages/dashboard";
@@ -133,6 +134,7 @@ function App() {
           <span className="text-sm font-semibold tracking-tight">Looper</span>
         </header>
         <ClaudeCheckBanner />
+        <DrainBanner />
         <main className="min-h-0 flex-1 overflow-hidden">
           <div className={route.page === "chat" ? "h-full" : "hidden"}>
             <ChatPage

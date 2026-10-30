@@ -952,6 +952,22 @@ Lark pass on only the senders they list, and a channel without such a list
 does not start ([Channels](#channels)). The web dashboard stays local-only
 ([HTTP API](#http-api)).
 
+### Planned-restart drain
+
+An operator can `POST /api/v1/system/drain` with `scope` (`turns` or `runs`) and an optional positive
+`timeout_seconds`. The response is 202. New Worker/Reviewer runs wait before execution, Manager messages
+remain undelivered in the bus journal, scheduled fires keep their due cursor, and queued consults wait.
+Planner turns and `TASK_START` continue: they must persist results before restart drops Planner queues.
+Active schedule gates and wait checks finish; new wait checks pause.
+
+`GET /api/v1/system/drain` and `system/status` report the phase, deadline, `deadline_passed`, and blockers:
+runs (including typed `keepable`), Manager/Planner turns, gates, waits, consults and starts in progress.
+Drain completes only after those operations settle and Planner queues empty. Both scopes currently wait
+for all runs because no runtime is keepable yet. Defaults are 180 seconds for turns and 1200 for runs;
+expiration reports blockers without stopping them. `DELETE /api/v1/system/drain` resumes admission.
+The dashboard displays an upgrade banner during draining and drained. Drain is process-local; a new
+server starts serving, resumes dispatched steps, replays Manager messages, and catches up schedules.
+
 ### How an agent is stopped
 
 Looper starts every agent process in a session of its own: each Worker and

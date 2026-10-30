@@ -26,6 +26,7 @@ from ..message import (
     channel_address,
 )
 from .base import ChannelAdapter, DeliveryReceipt
+from .chat_history import CHAT_RECORD
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,13 @@ class WebChannelAdapter(ChannelAdapter):
             # Saved here, not by the page: a page left before the answer came would lose it.
             session_id, message_id = awaiting
             saved = await self._add_to_chat(session_id, envelope, message_id=reply_message_id(message_id))
+        elif envelope.message_type in _ANSWERS and envelope.source.agent_type == "manager":
+            # A replayed request has no in-memory awaiting entry after restart.
+            record = envelope.metadata.get(CHAT_RECORD)
+            if isinstance(record, dict):
+                session_id, message_id = record.get("session_id"), record.get("message_id")
+                if isinstance(session_id, str) and session_id and isinstance(message_id, str) and message_id:
+                    saved = await self._add_to_chat(session_id, envelope, message_id=message_id)
         sse_q = self._sse_queues.get(corr_id)
 
         if sse_q is None:

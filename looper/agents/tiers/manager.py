@@ -45,6 +45,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from ..broadcast import Broadcaster
+from ..drain import DrainState
 from ..bus import MessageBus
 from ..channels.chat_history import CHAT_RECORD, chat_record
 from ..supervisor import cancel_and_wait
@@ -651,6 +652,12 @@ def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *
     outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
     if record is None:
         record = _chat_record(original, f"{original.message_id}:reply")
+        context = original.payload.get("channel_context")
+        if original.source.channel == "web" and isinstance(context, dict):
+            session, client_id = context.get("session_id"), context.get("client_message_id")
+            if isinstance(session, str) and session and isinstance(client_id, str) and client_id:
+                # The journal survives restart; the web adapter's awaiting/SSE maps do not.
+                record = {CHAT_RECORD: chat_record(session, f"{client_id}:reply")}
     return MessageEnvelope.create(
         source=source,
         target=original.source,
@@ -674,7 +681,9 @@ class ManagerAgent:
         broadcaster: Broadcaster | None = None,
         definition: ManagerDefinition | None = None,
         clock: Callable[[], float] = time.monotonic,
+        drain: DrainState | None = None,
     ) -> None:
+        self._drain = drain
         self._definition = definition or default_definition()
         self._log = self._definition.id
         # Set when the definition was turned off or deleted; the fleet (card 6) sets ``on_turned_off``.
@@ -861,6 +870,8 @@ class ManagerAgent:
         on, queued or not."""
         if envelope.target.agent_id != self.agent_id:
             return False
+        if self._drain is not None and self._drain.draining:
+            return False
         text = envelope.payload.get("text")
         if not isinstance(text, str) or not is_stop_command(text):
             self._register_turn(envelope)
@@ -1013,6 +1024,10 @@ class ManagerAgent:
             async for envelope in self._bus.subscribe(self.agent_id):
                 if not self._running:
                     break
+                # Before persisting chat, emitting status, commands, or taking _turn_lock.
+                # subscribe() acknowledges only after this handler returns; restart replays held messages.
+                if self._drain is not None:
+                    await self._drain.wait_serving()
                 self._handling = envelope
                 try:
                     await self._handle(envelope)
@@ -2601,7 +2616,7 @@ class ManagerAgent:
         (one about a user gate, whose discussion keeps the message). ``outcome`` is how the turn ended; by default
         failed with an ``error``, else answered."""
         assert self._bus is not None
-        record = _chat_record(original, f"{original.message_id}:reply") if persist else {}
+        record = None if persist else {}
         outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
         await self._bus.publish(reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
                                                record=record, snapshot=snapshot))

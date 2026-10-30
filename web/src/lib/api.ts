@@ -10,6 +10,7 @@ export interface SystemStatus {
   checks: SelfCheck[];
   /** True for a password session, which can sign out; false for the local browser's auto-login. */
   can_sign_out: boolean;
+  drain?: { phase: "serving" | "draining" | "drained" };
   turn_binding?: TurnBindingStatus;
   managers?: { id: string; name: string; running: boolean; busy: boolean; healthy: boolean;
     sync: "pending" | "ok"; sync_error?: string; turn_binding: TurnBindingStatus }[];
@@ -202,8 +203,8 @@ export interface SSEEvent {
   payload: Record<string, unknown>;
 }
 
-export async function fetchStatus(): Promise<SystemStatus> {
-  const result = await callV1<SystemStatus>("/api/v1/system/status", {});
+export async function fetchStatus(signal?: AbortSignal): Promise<SystemStatus> {
+  const result = await callV1<SystemStatus>("/api/v1/system/status", {}, { signal });
   if (result.status === "needs_confirmation") throw new V1Error(202, "unavailable", "Status unexpectedly needs confirmation.");
   return result;
 }

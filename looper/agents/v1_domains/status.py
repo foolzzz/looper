@@ -2,6 +2,8 @@
 
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 
+from .drain import DRAIN
+
 ORDER = 1
 
 _AGENT = _object({"healthy": _BOOL, "state": _STR, "up": _BOOL, "restart_count": _INT,
@@ -12,6 +14,7 @@ _BINDING = _object({
                          ["reason", "runtime", "tool", "count"])),
     "matches": _array(_object({"by": _STR, "when": _STR, "count": _INT}))}, ["enforced", "mismatches", "by"])
 _STATUS = _object({
+    "drain": DRAIN,
     "status": {"const": "running"}, "agents": {"type": "object", "additionalProperties": _AGENT},
     "tasks": _object({"total": _INT, "running": _INT, "completed": _INT}),
     "channels": _object({"web": _object({"channel": {"const": "web"}, "healthy": _BOOL,
@@ -27,7 +30,9 @@ _STATUS = _object({
 
 RESULTS = {}
 OPERATIONS = (Operation("system.status", "POST", "/api/v1/system/status", "Read dashboard status.",
-                        "Read dashboard status.", _object({}, closed=True), _STATUS, risk="read"),)
+                        "Read dashboard status.", _object({}, closed=True), _STATUS, risk="read"),
+              Operation("system.status_read", "GET", "/api/v1/system/status", "Read dashboard status.",
+                        "Read dashboard status.", None, _STATUS, risk="read"),)
 
 
 async def run(server, operation, arguments, principal, headers):

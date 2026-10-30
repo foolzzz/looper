@@ -64,6 +64,7 @@ import asyncpg
 from ..db import agent_setting_layers as db_layers, connection as db_connection, llm_records as db_llm_records
 from ..db import schedules as db_schedules, tasks as db_tasks
 from . import cron
+from .drain import DrainState
 from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType
 from .schedule_gate import GateResult, run_gate
 from .schedule_notify import Notifier, Sender
@@ -362,7 +363,8 @@ class Scheduler:
     ``day_zone`` is the zone whose midnight starts a day for the daily budget (the server's own by default)."""
 
     def __init__(self, *, bus: _Bus, clock: Callable[[], datetime] = _utcnow, tick_seconds: float = TICK_SECONDS,
-                 sender: Sender | None = None, day_zone: str | None = None, dashboard_url: str = "") -> None:
+                 sender: Sender | None = None, day_zone: str | None = None, dashboard_url: str = "",
+                 drain: DrainState | None = None) -> None:
         self._bus = bus
         self._clock = clock
         self._tick_seconds = tick_seconds
@@ -371,6 +373,24 @@ class Scheduler:
         self._day_zone = cron.zone(day_zone or cron.local_zone_name())
         # Gates and messages under way; stopping cancels them.
         self._background: set[asyncio.Task[Any]] = set()
+        self._drain = drain
+        self._starting = 0
+        self._gates = 0
+
+    def drain_waiting(self) -> dict[str, int]:
+        return {"gates": self._gates, "starting": self._starting}
+
+    @contextmanager
+    def _admit_start(self) -> Iterator[bool]:
+        """Count admission through task publication, including awaits in database transactions."""
+        if self._drain is not None and self._drain.draining:
+            yield False
+            return
+        self._starting += 1
+        try:
+            yield True
+        finally:
+            self._starting -= 1
 
     async def start(self) -> None:
         # A gate cannot outlive the server that ran it.
@@ -401,10 +421,17 @@ class Scheduler:
         while self._background:
             await asyncio.gather(*list(self._background), return_exceptions=True)
 
-    def _spawn(self, job: Any) -> None:
+    def _spawn(self, job: Any, *, gate: bool = False) -> None:
         task = asyncio.ensure_future(job)
         self._background.add(task)
         task.add_done_callback(self._background.discard)
+        if gate:
+            # Count before the task first executes: a drain can start in that scheduling gap.
+            self._gates += 1
+            task.add_done_callback(lambda _: self._gate_done())
+
+    def _gate_done(self) -> None:
+        self._gates -= 1
 
     async def _loop(self) -> None:
         while True:
@@ -421,9 +448,10 @@ class Scheduler:
         stale alerts that are due."""
         now = self._clock()
         await self._settle_running(now)
-        for schedule_id in await db_schedules.schedules_with_queued_runs():
-            await self._start_queued(schedule_id)
-        await self._fire_due(now)
+        if self._drain is None or not self._drain.draining:
+            for schedule_id in await db_schedules.schedules_with_queued_runs():
+                await self._start_queued(schedule_id)
+            await self._fire_due(now)
         await self._notifier.check_stale(now)
 
     # --- Firing ---
@@ -431,13 +459,15 @@ class Scheduler:
     async def _fire_due(self, now: datetime) -> None:
         handled: list[str] = []
         while True:
-            with ExitStack() as firing_guard:
+            with self._admit_start() as admitted, ExitStack() as firing_guard:
+                if not admitted:
+                    return
                 launched: _Launched | None = None
                 schedule: dict[str, Any] | None = None
                 try:
                     async with db_connection.transaction() as conn:
                         schedule = await db_schedules.lock_next_due(conn, now, skip=handled)
-                        if schedule is None:
+                        if schedule is None or (self._drain is not None and self._drain.draining):
                             return
                         handled.append(schedule["id"])
                         if not firing_guard.enter_context(_project_firing(schedule["project_id"])):
@@ -489,10 +519,13 @@ class Scheduler:
         """Fire a schedule now, enabled or not (``trigger`` manual); the run's id, None for an unknown schedule.
         Its ``next_fire_at`` stays. A gate runs in the background: the run is ``gating`` until it ends."""
         now = self._clock()
-        with ExitStack() as firing_guard:
+        with self._admit_start() as admitted, ExitStack() as firing_guard:
+            if not admitted:
+                return None
             async with db_connection.transaction() as conn:
                 schedule = await db_schedules.lock_schedule(conn, schedule_id)
-                if schedule is None or not firing_guard.enter_context(_project_firing(schedule["project_id"])):
+                if (schedule is None or (self._drain is not None and self._drain.draining)
+                        or not firing_guard.enter_context(_project_firing(schedule["project_id"]))):
                     return None
                 launched = await self._fire(conn, schedule, Firing(Trigger.MANUAL, now), now)
             await self._follow(schedule, launched)
@@ -504,7 +537,7 @@ class Scheduler:
             await self._start_task(launched.task_id, schedule["project_id"])
         if launched.gate is not None:
             self._spawn(self._gate(schedule["id"], launched.run_id, launched.gate, launched.fingerprint,
-                                   launched.gate_enabled))
+                                   launched.gate_enabled), gate=True)
         if launched.ended:
             self._spawn(self._notifier.run_ended(launched.run_id))
 
@@ -792,22 +825,31 @@ class Scheduler:
 
     async def _start_task(self, task_id: str, project_id: str) -> None:
         """Publish through the deletion barrier, including recovery of tasks created before a server stop."""
-        with _project_firing(project_id) as allowed:
-            # A retry can carry a snapshot read before deletion finished and released the barrier.
-            if not allowed or await db_tasks.get_task(task_id) is None:
-                return
-            await self._bus.publish(MessageEnvelope.create(
-                source=SCHEDULER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_START,
-                payload={"task_id": task_id},
-            ))
+        self._starting += 1
+        try:
+            with _project_firing(project_id) as allowed:
+                # TASK_START stays admitted during drain so Planners can persist results and decisions;
+                # their bus queues are lost at restart. Their dispatched runs wait at the Worker slot.
+                # A retry can carry a snapshot read before deletion finished and released the barrier.
+                if not allowed or await db_tasks.get_task(task_id) is None:
+                    return
+                await self._bus.publish(MessageEnvelope.create(
+                    source=SCHEDULER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_START,
+                    payload={"task_id": task_id},
+                ))
+        finally:
+            self._starting -= 1
 
     async def _start_queued(self, schedule_id: str) -> None:
         """Start the schedule's queued run when none of its tasks or gates is in progress any more."""
         now = self._clock()
-        with ExitStack() as firing_guard:
+        with self._admit_start() as admitted, ExitStack() as firing_guard:
+            if not admitted:
+                return
             async with db_connection.transaction() as conn:
                 schedule = await db_schedules.lock_schedule(conn, schedule_id)
-                if schedule is None or not firing_guard.enter_context(_project_firing(schedule["project_id"])):
+                if (schedule is None or (self._drain is not None and self._drain.draining)
+                        or not firing_guard.enter_context(_project_firing(schedule["project_id"]))):
                     return
                 runs = await db_schedules.open_runs(conn, schedule_id)
                 queued = [run for run in runs if run["status"] == db_schedules.QUEUED]

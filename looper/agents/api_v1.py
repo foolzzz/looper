@@ -89,7 +89,7 @@ _CONFIRMATION_NOTE = " Some calls answer needs_confirmation first; POST /api/v1/
 @dataclass(frozen=True)
 class Operation:
     operation_id: str  # "tasks.list", "task_create", "chat.send"
-    method: str  # "POST" or "GET"
+    method: str  # "POST", "GET" or "DELETE"
     path: str  # "/api/v1/ops/tasks/list"
     summary: str  # the description's first sentence, at most 120 characters
     description: str
@@ -105,6 +105,7 @@ class Operation:
     credential_write: bool = False  # bypass argument/result audit and redact failures
     stream_description: str | None = None
     stream_events: Mapping[str, Any] | None = None
+    success_status: int = 200  # HTTP success code; 202 for an admitted asynchronous operation.
     audit_operator: bool = True  # dashboard operations may opt out of the Manager/client action trail
 
 
@@ -478,7 +479,7 @@ def _responses(operation: Operation) -> dict[str, Any]:
     else:
         ok = {"description": "ok", "content": {"application/json": {"schema": {"allOf": [
             {"$ref": "#/components/schemas/OpOk"}, {"type": "object", "properties": {"result": dict(operation.result)}}]}}}}
-    responses: dict[str, Any] = {"200": ok}
+    responses: dict[str, Any] = {str(operation.success_status): ok}
     if operation.confirms:
         responses["202"] = {"description": "needs_confirmation: POST /confirm with the confirmation_id",
                             "content": {"application/json": {"schema": {
