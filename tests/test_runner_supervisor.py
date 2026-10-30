@@ -482,14 +482,18 @@ def test_release_closes_one_active_session_and_joins_its_tools(runners):
     run(exercise())
 
 
-def test_fifth_failure_stops_demand_retries_and_returns_unavailable(runners, monkeypatch):
+@pytest.mark.parametrize("kind", ["fake", "pi", "dsh"])
+def test_fifth_failure_stops_demand_retries_and_returns_unavailable(runners, monkeypatch, kind):
+    from looper.agents.runtimes import dsh_runner, pi_runner
+
+    startup_error = {"pi": pi_runner._opt_out, "dsh": dsh_runner._opt_out}.get(kind)
     monkeypatch.setattr(s, "BACKOFF_MAX", 0.01)
     async def exercise():
-        async with runners() as (owner, processes):
-            lease = await owner.acquire("fake")
+        async with runners(kinds=(kind,), startup_error=startup_error) as (owner, processes):
+            lease = await owner.acquire(kind)
             for number in range(1, 6):
                 current = processes[-1]
-                state = owner._kinds["fake"]
+                state = owner._kinds[kind]
                 generation = lease._generation
                 current.kill()
                 await generation.exited.wait()
@@ -499,10 +503,14 @@ def test_fifth_failure_stops_demand_retries_and_returns_unavailable(runners, mon
                 if number < 5:
                     await asyncio.shield(state.restart)
                     assert len(processes) == number and not state.members
-                    lease = await owner.acquire("fake")
+                    lease = await owner.acquire(kind)
                     assert len(processes) == number + 1
-            with pytest.raises(s.RunnerUnavailable, match="five failures"):
-                await owner.acquire("fake")
+            with pytest.raises(s.RunnerUnavailable, match="five failures") as caught:
+                await owner.acquire(kind)
+            message = str(caught.value)
+            assert "runner-exited:" in message
+            if startup_error is not None:
+                assert f'[runtimes] {kind} = "cli"' in message
             assert len(processes) == 5 and (state.restart is None or state.restart.done())
     run(exercise())
 
