@@ -105,6 +105,50 @@ def test_exchange_binds_in_process_tools_and_runner_caps(agent_db, monkeypatch, 
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(("runtime", "pid", "expected"), [
+    ("dsh", None, "Planner DSH started"),
+    ("claude-code", 123, "Planner Claude Code started (pid 123)"),
+])
+def test_planner_start_activity_uses_launch_runtime(
+    agent_db: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    runtime: str, pid: int | None, expected: str,
+) -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from looper.agents.agent_settings import AgentSettings, Launch
+    from looper.agents.profile_registry import LegacyProviderSpec, RuntimeSpec, builtin_resolved_profile
+    from looper.agents.runtimes import ApiProtocol, AuthKind
+    from looper.agents.tiers.planner import TaskPlan
+    from tests.runtime_model_helpers import resolved_profile
+
+    async def run() -> None:
+        agent = PlannerAgent(task_id="runtime-label", runtime_root=tmp_path)
+        agent._plan = TaskPlan("plan", "goal", "Inspect", str(tmp_path))
+        runtime_adapter = adapter(runtime)
+        profile = replace(builtin_resolved_profile(), runtime=RuntimeSpec("runtime", runtime, runtime),
+                          agent_teams=False)
+        if runtime == "dsh":
+            provider = LegacyProviderSpec("test", "Test", AuthKind.API_KEY,
+                                          protocols=frozenset({ApiProtocol.ANTHROPIC_MESSAGES}), api_key="test-only")
+            profile = resolved_profile("test", "Test", profile.runtime, provider, "deepseek-flash", "high")
+        monkeypatch.setattr(agent, "_load_agent_settings", AsyncMock(return_value=AgentSettings(profile=profile)))
+        # Exercise the launch activity without starting a real runtime or reading its login.
+        session = SimpleNamespace(label=agent.agent_id, started=False, pid=pid, stale=lambda _: False,
+                                  start=AsyncMock(), stop=AsyncMock())
+        agent._claude, agent._claude_runtime = session, runtime_adapter
+        monkeypatch.setattr(agent, "_claude_command", lambda *args: [])
+        monkeypatch.setattr(Launch, "environment", lambda self: {})
+        monkeypatch.setattr(agent, "_exchange", AsyncMock(return_value="reply"))
+        try:
+            assert await agent._turn("Inspect") == "reply"
+        finally:
+            await session.stop()
+        assert [line for line in activity(agent_db) if " started" in line] == [expected]
+
+    asyncio.run(run())
+
+
 # --- Scripted Planner replies ---
 
 
@@ -436,6 +480,50 @@ class TestPlanning:
         repair = claude.turns()[1]["text"]
         assert repair.startswith("[PLAN] Your last reply broke the reply contract: the reply has no ```json")
 
+    @pytest.mark.parametrize("empty", ["", " \n\t"])
+    def test_empty_plan_gets_one_repair_turn(self, planner_claude: Any, agent_db: Any, empty: str) -> None:
+        claude = planner_claude(empty, plan(step("s1")), decide("accept"))
+        h = drive(claude, always(WORK_OK))
+
+        assert h.final().payload["status"] == "completed"
+        assert h.dispatched_at_turn == [2]
+        assert len(claude.turns()) == 3
+        assert "Your last reply broke the reply contract: the reply was empty" in claude.turns()[1]["text"]
+        assert sum("asking again" in line for line in activity(agent_db)) == 1
+        first = agent_db.finish_record.await_args_list[0].kwargs
+        assert first["error"] == "Claude Code returned an empty reply"
+        assert first["status"] == "failed" and first["cost_usd"] == 0.25
+
+    @pytest.mark.parametrize("repaired", ["", "still not json"])
+    def test_empty_plan_with_invalid_repair_fails(self, planner_claude: Any, agent_db: Any, repaired: str) -> None:
+        claude = planner_claude("", repaired)
+        h = drive(claude, always(WORK_OK))
+
+        assert h.final().payload["status"] == "failed"
+        assert "Planning failed: invalid reply after a repair turn" in h.final().payload["summary"]
+        if not repaired:
+            assert "the reply was empty" in h.final().payload["summary"]
+        assert h.dispatched == []
+        assert len(claude.turns()) == 2
+        assert sum("asking again" in line for line in activity(agent_db)) == 1
+
+    @pytest.mark.parametrize(("answer", "error"), [
+        ("<error>", "Claude Code turn did not succeed"),
+        ("<exit>", "Claude Code exited before finishing the turn (exit code 3)"),
+        ("<budget>", "Reached maximum budget"),
+    ])
+    def test_failed_empty_turn_is_not_repaired(
+        self, planner_claude: Any, agent_db: Any, answer: str, error: str,
+    ) -> None:
+        claude = planner_claude(answer, plan(step("s1")))
+        h = drive(claude, always(WORK_OK))
+
+        assert h.final().payload["status"] == "failed"
+        assert error in h.final().payload["summary"]
+        assert h.dispatched == []
+        assert len(claude.turns()) == 1
+        assert not any("asking again" in line for line in activity(agent_db))
+
     def test_second_invalid_plan_fails_the_task(self, planner_claude: Any, agent_db: Any) -> None:
         claude = planner_claude("no plan", plan(step("s1"), step("s2", "s9")))
         h = drive(claude, always(WORK_OK))
@@ -466,6 +554,7 @@ class TestPlanning:
         assert "longer than the 1 s limit (timeout_seconds)" in h.final().payload["summary"]  # type: ignore[union-attr]
         # The stand-in was killed (one killed before it logged its pid is not listed at all).
         assert not any(_alive(pid) for pid in claude.pids())
+        assert len(claude.turns()) == 1
 
 
 # --- Decisions on results ---
