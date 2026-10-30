@@ -738,20 +738,25 @@ class Scheduler:
                     run = await db_schedules.get_run(run_id, pool=conn)
                     if schedule is None or run is None or run["status"] != db_schedules.GATING:
                         return
-                    if not firing_guard.enter_context(_project_firing(schedule["project_id"])):
-                        return
+                    allowed = firing_guard.enter_context(_project_firing(schedule["project_id"]))
                     output = result.stdout.strip()
                     await db_schedules.update_run(conn, run_id, gate_output=output or None)
-                    try:
-                        if schedule["enabled"] != enabled:
-                            raise ValueError("schedule enabled state changed while its gate ran")
-                        current = await effective_schedule(conn, schedule)
-                        if configuration_error or fingerprint(schedule, current) != expected:
-                            raise ValueError(configuration_error or "schedule/template configuration changed while its gate ran")
-                    except ValueError as exc:
-                        await db_schedules.update_run(conn, run_id, status="failed", finished_at=now, error=str(exc))
-                        await db_schedules.count_outcome(conn, schedule_id, "failed", now)
+                    if not allowed:
+                        await db_schedules.update_run(conn, run_id, status="gate_failed", finished_at=now,
+                                                      error="project delete refused the gate's task start")
+                        await db_schedules.count_outcome(conn, schedule_id, "gate_failed", now)
                         launched = _Launched(run_id, ended=True)
+                    else:
+                        try:
+                            if schedule["enabled"] != enabled:
+                                raise ValueError("schedule enabled state changed while its gate ran")
+                            current = await effective_schedule(conn, schedule)
+                            if configuration_error or fingerprint(schedule, current) != expected:
+                                raise ValueError(configuration_error or "schedule/template configuration changed while its gate ran")
+                        except ValueError as exc:
+                            await db_schedules.update_run(conn, run_id, status="failed", finished_at=now, error=str(exc))
+                            await db_schedules.count_outcome(conn, schedule_id, "failed", now)
+                            launched = _Launched(run_id, ended=True)
                     if launched is not None:
                         pass
                     elif not result.ok:

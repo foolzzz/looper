@@ -641,6 +641,8 @@ class TaskRouter:
     async def _handle_restart(self, envelope: MessageEnvelope) -> None:
         """Run a task again as its ``RestartMode`` says: continued from its saved plan (the default), planned anew,
         or continued at a raised spend cap."""
+        from ..scheduler import _project_firing
+
         assert self._bus is not None
         task_id = envelope.payload.get("task_id", "")
         try:
@@ -670,41 +672,46 @@ class TaskRouter:
             logger.warning("task %s status=%s not restartable", task_id, db_row["status"])
             return
 
-        start_over = mode is RestartMode.START_OVER
-        if start_over:
-            # Planned anew: the steps go, and so do their worktrees and branches.
+        # Keep restart cleanup and Planner startup inside the same barrier as a ready start.
+        with _project_firing(db_row["project_id"]) as allowed:
+            if not allowed:
+                return
+            start_over = mode is RestartMode.START_OVER
+            if start_over:
+                # Planned anew: the steps go, and so do their worktrees and branches.
+                try:
+                    await step_workspaces.remove_task(task_id)
+                except Exception:
+                    logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
+                # And the sessions its runs kept for the room (its room goes with the steps).
+                remove_run_sessions(self._runtime_root, task_id)
             try:
-                await step_workspaces.remove_task(task_id)
+                if not await db_tasks.reset_task_for_restart(task_id, keep_steps=not start_over):
+                    return
             except Exception:
-                logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
-            # And the sessions its runs kept for the room (its room goes with the steps).
-            remove_run_sessions(self._runtime_root, task_id)
-        try:
-            await db_tasks.reset_task_for_restart(task_id, keep_steps=not start_over)
-        except Exception:
-            logger.exception("failed to reset task %s for restart", task_id)
-            return
+                logger.exception("failed to reset task %s for restart", task_id)
+                return
 
-        task = Task.from_row(task_id, db_row)
-        self._tasks[task_id] = task
+            task = Task.from_row(task_id, db_row)
+            self._tasks[task_id] = task
 
-        # The Planner plans the request, unless it carries on with the plan (``restart``) of a task that ran before
-        # and ended as ``ended`` says.
-        carry_on = not start_over and db_row["status"] != db_tasks.READY
-        restart_envelope = MessageEnvelope.create(
-            source=TASK_ROUTER_ADDRESS,
-            target=TASK_ROUTER_ADDRESS,
-            message_type=MessageType.TASK_REQUEST,
-            payload={
-                "requirement": task.requirement,
-                "goal_id": task.goal_id,
-                "work_dir": task.work_dir,
-                "project_id": task.project_id,
-                **({"restart": mode.value, "ended": db_row["status"]} if carry_on else {}),
-            },
-            correlation_id=task.correlation_id,
-        )
-        await self._start(task, restart_envelope)
+            # The Planner plans the request, unless it carries on with the plan (``restart``) of a task that ran before
+            # and ended as ``ended`` says.
+            carry_on = not start_over and db_row["status"] != db_tasks.READY
+            restart_envelope = MessageEnvelope.create(
+                source=TASK_ROUTER_ADDRESS,
+                target=TASK_ROUTER_ADDRESS,
+                message_type=MessageType.TASK_REQUEST,
+                payload={
+                    "requirement": task.requirement,
+                    "goal_id": task.goal_id,
+                    "work_dir": task.work_dir,
+                    "project_id": task.project_id,
+                    **({"restart": mode.value, "ended": db_row["status"]} if carry_on else {}),
+                },
+                correlation_id=task.correlation_id,
+            )
+            await self._start(task, restart_envelope)
 
     async def _teardown_task(self, task_id: str) -> None:
         planner = self._planners.get(task_id)

@@ -350,15 +350,16 @@ class TestTaskProject:
         agent_db.create_task.assert_not_awaited()
         assert any("project" in record.getMessage() for record in caplog.records)
 
-    def test_restart_keeps_the_project(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize("reset", [True, False])
+    def test_restart_keeps_the_project(self, monkeypatch: pytest.MonkeyPatch, reset: bool) -> None:
         from looper.db import tasks as db_tasks
 
         row = {"id": "t1", "requirement": "build it", "goal_id": "g1", "work_dir": "/tmp/p",
                "project_id": "proj-7", "status": "stopped", "correlation_id": "c1", "origin_channel_id": ""}
         monkeypatch.setattr(db_tasks, "get_task", AsyncMock(return_value=row))
-        monkeypatch.setattr(db_tasks, "reset_task_for_restart", AsyncMock(return_value=True))
+        monkeypatch.setattr(db_tasks, "reset_task_for_restart", AsyncMock(return_value=reset))
 
-        async def _run() -> tuple[Task, MessageEnvelope]:
+        async def _run() -> Any:
             with tempfile.TemporaryDirectory() as tmp:
                 bus = MessageBus(runtime_root=Path(tmp))
                 router = TaskRouter(runtime_root=Path(tmp))
@@ -370,10 +371,15 @@ class TestTaskProject:
                     message_type=MessageType.TASK_RESTART, payload={"task_id": "t1"},
                 ))
                 await bus.shutdown()
-                task, envelope = assign.await_args.args
-                return task, envelope
+                if not reset:
+                    assert router._tasks == {}
+                return assign.await_args
 
-        task, envelope = asyncio.run(_run())
+        assigned = asyncio.run(_run())
+        if not reset:
+            assert assigned is None
+            return
+        task, envelope = assigned.args
         assert task.project_id == "proj-7"
         assert envelope.payload["project_id"] == "proj-7"
 
