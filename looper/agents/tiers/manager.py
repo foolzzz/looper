@@ -36,11 +36,12 @@ import json
 import logging
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from ..broadcast import Broadcaster
@@ -1291,9 +1292,11 @@ class ManagerAgent:
             await token.keep("claude_stop", self._claude.stop(), 10)
             self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
             command = self._claude_command(prompt_file, launch)
-            await self._start_runtime(token, command, launch,
-                cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
-                totals=self._session_totals, price=launch.price)
+            with self._runtime_start_budget(launch) as seconds:
+                await token.keep("claude_start", self._claude.start(
+                    command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
+                    totals=self._session_totals, price=launch.price), seconds,
+                    undo=lambda: self._claude.stop(kill=True))
             self._process = _Process(command, signature, system_prompt, launch)
         if switch is None and self._session_id and isinstance(self._claude, ReportsContext) \
                 and self._claude.started and self._claude.context_full:
@@ -1306,14 +1309,15 @@ class ManagerAgent:
             envelope=envelope, turn=ask.turn, message=ask.message, note=ask.note, retried=ask.retried, system_prompt=system_prompt,
             launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text)
 
-    async def _start_runtime(self, token: TurnToken, command: list[str], launch: Launch, **kwargs: Any) -> None:
+    @contextmanager
+    def _runtime_start_budget(self, launch: Launch) -> Iterator[float]:
+        """Choose the startup budget and report timeouts; the caller keeps the start on its turn token."""
         from ..runtimes.runner.session import RunnerSession
 
         hosted = isinstance(self._claude, RunnerSession) or launch.runtime.hosts_runs
         seconds = RUNNER_START_SECONDS if hosted else RUNTIME_START_SECONDS
         try:
-            await token.keep("claude_start", self._claude.start(command, **kwargs), seconds,
-                             undo=lambda: self._claude.stop(kill=True))
+            yield seconds
         except TimeoutError:
             cause = f"{launch.runtime.label} did not start within {seconds:g} s"
             kind = getattr(self._claude, "kind", launch.runtime.type)
@@ -1370,11 +1374,12 @@ class ManagerAgent:
                 self._session_runtime, self._session_profile = launch.runtime.type, launch.profile.id
                 self._session_provider = launch.profile.provider.id
                 try:
-                    await self._start_runtime(token, command, launch,
-                        cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
-                        totals=self._session_totals if run.resuming else None,
-                        autonomous=self._autonomous_turns(command, prepared.system_prompt, launch),
-                        price=launch.price)
+                    with self._runtime_start_budget(launch) as seconds:
+                        await token.keep("claude_start", self._claude.start(
+                            command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
+                            totals=self._session_totals if run.resuming else None,
+                            autonomous=self._autonomous_turns(command, prepared.system_prompt, launch),
+                            price=launch.price), seconds, undo=lambda: self._claude.stop(kill=True))
                 except TurnStopped:
                     self._process = _Process(self._claude.command or command, signature, prepared.system_prompt, launch)
                     raise
