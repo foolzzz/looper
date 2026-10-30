@@ -68,28 +68,32 @@ def test_incomplete_requests_diagnose_missing_conditions(tmp_path, monkeypatch, 
         _, installed = require_dsh()
         reply = peer.Reply(["Partial response"], cut=case != "drained-without-stop",
                            status=401 if case == "truncated-rejection" else 200)
-        with peer.MessagesServer([reply]) as server:
+        # A truncated HTTP body is normalized by the SDK to TRANSPORT.
+        count = 4 if case == "truncated-rejection" else 1
+        with peer.MessagesServer([reply] * count) as server:
             async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (process, send, receive):
                 client = Client(send, receive)
                 await client.start()
                 sid = (await client.call("session/new", params_for(tmp_path, server)))["session_id"]
                 await client.prompt(sid)
                 result = await client.settled(sid)
-                end, = assert_accounted(client, sid)
-                assert not end["complete"] and not result["usage_complete"]
-                assert len(server.requests) == 1
+                ends = assert_accounted(client, sid, count=count)
+                assert all(not end["complete"] for end in ends) and not result["usage_complete"]
+                assert len(server.requests) == count
                 process.stdin.close()
                 assert await asyncio.wait_for(process.wait(), 5) == 0
                 diagnostics = (await process.stderr.read()).decode()
-                line, = [line for line in diagnostics.splitlines() if line.startswith("usage_incomplete ")]
-                assert f"request_id={end['request_id']}" in line
-                assert "message_stop=false" in line and "terminal_usage=false" in line
-                missing = line.split("missing=", 1)[1].split()[0].split(",")
-                assert {"message_stop", "terminal_usage"} <= set(missing)
-                if case == "drained-without-stop":
-                    assert "body_done=true" in line
-                else:
-                    assert "body_done=false" in line and "body_drained_on_error" in missing
+                lines = [line for line in diagnostics.splitlines() if line.startswith("usage_incomplete ")]
+                assert len(lines) == count
+                for end, line in zip(ends, lines):
+                    assert f"request_id={end['request_id']}" in line
+                    assert "message_stop=false" in line and "terminal_usage=false" in line
+                    missing = line.split("missing=", 1)[1].split()[0].split(",")
+                    assert {"message_stop", "terminal_usage"} <= set(missing)
+                    if case == "drained-without-stop":
+                        assert "body_done=true" in line
+                    else:
+                        assert "body_done=false" in line and "body_drained_on_error" in missing
                 assert "Partial response" not in diagnostics and "Disposable prompt" not in diagnostics
 
     run(exercise())
@@ -145,17 +149,18 @@ def test_in_band_provider_errors_have_protocol_types(tmp_path, monkeypatch, erro
 
     async def exercise():
         _, installed = require_dsh()
-        with peer.MessagesServer([["unused"]]) as server:
+        count = 1 if error_type == "authentication_error" else 4
+        with peer.MessagesServer([["unused"]] * count) as server:
             async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
                 client = Client(send, receive)
                 await client.start()
                 sid = (await client.call("session/new", params_for(tmp_path, server)))["session_id"]
                 await client.prompt(sid)
                 result = await client.settled(sid)
-                end, = assert_accounted(client, sid)
+                ends = assert_accounted(client, sid, count=count)
                 assert result["outcome"] == "failed" and result["error"]["kind"] == kind
-                assert end["status"] == "error" and not end["complete"]
-                assert len(server.requests) == 1
+                assert all(end["status"] == "error" and not end["complete"] for end in ends)
+                assert len(server.requests) == count
 
     run(exercise())
 
