@@ -134,9 +134,9 @@ class ErrorCode(IntEnum):
 
 
 class ProtocolError(ValueError):
-    def __init__(self, code: ErrorCode):
+    def __init__(self, code: ErrorCode, message: str | None = None):
         self.code = code
-        super().__init__(code.name)  # Never retain the offending payload.
+        super().__init__(message or code.name)  # Never retain the offending payload.
 
 
 class Payload(dict):

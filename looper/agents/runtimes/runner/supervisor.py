@@ -29,6 +29,8 @@ SHUTDOWN_TIMEOUT = 5.0
 DIAGNOSTIC_BYTES = 8192
 STDERR_LINES_PER_SECOND = 10
 STDERR_DRAIN_TIMEOUT = 1.0
+MAX_RUNNERS_PER_KIND = 4
+IDLE_STOP_SECONDS = 300.0
 _KIND = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,63}")
 _ENV = frozenset({"PATH", "LANG", "LANGUAGE", "TZ", "LC_ALL", "LC_CTYPE", "LC_NUMERIC",
     "LC_TIME", "LC_COLLATE", "LC_MONETARY", "LC_MESSAGES", "LC_PAPER", "LC_NAME",
@@ -130,7 +132,7 @@ class RunnerLease:
 class _Kind:
     command: tuple[str, ...]
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    generation: _Generation | None = None
+    members: list[_Generation] = field(default_factory=list)
     number: int = 0
     failures: deque = field(default_factory=deque)
     fatal: bool = False
@@ -153,6 +155,7 @@ class _Generation:
     failure: asyncio.Task | None = None
     failed: bool = False
     stopping: bool = False
+    idle: asyncio.Task | None = None
     diagnostics: deque[bytes] = field(default_factory=deque, repr=False)
 
 
@@ -221,46 +224,63 @@ class RunnerSupervisor:
         if owner is not None and (not owner or not owner_name or owner_name.startswith(".")):
             raise ValueError("runner owner must name a safe state directory")
         state = self._kinds[kind]
-        async with state.lock:
-            if self._stopped:
-                raise RunnerUnavailable("runner supervisor is stopped")
-            self._trim(state)
-            if state.fatal:
-                raise RunnerUnavailable("runner configuration or protocol version is invalid")
-            if len(state.failures) >= MAX_FAILURES:
-                raise RunnerUnavailable("runner unavailable: five failures within ten minutes")
-            if state.generation is None:
-                if state.restart is not None and not state.restart.done():
-                    raise RunnerUnavailable("runner unavailable during restart backoff")
-                await _joined(self._own(self._start(kind, state)))
-            generation = state.generation
-            if generation.process.returncode is not None:
-                self._failed(generation)
-            if self._stopped or generation.failed or generation.bridge._error:
-                raise RunnerUnavailable("runner generation is unavailable; resume was lost")
-            if len(generation.leases) >= generation.cap:
-                raise ProtocolError(ErrorCode.CAPACITY)
-            key = uuid.uuid4().hex
-            directory = _private(generation.directory / "sessions" / key)
-            try:
-                if state_dir is not None:
-                    state_dir = Path(state_dir)
-                    state_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    state_dir = _private(state_dir)
-                elif owner_name is not None:
-                    state_dir = _private(_private(_private(self.root / "state") / kind) / owner_name)
-                else:
-                    state_dir = _private(directory / "native")
-                lease = RunnerLease(generation.bridge, generation.directory.name, key, directory,
-                    _private(directory / "home"), state_dir, _private(directory / "agent"),
-                    self, generation)
-            except BaseException:
-                shutil.rmtree(directory)
-                raise
-            generation.leases.add(lease)  # Opening counts, before releasing the kind lock.
-            return lease
+        while True:
+            backoff = None
+            async with state.lock:
+                if self._stopped:
+                    raise RunnerUnavailable("runner supervisor is stopped")
+                # Reap dead members before counting the pool or selecting free slots.
+                for member in list(state.members):
+                    if member.process.returncode is not None or member.bridge._error:
+                        self._failed(member)
+                    if member.failed:
+                        await self._retire(member)
+                generation = max(state.members, key=lambda m: m.cap - len(m.leases), default=None)
+                if generation is None or len(generation.leases) >= generation.cap:
+                    if len(state.members) >= MAX_RUNNERS_PER_KIND:
+                        total = sum(member.cap for member in state.members)
+                        raise ProtocolError(ErrorCode.CAPACITY, f"CAPACITY: runner pool has {total} session slots; all are in use")
+                    self._trim(state)
+                    if state.fatal:
+                        raise RunnerUnavailable("runner configuration or protocol version is invalid")
+                    if len(state.failures) >= MAX_FAILURES:
+                        raise RunnerUnavailable("runner unavailable: five failures within ten minutes")
+                    if state.restart is not None and not state.restart.done():
+                        backoff = state.restart
+                    else:
+                        # The kind lock covers the handshake and first reservation,
+                        # so concurrent acquisitions cannot over-expand the pool.
+                        generation = await _joined(self._own(self._start(kind, state)))
+                if backoff is None:
+                    if self._stopped or generation.failed or generation.bridge._error:
+                        raise RunnerUnavailable("runner generation is unavailable; resume was lost")
+                    key = uuid.uuid4().hex
+                    directory = _private(generation.directory / "sessions" / key)
+                    try:
+                        if state_dir is not None:
+                            state_dir = Path(state_dir)
+                            state_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                            state_dir = _private(state_dir)
+                        elif owner_name is not None:
+                            state_dir = _private(_private(_private(self.root / "state") / kind) / owner_name)
+                        else:
+                            state_dir = _private(directory / "native")
+                        lease = RunnerLease(generation.bridge, generation.directory.name, key, directory,
+                            _private(directory / "home"), state_dir, _private(directory / "agent"),
+                            self, generation)
+                    except BaseException:
+                        shutil.rmtree(directory)
+                        raise
+                    generation.leases.add(lease)  # Opening counts, before releasing the kind lock.
+                    if generation.idle is not None:
+                        generation.idle.cancel()
+                        generation.idle = None
+                    return lease
+            # Wait without the kind lock, then recheck members and free slots:
+            # a healthy member may have freed capacity during the backoff.
+            await asyncio.shield(backoff)
 
-    async def _start(self, kind: str, state: _Kind) -> None:
+    async def _start(self, kind: str, state: _Kind) -> _Generation:
         self.root.parent.mkdir(parents=True, exist_ok=True)
         _private(self.root)
         numbers = [int(m[1]) for path in self.root.iterdir()
@@ -301,8 +321,13 @@ class RunnerSupervisor:
             generation.cap = min(self.session_cap, maximum) if caps.get("per_session_isolation") is True else 1
             if generation.bridge._error or process.returncode is not None:
                 raise RunnerUnavailable("runner exited during initialization")
-            state.generation = generation
+            state.members.append(generation)
             generation.waiter = self._own(self._wait(generation))
+            self._idle(generation)
+            logger.info("runner %s member %s started: sessions=%d capacity=%d pool_sessions=%d",
+                        kind, directory.name.rsplit("-", 1)[1], len(generation.leases), generation.cap,
+                        sum(len(member.leases) for member in state.members))
+            return generation
         except BaseException as error:
             # Timeouts and transient I/O failures use the same bounded restart path as a crash.
             state.fatal = (isinstance(error, (ValueError, ProtocolError)) or
@@ -337,11 +362,11 @@ class RunnerSupervisor:
         if not generation.stopping:
             generation.failure = self._own(self._recover(generation))
 
-    async def invalidate(self, kind: str, cause: BaseException) -> None:
-        state = self._kinds[kind]
+    async def invalidate(self, lease: RunnerLease, cause: BaseException) -> None:
+        generation = lease._generation
+        state = generation.state
         async with state.lock:
-            generation = state.generation
-            if generation is None:
+            if generation not in state.members:
                 return
             if (isinstance(cause, ValueError) and not isinstance(cause, ProtocolError)) or (
                     isinstance(cause, (ProtocolError, RpcFailure)) and cause.code == ErrorCode.VERSION_MISMATCH):
@@ -350,16 +375,19 @@ class RunnerSupervisor:
         if generation.failure:
             await _joined(generation.failure)
 
-    async def _recover(self, generation: _Generation) -> None:
+    async def _retire(self, generation: _Generation) -> None:
+        # Caller holds the kind lock; a queued recovery may find it already reaped.
         state = generation.state
-        async with state.lock:
-            if state.generation is not generation:
-                return
-            await self._dispose(generation)
-            if state.generation is generation:
-                state.generation = None
-                state.failures.append(time.monotonic())
-                self._restart(generation.kind, state)
+        if generation not in state.members:
+            return
+        await self._dispose(generation)
+        state.members.remove(generation)
+        state.failures.append(time.monotonic())
+        self._restart(generation.kind, state)
+
+    async def _recover(self, generation: _Generation) -> None:
+        async with generation.state.lock:
+            await self._retire(generation)
 
     def _restart(self, kind: str, state: _Kind) -> None:
         self._trim(state)
@@ -368,24 +396,29 @@ class RunnerSupervisor:
             state.restart = self._own(self._restart_loop(kind, state))
 
     async def _restart_loop(self, kind: str, state: _Kind) -> None:
-        while not self._stopped and not state.fatal:
-            self._trim(state)
-            if len(state.failures) >= MAX_FAILURES:
-                return
-            delay = min(BACKOFF_MAX, BACKOFF_BASE * 2 ** max(0, len(state.failures) - 1))
-            try:
-                await asyncio.wait_for(self._shutdown.wait(), delay)
-                return
-            except TimeoutError:
-                pass
+        # Back off after failure, but replace a member only on demand.
+        delay = min(BACKOFF_MAX, BACKOFF_BASE * 2 ** max(0, len(state.failures) - 1))
+        try:
+            await asyncio.wait_for(self._shutdown.wait(), delay)
+        except TimeoutError:
+            pass
+
+    def _idle(self, generation: _Generation) -> None:
+        if not self._stopped and not generation.stopping and not generation.leases and generation.idle is None:
+            generation.idle = self._own(self._stop_idle(generation))
+
+    async def _stop_idle(self, generation: _Generation) -> None:
+        try:
+            await asyncio.sleep(IDLE_STOP_SECONDS)
+            state = generation.state
             async with state.lock:
-                if self._stopped or state.generation is not None:
-                    return
-                try:
-                    await self._start(kind, state)
-                except RunnerUnavailable:
-                    continue
-                return
+                if (not self._stopped and not generation.failed and not generation.leases
+                        and sum(not member.failed for member in state.members) > 1):
+                    await self._dispose(generation, graceful=True)
+                    state.members.remove(generation)
+        finally:
+            if generation.idle is asyncio.current_task():
+                generation.idle = None
 
     async def _release(self, lease: RunnerLease) -> None:
         generation, bridge = lease._generation, lease.bridge
@@ -420,9 +453,14 @@ class RunnerSupervisor:
                     shutil.rmtree(lease.directory)
                 finally:
                     generation.leases.discard(lease)
+                    self._idle(generation)
 
     async def _dispose(self, generation: _Generation, *, graceful: bool = False) -> None:
         generation.stopping = True
+        if generation.idle is not None and generation.idle is not asyncio.current_task():
+            generation.idle.cancel()
+            generation.idle = None
+        session_count = len(generation.leases)
         process = generation.process
         known = {}
         if graceful and process.returncode is None:
@@ -466,6 +504,10 @@ class RunnerSupervisor:
             if isinstance(error, BaseException) and not isinstance(error, asyncio.CancelledError):
                 logger.error("runner %s cleanup failed (%s)", generation.kind, type(error).__name__)
 
+        logger.info("runner %s member %s stopped: sessions=%d capacity=%d pool_sessions=%d",
+                    generation.kind, generation.directory.name.rsplit("-", 1)[1], session_count, generation.cap,
+                    sum(len(member.leases) for member in generation.state.members if member is not generation))
+
     async def stop(self) -> None:
         self._stopped = True
         self._shutdown.set()
@@ -476,9 +518,9 @@ class RunnerSupervisor:
     async def _stop(self) -> None:
         async def close_kind(state):
             async with state.lock:
-                if state.generation is not None:
-                    await self._dispose(state.generation, graceful=True)
-                    state.generation = None
+                for generation in list(state.members):
+                    await self._dispose(generation, graceful=True)
+                    state.members.remove(generation)
         results = await asyncio.gather(*(close_kind(state) for state in self._kinds.values()),
                                        return_exceptions=True)
         if self._tasks:

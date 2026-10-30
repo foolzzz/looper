@@ -233,7 +233,7 @@ class RunnerSession:
                 await lease.bridge.wait_settled(turn.session_id, turn.trace_id)
         except (TimeoutError, ConnectionLost, RpcFailure, ProtocolError):
             if not lease.bridge._error:  # A lost generation is already owned by supervisor recovery.
-                await self.supervisor.invalidate(self.kind, ConnectionLost("runner cancellation did not settle"))
+                await self.supervisor.invalidate(lease, ConnectionLost("runner cancellation did not settle"))
 
     def _request_cancel(self) -> None:
         if self._turn is not None:
@@ -396,11 +396,11 @@ class RunnerSession:
             try:
                 done, _ = await asyncio.wait({closing}, timeout=SETTLE_TIMEOUT)
                 if not done and not lease.bridge._error:
-                    await self.supervisor.invalidate(self.kind, ConnectionLost("runner close did not settle"))
+                    await self.supervisor.invalidate(lease, ConnectionLost("runner close did not settle"))
             finally:
                 await _joined(closing)
                 if not lease.bridge._error and lease.session_id in lease.bridge.sessions:
-                    await self.supervisor.invalidate(self.kind, ConnectionLost("runner session close was refused"))
+                    await self.supervisor.invalidate(lease, ConnectionLost("runner session close was refused"))
 
     async def stop(self, *, kill: bool = False) -> None:
         self._closing = True

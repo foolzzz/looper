@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.15] - 2026-10-29
+
+### Changed
+
+- **Runner processes are pooled per SDK, so sessions no longer hit one runner's cap.** With `[runtimes] dsh = "runner"` or `[runtimes] pi = "runner"`, a kind used to run on one runner process, and a lease failed with `CAPACITY` once its session cap was reached (20 for DSH, 10 for pi). The supervisor now starts another runner of that kind when every runner is full, up to four per kind (80 DSH or 40 pi sessions), places new sessions on the runner with the most free slots, and keeps each session on its runner. Extra runners that have been empty for 300 seconds stop; the last one stays. Only a full pool returns `CAPACITY`, now with a message naming the pool's slot count. A crash fails only the sessions of that runner, and a replacement starts on the next acquisition after the crash backoff instead of at once. Starting and stopping a runner is logged with the kind, the runner's index and the session counts. The default `"cli"` runtime is unchanged. ([#903](https://github.com/foolzzz/looper/pull/903))
+
 ## [2.14.14] - 2026-10-29
 
 ### Added
