@@ -36,11 +36,12 @@ import json
 import logging
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from ..broadcast import Broadcaster
@@ -308,6 +309,9 @@ CONVERSATION_MESSAGE_CHARS = 300
 CONVERSATION_MAX_CHARS = 4_000
 # How long the old session may take to write its handoff before the new one starts without it.
 HANDOFF_TIMEOUT_SEC = 300
+RUNTIME_START_SECONDS = 30
+# A runner's first SDK initialize can take 60 seconds, in addition to spawning.
+RUNNER_START_SECONDS = 90
 # How long a stopped turn still waits for its events to be handled (a slow database write) before it ends without.
 STOP_HANDLING_SEC = 3.0
 # How long a stopped turn's own record and session writes may take (a row lock held elsewhere) before it ends without.
@@ -1146,10 +1150,11 @@ class ManagerAgent:
                 return
             else:
                 # Always answer: the chat stream waits for a final reply. What a tool did before is still shown.
-                logger.exception("%s failed to answer %s", self._log, envelope.message_id)
+                cause = str(exc) or type(exc).__name__
+                logger.exception("%s failed to answer %s: %s", self._log, envelope.message_id, cause)
                 hint = exc.hint() if isinstance(exc, ProfileUnavailable) else ""
                 await self._send_reply(
-                    envelope, _with_blocks(f"Manager 出错，没能完成这次回复：{exc}{hint}", turn.blocks), error=str(exc))
+                    envelope, _with_blocks(f"Manager 出错，没能完成这次回复：{cause}{hint}", turn.blocks), error=cause)
                 return
         if turn.refused:
             problem = "Looper 拒绝了管家工具的令牌"
@@ -1287,10 +1292,11 @@ class ManagerAgent:
             await token.keep("claude_stop", self._claude.stop(), 10)
             self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
             command = self._claude_command(prompt_file, launch)
-            await token.keep("claude_start", self._claude.start(
-                command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
-                totals=self._session_totals, price=launch.price), 30,
-                undo=lambda: self._claude.stop(kill=True))
+            with self._runtime_start_budget(launch) as seconds:
+                await token.keep("claude_start", self._claude.start(
+                    command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
+                    totals=self._session_totals, price=launch.price), seconds,
+                    undo=lambda: self._claude.stop(kill=True))
             self._process = _Process(command, signature, system_prompt, launch)
         if switch is None and self._session_id and isinstance(self._claude, ReportsContext) \
                 and self._claude.started and self._claude.context_full:
@@ -1302,6 +1308,24 @@ class ManagerAgent:
         return Prepared(
             envelope=envelope, turn=ask.turn, message=ask.message, note=ask.note, retried=ask.retried, system_prompt=system_prompt,
             launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text)
+
+    @contextmanager
+    def _runtime_start_budget(self, launch: Launch) -> Iterator[float]:
+        """Choose the startup budget and report timeouts; the caller keeps the start on its turn token."""
+        from ..runtimes.runner.session import RunnerSession
+
+        hosted = isinstance(self._claude, RunnerSession) or launch.runtime.hosts_runs
+        seconds = RUNNER_START_SECONDS if hosted else RUNTIME_START_SECONDS
+        try:
+            yield seconds
+        except TimeoutError:
+            cause = f"{launch.runtime.label} did not start within {seconds:g} s"
+            kind = getattr(self._claude, "kind", launch.runtime.type)
+            if hosted and kind in {"pi", "dsh"}:
+                from ..runtimes import dsh_runner, pi_runner
+
+                cause = (pi_runner if kind == "pi" else dsh_runner)._opt_out(cause)
+            raise OSError(cause) from None
 
     async def _start_turn(self, token: TurnToken, prepared: Prepared) -> None:
         """The prepared turn gets its process: the session switch, the runtime swap and the stale process's stop,
@@ -1350,23 +1374,27 @@ class ManagerAgent:
                 self._session_runtime, self._session_profile = launch.runtime.type, launch.profile.id
                 self._session_provider = launch.profile.provider.id
                 try:
-                    await token.keep("claude_start", self._claude.start(
-                        command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
-                        totals=self._session_totals if run.resuming else None,
-                        autonomous=self._autonomous_turns(command, prepared.system_prompt, launch),
-                        price=launch.price), 30,
-                        undo=lambda: self._claude.stop(kill=True))  # given up (closed, timed out): no process
+                    with self._runtime_start_budget(launch) as seconds:
+                        await token.keep("claude_start", self._claude.start(
+                            command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
+                            totals=self._session_totals if run.resuming else None,
+                            autonomous=self._autonomous_turns(command, prepared.system_prompt, launch),
+                            price=launch.price), seconds, undo=lambda: self._claude.stop(kill=True))
                 except TurnStopped:
                     self._process = _Process(self._claude.command or command, signature, prepared.system_prompt, launch)
                     raise
                 except OSError as exc:
-                    logger.error("failed to start %s: %s", launch.runtime.label, exc)
+                    cause = str(exc) or type(exc).__name__
+                    logger.error("failed to start %s: %s", launch.runtime.label, cause)
                     if token.phase is TurnPhase.STOPPING:  # asked while it was started: the turn ends stopped
                         raise TurnStopped() from None
-                    error = f"Cannot start {launch.runtime.label}: {exc}"
+                    error = f"Cannot start {launch.runtime.label}: {cause}"
                     await token.keep("recorder_finish", recorder.finish(output_text=None, result_event=None,
                                                                        error=error), 10)
-                    raise TurnFailed(f"无法启动 {launch.runtime.label}，请检查安装。", error) from None
+                    reply = f"无法启动 {launch.runtime.label}，请检查安装。"
+                    if launch.runtime.hosts_runs and launch.runtime.type in {"pi", "dsh"}:
+                        reply = f"无法启动 {launch.runtime.label}：{cause}"
+                    raise TurnFailed(reply, error) from None
                 if self._claude.command != command:
                     # A per-turn runtime may materialize its owner's home at start.
                     command = self._claude.command

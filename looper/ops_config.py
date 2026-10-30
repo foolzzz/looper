@@ -12,9 +12,10 @@
     log_level = "info"                          # debug, info, warning or error
 
     [runtimes]
-    # Opt in to "runner" for every Pi or DSH role; restart required.
-    pi = "cli"
-    dsh = "cli"
+    # Pi and DSH profiles run on their SDK runners. Set "cli" to opt out.
+    # The setting is read once at startup; restart required.
+    # pi = "runner"
+    # dsh = "runner"
 
     [backup]                                    # how the database is backed up before a schema change
     pg_dump = "/usr/lib/postgresql/17/bin/pg_dump"
@@ -38,7 +39,7 @@ stops the command with a message that names the key and never shows the value. N
 no ``~``, no include.
 
 Environment and ``.env`` settings remain readable until the ops file names them. Only deployment settings are
-read from ``.env``; its contents are never added to the process environment. ``runtimes.pi`` and ``runtimes.dsh`` are file-only.
+read from ``.env``; its contents are never added to the process environment. ``runtimes.pi`` and ``runtimes.dsh`` are file-only and default to ``runner`` (``cli`` is the opt-out).
 """
 
 from __future__ import annotations
@@ -114,8 +115,8 @@ class OpsConfig:
     backup_command: tuple[str, ...] = ()
     backup_verify_command: tuple[str, ...] = ()
     operator_notes_root: str = ""
-    pi_runtime: str = "cli"
-    dsh_runtime: str = "cli"
+    pi_runtime: str = "runner"
+    dsh_runtime: str = "runner"
     sources: Mapping[str, Source] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
 
@@ -445,10 +446,11 @@ def render(config: OpsConfig) -> str:
         else '# public_url = "https://looper.example.com"',
         f"log_level = {_toml_string(config.log_level)}" if config.log_level != "info" else '# log_level = "info"',
         "",
-        '# Opt in to "runner" for every Pi or DSH role; restart required.',
+        '# Pi and DSH profiles run on their SDK runners. Set "cli" to opt out. '
+        'The setting is read once at startup; restart required.',
         "[runtimes]",
-        'pi = "runner"' if config.pi_runtime == "runner" else '# pi = "cli"',
-        'dsh = "runner"' if config.dsh_runtime == "runner" else '# dsh = "cli"',
+        'pi = "cli"' if config.pi_runtime == "cli" else '# pi = "runner"',
+        'dsh = "cli"' if config.dsh_runtime == "cli" else '# dsh = "runner"',
         "",
         "[backup]",
         f"pg_dump = {_toml_string(config.pg_dump)}" if config.pg_dump else '# pg_dump = "/path/to/pg_dump"',

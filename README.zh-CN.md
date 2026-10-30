@@ -267,8 +267,10 @@ PostgreSQL 是启动的硬性依赖。空库只运行一次 `looper/db/schema.sq
 | `backup.command` | 否 | 一个 argv 数组，它的标准输出就是备份；`{dbname}` 和 `{user}` 从数据库 URL 填入 |
 | `backup.verify_command` | 否 | 一个 argv 数组，从标准输入读备份，像 `pg_restore --list` 一样列出内容；`backup.command` 是 `docker exec ... <容器> pg_dump ...` 时自动推导，否则用本机 `pg_restore` |
 | `operator_notes.root` | 否 | 操作者的 Claude Code 存放项目笔记的目录，必须是绝对路径 |
+| `runtimes.pi` | 否 | `"runner"`（默认）或 `"cli"`。Pi 的 Profile 走 SDK runner（Node 22.19+，pi 1.3.x）。`"cli"` 改走 Pi CLI。只写在文件里，启动读取一次，改完重启。runner 起不来时，错误写明原因和这条退路 |
+| `runtimes.dsh` | 否 | `"runner"`（默认）或 `"cli"`。DSH 的 Profile 走 SDK runner（Node 22.19+，dsh 0.2.1-rc.2）。`"cli"` 改走 DSH CLI。只写在文件里，启动读取一次，改完重启。runner 起不来时，错误写明原因和这条退路 |
 
-每一项按这个顺序取第一个：显式参数（`--host`、`--port`，以及把 `server.log_level` 设为 `debug` 的 `--verbose`）、文件、然后在文件还没写这项之前仍读的旧变量（环境里的 `LOOPER_DATABASE_URL`、`LOOPER_PUBLIC_URL`、`LOOPER_PG_DUMP`、`LOOPER_BACKUP_CMD`、`LOOPER_BACKUP_VERIFY_CMD`、`LOOPER_OPERATOR_NOTES_ROOT`，以及前四项的 `LOOPX_*` 同名；笔记根目录和校验命令只认 `LOOPER_` 前缀）、再是 checkout 的 `.env` 里的同名、最后是内置默认值。数据库 URL 没有默认值。用到旧变量就记一条弃用警告，只写变量名、不写值。支持的安装路径是私有运维文件加上 `--runtime-root`。runtime root 是 `--runtime-root`，否则是 `LOOPER_RUNTIME_ROOT`（已弃用，会警告；`LOOPX_RUNTIME_ROOT` 同样），否则是 `~/.looper`。文件本身不写 runtime root。`.env` 不再放进 Looper 的环境：只从中读上述旧设置，其余的键（例如某个渠道 token 变量）会被忽略，并在警告里点名。
+每一项按这个顺序取第一个：显式参数（`--host`、`--port`，以及把 `server.log_level` 设为 `debug` 的 `--verbose`）、文件、然后在文件还没写这项之前仍读的旧变量（环境里的 `LOOPER_DATABASE_URL`、`LOOPER_PUBLIC_URL`、`LOOPER_PG_DUMP`、`LOOPER_BACKUP_CMD`、`LOOPER_BACKUP_VERIFY_CMD`、`LOOPER_OPERATOR_NOTES_ROOT`，以及前四项的 `LOOPX_*` 同名；笔记根目录和校验命令只认 `LOOPER_` 前缀）、再是 checkout 的 `.env` 里的同名、最后是内置默认值。数据库 URL 没有默认值。用到旧变量就记一条弃用警告，只写变量名、不写值。支持的安装路径是私有运维文件加上 `--runtime-root`。runtime root 是 `--runtime-root`，否则是 `LOOPER_RUNTIME_ROOT`（已弃用，会警告；`LOOPX_RUNTIME_ROOT` 同样），否则是 `~/.looper`。文件本身不写 runtime root。`.env` 不再放进 Looper 的环境：只从中读上述旧设置，其余的键（例如某个渠道 token 变量）会被忽略，并在警告里点名。`runtimes.pi` 和 `runtimes.dsh` 只写在运维文件里。内置默认是 `"runner"`，文件里的 `"cli"` 是退回 CLI 的设置。Claude Code 使用 Claude Code CLI。
 
 已有安装迁过来：跑一次 `looper config init-ops`。它按当前生效的值写成文件，权限 0600，已有文件则拒绝覆盖。
 什么都没配时，写入旧的默认值 `postgresql://localhost:5432/loopx` 并说明。然后从 shell 和 `.env` 里删掉旧变量；
@@ -314,6 +316,7 @@ agent 还需要别的变量时，从它的设置里取（Settings，或项目层
 保存为 Settings → Agent Profiles 里的一个 **Agent Profile**，在 Settings → Roles 里选用。
 
 - **运行时**是 Looper 有适配器的某类 agent CLI（Claude Code、Codex 或 OMP）。运行时是内置的：Looper 在服务的 PATH 上找到它们并探测版本和能力，Settings → Agent Runtimes 列出它们并可 Re-detect；要换一个可执行文件，就改服务的 PATH。
+- Pi 和 DSH 的 Profile 默认走各自的 SDK runner（Node 22.19+，pi 1.3.x，dsh 0.2.1-rc.2）。Claude Code 使用 Claude Code CLI。要让其中一家改走 CLI，在运维文件里写 `[runtimes] pi = "cli"` 或 `[runtimes] dsh = "cli"`，然后重启。这项在启动时读取一次。runner 起不来时，错误写明原因和这条退路；CLI 只在写成这个显式值时使用。
 - **提供方**是 agent 请求发往的地方：它支持的协议、模型及价格，以及认证方式：运行时自己的登录，或 API key（API 从不返回它）。
 - 内置 agent `claude-code/opus`（Claude Code、它自己的登录、`opus`）运行所有没有另选 agent 的角色。
 

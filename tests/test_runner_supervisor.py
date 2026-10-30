@@ -26,8 +26,9 @@ def fake_runner():
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         if not options.get("initialize_child"):
             child = start_child()
-    Path("observed.json").write_text(json.dumps({"cwd": os.getcwd(), "env": dict(os.environ),
+    Path("observed.tmp").write_text(json.dumps({"cwd": os.getcwd(), "env": dict(os.environ),
         "child": child.pid if child else None}))
+    Path("observed.tmp").replace("observed.json")
     if options.get("stderr"):
         sys.stderr.write("x" * 65536 + "\n" + "safe\u2028one-line\n" + "secret-sentinel\n" * 30)
         sys.stderr.flush()
@@ -44,9 +45,10 @@ def fake_runner():
             if options.get("initialize_child"):
                 child = start_child()
                 observed = json.loads(Path("observed.json").read_text())
-                Path("observed.json").write_text(json.dumps({**observed, "child": child.pid}))
+                Path("observed.tmp").write_text(json.dumps({**observed, "child": child.pid}))
+                Path("observed.tmp").replace("observed.json")
             if options.get("slow_initialize"):
-                time.sleep(0.25)
+                time.sleep(0.25 if options["slow_initialize"] is True else options["slow_initialize"])
             result = {"protocol_version": options.get("version", "0.1"),
                 "runner": {"kind": options.get("kind", "fake"), "version": "1"}, "sdk": {"name": "fake", "version": "1"},
                 "capabilities": {"max_sessions": options.get("cap", 4),
@@ -178,7 +180,8 @@ def runners(tmp_path, monkeypatch):
     processes = []
 
     @asynccontextmanager
-    async def make(*, session_cap=4, kinds=("fake",), control_timeouts=(10.0,), env=None, **options):
+    async def make(*, session_cap=4, kinds=("fake",), control_timeouts=(10.0,), env=None,
+                   startup_error=None, **options):
         async def connect(process, kind):
             processes.append(process)
             timeout = control_timeouts[min(len(processes) - 1, len(control_timeouts) - 1)]
@@ -191,7 +194,7 @@ def runners(tmp_path, monkeypatch):
             return bridge
         supervisor = s.RunnerSupervisor(tmp_path, {kind: [sys.executable,
             Path("tests/test_runner_supervisor.py"), json.dumps({**options, "kind": kind})] for kind in kinds},
-            session_cap=session_cap, connect=connect, env=env)
+            session_cap=session_cap, connect=connect, env=env, startup_error=startup_error)
         try:
             yield supervisor, processes
         finally:
@@ -409,12 +412,18 @@ def test_shutdown_reaps_uncooperative_parent_and_separate_child_group(runners):
     run(exercise())
 
 
-def test_stderr_is_lf_bounded_redacted_and_rate_limited(runners, caplog):
+def test_stderr_is_lf_bounded_redacted_and_rate_limited(runners, caplog, monkeypatch):
+    from types import SimpleNamespace
+
+    # Keep this burst in one diagnostic window regardless of subprocess scheduling.
+    # Replace only the supervisor's clock, leaving asyncio's timeout clock live.
+    monkeypatch.setattr(s, "time", SimpleNamespace(monotonic=lambda: 0.0))
     add_secret("secret-sentinel")
     async def exercise():
         async with runners(stderr=True, echo_key=True) as (owner, _):
             lease = await owner.acquire("fake")
             await lease.open_session(dict(NEW, provider={**NEW["provider"], "api_key": "session-provider-sentinel"}))
+            await until(lambda: len(lease._generation.diagnostics) == 33)
             await owner.stop()
             records = [r for r in caplog.records if r.name == s.__name__]
             assert len(records) == 10
@@ -616,6 +625,46 @@ def test_temporary_initialize_io_error_is_retryable(runners):
     run(exercise())
 
 
+@pytest.mark.parametrize("kind", ["pi", "dsh"])
+@pytest.mark.parametrize("failure", ["timeout", "io", "connection", "rpc"])
+def test_retryable_startup_failure_names_cause_and_opt_out(runners, kind, failure):
+    from looper.agents.runtimes import dsh_runner, pi_runner
+
+    module = pi_runner if kind == "pi" else dsh_runner
+    add_secret("startup-secret-sentinel")
+
+    async def exercise():
+        async with runners(startup_error=module._opt_out, slow_initialize=True,
+                           control_timeouts=(0.1, 10)) as (owner, processes):
+            connect = owner.connect
+
+            async def fail_once(process, runner_kind):
+                if not processes and failure != "timeout":
+                    processes.append(process)
+                    cause = "temporary initialization failure\nstartup-secret-sentinel"
+                    if failure == "io":
+                        raise OSError(errno.EIO, cause)
+                    if failure == "connection":
+                        raise ConnectionLost(cause)
+                    raise RpcFailure({"code": p.ErrorCode.INTERNAL_ERROR, "message": cause})
+                return await connect(process, runner_kind)
+
+            owner.connect = fail_once
+            with pytest.raises(s.RunnerUnavailable) as caught:
+                await owner.acquire("fake")
+            message = str(caught.value)
+            assert ("timed out" if failure == "timeout" else "temporary initialization failure") in message
+            assert f'[runtimes] {kind} = "cli" in the ops file' in message
+            assert "restart is bounded" in message
+            assert "startup-secret-sentinel" not in message and "\n" not in message
+            state = owner._kinds["fake"]
+            assert state.fatal is None and len(state.failures) == 1
+            assert not state.members and processes[0].returncode is not None
+            await asyncio.shield(state.restart)
+            assert (await owner.acquire("fake")).valid and len(processes) == 2
+    run(exercise())
+
+
 @pytest.mark.parametrize("shutdown", [False, True], ids=["recover", "shutdown"])
 def test_immediate_generation_loss_reaps_startup_child_in_separate_group(runners, monkeypatch, shutdown):
     # No periodic observation has run when a caller kills a just-started runner.
@@ -719,6 +768,87 @@ def test_reused_child_identity_is_not_signalled_or_allowed_to_hold_shutdown(runn
     run(exercise())
 
 
+
+@pytest.mark.parametrize("action", ["cancel", "abandon", "stop"])
+def test_interrupted_initialize_reaps_uncooperative_process_tree(runners, monkeypatch, action):
+    from looper.agents.runtimes import cancel
+
+    monkeypatch.setattr(cancel, "ABANDON_SEC", 0.02)
+
+    async def exercise():
+        async with runners(uncooperative=True, initialize_child=True, slow_initialize=60) as (owner, processes):
+            acquiring = asyncio.create_task(owner.acquire("fake"))
+            stopping = None
+            try:
+                await until(lambda: bool(processes) and any(
+                    path.exists() and json.loads(path.read_text())["child"] is not None
+                    for path in owner.root.glob("*/observed.json")))
+                child = next(json.loads(path.read_text())["child"]
+                             for path in owner.root.glob("*/observed.json"))
+                assert child in proc_tree._snapshot()
+                if action == "stop":
+                    stopping = asyncio.create_task(owner.stop())
+                elif action == "abandon":
+                    await cancel.abandon(acquiring)
+                else:
+                    acquiring.cancel()
+                await until(lambda: processes[0].returncode is not None
+                            and child not in proc_tree._snapshot(), timeout=s.SHUTDOWN_TIMEOUT + 5)
+                if stopping is not None:
+                    await stopping
+                with pytest.raises((asyncio.CancelledError, s.RunnerUnavailable)):
+                    await acquiring
+                assert not owner._kinds["fake"].members
+            finally:
+                # Keep the regression itself from leaving a sleeping runner or child behind.
+                for process in processes:
+                    await proc_tree.end(process, label="interrupted startup test cleanup")
+                await asyncio.gather(acquiring, *([stopping] if stopping else []), return_exceptions=True)
+    run(exercise())
+
+
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+def test_interrupted_spawn_reaps_process_when_spawn_returns(runners, monkeypatch, action):
+    async def exercise():
+        spawned, release = asyncio.Event(), asyncio.Event()
+        original_spawn = proc_tree.spawn
+        created = []
+
+        async def held_spawn(*args, **kwargs):
+            process = await original_spawn(*args, **kwargs)
+            created.append(process)
+            spawned.set()
+            await release.wait()
+            return process
+
+        monkeypatch.setattr(proc_tree, "spawn", held_spawn)
+        async with runners(uncooperative=True, slow_initialize=60) as (owner, _):
+            acquiring = asyncio.create_task(owner.acquire("fake"))
+            stopping = None
+            try:
+                await spawned.wait()
+                await until(lambda: any(path.exists() for path in owner.root.glob("*/observed.json")))
+                if action == "stop":
+                    stopping = asyncio.create_task(owner.stop())
+                    await asyncio.sleep(0)
+                else:
+                    acquiring.cancel()
+                    await asyncio.sleep(0)
+                release.set()
+                await until(lambda: created[0].returncode is not None, timeout=s.SHUTDOWN_TIMEOUT + 5)
+                assert created[0].returncode == -signal.SIGKILL
+                assert not list(owner.root.glob("*/requests.jsonl"))
+                if stopping is not None:
+                    await stopping
+                with pytest.raises((asyncio.CancelledError, s.RunnerUnavailable)):
+                    await acquiring
+            finally:
+                release.set()
+                for process in created:
+                    await proc_tree.end(process, label="interrupted spawn test cleanup")
+                await asyncio.gather(acquiring, *([stopping] if stopping else []), return_exceptions=True)
+    run(exercise())
+
 @pytest.mark.parametrize("recovers", [True, False], ids=["retry-succeeds", "bounded-failures"])
 def test_initialize_timeout_uses_bounded_demand_retries(runners, monkeypatch, recovers):
     monkeypatch.setattr(s, "BACKOFF_MAX", 0.01)
@@ -774,9 +904,14 @@ def test_failed_close_retains_lease_capacity_until_retry_succeeds(runners, monke
             other_events = []
             await other.bridge.begin_turn(other_sid, "other-trace", other_events.append, Turn(), text="still active")
             other_entry = other.bridge.sessions[other_sid]
-            lease.bridge.control_timeout = 0.1
+            control_timeout = lease.bridge.control_timeout
+            if failure == "timeout_close_once":
+                lease.bridge.control_timeout = 0.1
 
             await lease.release()
+            # The short deadline injects only the first withheld response. The
+            # peer probe and successful retry use the normal control deadline.
+            lease.bridge.control_timeout = control_timeout
             assert not lease.valid and lease.directory.exists()
             assert lease in lease._generation.leases and len(lease._generation.leases) == 2
             assert entry.close_state == "close_failed"

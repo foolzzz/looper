@@ -353,31 +353,38 @@ the key nor connects to PostgreSQL: `credentials`, `database_connection` and
 `real_validation` remain `untested` even when preflight passes. Missing or
 unsupported dependencies are a failed preflight, not model acceptance.
 
-The lead runs the following **pending, paid acceptance commands** before
-merging. First run the installed stand-in tests with DSH 0.2.1-rc.2,
-Node 22.19+ and a disposable `LOOPER_TEST_DATABASE_URL`:
+The maintainer accepted the DSH runner on real DeepSeek: every comparison met
+the gate, and the real smoke was 5/5 on current main. These instructions do
+not re-run those models. Before merging, the lead runs one real smoke per
+runtime with no flag. A command with no flag uses the runner. `--dsh-cli`
+selects the CLI path. `--dsh-runner` still selects the runner explicitly.
+Passing both flags is an error.
+
+Installed stand-in tests use DSH 0.2.1-rc.2, Node 22.19+ and a disposable
+`LOOPER_TEST_DATABASE_URL`. The smoke below is the unflagged runner path:
 
 ```sh
 uv run --extra test python -m pytest tests/test_dsh_runner_serve_db.py
-uv run --extra test python -m examples.dsh.validate smoke --real --dsh-runner \
+uv run --extra test python -m examples.dsh.validate smoke --real \
   --disposable-pg-url <disposable-/postgres-URL>
 ```
 
-For each comparison, run the CLI baseline first, then pass its ignored real
-run JSON to the runner command. Each command uses `jobs=1`, `reps=2`:
+For each comparison, run the CLI baseline with `--dsh-cli` first, then pass
+its ignored real run JSON to the runner command (no flag, or `--dsh-runner`).
+Each command uses `jobs=1`, `reps=2`:
 
 ```sh
+uv run --extra test python -m examples.dsh.validate manager --real --dsh-cli \
+  --disposable-pg-url <disposable-/postgres-URL>
 uv run --extra test python -m examples.dsh.validate manager --real \
-  --disposable-pg-url <disposable-/postgres-URL>
-uv run --extra test python -m examples.dsh.validate manager --real --dsh-runner \
   --baseline <manager-CLI-run.json> --disposable-pg-url <disposable-/postgres-URL>
+uv run --extra test python -m examples.dsh.validate task-basic --real --dsh-cli \
+  --disposable-pg-url <disposable-/postgres-URL>
 uv run --extra test python -m examples.dsh.validate task-basic --real \
-  --disposable-pg-url <disposable-/postgres-URL>
-uv run --extra test python -m examples.dsh.validate task-basic --real --dsh-runner \
   --baseline <task-basic-CLI-run.json> --disposable-pg-url <disposable-/postgres-URL>
-uv run --extra test python -m examples.dsh.validate task-review --real \
+uv run --extra test python -m examples.dsh.validate task-review --real --dsh-cli \
   --disposable-pg-url <disposable-/postgres-URL>
-uv run --extra test python -m examples.dsh.validate task-review --real --dsh-runner \
+uv run --extra test python -m examples.dsh.validate task-review --real \
   --baseline <task-review-CLI-run.json> --disposable-pg-url <disposable-/postgres-URL>
 ```
 
@@ -404,13 +411,16 @@ external channels and starts its own server away from 8767. It checks two
 Manager turns, two tasks, all four roles, room consults and API/DB readback.
 Channel stand-ins do not establish Telegram/Lark delivery to real accounts.
 
-`--dsh-runner` on `task-basic`, `task-review`, `manager` and `smoke` writes
-`[runtimes] dsh = "runner"` into that isolated server's ops file. The underlying
-`evals.prompt_regression run` and `dialogs` commands accept the same opt-in.
+With no flag, `task-basic`, `task-review`, `manager` and `smoke` write
+`[runtimes] dsh = "runner"` into that isolated server's ops file and check
+runner evidence. `--dsh-runner` selects that path explicitly. `--dsh-cli`
+writes `[runtimes] dsh = "cli"` and checks CLI evidence. The underlying
+`evals.prompt_regression run` and `dialogs` commands accept `--dsh-cli` and
+`--dsh-runner` the same way; with no flag they use the runner.
 Runner evidence requires `looper-runner` commands parsing as kind `dsh`
 Descriptors; smoke checks each record's complete usage and own cost instead
-of CLI owner-home and Session-reader accounting. Its summary has
-`"path": "runner"`. Without the flag, CLI validation is unchanged.
+of CLI owner-home and Session-reader accounting. The runner summary has
+`"path": "runner"`.
 
 Each invocation sets a $0.50 per-run soft cap, a $4 total observed-spend cap,
 300 seconds per task/dialog (per stage for smoke), and 20 minutes outside the
@@ -637,10 +647,14 @@ resume, the cancel tree, a raw Responses readback of optional parameters and
 `strict`, the `operator_notes_stale` and `schedule_*` dialogs, and a shared
 prompt or contract comparison against the baseline commit.
 
-For the SDK runner opt-in, `run --pi-runner` and `dialogs --pi-runner`
-write `[runtimes] pi = "runner"` into the isolated server's ops file. This
-covers every Pi role, including Worker, Reviewer and room consults, with no
-CLI fallback. The default remains the Pi CLI path.
+A Pi eval with no flag uses the SDK runner and writes `[runtimes] pi = "runner"`
+into the isolated server's ops file. This covers every Pi role, including
+Worker, Reviewer and room consults. `--pi-cli` writes `[runtimes] pi = "cli"`
+and is the CLI comparison path. `--pi-runner` still selects the runner
+explicitly. A runner that cannot start stays on that failure and names the
+ops-file opt-out. The maintainer accepted this runner through CPA: dialogs
+8/8, tasks 17/18 against the CLI path. These instructions do not re-run that
+comparison. Before merging, the lead runs one real smoke with no flag.
 
 For the task comparison, keep a spec based on
 `evals/agents/pi-cpa.example.json` in ignored `.local/pi-cpa.json`, selecting
@@ -657,8 +671,10 @@ uv run --extra test python -m evals.prompt_regression run --mode real --register
   --total-cap-usd "$EVAL_CAP_USD" --pg-url "$LOOPER_EVAL_DATABASE_URL"
 ```
 
-Save the CLI run JSON path as `PI_CLI_RUN_JSON`, then run the same command
-with `--pi-runner --baseline "$PI_CLI_RUN_JSON"`. Each task's runner pass
+That unflagged command is the runner. Save a CLI baseline by repeating it
+with `--pi-cli`, and keep that JSON path as `PI_CLI_RUN_JSON`. Run the runner
+command again with `--baseline "$PI_CLI_RUN_JSON"` (add `--pi-runner` only when
+the runner selection should be explicit). Each task's runner pass
 count must be at least the CLI count minus one. Report errors separately
 from failures, rerun an errored task once and report both attempts. If a cap
 stops a run, raise it and rerun before claiming the gate. The `reviewer_*`
@@ -666,8 +682,8 @@ cases run their Reviewer on Claude Code and do not compare the Pi Reviewer;
 `tests/test_pi_runner_serve_db.py` covers the Pi Reviewer on the installed path.
 For one runner case, check without printing the key that its server log does
 not contain it, and parse its Worker record commands as runner Descriptors.
-The task comparison is prepared but has not been run; no real-model gate is
-claimed by these instructions.
+The maintainer's CPA comparison met the gate (dialogs 8/8, tasks 17/18).
+These instructions do not themselves re-run it.
 
 #### Running cases in parallel
 

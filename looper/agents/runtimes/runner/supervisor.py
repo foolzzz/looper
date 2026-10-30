@@ -29,6 +29,7 @@ SHUTDOWN_TIMEOUT = 5.0
 DIAGNOSTIC_BYTES = 8192
 STDERR_LINES_PER_SECOND = 10
 STDERR_DRAIN_TIMEOUT = 1.0
+_CONFIGURATION_ERROR = "runner configuration or protocol version is invalid"
 MAX_RUNNERS_PER_KIND = 4
 IDLE_STOP_SECONDS = 300.0
 _KIND = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,63}")
@@ -135,7 +136,7 @@ class _Kind:
     members: list[_Generation] = field(default_factory=list)
     number: int = 0
     failures: deque = field(default_factory=deque)
-    fatal: bool = False
+    fatal: str | None = None
     restart: asyncio.Task | None = None
 
 
@@ -163,11 +164,13 @@ class RunnerSupervisor:
     def __init__(self, runtime_root: Path, commands: Mapping[str, Sequence[str | Path]], *,
                  session_cap: int = 4,
                  env: Mapping[str, Mapping[str, str]] | None = None,
+                 startup_error: Callable[[str], str] | None = None,
                  connect: Callable[[asyncio.subprocess.Process, str], Awaitable[RunnerBridge]]):
         if type(session_cap) is not int or session_cap <= 0:
             raise ValueError("runner session cap must be positive")
         self.root = Path(runtime_root).absolute() / "runners"
         self.session_cap, self.connect = session_cap, connect
+        self._startup_error = startup_error
         self._kinds: dict[str, _Kind] = {}
         for kind, argv in commands.items():
             if not isinstance(kind, str) or not _KIND.fullmatch(kind):
@@ -198,6 +201,7 @@ class RunnerSupervisor:
         self._shutdown = asyncio.Event()
         self._stop_task: asyncio.Task | None = None
         self._tasks: set[asyncio.Task] = set()
+        self._starts: set[asyncio.Task] = set()
 
     def _own(self, coroutine) -> asyncio.Task:
         task = asyncio.create_task(coroutine)
@@ -242,7 +246,7 @@ class RunnerSupervisor:
                         raise ProtocolError(ErrorCode.CAPACITY, f"CAPACITY: runner pool has {total} session slots; all are in use")
                     self._trim(state)
                     if state.fatal:
-                        raise RunnerUnavailable("runner configuration or protocol version is invalid")
+                        raise RunnerUnavailable(state.fatal)
                     if len(state.failures) >= MAX_FAILURES:
                         raise RunnerUnavailable("runner unavailable: five failures within ten minutes")
                     if state.restart is not None and not state.restart.done():
@@ -250,7 +254,21 @@ class RunnerSupervisor:
                     else:
                         # The kind lock covers the handshake and first reservation,
                         # so concurrent acquisitions cannot over-expand the pool.
-                        generation = await _joined(self._own(self._start(kind, state)))
+                        starting = self._own(self._start(kind, state))
+                        self._starts.add(starting)
+                        starting.add_done_callback(self._starts.discard)
+                        try:
+                            generation = await asyncio.shield(starting)
+                        except asyncio.CancelledError:
+                            # The supervisor owns cleanup after a turn stops waiting,
+                            # including abandon() cancelling the caller a second time.
+                            if not starting.done():
+                                if not starting.cancelling():
+                                    starting.cancel()
+                            elif not starting.cancelled() and starting.exception() is None:
+                                self._failed(starting.result())
+                            await asyncio.shield(asyncio.gather(starting, return_exceptions=True))
+                            raise
                 if backoff is None:
                     if self._stopped or generation.failed or generation.bridge._error:
                         raise RunnerUnavailable("runner generation is unavailable; resume was lost")
@@ -301,14 +319,24 @@ class RunnerSupervisor:
             environment = {k: v for k, v in os.environ.items() if k in _ENV}
             environment.update(self._env.get(kind, {}))
             environment.update(HOME=str(directory), TMPDIR=str(tmp))
-            process = await proc_tree.spawn(*state.command, env=environment, cwd=directory,
+            spawning = self._own(proc_tree.spawn(*state.command, env=environment, cwd=directory,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE, limit=MAX_FRAME_BYTES + 1)
+                stderr=asyncio.subprocess.PIPE, limit=MAX_FRAME_BYTES + 1))
+            cancelled = None
+            try:
+                process = await asyncio.shield(spawning)
+            except asyncio.CancelledError as error:
+                # A spawn can create its process before returning the handle. Keep
+                # ownership until it returns, then dispose instead of initializing.
+                process = await asyncio.shield(spawning)
+                cancelled = error
             generation = _Generation(kind, state, directory, process)
             generation.exited = _exit_signal(process)
             generation.tree = proc_tree.track(process, label=f"runner {kind}")
             generation.tree.start_ticker()
             generation.stderr = self._own(self._stderr(generation))
+            if cancelled is not None:
+                raise cancelled
             generation.bridge = await self.connect(process, kind)
             # Initialization can start children after the launch snapshot. Own
             # them before publishing a runner that may immediately be killed.
@@ -330,12 +358,21 @@ class RunnerSupervisor:
             return generation
         except BaseException as error:
             # Timeouts and transient I/O failures use the same bounded restart path as a crash.
-            state.fatal = (isinstance(error, (ValueError, ProtocolError)) or
+            fatal = (isinstance(error, (ValueError, ProtocolError)) or
                 generation is None and isinstance(error, OSError) and error.errno in {
                     errno.ENOENT, errno.EACCES, errno.ENOEXEC} or
                 isinstance(error, RpcFailure) and error.code in {
                     ErrorCode.VERSION_MISMATCH, ErrorCode.INVALID_PARAMS, ErrorCode.UNSUPPORTED,
                     ErrorCode.ISOLATION_REFUSED})
+            if fatal:
+                cause = _CONFIGURATION_ERROR
+                if isinstance(error, RpcFailure) or generation is None and isinstance(error, OSError):
+                    cause = redact(str(error)).replace("\r", " ").replace("\n", " ")[:512]
+                state.fatal = _CONFIGURATION_ERROR
+                if self._startup_error:
+                    state.fatal = self._startup_error(cause)
+                elif cause != _CONFIGURATION_ERROR:
+                    state.fatal = f"{_CONFIGURATION_ERROR}: {cause}"
             if generation is not None:
                 generation.stopping = True
                 await self._dispose(generation)
@@ -343,8 +380,13 @@ class RunnerSupervisor:
             self._restart(kind, state)
             if isinstance(error, asyncio.CancelledError):
                 raise
-            raise RunnerUnavailable("runner configuration or protocol version is invalid" if state.fatal else
-                                    "runner failed to initialize; restart is bounded") from None
+            message = state.fatal or "runner failed to initialize; restart is bounded"
+            if not state.fatal and self._startup_error:
+                cause = str(error) or ("runner initialization timed out" if isinstance(error, TimeoutError)
+                                       else type(error).__name__)
+                cause = redact(cause).replace("\r", " ").replace("\n", " ")[:512]
+                message = f"{self._startup_error(cause)}; restart is bounded"
+            raise RunnerUnavailable(message) from None
 
     async def _wait(self, generation: _Generation) -> None:
         await generation.exited.wait()
@@ -370,7 +412,7 @@ class RunnerSupervisor:
                 return
             if (isinstance(cause, ValueError) and not isinstance(cause, ProtocolError)) or (
                     isinstance(cause, (ProtocolError, RpcFailure)) and cause.code == ErrorCode.VERSION_MISMATCH):
-                state.fatal = True
+                state.fatal = _CONFIGURATION_ERROR
             self._failed(generation)
         if generation.failure:
             await _joined(generation.failure)
@@ -516,6 +558,15 @@ class RunnerSupervisor:
         await _joined(self._stop_task)
 
     async def _stop(self) -> None:
+        # Initialization holds the kind lock. Interrupt it before waiting for that
+        # lock, and keep every spawn/cleanup owned until its process has been reaped.
+        starts = list(self._starts)
+        for starting in starts:
+            if not starting.done() and not starting.cancelling():
+                starting.cancel()
+        if starts:
+            await asyncio.gather(*starts, return_exceptions=True)
+
         async def close_kind(state):
             async with state.lock:
                 for generation in list(state.members):

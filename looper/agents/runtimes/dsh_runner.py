@@ -1,8 +1,9 @@
-"""Ops-file opt-in for every DSH role (one runner, 20 sessions)."""
+"""Every DSH role uses the SDK runner pool unless the ops file sets cli."""
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 import hashlib
+import json
 import logging
 from pathlib import Path
 import re
@@ -39,6 +40,10 @@ RUN_TOOL_TIMEOUT_SEC = 86400
 _NO_CLI = ('the DSH runner hosts this run; there is no DSH CLI command under [runtimes] dsh = "runner"')
 _PROVIDER_ENV = ("the DSH runner cannot apply a provider's environment variables; clear them or use "
                  'the CLI path ([runtimes] dsh = "cli")')
+# Per-member cap; the supervisor starts another runner when existing members are full.
+SESSION_CAP = 32
+_DSH_PACKAGE = "@deepseek-ai/dsh"
+_DSH_VERSION = "0.2.1-rc.2"
 
 
 def _prompt_text(looper_prompt: str, launch: Launch, *, cwd: str | Path | None = None) -> str:
@@ -84,8 +89,8 @@ class DshRunnerRuntime(DshRuntime):
     def _check_executable(self, executable: str) -> None:
         resolved = shutil.which(executable)
         if resolved is None or Path(resolved).resolve() != self.dsh:
-            raise RuntimeUnsupported(f"the DSH runner uses {self.dsh}; the launch executable {executable} "
-                                     f"resolves to {resolved}; restart with the same dsh executable")
+            raise RuntimeUnsupported(_opt_out(f"the DSH runner uses {self.dsh}; the launch executable {executable} "
+                                              f"resolves to {resolved}; restart with the same dsh executable"))
 
     def _runner_prompt(self, prompt_file: Path, launch: Launch, cwd: str | Path) -> Path:
         text = _prompt_text(Path(prompt_file).read_text(encoding="utf-8"), launch, cwd=cwd)
@@ -178,32 +183,79 @@ class DshRunnerRuntime(DshRuntime):
         return record
 
 
+def _opt_out(cause: str) -> str:
+    return (f"the DSH runner cannot start: {cause}; install the supported version, "
+            'or set [runtimes] dsh = "cli" in the ops file; restart Looper')
+
+
+def _package_version(executable: str, package: str) -> str | None:
+    """The installed package version, or None when ``executable`` is not a real file.
+
+    A missing file skips this gate (unit-test stand-ins, and a PATH miss already
+    reported). A real executable is walked up at most eight parents for that
+    package's ``package.json``, the same walk the runner's loader uses. ``""``
+    means the file exists and the package was not found.
+    """
+    path = Path(executable)
+    try:
+        if not path.is_file():
+            return None
+        root = path.resolve().parent
+    except OSError:
+        return ""
+    for _depth in range(9):
+        try:
+            text = (root / "package.json").read_text(encoding="utf-8")
+        except OSError:
+            text = None
+        if text is not None:
+            try:
+                data = json.loads(text)
+            except ValueError:
+                data = None
+            if isinstance(data, dict) and data.get("name") == package:
+                version = data.get("version")
+                return version if isinstance(version, str) else ""
+        parent = root.parent
+        if parent == root:
+            break
+        root = parent
+    return ""
+
+
 def enable(runtime_root: Path) -> RunnerSupervisor | None:
     """Install the adapter at startup, retaining failures without a CLI fallback."""
     node, dsh = shutil.which("node"), shutil.which("dsh")
-    requirement = "the DSH runner requires node 22.19+ and dsh on PATH"
-    unavailable = None
     if not node or not dsh:
-        unavailable = requirement + "; install them and restart Looper"
+        unavailable = _opt_out("node 22.19+ and dsh are not both on PATH")
     else:
         try:
             result = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=2, check=True)
             version = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", result.stdout.strip())
             if version is None or tuple(map(int, version.groups())) < (22, 19, 0):
-                unavailable = requirement + "; upgrade node and restart Looper"
+                unavailable = _opt_out(f"node 22.19+ is required (found {result.stdout.strip() or 'unknown'})")
+            else:
+                unavailable = None
         except (OSError, subprocess.SubprocessError):
-            unavailable = requirement + "; could not check node --version within 2 seconds; check node and restart Looper"
+            unavailable = _opt_out(
+                "node 22.19+ and dsh could not be checked: node --version did not finish within 2 seconds")
+        if unavailable is None:
+            found = _package_version(dsh, _DSH_PACKAGE)
+            if found is not None and found != _DSH_VERSION:
+                unavailable = _opt_out(
+                    f"node 22.19+ and {_DSH_PACKAGE} {_DSH_VERSION} are required "
+                    f"(found {found or 'not inside ' + _DSH_PACKAGE})")
     if not unavailable:
         try:
             state = dsh_command.state_root(runtime_root)
             supervisor = RunnerSupervisor(runtime_root, {"dsh": dsh_command.command(node, dsh, state)},
-                                          session_cap=20, connect=dsh_command.connect)
+                                          session_cap=SESSION_CAP, startup_error=_opt_out, connect=dsh_command.connect)
             resolved = Path(dsh).resolve()
         except (OSError, ValueError) as exc:
-            unavailable = f"the DSH runner could not initialize: {exc}; check the installation and runtime root and restart Looper"
+            unavailable = _opt_out(f"could not initialize ({exc}); node 22.19+ and dsh are required")
     if unavailable:
         ADAPTERS["dsh"] = DshRunnerRuntime(None, dsh=None, unavailable=unavailable)
         return None
     ADAPTERS["dsh"] = DshRunnerRuntime(supervisor, dsh=resolved)
-    logger.info("DSH runner enabled for every DSH role (one runner, 20 sessions)")
+    logger.info("DSH runner pool enabled for every DSH role (%s sessions per member)", SESSION_CAP)
     return supervisor

@@ -16,6 +16,7 @@ export type Session = {
   ephemeral: boolean; fork: boolean; processes: Set<number>; platformTools: Map<string, Registration>;
   allowed: Set<string>; turn: Turn | null; activeRequest: string | null; closing: boolean;
 };
+export const SESSION_CAP = 32;
 export const sessions = new Map<string, Session>();
 const opening = new Set<string>(), loading = new Set<string>();
 const closing = new Map<string, Promise<void>>();
@@ -98,7 +99,7 @@ async function compose(params: Record<string, any>, resumed: boolean): Promise<o
   if (opening.has(params.session_key) || [...sessions.values()].some(record => record.key === params.session_key)) {
     throw new RpcError(-32002, 'session key is already owned');
   }
-  if (sessions.size + opening.size >= 20) throw new RpcError(-32006, 'session capacity reached');
+  if (sessions.size + opening.size >= SESSION_CAP) throw new RpcError(-32006, 'session capacity reached');
   opening.add(params.session_key);
   if (resumed) loading.add(params.session_id);
   const provider = params.provider, wireModel = provider.model.replace(/\[1m\]$/, '');

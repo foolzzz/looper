@@ -35,7 +35,7 @@ from tests.pi_runtime_support import KEY, launch, provider
 def test_ops_runtime_round_trip(tmp_path, value):
     config = ops.OpsConfig(runtime_root=tmp_path, path=tmp_path / ops.FILE, pi_runtime=value)
     rendered = ops.render(config)
-    assert '[runtimes]\n' + ('pi = "runner"' if value == "runner" else '# pi = "cli"') in rendered
+    assert '[runtimes]\n' + ('# pi = "runner"' if value == "runner" else 'pi = "cli"') in rendered
     ops.write_private(config.path, rendered)
     loaded = ops.load(ops.Flags(runtime_root=tmp_path), environ={}, dotenv=tmp_path / "absent")
     assert loaded.pi_runtime == value
@@ -45,7 +45,7 @@ def test_ops_default_has_no_environment_variable(tmp_path):
     config = ops.load(ops.Flags(runtime_root=tmp_path), require_database=False,
                       environ={"LOOPER_PI_RUNTIME": "runner", "LOOPX_PI_RUNTIME": "runner"},
                       dotenv=tmp_path / "absent")
-    assert config.pi_runtime == "cli"
+    assert config.pi_runtime == "runner"
     assert type(ADAPTERS["pi"]) is PiRuntime
     assert not ADAPTERS["pi"].hosts_runs
     assert isinstance(ADAPTERS["pi"].resident_session("test"), ResidentPi)
@@ -84,7 +84,7 @@ def test_serve_reads_opt_in_before_ownership_and_cleans_partial_start(tmp_path, 
     monkeypatch.setattr(pi_runner, "enable", enable)
     monkeypatch.setattr(serve, "_run_agent_system_owned", owned)
     monkeypatch.setattr("looper.db.close_pool", lambda: stopped("database stopped"))
-    config = ops.OpsConfig(runtime_root=tmp_path, path=tmp_path / ops.FILE, pi_runtime=value)
+    config = ops.OpsConfig(runtime_root=tmp_path, path=tmp_path / ops.FILE, pi_runtime=value, dsh_runtime="cli")
     with pytest.raises(serve.StartupCheckFailed):
         asyncio.run(serve._run_agent_system(ops=config, runtime_root=tmp_path, work_dir=tmp_path))
     assert calls == (["enabled", "agents stopped", "runner stopped", "database stopped"] if value == "runner" else [])
@@ -310,7 +310,7 @@ def test_enable_installs_one_ten_session_supervisor(tmp_path, monkeypatch, versi
     result = pi_runner.enable(tmp_path)
     assert ADAPTERS["pi"].supervisor is result
     assert ADAPTERS["pi"].pi == Path("/pi")
-    assert seen["root"] == tmp_path and seen["session_cap"] == 10
+    assert seen["root"] == tmp_path and seen["session_cap"] == 32
     assert seen["commands"]["pi"][0] == "/node" and seen["commands"]["pi"][-2:] == ["--pi", "/pi"]
     assert seen["env"] == {"pi": pi_runner.pi_command.ENV}
     assert seen["connect"] is pi_runner.pi_command.connect

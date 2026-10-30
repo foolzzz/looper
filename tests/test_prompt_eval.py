@@ -3330,15 +3330,16 @@ def test_eval_server_renders_dsh_runner_only_when_requested(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize("command", ["run", "dialogs"])
-@pytest.mark.parametrize("requested", [False, True])
-def test_dsh_eval_flag_reaches_selected_harness(monkeypatch, command, requested):
+@pytest.mark.parametrize("flag,expected", [(None, "runner"), ("--dsh-runner", "runner"), ("--dsh-cli", "cli")])
+def test_dsh_eval_flag_reaches_selected_harness(monkeypatch, command, flag, expected):
     from evals.prompt_regression import dialogs
 
     def run(**kwargs):
-        assert kwargs["dsh_runtime"] == ("runner" if requested else "cli")
+        assert kwargs["dsh_runtime"] == expected
+        assert kwargs["pi_runtime"] == "runner"
         return {}, Path("unused.json")
 
     monkeypatch.setattr(runner if command == "run" else dialogs, "run", run)
     monkeypatch.setattr(cli, "_report", lambda *a, **kw: None)
     monkeypatch.setattr(dialogs, "markdown", lambda _: "")
-    assert cli.main([command, "--pg-url", "unused", *(["--dsh-runner"] if requested else [])]) == 0
+    assert cli.main([command, "--pg-url", "unused", *([flag] if flag else [])]) == 0

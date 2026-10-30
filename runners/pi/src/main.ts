@@ -10,7 +10,7 @@ clean = rpc.scrub;
 format = (await import('node:util')).format;
 const { monitorEventLoopDelay } = await import('node:perf_hooks');
 const { load } = await import('./sdk.ts');
-const { sessions, newSession, loadSession, closeSession } = await import('./session.ts');
+const { SESSION_CAP, sessions, newSession, loadSession, closeSession } = await import('./session.ts');
 const { toolProcesses } = await import('./exec.ts');
 const { prompt, cancel, steer } = await import('./turn.ts');
 const args = process.argv.slice(2);
@@ -32,7 +32,7 @@ rpc.method('initialize', async params => {
   const sdk = await load(args[1]);
   return { protocol_version: '0.1', runner: { kind: 'pi', version: '0.1.0' },
     sdk: { name: '@earendil-works/pi-coding-agent', version: sdk.version }, capabilities: {
-      max_sessions: 10, per_session_isolation: true, per_session_credentials: true, cancel: true, fork: true,
+      max_sessions: SESSION_CAP, per_session_isolation: true, per_session_credentials: true, cancel: true, fork: true,
       steer: { in_trace: true, boundary: 'after_tool_batch', idle_start: false },
       usage: { per_request: true, buckets: true, reasoning_in_output: true },
       authorize_covers: ['turn', 'retry', 'compaction'],

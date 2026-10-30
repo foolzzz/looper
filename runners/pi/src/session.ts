@@ -15,6 +15,7 @@ export type Session = {
   agent: any; runtime: any; turn: Turn | null; closing: boolean;
   extensionApi: any; builtinTools: string[]; platformTools: Map<string, PlatformTool>;
 };
+export const SESSION_CAP = 32;
 export const sessions = new Map<string, Session>();
 const opening = new Set<string>();
 const loading = new Set<string>();
@@ -93,7 +94,7 @@ async function compose(params: Record<string, any>, resumed: boolean): Promise<o
   if (opening.has(params.session_key) || [...sessions.values()].some(r => r.key === params.session_key)) {
     throw new RpcError(-32002, 'session key is already owned');
   }
-  if (sessions.size + opening.size >= 10) throw new RpcError(-32006, 'session capacity reached');
+  if (sessions.size + opening.size >= SESSION_CAP) throw new RpcError(-32006, 'session capacity reached');
   opening.add(params.session_key);
   if (resumed) loading.add(params.session_id);
   let agent: any, runtime: any;

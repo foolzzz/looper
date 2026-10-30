@@ -16,7 +16,6 @@ import pytest
 
 from looper.agents import proc_tree
 from looper.agents.runtimes.runner import pi_command
-from looper.agents.runtimes.runner.bridge import RunnerBridge
 from looper.agents.runtimes.runner.protocol import MAX_FRAME_BYTES
 from looper.agents.runtimes.runner.supervisor import RunnerSupervisor, _ENV
 
@@ -54,20 +53,9 @@ def require_pi() -> tuple[str, str]:
 async def pi_supervisor(tmp_path: Path, *, pi=None, env=None):
     node, installed_pi = require_pi()
 
-    async def connect(process, kind):
-        # Cold SDK imports under parallel installed tests are not a startup SLO.
-        bridge = RunnerBridge(process.stdout, process.stdin, kind, control_timeout=60)
-        try:
-            await bridge.initialize(permitted=pi_command.PERMITTED)
-        except BaseException:
-            await bridge.close()
-            raise
-        bridge.control_timeout = 10
-        return bridge
-
     supervisor = RunnerSupervisor(tmp_path / "runtime", {
         "pi": pi_command.command(node, str(pi if pi is not None else installed_pi))},
-        session_cap=10, env={"pi": {**pi_command.ENV, **(env or {})}}, connect=connect)
+        session_cap=10, env={"pi": {**pi_command.ENV, **(env or {})}}, connect=pi_command.connect)
     try:
         yield supervisor
     finally:
