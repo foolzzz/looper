@@ -1,6 +1,5 @@
 """Full project administration and typed results for the existing compact operations."""
 
-from ...db import managers
 from .. import projects as core
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT
 from ..ops import Call, ErrorCode, OpError, Turn
@@ -55,6 +54,9 @@ RESULTS = {
 
 def _op(action, request, result, risk):
     description = f"{action.capitalize()} projects." if action == "list" else f"{action.capitalize()} a project."
+    if action == "delete":
+        description = ("Delete a project with its tasks and schedules, stopping its running tasks first "
+                       "(the user confirms first).")
     return Operation(f"project_admin.{action}", "POST", f"/api/v1/project_admin/{action}",
                      description, description, request, result, risk=risk, confirms=risk == "high")
 
@@ -71,8 +73,6 @@ async def impact(server, operation, arguments, principal, headers):
     if operation.operation_id != "project_admin.delete":
         return None
     project = await answered(core.deletable_project(arguments["project_id"]))
-    if used := await managers.template_using_project(project["id"]):
-        raise OpError(ErrorCode.CONFLICT, str(core._used_by_template(project["id"], used)))
     # Use the compact operation's impact and occupancy checks without changing its Tool contract.
     return await _deleting_project(Call({"action": "delete", "project": project["name"]}, Turn(None, None), None))
 
@@ -97,7 +97,9 @@ async def run(server, operation, arguments, principal, headers):
         return {"project": await answered(core.create_project(_input_fields(arguments)))}
     project_id = arguments["project_id"]
     if action == "delete":
-        return await answered(core.delete_project(project_id))
+        return await answered(core.delete_project(
+            project_id, server._supervisor.bus, server._web_adapter._address, server._runtime_root,
+            task_router=server._task_router))
     fields = _input_fields(arguments["fields"])
     try:
         normalized = core._project_fields(fields, update=True)

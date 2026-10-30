@@ -961,7 +961,7 @@ export async function updateProject(projectId: string, fields: ProjectUpdate): P
   return result.project;
 }
 
-/** Only an empty project can be deleted; the server answers 409 otherwise. */
+/** Delete a project with its tasks and schedules, stopping running tasks first. */
 export async function deleteProject(projectId: string): Promise<void> {
   const result = await callV1<{ deleted: string }>("/api/v1/project_admin/delete", { project_id: projectId });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);

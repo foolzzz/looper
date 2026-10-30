@@ -3,12 +3,15 @@
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
 from looper.agents import api_v1
 from looper.agents.bus import MessageBus
 from looper.agents.ops.clients import ClientOps
+from looper.agents.message import channel_address
+from looper.agents.tiers.task import TaskRouter
 from looper.agents.ops.service import Platform
 from looper.db import api_clients, library, projects, role_templates, task_roles
 from tests.db_support import DSN, run_db
@@ -28,8 +31,11 @@ TEMPLATE = {"key": "security", "kind": "review", "description": "Check authentic
 async def _api(tmp_path, pool):
     _, token = await api_clients.create("role template validation", pool=pool)
     async with _serving(tmp_path) as server:
-        server._client_ops = ClientOps(Platform(bus=MessageBus(runtime_root=tmp_path),
-                                               task_router=server._task_router, runtime_root=tmp_path))
+        bus = MessageBus(runtime_root=tmp_path)
+        server._supervisor = SimpleNamespace(bus=bus)
+        server._web_adapter = SimpleNamespace(_address=channel_address("web"))
+        server._task_router = TaskRouter(runtime_root=tmp_path)
+        server._client_ops = ClientOps(Platform(bus=bus, task_router=server._task_router, runtime_root=tmp_path))
 
         async def call(action, body=None, *, client=False, method="POST", session="role-templates"):
             path = action if action.startswith("/") else "/api/v1/" + action.replace(".", "/")

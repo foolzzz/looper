@@ -93,6 +93,14 @@ async def get_task_project(task_id: str, *, pool: asyncpg.Pool | None = None) ->
     return project
 
 
+async def used_outside_manager(project_id: str, manager_id: str, *, pool: asyncpg.Pool | None = None) -> bool:
+    """Whether deletion would touch another Manager's tasks or schedules, without returning their counts."""
+    pool = pool or get_pool()
+    return bool(await pool.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM tasks WHERE project_id = $1 AND manager_id <> $2) "
+        "OR EXISTS (SELECT 1 FROM schedules WHERE project_id = $1 AND manager_id <> $2)", project_id, manager_id))
+
+
 async def find_project_by_name(name: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
     pool = pool or get_pool()
     row = await pool.fetchrow("SELECT * FROM projects WHERE lower(name) = lower($1)", name)

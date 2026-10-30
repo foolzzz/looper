@@ -31,7 +31,7 @@ def _isolated(monkeypatch, tmp_path):
 async def _workspaces(tmp_path, *, planner=False):
     async with _serving(tmp_path) as server:
         bus = MessageBus(runtime_root=tmp_path)
-        server._task_router = SimpleNamespace(has_planner=lambda _: planner)
+        server._task_router = SimpleNamespace(has_planner=lambda _: planner, forget_task=lambda _: None)
         server._supervisor = SimpleNamespace(bus=bus)
         server._client_ops = ClientOps(Platform(bus=bus, task_router=server._task_router, runtime_root=tmp_path))
 
@@ -155,9 +155,9 @@ def test_operator_delete_removes_owned_state_in_original_order_and_retires_legac
         events = []
         remove_steps, finish, remove_sessions, delete = ws.remove_task, tw.finish, room.remove_run_sessions, tasks.delete_task
 
-        async def observed_steps(task_id):
+        async def observed_steps(task_id, **kwargs):
             assert checkout.exists() and session.exists() and await tasks.get_task(task_id)
-            result = await remove_steps(task_id)
+            result = await remove_steps(task_id, **kwargs)
             events.append("steps")
             return result
 

@@ -1946,11 +1946,12 @@ class TestTaskEnd:
                     source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_START,
                     payload={"task_id": "task-calc"},
                 ))
-                # The task has ended and its teardown waits for the lingering Claude to exit.
-                await h.until(lambda: router._tasks and not router._planners and claude.pids()
-                              and next(iter(router._tasks.values())).status == "completed")
-                # Cancel after resident cleanup has started; an earlier cancel takes the immediate-kill path.
+                # Completion is recorded while the Planner stays registered until its cleanup ends.
+                # Cancel once resident cleanup has started; an earlier cancel takes the immediate-kill path.
+                await h.until(lambda: h.final() is not None and router._planners and claude.pids())
                 await asyncio.wait_for(cleanup_started.wait(), 5)
+                assert router._tasks["task-calc"].status == "completed"
+                assert router._planners
                 assert _alive(claude.pids()[0])
                 started = asyncio.get_event_loop().time()
                 await asyncio.wait_for(router.stop(), 4)

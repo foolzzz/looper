@@ -1,4 +1,4 @@
-"""Authenticated project CRUD, execution inheritance and deletion protection on PostgreSQL."""
+"""Authenticated project CRUD, execution inheritance and cascade deletion confirmation on PostgreSQL."""
 
 import pytest
 
@@ -111,7 +111,7 @@ def test_name_collision_is_conflict_and_preserves_original_project(tmp_path, mon
 
 
 @pytest.mark.parametrize("occupancy", ["task", "schedule", "manager_template"])
-def test_occupied_project_delete_is_refused_before_confirmation(tmp_path, monkeypatch, occupancy):
+def test_project_delete_confirms_tasks_and_schedules_but_refuses_template_use(tmp_path, monkeypatch, occupancy):
     async def run(pool):
         row = await projects.create_project(name="Occupied", pool=pool)
         if occupancy == "task":
@@ -124,7 +124,12 @@ def test_occupied_project_delete_is_refused_before_confirmation(tmp_path, monkey
                 "VALUES ('manager', 'example', 'Example', $1)", row["id"])
         async with _api(tmp_path, pool) as call:
             status, answer = await call("project_admin.delete", {"project_id": row["id"]}, client=True)
-            assert status == 409 and answer["error"]["code"] == "conflict", answer
+            if occupancy == "manager_template":
+                assert status == 409 and answer["error"]["code"] == "conflict", answer
+            else:
+                assert status == 202 and answer["status"] == "needs_confirmation", answer
+                assert ("停止它正在运行的 1 个任务" if occupancy == "task" else
+                        "1 个定时任务（含运行记录）") in answer["impact"]
             assert await projects.get_project(row["id"], pool=pool)
     run_db(run, monkeypatch, timeout=30)
 

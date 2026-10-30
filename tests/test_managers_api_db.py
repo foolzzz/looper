@@ -365,7 +365,13 @@ def test_the_example_file_validates(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_profiles_and_projects_a_manager_or_template_uses_cannot_be_deleted(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.agents import profile_registry, projects
+    from looper.agents.message import channel_address
     from looper.db import profile_registry as db
+    from tests.schedule_support import Bus
+
+    async def delete(project_id: str) -> dict[str, Any]:
+        # No live task: the bus and runtime root are what a delete uses to stop one.
+        return await projects.delete_project(project_id, Bus(), channel_address("web"), None)
 
     async def test(pool: Any) -> None:
         await _profiles(pool)
@@ -381,7 +387,7 @@ def test_profiles_and_projects_a_manager_or_template_uses_cannot_be_deleted(monk
         with pytest.raises(profile_registry.RegistryConflict, match="template PR review of Manager Review"):
             await profile_registry.delete_profile(free)
         with pytest.raises(projects.RequestError, match="used by template 'PR review' of Manager 'Review'") as err:
-            await projects.delete_project(project)
+            await delete(project)
         assert err.value.status.startswith("409")
 
         # deleting the Manager frees both
@@ -389,7 +395,7 @@ def test_profiles_and_projects_a_manager_or_template_uses_cannot_be_deleted(monk
         assert await db.profile_usage(used) == {} and await db.profile_usage(free) == {}
         assert await profile_registry.delete_profile(used) == {"deleted": used}
         assert await profile_registry.delete_profile(free) == {"deleted": free}
-        assert await projects.delete_project(project) == {"deleted": project}
+        assert await delete(project) == {"deleted": project}
 
     run_db(test, monkeypatch)
 

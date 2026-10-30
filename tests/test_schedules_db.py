@@ -633,7 +633,7 @@ def test_runs_whose_task_ended_while_no_one_listened_are_settled(monkeypatch: py
 # --- Guards ---
 
 
-def test_a_project_with_schedules_is_not_deleted_and_a_deleted_schedule_keeps_its_tasks(
+def test_a_project_deletes_its_tasks_and_schedules_but_a_deleted_schedule_keeps_its_tasks(
         monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from looper.db import projects as db_projects
 
@@ -647,14 +647,21 @@ def test_a_project_with_schedules_is_not_deleted_and_a_deleted_schedule_keeps_it
         counts = {p["project_id"]: p["schedule_count"] for p in (await env.ok("POST", "/api/v1/project_admin/list", {}))["projects"]}
         assert counts == {env.project_id: 0, empty["id"]: 1}
 
-        status, payload = await env.call("POST", "/api/v1/project_admin/delete", {"project_id": empty['id']})
-        assert status == 409 and "still has 1 schedule; delete them first" in payload["error"]
-
         run = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]
         await env.ok("POST", "/api/v1/schedule_admin/delete", {"schedule_id": sid})
         assert await env.pool.fetchval("SELECT schedule_id FROM tasks WHERE id = $1", run["task_id"]) is None
         assert await env.pool.fetchval("SELECT count(*) FROM schedule_runs") == 0
         assert (await env.call("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))[0] == 404
+        assert await env.pool.fetchval("SELECT count(*) FROM tasks WHERE id = $1", run["task_id"]) == 1
+
+        await env.end_task(run["task_id"], "stopped")
+        await env.ok("POST", "/api/v1/schedule_admin/create", {"project_id": empty['id'], "fields": {
+            "name": "n", "cron": "0 9 * * *", "requirement": "r"}})
+        assert await env.ok("POST", "/api/v1/project_admin/delete", {"project_id": empty['id']}) == {
+            "deleted": empty["id"]}
+        assert await db_projects.get_project(empty["id"], pool=env.pool) is None
+        assert await env.pool.fetchval("SELECT count(*) FROM tasks WHERE id = $1", run["task_id"]) == 0
+        assert await env.pool.fetchval("SELECT count(*) FROM schedules") == 0
 
     run_scheduled(test, monkeypatch, tmp_path)
 

@@ -202,19 +202,52 @@ def isolated_dsh(tmp_path):
 
 
 def dsh_runner_processes(tmp_path):
-    processes = subprocess.run(["ps", "-ww", "-A", "-o", "pid=,command="], capture_output=True,
+    processes = subprocess.run(["ps", "-ww", "-A", "-o", "pid=,stat=,command="], capture_output=True,
                                text=True, check=True, timeout=5).stdout
     owned = []
     for file in (tmp_path / "runtime/.local/agent-processes").glob("*.json"):
         pid = int(file.stem)
-        line = next((line for line in processes.splitlines() if line.split(maxsplit=1)[0] == str(pid)), "")
+        line = next((line for line in processes.splitlines() if line.split(maxsplit=2)[0] == str(pid)), "")
         if not line:  # A killed runner's process record may be awaiting supervisor cleanup.
             continue
-        command = shlex.split(line.split(maxsplit=1)[1])
+        _, stat, command = line.split(maxsplit=2)
+        if stat.startswith("Z") or "E" in stat:
+            continue  # The process has exited and serve is reaping it.
+        command = shlex.split(command)
         assert Path(command[0]).name == "node" and any(
             arg.endswith("dsh_runner/src/main.ts") for arg in command[1:]), line
         owned.append(pid)
     return owned
+
+
+@pytest.mark.parametrize("stat,command,expected", [
+    ("Z+", "[MainThread] <defunct>", []),
+    ("UE", "(node)", []),
+    ("S", '/usr/bin/node "/runner path/dsh_runner/src/main.ts"', [15333]),
+])
+def test_dsh_runner_processes_states(tmp_path, monkeypatch, stat, command, expected):
+    directory = tmp_path / "runtime/.local/agent-processes"
+    directory.mkdir(parents=True)
+    (directory / "15333.json").write_text("{}")
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs:
+        subprocess.CompletedProcess(args, 0, stdout=f"  15333 {stat} {command}\n"))
+
+    assert dsh_runner_processes(tmp_path) == expected
+
+
+@pytest.mark.parametrize("command", [
+    "/usr/bin/python /runner/dsh_runner/src/main.ts",
+    "/usr/bin/node /runner/other.ts",
+])
+def test_dsh_runner_processes_rejects_other_live_processes(tmp_path, monkeypatch, command):
+    directory = tmp_path / "runtime/.local/agent-processes"
+    directory.mkdir(parents=True)
+    (directory / "15333.json").write_text("{}")
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs:
+        subprocess.CompletedProcess(args, 0, stdout=f"  15333 S {command}\n"))
+
+    with pytest.raises(AssertionError):
+        dsh_runner_processes(tmp_path)
 
 
 def send(api, message_id, text):

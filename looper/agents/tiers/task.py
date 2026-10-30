@@ -206,6 +206,7 @@ class TaskRouter:
         return planners
 
     def has_planner(self, task_id: str) -> bool:
+        """Whether the task has a Planner, including while its stop is still running."""
         return task_id in self._planners
 
     def set_task_project(self, task_id: str, project_id: str) -> None:
@@ -327,27 +328,41 @@ class TaskRouter:
 
     async def _handle_start(self, envelope: MessageEnvelope) -> None:
         """Start a ready task, once."""
+        from ..scheduler import _project_firing
+
         task_id = envelope.payload.get("task_id", "")
         try:
-            row = await db_tasks.start_ready_task(task_id)
+            snapshot = await db_tasks.get_task(task_id)
         except Exception:
-            logger.exception("failed to start task %s", task_id)
+            logger.exception("failed to read task %s before starting it", task_id)
             return
-        if row is None:
-            logger.warning("task %s is not ready (unknown or started already); not starting it", task_id)
+        if snapshot is None:
             return
-        task = Task.from_row(task_id, row)
-        self._tasks[task_id] = task
-        await self._start(task, MessageEnvelope.create(
-            source=TASK_ROUTER_ADDRESS,
-            target=TASK_ROUTER_ADDRESS,
-            message_type=MessageType.TASK_REQUEST,
-            payload={"requirement": task.requirement, "goal_id": task.goal_id, "work_dir": task.work_dir,
-                     "project_id": task.project_id},
-            # A task asked for in a chat reports its plan and its outcome there.
-            correlation_id=task.correlation_id,
-            metadata={"origin_channel_id": task.origin_channel_id},
-        ))
+        # Publication only queues TASK_START. Keep deletion out until the Router has claimed
+        # the row and finished preparing its workspace and Planner; refuse starts during cleanup.
+        with _project_firing(snapshot["project_id"]) as allowed:
+            if not allowed:
+                return
+            try:
+                row = await db_tasks.start_ready_task(task_id)
+            except Exception:
+                logger.exception("failed to start task %s", task_id)
+                return
+            if row is None:
+                logger.warning("task %s is not ready (unknown or started already); not starting it", task_id)
+                return
+            task = Task.from_row(task_id, row)
+            self._tasks[task_id] = task
+            await self._start(task, MessageEnvelope.create(
+                source=TASK_ROUTER_ADDRESS,
+                target=TASK_ROUTER_ADDRESS,
+                message_type=MessageType.TASK_REQUEST,
+                payload={"requirement": task.requirement, "goal_id": task.goal_id, "work_dir": task.work_dir,
+                         "project_id": task.project_id},
+                # A task asked for in a chat reports its plan and its outcome there.
+                correlation_id=task.correlation_id,
+                metadata={"origin_channel_id": task.origin_channel_id},
+            ))
 
     async def _start(self, task: Task, envelope: MessageEnvelope) -> None:
         """Give ``task`` its Planner now, unless it has one."""
@@ -598,14 +613,17 @@ class TaskRouter:
             logger.exception("failed to persist stop for task %s", task_id)
 
         if planner:
-            plnr = self._planners.pop(task_id, None)
-            if plnr:
-                await plnr.stop()
+            await planner.stop()
+            self._planners.pop(task_id, None)
         if self._broadcaster:
             self._broadcaster.close_task(task_id)
 
         logger.info("task %s stopped", task_id)
         await self._task_ended(task_id, "stopped")
+
+    def forget_task(self, task_id: str) -> None:
+        """Drop an already stopped task after its database row has been deleted."""
+        self._tasks.pop(task_id, None)
 
     @staticmethod
     async def _stop_note(task_id: str) -> str:
@@ -623,6 +641,8 @@ class TaskRouter:
     async def _handle_restart(self, envelope: MessageEnvelope) -> None:
         """Run a task again as its ``RestartMode`` says: continued from its saved plan (the default), planned anew,
         or continued at a raised spend cap."""
+        from ..scheduler import _project_firing
+
         assert self._bus is not None
         task_id = envelope.payload.get("task_id", "")
         try:
@@ -652,46 +672,52 @@ class TaskRouter:
             logger.warning("task %s status=%s not restartable", task_id, db_row["status"])
             return
 
-        start_over = mode is RestartMode.START_OVER
-        if start_over:
-            # Planned anew: the steps go, and so do their worktrees and branches.
+        # Keep restart cleanup and Planner startup inside the same barrier as a ready start.
+        with _project_firing(db_row["project_id"]) as allowed:
+            if not allowed:
+                return
+            start_over = mode is RestartMode.START_OVER
+            if start_over:
+                # Planned anew: the steps go, and so do their worktrees and branches.
+                try:
+                    await step_workspaces.remove_task(task_id)
+                except Exception:
+                    logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
+                # And the sessions its runs kept for the room (its room goes with the steps).
+                remove_run_sessions(self._runtime_root, task_id)
             try:
-                await step_workspaces.remove_task(task_id)
+                if not await db_tasks.reset_task_for_restart(task_id, keep_steps=not start_over):
+                    return
             except Exception:
-                logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
-            # And the sessions its runs kept for the room (its room goes with the steps).
-            remove_run_sessions(self._runtime_root, task_id)
-        try:
-            await db_tasks.reset_task_for_restart(task_id, keep_steps=not start_over)
-        except Exception:
-            logger.exception("failed to reset task %s for restart", task_id)
-            return
+                logger.exception("failed to reset task %s for restart", task_id)
+                return
 
-        task = Task.from_row(task_id, db_row)
-        self._tasks[task_id] = task
+            task = Task.from_row(task_id, db_row)
+            self._tasks[task_id] = task
 
-        # The Planner plans the request, unless it carries on with the plan (``restart``) of a task that ran before
-        # and ended as ``ended`` says.
-        carry_on = not start_over and db_row["status"] != db_tasks.READY
-        restart_envelope = MessageEnvelope.create(
-            source=TASK_ROUTER_ADDRESS,
-            target=TASK_ROUTER_ADDRESS,
-            message_type=MessageType.TASK_REQUEST,
-            payload={
-                "requirement": task.requirement,
-                "goal_id": task.goal_id,
-                "work_dir": task.work_dir,
-                "project_id": task.project_id,
-                **({"restart": mode.value, "ended": db_row["status"]} if carry_on else {}),
-            },
-            correlation_id=task.correlation_id,
-        )
-        await self._start(task, restart_envelope)
+            # The Planner plans the request, unless it carries on with the plan (``restart``) of a task that ran before
+            # and ended as ``ended`` says.
+            carry_on = not start_over and db_row["status"] != db_tasks.READY
+            restart_envelope = MessageEnvelope.create(
+                source=TASK_ROUTER_ADDRESS,
+                target=TASK_ROUTER_ADDRESS,
+                message_type=MessageType.TASK_REQUEST,
+                payload={
+                    "requirement": task.requirement,
+                    "goal_id": task.goal_id,
+                    "work_dir": task.work_dir,
+                    "project_id": task.project_id,
+                    **({"restart": mode.value, "ended": db_row["status"]} if carry_on else {}),
+                },
+                correlation_id=task.correlation_id,
+            )
+            await self._start(task, restart_envelope)
 
     async def _teardown_task(self, task_id: str) -> None:
-        planner = self._planners.pop(task_id, None)
+        planner = self._planners.get(task_id)
         if planner:
             await planner.stop()
+            self._planners.pop(task_id, None)
             logger.info("task %s planner torn down", task_id)
 
         task = self._tasks.get(task_id)
