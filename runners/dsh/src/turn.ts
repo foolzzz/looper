@@ -22,6 +22,7 @@ export type Turn = {
   endReason?: any; last?: any; opened: ReturnType<typeof deferred>; closed: ReturnType<typeof deferred>;
   finished: ReturnType<typeof deferred>; settling?: Promise<void>; drained?: () => void;
   authorizationExpired: ReturnType<typeof deferred>; forced?: boolean; failure?: Failure;
+  retryDelay?: AbortController;
   steers: Map<string, Steer>;
 };
 async function within(promise: Promise<unknown>, ms: number): Promise<boolean> {
@@ -137,6 +138,7 @@ export function onEvent(record: Session, event: any): void {
 }
 export function settle(record: Session, turn: Turn, failure?: Failure): Promise<void> {
   if (turn.settled) return turn.finished.promise;
+  turn.retryDelay?.abort();
   if (failure) turn.failure = failure;
   if (turn.settling) return turn.settling;
   turn.settling = (async () => {
@@ -192,6 +194,7 @@ export function cancel(params: Record<string, unknown>): object {
 }
 export async function cancelTurn(record: Session, turn: Turn, deadline = 4000): Promise<void> {
   if (turn.settled) return;
+  turn.retryDelay?.abort();
   dropSteers(record, turn);
   if (!turn.started) {
     record.agent.inbox.remove(turn.promptId);
