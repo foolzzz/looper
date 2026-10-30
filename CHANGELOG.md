@@ -18,6 +18,13 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.19] - 2026-10-30
+
+### Fixed
+
+- **The project delete closes three races left by the cascade.** A Restart or Start over of a task during the delete no longer starts a Planner on a deleted task: the restart runs inside the same per-project barrier as a ready start, returns while the project is being deleted, and stops when the task was not reset. The delete skips a task that moved to another project after its snapshot, keeping its checkout and record. A Manager template attached after the preflight is reported as a template conflict instead of "a task or schedule was added". A schedule run whose gate finished while the project was being deleted now ends as `gate_failed` instead of staying `gating` until a server restart. No schema, API or model-visible change. ([#912](https://github.com/foolzzz/looper/pull/912))
+- **The installed DSH runner serve test helper skips a runner that has exited.** `dsh_runner_processes` reads the `ps` state and skips a defunct or exiting process that serve has not yet reaped, instead of failing the test. Test file only; no production code changes. ([#908](https://github.com/foolzzz/looper/pull/908))
+
 ## [2.14.18] - 2026-10-29
 
 ### Fixed
