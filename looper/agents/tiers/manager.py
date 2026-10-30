@@ -1386,7 +1386,10 @@ class ManagerAgent:
                     error = f"Cannot start {launch.runtime.label}: {cause}"
                     await token.keep("recorder_finish", recorder.finish(output_text=None, result_event=None,
                                                                        error=error), 10)
-                    raise TurnFailed(f"无法启动 {launch.runtime.label}，请检查安装。", error) from None
+                    reply = f"无法启动 {launch.runtime.label}，请检查安装。"
+                    if launch.runtime.hosts_runs and launch.runtime.type in {"pi", "dsh"}:
+                        reply = f"无法启动 {launch.runtime.label}：{cause}"
+                    raise TurnFailed(reply, error) from None
                 if self._claude.command != command:
                     # A per-turn runtime may materialize its owner's home at start.
                     command = self._claude.command

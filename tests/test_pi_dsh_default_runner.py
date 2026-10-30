@@ -416,6 +416,93 @@ def test_lazy_spawn_failure_retains_cause_and_opt_out(tmp_path, monkeypatch, kin
     asyncio.run(asyncio.wait_for(exercise(), 10))
 
 
+@pytest.mark.parametrize("kind", ["pi", "dsh"])
+@pytest.mark.parametrize("channel", ["web", "telegram", "lark", "lark-group"])
+def test_manager_runner_start_diagnostic_reaches_the_chat(agent_db, tmp_path, monkeypatch, kind, channel):
+    from unittest.mock import AsyncMock
+
+    from looper.agents.agent_settings import AgentSettings
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.channels.telegram import TelegramChannelAdapter
+    from looper.agents.channels.web import WebChannelAdapter
+    from looper.agents.message import MessageType
+    from looper.agents.profile_registry import RuntimeSpec
+    from tests.pi_runtime_support import provider
+    from tests.runtime_model_helpers import resolved_profile
+    from tests.test_agent_channels import _allowlist
+    from tests.test_manager_new_session import _drain, _web
+    from tests.test_manager_stop import _manager
+
+    module = pi_runner if kind == "pi" else dsh_runner
+    package, version = (("@earendil-works/pi-coding-agent", "1.4.0") if kind == "pi"
+                        else ("@deepseek-ai/dsh", "0.2.1-rc.3"))
+    cause = f"{package} version {version} is unsupported"
+    diagnostic = module._opt_out(cause)
+    opt_out = f'[runtimes] {kind} = "cli" in the ops file; restart Looper'
+    # The SDK changed after startup validation: acquisition fails at the lazy handshake.
+    supervisor = SimpleNamespace(acquire=AsyncMock(side_effect=RunnerUnavailable(diagnostic)))
+    runtime = PiRunnerRuntime(supervisor, pi=None) if kind == "pi" else DshRunnerRuntime(supervisor, dsh=None)
+    monkeypatch.setitem(ADAPTERS, kind, runtime)
+    monkeypatch.setattr(runtime, "_check_executable", lambda executable: None)
+    account = provider(protocols=frozenset({ApiProtocol.OPENAI_RESPONSES if kind == "pi"
+                                           else ApiProtocol.ANTHROPIC_MESSAGES}))
+    profile = resolved_profile("test-profile", "test", RuntimeSpec("test-runtime", kind, kind),
+                               account, "test-model" if kind == "pi" else "deepseek-flash", None)
+
+    async def exercise():
+        manager, bus, queue = _manager(tmp_path, runtime.resident_session("manager"))
+        manager._claude_runtime = runtime
+        monkeypatch.setattr(manager, "_load_agent_settings", AsyncMock(return_value=AgentSettings(profile=profile)))
+        incoming = _web("hello")
+        wire = SimpleNamespace(send=AsyncMock(return_value="status-1"), reply=AsyncMock(return_value="status-1"),
+                               edit=AsyncMock())
+        if channel == "web":
+            adapter = WebChannelAdapter()
+            adapter._bus = bus
+            saved = AsyncMock()
+            monkeypatch.setattr("looper.db.chat.save_message", saved)
+            await adapter.handle_user_message(text="hello", session_id="chat-1", message_id="user-1")
+            incoming = await bus.get_queue("manager").get()
+        elif channel == "telegram":
+            adapter = TelegramChannelAdapter(allowlist=_allowlist("channel-telegram", "7"), bot_token="test")
+            adapter._app = SimpleNamespace(bot=SimpleNamespace(
+                send_message=AsyncMock(return_value=SimpleNamespace(message_id=1)), edit_message_text=AsyncMock()))
+            adapter._remember(incoming.correlation_id, 7)
+        else:
+            adapter = LarkChannelAdapter(allowlist=_allowlist("channel-lark", "ou_test"), transport=wire,
+                                         runtime_root=tmp_path)
+            adapter._correlation_chat[incoming.correlation_id] = "oc_test"
+            if channel == "lark-group":
+                adapter._group_message[incoming.correlation_id] = "om_test"
+        try:
+            if channel != "web":
+                await adapter._status.update(incoming.correlation_id, "7" if channel == "telegram"
+                                             else incoming.correlation_id, {"phase": "thinking"})
+            await manager._handle(incoming)
+            (reply,) = [item for item in _drain(queue) if item.message_type == MessageType.AGENT_REPLY]
+            assert reply.payload["outcome"] == "failed" and diagnostic in reply.payload["error"]
+            assert supervisor.acquire.await_count == 1
+            assert (await adapter.deliver(reply)).success
+            if channel == "web":
+                events = [event async for event in adapter.iter_sse_events(incoming.correlation_id, timeout=1)]
+                delivered = events[-1]["payload"]["response"]["message"]
+                assert saved.await_args.kwargs["content"] == delivered
+            elif channel == "telegram":
+                delivered = adapter._app.bot.send_message.await_args.kwargs["text"]
+                assert opt_out not in adapter._app.bot.edit_message_text.await_args.kwargs["text"]
+            else:
+                delivered = (wire.reply if channel == "lark-group" else wire.send).await_args.kwargs["markdown"]
+                assert opt_out not in wire.edit.await_args.kwargs["text"]
+            assert cause in delivered
+            assert opt_out in delivered
+            assert diagnostic in delivered
+        finally:
+            await manager.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(exercise(), 10))
+
+
 @pytest.mark.installed
 @pytest.mark.parametrize("kind", ["pi", "dsh"])
 @pytest.mark.parametrize("member", ["first", "additional"])
@@ -445,7 +532,12 @@ def test_lazy_handshake_failure_retains_cause_and_opt_out(tmp_path, monkeypatch,
         return process
 
     monkeypatch.setattr(supervisor_module.proc_tree, "spawn", track)
-    supervisor = module.enable(tmp_path / "runtime")
+    # require_node already validated the installed binary. Keep the redundant
+    # two-second startup probe out of this test of later handshake failures.
+    with monkeypatch.context() as startup:
+        startup.setattr(module.subprocess, "run", lambda command, **kwargs:
+            subprocess.CompletedProcess(command, 0, stdout="v22.19.0\n"))
+        supervisor = module.enable(tmp_path / "runtime")
     assert supervisor is not None and ADAPTERS[kind].unavailable is None
     adapter = ADAPTERS[kind]
     prompt = tmp_path / "prompt.md"
