@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.23] - 2026-10-30
+
+### Fixed
+
+- **Runner startup failures no longer stop `looper serve` and name their cause.** Pi and DSH default to their SDK runners, so a runner adapter that cannot be built (an unsupported runtime or a bad path) now becomes an "unavailable" adapter carrying the reason and the `[runtimes] <kind> = "cli"` opt-out, instead of an exception at startup. A failing `node --version` check reports its own error rather than a timeout message, and Node 23.0 to 23.5, which cannot run the runner, is rejected up front. After repeated runner failures, the error now includes the last failure, and a runner that exits reports its cause. A cold start cancelled while its handshake succeeds is retired without using the crash budget (five failures in ten minutes). The architecture document and the ops-file comments now describe the runner default, 32 session slots per runner and up to four runners per kind. No model-visible change. ([#920](https://github.com/foolzzz/looper/pull/920))
+
 ## [2.14.22] - 2026-10-30
 
 ### Fixed
