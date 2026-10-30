@@ -10,7 +10,10 @@ exercise all four roles against a loopback-only fake Chat Completions provider.
 The development harness reuses the packaging tests' build/HTTP helpers; the
 server and negative startup checks run in the installed wheel's interpreter.
 Missing prerequisites are recorded as unverified and return 2; failures return
-1. Evidence stays in the checkout's ignored .local directory.
+1. Evidence stays in the checkout's ignored .local directory. This smoke covers
+the Pi CLI opt-out. Its evidence (``.local/mcp`` grant files, ``mcp__looper__``
+names, ``.local/agent-processes``) exists only on the CLI path. Installed
+coverage of the runner default is a separate change.
 """
 from __future__ import annotations
 
@@ -465,7 +468,7 @@ asyncio.run(check())
     ops = root / "ops"
     ops.mkdir(mode=0o700)
     config = ops / "server.toml"
-    config.write_text('[database]\nurl = ' + json.dumps(dsn) + '\n')
+    config.write_text('[database]\nurl = ' + json.dumps(dsn) + '\n\n[runtimes]\npi = "cli"\n')
     config.chmod(0o600)
     # A minimal PATH prevents startup from probing the operator's other CLIs.
     bin_dir = work / "safe-bin"
