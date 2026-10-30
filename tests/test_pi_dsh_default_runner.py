@@ -203,6 +203,63 @@ def test_supported_sdk_versions_still_install_the_runner(tmp_path, monkeypatch):
     assert pi_runner.SESSION_CAP == dsh_runner.SESSION_CAP == 32
 
 
+@pytest.mark.parametrize("elapsed", [27.8, 45, 61], ids=["cold-start", "slow-cold-start", "startup-timeout"])
+def test_pi_production_handshake_uses_cold_start_bound(monkeypatch, elapsed):
+    from looper.agents.runtimes.runner import pi_command, protocol as p
+    from runner_pipe_support import pipe, send
+
+    async def exercise():
+        host_reader, runner_writer, rt = await pipe()
+        runner_reader, host_writer, ht = await pipe()
+        loop = asyncio.get_running_loop()
+        now, offset = loop.time, 0
+        connecting = bridge = None
+        # Advance only this loop's clock, exercising real RPC deadlines without
+        # waiting for cold imports or changing the production connect function.
+        with monkeypatch.context() as clock:
+            clock.setattr(loop, "time", lambda: now() + offset)
+            try:
+                connecting = asyncio.create_task(pi_command.connect(
+                    SimpleNamespace(stdout=host_reader, stdin=host_writer), "pi"))
+                request = await p.read_frame(runner_reader)
+                assert request.method == "initialize"
+                offset += elapsed
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                if elapsed > 60:
+                    with pytest.raises(TimeoutError):
+                        await connecting
+                    assert host_writer.is_closing()
+                else:
+                    await send(runner_writer, p.Response(request.id, result={
+                        "protocol_version": "0.1", "runner": {"kind": "pi", "version": "1"},
+                        "sdk": {"name": "pi", "version": "1.3.0"},
+                        "capabilities": {"cancel": True, "usage": {"per_request": True},
+                                         "authorize_covers": list(pi_command.PERMITTED)}}))
+                    bridge = await connecting
+                    assert bridge.control_timeout == 10
+                    health = asyncio.create_task(bridge.health())
+                    assert (await p.read_frame(runner_reader)).method == "runner/health"
+                    offset += 10.1
+                    with pytest.raises(TimeoutError):
+                        await health
+            finally:
+                if connecting is not None:
+                    if not connecting.done():
+                        connecting.cancel()
+                    result = (await asyncio.gather(connecting, return_exceptions=True))[0]
+                    if isinstance(result, RunnerBridge):
+                        await result.close()
+                runner_writer.close()
+                host_writer.close()
+                rt.close()
+                ht.close()
+                await runner_writer.wait_closed()
+                await host_writer.wait_closed()
+
+    asyncio.run(asyncio.wait_for(exercise(), 90))
+
+
 @pytest.mark.installed
 @pytest.mark.parametrize("kind", ["pi", "dsh"])
 def test_default_runner_pools_35_sdk_sessions_and_stops_idle_extra(tmp_path, monkeypatch, kind):
@@ -219,18 +276,6 @@ def test_default_runner_pools_35_sdk_sessions_and_stops_idle_extra(tmp_path, mon
     which = module.shutil.which
     monkeypatch.setattr(module.shutil, "which", lambda name:
         node if name == "node" else executable if name == kind else which(name))
-    if kind == "pi":
-        async def connect(process, kind):
-            # Match the installed-test cold-import bound; this test checks admission, not latency.
-            bridge = RunnerBridge(process.stdout, process.stdin, kind, control_timeout=60)
-            try:
-                await bridge.initialize(permitted=module.pi_command.PERMITTED)
-            except BaseException:
-                await bridge.close()
-                raise
-            bridge.control_timeout = 10
-            return bridge
-        monkeypatch.setattr(module.pi_command, "connect", connect)
     supervisor = module.enable(tmp_path / "runtime")
     assert supervisor is not None
     monkeypatch.setattr(supervisor_module, "IDLE_STOP_SECONDS", 0.05)

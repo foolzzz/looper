@@ -355,7 +355,13 @@ class RunnerSupervisor:
             self._restart(kind, state)
             if isinstance(error, asyncio.CancelledError):
                 raise
-            raise RunnerUnavailable(state.fatal or "runner failed to initialize; restart is bounded") from None
+            message = state.fatal or "runner failed to initialize; restart is bounded"
+            if not state.fatal and self._startup_error:
+                cause = str(error) or ("runner initialization timed out" if isinstance(error, TimeoutError)
+                                       else type(error).__name__)
+                cause = redact(cause).replace("\r", " ").replace("\n", " ")[:512]
+                message = f"{self._startup_error(cause)}; restart is bounded"
+            raise RunnerUnavailable(message) from None
 
     async def _wait(self, generation: _Generation) -> None:
         await generation.exited.wait()

@@ -25,10 +25,12 @@ def command(node: str, pi: str) -> list[str | Path]:
 
 
 async def connect(process, kind: str) -> RunnerBridge:
-    bridge = RunnerBridge(process.stdout, process.stdin, kind, control_timeout=10)
+    # Cold SDK imports need a larger bound than ordinary control requests.
+    bridge = RunnerBridge(process.stdout, process.stdin, kind, control_timeout=60)
     try:
         await bridge.initialize(permitted=PERMITTED)
     except BaseException:
         await bridge.close()
         raise
+    bridge.control_timeout = 10
     return bridge
