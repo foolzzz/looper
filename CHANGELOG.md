@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.18] - 2026-10-29
+
+### Fixed
+
+- **A hash navigation made just before the Chat page pins its thread is no longer reverted.** The Chat page replaces the address with the shown Manager's thread (`#chat?target=<id>&conversation=<id>`) so that New conversation can push the next entry. That replace ran from a stale render and was unconditional, so a navigation made just before it (Back/Forward, a link, a typed address, a click) was reverted to the previous Manager's thread. The replace now applies only while the address is still the one the effect saw; otherwise the newer navigation is kept. Dashboard only; no server, API, database or model-visible change. ([#910](https://github.com/foolzzz/looper/pull/910))
+
 ## [2.14.17] - 2026-10-29
 
 ### Changed
