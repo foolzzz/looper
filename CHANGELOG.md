@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.26] - 2026-10-30
+
+### Added
+
+- **The hot upgrade v0 RFC.** `docs/architecture/rfcs/hot-upgrade-v0.zh-CN.md` (Chinese) designs planned restarts that do not interrupt runs and upgrade only the changed components, and the development plan's open todos record its stages (S0 in progress; S1, S2, S3 to do). Documentation only; no runtime or model-visible change. ([#928](https://github.com/foolzzz/looper/pull/928))
+
 ## [2.14.25] - 2026-10-30
 
 ### Fixed
