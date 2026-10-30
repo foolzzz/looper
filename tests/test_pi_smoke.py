@@ -23,15 +23,18 @@ smoke = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(smoke)
 
 
-def test_fake_provider_mode_is_explicit_and_preserves_unverified_summary(monkeypatch):
+@pytest.mark.parametrize("runtime_args, expected", [([], "cli"), (["--pi-runtime", "cli"], "cli"),
+                                                   (["--pi-runtime", "runner"], "runner")])
+def test_fake_provider_mode_is_explicit_and_preserves_unverified_summary(monkeypatch, runtime_args, expected):
     monkeypatch.delenv("LOOPER_TEST_DATABASE_URL", raising=False)
 
     def exercise(args, _root, _output, summary):
         assert args.fake_provider is True
+        assert args.pi_runtime == expected
         summary["unverified"].append("disposable database unavailable")
 
     monkeypatch.setattr(smoke, "smoke", exercise)
-    assert smoke.main(["--fake-provider"]) == 2
+    assert smoke.main(["--fake-provider", *runtime_args]) == 2
     assert json.loads((smoke.LAST_OUTPUT / "summary.json").read_text())["passed"] == []
 
 
@@ -76,14 +79,15 @@ def _fresh_smoke_database(admin_url: str):
         asyncio.run(drop())
 
 
-@pytest.fixture(scope="module")
-def installed_session_evidence():
+@pytest.fixture(scope="module", params=("cli", "runner"))
+def installed_session_evidence(request):
     """One installed service on a fresh looper_smoke_* database, never an operator service."""
     admin = os.environ.get("LOOPER_TEST_DATABASE_URL")
     if not admin:
         pytest.skip("no disposable DB: installed fake-provider sessions remain unverified")
     with _fresh_smoke_database(admin) as smoke_url:
-        code = smoke.main(["--fake-provider", "--database-url", smoke_url, "--disposable-db"])
+        code = smoke.main(["--fake-provider", "--database-url", smoke_url, "--disposable-db",
+                           "--pi-runtime", request.param])
         summary = json.loads((smoke.LAST_OUTPUT / "summary.json").read_text())
         if code == 2:
             pytest.skip("; ".join(summary["unverified"]))
@@ -102,7 +106,7 @@ def test_installed_fake_provider_session_closed_loop(installed_session_evidence,
     # platform's answer; an empty provider log cannot satisfy this assertion.
     messages = _tool_messages(SimpleNamespace(requests=evidence["requests"]))
     assert any(json.loads(message["content"])["status"] == "ok" for message in messages)
-    smoke.assert_role_evidence(role, evidence)
+    smoke.assert_role_evidence(role, evidence, pi_runtime=installed_session_evidence["pi_runtime"])
 
 
 @pytest.mark.installed

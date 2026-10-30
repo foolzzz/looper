@@ -10,10 +10,9 @@ exercise all four roles against a loopback-only fake Chat Completions provider.
 The development harness reuses the packaging tests' build/HTTP helpers; the
 server and negative startup checks run in the installed wheel's interpreter.
 Missing prerequisites are recorded as unverified and return 2; failures return
-1. Evidence stays in the checkout's ignored .local directory. This smoke covers
-the Pi CLI opt-out. Its evidence (``.local/mcp`` grant files, ``mcp__looper__``
-names, ``.local/agent-processes``) exists only on the CLI path. Installed
-coverage of the runner default is a separate change.
+1. Evidence stays in the checkout's ignored .local directory. Select the Pi CLI
+opt-out (default) or SDK runner with --pi-runtime cli|runner. Grant files,
+prefixed platform tools and agent-process leader files exist only in CLI mode.
 """
 from __future__ import annotations
 
@@ -50,7 +49,7 @@ STEER_SENTINEL = "SMOKE_STEER_701d"
 
 
 @contextmanager
-def fake_provider():
+def fake_provider(pi_runtime="cli"):
     """The role-tool driver's local SSE protocol, with real platform results only.
 
     Requests advertise the actual bridge schemas. The provider chooses a tool;
@@ -59,6 +58,7 @@ def fake_provider():
     """
     state = {"requests": [], "errors": [], "worker": threading.Event(), "controls": 0,
              "cancel": threading.Event(), "ready": {role: threading.Event() for role in ROLES}}
+    prefix = PREFIX if pi_runtime == "cli" else ""
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -77,11 +77,12 @@ def fake_provider():
                     role, delta, reason = "control", {"content": "counted"}, "stop"
                 else:
                     tools = {t["function"]["name"]: t["function"] for t in body["tools"]}
-                    role = ("manager" if PREFIX + "looper_projects" in tools else
-                            "planner" if PREFIX + "looper_task_profiles" in tools else
-                            "worker" if PREFIX + "looper_room_watch" in tools else "reviewer")
+                    role = ("manager" if prefix + "looper_projects" in tools else
+                            "planner" if prefix + "looper_task_profiles" in tools else
+                            "worker" if prefix + "looper_room_watch" in tools else "reviewer")
                     received["role"] = role
-                    assert state["ready"][role].wait(10), "role's live scoped token was not observed"
+                    if pi_runtime == "cli":
+                        assert state["ready"][role].wait(10), "role's live scoped token was not observed"
                     users = [m["content"] if isinstance(m["content"], str) else
                              "".join(block.get("text", "") for block in m["content"])
                              for m in body["messages"] if m["role"] == "user"]
@@ -101,7 +102,7 @@ def fake_provider():
                             script = ("require('node:fs').writeFileSync('cancel-tool.json', JSON.stringify({pid:process.pid}));"
                                       "setTimeout(() => {}, 120000)")
                             name, arguments = "bash", {"command": "node -e " + shlex.quote(script)}
-                        tool = tools[name if cancelling else PREFIX + name]
+                        tool = tools[name if cancelling else prefix + name]
                         assert tool["parameters"]["type"] == "object"
                         delta = {"tool_calls": [{"index": 0, "id": call_id,
                                   "type": "function", "function": {"name": tool["name"],
@@ -177,7 +178,8 @@ def fake_provider():
         thread.join(timeout=3)
 
 
-def assert_role_evidence(role, evidence):
+def assert_role_evidence(role, evidence, *, pi_runtime="cli"):
+    prefix = PREFIX if pi_runtime == "cli" else ""
     requests, records = evidence["requests"], evidence["records"]
     assert requests and records, f"{role}: no positive provider/run control"
     assert all(record["status"] == "completed" for record in records), role
@@ -189,17 +191,19 @@ def assert_role_evidence(role, evidence):
         assert record["model"] == "selected"
         assert record["metadata"]["profile"]["runtime"]["type"] == "pi"
     advertised = {tool["function"]["name"] for tool in requests[0]["tools"]}
-    assert {PREFIX + tool["name"] for tool in evidence["catalog"]} == {name for name in advertised if name.startswith(PREFIX)}
-    assert evidence["scope_denied"] is True
+    if pi_runtime == "cli":
+        assert {prefix + tool["name"] for tool in evidence["catalog"]} == {name for name in advertised if name.startswith(prefix)}
+        assert evidence["scope_denied"] is True
     name = {"manager": "looper_projects", "planner": "looper_task_profiles",
             "worker": "looper_room_inbox", "reviewer": "looper_room_roster"}[role]
-    assert PREFIX + name in evidence["tool_names"], role
+    assert prefix + name in evidence["tool_names"], role
+    assert len({record["session_id"] for record in records}) == 1
+    assert records[0]["session_id"]
     if role in ("manager", "planner"):
-        assert len(records) >= 2 and len({record["session_id"] for record in records}) == 1
-        assert records[0]["session_id"]
+        assert len(records) >= 2
         assert len([m for m in requests[-1]["messages"] if m["role"] == "user"]) >= 2
     if role == "planner":
-        assert advertised - {name for name in advertised if name.startswith(PREFIX)} == {"read", "grep", "find", "ls"}
+        assert advertised - {name for name in advertised if name.startswith(prefix + "looper_")} == {"read", "grep", "find", "ls"}
         assert all(record["metadata"]["read_only"] == "tools" for record in records)
     if role == "worker":
         assert any(STEER_SENTINEL in json.dumps(body["messages"]) for body in requests[1:])
@@ -210,9 +214,9 @@ def assert_role_evidence(role, evidence):
     assert all(PARENT_SENTINEL not in json.dumps(body) and PERSONAL_SENTINEL not in json.dumps(body) for body in requests)
 
 
-def session_smoke(base, token, root, work, output, provider, *, helper, installed):
-    """Drive the installed service, including resident factories and Worker RPC."""
-    evidence = {"roles": {}, "boundaries": {}, "provider_control": provider["controls"]}
+def session_smoke(base, token, root, work, output, provider, *, helper, installed, pi_runtime="cli"):
+    """Drive the installed service through the selected Pi runtime for all roles."""
+    evidence = {"pi_runtime": pi_runtime, "roles": {}, "boundaries": {}, "provider_control": provider["controls"]}
     grants = {}
     seen = set()
 
@@ -239,7 +243,8 @@ def session_smoke(base, token, root, work, output, provider, *, helper, installe
     def wait(check, description, timeout=90):
         deadline = time.monotonic() + timeout
         while True:
-            collect_grants()
+            if pi_runtime == "cli":
+                collect_grants()
             assert not provider["errors"], provider["errors"]
             value = check()
             if value:
@@ -263,11 +268,12 @@ def session_smoke(base, token, root, work, output, provider, *, helper, installe
                 if event.get("type") == "assistant":
                     tool_names.extend(block["name"] for block in event["message"]["content"]
                                       if block.get("type") == "tool_use")
-        grant = grants[role]
         evidence["roles"][role] = {"requests": [r["body"] for r in provider["requests"] if r["role"] == role],
-                                  "records": selected, "catalog": grant["catalog"],
-                                  "scope_denied": grant["scope_denied"], "tool_names": tool_names}
-        assert_role_evidence(role, evidence["roles"][role])
+                                  "records": selected, "tool_names": tool_names}
+        if pi_runtime == "cli":
+            grant = grants[role]
+            evidence["roles"][role].update(catalog=grant["catalog"], scope_denied=grant["scope_denied"])
+        assert_role_evidence(role, evidence["roles"][role], pi_runtime=pi_runtime)
 
     def send(text, role="manager", task_id=None):
         target = {"kind": role, **({"task_id": task_id} if task_id else {})}
@@ -334,11 +340,17 @@ def session_smoke(base, token, root, work, output, provider, *, helper, installe
                         return True
             return False
         wait(tool_started, "cancellation did not reach a live tool")
-        process_files = list((root / ".local/agent-processes").glob("*.json"))
-        leaders = [int(path.stem) for path in process_files]
-        assert leaders, "no running process positive control before cancellation"
-        _, python, env = installed
-        snapshot = helper._run([str(python), "-I", "-c", '''
+        if pi_runtime == "runner":
+            pid = json.loads(tool_child.read_text())["pid"]
+            os.kill(pid, 0)  # Positive control: the tool child is alive before cancel.
+            tree = {"pids": [pid], "groups": []}
+            evidence["cancel_tree"] = tree
+        else:
+            process_files = list((root / ".local/agent-processes").glob("*.json"))
+            leaders = [int(path.stem) for path in process_files]
+            assert leaders, "no running process positive control before cancellation"
+            _, python, env = installed
+            snapshot = helper._run([str(python), "-I", "-c", '''
 import json, sys
 from types import SimpleNamespace
 from looper.agents import proc_tree
@@ -350,10 +362,10 @@ for pid in sys.argv[1:]:
 assert tree, 'no live tree before cancellation'
 print(json.dumps({'pids': list(tree), 'groups': list(set(tree.values()))}))
 ''', *map(str, leaders)], cwd=work, env=env)
-        tree = json.loads(snapshot.stdout)
-        assert json.loads(tool_child.read_text())["pid"] in tree["pids"], "tool child missing from live tree"
-        evidence["cancel_tree"] = tree
-        cancelled_token = grants["worker"]["token"]
+            tree = json.loads(snapshot.stdout)
+            assert json.loads(tool_child.read_text())["pid"] in tree["pids"], "tool child missing from live tree"
+            evidence["cancel_tree"] = tree
+            cancelled_token = grants["worker"]["token"]
         count_before = len([r for r in provider["requests"] if r["role"] == "worker"])
         request(base, "/api/v1/ops/task_control/cancel", token, "POST", {"task_id": cancelled})
         wait(lambda: request(base, "/api/v1/tasks/detail", token, "POST", {"task_id": cancelled})["result"]["status"] == "cancelled", "task not cancelled")
@@ -371,14 +383,15 @@ print(json.dumps({'pids': list(tree), 'groups': list(set(tree.values()))}))
                     return False
                 except ProcessLookupError:
                     pass
-            return not list((root / ".local/agent-processes").glob("*.json"))
+            return pi_runtime == "runner" or not list((root / ".local/agent-processes").glob("*.json"))
         wait(reaped, "cancel left processes", timeout=60)
-        try:
-            request(base, "/api/agent/v1/tools", cancelled_token)
-        except urllib.error.HTTPError as error:
-            assert error.code == 401
-        else:
-            raise AssertionError("cancel left a live run token")
+        if pi_runtime == "cli":
+            try:
+                request(base, "/api/agent/v1/tools", cancelled_token)
+            except urllib.error.HTTPError as error:
+                assert error.code == 401
+            else:
+                raise AssertionError("cancel left a live run token")
         assert len([r for r in provider["requests"] if r["role"] == "worker"]) == count_before
         evidence["boundaries"]["cancel-tool"] = True
     finally:
@@ -450,7 +463,7 @@ def request(base, path, token, method="GET", data=None):
         return json.load(response)
 
 
-def registry_smoke(helper, installed, root, port, dsn, output, provider_url, *, provider_state=None):
+def registry_smoke(helper, installed, root, port, dsn, output, provider_url, *, provider_state=None, pi_runtime="cli"):
     work, python, env = installed
     # Refuse an initialized DB before serve can resume anything or enable a channel.
     helper._run([str(python), "-I", "-c", '''
@@ -468,7 +481,7 @@ asyncio.run(check())
     ops = root / "ops"
     ops.mkdir(mode=0o700)
     config = ops / "server.toml"
-    config.write_text('[database]\nurl = ' + json.dumps(dsn) + '\n\n[runtimes]\npi = "cli"\n')
+    config.write_text('[database]\nurl = ' + json.dumps(dsn) + '\n\n[runtimes]\npi = ' + json.dumps(pi_runtime) + '\n')
     config.chmod(0o600)
     # A minimal PATH prevents startup from probing the operator's other CLIs.
     bin_dir = work / "safe-bin"
@@ -508,6 +521,7 @@ asyncio.run(check())
                 if time.monotonic() > deadline:
                     raise TimeoutError("installed serve readiness timed out")
                 time.sleep(0.2)
+        assert ("Pi runner pool enabled" in (output / "serve.log").read_text()) == (pi_runtime == "runner")
         channels = request(base, "/api/v1/channel_configs/list", token, "POST", {})["result"]["configs"]
         assert {c["channel_type"] for c in channels} >= {"telegram", "lark", "lark_bot"}
         assert all(not c["enabled"] for c in channels if c["channel_type"] in ("telegram", "lark", "lark_bot"))
@@ -541,7 +555,8 @@ asyncio.run(check())
         assert {layer["role"] for layer in saved["used_by"]["layers"]} == set(ROLES)
         (output / "registry.json").write_text(json.dumps({"profile": saved, "probe": probe}, indent=2, default=str))
         if provider_state is not None:
-            session_smoke(base, token, root, work, output, provider_state, helper=helper, installed=installed)
+            session_smoke(base, token, root, work, output, provider_state, helper=helper, installed=installed,
+                          pi_runtime=pi_runtime)
 
 
 def configuration_smoke(helper, installed, root, url):
@@ -640,12 +655,13 @@ print(probe.version)
         if args.database_url:
             runtime_root = Path(args.runtime_root) if args.runtime_root else root / "runtime"
             if args.fake_provider:
-                with fake_provider() as provider:
+                with fake_provider(args.pi_runtime) as provider:
                     registry_smoke(helper, installed, runtime_root, args.port, args.database_url, output,
-                                   provider["url"], provider_state=provider)
-                summary["passed"].append("installed four-role fake-provider sessions, scoped tools, usage, steering and cancellation")
+                                   provider["url"], provider_state=provider, pi_runtime=args.pi_runtime)
+                summary["passed"].append("installed four-role fake-provider sessions, platform tools, usage, steering and cancellation")
             else:
-                registry_smoke(helper, installed, runtime_root, args.port, args.database_url, output, url)
+                registry_smoke(helper, installed, runtime_root, args.port, args.database_url, output, url,
+                               pi_runtime=args.pi_runtime)
             assert not api.state["requests"]
             summary["passed"].append("installed serve, disabled channels and four-role registry readback; model requests = 0")
 
@@ -657,6 +673,7 @@ def main(argv=None):
     parser.add_argument("--disposable-db", action="store_true")
     parser.add_argument("--runtime-root")
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--pi-runtime", choices=("cli", "runner"), default="cli")
     parser.add_argument("--fake-provider", action="store_true", help="exercise installed sessions using only a local fake provider")
     args = parser.parse_args(argv)
     validate(parser, args)
