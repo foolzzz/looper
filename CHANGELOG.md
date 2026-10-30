@@ -22,6 +22,12 @@ How the agent system works today is described in
 
 - **Pi and DSH profiles run on their SDK runners by default.** `[runtimes] pi` and `[runtimes] dsh` default to `"runner"` and are read once at startup. An explicit `"cli"` is the opt-out: set `[runtimes] pi = "cli"` or `[runtimes] dsh = "cli"` in the ops file and restart. Claude Code stays on the Claude Code CLI. Each runner allows 32 sessions; the supervisor starts another runner of that kind when all members are full, up to four members (128 sessions per kind). Only a full pool fails with `CAPACITY`. Extra runners stop after 300 idle seconds; one stays. If the runner cannot start because Node is unsupported (22.19+ required), the SDK is outside the gate (pi 1.3.x, dsh 0.2.1-rc.2), or the executable is missing, the launch fails. The message names the cause and the same opt-out, including failures on the first lease after startup or when starting another pool member. `evals.prompt_regression` and `examples/dsh/validate.py` use the runner when no flag is set; `--pi-cli` and `--dsh-cli` select the CLI path, and `--pi-runner` / `--dsh-runner` still select the runner. **Model-visible:** a Pi or DSH role runs in the SDK runner, so its platform tools are `looper_*` in process and the run record stores a runner Descriptor. A Claude Code profile is unchanged.
 
+## [2.14.20] - 2026-10-30
+
+### Fixed
+
+- **The DSH runner retries transient provider errors, each attempt authorized.** A provider error such as HTTP 429/5xx or a DeepSeek overload no longer fails the turn at once. Inside the runner's `llm/stream` hook, a request that failed with a retryable status or SDK error code and produced no model output is retried up to 3 times, with 1/2/4 second backoff plus up to 20% jitter and a `Retry-After` hint capped at 30 seconds. Every attempt gets its own request id, `budget/authorize` call and accounting; cancel, close or settle ends the wait. When retries are exhausted the last error is kept with an ` (after N attempts)` suffix. No schema, API or prompt change. ([#915](https://github.com/foolzzz/looper/pull/915))
+
 ## [2.14.19] - 2026-10-30
 
 ### Fixed
