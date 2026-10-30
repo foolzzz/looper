@@ -225,9 +225,12 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
     def members(table: Table, known: Tree) -> Tree:
         return _tree(process, table, known, skip=exclude)
 
-    seen = members(_snapshot(), known)
+    seen = dict(known)
     alive = dict(seen)
     try:
+        # Bulk stops must not serialize blocking ps calls on the server's event loop.
+        seen = members(await asyncio.to_thread(_snapshot), known)
+        alive = dict(seen)
         if recorded is not None:
             path, started = recorded
             await _record_tree(process.pid, seen)

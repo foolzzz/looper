@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -572,24 +573,34 @@ def test_running_task_is_stopped_through_router_and_deleted_only_after_its_agent
     async def run(pool):
         project = await db_projects.create_project(name="Example", pool=pool)
         await _task(pool, project, "task-running", "running")
+        await _task(pool, project, "task-done")
         await _schedule(pool, project)
         bus, router = MessageBus(runtime_root=tmp_path), TaskRouter(runtime_root=tmp_path)
         planner = PlannerAgent(task_id="task-running", runtime_root=tmp_path)
         session = _Session(hold=False)
         session.started = True
         planner._claude = session
-        stopping, release = asyncio.Event(), asyncio.Event()
-        original_stop = session.stop
-        async def held_stop(**kwargs):
+        stopping = asyncio.Event()
+        original_stop = planner.stop
+        async def slow_stop():
             stopping.set()
-            await release.wait()
-            await original_stop(**kwargs)
-        monkeypatch.setattr(session, "stop", held_stop)
-        seen, stop_sent = [], asyncio.Event()
+            await asyncio.sleep(2)
+            await original_stop()
+        monkeypatch.setattr(planner, "stop", slow_stop)
+        seen = []
         def observe_stop(envelope):
             seen.append(envelope)
-            stop_sent.set()
         bus.subscribe_topic(MessageType.TASK_STOP.value, observe_stop)
+        delete_task = tasks.delete_task
+        deleted = []
+
+        async def checked_delete(task_id, **kwargs):
+            assert not router.has_planner("task-running")
+            assert not session.started
+            deleted.append(task_id)
+            return await delete_task(task_id, **kwargs)
+
+        monkeypatch.setattr(tasks, "delete_task", checked_delete)
         await router.start(bus)
         await planner.start(bus)
         router._tasks["task-running"] = Task(task_id="task-running", requirement="Build", goal_id="", work_dir="",
@@ -605,19 +616,22 @@ def test_running_task_is_stopped_through_router_and_deleted_only_after_its_agent
                 await asyncio.wait_for(stopping.wait(), 5)
             deleting = asyncio.create_task(_delete(project, tmp_path, bus, task_router=router))
             await asyncio.wait_for(stopping.wait(), 5)
-            await asyncio.wait_for(stop_sent.wait(), 5)
+            await asyncio.sleep(1.1)  # The deletion has polled again while the Planner still exits.
             assert not deleting.done()
-            assert (await tasks.get_task("task-running", pool=pool))["status"] in tasks.ACTIVE_STATUSES
+            assert (await tasks.get_task("task-running", pool=pool))["status"] == (
+                "stopped" if end_kind == "stop" else end_kind)
+            assert router.has_planner("task-running")
+            assert deleted == []
+            assert await tasks.get_task("task-done", pool=pool) is not None
             assert await pool.fetchval("SELECT count(*) FROM schedules") == 0
-            assert [e.payload["task_id"] for e in seen] == ["task-running"]
+            assert [e.payload["task_id"] for e in seen] == (["task-running"] if end_kind == "stop" else [])
             assert session.started  # Cleanup is still held; the row must survive until it ends.
-            release.set()
             assert await asyncio.wait_for(deleting, 5) == {"deleted": project["id"]}
+            assert set(deleted) == {"task-running", "task-done"}
             assert "task-running" not in router._tasks and not router.has_planner("task-running")
             assert not planner._running and not session.started
             assert await tasks.get_task("task-running", pool=pool) is None
         finally:
-            release.set()
             if deleting is not None:
                 if not deleting.done():
                     deleting.cancel()
@@ -628,30 +642,76 @@ def test_running_task_is_stopped_through_router_and_deleted_only_after_its_agent
     run_db(run, monkeypatch, timeout=20)
 
 
-def test_stop_timeout_removes_schedules_but_keeps_all_tasks_and_retry_finishes(monkeypatch, tmp_path):
-    monkeypatch.setattr(projects, "PROJECT_DELETE_STOP_WAIT_SECONDS", 1, raising=False)
+def test_user_stop_is_not_resumed_after_crash_during_planner_stop(monkeypatch, tmp_path):
+    from looper.agents.tiers.planner import PlannerAgent
+    from looper.agents.tiers.task import Task, TaskRouter
 
     async def run(pool):
         project = await db_projects.create_project(name="Example", pool=pool)
         await _task(pool, project, "task-running", "running")
+        row = await tasks.get_task("task-running", pool=pool)
+        await plans.save("task-running", plan={"plan_id": "plan-running", "status": "executing"}, pool=pool)
+        assert await plans.resumable_task_ids(tasks.ACTIVE_STATUSES, pool=pool) == ["task-running"]
+        bus, router = MessageBus(runtime_root=tmp_path), TaskRouter(runtime_root=tmp_path)
+        planner = PlannerAgent(task_id="task-running", runtime_root=tmp_path)
+        stopping, release = asyncio.Event(), asyncio.Event()
+
+        async def held_stop():
+            stopping.set()
+            await release.wait()
+
+        monkeypatch.setattr(planner, "stop", held_stop)
+        await router.start(bus)
+        router._tasks["task-running"] = Task.from_row("task-running", row)
+        router._planners["task-running"] = planner
+        try:
+            await bus.publish(MessageEnvelope.create(
+                source=SOURCE, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_STOP,
+                payload={"task_id": "task-running"}))
+            await asyncio.wait_for(stopping.wait(), 5)
+            router._loop_task.cancel()  # The process exits before the Planner's stop can finish.
+            await asyncio.gather(router._loop_task, return_exceptions=True)
+            saved = await tasks.get_task("task-running", pool=pool)
+            assert saved["status"] == "stopped"
+            assert "The task was stopped before it finished." in saved["result_summary"]
+            # This is the query serve uses on restart; the live plan must not revive a user's stop.
+            assert await plans.resumable_task_ids(tasks.ACTIVE_STATUSES, pool=pool) == []
+        finally:
+            release.set()
+            await router.stop()
+            await bus.shutdown()
+
+    run_db(run, monkeypatch, timeout=15)
+
+
+@pytest.mark.parametrize("planner_pending", [False, True])
+def test_stop_timeout_removes_schedules_but_keeps_all_tasks_and_retry_finishes(monkeypatch, tmp_path, planner_pending):
+    monkeypatch.setattr(projects, "PROJECT_DELETE_STOP_WAIT_SECONDS", 1, raising=False)
+
+    async def run(pool):
+        project = await db_projects.create_project(name="Example", pool=pool)
+        await _task(pool, project, "task-running", "stopped" if planner_pending else "running")
         await _task(pool, project, "task-stopping", "stopping")
         await _task(pool, project, "task-done")
         await _schedule(pool, project)
         bus = Bus()  # A fake runtime that receives the stop and does not stop.
+        planners = {"task-running"} if planner_pending else set()
+        router = SimpleNamespace(has_planner=planners.__contains__, forget_task=planners.discard)
         with pytest.raises(projects.RequestError) as raised:
-            await _delete(project, tmp_path, bus)
+            await _delete(project, tmp_path, bus, task_router=router)
         assert raised.value.status == projects.HTTP_409
         message = str(raised.value)
         assert "2 task(s) of project 'Example' are still stopping" in message
         assert "task-running" in message and "task-stopping" in message
         assert message.endswith("delete the project again to finish")
-        assert bus.of("task_stop") == ["task-running"]
+        assert bus.of("task_stop") == ([] if planner_pending else ["task-running"])
         assert await pool.fetchval("SELECT count(*) FROM schedules") == 0
         assert await pool.fetchval("SELECT count(*) FROM schedule_runs") == 0
         assert await pool.fetchval("SELECT count(*) FROM tasks") == 3
         assert await db_projects.get_project(project["id"], pool=pool)
         await pool.execute("UPDATE tasks SET status = 'stopped' WHERE status = ANY($1::text[])", list(tasks.ACTIVE_STATUSES))
-        assert await _delete(project, tmp_path, bus) == {"deleted": project["id"]}
+        planners.clear()
+        assert await _delete(project, tmp_path, bus, task_router=router) == {"deleted": project["id"]}
         assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
 
     run_db(run, monkeypatch, timeout=15)

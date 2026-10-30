@@ -270,11 +270,13 @@ async def delete_project(project_id: str, bus: MessageBus, source: AgentAddress,
             sent: set[str] = set()
             while True:
                 tasks = await db_tasks.project_tasks(project_id, manager_id=manager_id)
-                active = [task for task in tasks if task["status"] in db_tasks.ACTIVE_STATUSES]
+                active = [task for task in tasks if task["status"] in db_tasks.ACTIVE_STATUSES
+                          or (task_router is not None and task_router.has_planner(task["id"]))]
                 if active:
                     for task in active:
                         task_id = task["id"]
-                        if task["status"] == "stopping" or task_id in sent:
+                        if task["status"] not in db_tasks.ACTIVE_STATUSES or task["status"] == "stopping" \
+                                or task_id in sent:
                             continue
                         try:
                             await control_task(task_id, "stop", bus, source)
