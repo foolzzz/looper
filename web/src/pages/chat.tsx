@@ -312,7 +312,7 @@ function chatQuery(targetId: string, conversationId = ""): string {
 /** `#chat?target=<agent id>&conversation=<session id>`: the agent open (the Manager when left out or unknown) and, with the
  * Manager, a Lark or Telegram conversation read-only. `query` is undefined while another page is shown: the chat stays
  * mounted, and keeps what it last read. */
-export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query: string, replace?: boolean) => void }) {
+export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query: string, replace?: boolean, from?: string) => void }) {
   const seenQuery = useRef("");
   if (query !== undefined) seenQuery.current = query;
   const urlParams = new URLSearchParams(seenQuery.current);
@@ -647,7 +647,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   // Pin the shown thread to this history entry before New conversation pushes the next one.
   useEffect(() => {
     if (query === undefined || target.kind !== "manager" || !targetSettled || wantConversation || !threadOwned) return;
-    onQuery?.(chatQuery(target.id, sessionId), true);
+    onQuery?.(chatQuery(target.id, sessionId), true, query);
   }, [query, target.kind, target.id, targetSettled, wantConversation, threadOwned, sessionId, onQuery]);
   const openConversation = (session: ChatSession, fromManagerId?: string) => {
     // A click queued on a row of the Manager shown before a switch does nothing.

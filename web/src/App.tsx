@@ -63,9 +63,17 @@ function App() {
     window.location.hash = p;
   }, []);
 
-  const navigateSub = useCallback((p: Page, sub: string, query = "", replace = false) => {
+  const navigateSub = useCallback((p: Page, sub: string, query = "", replace = false, from?: string) => {
     const hash = (sub ? `${p}/${sub}` : p) + (query ? `?${query}` : "");
     if (replace) {
+      if (from !== undefined) {
+        // A replace only refines the entry its caller rendered; a newer navigation wins.
+        const live = readHash();
+        if (live.page !== p || live.sub !== sub || live.query !== from) {
+          setRoute(live);
+          return;
+        }
+      }
       window.history.replaceState(null, "", `#${hash}`);
     } else window.location.hash = hash;
     setRoute(readHash());
@@ -129,7 +137,7 @@ function App() {
           <div className={route.page === "chat" ? "h-full" : "hidden"}>
             <ChatPage
               query={route.page === "chat" ? route.query : undefined}
-              onQuery={(q, replace) => navigateSub("chat", "", q, replace)}
+              onQuery={(q, replace, from) => navigateSub("chat", "", q, replace, from)}
             />
           </div>
           {route.page === "dashboard" && (

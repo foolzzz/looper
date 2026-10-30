@@ -25,7 +25,7 @@ let chatReads: { path: string; session_id?: string }[] = [];
 function answer(url: string, payload: Record<string, string>): unknown {
   if (url === "/api/v1/tasks/detail") return { status: "ok", result: task };
   if (url === "/api/v1/tasks/page") return { status: "ok", result: { tasks: [], counts: { failed: 2 }, next_before: null } };
-  if (url === "/api/v1/operator_chat/targets") return { status: "ok", result: { targets: [{ kind: "manager", id: "manager", can_send: true }, planner("task-a")] } };
+  if (url === "/api/v1/operator_chat/targets") return { status: "ok", result: { targets: [{ kind: "manager", id: "manager", can_send: true }, { kind: "manager", id: "manager-other", name: "Other Manager", can_send: true }, planner("task-a")] } };
   if (url === "/api/v1/operator_chat/sessions") {
     const asked = payload.session_id;
     if (asked === "web-1") return { status: "ok", result: { sessions: [web(asked)] } };
@@ -178,6 +178,36 @@ describe("the dashboard keeps its place in the URL", () => {
 
   describe("the chat", () => {
     const heading = () => container.textContent ?? "";
+
+    it("keeps a newer navigation when a pending Manager thread read pins the address", async () => {
+      let release!: () => void;
+      const pending = new Promise<void>((resolve) => { release = resolve; });
+      let held = false;
+      vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const payload = init?.body ? JSON.parse(String(init.body)) : {};
+        const body = answer(String(input), payload);
+        if (String(input) === "/api/v1/operator_chat/messages" && payload.manager === "manager-other" && !held) {
+          held = true;
+          await pending;
+        }
+        return body === undefined ? new Response("{}", { status: 404 }) : Response.json(body);
+      });
+      await open("#chat?target=manager-other");
+      expect(held).toBe(true);
+      expect(hash()).toBe("#chat?target=manager-other");
+
+      await act(async () => {
+        release();
+        for (let i = 0; i < 5; i++) await Promise.resolve();
+        // Follow a link before React runs the pin effect scheduled by the thread read.
+        window.location.hash = "#chat?conversation=web-1";
+      });
+      // Like the browser, deliver hashchange after the pending effect has had a chance to run.
+      await act(async () => { window.dispatchEvent(new HashChangeEvent("hashchange")); });
+      await settle();
+      expect(hash()).toBe("#chat?conversation=web-1");
+      expect(heading()).toContain("The original conversation");
+    });
 
     it("names the stored thread in a bare chat address before starting another", async () => {
       localStorage.setItem("looper-chat-session-id", "web-1");
