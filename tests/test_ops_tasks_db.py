@@ -37,7 +37,8 @@ class _Chat:
         self.sender = sender
         self.bus = MessageBus(runtime_root=tmp)
         self.planners = planners if planners is not None else set()
-        router = SimpleNamespace(has_planner=lambda task_id: task_id in self.planners)
+        router = SimpleNamespace(has_planner=lambda task_id: task_id in self.planners,
+                                 forget_task=self.planners.discard)
         self.ops = ManagerOps(Platform(bus=self.bus, task_router=router), url="http://127.0.0.1:9", token="tok")
         self.turns: list[Turn] = []
         self.notes: list[str] = []

@@ -52,8 +52,9 @@ import asyncio
 import logging
 import re
 import uuid
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, asynccontextmanager, contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Protocol
@@ -92,6 +93,54 @@ CARRIED_MIN_CHARS = 300
 _OUTCOMES = {"completed": "completed", "failed": "failed", "stopped": "stopped", "cancelled": "cancelled"}
 # A schedule's task that still counts as in progress: queued, running, or created and about to start.
 _BUSY_STATUSES = (*db_tasks.ACTIVE_STATUSES, db_tasks.READY)
+
+
+@dataclass
+class _ProjectFirings:
+    active: int = 0
+    deleting: bool = False
+    idle: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+# Shared by the deletion entry points and every Scheduler in this server.
+_project_firings: dict[str, _ProjectFirings] = {}
+
+
+@contextmanager
+def _project_firing(project_id: str) -> Iterator[bool]:
+    state = _project_firings.setdefault(project_id, _ProjectFirings())
+    if state.deleting:
+        yield False
+        return
+    state.active += 1
+    state.idle.clear()
+    try:
+        yield True
+    finally:
+        state.active -= 1
+        if not state.active:
+            state.idle.set()
+            if not state.deleting:
+                _project_firings.pop(project_id, None)
+
+
+@asynccontextmanager
+async def quiesce_project(project_id: str) -> AsyncIterator[None]:
+    """Refuse new firings and Router starts, then drain admitted work before cleanup.
+
+    The caller serializes project deletions. Gates may keep running outside transactions; their completion
+    must enter the barrier again before it can create a task. A failed or cancelled delete releases the barrier.
+    """
+    state = _project_firings.setdefault(project_id, _ProjectFirings())
+    state.deleting = True
+    try:
+        if state.active:
+            await state.idle.wait()
+        yield
+    finally:
+        state.deleting = False
+        if not state.active:
+            _project_firings.pop(project_id, None)
 
 
 class Trigger(str, Enum):
@@ -382,23 +431,26 @@ class Scheduler:
     async def _fire_due(self, now: datetime) -> None:
         handled: list[str] = []
         while True:
-            launched: _Launched | None = None
-            schedule: dict[str, Any] | None = None
-            try:
-                async with db_connection.transaction() as conn:
-                    schedule = await db_schedules.lock_next_due(conn, now, skip=handled)
+            with ExitStack() as firing_guard:
+                launched: _Launched | None = None
+                schedule: dict[str, Any] | None = None
+                try:
+                    async with db_connection.transaction() as conn:
+                        schedule = await db_schedules.lock_next_due(conn, now, skip=handled)
+                        if schedule is None:
+                            return
+                        handled.append(schedule["id"])
+                        if not firing_guard.enter_context(_project_firing(schedule["project_id"])):
+                            continue
+                        launched = await self._fire_schedule(conn, schedule, now)
+                except Exception:
                     if schedule is None:
-                        return
-                    handled.append(schedule["id"])
-                    launched = await self._fire_schedule(conn, schedule, now)
-            except Exception:
-                if schedule is None:
-                    raise  # the database itself failed: the next pass tries again
-                # Rolled back: this schedule is due again next pass; the others go on now.
-                logger.exception("could not fire schedule %s", schedule["id"])
-                continue
-            if launched is not None:
-                await self._follow(schedule["id"], launched)
+                        raise  # the database itself failed: the next pass tries again
+                    # Rolled back: this schedule is due again next pass; the others go on now.
+                    logger.exception("could not fire schedule %s", schedule["id"])
+                    continue
+                if launched is not None:
+                    await self._follow(schedule, launched)
 
     async def _fire_schedule(self, conn: asyncpg.Connection, schedule: dict[str, Any],
                              now: datetime) -> _Launched | None:
@@ -437,20 +489,21 @@ class Scheduler:
         """Fire a schedule now, enabled or not (``trigger`` manual); the run's id, None for an unknown schedule.
         Its ``next_fire_at`` stays. A gate runs in the background: the run is ``gating`` until it ends."""
         now = self._clock()
-        async with db_connection.transaction() as conn:
-            schedule = await db_schedules.lock_schedule(conn, schedule_id)
-            if schedule is None:
-                return None
-            launched = await self._fire(conn, schedule, Firing(Trigger.MANUAL, now), now)
-        await self._follow(schedule_id, launched)
-        return launched.run_id
+        with ExitStack() as firing_guard:
+            async with db_connection.transaction() as conn:
+                schedule = await db_schedules.lock_schedule(conn, schedule_id)
+                if schedule is None or not firing_guard.enter_context(_project_firing(schedule["project_id"])):
+                    return None
+                launched = await self._fire(conn, schedule, Firing(Trigger.MANUAL, now), now)
+            await self._follow(schedule, launched)
+            return launched.run_id
 
-    async def _follow(self, schedule_id: str, launched: _Launched) -> None:
+    async def _follow(self, schedule: Mapping[str, Any], launched: _Launched) -> None:
         """After the firing's transaction: start its task, run its gate, report its end."""
         if launched.task_id:
-            await self._start_task(launched.task_id)
+            await self._start_task(launched.task_id, schedule["project_id"])
         if launched.gate is not None:
-            self._spawn(self._gate(schedule_id, launched.run_id, launched.gate, launched.fingerprint,
+            self._spawn(self._gate(schedule["id"], launched.run_id, launched.gate, launched.fingerprint,
                                    launched.gate_enabled))
         if launched.ended:
             self._spawn(self._notifier.run_ended(launched.run_id))
@@ -679,80 +732,88 @@ class Scheduler:
                                         started and started["run_timeout_seconds"]))
             now = self._clock()
             launched: _Launched | None = None
-            async with db_connection.transaction() as conn:
-                schedule = await db_schedules.lock_schedule(conn, schedule_id)
-                run = await db_schedules.get_run(run_id, pool=conn)
-                if schedule is None or run is None or run["status"] != db_schedules.GATING:
-                    return
-                output = result.stdout.strip()
-                await db_schedules.update_run(conn, run_id, gate_output=output or None)
-                try:
-                    if schedule["enabled"] != enabled:
-                        raise ValueError("schedule enabled state changed while its gate ran")
-                    current = await effective_schedule(conn, schedule)
-                    if configuration_error or fingerprint(schedule, current) != expected:
-                        raise ValueError(configuration_error or "schedule/template configuration changed while its gate ran")
-                except ValueError as exc:
-                    await db_schedules.update_run(conn, run_id, status="failed", finished_at=now, error=str(exc))
-                    await db_schedules.count_outcome(conn, schedule_id, "failed", now)
-                    launched = _Launched(run_id, ended=True)
-                if launched is not None:
-                    pass
-                elif not result.ok:
-                    await db_schedules.update_run(conn, run_id, status="gate_failed", finished_at=now,
-                                                  error=result.failure(timeout), gate_output=output or None)
-                    await db_schedules.count_outcome(conn, schedule_id, "gate_failed", now)
-                    launched = _Launched(run_id, ended=True)
-                else:
-                    carried = await self._carried(conn, schedule, before=run_id, expected_fingerprint=expected)
-                    if not output and not carried:
-                        # Nothing new: counted on the latest run when that is a skipped_gate of today too.
-                        merged = await db_schedules.count_skip(conn, schedule_id, status="skipped_gate", at=now,
-                                                               since=self.day_start(now), besides=run_id)
-                        if merged:
-                            await db_schedules.delete_run(conn, run_id)
-                        else:
-                            await db_schedules.update_run(conn, run_id, status="skipped_gate", finished_at=now)
-                        await db_schedules.count_outcome(conn, schedule_id, "skipped_gate", now)
-                        launched = _Launched(merged or run_id, ended=True)
+            with ExitStack() as firing_guard:
+                async with db_connection.transaction() as conn:
+                    schedule = await db_schedules.lock_schedule(conn, schedule_id)
+                    run = await db_schedules.get_run(run_id, pool=conn)
+                    if schedule is None or run is None or run["status"] != db_schedules.GATING:
+                        return
+                    if not firing_guard.enter_context(_project_firing(schedule["project_id"])):
+                        return
+                    output = result.stdout.strip()
+                    await db_schedules.update_run(conn, run_id, gate_output=output or None)
+                    try:
+                        if schedule["enabled"] != enabled:
+                            raise ValueError("schedule enabled state changed while its gate ran")
+                        current = await effective_schedule(conn, schedule)
+                        if configuration_error or fingerprint(schedule, current) != expected:
+                            raise ValueError(configuration_error or "schedule/template configuration changed while its gate ran")
+                    except ValueError as exc:
+                        await db_schedules.update_run(conn, run_id, status="failed", finished_at=now, error=str(exc))
+                        await db_schedules.count_outcome(conn, schedule_id, "failed", now)
+                        launched = _Launched(run_id, ended=True)
+                    if launched is not None:
+                        pass
+                    elif not result.ok:
+                        await db_schedules.update_run(conn, run_id, status="gate_failed", finished_at=now,
+                                                      error=result.failure(timeout), gate_output=output or None)
+                        await db_schedules.count_outcome(conn, schedule_id, "gate_failed", now)
+                        launched = _Launched(run_id, ended=True)
                     else:
-                        launched = await self._create_run(conn, schedule, firing, now, run_id=run_id,
-                                                          gate_output=output or None, carried=carried,
-                                                          fires_now=False, expected_fingerprint=expected)
-            logger.info("schedule %s: gate of run %s %s", schedule_id, run_id,
-                        "started a task" if launched.task_id else "ended the run")
-            await self._follow(schedule_id, launched)
-            if launched.task_id is None:
-                await self._start_queued(schedule_id)
+                        carried = await self._carried(conn, schedule, before=run_id, expected_fingerprint=expected)
+                        if not output and not carried:
+                            # Nothing new: counted on the latest run when that is a skipped_gate of today too.
+                            merged = await db_schedules.count_skip(conn, schedule_id, status="skipped_gate", at=now,
+                                                                   since=self.day_start(now), besides=run_id)
+                            if merged:
+                                await db_schedules.delete_run(conn, run_id)
+                            else:
+                                await db_schedules.update_run(conn, run_id, status="skipped_gate", finished_at=now)
+                            await db_schedules.count_outcome(conn, schedule_id, "skipped_gate", now)
+                            launched = _Launched(merged or run_id, ended=True)
+                        else:
+                            launched = await self._create_run(conn, schedule, firing, now, run_id=run_id,
+                                                              gate_output=output or None, carried=carried,
+                                                              fires_now=False, expected_fingerprint=expected)
+                logger.info("schedule %s: gate of run %s %s", schedule_id, run_id,
+                            "started a task" if launched.task_id else "ended the run")
+                await self._follow(schedule, launched)
+                if launched.task_id is None:
+                    await self._start_queued(schedule_id)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("could not finish the gate of schedule run %s", run_id)
 
-    async def _start_task(self, task_id: str) -> None:
-        """Start the task through the TaskRouter's start path, as the dashboard's Start does."""
-        await self._bus.publish(MessageEnvelope.create(
-            source=SCHEDULER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_START,
-            payload={"task_id": task_id},
-        ))
+    async def _start_task(self, task_id: str, project_id: str) -> None:
+        """Publish through the deletion barrier, including recovery of tasks created before a server stop."""
+        with _project_firing(project_id) as allowed:
+            # A retry can carry a snapshot read before deletion finished and released the barrier.
+            if not allowed or await db_tasks.get_task(task_id) is None:
+                return
+            await self._bus.publish(MessageEnvelope.create(
+                source=SCHEDULER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_START,
+                payload={"task_id": task_id},
+            ))
 
     async def _start_queued(self, schedule_id: str) -> None:
         """Start the schedule's queued run when none of its tasks or gates is in progress any more."""
         now = self._clock()
-        async with db_connection.transaction() as conn:
-            schedule = await db_schedules.lock_schedule(conn, schedule_id)
-            if schedule is None:
-                return
-            runs = await db_schedules.open_runs(conn, schedule_id)
-            queued = [run for run in runs if run["status"] == db_schedules.QUEUED]
-            if not queued or any(run["status"] == db_schedules.GATING for run in runs) \
-                    or await self._busy_task(conn, schedule_id):
-                return
-            run = queued[0]
-            firing = Firing(Trigger(run["trigger"]), run["scheduled_for"], missed=run["missed"])
-            launched = await self._launch(conn, schedule, firing, now, run_id=run["id"])
-        logger.info("schedule %s: the queued run %s starts now", schedule_id, launched.run_id)
-        await self._follow(schedule_id, launched)
+        with ExitStack() as firing_guard:
+            async with db_connection.transaction() as conn:
+                schedule = await db_schedules.lock_schedule(conn, schedule_id)
+                if schedule is None or not firing_guard.enter_context(_project_firing(schedule["project_id"])):
+                    return
+                runs = await db_schedules.open_runs(conn, schedule_id)
+                queued = [run for run in runs if run["status"] == db_schedules.QUEUED]
+                if not queued or any(run["status"] == db_schedules.GATING for run in runs) \
+                        or await self._busy_task(conn, schedule_id):
+                    return
+                run = queued[0]
+                firing = Firing(Trigger(run["trigger"]), run["scheduled_for"], missed=run["missed"])
+                launched = await self._launch(conn, schedule, firing, now, run_id=run["id"])
+            logger.info("schedule %s: the queued run %s starts now", schedule_id, launched.run_id)
+            await self._follow(schedule, launched)
 
     # --- Ending ---
 
@@ -824,4 +885,4 @@ class Scheduler:
         if task_status == db_tasks.READY and run["fired_at"] and now - run["fired_at"] >= START_RETRY_AFTER:
             logger.info("schedule %s: task %s was created but never started; starting it", run["schedule_id"],
                         run["task_id"])
-            await self._start_task(run["task_id"])
+            await self._start_task(run["task_id"], run["project_id"])

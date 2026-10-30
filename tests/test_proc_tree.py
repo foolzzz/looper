@@ -15,6 +15,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -139,6 +140,50 @@ def test_what_ignores_sigterm_is_killed_after_the_grace_period(
     assert _running(list(tree.values())) == []
     assert took >= proc_tree.TERM_GRACE_SEC
     assert _ended_line(caplog).endswith(": 4 found, 3 exited on SIGTERM, 1 killed")
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_stop_keeps_server_responsive_while_process_listing_is_slow(monkeypatch, cancelled):
+    class Agent:
+        pid = 101
+        returncode = None
+
+        async def wait(self):
+            return self.returncode
+
+    agent = Agent()
+    table = {101: (1, 101), 102: (101, 102)}
+    release = threading.Event()
+    signalled = set()
+
+    def snapshot():
+        if not release.wait(1):
+            raise RuntimeError("process listing blocked the server's event loop")
+        return dict(table)
+
+    def signal_tree(process, tree, sig):
+        signalled.update(tree)
+        table.clear()
+        agent.returncode = -sig
+
+    monkeypatch.setattr(proc_tree, "_snapshot", snapshot)
+    monkeypatch.setattr(proc_tree, "_signal", signal_tree)
+
+    async def run():
+        ending = asyncio.create_task(proc_tree.end(agent, label="agent"))
+        await asyncio.sleep(0)
+        if cancelled:
+            ending.cancel()  # Shutdown can interrupt the very first process listing too.
+        release.set()  # The server must still handle work while ps has not returned.
+        if cancelled:
+            with pytest.raises(asyncio.CancelledError):
+                await ending
+        else:
+            await ending
+
+    asyncio.run(run())
+    assert signalled == {101, 102}
+    assert agent.returncode == -(signal.SIGKILL if cancelled else signal.SIGTERM)
 
 
 @pytest.mark.parametrize("exits", [True, False], ids=["exits", "deadline"])

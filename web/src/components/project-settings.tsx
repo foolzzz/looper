@@ -39,12 +39,13 @@ function changesOf(draft: Draft, project: Project): ProjectUpdate {
   return fields;
 }
 
-/** A project's fields and execution settings, saved together, and deleting the project once it has no tasks and no
- * schedules. Its agent settings are on its Agent Profiles tab. */
+/** A project's fields and execution settings, saved together, and deleting it with its tasks and schedules.
+ * Its agent settings are on its Agent Profiles tab. */
 export function ProjectSettingsForm({ project, onDeleted }: { project: Project; onDeleted: () => void }) {
   const id = useId();
   const [draft, setDraft] = useState<Draft>(() => draftOf(project));
   const [busy, setBusy] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -75,6 +76,7 @@ export function ProjectSettingsForm({ project, onDeleted }: { project: Project; 
 
   const remove = async () => {
     setBusy(true);
+    setDeleting(true);
     setError("");
     try {
       await deleteProject(project.project_id);
@@ -82,6 +84,7 @@ export function ProjectSettingsForm({ project, onDeleted }: { project: Project; 
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
+      setDeleting(false);
     }
   };
 
@@ -137,7 +140,7 @@ export function ProjectSettingsForm({ project, onDeleted }: { project: Project; 
             Discard changes
           </Button>
           <Button type="submit" size="sm" disabled={!dirty || busy || tooLong}>
-            {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            {busy && !deleting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
             Save
           </Button>
         </div>
@@ -145,54 +148,39 @@ export function ProjectSettingsForm({ project, onDeleted }: { project: Project; 
 
       <section aria-labelledby={`${id}-delete`} className="rounded-lg border border-border bg-card px-5 py-4">
         <h2 id={`${id}-delete`} className="text-sm font-semibold">Delete project</h2>
-        {project.task_count > 0 ? (
-          <p className="mt-1 text-xs text-muted-foreground">
-            Only a project without tasks can be deleted; move or delete its {project.task_count}{" "}
-            {project.task_count === 1 ? "task" : "tasks"} first
-            {project.schedule_count > 0 && ", and delete its schedules"}.
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <p className="mr-auto text-xs text-muted-foreground">
+            Removes the project with its knowledge and skills
+            {project.task_count > 0 && <>, its {project.task_count} tasks ({project.active_count > 0 && <>the {project.active_count} running ones are stopped first; </>}result branches stay)</>}
+            {project.schedule_count > 0 && <>, and its {project.schedule_count} schedules with their run history</>}.
           </p>
-        ) : project.schedule_count > 0 ? (
-          <p className="mt-1 text-xs text-muted-foreground">
-            Only a project without schedules can be deleted. Delete its schedules first: it has{" "}
-            {project.schedule_count} on its{" "}
-            <a
-              href={`#projects/${project.project_id}/schedules`}
-              className="text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            >
-              Schedules tab
-            </a>
-            .
-          </p>
-        ) : (
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <p className="mr-auto text-xs text-muted-foreground">
-              Removes the project with its knowledge and skills.
-            </p>
-            {confirmDelete ? (
-              <>
-                <span className="text-xs text-muted-foreground">Delete {project.name}?</span>
-                <Button type="button" variant="destructive" size="sm" onClick={remove} disabled={busy}>
-                  {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                  Delete
-                </Button>
-                <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmDelete(false)}>
-                  Cancel
-                </Button>
-              </>
-            ) : (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setConfirmDelete(true)}
-                className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-                Delete project
+          {confirmDelete ? (
+            <>
+              <span className="text-xs text-muted-foreground">
+                Delete {project.name}{project.task_count > 0 && <> and its {project.task_count} tasks</>}?
+              </span>
+              <Button type="button" variant="destructive" size="sm" onClick={remove} disabled={busy}>
+                {deleting && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
+                {deleting ? "Stopping and deleting…" : "Delete"}
               </Button>
-            )}
-          </div>
-        )}
+              <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmDelete(false)} disabled={busy}>
+                Cancel
+              </Button>
+            </>
+          ) : (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setConfirmDelete(true)}
+              disabled={busy}
+              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Delete project
+            </Button>
+          )}
+        </div>
       </section>
     </div>
   );

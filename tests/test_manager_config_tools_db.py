@@ -139,14 +139,18 @@ def test_deleting_a_project_asks_first_and_runs_only_on_the_next_messages_confir
     run_db(test, monkeypatch)
 
 
-def test_a_project_with_tasks_is_not_offered_for_deletion(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_a_project_with_tasks_is_confirmed_then_deleted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(pool: Any) -> None:
         await _task(pool, "task-a", "completed", await _project(pool))
         chat = _Chat(tmp_path)
         (answer,) = await chat.say("删掉 calc", ("looper_projects", {"action": "delete", "project": "calc"}))
-        assert _error(answer) == "conflict" and "still has tasks" in answer["error"]["message"]
-        assert chat.turns[0].blocks == []  # nothing was asked
+        assert answer["status"] == "needs_confirmation", answer
+        assert "删除它的全部 1 个任务" in chat.turns[0].blocks[0]
         assert await pool.fetchval("SELECT count(*) FROM projects") == 1
+        (done,) = await chat.say("确认", ("looper_confirm", {"confirmation_id": answer["confirmation_id"]}))
+        assert done == {"status": "ok", "result": {"deleted": "calc"}}, done
+        assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
+        assert await pool.fetchval("SELECT count(*) FROM projects") == 0
 
     run_db(test, monkeypatch)
 

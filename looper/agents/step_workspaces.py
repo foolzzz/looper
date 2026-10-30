@@ -820,20 +820,20 @@ async def remove_orphan(path: Path, *, keep_branch: bool = False) -> None:
 # --- A task's workspaces, and the sweep at startup ---
 
 
-async def remove_task(task_id: str) -> int:
+async def remove_task(task_id: str, *, pool: Any = None) -> int:
     """Remove every workspace of the task still there, branches included: the task completed, is deleted or is
     started over. Returns how many."""
     from ..db import step_workspaces as db_step_workspaces
 
     removed = 0
-    for row in await db_step_workspaces.list_for_task(task_id):
+    for row in await db_step_workspaces.list_for_task(task_id, pool=pool):
         workspace = StepWorkspace.from_row(row)
         if workspace.removed_at is not None:
             continue
         if StepWorkspaceState.DISCARDED in ALLOWED_TRANSITIONS[workspace.state]:
             workspace = workspace.moved(StepWorkspaceState.DISCARDED)
         workspace = await remove(workspace)
-        await db_step_workspaces.save(workspace.row())
+        await db_step_workspaces.save(workspace.row(), pool=pool)
         removed += 1
     return removed
 
