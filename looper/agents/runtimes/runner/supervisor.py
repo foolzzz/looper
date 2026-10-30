@@ -201,6 +201,7 @@ class RunnerSupervisor:
         self._shutdown = asyncio.Event()
         self._stop_task: asyncio.Task | None = None
         self._tasks: set[asyncio.Task] = set()
+        self._starts: set[asyncio.Task] = set()
 
     def _own(self, coroutine) -> asyncio.Task:
         task = asyncio.create_task(coroutine)
@@ -253,7 +254,21 @@ class RunnerSupervisor:
                     else:
                         # The kind lock covers the handshake and first reservation,
                         # so concurrent acquisitions cannot over-expand the pool.
-                        generation = await _joined(self._own(self._start(kind, state)))
+                        starting = self._own(self._start(kind, state))
+                        self._starts.add(starting)
+                        starting.add_done_callback(self._starts.discard)
+                        try:
+                            generation = await asyncio.shield(starting)
+                        except asyncio.CancelledError:
+                            # The supervisor owns cleanup after a turn stops waiting,
+                            # including abandon() cancelling the caller a second time.
+                            if not starting.done():
+                                if not starting.cancelling():
+                                    starting.cancel()
+                            elif not starting.cancelled() and starting.exception() is None:
+                                self._failed(starting.result())
+                            await asyncio.shield(asyncio.gather(starting, return_exceptions=True))
+                            raise
                 if backoff is None:
                     if self._stopped or generation.failed or generation.bridge._error:
                         raise RunnerUnavailable("runner generation is unavailable; resume was lost")
@@ -304,14 +319,24 @@ class RunnerSupervisor:
             environment = {k: v for k, v in os.environ.items() if k in _ENV}
             environment.update(self._env.get(kind, {}))
             environment.update(HOME=str(directory), TMPDIR=str(tmp))
-            process = await proc_tree.spawn(*state.command, env=environment, cwd=directory,
+            spawning = self._own(proc_tree.spawn(*state.command, env=environment, cwd=directory,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE, limit=MAX_FRAME_BYTES + 1)
+                stderr=asyncio.subprocess.PIPE, limit=MAX_FRAME_BYTES + 1))
+            cancelled = None
+            try:
+                process = await asyncio.shield(spawning)
+            except asyncio.CancelledError as error:
+                # A spawn can create its process before returning the handle. Keep
+                # ownership until it returns, then dispose instead of initializing.
+                process = await asyncio.shield(spawning)
+                cancelled = error
             generation = _Generation(kind, state, directory, process)
             generation.exited = _exit_signal(process)
             generation.tree = proc_tree.track(process, label=f"runner {kind}")
             generation.tree.start_ticker()
             generation.stderr = self._own(self._stderr(generation))
+            if cancelled is not None:
+                raise cancelled
             generation.bridge = await self.connect(process, kind)
             # Initialization can start children after the launch snapshot. Own
             # them before publishing a runner that may immediately be killed.
@@ -533,6 +558,15 @@ class RunnerSupervisor:
         await _joined(self._stop_task)
 
     async def _stop(self) -> None:
+        # Initialization holds the kind lock. Interrupt it before waiting for that
+        # lock, and keep every spawn/cleanup owned until its process has been reaped.
+        starts = list(self._starts)
+        for starting in starts:
+            if not starting.done() and not starting.cancelling():
+                starting.cancel()
+        if starts:
+            await asyncio.gather(*starts, return_exceptions=True)
+
         async def close_kind(state):
             async with state.lock:
                 for generation in list(state.members):

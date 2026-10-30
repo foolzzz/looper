@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 import uuid
@@ -24,10 +25,18 @@ def install(root: Path) -> tuple[Path, Path]:
     state.mkdir()
     # Smoke exposes the selected executable through another symlink. Unlike
     # fake_claude's argv[0] + '.py' driver, this entry works from either path.
+    driver = bin_dir / "dsh.py"
+    driver.write_text("from pathlib import Path\n"
+                      "from tests.dsh_runtime_stand_in import main\n"
+                      f"main(Path({str(state)!r}))\n", encoding="utf-8")
     dsh = bin_dir / "dsh"
-    dsh.write_text(f"#!{sys.executable}\nfrom pathlib import Path\n"
-                   "from tests.dsh_runtime_stand_in import main\n"
-                   f"main(Path({str(state)!r}))\n", encoding="utf-8")
+    # Discovery is a fixed fixture response, independent of a cold Python import
+    # taking longer than the production probe's deadline on a loaded test host.
+    dsh.write_text("#!/bin/sh\ncase \"$1\" in\n"
+                   "--version) printf '%s\\n' '0.2.1-rc.2';;\n"
+                   "--help) printf '%s\\n' '--profile --patch --json --session-id';;\n"
+                   f"*) exec {shlex.quote(sys.executable)} {shlex.quote(str(driver))} \"$@\";;\n"
+                   "esac\n", encoding="utf-8")
     dsh.chmod(0o755)
     # Startup may check Claude, but must never run the operator's binary/login.
     fake_claude(bin_dir / "claude", "import sys\n"

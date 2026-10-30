@@ -48,7 +48,7 @@ def fake_runner():
                 Path("observed.tmp").write_text(json.dumps({**observed, "child": child.pid}))
                 Path("observed.tmp").replace("observed.json")
             if options.get("slow_initialize"):
-                time.sleep(0.25)
+                time.sleep(0.25 if options["slow_initialize"] is True else options["slow_initialize"])
             result = {"protocol_version": options.get("version", "0.1"),
                 "runner": {"kind": options.get("kind", "fake"), "version": "1"}, "sdk": {"name": "fake", "version": "1"},
                 "capabilities": {"max_sessions": options.get("cap", 4),
@@ -767,6 +767,87 @@ def test_reused_child_identity_is_not_signalled_or_allowed_to_hold_shutdown(runn
                     await stopping
     run(exercise())
 
+
+
+@pytest.mark.parametrize("action", ["cancel", "abandon", "stop"])
+def test_interrupted_initialize_reaps_uncooperative_process_tree(runners, monkeypatch, action):
+    from looper.agents.runtimes import cancel
+
+    monkeypatch.setattr(cancel, "ABANDON_SEC", 0.02)
+
+    async def exercise():
+        async with runners(uncooperative=True, initialize_child=True, slow_initialize=60) as (owner, processes):
+            acquiring = asyncio.create_task(owner.acquire("fake"))
+            stopping = None
+            try:
+                await until(lambda: bool(processes) and any(
+                    path.exists() and json.loads(path.read_text())["child"] is not None
+                    for path in owner.root.glob("*/observed.json")))
+                child = next(json.loads(path.read_text())["child"]
+                             for path in owner.root.glob("*/observed.json"))
+                assert child in proc_tree._snapshot()
+                if action == "stop":
+                    stopping = asyncio.create_task(owner.stop())
+                elif action == "abandon":
+                    await cancel.abandon(acquiring)
+                else:
+                    acquiring.cancel()
+                await until(lambda: processes[0].returncode is not None
+                            and child not in proc_tree._snapshot(), timeout=s.SHUTDOWN_TIMEOUT + 5)
+                if stopping is not None:
+                    await stopping
+                with pytest.raises((asyncio.CancelledError, s.RunnerUnavailable)):
+                    await acquiring
+                assert not owner._kinds["fake"].members
+            finally:
+                # Keep the regression itself from leaving a sleeping runner or child behind.
+                for process in processes:
+                    await proc_tree.end(process, label="interrupted startup test cleanup")
+                await asyncio.gather(acquiring, *([stopping] if stopping else []), return_exceptions=True)
+    run(exercise())
+
+
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+def test_interrupted_spawn_reaps_process_when_spawn_returns(runners, monkeypatch, action):
+    async def exercise():
+        spawned, release = asyncio.Event(), asyncio.Event()
+        original_spawn = proc_tree.spawn
+        created = []
+
+        async def held_spawn(*args, **kwargs):
+            process = await original_spawn(*args, **kwargs)
+            created.append(process)
+            spawned.set()
+            await release.wait()
+            return process
+
+        monkeypatch.setattr(proc_tree, "spawn", held_spawn)
+        async with runners(uncooperative=True, slow_initialize=60) as (owner, _):
+            acquiring = asyncio.create_task(owner.acquire("fake"))
+            stopping = None
+            try:
+                await spawned.wait()
+                await until(lambda: any(path.exists() for path in owner.root.glob("*/observed.json")))
+                if action == "stop":
+                    stopping = asyncio.create_task(owner.stop())
+                    await asyncio.sleep(0)
+                else:
+                    acquiring.cancel()
+                    await asyncio.sleep(0)
+                release.set()
+                await until(lambda: created[0].returncode is not None, timeout=s.SHUTDOWN_TIMEOUT + 5)
+                assert created[0].returncode == -signal.SIGKILL
+                assert not list(owner.root.glob("*/requests.jsonl"))
+                if stopping is not None:
+                    await stopping
+                with pytest.raises((asyncio.CancelledError, s.RunnerUnavailable)):
+                    await acquiring
+            finally:
+                release.set()
+                for process in created:
+                    await proc_tree.end(process, label="interrupted spawn test cleanup")
+                await asyncio.gather(acquiring, *([stopping] if stopping else []), return_exceptions=True)
+    run(exercise())
 
 @pytest.mark.parametrize("recovers", [True, False], ids=["retry-succeeds", "bounded-failures"])
 def test_initialize_timeout_uses_bounded_demand_retries(runners, monkeypatch, recovers):
