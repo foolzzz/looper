@@ -173,7 +173,7 @@ class _Server(AgentHTTPServer):
 @pytest.fixture
 def platform(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     """Storage boundaries only; production catalogs, permission checks and reads."""
-    from looper.db import agent_setting_layers, manager_actions, managers, projects, system_settings, tasks
+    from looper.db import agent_setting_layers, manager_actions, managers, projects, schedules, system_settings, tasks
     from looper.agents import ops
 
     project = {"id": "proj-test", "name": "disposable", "description": "", "work_dir": str(tmp_path),
@@ -186,6 +186,8 @@ def platform(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace
     monkeypatch.setattr(projects, "list_projects", AsyncMock(return_value=[project]))
     deleted = AsyncMock()
     monkeypatch.setattr(projects, "delete_project", deleted)
+    monkeypatch.setattr(schedules, "list_schedules", AsyncMock(return_value=[]))
+    monkeypatch.setattr(tasks, "project_tasks", AsyncMock(return_value=[]))
     monkeypatch.setattr(managers, "template_using_project", AsyncMock(return_value=None))
     monkeypatch.setattr(manager_actions, "record", AsyncMock())
     monkeypatch.setattr(agent_setting_layers, "list_layers", AsyncMock(return_value=[]))
