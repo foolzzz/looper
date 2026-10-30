@@ -297,9 +297,12 @@ async def update_task_phase(
     )
 
 
-async def get_task(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+async def get_task(task_id: str, *, pool: asyncpg.Pool | None = None,
+                   for_update: bool = False) -> dict[str, Any] | None:
+    """Read a task; ``for_update`` locks its status in the caller's transaction until cleanup commits."""
     pool = pool or get_pool()
-    row = await pool.fetchrow("SELECT * FROM tasks WHERE id = $1", task_id)
+    lock = " FOR NO KEY UPDATE" if for_update else ""
+    row = await pool.fetchrow("SELECT * FROM tasks WHERE id = $1" + lock, task_id)
     if row is None:
         return None
     return _task(row)
@@ -557,6 +560,15 @@ _FILTERS = """
 # A literal substring, so '%' and '_' in a search never become SQL wildcards.
 _SEARCH = ("strpos(lower(regexp_replace(concat_ws(' ', t.id, t.title, t.requirement, p.name, t.goal_id), "
            "'\\s+', ' ', 'g')), {parameter}) > 0")
+
+
+async def project_tasks(project_id: str, *, manager_id: str | None = None,
+                        pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """All project task ids and statuses (only this Manager's when given), without pagination or detail joins."""
+    pool = pool or get_pool()
+    return [dict(row) for row in await pool.fetch(
+        "SELECT id, status FROM tasks WHERE project_id = $1 AND ($2::text IS NULL OR manager_id = $2) "
+        "ORDER BY created_at, id", project_id, manager_id)]
 
 
 async def list_tasks(

@@ -120,24 +120,16 @@ async def _projects(call: Call) -> dict[str, Any]:
         fields = _given(arguments, ("name", "work_dir", "background"))
         return {"project": await answered(projects.update_project(
             project["id"], fields, manager_id=call.manager_id if call.scoped else None))}
-    await _unused(call, projects.delete_project(project["id"]), project)
+    await answered(projects.delete_project(
+        project["id"], call.platform.bus, call.manager_address, call.platform.runtime_root,
+        manager_id=call.manager_id if call.scoped else None, task_router=call.platform.task_router))
     return {"deleted": project["name"]}
 
 
-async def _unused(call: Call, request: Awaitable[T], project: Mapping[str, Any]) -> T:
-    """``request``, a deletion checked against every task, schedule and template; a scoped Manager is refused
-    without learning of anyone else's (``project`` carries its own task count): only its own tasks are counted."""
-    try:
-        return await answered(request)
-    except OpError as exc:
-        if exc.code is not ErrorCode.CONFLICT or not call.scoped:
-            raise
-        own = project["task_count"]
-        raise OpError(ErrorCode.CONFLICT,
-                      f"project {project['name']!r} still has {own} {'task' if own == 1 else 'tasks'} of this "
-                      "Manager; move or delete them first" if own else
-                      f"project {project['name']!r} is still used outside this Manager: it cannot be deleted from "
-                      "here") from None
+async def _unused(call: Call, project: Mapping[str, Any]) -> dict[str, Any]:
+    """Check template and scope before confirmation, without exposing other Managers' counts."""
+    return await answered(projects.deletable_project(
+        project["id"], manager_id=call.manager_id if call.scoped else None))
 
 
 async def _deleting_project(call: Call) -> str | None:
@@ -146,8 +138,17 @@ async def _deleting_project(call: Call) -> str | None:
         return None
     _required(call.arguments, "delete", "project")
     named = await project_named(call.arguments["project"], manager_id=call.manager_id if call.scoped else None)
-    project = await _unused(call, projects.deletable_project(named["id"]), named)
-    return (f"要删除项目「{project['name']}」（默认目录：{project['work_dir'] or '没有'}）吗？它没有任务和定时任务。它的 "
+    project = await _unused(call, named)
+    clauses = []
+    if count := project.get("schedule_count", 0):
+        clauses.append(f"删除它的 {count} 个定时任务（含运行记录）")
+    if count := project.get("active_count", 0):
+        clauses.append(f"停止它正在运行的 {count} 个任务")
+    if count := project.get("task_count", 0):
+        clauses.append(("再" if clauses else "")
+                       + f"删除它的全部 {count} 个任务（步骤工作区、任务目录、会话和记录；结果分支保留）")
+    effects = "它没有任务和定时任务。" if not clauses else "会先" + "，".join(clauses) + "。"
+    return (f"要删除项目「{project['name']}」（默认目录：{project['work_dir'] or '没有'}）吗？{effects}它的 "
             "Agent 设置、规划者可选的 Agent Profile 列表、技能和 MCP 的安装、项目知识和它自己写的技能会一起删除，不能恢复；"
             "目录里的文件不受影响。")
 
@@ -542,8 +543,8 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_projects",
         description="Projects: list; get one; create (name, and the work_dir and background the user gave; never "
-                    "pick a directory); update its name, work_dir or background; delete one without tasks or "
-                    "schedules (the user confirms first).",
+                    "pick a directory); update its name, work_dir or background; delete one with its tasks and schedules, "
+                    "stopping its running tasks first (the user confirms first).",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {

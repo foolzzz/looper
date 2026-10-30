@@ -24,6 +24,7 @@ from looper.agents import api_v1
 from looper.agents.ops.clients import ClientOps
 from looper.agents.http_server import AgentHTTPServer
 from looper.agents.tiers.task import Task, TaskRouter
+from looper.agents.message import channel_address
 from looper.db import connection as db_connection, llm_records as db_llm_records, projects as db_projects, tasks as db_tasks
 
 ACTIVE = ("pending", "assigned", "running", "executing")
@@ -106,6 +107,13 @@ class _Store:
         self.add_task(task_id, project_id, status)
         self.tasks[task_id].update(work_dir=work_dir, pool=pool, **fields)
         return {"task_id": task_id, "created_at": NOW.isoformat()}
+
+    async def project_tasks(self, project_id: str, **_: Any) -> list[dict[str, Any]]:
+        return [{"id": task["id"], "status": task["status"]}
+                for task in self.tasks.values() if task["project_id"] == project_id]
+
+    async def delete_task(self, task_id: str, **_: Any) -> bool:
+        return self.tasks.pop(task_id, None) is not None
 
     async def set_task_project(self, task_id: str, project_id: str, **_: Any) -> bool:
         if task_id not in self.tasks:
@@ -195,7 +203,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     for name in ("list_projects", "get_project", "find_project_by_name", "create_project", "update_project", "delete_project"):
         monkeypatch.setattr(db_projects, name, getattr(fake, name))
     for name in ("create_task", "set_task_project", "list_tasks", "count_by_status", "task_exists", "get_task",
-                 "get_task_with_steps"):
+                 "get_task_with_steps", "project_tasks", "delete_task"):
         monkeypatch.setattr(db_tasks, name, getattr(fake, name))
     monkeypatch.setattr(db_connection, "transaction", fake.transaction)
     monkeypatch.setattr(db_llm_records, "task_costs", fake.task_costs)
@@ -237,6 +245,12 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     monkeypatch.setattr(db_managers, "list_managers", AsyncMock(return_value=[default]))
     monkeypatch.setattr(db_managers, "get_manager", AsyncMock(return_value=default))
     monkeypatch.setattr(db_managers, "template_using_project", AsyncMock(return_value=None))
+    from looper.agents import step_workspaces, task_workspaces
+    from looper.db import schedules as db_schedules
+
+    monkeypatch.setattr(db_schedules, "list_schedules", AsyncMock(return_value=[]))
+    monkeypatch.setattr(step_workspaces, "remove_task", AsyncMock(return_value=0))
+    monkeypatch.setattr(task_workspaces, "finish", AsyncMock(return_value=None))
     return fake
 
 
@@ -254,7 +268,8 @@ class _Writer:
 def _server(router: TaskRouter | None = None) -> AgentHTTPServer:
     if router is None:
         router = TaskRouter(runtime_root=Path(tempfile.mkdtemp()))
-    return AgentHTTPServer(web_adapter=SimpleNamespace(), task_router=router, supervisor=SimpleNamespace())
+    return AgentHTTPServer(web_adapter=SimpleNamespace(_address=channel_address("web")), task_router=router,
+                           supervisor=SimpleNamespace(bus=SimpleNamespace(publish=AsyncMock())))
 
 
 def _call(method: str, path: str, body: Any = None, *, query: dict[str, str] | None = None,
@@ -361,12 +376,12 @@ class TestProjectEndpoints:
         assert _call("POST", "/api/v1/project_admin/delete", {"project_id": 'proj-a'}) == (200, {"deleted": "proj-a"})
         assert store.projects == {}
 
-    def test_delete_of_a_project_with_tasks_is_409(self, store: _Store) -> None:
+    def test_delete_of_a_project_also_deletes_its_tasks(self, store: _Store) -> None:
         store.add_project("proj-a", "tetris")
         store.add_task("task-1", "proj-a", "completed")
         status, body = _call("POST", "/api/v1/project_admin/delete", {"project_id": 'proj-a'})
-        assert status == 409 and "task" in body["error"]
-        assert "proj-a" in store.projects
+        assert (status, body) == (200, {"deleted": "proj-a"})
+        assert store.projects == {} and store.tasks == {}
 
     def test_delete_of_an_unknown_project_is_404(self, store: _Store) -> None:
         assert _call("POST", "/api/v1/project_admin/delete", {"project_id": 'proj-nope'})[0] == 404

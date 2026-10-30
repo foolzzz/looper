@@ -42,7 +42,8 @@ def _scoped_chat(tmp: Path, definition: ManagerDefinition | None = None, planner
     """A Lark chat with the Manager ``definition`` names (the default Manager without one), over a platform that
     can also answer the overview."""
     chat = _Chat(tmp, planners)
-    router = SimpleNamespace(has_planner=chat.ops.platform.task_router.has_planner, running_planners=lambda: [])
+    router = SimpleNamespace(has_planner=chat.ops.platform.task_router.has_planner, running_planners=lambda: [],
+                             forget_task=chat.ops.platform.task_router.forget_task)
     supervisor = SimpleNamespace(agent_status=lambda: {})
     manager_id = definition.id if definition is not None else "manager"
     platform = replace(chat.ops.platform, task_router=router, supervisor=supervisor,
@@ -576,7 +577,7 @@ def test_agent_profile_answers_count_only_a_scoped_managers_tasks(monkeypatch: p
 
 def test_project_deletion_conflicts_stay_inside_a_scoped_managers_tasks(monkeypatch: pytest.MonkeyPatch,
                                                                         tmp_path: Path) -> None:
-    from tests.test_manager_schedule_tools_db import _confirm, _schedule
+    from tests.test_manager_schedule_tools_db import _schedule
 
     async def test(pool: Any) -> None:
         from looper.db import managers
@@ -586,24 +587,27 @@ def test_project_deletion_conflicts_stay_inside_a_scoped_managers_tasks(monkeypa
 
         async def refused(who: _Chat) -> str:
             (answer,) = await who.say("rm", ("looper_projects", {"action": "delete", "project": "calc"}))
-            if answer["status"] == "needs_confirmation":  # a template is checked when the deletion runs
-                answer = await _confirm(who, answer)
             assert _error(answer) == "conflict", answer
+            assert who.turns[-1].blocks == []  # Refuse before asking, without changing the project.
             return answer["error"]["message"]
 
-        assert await refused(chat) == "project 'calc' still has 1 task of this Manager; move or delete them first"
-        assert "still has tasks" in await refused(default)
+        outside = "project 'calc' is still used outside this Manager: it cannot be deleted from here"
+        assert await refused(chat) == outside
+        assert await pool.fetchval("SELECT count(*) FROM tasks") == 2
+        (asked,) = await default.say("rm", ("looper_projects", {"action": "delete", "project": "calc"}))
+        assert asked["status"] == "needs_confirmation", asked
+        assert "停止它正在运行的 2 个任务" in default.turns[-1].blocks[0]
 
         await pool.execute("DELETE FROM tasks WHERE id = 'task-own'")
         await _schedule(project, "nightly")
+        assert await refused(chat) == outside
         await _manager(pool, "other", name="Other")
         await managers.put_template("manager-other", "pr", {"name": "PR", "project_id": project["id"]})
-        message = await refused(chat)
-        assert message == "project 'calc' is still used outside this Manager: it cannot be deleted from here"
+        assert "used by template" in await refused(chat)
         await pool.execute("DELETE FROM tasks")
         await pool.execute("DELETE FROM schedules")
-        assert await refused(chat) == message  # a template of another Manager, not named
-        assert "template" in await refused(default)
+        assert "used by template" in await refused(chat)
+        assert "used by template" in await refused(default)
 
     run_db(test, monkeypatch)
 

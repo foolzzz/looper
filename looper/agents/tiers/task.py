@@ -206,6 +206,7 @@ class TaskRouter:
         return planners
 
     def has_planner(self, task_id: str) -> bool:
+        """Whether the task has a Planner, including while its stop is still running."""
         return task_id in self._planners
 
     def set_task_project(self, task_id: str, project_id: str) -> None:
@@ -327,27 +328,41 @@ class TaskRouter:
 
     async def _handle_start(self, envelope: MessageEnvelope) -> None:
         """Start a ready task, once."""
+        from ..scheduler import _project_firing
+
         task_id = envelope.payload.get("task_id", "")
         try:
-            row = await db_tasks.start_ready_task(task_id)
+            snapshot = await db_tasks.get_task(task_id)
         except Exception:
-            logger.exception("failed to start task %s", task_id)
+            logger.exception("failed to read task %s before starting it", task_id)
             return
-        if row is None:
-            logger.warning("task %s is not ready (unknown or started already); not starting it", task_id)
+        if snapshot is None:
             return
-        task = Task.from_row(task_id, row)
-        self._tasks[task_id] = task
-        await self._start(task, MessageEnvelope.create(
-            source=TASK_ROUTER_ADDRESS,
-            target=TASK_ROUTER_ADDRESS,
-            message_type=MessageType.TASK_REQUEST,
-            payload={"requirement": task.requirement, "goal_id": task.goal_id, "work_dir": task.work_dir,
-                     "project_id": task.project_id},
-            # A task asked for in a chat reports its plan and its outcome there.
-            correlation_id=task.correlation_id,
-            metadata={"origin_channel_id": task.origin_channel_id},
-        ))
+        # Publication only queues TASK_START. Keep deletion out until the Router has claimed
+        # the row and finished preparing its workspace and Planner; refuse starts during cleanup.
+        with _project_firing(snapshot["project_id"]) as allowed:
+            if not allowed:
+                return
+            try:
+                row = await db_tasks.start_ready_task(task_id)
+            except Exception:
+                logger.exception("failed to start task %s", task_id)
+                return
+            if row is None:
+                logger.warning("task %s is not ready (unknown or started already); not starting it", task_id)
+                return
+            task = Task.from_row(task_id, row)
+            self._tasks[task_id] = task
+            await self._start(task, MessageEnvelope.create(
+                source=TASK_ROUTER_ADDRESS,
+                target=TASK_ROUTER_ADDRESS,
+                message_type=MessageType.TASK_REQUEST,
+                payload={"requirement": task.requirement, "goal_id": task.goal_id, "work_dir": task.work_dir,
+                         "project_id": task.project_id},
+                # A task asked for in a chat reports its plan and its outcome there.
+                correlation_id=task.correlation_id,
+                metadata={"origin_channel_id": task.origin_channel_id},
+            ))
 
     async def _start(self, task: Task, envelope: MessageEnvelope) -> None:
         """Give ``task`` its Planner now, unless it has one."""
@@ -598,14 +613,17 @@ class TaskRouter:
             logger.exception("failed to persist stop for task %s", task_id)
 
         if planner:
-            plnr = self._planners.pop(task_id, None)
-            if plnr:
-                await plnr.stop()
+            await planner.stop()
+            self._planners.pop(task_id, None)
         if self._broadcaster:
             self._broadcaster.close_task(task_id)
 
         logger.info("task %s stopped", task_id)
         await self._task_ended(task_id, "stopped")
+
+    def forget_task(self, task_id: str) -> None:
+        """Drop an already stopped task after its database row has been deleted."""
+        self._tasks.pop(task_id, None)
 
     @staticmethod
     async def _stop_note(task_id: str) -> str:
@@ -689,9 +707,10 @@ class TaskRouter:
         await self._start(task, restart_envelope)
 
     async def _teardown_task(self, task_id: str) -> None:
-        planner = self._planners.pop(task_id, None)
+        planner = self._planners.get(task_id)
         if planner:
             await planner.stop()
+            self._planners.pop(task_id, None)
             logger.info("task %s planner torn down", task_id)
 
         task = self._tasks.get(task_id)
