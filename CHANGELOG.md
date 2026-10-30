@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.22] - 2026-10-30
+
+### Fixed
+
+- **A Planner's empty reply gets the same repair turn as an invalid one.** A turn that succeeded with an empty reply used to fail the task at once with "Planning failed: RUNTIME returned an empty reply". The turn is still recorded with that error, but the reply now goes to the contract parser, which rejects it as "the reply was empty" and so triggers the single repair turn; other turn failures are unchanged. The Planner's start activity now names the runtime that runs it instead of always "Claude Code". **Model-visible:** after an empty reply the Planner receives the repair turn instead of the task failing. ([#919](https://github.com/foolzzz/looper/pull/919))
+
 ## [2.14.21] - 2026-10-30
 
 ### Changed
