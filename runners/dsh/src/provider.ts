@@ -228,7 +228,10 @@ export function installProvider(): void {
         retry = terminal === 'error' && !modelOutput && retryable(attempt, terminalChunk.reason.failure);
       } finally {
         record.activeRequest = null;
-        const rejected = attempt.status !== undefined && attempt.status >= 400 && attempt.bodyDone && !modelOutput;
+        // No-output retries below HTTP 400 (or before headers) are zero-token
+        // rejections, just like drained HTTP error responses.
+        const rejected = (retry && (attempt.status === undefined || attempt.status < 400))
+          || (attempt.status !== undefined && attempt.status >= 400 && attempt.bodyDone && !modelOutput);
         const successful = terminal !== undefined && ['stop', 'tool-calls', 'max-tokens'].includes(terminal);
         // providerUsage observes only 2xx streams. Its validated message_stop is
         // authoritative even when the SDK finishes before the HTTP body drains.

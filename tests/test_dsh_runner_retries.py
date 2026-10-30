@@ -198,7 +198,8 @@ def test_transient_http_statuses_are_retried(tmp_path, status):
 
 
 @pytest.mark.parametrize("error_type", ["rate_limit_error", "api_error", "overloaded_error"])
-def test_sdk_retryable_stream_errors_before_output_recover(tmp_path, monkeypatch, error_type):
+@pytest.mark.parametrize("run_cap", [1, None])
+def test_sdk_retryable_stream_errors_before_output_recover(tmp_path, monkeypatch, error_type, run_cap):
     original = peer.messages_wire
 
     def wire(reply, index):
@@ -213,14 +214,17 @@ def test_sdk_retryable_stream_errors_before_output_recover(tmp_path, monkeypatch
         with MessagesServer([["unused"], ["Recovered"]]) as server:
             async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
                 client = BudgetClient(send, receive)
-                sid = await client.session(tmp_path, server, run_cap=None)
+                sid = await client.session(tmp_path, server, run_cap=run_cap)
                 await client.prompt(sid)
                 result = await client.settled(sid)
                 assert result["outcome"] == "completed" and result["final_text"] == "Recovered"
                 ends = assert_accounted(client, sid, count=2)
-                assert ends[0]["status"] == "error" and not ends[0]["complete"]
+                assert ends[0]["status"] == "error" and ends[0]["complete"]
+                assert [ends[0][k] for k in ("input_uncached", "output", "cache_read", "cache_write")] == [0] * 4
                 assert (ends[1]["input_uncached"], ends[1]["output"]) == (11, 5)
                 assert len(server.requests) == 2
+                assert result["usage_complete"]
+                assert client.summary.usage.cost_usd == pytest.approx(0.000021)
     run(exercise())
 
 
@@ -250,16 +254,22 @@ def test_output_and_bad_requests_are_not_retried(tmp_path, monkeypatch, case):
     run(exercise())
 
 
-def test_connection_lost_before_headers_is_retried(tmp_path):
+@pytest.mark.parametrize("run_cap", [1, None])
+def test_connection_lost_before_headers_is_retried(tmp_path, run_cap):
     async def exercise():
         _, installed = require_dsh()
         with MessagesServer([Reply(disconnect=True), ["Recovered"]]) as server:
             async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
                 client = BudgetClient(send, receive)
-                sid = await client.session(tmp_path, server, run_cap=None)
+                sid = await client.session(tmp_path, server, run_cap=run_cap)
                 await client.prompt(sid)
-                assert (await client.settled(sid))["outcome"] == "completed"
+                result = await client.settled(sid)
+                assert result["outcome"] == "completed"
                 ends = assert_accounted(client, sid, count=2)
                 assert len(server.requests) == 2 and ends[0]["status"] == "error"
-                assert not ends[0]["complete"], "a sent request with no headers has unknown usage"
+                assert ends[0]["complete"]
+                assert [ends[0][k] for k in ("input_uncached", "output", "cache_read", "cache_write")] == [0] * 4
+                assert (ends[1]["input_uncached"], ends[1]["output"]) == (11, 5)
+                assert result["usage_complete"]
+                assert client.summary.usage.cost_usd == pytest.approx(0.000021)
     run(exercise())

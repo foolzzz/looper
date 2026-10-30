@@ -159,7 +159,12 @@ def test_in_band_provider_errors_have_protocol_types(tmp_path, monkeypatch, erro
                 result = await client.settled(sid)
                 ends = assert_accounted(client, sid, count=count)
                 assert result["outcome"] == "failed" and result["error"]["kind"] == kind
-                assert all(end["status"] == "error" and not end["complete"] for end in ends)
+                complete = error_type != "authentication_error"
+                assert all(end["status"] == "error" and end["complete"] is complete for end in ends)
+                assert result["usage_complete"] is complete
+                if complete:
+                    assert all([end[k] for k in ("input_uncached", "output", "cache_read", "cache_write")]
+                               == [0] * 4 for end in ends)
                 assert len(server.requests) == count
 
     run(exercise())
