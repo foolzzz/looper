@@ -3419,9 +3419,11 @@ class PlannerAgent:
                 await recorder.finish(output_text=None, result_event=None, error=error)
                 raise PlannerTurnError(error) from None
             self._process = process
-            resumed = (", resuming the stored session" if self._scheduled else
-                       f", resuming session {plan.session_id}") if plan.session_id else ""
-            await self._activity("phase", f"Planner Claude Code started (pid {self._claude.pid}{resumed})")
+            details = [f"pid {self._claude.pid}"] if self._claude.pid is not None else []
+            if plan.session_id:
+                details.append("resuming the stored session" if self._scheduled else f"resuming session {plan.session_id}")
+            suffix = f" ({', '.join(details)})" if details else ""
+            await self._activity("phase", f"Planner {process.launch.runtime.label} started{suffix}")
 
         try:
             return await self._exchange(f"{brief}\n\n{message}" if brief else message, process,
@@ -3548,14 +3550,13 @@ class PlannerAgent:
                                                                command=process.command)
                 error = (f"{label} turn did not succeed: {detail}"[:500] if detail else
                          f"{label} turn did not succeed ({result_event.get('subtype') or 'error'})")
-            elif not final_text.strip():
-                error = f"{label} returned an empty reply"
             # The turn is over: recorded first, so a stop that comes while Claude stops or the session is saved
             # keeps what it spent.
+            # A successful empty reply is recorded as before, but its contract parser gets to request a repair.
             await recorder.finish(
                 output_text=final_text or None,
                 result_event=result_event,
-                error=error,
+                error=error or (f"{label} returned an empty reply" if not final_text.strip() else None),
                 usage=turn.usage,
             )
             changed, check = await self._changed_files(plan, watched)

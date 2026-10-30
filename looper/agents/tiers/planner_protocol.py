@@ -417,6 +417,8 @@ def extract_reply(text: str) -> dict[str, Any]:
     The block's end is found by decoding the JSON, so string values may quote
     code fences of their own.
     """
+    if not text.strip():
+        raise ProtocolError("the reply was empty")
     openings = list(_OPENING.finditer(text))
     if not openings:
         raise ProtocolError("the reply has no ```json fenced block")
