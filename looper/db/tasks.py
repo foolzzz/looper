@@ -559,6 +559,15 @@ _SEARCH = ("strpos(lower(regexp_replace(concat_ws(' ', t.id, t.title, t.requirem
            "'\\s+', ' ', 'g')), {parameter}) > 0")
 
 
+async def project_tasks(project_id: str, *, manager_id: str | None = None,
+                        pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """All project task ids and statuses (only this Manager's when given), without pagination or detail joins."""
+    pool = pool or get_pool()
+    return [dict(row) for row in await pool.fetch(
+        "SELECT id, status FROM tasks WHERE project_id = $1 AND ($2::text IS NULL OR manager_id = $2) "
+        "ORDER BY created_at, id", project_id, manager_id)]
+
+
 async def list_tasks(
     *,
     limit: int = 50,

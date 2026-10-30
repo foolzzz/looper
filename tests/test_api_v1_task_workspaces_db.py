@@ -31,7 +31,7 @@ def _isolated(monkeypatch, tmp_path):
 async def _workspaces(tmp_path, *, planner=False):
     async with _serving(tmp_path) as server:
         bus = MessageBus(runtime_root=tmp_path)
-        server._task_router = SimpleNamespace(has_planner=lambda _: planner)
+        server._task_router = SimpleNamespace(has_planner=lambda _: planner, forget_task=lambda _: None)
         server._supervisor = SimpleNamespace(bus=bus)
         server._client_ops = ClientOps(Platform(bus=bus, task_router=server._task_router, runtime_root=tmp_path))
 

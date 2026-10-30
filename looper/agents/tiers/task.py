@@ -470,6 +470,10 @@ class TaskRouter:
         if not task or ends_task(task.status):
             return  # an ended task's notice is its last message (``task_notice``)
 
+        if ends_task(status) and (planner := self._planners.get(task_id)) is not None:
+            # A non-active database status permits deletion. End every agent before publishing that state.
+            await planner.stop()
+            self._planners.pop(task_id, None)
         summary = envelope.payload.get("summary") or None
         branch_line = await self._finish_workspace(task) if status == "completed" else None
         fail_kind = envelope.payload.get("fail_kind") if status == "failed" else None
@@ -581,7 +585,7 @@ class TaskRouter:
             await self._task_ended(task_id, "stopped")
             return
 
-        task.status = "stopped"
+        task.status = "stopping"
         planner = self._planners.get(task_id)
         if planner:
             await self._bus.publish(MessageEnvelope.create(
@@ -593,7 +597,7 @@ class TaskRouter:
             ))
 
         try:
-            await db_tasks.update_task_status(task_id, "stopped", result_summary=await self._stop_note(task_id))
+            await db_tasks.update_task_status(task_id, "stopping")
         except Exception:
             logger.exception("failed to persist stop for task %s", task_id)
 
@@ -604,8 +608,17 @@ class TaskRouter:
         if self._broadcaster:
             self._broadcaster.close_task(task_id)
 
+        task.status = "stopped"
+        try:
+            await db_tasks.update_task_status(task_id, "stopped", result_summary=await self._stop_note(task_id))
+        except Exception:
+            logger.exception("failed to persist stop for task %s", task_id)
         logger.info("task %s stopped", task_id)
         await self._task_ended(task_id, "stopped")
+
+    def forget_task(self, task_id: str) -> None:
+        """Drop an already stopped task after its database row has been deleted."""
+        self._tasks.pop(task_id, None)
 
     @staticmethod
     async def _stop_note(task_id: str) -> str:

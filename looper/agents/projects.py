@@ -18,11 +18,13 @@ roles, and how many of its Workers or Reviewers run at once.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 import asyncpg
@@ -53,6 +55,8 @@ NO_WORK_DIR = "a work directory is required: set one on the task or on its proje
 BASE_MAX_CHARS = 200
 TASKS_PAGE = 50
 TASKS_PAGE_MAX = 200
+PROJECT_DELETE_STOP_WAIT_SECONDS = 60
+_project_delete_locks: dict[str, asyncio.Lock] = {}
 # The roles a task may choose the Agent Profile of; the Manager spans every task.
 TASK_PROFILE_ROLES = ("planner", "worker", "reviewer")
 # Fields a project used to hold that are agent settings now (its layer and its roles' layers).
@@ -210,19 +214,16 @@ async def update_project(project_id: str, data: dict[str, Any], *, manager_id: s
     return project_view(await _existing_project(project_id, manager_id=manager_id))
 
 
-def _still_used(project: dict[str, Any]) -> RequestError:
-    return RequestError(HTTP_409, f"project {project['name']!r} still has tasks; move or delete them first")
+async def deletable_project(project_id: str, *, manager_id: str | None = None) -> dict[str, Any]:
+    """Check existence, template use and Manager ownership before any confirmation or destructive work."""
+    from ..db import managers as db_managers
 
-
-async def deletable_project(project_id: str) -> dict[str, Any]:
-    """The project, when nothing keeps it from being deleted: 404 for an unknown one, 409 while it has tasks or
-    schedules."""
     project = await _existing_project(project_id)
-    if project["task_count"]:
-        raise _still_used(project)
-    if count := project.get("schedule_count"):
-        raise RequestError(HTTP_409, f"project {project['name']!r} still has {count} "
-                                     f"schedule{'s' if count != 1 else ''}; delete them first")
+    if used := await db_managers.template_using_project(project_id):
+        raise _used_by_template(project_id, used)
+    if manager_id is not None and await db_projects.used_outside_manager(project_id, manager_id):
+        raise RequestError(HTTP_409, f"project {project['name']!r} is still used outside this Manager: "
+                                     "it cannot be deleted from here")
     return project
 
 
@@ -231,19 +232,100 @@ def _used_by_template(project_id: str, used: tuple[str, str]) -> RequestError:
                                   "change the template first")
 
 
-async def delete_project(project_id: str) -> dict[str, Any]:
-    from ..db import managers as db_managers
+async def delete_project(project_id: str, bus: MessageBus, source: AgentAddress,
+                         runtime_root: Path | None, *, manager_id: str | None = None,
+                         task_router: TaskRouter | None = None) -> dict[str, Any]:
+    """Remove schedules first, stop all active tasks, then share single-task cleanup before deleting the project.
 
-    project = await deletable_project(project_id)
-    if used := await db_managers.template_using_project(project_id):
-        raise _used_by_template(project_id, used)
+    A conflict leaves completed cleanup in place; the user can resolve it and retry the same operation.
+    """
+    from ..db import schedules as db_schedules
+    from . import schedules, task_workspaces
+
+    project = await deletable_project(project_id, manager_id=manager_id)
+    lock = _project_delete_locks.setdefault(project_id, asyncio.Lock())
+    if lock.locked():
+        raise RequestError(HTTP_409, f"project {project['name']!r} is already being deleted")
+    await lock.acquire()
     try:
-        await db_projects.delete_project(project_id)
-    except asyncpg.ForeignKeyViolationError:  # a task, a schedule or a template was added meanwhile
-        if used := await db_managers.template_using_project(project_id):
-            raise _used_by_template(project_id, used) from None
-        raise _still_used(project) from None
+        for schedule in await db_schedules.list_schedules(project_id):
+            if manager_id is not None and schedule["manager_id"] != manager_id:
+                continue  # A different owner added this after the scope check; the final FK guard keeps it.
+            try:
+                await schedules.delete_schedule(schedule["id"])
+            except RequestError as exc:
+                if exc.status != HTTP_404:  # another caller may already have removed this schedule
+                    raise
+
+        deadline = asyncio.get_running_loop().time() + PROJECT_DELETE_STOP_WAIT_SECONDS
+        sent: set[str] = set()
+        while True:
+            tasks = await db_tasks.project_tasks(project_id, manager_id=manager_id)
+            active = [task for task in tasks if task["status"] in db_tasks.ACTIVE_STATUSES]
+            if not active:
+                break
+            for task in active:
+                task_id = task["id"]
+                if task["status"] == "stopping" or task_id in sent:
+                    continue
+                try:
+                    await control_task(task_id, "stop", bus, source)
+                except RequestError:
+                    # Completion can race the control check; only ignore it when no stop is needed now.
+                    current = await db_tasks.get_task(task_id)
+                    if current is not None and current["status"] in db_tasks.ACTIVE_STATUSES \
+                            and current["status"] != "stopping":
+                        raise
+                sent.add(task_id)
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                ids = ", ".join(task["id"] for task in active[:5])
+                raise RequestError(HTTP_409, f"{len(active)} task(s) of project {project['name']!r} are still "
+                                             f"stopping ({ids}): delete the project again to finish")
+            await asyncio.sleep(min(1, remaining))
+
+        for deleted, task in enumerate(tasks):
+            try:
+                await delete_task(task["id"], runtime_root, task_router=task_router)
+            except task_workspaces.TaskWorkspaceError as exc:
+                raise RequestError(HTTP_409, f"task {task['id']} kept its worktree, so nothing is lost: {exc}; "
+                                             f"{deleted} of {len(tasks)} tasks were deleted. Resolve it, then "
+                                             "delete the project again") from None
+        try:
+            await db_projects.delete_project(project_id)
+        except asyncpg.ForeignKeyViolationError:
+            raise RequestError(HTTP_409, f"a task or schedule was added to project {project['name']!r} while it "
+                                         "was being deleted: delete it again") from None
+    finally:
+        lock.release()
+        _project_delete_locks.pop(project_id, None)
     return {"deleted": project_id}
+
+
+async def delete_task(task_id: str, runtime_root: Path | None, *,
+                      task_router: TaskRouter | None = None) -> dict[str, Any]:
+    """Delete a stopped task in workspace/session order; a TaskWorkspaceError keeps its checkout and row."""
+    from . import step_workspaces, task_workspaces
+
+    task_id = task_id.strip()
+    task = await db_tasks.get_task(task_id)
+    if task is None:
+        raise RequestError(HTTP_404, "task not found")
+    if task.get("status", "") in db_tasks.ACTIVE_STATUSES:
+        raise RequestError(HTTP_400, "stop the task before deleting")
+    try:
+        await step_workspaces.remove_task(task_id)
+    except Exception:
+        logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
+    # Steps belong to the task checkout. Commit what the task left to its result branch, which stays.
+    await task_workspaces.finish(task_id, deleted=True)
+    if runtime_root is not None:
+        from .room import remove_run_sessions
+        remove_run_sessions(runtime_root, task_id)
+    await db_tasks.delete_task(task_id)
+    if task_router is not None:
+        task_router.forget_task(task_id)
+    return {"deleted": task_id}
 
 
 def _task_work_dir(raw: Any, project_default: str) -> str:

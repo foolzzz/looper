@@ -1117,31 +1117,13 @@ class AgentHTTPServer:
 
     async def _delete_task(self, task_id: str) -> dict[str, Any]:
         """Delete a stopped task, preserving the established workspace/session cleanup order."""
-        from ..db.tasks import ACTIVE_STATUSES, delete_task, get_task
+        from . import task_workspaces
 
-        task_id = task_id.strip()
-        task = await get_task(task_id)
-        if task is None:
-            raise projects.RequestError(HTTP_404, "task not found")
-        if task.get("status", "") in ACTIVE_STATUSES:
-            raise projects.RequestError(HTTP_400, "stop the task before deleting")
-
-        from . import step_workspaces, task_workspaces
         try:
-            await step_workspaces.remove_task(task_id)
-        except Exception:
-            logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
-        try:
-            # After the steps' worktrees, which are of the task's: what it left goes onto its branch, which stays.
-            await task_workspaces.finish(task_id, deleted=True)
+            return await projects.delete_task(task_id, self._runtime_root, task_router=self._task_router)
         except task_workspaces.TaskWorkspaceError as exc:
             raise projects.RequestError(
                 HTTP_409, f"the task's worktree was kept, so nothing is lost: {exc}") from None
-        if self._runtime_root is not None:
-            from .room import remove_run_sessions
-            remove_run_sessions(self._runtime_root, task_id)
-        await delete_task(task_id)
-        return {"deleted": task_id}
 
     # --- Task detail handlers ---
 
