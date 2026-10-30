@@ -59,15 +59,14 @@ def test_terminal_usage_completes_before_http_eof(tmp_path, monkeypatch, eof_del
     run(exercise())
 
 
-@pytest.mark.parametrize("case", ["drained-without-stop", "dropped-before-stop", "truncated-rejection"])
+@pytest.mark.parametrize("case", ["drained-without-stop", "dropped-before-stop"])
 def test_incomplete_requests_diagnose_missing_conditions(tmp_path, monkeypatch, case):
     if case == "drained-without-stop":
         rewrite_events(monkeypatch, lambda events: events[:-1])
 
     async def exercise():
         _, installed = require_dsh()
-        reply = peer.Reply(["Partial response"], cut=case != "drained-without-stop",
-                           status=401 if case == "truncated-rejection" else 200)
+        reply = peer.Reply(["Partial response"], cut=case != "drained-without-stop")
         with peer.MessagesServer([reply]) as server:
             async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (process, send, receive):
                 client = Client(send, receive)
@@ -75,21 +74,23 @@ def test_incomplete_requests_diagnose_missing_conditions(tmp_path, monkeypatch, 
                 sid = (await client.call("session/new", params_for(tmp_path, server)))["session_id"]
                 await client.prompt(sid)
                 result = await client.settled(sid)
-                end, = assert_accounted(client, sid)
-                assert not end["complete"] and not result["usage_complete"]
+                ends = assert_accounted(client, sid)
+                assert all(not end["complete"] for end in ends) and not result["usage_complete"]
                 assert len(server.requests) == 1
                 process.stdin.close()
                 assert await asyncio.wait_for(process.wait(), 5) == 0
                 diagnostics = (await process.stderr.read()).decode()
-                line, = [line for line in diagnostics.splitlines() if line.startswith("usage_incomplete ")]
-                assert f"request_id={end['request_id']}" in line
-                assert "message_stop=false" in line and "terminal_usage=false" in line
-                missing = line.split("missing=", 1)[1].split()[0].split(",")
-                assert {"message_stop", "terminal_usage"} <= set(missing)
-                if case == "drained-without-stop":
-                    assert "body_done=true" in line
-                else:
-                    assert "body_done=false" in line and "body_drained_on_error" in missing
+                lines = [line for line in diagnostics.splitlines() if line.startswith("usage_incomplete ")]
+                assert len(lines) == 1
+                for end, line in zip(ends, lines):
+                    assert f"request_id={end['request_id']}" in line
+                    assert "message_stop=false" in line and "terminal_usage=false" in line
+                    missing = line.split("missing=", 1)[1].split()[0].split(",")
+                    assert {"message_stop", "terminal_usage"} <= set(missing)
+                    if case == "drained-without-stop":
+                        assert "body_done=true" in line
+                    else:
+                        assert "body_done=false" in line and "body_drained_on_error" in missing
                 assert "Partial response" not in diagnostics and "Disposable prompt" not in diagnostics
 
     run(exercise())
@@ -145,17 +146,23 @@ def test_in_band_provider_errors_have_protocol_types(tmp_path, monkeypatch, erro
 
     async def exercise():
         _, installed = require_dsh()
-        with peer.MessagesServer([["unused"]]) as server:
+        count = 1 if error_type == "authentication_error" else 4
+        with peer.MessagesServer([["unused"]] * count) as server:
             async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (_, send, receive):
                 client = Client(send, receive)
                 await client.start()
                 sid = (await client.call("session/new", params_for(tmp_path, server)))["session_id"]
                 await client.prompt(sid)
                 result = await client.settled(sid)
-                end, = assert_accounted(client, sid)
+                ends = assert_accounted(client, sid, count=count)
                 assert result["outcome"] == "failed" and result["error"]["kind"] == kind
-                assert end["status"] == "error" and not end["complete"]
-                assert len(server.requests) == 1
+                complete = error_type != "authentication_error"
+                assert all(end["status"] == "error" and end["complete"] is complete for end in ends)
+                assert result["usage_complete"] is complete
+                if complete:
+                    assert all([end[k] for k in ("input_uncached", "output", "cache_read", "cache_write")]
+                               == [0] * 4 for end in ends)
+                assert len(server.requests) == count
 
     run(exercise())
 

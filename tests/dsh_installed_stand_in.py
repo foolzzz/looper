@@ -29,6 +29,10 @@ class Reply:
     cut: bool = False
     hold: threading.Event | None = None
     eof_delay: float = 0
+    error_message: str = "Synthetic provider rejection"
+    error_type: str | None = None
+    headers: dict[str, str] = field(default_factory=dict)
+    disconnect: bool = False
 
 
 def messages_wire(blocks: list[str | dict] | Reply, index: int) -> str:
@@ -104,12 +108,15 @@ class MessagesServer:
                     return
                 reply = owner.replies[index]
                 reply = reply if isinstance(reply, Reply) else Reply(reply)
+                if reply.disconnect:
+                    self.close_connection = True
+                    return
                 if reply.hold is not None and not reply.hold.wait(30):
                     return
                 if reply.status != 200:
                     wire = json.dumps({"type": "error", "error": {
-                        "type": "authentication_error" if reply.status in (401, 403) else "api_error",
-                        "message": "Synthetic provider rejection"}}).encode()
+                        "type": reply.error_type or ("authentication_error" if reply.status in (401, 403) else "api_error"),
+                        "message": reply.error_message}}).encode()
                 else:
                     wire = messages_wire(reply, index).encode()
                 self.send_response(reply.status)
@@ -117,6 +124,8 @@ class MessagesServer:
                 # A trailing SSE comment separates message_stop from HTTP EOF.
                 tail = b": eof\n\n" if reply.eof_delay else b""
                 self.send_header("Content-Length", str(len(wire) + len(tail)))
+                for name, value in reply.headers.items():
+                    self.send_header(name, value)
                 self.end_headers()
                 try:
                     self.wfile.write((wire.split(b"event: message_stop")[0] if reply.status == 200 else wire[:-1])

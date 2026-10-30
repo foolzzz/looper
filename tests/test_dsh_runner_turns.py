@@ -171,7 +171,8 @@ def test_provider_failures_account_exactly(tmp_path, case, complete, status, err
     async def exercise():
         _, installed = require_dsh()
         reply = Reply(["Partial output"], cut=case == "cut", status=int(case) if case.isdigit() else 200)
-        with MessagesServer([reply]) as server:
+        count = 4 if case in ("500", "connection") else 1
+        with MessagesServer([reply] * count) as server:
             if case == "connection":
                 with socket.socket() as sock:
                     sock.bind(("127.0.0.1", 0))
@@ -186,13 +187,14 @@ def test_provider_failures_account_exactly(tmp_path, case, complete, status, err
                 sid = (await client.call("session/new", params))["session_id"]
                 await client.prompt(sid)
                 result = await client.settled(sid)
-                end, = assert_accounted(client, sid)
-                assert end["complete"] is complete and end["status"] == status
-                if case != "cut":
-                    assert [end[k] for k in ("input_uncached", "output", "cache_read", "cache_write")] == [0, 0, 0, 0]
+                ends = assert_accounted(client, sid, count=count)
+                for end in ends:
+                    assert end["complete"] is complete and end["status"] == status
+                    if case != "cut":
+                        assert [end[k] for k in ("input_uncached", "output", "cache_read", "cache_write")] == [0, 0, 0, 0]
                 assert result["outcome"] == "failed" and result["error"]["kind"] == error
                 assert result["usage_complete"] is complete
-                assert len(server.requests) == (0 if case == "connection" else 1)
+                assert len(server.requests) == (0 if case == "connection" else count)
     run(exercise())
 
 
