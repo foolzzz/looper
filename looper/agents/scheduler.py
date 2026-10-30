@@ -126,7 +126,7 @@ def _project_firing(project_id: str) -> Iterator[bool]:
 
 @asynccontextmanager
 async def quiesce_project(project_id: str) -> AsyncIterator[None]:
-    """Refuse new firings, then drain admitted transactions and TASK_START publications before cleanup.
+    """Refuse new firings and Router starts, then drain admitted work before cleanup.
 
     The caller serializes project deletions. Gates may keep running outside transactions; their completion
     must enter the barrier again before it can create a task. A failed or cancelled delete releases the barrier.

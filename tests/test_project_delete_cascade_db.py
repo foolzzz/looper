@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -194,6 +195,252 @@ def test_project_delete_drains_inflight_firing_before_schedule_or_task_cleanup(m
             await scheduler.stop()
 
     run_db(run, monkeypatch, timeout=25)
+
+
+@pytest.mark.parametrize("stage", ["claim", "workspace"])
+def test_project_delete_waits_for_router_start_to_finish(monkeypatch, tmp_path, stage):
+    from looper.agents.scheduler import Scheduler
+    from looper.agents.tiers.planner import PlannerAgent
+    from looper.agents.tiers.task import TaskRouter
+
+    async def run(pool):
+        repo = _repo(tmp_path / "repo")
+        project = await db_projects.create_project(name="Example", work_dir=str(repo),
+                                                   execution={"task_workspaces": "worktree"}, pool=pool)
+        sid = (await schedules.create_schedule(project["id"], {
+            "name": "Starting", "cron": "*/5 * * * *", "timezone": "UTC", "requirement": "Read reports",
+        }))["schedule"]["schedule_id"]
+        bus, router = MessageBus(runtime_root=tmp_path), TaskRouter(runtime_root=tmp_path)
+        scheduler = Scheduler(bus=bus)
+        monkeypatch.setattr(PlannerAgent, "start", AsyncMock())
+        monkeypatch.setattr(PlannerAgent, "stop", AsyncMock())
+        entered, release, deleting_entered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        original = tasks.start_ready_task if stage == "claim" else router._prepare_workspace
+
+        async def held(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(tasks if stage == "claim" else router,
+                            "start_ready_task" if stage == "claim" else "_prepare_workspace", held)
+        preflight = projects.deletable_project
+
+        async def checked(*args, **kwargs):
+            result = await preflight(*args, **kwargs)
+            asyncio.get_running_loop().call_soon(deleting_entered.set)
+            return result
+
+        monkeypatch.setattr(projects, "deletable_project", checked)
+        cleanup_started = asyncio.Event()
+        list_schedules = db_schedules.list_schedules
+
+        async def observed_cleanup(*args, **kwargs):
+            cleanup_started.set()
+            return await list_schedules(*args, **kwargs)
+
+        monkeypatch.setattr(db_schedules, "list_schedules", observed_cleanup)
+        await router.start(bus)
+        deleting = None
+        try:
+            run_id = await scheduler.run_now(sid)
+            task_id = (await db_schedules.get_run(run_id, pool=pool))["task_id"]
+            await asyncio.wait_for(entered.wait(), 5)
+            deleting = asyncio.create_task(_delete(project, tmp_path, bus, task_router=router))
+            await asyncio.wait_for(deleting_entered.wait(), 5)
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(cleanup_started.wait(), 0.2)
+            assert await db_schedules.get_schedule(sid, pool=pool) is not None
+            assert await tasks.get_task(task_id, pool=pool) is not None
+            assert not deleting.done()
+            release.set()
+            assert await asyncio.wait_for(deleting, 10) == {"deleted": project["id"]}
+            assert await tasks.get_task(task_id, pool=pool) is None
+            assert not router.has_planner(task_id)
+            assert PlannerAgent.start.await_count == PlannerAgent.stop.await_count == 1
+            assert git(repo, "rev-parse", "--verify", f"refs/heads/{task_workspaces.task_branch(task_id)}")
+        finally:
+            release.set()
+            if deleting is not None:
+                deleting.cancel()
+                await asyncio.gather(deleting, return_exceptions=True)
+            await router.stop()
+            await scheduler.stop()
+            await bus.shutdown()
+
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("start", ["queued", "concurrent"])
+def test_start_racing_task_cleanup_preserves_worktree_until_stopped(monkeypatch, tmp_path, start):
+    from looper.agents import step_workspaces
+    from looper.agents.scheduler import Scheduler
+    from looper.agents.tiers.planner import PlannerAgent
+    from looper.agents.tiers.task import Task, TaskRouter
+
+    async def run(pool):
+        repo = _repo(tmp_path / "repo")
+        project = await db_projects.create_project(name="Example", work_dir=str(repo),
+                                                   execution={"task_workspaces": "worktree"}, pool=pool)
+        sid = (await schedules.create_schedule(project["id"], {
+            "name": "Queued start", "cron": "*/5 * * * *", "timezone": "UTC", "requirement": "Read reports",
+        }))["schedule"]["schedule_id"]
+        bus, router = MessageBus(runtime_root=tmp_path), TaskRouter(runtime_root=tmp_path)
+        scheduler = Scheduler(bus=bus)
+        monkeypatch.setattr(PlannerAgent, "start", AsyncMock())
+        stopping, stop_release = asyncio.Event(), asyncio.Event()
+
+        async def stop():
+            stopping.set()
+            await stop_release.wait()
+
+        monkeypatch.setattr(PlannerAgent, "stop", AsyncMock(side_effect=stop))
+        # Leave TASK_START queued behind an earlier Router handler.
+        busy, start_release = asyncio.Event(), asyncio.Event()
+        original_stop = router._handle_stop
+
+        async def busy_stop(envelope):
+            if envelope.payload["task_id"] == "earlier-handler":
+                busy.set()
+                await start_release.wait()
+            else:
+                await original_stop(envelope)
+
+        monkeypatch.setattr(router, "_handle_stop", busy_stop)
+        handled = asyncio.Event()
+        original_start = router._handle_start
+
+        async def observed_start(envelope):
+            await original_start(envelope)
+            handled.set()
+
+        monkeypatch.setattr(router, "_handle_start", observed_start)
+        await router.start(bus)
+        deleting = None
+        stale_read, cleanup_release = asyncio.Event(), asyncio.Event()
+        try:
+            await bus.publish(MessageEnvelope.create(
+                source=SOURCE, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_STOP,
+                payload={"task_id": "earlier-handler"}))
+            await asyncio.wait_for(busy.wait(), 5)
+            run_id = await scheduler.run_now(sid)
+            task_id = (await db_schedules.get_run(run_id, pool=pool))["task_id"]
+            original_get = tasks.get_task
+
+            async def stale_get(tid, **kwargs):
+                row = await original_get(tid, **kwargs)
+                if tid == task_id and asyncio.current_task() is deleting and not stale_read.is_set():
+                    stale_read.set()
+                    await cleanup_release.wait()
+                return row
+
+            monkeypatch.setattr(tasks, "get_task", stale_get)
+            remove_steps, finish = step_workspaces.remove_task, task_workspaces.finish
+            cleaned = []
+
+            async def checked_cleanup(operation, tid, **kwargs):
+                # Both cleanup operations must wait for the Planner to stop, even after a stale ready read.
+                assert not router.has_planner(tid)
+                assert (await original_get(tid))["status"] not in tasks.ACTIVE_STATUSES
+                cleaned.append(operation)
+                return await operation(tid, **kwargs)
+
+            async def checked_steps(tid, **kwargs):
+                return await checked_cleanup(remove_steps, tid, **kwargs)
+
+            async def checked_finish(tid, **kwargs):
+                return await checked_cleanup(finish, tid, **kwargs)
+
+            monkeypatch.setattr(step_workspaces, "remove_task", checked_steps)
+            monkeypatch.setattr(task_workspaces, "finish", checked_finish)
+            deleting = asyncio.create_task(_delete(project, tmp_path, bus, task_router=router))
+            await asyncio.wait_for(stale_read.wait(), 5)
+            if start == "concurrent":
+                # Another start path can claim the row after the delete read its ready snapshot.
+                row = await tasks.start_ready_task(task_id)
+                task = Task.from_row(task_id, row)
+                router._tasks[task_id] = task
+                await router._start(task, MessageEnvelope.create(
+                    source=SOURCE, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_REQUEST,
+                    payload={"task_id": task_id}))
+            start_release.set()
+            await asyncio.wait_for(handled.wait(), 5)
+            if start == "queued":
+                assert not router.has_planner(task_id)
+                assert (await original_get(task_id))["status"] == tasks.READY
+            else:
+                assert router.has_planner(task_id)
+                assert (await original_get(task_id))["status"] in tasks.ACTIVE_STATUSES
+            cleanup_release.set()
+            if start == "concurrent":
+                await asyncio.wait_for(stopping.wait(), 5)
+                assert cleaned == [] and not deleting.done()
+                stop_release.set()
+            assert await asyncio.wait_for(deleting, 5) == {"deleted": project["id"]}
+            assert cleaned == [remove_steps, finish]
+            assert await original_get(task_id) is None
+            if start == "concurrent":
+                assert git(repo, "rev-parse", "--verify", f"refs/heads/{task_workspaces.task_branch(task_id)}")
+        finally:
+            start_release.set()
+            cleanup_release.set()
+            stop_release.set()
+            if deleting is not None:
+                deleting.cancel()
+                await asyncio.gather(deleting, return_exceptions=True)
+            await router.stop()
+            await scheduler.stop()
+            await bus.shutdown()
+
+    run_db(run, monkeypatch, timeout=20)
+
+
+def test_task_delete_holds_row_lock_from_first_filesystem_cleanup_until_row_removal(monkeypatch, tmp_path):
+    import asyncpg
+    from looper.agents import step_workspaces
+
+    async def run(pool):
+        project = await db_projects.create_project(name="Example", pool=pool)
+        await _task(pool, project, "task-ready", tasks.READY)
+        entered, release = asyncio.Event(), asyncio.Event()
+        remove = step_workspaces.remove_task
+
+        async def held_remove(task_id, **kwargs):
+            entered.set()
+            await release.wait()
+            return await remove(task_id, **kwargs)
+
+        monkeypatch.setattr(step_workspaces, "remove_task", held_remove)
+        deleting = asyncio.create_task(projects.delete_task("task-ready", tmp_path))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            async with pool.acquire() as conn:
+                await conn.execute("SET lock_timeout = '200ms'")
+                try:
+                    with pytest.raises(asyncpg.LockNotAvailableError):
+                        await tasks.start_ready_task("task-ready", pool=conn)
+                finally:
+                    await conn.execute("RESET lock_timeout")
+            assert (await tasks.get_task("task-ready", pool=pool))["status"] == tasks.READY
+            release.set()
+            assert await asyncio.wait_for(deleting, 5) == {"deleted": "task-ready"}
+            assert await tasks.start_ready_task("task-ready", pool=pool) is None
+        finally:
+            release.set()
+            deleting.cancel()
+            await asyncio.gather(deleting, return_exceptions=True)
+
+    run_db(run, monkeypatch, timeout=15)
+
+
+def test_task_delete_reuses_row_lock_connection_with_a_single_connection_pool(monkeypatch, tmp_path):
+    async def run(pool):
+        project = await db_projects.create_project(name="Example", pool=pool)
+        await _task(pool, project, "task-ready", tasks.READY)
+        assert await asyncio.wait_for(projects.delete_task("task-ready", tmp_path), 5) == {"deleted": "task-ready"}
+        assert await tasks.get_task("task-ready", pool=pool) is None
+
+    run_db(run, monkeypatch, timeout=60, max_size=1)
 
 
 @pytest.mark.parametrize("cancel", [False, True])

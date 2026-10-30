@@ -73,6 +73,13 @@ class RequestError(Exception):
         self.status = status
 
 
+class _TaskActive(RequestError):
+    """The task must finish stopping before deletion can take its workspace."""
+
+    def __init__(self) -> None:
+        super().__init__(HTTP_400, "stop the task before deleting")
+
+
 def check_requirement(text: str) -> str:
     """``text``, a task requirement, when it is at most ``TASK_REQUIREMENT_LIMIT`` characters; else a 400 that
     says so (a longer one would be clipped where agents read it)."""
@@ -264,35 +271,40 @@ async def delete_project(project_id: str, bus: MessageBus, source: AgentAddress,
             while True:
                 tasks = await db_tasks.project_tasks(project_id, manager_id=manager_id)
                 active = [task for task in tasks if task["status"] in db_tasks.ACTIVE_STATUSES]
-                if not active:
-                    break
-                for task in active:
-                    task_id = task["id"]
-                    if task["status"] == "stopping" or task_id in sent:
-                        continue
-                    try:
-                        await control_task(task_id, "stop", bus, source)
-                    except RequestError:
-                        # Completion can race the control check; only ignore it when no stop is needed now.
-                        current = await db_tasks.get_task(task_id)
-                        if current is not None and current["status"] in db_tasks.ACTIVE_STATUSES \
-                                and current["status"] != "stopping":
-                            raise
-                    sent.add(task_id)
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    ids = ", ".join(task["id"] for task in active[:5])
-                    raise RequestError(HTTP_409, f"{len(active)} task(s) of project {project['name']!r} are still "
-                                                 f"stopping ({ids}): delete the project again to finish")
-                await asyncio.sleep(min(1, remaining))
+                if active:
+                    for task in active:
+                        task_id = task["id"]
+                        if task["status"] == "stopping" or task_id in sent:
+                            continue
+                        try:
+                            await control_task(task_id, "stop", bus, source)
+                        except RequestError:
+                            # Completion can race the control check; only ignore it when no stop is needed now.
+                            current = await db_tasks.get_task(task_id)
+                            if current is not None and current["status"] in db_tasks.ACTIVE_STATUSES \
+                                    and current["status"] != "stopping":
+                                raise
+                        sent.add(task_id)
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        ids = ", ".join(task["id"] for task in active[:5])
+                        raise RequestError(HTTP_409, f"{len(active)} task(s) of project {project['name']!r} are still "
+                                                     f"stopping ({ids}): delete the project again to finish")
+                    await asyncio.sleep(min(1, remaining))
+                    continue
 
-            for deleted, task in enumerate(tasks):
-                try:
-                    await delete_task(task["id"], runtime_root, task_router=task_router)
-                except task_workspaces.TaskWorkspaceError as exc:
-                    raise RequestError(HTTP_409, f"task {task['id']} kept its worktree, so nothing is lost: {exc}; "
-                                                 f"{deleted} of {len(tasks)} tasks were deleted. Resolve it, then "
-                                                 "delete the project again") from None
+                for deleted, task in enumerate(tasks):
+                    try:
+                        await delete_task(task["id"], runtime_root, task_router=task_router)
+                    except _TaskActive:
+                        # A start claimed the row after the snapshot: stop it before touching any files.
+                        break
+                    except task_workspaces.TaskWorkspaceError as exc:
+                        raise RequestError(HTTP_409, f"task {task['id']} kept its worktree, so nothing is lost: {exc}; "
+                                                     f"{deleted} of {len(tasks)} tasks were deleted. Resolve it, then "
+                                                     "delete the project again") from None
+                else:
+                    break
             try:
                 await db_projects.delete_project(project_id)
             except asyncpg.ForeignKeyViolationError:
@@ -314,17 +326,25 @@ async def delete_task(task_id: str, runtime_root: Path | None, *,
     if task is None:
         raise RequestError(HTTP_404, "task not found")
     if task.get("status", "") in db_tasks.ACTIVE_STATUSES:
-        raise RequestError(HTTP_400, "stop the task before deleting")
-    try:
-        await step_workspaces.remove_task(task_id)
-    except Exception:
-        logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
-    # Steps belong to the task checkout. Commit what the task left to its result branch, which stays.
-    await task_workspaces.finish(task_id, deleted=True)
-    if runtime_root is not None:
-        from .room import remove_run_sessions
-        remove_run_sessions(runtime_root, task_id)
-    await db_tasks.delete_task(task_id)
+        raise _TaskActive()
+    async with db_connection.transaction() as conn:
+        # Serialize cleanup with start_ready_task's UPDATE, using this connection throughout
+        # so cleanup cannot wait for another connection while holding the row lock.
+        task = await db_tasks.get_task(task_id, pool=conn, for_update=True)
+        if task is None:
+            raise RequestError(HTTP_404, "task not found")
+        if task["status"] in db_tasks.ACTIVE_STATUSES:
+            raise _TaskActive()
+        try:
+            await step_workspaces.remove_task(task_id, pool=conn)
+        except Exception:
+            logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
+        # Steps belong to the task checkout. Commit what the task left to its result branch, which stays.
+        await task_workspaces.finish(task_id, deleted=True, pool=conn)
+        if runtime_root is not None:
+            from .room import remove_run_sessions
+            remove_run_sessions(runtime_root, task_id)
+        await db_tasks.delete_task(task_id, pool=conn)
     if task_router is not None:
         task_router.forget_task(task_id)
     return {"deleted": task_id}

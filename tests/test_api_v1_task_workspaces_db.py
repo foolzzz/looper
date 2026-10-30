@@ -155,9 +155,9 @@ def test_operator_delete_removes_owned_state_in_original_order_and_retires_legac
         events = []
         remove_steps, finish, remove_sessions, delete = ws.remove_task, tw.finish, room.remove_run_sessions, tasks.delete_task
 
-        async def observed_steps(task_id):
+        async def observed_steps(task_id, **kwargs):
             assert checkout.exists() and session.exists() and await tasks.get_task(task_id)
-            result = await remove_steps(task_id)
+            result = await remove_steps(task_id, **kwargs)
             events.append("steps")
             return result
 

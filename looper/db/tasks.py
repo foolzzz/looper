@@ -297,9 +297,12 @@ async def update_task_phase(
     )
 
 
-async def get_task(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+async def get_task(task_id: str, *, pool: asyncpg.Pool | None = None,
+                   for_update: bool = False) -> dict[str, Any] | None:
+    """Read a task; ``for_update`` locks its status in the caller's transaction until cleanup commits."""
     pool = pool or get_pool()
-    row = await pool.fetchrow("SELECT * FROM tasks WHERE id = $1", task_id)
+    lock = " FOR NO KEY UPDATE" if for_update else ""
+    row = await pool.fetchrow("SELECT * FROM tasks WHERE id = $1" + lock, task_id)
     if row is None:
         return None
     return _task(row)

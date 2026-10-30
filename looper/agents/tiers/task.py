@@ -327,27 +327,41 @@ class TaskRouter:
 
     async def _handle_start(self, envelope: MessageEnvelope) -> None:
         """Start a ready task, once."""
+        from ..scheduler import _project_firing
+
         task_id = envelope.payload.get("task_id", "")
         try:
-            row = await db_tasks.start_ready_task(task_id)
+            snapshot = await db_tasks.get_task(task_id)
         except Exception:
-            logger.exception("failed to start task %s", task_id)
+            logger.exception("failed to read task %s before starting it", task_id)
             return
-        if row is None:
-            logger.warning("task %s is not ready (unknown or started already); not starting it", task_id)
+        if snapshot is None:
             return
-        task = Task.from_row(task_id, row)
-        self._tasks[task_id] = task
-        await self._start(task, MessageEnvelope.create(
-            source=TASK_ROUTER_ADDRESS,
-            target=TASK_ROUTER_ADDRESS,
-            message_type=MessageType.TASK_REQUEST,
-            payload={"requirement": task.requirement, "goal_id": task.goal_id, "work_dir": task.work_dir,
-                     "project_id": task.project_id},
-            # A task asked for in a chat reports its plan and its outcome there.
-            correlation_id=task.correlation_id,
-            metadata={"origin_channel_id": task.origin_channel_id},
-        ))
+        # Publication only queues TASK_START. Keep deletion out until the Router has claimed
+        # the row and finished preparing its workspace and Planner; refuse starts during cleanup.
+        with _project_firing(snapshot["project_id"]) as allowed:
+            if not allowed:
+                return
+            try:
+                row = await db_tasks.start_ready_task(task_id)
+            except Exception:
+                logger.exception("failed to start task %s", task_id)
+                return
+            if row is None:
+                logger.warning("task %s is not ready (unknown or started already); not starting it", task_id)
+                return
+            task = Task.from_row(task_id, row)
+            self._tasks[task_id] = task
+            await self._start(task, MessageEnvelope.create(
+                source=TASK_ROUTER_ADDRESS,
+                target=TASK_ROUTER_ADDRESS,
+                message_type=MessageType.TASK_REQUEST,
+                payload={"requirement": task.requirement, "goal_id": task.goal_id, "work_dir": task.work_dir,
+                         "project_id": task.project_id},
+                # A task asked for in a chat reports its plan and its outcome there.
+                correlation_id=task.correlation_id,
+                metadata={"origin_channel_id": task.origin_channel_id},
+            ))
 
     async def _start(self, task: Task, envelope: MessageEnvelope) -> None:
         """Give ``task`` its Planner now, unless it has one."""

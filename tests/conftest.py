@@ -220,6 +220,12 @@ class _PlanStore:
     async def start_ready_task(self, task_id: str, **_: object) -> dict[str, Any] | None:
         return self.ready.pop(task_id, None)
 
+    async def get_task(self, task_id: str, **_: object) -> dict[str, Any] | None:
+        if task_id in self.ready:
+            return {**copy.deepcopy(self.ready[task_id]), "status": "init"}
+        row = self.tasks.get(task_id)
+        return copy.deepcopy(row) if row is not None else None
+
     async def save(self, task_id: str, *, plan: Any = None, steps: Any = (), journal: Any = (), gates: Any = (),
                    gate_messages: Any = (), waits: Any = (), **_: object) -> None:
         if plan is not None:
@@ -657,7 +663,7 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
     sessions the agents save, the tasks created ready and the step workspaces
     are kept in memory (``store``, a ``_PlanStore``) and read back from there:
     ``save_plan``, ``load_plan``, ``save_session``, ``get_session``,
-    ``create_task``, ``start_ready_task`` and the ``*_workspace*`` ones are
+    ``create_task``, ``get_task``, ``start_ready_task`` and the ``*_workspace*`` ones are
     mocks around it. The returned namespace exposes them by
     name so a test can assert what was persisted. A bare ``claude`` is a stub
     that never answers (``stub_claude_on_path``).
@@ -693,6 +699,7 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
          store.other_live_task_has_session),
         (tasks, "set_planner_session_label", "set_planner_session_label", store.set_planner_session_label),
         (tasks, "create_task", "create_task", store.create_task),
+        (tasks, "get_task", "get_task", store.get_task),
         (tasks, "start_ready_task", "start_ready_task", store.start_ready_task),
         (step_workspaces, "next_workspace_id", "next_id", store.next_workspace_id),
         (step_workspaces, "save_workspace", "save", store.save_workspace),

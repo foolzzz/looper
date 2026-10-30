@@ -305,10 +305,10 @@ def _worktree_path(runtime_root: Path, task_id: str) -> Path:
     return runtime_root / TASK_WORKTREES_DIR / task_id
 
 
-async def _save(worktree: TaskWorktree) -> None:
+async def _save(worktree: TaskWorktree, *, pool: Any = None) -> None:
     from ..db import task_worktrees as db_task_worktrees
 
-    await db_task_worktrees.save(worktree.row())
+    await db_task_worktrees.save(worktree.row(), pool=pool)
 
 
 def _link(worktree: TaskWorktree, relative: str) -> str:
@@ -394,13 +394,14 @@ async def _restore(worktree: TaskWorktree) -> None:
         _link(worktree, relative)
 
 
-async def finish(task_id: str, *, completed: bool = False, deleted: bool = False) -> TaskWorktree | None:
+async def finish(task_id: str, *, completed: bool = False, deleted: bool = False,
+                 pool: Any = None) -> TaskWorktree | None:
     """At the task's end: when it completed or is deleted, commit what it left uncommitted on its branch and remove
     its worktree (the branch stays); a stopped or failed task keeps it. The worktree as it is now, None without one.
     Raises ``TaskWorkspaceError`` when what was left cannot be committed (the worktree then stays)."""
     from ..db import task_worktrees as db_task_worktrees
 
-    row = await db_task_worktrees.get(task_id)
+    row = await db_task_worktrees.get(task_id, pool=pool)
     if row is None:
         return None
     worktree = TaskWorktree.from_row(row)
@@ -429,7 +430,7 @@ async def finish(task_id: str, *, completed: bool = False, deleted: bool = False
         await asyncio.to_thread(shutil.rmtree, path, True)
     ws._remove_empty(path.parent)
     worktree = replace(worktree, state=WorktreeState.REMOVED, result_commit=tip, removed_at=ws.now())
-    await _save(worktree)
+    await _save(worktree, pool=pool)
     return worktree
 
 
