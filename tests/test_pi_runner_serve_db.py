@@ -218,7 +218,7 @@ def saved_events(url, record):
 
 
 def runner_processes(tmp_path):
-    processes = subprocess.run(["ps", "-A", "-o", "pid=,command="], capture_output=True, text=True, check=True, timeout=5).stdout
+    processes = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,args="], capture_output=True, text=True, check=True, timeout=5).stdout
     owned = []
     # Runner cwd belongs to the test; its process record gives a stable identity.
     for file in (tmp_path / "runtime/.local/agent-processes").glob("*.json"):
@@ -231,6 +231,28 @@ def runner_processes(tmp_path):
             executable = shutil.which("pi")
             assert not executable or str(Path(executable).resolve()) not in line, line
     return owned
+
+
+def the_runner(tmp_path) -> int:
+    pids = runner_processes(tmp_path)
+    if len(pids) == 1:
+        return pids[0]
+    diagnostics = [f"Expected exactly one Pi runner, found {len(pids)}: {pids}"]
+    files = sorted((tmp_path / "runtime/.local/agent-processes").glob("*.json"))
+    if files:
+        processes = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,args="],
+                                   capture_output=True, text=True, check=True, timeout=5).stdout
+        for file in files:
+            pid = int(file.stem)
+            line = next((line for line in processes.splitlines() if line.split(maxsplit=1)[0] == str(pid)), "")
+            diagnostics.append(f"{file}: pid={pid}, ps={line!r}")
+    else:
+        diagnostics.append("No agent process records found.")
+        log = tmp_path / "serve.log"
+        if log.is_file():
+            diagnostics.extend(line for line in log.read_text().splitlines()
+                               if "cannot read the start time" in line or "cannot record agent pid" in line)
+    pytest.fail("\n".join(diagnostics))
 
 
 def test_pi_runner_manager_stop_and_restart(isolated_pi, tmp_path):
@@ -254,7 +276,7 @@ def test_pi_runner_manager_stop_and_restart(isolated_pi, tmp_path):
     (action,) = query(url, "SELECT * FROM manager_actions WHERE tool='looper_tasks'")
     assert action["status"] == "ok" and action["manager_id"] == "manager"
     assert json.loads(action["arguments"]) == {"action": "list"}
-    (pid,) = runner_processes(tmp_path)
+    pid = the_runner(tmp_path)
     session = query(url, "SELECT session_id FROM agent_sessions WHERE agent_id='manager'")[0]["session_id"]
 
     api.post("/api/v1/chat_settings/update", {"stop_enabled": True})
@@ -296,7 +318,7 @@ def test_pi_runner_missing_manager_session_records_failed_resume(isolated_pi, tm
     assert session
     (saved,) = (tmp_path / "runtime/runners/state/pi/manager").glob(f"*_{session}.jsonl")
     saved.unlink()  # Keep the database's saved session, but lose the runner's history.
-    (pid,) = runner_processes(tmp_path)
+    pid = the_runner(tmp_path)
     os.kill(pid, signal.SIGKILL)
     wait_until(lambda: runner_processes(tmp_path), lambda pids: pid not in pids, timeout=10)
 
@@ -489,7 +511,7 @@ def test_pi_runner_task_with_every_role(isolated_pi, tmp_path):
     task, work = start_task(api, tmp_path, "STEP-ONE and STEP-TWO")
     try:
         wait_until(started.exists)
-        (pid,) = runner_processes(tmp_path)
+        pid = the_runner(tmp_path)
         api.post("/api/v1/operator_chat/send", {"text": "Pass STEER-TOKEN to step one", "session_id": "pi-acceptance",
             "message_id": "steer", "target": {"kind": "planner", "task_id": task}})
         assert "Passed on" in reply(api, "steer")
@@ -596,7 +618,7 @@ def test_pi_runner_worker_cancel_crash_and_budget(isolated_pi, tmp_path):
     mode = "CANCEL"
     task, _ = start_task(api, tmp_path, "Cancel Worker")
     assert provider.held.wait(20)
-    (pid,) = runner_processes(tmp_path)
+    pid = the_runner(tmp_path)
     children = proc_tree._tree(SimpleNamespace(pid=pid, returncode=None), proc_tree._snapshot(), {})
     assert pid in children, "positive control: process snapshot must include the live runner"
     before = time.monotonic()
