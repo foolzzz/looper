@@ -3,7 +3,7 @@
 - **状态：** 已批准（2026-10-30）。第 9 节的四个问题都按推荐答案执行；先做 S0，S1 在 S0 上线之后开工。
 - **需求：** 维护者问：能不能在任务继续跑的情况下重启？把系统拆成几个组件，每次只升级改了的组件。请设计一个热升级方案。
 - **相关：** [Agent SDK 运行器](agent-sdk-runner-v0.zh-CN.md)（运行器协议 0.1、generation、`session/load`）、[定时任务](scheduled-tasks-v0.zh-CN.md)（错过的触发怎么补）、[issue #909](https://github.com/foolzzz/looper/issues/909)（同一个库上跑两个 `looper serve` 不安全）、[开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 1 节第 8 条（合入后部署）和第 5.2 节、`docs/architecture/agent-system.md` 的「How an agent is stopped」和「Message Bus」两节。
-- **核对基线：** `main` `71380e44c`（v2.14.25）。变更频率统计的是 2026-10-15（改名之后）到 2026-10-30 的 246 个发布 tag（v2.8.0 到 v2.14.25）。本文只读了代码和 git 历史，没有启动服务，也没有读运行中服务的数据库。内存数字来自本机 CPython 3.11 的一次性测量，启动耗时来自一次性库上升级检查的日志。
+- **核对基线：** `main` `6a3cbb94e`（v2.14.26），本文的代码行号已逐项核对。变更频率仍统计 2026-10-15（改名之后）到 2026-10-30 的 246 个发布 tag（v2.8.0 到 v2.14.25）。本文只读了代码和 git 历史，没有启动服务，也没有读运行中服务的数据库。内存数字来自本机 CPython 3.11 的一次性测量，启动耗时来自一次性库上升级检查的日志。
 - **引用约定：** 路径相对仓库根，写成「文件:行」。
 - **术语：**
   - **控制面**：`looper serve` 进程本身，包括 HTTP API 与控制台、总线、Manager/TaskRouter/Planner/WorkerPool 的逻辑、调度器和渠道。
@@ -245,28 +245,31 @@
 
 - **指纹** 是组件里每个文件的「路径 + 内容的 sha256」排序后再取一次 sha256。目标版本的指纹可以直接从 git 树（`git cat-file --batch`，不用检出）或者 wheel（zip）算出来，不需要先安装。
 - **接管契约指纹**（单独一组，任何一项变了都走 `FULL`）：`run_manifest_version`；Worker 和 Reviewer 报告契约原文的 sha256（`looper/agents/system_prompt.py` 的 `WORK_CONTRACT`、`REVIEW_CONTRACT`）；Worker/Reviewer 席位工具列表 JSON 的 sha256；看护进程支持的协议版本集合。
-- **运行中的指纹：** 控制面启动时，按自己加载的安装目录算一遍，通过 `GET /api/v1/system/components` 返回 `{version, loaded_at, components: {…}, adoption: {…}}`（要操作者令牌）。
+- **运行中的指纹：** 控制面启动时，按自己加载的安装目录计算并固定 `loaded_components`（不含 `web`）和 `adoption`，与 `version`、`loaded_at` 一起保留到退出；磁盘文件被替换不改变这份加载快照。`web.fingerprint` 则在每次请求时从 HTTP 服务实际使用的静态资源目录读取文件计算，`web.checked_at` 记录本次读取时间。`POST /api/v1/system/components`（`system.components`，要操作者令牌）返回 HTTP 200，正文为 `{status: "ok", result: {version, loaded_at, loaded_components: {…}, adoption: {…}, web: {fingerprint, checked_at}}}`。`WEB_ONLY` 校验和后续升级计划都读取当前的 `web.fingerprint`。
 
 ### 7.2 升级计划和部署脚本
 
-新加 `looper service upgrade [--to <git ref | wheel>] [--dry-run] [--drain-timeout 1200] [--turns-timeout 180]`；`looper service restart --drain` 是它在 `FULL` 计划下的那一段。顺序必须是 **先算计划 → 排空 → 再安装 → 再重启**，避免排空期间的旧进程导入到新代码（第 4.5 节）：
+新加 `looper service upgrade [--to <git ref | wheel>] [--dry-run] [--drain-timeout 1200] [--turns-timeout 180]`；`looper service restart --drain` 是它在 `FULL` 计划下省去安装的那一段。需要重启时，顺序必须是 **先算计划 → 排空 → 停止旧控制面并完成脱离 → 确认旧进程退出 → 安装 → 启动**。排空超时也遵守这个顺序，旧进程仍在运行时不得就地安装，避免延迟导入混用新旧代码（第 4.5 节）：
 
 ```text
 target   = manifest_of(source)              # git 树或 wheel，不安装
-running  = GET /api/v1/system/components    # 运行中的控制面加载的代码
+running  = (POST /api/v1/system/components {}).result  # 加载快照 + 本次从磁盘读取的 web 指纹
 keepers  = scan(.local/runs/*/keeper.json)  # 还活着的看护进程及其协议版本
 plan     = decide(target, running, keepers, keeper_mode)
 print(plan, reasons)                        # --dry-run 到此为止
 NOOP          → 安装（只是换文件），不重启
 WEB_ONLY      → 安装；checkout 先构建到临时目录再整体换名替换 web/dist；校验 index.html
-CONTROL_PLANE → 排空（scope=turns）→ 安装 → service restart（SIGTERM 时托管的运行脱离）→ 等服务起来 → 校验
-FULL          → 排空（scope=runs）→ 安装 → service restart → 等服务起来 → 校验
-校验：/system/components 的指纹等于 target；接管数 = 重启前托管的运行数；打印部署报告（第 8.2 节）
+CONTROL_PLANE → 排空（scope=turns）→ service stop（托管运行完成脱离，确认旧进程退出）→ 安装 → service start → 等服务起来 → 校验
+FULL          → 排空（scope=runs）→ service stop（完成停机，确认旧进程退出）→ 安装 → service start → 等服务起来 → 校验
+校验：重新 POST /api/v1/system/components {}，web.fingerprint 等于 target.web；
+      其余组件的 loaded_components 和 adoption 等于 target 对应值；
+      CONTROL_PLANE 的接管数 = 重启前托管的运行数；打印部署报告（第 8.2 节）
 ```
 
 ```text
 decide(target, running, keepers, keeper_mode):
-  changed = {c | target[c] != running[c]}
+  current = running.loaded_components + {web: running.web.fingerprint}
+  changed = {c | target[c] != current[c]}
   if changed == ∅:                                         return NOOP
   if changed ⊆ {web}:                                      return WEB_ONLY
   if keeper_mode == off:                                   return FULL
@@ -275,7 +278,7 @@ decide(target, running, keepers, keeper_mode):
   return CONTROL_PLANE        # keeper 组件变了不影响计划
 ```
 
-在 checkout 里，「安装」是 `git merge --ff-only`；装 wheel 时是 `pip install`。`NOOP` 和 `WEB_ONLY` 之后，`/api/v1/version` 仍然报旧版本号，部署报告里会写清楚「运行中的代码指纹 X，安装的包版本 Y」。
+在 checkout 里，「安装」是 `git merge --ff-only`；装 wheel 时是 `pip install`。`NOOP` 和 `WEB_ONLY` 之后，`GET /api/v1/whoami` 的 `result.looper_version` 仍然报旧控制面加载的版本号（`looper/agents/api_v1.py:75-79`），部署报告分别列出控制面加载指纹、当前 web 指纹和安装的包版本。连续两次只升级控制台时，每次都用新请求读取的 web 指纹制定计划和校验，不把启动时的值当成当前静态资源版本。
 
 ### 7.3 S0：排空
 
@@ -293,7 +296,7 @@ class DrainStatus: phase: DrainPhase; scope: DrainScope | None; since: datetime 
 | 位置 | 排空时 | 重启之后 | 为什么这样就不浪费 |
 |---|---|---|---|
 | `WorkerPool._take_slot`（`worker.py:723-755`） | 新运行一律等位，相当于上限是 0 | 步骤在库里仍是 `dispatched`，续跑时照常重派（`planner.py:2541-2550`） | 等位发生在 `_execute` 之前（`worker.py:791-809`），运行根本没开始 |
-| Manager 取 `_turn_lock` 之前（`manager.py:1246`），而且要在任何用户看得到的动作之前 | 不开始新回合，消息留在总线日志里，没有标为已送达 | 启动后重放（`bus.py:182-209`），只答一次 | 回合根本没开始 |
+| Manager 的 `_handle` 入口（`looper/agents/tiers/manager.py:1030-1043`），在任何用户看得到的动作和取 `_turn_lock` 之前 | 已取出的消息由当前 handler 持有，等待 SERVING 许可，等待期间不得返回或推进 `subscribe`；后续消息仍排队 | 取消排空就继续处理；停机时取消等待并退出消息循环（`manager.py:1013-1028`），不再取下一条，未确认的消息启动后重放（`bus.py:182-209`），只答一次 | `bus.subscribe` 在 yield 之后才标为已送达（`looper/agents/bus.py:256-263`）；等待时不确认、不开始回合 |
 | 调度器 `tick` 里的触发（`scheduler.py:419-443`） | 不触发新的定时运行；已经在做的前置检查让它跑完 | 第一轮按各定时任务的 catch-up 规则补触发（`scheduler.py:1-24`） | 不会再出现 `gate_failed`（`scheduler.py:376-380`） |
 | `ConsultService` 排队中的咨询 | 不开始 | 照常（`consult.py:215-226`） | — |
 | Planner 回合、`TASK_START` | **不拦** | — | Planner 要先把 Worker 的结果存进库，才能交给决策回合；如果拦住，结果会一直留在发给 Planner 的总线队列里，而重启时这个队列会被丢掉（`bus.py:20-22`），结果就丢了。规划和决策回合本身有上限（每回合 1200 秒，`serve.py:289-292`），它们派出的运行会在 `_take_slot` 等位 |
@@ -302,7 +305,15 @@ class DrainStatus: phase: DrainPhase; scope: DrainScope | None; since: datetime 
 
 **期限：** `turns` 默认 180 秒，`runs` 默认 1200 秒。到期后部署照常往下走，剩下的运行像今天一样被中断，报告里逐个列出来；`--no-force` 时放弃这次部署，回到 SERVING。
 
-**接口（要操作者令牌，放在 v1 的 system 域里，loopercli 自动生成对应命令）：** `POST /api/v1/system/drain {scope, timeout_seconds}` 返回 202 和当前状态；`GET /api/v1/system/drain` 返回 `{phase, scope, since, deadline, waiting: {runs: [{worker_id, task_id, role, since, keepable}], manager_turns, planner_turns, gates, waits, consults}}`；`DELETE` 取消排空。`GET /api/v1/system/status` 里也带上 `drain`，控制台据此显示一条横幅：「正在升级：新的回合和运行会在重启后开始」。排空状态只存在内存里：排空期间服务如果崩溃，下次启动就是 SERVING。
+**接口（要操作者令牌，放在 v1 的 system 域里，loopercli 自动生成对应命令）：** 域操作统一使用 POST（现有 `system.status` 见 `looper/agents/v1_domains/status.py:29-30`）：
+
+| 操作 | 请求 | 结果 |
+|---|---|---|
+| `system.drain` | `POST /api/v1/system/drain {scope, timeout_seconds}` | 进入排空并立即返回当前状态，不等待排空完成 |
+| `system.drain_cancel` | `POST /api/v1/system/drain_cancel {}` | 取消排空，返回 SERVING 状态 |
+| `system.drain_status` | `POST /api/v1/system/drain_status {}` | 返回当前排空状态 |
+
+以上操作者调用都执行一次并返回 HTTP 200，正文为 `{status: "ok", result: {phase, scope, since, deadline, waiting: {runs: [{worker_id, task_id, role, since, keepable}], manager_turns, planner_turns, gates, waits, consults}}}`；202 只表示 `needs_confirmation`，不表示排空尚未完成（`looper/agents/api_v1.py:65-71`）。取消排空也只用 POST。`POST /api/v1/system/status` 的 `result` 里也带上 `drain`，控制台据此显示一条横幅：「正在升级：新的回合和运行会在重启后开始」。排空状态只存在内存里：排空期间服务如果崩溃，下次启动就是 SERVING。
 
 ### 7.4 S0：重启空窗
 
@@ -325,7 +336,7 @@ class DrainStatus: phase: DrainPhase; scope: DrainScope | None; since: datetime 
 | `detach.json` | 控制面在脱离时写 | `{epoch, consumed: {stdout, stderr}, stdin_offset, at}` |
 | `keeper.sock` | 看护进程 | Unix 套接字，权限 0600 |
 
-**进程模型：** 控制面用 `start_new_session=True` 启动 `sys.executable -m looper.agents.keeper --dir <run dir> -- <argv…>`，看护进程自己的 stdin/stdout/stderr 都接 `/dev/null`，诊断写进 `keeper.log`。子进程的环境变量就是看护进程的环境去掉 `LOOPER_KEEPER_*`，这样 provider 的 key 不会落盘；cwd 由参数指定。看护进程用 `proc_tree` 的方式启动子进程（子进程在自己的 session 里），并以自己作为「服务」写一份 `proc_tree` 记录，这样控制面启动时的 `sweep` 会因为它的「服务」还活着而不去碰它（`looper/agents/proc_tree.py:369-410`，现有逻辑就是这样）。子进程退出、日志落盘之后，看护进程写 `state=exited` 然后退出，运行目录留到控制面释放。**孤儿保护：** 连续 `orphan_timeout_s`（默认 30 分钟）都没有控制者连上，看护进程就结束子进程（`end_reason=orphaned`），防止控制面再也回不来时一直在花钱。
+**进程模型：** 控制面直接用 `asyncio.create_subprocess_exec(..., start_new_session=True)` 启动 `sys.executable -m looper.agents.keeper --dir <run dir> -- <argv…>`，不经过 `proc_tree.spawn`，从启动起就不为 keeper 写以控制面为所有者的 `proc_tree` 记录。`proc_tree.spawn` 会把调用方登记为所有者（`looper/agents/proc_tree.py:335-346`），而新控制面先执行 `sweep`、后执行 `end_unfinished_records`（`looper/agents/serve.py:539-551`），到接管扫描时再豁免已经来不及。看护进程自己的 stdin/stdout/stderr 都接 `/dev/null`，诊断写进 `keeper.log`。子进程的环境变量就是看护进程的环境去掉 `LOOPER_KEEPER_*`，这样 provider 的 key 不会落盘；cwd 由参数指定。看护进程用 `proc_tree` 的方式启动子进程（子进程在自己的 session 里），并以 keeper 自己的 pid 和启动时间作为「服务」写一份子进程记录，这样控制面启动时的 `sweep` 会因为 keeper 还活着而不去碰子进程（`looper/agents/proc_tree.py:369-410`）。子进程退出、日志落盘之后，看护进程写 `state=exited` 然后退出，运行目录留到控制面释放。**孤儿保护：** 连续 `orphan_timeout_s`（默认 30 分钟）都没有控制者连上，看护进程就结束子进程（`end_reason=orphaned`），防止控制面再也回不来时一直在花钱。
 
 **协议 1.0：** JSON-RPC 2.0，每行一个 JSON，单帧不超过 4 MiB（和运行器协议的 `MAX_FRAME_BYTES` 一致），数据用 base64 分块，每块不超过 64 KiB。
 
@@ -357,13 +368,13 @@ class DrainStatus: phase: DrainPhase; scope: DrainScope | None; since: datetime 
 
 ### 7.7 S1：所有权和围栏
 
-- **只允许一个控制面：** serve 建好连接池之后，用一条专用连接取会话级的 `pg_try_advisory_lock`，一直持有到进程退出。取不到就抛 `StartupCheckFailed`，写清楚是谁占着锁（从 `pg_locks` 和 `pg_stat_activity` 查；`application_name` 设成 `looper serve <pid>@<host>`）。连接一断，锁自然释放，所以进程卡死后被 `os._exit` 也不会留下死锁。按关键词只读检索，没找到在同一个库上起两个服务的测试，实现时要再确认一遍；调度器里那段 `SKIP LOCKED` 的说明（`scheduler.py:11-13`）要相应改掉。这是一处行为变更，见待决问题 3。
+- **只允许一个控制面：** serve 建好连接池之后，用一条专用连接取会话级的 `pg_try_advisory_lock`，一直持有到进程退出。取不到就抛 `StartupCheckFailed`，写清楚是谁占着锁（从 `pg_locks` 和 `pg_stat_activity` 查；`application_name` 设成 `looper serve <pid>@<host>`）。专用连接通过断开通知和有期限的健康检查监测失锁；连接断开或无法确认仍持锁时，旧控制面立即停止接收工作和派工，取消进行中的控制面操作并退出，沿用有期限的停机兜底。失锁是本实例的终态：不得重连后继续工作或重新抢锁，普通数据库连接池即使自动重连也不得恢复读写和派工；数据库重启导致锁释放时同样适用。连接一断锁自然释放，退出不会留下死锁；keeper 的纪元围栏不能代替控制面失锁退出。按关键词只读检索，没找到在同一个库上起两个服务的测试，实现时要再确认一遍；调度器里那段 `SKIP LOCKED` 的说明（`scheduler.py:11-13`）要相应改掉。这是一处行为变更，见待决问题 3。
 - **纪元：** 拿到锁之后，在数据库里把 `control_plane_epoch` 加 1，然后在 `initialize` 时交给看护进程。看护进程拒绝比自己见过的更低的纪元；遇到更高的就顶替。这样一来，一个卡在停机途中的旧控制面，再也写不进任何运行的 stdin。
 - **运行和步骤一一对应：** 运行归 `worker_id` 所在的那个步骤。只有当库里这个步骤还是 `dispatched` 或在评审中、`worker_id`/`reviewer_id` 也对得上时，才接管。
 
 ### 7.8 S1：跨重启的契约
 
-- **agent API 断线重试：** `looper/agents/mcp_server.py` 的 `AgentClient` 遇到连接被拒（请求肯定没送到）时，按 0.5 秒起、翻倍、最多 5 秒的间隔重试，直到 `LOOPER_AGENT_RECONNECT_SECONDS`（默认 120 秒）用完；收到带 `Retry-After` 的 503 也重试；只读的 GET 遇到任何连接错误都可以重试；其余情况和今天一样（发出去之后超时的请求不重试，`LooperTimedOut`）。Pi 扩展做同样的修改。HTTP 服务在续跑和接管之后才开始监听（`serve.py:688-717`），所以重试成功时，被接管运行的令牌已经重新生效了。
+- **agent API 断线重试：** `looper/agents/mcp_server.py` 的 `AgentClient` 遇到连接被拒（请求肯定没送到）时，按 0.5 秒起、翻倍、最多 5 秒的间隔重试，直到 `LOOPER_AGENT_RECONNECT_SECONDS`（默认 120 秒）用完；收到带 `Retry-After` 的 503 也重试；只读操作（按操作定义的 `risk=read` 判定，包括 POST）遇到任何连接错误都可以重试；其余情况和今天一样（发出去之后超时的请求不重试，`LooperTimedOut`）。Pi 扩展做同样的修改。HTTP 服务在续跑和接管之后才开始监听（`serve.py:688-717`），所以重试成功时，被接管运行的令牌已经重新生效了。
 - **令牌：** 托管运行的席位授权在签发时写进 `grant.json`（只存哈希），接管时 `RoomOps` 从这里加载。Planner 的令牌跟着 Planner 常驻进程走，那个进程本来就会重启，不需要持久化。
 - **契约变了就走 `FULL`：** 用的是第 7.1 节的接管契约指纹。
 - **Codex `app-server`、OMP rpc、Grok ACP** 在 S1 里不可托管：`turns` 排空会等它们，最多等到运行排空期限，报告里单独列出来。S3 里每种运行时各自补上「用重放重建请求 id 和 thread 状态」并通过测试之后，再把 `keepable` 改成 True。
@@ -375,14 +386,14 @@ S0（用全新的数据库、一次性的 runtime root 和非 8767 的端口跑 
 
 1. 一个 Worker 在跑时开始 `runs` 排空：第二个派出的步骤在等位；排空期间发给 Manager 的消息不开始回合；那个 Worker 跑完之后状态变成 DRAINED；重启之后，等位的步骤开始跑，Manager 那条消息只答一次；`llm_records` 里没有 `interrupted`。
 2. 运行比期限长：到期后像今天一样被中断，报告里列出这个运行；带 `--no-force` 时放弃部署，回到 SERVING。
-3. `DELETE` 取消排空：等位的运行马上开始。
+3. 操作者调用 `POST /api/v1/system/drain_cancel {}` 取消排空，返回 200 和 SERVING 状态：等位的运行和 Manager 消息马上继续。
 4. 排空期间到点的定时任务：重启之后按 catch-up 规则触发，不出现 `gate_failed`。
-5. 升级计划：只改文档 → `NOOP`，进程 pid 不变；只改控制台 → `WEB_ONLY`，pid 不变，控制台拿到新的 `index.html`；改了 `planner.py` → `FULL`（S0 里没有看护进程）。
+5. 升级计划：只改文档 → `NOOP`，进程 pid 不变；连续两次只改控制台 → 每次都是 `WEB_ONLY`，pid 和控制面加载指纹不变，控制台拿到新的 `index.html`，组件接口的 web 指纹每次都等于本次目标，再对同一目标规划得到 `NOOP`；改了 `planner.py` → `FULL`（S0 里没有看护进程），包括排空超时分支，确认旧控制面退出后才开始安装，安装完才启动新控制面。
 6. 空窗期间发到 Telegram 的消息（用替身 Bot API）：重启后只投递一次；超过积压上限的只记录。
 
 S1：
 
-7. Claude Code Worker 跑到一半时做 `CONTROL_PLANE` 重启：运行不中断，`worker_id` 不变，只有一条运行记录，最后是 `completed`，花费只算一次，步骤没有被重派，活动记录是连着的；重启之后 Planner 发给它的引导能送到。真实 Claude CLI 跑一次，替身 CLI 覆盖其余分支。
+7. Claude Code Worker 跑到一半时做 `CONTROL_PLANE` 重启：keeper 没有以旧控制面为所有者的进程记录，新控制面的启动 `sweep` 不结束 keeper 或其子进程；运行不中断，`worker_id` 不变，只有一条运行记录，最后是 `completed`，花费只算一次，步骤没有被重派，活动记录是连着的；重启之后 Planner 发给它的引导能送到。真实 Claude CLI 跑一次，替身 CLI 覆盖其余分支。
 8. 运行在控制面停着的时候跑完：启动后结果只交一次。
 9. 空窗期间发出的 MCP 调用：重试后成功；超过重试窗口的返回错误结果。
 10. 用旧纪元连接被拒；纪元更高的控制面顶替旧的；控制面一直不回来时，孤儿保护在期限后结束运行。
@@ -390,18 +401,19 @@ S1：
 12. `looper service restart` 在 launchd（macOS）和 systemd（Linux）上都不会杀掉看护进程。
 13. 杀掉一个看护进程：只有那一个运行中断后重做，别的运行不受影响。
 14. 反向用例：同一个库上再起一个 `looper serve`，它拒绝启动，并说明谁占着锁。
+15. 断开第一个控制面的持锁连接，再启动第二个实例：第一个停止接收工作、停止派工并退出，第二个取得锁后启动；第一个的普通连接池恢复连接也不能继续工作。分别覆盖直接断开专用连接和数据库重启导致失锁两种情况。
 
 ### 7.10 任务卡
 
 | 卡 | 阶段 | 内容 | 验收 |
 |---|---|---|---|
-| C1 | S0 | `components.toml` 和指纹计算（git 树、wheel、安装目录三种来源）；`GET /api/v1/system/components`；CI 的归类检查；`decide` 函数；`looper service upgrade --dry-run` | 用例 5；`decide` 的每个分支各一行参数化测试 |
-| C2 | S0 | `DrainState`、四个暂停点、判定完成、期限；`/api/v1/system/drain` 的三个方法；`system/status` 里的 `drain`；控制台横幅 | 用例 1–4 |
-| C3 | S0 | `looper service upgrade` / `restart --drain` 的执行和部署报告；先排空再安装；`web/dist` 原子替换；Telegram 不再丢积压 | 用例 1、5、6；部署报告的字段 |
+| C1 | S0 | `components.toml` 和指纹计算（git 树、wheel、安装目录三种来源）；控制面加载快照与按请求读取的 web 指纹；`POST /api/v1/system/components`；CI 的归类检查；`decide` 函数；`looper service upgrade --dry-run` | 用例 5；`decide` 的每个分支各一行参数化测试 |
+| C2 | S0 | `DrainState`、四个暂停点、判定完成、期限；POST 操作 `system.drain`、`system.drain_cancel`、`system.drain_status`；`system/status` 里的 `drain`；控制台横幅 | 用例 1–4 |
+| C3 | S0 | `looper service upgrade` / `restart --drain` 的执行和部署报告；排空、停止并完成脱离、确认退出后安装再启动；`web/dist` 原子替换；Telegram 不再丢积压 | 用例 1、5、6；部署报告的字段 |
 | C4 | S1 | `looper/agents/keeper/`：运行目录、进程模型、协议 1.0、纪元、孤儿保护、日志上限；导入白名单的 CI 检查 | 用例 10、13；控制面被杀掉之后子进程继续跑，从任意偏移补读 |
 | C5 | S1 | `KeptRun`；`_execute` 拆成 prepare 和 consume；计划内脱离；`keepable` 开关；systemd 加 `KillMode=process` | 用例 7（替身 CLI）、12 |
 | C6 | S1 | 启动时扫描候选；`end_unfinished_records(keep=…)`；`adopt`；重放重建；`ClaudeRunRecorder.resume`；释放运行目录 | 用例 7、8 |
-| C7 | S1 | 单控制面锁和纪元；`grant.json`；`mcp_server` 和 Pi 扩展的断线重试；接管契约指纹接入 `decide` | 用例 9、11、14 |
+| C7 | S1 | 单控制面锁、失锁退出和纪元；`grant.json`；`mcp_server` 和 Pi 扩展的断线重试；接管契约指纹接入 `decide` | 用例 9、11、14、15 |
 | C8 | S1 | 真实链路验证：真实 Claude CLI 跑一次用例 7，在 macOS 和 Linux 上各跑一次用例 12，收集第 8.2 节的指标 | 截图和部署报告附在 PR 上 |
 
 ## 8. 风险与监控项
@@ -411,12 +423,12 @@ S1：
 | 风险 | 后果 | 缓解 | 剩下的风险 |
 |---|---|---|---|
 | 新控制面消费旧运行，两边版本不一致 | 报告被判成违反契约、工具调用失败 | 接管契约指纹不一致就走 `FULL`；清单带版本号 | 指纹没覆盖到的隐含约定，靠用例 7 和真实运行去发现 |
-| 进程还在跑，磁盘上的代码被换掉 | 旧进程导入到新模块，新旧代码混在一起 | 先排空再安装；看护进程只用启动时导入的代码，CI 检查 | 控制面在排空期间仍可能在函数里导入，但这时代码还没换 |
+| 进程还在跑，磁盘上的代码被换掉 | 旧进程导入到新模块，新旧代码混在一起 | 排空后先停止、完成脱离并确认退出，再安装启动；看护进程只用启动时导入的代码，CI 检查 | 版本隔离安装目录仍是待办；存活的看护进程依赖导入约束 |
 | 看护进程占资源 | 每个运行多一个约 24 MB 的进程（实测，含共享页） | 运行的并发上限不变；`system/status` 显示看护进程的数量 | Claude CLI 进程本身占多少内存需要实测；预计远大于看护进程（推测） |
 | 服务管理器把看护进程一起杀了 | 运行中断，退回到今天的样子 | systemd 加 `KillMode=process`；launchd 实机验证 | macOS 上的行为需要验证 |
 | 重放的结果和原来不一样 | 内存里的计数有偏差 | 重放只重建计数，不产生副作用；结果按步骤状态只交一次 | 新代码重新解释旧事件，计数可能略有出入（只影响观测，不影响结果） |
 | 空窗期间平台工具调用失败 | 模型看到错误结果 | 连接被拒时重试，最长 120 秒；HTTP 在接管完成之后才开始监听 | 空窗比 120 秒长时（比如表结构变更要先做 `pg_dump`）会失败，需要实测备份的耗时 |
-| 单控制面锁误判 | 服务起不来 | 连接断了锁就释放；报错里写清楚是谁占着 | 不提供强制夺锁，以免脑裂 |
+| 单控制面锁获取失败或失锁 | 第二个实例起不来；旧实例若继续工作会脑裂 | 报错里写清楚是谁占着；专用连接断开（含数据库重启）后旧控制面停止接活并退出，连接池不得恢复工作 | 不提供强制夺锁；退出后的恢复依赖服务管理器重新启动 |
 | 孤儿运行一直在花钱 | 浪费 | 孤儿保护默认 30 分钟；接管时立刻检查花费上限 | 空窗那几秒里花费上限暂时不生效 |
 | 日志占满磁盘 | 磁盘写满 | stdout 上限 512 MB；释放和清扫运行目录 | — |
 | 排空迟迟完不成 | 部署变慢 | 两个期限；报告里列出在等谁 | 期限到了照样会中断一部分运行 |
@@ -424,7 +436,7 @@ S1：
 
 ### 8.2 监控与告警
 
-Looper 是本机服务，没有独立的指标系统。可观测性落在三个地方：结构化日志、`GET /api/v1/system/status` 的字段，以及控制台概览和 Manager 通知。
+Looper 是本机服务，没有独立的指标系统。可观测性落在三个地方：结构化日志、`POST /api/v1/system/status` 的字段，以及控制台概览和 Manager 通知。
 
 - **部署报告**（`looper service upgrade` 打印出来，同时写一行结构化日志）：`plan`、`reasons`、`drain_seconds`、`gap_seconds`（从 SIGTERM 到 HTTP 重新可用）、`kept_before`、`adopted`、`interrupted{reason=deadline|full|not_keepable|keeper_lost|protocol}`、被中断运行的估计花费（取运行记录里已经流出来的用量）。
 - **`system/status`：** `drain.phase` 和在等谁；`keepers.alive`、`keepers.orphaned`、`keepers.log_bytes`；`components` 的指纹。
@@ -443,4 +455,4 @@ Looper 是本机服务，没有独立的指标系统。可观测性落在三个�
 1. **排空的语义和期限。** 推荐：按第 7.3 节做。排空期间新运行等位，新的 Manager 回合留到重启后再开始，定时任务暂停触发（重启后按 catch-up 补），Planner 回合照常进行；运行排空期限 20 分钟，回合排空期限 3 分钟，到期像今天一样中断。这意味着部署期间各任务最多停顿 20 分钟（S1 之后，大多数发布只停顿 3 分钟以内）。
 2. **看护层放在哪：每个运行一个看护进程，还是一个常驻宿主。** 推荐每个运行一个（B2）：看护代码升级不打断任何运行，一次崩溃只影响一个运行，协议也最简单。代价是每个运行多一个约 24 MB 的 Python 进程。运行器（S3）由同一种看护进程持有。
 3. **要不要把「一个数据库只跑一个 `looper serve`」做成启动检查。** 推荐要。这是 B 依赖的前提，而且第二个实例会被明确拒绝，而不是悄悄地不安全。#909 里剩下的两条多实例问题，以「拒绝第二个实例」为由关闭；方案 C 不做。
-4. **部署顺序和安装布局。** 推荐：S0 起部署脚本先从 git 树或 wheel 算出计划，排空完成之后才 `git merge --ff-only` 或 `pip install`。S1 继续就地安装，再加上「看护进程只用启动时导入的代码」这条约束。按版本分开的不可变安装目录（`releases/<version>` 加一个 `current` 链接）先记成待办，等到看护进程跨好几个版本长期存活成为常态再做。
+4. **部署顺序和安装布局。** 推荐：S0 起部署脚本先从 git 树或 wheel 算出计划；需要重启时，排空完成或到期后先停止旧控制面，S1 还要完成托管运行的脱离，确认旧进程退出后才 `git merge --ff-only` 或 `pip install`，最后启动新控制面。S1 继续就地安装，并约束看护进程只用启动时导入的代码。按版本分开的不可变安装目录（`releases/<version>` 加一个 `current` 链接）先记成待办，等到看护进程跨好几个版本长期存活成为常态再做。
