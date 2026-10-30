@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.16] - 2026-10-29
+
+### Fixed
+
+- **The installed Pi runner serve tests find the runner process regardless of terminal width.** The nightly tests in `tests/test_pi_runner_serve_db.py` matched the runner by its `ps` command line, which Linux procps cuts at the terminal width, so they failed with "not enough values to unpack". They now list processes with `ps -A -ww -o pid=,args=`, and a miss reports the pids found, the agent process records and the relevant serve log lines. Test files only; no production code changes. ([#906](https://github.com/foolzzz/looper/pull/906))
+
 ## [2.14.15] - 2026-10-29
 
 ### Changed
