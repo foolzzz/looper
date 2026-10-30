@@ -12,7 +12,7 @@
     log_level = "info"                          # debug, info, warning or error
 
     [runtimes]
-    # Pi and DSH profiles run on their SDK runners. Set "cli" to opt out.
+    # Pi and DSH profiles default to their SDK runners. Set "cli" to opt out.
     # The setting is read once at startup; restart required.
     # pi = "runner"
     # dsh = "runner"
@@ -446,7 +446,7 @@ def render(config: OpsConfig) -> str:
         else '# public_url = "https://looper.example.com"',
         f"log_level = {_toml_string(config.log_level)}" if config.log_level != "info" else '# log_level = "info"',
         "",
-        '# Pi and DSH profiles run on their SDK runners. Set "cli" to opt out. '
+        '# Pi and DSH profiles default to their SDK runners. Set "cli" to opt out. '
         'The setting is read once at startup; restart required.',
         "[runtimes]",
         'pi = "cli"' if config.pi_runtime == "cli" else '# pi = "runner"',

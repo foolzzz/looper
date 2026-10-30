@@ -224,21 +224,29 @@ def enable(runtime_root: Path) -> RunnerSupervisor | None:
             version = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", result.stdout.strip())
             if version is None or tuple(map(int, version.groups())) < (22, 19, 0):
                 unavailable = _opt_out(f"node {result.stdout.strip() or 'unknown'} is older than 22.19")
+            elif (23, 0, 0) <= tuple(map(int, version.groups())) < (23, 6, 0):
+                unavailable = _opt_out("Node 23.0–23.5 cannot run the runner (use 22.19+ or 23.6+)")
             else:
                 unavailable = None
-        except (OSError, subprocess.SubprocessError):
+        except subprocess.TimeoutExpired:
             unavailable = _opt_out("node --version did not finish within 2 seconds")
+        except (OSError, subprocess.SubprocessError) as exc:
+            unavailable = _opt_out(str(exc))
         if unavailable is None:
             found = _package_version(pi, _PI_PACKAGE)
             if found is not None and _PI_VERSION.fullmatch(found) is None:
                 unavailable = _opt_out(f"{_PI_PACKAGE} 1.3.x is required (found {found or 'not inside ' + _PI_PACKAGE})")
+    if not unavailable:
+        try:
+            resolved = Path(pi).resolve()
+            supervisor = RunnerSupervisor(runtime_root, {"pi": pi_command.command(node, pi)},
+                                          env={"pi": pi_command.ENV}, session_cap=SESSION_CAP,
+                                          startup_error=_opt_out, connect=pi_command.connect)
+        except (RuntimeUnsupported, OSError, ValueError) as exc:
+            unavailable = _opt_out(str(exc))
     if unavailable:
         ADAPTERS["pi"] = PiRunnerRuntime(None, pi=None, unavailable=unavailable)
         return None
-    resolved = Path(pi).resolve()
-    supervisor = RunnerSupervisor(runtime_root, {"pi": pi_command.command(node, pi)},
-                                  env={"pi": pi_command.ENV}, session_cap=SESSION_CAP,
-                                  startup_error=_opt_out, connect=pi_command.connect)
     ADAPTERS["pi"] = PiRunnerRuntime(supervisor, pi=resolved)
     logger.info("Pi runner pool enabled for every Pi role (%s sessions per member)", SESSION_CAP)
     return supervisor

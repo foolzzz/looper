@@ -1280,7 +1280,7 @@ Manager tools.
   `https://api.deepseek.com/anthropic`; an explicit Messages-compatible
   gateway is preserved. Other runtimes' defaults and profiles are unchanged.
 
-  By default DSH uses the CLI path: headless JSONL, one process per turn,
+  The explicit `[runtimes] dsh = "cli"` opt-out uses headless JSONL, one process per turn,
   persisted owner Sessions, an MCP bootstrap for Looper tools and read-only
   snapshots for consults. Catalog skills and external MCP are available on
   that path; root usage alone does not establish complete auxiliary billing.
@@ -1299,11 +1299,11 @@ Manager tools.
   before another member takes ownership; Pi's native ownership checks are
   process-local, so callers must serialize access to the same saved session.
 
-  Set `[runtimes] dsh = "runner"` in the ops file to put Manager, Planner,
+  The default `[runtimes] dsh = "runner"` puts Manager, Planner,
   Worker, Reviewer and consults on a pool of installed DSH SDK runners (Node 22.19+).
-  The default remains `"cli"`; runner startup, capacity or request failures
-  never fall back to the CLI. Each member has 20 session slots shared by all roles;
-  the pool grows on demand to four members (80 slots), then returns `CAPACITY`. Records store
+  Set `dsh = "cli"` in the ops file to opt out; runner startup, capacity or request failures
+  never fall back to the CLI. Each runner has 32 session slots shared by all roles;
+  the pool grows on demand to four runners per kind (128 slots), then returns `CAPACITY`. Records store
   `looper-runner` Descriptors of kind `dsh`, rather than DSH CLI commands.
 
   Manager, Workers and Reviewers have `read`, `glob`, `grep`, `write`, `edit`
@@ -1397,12 +1397,13 @@ Manager tools.
   skipped while no Agent Profile uses the login.
 - **Pi** (`looper/agents/runtimes/pi.py`, the `pi` CLI, minimum 1.3.0,
   verified against pi 1.3.0 in the [pi runtime RFC](rfcs/pi-runtime-v0.zh-CN.md))
-  runs Manager, Planner, Worker and Reviewer. With `[runtimes] pi = "runner"`
-  in the ops file, `PiRunnerRuntime` runs all four roles and consults through
-  a pool of Node >= 22.19 SDK runners. The opt-in is read once at startup and
-  needs a restart; there is no environment-variable override or dashboard control.
-  Each member has 10 session slots shared by all roles. The pool grows on demand
-  to four members (40 slots); only a full pool returns `CAPACITY`, failing a step
+  runs Manager, Planner, Worker and Reviewer. With the default `[runtimes] pi = "runner"`,
+  `PiRunnerRuntime` runs all four roles and consults through
+  a pool of Node >= 22.19 SDK runners. Set `pi = "cli"` in the ops file to opt out.
+  The setting is read once at startup and needs a restart; there is no
+  environment-variable override or dashboard control.
+  Each runner has 32 session slots shared by all roles. The pool grows on demand
+  to four runners per kind (128 slots); only a full pool returns `CAPACITY`, failing a step
   like any other start failure. There is no CLI fallback.
   Missing prerequisites fail with the startup reason. Turns submitted during
   restart backoff fail fast when no healthy member has room; replacement happens
@@ -1420,7 +1421,7 @@ Manager tools.
   Run records store a runner Descriptor as their command. Dashboard task controls
   and Telegram/Lark task stop cancel the session; Planner chat forwards into the
   running Worker in the same trace, using the existing channel paths.
-  The following describes the default `[runtimes] pi = "cli"` path.
+  The following describes the explicit `[runtimes] pi = "cli"` opt-out path.
   A Worker or Reviewer is
   `pi -p --mode json`; a Worker that can steer drops `-p` and uses
   `--mode rpc` (`pi_steer`), without OMP's `--no-ui`. Providers are API keys
@@ -4177,7 +4178,7 @@ another file. The keys are `[database] url`, `[server]` `host`, `port`,
 `pg_dump`, `command` (an argv array; `{dbname}` and `{user}` are filled
 in) and `verify_command` (an argv array that lists the dump read on stdin like
 `pg_restore --list`), `[operator_notes] root` (an absolute path), and
-`[runtimes] pi` (`"cli"` by default, or `"runner"`; file only). Nothing is expanded: no
+`[runtimes] pi` and `dsh` (`"runner"` by default, or explicit `"cli"` opt-outs; file only). Nothing is expanded: no
 variable, no `~`, no include. An unknown key, a wrong type or a bad value
 stops the command; the message names the key and never shows the value. The
 file must be a regular file (not a symlink), owned by the user, mode 0600, in
@@ -4204,8 +4205,8 @@ database) or in the server's environment (`looper service install --env
 NAME`).
 
 `looper config init-ops` writes the file once from the values in effect, mode
-0600, including `[runtimes]` with the commented Pi CLI default (or the explicit
-runner opt-in), and refuses to overwrite a file that exists. With nothing configured it
+0600, including `[runtimes]` with the commented Pi and DSH runner defaults (or explicit
+`"cli"` opt-outs), and refuses to overwrite a file that exists. With nothing configured it
 writes `postgresql://localhost:5432/loopx` and says so. Remove the old
 variables from the shell and `.env`, then run `looper service install` again
 if the service is used. Until then `looper serve` keeps working from the
