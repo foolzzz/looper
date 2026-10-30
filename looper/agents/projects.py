@@ -241,6 +241,7 @@ async def delete_project(project_id: str, bus: MessageBus, source: AgentAddress,
     """
     from ..db import schedules as db_schedules
     from . import schedules, task_workspaces
+    from .scheduler import quiesce_project
 
     project = await deletable_project(project_id, manager_id=manager_id)
     lock = _project_delete_locks.setdefault(project_id, asyncio.Lock())
@@ -248,54 +249,55 @@ async def delete_project(project_id: str, bus: MessageBus, source: AgentAddress,
         raise RequestError(HTTP_409, f"project {project['name']!r} is already being deleted")
     await lock.acquire()
     try:
-        for schedule in await db_schedules.list_schedules(project_id):
-            if manager_id is not None and schedule["manager_id"] != manager_id:
-                continue  # A different owner added this after the scope check; the final FK guard keeps it.
-            try:
-                await schedules.delete_schedule(schedule["id"])
-            except RequestError as exc:
-                if exc.status != HTTP_404:  # another caller may already have removed this schedule
-                    raise
-
-        deadline = asyncio.get_running_loop().time() + PROJECT_DELETE_STOP_WAIT_SECONDS
-        sent: set[str] = set()
-        while True:
-            tasks = await db_tasks.project_tasks(project_id, manager_id=manager_id)
-            active = [task for task in tasks if task["status"] in db_tasks.ACTIVE_STATUSES]
-            if not active:
-                break
-            for task in active:
-                task_id = task["id"]
-                if task["status"] == "stopping" or task_id in sent:
-                    continue
+        async with quiesce_project(project_id):
+            for schedule in await db_schedules.list_schedules(project_id):
+                if manager_id is not None and schedule["manager_id"] != manager_id:
+                    continue  # A different owner added this after the scope check; the final FK guard keeps it.
                 try:
-                    await control_task(task_id, "stop", bus, source)
-                except RequestError:
-                    # Completion can race the control check; only ignore it when no stop is needed now.
-                    current = await db_tasks.get_task(task_id)
-                    if current is not None and current["status"] in db_tasks.ACTIVE_STATUSES \
-                            and current["status"] != "stopping":
+                    await schedules.delete_schedule(schedule["id"])
+                except RequestError as exc:
+                    if exc.status != HTTP_404:  # another caller may already have removed this schedule
                         raise
-                sent.add(task_id)
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                ids = ", ".join(task["id"] for task in active[:5])
-                raise RequestError(HTTP_409, f"{len(active)} task(s) of project {project['name']!r} are still "
-                                             f"stopping ({ids}): delete the project again to finish")
-            await asyncio.sleep(min(1, remaining))
 
-        for deleted, task in enumerate(tasks):
+            deadline = asyncio.get_running_loop().time() + PROJECT_DELETE_STOP_WAIT_SECONDS
+            sent: set[str] = set()
+            while True:
+                tasks = await db_tasks.project_tasks(project_id, manager_id=manager_id)
+                active = [task for task in tasks if task["status"] in db_tasks.ACTIVE_STATUSES]
+                if not active:
+                    break
+                for task in active:
+                    task_id = task["id"]
+                    if task["status"] == "stopping" or task_id in sent:
+                        continue
+                    try:
+                        await control_task(task_id, "stop", bus, source)
+                    except RequestError:
+                        # Completion can race the control check; only ignore it when no stop is needed now.
+                        current = await db_tasks.get_task(task_id)
+                        if current is not None and current["status"] in db_tasks.ACTIVE_STATUSES \
+                                and current["status"] != "stopping":
+                            raise
+                    sent.add(task_id)
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    ids = ", ".join(task["id"] for task in active[:5])
+                    raise RequestError(HTTP_409, f"{len(active)} task(s) of project {project['name']!r} are still "
+                                                 f"stopping ({ids}): delete the project again to finish")
+                await asyncio.sleep(min(1, remaining))
+
+            for deleted, task in enumerate(tasks):
+                try:
+                    await delete_task(task["id"], runtime_root, task_router=task_router)
+                except task_workspaces.TaskWorkspaceError as exc:
+                    raise RequestError(HTTP_409, f"task {task['id']} kept its worktree, so nothing is lost: {exc}; "
+                                                 f"{deleted} of {len(tasks)} tasks were deleted. Resolve it, then "
+                                                 "delete the project again") from None
             try:
-                await delete_task(task["id"], runtime_root, task_router=task_router)
-            except task_workspaces.TaskWorkspaceError as exc:
-                raise RequestError(HTTP_409, f"task {task['id']} kept its worktree, so nothing is lost: {exc}; "
-                                             f"{deleted} of {len(tasks)} tasks were deleted. Resolve it, then "
-                                             "delete the project again") from None
-        try:
-            await db_projects.delete_project(project_id)
-        except asyncpg.ForeignKeyViolationError:
-            raise RequestError(HTTP_409, f"a task or schedule was added to project {project['name']!r} while it "
-                                         "was being deleted: delete it again") from None
+                await db_projects.delete_project(project_id)
+            except asyncpg.ForeignKeyViolationError:
+                raise RequestError(HTTP_409, f"a task or schedule was added to project {project['name']!r} while it "
+                                             "was being deleted: delete it again") from None
     finally:
         lock.release()
         _project_delete_locks.pop(project_id, None)

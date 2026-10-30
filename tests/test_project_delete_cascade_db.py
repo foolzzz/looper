@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -52,6 +52,216 @@ async def _schedule(pool, project, *, manager_id="manager", task_id=None):
 
 async def _delete(project, root, bus=None, **kwargs):
     return await projects.delete_project(project["id"], bus or Bus(), SOURCE, root, **kwargs)
+
+
+@pytest.mark.parametrize("trigger", ["tick", "manual", "queued", "gate", "retry"])
+def test_project_delete_blocks_every_schedule_start_before_removing_its_first_schedule(monkeypatch, tmp_path, trigger):
+    from looper.agents import scheduler as scheduler_module
+    from looper.agents.schedule_gate import GateResult
+
+    async def run(pool):
+        project = await db_projects.create_project(name="Example", work_dir=str(tmp_path), pool=pool)
+        bus = Bus()
+        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        now -= timedelta(minutes=now.minute % 5)
+        scheduler = scheduler_module.Scheduler(bus=bus, clock=lambda: now)
+        first = await _schedule(pool, project)
+        second = (await schedules.create_schedule(project["id"], {
+            "name": "Later due during deletion", "cron": "*/5 * * * *", "timezone": "UTC",
+            "requirement": "Read reports", "overlap": "queue",
+            "gate_command": "example" if trigger == "gate" else None,
+        }))["schedule"]["schedule_id"]
+        gate_started, gate_release = asyncio.Event(), asyncio.Event()
+
+        async def gate(*args, **kwargs):
+            gate_started.set()
+            await gate_release.wait()
+            return GateResult(0, "Read this report", "")
+
+        monkeypatch.setattr(scheduler_module, "run_gate", gate)
+        if trigger in {"queued", "gate", "retry"}:
+            run_id = await scheduler.run_now(second)
+            initial = await db_schedules.get_run(run_id, pool=pool)
+            if trigger == "gate":
+                await asyncio.wait_for(gate_started.wait(), 5)
+            elif trigger == "queued":
+                queued = await scheduler.run_now(second)
+                assert (await db_schedules.get_run(queued, pool=pool))["status"] == "queued"
+                await pool.execute("UPDATE tasks SET status = 'completed' WHERE id = $1", initial["task_id"])
+            else:
+                await pool.execute("UPDATE schedule_runs SET fired_at = $2 WHERE id = $1", run_id,
+                                   now - timedelta(minutes=2))
+        bus.sent.clear()
+        if trigger == "tick":
+            await pool.execute("UPDATE schedules SET enabled = true, next_fire_at = $2 WHERE id = ANY($1::text[])",
+                               [first, second], now)
+        # A different project's due schedule is a positive control: the tick must still fire it.
+        control = await db_projects.create_project(name="Control", work_dir=str(tmp_path), pool=pool)
+        control_sid = (await schedules.create_schedule(control["id"], {
+            "name": "Control", "cron": "*/5 * * * *", "timezone": "UTC", "requirement": "Read control",
+        }))["schedule"]["schedule_id"]
+        await pool.execute("UPDATE schedules SET enabled = true, next_fire_at = $2 WHERE id = $1", control_sid, now)
+        delete_schedule = schedules.delete_schedule
+        checked = False
+
+        async def delete_and_fire(schedule_id):
+            nonlocal checked
+            await delete_schedule(schedule_id)
+            if schedule_id != first:
+                return
+            checked = True
+            assert await db_schedules.get_schedule(second, pool=pool)
+            if trigger == "manual":
+                await scheduler.run_now(second)
+            elif trigger == "gate":
+                gate_release.set()
+                await asyncio.wait_for(scheduler.idle(), 5)
+            await scheduler.tick()
+            started = [await tasks.get_task(tid, pool=pool) for tid in bus.of("task_start")]
+            assert started and all(task["project_id"] == control["id"] for task in started)
+            if trigger in {"tick", "manual", "gate"}:
+                assert await tasks.project_tasks(project["id"], pool=pool) == []
+            else:
+                assert len(await tasks.project_tasks(project["id"], pool=pool)) == 1
+
+        monkeypatch.setattr(schedules, "delete_schedule", delete_and_fire)
+        try:
+            assert await _delete(project, tmp_path, bus) == {"deleted": project["id"]}
+            assert checked
+            assert await db_projects.get_project(project["id"], pool=pool) is None
+            assert await tasks.project_tasks(project["id"], pool=pool) == []
+        finally:
+            gate_release.set()
+            await scheduler.stop()
+
+    run_db(run, monkeypatch, timeout=25)
+
+
+@pytest.mark.parametrize("stage", ["create", "publish"])
+def test_project_delete_drains_inflight_firing_before_schedule_or_task_cleanup(monkeypatch, tmp_path, stage):
+    from looper.agents.scheduler import Scheduler
+
+    async def run(pool):
+        project = await db_projects.create_project(name="Example", work_dir=str(tmp_path), pool=pool)
+        sid = (await schedules.create_schedule(project["id"], {
+            "name": "In flight", "cron": "*/5 * * * *", "timezone": "UTC", "requirement": "Read reports",
+        }))["schedule"]["schedule_id"]
+        bus = Bus()
+        scheduler = Scheduler(bus=bus)
+        entered, release, checked = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        original = scheduler._create_task if stage == "create" else bus.publish
+
+        async def held(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(scheduler if stage == "create" else bus,
+                            "_create_task" if stage == "create" else "publish", held)
+        preflight, listing = projects.deletable_project, db_schedules.list_schedules
+        cleanup = []
+
+        async def preflight_checked(*args, **kwargs):
+            result = await preflight(*args, **kwargs)
+            asyncio.get_running_loop().call_soon(checked.set)
+            return result
+
+        async def observe_cleanup(*args, **kwargs):
+            cleanup.append(True)
+            return await listing(*args, **kwargs)
+
+        monkeypatch.setattr(projects, "deletable_project", preflight_checked)
+        monkeypatch.setattr(db_schedules, "list_schedules", observe_cleanup)
+        firing = asyncio.create_task(scheduler.run_now(sid))
+        deleting = None
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            deleting = asyncio.create_task(_delete(project, tmp_path, bus))
+            await asyncio.wait_for(checked.wait(), 5)
+            assert not cleanup and not deleting.done()
+            release.set()
+            await asyncio.wait_for(firing, 5)
+            assert await asyncio.wait_for(deleting, 5) == {"deleted": project["id"]}
+            sent = list(bus.sent)
+            await scheduler.tick()
+            assert bus.sent == sent
+            assert await db_projects.get_project(project["id"], pool=pool) is None
+            for table in ("schedules", "schedule_runs", "tasks"):
+                assert await pool.fetchval(f"SELECT count(*) FROM {table}") == 0
+        finally:
+            release.set()
+            await asyncio.gather(firing, *([deleting] if deleting else []), return_exceptions=True)
+            await scheduler.stop()
+
+    run_db(run, monkeypatch, timeout=25)
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_failed_or_cancelled_project_delete_releases_its_schedule_barrier(monkeypatch, tmp_path, cancel):
+    from looper.agents.scheduler import Scheduler
+
+    async def run(pool):
+        project = await db_projects.create_project(name="Example", work_dir=str(tmp_path), pool=pool)
+        sid = (await schedules.create_schedule(project["id"], {
+            "name": "Retryable", "cron": "*/5 * * * *", "timezone": "UTC", "requirement": "Read reports",
+        }))["schedule"]["schedule_id"]
+        bus = Bus()
+        scheduler = Scheduler(bus=bus)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def fail_cleanup(schedule_id):
+            entered.set()
+            await release.wait()
+            raise projects.RequestError(projects.HTTP_409, "cleanup unavailable")
+
+        monkeypatch.setattr(schedules, "delete_schedule", fail_cleanup)
+        deleting = asyncio.create_task(_delete(project, tmp_path, bus))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            assert await scheduler.run_now(sid) is None
+            assert bus.of("task_start") == []
+            if cancel:
+                deleting.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await deleting
+            else:
+                release.set()
+                with pytest.raises(projects.RequestError, match="cleanup unavailable"):
+                    await deleting
+            run_id = await scheduler.run_now(sid)
+            run = await db_schedules.get_run(run_id, pool=pool)
+            assert bus.of("task_start") == [run["task_id"]]
+        finally:
+            deleting.cancel()
+            await asyncio.gather(deleting, return_exceptions=True)
+            await scheduler.stop()
+
+    run_db(run, monkeypatch, timeout=20)
+
+
+def test_start_retry_with_a_snapshot_from_before_project_deletion_starts_nothing(monkeypatch, tmp_path):
+    from looper.agents.scheduler import Scheduler
+
+    async def run(pool):
+        project = await db_projects.create_project(name="Example", work_dir=str(tmp_path), pool=pool)
+        sid = (await schedules.create_schedule(project["id"], {
+            "name": "Recovery", "cron": "*/5 * * * *", "timezone": "UTC", "requirement": "Read reports",
+        }))["schedule"]["schedule_id"]
+        bus = Bus()
+        scheduler = Scheduler(bus=bus)
+        try:
+            await scheduler.run_now(sid)
+            (snapshot,) = await db_schedules.running_runs(pool=pool)
+            assert bus.of("task_start") == [snapshot["task_id"]]
+            bus.sent.clear()
+            await _delete(project, tmp_path, bus)
+            await scheduler._settle(snapshot, snapshot["fired_at"] + timedelta(minutes=2))
+            assert bus.of("task_start") == []
+            assert await tasks.get_task(snapshot["task_id"], pool=pool) is None
+        finally:
+            await scheduler.stop()
+
+    run_db(run, monkeypatch, timeout=20)
 
 
 def test_empty_project_keeps_its_exact_confirmation_and_result(monkeypatch, tmp_path):
