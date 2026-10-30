@@ -59,32 +59,29 @@ def test_terminal_usage_completes_before_http_eof(tmp_path, monkeypatch, eof_del
     run(exercise())
 
 
-@pytest.mark.parametrize("case", ["drained-without-stop", "dropped-before-stop", "truncated-rejection"])
+@pytest.mark.parametrize("case", ["drained-without-stop", "dropped-before-stop"])
 def test_incomplete_requests_diagnose_missing_conditions(tmp_path, monkeypatch, case):
     if case == "drained-without-stop":
         rewrite_events(monkeypatch, lambda events: events[:-1])
 
     async def exercise():
         _, installed = require_dsh()
-        reply = peer.Reply(["Partial response"], cut=case != "drained-without-stop",
-                           status=401 if case == "truncated-rejection" else 200)
-        # A truncated HTTP body is normalized by the SDK to TRANSPORT.
-        count = 4 if case == "truncated-rejection" else 1
-        with peer.MessagesServer([reply] * count) as server:
+        reply = peer.Reply(["Partial response"], cut=case != "drained-without-stop")
+        with peer.MessagesServer([reply]) as server:
             async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (process, send, receive):
                 client = Client(send, receive)
                 await client.start()
                 sid = (await client.call("session/new", params_for(tmp_path, server)))["session_id"]
                 await client.prompt(sid)
                 result = await client.settled(sid)
-                ends = assert_accounted(client, sid, count=count)
+                ends = assert_accounted(client, sid)
                 assert all(not end["complete"] for end in ends) and not result["usage_complete"]
-                assert len(server.requests) == count
+                assert len(server.requests) == 1
                 process.stdin.close()
                 assert await asyncio.wait_for(process.wait(), 5) == 0
                 diagnostics = (await process.stderr.read()).decode()
                 lines = [line for line in diagnostics.splitlines() if line.startswith("usage_incomplete ")]
-                assert len(lines) == count
+                assert len(lines) == 1
                 for end, line in zip(ends, lines):
                     assert f"request_id={end['request_id']}" in line
                     assert "message_stop=false" in line and "terminal_usage=false" in line

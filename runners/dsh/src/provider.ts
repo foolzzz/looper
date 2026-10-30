@@ -228,9 +228,9 @@ export function installProvider(): void {
         retry = terminal === 'error' && !modelOutput && retryable(attempt, terminalChunk.reason.failure);
       } finally {
         record.activeRequest = null;
-        // No-output retries below HTTP 400 (or before headers) are zero-token
-        // rejections, just like drained HTTP error responses.
-        const rejected = (retry && (attempt.status === undefined || attempt.status < 400))
+        // No-output retries settle even when an HTTP error body is truncated.
+        // Keep authoritative usage; only its absence makes the retry zero-token.
+        const rejected = retry
           || (attempt.status !== undefined && attempt.status >= 400 && attempt.bodyDone && !modelOutput);
         const successful = terminal !== undefined && ['stop', 'tool-calls', 'max-tokens'].includes(terminal);
         // providerUsage observes only 2xx streams. Its validated message_stop is
@@ -250,7 +250,7 @@ export function installProvider(): void {
             + ` body_done=${attempt.bodyDone}`);
         }
         const end = () => endRequest(record, turn, id, status, complete,
-          attempt.sent && !rejected ? attempt.terminalUsage ?? usage : undefined);
+          attempt.sent ? attempt.terminalUsage ?? (rejected ? undefined : usage) : undefined);
         // Release the reservation before asking the host to authorize a retry.
         if (retry && number < 4) end();
         else setImmediate(end);

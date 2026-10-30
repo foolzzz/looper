@@ -93,6 +93,77 @@ def test_busy_retries_are_separately_authorized_and_priced(tmp_path):
     run(exercise())
 
 
+@pytest.mark.parametrize("usage,cost", [
+    ({"input": 11, "output": 0, "cache_read": 0, "cache_write": 0}, 0.000032),
+    ({"input": 13, "output": 0, "cache_read": 2, "cache_write": 3}, 0.000052),
+])
+def test_empty_response_retry_preserves_terminal_usage(tmp_path, usage, cost):
+    async def exercise():
+        _, installed = require_dsh()
+        with MessagesServer([Reply(usage=usage), ["Recovered"]]) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (process, send, receive):
+                client = BudgetClient(send, receive)
+                sid = await client.session(tmp_path, server, run_cap=1)
+                await client.prompt(sid)
+                result = await client.settled(sid)
+                ends = assert_accounted(client, sid, count=2)
+                assert result["outcome"] == "completed" and result["final_text"] == "Recovered"
+                assert result["usage_complete"] and all(end["complete"] for end in ends)
+                assert ends[0]["status"] == "error" and ends[1]["status"] == "completed"
+                assert [ends[0][k] for k in ("input_uncached", "output", "cache_read", "cache_write")] == [
+                    usage[k] for k in ("input", "output", "cache_read", "cache_write")]
+                assert (ends[1]["input_uncached"], ends[1]["output"]) == (11, 5)
+                assert len(server.requests) == len(client.authorized) == 2
+                assert client.summary.usage.cost_usd == pytest.approx(cost)
+                assert "code=EMPTY_RESPONSE" in await diagnostics(process)
+    run(exercise())
+
+
+@pytest.mark.parametrize("status", [401, 429, 503])
+@pytest.mark.parametrize("run_cap", [1, None])
+def test_truncated_http_rejection_retries_with_complete_accounting(tmp_path, status, run_cap):
+    async def exercise():
+        _, installed = require_dsh()
+        with MessagesServer([Reply(status=status, cut=True), ["Recovered"]]) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (process, send, receive):
+                client = BudgetClient(send, receive)
+                sid = await client.session(tmp_path, server, run_cap=run_cap)
+                await client.prompt(sid)
+                result = await client.settled(sid)
+                ends = assert_accounted(client, sid, count=2)
+                assert result["outcome"] == "completed" and result["final_text"] == "Recovered"
+                assert result["usage_complete"] and all(end["complete"] for end in ends)
+                assert [end["status"] for end in ends] == [f"http_{status}", "completed"]
+                assert [ends[0][k] for k in ("input_uncached", "output", "cache_read", "cache_write")] == [0] * 4
+                assert (ends[1]["input_uncached"], ends[1]["output"]) == (11, 5)
+                assert len(server.requests) == len(client.authorized) == 2
+                assert client.summary.usage.cost_usd == pytest.approx(0.000021)
+                log = await diagnostics(process)
+                assert "code=TRANSPORT" in log and "usage_incomplete" not in log
+    run(exercise())
+
+
+def test_truncated_http_rejection_exhaustion_remains_completely_accounted(tmp_path):
+    async def exercise():
+        _, installed = require_dsh()
+        with MessagesServer([Reply(status=401, cut=True)] * 4) as server:
+            async with raw_runner(tmp_path, installed, env=guard_env(tmp_path, server.port)) as (process, send, receive):
+                client = BudgetClient(send, receive)
+                sid = await client.session(tmp_path, server, run_cap=1)
+                await client.prompt(sid)
+                result = await client.settled(sid)
+                ends = assert_accounted(client, sid, count=4)
+                assert result["outcome"] == "failed" and result["usage_complete"]
+                assert all(end["complete"] and end["status"] == "http_401" for end in ends)
+                assert all([end[k] for k in ("input_uncached", "output", "cache_read", "cache_write")] == [0] * 4
+                           for end in ends)
+                assert len(server.requests) == len(client.authorized) == 4
+                assert client.summary.usage.cost_usd == 0
+                log = await diagnostics(process)
+                assert log.count("provider_retry ") == 3 and "usage_incomplete" not in log
+    run(exercise())
+
+
 def test_retry_after_waits_before_dispatch(tmp_path):
     async def exercise():
         _, installed = require_dsh()
