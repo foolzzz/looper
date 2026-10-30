@@ -246,7 +246,7 @@ async def delete_project(project_id: str, bus: MessageBus, source: AgentAddress,
 
     A conflict leaves completed cleanup in place; the user can resolve it and retry the same operation.
     """
-    from ..db import schedules as db_schedules
+    from ..db import managers as db_managers, schedules as db_schedules
     from . import schedules, task_workspaces
     from .scheduler import quiesce_project
 
@@ -257,6 +257,8 @@ async def delete_project(project_id: str, bus: MessageBus, source: AgentAddress,
     await lock.acquire()
     try:
         async with quiesce_project(project_id):
+            if used := await db_managers.template_using_project(project_id):
+                raise _used_by_template(project_id, used)
             for schedule in await db_schedules.list_schedules(project_id):
                 if manager_id is not None and schedule["manager_id"] != manager_id:
                     continue  # A different owner added this after the scope check; the final FK guard keeps it.
@@ -297,7 +299,8 @@ async def delete_project(project_id: str, bus: MessageBus, source: AgentAddress,
 
                 for deleted, task in enumerate(tasks):
                     try:
-                        await delete_task(task["id"], runtime_root, task_router=task_router)
+                        await delete_task(task["id"], runtime_root, task_router=task_router,
+                                          expected_project_id=project_id)
                     except _TaskActive:
                         # A start claimed the row after the snapshot: stop it before touching any files.
                         break
@@ -310,6 +313,8 @@ async def delete_project(project_id: str, bus: MessageBus, source: AgentAddress,
             try:
                 await db_projects.delete_project(project_id)
             except asyncpg.ForeignKeyViolationError:
+                if used := await db_managers.template_using_project(project_id):
+                    raise _used_by_template(project_id, used) from None
                 raise RequestError(HTTP_409, f"a task or schedule was added to project {project['name']!r} while it "
                                              "was being deleted: delete it again") from None
     finally:
@@ -319,7 +324,8 @@ async def delete_project(project_id: str, bus: MessageBus, source: AgentAddress,
 
 
 async def delete_task(task_id: str, runtime_root: Path | None, *,
-                      task_router: TaskRouter | None = None) -> dict[str, Any]:
+                      task_router: TaskRouter | None = None,
+                      expected_project_id: str | None = None) -> dict[str, Any]:
     """Delete a stopped task in workspace/session order; a TaskWorkspaceError keeps its checkout and row."""
     from . import step_workspaces, task_workspaces
 
@@ -335,6 +341,8 @@ async def delete_task(task_id: str, runtime_root: Path | None, *,
         task = await db_tasks.get_task(task_id, pool=conn, for_update=True)
         if task is None:
             raise RequestError(HTTP_404, "task not found")
+        if expected_project_id is not None and task["project_id"] != expected_project_id:
+            return {"skipped": task_id}  # It moved after the project's snapshot; its checkout belongs there now.
         if task["status"] in db_tasks.ACTIVE_STATUSES:
             raise _TaskActive()
         try:
