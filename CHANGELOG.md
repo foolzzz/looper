@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.17] - 2026-10-29
+
+### Changed
+
+- **A project can be deleted together with its tasks and schedules.** Deleting a project no longer requires it to be empty. After the user confirms, Looper deletes the project's schedules (with their run history), stops its running tasks and waits up to 60 seconds for them to stop, deletes every task of the project with the same cleanup a single task delete does (step worktrees, task checkout, saved sessions, records; the result branch stays), then deletes the project. A project used by a Manager template, and, for a scoped Manager, a project that has other Managers' tasks or schedules, are still refused. The Manager `looper_projects` tool description and confirmation text, the v1 `project_admin.delete` description and impact, and the dashboard project settings Delete section follow. Scheduler firings and Router starts for the project are refused while it is deleted. ([#905](https://github.com/foolzzz/looper/pull/905))
+
 ## [2.14.16] - 2026-10-29
 
 ### Fixed
