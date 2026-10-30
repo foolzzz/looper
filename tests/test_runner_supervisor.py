@@ -482,14 +482,18 @@ def test_release_closes_one_active_session_and_joins_its_tools(runners):
     run(exercise())
 
 
-def test_fifth_failure_stops_demand_retries_and_returns_unavailable(runners, monkeypatch):
+@pytest.mark.parametrize("kind", ["fake", "pi", "dsh"])
+def test_fifth_failure_stops_demand_retries_and_returns_unavailable(runners, monkeypatch, kind):
+    from looper.agents.runtimes import dsh_runner, pi_runner
+
+    startup_error = {"pi": pi_runner._opt_out, "dsh": dsh_runner._opt_out}.get(kind)
     monkeypatch.setattr(s, "BACKOFF_MAX", 0.01)
     async def exercise():
-        async with runners() as (owner, processes):
-            lease = await owner.acquire("fake")
+        async with runners(kinds=(kind,), startup_error=startup_error) as (owner, processes):
+            lease = await owner.acquire(kind)
             for number in range(1, 6):
                 current = processes[-1]
-                state = owner._kinds["fake"]
+                state = owner._kinds[kind]
                 generation = lease._generation
                 current.kill()
                 await generation.exited.wait()
@@ -499,10 +503,14 @@ def test_fifth_failure_stops_demand_retries_and_returns_unavailable(runners, mon
                 if number < 5:
                     await asyncio.shield(state.restart)
                     assert len(processes) == number and not state.members
-                    lease = await owner.acquire("fake")
+                    lease = await owner.acquire(kind)
                     assert len(processes) == number + 1
-            with pytest.raises(s.RunnerUnavailable, match="five failures"):
-                await owner.acquire("fake")
+            with pytest.raises(s.RunnerUnavailable, match="five failures") as caught:
+                await owner.acquire(kind)
+            message = str(caught.value)
+            assert "runner-exited:" in message
+            if startup_error is not None:
+                assert f'[runtimes] {kind} = "cli"' in message
             assert len(processes) == 5 and (state.restart is None or state.restart.done())
     run(exercise())
 
@@ -1087,4 +1095,93 @@ def test_run_state_directory_rules(runners, tmp_path, rule):
             with pytest.raises(ValueError):
                 await owner.acquire("fake", owner="manager" if rule == "owner" else None, state_dir=state_dir)
             assert all(not member.leases for member in owner._kinds["fake"].members)
+    run(exercise())
+
+
+@pytest.mark.parametrize("kind", ["pi", "dsh"])
+def test_five_initialize_failures_retain_last_cause_and_opt_out(runners, monkeypatch, kind):
+    from looper.agents.runtimes import dsh_runner, pi_runner
+
+    module = pi_runner if kind == "pi" else dsh_runner
+    monkeypatch.setattr(s, "BACKOFF_BASE", 0)
+
+    async def exercise():
+        async with runners(startup_error=module._opt_out) as (owner, processes):
+            async def fail(process, runner_kind):
+                processes.append(process)
+                raise ConnectionLost(f"initialize attempt {len(processes)} refused")
+
+            owner.connect = fail
+            for number in range(1, 6):
+                with pytest.raises(s.RunnerUnavailable, match=f"initialize attempt {number} refused"):
+                    await owner.acquire("fake")
+            with pytest.raises(s.RunnerUnavailable) as caught:
+                await owner.acquire("fake")
+            message = str(caught.value)
+            assert "five failures within ten minutes" in message
+            assert "initialize attempt 5 refused" in message
+            assert f'[runtimes] {kind} = "cli"' in message
+            assert len(processes) == 5 and all(process.returncode is not None for process in processes)
+    run(exercise())
+
+
+@pytest.mark.parametrize("phase", ["spawn", "initialize", "ready"])
+def test_five_cancelled_cold_starts_do_not_block_next_start(runners, monkeypatch, phase):
+    async def exercise():
+        entered = asyncio.Queue()
+        original_spawn = proc_tree.spawn
+        spawned = []
+
+        async def held_spawn(*args, **kwargs):
+            process = await original_spawn(*args, **kwargs)
+            spawned.append(process)
+            if phase == "spawn" and len(spawned) <= 5:
+                release = asyncio.Event()
+                await entered.put(release)
+                await release.wait()
+            return process
+
+        monkeypatch.setattr(proc_tree, "spawn", held_spawn)
+        async with runners() as (owner, processes):
+            connect = owner.connect
+            start = owner._start
+
+            async def ready_start(kind, state):
+                member = await start(kind, state)
+                if len(spawned) <= 5:
+                    entered.put_nowait(None)
+                    acquiring.cancel()
+                return member
+
+            if phase == "ready":
+                monkeypatch.setattr(owner, "_start", ready_start)
+
+            async def held_connect(process, kind):
+                if phase == "initialize" and len(spawned) <= 5:
+                    processes.append(process)
+                    await entered.put(None)
+                    await asyncio.Event().wait()
+                return await connect(process, kind)
+
+            owner.connect = held_connect
+            for _ in range(5):
+                acquiring = asyncio.create_task(owner.acquire("fake"))
+                try:
+                    release = await entered.get()
+                    if phase != "ready":
+                        acquiring.cancel()
+                    if release is not None:
+                        release.set()
+                    with pytest.raises(asyncio.CancelledError):
+                        await acquiring
+                    assert spawned[-1].returncode is not None
+                finally:
+                    if not acquiring.done():
+                        acquiring.cancel()
+                    await asyncio.gather(acquiring, return_exceptions=True)
+            state = owner._kinds["fake"]
+            assert not state.failures and state.restart is None
+            lease = await owner.acquire("fake")
+            assert lease.valid and len(spawned) == 6
+            await lease.release()
     run(exercise())

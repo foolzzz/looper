@@ -234,11 +234,15 @@ def enable(runtime_root: Path) -> RunnerSupervisor | None:
             version = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", result.stdout.strip())
             if version is None or tuple(map(int, version.groups())) < (22, 19, 0):
                 unavailable = _opt_out(f"node 22.19+ is required (found {result.stdout.strip() or 'unknown'})")
+            elif (23, 0, 0) <= tuple(map(int, version.groups())) < (23, 6, 0):
+                unavailable = _opt_out("Node 23.0–23.5 cannot run the runner (use 22.19+ or 23.6+)")
             else:
                 unavailable = None
-        except (OSError, subprocess.SubprocessError):
+        except subprocess.TimeoutExpired:
             unavailable = _opt_out(
                 "node 22.19+ and dsh could not be checked: node --version did not finish within 2 seconds")
+        except (OSError, subprocess.SubprocessError) as exc:
+            unavailable = _opt_out(str(exc))
         if unavailable is None:
             found = _package_version(dsh, _DSH_PACKAGE)
             if found is not None and found != _DSH_VERSION:
@@ -251,7 +255,7 @@ def enable(runtime_root: Path) -> RunnerSupervisor | None:
             supervisor = RunnerSupervisor(runtime_root, {"dsh": dsh_command.command(node, dsh, state)},
                                           session_cap=SESSION_CAP, startup_error=_opt_out, connect=dsh_command.connect)
             resolved = Path(dsh).resolve()
-        except (OSError, ValueError) as exc:
+        except (RuntimeUnsupported, OSError, ValueError) as exc:
             unavailable = _opt_out(f"could not initialize ({exc}); node 22.19+ and dsh are required")
     if unavailable:
         ADAPTERS["dsh"] = DshRunnerRuntime(None, dsh=None, unavailable=unavailable)

@@ -136,6 +136,7 @@ class _Kind:
     members: list[_Generation] = field(default_factory=list)
     number: int = 0
     failures: deque = field(default_factory=deque)
+    last_failure: str | None = None
     fatal: str | None = None
     restart: asyncio.Task | None = None
 
@@ -248,7 +249,8 @@ class RunnerSupervisor:
                     if state.fatal:
                         raise RunnerUnavailable(state.fatal)
                     if len(state.failures) >= MAX_FAILURES:
-                        raise RunnerUnavailable("runner unavailable: five failures within ten minutes")
+                        detail = f"; last failure: {state.last_failure}" if state.last_failure else ""
+                        raise RunnerUnavailable(f"runner unavailable: five failures within ten minutes{detail}")
                     if state.restart is not None and not state.restart.done():
                         backoff = state.restart
                     else:
@@ -266,7 +268,11 @@ class RunnerSupervisor:
                                 if not starting.cancelling():
                                     starting.cancel()
                             elif not starting.cancelled() and starting.exception() is None:
-                                self._failed(starting.result())
+                                # Cancellation can race with a successful handshake.
+                                # Retire that unused member without counting a crash.
+                                unused = starting.result()
+                                state.members.remove(unused)
+                                await _joined(self._own(self._dispose(unused)))
                             await asyncio.shield(asyncio.gather(starting, return_exceptions=True))
                             raise
                 if backoff is None:
@@ -356,6 +362,10 @@ class RunnerSupervisor:
                         kind, directory.name.rsplit("-", 1)[1], len(generation.leases), generation.cap,
                         sum(len(member.leases) for member in state.members))
             return generation
+        except asyncio.CancelledError:
+            if generation is not None:
+                await self._dispose(generation)
+            raise
         except BaseException as error:
             # Timeouts and transient I/O failures use the same bounded restart path as a crash.
             fatal = (isinstance(error, (ValueError, ProtocolError)) or
@@ -378,14 +388,13 @@ class RunnerSupervisor:
                 await self._dispose(generation)
             state.failures.append(time.monotonic())
             self._restart(kind, state)
-            if isinstance(error, asyncio.CancelledError):
-                raise
             message = state.fatal or "runner failed to initialize; restart is bounded"
             if not state.fatal and self._startup_error:
                 cause = str(error) or ("runner initialization timed out" if isinstance(error, TimeoutError)
                                        else type(error).__name__)
                 cause = redact(cause).replace("\r", " ").replace("\n", " ")[:512]
                 message = f"{self._startup_error(cause)}; restart is bounded"
+            state.last_failure = message
             raise RunnerUnavailable(message) from None
 
     async def _wait(self, generation: _Generation) -> None:
@@ -422,8 +431,11 @@ class RunnerSupervisor:
         state = generation.state
         if generation not in state.members:
             return
+        cause = str(generation.bridge._error or "runner-exited: generation lost")
+        cause = redact(cause).replace("\r", " ").replace("\n", " ")[:512]
         await self._dispose(generation)
         state.members.remove(generation)
+        state.last_failure = self._startup_error(cause) if self._startup_error else cause
         state.failures.append(time.monotonic())
         self._restart(generation.kind, state)
 
