@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.24] - 2026-10-30
+
+### Fixed
+
+- **Two installed test fixtures match the runner default and the project delete cascade.** The installed Pi smoke now pins `[runtimes] pi = "cli"` because its evidence exists only on the CLI path, and the `platform` fixture of `tests/test_pi_platform_tools.py` stubs `schedules.list_schedules` and `tasks.project_tasks`, which the delete cascade now calls. Test and example files only; no runtime or model-visible change. ([#924](https://github.com/foolzzz/looper/pull/924))
+
 ## [2.14.23] - 2026-10-30
 
 ### Fixed
