@@ -22,6 +22,12 @@ How the agent system works today is described in
 
 - **Pi and DSH profiles run on their SDK runners by default.** `[runtimes] pi` and `[runtimes] dsh` default to `"runner"` and are read once at startup. An explicit `"cli"` is the opt-out: set `[runtimes] pi = "cli"` or `[runtimes] dsh = "cli"` in the ops file and restart. Claude Code stays on the Claude Code CLI. Each runner allows 32 sessions; the supervisor starts another runner of that kind when all members are full, up to four members (128 sessions per kind). Only a full pool fails with `CAPACITY`. Extra runners stop after 300 idle seconds; one stays. If the runner cannot start because Node is unsupported (22.19+ required), the SDK is outside the gate (pi 1.3.x, dsh 0.2.1-rc.2), or the executable is missing, the launch fails. The message names the cause and the same opt-out, including failures on the first lease after startup or when starting another pool member. `evals.prompt_regression` and `examples/dsh/validate.py` use the runner when no flag is set; `--pi-cli` and `--dsh-cli` select the CLI path, and `--pi-runner` / `--dsh-runner` still select the runner. **Model-visible:** a Pi or DSH role runs in the SDK runner, so its platform tools are `looper_*` in process and the run record stores a runner Descriptor. A Claude Code profile is unchanged.
 
+## [2.14.16] - 2026-10-29
+
+### Fixed
+
+- **The installed Pi runner serve tests find the runner process regardless of terminal width.** The nightly tests in `tests/test_pi_runner_serve_db.py` matched the runner by its `ps` command line, which Linux procps cuts at the terminal width, so they failed with "not enough values to unpack". They now list processes with `ps -A -ww -o pid=,args=`, and a miss reports the pids found, the agent process records and the relevant serve log lines. Test files only; no production code changes. ([#906](https://github.com/foolzzz/looper/pull/906))
+
 ## [2.14.15] - 2026-10-29
 
 ### Changed
