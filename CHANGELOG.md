@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.25] - 2026-10-30
+
+### Fixed
+
+- **The installed Pi smoke covers the Pi runner default as well as the CLI opt-out.** `examples/pi/isolated-smoke.py` gains `--pi-runtime cli|runner` (default `cli`) and writes the chosen value to `[runtimes] pi`; `tests/test_pi_smoke.py` runs the installed four-role fixture in both modes. Example and test files only; no runtime or model-visible change. ([#926](https://github.com/foolzzz/looper/pull/926))
+
 ## [2.14.24] - 2026-10-30
 
 ### Fixed
