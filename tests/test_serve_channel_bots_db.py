@@ -478,11 +478,15 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
     from looper.agents.channels import lark_cli
     from looper.agents.channels.lark import LarkChannelAdapter
     from looper.agents.channels.telegram import TelegramChannelAdapter
-    from looper.agents.runtimes import codex_login, grok_login
+    from looper.agents.runtimes import ADAPTERS, codex_login, grok_login
     from looper.agents.tiers.manager import TURNED_OFF_REPLY
     from tests.test_agent_channels import _lark_event, _tg_update
     from tests.test_channel_post import _Bot
     from tests.test_lark_transport import StubTransport
+
+    # Startup installs the default runners in this process; restore them for later tests.
+    for kind in ("pi", "dsh"):
+        monkeypatch.setitem(ADAPTERS, kind, ADAPTERS[kind])
 
     class Started(Exception):
         pass
