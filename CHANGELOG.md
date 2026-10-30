@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.20] - 2026-10-30
+
+### Fixed
+
+- **The DSH runner retries transient provider errors, each attempt authorized.** A provider error such as HTTP 429/5xx or a DeepSeek overload no longer fails the turn at once. Inside the runner's `llm/stream` hook, a request that failed with a retryable status or SDK error code and produced no model output is retried up to 3 times, with 1/2/4 second backoff plus up to 20% jitter and a `Retry-After` hint capped at 30 seconds. Every attempt gets its own request id, `budget/authorize` call and accounting; cancel, close or settle ends the wait. When retries are exhausted the last error is kept with an ` (after N attempts)` suffix. No schema, API or prompt change. ([#915](https://github.com/foolzzz/looper/pull/915))
+
 ## [2.14.19] - 2026-10-30
 
 ### Fixed
