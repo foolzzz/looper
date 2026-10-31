@@ -39,7 +39,7 @@ it.each(["draining", "drained"] as const)("announces the upgrade while %s", asyn
   expect(container.querySelector('[role="status"]')?.textContent).toBe(
     "Upgrading: new turns and runs start after the restart",
   );
-  expect(fetcher).toHaveBeenCalledWith("/api/v1/system/status", expect.objectContaining({ method: "POST" }));
+  expect(fetcher).toHaveBeenCalledWith("/api/v1/system/status", expect.objectContaining({ method: "POST", body: "{}" }));
 });
 
 it("shows nothing while serving and removes the banner when a drain is cancelled", async () => {

@@ -652,12 +652,12 @@ def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *
     outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
     if record is None:
         record = _chat_record(original, f"{original.message_id}:reply")
-        context = original.payload.get("channel_context")
-        if original.source.channel == "web" and isinstance(context, dict):
-            session, client_id = context.get("session_id"), context.get("client_message_id")
-            if isinstance(session, str) and session and isinstance(client_id, str) and client_id:
-                # The journal survives restart; the web adapter's awaiting/SSE maps do not.
-                record = {CHAT_RECORD: chat_record(session, f"{client_id}:reply")}
+    context = original.payload.get("channel_context")
+    if original.source.channel == "web" and isinstance(context, dict):
+        session, client_id = context.get("session_id"), context.get("client_message_id")
+        if isinstance(session, str) and session and isinstance(client_id, str) and client_id:
+            # Web recovery needs its identity even when external chat persistence is disabled.
+            record = {**record, CHAT_RECORD: chat_record(session, f"{client_id}:reply")}
     return MessageEnvelope.create(
         source=source,
         target=original.source,
@@ -2612,8 +2612,9 @@ class ManagerAgent:
                           persist: bool = True, outcome: ReplyOutcome | None = None,
                           snapshot: str | None = None) -> None:
         """Answer ``original``; ``error`` says why the turn failed (a chat channel shows it on its status line).
-        The channel keeps the answer in the chat's history once it has sent it; without ``persist`` it is not kept
-        (one about a user gate, whose discussion keeps the message). ``outcome`` is how the turn ended; by default
+        The channel keeps the answer in the chat's history once it has sent it; ``persist`` controls external chat
+        history (a user gate keeps its own discussion). Web replies always retain their recovery identity.
+        ``outcome`` is how the turn ended; by default
         failed with an ``error``, else answered."""
         assert self._bus is not None
         record = None if persist else {}

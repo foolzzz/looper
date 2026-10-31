@@ -30,9 +30,7 @@ _STATUS = _object({
 
 RESULTS = {}
 OPERATIONS = (Operation("system.status", "POST", "/api/v1/system/status", "Read dashboard status.",
-                        "Read dashboard status.", _object({}, closed=True), _STATUS, risk="read"),
-              Operation("system.status_read", "GET", "/api/v1/system/status", "Read dashboard status.",
-                        "Read dashboard status.", None, _STATUS, risk="read"),)
+                        "Read dashboard status.", _object({}, closed=True), _STATUS, risk="read"),)
 
 
 async def run(server, operation, arguments, principal, headers):

@@ -81,30 +81,48 @@ def test_cancel_wakes_the_held_worker_slot(tmp_path, monkeypatch):
 def test_operator_drain_api_and_generated_cli_contract(tmp_path):
     async def run():
         async with _serving(tmp_path, listen=True) as server:
-            for method in ("GET", "POST", "DELETE"):
-                code, _, _ = await _send(server, f"{method} /api/v1/system/drain", _bearer(CLIENT_TOKEN),
-                                         json.dumps({"scope": "runs"}) if method == "POST" else "")
+            for name in ("drain", "drain_status", "drain_cancel"):
+                code, _, _ = await _send(server, f"POST /api/v1/system/{name}", _bearer(CLIENT_TOKEN),
+                                         json.dumps({"scope": "runs"}) if name == "drain" else "{}")
                 assert code == 403
             code, _, _ = await _send(server, "POST /api/v1/system/drain", _bearer(TOKEN), '{"scope":"bad"}')
             assert code == 400
             code, _, answer = await _send(server, "POST /api/v1/system/drain", _bearer(TOKEN),
                                            '{"scope":"turns","timeout_seconds":1}')
-            assert code == 202 and answer["result"]["phase"] == "drained"
-            code, _, answer = await _send(server, "GET /api/v1/system/drain", _bearer(TOKEN))
+            assert code == 200 and answer["status"] == "ok" and answer["result"]["phase"] == "drained"
+            code, _, answer = await _send(server, "POST /api/v1/system/drain_status", _bearer(TOKEN), "{}")
             assert code == 200 and answer["result"]["scope"] == "turns"
-            code, _, answer = await _send(server, "DELETE /api/v1/system/drain", _bearer(TOKEN))
+            assert not any(answer["result"]["waiting"].values())
+            code, _, answer = await _send(server, "POST /api/v1/system/drain_cancel", _bearer(TOKEN), "{}")
             assert code == 200 and answer["result"]["phase"] == "serving"
             assert answer["result"]["since"] is None and answer["result"]["deadline"] is None
         document = api_v1.document()
-        operations = document["paths"]["/system/drain"]
-        assert set(operations) == {"get", "post", "delete"}
-        assert "202" in operations["post"]["responses"]
+        for name in ("drain", "drain_status", "drain_cancel"):
+            operations = document["paths"][f"/system/{name}"]
+            assert set(operations) == {"post"}
+            assert "200" in operations["post"]["responses"]
+            assert "202" not in operations["post"]["responses"]
+        assert set(document["paths"]["/system/status"]) == {"post"}
         from looper import loopercli
         commands = {(head, tail, operation.method) for head, tail, _, _, operation
                     in loopercli.generated_operations(document)}
-        assert {("system", "drain", "POST"), ("system", "drain-status", "GET"),
-                ("system", "drain-cancel", "DELETE")} <= commands
+        assert {("system", "drain", "POST"), ("system", "drain-status", "POST"),
+                ("system", "drain-cancel", "POST")} <= commands
 
+    asyncio.run(run())
+
+
+@pytest.mark.usefixtures("clients")
+@pytest.mark.parametrize("method", ["GET", "DELETE"])
+def test_drain_refuses_non_post_methods_like_existing_system_operations(tmp_path, method):
+    async def run():
+        async with _serving(tmp_path, listen=True) as server:
+            code, _, answer = await _send(server, f"{method} /api/v1/system/check", _bearer(TOKEN))
+            assert code in (404, 405)
+            for name in ("drain", "drain_status", "drain_cancel", "status"):
+                refused, _, body = await _send(server, f"{method} /api/v1/system/{name}", _bearer(TOKEN))
+                assert refused == code
+                assert body == answer
     asyncio.run(run())
 
 

@@ -302,7 +302,7 @@ class DrainStatus: phase: DrainPhase; scope: DrainScope | None; since: datetime 
 
 **期限：** `turns` 默认 180 秒，`runs` 默认 1200 秒。到期后部署照常往下走，剩下的运行像今天一样被中断，报告里逐个列出来；`--no-force` 时放弃这次部署，回到 SERVING。
 
-**接口（要操作者令牌，放在 v1 的 system 域里，loopercli 自动生成对应命令）：** `POST /api/v1/system/drain {scope, timeout_seconds}` 返回 202 和当前状态；`GET /api/v1/system/drain` 返回 `{phase, scope, since, deadline, waiting: {runs: [{worker_id, task_id, role, since, keepable}], manager_turns, planner_turns, gates, waits, consults}}`；`DELETE` 取消排空。`GET /api/v1/system/status` 里也带上 `drain`，控制台据此显示一条横幅：「正在升级：新的回合和运行会在重启后开始」。排空状态只存在内存里：排空期间服务如果崩溃，下次启动就是 SERVING。
+**接口（要操作者令牌，放在 v1 的 system 域里，loopercli 自动生成对应命令）：** `POST /api/v1/system/drain {scope, timeout_seconds}` 返回 200 和当前状态；`POST /api/v1/system/drain_status {}` 返回 `{phase, scope, since, deadline, waiting: {runs: [{worker_id, task_id, role, since, keepable}], manager_turns, planner_turns, gates, waits, consults}}`；`POST /api/v1/system/drain_cancel {}` 取消排空，返回 200 和当前状态。`POST /api/v1/system/status` 里也带上 `drain`，控制台据此显示一条横幅：「正在升级：新的回合和运行会在重启后开始」。排空状态只存在内存里：排空期间服务如果崩溃，下次启动就是 SERVING。
 
 ### 7.4 S0：重启空窗
 
@@ -375,7 +375,7 @@ S0（用全新的数据库、一次性的 runtime root 和非 8767 的端口跑 
 
 1. 一个 Worker 在跑时开始 `runs` 排空：第二个派出的步骤在等位；排空期间发给 Manager 的消息不开始回合；那个 Worker 跑完之后状态变成 DRAINED；重启之后，等位的步骤开始跑，Manager 那条消息只答一次；`llm_records` 里没有 `interrupted`。
 2. 运行比期限长：到期后像今天一样被中断，报告里列出这个运行；带 `--no-force` 时放弃部署，回到 SERVING。
-3. `DELETE` 取消排空：等位的运行马上开始。
+3. `POST /api/v1/system/drain_cancel` 取消排空：等位的运行马上开始。
 4. 排空期间到点的定时任务：重启之后按 catch-up 规则触发，不出现 `gate_failed`。
 5. 升级计划：只改文档 → `NOOP`，进程 pid 不变；只改控制台 → `WEB_ONLY`，pid 不变，控制台拿到新的 `index.html`；改了 `planner.py` → `FULL`（S0 里没有看护进程）。
 6. 空窗期间发到 Telegram 的消息（用替身 Bot API）：重启后只投递一次；超过积压上限的只记录。
@@ -396,7 +396,7 @@ S1：
 | 卡 | 阶段 | 内容 | 验收 |
 |---|---|---|---|
 | C1 | S0 | `components.toml` 和指纹计算（git 树、wheel、安装目录三种来源）；`GET /api/v1/system/components`；CI 的归类检查；`decide` 函数；`looper service upgrade --dry-run` | 用例 5；`decide` 的每个分支各一行参数化测试 |
-| C2 | S0 | `DrainState`、四个暂停点、判定完成、期限；`/api/v1/system/drain` 的三个方法；`system/status` 里的 `drain`；控制台横幅 | 用例 1–4 |
+| C2 | S0 | `DrainState`、四个暂停点、判定完成、期限；`system.drain`、`system.drain_status`、`system.drain_cancel` 三个 POST 操作；`system/status` 里的 `drain`；控制台横幅 | 用例 1–4 |
 | C3 | S0 | `looper service upgrade` / `restart --drain` 的执行和部署报告；先排空再安装；`web/dist` 原子替换；Telegram 不再丢积压 | 用例 1、5、6；部署报告的字段 |
 | C4 | S1 | `looper/agents/keeper/`：运行目录、进程模型、协议 1.0、纪元、孤儿保护、日志上限；导入白名单的 CI 检查 | 用例 10、13；控制面被杀掉之后子进程继续跑，从任意偏移补读 |
 | C5 | S1 | `KeptRun`；`_execute` 拆成 prepare 和 consume；计划内脱离；`keepable` 开关；systemd 加 `KillMode=process` | 用例 7（替身 CLI）、12 |
@@ -424,7 +424,7 @@ S1：
 
 ### 8.2 监控与告警
 
-Looper 是本机服务，没有独立的指标系统。可观测性落在三个地方：结构化日志、`GET /api/v1/system/status` 的字段，以及控制台概览和 Manager 通知。
+Looper 是本机服务，没有独立的指标系统。可观测性落在三个地方：结构化日志、`POST /api/v1/system/status` 的字段，以及控制台概览和 Manager 通知。
 
 - **部署报告**（`looper service upgrade` 打印出来，同时写一行结构化日志）：`plan`、`reasons`、`drain_seconds`、`gap_seconds`（从 SIGTERM 到 HTTP 重新可用）、`kept_before`、`adopted`、`interrupted{reason=deadline|full|not_keepable|keeper_lost|protocol}`、被中断运行的估计花费（取运行记录里已经流出来的用量）。
 - **`system/status`：** `drain.phase` 和在等谁；`keepers.alive`、`keepers.orphaned`、`keepers.log_bytes`；`components` 的指纹。

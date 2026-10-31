@@ -569,8 +569,7 @@ class AgentHTTPServer:
                 arguments = api_v1.validate_arguments(operation.request or {}, data)
                 if writer is not None:
                     return await invoke(domain.stream, arguments, writer)
-                return (f"{operation.success_status} Accepted" if operation.success_status == 202 else api_v1.OK,
-                        {"status": "ok", "result": _serialize(await invoke(domain.run, arguments))})
+                return api_v1.OK, {"status": "ok", "result": _serialize(await invoke(domain.run, arguments))}
             if self._client_ops is None:
                 raise OpError(ErrorCode.UNAVAILABLE, "the API is not ready")
 

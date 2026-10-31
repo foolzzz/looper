@@ -158,12 +158,12 @@ def _detail(api, task):
     return api.post("/api/v1/tasks/detail", {"task_id": task})["result"]
 
 
-def _drain(api, method="GET", body=None):
-    data = None if body is None else json.dumps(body).encode()
-    request = Request(api.base_url + "/api/v1/system/drain", data=data, method=method,
+def _drain(api, operation="drain_status", body=None):
+    data = json.dumps(body or {}).encode()
+    request = Request(api.base_url + "/api/v1/system/" + operation, data=data, method="POST",
                       headers={"Authorization": "Bearer " + api.token, "Content-Type": "application/json"})
     with urlopen(request, timeout=10) as response:
-        assert response.status == (202 if method == "POST" else 200)
+        assert response.status == 200
         return json.load(response)["result"]
 
 
@@ -196,12 +196,12 @@ def test_drain_restart_replays_held_runs_and_manager_once_and_keeps_planners_mov
             _until(lambda: _events(state, "worker", "restart"), "the first Worker to start")
             _until(lambda: len([s for s in _detail(api, task)["steps"] if s["status"] == "dispatched"]) == 2,
                    "both steps to be dispatched")
-            status = _drain(api, "POST", {"scope": "runs", "timeout_seconds": 60})
+            status = _drain(api, "drain", {"scope": "runs", "timeout_seconds": 60})
             assert status["phase"] == "draining" and status["scope"] == "runs"
             (run,) = status["waiting"]["runs"]
             assert run["task_id"] == task and run["worker_id"] and run["role"] == "worker"
             assert run["since"] and run["keepable"] is False
-            assert api.get("/api/v1/system/status")["result"]["drain"]["phase"] == "draining"
+            assert api.post("/api/v1/system/status", {})["result"]["drain"]["phase"] == "draining"
             _send(api, "held-during-drain")
 
             # A second TASK_START and its planning turn must execute, even though its run cannot take a slot.
@@ -248,7 +248,7 @@ def test_deadline_reports_unkeepable_worker_and_cancel_releases_held_run(tmp_pat
             project = _project(api, tmp_path, "deadline")
             task = _task(api, project, "deadline")
             _until(lambda: _events(state, "worker", "deadline"), "the long Worker to start")
-            _drain(api, "POST", {"scope": scope, "timeout_seconds": 1})
+            _drain(api, "drain", {"scope": scope, "timeout_seconds": 1})
             held = _task(api, project, "cancelled_drain")
             _until(lambda: any(s["status"] == "dispatched" for s in _detail(api, held)["steps"]),
                    "the held task to dispatch")
@@ -260,14 +260,44 @@ def test_deadline_reports_unkeepable_worker_and_cancel_releases_held_run(tmp_pat
             assert not _events(state, "worker", "cancelled_drain")
             _send(api, "cancel-releases-manager")
             assert not any(m["message_id"] == "cancel-releases-manager:reply" for m in _messages(api))
-            assert _drain(api, "DELETE")["phase"] == "serving"
-            _until(lambda: _events(state, "worker", "cancelled_drain"), "DELETE to release the held run", 10)
+            assert _drain(api, "drain_cancel")["phase"] == "serving"
+            _until(lambda: _events(state, "worker", "cancelled_drain"), "drain_cancel to release the held run", 10)
             assert not (state / "release-deadline").exists()
             _until(lambda: any(m["message_id"] == "cancel-releases-manager:reply" for m in _messages(api)),
-                   "DELETE to release the held Manager message", 10)
+                   "drain_cancel to release the held Manager message", 10)
             (state / "release-deadline").touch()
             _completed(api, task)
             _completed(api, held)
+
+
+def test_drain_restart_keeps_web_gate_command_reply(tmp_path):
+    """Code-owned replies need their web destination even when external chat persistence is disabled."""
+    with _fixture(tmp_path) as (_, state, server):
+        body = {"session_id": "drain-chat", "message_id": "gates-before-drain", "text": "/gates"}
+        with running_server(**server, log_path=tmp_path / "before.log") as api:
+            api.post("/api/v1/operator_chat/send", body)
+            _until(lambda: any(m["message_id"] == "gates-before-drain:reply" for m in _messages(api)),
+                   "the serving gate command's positive control reply")
+            _drain(api, "drain", {"scope": "turns", "timeout_seconds": 60})
+            body["message_id"] = "gates-during-drain"
+            api.post("/api/v1/operator_chat/send", body)
+            _until(lambda: _drain(api)["phase"] == "drained", "the service to drain")
+            assert not any(m["message_id"] == "gates-during-drain:reply" for m in _messages(api))
+            journal = server["runtime_root"] / ".local/agent-bus"
+            entries = [json.loads(line) for line in (journal / "journal.jsonl").read_text().splitlines()]
+            held = next(row for row in entries if
+                        row["payload"].get("channel_context", {}).get("client_message_id") == "gates-during-drain")
+            assert held["message_id"] not in (journal / "delivered.txt").read_text().splitlines()
+
+        with running_server(**server, log_path=tmp_path / "after.log") as api:
+            replies = _until(lambda: [m for m in _messages(api) if m["message_id"] == "gates-during-drain:reply"],
+                             "the replayed gate command's saved reply")
+            assert len(replies) == 1 and replies[0]["content"]
+            assert not _events(state, "manager")  # /gates is answered by code, never the model.
+            entries = [json.loads(line) for line in (journal / "journal.jsonl").read_text().splitlines()]
+            reply = next(row for row in entries if row.get("reply_to") == held["message_id"])
+            _until(lambda: reply["message_id"] in (journal / "delivered.txt").read_text().splitlines(),
+                   "the saved reply to be acknowledged")
 
 
 def test_schedule_due_while_drained_catches_up_after_restart_without_gate_failure(tmp_path):
@@ -282,7 +312,7 @@ def test_schedule_due_while_drained_catches_up_after_restart_without_gate_failur
             control = api.post("/api/v1/schedule_admin/run", {"schedule_id": sid})["result"]["run"]
             _until(lambda: (rows := _query(url, "SELECT status FROM schedule_runs WHERE id=$1", control["run_id"]))
                    and rows[0]["status"] == "completed", "the positive-control gate and scheduled task to finish")
-            _drain(api, "POST", {"scope": "runs", "timeout_seconds": 60})
+            _drain(api, "drain", {"scope": "runs", "timeout_seconds": 60})
             _until(lambda: _drain(api)["phase"] == "drained", "the service to drain")
             _query(url, "UPDATE schedules SET enabled=TRUE, next_fire_at=date_trunc('minute', now()) - "
                         "interval '3 minutes' WHERE id=$1", sid, execute=True)

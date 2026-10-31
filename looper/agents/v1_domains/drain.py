@@ -13,15 +13,16 @@ DRAIN = _object({"phase": {"type": "string", "enum": ["serving", "draining", "dr
 RESULTS = {}
 OPERATIONS = (
     Operation("system.drain", "POST", "/api/v1/system/drain", "Drain before a planned restart.",
-              "Hold new turns and runs until restart or cancellation; deadlines do not abort work.",
+              "Drain before a planned restart. Hold new turns and runs until restart or cancellation; deadlines do not abort work.",
               _object({"scope": {"type": "string", "enum": ["turns", "runs"]},
                        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0}},
                       ["scope"], closed=True), DRAIN, risk="write", operator_only=True,
-              audit_operator=False, success_status=202),
-    Operation("system.drain_status", "GET", "/api/v1/system/drain", "Read drain status and blockers.",
-              "Read drain status and blockers.", None, DRAIN, risk="read", operator_only=True),
-    Operation("system.drain_cancel", "DELETE", "/api/v1/system/drain", "Cancel drain and resume admission.",
-              "Cancel drain and resume held messages and runs.", None, DRAIN, risk="write",
+              audit_operator=False),
+    Operation("system.drain_status", "POST", "/api/v1/system/drain_status", "Read drain status and blockers.",
+              "Read drain status and blockers.", _object({}, closed=True), DRAIN, risk="read", operator_only=True),
+    Operation("system.drain_cancel", "POST", "/api/v1/system/drain_cancel", "Cancel drain and resume admission.",
+              "Cancel drain and resume admission. Resume held messages and runs.",
+              _object({}, closed=True), DRAIN, risk="write",
               operator_only=True, audit_operator=False),
 )
 
