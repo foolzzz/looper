@@ -249,7 +249,7 @@
 
 ### 7.2 升级计划和部署脚本
 
-新加 `looper service upgrade [--to <git ref | wheel>] [--dry-run] [--drain-timeout 1200] [--no-force]`；`looper service restart --drain` 是它在 `FULL` 计划下省去安装的那一段。需要重启时，顺序必须是 **先算计划 → 排空 → 停止旧控制面并完成脱离 → 确认旧进程退出 → 安装 → 启动**。排空超时也遵守这个顺序，旧进程仍在运行时不得就地安装，避免延迟导入混用新旧代码（第 4.5 节）：
+新加 `looper service upgrade [--to <git ref | wheel>] [--dry-run] [--turns-timeout 180] [--drain-timeout 1200] [--no-force]`；`CONTROL_PLANE` 用 `--turns-timeout` 排空回合，`FULL` 用 `--drain-timeout` 排空运行。`looper service restart --drain` 是它在 `FULL` 计划下省去安装的那一段。需要重启时，顺序必须是 **先算计划 → 排空 → 停止旧控制面并完成脱离 → 确认旧进程退出 → 安装 → 启动**。排空超时也遵守这个顺序，旧进程仍在运行时不得就地安装，避免延迟导入混用新旧代码（第 4.5 节）：
 
 ```text
 target   = manifest_of(source)              # git 树或 wheel，不安装
@@ -279,6 +279,8 @@ decide(target, running, keepers, keeper_mode):
 ```
 
 在 checkout 里，「安装」是 `git merge --ff-only`；装 wheel 时是 `pip install`。`NOOP` 和 `WEB_ONLY` 之后，`GET /api/v1/whoami` 的 `result.looper_version` 仍然报旧控制面加载的版本号（`looper/agents/api_v1.py:75-79`），部署报告分别列出控制面加载指纹、当前 web 指纹和安装的包版本。连续两次只升级控制台时，每次都用新请求读取的 web 指纹制定计划和校验，不把启动时的值当成当前静态资源版本。
+
+checkout 的 `NOOP` 和 `WEB_ONLY` 不同步依赖；需要同步时使用 `uv sync --extra test --inexact`，保留部署的测试依赖和环境中其他已安装的包。构建控制台时传入当前解释器的 `PYTHON`，发布前统一目录为 0755、文件为 0644。有未跟踪的指纹输入时，在排空前拒绝并列出文件，Git 忽略的文件除外。wheel 的 `NOOP` 和 `WEB_ONLY` 均安装整个包而不同步依赖，控制台先暂存再原子替换。新进程启动失败时，从当前安装再启动一次；命令仍报告失败，并用 `serving` 表明服务是否已响应。
 
 ### 7.3 S0：排空
 
