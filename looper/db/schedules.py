@@ -696,6 +696,40 @@ async def list_notifications(schedule_id: str, *, limit: int, pool: Db | None = 
     return [dict(row) for row in rows]
 
 
+async def prune_runs(conn: Db, before: datetime) -> int:
+    """Delete one batch of expired terminal runs, keeping each schedule's newest runs."""
+    from ..agents.housekeeping import KEEP_LATEST_RUNS, PRUNE_BATCH
+
+    result = await conn.execute(
+        "DELETE FROM schedule_runs WHERE id IN (SELECT id FROM ("
+        "SELECT id, finished_at, status, row_number() OVER ("
+        "PARTITION BY schedule_id ORDER BY created_at DESC, id DESC) AS rn FROM schedule_runs) r "
+        "WHERE rn > $2 AND finished_at < $1 AND NOT (status = ANY($3::text[])) LIMIT $4)",
+        before, KEEP_LATEST_RUNS, list(OPEN_STATUSES), PRUNE_BATCH)
+    return int(result.split()[-1])
+
+
+async def prune_notifications(conn: Db, before: datetime) -> int:
+    """Delete one batch of notifications older than the retention cutoff."""
+    from ..agents.housekeeping import PRUNE_BATCH
+
+    result = await conn.execute(
+        "DELETE FROM schedule_notifications WHERE id IN ("
+        "SELECT id FROM schedule_notifications WHERE created_at < $1 LIMIT $2)", before, PRUNE_BATCH)
+    return int(result.split()[-1])
+
+
+async def run_states(conn: Db, run_ids: Sequence[str]) -> dict[str, str]:
+    rows = await conn.fetch("SELECT id, status FROM schedule_runs WHERE id = ANY($1::text[])", list(run_ids))
+    return {row["id"]: row["status"] for row in rows}
+
+
+async def open_log_paths(conn: Db) -> set[str]:
+    rows = await conn.fetch("SELECT log_path FROM schedule_runs WHERE status = ANY($1::text[]) "
+                            "AND log_path IS NOT NULL", list(OPEN_STATUSES))
+    return {row["log_path"] for row in rows}
+
+
 async def enabled_schedules(*, pool: Db | None = None) -> list[dict[str, Any]]:
     db = pool or get_pool()
     return await _with_overrides(db, await db.fetch("SELECT * FROM schedules WHERE enabled"))

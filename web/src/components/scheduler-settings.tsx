@@ -34,12 +34,17 @@ const FIELDS: { name: Name; label: string; help: string }[] = [
     label: "Default run timeout (seconds; no limit until you set one)",
     help: "For schedules set to use the default. A run keeps the timeout it started with, so a change affects later runs only.",
   },
+  {
+    name: "run_retention_days",
+    label: "Run retention (days)",
+    help: "Days a finished schedule run is kept; each schedule keeps its newest 100. Enter 1–3650 days.",
+  },
 ];
 
-/** Settings → Scheduler: the two system-wide limits of schedules, each with its effective value and source. */
+/** Settings → Scheduler: system-wide schedule settings, each with its effective value and source. */
 function ScheduleSettings() {
   const [settings, setSettings] = useState<SchedulerSettings | null>(null);
-  const [drafts, setDrafts] = useState<Record<Name, string>>({ min_interval_seconds: "", run_timeout_seconds: "" });
+  const [drafts, setDrafts] = useState<Record<Name, string>>({ min_interval_seconds: "", run_timeout_seconds: "", run_retention_days: "" });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -51,6 +56,7 @@ function ScheduleSettings() {
     const stored: Record<Name, string> = {
       min_interval_seconds: String(next.min_interval_seconds.value),
       run_timeout_seconds: next.run_timeout_seconds.value == null ? "" : String(next.run_timeout_seconds.value),
+      run_retention_days: String(next.run_retention_days.value),
     };
     setDrafts((current) => (only ? { ...current, [only]: stored[only] } : stored));
   };
@@ -101,29 +107,36 @@ function ScheduleSettings() {
           const id = `${idBase}-${name}`;
           const typed = drafts[name].trim();
           const changed = typed !== (setting.value == null ? "" : String(setting.value));
+          const retention = name === "run_retention_days";
+          const valid = /^\d+$/.test(typed) && (!retention ||
+            (Number(typed) >= setting.minimum && Number(typed) <= setting.maximum!));
           return (
             <form
               key={name}
               className="space-y-1"
               onSubmit={(e) => {
                 e.preventDefault();
-                void save(name, Number(typed));
+                if (valid) void save(name, Number(typed));
               }}
             >
               <label htmlFor={id} className="block text-xs font-medium text-muted-foreground">{label}</label>
               <div className="flex flex-wrap items-center gap-2">
                 <Input
                   id={id}
+                  type={retention ? "number" : "text"}
+                  min={retention ? setting.minimum : undefined}
+                  max={retention ? setting.maximum : undefined}
+                  step={retention ? 1 : undefined}
                   inputMode="numeric"
                   value={drafts[name]}
                   onChange={(e) => setDrafts({ ...drafts, [name]: e.target.value })}
                   aria-describedby={`${id}-hint`}
                   className="w-40"
                 />
-                <Button type="submit" size="sm" disabled={busy || !changed || !/^\d+$/.test(typed)}>Save</Button>
+                <Button type="submit" size="sm" disabled={busy || !changed || !valid}>Save</Button>
                 {setting.source === "setting" && (
                   <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void save(name, null)}>
-                    Use the built-in ({setting.built_in == null ? "no limit" : `${setting.built_in} s`})
+                    Use the built-in ({setting.built_in == null ? "no limit" : `${setting.built_in} ${retention ? "days" : "s"}`})
                   </Button>
                 )}
               </div>

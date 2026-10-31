@@ -158,7 +158,8 @@ def _shown_value(name: str, value: Any, profiles: Mapping[str, str]) -> str:
     return str(value)
 
 
-_SCHEDULER_WORDS = {"min_interval_seconds": "定时任务的最小间隔", "run_timeout_seconds": "定时任务的默认运行超时"}
+_SCHEDULER_WORDS = {"min_interval_seconds": "定时任务的最小间隔", "run_timeout_seconds": "定时任务的默认运行超时",
+                    "run_retention_days": "定时任务的运行记录保留天数"}
 _WAIT_WORDS = {"max_wait_seconds": "单步最长等待时间", "min_check_seconds": "等待检查的最小间隔"}
 _SOURCE_WORDS = {"setting": "设置", "env": "旧环境变量", "built-in": "内置默认"}
 
@@ -166,8 +167,9 @@ _SOURCE_WORDS = {"setting": "设置", "env": "旧环境变量", "built-in": "内
 def _scheduler_values(arguments: Mapping[str, Any]) -> dict[str, Any]:
     values = arguments.get("scheduler")
     if not isinstance(values, Mapping) or not values:
-        raise OpError(ErrorCode.INVALID, "scheduler: give min_interval_seconds and/or run_timeout_seconds (null: "
-                                         "the built-in)")
+        raise OpError(ErrorCode.INVALID, "scheduler: give min_interval_seconds, run_timeout_seconds and/or "
+                                         "run_retention_days (days a finished schedule run is kept; each schedule "
+                                         "keeps its newest 100) (null: the built-in)")
     return dict(values)
 
 
@@ -175,8 +177,9 @@ def _seconds(value: int | None) -> str:
     return "不限" if value is None else f"{value} 秒"
 
 
-def _scheduler_shown(entry: Mapping[str, Any]) -> str:
-    return f"{_seconds(entry['value'])}（{_SOURCE_WORDS[entry['source']]}）"
+def _scheduler_shown(entry: Mapping[str, Any], *, days: bool = False) -> str:
+    value = f"{entry['value']} 天" if days else _seconds(entry['value'])
+    return f"{value}（{_SOURCE_WORDS[entry['source']]}）"
 
 
 async def _scheduler_confirming(call: Call) -> str:
@@ -189,8 +192,11 @@ async def _scheduler_confirming(call: Call) -> str:
     before = await scheduler_settings.settings_view()
     lines = ["要修改定时任务的系统设置吗？"]
     for name, value in values.items():
-        after = f"{value} 秒" if value is not None else f"内置默认 {_seconds(before[name]['built_in'])}"
-        lines.append(f"- {_SCHEDULER_WORDS[name]}：{_scheduler_shown(before[name])} → {after}")
+        days = name == "run_retention_days"
+        unit = "天" if days else "秒"
+        built_in = f"{before[name]['built_in']} 天" if days else _seconds(before[name]['built_in'])
+        after = f"{value} {unit}" if value is not None else f"内置默认 {built_in}"
+        lines.append(f"- {_SCHEDULER_WORDS[name]}：{_scheduler_shown(before[name], days=days)} → {after}")
     lines.append("最小间隔决定定时任务最频繁能多久触发一次（已保存的不会重新检查）；默认运行超时只影响之后开始的运行。")
     return "\n".join(lines)
 
@@ -199,8 +205,8 @@ async def _scheduler_set(call: Call) -> dict[str, Any]:
     values = _scheduler_values(call.arguments)
     before = await scheduler_settings.settings_view()
     after = await answered(schedules.update_scheduler_settings(values))
-    return {"changes": [{"setting": name, "before": _scheduler_shown(before[name]),
-                         "after": _scheduler_shown(after[name])} for name in values]}
+    return {"changes": [{"setting": name, "before": _scheduler_shown(before[name], days=name == "run_retention_days"),
+                         "after": _scheduler_shown(after[name], days=name == "run_retention_days")} for name in values]}
 
 
 def _wait_values(arguments: Mapping[str, Any]) -> dict[str, int | None]:
@@ -399,7 +405,8 @@ async def _view(call: Call) -> dict[str, Any]:
         timeouts = {c["role"]: c["timeout_seconds"] for c in await db_roles.list_configs()}
         scheduler = await scheduler_settings.settings_view()
         vault_view = await vault.settings_view()
-        answer = {"scheduler": {name: _scheduler_shown(entry) for name, entry in scheduler.items()},
+        answer = {"scheduler": {name: _scheduler_shown(entry, days=name == "run_retention_days")
+                                for name, entry in scheduler.items()},
                 "waits": await waits.settings_view(),
                 "shared_defaults": _layer_set(view["system"]["values"], profiles),
                 "roles": {role: {"set": _layer_set(entry["values"], profiles),
@@ -502,7 +509,9 @@ TOOLS: tuple[Tool, ...] = (
                     },
                 },
                 "scheduler": {"type": "object", "description": "scheduler: min_interval_seconds (schedules' least "
-                                                              "gap), run_timeout_seconds (default); null: built-in."},
+                                                              "gap), run_timeout_seconds (default), run_retention_days "
+                                                              "(days a finished schedule run is kept; each schedule "
+                                                              "keeps its newest 100); null: built-in."},
                 "add": {"type": "array", "description": "allowed_profiles: profile ids or names."},
                 "remove": {"type": "array", "description": "allowed_profiles: as add."},
             },

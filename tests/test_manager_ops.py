@@ -584,6 +584,21 @@ def test_manager_contract_distinguishes_accounts_models_and_profiles():
     assert "Settings → LLM Providers" in TOOLS_CONTRACT
 
 
+def test_scheduler_tool_describes_retention_and_lists_it_in_an_empty_update_error(recorded):
+    from looper.agents.ops.settings import TOOLS
+
+    clause = "days a finished schedule run is kept; each schedule keeps its newest 100"
+    description = TOOLS[0].schema["properties"]["scheduler"]["description"]
+    assert "run_retention_days" in description and clause in description
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", token="tok")
+    ops.begin_turn(_turn("change scheduler settings"))
+    answer = asyncio.run(ops.call("looper_settings", {"action": "scheduler", "scheduler": {}}))
+    assert answer["error"]["code"] == "invalid"
+    message = answer["error"]["message"]
+    assert all(name in message for name in ("min_interval_seconds", "run_timeout_seconds", "run_retention_days"))
+    assert clause in message
+
+
 @pytest.mark.parametrize("reference", ["model-sonnet", {
     "provider": "Claude account", "name": "sonnet", "protocol": "anthropic-messages"}])
 def test_profile_crud_resolves_models_and_keeps_runtime_options(recorded, monkeypatch, reference):

@@ -16,10 +16,11 @@ from looper.agents.channels.allowlist import SenderAllowlist
 from looper.agents.channels.chat_routing import RoutingSnapshot
 from looper.agents.channels.registry import ChannelRegistry
 from looper.agents.channels.telegram import TelegramChannelAdapter
+from looper.agents.channels.telegram_inbox import TelegramInbox
 from looper.agents.serve import _register_optional_channel
 
 
-@pytest.mark.parametrize("failure", [None, "updater.stop", "stop", "shutdown"])
+@pytest.mark.parametrize("failure", [None, "polling_stopped", "updater.stop", "stop", "shutdown"])
 def test_stop_drains_reactions_from_already_queued_messages(tmp_path, monkeypatch, failure):
     """Use Application's real update queue and handlers, with a synthetic Telegram transport.
 
@@ -29,6 +30,12 @@ def test_stop_drains_reactions_from_already_queued_messages(tmp_path, monkeypatc
     from telegram import Update
     from telegram.ext import Application, Updater
     from telegram.request import HTTPXRequest
+
+    if failure == "polling_stopped":
+        def fail_boundary(*args):
+            raise OSError("synthetic checkpoint failure")
+
+        monkeypatch.setattr(TelegramInbox, "polling_stopped", fail_boundary)
 
     async def run():
         bus = MessageBus(runtime_root=tmp_path)
@@ -153,6 +160,10 @@ def test_partial_start_releases_resources(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None, optional: bool,
 ) -> None:
     async def run() -> None:
+        inbox_path = tmp_path / ".local/telegram/channel-telegram/0.sqlite3"
+        inbox = TelegramInbox(inbox_path)
+        inbox.polling_stopped(100)
+        inbox.close()
         bus = MessageBus(runtime_root=tmp_path)
         registry = ChannelRegistry(bus)
         adapter = TelegramChannelAdapter(
@@ -171,6 +182,7 @@ def test_partial_start_releases_resources(
                 app.running = True
             elif name == "deleteWebhook":
                 app.updater.running = True
+                adapter._inbox.polling_received([])
             elif name == "updater.stop":
                 assert app.updater.running
                 app.updater.running = False
@@ -231,6 +243,15 @@ def test_partial_start_releases_resources(
             assert adapter._app is None and adapter._outbound_task is None and adapter._bus is None
             assert not adapter._requests
             assert not adapter.healthcheck()["healthy"]
+            inbox = TelegramInbox(inbox_path)
+            try:
+                # Failed startup must not shorten the offline delivery window.
+                if failure is not None:
+                    assert inbox.previous_polling_stopped_at == 100
+                else:
+                    assert inbox.previous_polling_stopped_at > 100
+            finally:
+                inbox.close()
             assert registry.get(adapter.channel_id) is None
             before = list(events)
             await adapter.stop()
