@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.53] - 2026-10-31
+
+### Fixed
+
+- **`looper service upgrade` acts only on the service's own install, and recovers a late stop.** The upgrade refuses unless it runs with the unit's own `looper` and, for a checkout upgrade, from that looper's checkout; wheel installs and `uv sync` are pinned to the service interpreter's environment. The drain lease is renewed while the stop is waited on, a unit whose old process exits after the stop wait timed out is started again, and a failed upgrade reports the fingerprint of the code actually running and whether the service is serving. The component fingerprint hashes only tracked files. ([#1021](https://github.com/foolzzz/looper/pull/1021))
+
 ## [2.14.52] - 2026-10-31
 
 ### Added
