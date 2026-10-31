@@ -143,6 +143,39 @@ def test_templates_only_owner_rejects_command_schedule(tmp_path, monkeypatch):
     run_db(run, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("rule,anchor,seconds", [
+    ("* * * * *", "enabled_at", 900),
+    ("*/30 * * * *", "enabled_at", 5400),
+    ("0 9 * * *", "enabled_at", 86400),
+    *[("0,5,50 * * * *", key, 8100) for key in ("last_ok_at", "enabled_at", "rule_changed_at")],
+])
+def test_default_stale_view_matches_runtime_window(tmp_path, monkeypatch, rule, anchor, seconds):
+    from looper.agents import cron, schedule_notify
+
+    async def run(pool):
+        project = await projects.create_project(name="Example", work_dir=str(tmp_path))
+        since = datetime(2030, 1, 15, tzinfo=timezone.utc)
+        moments = dict.fromkeys(("last_ok_at", "enabled_at", "rule_changed_at"), since - timedelta(minutes=11))
+        moments[anchor] = since
+        async with _api(tmp_path, pool) as call:
+            sid = (await _create(call, project["id"], cron=rule))["schedule_id"]
+            await pool.execute("UPDATE schedules SET last_ok_at=$2, enabled_at=$3, rule_changed_at=$4 WHERE id=$1",
+                               sid, moments["last_ok_at"], moments["enabled_at"], moments["rule_changed_at"])
+            row = await db_schedules.get_schedule(sid)
+            policy = schedule_notify.alert_policy(row)
+            assert policy.stale_after is None
+            parsed, tz = cron.parse(rule), cron.zone(row["timezone"])
+            deadline = schedule_notify.stale_deadline(parsed, tz, last_ok=moments["last_ok_at"],
+                first_run=None, enabled_at=moments["enabled_at"], rule_changed_at=moments["rule_changed_at"],
+                window=policy.stale_after)
+            assert (deadline - cron.next_fire(parsed, tz, since)).total_seconds() == seconds
+            status, result = await call("get", {"schedule_id": sid})
+            assert status == 200, result
+            assert result["schedule"]["alert_policy"]["stale_after_seconds"] == {
+                "value": seconds, "default": True, "source": "default"}
+    run_db(run, monkeypatch, timeout=30)
+
+
 def test_runs_status_filter_stats_and_execution_details(tmp_path, monkeypatch):
     async def run(pool):
         project = await projects.create_project(name="Example", work_dir=str(tmp_path))

@@ -25,7 +25,7 @@ as a task's own choices (``projects.set_task_agents``).
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
@@ -209,6 +209,24 @@ def _timeout_view(row: Mapping[str, Any], default: int | None) -> tuple[Any, int
     return row["run_timeout_seconds"], row["run_timeout_seconds"]
 
 
+def _stale_after_seconds_view(row: Mapping[str, Any], window: timedelta | None) -> int:
+    """Show the runtime's window even before the schedule has run or been enabled."""
+    from .schedule_notify import STALE_LIMIT, stale_deadline
+
+    if window is not None:
+        return int(window.total_seconds())
+    rule, tz = cron.parse(row["cron"]), cron.zone(row["timezone"])
+    enabled_at = row.get("enabled_at") or row["created_at"]
+    since = max(moment for moment in (row.get("last_ok_at"), enabled_at, row.get("rule_changed_at"))
+                if moment is not None)
+    start = cron.next_fire(rule, tz, since)
+    # A hypothetical first run exposes the window without changing runtime alert eligibility.
+    deadline = stale_deadline(rule, tz, last_ok=row.get("last_ok_at"), first_run=since,
+                              enabled_at=enabled_at, rule_changed_at=row.get("rule_changed_at"))
+    window = deadline - start if deadline is not None and start is not None else STALE_LIMIT
+    return int(window.total_seconds())
+
+
 def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None, *,
                   spent_today: float = 0.0, default_timeout: int | None = None) -> dict[str, Any]:
     """``default_timeout``: the system default run timeout, for a schedule that follows it."""
@@ -229,7 +247,7 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
                          for key, column, value in (
                              ("failures_after", "alert_failures_after", policy.failures_after),
                              ("stale_after_seconds", "alert_stale_after_seconds",
-                              int(policy.stale_after.total_seconds())),
+                              _stale_after_seconds_view(row, policy.stale_after)),
                              ("overlap_after", "alert_overlap_after", policy.overlap_after))},
         "timezone": row["timezone"], "description": describe(row["cron"], row["timezone"]),
         "requirement": row["requirement"], "work_dir": row["work_dir"], "overlap": row["overlap"],
@@ -713,8 +731,9 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
                 fields["enabled"] = enabled
             if enabled and not row["enabled"]:
                 fields["enabled_at"] = now  # the no-success alert counts from here (``stale_deadline``)
-            if rule.text != row["cron"] or zone_name != row["timezone"]:
-                fields["rule_changed_at"] = now  # so does it from a new rule or zone
+            if (rule.text != row["cron"] or zone_name != row["timezone"]
+                    or fields.get("success_deadline", row["success_deadline"]) != row["success_deadline"]):
+                fields["rule_changed_at"] = now  # so does it from a new rule, zone or deadline
             await db_schedules.update_schedule(conn, schedule_id, fields, profiles=profiles, task_limits=task_limits)
     except asyncpg.UniqueViolationError:
         raise _name_taken(fields["name"]) from None
@@ -896,6 +915,7 @@ async def schedule_overview(since: datetime) -> dict[str, Any]:
                      "project_name": row["project_name"], "timezone": row["timezone"],
                      "consecutive_failures": row["consecutive_failures"],
                      "failures_since": row["failures_alert_at"], "stale_since": row["stale_alert_at"],
+                     "deadline_since": row["deadline_alert_at"], "overlap_since": row["overlap_alert_at"],
                      "last_success_at": row["last_success_at"], "last_status": row["last_status"]}
                     for row in summary["failing"]],
         "skipped_today": {status: summary["skipped"].get(status, 0)

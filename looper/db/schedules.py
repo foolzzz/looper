@@ -654,6 +654,29 @@ async def start_stale_alert(conn: Db, schedule_id: str, at: datetime, *, last_ok
         "AND last_ok_at IS NOT DISTINCT FROM $3", schedule_id, at, last_ok_at) == "UPDATE 1"
 
 
+async def start_deadline_alert(conn: Db, schedule_id: str, at: datetime, *, last_ok_at: datetime | None) -> bool:
+    """Start the deadline alert once, unless a successful run has finished since the candidate was read."""
+    return await conn.execute(
+        "UPDATE schedules SET deadline_alert_at = $2 WHERE id = $1 AND deadline_alert_at IS NULL "
+        "AND last_ok_at IS NOT DISTINCT FROM $3", schedule_id, at, last_ok_at) == "UPDATE 1"
+
+
+async def add_overlap(conn: Db, schedule_id: str) -> int:
+    """Count a skipped firing in the same transaction that records it."""
+    return await conn.fetchval(
+        "UPDATE schedules SET consecutive_overlaps = consecutive_overlaps + 1 WHERE id = $1 "
+        "RETURNING consecutive_overlaps", schedule_id)
+
+
+async def reset_overlaps(conn: Db, schedule_id: str) -> bool:
+    """Reset the streak for a started run, returning whether its overlap alert needs recovery."""
+    # A notification's foreign key holds KEY SHARE; resetting non-key columns must not wait on it.
+    return await conn.fetchval(
+        "UPDATE schedules s SET consecutive_overlaps = 0, overlap_alert_at = NULL "
+        "FROM (SELECT overlap_alert_at AS was FROM schedules WHERE id = $1 FOR NO KEY UPDATE) old "
+        "WHERE s.id = $1 RETURNING old.was IS NOT NULL", schedule_id)
+
+
 async def insert_notification(conn: Db, *, schedule_id: str, run_id: str | None, kind: str, channel: str | None,
                               chat: str | None, text: str, status: str, error: str | None) -> str:
     """Record a message; ``created_at`` is the database's clock, so the outbox keeps the order they were sent in."""
@@ -678,6 +701,13 @@ async def enabled_schedules(*, pool: Db | None = None) -> list[dict[str, Any]]:
     return await _with_overrides(db, await db.fetch("SELECT * FROM schedules WHERE enabled"))
 
 
+async def deadline_candidates(*, pool: Db | None = None) -> list[dict[str, Any]]:
+    """Enabled schedules with a deadline whose alert has not started."""
+    db = pool or get_pool()
+    return await _with_overrides(db, await db.fetch(
+        f"{_WITH_PROJECT} WHERE s.enabled AND s.success_deadline IS NOT NULL AND s.deadline_alert_at IS NULL"))
+
+
 async def first_run_at(conn: Db, schedule_id: str) -> datetime | None:
     return await conn.fetchval("SELECT min(scheduled_for) FROM schedule_runs WHERE schedule_id = $1", schedule_id)
 
@@ -695,12 +725,15 @@ async def overview(since: datetime, *, pool: Db | None = None) -> dict[str, Any]
     failing = await db.fetch(
         """
         SELECT s.id, s.name, s.project_id, p.name AS project_name, s.timezone, s.consecutive_failures,
-               s.failures_alert_at, s.stale_alert_at, s.last_success_at,
+               s.failures_alert_at, s.stale_alert_at, s.deadline_alert_at, s.overlap_alert_at, s.last_success_at,
                (SELECT r.status FROM schedule_runs r WHERE r.schedule_id = s.id AND NOT (r.status = ANY($1::text[]))
                 ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS last_status
         FROM schedules s JOIN projects p ON p.id = s.project_id
         WHERE s.consecutive_failures > 0 OR s.failures_alert_at IS NOT NULL OR s.stale_alert_at IS NOT NULL
-        ORDER BY (s.failures_alert_at IS NULL AND s.stale_alert_at IS NULL), s.consecutive_failures DESC, lower(s.name)
+              OR s.deadline_alert_at IS NOT NULL OR s.overlap_alert_at IS NOT NULL
+        ORDER BY (s.failures_alert_at IS NULL AND s.stale_alert_at IS NULL
+                  AND s.deadline_alert_at IS NULL AND s.overlap_alert_at IS NULL),
+                 s.consecutive_failures DESC, lower(s.name)
         """,
         list(OPEN_STATUSES),
     )

@@ -145,7 +145,7 @@ def test_one_minute_rules_are_only_allowed_for_commands_or_gates(monkeypatch, ki
 
 
 @pytest.mark.parametrize(("kind", "overrides", "expected"), [
-    ("command", {}, (3, 900, 10)), ("agent", {}, (3, 900, 0)),
+    ("command", {}, (3, None, 10)), ("agent", {}, (3, None, 0)),
     ("command", {"alert_failures_after": 1, "alert_stale_after_seconds": 300,
                  "alert_overlap_after": 0}, (1, 300, 0)),
 ])
