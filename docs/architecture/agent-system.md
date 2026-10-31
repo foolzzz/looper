@@ -961,6 +961,22 @@ group. Some start one of their own: Codex and Claude Code run each shell
 command in a new session (seen on the real path with Codex 0.162.0 and
 Claude Code 2.1.285).
 
+With `[agent_host] keeper = "on"`, a keeper holds each task's eligible
+Claude Code Worker or Reviewer process. The keeper owns the child's process
+record and captures stdout, stderr and stdin in the run directory. Hosted or
+steered runs, launchers without reliable exit codes, runs without a task and
+other runtimes use their existing process path. Consults also keep their own
+process path. Stop, kill, timeout and the spend cap all call the run handle's
+`end()`, which sends `child/end` to the keeper; the keeper then ends the
+child's tree through `looper/agents/proc_tree.py`. A normal server shutdown
+ends kept runs too.
+
+If a keeper connection closes without `child/exited`, only that run fails
+with `the run's keeper process ended unexpectedly`. The control plane ends
+the orphaned child's tree after checking the identity recorded in
+`keeper.json`. A keeper reporting a newer controller instead fences the old
+control plane without ending the child.
+
 Every way Looper ends an agent goes through `looper/agents/proc_tree.py`:
 
 - a task's step killed or its task stopped or cancelled (a stopped task ends
@@ -1035,10 +1051,20 @@ started is still found after it has exited and its children have been
 re-parented. Each stop logs one line:
 `<agent>: ended the process tree of pid N: F found, T exited on SIGTERM, K killed`.
 
-The agents no longer share the server's process group. So when the server
-itself is killed with SIGKILL or crashes, launchd's clean-up of the job's
-group does not reach them (systemd still ends the whole cgroup). Each agent
-process is therefore started through `proc_tree.spawn`, which records it in
+The agents no longer share the server's process group. When the main process
+exits, launchd SIGKILLs only what remains in the job's process group; the plist
+sets no `AbandonProcessGroup`. Keepers use `start_new_session=True`, in a
+session and process group of their own, so they survive that cleanup and the
+plist needs no change. Command schedule runners survive restarts the same
+way.
+
+The systemd units already use `KillMode=process`, so stop and restart signal
+only serve. Leftover keepers remain in the unit's cgroup, and systemd may log
+"left-over process" at the next start; this is harmless. An old unit without
+that setting is warned about by service install and upgrade checks; such a
+unit requires a `FULL` upgrade rather than preserving running agents.
+
+Each agent process is started through `proc_tree.spawn`, which records it in
 `<runtime root>/.local/agent-processes/<pid>.json` until the process is
 reaped: its pid, its start time (`ps -o lstart=`, in UTC) and the pid and
 start time of the server that started it. At startup, before any task
@@ -4249,15 +4275,23 @@ variables, with the warnings.
 **One control plane per database.** With `[agent_host] keeper = "on"`,
 `looper serve` holds a PostgreSQL session advisory lock on a dedicated connection
 before it initializes the database pool. A second server refuses to start and
-names the holder's pid, application name, client address and backend start time;
-unavailable fields are reported as unknown. Each successful start increments
+names the holder connection's PostgreSQL `backend_pid`, application name,
+client address and backend start time; unavailable fields are reported as
+unknown. The serve process id is in `application_name`, not `backend_pid`.
+Each successful start increments
 the `control_plane_epoch` key in `system_settings` after the schema check. If the connection
 closes or a health check finds the lock lost (within 10 seconds), the server
 fences its database pool, closes the HTTP listener, ends its own agents and exits
-with code 75, without updating run records or detaching runs. A lock lost during
+with code 75, without updating run records or detaching runs. Kept runs are
+fenced synchronously before any owned agent cleanup: their sockets close
+without sending a request or touching their files. Command schedule runners
+are also left running: they deliberately start outside `proc_tree.spawn`,
+survive the exit and are adopted by the next control plane. A lock lost during
 startup or shutdown follows the same exit path. The service manager restarts the
 failed process, which must acquire the lock again. With keeper off, the server
-takes no control-plane lock and writes no epoch.
+takes no control-plane lock and writes no epoch. With keeper on, startup also
+checks that the longest run socket path fits within 103 bytes; use a shorter
+`--runtime-root` or switch keeper off if the check refuses startup.
 
 `looper service install` (`looper/agents/service.py`) writes a unit that runs
 `looper serve --config <absolute ops file> --runtime-root <absolute root>`,

@@ -79,7 +79,11 @@ class Keeper:
             self._end_task = asyncio.create_task(proc_tree.end(self.child, label=f"keeper {self.run_id}"))
 
     def append_stdin(self, data):
-        _write_all(self.fds[STDIN], data)
+        try:
+            _write_all(self.fds[STDIN], data)
+        except OSError:
+            os.ftruncate(self.fds[STDIN], self.offsets[STDIN])
+            raise
         self.offsets[STDIN] += len(data)
 
     async def _mark_eof(self, name):

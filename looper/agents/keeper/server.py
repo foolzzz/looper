@@ -279,7 +279,7 @@ class _Connection:
             elif method == "child/signal":
                 self.keys(params, "signal")
                 sig = KeeperSignal(params["signal"])
-                if keeper.child is not None:
+                if keeper.child is not None and keeper.child.returncode is None:
                     try:
                         os.killpg(keeper.child.pid, getattr(signal, f"SIG{sig}"))
                     except ProcessLookupError:

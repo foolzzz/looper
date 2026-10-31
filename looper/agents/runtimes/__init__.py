@@ -350,6 +350,7 @@ class RuntimeAdapter(ABC):
     # Whether a run reads more user turns while it runs (``write_turn`` after the prompt): a forwarded message, a
     # Planner's nudge, an agent room reminder. A runtime that reads only its prompt has False.
     run_input: ClassVar[bool] = False
+    keepable: ClassVar[bool] = False  # a keeper may hold its run across a control-plane restart
     # How it keeps a run that must not change files from changing them (``Launch.read_only``).
     read_only: ClassVar[ReadOnly] = ReadOnly.CHECK
     # Whether a run priced by the runtime's own figure (``CostSource.RUNTIME``) stops at its per-run spend cap:

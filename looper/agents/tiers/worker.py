@@ -50,6 +50,8 @@ from ..agent_settings import AgentType, Launch, load_agent_settings, load_task_l
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, budget_error, ended_by
 from .. import proc_tree, reported_files, vault
+from .. import keeper
+from ..kept_run import KeptRun, KeeperLost, KeeperSettings
 from ..ops.vault import run_section
 from ..run_usage import run_usage
 from ..knowledge import documents_label, load_knowledge
@@ -416,7 +418,7 @@ class WorkerProcess:
     instruction: str = ""
     project_id: str | None = None  # its task's project, once read (the overview shows it there)
     since: datetime = field(default_factory=lambda: datetime.now(timezone.utc))  # when it began to wait, then to run
-    keepable: bool = False  # S0 has no keeper; every run must finish before either drain scope.
+    keepable: bool = False  # a keeper holds this run across a control-plane restart
     task_role: dict[str, Any] | None = None  # the role its dispatch names (``task_roles.run_role``); None: built-in
 
 
@@ -427,7 +429,9 @@ class WorkerPool:
     subprocess to do the work, and publishes the result back to the Planner.
     """
 
-    def __init__(self, *, config: WorkerConfig, runtime_root: Path, drain: DrainState | None = None) -> None:
+    def __init__(self, *, config: WorkerConfig, runtime_root: Path, drain: DrainState | None = None,
+                 keeper: KeeperSettings | None = None, on_stale: Callable[[str], None] | None = None) -> None:
+        self._keeper, self._on_stale = keeper, on_stale
         self._drain = drain
         if drain is not None:
             drain.add_waker(self._wake_slot_waiters)
@@ -499,6 +503,11 @@ class WorkerPool:
     def is_healthy(self) -> bool:
         # A missing unrelated runtime must not restart the pool and cancel active runs.
         return self._running and self._listener_task is not None and not self._listener_task.done()
+
+    def fence_kept(self) -> None:
+        for wp in self._active.values():
+            if isinstance(wp.handle, KeptRun):
+                wp.handle.fence()
 
     async def _listen_loop(self) -> None:
         """Listen for work items addressed to any worker-* queue.
@@ -863,6 +872,8 @@ class WorkerPool:
             correlation_id=envelope.correlation_id,
             metadata=envelope.metadata,
         ))
+        if isinstance(wp.handle, KeptRun):
+            wp.handle.release()
 
     async def _execute(
         self,
@@ -1029,6 +1040,8 @@ class WorkerPool:
                 return {"passed": False, "findings": [problem], "summary": problem}
             return {"status": "failed", "error": problem}
         runtime = launch.runtime
+        kept = (self._keeper is not None and runtime.keepable and not hosted and not launch.steers
+                and launch.exit_code_reliable and bool(parent_task_id))
         # A run in a room keeps its session, for a later consult (Codex and OMP keep none otherwise).
         session_dir = run_session_dir(self._runtime_root, runtime.type, parent_task_id, worker_id) \
             if seat is not None else None
@@ -1044,8 +1057,30 @@ class WorkerPool:
                 command = run_command(launch.executable(self._config.claude_bin), cwd=work_dir,
                                       prompt_file=prompt_file, launch=launch, max_turns=max_turns,
                                       session_dir=session_dir)
-                handle = ProcessRun(runtime, command, launch=launch, cwd=work_dir, session_dir=session_dir,
-                                    label=f"worker {worker_id}")
+                if kept:
+                    handle = KeptRun(runtime, command, launch=launch, cwd=work_dir, session_dir=session_dir,
+                                     label=f"worker {worker_id}",
+                                     run_dir=self._runtime_root / keeper.RUNS_DIR / worker_id,
+                                     runtime_root=self._runtime_root, epoch=self._keeper.epoch,
+                                     on_stale=self._on_stale or (lambda reason: None))
+                    handle.manifest.update({
+                        "role": agent.value, "task_id": parent_task_id, "step_id": payload.get("task_id"),
+                        "plan_id": payload.get("plan_id"), "step_key": payload.get("step_key"),
+                        "instruction": payload.get("instruction"), "task_role": payload.get("task_role"),
+                        "is_verify": is_verify, "started_at": started_at.isoformat(),
+                        "timeout_s": run_timeout, "max_turns": max_turns, "room_seat": seat is not None,
+                        "reply": {"target": {"agent_type": envelope.source.agent_type,
+                                             "agent_id": envelope.source.agent_id},
+                                  "correlation_id": envelope.correlation_id, "metadata": envelope.metadata},
+                        "consume": {"provider_id": launch.profile.provider.id, "model": launch.model,
+                                    "launcher": launch.profile.runtime.launcher.value,
+                                    "max_budget_usd": launch.max_budget_usd},
+                    })
+                    if (wp := self._active.get(worker_id)) is not None:
+                        wp.keepable = True
+                else:
+                    handle = ProcessRun(runtime, command, launch=launch, cwd=work_dir, session_dir=session_dir,
+                                        label=f"worker {worker_id}")
         except (RuntimeUnsupported, OSError) as exc:
             problem = f"Cannot prepare {runtime.label}: {exc}"
             logger.error("worker %s: %s", worker_id, problem)
@@ -1082,6 +1117,10 @@ class WorkerPool:
         async with recorder:  # whatever ends the run (a kill, its task or the server stopping) ends its record
             logger.info("worker %s starting run: %s (cwd=%s)", worker_id, command[0], work_dir)
             try:
+                if isinstance(handle, KeptRun):
+                    handle.set_record(recorder.record_id)
+                    if (wp := self._active.get(worker_id)) is not None:
+                        wp.handle = handle  # fencing must also reach a keeper while it starts
                 await handle.launch()
                 logger.info("worker %s run started (pid=%s)", worker_id, handle.pid)
                 wp = self._active.get(worker_id)
@@ -1260,6 +1299,7 @@ class WorkerPool:
                 timed_out = isinstance(exc, asyncio.TimeoutError)
                 error = (
                     f"Claude ran longer than the {run_timeout} s limit (timeout_seconds)" if timed_out
+                    else str(exc) if isinstance(exc, KeeperLost)
                     else f"worker stopped reading Claude: {type(exc).__name__}"
                 )
                 await recorder.finish(output_text=None, result_event=result_event, error=error,

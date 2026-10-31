@@ -9,9 +9,9 @@ import signal
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 from collections.abc import Callable, Iterator
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,6 +21,7 @@ import pytest
 from looper.agents import keeper, proc_tree
 from looper.agents.keeper.__main__ import main
 from looper.agents.keeper.process import Keeper
+from tests.test_keeper_protocol import short_directory
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -97,7 +98,7 @@ class Run:
 @pytest.fixture
 def launch(tmp_path: Path) -> Iterator[Callable[..., Run]]:
     runs: list[Run] = []
-    directories = []
+    directories = ExitStack()
 
     def start(
         script: str = SLEEP, *, manifest: dict | str | None = None,
@@ -105,9 +106,7 @@ def launch(tmp_path: Path) -> Iterator[Callable[..., Run]]:
         via_parent: bool = False, directory_mode: int = 0o700, keeper_setup: str = "",
     ) -> Run:
         runtime_root = tmp_path / f"runtime-{len(runs)}"
-        temporary = tempfile.TemporaryDirectory(prefix="", dir=ROOT)
-        directories.append(temporary)
-        directory = Path(temporary.name)
+        directory = directories.enter_context(short_directory())
         runtime_root.mkdir(parents=True)
         directory.chmod(directory_mode)
         cwd = runtime_root / "work"
@@ -185,8 +184,7 @@ def launch(tmp_path: Path) -> Iterator[Callable[..., Run]]:
                 except ProcessLookupError:
                     pass
         _wait_for(lambda: not _live(list(run.identities)), timeout=5)
-    for temporary in directories:
-        temporary.cleanup()
+    directories.close()
 
 
 def test_every_child_byte_is_logged_in_order(launch: Callable[..., Run]) -> None:

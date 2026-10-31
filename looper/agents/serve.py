@@ -46,7 +46,8 @@ from .channels.registry import ChannelRegistry
 from .channels.chat_routing import ChatResolver, ChatStop
 from .channels.telegram import TelegramChannelAdapter
 from .channels.web import WebChannelAdapter
-from . import self_check
+from . import keeper, self_check
+from .kept_run import KeeperSettings
 from .gate_courier import GateCourier
 from .gate_service import GateReminders
 from .drain import DrainState
@@ -425,6 +426,7 @@ class Fence:
     """Loss bypasses normal shutdown: stop database writes and end only owned processes."""
 
     http_server: AgentHTTPServer | None = None
+    worker_pool: WorkerPool | None = None
     exit_now: Callable[[int], Any] = os._exit
     _lost: bool = False
     _backstop: asyncio.TimerHandle | None = None
@@ -438,21 +440,27 @@ class Fence:
 
         proc_tree.fence_spawns()
         loop = asyncio.get_running_loop()
-        self._backstop = loop.call_later(SHUTDOWN_DEADLINE_SEC, self.exit_now, EXIT_LOCK_LOST)
+        self._backstop = loop.call_later(SHUTDOWN_DEADLINE_SEC, self.exit, EXIT_LOCK_LOST)
         connection.fence()
+        if self.worker_pool is not None:
+            self.worker_pool.fence_kept()
+        logger.error("fenced the database pool")
         if self.http_server is not None:
             self.http_server.close_listener()
+            logger.error("closed the HTTP listener")
 
         async def end_owned() -> None:
             try:
                 await proc_tree.end_owned(deadline=10)
             finally:
-                self.exit_now(EXIT_LOCK_LOST)
+                self.exit(EXIT_LOCK_LOST)
 
         self._ending = loop.create_task(end_owned())
 
     def exit(self, code: int) -> None:
         # Loss wins even when a normal shutdown's deadline or second signal fires first.
+        if self._lost:
+            logger.error("exiting with 75")
         self.exit_now(EXIT_LOCK_LOST if self._lost else code)
 
 
@@ -569,6 +577,12 @@ async def _run_agent_system_owned(
                 f"another looper serve already runs on this database: {exc.holder.describe()}. "
                 "Stop it first: one database runs one control plane.") from None
     try:
+        if ops.keeper_mode is KeeperMode.ON:
+            n = len(str(runtime_root / keeper.RUNS_DIR / ("reviewer-" + "0" * 12) / keeper.SOCKET).encode())
+            if n > keeper.SOCKET_PATH_MAX:
+                raise StartupCheckFailed(
+                    f"the runtime root is too long for keeper sockets ({n} > 103 bytes): "
+                    'use a shorter --runtime-root, or set [agent_host] keeper = "off"')
         pool = await init_pool(dsn)
         await _back_up_before_schema_change(pool, ops, runtime_root, skip_backup=skip_backup)
         await ensure_schema(pool)
@@ -693,7 +707,10 @@ async def _run_agent_system_owned(
         supervisor.register(task_router)
 
         worker_config = WorkerConfig(claude_bin=claude_bin)
-        worker_pool = WorkerPool(config=worker_config, runtime_root=runtime_root, drain=drain)
+        worker_pool = WorkerPool(config=worker_config, runtime_root=runtime_root, drain=drain,
+                                 keeper=KeeperSettings(epoch) if lease is not None else None,
+                                 on_stale=lease.lose if lease is not None else None)
+        fence.worker_pool = worker_pool
         supervisor.register(worker_pool)
 
         # The Manager's platform tools: its MCP server reaches this server with a token made now. Each task's Planner

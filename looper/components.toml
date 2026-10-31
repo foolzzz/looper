@@ -22,8 +22,8 @@ include = ["runners/**"]
 "looper/agents/runtimes/runner/protocol_data/" = "runners/protocol/"
 
 [adoption]
-run_manifest_version = 0
-keeper_protocols = []
+run_manifest_version = 1
+keeper_protocols = ["1.0"]
 
 [ignore]
 paths = [

@@ -112,7 +112,7 @@ class DrainState:
                 else:
                     waiting[key] += value
         if self.draining:
-            # S0 runs are never keepable. S1 may leave keepable runs alive for a turns drain.
+            # A turns drain may leave keepable runs alive; a runs drain waits for every run.
             blocking_runs = any(self._status.scope == DrainScope.RUNS or not run["keepable"]
                                 for run in waiting["runs"])
             blocked = blocking_runs or any(value for key, value in waiting.items() if key != "runs")
