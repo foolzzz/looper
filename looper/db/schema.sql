@@ -1106,6 +1106,7 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
     fired_at      TIMESTAMPTZ,
     trigger       TEXT NOT NULL CHECK (trigger IN ('scheduled', 'catch_up', 'manual')),
     missed        INTEGER NOT NULL DEFAULT 0 CHECK (missed >= 0),
+    missed_since  TIMESTAMPTZ,
     status        TEXT NOT NULL CHECK (status IN (
                       'queued', 'gating', 'running', 'completed', 'failed', 'stopped', 'cancelled', 'timed_out',
                       'gate_failed', 'skipped_overlap', 'skipped_missed', 'skipped_gate', 'skipped_budget',

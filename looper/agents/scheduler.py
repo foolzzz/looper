@@ -65,7 +65,7 @@ import asyncpg
 from ..db import agent_setting_layers as db_layers, connection as db_connection, llm_records as db_llm_records
 from ..db import schedules as db_schedules, tasks as db_tasks
 from . import cron
-from .command_runs import BACKSTOP_SLACK, CommandRuns, CommandSpec, Finished, Lost, Observation, Running, Starting
+from .command_runs import BACKSTOP_SLACK, CommandRuns, CommandSpec, Finished, Lost, Observation, Running, Starting, Unknown
 from .drain import DrainState
 from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType
 from .schedule_gate import GateResult, run_gate
@@ -581,7 +581,8 @@ class Scheduler:
         """One firing, the schedule's row held: after the overlap check, a queued or skipped run, or the run
         launched (``_launch``)."""
         common = {"schedule_id": schedule["id"], "scheduled_for": firing.scheduled_for,
-                  "trigger": firing.trigger.value, "missed": firing.missed, "created_at": now}
+                  "trigger": firing.trigger.value, "missed": firing.missed,
+                  "missed_since": firing.missed_since, "created_at": now}
         command = schedule["kind"] == "command"
         if not command and await db_schedules.owner_error(conn, schedule["manager_id"], template_key=schedule.get("template_key")):
             return await self._create_run(conn, schedule, firing, now, common=common)
@@ -938,7 +939,8 @@ class Scheduler:
                 if busy:
                     return
                 run = queued[0]
-                firing = Firing(Trigger(run["trigger"]), run["scheduled_for"], missed=run["missed"])
+                firing = Firing(Trigger(run["trigger"]), run["scheduled_for"], missed=run["missed"],
+                                missed_since=run["missed_since"])
                 launched = await self._launch(conn, schedule, firing, now, run_id=run["id"])
             logger.info("schedule %s: the queued run %s starts now", schedule_id, launched.run_id)
             await self._follow(schedule, launched)
@@ -994,7 +996,7 @@ class Scheduler:
     async def _settle_command(self, run: Mapping[str, Any], obs: Observation, now: datetime) -> None:
         run_id = run["id"]
         fields: dict[str, Any] = {}
-        if isinstance(obs, Starting):
+        if isinstance(obs, (Starting, Unknown)):
             return
         if isinstance(obs, Running):
             assert self._commands is not None

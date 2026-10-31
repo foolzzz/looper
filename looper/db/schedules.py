@@ -327,17 +327,19 @@ async def insert_run(conn: Db, *, schedule_id: str, scheduled_for: datetime, tri
                      error: str | None = None, finished_at: datetime | None = None,
                      created_at: datetime | None = None, carried_from: str | None = None,
                      run_timeout_seconds: int | None = None, run_id: str | None = None,
-                     started_at: datetime | None = None, log_path: str | None = None) -> str:
+                     started_at: datetime | None = None, log_path: str | None = None,
+                     missed_since: datetime | None = None) -> str:
     if run_id is None:
         run_id = new_run_id()
     await conn.execute(
         """
         INSERT INTO schedule_runs (id, schedule_id, scheduled_for, fired_at, trigger, missed, status, task_id,
-                                   error, finished_at, created_at, carried_from, run_timeout_seconds, started_at, log_path)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, now()), $12, $13, $14, $15)
+                                   error, finished_at, created_at, carried_from, run_timeout_seconds, started_at, log_path,
+                                   missed_since)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, now()), $12, $13, $14, $15, $16)
         """,
         run_id, schedule_id, scheduled_for, fired_at, trigger, missed, status, task_id, error, finished_at,
-        created_at, carried_from, run_timeout_seconds, started_at, log_path,
+        created_at, carried_from, run_timeout_seconds, started_at, log_path, missed_since,
     )
     return run_id
 

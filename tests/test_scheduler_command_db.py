@@ -238,6 +238,63 @@ def test_killed_runner_interrupts_the_run_and_ends_its_command_group(monkeypatch
     run_scheduled(test, monkeypatch, tmp_path)
 
 
+@pytest.mark.parametrize("failure", ["timeout", "os_error", "empty", "nonzero"])
+def test_ps_failure_preserves_live_commands_until_the_next_tick(monkeypatch, tmp_path, caplog, failure):
+    async def test(env: ScheduleEnv):
+        sid = await _command(env, "sleep 3; printf done", overlap="parallel", max_parallel_runs=2)
+        run_ids = [await env.scheduler.run_now(sid) for _ in range(2)]
+        identities = [await _runner(env, run_id) for run_id in run_ids]
+        processes = [env.scheduler._commands._owned[run_id] for run_id in run_ids]
+
+        def failed_ps(args, **kwargs):
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(args, 5)
+            if failure == "os_error":
+                raise OSError("ps unavailable")
+            return subprocess.CompletedProcess(args, 2 if failure == "nonzero" else 0, "", "ps failed")
+
+        for tick in range(2):
+            with monkeypatch.context() as patch:
+                patch.setattr(subprocess, "run", failed_ps)
+                await env.scheduler.tick()
+            assert all(run["status"] == "running" for run in await _rows(env, sid))
+            assert all(_alive(identity[key]) for identity in identities for key in ("runner_pid", "child_pid"))
+            warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+            assert len(warnings) == tick + 1
+        await env.scheduler.tick()
+        assert all(run["status"] == "running" for run in await _rows(env, sid))
+        for process in processes:
+            assert await asyncio.to_thread(process.wait, timeout=5) == 0
+        await env.scheduler.tick()
+        assert all(run["status"] == "succeeded" for run in await _rows(env, sid))
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_runner_killed_before_its_first_record_is_interrupted_in_one_tick(monkeypatch, tmp_path):
+    async def test(env: ScheduleEnv):
+        # Block before the runner can write metadata or start a command.
+        blocked = tmp_path / "blocked_runner.py"
+        blocked.write_text("import signal\nsignal.pause()\n")
+        monkeypatch.setattr(env.scheduler._commands, "_runner", blocked)
+        sid = await _command(env)
+        run_id = await env.scheduler.run_now(sid)
+        process = env.scheduler._commands._owned[run_id]
+        directory = env.runtime_root / ".local" / "command-runs" / run_id
+        try:
+            assert not (directory / "runner.json").exists()
+            process.kill()
+            assert await asyncio.to_thread(process.wait, timeout=5) == -signal.SIGKILL
+            await env.scheduler.tick()
+            [run] = await _rows(env, sid)
+            assert run["status"] == "interrupted"
+            assert "ended without recording an exit code" in run["error"]
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
 def test_a_run_without_start_files_is_interrupted_after_start_grace(monkeypatch, tmp_path):
     async def test(env: ScheduleEnv):
         sid = await _command(env)
@@ -308,6 +365,31 @@ def test_queued_command_starts_after_the_running_command_finishes(monkeypatch, t
         assert {row["id"] for row in rows} == {first["id"], queued["id"]}
         assert all(row["status"] == "succeeded" for row in rows)
         assert next(row for row in rows if row["id"] == queued["id"])["runner_pid"]
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_queued_catch_up_keeps_the_first_missed_time_after_restart(monkeypatch, tmp_path):
+    async def test(env: ScheduleEnv):
+        sid = await _command(env, 'if [ "$LOOPER_SCHEDULE_TRIGGER" = manual ]; then sleep 3; fi; '
+                             'printf "%s\\n%s\\n" "$LOOPER_SCHEDULE_MISSED" '
+                             '"$LOOPER_SCHEDULE_MISSED_SINCE"', overlap="queue", catch_up="once")
+        first_id = await env.scheduler.run_now(sid)
+        process = env.scheduler._commands._owned[first_id]
+        await _runner(env, first_id)
+        await env.due(sid, fires_ago=2)
+        missed_since = await env.pool.fetchval("SELECT next_fire_at FROM schedules WHERE id=$1", sid)
+        await env.scheduler.tick()
+        queued = next(run for run in await _rows(env, sid) if run["status"] == "queued")
+        assert queued["trigger"] == "catch_up" and queued["missed"] == 3
+        assert process.poll() is None
+        await env.scheduler.stop()
+        assert await asyncio.to_thread(process.wait, timeout=5) == 0
+        env.scheduler = Scheduler(bus=env.bus, clock=env.clock, runtime_root=env.runtime_root)
+        await asyncio.to_thread(env.scheduler._commands.prepare)
+        rows = await _ended(env, sid, count=2)
+        catch_up = next(run for run in rows if run["id"] == queued["id"])
+        assert catch_up["status"] == "succeeded"
+        assert (env.runtime_root / catch_up["log_path"]).read_text().splitlines() == ["3", missed_since.isoformat()]
     run_scheduled(test, monkeypatch, tmp_path)
 
 
