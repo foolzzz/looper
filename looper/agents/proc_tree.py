@@ -55,6 +55,7 @@ RECORDS_DIR = Path(".local") / "agent-processes"  # under the runtime root: one 
 # Set by ``sweep``: where this server records its agents, and the server (pid, start time) each record names.
 _records: Path | None = None
 _server: tuple[int, str] | None = None
+_owner_run_dir: Path | None = None
 _recorded: dict[int, tuple[Path, str]] = {}
 _ending: set[int] = set()
 _forgetting: set[asyncio.Task[None]] = set()
@@ -193,7 +194,7 @@ async def _record_tree(pid: int, tree: Tree) -> None:
         logger.warning("cannot read start times for agent pid %s; keeping its recorded tree", pid)
         return
     assert _server is not None
-    _write_record(path.parent, pid, started, _server, tree=starts)
+    _write_record(path.parent, pid, started, _server, tree=starts, run_dir=_owner_run_dir)
 
 
 async def end(process: asyncio.subprocess.Process, *, label: str, known: Tree | None = None) -> None:
@@ -327,10 +328,13 @@ def _start_times(pids: Iterable[int]) -> dict[int, str] | None:
 
 def _write_record(
     directory: Path, pid: int, started: str, server: tuple[int, str], tree: dict[int, str] | None = None,
+    *, run_dir: Path | None = None,
 ) -> Path:
     """Record agent ``pid``, started at ``started``, as started by ``server`` (its pid and start time)."""
     path = directory / f"{pid}.json"
     record: dict[str, Any] = {"pid": pid, "started": started, "server_pid": server[0], "server_started": server[1]}
+    if run_dir is not None:
+        record["run_dir"] = str(run_dir)
     if tree is not None:
         record["tree"] = [{"pid": p, "started": s} for p, s in tree.items()]
     path.write_text(json.dumps(record) + "\n", encoding="utf-8")
@@ -348,7 +352,7 @@ async def spawn(*argv: str, env: Mapping[str, str] | None = None, **kwargs: Any)
                            process.pid)
             return process
         try:
-            path = _write_record(_records, process.pid, started, _server)
+            path = _write_record(_records, process.pid, started, _server, run_dir=_owner_run_dir)
         except OSError as exc:
             logger.warning("cannot record agent pid %s for the next sweep: %s", process.pid, exc)
             return process
@@ -371,19 +375,20 @@ async def _forget(process: asyncio.subprocess.Process, path: Path, started: str)
     _recorded.pop(process.pid, None)
 
 
-def own_records(runtime_root: Path) -> None:
+def own_records(runtime_root: Path, *, run_dir: Path | None = None) -> None:
     """Record agents for a process that owns agents but is not a server, without sweeping.
 
     ``spawn`` records this process as owner. A server's ``sweep`` leaves its
     agents alone while it lives, and ends them once their owner is gone.
     """
-    global _records, _server
+    global _records, _server, _owner_run_dir
     directory = runtime_root / RECORDS_DIR
     directory.mkdir(parents=True, exist_ok=True)
     started = _start_time(os.getpid())
     if started is None:
         raise RuntimeError("cannot read this owner's start time")
     _records, _server = directory, (os.getpid(), started)
+    _owner_run_dir = run_dir.resolve() if run_dir is not None else None
 
 
 async def sweep(runtime_root: Path) -> None:
@@ -398,7 +403,8 @@ async def sweep(runtime_root: Path) -> None:
     lists the tree an end was ending, so a server that exited in the middle
     of an end has the rest ended at the next start.
     """
-    global _records, _server
+    global _records, _server, _owner_run_dir
+    _owner_run_dir = None
     directory = runtime_root / RECORDS_DIR
     directory.mkdir(parents=True, exist_ok=True)
     own_start = _start_time(os.getpid())

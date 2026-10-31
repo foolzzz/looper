@@ -367,6 +367,27 @@ with open('tree.json', 'w') as output:
     assert not _live(list(tree.values()))
 
 
+def test_a_setsid_descendant_holding_stdout_does_not_block_keeper_exit(launch: Callable[..., Run]) -> None:
+    run = launch("""\
+import json, subprocess, sys
+grandchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)
+with open('tree.json', 'w') as output:
+    json.dump({'grandchild': grandchild.pid}, output)
+print('child finished', flush=True)
+""")
+    tree = run.tree()
+    assert run.process is not None
+    bound = 2 * proc_tree.REAP_SEC + 2
+    started = time.monotonic()
+    assert run.process.wait(timeout=bound) == 0
+    assert time.monotonic() - started < bound
+    state = run.state()
+    assert state["state"] == "exited" and state["end_reason"] == "exited" and state["exit_code"] == 0
+    assert (run.directory / keeper.STDOUT).read_bytes() == b"child finished\n"
+    # Still holding stdout outside the original tree: the bounded drain had to close its reader.
+    assert _live(list(tree.values())) == set(tree.values())
+
+
 def test_a_descendants_output_during_sigterm_is_logged(launch: Callable[..., Run]) -> None:
     descendant = """\
 import os, signal, time

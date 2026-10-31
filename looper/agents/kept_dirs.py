@@ -65,6 +65,25 @@ def live(records: Mapping[str, KeeperRecord]) -> dict[str, bool]:
     return {name: starts.get(record.keeper_pid) == record.keeper_started for name, record in records.items()}
 
 
+def _recover(run_dir: Path, records_dir: Path) -> KeeperRecord | None:
+    # The owner identity alone does not tie an agent record to a particular run.
+    matches = []
+    for path in records_dir.glob("*.json"):
+        data = read_json(path)
+        if data is None or data.get("run_dir") != str(run_dir.resolve()):
+            continue
+        if any(type(data.get(name)) is not int or data[name] < 1 for name in ("pid", "server_pid")):
+            return None
+        if any(not isinstance(data.get(name), str) or not data[name].strip()
+               for name in ("started", "server_started")):
+            return None
+        if path.name != f"{data['pid']}.json":
+            return None
+        matches.append(KeeperRecord(data["server_pid"], data["server_started"], data["pid"], data["started"],
+                                    KeeperState.RUNNING, None, None, None))
+    return matches[0] if len(matches) == 1 else None
+
+
 class Verdict(StrEnum):
     END = "end"
     RELEASE = "release"
@@ -101,16 +120,21 @@ async def end_keeper(record: KeeperRecord, run_dir: Path) -> None:
                 or not await _running(record.keeper_pid, record.keeper_started)):
             break
         await asyncio.sleep(0.1)
+    await _end_child(record, run_dir)
+    await _signal_keeper(record, signal.SIGKILL)
+
+
+async def _end_child(record: KeeperRecord, run_dir: Path) -> None:
     if record.child_pid is not None and record.child_started is not None:
         if await _running(record.child_pid, record.child_started):
             await proc_tree.end_orphan(record.child_pid, record.child_started, label=f"kept run {run_dir.name}")
-    await _signal_keeper(record, signal.SIGKILL)
 
 
 @dataclass
 class StartScan:
     ended: Counter[Reason] = field(default_factory=Counter)
     released: int = 0
+    unidentified: int = 0
 
 
 async def scan_at_start(runtime_root: Path) -> StartScan:
@@ -119,26 +143,31 @@ async def scan_at_start(runtime_root: Path) -> StartScan:
     if not runs.exists():
         return scan
     records = {path: KeeperRecord.read(path / STATE) for path in sorted(runs.iterdir()) if path.is_dir()}
+    bad_files = {path for path, record in records.items() if record is None}
+    for path in bad_files:
+        records[path] = _recover(path, runtime_root / proc_tree.RECORDS_DIR)
     # Finish the whole liveness preflight before ending keepers or deleting any directory.
     alive = await asyncio.to_thread(live, {path.name: record for path, record in records.items()
                                          if record is not None})
     verdicts = {}
     for path, record in records.items():
         if record is None:
-            verdicts[path] = (Verdict.RELEASE, Reason.BAD_FILES)
-            logger.warning("unreadable kept run files in %s; removing directory without signalling its keeper; "
-                           "an unidentified keeper's orphan timer ends its child", path.name)
+            logger.error("cannot identify the keeper of %s; leaving it for its orphan timeout", path)
+            scan.unidentified += 1
+        elif path in bad_files:
+            verdicts[path] = (Verdict.END, Reason.BAD_FILES)
         elif record.state == KeeperState.EXITED or not alive[path.name]:
             verdicts[path] = (Verdict.RELEASE, Reason.KEEPER_DEAD)
         else:
             verdicts[path] = (Verdict.END, Reason.NOT_ADOPTABLE)
-    await asyncio.gather(*(end_keeper(records[path], path) for path, (verdict, _) in verdicts.items()
-                           if verdict == Verdict.END))
+    await asyncio.gather(*((end_keeper(records[path], path) if verdict == Verdict.END
+                            else _end_child(records[path], path)) for path, (verdict, _) in verdicts.items()))
     for path, (verdict, reason) in verdicts.items():
         shutil.rmtree(path)
         if verdict == Verdict.END:
             scan.ended[reason] += 1
         else:
             scan.released += 1
-    logger.info("kept runs at start ended=%s released=%d", dict(scan.ended), scan.released)
+    logger.info("kept runs at start ended=%s released=%d unidentified=%d",
+                dict(scan.ended), scan.released, scan.unidentified)
     return scan

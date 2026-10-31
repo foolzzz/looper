@@ -75,7 +75,7 @@ def test_a_live_leftover_keeper_is_ended_before_the_scan_returns(tmp_path, monke
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("leftover", ["dead", "exited", "bad", "missing"])
+@pytest.mark.parametrize("leftover", ["dead", "exited"])
 def test_dead_keepers_directories_are_released(tmp_path, monkeypatch, caplog, leftover):
     async def run():
         async with running_keeper(tmp_path) as (directory, process, state):
@@ -85,22 +85,117 @@ def test_dead_keepers_directories_are_released(tmp_path, monkeypatch, caplog, le
                 monkeypatch.setattr(proc_tree, "_records", None)
                 monkeypatch.setattr(proc_tree, "_server", None)
                 await proc_tree.sweep(tmp_path)
-            elif leftover == "exited":
+            else:
                 process.send_signal(signal.SIGTERM)
                 await asyncio.wait_for(process.wait(), 10)
-            elif leftover == "bad":
-                (directory / keeper.STATE).write_text("invalid json")
-            else:
-                (directory / keeper.STATE).unlink()
             scan = await kept_dirs.scan_at_start(tmp_path)
             assert not scan.ended and scan.released == 1
             assert not directory.exists()
-            if leftover in {"bad", "missing"}:
-                assert process.returncode is None  # No trustworthy identity to signal.
-                assert state["child_pid"] in proc_tree._snapshot()
-                assert directory.name in caplog.text
+            assert state["child_pid"] not in proc_tree._snapshot()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("missing_state", [False, True], ids=["corrupt", "missing"])
+def test_unreadable_state_ends_the_keeper_and_child_from_the_spawn_record(tmp_path, missing_state):
+    async def run():
+        async with running_keeper(tmp_path) as (directory, process, state):
+            if missing_state:
+                (directory / keeper.STATE).unlink()
             else:
-                assert state["child_pid"] not in proc_tree._snapshot()
+                (directory / keeper.STATE).write_text("invalid json")
+            scan = await kept_dirs.scan_at_start(tmp_path)
+            assert scan.ended == {kept_dirs.Reason.BAD_FILES: 1}
+            assert scan.released == 0 and scan.unidentified == 0
+            assert await asyncio.wait_for(process.wait(), 5) == 0
+            assert state["child_pid"] not in proc_tree._snapshot()
+            assert not directory.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("spawn_record", ["missing", "unbound", "other_run", "invalid_identity"])
+def test_unidentifiable_keeper_is_left_for_the_next_scan(tmp_path, monkeypatch, caplog, spawn_record):
+    async def run():
+        async with running_keeper(tmp_path) as (directory, process, state):
+            (directory / keeper.STATE).write_text("invalid json")
+            path = tmp_path / proc_tree.RECORDS_DIR / f"{state['child_pid']}.json"
+            record = keeper.read_json(path)
+            assert record is not None
+            if spawn_record == "missing":
+                path.unlink()
+            else:
+                record.pop("run_dir", None)
+                if spawn_record == "other_run":
+                    record["run_dir"] = str(directory.with_name("another-run").resolve())
+                elif spawn_record == "invalid_identity":
+                    record["run_dir"] = str(directory.resolve())
+                    record["server_pid"] = True
+                keeper.write_json(path, record)
+
+            def unexpected_signal(*args):
+                pytest.fail("an unidentified keeper or child must not be signalled")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(kept_dirs.os, "kill", unexpected_signal)
+                patch.setattr(proc_tree.os, "killpg", unexpected_signal)
+                with caplog.at_level("ERROR", logger=kept_dirs.__name__):
+                    for _ in range(2):
+                        scan = await kept_dirs.scan_at_start(tmp_path)
+                        assert scan.unidentified == 1
+                        assert not scan.ended and scan.released == 0
+            assert directory.exists() and process.returncode is None
+            assert state["child_pid"] in proc_tree._snapshot()
+            assert f"cannot identify the keeper of {directory}; leaving it for its orphan timeout" in caplog.text
+
+    asyncio.run(run())
+
+
+def test_scan_ends_a_child_whose_keeper_died_after_sweep(tmp_path, monkeypatch):
+    async def run():
+        async with running_keeper(tmp_path) as (directory, process, state):
+            monkeypatch.setattr(proc_tree, "_records", None)
+            monkeypatch.setattr(proc_tree, "_server", None)
+            await proc_tree.sweep(tmp_path)
+            assert state["child_pid"] in proc_tree._snapshot()
+            assert (tmp_path / proc_tree.RECORDS_DIR / f"{state['child_pid']}.json").exists()
+            process.kill()
+            await asyncio.wait_for(process.wait(), 5)
+            assert state["child_pid"] in proc_tree._snapshot()
+            scan = await kept_dirs.scan_at_start(tmp_path)
+            assert not scan.ended and scan.released == 1 and scan.unidentified == 0
+            assert state["child_pid"] not in proc_tree._snapshot()
+            assert not directory.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("bad_state", [False, True], ids=["keeper_dead", "bad_files"])
+def test_scan_does_not_signal_a_reused_child_pid(tmp_path, monkeypatch, bad_state):
+    async def run():
+        async with running_keeper(tmp_path) as (directory, process, state):
+            process.kill()
+            await asyncio.wait_for(process.wait(), 5)
+            if bad_state:
+                (directory / keeper.STATE).write_text("invalid json")
+                path = tmp_path / proc_tree.RECORDS_DIR / f"{state['child_pid']}.json"
+                record = keeper.read_json(path)
+                record["started"] = "a previous process's start time"
+                keeper.write_json(path, record)
+            else:
+                keeper.write_json(directory / keeper.STATE,
+                                  {**state, "child_started": "a previous process's start time"})
+
+            def unexpected_signal(*args):
+                pytest.fail("a reused pid must not be signalled")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(kept_dirs.os, "kill", unexpected_signal)
+                patch.setattr(proc_tree.os, "killpg", unexpected_signal)
+                scan = await kept_dirs.scan_at_start(tmp_path)
+            assert scan.unidentified == 0
+            assert state["child_pid"] in proc_tree._snapshot()
+            assert not directory.exists()
 
     asyncio.run(run())
 
@@ -226,8 +321,8 @@ def test_invalid_record_fields_are_bad_files(tmp_path, field, value):
     directory.mkdir(parents=True)
     (directory / keeper.STATE).write_text(json.dumps(data))
     scan = asyncio.run(kept_dirs.scan_at_start(tmp_path))
-    assert scan.released == 1 and not scan.ended
-    assert not directory.exists()
+    assert scan.unidentified == 1 and not scan.ended and scan.released == 0
+    assert directory.exists()
 
 
 def test_live_checks_all_identities_in_one_snapshot(monkeypatch):

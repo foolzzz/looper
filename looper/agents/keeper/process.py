@@ -145,7 +145,7 @@ class Keeper:
                 self.offsets[name] = os.fstat(self.fds[name]).st_size
             self._write_state(keeper_started=proc_tree._start_time(os.getpid()))
             try:
-                proc_tree.own_records(self.runtime_root)
+                proc_tree.own_records(self.runtime_root, run_dir=self.run_dir)
                 self.child = await proc_tree.spawn(*self.argv, cwd=self.cwd, env=dict(os.environ),
                                                   stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                                                   stderr=asyncio.subprocess.PIPE)
