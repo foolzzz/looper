@@ -51,6 +51,9 @@ def upgrade_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     def run(argv, *, env=None):
         assert argv[:3] == [host.executable, "-I", "-c"], "ownership must be checked before git"
+        if "sysconfig" in argv[-1]:
+            return subprocess.CompletedProcess(argv, 0,
+                json.dumps([str(checkout / ".venv"), str(checkout), str(checkout)]), "")
         if "sys.prefix" in argv[-1]:
             return subprocess.CompletedProcess(argv, 0, str(checkout / ".venv"), "")
         assert env["UNIT_MARKER"] == "service"
@@ -253,7 +256,7 @@ def test_upgrade_queries_the_unit_interpreter_in_an_isolated_environment(
     mgr.unit_path.parent.mkdir(parents=True)
     mgr.unit_path.write_bytes(mgr.render(service.ServiceSpec(mgr.label,
         (*service.looper_command(sys.executable), "serve"), own_root,
-        (("UNIT_MARKER", "service $$ value"), ("PYTHONPATH", str(foreign))), tmp_path / "serve.log")))
+        (("UNIT_MARKER", "service $$ value"),), tmp_path / "serve.log")))
     # Keep settings/status fake; read the real unit's argv and environment and run its Python.
     fake = service.manager(host, "test")
     fake.unit_path, fake.unit_argv = mgr.unit_path, mgr.unit_argv

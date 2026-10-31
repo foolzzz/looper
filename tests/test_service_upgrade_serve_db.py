@@ -121,10 +121,13 @@ def test_docs_and_two_dashboard_upgrades_keep_real_serve_pid_and_refresh_compone
            "UPGRADE_FIXTURE_PID": str(pid_file)}
     installed_commands: list[list[str]] = []
 
-    def run(argv):
+    def run(argv, *, env=None):
         argv = list(argv)
         installed_commands.append(argv)
-        if argv[:3] == [sys.executable, "-m", "pip"]:
+        if argv[:3] == [sys.executable, "-I", "-c"] and "sysconfig" in argv[-1]:
+            return subprocess.CompletedProcess(argv, 0,
+                json.dumps([sys.prefix, str(source), str(source)]), "")
+        if argv[:4] == [sys.executable, "-I", "-m", "pip"]:
             if "install" in argv:
                 assert "--no-deps" in argv
                 with zipfile.ZipFile(argv[-1]) as archive:

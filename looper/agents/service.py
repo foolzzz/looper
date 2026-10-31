@@ -1076,19 +1076,45 @@ def _dashboard_safe_wheel(source: str, directory: Path):
                     csv.writer(output).writerows(dashboard_rows)
 
 
-def _install_wheel(host: Host, source: str, *, dependencies: bool) -> None:
+def _wheel_install_environment(host: Host, package_root: Path) -> dict[str, str]:
+    # Inspect the interpreter's prefix scheme, then use that same prefix for both
+    # installers. An editable checkout or a user/target install is not this scheme.
+    output = _checked(host, [host.executable, "-I", "-c",
+        "import json, sys, sysconfig; "
+        "paths = sysconfig.get_paths(scheme=sysconfig.get_preferred_scheme('prefix')); "
+        "print(json.dumps([sys.prefix, paths['purelib'], paths['platlib']]))"])
+    prefix, purelib, platlib = map(Path, json.loads(output))
+    if not all(path.is_absolute() for path in (prefix, purelib, platlib)):
+        raise ServiceError("cannot resolve the service interpreter's installation paths")
+    if package_root.resolve() not in (purelib.resolve(), platlib.resolve()):
+        raise ServiceError(f"the service package in {package_root} is outside the interpreter's installation "
+                           f"paths {purelib} and {platlib}; refusing to install a wheel")
+    redirects = {"PIP_TARGET", "PIP_PREFIX", "PIP_ROOT", "PIP_USER", "PIP_PYTHON",
+                 "UV_TARGET", "UV_PREFIX", "UV_PYTHON", "UV_PROJECT_ENVIRONMENT", "UV_SYSTEM_PYTHON",
+                 "UV_CONFIG_FILE", "PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE"}
+    # PIP_CONFIG_FILE=/dev/null disables global, user and venv-local pip config;
+    # uv's no-config mode likewise prevents project/user config from retargeting.
+    return {**{name: value for name, value in host.environ.items() if name not in redirects},
+            "PIP_CONFIG_FILE": os.devnull, "PIP_PREFIX": str(prefix), "UV_NO_CONFIG": "true"}
+
+
+def _install_wheel(host: Host, source: str, *, dependencies: bool, environment: Mapping[str, str]) -> None:
     # uv tool environments omit pip; target that same interpreter with uv's pip interface.
-    has_pip = host.run([host.executable, "-m", "pip", "--version"]).returncode == 0
-    command = ([host.executable, "-m", "pip", "install", "--force-reinstall"] if has_pip else
+    has_pip = host.run([host.executable, "-I", "-m", "pip", "--version"], env=environment).returncode == 0
+    command = ([host.executable, "-I", "-m", "pip", "install", "--force-reinstall"] if has_pip else
                ["uv", "pip", "install", "--python", host.executable, "--reinstall"])
-    _checked(host, [*command, *([] if dependencies else ["--no-deps"]), source], installing=True)
+    _checked(host, [*command, "--prefix", environment["PIP_PREFIX"],
+                   *([] if dependencies else ["--no-deps"]), source], installing=True, env=environment)
 
 
 def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
-                    dependencies: bool = True, sync_environment: Path | None = None) -> tuple[bytes, str] | None:
+                    dependencies: bool = True, sync_environment: Path | None = None,
+                    wheel_environment: Mapping[str, str] | None = None) -> tuple[bytes, str] | None:
     from ..components import record_web_source, web_fingerprints
 
     if wheel:
+        if wheel_environment is None:
+            wheel_environment = _wheel_install_environment(host, host.package_root)
         if not dependencies:
             from .http_server import default_static_dir
 
@@ -1112,12 +1138,12 @@ def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
                     raise ServiceError("the wheel dashboard did not contain index.html")
                 expected = ((staged / "index.html").read_bytes(), web_fingerprints(staged)[1])
                 with _dashboard_safe_wheel(source, destination.parent) as filtered:
-                    _install_wheel(host, filtered, dependencies=False)
+                    _install_wheel(host, filtered, dependencies=False, environment=wheel_environment)
                 _swap_directory(staged, destination)
                 return expected
             finally:
                 shutil.rmtree(staged, ignore_errors=True)
-        _install_wheel(host, source, dependencies=dependencies)
+        _install_wheel(host, source, dependencies=dependencies, environment=wheel_environment)
         return None
     if dependencies and sync_environment is None:
         sync_environment = _checkout_sync_environment(host)
@@ -1380,11 +1406,14 @@ def _unit_package_root(host: Host, mgr: _Manager) -> Path:
             environment = dict(word.split("=", 1)
                 for line in mgr.unit_path.read_text().splitlines() if line.startswith("Environment=")
                 for word in _systemd_words(line.removeprefix("Environment=").replace("$$", "$$$$")) if "=" in word)
-        environment.pop("PYTHONPATH", None)
+        overrides = [name for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE") if environment.get(name)]
+        if overrides:
+            raise ServiceError("the service unit overrides Python imports with " + ", ".join(overrides)
+                               + "; reinstall the unit without these overrides before upgrading")
         environment.setdefault("HOME", str(host.home))
         result = host.run([host.executable, "-I", "-c",
             "import looper, pathlib; print(pathlib.Path(looper.__file__).resolve().parent.parent)"], env=environment)
-    except (OSError, ValueError, ServiceError):
+    except (OSError, ValueError):
         raise ServiceError(f"cannot resolve the service's package root with {host.executable}") from None
     path = Path(result.stdout.strip())
     if result.returncode or not path.is_absolute():
@@ -1464,6 +1493,7 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
             destination = default_static_dir().resolve()
             if destination not in (package_root / "web/dist", package_root / "looper/web/dashboard"):
                 raise ServiceError(f"{destination} is not the service's dashboard in {package_root}")
+        wheel_environment = _wheel_install_environment(host, package_root) if wheel else None
         if dry_run:
             return "\n".join((f"plan       {plan.kind.value}", f"target     {target.version}",
                 f"running    {running.version} (loaded {running.loaded_at})",
@@ -1472,7 +1502,7 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
         return _execute_plan(host, mgr, port=port, root=root, log_path=log_path, plan=plan,
             running=running, target=target,
             installer=lambda: _install_target(host, source, wheel=wheel, build_web="web" in plan.changed_components,
-                dependencies=dependencies, sync_environment=sync_environment),
+                dependencies=dependencies, sync_environment=sync_environment, wheel_environment=wheel_environment),
             timeout=timeout, drain_timeout=drain_timeout, turns_timeout=turns_timeout, no_force=no_force)
     except (ValueError, KeyError, zipfile.BadZipFile) as exc:
         raise ServiceError(str(exc)) from exc
