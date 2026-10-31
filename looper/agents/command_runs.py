@@ -217,7 +217,8 @@ class CommandRuns:
         except (KeyError, ValueError, TypeError):
             return None
 
-    def inspect(self, runs: Sequence[Mapping[str, Any]], now: datetime) -> dict[str, Observation]:
+    def inspect(self, runs: Sequence[Mapping[str, Any]], now: datetime, *, strict: bool = False) -> dict[str, Observation]:
+        """Observe runs; destructive cleanup uses strict mode to preserve files if ps cannot run."""
         results: dict[str, Observation] = {}
         pending = []
         for run in runs:
@@ -241,6 +242,8 @@ class CommandRuns:
                     capture_output=True, text=True, timeout=5, check=False,
                     env={**child_env.inherited(), "LC_ALL": "C", "TZ": "UTC"},
                 )
+                if strict and listed.returncode not in (0, 1):
+                    raise OSError(f"runner process query failed with status {listed.returncode}")
                 for line in listed.stdout.splitlines():
                     fields = line.split(maxsplit=2)
                     if len(fields) == 3 and not fields[1].startswith("Z"):
@@ -249,7 +252,8 @@ class CommandRuns:
                         except ValueError:
                             continue
             except (OSError, subprocess.SubprocessError):
-                pass
+                if strict:
+                    raise
         for run, directory, runner, pid, started in pending:
             identity = runner or {}
             child_pid, child_started = identity.get("child_pid"), identity.get("child_started")

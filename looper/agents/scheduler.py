@@ -62,6 +62,8 @@ from typing import Any, Protocol
 
 import asyncpg
 
+from . import housekeeping
+
 from ..db import agent_setting_layers as db_layers, connection as db_connection, llm_records as db_llm_records
 from ..db import schedules as db_schedules, tasks as db_tasks
 from . import cron
@@ -376,6 +378,8 @@ class Scheduler:
         self._notifier = Notifier(sender=sender, clock=clock, dashboard_url=dashboard_url)
         self._day_zone = cron.zone(day_zone or cron.local_zone_name())
         self._commands = CommandRuns(runtime_root) if runtime_root is not None else None
+        self._runtime_root = runtime_root
+        self._housekeeping_at: datetime | None = None
         self._adopted: set[str] = set()
         # Gates and messages under way; stopping cancels them.
         self._background: set[asyncio.Task[Any]] = set()
@@ -476,6 +480,18 @@ class Scheduler:
                 await self._start_queued(schedule_id)
             await self._fire_due(now)
         await self._notifier.check_stale(now)
+        if self._runtime_root is not None and (self._housekeeping_at is None or now >= self._housekeeping_at):
+            self._spawn(self._housekeep(now))
+            self._housekeeping_at = now + housekeeping.INTERVAL
+
+    async def _housekeep(self, now: datetime) -> None:
+        try:
+            assert self._runtime_root is not None
+            await housekeeping.run_once(self._runtime_root, now,
+                                        current_runner=self._commands._runner if self._commands is not None else None,
+                                        commands=self._commands)
+        except Exception:
+            logger.exception("scheduler housekeeping failed; trying again on the next housekeeping pass")
 
     # --- Firing ---
 

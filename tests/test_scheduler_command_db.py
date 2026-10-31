@@ -297,16 +297,23 @@ def test_backstop_kills_a_stopped_runner_and_its_command_group(monkeypatch, tmp_
 
 def test_queued_command_starts_after_the_running_command_finishes(monkeypatch, tmp_path):
     async def test(env: ScheduleEnv):
-        sid = await _command(env, "sleep 1", overlap="queue")
+        release = tmp_path / "release-command"
+        # Keep the first command running until the queued state has been observed, even on slow ticks.
+        sid = await _command(env, "while [ ! -f release-command ]; do sleep 0.02; done", overlap="queue")
         first = await _fire(env, sid)
-        await _fire(env, sid)
-        rows = await _rows(env, sid)
-        assert {row["status"] for row in rows} == {"running", "queued"}
-        queued = next(row for row in rows if row["status"] == "queued")
-        rows = await _ended(env, sid, count=2)
-        assert {row["id"] for row in rows} == {first["id"], queued["id"]}
-        assert all(row["status"] == "succeeded" for row in rows)
-        assert next(row for row in rows if row["id"] == queued["id"])["runner_pid"]
+        try:
+            await _runner(env, first["id"])
+            await _fire(env, sid)
+            rows = await _rows(env, sid)
+            assert {row["status"] for row in rows} == {"running", "queued"}
+            queued = next(row for row in rows if row["status"] == "queued")
+            release.touch()
+            rows = await _ended(env, sid, count=2)
+            assert {row["id"] for row in rows} == {first["id"], queued["id"]}
+            assert all(row["status"] == "succeeded" for row in rows)
+            assert next(row for row in rows if row["id"] == queued["id"])["runner_pid"]
+        finally:
+            release.touch()
     run_scheduled(test, monkeypatch, tmp_path)
 
 
