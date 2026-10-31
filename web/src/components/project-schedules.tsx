@@ -1632,7 +1632,6 @@ export function RunHistory({ schedule, open, version, runId = "" }: {
   const [error, setError] = useState("");
   const [hideSkips, setHideSkips] = useState(!runId);
   const [status, setStatus] = useState<ScheduleRunStatus | "">("");
-  const [missingRun, setMissingRun] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const latest = useRef(0);
   /** How many runs are shown, so a refresh keeps the pages already loaded. */
@@ -1655,24 +1654,22 @@ export function RunHistory({ schedule, open, version, runId = "" }: {
 
   const load = useCallback(() => {
     const mine = ++latest.current;
-    setMissingRun(false);
     const fetchPage = async () => {
       const options = { skips, ...(status ? { status } : {}) } as const;
       let next = await fetchScheduleRuns(scheduleId, { limit: Math.min(shown.current, RUNS_MAX), ...options });
       const cursors = new Set<string>();
       while (runId && !status && !next.runs.some((run) => run.run_id === runId)
-        && next.next_before && next.runs.length < RUNS_MAX) {
+        && next.next_before) {
         if (mine !== latest.current) return;
         if (cursors.has(next.next_before)) throw new Error("The run history did not advance");
         cursors.add(next.next_before);
         const older = await fetchScheduleRuns(scheduleId, {
-          limit: Math.min(RUNS_PAGE, RUNS_MAX - next.runs.length), before: next.next_before, ...options,
+          limit: RUNS_PAGE, before: next.next_before, ...options,
         });
         next = { ...older, runs: [...next.runs, ...older.runs] };
       }
       if (mine !== latest.current) return;
       shown.current = Math.max(RUNS_PAGE, next.runs.length);
-      setMissingRun(Boolean(runId && !status && !next.runs.some((run) => run.run_id === runId)));
       return next;
     };
     fetchPage().then((next) => {
@@ -1708,6 +1705,8 @@ export function RunHistory({ schedule, open, version, runId = "" }: {
       .finally(() => setLoadingMore(false));
   };
 
+  const missingRun = Boolean(page && runId && !status && !page.next_before
+    && !page.runs.some((run) => run.run_id === runId));
   const skipCount = page ? page.routine_skips.skipped_gate + page.routine_skips.skipped_overlap : 0;
   return (
     <section aria-labelledby={`${id}-history`} className="space-y-2 border-t border-border pt-4">

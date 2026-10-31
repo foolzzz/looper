@@ -363,6 +363,24 @@ def test_command_run_history_deep_link_and_alerts(dashboard, width):
     page.get_by_role("region", name="Schedules", exact=True).scroll_into_view_if_needed()
     page.screenshot(path=str(artifacts / f"deadline-{width}.png"), full_page=True)
 
+    # An overlap notification can point to a running command behind hundreds of newer skips.
+    target_run = next(run for run in state["runs"] if run["run_id"] == target)
+    target_run.update(status="running", finished_at=None, duration_seconds=None, exit_code=None)
+    skip = next(run for run in state["runs"] if run["status"] == "skipped_overlap")
+    state["runs"] = [{**skip, "run_id": f"run-newer-skip-{index}"} for index in range(220)] + state["runs"]
+    state["run_page_size"] = 20
+    schedule["last_run"] = state["runs"][0]
+    page.goto(f"{base}/#projects/proj-example/schedules/{sid}/runs/{target}")
+    expect(history.locator(f'li[data-run-id="{target}"]').get_by_role("button", expanded=True)).to_be_visible()
+    expect(history.get_by_label("Run log", exact=True)).to_contain_text(log.decode().strip())
+    expect(history.get_by_text("This run is no longer kept", exact=True)).to_have_count(0)
+    page.screenshot(path=str(artifacts / f"older-linked-run-{width}.png"))
+
+    page.goto(f"{base}/#projects/proj-example/schedules/{sid}/runs/run-gone")
+    expect(history.get_by_text("This run is no longer kept", exact=True)).to_be_visible()
+    expect(history.locator("li[data-run-id]")).to_have_count(len(state["runs"]))
+    expect(history.get_by_role("button", name="Show older runs", exact=True)).to_have_count(0)
+
 
 @pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "narrow"])
 def test_command_form_create_edit_and_agent_regression(tmp_path, staged_dashboard_dir, width):

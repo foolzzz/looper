@@ -453,16 +453,41 @@ describe("command run history", () => {
     expect(container.textContent).toContain("No runs in the last 24 h");
   });
 
-  it("stops looking for a linked run after 200 records", async () => {
-    let count = 0;
-    stub(() => {
-      const rows = Array.from({ length: 20 }, () => run({ run_id: `srun-${++count}` }));
-      return respond(rows, rows.at(-1)!.run_id);
+  it.each([true, false])("searches past 200 runs until the target is found or history is exhausted (retained: %s)", async (retained) => {
+    const rows = Array.from({ length: 261 }, (_, index) => run({ run_id: `srun-${index}`, status: "skipped_overlap" }));
+    if (retained) rows[220] = run({ run_id: "srun-target", status: "running", finished_at: null });
+    stub((path, body) => {
+      if (path !== "schedule_admin/runs") return;
+      const start = body.before ? rows.findIndex((row) => row.run_id === body.before) + 1 : 0;
+      const end = start + Number(body.limit);
+      return respond(rows.slice(start, end), end < rows.length ? rows[end - 1].run_id : null);
     });
-    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} runId="srun-gone" />));
-    expect(count).toBe(200);
-    expect(requests).toHaveLength(10);
-    expect(container.textContent).toContain("This run is no longer kept");
+    let resume!: () => void;
+    const pending = new Promise<void>((resolve) => { resume = resolve; });
+    const base = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/runs") && JSON.parse(String(init?.body)).before === "srun-199") await pending;
+      return base(url, init);
+    });
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} runId="srun-target" />));
+    try {
+      expect(container.textContent).not.toContain("This run is no longer kept");
+    } finally {
+      await act(async () => resume());
+    }
+    const calls = requests.filter((request) => request.path === "schedule_admin/runs");
+    expect(calls).toHaveLength(retained ? 12 : 14);
+    expect(calls.every(({ body }) => body.skips === "show" && Number(body.limit) > 0 && Number(body.limit) <= 200)).toBe(true);
+    if (retained) {
+      expect(container.querySelector('[data-run-id="srun-target"] button')?.getAttribute("aria-expanded")).toBe("true");
+      expect(container.textContent).toContain("fresh tail");
+      expect(container.textContent).not.toContain("This run is no longer kept");
+      expect(button("Show older runs")).toBeDefined();
+    } else {
+      expect(container.querySelectorAll("li[data-run-id]")).toHaveLength(rows.length);
+      expect(container.textContent).toContain("This run is no longer kept");
+      expect(button("Show older runs")).toBeUndefined();
+    }
   });
 
   it("shows the API reason when a log has been removed", async () => {
