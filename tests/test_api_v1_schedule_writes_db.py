@@ -1,5 +1,6 @@
 """Schedule writes use authenticated v1 dispatch, real core services and disposable PostgreSQL."""
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -51,7 +52,7 @@ async def _api(tmp_path, pool, *, scheduler=True):
     _, token = await api_clients.create("Schedule writes", pool=pool)
     bus = Bus()
     async with _serving(tmp_path) as server:
-        server._scheduler = Scheduler(bus=bus) if scheduler else None
+        server._scheduler = Scheduler(bus=bus) if scheduler is True else scheduler or None
         server._client_ops = ClientOps(Platform(bus=bus, task_router=server._task_router,
                                                scheduler=server._scheduler, runtime_root=tmp_path))
         async def call(action, body=None, *, client=False, session="one", method="POST"):
@@ -170,6 +171,100 @@ def test_client_enable_and_cap_raise_wait_for_confirmation_and_disable_clears_fi
             assert row["enabled"] and row["next_fire_at"] > datetime.now(timezone.utc)
             status, result = await call("update", {"schedule_id": sid, "fields": {"enabled": False}}, client=True)
             assert status == 200 and result["schedule"]["next_fire_at"] is None
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("kind,action,command,command_patch,work_dir,fence", [
+    ("agent", "enable", None, None, "", ""), ("agent", "run", None, None, "", ""),
+    ("command", "enable", "exit 0", None, "", "```"),
+    ("command", "enable", "exit 0", "printf '`updated`'\nexit 0", "", "```"),
+    ("command", "enable", "printf '`ok`'\nexit 0", None, "", "```"),
+    ("command", "run", "exit 0", None, "", "```"),
+    ("command", "run", "printf '`ok`'\nexit 0", None, "/srv/reports", "```"),
+    ("command", "enable", "exit 0\n# ````", None, "", "`````"),
+    ("command", "run", "exit 0\n# ````", None, "", "`````"),
+])
+def test_client_start_impact_describes_schedule_kind(tmp_path, monkeypatch, action, kind, command,
+                                                   command_patch, work_dir, fence):
+    async def run(pool):
+        _, sid = await _seed(pool, kind=kind, work_dir=work_dir,
+                             **({"command": command, "requirement": ""} if kind == "command" else {}))
+        subject = "schedule 'Hourly' in project 'Reports'"
+        async with _api(tmp_path, pool) as call:
+            fields = {"enabled": True, **({"command": command_patch} if command_patch else {})}
+            status, pending = await call("update" if action == "enable" else "run",
+                {"schedule_id": sid, **({"fields": fields} if action == "enable" else {})}, client=True)
+            assert status == 202, pending
+            if kind == "command":
+                fenced = f"\n{fence}\n{command_patch or command}\n{fence}\n"
+                expected = (f"Update {subject}: enabled: False → True. Enabling runs its shell command "
+                            f"{fenced} unattended at each fire, without an agent or model spend."
+                            if action == "enable" else
+                            f"Run {subject}'s shell command once now, without an agent or model spend: "
+                            f"{fenced} in {work_dir or 'the project directory'}. Its next fire stays.")
+            else:
+                expected = (f"Update {subject}: enabled: False → True. Enabling starts unattended scheduled tasks; "
+                            "raised or removed caps allow more spending." if action == "enable" else
+                            f"Run {subject} once now through its overlap check, spending within its caps. Its next fire stays.")
+            assert pending["impact"] == expected
+            assert not (await db_schedules.get_schedule(sid))["enabled"]
+            assert await pool.fetchval("SELECT count(*) FROM schedule_runs") == 0
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("action", ["enable", "run"])
+@pytest.mark.parametrize("when", ["before-confirm", "before-lock"])
+@pytest.mark.parametrize("changed", [{"command": "exit 7"}, {"env": {"MODE": "apply"}}])
+def test_client_command_confirmation_is_bound_to_locked_configuration(tmp_path, monkeypatch, action, when, changed):
+    async def run(pool):
+        _, sid = await _seed(pool, kind="command", command="exit 0", requirement="", work_dir=str(tmp_path))
+        scheduler = Scheduler(bus=Bus(), runtime_root=tmp_path)
+        scheduler._commands.prepare()
+        try:
+            async with _api(tmp_path, pool, scheduler=scheduler) as call:
+                body = {"schedule_id": sid, **({"fields": {"enabled": True}} if action == "enable" else {})}
+                operation = "update" if action == "enable" else "run"
+                status, pending = await call(operation, body, client=True)
+                assert status == 202, pending
+                assert "\n```\nexit 0\n```\n" in pending["impact"]
+                if when == "before-lock":
+                    lock = db_schedules.lock_schedule
+
+                    async def change_before_lock(conn, schedule_id):
+                        monkeypatch.setattr(db_schedules, "lock_schedule", lock)
+                        assert (await call("update", {"schedule_id": sid, "fields": changed}))[0] == 200
+                        return await lock(conn, schedule_id)
+
+                    monkeypatch.setattr(db_schedules, "lock_schedule", change_before_lock)
+                else:
+                    assert (await call("update", {"schedule_id": sid, "fields": changed}))[0] == 200
+
+                status, refused = await call("/api/v1/confirm", {"confirmation_id": pending["confirmation_id"]}, client=True)
+                assert status == 409 and refused["error"]["code"] == "conflict", refused
+                assert "confirm" in refused["error"]["message"].lower()
+                assert not (await db_schedules.get_schedule(sid))["enabled"]
+                assert await pool.fetchval("SELECT count(*) FROM schedule_runs") == 0
+
+                status, fresh = await call(operation, body, client=True)
+                assert status == 202, fresh
+                assert f"\n```\n{changed.get('command', 'exit 0')}\n```\n" in fresh["impact"]
+                status, done = await call("/api/v1/confirm", {"confirmation_id": fresh["confirmation_id"]}, client=True)
+                assert status == 200, done
+                if action == "enable":
+                    assert (await db_schedules.get_schedule(sid))["enabled"]
+                else:
+                    run_id = done["run"]["run_id"]
+                    await asyncio.to_thread(scheduler._commands._owned[run_id].wait, timeout=10)
+                    await scheduler.tick()
+                    saved = await db_schedules.get_run(run_id)
+                    assert saved["exit_code"] == (7 if "command" in changed else 0)
+        finally:
+            await scheduler.stop()
+            for process in list(scheduler._commands._owned.values()):
+                if process.poll() is None:
+                    process.terminate()
+                await asyncio.to_thread(process.wait, timeout=10)
+
     run_db(run, monkeypatch, timeout=30)
 
 
