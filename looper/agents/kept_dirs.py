@@ -50,8 +50,9 @@ class KeeperRecord:
             values["state"] = KeeperState(values["state"])
             if values["end_reason"] is not None:
                 values["end_reason"] = EndReason(values["end_reason"])
-            if ((values["child_pid"] is None) != (values["child_started"] is None)
-                    or (values["state"] == KeeperState.RUNNING and values["child_pid"] is None)):
+            if (values["state"] != KeeperState.EXITED
+                    and ((values["child_pid"] is None) != (values["child_started"] is None)
+                         or (values["state"] == KeeperState.RUNNING and values["child_pid"] is None))):
                 return None
             return cls(**values)
         except (KeyError, TypeError, ValueError):

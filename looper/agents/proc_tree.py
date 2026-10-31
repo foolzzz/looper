@@ -229,7 +229,22 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
         _ending.add(process.pid)
 
     def members(table: Table, known: Tree) -> Tree:
+        if process.returncode is not None:
+            # A reaped pid in the listing belongs to someone else. Discover only the old group's survivors
+            # when its leader is absent, or follow members already observed before that pid was reused.
+            if process.pid not in table and process.pid not in exclude:
+                known = {**known, **{pid: pgid for pid, (_, pgid) in table.items() if pgid == process.pid}}
+            return _tree(process, table, known, skip=exclude | {process.pid})
         return _tree(process, table, known, skip=exclude)
+
+    async def signal_tree(tree: Tree, sig: int) -> None:
+        if process.returncode is not None:
+            table = await asyncio.to_thread(_snapshot)
+            # Never signal the reaped pid or its group directly. Old group members are safe only while
+            # their pid and group still match the snapshot; other observed subtrees retain their cleanup.
+            tree = {pid: pgid for pid, pgid in tree.items() if pid != process.pid
+                    and (pgid != process.pid or (pid in table and table[pid][1] == pgid))}
+        _signal(process, tree, sig)
 
     seen = dict(known)
     alive = dict(seen)
@@ -246,7 +261,7 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
                     logger.warning("%s: pid %s was reused; leaving it alone", label, process.pid)
                     alive = {}
                     return
-            _signal(process, alive, signal.SIGTERM)
+            await signal_tree(alive, signal.SIGTERM)
         deadline = time.monotonic() + TERM_GRACE_SEC
         while alive and time.monotonic() < deadline:
             await asyncio.sleep(_POLL_SEC)
@@ -255,7 +270,7 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
                 seen.update(fresh)
                 if recorded is not None:
                     await _record_tree(process.pid, seen)
-                _signal(process, fresh, signal.SIGTERM)
+                await signal_tree(fresh, signal.SIGTERM)
     except BaseException:
         alive = members(_snapshot(), seen)
         raise
@@ -265,7 +280,7 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
                     and await asyncio.to_thread(_start_time, process.pid) != process.started):
                 logger.warning("%s: pid %s was reused; leaving it alone", label, process.pid)
             else:
-                _signal(process, alive, signal.SIGKILL)
+                await signal_tree(alive, signal.SIGKILL)
                 # SIGKILL being sent (or the agent being reaped) does not mean its descendants have exited.
                 # Wait for the processes we signalled, without expanding the tree or signalling it again.
                 pending = dict(alive)

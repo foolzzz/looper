@@ -1070,10 +1070,13 @@ leaves a live keeper's child alone and ends a dead keeper's child.
 Startup then scans `<runtime root>/.local/runs/*`, even when keepers are
 switched off. No run is adoptable yet. A live keeper is ended with its child
 (`not_adoptable`), then its directory is removed. A dead keeper or an `exited`
-state releases its directory (`keeper_dead`). Missing or invalid `keeper.json`
-releases the directory with a warning (`bad_files`): no process can safely be
-identified from it, so an unidentified live keeper's orphan timer ends its
-child within 30 minutes. Non-directory entries are ignored. Keeper identities
+state releases its directory (`keeper_dead`). With missing or invalid
+`keeper.json`, a matching spawn record identifies the keeper and its child;
+they are ended before the directory is removed (`bad_files`). Without such a
+record, the directory is left in place and an error is logged: the keeper
+cannot be identified safely, so its orphan timer ends its child within 30
+minutes, and the next startup scans the directory again. An unidentified live
+keeper does not fail startup. Non-directory entries are ignored. Keeper identities
 are checked in one process snapshot before any directory is removed, and
 checked again before each signal. Unknown liveness refuses startup without
 deleting any run directory, so steps cannot be dispatched again while their

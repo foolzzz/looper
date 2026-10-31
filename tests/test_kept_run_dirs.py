@@ -96,6 +96,32 @@ def test_dead_keepers_directories_are_released(tmp_path, monkeypatch, caplog, le
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("argv", [["/usr/bin/true"], ["/nonexistent-keeper-child"]], ids=["exited", "start_failed"])
+def test_exited_keeper_without_a_child_start_time_is_released(tmp_path, argv):
+    async def run():
+        directory = tmp_path / keeper.RUNS_DIR / "worker-short-lived"
+        directory.mkdir(parents=True, mode=0o700)
+        process = await asyncio.create_subprocess_exec(
+            *keeper.boot_argv(sys.executable, ROOT, directory, tmp_path, str(tmp_path), argv),
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
+        )
+        try:
+            assert await asyncio.wait_for(process.wait(), 10) == (0 if argv == ["/usr/bin/true"] else 3)
+            state = keeper.read_json(directory / keeper.STATE)
+            assert state["state"] == "exited" and state["child_started"] is None
+            assert kept_dirs.KeeperRecord.read(directory / keeper.STATE) is not None
+            scan = await kept_dirs.scan_at_start(tmp_path)
+            assert scan.released == 1 and not scan.ended and scan.unidentified == 0
+            assert not directory.exists()
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await asyncio.wait_for(process.wait(), 5)
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("missing_state", [False, True], ids=["corrupt", "missing"])
 def test_unreadable_state_ends_the_keeper_and_child_from_the_spawn_record(tmp_path, missing_state):
     async def run():
