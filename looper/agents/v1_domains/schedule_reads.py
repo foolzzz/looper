@@ -83,11 +83,12 @@ NOTIFICATION = _object({
     "status": _enum("sent", "failed", "dashboard")})
 LISTED_RUN = _object({
     **dict.fromkeys(("run_id", "status", "trigger"), _STR),
-    **dict.fromkeys(("at", "task_id", "summary"), _NULL_STR), "cost_usd": _NULL_NUMBER, "firings": _INT},
-    ["run_id", "status", "trigger", "at", "task_id", "summary", "cost_usd"])
+    **dict.fromkeys(("at", "task_id", "summary"), _NULL_STR), "cost_usd": _NULL_NUMBER, "firings": _INT,
+    "exit_code": _NULL_INT},
+    ["run_id", "status", "trigger", "at", "task_id", "summary", "cost_usd", "exit_code"])
 LISTED_SCHEDULE = _object({
     **dict.fromkeys(("schedule_id", "name", "project", "cron", "timezone", "description"), _STR),
-    "user_gates": _enum("off", "on"),
+    "user_gates": _enum("off", "on"), "kind": _enum("agent", "command"),
     "enabled": _BOOL, "next_fire_at": _NULL_STR, "consecutive_failures": _INT, "last_run": _nullable(LISTED_RUN)})
 RESULTS = {
     "schedules.list": _object({"schedules": _array(LISTED_SCHEDULE)}),

@@ -50,6 +50,36 @@ def _with(chat: _Chat, **platform: Any) -> _Chat:
 # --- create ---
 
 
+def test_changing_a_command_schedule_shows_the_command_and_alert_settings_before_and_after(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def test(pool: Any) -> None:
+        await _project(pool, work_dir=str(tmp_path))
+        (tmp_path / "pull.env").write_text("TOKEN=synthetic-value\n")
+        chat = _Chat(tmp_path)
+        (created,) = await chat.say("创建脚本定时任务", (TOOL, {
+            "action": "create", "project": "calc", "fields": {
+                "name": "pull", "kind": "command", "command": "old", "cron": "* * * * *"}}))
+        assert created["status"] == "ok", created
+        (changed,) = await chat.say("修改命令和告警", (TOOL, {
+            "action": "update", "schedule": "pull", "fields": {
+                "command": "new", "env": {"A": "hidden", "B": "hidden"}, "env_file": str(tmp_path / "pull.env"),
+                "success_deadline": "08:00", "alert_failures_after": 1,
+                "alert_stale_after_seconds": 600, "alert_overlap_after": 0}}))
+        assert changed["status"] == "ok", changed
+        (block,) = chat.turns[-1].blocks
+        assert "- 命令：`old` → `new`" in block
+        assert "- 环境变量：没有 → A、B" in block
+        assert f"- 环境文件：没有 → {tmp_path / 'pull.env'}" in block
+        assert "- 最晚成功时间：不设 → 08:00" in block
+        assert "连续失败 1 次、长时间没成功 600 秒、连续跳过 0 次（0 为不发）" in block
+        assert "hidden" not in block
+        assert set(changed["result"]["changed"]) == {
+            "command", "env", "env_file", "success_deadline", "alert_policy"}
+
+    run_db(test, monkeypatch)
+
+
 def test_a_schedule_is_created_disabled_with_its_configuration_and_enabled_only_in_a_later_turn(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:

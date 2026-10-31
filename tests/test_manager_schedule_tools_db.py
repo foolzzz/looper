@@ -28,6 +28,63 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 TOOL = "looper_schedules"
 
 
+@pytest.mark.parametrize("action", ["enable", "run"])
+def test_command_schedule_creation_and_start_show_the_command_before_confirmation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, action: str,
+) -> None:
+    async def test(pool: Any) -> None:
+        await _project(pool, work_dir=str(tmp_path))
+        chat = _Chat(tmp_path)
+        (tmp_path / "pull.env").write_text("TOKEN=synthetic-value\n")
+        command = "bash scripts/pull.sh" + (" # " + "long command " * 30 + "end" if action == "run" else "")
+        created, refused = await chat.say("每分钟运行脚本", (TOOL, {
+            "action": "create", "project": "calc", "fields": {
+                "name": "pull", "kind": "command", "command": command, "cron": "* * * * *",
+                "overlap": "skip", "run_timeout_seconds": 180, "env": {"MODE": "private-value"},
+                "env_file": str(tmp_path / "pull.env"), "success_deadline": "09:00"}}),
+            (TOOL, {"action": action, "schedule": "pull"}))
+        assert created["status"] == "ok", created
+        assert created["result"]["schedule"]["kind"] == "command"
+        sid = created["result"]["schedule"]["schedule_id"]
+        assert await _starting_state(pool, sid) == (False, 0)
+        assert _error(refused) == "conflict", refused
+        (block,) = chat.turns[-1].blocks
+        for text in ("- 命令：`bash scripts/pull.sh", "不花模型额度", "- 环境变量：MODE", f"- 环境文件：{tmp_path / 'pull.env'}",
+                     "- 最晚成功时间：09:00", "- 告警阈值：连续失败 3 次、长时间没成功按默认、连续跳过 10 次（0 为不发）"):
+            assert text in block
+        for text in ("需求", "前置检查", "用户确认", "花费上限", "Profile", "任务并发", "private-value"):
+            assert text not in block
+        if action == "run":
+            assert command not in block  # The configuration is a summary; approval below must show all of it.
+
+        (asked,) = await chat.say("启用或立即运行", (TOOL, {"action": action, "schedule": "pull"}))
+        assert asked["status"] == "needs_confirmation", asked
+        assert await _starting_state(pool, sid) == (False, 0)
+        (block,) = chat.turns[-1].blocks
+        assert f"- 命令：`{command}`" in block
+        assert "不花模型额度" in block
+        assert "- 目录：" in block
+        assert ("- 接下来 3 次：" in block) is (action == "enable")
+        if action == "enable":
+            enabled = await _confirm(chat, asked)
+            assert enabled["status"] == "ok", enabled
+            assert await _starting_state(pool, sid) == (True, 0)
+
+        # Read a command's stored exit result through the compact list and get projections.
+        from looper.db import schedules as db_schedules
+
+        run_id = await _run_of(pool, sid, "failed")
+        await db_schedules.update_run(pool, run_id, exit_code=3)
+        (got,) = await chat.say("查看 pull", (TOOL, {"action": "get", "schedule": "pull"}))
+        assert got["result"]["schedule"]["kind"] == "command"
+        assert got["result"]["latest_runs"][0]["exit_code"] == 3
+        (listed,) = await chat.say("列出定时任务", (TOOL, {"action": "list"}))
+        schedule = listed["result"]["schedules"][0]
+        assert (schedule["kind"], schedule["last_run"]["exit_code"]) == ("command", 3)
+
+    run_db(test, monkeypatch)
+
+
 async def _confirm(chat: _Chat, asked: dict[str, Any]) -> dict[str, Any]:
     """The user confirms in the very next message, whose note names what will run."""
     assert asked["status"] == "needs_confirmation", asked

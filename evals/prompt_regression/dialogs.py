@@ -993,6 +993,7 @@ def _created_without_a_mode(look: Look) -> str | None:
     return f"the Manager chose workspace_mode {chose[0]!r}, which the user never asked for" if chose else None
 # The schedules dialogs that create, change and run them.
 DEPS = "eval-deps"
+PULL = "pull"
 LIGHT = "eval/light"  # a lower-effort profile for a repetitive schedule's Planner
 OPS = "eval-ops"
 
@@ -1011,6 +1012,8 @@ def _schedule_created_disabled(look: Look) -> str | None:
     schedule = _named(look, DEPS)
     if schedule is None:
         return f"no schedule {DEPS}"
+    if schedule["kind"] != "agent":
+        return f"{DEPS} is {schedule['kind']}, not an agent schedule"
     if schedule["description"] != "Weekdays at 09:00 (Asia/Shanghai)":
         return f"{DEPS} runs {schedule['description']}, not on weekdays at 09:00 in Asia/Shanghai"
     if schedule["enabled"]:
@@ -1018,6 +1021,28 @@ def _schedule_created_disabled(look: Look) -> str | None:
     if schedule["project_name"] != PROJECT or schedule["created_via"] != "manager":
         return f"{DEPS} is in {schedule['project_name']}, made by {schedule['created_via']}"
     return None if "要启用吗" in look.reply else "the reply lacks the schedule's configuration and the question"
+
+
+def _command_schedule_created_disabled(look: Look) -> str | None:
+    schedule = _named(look, PULL)
+    if schedule is None:
+        return f"no schedule {PULL}"
+    fields = {"kind": "command", "command": "bash scripts/pull.sh", "cron": "* * * * *",
+              "overlap": "skip", "run_timeout_seconds": 180}
+    if any(schedule[key] != value for key, value in fields.items()) or schedule["requirement"]:
+        return f"{PULL} does not run the requested command with the requested rule and bounds"
+    if schedule["enabled"] or schedule["project_name"] != PROJECT or schedule["created_via"] != "manager":
+        return f"{PULL} was enabled early or was not created by the Manager in {PROJECT}"
+    if schedule["work_dir"]:
+        return f"{PULL} does not use the project's default directory"
+    writes = _writes(look)
+    if len(writes) != 1 or writes[0]["tool"] != "looper_schedules" or writes[0]["arguments"].get("action") != "create":
+        return "expected exactly one looper_schedules create"
+    given = writes[0]["arguments"].get("fields", {})
+    if any(given.get(key) != value for key, value in fields.items()) or "requirement" in given:
+        return "the create call lacks command fields or supplies an agent requirement"
+    return (None if all(text in look.reply for text in ("- 定时任务：", "`bash scripts/pull.sh`", "要启用吗"))
+            else "the reply lacks the command configuration and the question whether to enable it")
 
 
 def _planner_profile_names(look: Look, schedule: dict[str, Any]) -> dict[str, str]:
@@ -1067,20 +1092,20 @@ def _schedule_moved_keeps_its_planner(look: Look) -> str | None:
     return None if chosen == {"planner": LIGHT} else f"{DEPS}'s Agent Profiles became {chosen}"
 
 
-def _schedule_enable_asked(look: Look) -> str | None:
+def _schedule_enable_asked(look: Look, name: str = DEPS) -> str | None:
     """The user said to enable it: the call waits for their next message, and nothing is enabled yet."""
-    schedule = _named(look, DEPS)
+    schedule = _named(look, name)
     if schedule is None or schedule["enabled"]:
-        return f"{DEPS} is missing or was enabled before the user confirmed"
+        return f"{name} is missing or was enabled before the user confirmed"
     if not _writes(look, status="needs_confirmation", tool="looper_schedules"):
         return "enabling the schedule does not wait for the user's confirmation"
     return _raw_json(look.reply)
 
 
-def _schedule_enabled_on_confirmation(look: Look) -> str | None:
-    schedule = _named(look, DEPS)
+def _schedule_enabled_on_confirmation(look: Look, name: str = DEPS) -> str | None:
+    schedule = _named(look, name)
     if schedule is None or not schedule["enabled"]:
-        return f"{DEPS} is not enabled"
+        return f"{name} is not enabled"
     confirmed = [a for a in _writes(look, status="ok", tool="looper_schedules") if a["confirmation_id"]]
     return _raw_json(look.reply) if confirmed else "it was enabled without a confirmed call"
 
@@ -1670,6 +1695,18 @@ DIALOGS: tuple[Dialog, ...] = (
                 "requirement": "检查依赖有没有新版本，把结果写进 deps.md。"}}),)),
         Say("启用。", _schedule_enable_asked, (("looper_schedules", {"action": "enable", "schedule": DEPS}),)),
         Say("确认。", _schedule_enabled_on_confirmation, (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
+    )),
+    Dialog("schedule_command_create", (
+        Say(f"在 {PROJECT} 项目里建一个命令型定时任务 pull：每分钟运行 `bash scripts/pull.sh`，"
+            "上一次没跑完就跳过这一次，每次最多跑 3 分钟。不需要 agent，目录用项目默认的。",
+            _command_schedule_created_disabled,
+            (("looper_schedules", {"action": "create", "project": PROJECT, "fields": {
+                "name": PULL, "kind": "command", "command": "bash scripts/pull.sh", "cron": "* * * * *",
+                "overlap": "skip", "run_timeout_seconds": 180}}),)),
+        Say("启用。", lambda look: _schedule_enable_asked(look, PULL),
+            (("looper_schedules", {"action": "enable", "schedule": PULL}),)),
+        Say("确认。", lambda look: _schedule_enabled_on_confirmation(look, PULL),
+            (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
     )),
     Dialog("schedule_template_create", (
         Say(f"在 {PROJECT} 项目里建一个定时任务 {DEPS}：每个工作日早上 9 点（Asia/Shanghai 时区），"
