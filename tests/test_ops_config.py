@@ -121,6 +121,42 @@ def test_sample_dsn_keeps_the_existing_database_name():
     assert ops.SAMPLE_DATABASE_URL == "postgresql://localhost:5432/loopx"
 
 
+def test_keeper_defaults_off(tmp_path, dotenv):
+    config = _load(tmp_path, dotenv)
+    assert config.keeper_mode is ops.KeeperMode.OFF
+    assert "keeper_mode" not in config.sources
+    assert "agent_host" not in tomllib.loads(ops.render(config))
+
+
+@pytest.mark.parametrize("mode", ["off", "on"])
+def test_keeper_file_setting_round_trips(tmp_path, dotenv, mode):
+    _file(tmp_path, f'[agent_host]\nkeeper = "{mode}"\n')
+    config = _load(tmp_path, dotenv)
+    assert config.keeper_mode is ops.KeeperMode(mode)
+    assert config.sources["keeper_mode"].origin is Origin.FILE
+    table = tomllib.loads(ops.render(config))
+    if mode == "on":
+        assert table["agent_host"] == {"keeper": "on"}
+    else:
+        assert "agent_host" not in table
+
+
+@pytest.mark.parametrize("value", ['"yes"', 'true', '1', '[]', '" ON "'])
+def test_keeper_rejects_values_other_than_off_or_on(tmp_path, dotenv, value):
+    _file(tmp_path, f"[agent_host]\nkeeper = {value}\n")
+    with pytest.raises(OpsConfigError, match=r"agent_host\.keeper.*must be off or on"):
+        _load(tmp_path, dotenv)
+
+
+def test_keeper_is_file_only(tmp_path, dotenv, monkeypatch):
+    setting = next(setting for setting in ops.SETTINGS if setting.name == "keeper_mode")
+    assert setting.variables == ()
+    monkeypatch.setenv("LOOPER_KEEPER_MODE", "on")
+    monkeypatch.setenv("LOOPX_KEEPER_MODE", "on")
+    dotenv.write_text("LOOPER_KEEPER_MODE=on\nLOOPX_KEEPER_MODE=on\n")
+    assert _load(tmp_path, dotenv).keeper_mode is ops.KeeperMode.OFF
+
+
 @pytest.mark.parametrize("origin", ["environment", ".env"])
 @pytest.mark.parametrize(("name", "value"), [
     ("LOOPER_DATABASE_URL", f"mysql://{SECRET}@host/db"),

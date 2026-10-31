@@ -71,3 +71,92 @@ def test_injected_runner_startup_failure_stops_owners_before_runner_and_database
         asyncio.run(serve._run_agent_system(ops=None, runtime_root=tmp_path, work_dir=tmp_path,
                                            runner_supervisor=runner))
     assert stopped == ["fleet", "agents", "runner", "database"]
+
+
+def test_lost_lock_fences_before_ending_owned_agents(monkeypatch):
+    from looper.agents import proc_tree
+    from looper.db import connection
+
+    async def run():
+        events = []
+        monkeypatch.setattr(proc_tree, "fence_spawns", lambda: events.append("spawns fenced"))
+        monkeypatch.setattr(connection, "fence", lambda: events.append("fenced"))
+        async def end_owned(*, deadline):
+            assert deadline == 10
+            events.append("agents ended")
+        monkeypatch.setattr(proc_tree, "end_owned", end_owned)
+        fence = serve.Fence(exit_now=lambda code: events.append(code))
+        fence.http_server = SimpleNamespace(close_listener=lambda: events.append("listener closed"))
+        fence.lost("connection lost during shutdown")
+        assert events == ["spawns fenced", "fenced", "listener closed"]
+        assert fence._backstop is not None
+        fence.exit(1)  # A normal shutdown deadline that fires after loss still exits 75.
+        fence.lost("second notification")
+        await fence._ending
+        fence._backstop.cancel()
+        assert events == ["spawns fenced", "fenced", "listener closed", 75, "agents ended", 75]
+    asyncio.run(run())
+
+
+def test_lost_lock_before_http_still_exits_if_agent_cleanup_fails(monkeypatch):
+    from looper.agents import proc_tree
+    from looper.db import connection
+
+    async def run():
+        exits = []
+        monkeypatch.setattr(proc_tree, "_spawns_fenced", False)
+        monkeypatch.setattr(connection, "fence", lambda: None)
+        async def end_owned(*, deadline):
+            raise OSError("cannot read processes")
+        monkeypatch.setattr(proc_tree, "end_owned", end_owned)
+        fence = serve.Fence(exit_now=exits.append)
+        fence.lost("lost during startup")
+        with pytest.raises(OSError):
+            await fence._ending
+        fence._backstop.cancel()
+        assert exits == [75]
+    asyncio.run(run())
+
+
+def test_startup_failure_closes_the_pool_before_releasing_the_lease(monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+    from looper import db
+    from looper.ops_config import KeeperMode, OpsConfig
+    from looper.agents import operator_notes
+
+    async def run():
+        events = []
+        async def closed():
+            events.append("pool closed")
+        async def released():
+            events.append("lease released")
+        lease = SimpleNamespace(release=released)
+        monkeypatch.setattr(operator_notes, "_root", str(tmp_path))
+        monkeypatch.setattr(serve.self_check, "check_database", AsyncMock(return_value=SimpleNamespace(status="ok")))
+        monkeypatch.setattr(serve.ControlPlaneLease, "acquire", AsyncMock(return_value=lease))
+        monkeypatch.setattr(db, "init_pool", AsyncMock(return_value=object()))
+        monkeypatch.setattr(db, "close_pool", closed)
+        monkeypatch.setattr(serve, "_back_up_before_schema_change", AsyncMock(side_effect=OSError("startup failed")))
+        ops = OpsConfig(runtime_root=tmp_path, path=tmp_path / "ops.toml", keeper_mode=KeeperMode.ON)
+        with pytest.raises(OSError, match="startup failed"):
+            await serve._run_agent_system_owned(ops=ops, runtime_root=tmp_path, work_dir=tmp_path)
+        assert events == ["pool closed", "lease released"]
+    asyncio.run(run())
+
+
+def test_a_failed_database_check_runs_before_lock_acquisition(monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+    from looper.ops_config import KeeperMode, OpsConfig
+    from looper.agents import operator_notes
+
+    async def run():
+        monkeypatch.setattr(operator_notes, "_root", str(tmp_path))
+        check = serve.self_check.Check("database", "Database", "fail", "unavailable")
+        monkeypatch.setattr(serve.self_check, "check_database", AsyncMock(return_value=check))
+        acquire = AsyncMock()
+        monkeypatch.setattr(serve.ControlPlaneLease, "acquire", acquire)
+        ops = OpsConfig(runtime_root=tmp_path, path=tmp_path / "ops.toml", keeper_mode=KeeperMode.ON)
+        with pytest.raises(serve.StartupCheckFailed, match="unavailable"):
+            await serve._run_agent_system_owned(ops=ops, runtime_root=tmp_path, work_dir=tmp_path)
+        acquire.assert_not_awaited()
+    asyncio.run(run())
