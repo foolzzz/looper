@@ -285,6 +285,7 @@ def test_install_reloads_probe_and_removes_it_when_unconfigured(tmp_path, checko
     root = tmp_path / "runtime"
     _configure_probe(root)
     for _ in range(2):
+        fake.calls.clear()
         assert _install(monkeypatch, host, root, "--env", "MY_BOT_TOKEN") == 0
         assert all(path.is_file() and _mode(path) == 0o600 for path in _probe_paths(host))
         assert all(b"sk-test" not in path.read_bytes() and b"MY_BOT_TOKEN" not in path.read_bytes()
@@ -294,11 +295,15 @@ def test_install_reloads_probe_and_removes_it_when_unconfigured(tmp_path, checko
         assert "oc_probechat123" not in out
         if system == "Darwin":
             assert fake.probe.loaded and fake.probe.early_bootstraps == 0
-            assert fake.commands().index("bootstrap") < next(
-                i for i, argv in enumerate(fake.calls) if argv[-1].endswith(f"{LABEL}.probe.plist"))
+            starts = [argv[-1] for argv in fake.calls if argv[1] == "bootstrap"]
+            assert starts == [str(service.Launchd(host, f"{LABEL}.probe").unit_path),
+                              str(service.Launchd(host, LABEL).unit_path)]
         else:
             assert fake.probe_active
-            assert fake.commands()[-2:] == ["daemon-reload", f"enable --now {LABEL}-probe.timer"]
+            commands = fake.commands()
+            probe_start = commands.index(f"enable --now {LABEL}-probe.timer")
+            assert commands[probe_start - 1:probe_start + 1] == ["daemon-reload", f"enable --now {LABEL}-probe.timer"]
+            assert probe_start < commands.index(f"enable --now {LABEL}.service")
     _write_ops(root)
     assert _install(monkeypatch, host, root) == 0
     assert not any(path.exists() for path in _probe_paths(host))
@@ -313,24 +318,69 @@ def test_install_reloads_probe_and_removes_it_when_unconfigured(tmp_path, checko
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
 @pytest.mark.parametrize("failure", ["busy", "timeout"])
 @pytest.mark.parametrize("configured", [False, True])
-def test_failed_reinstall_keeps_old_probe(tmp_path, checkout, monkeypatch, capsys, system, failure, configured):
+@pytest.mark.parametrize("explicit_port", [None, "9000"], ids=["file", "flag"])
+def test_failed_reinstall_syncs_probe_before_start(
+    tmp_path, checkout, monkeypatch, capsys, system, failure, configured, explicit_port,
+):
+    from looper.agents import probe
+
     fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
     host = _host(tmp_path, checkout, fake, system=system)
-    _configure_probe(tmp_path / "old-runtime")
-    assert _install(monkeypatch, host, tmp_path / "old-runtime") == 0
+    old_root = tmp_path / "old-runtime"
+    _configure_probe(old_root)
+    old_config = old_root / ops_config.FILE
+    old_config.write_text(old_config.read_text().replace('[server]\n', '[server]\nport = 19001\n'))
+    assert _install(monkeypatch, host, old_root, port=None) == 0
+    operator_auth.ensure_token(old_root)
     assert all(path.is_file() for path in _probe_paths(host))
     assert fake.probe.loaded if system == "Darwin" else fake.probe_active
 
-    units = {path: path.read_bytes() for path in _probe_paths(host)}
     root = tmp_path / "new-runtime"
     if configured:
         _configure_probe(root)
-    host.port_in_use = lambda port, address="127.0.0.1": failure == "busy"
+    else:
+        _write_ops(root)
+    config = root / ops_config.FILE
+    config.write_text(config.read_text().replace('[server]\n', '[server]\nport = 19002\n'))
+    custom = config.with_name("B.toml")
+    config.rename(custom)
+    token = operator_auth.ensure_token(root)
+    port = int(explicit_port) if explicit_port else 19002
+
+    def check_target():
+        if not configured:
+            assert not any(path.exists() for path in _probe_paths(host))
+            return
+        argv = _probe_argv(host)
+        assert argv[argv.index("--config") + 1] == str(custom)
+        assert argv[argv.index("--runtime-root") + 1] == str(root)
+        assert service._given_port(argv) == (int(explicit_port) if explicit_port else None)
+        received = []
+        with monkeypatch.context() as patch:
+            patch.setattr(probe, "sample", lambda port, token, host: received.append((port, token))
+                          or (probe.Verdict.OK, "ok"))
+            assert _looper(patch, host, *argv[argv.index("service") + 1:]) == 0
+        assert received == [(port, token)]
+
+    # The new unit can start at login even if this attempt fails its port check.
+    # Its probe must already target the new unit before any start is attempted.
+    def port_in_use(port, address="127.0.0.1"):
+        check_target()
+        return failure == "busy"
+
+    host.port_in_use = port_in_use
     host.get_status = lambda port, token, address="127.0.0.1": None
-    assert _install(monkeypatch, host, root, "--timeout", "2") == 1
-    assert ("port 9876 is in use" if failure == "busy" else "within 2 s") in capsys.readouterr().err
-    assert all(path.read_bytes() == data for path, data in units.items())
-    assert fake.probe.loaded if system == "Darwin" else fake.probe_active
+    assert _install(monkeypatch, host, root, "--config", str(custom), "--timeout", "2", port=explicit_port) == 1
+    assert (f"port {port} is in use" if failure == "busy" else "within 2 s") in capsys.readouterr().err
+    assert fake.serving == (failure == "timeout")
+    check_target()
+    assert (fake.probe.loaded if system == "Darwin" else fake.probe_active) == configured
+    host.port_in_use = lambda port, address="127.0.0.1": False
+    received = []
+    host.get_status = lambda port, token, address="127.0.0.1": received.append(port) or {"status": "running"}
+    assert _looper(monkeypatch, host, "restart", "--label", LABEL) == 0
+    assert received == [port]
+    check_target()
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
@@ -541,6 +591,48 @@ def test_probe_follows_ops_port_changes_after_restart(tmp_path, checkout, monkey
     argv = _probe_argv(host)
     assert _looper(monkeypatch, host, *argv[argv.index("service") + 1:]) == 0
     assert received == [initial_port or ops_config.DEFAULT_PORT, 9889]
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+@pytest.mark.parametrize("stale_setting", ["config", "runtime-root", "both"])
+def test_restart_retargets_existing_probe(tmp_path, checkout, monkeypatch, system, stale_setting):
+    from looper.agents import probe
+
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    config = root / ops_config.FILE
+    config.write_text(config.read_text().replace('[server]\n', '[server]\nport = 19002\n'))
+    assert _install(monkeypatch, host, root, port=None) == 0
+    token = operator_auth.ensure_token(root)
+
+    old_root = tmp_path / "old-runtime"
+    _configure_probe(old_root)
+    operator_auth.ensure_token(old_root)
+    old_config = old_root / ops_config.FILE
+    old_config.write_text(old_config.read_text().replace('[server]\n', '[server]\nport = 19001\n'))
+    # Reproduce an existing probe left behind by an older failed reinstall.
+    stale = service.build_probe_spec(
+        host, label=LABEL, port=None,
+        runtime_root=old_root if stale_setting in ("runtime-root", "both") else root,
+        config=old_config if stale_setting in ("config", "both") else config,
+    )
+    path = _probe_paths(host)[0]
+    path.write_bytes(service.render_probe_plist(stale) if system == "Darwin"
+                     else service.render_probe_systemd(stale)[0].encode())
+
+    assert _looper(monkeypatch, host, "restart", "--label", LABEL) == 0
+    argv = _probe_argv(host)
+    assert argv[argv.index("--config") + 1] == str(config)
+    assert argv[argv.index("--runtime-root") + 1] == str(root)
+    assert "--port" not in argv
+    received = []
+    monkeypatch.setattr(probe, "sample", lambda port, token, host: received.append((port, token))
+                        or (probe.Verdict.OK, "ok"))
+    assert _looper(monkeypatch, host, *argv[argv.index("service") + 1:]) == 0
+    assert received == [(19002, token)]
+    assert fake.probe.loaded if system == "Darwin" else fake.probe_active
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
@@ -823,14 +915,16 @@ def test_reinstall_updates_the_unit_after_launchd_has_let_go_of_the_old_job(
 
     assert _install(monkeypatch, host, tmp_path / "runtime") == 0
     first = plist_path.read_bytes()
-    assert fake.commands()[:2] == ["print", "bootstrap"] and _mode(plist_path) == 0o600
+    commands = [argv[1] for argv in fake.calls if argv[-1].endswith((f"/{LABEL}", f"/{LABEL}.plist"))]
+    assert commands[:2] == ["print", "bootstrap"] and _mode(plist_path) == 0o600
 
     fake.calls.clear()
     assert _install(monkeypatch, host, tmp_path / "runtime") == 0
 
     assert plist_path.read_bytes() == first and _mode(plist_path) == 0o600
     # bootout returns while launchd still lists the job; bootstrap waits until it is gone.
-    assert fake.commands()[:6] == ["print", "bootout", "print", "print", "print", "bootstrap"]
+    commands = [argv[1] for argv in fake.calls if argv[-1].endswith((f"/{LABEL}", f"/{LABEL}.plist"))]
+    assert commands[:6] == ["print", "bootout", "print", "print", "print", "bootstrap"]
     assert fake.early_bootstraps == 0 and fake.loaded
 
     assert _install(monkeypatch, host, tmp_path / "runtime", port="9877") == 0
