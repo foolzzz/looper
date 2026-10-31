@@ -16,6 +16,11 @@ from tests.db_support import DSN, fresh_connection, fresh_schema
 
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
 
+_COMMAND_RUN_DEFAULTS = {
+    "started_at": None, "exit_code": None, "exit_signal": None, "log_path": None, "log_bytes": None,
+    "log_truncated": False, "log_tail": None, "runner_pid": None, "runner_started": None,
+}
+
 
 def run(test):
     asyncio.run(asyncio.wait_for(test(), 90))
@@ -114,12 +119,13 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
             assert after["task_user_gate_messages"] == before["task_user_gate_messages"]
             assert after["task_user_gate_posts"][0] == {**before["task_user_gate_posts"][0], "channel": "telegram"}
             assert {r["name"] for r in before["schema_migrations"]} <= {r["name"] for r in after["schema_migrations"]}
+            assert {"schedule_user_gates", "command_schedules"} <= {r["name"] for r in after["schema_migrations"]}
             assert await conn.fetchval("SELECT planner_session_runtime FROM schedules") == "claude-code"
-            # The bridge predates execution snapshots; adding the column preserves every historical run field.
+            # Added snapshot and command metadata preserve every historical run field.
             runs = [dict(row) for row in after["schedule_runs"]]
             assert len(runs) == 1
             assert all(row.pop("execution_snapshot") is None for row in runs)
-            assert runs == before["schedule_runs"]
+            assert runs == [{**row, **_COMMAND_RUN_DEFAULTS} for row in before["schedule_runs"]]
             await connection.ensure_schema(fresh)
             assert await structure(conn) == await structure(fresh)
             await connection.ensure_schema(conn)
@@ -146,7 +152,7 @@ def test_released_bridge_preserves_execution_snapshot(snapshot_bridge_source, br
             assert await witness(conn) == before and await structure(conn) == shape
             await connection.ensure_schema(conn)
             after = await witness(conn)
-            assert after["schedule_runs"] == before["schedule_runs"]
+            assert after["schedule_runs"] == [{**row, **_COMMAND_RUN_DEFAULTS} for row in before["schedule_runs"]]
             assert json.loads(after["schedule_runs"][0]["execution_snapshot"]) == snapshot
             assert await conn.fetchval("SELECT version FROM registry_schema_version") == 4
             await connection.ensure_schema(fresh)

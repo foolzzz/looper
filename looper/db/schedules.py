@@ -25,23 +25,28 @@ from . import agent_sessions, tasks
 # The schedule fields a request sets (looper/agents/schedules.py validates them).
 FIELDS = ("name", "cron", "timezone", "requirement", "work_dir", "overlap", "max_parallel_runs", "catch_up",
           "run_timeout_mode", "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds",
-          "daily_budget_usd", "notify", "notify_channel", "notify_chat", "user_gates", "template_key", "template_inputs")
+          "daily_budget_usd", "notify", "notify_channel", "notify_chat", "user_gates", "template_key", "template_inputs",
+          "kind", "command", "env", "env_file", "success_deadline", "alert_failures_after",
+          "alert_stale_after_seconds", "alert_overlap_after")
+
+_JSON_FIELDS = ("template_inputs", "env")
 
 QUEUED = "queued"
 GATING = "gating"
 RUNNING = "running"
 OPEN_STATUSES = (QUEUED, GATING, RUNNING)
+# Successful task or command runs update last_success_at.
+SUCCESS = ("completed", "succeeded")
 # The final statuses that count as a failure.
-FAILURES = ("failed", "timed_out", "gate_failed")
-# The final statuses of a run that went well: its task completed, or its gate found nothing to do. Either ends a
-# failure streak and is the schedule's latest ok run (``last_ok_at``); only a completed one is a success.
-OK = ("completed", "skipped_gate")
+FAILURES = ("failed", "timed_out", "gate_failed", "interrupted")
+# A success or a gate that found nothing to do ends a failure streak and updates last_ok_at.
+OK = (*SUCCESS, "skipped_gate")
 # Runs that ran nothing: they neither carry an unfinished input nor hide one.
 NOTHING_RAN = ("skipped_overlap", "skipped_missed", "skipped_budget")
 # Firings that created no task; one that repeats the schedule's latest run is counted on it (``count_skip``).
 SKIPPED = ("skipped_gate", *NOTHING_RAN)
 # A run whose input was not done: the next run is given its gate output.
-UNFINISHED = ("failed", "timed_out", "gate_failed", "stopped", "cancelled")
+UNFINISHED = ("failed", "timed_out", "gate_failed", "stopped", "cancelled", "interrupted")
 
 _RUN = """
     SELECT r.*, s.manager_id, t.status AS task_status, t.title AS task_title FROM schedule_runs r
@@ -83,8 +88,9 @@ async def _with_overrides(db: Db, rows: list[asyncpg.Record]) -> list[dict[str, 
     views = [{**dict(row), "profile_overrides": overrides[row["id"]], "task_limits": limits[row["id"]]}
              for row in rows]
     for row in views:
-        if isinstance(row.get("template_inputs"), str):
-            row["template_inputs"] = json.loads(row["template_inputs"])
+        for name in _JSON_FIELDS:
+            if isinstance(row.get(name), str):
+                row[name] = json.loads(row[name])
         if "planner_session_task_title" in row and row.get("planner_session_task_id"):
             row["planner_session_task_title"] = tasks.task_name(
                 title=row["planner_session_task_title"], goal_id=row["planner_session_task_goal_id"],
@@ -164,7 +170,7 @@ async def create_schedule(conn: asyncpg.Connection, *, project_id: str, fields: 
         raise ValueError(error)
     schedule_id = f"sched-{uuid.uuid4().hex[:12]}"
     columns = [name for name in FIELDS if name in fields]
-    values = [json.dumps(fields[name]) if name == "template_inputs" else fields[name] for name in columns]
+    values = [json.dumps(fields[name]) if name in _JSON_FIELDS else fields[name] for name in columns]
     placeholders = ", ".join(f"${i}" for i in range(5, len(columns) + 5))
     await conn.execute(
         f"INSERT INTO schedules (id, project_id, created_via, manager_id, {', '.join(columns)}) VALUES ($1, $2, $3, $4, "
@@ -183,11 +189,13 @@ async def update_schedule(conn: asyncpg.Connection, schedule_id: str, fields: Ma
     and the profile overrides and the task limits when given (each replaces what the schedule had)."""
     if "manager_id" in fields:
         raise ValueError("a schedule's owner cannot change")
+    if "kind" in fields:
+        raise ValueError("a schedule's kind cannot change")
     columns = [name for name in (*FIELDS, "enabled", "enabled_at", "rule_changed_at", "next_fire_at") if name in fields]
     sets = [f"{name} = ${i}" for i, name in enumerate(columns, start=2)]
     await conn.execute(
         f"UPDATE schedules SET {', '.join([*sets, 'updated_at = now()'])} WHERE id = $1",
-        schedule_id, *[json.dumps(fields[name]) if name == "template_inputs" else fields[name] for name in columns],
+        schedule_id, *[json.dumps(fields[name]) if name in _JSON_FIELDS else fields[name] for name in columns],
     )
     if profiles is not None:
         await _set_overrides(conn, schedule_id, profiles)
@@ -316,22 +324,25 @@ async def insert_run(conn: Db, *, schedule_id: str, scheduled_for: datetime, tri
                      missed: int = 0, fired_at: datetime | None = None, task_id: str | None = None,
                      error: str | None = None, finished_at: datetime | None = None,
                      created_at: datetime | None = None, carried_from: str | None = None,
-                     run_timeout_seconds: int | None = None) -> str:
-    run_id = new_run_id()
+                     run_timeout_seconds: int | None = None, run_id: str | None = None,
+                     started_at: datetime | None = None, log_path: str | None = None) -> str:
+    if run_id is None:
+        run_id = new_run_id()
     await conn.execute(
         """
         INSERT INTO schedule_runs (id, schedule_id, scheduled_for, fired_at, trigger, missed, status, task_id,
-                                   error, finished_at, created_at, carried_from, run_timeout_seconds)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, now()), $12, $13)
+                                   error, finished_at, created_at, carried_from, run_timeout_seconds, started_at, log_path)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, now()), $12, $13, $14, $15)
         """,
         run_id, schedule_id, scheduled_for, fired_at, trigger, missed, status, task_id, error, finished_at,
-        created_at, carried_from, run_timeout_seconds,
+        created_at, carried_from, run_timeout_seconds, started_at, log_path,
     )
     return run_id
 
 
 _RUN_COLUMNS = ("status", "fired_at", "task_id", "summary", "cost_usd", "error", "finished_at", "gate_output",
-                "carried_from", "run_timeout_seconds", "execution_snapshot")
+                "carried_from", "run_timeout_seconds", "execution_snapshot", "started_at", "exit_code", "exit_signal",
+                "log_path", "log_bytes", "log_truncated", "log_tail", "runner_pid", "runner_started")
 
 
 def _run_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -450,13 +461,13 @@ async def finish_run(conn: Db, run_id: str, *, status: str, at: datetime, summar
 
 async def count_outcome(conn: Db, schedule_id: str, status: str, at: datetime) -> None:
     """A run's final ``status`` on the schedule's counters: an ok run (``OK``) clears ``consecutive_failures`` and
-    sets ``last_ok_at``, and a completed one ``last_success_at`` too; a failure adds one; anything else (a stopped
+    sets ``last_ok_at``, and a successful one ``last_success_at`` too; a failure adds one; anything else (a stopped
     or cancelled run, a skip that ran nothing) changes neither."""
     if status in OK:
         await conn.execute(
             "UPDATE schedules SET consecutive_failures = 0, last_ok_at = $2, "
             "last_success_at = CASE WHEN $3 THEN $2 ELSE last_success_at END WHERE id = $1",
-            schedule_id, at, status == "completed",
+            schedule_id, at, status in SUCCESS,
         )
     elif status in FAILURES:
         await conn.execute("UPDATE schedules SET consecutive_failures = consecutive_failures + 1 WHERE id = $1",
@@ -560,7 +571,7 @@ async def fail_gating_runs(conn: Db, at: datetime) -> int:
 
 async def set_alert(conn: Db, schedule_id: str, column: str, at: datetime | None) -> bool:
     """Start (``at``) or end (None) an alert, once: False when it already was in that state."""
-    if column not in ("failures_alert_at", "stale_alert_at"):
+    if column not in ("failures_alert_at", "stale_alert_at", "deadline_alert_at", "overlap_alert_at"):
         raise ValueError(f"not an alert column: {column}")
     condition = f"{column} IS NULL" if at is not None else f"{column} IS NOT NULL"
     return await conn.execute(f"UPDATE schedules SET {column} = $2 WHERE id = $1 AND {condition}",
