@@ -57,6 +57,7 @@ def deployment(tmp_path, monkeypatch):
         state.running = False
         state.pid = None
         if scenario.stop_then_error:
+            scenario.stop_then_error = False
             raise service.ServiceError("manager stopped the service but lost its response")
 
     def start():
@@ -91,6 +92,7 @@ def deployment(tmp_path, monkeypatch):
     monkeypatch.setattr(service.Host, "current", classmethod(lambda cls: host))
     monkeypatch.setattr(components, "manifest_from_git", lambda *args: scenario.target)
     monkeypatch.setattr(service, "_install_target", install)
+    monkeypatch.setattr(service, "_unit_package_root", lambda host, mgr: host.package_root.resolve())
     monkeypatch.setattr(service, "__file__", str(tmp_path / "looper/agents/service.py"))
     return SimpleNamespace(host=host, events=events, statuses=statuses, state=state, scenario=scenario,
                            root=root, elapsed=elapsed)
@@ -139,8 +141,12 @@ def test_stop_timeout_recovers_a_late_exit_and_cancels_drain(
         deployment, late_exit, manager_readable, capsys):
     mgr = service.manager(deployment.host, "test")
     stop_deadline = []
+    original_stop = mgr.stop
 
     def stop():
+        if stop_deadline:
+            original_stop()
+            return
         deployment.events.append("stop")
         deployment.elapsed[0] += service._STOP_WAIT_SECONDS
         stop_deadline.append(deployment.elapsed[0])
@@ -190,9 +196,9 @@ def test_stop_wait_renews_drain_best_effort(deployment, renew_error):
 
 
 @pytest.mark.parametrize("live_pid", [False, True])
-def test_failed_start_only_stops_a_live_process_before_retry(deployment, live_pid):
+def test_failed_start_stops_the_unit_before_retry_even_without_a_live_pid(deployment, live_pid):
     mgr = service.manager(deployment.host, "test")
-    start, stop = mgr.start, mgr.stop
+    start = mgr.start
 
     def fail_once():
         if deployment.events.count("start") == 0:
@@ -202,16 +208,11 @@ def test_failed_start_only_stops_a_live_process_before_retry(deployment, live_pi
             raise service.ServiceError("first start failed")
         start()
 
-    def stop_once():
-        if deployment.events.count("stop") and not live_pid:
-            pytest.fail("must start immediately when no process is alive")
-        stop()
-
-    mgr.start, mgr.stop = fail_once, stop_once
+    mgr.start = fail_once
     deployment.host.pid_alive = lambda pid: deployment.state.pid == pid
     assert cli.main(["service", "upgrade"]) == 1
     assert deployment.events.count("start") == 2
-    assert deployment.events.count("stop") == (2 if live_pid else 1)
+    assert deployment.events.count("stop") == 2
     assert report(deployment)["serving"] is True
 
 
@@ -437,8 +438,8 @@ def test_wheel_dashboard_is_staged_and_published_atomically_while_http_serves(
 
 
 def test_cli_repeated_wheel_upgrade_preserves_dashboard_without_dependency_reinstall(deployment, tmp_path, monkeypatch):
-    static = tmp_path / "dashboard"
-    static.mkdir()
+    static = tmp_path / "looper/web/dashboard"
+    static.mkdir(parents=True)
     files = {"index.html": b"dashboard", "assets/app.js": b"script"}
     wheel = tmp_path / "same-version.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
@@ -518,6 +519,7 @@ def test_wheel_upgrade_installs_cli_code_and_metadata_without_restart(
     monkeypatch.setattr(service, "__file__", str(site / "looper/agents/service.py"))
     monkeypatch.setattr(service, "_install_target", _REAL_INSTALLER)
     deployment.host.executable = python
+    deployment.host.package_root = site
     deployment.scenario.target = manifest(change, version="1.0.1")
     monkeypatch.setattr(components, "manifest_from_wheel", lambda path: deployment.scenario.target)
     installations = []

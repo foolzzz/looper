@@ -162,6 +162,7 @@ def test_docs_and_two_dashboard_upgrades_keep_real_serve_pid_and_refresh_compone
                 start=forbidden, stop=forbidden, restart=forbidden,
             )
             monkeypatch.setattr(service, "manager", lambda host, label: manager)
+            monkeypatch.setattr(service, "_unit_package_root", lambda host, mgr: source.resolve())
             monkeypatch.setattr(service, "__file__", str(source / "looper/agents/service.py"))
             host = service.Host(system="Linux", home=home, uid=os.getuid(), environ={},
                                 executable=sys.executable, cwd=source, package_root=source, run=run)
@@ -314,6 +315,7 @@ def test_ignored_web_files_allow_dashboard_and_full_upgrade_on_real_serve(tmp_pa
                             executable=sys.executable, cwd=source, package_root=source, run=run)
         manager.host = host
         monkeypatch.setattr(service, "manager", lambda host, label: manager)
+        monkeypatch.setattr(service, "_unit_package_root", lambda host, mgr: source.resolve())
         monkeypatch.setattr(service, "__file__", str(source / "looper/agents/service.py"))
         for target, kind, label in ((targets[1][0], "WEB_ONLY", targets[1][2]),
                                     (full, "FULL", "full dashboard update")):

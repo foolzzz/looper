@@ -57,6 +57,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,10 +102,11 @@ class ServiceError(RuntimeError):
     """A service command could not do its job; the message says why and what to do."""
 
 
-def _run(argv: Sequence[str], *, timeout: float = _COMMAND_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
+def _run(argv: Sequence[str], *, timeout: float = _COMMAND_TIMEOUT_SECONDS,
+         env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(list(argv), capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                              timeout=timeout)
+                              timeout=timeout, env=env)
     except FileNotFoundError as exc:
         raise ServiceError(f"`{argv[0]}` is not on PATH") from exc
     except subprocess.TimeoutExpired as exc:
@@ -213,7 +215,7 @@ class Host:
     environ: Mapping[str, str]
     executable: str  # the interpreter running looper
     cwd: Path
-    run: Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+    run: Callable[..., subprocess.CompletedProcess[str]]
     package_root: Path = Path(__file__).resolve().parents[2]
     sleep: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
@@ -1146,8 +1148,18 @@ def _deploy_report(report: dict, log_path: Path | None) -> str:
     return line
 
 
+def _stop_with_renewal(mgr: _Manager, renew: Callable[[], None] | None) -> None:
+    # Both systemctl stop and launchd's unload wait can outlast the drain lease.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        stopping = executor.submit(mgr.stop)
+        while not wait([stopping], timeout=5).done:
+            if renew is not None:
+                renew()
+        stopping.result()
+
+
 def _stop_for_install(mgr: _Manager, before: int | None, renew: Callable[[], None] | None = None) -> None:
-    mgr.stop()
+    _stop_with_renewal(mgr, renew)
     deadline = mgr.host.clock() + _STOP_WAIT_SECONDS
     while mgr.state().running or (before is not None and mgr.host.pid_alive(before)):
         if renew is not None:
@@ -1273,21 +1285,32 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                         renew()
                         if host.clock() >= deadline:
                             report["recovery_error"] = ("the old service process is still running; "
-                                                        "start it by hand once it exits")
+                                                        "run `looper service restart` once it exits")
                             break
                         host.sleep(_POLL_SECONDS)
                     else:
-                        try:
-                            stopped = not mgr.state().running
-                        except (ServiceError, OSError):
-                            stopped = not host.port_in_use(port)
+                        stopped = True
                 # A timed-out start can leave a loaded unit or a partial process.
                 # Retry the current install from a stopped unit before cancelling.
                 if stopped:
+                    pid = None
                     if start_attempted:
                         pid = mgr.state().pid
-                        if pid is not None and host.pid_alive(pid):
-                            _stop_for_install(mgr, pid, renew)
+                    if pid is not None and host.pid_alive(pid):
+                        _stop_for_install(mgr, pid, renew)
+                    else:
+                        # An exited launchd job can remain loaded forever;
+                        # bootstrap needs a completed bootout even without a PID.
+                        _stop_with_renewal(mgr, renew)
+                    if host.port_in_use(port):
+                        answer = host.get_status(port, token, "127.0.0.1") or {}
+                        if "pid" not in answer:
+                            try:
+                                answer = host.system_operation(port, token, "health", {})
+                            except (ServiceError, OSError):
+                                pass
+                        raise ServiceError(f"port {port} is served by pid {answer.get('pid', 'unknown')}; "
+                                           "refusing to start another service")
                     _start_and_wait(mgr, port, log_path, timeout, root)
             except Exception as cancel_error:
                 report["recovery_error"] = str(cancel_error)
@@ -1341,6 +1364,27 @@ def _planned_restart(host: Host, *, label: str, timeout: float, drain_timeout: f
         running=running, target=None, installer=None, timeout=timeout, drain_timeout=drain_timeout, no_force=no_force)
 
 
+def _unit_package_root(host: Host, mgr: _Manager) -> Path:
+    try:
+        if host.system == "Darwin":
+            environment = dict(plistlib.loads(mgr.unit_path.read_bytes()).get("EnvironmentVariables", {}))
+        else:
+            # Environment values keep literal dollars; ExecStart's parser expands $$.
+            environment = dict(word.split("=", 1)
+                for line in mgr.unit_path.read_text().splitlines() if line.startswith("Environment=")
+                for word in _systemd_words(line.removeprefix("Environment=").replace("$$", "$$$$")) if "=" in word)
+        environment.pop("PYTHONPATH", None)
+        environment.setdefault("HOME", str(host.home))
+        result = host.run([host.executable, "-I", "-c",
+            "import looper, pathlib; print(pathlib.Path(looper.__file__).resolve().parent.parent)"], env=environment)
+    except (OSError, ValueError, ServiceError):
+        raise ServiceError(f"cannot resolve the service's package root with {host.executable}") from None
+    path = Path(result.stdout.strip())
+    if result.returncode or not path.is_absolute():
+        raise ServiceError(f"cannot resolve the service's package root with {host.executable}")
+    return path.resolve()
+
+
 def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dry_run: bool = False,
             timeout: float = DEFAULT_TIMEOUT_SECONDS, drain_timeout: float = 1200, turns_timeout: float = 180,
             no_force: bool = False) -> str:
@@ -1351,6 +1395,21 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
     try:
         wheel = bool(to and to.endswith(".whl"))
         source = str(Path(to).resolve()) if wheel else to or "origin/main"
+        mgr = manager(host, label)
+        port, log_path, root = mgr.unit_settings()
+        if port is None or root is None:
+            raise ServiceError("cannot locate the service port and runtime root; install the service first")
+        expected = looper_command(host.executable)
+        try:
+            argv = list(mgr.unit_argv())
+        except OSError as exc:
+            raise ServiceError("cannot read the service unit") from exc
+        if argv[:len(expected)] != expected:
+            raise ServiceError(f"the service runs {shlex.join(argv[:len(expected) or 1])}; "
+                               "run looper service upgrade with that looper")
+        package_root = _unit_package_root(host, mgr)
+        if not wheel and host.cwd.resolve() != package_root:
+            raise ServiceError(f"{host.cwd.resolve()} is not the service's checkout {package_root}")
         if not dry_run and not wheel:
             if _checked(host, ["git", "-C", str(host.cwd), "status", "--porcelain", "--untracked-files=no"]):
                 raise ServiceError("the installed checkout has tracked changes; refusing to upgrade")
@@ -1371,25 +1430,17 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
                                      "--end-of-options", source + "^{commit}"])
         target = (components.manifest_from_wheel(Path(source)) if wheel
                   else components.manifest_from_git(host.cwd, source))
-        mgr = manager(host, label)
-        port, log_path, root = mgr.unit_settings()
-        if port is None or root is None:
-            raise ServiceError("cannot locate the service port and runtime root; install the service first")
-        expected = looper_command(host.executable)
-        try:
-            argv = list(mgr.unit_argv())
-        except OSError as exc:
-            raise ServiceError("cannot read the service unit") from exc
-        if argv[:len(expected)] != expected:
-            raise ServiceError(f"the service runs {shlex.join(argv[:len(expected) or 1])}; "
-                               "run looper service upgrade with that looper")
-        if not wheel and host.cwd.resolve() != host.package_root.resolve():
-            raise ServiceError(f"run the upgrade from the service's checkout {host.package_root}")
         token = operator_auth.read_token(root)
         if not token:
             raise ServiceError("the service operator token is missing")
         running = components.Manifest.from_dict(host.get_components(port, token))
         plan = decide(target, running, scan_keepers(root), keeper_mode=False)
+        if wheel and plan.kind in (UpgradeKind.WEB_ONLY, UpgradeKind.NOOP):
+            from .http_server import default_static_dir
+
+            destination = default_static_dir().resolve()
+            if destination not in (package_root / "web/dist", package_root / "looper/web/dashboard"):
+                raise ServiceError(f"{destination} is not the service's dashboard in {package_root}")
         if dry_run:
             return "\n".join((f"plan       {plan.kind.value}", f"target     {target.version}",
                 f"running    {running.version} (loaded {running.loaded_at})",
