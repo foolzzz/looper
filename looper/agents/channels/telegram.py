@@ -99,6 +99,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             raise ValueError("backlog_max_age_seconds must be a positive integer")
         self._backlog_max_age_seconds = backlog_max_age_seconds
         self._inbox: TelegramInbox | None = None
+        self._reached_publish: set[int] = set()
         # Only the built-in row falls back to the environment; an added bot has its own token.
         self._bot_token = bot_token or (env.get("LOOPER_TELEGRAM_BOT_TOKEN", "") if channel_id is None else "")
         self._allowlist = allowlist  # Telegram user ids, as strings
@@ -325,6 +326,9 @@ class TelegramChannelAdapter(ChannelAdapter):
                 except ValueError:
                     pass
                 else:
+                    if (envelope.message_type is MessageType.STATUS_UPDATE
+                            and status_kind(envelope.payload) is StatusKind.PROGRESS):
+                        return await self._send_answer(chat_id, str(envelope.payload["text"]))
                     self._remember(corr_id, chat_id)
         if chat_id is None:
             return DeliveryReceipt(
@@ -457,22 +461,35 @@ class TelegramChannelAdapter(ChannelAdapter):
     def _durable(self, callback: Callable[..., Awaitable[None]]) -> Callable[..., Awaitable[None]]:
         async def handle(update: Any, context: Any) -> None:
             assert self._inbox is not None
-            if self._inbox.processed(update.update_id):
-                logger.info("%s: duplicate Telegram update_id=%s ignored", self.channel_id, update.update_id)
-                return
-            message = update.effective_message
-            date = getattr(message, "date", None)
-            age = (datetime.now(timezone.utc) - date).total_seconds() if date is not None else 0
-            stopped_at = self._inbox.previous_polling_stopped_at
-            resumed_at = self._inbox.polling_resumed_at
-            during_downtime = (date is not None and stopped_at is not None and resumed_at is not None
-                               and stopped_at <= date.timestamp() < resumed_at)
-            if age > self._backlog_max_age_seconds and not during_downtime:
-                logger.warning("%s: stale Telegram update_id=%s age_seconds=%.0f backlog_max_age_seconds=%s ignored",
-                               self.channel_id, update.update_id, age, self._backlog_max_age_seconds)
-            else:
-                await callback(update, context)
-            self._inbox.finish(update.update_id)
+            try:
+                if self._inbox.processed(update.update_id):
+                    logger.info("%s: duplicate Telegram update_id=%s ignored", self.channel_id, update.update_id)
+                    return
+                message = update.effective_message
+                date = getattr(message, "date", None)
+                age = (datetime.now(timezone.utc) - date).total_seconds() if date is not None else 0
+                stopped_at = self._inbox.previous_polling_stopped_at
+                resumed_at = self._inbox.polling_resumed_at
+                during_downtime = (date is not None and stopped_at is not None and resumed_at is not None
+                                   and stopped_at <= date.timestamp() < resumed_at)
+                if age > self._backlog_max_age_seconds and not during_downtime:
+                    logger.warning("%s: stale Telegram update_id=%s age_seconds=%.0f backlog_max_age_seconds=%s ignored",
+                                   self.channel_id, update.update_id, age, self._backlog_max_age_seconds)
+                else:
+                    for attempt in range(3):
+                        try:
+                            await callback(update, context)
+                        except Exception:
+                            if (attempt < 2 and update.update_id not in self._reached_publish and self._running):
+                                await asyncio.sleep(attempt + 1)
+                                if self._running:
+                                    continue
+                            logger.exception("%s: Telegram update_id=%s handler failed", self.channel_id, update.update_id)
+                            raise
+                        break
+                self._inbox.finish(update.update_id)
+            finally:
+                self._reached_publish.discard(update.update_id)
         return handle
 
     async def _admitted(self, update: Any, *, text_required: bool = False) -> RouteDecision | None:
@@ -579,6 +596,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             correlation_id=correlation_id,
             metadata=metadata,
         )
+        self._reached_publish.add(update.update_id)
         await self._bus.publish(envelope)
 
     # --- Outbound: Bus → Telegram ---

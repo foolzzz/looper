@@ -11,6 +11,7 @@ from telegram.request import BaseRequest
 
 from looper.agents.bus import MessageBus
 from looper.agents.channels.allowlist import SenderAllowlist
+from looper.agents.channels.base import DeliveryFailure
 from looper.agents.channels.lark import LarkChannelAdapter
 from looper.agents.channels.telegram import TelegramChannelAdapter
 from looper.agents.drain import DrainScope, DrainState
@@ -213,3 +214,37 @@ def test_start_over_keeps_chat_progress_silent_while_serving(agent_db, planner_c
             await bus.shutdown()
 
     asyncio.run(asyncio.wait_for(run(), 15))
+
+
+@pytest.mark.parametrize("kind,payload,caches", [
+    (MessageType.STATUS_UPDATE, {"text": "Task progress"}, False),
+    (MessageType.AGENT_REPLY, {"text": "Answer"}, True),
+    (MessageType.STATUS_UPDATE, {"phase": "thinking"}, True),
+])
+@pytest.mark.parametrize("chat", ["99", "invalid"])
+def test_telegram_restored_route_only_caches_answers_and_phases(kind, payload, caches, chat):
+    api = _TelegramAPI()
+    adapter = TelegramChannelAdapter(allowlist=SenderAllowlist("channel-telegram", frozenset({"7"})))
+
+    async def run():
+        async with Bot("0:synthetic", request=api, get_updates_request=_TelegramAPI()) as bot:
+            adapter._app = SimpleNamespace(bot=bot)
+            first = MessageEnvelope.create(
+                source=MANAGER_ADDRESS, target=adapter._address, message_type=kind,
+                payload=payload, correlation_id="restored", metadata={"reply_route": {"chat_id": chat}})
+            receipt = await adapter.deliver(first)
+            assert receipt.success is (chat == "99")
+            if chat == "invalid":
+                assert receipt.failure is DeliveryFailure.NO_CHAT
+            followup = MessageEnvelope.create(
+                source=MANAGER_ADDRESS, target=adapter._address, message_type=MessageType.STATUS_UPDATE,
+                payload={"text": "Next progress"}, correlation_id="restored")
+            receipt = await adapter.deliver(followup)
+            cached = caches and chat == "99"
+            assert receipt.success is cached
+            if not cached:
+                assert receipt.failure is DeliveryFailure.NO_CHAT
+            assert ("restored" in adapter._correlation_chat) is cached
+            assert len(api.sent) == (int(chat == "99") + int(cached))
+
+    asyncio.run(asyncio.wait_for(run(), 5))

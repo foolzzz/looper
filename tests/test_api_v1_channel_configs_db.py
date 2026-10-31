@@ -283,3 +283,22 @@ def test_refused_manager_builtin_and_unknown_operations_leave_rows(tmp_path, mon
             assert actual == status and answer["error"]["code"] == ("not_found" if status == 404 else "invalid"), answer
             assert await channel_configs.list_configs() == before
     _run(run, monkeypatch)
+
+
+@pytest.mark.parametrize("value,status", [(1800, 200), (0, 400), ("600", 400)])
+def test_telegram_backlog_cap_update_validates_and_reads_back(tmp_path, monkeypatch, value, status):
+    async def run(pool):
+        before = await channel_configs.get_config("channel-telegram")
+        async with _api(tmp_path, pool) as call:
+            code, answer = await call("update", {"channel_id": "channel-telegram", "fields": {
+                "config": {"backlog_max_age_seconds": value}}})
+            assert code == status, answer
+            if status == 200:
+                assert answer["result"]["config"]["backlog_max_age_seconds"] == value
+                code, answer = await call("get", {"channel_id": "channel-telegram"})
+                assert code == 200 and answer["result"]["config"]["backlog_max_age_seconds"] == value
+                assert (await channel_configs.get_config("channel-telegram"))["config"]["backlog_max_age_seconds"] == value
+            else:
+                assert answer["error"]["code"] == "invalid"
+                assert await channel_configs.get_config("channel-telegram") == before
+    _run(run, monkeypatch)
