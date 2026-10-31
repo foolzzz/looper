@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import urllib.error
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -116,6 +117,55 @@ def test_cli_upgrade_can_inspect_a_wheel_without_installing(upgrade_host, monkey
     assert cli.main(["service", "upgrade", "--dry-run", "--to", str(wheel)]) == 0
     assert "WEB_ONLY" in capsys.readouterr().out
     assert targets == [wheel]
+
+
+@pytest.mark.parametrize("path, needle, replacement", [
+    ("looper/agents/ops/__init__.py", '    READ = "read"',
+     '    READ = (MARK, "read")[1]'),
+    ("looper/agents/ops/__init__.py", "    name: str",
+     "    MARK\n    name: str"),
+    ("looper/agents/ops/__init__.py", "@dataclass(frozen=True)\nclass Tool:",
+     "@(MARK or dataclass(frozen=True))\nclass Tool:"),
+    ("looper/agents/ops/__init__.py", '        return {"name": self.name,',
+     '        MARK\n        return {"name": self.name,'),
+    ("looper/agents/ops/room.py", '"maximum": 120',
+     '"maximum": (MARK, 120)[1]'),
+    ("looper/agents/ops/room.py", "    if kind is MemberKind.WORK:",
+     "    MARK\n    if kind is MemberKind.WORK:"),
+    ("looper/agents/ops/vault.py", "async def _never(call: Any)",
+     "async def _never(call: Any = MARK)"),
+])
+def test_cli_upgrade_rejects_executable_wheel_declarations_without_side_effects(
+    upgrade_host, tmp_path, capsys, path, needle, replacement,
+):
+    root = Path(components.__file__).resolve().parent.parent
+    sources = {name: (root / name).read_text() for name in (
+        "looper/components.toml", "looper/__init__.py", "looper/agents/system_prompt.py",
+        *components.SEAT_SOURCES,
+    )}
+    wheel = tmp_path / "candidate.whl"
+
+    def write_wheel():
+        with zipfile.ZipFile(wheel, "w") as archive:
+            for name, source in sources.items():
+                archive.writestr(name, source)
+
+    # A real, supported wheel must work through the same CLI and manifest reader.
+    write_wheel()
+    assert cli.main(["service", "upgrade", "--dry-run", "--to", str(wheel)]) == 0
+    capsys.readouterr()
+    marker = tmp_path / "executed"
+    payload = f"__import__('pathlib').Path({str(marker)!r}).write_text('executed')"
+    assert needle in sources[path]
+    sources[path] = sources[path].replace(needle, replacement.replace("MARK", payload), 1)
+    write_wheel()
+
+    result = cli.main(["service", "upgrade", "--dry-run", "--to", str(wheel)])
+
+    assert not marker.exists(), "dry-run executed code from the candidate wheel"
+    assert result == 1
+    captured = capsys.readouterr()
+    assert "cannot read target Worker/Reviewer seat tool contracts" in captured.err + captured.out
 
 
 def test_cli_upgrade_without_dry_run_refuses_before_touching_the_service(upgrade_host, monkeypatch, capsys):
