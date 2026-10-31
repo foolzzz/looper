@@ -122,7 +122,6 @@ class Keeper:
         except (OSError, ValueError) as exc:
             logger.error("invalid keeper directory: %s", exc)
             return 2
-        os.umask(0o077)
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGTERM, self.request_end, EndReason.ENDED)
         loop.add_signal_handler(signal.SIGINT, lambda: None)

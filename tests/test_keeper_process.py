@@ -217,6 +217,20 @@ sys.exit(7)
         assert stat.S_IMODE((run.directory / name).stat().st_mode) == 0o600
 
 
+def test_the_child_keeps_the_callers_umask(launch: Callable[..., Run]) -> None:
+    run = launch("""\
+import os
+previous = os.umask(0)
+os.umask(previous)
+print(oct(previous))
+with open('created.txt', 'w') as output:
+    output.write('child file')
+""", keeper_setup="import os; os.umask(0o022)")
+    assert run.wait()["exit_code"] == 0
+    assert (run.directory / keeper.STDOUT).read_text() == "0o22\n"
+    assert stat.S_IMODE((run.cwd / "created.txt").stat().st_mode) == 0o644
+
+
 def test_the_keeper_outlives_its_parent_and_its_group(launch: Callable[..., Run]) -> None:
     run = launch(TREE, via_parent=True)
     run.running()
