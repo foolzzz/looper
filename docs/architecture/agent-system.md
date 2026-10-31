@@ -4285,6 +4285,32 @@ SPA uses `#page/sub` format for deep linking that survives browser refresh:
 - `#settings/page[/sub]` → one Settings page (`#settings` and `#settings/defaults` redirect to `#settings/roles`)
 - `#history/agent-id?task=task-id` → one agent's history
 
+## Component upgrade previews
+
+`looper service upgrade --dry-run [--to <git ref | wheel path>]` compares the
+running service's startup manifest with a Git tree (default `origin/main` of
+the current checkout) or a wheel, without installing files or restarting.
+It prints `NOOP`, `WEB_ONLY`, `CONTROL_PLANE` or `FULL`, the changed components
+and the reason. Keeper mode is off in S0, so every control-plane change plans
+`FULL`. Running without `--dry-run` refuses until drain and deployment are
+available.
+
+`looper/components.toml` declares component globs, runner packaging aliases
+and explicit ignores. A normal-suite test rejects unclassified tracked files.
+Git objects are read with `git cat-file --batch`; wheels are read as ZIP files.
+Each fingerprint hashes sorted `path sha256(content)\n` lines. Checkout web
+plans use `web/src` and package files; `verification.web` hashes built assets
+under canonical `web/dist` paths (also used for the packaged dashboard).
+The adoption fingerprint separately covers report contracts, both seat-tool
+listings (including optional vault tools), manifest version and keeper protocols.
+
+`GET /api/v1/system/components` requires operator authentication and returns the
+standard v1 result envelope containing `version`, `loaded_at`, `components`,
+`adoption` and `verification`. The snapshot is captured from the loaded package's
+directory once per process at HTTP-server startup and remains fixed if files later change.
+The operation is also available through generated `loopercli` commands. Dashboard,
+Telegram and Lark need no change for this read-only planning command.
+
 ## HTTP API
 
 The HTTP server has five route classes: the exact paths `/login` and `/logout`

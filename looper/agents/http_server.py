@@ -23,6 +23,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from .. import components
 from ..db import api_clients as db_api_clients
 from ..ops_config import OpsConfig
 from . import (
@@ -207,8 +208,11 @@ class AgentHTTPServer:
         # Configuration files uploaded for import, waiting to be applied (under the runtime root).
         self._config_imports = config_imports.ConfigImports(runtime_root) if runtime_root else None
         self._server: asyncio.Server | None = None
+        self._components: components.Manifest | None = None
 
     async def start(self) -> None:
+        # Snapshot the loaded installation once, before accepting requests.
+        self._components = components.loaded_manifest()
         if self._config_imports:
             self._config_imports.clear()  # what a previous server left pending
         self._server = await asyncio.start_server(

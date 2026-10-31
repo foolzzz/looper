@@ -126,13 +126,17 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
     for command in (install, restart):
         command.add_argument("--timeout", type=float, default=120.0,
                              help="Seconds to wait for the service to answer (default 120).")
+    upgrade = service_commands.add_parser(
+        "upgrade", allow_abbrev=False, help="Compute a component upgrade plan without installing or restarting.")
+    upgrade.add_argument("--dry-run", action="store_true", help="Print the upgrade plan only.")
+    upgrade.add_argument("--to", metavar="REF_OR_WHEEL", help="Target Git ref (default origin/main) or wheel path.")
     status = service_commands.add_parser(
         "status", allow_abbrev=False,
         help="Show whether the service is installed and running, its PID, last exit and log, and POST /api/v1/system/status.",
         description="Exits 0 when the service runs and answers on its port, else 1.")
     uninstall = service_commands.add_parser(
         "uninstall", allow_abbrev=False, help="Stop the service and remove its unit.")
-    for command in (install, restart, status, uninstall):
+    for command in (install, restart, upgrade, status, uninstall):
         command.add_argument("--label", default="com.looper.serve",
                              help="Service name: the launchd label or systemd unit name (default com.looper.serve).")
 
@@ -222,6 +226,8 @@ def _service(args: argparse.Namespace) -> int:
                 return 1
             print(service.install(host, ops, label=args.label, port=args.port, extra_env=args.env,
                                   timeout=args.timeout))
+        elif args.service_command == "upgrade":
+            print(service.upgrade(host, label=args.label, to=args.to, dry_run=args.dry_run))
         elif args.service_command == "restart":
             print(service.restart(host, label=args.label, timeout=args.timeout))
         elif args.service_command == "uninstall":

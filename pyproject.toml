@@ -43,11 +43,11 @@ loopercli = "looper.loopercli:main"
 include = ["looper*"]
 
 [tool.setuptools.package-data]
-"looper" = ["web/dashboard/*", "web/dashboard/assets/*", "skill/looper-skill/SKILL.md"]
+"looper" = ["components.toml", "web/dashboard/*", "web/dashboard/assets/*", "skill/looper-skill/SKILL.md"]
 "looper.db" = ["*.sql"]
 "looper.agents.runtimes.api" = ["THIRD_PARTY_NOTICES.txt"]
 "looper.agents.runtimes" = ["*.mjs", "pi_extension/looper.ts"]
-"looper.agents.runtimes.runner" = ["pi_runner/package.json", "pi_runner/src/*.ts", "common/package.json", "common/*.ts", "dsh_runner/package.json", "dsh_runner/src/*.ts"]
+"looper.agents.runtimes.runner" = ["pi_runner/package.json", "pi_runner/src/*.ts", "common/package.json", "common/*.ts", "dsh_runner/package.json", "dsh_runner/src/*.ts", "fake_runner/*.py", "protocol_data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

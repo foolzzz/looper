@@ -1,0 +1,37 @@
+# Plan hashes use frontend sources; verification hashes use built assets.
+[components.web]
+include = ["web/src/**", "web/package*.json"]
+verify = ["web/dist/**", "looper/web/dashboard/**"]
+
+[components.control_plane]
+include = ["looper/**", "runners/**"]
+exclude = ["looper/__init__.py", "looper/cli.py", "looper/loopercli.py", "looper/skill/**", "looper/upgrade.py", "looper/agents/service.py", "looper/agents/auth_commands.py", "looper/web/dashboard/**"]
+
+[components.keeper]
+include = ["looper/agents/keeper/**", "looper/agents/proc_tree.py", "looper/child_env.py"]
+
+[components.runners]
+include = ["runners/**"]
+
+# Wheel builds dereference these source-tree runner symlinks.
+[aliases]
+"looper/agents/runtimes/runner/common/" = "runners/common/"
+"looper/agents/runtimes/runner/pi_runner/" = "runners/pi/"
+"looper/agents/runtimes/runner/dsh_runner/" = "runners/dsh/"
+"looper/agents/runtimes/runner/fake_runner/" = "runners/fake/"
+"looper/agents/runtimes/runner/protocol_data/" = "runners/protocol/"
+
+[adoption]
+run_manifest_version = 0
+keeper_protocols = []
+
+[ignore]
+paths = [
+  "docs/**", "tests/**", "evals/**", "*.md", "looper/__init__.py",
+  "looper/cli.py", "looper/loopercli.py", "looper/skill/**", "looper/upgrade.py", "looper/agents/service.py", "looper/agents/auth_commands.py",
+  ".claude-plugin/**", ".github/**", ".env.example", ".gitignore",
+  "LICENSE", "LICENSE-MIT", "NOTICE", "install.sh", "pyproject.toml",
+  "examples/**", "plugins/**", "scripts/**",
+  "web/README.md", "web/.gitignore", "web/.oxlintrc.json", "web/index.html", "web/public/**",
+  "web/tsconfig*.json", "web/vite.config.ts",
+]
