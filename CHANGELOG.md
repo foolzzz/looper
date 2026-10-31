@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.32] - 2026-10-31
+
+### Fixed
+
+- **A TTADK run that ends without a result now says why, and the dashboard names the launcher.** When a Worker, Planner or Manager turn through the TTADK launcher ends without a result, its error (and, for Worker and Planner, its activity entry) keeps the last 1000 characters of the process's stderr, with credentials redacted. A per-turn process now carries that stderr on its turn result. The Agent Profiles page shows a TTADK runtime as `<name> (launcher: ttadk)`, and the dashboard's `Runtime` type gains the optional `launcher` field. Native runtimes keep their error text. ([#947](https://github.com/foolzzz/looper/pull/947))
+
+No model-visible change: no prompt, tool or message text given to a model changes.
+
 ## [2.14.31] - 2026-10-31
 
 ### Added
