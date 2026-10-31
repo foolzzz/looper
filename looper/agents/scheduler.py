@@ -367,6 +367,8 @@ class Scheduler:
         self._clock = clock
         self._tick_seconds = tick_seconds
         self._loop_task: asyncio.Task[None] | None = None
+        self._last_tick_at: datetime | None = None
+        self._last_ok_tick_at: datetime | None = None
         self._notifier = Notifier(sender=sender, clock=clock, dashboard_url=dashboard_url)
         self._day_zone = cron.zone(day_zone or cron.local_zone_name())
         # Gates and messages under way; stopping cancels them.
@@ -396,6 +398,19 @@ class Scheduler:
     def is_running(self) -> bool:
         return self._loop_task is not None and not self._loop_task.done()
 
+    def health(self) -> dict[str, Any]:
+        """Report the loop's latest completed pass without accessing the database."""
+        return {
+            "running": self.is_running(),
+            "tick_seconds": self._tick_seconds,
+            "last_tick_at": self._last_tick_at.isoformat() if self._last_tick_at else None,
+            "last_ok_tick_at": self._last_ok_tick_at.isoformat() if self._last_ok_tick_at else None,
+            "last_ok_tick_age_seconds": (
+                (self._clock() - self._last_ok_tick_at).total_seconds() if self._last_ok_tick_at else None
+            ),
+            "command_runs": {"running": 0},
+        }
+
     async def idle(self) -> None:
         """Wait for the gates and messages under way, and those they start."""
         while self._background:
@@ -410,9 +425,11 @@ class Scheduler:
         while True:
             try:
                 await self.tick()
+                self._last_tick_at = self._last_ok_tick_at = self._clock()
             except asyncio.CancelledError:
                 raise
             except Exception:
+                self._last_tick_at = self._clock()
                 logger.exception("scheduler pass failed; trying again in %g s", self._tick_seconds)
             await asyncio.sleep(self._tick_seconds)
 
