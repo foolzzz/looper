@@ -39,12 +39,13 @@ stops the command with a message that names the key and never shows the value. N
 no ``~``, no include.
 
 Environment and ``.env`` settings remain readable until the ops file names them. Only deployment settings are
-read from ``.env``; its contents are never added to the process environment. ``runtimes.pi`` and ``runtimes.dsh`` are file-only and default to ``runner`` (``cli`` is the opt-out).
+read from ``.env``; its contents are never added to the process environment. ``runtimes.pi`` and ``runtimes.dsh`` are file-only and default to ``runner`` (``cli`` is the opt-out). The ``probe`` settings are file-only too.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import stat
 import tempfile
@@ -56,6 +57,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .agents.channels import lark_cli
 from .paths import home_runtime_root
 
 FILE = Path("ops") / "server.toml"
@@ -117,6 +119,10 @@ class OpsConfig:
     operator_notes_root: str = ""
     pi_runtime: str = "runner"
     dsh_runtime: str = "runner"
+    probe_notify_channel: str = ""
+    probe_notify_chat: str = ""
+    probe_after_minutes: int = 5
+    probe_lark_profile: str = ""
     sources: Mapping[str, Source] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
 
@@ -173,6 +179,30 @@ def _runtime_choice(value: Any, where: str) -> str:
     return value
 
 
+def _probe_channel(value: Any, where: str) -> str:
+    if value not in ("lark", "lark_bot"):
+        raise OpsConfigError(f"{where} must be lark or lark_bot")
+    return value
+
+
+def _probe_chat(value: Any, where: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"(ou|oc)_[A-Za-z0-9_-]{4,128}", value):
+        raise OpsConfigError(f"{where} must be a Lark open_id (ou_) or chat_id (oc_)")
+    return value
+
+
+def _probe_after_minutes(value: Any, where: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 120:
+        raise OpsConfigError(f"{where} must be an integer from 1 to 120")
+    return value
+
+
+def _probe_profile(value: Any, where: str) -> str:
+    if not isinstance(value, str) or (value and not lark_cli.PROFILE_PATTERN.fullmatch(value)):
+        raise OpsConfigError(f"{where} must be a lark-cli profile name or an empty string")
+    return value
+
+
 def _command(value: Any, where: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not value or not all(isinstance(word, str) and word for word in value):
         raise OpsConfigError(f"{where} must be a non-empty array of non-empty strings, the program first")
@@ -221,6 +251,10 @@ class _Setting:
 SETTINGS = (
     _Setting("pi_runtime", "runtimes", "pi", _runtime_choice),
     _Setting("dsh_runtime", "runtimes", "dsh", _runtime_choice),
+    _Setting("probe_notify_channel", "probe", "notify_channel", _probe_channel),
+    _Setting("probe_notify_chat", "probe", "notify_chat", _probe_chat),
+    _Setting("probe_after_minutes", "probe", "after_minutes", _probe_after_minutes),
+    _Setting("probe_lark_profile", "probe", "lark_profile", _probe_profile),
     _Setting("database_url", "database", "url", _database_url, variable="LOOPER_DATABASE_URL"),
     _Setting("host", "server", "host", _text, flag="host"),
     _Setting("port", "server", "port", _port, flag="port"),
@@ -320,6 +354,8 @@ def read_file(path: Path, *, required: bool = False) -> dict[str, Any]:
                 raise OpsConfigError(f"{path}: unknown key {section}.{key}; [{section}] takes "
                                      f"{', '.join(settings)}")
             values[setting.name] = setting.check(value, f"{setting.dotted} in {path}")
+    if ("probe_notify_channel" in values) != ("probe_notify_chat" in values):
+        raise OpsConfigError(f"{path}: probe.notify_channel and probe.notify_chat must be configured together")
     return values
 
 
@@ -432,6 +468,7 @@ def render(config: OpsConfig) -> str:
     """The ops file holding ``config``'s settings that are not defaults (and the database URL), the others as
     comments."""
     database_url = config.database_url or SAMPLE_DATABASE_URL
+    probe_configured = bool(config.probe_notify_channel or config.probe_after_minutes != 5 or config.probe_lark_profile)
     lines = [
         "# Looper's deployment settings, read when `looper serve` starts: restart it after a change.",
         "# It holds the database password: keep it mode 0600, in a directory only you can enter.",
@@ -464,6 +501,17 @@ def render(config: OpsConfig) -> str:
         "[operator_notes]",
         f"root = {_toml_string(config.operator_notes_root)}" if config.operator_notes_root
         else '# root = "/absolute/path/to/claude/projects"',
+        "",
+        "# Check the service every minute and alert through Lark after a sustained failure.",
+        "[probe]" if probe_configured else "# [probe]",
+        (f"notify_channel = {_toml_string(config.probe_notify_channel)}" if config.probe_notify_channel
+         else '# notify_channel = "lark"'),
+        (f"notify_chat = {_toml_string(config.probe_notify_chat)}" if config.probe_notify_chat
+         else '# notify_chat = "ou_..."'),
+        (f"after_minutes = {config.probe_after_minutes}" if probe_configured
+         else "# after_minutes = 5"),
+        (f"lark_profile = {_toml_string(config.probe_lark_profile)}" if probe_configured
+         else '# lark_profile = ""'),
         "",
     ]
     return "\n".join(lines)
