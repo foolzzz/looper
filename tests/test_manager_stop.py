@@ -212,11 +212,17 @@ def test_runner_turn_and_direct_handoff_bind_fresh_tools_and_budget(agent_db, mo
     from looper.agents.runtimes.cancel import TurnCancel
     from looper.agents.tiers import manager as module
 
+    # Python 3.11 caches Protocol matches by class; keep runner capabilities off the shared stand-in.
+    class _RunnerSession(_Session):
+        def set_turn_tools(self, tools: Any) -> None:
+            self.tools = tools
+
+        def set_turn_budget(self, **kwargs: Any) -> None:
+            self.budget = kwargs
+
     async def run():
-        session = _Session(hold=False)
-        monkeypatch.setattr(_Session, "set_turn_tools", lambda self, tools: setattr(self, "tools", tools), raising=False)
-        monkeypatch.setattr(_Session, "set_turn_budget", lambda self, **kw: setattr(self, "budget", kw), raising=False)
-        monkeypatch.setattr("looper.agents.runtimes.runner.session.RunnerSession", _Session)
+        session = _RunnerSession(hold=False)
+        monkeypatch.setattr("looper.agents.runtimes.runner.session.RunnerSession", _RunnerSession)
         monkeypatch.setattr(module.CLAUDE_CODE, "platform_tools_in_process", True)
         manager, bus, _ = _manager(tmp_path, session)
         probe = AsyncMock(side_effect=AssertionError("runner must not probe MCP"))

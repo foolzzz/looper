@@ -36,8 +36,11 @@ def test_the_server_listens_before_recovering_consults_and_starting_agents_or_ta
     run = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef)
                and node.name == "_run_agent_system_owned")
     # Startup cleanup guards keep their normal execution order; exception handlers are not startup.
-    body = [statement for node in run.body
-            for statement in (node.body if isinstance(node, ast.Try) else [node])]
+    def startup_body(body: list[ast.stmt]) -> list[ast.stmt]:
+        return [statement for node in body
+                for statement in (startup_body(node.body) if isinstance(node, ast.Try) else [node])]
+
+    body = startup_body(run.body)
     calls = [node.value.value.func for node in body if isinstance(node, ast.Expr)
              and isinstance(node.value, ast.Await) and isinstance(node.value.value, ast.Call)]
     names = [ast.unparse(call) for call in calls]
