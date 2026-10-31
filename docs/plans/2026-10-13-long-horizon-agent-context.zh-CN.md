@@ -4,7 +4,7 @@
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
-- **最近更新：** 2026-10-30
+- **最近更新：** 2026-10-31
 
 ## 1. 工作方式
 
@@ -60,7 +60,7 @@
 | LLM 模型层 | Provider → Endpoint → Model → Profile；配置为 `looper-config/v4` | 已随 2.13 发布；真实 CLI 凭据与两档 dialogs 仍未测，五任务一次重复不是完整基线（§5.4） | M9a、M8e |
 | M9f | Grok 运行时：Grok 自己的登录（`grok-login`），四类角色都支持 | 进行中 | M9c、M9e |
 | M9g | Pi 运行时：API key 的两种协议，四类角色，自有 HTTP 工具桥 | 本分支已实现（假 provider 闭环）；真实 Responses/DeepSeek 与 Claude 对照未验证 | M9e |
-| 命令型定时任务 v0 | 按 cron 直接执行命令，跨重启接管、日志、告警与外部探活（[RFC](../architecture/rfcs/command-schedules-v0.zh-CN.md)） | 设计已批准，开发中 | 现有定时任务；排空期间放行依赖热升级排空功能 |
+| 命令型定时任务 v0 | 按 cron 直接执行命令，跨重启接管、日志、告警与外部探活（[RFC](../architecture/rfcs/command-schedules-v0.zh-CN.md)） | 设计已批准，开发中；本分支已实现排空期间放行命令型触发 | 现有定时任务；热升级排空功能 |
 
 执行顺序：M1 → M1.5 → M1.6 → M1.7 → M2 → M3 → M4 → M5 → M6 → M7a → M7b → M8a → M8b、M8c、M8d（可并行）→ M8e。
 
@@ -735,6 +735,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-29 | 定时任务按项开启用户关卡：新增 `schedules.user_gates`（默认 `off`），仅在项目和定时任务都开启时允许规划者开关卡；未开启时完整 Planner prompt 与原策略逐字节相同。API、管家列表/配置/差异/启用确认、v4 配置导入导出和项目定时表单/详情均携带该字段；v4 缺省导入为关闭。关卡优先发到定时任务通知对象，否则用系统 dashboard target，再否则仅任务页，复用渠道白名单与 `/gates` 路由。等待计入运行超时，重叠跳过、补跑和预算规则不变。一次性数据库的定向 pytest 以 `-n 2` 验证策略、升级、投递、API 回复恢复、超时和导入导出；隔离 serve 配 fake runtime 与本地 Lark 替身完整跑通。Web 36 项测试及构建通过，1280/390 浏览器验证开关、保存读回和超时提示；无真实渠道发送。 |
 
 | 2026-10-30 | DSH runner 瞬态重试（本分支）：在 `llm/stream` 内最多重试 3 次，逐次使用独立 request id、预算授权和计量；仅无模型输出时按 HTTP 状态及固定 SDK 的类型化错误码表重试，包含 DeepSeek overload。退避为 1/2/4 秒加至多 20% jitter，`Retry-After` 上限 30 秒，cancel、close 或 settle 立即中断等待；耗尽保留最后错误和尝试次数，逐次诊断不含 provider 消息或凭据。已检查 `0.2.1-rc.2` 源码并用安装版 SDK 与 loopback provider 验证：重复 `next()` 会创建新的 adapter stream、HTTP 请求和鉴权，不需重新调用一次性的 prepared-call 入口。新增 22 项覆盖重试、计费、拒绝、中断、输出边界与错误分类；原截断响应夹具按 `TRANSPORT` 重试更新。`-n 2` 定向回归共 201 项分批通过（重试 22 项、请求 26 项完成复测；中途超时批次不计通过），含独立数据库上的 DSH serve 预算/取消/崩溃验证。Dashboard、Telegram、Lark 和 CLI 共用 runner 行为，无需新增入口；未改 Pi、未调用真实 provider。 |
+
+| 2026-10-31 | 排空期间放行命令型定时任务（本分支）：到期、排队和立即运行照常执行，命令启动不计入排空等待；agent 定时任务保留到期游标和排队运行，取消排空后按原补跑规则继续。已有 agent 定时任务的立即运行返回 409 和重启后再试的提示，修复 #948 的误报 404；未知定时任务仍返回 404，Dashboard、管家（含 Telegram/Lark）和 CLI 共用后端，无需入口改动。定向 pytest 两批 246 项、58 项均通过（含重复用例），隔离 serve 验证排空期间触发、409/404、运行器跨重启接管并成功结算。 |
 
 ## 5. 不属于本 RFC 的待办
 
