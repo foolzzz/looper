@@ -767,6 +767,124 @@ def test_a_projects_role_templates_import_checked_and_the_ones_the_file_does_not
 # --- Schedules ---
 
 
+@pytest.mark.parametrize("missing_env_file", [False, True])
+def test_command_schedule_roundtrips_disabled_and_rewrites_changed_fields(monkeypatch, tmp_path, missing_env_file):
+    async def test():
+        env_file = tmp_path / "schedule.env"
+        env_file.write_text("PRIVATE_VALUE=never-export-this-value\n")
+        fields = {"name": "command", "kind": "command", "cron": "*/2 * * * *", "timezone": "UTC",
+                  "command": "printf done", "env": {"MODE": "daily"}, "env_file": str(env_file),
+                  "success_deadline": "09:30", "alert_failures_after": 5,
+                  "alert_stale_after_seconds": 3600, "alert_overlap_after": 0}
+        async with _installation() as (source, source_url), _installation() as (target, target_url):
+            _serve(monkeypatch, source)
+            project = (await _ok("POST", "/api/v1/project_admin/create",
+                                 {"name": "calc", "work_dir": str(tmp_path)}))["project_id"]
+            schedule = (await _ok("POST", "/api/v1/schedule_admin/create",
+                                  {"project_id": project, "fields": fields}))["schedule"]
+            await _ok("POST", "/api/v1/schedule_admin/update",
+                      {"schedule_id": schedule["schedule_id"], "fields": {"enabled": True}})
+            path = tmp_path / "config.json"
+            assert (await _transfer_file(source_url, "export", str(path), include_projects=True))[0] == 0
+            data = json.loads(path.read_text())
+            entry = data["projects"][0]["schedules"][0]
+            assert data["format"] == "looper-config/v4"
+            assert all(entry[key] == value for key, value in fields.items())
+            assert not set(entry) & {"requirement", "gate_command", "gate_timeout_seconds", "run_budget_usd",
+                                     "daily_budget_usd", "user_gates", "profiles", "task_limits"}
+            assert "never-export-this-value" not in path.read_text()
+            if missing_env_file:
+                env_file.unlink()
+            for apply in (False, True):
+                code, out, err = await _transfer_file(target_url, "import", str(path), apply=apply, json_output=True)
+                assert code == 0, err
+                plan = _plan(out)
+                assert plan["counts"]["project.schedules"]["added"] == 1, plan
+                assert (f"env_file {env_file} does not exist on this machine; create it before enabling"
+                        in " ".join(plan["notes"])) == missing_env_file
+                assert "come in disabled" in " ".join(plan["notes"])
+                if not apply:
+                    assert await target.fetchval("SELECT count(*) FROM schedules") == 0
+            row = await target.fetchrow("SELECT * FROM schedules")
+            assert all((json.loads(row[key]) if key == "env" else row[key]) == value
+                       for key, value in fields.items())
+            assert row["requirement"] == "" and row["enabled"] is False
+            assert row["run_timeout_mode"] == "none" and row["run_timeout_seconds"] is None
+            code, out, err = await _transfer_file(target_url, "import", str(path), apply=True, json_output=True)
+            assert code == 0, err
+            assert _plan(out)["counts"]["project.schedules"]["unchanged"] == 1
+            entry["command"] = "printf changed"
+            entry["env"] = {"MODE": "weekly"}
+            entry["alert_overlap_after"] = 4
+            path.write_text(json.dumps(data))
+            await target.execute("UPDATE schedules SET enabled = true")
+            code, out, err = await _transfer_file(target_url, "import", str(path), apply=True, json_output=True)
+            assert code == 0, err
+            change = next(c for c in _plan(out)["changes"] if c["section"] == "project.schedules")
+            assert set(change["fields"]) == {"command", "env", "alert_overlap_after"}
+            row = await target.fetchrow("SELECT * FROM schedules")
+            assert (row["command"], json.loads(row["env"]), row["alert_overlap_after"], row["enabled"]) == (
+                "printf changed", {"MODE": "weekly"}, 4, False)
+
+    asyncio.run(asyncio.wait_for(test(), timeout=30))
+
+
+def test_agent_schedule_alert_settings_roundtrip(monkeypatch, tmp_path):
+    async def test():
+        alerts = {"success_deadline": "08:15", "alert_failures_after": 1,
+                  "alert_stale_after_seconds": 300, "alert_overlap_after": 0}
+        async with _installation() as (source, source_url), _installation() as (target, target_url):
+            path = tmp_path / "config.json"
+            path.write_text(json.dumps({"format": "looper-config/v4", "projects": [{"name": "calc",
+                "schedules": [{"name": "agent", "cron": "0 9 * * *", "timezone": "UTC",
+                               "requirement": "Run it.", **alerts}]}]}))
+            code, out, err = await _transfer_file(source_url, "import", str(path), apply=True, json_output=True)
+            assert code == 0, err
+            assert _plan(out)["counts"]["project.schedules"]["added"] == 1
+            assert (await _transfer_file(source_url, "export", str(path), include_projects=True))[0] == 0
+            entry = json.loads(path.read_text())["projects"][0]["schedules"][0]
+            assert all(entry[key] == value for key, value in alerts.items())
+            assert "kind" not in entry and "command" not in entry
+            code, out, err = await _transfer_file(target_url, "import", str(path), apply=True, json_output=True)
+            assert code == 0, err
+            assert _plan(out)["counts"]["project.schedules"]["added"] == 1
+            row = await target.fetchrow("SELECT * FROM schedules")
+            assert all(row[key] == value for key, value in alerts.items())
+            assert row["kind"] == "agent" and row["enabled"] is False
+
+    asyncio.run(asyncio.wait_for(test(), timeout=30))
+
+
+@pytest.mark.parametrize("kind", ["agent", "command"])
+def test_schedule_import_preserves_existing_kind(monkeypatch, tmp_path, kind):
+    async def test():
+        async with _installation() as (target, url):
+            path = tmp_path / "config.json"
+            entry = {"name": "same", "cron": "0 9 * * *", "timezone": "UTC", "kind": kind,
+                     **({"command": "true"} if kind == "command" else {"requirement": "Run it."})}
+            data = {"format": "looper-config/v4", "projects": [{"name": "calc", "schedules": [entry]}]}
+            path.write_text(json.dumps(data))
+            code, out, err = await _transfer_file(url, "import", str(path), apply=True, json_output=True)
+            assert code == 0, err
+            assert _plan(out)["counts"]["project.schedules"]["added"] == 1
+            before = await target.fetchrow("SELECT * FROM schedules")
+            if kind == "command":
+                assert before["run_timeout_mode"] == "none" and before["run_timeout_seconds"] is None
+            entry.update(kind="agent" if kind == "command" else "command")
+            entry.pop("command" if kind == "command" else "requirement")
+            entry.update({"requirement": "Run it."} if kind == "command" else {"command": "true"})
+            path.write_text(json.dumps(data))
+            for apply in (False, True):
+                code, out, err = await _transfer_file(url, "import", str(path), apply=apply, json_output=True)
+                assert code == 0, err
+                change = next(c for c in _plan(out)["changes"] if c["section"] == "project.schedules")
+                assert change["action"] == "skipped"
+                assert change["reason"] == "a schedule with this name has another kind; rename one of them"
+                assert await target.fetchrow("SELECT * FROM schedules") == before
+
+    asyncio.run(asyncio.wait_for(test(), timeout=30))
+
+
 def test_a_schedule_whose_settings_changed_is_rewritten_disabled_and_one_that_did_not_keeps_running(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -777,6 +895,12 @@ def test_a_schedule_whose_settings_changed_is_rewritten_disabled_and_one_that_di
             assert (await _transfer_file(source_url, "export", str(exported), include_projects=True))[0] == 0
             calc = _by_name(json.loads(exported.read_text())["projects"], "calc")
             nightly = _by_name(calc["schedules"], "nightly")
+            assert _by_name(calc["schedules"], "weekly") == {
+                "name": "weekly", "cron": "0 9 * * 1", "timezone": "UTC", "requirement": "Sum up the week.",
+                "overlap": "skip", "max_parallel_runs": 3, "catch_up": "once", "run_timeout_seconds": "default",
+                "run_budget_usd": None, "gate_command": None, "gate_timeout_seconds": None,
+                "daily_budget_usd": None, "notify": "failures", "user_gates": "off", "notify_target": None,
+                "profiles": {}, "task_limits": {}}
             # Not whether it was enabled, nor its directory: a flag says it had one.
             assert "enabled" not in nightly and "work_dir" not in nightly and nightly["repoint"] is True
             assert (nightly["profiles"], nightly["task_limits"]) == ({"worker": "claude-code/sonnet"}, {"worker": 2})
@@ -811,6 +935,20 @@ _GOOD = {"name": "good", "cron": "0 9 * * *", "timezone": "UTC", "requirement": 
 
 
 @pytest.mark.parametrize(("bad", "reason"), [
+    ({"kind": "bogus"}, "kind must be one of agent, command"),
+    ({"command": "true"}, "applies to command schedules only"),
+    ({"success_deadline": "24:00"}, "success_deadline must be HH:MM"),
+    ({"alert_overlap_after": -1}, "alert_overlap_after must be a whole number"),
+    ({"kind": "command", "command": "true", "profiles": {}, "task_limits": {}, "gate_command": "true"},
+     "gate_command does not apply to a command schedule"),
+    ({"kind": "command", "command": "true", "profiles": {}, "task_limits": {"worker": 2}},
+     "task_limits does not apply to a command schedule"),
+    ({"kind": "command", "command": "true"}, "profile_overrides does not apply to a command schedule"),
+    ({"kind": "command", "command": "true", "profiles": {}, "task_limits": {}, "run_timeout_seconds": "default"},
+     "run_timeout_seconds is a number of seconds"),
+    ({"kind": "command", "command": ""}, "command is required"),
+    ({"kind": "command", "command": "true", "env": {"LOOPER_SCHEDULE_ID": "fake"}}, "env key"),
+    ({"kind": "command", "command": "true", "env_file": "relative.env"}, "env_file must be an absolute path"),
     ({"cron": "*/2 * * * *"}, "fires 2 minutes apart"),
     ({"timezone": "Mars/Base"}, "unknown time zone"),
     ({"requirement": ""}, "requirement is required"),
