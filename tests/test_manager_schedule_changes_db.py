@@ -50,6 +50,35 @@ def _with(chat: _Chat, **platform: Any) -> _Chat:
 # --- create ---
 
 
+def test_editing_only_the_tail_of_an_enabled_long_command_shows_the_full_change(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def test(pool: Any) -> None:
+        command = "echo " + "x" * 1994 + "a"
+        updated = command[:-1] + "b"
+        schedule = await _schedule(await _project(pool, work_dir=str(tmp_path)), "pull", enabled=True,
+                                   kind="command", command=command, requirement="")
+        chat = _Chat(tmp_path)
+        arguments = {"action": "update", "schedule": "pull", "fields": {"command": updated}}
+
+        (changed,) = await chat.say("只修改命令末尾", (TOOL, arguments))
+        assert changed["status"] == "ok", changed
+        assert changed["result"]["changed"] == ["command"]
+        (block,) = chat.turns[-1].blocks
+        assert f"- 命令：`{command}` → `{updated}`" in block
+        assert "没有变化" not in block
+        stored = (await _ok("POST", "/api/v1/schedule_admin/get", {
+            "schedule_id": schedule["schedule_id"]}))["schedule"]
+        assert stored["command"] == updated and stored["enabled"] is True
+
+        (unchanged,) = await chat.say("重复相同修改", (TOOL, arguments))
+        assert unchanged["status"] == "ok", unchanged
+        assert unchanged["result"]["changed"] == []
+        assert "- 没有变化" in chat.turns[-1].blocks[0]
+
+    run_db(test, monkeypatch)
+
+
 def test_changing_a_command_schedule_shows_the_command_and_alert_settings_before_and_after(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:

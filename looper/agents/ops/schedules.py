@@ -354,7 +354,7 @@ async def _changes(before: Mapping[str, Any], after: Mapping[str, Any], *,
         if only is not None and key not in only:
             continue
         old, new = _shown(key, before, names), _shown(key, after, names)
-        if old != new or (key == "template_inputs" and before.get(key) != after.get(key)):
+        if old != new or (key in ("command", "template_inputs") and before.get(key) != after.get(key)):
             lines[key] = f"- {label}：{old} → {new}"
     return lines
 
@@ -379,8 +379,7 @@ def _shown(key: str, view: Mapping[str, Any], names: Mapping[str, str]) -> str:
     if key == "kind":
         return "命令（不经过 agent，不花模型额度）" if value == "command" else "agent 任务"
     if key == "command":
-        shown = value[:299] + "…" if value and len(value) > 300 else value
-        return f"`{shown}`" if shown else "没有"
+        return f"`{value}`" if value else "没有"
     if key == "env":
         return "、".join(sorted(value or {})) or "没有"
     if key == "env_file":

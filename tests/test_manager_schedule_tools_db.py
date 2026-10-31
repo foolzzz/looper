@@ -54,8 +54,7 @@ def test_command_schedule_creation_and_start_show_the_command_before_confirmatio
             assert text in block
         for text in ("需求", "前置检查", "用户确认", "花费上限", "Profile", "任务并发", "private-value"):
             assert text not in block
-        if action == "run":
-            assert command not in block  # The configuration is a summary; approval below must show all of it.
+        assert f"- 命令：`{command}`" in block
 
         (asked,) = await chat.say("启用或立即运行", (TOOL, {"action": action, "schedule": "pull"}))
         assert asked["status"] == "needs_confirmation", asked
