@@ -18,6 +18,13 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.41] - 2026-10-31
+
+### Fixed
+
+- **`looper service status` and the install and restart reports use the address the unit listens on.** With `server.host = "::"` the status probe dials `[::1]` and the reports print `http://[::1]:<port>` instead of `http://127.0.0.1:<port>`. When the ops file cannot be read, status falls back to `127.0.0.1`. ([#992](https://github.com/foolzzz/looper/pull/992))
+- **Linux probe units stay consistent.** Reinstalling the probe stops a running probe first; uninstall removes the server unit even when probe cleanup fails (and then reports the failure, so it can be run again); uninstall stops the probe units by name when their files are already gone; and a failed probe update during install or restart restores the previous probe files instead of deleting them. ([#992](https://github.com/foolzzz/looper/pull/992))
+
 ## [2.14.40] - 2026-10-31
 
 ### Added
