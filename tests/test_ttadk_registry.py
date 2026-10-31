@@ -24,7 +24,10 @@ def test_runtime_launcher_and_version_survive_rows_and_records(launcher):
     profile = registry.AgentProfile.from_row({"id": "profile", "name": "profile", "model_id": "model",
         **{f"runtime_{key}": value for key, value in row.items()}})
     assert profile.runtime == spec
-    assert profile.record()["runtime"]["launcher"] == launcher.value
+    assert profile.record()["runtime"] == {
+        "id": row["id"], "name": row["name"], "type": row["type"],
+        "launcher": launcher.value,
+    }
     view = registry.runtime_view(row)
     assert view["launcher"] == launcher.value
     assert view["default_executable"] == ("ttadk" if launcher is Launcher.TTADK else "codex")

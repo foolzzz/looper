@@ -18,6 +18,39 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.34] - 2026-10-31
+
+### Fixed
+
+- **A failed `ps` no longer kills live command runs, and queued catch-up fires keep `missed_since`.** A non-zero, timed-out, failed or empty `ps` is now an unknown observation: the run is left alone and retried on the next tick. A runner whose recorded process is confirmed gone is lost at once instead of after the 60-second start grace. A catch-up fire that waits in the overlap queue keeps its `missed_since` (new nullable column `schedule_runs.missed_since`, added by one additive migration), so `LOOPER_SCHEDULE_MISSED_SINCE` is set when it starts. ([#958](https://github.com/foolzzz/looper/pull/958))
+- **The probe service install checks the port the service really uses and keeps its unit.** Install uses an explicit `--port`, else the installed unit's explicit port, else the ops file's; the readiness wait connects to the configured host (`::` through `::1`). A failed reinstall no longer deletes the probe unit first; `looper service restart` recreates a missing or stale probe unit when `[probe]` is configured; uninstall stops the probe before removing units and does not fail when none exists. ([#961](https://github.com/foolzzz/looper/pull/961))
+
+No model-visible change: no prompt, tool or message text given to a model changes.
+
+## [2.14.33] - 2026-10-31
+
+### Fixed
+
+- **Command schedules keep firing while the service drains for an upgrade.** During a planned-upgrade drain, only agent schedules are paused: command schedules fire, start their queued runs and run now as usual, and their starts do not count toward the `starting` the drain waits for. Run now on an agent schedule during a drain returns 409 "the service is draining for an upgrade: run it after the restart" instead of 404; an unknown schedule still returns 404. ([#962](https://github.com/foolzzz/looper/pull/962))
+
+No model-visible change: no prompt, tool or message text given to a model changes.
+
+## [2.14.32] - 2026-10-31
+
+### Fixed
+
+- **A TTADK run that ends without a result now says why, and the dashboard names the launcher.** When a Worker, Planner or Manager turn through the TTADK launcher ends without a result, its error (and, for Worker and Planner, its activity entry) keeps the last 1000 characters of the process's stderr, with credentials redacted. A per-turn process now carries that stderr on its turn result. The Agent Profiles page shows a TTADK runtime as `<name> (launcher: ttadk)`, and the dashboard's `Runtime` type gains the optional `launcher` field. Native runtimes keep their error text. ([#947](https://github.com/foolzzz/looper/pull/947))
+
+No model-visible change: no prompt, tool or message text given to a model changes.
+
+## [2.14.31] - 2026-10-31
+
+### Added
+
+- **The scheduler runs command schedules and adopts their runs after a restart.** A schedule of kind `command` starts a standalone runner (`looper/agents/command_runs.py`), skips or queues overlapping firings without merging skips, settles runs as `succeeded`, `failed`, `timed_out` or `interrupted`, adopts a live runner after a server restart, kills a run that passes its timeout by 90 seconds, and gets `LOOPER_SCHEDULE_TRIGGER`, `LOOPER_SCHEDULE_MISSED` and `LOOPER_SCHEDULE_MISSED_SINCE` (gates get them too). The runner's output tail also redacts secrets that cross its cut, and a failed serve start now stops the HTTP server. Nothing creates a command schedule yet. ([#944](https://github.com/foolzzz/looper/pull/944))
+
+No model-visible change: no prompt, tool or message text changes.
+
 ## [2.14.30] - 2026-10-31
 
 ### Added

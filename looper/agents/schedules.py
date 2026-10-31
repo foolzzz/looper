@@ -857,7 +857,8 @@ async def run_now(schedule_id: str, scheduler: Any, *, runtime_root: Path | None
     """Fire the schedule now (``trigger`` manual), through the same overlap check; its next fire time stays."""
     run_id = await scheduler.run_now(schedule_id)
     if run_id is None:
-        raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
+        await _existing(schedule_id)
+        raise RequestError(HTTP_409, "the service is draining for an upgrade: run it after the restart")
     row = await db_schedules.get_run(run_id)
     return {"run": (await _run_views([row], runtime_root=runtime_root))[0]}
 

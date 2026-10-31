@@ -65,7 +65,7 @@ import asyncpg
 from ..db import agent_setting_layers as db_layers, connection as db_connection, llm_records as db_llm_records
 from ..db import schedules as db_schedules, tasks as db_tasks
 from . import cron
-from .command_runs import BACKSTOP_SLACK, CommandRuns, CommandSpec, Finished, Lost, Observation, Running, Starting
+from .command_runs import BACKSTOP_SLACK, CommandRuns, CommandSpec, Finished, Lost, Observation, Running, Starting, Unknown
 from .drain import DrainState
 from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType
 from .schedule_gate import GateResult, run_gate
@@ -387,8 +387,11 @@ class Scheduler:
         return {"gates": self._gates, "starting": self._starting}
 
     @contextmanager
-    def _admit_start(self) -> Iterator[bool]:
+    def _admit_start(self, kind: str = "agent") -> Iterator[bool]:
         """Count admission through task publication, including awaits in database transactions."""
+        if kind == "command":
+            yield True
+            return
         if self._drain is not None and self._drain.draining:
             yield False
             return
@@ -471,26 +474,27 @@ class Scheduler:
         stale alerts that are due."""
         now = self._clock()
         await self._settle_running(now)
-        if self._drain is None or not self._drain.draining:
-            for schedule_id in await db_schedules.schedules_with_queued_runs():
-                await self._start_queued(schedule_id)
-            await self._fire_due(now)
+        kinds = ("command",) if self._drain is not None and self._drain.draining else None
+        for schedule_id in await db_schedules.schedules_with_queued_runs(kinds=kinds):
+            await self._start_queued(schedule_id)
+        await self._fire_due(now, kinds=kinds)
         await self._notifier.check_stale(now)
 
     # --- Firing ---
 
-    async def _fire_due(self, now: datetime) -> None:
+    async def _fire_due(self, now: datetime, *, kinds: Sequence[str] | None = None) -> None:
         handled: list[str] = []
         while True:
-            with self._admit_start() as admitted, ExitStack() as firing_guard:
-                if not admitted:
+            with ExitStack() as firing_guard:
+                if kinds is None and not firing_guard.enter_context(self._admit_start()):
                     return
                 launched: _Launched | None = None
                 schedule: dict[str, Any] | None = None
                 try:
                     async with db_connection.transaction() as conn:
-                        schedule = await db_schedules.lock_next_due(conn, now, skip=handled)
-                        if schedule is None or (self._drain is not None and self._drain.draining):
+                        schedule = await db_schedules.lock_next_due(conn, now, skip=handled, kinds=kinds)
+                        if schedule is None or (self._drain is not None and self._drain.draining
+                                                and schedule["kind"] != "command"):
                             return
                         handled.append(schedule["id"])
                         if not firing_guard.enter_context(_project_firing(schedule["project_id"])):
@@ -540,15 +544,13 @@ class Scheduler:
         return await self._fire(conn, schedule, firing, now)
 
     async def run_now(self, schedule_id: str) -> str | None:
-        """Fire a schedule now, enabled or not (``trigger`` manual); the run's id, None for an unknown schedule.
+        """Fire a schedule now, enabled or not (``trigger`` manual); None if unknown or admission is refused.
         Its ``next_fire_at`` stays. A gate runs in the background: the run is ``gating`` until it ends."""
         now = self._clock()
-        with self._admit_start() as admitted, ExitStack() as firing_guard:
-            if not admitted:
-                return None
+        with ExitStack() as firing_guard:
             async with db_connection.transaction() as conn:
                 schedule = await db_schedules.lock_schedule(conn, schedule_id)
-                if (schedule is None or (self._drain is not None and self._drain.draining)
+                if (schedule is None or not firing_guard.enter_context(self._admit_start(schedule["kind"]))
                         or not firing_guard.enter_context(_project_firing(schedule["project_id"]))):
                     return None
                 launched = await self._fire(conn, schedule, Firing(Trigger.MANUAL, now), now)
@@ -579,7 +581,8 @@ class Scheduler:
         """One firing, the schedule's row held: after the overlap check, a queued or skipped run, or the run
         launched (``_launch``)."""
         common = {"schedule_id": schedule["id"], "scheduled_for": firing.scheduled_for,
-                  "trigger": firing.trigger.value, "missed": firing.missed, "created_at": now}
+                  "trigger": firing.trigger.value, "missed": firing.missed,
+                  "missed_since": firing.missed_since, "created_at": now}
         command = schedule["kind"] == "command"
         if not command and await db_schedules.owner_error(conn, schedule["manager_id"], template_key=schedule.get("template_key")):
             return await self._create_run(conn, schedule, firing, now, common=common)
@@ -921,12 +924,10 @@ class Scheduler:
     async def _start_queued(self, schedule_id: str) -> None:
         """Start the schedule's queued run when none of its tasks or gates is in progress any more."""
         now = self._clock()
-        with self._admit_start() as admitted, ExitStack() as firing_guard:
-            if not admitted:
-                return
+        with ExitStack() as firing_guard:
             async with db_connection.transaction() as conn:
                 schedule = await db_schedules.lock_schedule(conn, schedule_id)
-                if (schedule is None or (self._drain is not None and self._drain.draining)
+                if (schedule is None or not firing_guard.enter_context(self._admit_start(schedule["kind"]))
                         or not firing_guard.enter_context(_project_firing(schedule["project_id"]))):
                     return
                 runs = await db_schedules.open_runs(conn, schedule_id)
@@ -938,7 +939,8 @@ class Scheduler:
                 if busy:
                     return
                 run = queued[0]
-                firing = Firing(Trigger(run["trigger"]), run["scheduled_for"], missed=run["missed"])
+                firing = Firing(Trigger(run["trigger"]), run["scheduled_for"], missed=run["missed"],
+                                missed_since=run["missed_since"])
                 launched = await self._launch(conn, schedule, firing, now, run_id=run["id"])
             logger.info("schedule %s: the queued run %s starts now", schedule_id, launched.run_id)
             await self._follow(schedule, launched)
@@ -994,7 +996,7 @@ class Scheduler:
     async def _settle_command(self, run: Mapping[str, Any], obs: Observation, now: datetime) -> None:
         run_id = run["id"]
         fields: dict[str, Any] = {}
-        if isinstance(obs, Starting):
+        if isinstance(obs, (Starting, Unknown)):
             return
         if isinstance(obs, Running):
             assert self._commands is not None

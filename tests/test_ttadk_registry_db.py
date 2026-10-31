@@ -13,7 +13,8 @@ from tests.test_profile_registry_db import _version_codex
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
-def test_existing_native_provider_ci_environment_loads_for_every_role(monkeypatch):
+@pytest.mark.parametrize("key", ["CI", "DEBUG", "FORCE_COLOR", "TTADK_DEBUG"])
+def test_existing_native_provider_environment_saves_and_loads_for_every_role(monkeypatch, key):
     monkeypatch.setattr(registry, "_login_modules", lambda: {})
 
     async def test(pool):
@@ -27,17 +28,37 @@ def test_existing_native_provider_ci_environment_loads_for_every_role(monkeypatc
             "runtime_id": "rt-claude-code", "model_id": model_id}))["profile"]["profile_id"]
         for role in agent_settings.AgentType:
             await agent_setting_layers.put_layer("role", role.value, None, {"profile_id": profile_id})
-        # Emulate the provider saved before TTADK was introduced, bypassing today's write validation.
-        await pool.execute("UPDATE llm_providers SET env = '[{\"key\":\"CI\",\"value\":\"1\"}]'::jsonb "
-                           "WHERE id = $1", provider_id)
+        saved = await registry.update_provider(provider_id, {"env": [{"key": key, "value": "1"}]})
+        assert saved["provider"]["env"] == [{"key": key, "value": "1"}]
         for role in agent_settings.AgentType:
             settings = await agent_settings.load_agent_settings(role)
             assert settings.error is None and settings.profile_error is None
             assert settings.profile.id == profile_id
             assert settings.profile.runtime.launcher is runtimes.Launcher.NATIVE
-            assert agent_settings.Launch(settings, role=role).environment()["CI"] == "1"
-        saved = await registry.update_provider(provider_id, {"env": [{"key": "CI", "value": "1"}]})
-        assert saved["provider"]["env"] == [{"key": "CI", "value": "1"}]
+            assert agent_settings.Launch(settings, role=role).environment()[key] == "1"
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_ttadk_profile_provider_refuses_gateway_key_environment(monkeypatch):
+    monkeypatch.setattr(registry, "_login_modules", lambda: {})
+
+    async def test(pool):
+        await db.insert_builtin_runtime("rt-ttadk-codex", {
+            "name": "ttadk-codex", "type": "codex", "launcher": "ttadk", "executable": "",
+            "version": "ttadk stand-in", "probe_error": None,
+            "capabilities": sorted(c.value for c in runtimes.adapter("codex").capabilities)})
+        provider = (await registry.create_provider({
+            "name": "TTADK account", "vendor_type": "codex-login",
+        }))["provider"]["provider_id"]
+        model = (await registry.create_model({"provider_id": provider, "name": "ttadk-test-model",
+            "protocol": "openai-responses"}))["model"]["model_id"]
+        await registry.create_profile({"name": "TTADK profile", "runtime_id": "rt-ttadk-codex",
+                                       "model_id": model})
+        with pytest.raises(registry.RegistryError, match="TTADK_OPENAI_API_KEY"):
+            await registry.update_provider(provider, {
+                "env": [{"key": "TTADK_OPENAI_API_KEY", "value": "synthetic-key"}]})
+        assert (await db.get_provider(provider))["env"] == []
 
     run_db(test, monkeypatch, timeout=30)
 
