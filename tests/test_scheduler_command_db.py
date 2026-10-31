@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from looper.agents import proc_tree
+from looper.agents.drain import DrainState
 from looper.agents.scheduler import Scheduler
 from looper.db import schedules as db_schedules
 from tests.db_support import DSN
@@ -417,4 +418,180 @@ def test_command_missed_skips_are_kept_as_separate_run_rows(monkeypatch, tmp_pat
             await env.scheduler.tick()
         rows = await _rows(env, sid)
         assert len(rows) == 2 and all(row["status"] == "skipped_missed" for row in rows)
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def _with_drain(env: ScheduleEnv) -> DrainState:
+    drain = DrainState(clock=env.clock)
+    env.scheduler = Scheduler(bus=env.bus, clock=env.clock, runtime_root=env.runtime_root, drain=drain)
+    env.scheduler._commands.prepare()
+    drain.add_source(env.scheduler.drain_waiting)
+    return drain
+
+
+@pytest.mark.parametrize("catch_up,expected", [("once", "running"), ("skip", "skipped_missed")])
+def test_drain_fires_commands_and_preserves_agent_catch_up(monkeypatch, tmp_path, catch_up, expected):
+    async def test(env: ScheduleEnv):
+        drain = _with_drain(env)
+        agent = (await env.enabled(catch_up=catch_up))["schedule_id"]
+        command = await _command(env, "sleep 1")
+        await env.due(agent, fires_ago=2)
+        due = await env.pool.fetchval("SELECT next_fire_at FROM schedules WHERE id=$1", agent)
+        # Put the blocked agent first: an unfiltered due lookup must not starve the command.
+        await env.pool.execute("UPDATE schedules SET next_fire_at=$2 WHERE id=$1", command,
+                               due + timedelta(minutes=5))
+        drain.begin("runs")
+        await env.scheduler.tick()
+        [run] = await _rows(env, command)
+        identity = await _runner(env, run["id"])
+        assert run["status"] == "running" and _alive(identity["runner_pid"])
+        assert await _rows(env, agent) == []
+        assert await env.pool.fetchval("SELECT next_fire_at FROM schedules WHERE id=$1", agent) == due
+        assert not env.bus.sent
+        assert drain.snapshot()["phase"] == "drained"
+        assert not any(drain.snapshot()["waiting"].values())
+        await _ended(env, command)
+
+        # A cancelled deployment resumes normal catch-up from the unchanged cursor.
+        env.clock.now += timedelta(minutes=3)
+        assert drain.cancel()["phase"] == "serving"
+        await env.scheduler.tick()
+        [run] = await _rows(env, agent)
+        assert run["status"] == expected and run["missed"] == 3
+        assert len(env.bus.of("task_start")) == (1 if expected == "running" else 0)
+        await _ended(env, command)
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("kind", ["agent", "command"])
+def test_run_now_during_drain_returns_command_run_or_agent_conflict(monkeypatch, tmp_path, kind):
+    async def test(env: ScheduleEnv):
+        drain = _with_drain(env)
+        sid = (await _command(env) if kind == "command"
+               else (await env.enabled())["schedule_id"])
+        next_fire = await env.pool.fetchval("SELECT next_fire_at FROM schedules WHERE id=$1", sid)
+        drain.begin("runs")
+        status, payload = await env.call("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid})
+        if kind == "command":
+            assert status == 200, payload
+            run_id = payload["run"]["run_id"]
+            assert run_id and payload["run"]["trigger"] == "manual"
+            [run] = await _ended(env, sid)
+            assert run["id"] == run_id and run["status"] == "succeeded"
+        else:
+            assert status == 409, payload
+            assert payload["error"]["message"] == (
+                "the service is draining for an upgrade: run it after the restart")
+            assert await env.scheduler.run_now(sid) is None
+            assert await _rows(env, sid) == []
+        assert await env.pool.fetchval("SELECT next_fire_at FROM schedules WHERE id=$1", sid) == next_fire
+        assert (await env.call("POST", "/api/v1/schedule_admin/run",
+                               {"schedule_id": "sched-missing"}))[0] == 404
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("kind", ["agent", "command"])
+def test_manager_confirmed_run_during_drain_obeys_schedule_kind(monkeypatch, tmp_path, kind):
+    from looper.agents.ops import Turn
+    from looper.agents.ops.service import ManagerOps, Platform
+
+    async def test(env: ScheduleEnv):
+        drain = _with_drain(env)
+        sid = (await _command(env) if kind == "command"
+               else (await env.enabled())["schedule_id"])
+        ops = ManagerOps(Platform(bus=env.bus, task_router=None, scheduler=env.scheduler),
+                         url="http://127.0.0.1:9", token="test-token")
+        asking = Turn(channel="web", chat="drain-test", message_id="ask")
+        ops.begin_turn(asking, binding="ask")
+        asked = await ops.call("looper_schedules", {"action": "run", "schedule": sid}, binding="ask")
+        assert asked["status"] == "needs_confirmation", asked
+        ops.end_turn(asking)
+        drain.begin("runs")
+        confirming = Turn(channel="web", chat="drain-test", message_id="confirm")
+        ops.begin_turn(confirming, binding="confirm")
+        answer = await ops.call("looper_confirm", {"confirmation_id": asked["confirmation_id"]},
+                                binding="confirm")
+        ops.end_turn(confirming)
+        if kind == "command":
+            assert answer["status"] == "ok", answer
+            [run] = await _ended(env, sid)
+            assert answer["result"]["run"]["run_id"] == run["id"]
+            assert run["status"] == "succeeded"
+        else:
+            assert answer == {"status": "error", "error": {"code": "conflict", "message":
+                "the service is draining for an upgrade: run it after the restart"}}
+            assert await _rows(env, sid) == []
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_drain_starts_only_queued_commands_after_previous_run_finishes(monkeypatch, tmp_path):
+    async def test(env: ScheduleEnv):
+        drain = _with_drain(env)
+        command = await _command(env, "sleep 1", overlap="queue")
+        first = await env.scheduler.run_now(command)
+        queued = await env.scheduler.run_now(command)
+        agent = (await env.enabled(overlap="queue"))["schedule_id"]
+        agent_first = await env.scheduler.run_now(agent)
+        agent_queued = await env.scheduler.run_now(agent)
+        [task] = env.bus.of("task_start")
+        drain.begin("runs")
+        await env.end_task(task, "completed")  # Also exercises the direct _start_queued entry point.
+        assert (await db_schedules.get_run(agent_first))["status"] == "completed"
+        assert (await db_schedules.get_run(agent_queued))["status"] == "queued"
+        assert (await db_schedules.get_run(first))["status"] == "running"
+        assert (await db_schedules.get_run(queued))["status"] == "queued"
+        rows = await _ended(env, command, count=2)
+        assert all(row["status"] == "succeeded" for row in rows)
+        assert next(row for row in rows if row["id"] == queued)["runner_pid"]
+        assert (await db_schedules.get_run(agent_queued))["status"] == "queued"
+        assert len(env.bus.of("task_start")) == 1
+        assert drain.snapshot()["phase"] == "drained"
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("entry", ["due", "manual", "queued"])
+def test_command_launch_does_not_hold_drain_waiting(monkeypatch, tmp_path, entry):
+    async def test(env: ScheduleEnv):
+        drain = _with_drain(env)
+        sid = await _command(env)
+        if entry == "due":
+            await env.due(sid)
+        elif entry == "queued":
+            await db_schedules.insert_run(env.pool, schedule_id=sid, scheduled_for=env.clock.now,
+                                          trigger="manual", status="queued")
+        drain.begin("runs")
+        start = env.scheduler._start_runner
+
+        async def starting(*args):
+            assert drain.snapshot()["phase"] == "drained"
+            assert env.scheduler.drain_waiting() == {"gates": 0, "starting": 0}
+            await start(*args)
+
+        monkeypatch.setattr(env.scheduler, "_start_runner", starting)
+        if entry == "manual":
+            assert await env.scheduler.run_now(sid)
+        else:
+            await env.scheduler.tick()
+        [run] = await _ended(env, sid)
+        assert run["status"] == "succeeded"
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_command_due_lookup_can_finish_when_drain_begins_mid_tick(monkeypatch, tmp_path):
+    async def test(env: ScheduleEnv):
+        drain = _with_drain(env)
+        sid = await _command(env)
+        await env.due(sid)
+        lock = db_schedules.lock_next_due
+
+        async def lookup(*args, **kwargs):
+            row = await lock(*args, **kwargs)
+            drain.begin("runs")
+            return row
+
+        monkeypatch.setattr(db_schedules, "lock_next_due", lookup)
+        await env.scheduler.tick()
+        [run] = await _ended(env, sid)
+        assert run["status"] == "succeeded"
+        assert drain.snapshot()["phase"] == "drained"
     run_scheduled(test, monkeypatch, tmp_path)

@@ -4311,6 +4311,13 @@ directory once per process at HTTP-server startup and remains fixed if files lat
 The operation is also available through generated `loopercli` commands. Dashboard,
 Telegram and Lark need no change for this read-only planning command.
 
+During a planned-upgrade drain, agent schedules keep their due times and queued
+runs for catch-up after restart or drain cancellation. Run now on an existing
+agent schedule returns 409 with "the service is draining for an upgrade: run it
+after the restart"; an unknown schedule still returns 404. Command schedules
+continue firing, including queued runs and Run now: their runs survive service
+restarts, and the drain does not wait for them.
+
 ## HTTP API
 
 The HTTP server has five route classes: the exact paths `/login` and `/logout`
