@@ -98,6 +98,8 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                     expected = [{**r, "harness_prompt": DEFAULT_HARNESS_PROMPT} if r["scope"] == "system" else r
                                 for r in before[table]]
                     assert after[table] == expected
+                elif table == "agent_runtimes":
+                    assert after[table] == [{**r, "launcher": "native"} for r in before[table]]
                 else:
                     assert after[table] == before[table], table
             assert json.loads(after["tasks"][0]["config"]) == {"worker": {"max_turns": 9}}
@@ -119,7 +121,8 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
             assert after["task_user_gate_messages"] == before["task_user_gate_messages"]
             assert after["task_user_gate_posts"][0] == {**before["task_user_gate_posts"][0], "channel": "telegram"}
             assert {r["name"] for r in before["schema_migrations"]} <= {r["name"] for r in after["schema_migrations"]}
-            assert {"schedule_user_gates", "command_schedules"} <= {r["name"] for r in after["schema_migrations"]}
+            assert {"schedule_user_gates", "command_schedules", "runtime_launcher"} <= {
+                r["name"] for r in after["schema_migrations"]}
             assert await conn.fetchval("SELECT planner_session_runtime FROM schedules") == "claude-code"
             # Added snapshot and command metadata preserve every historical run field.
             runs = [dict(row) for row in after["schedule_runs"]]

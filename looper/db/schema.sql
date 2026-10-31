@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     id            TEXT PRIMARY KEY,
     name          TEXT NOT NULL UNIQUE,
     type          TEXT NOT NULL,
+    launcher      TEXT NOT NULL DEFAULT 'native' CHECK (launcher IN ('native', 'ttadk')),
     executable    TEXT NOT NULL DEFAULT '',
     version       TEXT,
     capabilities  TEXT[] NOT NULL DEFAULT '{}'

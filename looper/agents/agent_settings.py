@@ -790,9 +790,15 @@ async def profile_launch_problem(profile: AgentProfile, role: AgentType) -> str 
 
 async def _login_problem(profile: AgentProfile) -> str | None:
     """Why ``profile``'s runtime cannot run with its own login now (``RuntimeAdapter.login_problem``)."""
-    from .runtimes import adapter
+    from .runtimes import Launcher, adapter, ttadk
 
-    problem = await adapter(profile.runtime.type).login_problem(profile.provider)
+    runtime = adapter(profile.runtime.type)
+    problem = await runtime.login_problem(profile.provider)
+    if not problem and profile.runtime.launcher is Launcher.TTADK:
+        if runtime.ttadk_tool is None:
+            problem = f"{runtime.label} cannot be launched through ttadk"
+        elif found := await ttadk.sign_in_problem(profile.runtime.executable or "ttadk", runtime.ttadk_tool):
+            problem = found.message(profile.runtime.type)
     return f"Agent Profile {profile.name!r} cannot run: {problem}" if problem else None
 
 
@@ -932,10 +938,18 @@ class Launch:
     def executable(self, claude: str) -> str:
         """What the run executes: its runtime's executable, else its type's default (``claude``, the server's
         configured one, for Claude Code)."""
-        from .runtimes import CLAUDE_CODE
+        from .runtimes import CLAUDE_CODE, Launcher
 
         runtime = self.runtime
+        if self.profile.runtime.launcher is Launcher.TTADK:
+            return self.profile.runtime.executable or "ttadk"
         return self.profile.runtime.executable or (claude if runtime is CLAUDE_CODE else runtime.default_executable)
+
+    @property
+    def exit_code_reliable(self) -> bool:
+        from .runtimes import Launcher
+
+        return self.profile.runtime.launcher is not Launcher.TTADK
 
     def args(self) -> list[str]:
         """The runtime's flags for these settings, installed items and knowledge (``RuntimeAdapter.launch_args``)."""

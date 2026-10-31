@@ -1275,9 +1275,11 @@ class WorkerPool:
             detail = (runtime.failure_detail(result_event, launch=launch, command=command, pid=handle.pid)
                       if not result_ok else None)
             # A run stopped at its spend cap exits non-zero too; its result says why.
-            if return_code != 0 and not result_ok and runtime.budget_error(result_event) is None and not detail:
+            if ((return_code != 0 or not launch.exit_code_reliable) and not result_ok
+                    and runtime.budget_error(result_event) is None and not detail):
                 stderr = await handle.error_output()
-                error = f"{runtime.label} exited with code {return_code}"
+                error = (f"{runtime.label} exited with code {return_code}" if launch.exit_code_reliable
+                         else f"{runtime.label} through TTADK ended without a result")
                 await recorder.finish(output_text=final_text, result_event=recorded, error=error,
                                       outcome=RunOutcome.RUN_FAILED.value)
                 return {"status": "failed", "error": error, "stderr": stderr[:500]}

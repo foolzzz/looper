@@ -67,6 +67,7 @@ _SCHEMA_LOCK = 0x6C6F6F70  # "loop"
 
 REGISTRY_SCHEMA_VERSION = 4
 _SCHEDULE_USER_GATES = "schedule_user_gates"
+_RUNTIME_LAUNCHER = "runtime_launcher"
 _COMMAND_SCHEDULES = "command_schedules"
 
 _COMMAND_SCHEDULES_DDL: tuple[str, ...] = (
@@ -107,6 +108,16 @@ _COMMAND_SCHEDULES_DDL: tuple[str, ...] = (
             'deadline_alert', 'deadline_recovered', 'overlap_alert', 'overlap_recovered'))""",
     "CREATE INDEX IF NOT EXISTS idx_schedule_runs_finished ON schedule_runs (finished_at) WHERE finished_at IS NOT NULL",
 )
+
+
+async def _runtime_launcher_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _RUNTIME_LAUNCHER):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('agent_runtimes') AND attname = 'launcher' "
+        "AND attnum > 0 AND NOT attisdropped)")
 
 
 async def _schedule_user_gates_pending(conn: asyncpg.Connection) -> bool:
@@ -238,6 +249,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("ALTER TABLE schedules ADD COLUMN IF NOT EXISTS user_gates "
                                "TEXT NOT NULL DEFAULT 'off' CHECK (user_gates IN ('off', 'on'))")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_USER_GATES)
+        if await _runtime_launcher_pending(conn):
+            await conn.execute("ALTER TABLE agent_runtimes ADD COLUMN IF NOT EXISTS launcher "
+                               "TEXT NOT NULL DEFAULT 'native' CHECK (launcher IN ('native', 'ttadk'))")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _RUNTIME_LAUNCHER)
         if await _command_schedules_pending(conn):
             for ddl in _COMMAND_SCHEDULES_DDL:
                 await conn.execute(ddl)
@@ -273,4 +288,5 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
         await conn.execute(f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK})")
         state = await _classify_schema(conn, sql)
         return state == "bridge" or (state == "current" and (
-            await _schedule_user_gates_pending(conn) or await _command_schedules_pending(conn)))
+            await _schedule_user_gates_pending(conn) or await _runtime_launcher_pending(conn)
+            or await _command_schedules_pending(conn)))
