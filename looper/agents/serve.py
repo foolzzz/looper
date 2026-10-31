@@ -691,12 +691,6 @@ async def _run_agent_system_owned(
     # The consults the last server left queued or running run again.
     await consults.resume_all()
 
-    # --- Start ---
-
-    await supervisor.start_all()
-    await fleet.sweep()
-    await carry_on_tasks(task_router, left_running)
-
     # --- HTTP Server ---
 
     http_server = AgentHTTPServer(
@@ -724,6 +718,16 @@ async def _run_agent_system_owned(
         channels=registry,
     )
     await http_server.start()
+
+    # Replayed Manager messages probe the tools immediately; listen before agents consume the backlog.
+    try:
+        await supervisor.start_all()
+        await fleet.sweep()
+        await carry_on_tasks(task_router, left_running)
+    except BaseException:
+        await http_server.stop()
+        raise
+
     # Its first pass handles the fires missed while the server was down.
     await scheduler.start()
     await gate_reminders.start()
