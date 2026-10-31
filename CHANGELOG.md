@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.43] - 2026-10-31
+
+### Fixed
+
+- **Command schedule runtime.** A due schedule is admitted by its kind after it is locked, so a command launch no longer blocks a drain and no tick under way can publish an agent task after the drain begins. Housekeeping runs retention, run pruning, notification pruning and each log rotation as independent steps recorded in `failed_steps`. Run pruning keeps an unfinished run whose gate output has not been handed on. The command runner retries opening its log once when the log directory vanished. Deleting a command schedule with a running run is refused with a 409. ([#993](https://github.com/foolzzz/looper/pull/993))
+
 ## [2.14.42] - 2026-10-31
 
 ### Added
