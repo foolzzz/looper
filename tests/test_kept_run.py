@@ -419,15 +419,48 @@ def test_a_new_controller_fences_the_old_run_without_ending_its_child(tmp_path: 
     exercise(run())
 
 
-def test_a_failed_keeper_launch_releases_its_directory(tmp_path: Path) -> None:
+@pytest.mark.parametrize('connected', [False, True], ids=['default', 'during-initialize'])
+def test_a_failed_keeper_launch_releases_its_directory(tmp_path: Path, monkeypatch, connected: bool) -> None:
     async def run() -> None:
         directory = short_directory()
         handle = KeptRun(CLAUDE_CODE, [str(tmp_path / 'absent-claude')], launch=builtin_launch(),
                          cwd=tmp_path, session_dir=None, label='cannot-start test', run_dir=directory,
                          runtime_root=tmp_path / 'runtime', epoch=1, on_stale=lambda reason: None)
+        if connected:
+            # Hold spawn until the real socket has an initialize request in flight.
+            allowed = tmp_path / 'spawn-allowed'
+            boot_argv = keeper.boot_argv
+
+            def delayed_boot(*args):
+                command = boot_argv(*args)
+                setup = f"""
+import asyncio
+from pathlib import Path
+from looper.agents import proc_tree
+original_spawn = proc_tree.spawn
+async def delayed_spawn(*args, **kwargs):
+    while not Path({str(allowed)!r}).exists():
+        await asyncio.sleep(0.01)
+    return await original_spawn(*args, **kwargs)
+proc_tree.spawn = delayed_spawn
+"""
+                command[3] = command[3].replace('; sys.exit(', '\n' + setup + '\nsys.exit(')
+                return command
+
+            initialize = handle._client.initialize
+
+            async def initialize_before_failure(**kwargs):
+                request = asyncio.create_task(initialize(**kwargs))
+                await asyncio.sleep(0)
+                allowed.touch()
+                return await request
+
+            monkeypatch.setattr(keeper, 'boot_argv', delayed_boot)
+            monkeypatch.setattr(handle._client, 'initialize', initialize_before_failure)
         try:
             with pytest.raises(RunStartError, match='absent-claude'):
                 await handle.launch()
+            assert not live(handle._keeper_process.pid)
             assert not directory.exists()
         finally:
             await handle.end()

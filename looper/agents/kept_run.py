@@ -14,7 +14,6 @@ from enum import StrEnum
 from pathlib import Path
 
 import looper
-from looper import components
 from . import keeper, proc_tree
 from .keeper.client import KeeperClient, KeeperGone
 from .keeper.protocol import ErrorCode, KeeperError, MAX_STDIN_BYTES, Stream
@@ -172,6 +171,8 @@ class KeptProcess:
 class KeptRun:
     def __init__(self, runtime, command, *, launch, cwd, session_dir, label, run_dir,
                  runtime_root, epoch, on_stale: Callable[[str], None]):
+        from looper import components
+
         self._runtime, self._command, self._launch = runtime, command, launch
         self._cwd, self._session_dir, self._label = cwd, session_dir, label
         self.run_dir, self._runtime_root = Path(run_dir), Path(runtime_root)
@@ -265,10 +266,15 @@ class KeptRun:
             if isinstance(exc, KeeperError) and exc.code == ErrorCode.STALE_CONTROLLER:
                 self._stale()
             await self.end()
+            message = str(exc)
+            if created and isinstance(exc, KeeperGone):
+                # A failed spawn can close an already connected socket before initialize replies.
+                state = keeper.read_json(self.run_dir / keeper.STATE) or {}
+                message = state.get("error") or message
             if created:
                 self.release()
             if isinstance(exc, (OSError, KeeperError, KeeperGone, TimeoutError)):
-                raise RunStartError(str(exc)) from exc
+                raise RunStartError(message) from exc
             raise
 
     def _data(self, stream, offset, data):
