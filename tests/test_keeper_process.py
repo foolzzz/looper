@@ -9,6 +9,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -96,6 +97,7 @@ class Run:
 @pytest.fixture
 def launch(tmp_path: Path) -> Iterator[Callable[..., Run]]:
     runs: list[Run] = []
+    directories = []
 
     def start(
         script: str = SLEEP, *, manifest: dict | str | None = None,
@@ -103,8 +105,10 @@ def launch(tmp_path: Path) -> Iterator[Callable[..., Run]]:
         via_parent: bool = False, directory_mode: int = 0o700, keeper_setup: str = "",
     ) -> Run:
         runtime_root = tmp_path / f"runtime-{len(runs)}"
-        directory = runtime_root / keeper.RUNS_DIR / "worker-test"
-        directory.mkdir(mode=0o700, parents=True)
+        temporary = tempfile.TemporaryDirectory(prefix="", dir=ROOT)
+        directories.append(temporary)
+        directory = Path(temporary.name)
+        runtime_root.mkdir(parents=True)
         directory.chmod(directory_mode)
         cwd = runtime_root / "work"
         cwd.mkdir()
@@ -181,6 +185,8 @@ def launch(tmp_path: Path) -> Iterator[Callable[..., Run]]:
                 except ProcessLookupError:
                     pass
         _wait_for(lambda: not _live(list(run.identities)), timeout=5)
+    for temporary in directories:
+        temporary.cleanup()
 
 
 def test_every_child_byte_is_logged_in_order(launch: Callable[..., Run]) -> None:
@@ -208,8 +214,10 @@ sys.exit(7)
     assert state["signal"] is None
     assert state["end_reason"] == "exited"
     assert state["format"] == 1
-    assert state["protocol_versions"] == []
-    assert state["controller_epoch"] is None and state["socket"] is None
+    assert state["protocol_versions"] == ["1.0"]
+    assert state["controller_epoch"] is None
+    assert state["socket"] == str(run.directory / keeper.SOCKET)
+    assert not (run.directory / keeper.SOCKET).exists()
     assert state["keeper_pid"] == run.pid and state["keeper_started"]
     assert state["ended_at"]
     assert stat.S_IMODE(run.directory.stat().st_mode) == 0o700
@@ -278,7 +286,7 @@ def test_no_controller_means_the_orphan_timeout_ends_the_child(launch: Callable[
     child = run.running()["child_pid"]
     assert run.wait()["end_reason"] == "orphaned"
     assert not _live([child])
-    assert "keeper orphaned run=worker-test" in (run.directory / keeper.LOG).read_text()
+    assert f"keeper orphaned run={run.directory.name}" in (run.directory / keeper.LOG).read_text()
 
 
 def test_stdout_past_the_cap_ends_the_run(launch: Callable[..., Run]) -> None:
