@@ -22,6 +22,7 @@ changed, before and after.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
@@ -47,6 +48,8 @@ ENABLE_QUESTION = "要启用吗？回复「启用」就启用，之后按规则�
 # A schedule's settings as the user is shown them, in this order; ``fields.profiles`` is the API's profile_overrides.
 FIELD_WORDS = {
     "name": "名称", "cron": "时间规则", "timezone": "时区", "work_dir": "目录", "requirement": "需求",
+    "kind": "类型", "command": "命令", "env": "环境变量", "env_file": "环境文件",
+    "success_deadline": "最晚成功时间", "alert_policy": "告警阈值",
     "overlap": "上一次还在运行时", "max_parallel_runs": "同时运行的上限", "catch_up": "错过的触发",
     "run_timeout_seconds": "运行超时", "gate_command": "前置检查", "gate_timeout_seconds": "前置检查超时",
     "run_budget_usd": "每次运行的花费上限", "daily_budget_usd": "每日花费上限", "notify": "通知",
@@ -69,12 +72,13 @@ def _run_listed(run: Mapping[str, Any]) -> dict[str, Any]:
     return {"run_id": run["run_id"], "status": run["status"], "trigger": run["trigger"],
             "at": run["fired_at"] or run["scheduled_for"], "task_id": run["task_id"],
             "summary": clip(run["summary"] or run["error"] or "", 200) or None, "cost_usd": run["cost_usd"],
+            "exit_code": run["exit_code"], "kind": run["kind"],
             **({"firings": run["firings"]} if run["firings"] > 1 else {})}
 
 
 def _listed(view: Mapping[str, Any]) -> dict[str, Any]:
     return {"schedule_id": view["schedule_id"], "name": view["name"], "project": view["project_name"],
-            "cron": view["cron"], "timezone": view["timezone"], "description": view["description"],
+            "cron": view["cron"], "timezone": view["timezone"], "description": view["description"], "kind": view["kind"],
             "enabled": view["enabled"], "next_fire_at": view["next_fire_at"],
             "user_gates": view["user_gates"],
             "template_key": view.get("template_key"), "template_name": view.get("template_name"),
@@ -142,7 +146,10 @@ async def _schedules(call: Call) -> dict[str, Any]:
         return {"schedules": [_listed(await _in_scope(call, v)) for v in views]}
     if action == "create":
         return await _create(call)
-    row = await _schedule(arguments)
+    # Resolve a confirmed start by its immutable id, even if another schedule has since taken its name.
+    row = await _schedule({**arguments, "schedule": call.confirmation["schedule_id"], "project": None}
+                          if call.confirmation else arguments)
+    expected = {"expected_version": call.confirmation["schedule_version"]} if call.confirmation else {}
     _not_created_now(call, row)
     if action == "update":
         return await _update(call, row)
@@ -154,7 +161,7 @@ async def _schedules(call: Call) -> dict[str, Any]:
     if action == "run":
         if call.platform.scheduler is None:
             raise OpError(ErrorCode.UNAVAILABLE, "this server runs no scheduler; try again later")
-        run = (await answered(schedules.run_now(row["id"], call.platform.scheduler)))["run"]
+        run = (await answered(schedules.run_now(row["id"], call.platform.scheduler, **expected)))["run"]
         (run,) = await _runs_in_scope(call, [run])
         return {"schedule": row["name"], "project": row["project_name"], "run": _run_listed(run),
                 "note": "it runs once now, through the same overlap check as a fire; its next fire time stays"}
@@ -167,7 +174,7 @@ async def _schedules(call: Call) -> dict[str, Any]:
                 "routine_skips": runs["routine_skips"]}
     if action in ("enable", "disable"):
         enabled = action == "enable"
-        answer = await answered(schedules.update_schedule(row["id"], {"enabled": enabled}))
+        answer = await answered(schedules.update_schedule(row["id"], {"enabled": enabled}, **expected))
         result = {"schedule": _listed(await _in_scope(call, answer["schedule"]))}
         if row["enabled"] is enabled:
             result["note"] = f"it was {action}d already"
@@ -237,6 +244,7 @@ async def _update(call: Call, row: Mapping[str, Any]) -> dict[str, Any]:
     changed = await _changes(before, view)
     call.turn.blocks.append("\n".join([f"已修改定时任务「{view['name']}」（项目 {view['project_name']}）：",
                                        *(changed.values() or ["- 没有变化"]), *_next_line(before, view),
+                                       *(["不经过 agent，不花模型额度。"] if view["kind"] == "command" else []),
                                        f"它现在{'已启用' if view['enabled'] else '是停用的'}。"]))
     return {"schedule": _listed(await _in_scope(call, view)), "changed": [_ARGUMENT.get(key, key) for key in changed],
             "shown_to_user": "Looper adds what changed, before and after, after your reply; do not repeat it."}
@@ -313,11 +321,30 @@ async def _starting(call: Call) -> str | None:
     row = await _schedule(call.arguments)
     _not_created_now(call, row)
     action = call.arguments["action"]
+    # Render and version the same read, so an edit during rendering cannot bind a different command.
+    call.confirmation.update(schedule_id=row["id"], schedule_version=db_schedules.configuration_version(row))
     if action == "enable" and row["enabled"]:
         return None
-    view = await _in_scope(call, (await answered(schedules.get_schedule(row["id"])))["schedule"])
+    view = await _in_scope(call, schedules.schedule_view(row, default_timeout=await schedules.default_run_timeout()))
     names = await _profile_names()
     head = f"定时任务「{row['name']}」（项目 {row['project_name']}）"
+    if view["kind"] == "command":
+        lines = [f"- 命令：{_shown('command', view, names)}",
+                 f"- 时间规则：{_shown('cron', view, names)}，时区 {view['timezone']}"]
+        if action == "enable":
+            lines.append(f"- 接下来 {NEXT_SHOWN} 次：{_next_fires(view)}")
+        project = await db_projects.get_project(row["project_id"])
+        directory = view["work_dir"] or f"项目的默认目录（{project['work_dir']}）"
+        lines.append(f"- 目录：{directory}")
+        keys = ["run_timeout_seconds", "env"]
+        if view["env_file"]:
+            keys.append("env_file")
+        if action == "enable":
+            keys.extend(("success_deadline", "alert_policy"))
+        lines.extend(f"- {FIELD_WORDS[key]}：{_shown(key, view, names)}" for key in keys)
+        first = (f"要现在执行一次{head}的命令吗？（不经过 agent，不花模型额度）" if action == "run" else
+                 f"要启用{head}吗？启用后它按规则无人值守地执行这条命令（不经过 agent，不花模型额度）：")
+        return "\n".join([first, *lines])
     lines = [f"- 时间规则：{_shown('cron', view, names)}，时区 {view['timezone']}",
              f"- 需求：{_shown('requirement', view, names)}",
              f"- 用户确认：{_shown('user_gates', view, names)}",
@@ -340,7 +367,15 @@ async def _changes(before: Mapping[str, Any], after: Mapping[str, Any], *,
         if only is not None and key not in only:
             continue
         old, new = _shown(key, before, names), _shown(key, after, names)
-        if old != new or (key == "template_inputs" and before.get(key) != after.get(key)):
+        if key == "env":
+            old_env, new_env = before.get(key) or {}, after.get(key) or {}
+            if old_env != new_env:
+                values_changed = sorted(k for k in old_env.keys() & new_env.keys() if old_env[k] != new_env[k])
+                values_line = f"；值已修改：{'、'.join(values_changed)}" if values_changed else ""
+                lines[key] = (f"- {label}：值已修改：{'、'.join(values_changed)}" if old_env.keys() == new_env.keys()
+                              else f"- {label}：{old} → {new}{values_line}")
+            continue
+        if old != new or (key in ("command", "template_inputs") and before.get(key) != after.get(key)):
             lines[key] = f"- {label}：{old} → {new}"
     return lines
 
@@ -362,6 +397,27 @@ def _money(value: Any, unset: str) -> str:
 def _shown(key: str, view: Mapping[str, Any], names: Mapping[str, str]) -> str:
     """A setting of a schedule's view as the user is shown it."""
     value = view.get(key)
+    if key == "kind":
+        return "命令（不经过 agent，不花模型额度）" if value == "command" else "agent 任务"
+    if key == "command":
+        if not value:
+            return "没有"
+        # Keep both fences on their own lines, even inside a before → after diff.
+        fence = "`" * max(3, 1 + max((len(run) for run in re.findall(r"`+", value)), default=0))
+        return f"\n{fence}\n{value}\n{fence}\n"
+    if key == "env":
+        return "、".join(sorted(value or {})) or "没有"
+    if key == "env_file":
+        return value or "没有"
+    if key == "success_deadline":
+        return value or "不设"
+    if key == "alert_policy":
+        if not value:
+            return "按默认"
+        stale = value["stale_after_seconds"]
+        stale_words = "按默认" if stale["default"] else f" {stale['value']} 秒"
+        return (f"连续失败 {value['failures_after']['value']} 次、长时间没成功{stale_words}、"
+                f"连续跳过 {value['overlap_after']['value']} 次（0 为不发）")
     if key == "template_key":
         return f"{view.get('template_name') or value}（{value}）" if value else "没有"
     if key == "template_inputs":
@@ -413,6 +469,19 @@ async def _configuration(view: Mapping[str, Any], project: Mapping[str, Any]) ->
     """A new schedule's configuration, as the user is shown it."""
     names = await _profile_names()
     directory = view["work_dir"] or f"项目的默认目录（{project['work_dir']}）"
+    if view["kind"] == "command":
+        return [
+            f"- 定时任务：{view['name']}（{view['schedule_id']}），项目 {view['project_name']}",
+            f"- 类型：{_shown('kind', view, names)}",
+            f"- 时间规则：{_shown('cron', view, names)}，时区 {view['timezone']}",
+            f"- 接下来 {NEXT_SHOWN} 次：{_next_fires(view)}", f"- 目录：{directory}",
+            *(f"- {FIELD_WORDS[key]}：{_shown(key, view, names)}" for key in ("command", "env", "env_file")),
+            f"- 上一次还在运行时：{_shown('overlap', view, names)}"
+            + (f"，最多 {view['max_parallel_runs']} 个同时运行" if view["overlap"] == "parallel" else "")
+            + f"；错过的触发：{_shown('catch_up', view, names)}",
+            *(f"- {FIELD_WORDS[key]}：{_shown(key, view, names)}"
+              for key in ("run_timeout_seconds", "success_deadline", "alert_policy")),
+            f"- 通知：{_shown('notify', view, names)} → {_shown('notify_target', view, names)}"]
     lines = [f"- 定时任务：{view['name']}（{view['schedule_id']}），项目 {view['project_name']}",
              f"- 时间规则：{_shown('cron', view, names)}，时区 {view['timezone']}",
              f"- 接下来 {NEXT_SHOWN} 次：{_next_fires(view)}",
@@ -456,6 +525,22 @@ _FIELDS = {
     "type": "object",
     "description": "create, update (only those to change; null clears one).",
     "properties": {
+        "kind": {"type": "string", "enum": ["agent", "command"],
+                 "description": "create only. command: runs `command` with /bin/sh at each firing, no task, "
+                                "no agent and no model spend; for scripts the user names. Default agent."},
+        "command": {"type": "string", "description": "kind command: the shell command, as the user gave it."},
+        "env": {"type": "object", "additionalProperties": {"type": "string"},
+                "description": "kind command: variables to set; never secrets (use env_file)."},
+        "env_file": {"type": "string", "description": "kind command: a KEY=VALUE file read at each run; "
+                                                        "only its path is stored."},
+        "success_deadline": {"type": ["string", "null"], "description": "HH:MM in the schedule's zone: "
+                             "alert once when no run succeeded since the previous deadline."},
+        "alert_failures_after": {"type": ["integer", "null"],
+                                 "description": "Alert after this many consecutive failures; null: default."},
+        "alert_stale_after_seconds": {"type": ["integer", "null"],
+                                      "description": "Alert after this many seconds without success; null: default."},
+        "alert_overlap_after": {"type": ["integer", "null"],
+                                "description": "Alert after this many consecutive overlap skips; 0: off; null: default."},
         "name": {"type": "string"}, "cron": {"type": "string", "description": "5 fields."},
         "timezone": {"type": "string", "description": "IANA."}, "requirement": {"type": "string"},
         "work_dir": {"type": "string", "description": "'' for the project's."},
@@ -486,9 +571,10 @@ _FIELDS = {
 TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_schedules",
-        description="Schedules (a project's task on a time rule): list; get (with latest runs); create (disabled; "
-                    "Looper shows it and asks whether to enable it); update; enable (its runs then start tasks "
-                    "unattended; the user confirms first) or disable; run now (the user confirms first); delete "
+        description="Schedules (a project's task, or a shell command with kind command, on a time rule): list; "
+                    "get (with latest runs); create (disabled; "
+                    "Looper shows it and asks whether to enable it); update; enable (it then fires unattended: "
+                    "its task, or its command; the user confirms first) or disable; run now (the user confirms first); delete "
                     "(the user confirms first; its tasks stay); reset_planner_session (the user confirms first; "
                     "the next run starts fresh; a run in progress keeps its session and will not write it back).",
         schema={

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { ArrowRight, Loader2, Play } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { DeleteSchedule, LastRun, NoticeText, ScheduleTime } from "@/components/project-schedules";
@@ -108,6 +109,7 @@ function ScheduleRow({
             className={cn("block truncate text-sm font-semibold", off && "text-muted-foreground", linkClass)}
           >
             {schedule.name}
+            {schedule.kind === "command" && <Badge variant="outline" className="ml-2">Command</Badge>}
           </a>
           <p className="truncate text-xs text-muted-foreground">{schedule.description}</p>
           {schedule.manager_id !== "manager" && (

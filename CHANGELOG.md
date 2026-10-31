@@ -18,6 +18,64 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.46] - 2026-10-31
+
+### Changed
+
+- **Command schedule confirmations and client-token API text.** The Manager's enable and run-now confirmations for a command schedule show the command in a verbatim code fence, the directory, the run timeout, the environment keys only, the env file when set, and (for enable) the success deadline and alert thresholds, and say the run uses no agent or model spend. Every command schedule update reply says so too, and the command appears in a code fence in the configuration block and in before → after diffs. The `looper_schedules` tool description no longer says an enabled schedule's runs "start tasks". The client-token API's enable and run confirmations name the shell command and say no task or model spend follows, and the confirmed update or run is bound to the configuration version that was shown. Listed runs and the run-now result carry the schedule `kind`. Agent schedule text is unchanged. ([#1005](https://github.com/foolzzz/looper/pull/1005))
+
+## [2.14.45] - 2026-10-31
+
+### Added
+
+- **Command run history in the dashboard.** A command schedule's run history shows each run's status with exit code or signal, times, duration and trigger; a run expands to its last 200 log lines with a full-log download; 24-hour and 7-day statistics and a status filter sit above it; `#projects/<project>/schedules/<schedule>/runs/<run>` opens one run; "Failing now" shows the missed-deadline and overlap alerts. ([#1000](https://github.com/foolzzz/looper/pull/1000))
+
+## [2.14.44] - 2026-10-31
+
+### Fixed
+
+- **Planner keeps the reason of a failed run.** The step activity, the work report, the review report and the closing-note outcome line keep the end of a failed Worker or Reviewer run's error instead of clipping it, and the verify path reads the run's `error` when a Reviewer run ended without a verdict. ([#996](https://github.com/foolzzz/looper/pull/996))
+
+## [2.14.43] - 2026-10-31
+
+### Fixed
+
+- **Command schedule runtime.** A due schedule is admitted by its kind after it is locked, so a command launch no longer blocks a drain and no tick under way can publish an agent task after the drain begins. Housekeeping runs retention, run pruning, notification pruning and each log rotation as independent steps recorded in `failed_steps`. Run pruning keeps an unfinished run whose gate output has not been handed on. The command runner retries opening its log once when the log directory vanished. Deleting a command schedule with a running run is refused with a 409. ([#993](https://github.com/foolzzz/looper/pull/993))
+
+## [2.14.42] - 2026-10-31
+
+### Added
+
+- **The Manager's `looper_schedules` tool creates, modifies and views command schedules.** It gains `kind`, `command`, `env`, `env_file`, `success_deadline` and three alert thresholds. For a command schedule the configuration, diff and the enable and run-now confirmations show the command verbatim and say it uses no model quota; the list and run summaries include `kind` and `exit_code`. A confirmed enable, disable or run-now is bound to the schedule id and configuration version it showed, and is refused with a 409 if the settings changed. ([#981](https://github.com/foolzzz/looper/pull/981))
+
+## [2.14.41] - 2026-10-31
+
+### Fixed
+
+- **`looper service status` and the install and restart reports use the address the unit listens on.** With `server.host = "::"` the status probe dials `[::1]` and the reports print `http://[::1]:<port>` instead of `http://127.0.0.1:<port>`. When the ops file cannot be read, status falls back to `127.0.0.1`. ([#992](https://github.com/foolzzz/looper/pull/992))
+- **Linux probe units stay consistent.** Reinstalling the probe stops a running probe first; uninstall removes the server unit even when probe cleanup fails (and then reports the failure, so it can be run again); uninstall stops the probe units by name when their files are already gone; and a failed probe update during install or restart restores the previous probe files instead of deleting them. ([#992](https://github.com/foolzzz/looper/pull/992))
+
+## [2.14.40] - 2026-10-31
+
+### Added
+
+- **The dashboard can create and edit command schedules.** The form on a project's Schedules tab has a "Type" selector (Agent task or Command) that is chosen only when creating and is read-only afterwards. A command schedule shows the command (up to 2000 characters), the work directory, `env` (KEY=VALUE lines or a JSON object), `env_file`, the timeout, overlap, catch-up, notifications, the success deadline and the three alert thresholds, and hides the agent-only fields (requirement, template, gate, budgets, profiles, task limits). The schedule list and detail view show a "Command" badge. ([#979](https://github.com/foolzzz/looper/pull/979))
+
+### Fixed
+
+- **Config import skips a command schedule that carries a requirement.** An entry of kind `command` whose `requirement` is non-empty is skipped with the reason "requirement does not apply to a command schedule"; `""` is stored only when the field is absent, null or blank. ([#995](https://github.com/foolzzz/looper/pull/995))
+- **A run's recorded profile omits `runtime.launcher` unless it is `ttadk`.** The run record (`profile.runtime`) no longer lists `"launcher": "native"`. ([#995](https://github.com/foolzzz/looper/pull/995))
+
+No model-visible change.
+
+## [2.14.39] - 2026-10-31
+
+### Fixed
+
+- **`loopercli schedule-log --tail N` prints exactly the last N lines.** The client asks the server for the tail with the largest page (4 MiB); when that page may begin mid-line it reads earlier byte ranges with `offset` and `limit_bytes` until it holds N whole lines or reaches the start of the file. The server API (`schedule_admin.run_log`) is unchanged. ([#991](https://github.com/foolzzz/looper/pull/991))
+
+No model-visible change.
+
 ## [2.14.38] - 2026-10-31
 
 ### Fixed

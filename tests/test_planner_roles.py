@@ -166,6 +166,29 @@ def _role_review(role_verdict: dict[str, Any]) -> Any:
     return outcome
 
 
+def test_a_review_role_run_error_keeps_its_final_diagnostic_in_the_activity(
+    planner_claude: Any, agent_db: Any, roles: _Roles,
+) -> None:
+    error = "Reviewer exited without a verdict: " + "diagnostic\n" * 80 + (
+        "Mixed-mode sign-in failed; run the launcher login command before retrying the review."
+    )
+    flat = " ".join(error.split())
+    claude = planner_claude(plan(ROLE_STEP), decide("review"), decide("fail", reason="review run failed"))
+    h = drive(claude, _role_review({"status": "failed", "error": error}))
+
+    assert _flow(h) == [("work", ("tester", 1)), ("review", None), ("review", ("security", 1))]
+    assert h.final().payload["status"] == "failed"  # type: ignore[union-attr]
+    (review_activity,) = [call.kwargs for call in agent_db.insert_activity.await_args_list
+                         if call.kwargs["summary"].startswith("Review by role security v1 failed: ")]
+    summary = review_activity["summary"].removeprefix("Review by role security v1 failed: ")
+    assert review_activity["kind"] == "error"
+    assert summary.startswith("Reviewer exited without a verdict: ")
+    assert summary.endswith(flat[-100:])
+    assert len(summary) <= 200
+    (row,) = agent_db.store.steps["t1"].values()
+    assert row["result"]["role_reviews"][0]["summary"] == error
+
+
 def test_an_advisory_review_role_that_fails_leaves_the_step_to_the_planner_who_may_accept_it(
     planner_claude: Any, agent_db: Any, roles: _Roles,
 ) -> None:

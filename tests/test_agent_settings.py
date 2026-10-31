@@ -271,8 +271,7 @@ class TestRecord:
         assert record["model_choice"] == {"model": "sonnet", "source": "role", "effort": "high"}
         assert record["profile"] == {"id": "agent-sonnet", "name": "claude-code/sonnet", "model": "sonnet",
                                      "model_id": "model-agent-sonnet", "custom_prompt": "",
-                                     "runtime": {"id": "rt-claude-code", "name": "claude-code", "type": "claude-code",
-                                                 "launcher": "native"},
+                                     "runtime": {"id": "rt-claude-code", "name": "claude-code", "type": "claude-code"},
                                      "provider": {"id": "prov-claude-subscription", "name": "claude-subscription",
                                                   "auth": "oauth"}, "source": "role"}
         assert record["settings_sources"] == {"harness": "role_project", "profile": "role", "effort": "profile",

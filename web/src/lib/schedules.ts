@@ -21,6 +21,8 @@ export const RUN_STATUS: Record<ScheduleRunStatus, { label: string; variant: Var
   queued: { label: "Queued", variant: "warning" },
   gating: { label: "Checking", variant: "default" },
   running: { label: "Running", variant: "default" },
+  succeeded: { label: "Succeeded", variant: "success" },
+  interrupted: { label: "Interrupted", variant: "destructive" },
   completed: { label: "Completed", variant: "success" },
   failed: { label: "Failed", variant: "destructive" },
   stopped: { label: "Stopped", variant: "warning" },

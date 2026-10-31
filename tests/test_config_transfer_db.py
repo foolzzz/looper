@@ -770,6 +770,23 @@ def test_a_projects_role_templates_import_checked_and_the_ones_the_file_does_not
 # --- Schedules ---
 
 
+@pytest.mark.parametrize("requirement", ["  ", "", None])
+def test_command_schedule_import_normalizes_blank_requirement(tmp_path, requirement):
+    async def test():
+        async with _installation() as (target, url):
+            path = tmp_path / "config.json"
+            entry = {"name": "command", "kind": "command", "command": "true",
+                     "cron": "0 9 * * *", "timezone": "UTC", "requirement": requirement}
+            path.write_text(json.dumps({"format": "looper-config/v4", "projects": [
+                {"name": "calc", "schedules": [entry]}]}))
+            code, out, err = await _transfer_file(url, "import", str(path), apply=True, json_output=True)
+            assert code == 0, err
+            assert _plan(out)["counts"]["project.schedules"]["added"] == 1
+            assert await target.fetchval("SELECT requirement FROM schedules") == ""
+
+    asyncio.run(asyncio.wait_for(test(), timeout=30))
+
+
 @pytest.mark.parametrize("missing_env_file", [False, True])
 def test_command_schedule_roundtrips_disabled_and_rewrites_changed_fields(monkeypatch, tmp_path, missing_env_file):
     async def test():
@@ -938,20 +955,24 @@ _GOOD = {"name": "good", "cron": "0 9 * * *", "timezone": "UTC", "requirement": 
 
 
 @pytest.mark.parametrize(("bad", "reason"), [
+    ({"kind": "command", "command": "true", "profiles": {}, "task_limits": {}},
+     "requirement does not apply to a command schedule"),
+    ({"kind": "command", "requirement": 0, "command": "true", "profiles": {}, "task_limits": {}},
+     "requirement does not apply to a command schedule"),
     ({"kind": "bogus"}, "kind must be one of agent, command"),
     ({"command": "true"}, "applies to command schedules only"),
     ({"success_deadline": "24:00"}, "success_deadline must be HH:MM"),
     ({"alert_overlap_after": -1}, "alert_overlap_after must be a whole number"),
-    ({"kind": "command", "command": "true", "profiles": {}, "task_limits": {}, "gate_command": "true"},
+    ({"kind": "command", "requirement": "", "command": "true", "profiles": {}, "task_limits": {}, "gate_command": "true"},
      "gate_command does not apply to a command schedule"),
-    ({"kind": "command", "command": "true", "profiles": {}, "task_limits": {"worker": 2}},
+    ({"kind": "command", "requirement": "", "command": "true", "profiles": {}, "task_limits": {"worker": 2}},
      "task_limits does not apply to a command schedule"),
-    ({"kind": "command", "command": "true"}, "profile_overrides does not apply to a command schedule"),
-    ({"kind": "command", "command": "true", "profiles": {}, "task_limits": {}, "run_timeout_seconds": "default"},
+    ({"kind": "command", "requirement": "", "command": "true"}, "profile_overrides does not apply to a command schedule"),
+    ({"kind": "command", "requirement": "", "command": "true", "profiles": {}, "task_limits": {}, "run_timeout_seconds": "default"},
      "run_timeout_seconds is a number of seconds"),
-    ({"kind": "command", "command": ""}, "command is required"),
-    ({"kind": "command", "command": "true", "env": {"LOOPER_SCHEDULE_ID": "fake"}}, "env key"),
-    ({"kind": "command", "command": "true", "env_file": "relative.env"}, "env_file must be an absolute path"),
+    ({"kind": "command", "requirement": "", "command": ""}, "command is required"),
+    ({"kind": "command", "requirement": "", "command": "true", "env": {"LOOPER_SCHEDULE_ID": "fake"}}, "env key"),
+    ({"kind": "command", "requirement": "", "command": "true", "env_file": "relative.env"}, "env_file must be an absolute path"),
     ({"cron": "*/2 * * * *"}, "fires 2 minutes apart"),
     ({"timezone": "Mars/Base"}, "unknown time zone"),
     ({"requirement": ""}, "requirement is required"),

@@ -388,7 +388,7 @@ function Overview({ project, onTab }: { project: Project; onTab: (tab: Tab) => v
 interface ProjectPageProps {
   /** "<project id>", "<project id>/<tab>", "<project id>/knowledge/<draft id>" to open one draft, or
    * "<project id>/profiles/<role, project or planner-choices>" or "<project id>/schedules/<schedule id>" to open one
-   * row. */
+   * row; "<project id>/schedules/<schedule id>/runs/<run id>" opens one run. */
   sub: string;
   onNavigate: (sub: string) => void;
 }
@@ -396,7 +396,7 @@ interface ProjectPageProps {
 /** One project: an overview, its knowledge, its skills, its Agent Profiles, its role templates, its schedules and its
  * settings, each a tab with its own address. */
 export function ProjectPage({ sub, onNavigate }: ProjectPageProps) {
-  const [projectId, tabPart, focus] = sub.split("/");
+  const [projectId, tabPart, focus, ...rest] = sub.split("/");
   const tab: Tab = TABS.some((t) => t.id === tabPart) ? (tabPart as Tab) : "overview";
   const { projects, error, reload } = useProjects();
   const project = projects?.find((p) => p.project_id === projectId) ?? null;
@@ -506,7 +506,7 @@ export function ProjectPage({ sub, onNavigate }: ProjectPageProps) {
           <ProjectSchedulesSection
             key={project.project_id}
             project={project}
-            linked={focus ?? ""}
+            linked={[focus, ...rest].filter(Boolean).join("/")}
             onLink={(scheduleId) => onNavigate(`${projectId}/schedules${scheduleId ? `/${scheduleId}` : ""}`)}
           />
         )}

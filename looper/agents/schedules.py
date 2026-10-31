@@ -178,7 +178,7 @@ def run_view(row: Mapping[str, Any], cost: Mapping[str, Any] | None = None, *,
         "task_title": row.get("task_title"),
         "summary": row.get("summary"), "cost_usd": cost_usd, "error": row.get("error"),
         "finished_at": row.get("finished_at"), "gate_output": row.get("gate_output"),
-        "started_at": row.get("started_at"), "exit_code": row.get("exit_code"),
+        "started_at": row.get("started_at"), "exit_code": row.get("exit_code"), "kind": row.get("kind", Kind.AGENT.value),
         "exit_signal": row.get("exit_signal"),
         "duration_seconds": (finish - start).total_seconds() if finish is not None and start is not None else None,
         "log": {"path": str(((runtime_root or home_runtime_root()) / row["log_path"]).absolute()),
@@ -672,7 +672,7 @@ async def get_schedule(schedule_id: str, *, runtime_root: Path | None = None) ->
 
 
 async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: datetime | None = None,
-                          runtime_root: Path | None = None) -> dict[str, Any]:
+                          runtime_root: Path | None = None, expected_version: str | None = None) -> dict[str, Any]:
     """Change the fields given. Enabling sets the next fire time from now (nothing missed before runs), as does a
     new rule or zone on an enabled schedule; disabling clears it."""
     if not data:
@@ -699,6 +699,7 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
             row = await db_schedules.lock_schedule(conn, schedule_id)
             if row is None:
                 raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
+            db_schedules.check_configuration_version(row, expected_version)
             kind = row["kind"]
             _check_kind_fields(kind, {**row, **fields,
                 "profile_overrides": profiles if "profile_overrides" in data else row["profile_overrides"],
@@ -735,6 +736,8 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
                     or fields.get("success_deadline", row["success_deadline"]) != row["success_deadline"]):
                 fields["rule_changed_at"] = now  # so does it from a new rule, zone or deadline
             await db_schedules.update_schedule(conn, schedule_id, fields, profiles=profiles, task_limits=task_limits)
+    except db_schedules.ConfigurationChanged as exc:
+        raise RequestError(HTTP_409, str(exc)) from None
     except asyncpg.UniqueViolationError:
         raise _name_taken(fields["name"]) from None
     except asyncpg.ForeignKeyViolationError:
@@ -744,9 +747,17 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
 
 
 async def delete_schedule(schedule_id: str) -> dict[str, Any]:
-    """Delete a schedule and its run history; the tasks it created stay."""
-    if not await db_schedules.delete_schedule(schedule_id):
-        raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
+    """Delete an idle command schedule or an agent schedule; its created tasks stay."""
+    async with db_connection.transaction() as conn:
+        row = await db_schedules.lock_schedule(conn, schedule_id)
+        if row is None:
+            raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
+        # Share the firing lock so a command cannot start between this check and deletion.
+        if row["kind"] == "command" and any(
+                run["status"] == db_schedules.RUNNING for run in await db_schedules.open_runs(conn, schedule_id)):
+            raise RequestError(HTTP_409, "cannot delete a command schedule while a run is running; "
+                               "disable the schedule and wait for the run to end")
+        await db_schedules.delete_schedule(schedule_id, pool=conn)
     return {"deleted": schedule_id}
 
 
@@ -872,9 +883,14 @@ def preview(data: Mapping[str, Any], *, now: datetime | None = None) -> dict[str
             "next": cron.next_fires(rule, tz, now, count), "error": None}
 
 
-async def run_now(schedule_id: str, scheduler: Any, *, runtime_root: Path | None = None) -> dict[str, Any]:
+async def run_now(schedule_id: str, scheduler: Any, *, runtime_root: Path | None = None,
+                  expected_version: str | None = None) -> dict[str, Any]:
     """Fire the schedule now (``trigger`` manual), through the same overlap check; its next fire time stays."""
-    run_id = await scheduler.run_now(schedule_id)
+    try:
+        run_id = await scheduler.run_now(schedule_id, **({"expected_version": expected_version}
+                                                       if expected_version is not None else {}))
+    except db_schedules.ConfigurationChanged as exc:
+        raise RequestError(HTTP_409, str(exc)) from None
     if run_id is None:
         await _existing(schedule_id)
         raise RequestError(HTTP_409, "the service is draining for an upgrade: run it after the restart")

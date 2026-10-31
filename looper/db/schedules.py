@@ -10,6 +10,7 @@ once; every time comes from the caller, so tests can set the clock.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from collections.abc import Mapping, Sequence
@@ -54,6 +55,23 @@ _RUN = """
 """
 
 Db = asyncpg.Pool | asyncpg.Connection
+
+
+class ConfigurationChanged(ValueError):
+    """The configuration the user confirmed no longer matches the locked schedule."""
+
+
+def configuration_version(row: Mapping[str, Any]) -> str:
+    """Version the settings, including environment values, without runtime counters or fire times."""
+    settings = {key: row.get(key) for key in (*FIELDS, "id", "project_id", "manager_id", "enabled",
+                                            "profile_overrides", "task_limits")}
+    return hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()
+
+
+def check_configuration_version(row: Mapping[str, Any], expected: str | None) -> None:
+    """Call under the same row lock as enabling or creating the run."""
+    if expected is not None and configuration_version(row) != expected:
+        raise ConfigurationChanged("the schedule configuration changed; run the tool again to ask for confirmation")
 
 
 def new_run_id() -> str:
@@ -700,12 +718,14 @@ async def prune_runs(conn: Db, before: datetime) -> int:
     """Delete one batch of expired terminal runs, keeping each schedule's newest runs."""
     from ..agents.housekeeping import KEEP_LATEST_RUNS, PRUNE_BATCH
 
+    # Unfinished inputs are kept until handed on; deleting the schedule removes them.
     result = await conn.execute(
         "DELETE FROM schedule_runs WHERE id IN (SELECT id FROM ("
-        "SELECT id, finished_at, status, row_number() OVER ("
+        "SELECT id, finished_at, status, carried_on, gate_output, row_number() OVER ("
         "PARTITION BY schedule_id ORDER BY created_at DESC, id DESC) AS rn FROM schedule_runs) r "
-        "WHERE rn > $2 AND finished_at < $1 AND NOT (status = ANY($3::text[])) LIMIT $4)",
-        before, KEEP_LATEST_RUNS, list(OPEN_STATUSES), PRUNE_BATCH)
+        "WHERE rn > $2 AND finished_at < $1 AND NOT (status = ANY($3::text[])) "
+        "AND NOT (NOT carried_on AND status = ANY($5::text[]) AND btrim(COALESCE(gate_output, '')) <> '') LIMIT $4)",
+        before, KEEP_LATEST_RUNS, list(OPEN_STATUSES), PRUNE_BATCH, list(UNFINISHED))
     return int(result.split()[-1])
 
 

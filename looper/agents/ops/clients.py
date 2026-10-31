@@ -175,6 +175,7 @@ class _Pending:
     arguments: dict[str, Any]
     impact: str
     at: float
+    confirmation: dict[str, Any]
 
 
 class ClientOps:
@@ -213,7 +214,7 @@ class ClientOps:
             if impact is not None:
                 risk = Risk.HIGH
             if impact is not None and require_confirmation:
-                pending = self._ask(principal, session, tool, arguments, impact)
+                pending = self._ask(principal, session, tool, arguments, impact, confirmation=call.confirmation)
                 await self._record(turn, tool, arguments, risk, "needs_confirmation", confirmation_id=pending.id)
                 return {"status": "needs_confirmation", "confirmation_id": pending.id,
                         "expires_in_seconds": CONFIRMATION_SECONDS, "impact": impact}
@@ -250,7 +251,7 @@ class ClientOps:
         turn = self._turn(principal, session)
         tool, arguments = pending.tool, pending.arguments
         try:
-            result = await self._run(tool, Call(arguments, turn, self._platform))
+            result = await self._run(tool, Call(arguments, turn, self._platform, confirmation=pending.confirmation))
         except OpError as exc:
             await self._record(turn, tool, arguments, Risk.HIGH, "error", error_code=exc.code.value,
                                result={"message": str(exc)}, confirmation_id=pending.id)
@@ -275,12 +276,12 @@ class ClientOps:
         return result
 
     def _ask(self, principal: Principal, session: str, tool: Tool, arguments: dict[str, Any],
-             impact: str) -> _Pending:
+             impact: str, *, confirmation: dict[str, Any]) -> _Pending:
         """Register the call for ``confirm``, replacing the key's earlier one."""
         key = (principal.key, session)
         self._pending.pop(key, None)
         pending = _Pending(id=f"c-{uuid.uuid4().hex[:12]}", tool=tool, arguments=arguments, impact=impact,
-                           at=self._clock())
+                           at=self._clock(), confirmation=dict(confirmation))
         self._pending[key] = pending
         while len(self._pending) > CONFIRMATION_CHATS:
             self._pending.popitem(last=False)

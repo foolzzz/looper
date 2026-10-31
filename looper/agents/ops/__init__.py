@@ -141,6 +141,8 @@ class Call:
     # The scope the call was judged by (``ManagerOps`` sets it); a Call built without one (a Planner's tool, a test)
     # is the default Manager's: unscoped.
     scope: OpsScope = None  # type: ignore[assignment]
+    # Trusted state captured while composing a confirmation, carried to its execution; never tool arguments.
+    confirmation: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.scope is None:

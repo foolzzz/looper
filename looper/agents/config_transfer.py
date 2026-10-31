@@ -2159,6 +2159,9 @@ class _Importer:
             for name in _SCHEDULE_FIELDS:
                 if kind == "command" and name in _AGENT_SCHEDULE_FIELDS:
                     if name == "requirement":
+                        raw = entry.get("requirement")
+                        if raw is not None and (not isinstance(raw, str) or raw.strip()):
+                            raise _Skip("requirement does not apply to a command schedule")
                         values[name] = ""
                         continue
                     if name not in entry:
