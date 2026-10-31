@@ -126,8 +126,12 @@ def test_ttadk_step_without_result_records_sign_in_stderr(
 
 
 @pytest.mark.parametrize("role", [False, True], ids=["builtin", "role"])
+@pytest.mark.parametrize("error", [
+    "Reviewer timed out before producing a verdict",
+    "Reviewer timed out: " + "diagnostic " * 30 + SIGN_IN_ERROR + "." * (100 - len(SIGN_IN_ERROR)),
+], ids=["short", "long-tail-boundary"])
 def test_planner_keeps_reviewer_run_error_without_a_verdict(
-    role: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+    role: bool, error: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
 ) -> None:
     agent = planner.PlannerAgent(task_id="t1", runtime_root=tmp_path)
     step = planner.PlanStep(step_id="s1", index=0, instruction="Inspect", status="completed", reviewer_id="r1",
@@ -138,15 +142,42 @@ def test_planner_keeps_reviewer_run_error_without_a_verdict(
     agent._plan = planner.TaskPlan("p1", "g1", "Inspect", str(tmp_path), steps=[step], status="executing")
     decide = AsyncMock()
     monkeypatch.setattr(agent, "_decide", decide)
-    error = "Reviewer timed out before producing a verdict"
     envelope = MessageEnvelope.create(
         source=worker_address("r1"), target=agent.agent_address, message_type=MessageType.VERIFY_RESULT,
         payload={"task_id": "s1", "status": "failed", "error": error},
     )
     asyncio.run(asyncio.wait_for(agent._handle_verify_result(envelope), 5))
-    assert error in planner.result_outcome(step.result)
-    assert error in agent_db.insert_activity.await_args.kwargs["summary"]
+    assert error[-100:] in planner.result_outcome(step.result)
+    assert error[-100:] in agent_db.insert_activity.await_args.kwargs["summary"]
     assert error in "\n".join(decide.await_args.args[3])
+    assert decide.await_args.args[2].succeeded is False
+
+
+def test_planner_failed_worker_summary_keeps_its_final_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+) -> None:
+    agent = planner.PlannerAgent(task_id="t1", runtime_root=tmp_path)
+    step = planner.PlanStep(step_id="s1", index=0, instruction="Inspect", worker_id="w1", status="dispatched")
+    agent._plan = planner.TaskPlan("p1", "g1", "Inspect", str(tmp_path), steps=[step], status="executing")
+    decide = AsyncMock()
+    monkeypatch.setattr(agent, "_decide", decide)
+    summary = "Worker failed: " + "diagnostic " * 150 + SIGN_IN_ERROR + "." * (100 - len(SIGN_IN_ERROR))
+    result = worker.judge_result(
+        {"subtype": "success", "result": '{"status": "failed", "summary": "' + summary + '"}'},
+        work_dir=tmp_path, is_verify=False,
+    )
+    assert result["error"] == result["summary"] == summary
+    envelope = MessageEnvelope.create(
+        source=worker_address("w1"), target=agent.agent_address, message_type=MessageType.WORK_RESULT,
+        payload={**result, "task_id": "s1"},
+    )
+    asyncio.run(asyncio.wait_for(agent._handle_work_result(envelope), 5))
+    report = decide.await_args.args[3]
+    summary_line = next(line for line in report if line.startswith("- summary: "))
+    assert summary_line.startswith("- summary: Worker failed: ")
+    assert summary_line.endswith(summary[-100:])
+    assert len(summary_line) == len("- summary: ") + 1000
+    assert not any(line.startswith("- error: ") for line in report)
     assert decide.await_args.args[2].succeeded is False
 
 

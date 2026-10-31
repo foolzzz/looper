@@ -2233,7 +2233,7 @@ class PlannerAgent:
                        "verify_learnings": journal.reported_learnings(result.get("learnings"))}
         await self._activity(
             "text" if passed else "error",
-            f"Verify {'passed' if passed else 'failed'}: {summary[:150] if passed else _clip_ends(summary, 150)}",
+            f"Verify {'passed' if passed else 'failed'}: {summary[:150] if passed else _clip_ends(summary, 200)}",
             worker=step.reviewer_id,
         )
         if passed and step.review_roles:
@@ -3911,7 +3911,8 @@ class PlannerAgent:
             f"- status: {result.get('status') or 'unknown'}",
         ]
         if result.get("summary"):
-            lines.append(f"- summary: {_clip(result['summary'], 1000)}")
+            clip = _clip_ends if result.get("status") == "failed" else _clip
+            lines.append(f"- summary: {clip(result['summary'], 1000)}")
         changed = result.get("changed_files")
         if isinstance(changed, dict) and changed:
             files = [f"{reported_files.prompt_name(path)} ({_clip(note, 80)})" if note else reported_files.prompt_name(path)
