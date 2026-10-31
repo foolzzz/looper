@@ -25,7 +25,9 @@ finds the job and ``bootstrap`` is retried a few times.
 
 from __future__ import annotations
 
+import csv
 import http.client
+import io
 import json
 import math
 import os
@@ -748,6 +750,63 @@ def _swap_directory(staged: Path, destination: Path) -> None:
         raise ServiceError(f"cannot atomically publish the dashboard: {os.strerror(error)}")
 
 
+@contextmanager
+def _dashboard_safe_wheel(source: str, directory: Path):
+    """Keep installers from deleting or overwriting assets served by the live process."""
+    prefix = "looper/web/dashboard/"
+    package_root = Path(__file__).resolve().parents[2]
+    protected = {}
+    dashboard_rows = []
+    target_record = None
+    with tempfile.TemporaryDirectory(prefix=".wheel-upgrade-", dir=directory) as temporary:
+        filtered = Path(temporary) / Path(source).name
+        with zipfile.ZipFile(source) as original, zipfile.ZipFile(filtered, "w") as output:
+            for entry in original.infolist():
+                if entry.filename.startswith(prefix):
+                    continue
+                data = original.read(entry)
+                if entry.filename.endswith(".dist-info/RECORD"):
+                    parts = Path(entry.filename).parts
+                    if len(parts) != 2 or not parts[0].startswith("looper-"):
+                        raise ServiceError("wheel contains an unsafe package record path")
+                    target_record = package_root / entry.filename
+                    rows = list(csv.reader(io.StringIO(data.decode())))
+                    dashboard_rows = [row for row in rows if row and row[0].startswith(prefix)]
+                    record = io.StringIO()
+                    csv.writer(record).writerows(row for row in rows if not row or not row[0].startswith(prefix))
+                    data = record.getvalue().encode()
+                output.writestr(entry, data)
+        try:
+            # Uninstall follows the old RECORD; excluding assets only from the
+            # incoming wheel would still leave the live directory empty.
+            for record in package_root.glob("looper-*.dist-info/RECORD"):
+                data = record.read_bytes()
+                rows = list(csv.reader(io.StringIO(data.decode())))
+                protected[record] = data
+                with record.open("w", newline="") as output:
+                    csv.writer(output).writerows(row for row in rows if not row or not row[0].startswith(prefix))
+            yield str(filtered)
+        except BaseException:
+            for record, data in protected.items():
+                if record.is_file():
+                    record.write_bytes(data)
+            raise
+        else:
+            # Preserve ownership for a later full reinstall/uninstall, including
+            # pip/uv's generated console scripts and installation metadata.
+            if target_record is not None and target_record.is_file():
+                with target_record.open("a", newline="") as output:
+                    csv.writer(output).writerows(dashboard_rows)
+
+
+def _install_wheel(host: Host, source: str, *, dependencies: bool) -> None:
+    # uv tool environments omit pip; target that same interpreter with uv's pip interface.
+    has_pip = host.run([host.executable, "-m", "pip", "--version"]).returncode == 0
+    command = ([host.executable, "-m", "pip", "install", "--force-reinstall"] if has_pip else
+               ["uv", "pip", "install", "--python", host.executable, "--reinstall"])
+    _checked(host, [*command, *([] if dependencies else ["--no-deps"]), source], installing=True)
+
+
 def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
                     dependencies: bool = True) -> tuple[bytes, str] | None:
     from ..components import record_web_source, web_fingerprints
@@ -756,8 +815,8 @@ def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
         if not dependencies:
             from .http_server import default_static_dir
 
-            # NOOP and WEB_ONLY retain the live interpreter and its complete dashboard.
-            # pip's uninstall/install would expose missing or partly written assets.
+            # Retain the live interpreter, but install CLI/service fixes and
+            # package metadata too. Only the dashboard needs atomic publication.
             destination = default_static_dir()
             staged = Path(tempfile.mkdtemp(prefix=".dist-upgrade-", dir=destination.parent))
             try:
@@ -775,15 +834,13 @@ def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
                 if not (staged / "index.html").is_file():
                     raise ServiceError("the wheel dashboard did not contain index.html")
                 expected = ((staged / "index.html").read_bytes(), web_fingerprints(staged)[1])
+                with _dashboard_safe_wheel(source, destination.parent) as filtered:
+                    _install_wheel(host, filtered, dependencies=False)
                 _swap_directory(staged, destination)
                 return expected
             finally:
                 shutil.rmtree(staged, ignore_errors=True)
-        # uv tool environments omit pip; target that same interpreter with uv's pip interface.
-        has_pip = host.run([host.executable, "-m", "pip", "--version"]).returncode == 0
-        command = ([host.executable, "-m", "pip", "install", "--force-reinstall", source] if has_pip else
-                   ["uv", "pip", "install", "--python", host.executable, "--reinstall", source])
-        _checked(host, command, installing=True)
+        _install_wheel(host, source, dependencies=dependencies)
         return None
     _checked(host, ["git", "-C", str(host.cwd), "merge", "--ff-only", source], installing=True)
     _checked(host, ["uv", "sync", "--project", str(host.cwd)], installing=True)
@@ -846,7 +903,7 @@ def _deployment_signals():
 @_deployment_signals()
 def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path: Path | None,
                   plan, running, target, installer, timeout: float, drain_timeout: float,
-                  no_force: bool, installed_version: str | None = None) -> str:
+                  no_force: bool) -> str:
     from ..components import Manifest
     from ..upgrade import UpgradeKind
 
@@ -901,7 +958,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
             report["gap_seconds"] = round(host.clock() - gap_started, 3)
         elif installer:
             expected = installer()
-            report["installed_package_version"] = installed_version or target.version
+            report["installed_package_version"] = target.version
 
         actual = Manifest.from_dict(host.get_components(port, token))
         if target is not None:
@@ -965,7 +1022,6 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
             timeout: float = DEFAULT_TIMEOUT_SECONDS, drain_timeout: float = 1200, no_force: bool = False) -> str:
     """Compute a plan before mutating files; stop the old interpreter before a full install."""
     from .. import components
-    from .. import __version__
     from ..upgrade import UpgradeKind, decide, scan_keepers
 
     try:
@@ -996,7 +1052,6 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
             running=running, target=target,
             installer=lambda: _install_target(host, source, wheel=wheel, build_web="web" in plan.changed_components,
                 dependencies=plan.kind in (UpgradeKind.FULL, UpgradeKind.CONTROL_PLANE)),
-            installed_version=__version__ if wheel and plan.kind == UpgradeKind.WEB_ONLY else None,
             timeout=timeout, drain_timeout=drain_timeout, no_force=no_force)
     except (ValueError, KeyError, zipfile.BadZipFile) as exc:
         raise ServiceError(str(exc)) from exc

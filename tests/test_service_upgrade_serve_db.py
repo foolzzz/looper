@@ -1,7 +1,7 @@
 """Real HTTP/serve verification of upgrades that retain the control-plane process.
 
-Git and npm run for real in a disposable source checkout. Only ``uv sync``
-is replaced: the running interpreter already supplies the test dependencies.
+Git and npm run for real in a disposable source checkout. Dependency sync and
+wheel package installation are replaced to retain the test interpreter.
 The zero-dependency dashboard fixture tests installation and HTTP delivery,
 without downloading or rebuilding the product's full frontend.
 """
@@ -117,7 +117,16 @@ def test_docs_and_two_dashboard_upgrades_keep_real_serve_pid_and_refresh_compone
     def run(argv):
         argv = list(argv)
         installed_commands.append(argv)
-        assert Path(argv[0]).name in ("git", "npm", "uv"), "wheel web updates must not invoke pip"
+        if argv[:3] == [sys.executable, "-m", "pip"]:
+            if "install" in argv:
+                assert "--no-deps" in argv
+                with zipfile.ZipFile(argv[-1]) as archive:
+                    assert "looper/cli.py" in archive.namelist()
+                    assert not any(name.startswith("looper/web/dashboard/") for name in archive.namelist())
+            else:
+                assert argv[-1] == "--version"
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        assert Path(argv[0]).name in ("git", "npm", "uv")
         if Path(argv[0]).name == "uv":
             assert argv[1:] == ["sync", "--project", str(source)]
             return subprocess.CompletedProcess(argv, 0, "", "")
@@ -145,6 +154,7 @@ def test_docs_and_two_dashboard_upgrades_keep_real_serve_pid_and_refresh_compone
                 start=forbidden, stop=forbidden, restart=forbidden,
             )
             monkeypatch.setattr(service, "manager", lambda host, label: manager)
+            monkeypatch.setattr(service, "__file__", str(source / "looper/agents/service.py"))
             host = service.Host(system="Linux", home=home, uid=os.getuid(), environ={},
                                 executable=sys.executable, cwd=source, run=run)
             host.system_operation = forbidden
@@ -219,3 +229,4 @@ def test_docs_and_two_dashboard_upgrades_keep_real_serve_pid_and_refresh_compone
 
     assert sum(Path(argv[0]).name == "uv" for argv in installed_commands) == 3
     assert sum(argv[:3] == ["npm", "run", "build"] for argv in installed_commands) == 2
+    assert sum("install" in argv and "--no-deps" in argv for argv in installed_commands) == 2

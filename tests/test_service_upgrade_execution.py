@@ -7,7 +7,9 @@ import multiprocessing
 import os
 import signal
 import subprocess
+import venv
 import zipfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -88,6 +90,7 @@ def deployment(tmp_path, monkeypatch):
     monkeypatch.setattr(service.Host, "current", classmethod(lambda cls: host))
     monkeypatch.setattr(components, "manifest_from_git", lambda *args: scenario.target)
     monkeypatch.setattr(service, "_install_target", install)
+    monkeypatch.setattr(service, "__file__", str(tmp_path / "looper/agents/service.py"))
     return SimpleNamespace(host=host, events=events, statuses=statuses, state=state, scenario=scenario,
                            root=root, elapsed=elapsed)
 
@@ -266,13 +269,24 @@ def test_wheel_dashboard_is_staged_and_published_atomically_while_http_serves(
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("looper/web/dashboard/index.html", "new dashboard")
         archive.writestr("looper/web/dashboard/assets/app.js", "new script")
-        archive.writestr("looper/__init__.py", "do not install backend code")
+        archive.writestr("looper/__init__.py", "target Python code")
     static = tmp_path / "dashboard"
     static.mkdir()
     (static / "assets").mkdir()
     (static / "assets/app.js").write_text("old script")
     monkeypatch.setenv("PYTEST_LOOPER_STATIC_DIR", str(static))
-    deployment.host.run = lambda argv: pytest.fail("a live dashboard upgrade must not reinstall the package")
+    installs = []
+
+    def install(argv):
+        if "install" in argv:
+            assert "--no-deps" in argv
+            with zipfile.ZipFile(argv[-1]) as archive:
+                assert archive.read("looper/__init__.py") == b"target Python code"
+                assert not any(name.startswith("looper/web/dashboard/") for name in archive.namelist())
+            installs.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    deployment.host.run = install
     swap = service._swap_directory
     publications = []
 
@@ -302,10 +316,11 @@ def test_wheel_dashboard_is_staged_and_published_atomically_while_http_serves(
 
     asyncio.run(asyncio.wait_for(run(), 10))
     assert publications == [static]
+    assert len(installs) == 1
     assert not list(tmp_path.glob(".dist-upgrade-*"))
 
 
-def test_cli_repeated_wheel_upgrade_preserves_dashboard_without_reinstall(deployment, tmp_path, monkeypatch):
+def test_cli_repeated_wheel_upgrade_preserves_dashboard_without_dependency_reinstall(deployment, tmp_path, monkeypatch):
     static = tmp_path / "dashboard"
     static.mkdir()
     files = {"index.html": b"dashboard", "assets/app.js": b"script"}
@@ -319,7 +334,17 @@ def test_cli_repeated_wheel_upgrade_preserves_dashboard_without_reinstall(deploy
     monkeypatch.setenv("PYTEST_LOOPER_STATIC_DIR", str(static))
     monkeypatch.setattr(components, "manifest_from_wheel", lambda path: deployment.scenario.current)
     monkeypatch.setattr(service, "_install_target", _REAL_INSTALLER)
-    deployment.host.run = lambda argv: pytest.fail("a NOOP wheel upgrade must not reinstall the package")
+    installs = []
+
+    def install(argv):
+        if "install" in argv:
+            assert "--no-deps" in argv
+            with zipfile.ZipFile(argv[-1]) as archive:
+                assert not any(name.startswith("looper/web/dashboard/") for name in archive.namelist())
+            installs.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    deployment.host.run = install
 
     for _ in range(2):
         assert cli.main(["service", "upgrade", "--to", str(wheel)]) == 0
@@ -328,10 +353,98 @@ def test_cli_repeated_wheel_upgrade_preserves_dashboard_without_reinstall(deploy
         assert {p.relative_to(static).as_posix(): p.read_bytes()
                 for p in static.rglob("*") if p.is_file()} == files
     assert deployment.events == []
+    assert len(installs) == 2
     assert not list(tmp_path.glob(".dist-upgrade-*"))
 
 
-@pytest.mark.parametrize("failure", ["missing_index", "unsafe_path", "swap"])
+@pytest.mark.parametrize("pip_available", [True, False], ids=["pip", "uv"])
+def test_noop_wheel_upgrade_installs_cli_code_and_metadata_without_restart(
+        deployment, tmp_path, monkeypatch, pip_available):
+    environment = tmp_path / "venv"
+    venv.EnvBuilder(with_pip=True).create(environment)
+    python = str(environment / "bin/python")
+    monkeypatch.setenv("PIP_NO_INDEX", "1")
+    monkeypatch.setenv("PIP_CONFIG_FILE", os.devnull)
+    monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
+
+    def execute(argv):
+        return subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True, timeout=30,
+                              env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
+
+    wheels = []
+    for version, marker in (("1.0.0", "old"), ("1.0.1", "fixed")):
+        wheel = tmp_path / f"looper-{version}-py3-none-any.whl"
+        metadata = f"looper-{version}.dist-info"
+        files = {
+            "looper/__init__.py": f"__version__ = {version!r}\n",
+            "looper/cli.py": ("from . import __version__\nfrom .agents.service import MARKER\n"
+                              f"def main(): print(__version__, {marker!r}, MARKER)\n"),
+            "looper/agents/__init__.py": "",
+            "looper/agents/service.py": f"MARKER = {marker!r}\n",
+            "looper/web/dashboard/index.html": "complete dashboard",
+            "looper/web/dashboard/assets/app.js": "complete script",
+            f"{metadata}/METADATA": f"Metadata-Version: 2.1\nName: looper\nVersion: {version}\n",
+            f"{metadata}/WHEEL": "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+            f"{metadata}/entry_points.txt": "[console_scripts]\nlooper = looper.cli:main\n",
+        }
+        files[f"{metadata}/RECORD"] = "".join(f"{name},,\n" for name in (*files, f"{metadata}/RECORD"))
+        with zipfile.ZipFile(wheel, "w") as archive:
+            for name, content in files.items():
+                archive.writestr(name, content)
+        wheels.append(wheel)
+    installed = execute([python, "-m", "pip", "install", "--no-deps", str(wheels[0])])
+    assert installed.returncode == 0, installed.stderr
+    site = Path(execute([python, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"]).stdout.strip())
+    static = site / "looper/web/dashboard"
+    original = {p.relative_to(static).as_posix(): p.read_bytes() for p in static.rglob("*") if p.is_file()}
+    monkeypatch.setenv("PYTEST_LOOPER_STATIC_DIR", str(static))
+    monkeypatch.setattr(service, "__file__", str(site / "looper/agents/service.py"))
+    monkeypatch.setattr(service, "_install_target", _REAL_INSTALLER)
+    deployment.host.executable = python
+    deployment.scenario.target = manifest(version="1.0.1")
+    monkeypatch.setattr(components, "manifest_from_wheel", lambda path: deployment.scenario.target)
+    installations = []
+
+    def run(argv):
+        assert {p.relative_to(static).as_posix(): p.read_bytes()
+                for p in static.rglob("*") if p.is_file()} == original
+        if argv[-1] == "--version" and not pip_available:
+            return subprocess.CompletedProcess(argv, 1, "", "pip not installed")
+        if "install" in argv:
+            with zipfile.ZipFile(argv[-1]) as archive:
+                assert "looper/cli.py" in archive.namelist()
+                assert "looper/agents/service.py" in archive.namelist()
+                assert not any(name.startswith("looper/web/dashboard/") for name in archive.namelist())
+            assert all("looper/web/dashboard/" not in p.read_text()
+                       for p in site.glob("looper-*.dist-info/RECORD"))
+            installations.append(list(argv))
+        result = execute(argv)
+        assert {p.relative_to(static).as_posix(): p.read_bytes()
+                for p in static.rglob("*") if p.is_file()} == original
+        return result
+
+    deployment.host.run = run
+    before = execute([str(environment / "bin/looper")])
+    assert before.stdout.strip() == "1.0.0 old old"
+    for _ in range(2):
+        assert cli.main(["service", "upgrade", "--to", str(wheels[1])]) == 0
+        data = report(deployment)
+        assert data["plan"] == "NOOP" and data["status"] == "ok"
+        assert data["installed_package_version"] == "1.0.1"
+        assert data["running_version"] == "1.0.0"
+        assert execute([str(environment / "bin/looper")]).stdout.strip() == "1.0.1 fixed fixed"
+        metadata = execute([python, "-c", "from importlib.metadata import version; print(version('looper'))"])
+        assert metadata.stdout.strip() == "1.0.1"
+        assert not (site / "looper-1.0.0.dist-info").exists()
+        record = (site / "looper-1.0.1.dist-info/RECORD").read_text()
+        assert all("looper/web/dashboard/" + name + "," in record for name in original)
+    assert len(installations) == 2
+    assert all("--no-deps" in argv for argv in installations)
+    assert deployment.events == []
+    assert not list(static.parent.glob(".*-upgrade-*"))
+
+
+@pytest.mark.parametrize("failure", ["missing_index", "unsafe_path", "install", "swap"])
 @pytest.mark.parametrize("build_web", [True, False], ids=["web_only", "noop"])
 def test_failed_wheel_dashboard_publication_preserves_all_current_files(
         deployment, tmp_path, monkeypatch, failure, build_web):
@@ -341,6 +454,11 @@ def test_failed_wheel_dashboard_publication_preserves_all_current_files(
     for name, data in original.items():
         (static / name).write_bytes(data)
     monkeypatch.setenv("PYTEST_LOOPER_STATIC_DIR", str(static))
+    old_record = tmp_path / "looper-1.0.0.dist-info/RECORD"
+    if failure == "install":
+        old_record.parent.mkdir()
+        old_record.write_text("looper/web/dashboard/index.html,,\nlooper/cli.py,,\n")
+        original_record = old_record.read_bytes()
     wheel = tmp_path / "dashboard-update.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("looper/web/dashboard/app.js", "new script")
@@ -352,9 +470,22 @@ def test_failed_wheel_dashboard_publication_preserves_all_current_files(
         def fail(*args):
             raise service.ServiceError("atomic exchange refused")
         monkeypatch.setattr(service, "_swap_directory", fail)
-    deployment.host.run = lambda argv: pytest.fail("a live dashboard upgrade must not reinstall the package")
+    def install(argv):
+        assert failure in ("install", "swap"), "invalid dashboard must fail before package installation"
+        assert {p.name: p.read_bytes() for p in static.iterdir()} == original
+        if "install" in argv:
+            assert "--no-deps" in argv
+            if failure == "install":
+                assert "dashboard" not in old_record.read_text()
+                return subprocess.CompletedProcess(argv, 1, "", "installation failed")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    deployment.host.run = install
     with pytest.raises(service.ServiceError):
         _REAL_INSTALLER(deployment.host, str(wheel), wheel=True, build_web=build_web, dependencies=False)
     assert {p.name: p.read_bytes() for p in static.iterdir()} == original
+    if failure == "install":
+        assert old_record.read_bytes() == original_record
     assert not (tmp_path / "escaped.js").exists()
     assert not list(tmp_path.glob(".dist-upgrade-*"))
+    assert not list(tmp_path.glob(".wheel-upgrade-*"))
