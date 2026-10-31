@@ -73,7 +73,7 @@ def test_injected_runner_startup_failure_stops_owners_before_runner_and_database
     assert stopped == ["fleet", "agents", "runner", "database"]
 
 
-def test_lost_lock_fences_before_ending_owned_agents(monkeypatch):
+def test_lost_lock_fences_before_ending_owned_agents(monkeypatch, caplog):
     from looper.agents import proc_tree
     from looper.db import connection
 
@@ -87,15 +87,19 @@ def test_lost_lock_fences_before_ending_owned_agents(monkeypatch):
         monkeypatch.setattr(proc_tree, "end_owned", end_owned)
         fence = serve.Fence(exit_now=lambda code: events.append(code))
         fence.http_server = SimpleNamespace(close_listener=lambda: events.append("listener closed"))
+        fence.worker_pool = SimpleNamespace(fence_kept=lambda: events.append("kept runs fenced"))
         fence.lost("connection lost during shutdown")
-        assert events == ["spawns fenced", "fenced", "listener closed"]
+        assert events == ["spawns fenced", "fenced", "kept runs fenced", "listener closed"]
         assert fence._backstop is not None
         fence.exit(1)  # A normal shutdown deadline that fires after loss still exits 75.
         fence.lost("second notification")
         await fence._ending
         fence._backstop.cancel()
-        assert events == ["spawns fenced", "fenced", "listener closed", 75, "agents ended", 75]
+        assert events == ["spawns fenced", "fenced", "kept runs fenced", "listener closed", 75, "agents ended", 75]
     asyncio.run(run())
+    assert "fenced the database pool" in caplog.text
+    assert "closed the HTTP listener" in caplog.text
+    assert "exiting with 75" in caplog.text
 
 
 def test_lost_lock_before_http_still_exits_if_agent_cleanup_fails(monkeypatch):
@@ -131,6 +135,7 @@ def test_startup_failure_closes_the_pool_before_releasing_the_lease(monkeypatch,
         async def released():
             events.append("lease released")
         lease = SimpleNamespace(release=released)
+        monkeypatch.setattr(serve.keeper, "SOCKET_PATH_MAX", 1000)
         monkeypatch.setattr(operator_notes, "_root", str(tmp_path))
         monkeypatch.setattr(serve.self_check, "check_database", AsyncMock(return_value=SimpleNamespace(status="ok")))
         monkeypatch.setattr(serve.ControlPlaneLease, "acquire", AsyncMock(return_value=lease))
@@ -159,4 +164,34 @@ def test_a_failed_database_check_runs_before_lock_acquisition(monkeypatch, tmp_p
         with pytest.raises(serve.StartupCheckFailed, match="unavailable"):
             await serve._run_agent_system_owned(ops=ops, runtime_root=tmp_path, work_dir=tmp_path)
         acquire.assert_not_awaited()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["on", "off"])
+def test_keeper_socket_length_is_checked_before_pool_creation(monkeypatch, tmp_path, mode):
+    from unittest.mock import AsyncMock
+    from looper import db
+    from looper.ops_config import KeeperMode, OpsConfig
+    from looper.agents import operator_notes
+
+    async def run():
+        root = tmp_path / ("é" * 40)
+        lease = SimpleNamespace(release=AsyncMock())
+        monkeypatch.setattr(operator_notes, "_root", str(tmp_path))
+        monkeypatch.setattr(serve.self_check, "check_database", AsyncMock(return_value=SimpleNamespace(status="ok")))
+        monkeypatch.setattr(serve.ControlPlaneLease, "acquire", AsyncMock(return_value=lease))
+        init_pool = AsyncMock(side_effect=OSError("pool creation reached"))
+        monkeypatch.setattr(db, "init_pool", init_pool)
+        monkeypatch.setattr(db, "close_pool", AsyncMock())
+        ops = OpsConfig(runtime_root=root, path=root / "ops.toml", keeper_mode=KeeperMode(mode))
+        if mode == "on":
+            n = len(str(root / serve.keeper.RUNS_DIR / ("reviewer-" + "0" * 12) / serve.keeper.SOCKET).encode())
+            with pytest.raises(serve.StartupCheckFailed, match=rf"keeper sockets \({n} > 103 bytes\)"):
+                await serve._run_agent_system_owned(ops=ops, runtime_root=root, work_dir=root)
+            init_pool.assert_not_awaited()
+            lease.release.assert_awaited_once()
+        else:
+            with pytest.raises(OSError, match="pool creation reached"):
+                await serve._run_agent_system_owned(ops=ops, runtime_root=root, work_dir=root)
+            init_pool.assert_awaited_once()
     asyncio.run(run())

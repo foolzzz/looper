@@ -50,7 +50,8 @@ class LockHolder:
     backend_start: datetime | None
 
     def describe(self) -> str:
-        return ", ".join(f"{name}={value or 'unknown'}" for name, value in vars(self).items())
+        return ", ".join(f"{'backend_pid' if name == 'pid' else name}={value or 'unknown'}"
+                         for name, value in vars(self).items())
 
 
 class LockHeld(RuntimeError):

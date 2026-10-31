@@ -296,7 +296,8 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
                    home: Path | None = None, notes_root: Path | None = None,
                    gh_diffs: dict[str, str] | None = None,
                    startup_timeout: float = 90.0, env: dict[str, str] | None = None,
-                   pi_runtime: str = "cli", dsh_runtime: str = "cli") -> Iterator[Api]:
+                   pi_runtime: str = "cli", dsh_runtime: str = "cli",
+                   keeper_mode: str = "off") -> Iterator[Api]:
     """``looper serve`` on a free port, with an ops file of its own in ``runtime_root`` naming ``database_url``;
     stopped with SIGINT, as the operator would. ``notes_root`` stands in for the operator's ``~/.claude/projects``
     (the operator's notes). ``env``: variables the server gets on top of this process's (a key read for it alone)."""
@@ -306,7 +307,8 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
     manager_dir.mkdir(parents=True, exist_ok=True)
     ops = ops_config.OpsConfig(runtime_root=runtime_root, path=runtime_root / ops_config.FILE,
                                database_url=database_url, operator_notes_root=str(notes_root) if notes_root else "",
-                               pi_runtime=pi_runtime, dsh_runtime=dsh_runtime)
+                               pi_runtime=pi_runtime, dsh_runtime=dsh_runtime,
+                               keeper_mode=ops_config.KeeperMode(keeper_mode))
     ops_config.write_private(ops.path, ops_config.render(ops))
     # None of the operator's ops variables: the file names the eval's database.
     server_env = {**{k: v for k, v in os.environ.items() if k not in ops_config.VARIABLES},

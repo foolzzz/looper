@@ -54,8 +54,8 @@ def _manifest(*, changed: tuple[str, ...] = (), adoption_change: bool = False,
         (("runners", "control_plane"), False, (), (), False, UpgradeKind.FULL),
     ],
     ids=["unchanged", "web-only", "keeper-off", "web-and-control-plane", "protocol-mismatch",
-         "adoption-mismatch", "adoption-only-mismatch", "adoptable", "keeper-s0-overlap", "keeper-compatible",
-         "runners-s0-overlap"],
+         "adoption-mismatch", "adoption-only-mismatch", "adoptable", "keeper-full-overlap", "keeper-compatible",
+         "runners-full-overlap"],
 )
 def test_upgrade_decision_branches(changed, keeper_mode, protocols, keepers, adoption_change, expected):
     running = _manifest(protocols=protocols)
@@ -138,8 +138,8 @@ def test_same_files_have_equal_git_wheel_and_directory_fingerprints(component_tr
     assert git.adoption == installed.adoption == packaged.adoption
     assert git.version == installed.version == packaged.version == "1.0.0"
     assert len(git.components["control_plane"]) == 64
-    assert git.adoption["run_manifest_version"] == 0
-    assert git.adoption["keeper_protocols"] == []
+    assert git.adoption["run_manifest_version"] == 1
+    assert git.adoption["keeper_protocols"] == ["1.0"]
 
 
 def test_git_manifest_reads_the_requested_tree_without_checkout(component_tree: Path):

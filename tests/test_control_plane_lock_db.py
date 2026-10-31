@@ -6,6 +6,7 @@ import contextlib
 import os
 import signal
 import sys
+import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,13 @@ from looper.db import connection
 from looper.ops_config import KeeperMode, OpsConfig
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+
+@pytest.fixture
+def tmp_path():
+    # Real keeper sockets must fit on platforms with a 103-byte Unix socket limit.
+    with tempfile.TemporaryDirectory(prefix="lk.lock.", dir="/tmp") as directory:
+        yield Path(directory)
 
 
 def _schema_dsn(schema: str) -> str:

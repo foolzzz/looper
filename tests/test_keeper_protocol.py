@@ -6,16 +6,18 @@ import asyncio
 import base64
 import json
 import os
+import secrets
+import shutil
 import signal
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 from collections.abc import Callable, Iterator
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -28,6 +30,24 @@ from looper.agents.keeper.protocol import (MAX_FRAME_BYTES, ErrorCode, KeeperSig
 
 ROOT = Path(__file__).resolve().parents[1]
 SLEEP = "import time; time.sleep(60)"
+
+
+@contextmanager
+def short_directory():
+    # Keep sockets inside even a long checkout without exceeding macOS's path limit.
+    for _ in range(256):
+        directory = ROOT / (".k" + secrets.token_hex(1))
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        break
+    else:
+        raise FileExistsError("no short keeper test directory available")
+    try:
+        yield directory
+    finally:
+        shutil.rmtree(directory)
 
 
 def exercise(coroutine) -> None:
@@ -75,14 +95,11 @@ class Run:
 @pytest.fixture
 def launch() -> Iterator[Callable[..., Run]]:
     runs: list[Run] = []
-    directories: list[tempfile.TemporaryDirectory] = []
+    directories = ExitStack()
 
     def start(script: str = SLEEP, *, manifest: dict | None = None,
               socket_overlong: bool = False, delay_spawn: bool = False) -> Run:
-        # The checkout is long: using this directory itself keeps the socket at 103 bytes.
-        temporary = tempfile.TemporaryDirectory(dir=ROOT, prefix=".k")
-        directories.append(temporary)
-        directory = Path(temporary.name)
+        directory = directories.enter_context(short_directory())
         if socket_overlong:
             directory /= "x" * keeper.SOCKET_PATH_MAX
             directory.mkdir()
@@ -152,8 +169,7 @@ proc_tree.spawn = delayed_spawn
                   for pid, started in run.identities.items()):
             assert time.monotonic() < deadline, "test left a child process running"
             time.sleep(0.03)
-    for directory in reversed(directories):
-        directory.cleanup()
+    directories.close()
 
 
 @dataclass
@@ -501,6 +517,34 @@ time.sleep(0.2)
     exercise(check())
 
 
+def test_a_failed_stdin_log_write_rolls_back_before_retry(tmp_path, monkeypatch) -> None:
+    from looper.agents.keeper import process
+
+    held = process.Keeper(tmp_path, tmp_path, str(tmp_path), [])
+    path = tmp_path / keeper.STDIN
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    held.fds[keeper.STDIN] = fd
+    write_all = process._write_all
+
+    def interrupted_write(target, data):
+        os.write(target, data[:2])
+        raise OSError("short write")
+
+    try:
+        held.append_stdin(b"before")
+        monkeypatch.setattr(process, "_write_all", interrupted_write)
+        with pytest.raises(OSError, match="short write"):
+            held.append_stdin(b"retry")
+        assert held.offsets[keeper.STDIN] == 6
+        assert path.read_bytes() == b"before"
+        monkeypatch.setattr(process, "_write_all", write_all)
+        held.append_stdin(b"retry")
+        assert held.offsets[keeper.STDIN] == 11
+        assert path.read_bytes() == b"beforeretry"
+    finally:
+        os.close(fd)
+
+
 def test_a_stdin_write_accepts_exactly_one_mib(launch) -> None:
     async def check():
         run = launch("""\
@@ -742,6 +786,25 @@ while True:
             await client.close()
 
     exercise(check())
+
+
+@pytest.mark.parametrize("returncode", [None, 0, -signal.SIGTERM])
+def test_signal_only_reaches_a_child_that_has_not_been_reaped(tmp_path, monkeypatch, returncode) -> None:
+    from looper.agents.keeper.server import KeeperServer, _Connection
+
+    sent = []
+    monkeypatch.setattr(os, "killpg", lambda pid, sig: sent.append((pid, sig)))
+
+    async def check():
+        held = SimpleNamespace(run_dir=tmp_path, child=SimpleNamespace(pid=123, returncode=returncode))
+        server = KeeperServer(held)
+        connection = _Connection(server, None, None)
+        connection.initialized = True
+        server.controller = connection
+        assert await connection.dispatch("child/signal", {"signal": "TERM"}) == {}
+
+    exercise(check())
+    assert sent == ([(123, signal.SIGTERM)] if returncode is None else [])
 
 
 def test_the_orphan_timer_follows_the_controller(launch) -> None:
@@ -1178,7 +1241,7 @@ async def fake_server(handler):
     def accept(reader, writer):
         tasks.append(asyncio.create_task(serve(reader, writer)))
 
-    with tempfile.TemporaryDirectory(dir=ROOT, prefix=".k") as directory:
+    with short_directory() as directory:
         path = Path(directory) / keeper.SOCKET
         server = await asyncio.start_unix_server(accept, path)
         try:

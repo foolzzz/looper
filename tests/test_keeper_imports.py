@@ -38,18 +38,3 @@ def test_keeper_modules_import_only_at_module_level() -> None:
                 imports = [child.lineno for child in ast.walk(node)
                            if isinstance(child, (ast.Import, ast.ImportFrom))]
                 assert not imports, f"{source.relative_to(ROOT)} imports inside a function at {imports}"
-
-
-def test_the_control_plane_does_not_load_the_keeper_yet() -> None:
-    result = subprocess.run(
-        [sys.executable, "-I", "-c",
-         "import json, sys; sys.path.insert(0, sys.argv[1]); "
-         "import looper.agents.serve; import looper.agents.tiers.worker; "
-         "print(json.dumps(sorted(m for m in sys.modules if m == 'looper' or m.startswith('looper.'))))",
-         str(ROOT)],
-        cwd=ROOT, capture_output=True, text=True, timeout=30, check=True,
-    )
-    modules = set(json.loads(result.stdout))
-    assert {"looper.agents.serve", "looper.agents.tiers.worker"} <= modules
-    assert not any(name == "looper.agents.keeper" or name.startswith("looper.agents.keeper.")
-                   for name in modules)

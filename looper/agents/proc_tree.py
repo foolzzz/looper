@@ -392,7 +392,7 @@ def _start_time(pid: int) -> str | None:
 
 
 def _start_times(pids: Iterable[int]) -> dict[int, str] | None:
-    """The start times ``ps`` lists for ``pids``, in UTC; None when ``ps`` cannot run."""
+    """The start times ``ps`` lists for ``pids``, in UTC; None when ``ps`` fails."""
     selected = ",".join(map(str, pids))
     if not selected:
         return {}
@@ -400,6 +400,9 @@ def _start_times(pids: Iterable[int]) -> dict[int, str] | None:
         listed = subprocess.run(["ps", "-o", "pid=,lstart=", "-p", selected], capture_output=True, text=True,
                                 timeout=_PS_TIMEOUT_SEC, check=False, env={**child_env.inherited(), "LC_ALL": "C", "TZ": "UTC"})
     except (OSError, subprocess.SubprocessError):
+        return None
+    if listed.returncode != 0 and not (listed.returncode == 1 and not listed.stdout.strip()
+                                       and not (listed.stderr or "").strip()):
         return None
     started: dict[int, str] = {}
     for line in listed.stdout.splitlines():

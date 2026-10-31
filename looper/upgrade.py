@@ -27,7 +27,7 @@ class UpgradePlan:
 
 
 def scan_keepers(runtime_root: Path | None) -> tuple[Keeper, ...]:
-    # S0 never starts keepers. S1 will read live keeper records here.
+    # Live keeper discovery is enabled when upgrades can preserve running agents.
     return ()
 
 

@@ -9,6 +9,11 @@ import pytest
 from looper.agents import control_plane as control
 
 
+def test_holder_identifies_the_database_backend_pid():
+    holder = control.LockHolder(123, "looper serve 456@host", "127.0.0.1", None)
+    assert holder.describe().startswith("backend_pid=123, application_name=looper serve 456@host")
+
+
 def test_hidden_holder_fields_are_unknown():
     assert control.LockHolder(None, None, None, None).describe().count("unknown") == 4
 

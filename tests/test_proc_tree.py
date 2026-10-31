@@ -221,6 +221,28 @@ def test_snapshot_distinguishes_ps_failure_from_an_empty_listing(monkeypatch, re
     assert proc_tree._snapshot() == ({} if result == "empty" else None)
 
 
+@pytest.mark.parametrize(("returncode", "output", "stderr", "expected"), [
+    (0, "123 Sat Oct 31 12:00:00 2026\n", "", {123: "Sat Oct 31 12:00:00 2026"}),
+    (0, "", "", {}),
+    (1, "", "", {}),
+    (1, "123 Sat Oct 31 12:00:00 2026\n", "", None),
+    (1, "", "ps: failed", None),
+    (2, "", "", None),
+])
+def test_start_times_distinguishes_missing_pids_from_a_failed_ps(monkeypatch, returncode, output, stderr, expected):
+    monkeypatch.setattr(proc_tree.subprocess, "run", lambda *args, **kwargs:
+                        subprocess.CompletedProcess(args, returncode, stdout=output, stderr=stderr))
+    assert proc_tree._start_times([123]) == expected
+
+
+def test_start_times_returns_unknown_when_ps_times_out(monkeypatch):
+    def run(*args, **kwargs):
+        raise subprocess.TimeoutExpired("ps", 5)
+
+    monkeypatch.setattr(proc_tree.subprocess, "run", run)
+    assert proc_tree._start_times([123]) is None
+
+
 @pytest.mark.parametrize("failure_at", ["confirmation", "initial", "no_tree"])
 def test_reaped_tree_ps_failure_signals_known_members_before_unlinking_record(tmp_path, monkeypatch, failure_at):
     class Agent:
