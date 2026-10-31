@@ -652,6 +652,7 @@ class ManagerConfig:
     claude_bin: str = "claude"
     work_dir: Path = field(default_factory=lambda: Path.cwd())
     max_context_tokens: int = 100_000
+    http_ready: asyncio.Event | None = None
 
 
 @dataclass
@@ -1035,6 +1036,10 @@ class ManagerAgent:
     async def _message_loop(self) -> None:
         assert self._bus is not None
         try:
+            # Restart replay can arrive before HTTP starts. Its tool probe must
+            # wait, or a durable message becomes an acknowledged error reply.
+            if self._config.http_ready is not None:
+                await self._config.http_ready.wait()
             async for envelope in self._bus.subscribe(self.agent_id):
                 if not self._running:
                     break

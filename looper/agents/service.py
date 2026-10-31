@@ -27,15 +27,18 @@ from __future__ import annotations
 
 import http.client
 import json
+import math
 import os
 import platform
 import plistlib
 import re
 import shlex
 import socket
+import shutil
 import subprocess
 import sys
 import time
+import tempfile
 import urllib.error
 import urllib.request
 import zipfile
@@ -75,14 +78,14 @@ class ServiceError(RuntimeError):
     """A service command could not do its job; the message says why and what to do."""
 
 
-def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+def _run(argv: Sequence[str], *, timeout: float = _COMMAND_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(list(argv), capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                              timeout=_COMMAND_TIMEOUT_SECONDS)
+                              timeout=timeout)
     except FileNotFoundError as exc:
         raise ServiceError(f"`{argv[0]}` is not on PATH") from exc
     except subprocess.TimeoutExpired as exc:
-        raise ServiceError(f"`{' '.join(argv)}` did not finish in {_COMMAND_TIMEOUT_SECONDS:.0f} s") from exc
+        raise ServiceError(f"`{' '.join(argv)}` did not finish in {timeout:.0f} s") from exc
 
 
 def _get_status(port: int, token: str | None) -> dict | None:
@@ -125,6 +128,48 @@ def _port_in_use(port: int) -> bool:
         return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
+def _system_operation(port: int, token: str, name: str, arguments: dict) -> dict:
+    return _request_json(port, token, f"/api/v1/system/{name}", arguments)
+
+
+def _request_json(port: int, token: str, path: str, arguments: dict | None = None) -> dict:
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
+        data=json.dumps(arguments).encode() if arguments is not None else None,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=3) as response:
+            payload = json.loads(response.read())
+        if isinstance(payload, dict) and payload.get("status") == "ok" and isinstance(payload.get("result"), dict):
+            return payload["result"]
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        raise ServiceError(f"{path} failed: {exc}") from exc
+    raise ServiceError(f"invalid response from {path}")
+
+
+def _get_whoami(port: int, token: str) -> dict:
+    return _request_json(port, token, "/api/v1/whoami")
+
+
+def _get_index(port: int, token: str) -> bytes:
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        request = urllib.request.Request(f"http://127.0.0.1:{port}/index.html",
+                                         headers={"Cookie": f"{operator_auth.cookie_name(port)}={token}"})
+        with opener.open(request, timeout=3) as response:
+            return response.read()
+    except (OSError, http.client.HTTPException) as exc:
+        raise ServiceError("the installed dashboard index.html is not served") from exc
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 @dataclass
 class Host:
     """What the service commands read and run, replaceable in tests."""
@@ -141,6 +186,10 @@ class Host:
     get_status: Callable[[int, str | None], dict | None] = _get_status
     port_in_use: Callable[[int], bool] = _port_in_use
     get_components: Callable[[int, str | None], dict | None] = _get_components
+    system_operation: Callable[[int, str, str, dict], dict] = _system_operation
+    get_whoami: Callable[[int, str], dict] = _get_whoami
+    get_index: Callable[[int, str], bytes] = _get_index
+    pid_alive: Callable[[int], bool] = _pid_alive
 
     @classmethod
     def current(cls) -> Host:
@@ -593,7 +642,11 @@ def install(host: Host, ops: OpsConfig, *, label: str = DEFAULT_LABEL, port: int
     return "\n".join(lines)
 
 
-def restart(host: Host, *, label: str = DEFAULT_LABEL, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> str:
+def restart(host: Host, *, label: str = DEFAULT_LABEL, timeout: float = DEFAULT_TIMEOUT_SECONDS,
+            drain: bool = False, drain_timeout: float = 1200, no_force: bool = False) -> str:
+    if drain:
+        return _planned_restart(host, label=label, timeout=timeout, drain_timeout=drain_timeout,
+                                no_force=no_force)
     mgr = manager(host, label)
     if not mgr.unit_path.is_file():
         raise ServiceError(f"{label} is not installed; run `looper service install`")
@@ -664,17 +717,222 @@ def doctor_check(host: Host | None = None, label: str = DEFAULT_LABEL) -> Check:
                  f"run `looper service restart`; the log is {state.log_path or 'under the runtime root'}")
 
 
-def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dry_run: bool = False) -> str:
-    """Plan first. S0's first change deliberately cannot install, drain or restart."""
-    if not dry_run:
-        raise ServiceError("the upgrade itself comes with the drain (next change); use --dry-run")
+def _checked(host: Host, argv: Sequence[str], *, installing: bool = False) -> str:
+    result = (_run(argv, timeout=600) if installing and host.run is _run else host.run(argv))
+    if result.returncode:
+        raise ServiceError(f"`{shlex.join(argv)}` failed: {(result.stderr or result.stdout).strip()}")
+    return result.stdout.strip()
+
+
+def _swap_directory(staged: Path, destination: Path) -> None:
+    """Publish a complete build with one rename, including an existing nonempty dist."""
+    if not destination.exists():
+        os.replace(staged, destination)
+        return
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        rename = libc.renamex_np
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        result = rename(os.fsencode(staged), os.fsencode(destination), 2)  # RENAME_SWAP
+    elif sys.platform == "linux":
+        rename = libc.renameat2
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        result = rename(-100, os.fsencode(staged), -100, os.fsencode(destination), 2)  # RENAME_EXCHANGE
+    else:
+        raise ServiceError("atomic dashboard replacement requires macOS or Linux")
+    if result != 0:
+        error = ctypes.get_errno()
+        raise ServiceError(f"cannot atomically publish the dashboard: {os.strerror(error)}")
+
+
+def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
+                    dependencies: bool = True) -> tuple[bytes, str] | None:
+    from ..components import record_web_source, web_fingerprints
+
+    if wheel:
+        # uv tool environments omit pip; target that same interpreter with uv's pip interface.
+        has_pip = host.run([host.executable, "-m", "pip", "--version"]).returncode == 0
+        command = ([host.executable, "-m", "pip", "install", "--force-reinstall", source] if has_pip else
+                   ["uv", "pip", "install", "--python", host.executable, "--reinstall", source])
+        # NOOP/WEB_ONLY retain the interpreter. Keep its unchanged dependencies
+        # in place so delayed imports use the same resolution.
+        if not dependencies:
+            command.insert(-1, "--no-deps")
+        _checked(host, command, installing=True)
+        return None
+    _checked(host, ["git", "-C", str(host.cwd), "merge", "--ff-only", source], installing=True)
+    _checked(host, ["uv", "sync", "--project", str(host.cwd)], installing=True)
+    if not build_web:
+        return None
+    web = host.cwd / "web"
+    staged = Path(tempfile.mkdtemp(prefix=".dist-upgrade-", dir=web))
+    try:
+        _checked(host, ["npm", "ci", "--prefix", str(web)], installing=True)
+        _checked(host, ["npm", "run", "build", "--prefix", str(web), "--", "--outDir", str(staged)], installing=True)
+        if not (staged / "index.html").is_file():
+            raise ServiceError("the dashboard build did not produce index.html")
+        record_web_source(host.cwd, staged)
+        expected = ((staged / "index.html").read_bytes(), web_fingerprints(staged)[1])
+        _swap_directory(staged, web / "dist")
+        return expected
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
+
+
+def _deploy_report(report: dict, log_path: Path | None) -> str:
+    line = json.dumps({"event": "service_upgrade", **report}, sort_keys=True)
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a") as output:
+            output.write(line + "\n")
+    return line
+
+
+def _stop_for_install(mgr: _Manager, before: int | None) -> None:
+    mgr.stop()
+    deadline = mgr.host.clock() + _STOP_WAIT_SECONDS
+    while mgr.state().running or (before is not None and mgr.host.pid_alive(before)):
+        if mgr.host.clock() >= deadline:
+            raise ServiceError("old service process is still running; refusing to install")
+        mgr.host.sleep(_POLL_SECONDS)
+
+
+def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path: Path | None,
+                  plan, running, target, installer, timeout: float, drain_timeout: float,
+                  no_force: bool) -> str:
+    from ..components import Manifest
+    from ..upgrade import UpgradeKind
+
+    if not all(math.isfinite(value) and value > 0 for value in (timeout, drain_timeout)):
+        raise ServiceError("--timeout and --drain-timeout must be positive finite numbers")
+    token = operator_auth.read_token(root)
+    if not token:
+        raise ServiceError("the service operator token is missing")
+    report = {"plan": plan.kind.value, "reasons": list(plan.reasons), "drain_seconds": 0.0,
+              "gap_seconds": 0.0, "interrupted": [], "kept_before": 0, "adopted": 0,
+              "running_code_fingerprint": running.components["control_plane"],
+              "installed_package_version": running.version, "status": "failed"}
+    draining, stopped, stop_attempted, restart_started = False, False, False, False
+    state = mgr.state()
+    before = state.pid
+    if plan.kind in (UpgradeKind.FULL, UpgradeKind.CONTROL_PLANE) and (not state.running or before is None):
+        raise ServiceError("the service manager has no running PID; cannot confirm exit before installing or restarting")
+    try:
+        expected = None
+        if plan.kind in (UpgradeKind.FULL, UpgradeKind.CONTROL_PLANE):
+            started = host.clock()
+            # Mark the attempt first: a lost response may still have begun draining.
+            draining = True
+            status = host.system_operation(port, token, "drain", {
+                "scope": "turns" if plan.kind == UpgradeKind.CONTROL_PLANE else "runs",
+                "timeout_seconds": drain_timeout})
+            while True:
+                phase = status.get("phase")
+                if phase not in ("draining", "drained"):
+                    raise ServiceError("drain was cancelled; deployment stopped")
+                passed = status.get("deadline_passed") or host.clock() - started >= drain_timeout
+                report["drain_seconds"] = round(host.clock() - started, 3)
+                if passed and phase != "drained":
+                    if no_force:
+                        raise ServiceError("drain deadline passed; --no-force cancelled deployment")
+                    report["interrupted"] = [
+                        {"worker_id": row["worker_id"], "role": row["role"], "reason": "deadline"}
+                        for row in status.get("waiting", {}).get("runs", [])]
+                if phase == "drained" or passed:
+                    break
+                host.sleep(_POLL_SECONDS)
+                status = host.system_operation(port, token, "drain_status", {})
+            gap_started = host.clock()
+            stop_attempted = True
+            _stop_for_install(mgr, before)
+            stopped = True
+            if installer:
+                expected = installer()
+                report["installed_package_version"] = target.version
+            restart_started = True
+            _start_and_wait(mgr, port, log_path, timeout, root)
+            report["gap_seconds"] = round(host.clock() - gap_started, 3)
+        elif installer:
+            expected = installer()
+            report["installed_package_version"] = target.version
+
+        actual = Manifest.from_dict(host.get_components(port, token))
+        if target is not None:
+            if actual.components != target.components or actual.adoption != target.adoption:
+                raise ServiceError("running system.components does not match the target")
+            if plan.kind == UpgradeKind.WEB_ONLY:
+                index = host.get_index(port, token)
+                if not index or (expected and (index != expected[0] or actual.verification.get("web") != expected[1])):
+                    raise ServiceError("the served dashboard does not match the installed build")
+                if expected is None and actual.verification.get("web") != target.verification.get("web"):
+                    raise ServiceError("the served dashboard does not match the target wheel")
+        whoami = host.get_whoami(port, token)
+        report.update(status="ok", running_code_fingerprint=actual.components["control_plane"],
+                      running_version=whoami["looper_version"], web_fingerprint=actual.components["web"])
+    except BaseException as exc:
+        report["error"] = str(exc)
+        if draining and not restart_started:
+            try:
+                # bootout/stop can take effect and then report an error. Check
+                # exit evidence before deciding that only drain_cancel is needed.
+                if stop_attempted and not stopped and before is not None and not host.pid_alive(before):
+                    try:
+                        stopped = not mgr.state().running
+                    except ServiceError:
+                        stopped = not host.port_in_use(port)
+                # If installation failed after stop, restore availability before cancelling.
+                if stopped:
+                    _start_and_wait(mgr, port, log_path, timeout, root)
+                host.system_operation(port, token, "drain_cancel", {})
+            except Exception as cancel_error:
+                report["recovery_error"] = str(cancel_error)
+        line = _deploy_report(report, log_path)
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise ServiceError(f"{exc}\n{line}") from exc
+    return (f"plan       {plan.kind.value}\n"
+            + "\n".join("reason     " + reason for reason in plan.reasons)
+            + f"\nrunning code fingerprint {report['running_code_fingerprint']}, "
+              f"installed package version {report['installed_package_version']}\n"
+            + _deploy_report(report, log_path))
+
+
+def _planned_restart(host: Host, *, label: str, timeout: float, drain_timeout: float, no_force: bool) -> str:
+    from ..components import Manifest
+    from ..upgrade import UpgradeKind, UpgradePlan
+    mgr = manager(host, label)
+    port, log_path, root = mgr.unit_settings()
+    if port is None or root is None or not mgr.state().running:
+        raise ServiceError("cannot locate a running installed service to drain")
+    token = operator_auth.read_token(root)
+    try:
+        running = Manifest.from_dict(host.get_components(port, token))
+    except (ValueError, KeyError) as exc:
+        raise ServiceError(str(exc)) from exc
+    plan = UpgradePlan(UpgradeKind.FULL, ("Planned restart requested; no package installation.",), ())
+    return _execute_plan(host, mgr, port=port, root=root, log_path=log_path, plan=plan,
+        running=running, target=None, installer=None, timeout=timeout, drain_timeout=drain_timeout, no_force=no_force)
+
+
+def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dry_run: bool = False,
+            timeout: float = DEFAULT_TIMEOUT_SECONDS, drain_timeout: float = 1200, no_force: bool = False) -> str:
+    """Compute a plan before mutating files; stop the old interpreter before a full install."""
     from .. import components
-    from ..upgrade import decide, scan_keepers
+    from ..upgrade import UpgradeKind, decide, scan_keepers
 
     try:
-        target = (components.manifest_from_wheel(Path(to)) if to and to.endswith(".whl")
-                  else components.manifest_from_git(host.cwd, to or "origin/main"))
-        port, _, root = manager(host, label).unit_settings()
+        wheel = bool(to and to.endswith(".whl"))
+        source = str(Path(to).resolve()) if wheel else to or "origin/main"
+        if not dry_run and not wheel:
+            if _checked(host, ["git", "-C", str(host.cwd), "status", "--porcelain", "--untracked-files=no"]):
+                raise ServiceError("the installed checkout has tracked changes; refusing to upgrade")
+            source = _checked(host, ["git", "-C", str(host.cwd), "rev-parse", "--verify",
+                                     "--end-of-options", source + "^{commit}"])
+        target = (components.manifest_from_wheel(Path(source)) if wheel
+                  else components.manifest_from_git(host.cwd, source))
+        mgr = manager(host, label)
+        port, log_path, root = mgr.unit_settings()
         if port is None or root is None:
             raise ServiceError("cannot locate the service port and runtime root; install the service first")
         token = operator_auth.read_token(root)
@@ -682,9 +940,15 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
             raise ServiceError("the service operator token is missing")
         running = components.Manifest.from_dict(host.get_components(port, token))
         plan = decide(target, running, scan_keepers(root), keeper_mode=False)
+        if dry_run:
+            return "\n".join((f"plan       {plan.kind.value}", f"target     {target.version}",
+                f"running    {running.version} (loaded {running.loaded_at})",
+                "changed    " + (", ".join(plan.changed_components) or "none"),
+                *("reason     " + reason for reason in plan.reasons)))
+        return _execute_plan(host, mgr, port=port, root=root, log_path=log_path, plan=plan,
+            running=running, target=target,
+            installer=lambda: _install_target(host, source, wheel=wheel, build_web="web" in plan.changed_components,
+                dependencies=plan.kind in (UpgradeKind.FULL, UpgradeKind.CONTROL_PLANE)),
+            timeout=timeout, drain_timeout=drain_timeout, no_force=no_force)
     except (ValueError, KeyError, zipfile.BadZipFile) as exc:
         raise ServiceError(str(exc)) from exc
-    return "\n".join((f"plan       {plan.kind.value}",
-                       f"target     {target.version}", f"running    {running.version} (loaded {running.loaded_at})",
-                       "changed    " + (", ".join(plan.changed_components) or "none"),
-                       *("reason     " + reason for reason in plan.reasons)))

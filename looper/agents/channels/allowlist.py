@@ -128,6 +128,10 @@ def normalized_config(channel_type: str, config: Any) -> dict[str, Any]:
     """
     if not isinstance(config, dict):
         raise AllowlistError("config must be a JSON object")
+    if channel_type == "telegram" and "backlog_max_age_seconds" in config:
+        age = config["backlog_max_age_seconds"]
+        if type(age) is not int or age <= 0:
+            raise AllowlistError("backlog_max_age_seconds must be a positive integer")
     fmt = SENDER_ID_FORMATS.get(channel_type)
     if fmt is None or fmt.field not in config:
         return dict(config)

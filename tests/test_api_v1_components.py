@@ -5,7 +5,7 @@ from pathlib import Path
 from looper import components
 from looper.agents import api_v1
 from looper.db import api_clients
-from tests.test_api_v1_auth import CLIENT, CLIENT_TOKEN, _bearer, _send, _serving
+from tests.test_api_v1_auth import CLIENT, CLIENT_TOKEN, _bearer, _send, _send_raw, _serving
 from tests.test_operator_auth import TOKEN
 
 
@@ -21,6 +21,10 @@ def test_components_require_operator_and_preserve_loaded_snapshot(tmp_path, monk
 
     async def run():
         async with _serving(tmp_path, listen=True) as server:
+            server._static_dir = tmp_path / "dashboard"
+            server._static_dir.mkdir()
+            (server._static_dir / "index.html").write_text("<html>dashboard</html>")
+            (server._static_dir / ".source-fingerprint").write_text("a" * 64 + "\n")
             expected = components.manifest_from_directory(
                 Path(components.__file__).resolve().parent.parent)
             for token, status in ((None, 401), (CLIENT_TOKEN, 403), (TOKEN, 200)):
@@ -29,9 +33,9 @@ def test_components_require_operator_and_preserve_loaded_snapshot(tmp_path, monk
                 assert actual == status
             result = answer["result"]
             assert result["version"] == expected.version
-            assert result["components"] == expected.components
+            assert result["components"] == {**expected.components, "web": "a" * 64}
             assert result["adoption"] == expected.adoption
-            assert result["verification"] == expected.verification
+            assert result["verification"] == {"web": components.web_fingerprints(server._static_dir)[1]}
             assert result["loaded_at"]
 
             def refuse_recompute(*args, **kwargs):
@@ -41,6 +45,24 @@ def test_components_require_operator_and_preserve_loaded_snapshot(tmp_path, monk
             status, headers, repeat = await _send(server, "POST /api/v1/system/components", _bearer(TOKEN))
             assert status == 200 and headers["cache-control"] == "no-store"
             assert repeat["result"] == result
+
+            # Replace exactly the served directory while the startup snapshot
+            # stays fixed, as a WEB_ONLY installation does.
+            replacement = tmp_path / "next-dashboard"
+            replacement.mkdir()
+            (replacement / "index.html").write_text("<html>new dashboard</html>")
+            (replacement / ".source-fingerprint").write_text("b" * 64 + "\n")
+            server._static_dir.rename(tmp_path / "old-dashboard")
+            replacement.rename(server._static_dir)
+            status, _, updated = await _send(server, "POST /api/v1/system/components", _bearer(TOKEN))
+            assert status == 200
+            assert updated["result"]["components"] == {**result["components"], "web": "b" * 64}
+            assert updated["result"]["verification"]["web"] != result["verification"]["web"]
+            for key in ("version", "loaded_at", "adoption"):
+                assert updated["result"][key] == result[key]
+            status, _, body = await _send_raw(server, "GET /", {
+                "Cookie": f"looper_operator_{server._port}={TOKEN}"})
+            assert status == 200 and body == "<html>new dashboard</html>"
 
     asyncio.run(run())
 

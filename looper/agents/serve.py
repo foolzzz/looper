@@ -92,7 +92,8 @@ def _telegram_adapter_from_config(
         token = builtin_env_token(config)
     return TelegramChannelAdapter(bot_token=token, allowlist=allowlist, channel_id=channel_id,
                                   manager_id=manager_id, manager_running=manager_running,
-                                  resolve_chat=resolve_chat, stop_chat=stop_chat)
+                                  resolve_chat=resolve_chat, stop_chat=stop_chat,
+                                  backlog_max_age_seconds=config.get("backlog_max_age_seconds", 600))
 
 
 def _lark_adapter_from_config(config: dict[str, Any], runtime_root: Path, *,
@@ -614,6 +615,7 @@ async def _run_agent_system_owned(
     manager_config = ManagerConfig(
         claude_bin=claude_bin,
         work_dir=work_dir,
+        http_ready=asyncio.Event(),
     )
 
     # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
@@ -651,8 +653,8 @@ async def _run_agent_system_owned(
     await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("telegram",), stop_chat=fleet.stop_chat)
     await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("lark", "lark_bot"), stop_chat=fleet.stop_chat)
 
-    # Poll before the advisory checks: Telegram drops pending updates when polling starts, so messages sent
-    # during a slow check must already be received. Problems only warn here and on /api/v1/system/status.
+    # Receive and persist backlog before the advisory checks. Managers wait for
+    # HTTP readiness before consuming it. Problems only warn here and on system/status.
     checks = [
         database_check,
         *await asyncio.to_thread(self_check.check_claude, claude_bin),
@@ -723,6 +725,7 @@ async def _run_agent_system_owned(
         channels=registry,
     )
     await http_server.start()
+    manager_config.http_ready.set()
     # Its first pass handles the fires missed while the server was down.
     await scheduler.start()
     await gate_reminders.start()

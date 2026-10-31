@@ -163,6 +163,7 @@ class MessageBus:
     """In-process async message bus with filesystem durability."""
 
     def __init__(self, runtime_root: Path) -> None:
+        self.runtime_root = runtime_root
         self._queues: dict[str, asyncio.Queue[MessageEnvelope]] = {}
         self._topic_subscribers: dict[str, list[Callable[[MessageEnvelope], Any]]] = {}
         self._topic_consumers: dict[str, list[Callable[[MessageEnvelope], bool]]] = {}

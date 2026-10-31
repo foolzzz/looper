@@ -273,3 +273,33 @@ def test_held_chat_reply_survives_restart(agent_db, tmp_path, monkeypatch, chann
             await bus.shutdown()
 
     asyncio.run(asyncio.wait_for(run(), 15))
+
+
+def test_replayed_manager_message_waits_for_http_readiness(agent_db, tmp_path, monkeypatch):
+    from looper.agents.bus import MessageBus
+    from looper.agents.message import AgentAddress, MessageEnvelope, MessageType
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+
+    async def run():
+        bus = MessageBus(tmp_path)
+        await bus.start()
+        ready, handled = asyncio.Event(), asyncio.Event()
+        envelope = MessageEnvelope.create(source=AgentAddress("channel", "channel-web"),
+            target=AgentAddress("manager", "manager"), message_type=MessageType.USER_MESSAGE,
+            payload={"text": "held during restart"})
+        await bus.publish(envelope)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path, http_ready=ready), runtime_root=tmp_path)
+        monkeypatch.setattr(manager, "_handle", AsyncMock(side_effect=lambda item: handled.set()))
+        await manager.start(bus)
+        try:
+            await asyncio.sleep(0)
+            assert not handled.is_set()
+            assert envelope.message_id in {item.message_id for item in bus.journal.undelivered()}
+            ready.set()
+            await asyncio.wait_for(handled.wait(), 2)
+            manager._handle.assert_awaited_once_with(envelope)
+        finally:
+            await manager.stop()
+            await bus.shutdown()
+
+    asyncio.run(run())

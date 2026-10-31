@@ -4285,31 +4285,56 @@ SPA uses `#page/sub` format for deep linking that survives browser refresh:
 - `#settings/page[/sub]` → one Settings page (`#settings` and `#settings/defaults` redirect to `#settings/roles`)
 - `#history/agent-id?task=task-id` → one agent's history
 
-## Component upgrade previews
+## Planned service upgrades
 
 `looper service upgrade --dry-run [--to <git ref | wheel path>]` compares the
-running service's startup manifest with a Git tree (default `origin/main` of
-the current checkout) or a wheel, without installing files or restarting.
+running service's startup control-plane snapshot and current served web source
+fingerprint with a Git tree (default `origin/main` of the current checkout) or
+a wheel, without installing files or restarting.
 It prints `NOOP`, `WEB_ONLY`, `CONTROL_PLANE` or `FULL`, the changed components
 and the reason. Keeper mode is off in S0, so every control-plane change plans
-`FULL`. Running without `--dry-run` refuses until drain and deployment are
-available.
+`FULL`. Without `--dry-run`, `NOOP` installs without restarting; `WEB_ONLY`
+installs and builds to a temporary directory, atomically swaps `web/dist`, then
+checks the served index and asset hash. A full upgrade starts a `runs` drain,
+waits for DRAINED or `--drain-timeout` (default 1200 seconds), stops the service
+and confirms its old PID exited before installing, then starts it and verifies
+`system.components`. `CONTROL_PLANE` retains the same path with a `turns` drain.
+Managers hold replayed messages until the restarted HTTP API is listening, so
+their tool probes cannot turn startup backlog into failed replies.
+`--no-force` cancels an expired drain and resumes serving. A failure before
+restart also attempts to cancel the drain, restoring the stopped service when
+necessary. `looper service restart --drain` follows the full path without an install.
+
+Checkout installation fast-forwards to the planned commit and runs `uv sync`;
+wheel installation uses pip. The deploy report is printed and appended as one
+JSON line to the service log: plan, reasons, drain duration, HTTP gap, deadline
+interruptions, running fingerprint and installed version. The running version
+is read from `GET /api/v1/whoami`, which can differ from the installed version
+when no restart was needed.
 
 `looper/components.toml` declares component globs, runner packaging aliases
 and explicit ignores. A normal-suite test rejects unclassified tracked files.
 Git objects are read with `git cat-file --batch`; wheels are read as ZIP files.
 Each fingerprint hashes sorted `path sha256(content)\n` lines. Checkout web
-plans use `web/src` and package files; `verification.web` hashes built assets
+plans include `web/src/**`, `web/index.html`, `web/public/**`, package files,
+and Vite/TypeScript/Tailwind/PostCSS configuration. A build records this source
+fingerprint in `.source-fingerprint` beside the assets, also included in wheels;
+`verification.web` hashes built assets
 under canonical `web/dist` paths (also used for the packaged dashboard).
 The adoption fingerprint separately covers report contracts, both seat-tool
 listings (including optional vault tools), manifest version and keeper protocols.
 
 `POST /api/v1/system/components` requires operator authentication and returns the
 standard v1 result envelope containing `version`, `loaded_at`, `components`,
-`adoption` and `verification`. The snapshot is captured from the loaded package's
-directory once per process at HTTP-server startup and remains fixed if files later change.
-The operation is also available through generated `loopercli` commands. Dashboard,
-Telegram and Lark need no change for this read-only planning command.
+`adoption` and `verification`. The control-plane snapshot and adoption contract
+are captured from the loaded package once per process at HTTP-server startup. Web source and asset hashes
+are recomputed per request from the directory actually served. Runtime
+requirements and a distributed dependency lock also enter the control-plane
+hash, while version and tool-only metadata do not. The operation is also
+available through generated `loopercli` commands. The dashboard uses the existing
+drain banner; Telegram persists and deduplicates updates across planned restarts.
+Lark transport remains unchanged; see [channel restart delivery](channel-restart-delivery.md)
+for the stand-in results and platform replay limitations.
 
 ## HTTP API
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -105,7 +106,7 @@ def test_stop_drains_reactions_from_already_queued_messages(tmp_path, monkeypatc
             app, owned = adapter._app, adapter._requests
 
             def update(number, text):
-                message = {"message_id": number, "date": 0, "chat": {"id": 7, "type": "private"},
+                message = {"message_id": number, "date": int(time.time()), "chat": {"id": 7, "type": "private"},
                            "from": {"id": 7, "is_bot": False, "first_name": "Sender"}, "text": text}
                 if text == "/help":
                     message["entities"] = [{"type": "bot_command", "offset": 0, "length": 5}]
@@ -394,5 +395,25 @@ def test_real_application_closes_http_clients_after_partial_start(
                 adapter._outbound_task.cancel()
                 await asyncio.gather(adapter._outbound_task, return_exceptions=True)
             await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_invalid_bot_token_releases_inbox_and_transports(tmp_path, monkeypatch):
+    from telegram.error import InvalidToken
+    from telegram.request import HTTPXRequest
+
+    closed = AsyncMock()
+    monkeypatch.setattr(HTTPXRequest, "shutdown", closed)
+    adapter = TelegramChannelAdapter(bot_token="invalid", allowlist=SenderAllowlist(
+        "channel-telegram", frozenset({"7"})))
+
+    async def run():
+        with pytest.raises(InvalidToken):
+            await adapter.start(MessageBus(tmp_path))
+        assert adapter._inbox is None
+        assert adapter._requests == ()
+        assert not adapter._running
+        assert closed.await_count == 2
 
     asyncio.run(run())

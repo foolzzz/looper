@@ -240,8 +240,9 @@ class FakeLarkPlatform:
             async with self._change:
                 await self._change.wait_for(lambda: len(self.acks) >= n)
 
-    async def push_frame(self, frame: Frame) -> None:
-        await self.wait_connections()
+    async def push_frame(self, frame: Frame, *, wait_for_connection: bool = True) -> None:
+        if wait_for_connection:
+            await self.wait_connections()
         await asyncio.gather(*(client.send(frame.encode()) for client in tuple(self.clients)))
 
     async def push_event(self, event: dict[str, Any], *, message_id: str | None = None,
