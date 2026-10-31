@@ -564,13 +564,15 @@ class Scheduler:
             return None
         return await self._fire(conn, schedule, firing, now)
 
-    async def run_now(self, schedule_id: str) -> str | None:
+    async def run_now(self, schedule_id: str, *, expected_version: str | None = None) -> str | None:
         """Fire a schedule now, enabled or not (``trigger`` manual); None if unknown or admission is refused.
         Its ``next_fire_at`` stays. A gate runs in the background: the run is ``gating`` until it ends."""
         now = self._clock()
         with ExitStack() as firing_guard:
             async with db_connection.transaction() as conn:
                 schedule = await db_schedules.lock_schedule(conn, schedule_id)
+                if schedule is not None:
+                    db_schedules.check_configuration_version(schedule, expected_version)
                 if (schedule is None or not firing_guard.enter_context(self._admit_start(schedule["kind"]))
                         or not firing_guard.enter_context(_project_firing(schedule["project_id"]))):
                     return None
