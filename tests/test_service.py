@@ -221,6 +221,14 @@ def _probe_paths(host):
     return tuple(directory / f"{LABEL}-probe.{suffix}" for suffix in ("service", "timer"))
 
 
+def _probe_argv(host):
+    unit = _probe_paths(host)[0].read_bytes()
+    if host.system == "Darwin":
+        return plistlib.loads(unit)["ProgramArguments"]
+    return service._systemd_words(next(line.removeprefix("ExecStart=") for line in unit.decode().splitlines()
+                                      if line.startswith("ExecStart=")))
+
+
 def _configure_probe(root):
     path = _write_ops(root)
     with path.open("a") as stream:
@@ -336,13 +344,71 @@ def test_installed_probe_uses_the_serving_port(tmp_path, checkout, monkeypatch, 
     host.get_status = lambda port, token: received.append(port) or {"status": "running"}
     assert _install(monkeypatch, host, root, port="9888" if selection == "flag" else None) == 0
     assert received == [9888]
-    unit = _probe_paths(host)[0].read_bytes()
-    if system == "Darwin":
-        argv = plistlib.loads(unit)["ProgramArguments"]
+    argv = _probe_argv(host)
+    if selection == "file":
+        assert "--port" not in argv
     else:
-        argv = service._systemd_words(next(line.removeprefix("ExecStart=") for line in unit.decode().splitlines()
-                                          if line.startswith("ExecStart=")))
-    assert argv[argv.index("--port") + 1] == "9888"
+        assert argv[argv.index("--port") + 1] == "9888"
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+@pytest.mark.parametrize("initial_port", [None, 9888], ids=["default", "file"])
+def test_probe_follows_ops_port_changes_after_restart(tmp_path, checkout, monkeypatch, system, initial_port):
+    from looper.agents import probe
+
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    config = root / ops_config.FILE
+    if initial_port is not None:
+        config.write_text(config.read_text().replace('[server]\n', f'[server]\nport = {initial_port}\n'))
+    assert _install(monkeypatch, host, root, port=None) == 0
+    received = []
+    monkeypatch.setattr(probe, "sample", lambda port, token, host: received.append(port) or (probe.Verdict.OK, "ok"))
+    argv = _probe_argv(host)
+    assert "--port" not in argv
+    assert _looper(monkeypatch, host, *argv[argv.index("service") + 1:]) == 0
+    assert received == [initial_port or ops_config.DEFAULT_PORT]
+
+    text = config.read_text()
+    config.write_text(text.replace(f"port = {initial_port}", "port = 9889") if initial_port is not None
+                      else text.replace('[server]\n', '[server]\nport = 9889\n'))
+    serving_ports = []
+    host.get_status = lambda port, token: serving_ports.append(port) or {"status": "running"}
+    assert _looper(monkeypatch, host, "restart", "--label", LABEL) == 0
+    assert serving_ports == [9889]
+    # Invoke the installed command again, as the timer would after a crash restart too.
+    argv = _probe_argv(host)
+    assert _looper(monkeypatch, host, *argv[argv.index("service") + 1:]) == 0
+    assert received == [initial_port or ops_config.DEFAULT_PORT, 9889]
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+@pytest.mark.parametrize("explicit_port", [None, "9888"], ids=["file", "flag"])
+def test_restart_refreshes_a_stale_pinned_probe(tmp_path, checkout, monkeypatch, system, explicit_port):
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    assert _install(monkeypatch, host, root, port=explicit_port) == 0
+    # Reproduce a probe installed by a version that pinned the old ops port.
+    stale = service.build_probe_spec(host, label=LABEL, runtime_root=root, config=root / ops_config.FILE, port=9887)
+    path = _probe_paths(host)[0]
+    path.write_bytes(service.render_probe_plist(stale) if system == "Darwin"
+                     else service.render_probe_systemd(stale)[0].encode())
+    config = root / ops_config.FILE
+    config.write_text(config.read_text().replace('[server]\n', '[server]\nport = 9889\n'))
+    received = []
+    host.get_status = lambda port, token: received.append(port) or {"status": "running"}
+    assert _looper(monkeypatch, host, "restart", "--label", LABEL) == 0
+    assert received == [int(explicit_port) if explicit_port else 9889]
+    argv = _probe_argv(host)
+    if explicit_port:
+        assert argv[argv.index("--port") + 1] == explicit_port
+    else:
+        assert "--port" not in argv
+    assert fake.probe.loaded if system == "Darwin" else fake.probe_active
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])

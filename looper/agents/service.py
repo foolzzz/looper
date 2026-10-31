@@ -29,7 +29,7 @@ schedule runners live in their own sessions and survive restarts.
 When the ops file configures probe notifications, install also registers an
 independent one-shot health check every 60 seconds. It writes logs/probe.log
 and carries only PATH, locale, time zone and network settings, never runtime
-API keys. Restart leaves it running; uninstall removes it before the server.
+API keys. Restart refreshes its port binding when needed; uninstall removes it before the server.
 """
 
 from __future__ import annotations
@@ -186,12 +186,12 @@ class ProbeSpec:
     log_path: Path
 
 
-def build_probe_spec(host: Host, *, label: str, runtime_root: Path, config: Path, port: int) -> ProbeSpec:
+def build_probe_spec(host: Host, *, label: str, runtime_root: Path, config: Path, port: int | None) -> ProbeSpec:
     check_label(label)
     root = _absolute_root(host, runtime_root)
     return ProbeSpec(label=label,
                      argv=(*looper_command(host.executable), "service", "probe", "--config", str(config),
-                           "--runtime-root", str(root), "--port", str(port)),
+                           "--runtime-root", str(root), *(("--port", str(port)) if port is not None else ())),
                      working_dir=host.cwd,
                      env=tuple((name, host.environ[name]) for name in PROBE_ENV_NAMES if name in host.environ),
                      log_path=root / PROBE_LOG_RELATIVE_PATH)
@@ -598,7 +598,7 @@ def _probe_unit_path(host: Host, label: str) -> Path:
             else Systemd(host, f"{label}-probe").unit_path.with_suffix(".timer"))
 
 
-def _install_probe(host: Host, ops: OpsConfig, label: str, runtime_root: Path, port: int) -> str:
+def _install_probe(host: Host, ops: OpsConfig, label: str, runtime_root: Path, port: int | None) -> str:
     path = _probe_unit_path(host, label)
     if not ops.probe_notify_chat:
         return (f"probe      not configured: add [probe] to {ops.path} "
@@ -621,6 +621,35 @@ def _install_probe(host: Host, ops: OpsConfig, label: str, runtime_root: Path, p
             reason += f"; cleanup failed: {cleanup}"
         return f"probe      failed to load: {reason}"
     return f"probe      {path} every {PROBE_INTERVAL_SECONDS} s → {ops.probe_notify_channel} {ops.probe_notify_chat[:6]}…"
+
+
+def _refresh_probe_port(host: Host, label: str, port: int | None) -> None:
+    """Keep an installed probe's port source aligned with serve, including older pinned probes."""
+    mgr = manager(host, f"{label}.probe" if host.system == "Darwin" else f"{label}-probe")
+    if not mgr.unit_path.is_file() or mgr.unit_settings(explicit_port=True)[0] == port:
+        return
+    if host.system == "Darwin":
+        unit = plistlib.loads(mgr.unit_path.read_bytes())
+        argv = unit["ProgramArguments"]
+    else:
+        lines = mgr.unit_path.read_text().splitlines()
+        command = next(i for i, line in enumerate(lines) if line.startswith("ExecStart="))
+        argv = _systemd_words(lines[command].removeprefix("ExecStart="))
+    if "--port" in argv:
+        index = argv.index("--port")
+        del argv[index:index + 2]
+    if port is not None:
+        argv.extend(("--port", str(port)))
+    if host.system == "Darwin":
+        unit["ProgramArguments"] = argv
+        mgr.stop()
+        write_private(mgr.unit_path, plistlib.dumps(unit))
+        mgr.start()
+    else:
+        lines[command] = "ExecStart=" + " ".join(_systemd_quote(word.replace("$", "$$")) for word in argv)
+        write_private(mgr.unit_path, ("\n".join(lines) + "\n").encode())
+        # The timer stays active; its next invocation reads the updated oneshot unit.
+        mgr._systemctl("daemon-reload")
 
 
 def _probe_status(host: Host, label: str, runtime_root: Path | None) -> list[str]:
@@ -715,7 +744,8 @@ def install(host: Host, ops: OpsConfig, *, label: str = DEFAULT_LABEL, port: int
     mgr.stop()
     serving_port = port if port is not None else ops.port
     serving = _start_and_wait(mgr, serving_port, spec.log_path, timeout, runtime_root)
-    probe_report = _install_probe(host, ops, label, runtime_root, serving_port)
+    # Persist only serve's explicit override; otherwise each probe reads the current ops port.
+    probe_report = _install_probe(host, ops, label, runtime_root, port)
     names = [name for name, _ in spec.env]
     dropped = sorted(name for name in host.environ if name.startswith(FORMER_PREFIXES) and name not in names
                      and name not in ops_config.VARIABLES and name not in ("LOOPER_RUNTIME_ROOT", "LOOPX_RUNTIME_ROOT"))
@@ -749,6 +779,7 @@ def restart(host: Host, *, label: str = DEFAULT_LABEL, timeout: float = DEFAULT_
     before = mgr.state().pid
     mgr.stop()
     serving = _start_and_wait(mgr, port, log_path, timeout, runtime_root)
+    _refresh_probe_port(host, label, mgr.unit_settings(explicit_port=True)[0])
     return (f"restarted {label}: pid {before or 'none'} -> {serving.pid or 'unknown'}, "
             f"serving http://127.0.0.1:{port}")
 

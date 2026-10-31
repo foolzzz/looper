@@ -53,7 +53,7 @@ def sample(port: int, token: str | None, host: str = "127.0.0.1") -> tuple[Verdi
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    address = "127.0.0.1" if host in ("", "localhost", "0.0.0.0", "::") else host
+    address = "127.0.0.1" if host in ("", "localhost", "0.0.0.0") else "::1" if host == "::" else host
     if ":" in address:
         address = f"[{address}]"
     request = Request(f"http://{address}:{port}/api/v1/system/health", data=b"{}", headers=headers, method="POST")

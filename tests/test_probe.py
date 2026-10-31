@@ -120,16 +120,16 @@ def test_sample_connection_refused():
     assert "refused" in reason.lower()
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "::"])
 def test_probe_run_samples_the_configured_listening_address(tmp_path, host):
-    with serving(host=host) as server:
+    with serving(host="::1" if host == "::" else host) as server:
         assert probe.run(ops(tmp_path, host=host, port=server.server_port), tmp_path) == 0
     state = json.loads((tmp_path / ".local/probe/state.json").read_text())
     assert state["last_verdict"] == "ok"
 
 
 @pytest.mark.parametrize(("host", "address"), [("", "127.0.0.1"), ("localhost", "127.0.0.1"),
-                                             ("0.0.0.0", "127.0.0.1"), ("::", "127.0.0.1"),
+                                             ("0.0.0.0", "127.0.0.1"), ("::", "[::1]"),
                                              ("::1", "[::1]"), ("192.0.2.7", "192.0.2.7"),
                                              ("2001:db8::7", "[2001:db8::7]")])
 def test_probe_addresses_wildcards_and_specific_hosts(monkeypatch, host, address):
