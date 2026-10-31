@@ -3,9 +3,12 @@
 import asyncio
 import base64
 import inspect
+import logging
 
 from .protocol import (MAX_FRAME_BYTES, MAX_STREAM_BYTES, PROTOCOL_VERSIONS, KeeperError,
                        Stream, decode_data, encode, read_frame)
+
+logger = logging.getLogger(__name__)
 
 
 class KeeperGone(ConnectionError):
@@ -18,8 +21,9 @@ class KeeperClient:
         self.on_eof = lambda stream, offset: None
         self.on_exited = lambda exit_code, signal: None
         self.on_replaced = lambda epoch: None
+        self.on_closing = lambda stdout_offset, stderr_offset: None
         self.on_closed = lambda: None
-        self._writer = self._reader_task = None
+        self._writer = self._reader_task = self._dispatcher_task = None
         self._pending, self._offsets = {}, {}
         self._next_id = 0
 
@@ -28,7 +32,14 @@ class KeeperClient:
         reader, self._writer = await asyncio.wait_for(
             asyncio.open_unix_connection(socket_path, limit=MAX_FRAME_BYTES), timeout)
         self._offsets.clear()
-        self._reader_task = asyncio.create_task(self._read(reader))
+        # At most 64 queued frames, each carrying at most MAX_STREAM_BYTES of data.
+        notifications = asyncio.Queue(maxsize=64)
+        available, finished = asyncio.Event(), asyncio.Event()
+        self._dispatcher_task = asyncio.create_task(self._dispatch(notifications, available, finished))
+        self._reader_task = asyncio.create_task(self._read(reader, notifications, available))
+        writer = self._writer
+        # A task cancelled before it starts never executes its coroutine's finally.
+        self._reader_task.add_done_callback(lambda _: self._disconnected(writer, available, finished))
 
     async def initialize(self, *, epoch, looper_version, timeout=10) -> dict:
         return await self._request("initialize", {"protocol_versions": PROTOCOL_VERSIONS,
@@ -58,6 +69,7 @@ class KeeperClient:
         await self._request("child/signal", {"signal": sig}, timeout)
 
     async def end(self, *, timeout=15) -> tuple[int | None, int | None]:
+        # child/end deliberately uses proc_tree's fixed grace, with no grace_seconds parameter.
         result = await self._request("child/end", {}, timeout)
         return result["exit_code"], result["signal"]
 
@@ -91,7 +103,26 @@ class KeeperClient:
         if inspect.isawaitable(result):
             await result
 
-    async def _read(self, reader):
+    async def _dispatch(self, notifications, available, finished):
+        try:
+            while True:
+                await available.wait()
+                available.clear()
+                while not notifications.empty():
+                    callback, args = notifications.get_nowait()
+                    try:
+                        await self._callback(callback, *args)
+                    except (Exception, asyncio.CancelledError):
+                        logger.exception("keeper notification callback failed")
+                        await self.close()
+                        if asyncio.current_task().cancelling():
+                            raise
+                if finished.is_set():
+                    break
+        finally:
+            await self._callback(self.on_closed)
+
+    async def _read(self, reader, notifications, available):
         try:
             while True:
                 message = await read_frame(reader)
@@ -114,32 +145,47 @@ class KeeperClient:
                     if method == "stream/data":
                         data = decode_data(params["data"], MAX_STREAM_BYTES)
                         self._offsets[stream] += len(data)
-                        await self._callback(self.on_data, stream, offset, data)
+                        callback, args = self.on_data, (stream, offset, data)
                     else:
-                        await self._callback(self.on_eof, stream, offset)
+                        callback, args = self.on_eof, (stream, offset)
                 elif method == "child/exited":
-                    await self._callback(self.on_exited, params["exit_code"], params["signal"])
+                    callback, args = self.on_exited, (params["exit_code"], params["signal"])
                 elif method == "controller/replaced":
-                    await self._callback(self.on_replaced, params["epoch"])
+                    callback, args = self.on_replaced, (params["epoch"],)
+                elif method == "keeper/closing":
+                    args = (params["stdout_offset"], params["stderr_offset"])
+                    if any(type(offset) is not int or offset < 0 for offset in args):
+                        raise ValueError("invalid final keeper offsets")
+                    callback = self.on_closing
+                else:
+                    continue
+                await notifications.put((callback, args))
+                available.set()
         except (EOFError, KeeperError, ValueError, KeyError, TypeError, ConnectionError, OSError):
             pass
-        finally:
-            writer, self._writer = self._writer, None
-            if writer is not None:
-                writer.close()
+
+    def _disconnected(self, writer, available, finished):
+        writer.close()
+        if self._writer is writer:
+            self._writer = None
             for future in self._pending.values():
                 if not future.done():
                     future.set_exception(KeeperGone("keeper connection dropped"))
-            await self._callback(self.on_closed)
+        # Wake the dispatcher without needing space for a sentinel in a full queue.
+        finished.set()
+        available.set()
 
     async def close(self):
         task, self._reader_task = self._reader_task, None
+        dispatcher, self._dispatcher_task = self._dispatcher_task, None
         writer = self._writer
         if writer is not None:
             writer.close()
         if task is not None and task is not asyncio.current_task():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        if dispatcher is not None and dispatcher is not asyncio.current_task():
+            await asyncio.gather(dispatcher, return_exceptions=True)
         if writer is not None:
             try:
                 await asyncio.wait_for(writer.wait_closed(), 1)

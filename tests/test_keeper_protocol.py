@@ -834,6 +834,94 @@ sys.stderr.buffer.write(b'error\\x00\\xff' * 1000)
     exercise(check())
 
 
+def test_a_data_callback_can_write_to_the_same_interactive_child(launch) -> None:
+    async def check():
+        run = launch("""\
+import sys
+print('ready', flush=True)
+for line in sys.stdin.buffer:
+    sys.stdout.buffer.write(line)
+    sys.stdout.buffer.flush()
+""")
+        client, events, _ = await connected(run)
+        record_data = client.on_data
+        written, echoed = asyncio.Event(), asyncio.Event()
+
+        async def on_data(stream, offset, data):
+            record_data(stream, offset, data)
+            if events.data[stream] == b"ready\n":
+                assert await client.stdin_write(b"echo\n", 0, timeout=2) == 5
+                written.set()
+            if events.data[stream] == b"ready\necho\n":
+                echoed.set()
+
+        client.on_data = on_data
+        try:
+            await client.subscribe(Stream.STDOUT, 0)
+            await asyncio.wait_for(written.wait(), 4)
+            await asyncio.wait_for(echoed.wait(), 4)
+            assert not events.closed.is_set()
+            assert (run.directory / keeper.STDIN).read_bytes() == b"echo\n"
+            await client.stdin_close(timeout=2)
+            await asyncio.wait_for(events.closed.wait(), 5)
+            assert events.exited == [(0, None)]
+            await run.wait()
+        finally:
+            await client.close()
+
+    exercise(check())
+
+
+def test_a_paused_consumer_gets_final_log_offsets_after_the_delivery_deadline(launch) -> None:
+    async def check():
+        run = launch("""\
+import pathlib, sys, time
+while not pathlib.Path('continue').exists():
+    time.sleep(0.01)
+sys.stdout.buffer.write(bytes(range(256)) * 32768)
+sys.stderr.buffer.write(b'error\\x00\\xff' * 1000)
+""")
+        client, events, _ = await connected(run)
+        closing = []
+
+        def on_closing(stdout_offset, stderr_offset):
+            closing.append((stdout_offset, stderr_offset))
+            events.order.append("closing")
+
+        client.on_closing = on_closing
+        transport = client._writer.transport
+        try:
+            await client.subscribe(Stream.STDOUT, 0)
+            await client.subscribe(Stream.STDERR, 0)
+            transport.pause_reading()
+            (run.cwd / "continue").touch()
+            await eventually(lambda: run.state().get("state") == "exited")
+            stdout = (run.directory / keeper.STDOUT).read_bytes()
+            stderr = (run.directory / keeper.STDERR).read_bytes()
+            assert stdout == bytes(range(256)) * 32768
+            assert stderr == b'error\x00\xff' * 1000
+            # Resume after the real 10 s deadline, during the bounded socket close.
+            await asyncio.sleep(10.1)
+            assert not events.closed.is_set()
+            transport.resume_reading()
+            await asyncio.wait_for(events.closed.wait(), 5)
+            assert closing == [(len(stdout), len(stderr))]
+            assert events.order[-2:] == ["closing", "closed"]
+            assert Stream.STDOUT not in events.eof
+            assert 0 < events.offsets[Stream.STDOUT] < len(stdout)
+            for stream, expected in ((Stream.STDOUT, stdout), (Stream.STDERR, stderr)):
+                with (run.directory / f"{stream}.log").open("rb") as source:
+                    source.seek(events.offsets[stream])
+                    missing = source.read()
+                assert bytes(events.data[stream]) + missing == expected
+            await run.wait()
+        finally:
+            transport.resume_reading()
+            await client.close()
+
+    exercise(check())
+
+
 def test_bad_requests_do_not_break_the_controller(launch) -> None:
     async def check():
         run = launch()
@@ -909,6 +997,162 @@ async def fake_server(handler):
             for outcome in outcomes:
                 if isinstance(outcome, BaseException) and not isinstance(outcome, asyncio.CancelledError):
                     raise outcome
+
+
+@pytest.mark.parametrize("disconnect", ["peer", "callback", "cancelled_callback"])
+def test_notification_callbacks_drain_in_wire_order_before_closed(disconnect) -> None:
+    async def check():
+        entered, release, sent, closed = (asyncio.Event() for _ in range(4))
+        frames = [
+            ("stream/data", {"stream": "stdout", "offset": 0, "data": "YQ=="}),
+            ("stream/data", {"stream": "stderr", "offset": 0, "data": "Yg=="}),
+            ("stream/data", {"stream": "stdout", "offset": 1, "data": "Yw=="}),
+            ("stream/eof", {"stream": "stderr", "offset": 1}),
+            ("child/exited", {"exit_code": 0, "signal": None}),
+            ("stream/eof", {"stream": "stdout", "offset": 2}),
+            ("controller/replaced", {"epoch": 1}),
+            ("keeper/closing", {"stdout_offset": 2, "stderr_offset": 1}),
+        ]
+
+        async def notifications(reader, writer):
+            for _ in Stream:
+                message = await read_frame(reader)
+                assert message["method"] == "stream/subscribe"
+                writer.write(encode({"jsonrpc": "2.0", "id": message["id"], "result": {}}))
+                await writer.drain()
+            for method, params in frames:
+                writer.write(encode({"jsonrpc": "2.0", "method": method, "params": params}))
+            await writer.drain()
+            message = await read_frame(reader)
+            assert message["method"] == "stdin/close"
+            writer.write(encode({"jsonrpc": "2.0", "id": message["id"], "result": {}}))
+            await writer.drain()
+            if disconnect == "peer":
+                await close_writer(writer)
+            sent.set()
+            if disconnect != "peer":
+                assert await reader.read() == b""
+
+        async with fake_server(notifications) as path:
+            client, seen = KeeperClient(), []
+
+            async def on_data(stream, offset, data):
+                if stream == Stream.STDERR:
+                    entered.set()
+                    await release.wait()
+                    if disconnect == "callback":
+                        await client.close()
+                seen.append(("data", stream, offset, data))
+                if stream == Stream.STDERR and disconnect == "cancelled_callback":
+                    cancelled = asyncio.get_running_loop().create_future()
+                    cancelled.cancel()
+                    await cancelled
+
+            def on_closed():
+                seen.append(("closed",))
+                closed.set()
+
+            client.on_data = on_data
+            client.on_eof = lambda stream, offset: seen.append(("eof", stream, offset))
+            client.on_exited = lambda code, sig: seen.append(("exited", code, sig))
+            client.on_replaced = lambda epoch: seen.append(("replaced", epoch))
+            client.on_closing = lambda stdout, stderr: seen.append(("closing", stdout, stderr))
+            client.on_closed = on_closed
+            try:
+                await client.connect(path, timeout=5)
+                await client.initialize(epoch=0, looper_version="test")
+                for stream in Stream:
+                    await client.subscribe(stream, 0)
+                await asyncio.wait_for(entered.wait(), 5)
+                # The response follows the remaining notifications on the wire.
+                await client.stdin_close(timeout=2)
+                await asyncio.wait_for(sent.wait(), 5)
+                assert seen == [("data", Stream.STDOUT, 0, b"a")]
+                assert not closed.is_set()
+                release.set()
+                await asyncio.wait_for(closed.wait(), 5)
+                assert seen == [
+                    ("data", Stream.STDOUT, 0, b"a"),
+                    ("data", Stream.STDERR, 0, b"b"),
+                    ("data", Stream.STDOUT, 1, b"c"),
+                    ("eof", Stream.STDERR, 1),
+                    ("exited", 0, None),
+                    ("eof", Stream.STDOUT, 2),
+                    ("replaced", 1),
+                    ("closing", 2, 1),
+                    ("closed",),
+                ]
+            finally:
+                release.set()
+                await client.close()
+
+    exercise(check())
+
+
+def test_the_client_can_close_before_its_reader_starts(launch) -> None:
+    async def check():
+        run = launch()
+        await run.running()
+        client, events = KeeperClient(), Events()
+        events.attach(client)
+        try:
+            await client.connect(run.socket, timeout=5)
+            async with asyncio.timeout(2):
+                await client.close()
+            await client.close()
+            assert events.order == ["closed"]
+        finally:
+            await client.close()
+
+    exercise(check())
+
+
+def test_a_slow_callback_bounds_the_notification_backlog() -> None:
+    async def check():
+        entered, release, sent = (asyncio.Event() for _ in range(3))
+
+        async def notifications(reader, writer):
+            message = await read_frame(reader)
+            assert message["method"] == "stream/subscribe"
+            writer.write(encode({"jsonrpc": "2.0", "id": message["id"], "result": {}}))
+            for offset in range(80):
+                writer.write(encode({"jsonrpc": "2.0", "method": "stream/data", "params": {
+                    "stream": "stdout", "offset": offset, "data": "YQ=="}}))
+            await writer.drain()
+            await close_writer(writer)
+            sent.set()
+
+        async with fake_server(notifications) as path:
+            client, events = KeeperClient(), Events()
+            events.attach(client)
+            record_data = client.on_data
+
+            async def on_data(stream, offset, data):
+                if offset == 0:
+                    entered.set()
+                    await release.wait()
+                record_data(stream, offset, data)
+
+            client.on_data = on_data
+            try:
+                await client.connect(path, timeout=5)
+                await client.initialize(epoch=0, looper_version="test")
+                await client.subscribe(Stream.STDOUT, 0)
+                await asyncio.wait_for(entered.wait(), 5)
+                await asyncio.wait_for(sent.wait(), 5)
+                # 64 queued, one in the callback, one parsed and waiting for queue space.
+                await eventually(lambda: client._offsets[Stream.STDOUT] >= 66)
+                assert client._offsets[Stream.STDOUT] == 66
+                assert events.data[Stream.STDOUT] == b""
+                release.set()
+                await asyncio.wait_for(events.closed.wait(), 5)
+                assert bytes(events.data[Stream.STDOUT]) == b"a" * 80
+                assert events.order == ["closed"]
+            finally:
+                release.set()
+                await client.close()
+
+    exercise(check())
 
 
 def test_the_client_closes_on_a_stream_gap() -> None:

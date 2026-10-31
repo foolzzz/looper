@@ -57,6 +57,10 @@ class KeeperServer:
             await asyncio.wait_for(deliver(), 10)
         except (TimeoutError, ConnectionError, OSError):
             pass
+        connection = self.controller
+        if connection is not None:
+            connection.closing_offsets = {"stdout_offset": self.keeper.offsets[STDOUT],
+                                          "stderr_offset": self.keeper.offsets[STDERR]}
 
     def exit_status(self):
         state = self.keeper.state
@@ -68,7 +72,6 @@ class KeeperServer:
             await self.listener.wait_closed()
             self.path.unlink(missing_ok=True)
         for connection in tuple(self.connections):
-            connection.writer.close()
             if not connection.task.cancelling():
                 connection.task.cancel()
         await asyncio.gather(*(c.closed.wait() for c in tuple(self.connections)))
@@ -80,6 +83,7 @@ class _Connection:
         self.task = asyncio.current_task()
         self.initialized, self.epoch = False, None
         self.subscriptions = {}
+        self.closing_offsets = None
         self.requests = set()
         self.closed, self.idle = asyncio.Event(), asyncio.Event()
         self.idle.set()
@@ -139,6 +143,13 @@ class _Connection:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             self.idle.set()
+            if self.closing_offsets is not None and not self.writer.is_closing():
+                # Producers have stopped; close below bounds this final frame's flush.
+                try:
+                    self.writer.write(encode({"jsonrpc": "2.0", "method": "keeper/closing",
+                                              "params": self.closing_offsets}))
+                except (ConnectionError, OSError):
+                    pass
             self.writer.close()
             try:
                 await asyncio.wait_for(self.writer.wait_closed(), 1)

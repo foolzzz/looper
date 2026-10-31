@@ -1,4 +1,23 @@
-"""Line-delimited JSON-RPC and byte limits shared by keeper peers."""
+"""Line-delimited JSON-RPC and byte limits shared by keeper peers.
+
+Notifications share one ordered channel: stream/data, stream/eof, child/exited,
+controller/replaced and keeper/closing. The client resolves responses in its
+reader and dispatches notifications in wire order on a separate task. Its queue
+holds at most 64 notifications (at most 4 MiB of decoded data); a full queue
+backpressures the reader. Connection loss fails pending RPCs immediately, then
+drains queued callbacks before calling on_closed once.
+
+After child exit, delivery is bounded to 10 seconds. Before closing, the keeper
+queues keeper/closing with {stdout_offset, stderr_offset}, the final byte lengths
+of stdout.log and stderr.log, even if stream/eof could not be delivered. The
+client calls on_closing(stdout_offset, stderr_offset) in notification order.
+Callers compare these lengths with their own consumed offsets and read any
+missing suffix from the log files. These are not the reader's prefetched offsets.
+The final frame uses the existing bounded socket flush: a peer that remains
+unreadable through that flush, or a broken connection, can still lose it. Without
+stream/eof, callers must check final offsets or fall back to the logs if the
+closing frame is also missing.
+"""
 
 import asyncio
 import base64
