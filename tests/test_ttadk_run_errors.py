@@ -12,7 +12,7 @@ import pytest
 from fake_claude import fake_claude
 from looper.agents import log_redaction
 from looper.agents.bus import MessageBus
-from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address, worker_address
 from looper.agents.runtimes import Launcher
 from looper.agents.system_prompt import SystemPrompt
 from looper.agents.tiers import manager, planner, worker
@@ -21,6 +21,32 @@ from test_ttadk_runtime import CODEX, _launch
 
 SIGN_IN_ERROR = "Sign-in expired; run ttadk auth login sso"
 SECRET = "synthetic-sign-in-secret"
+
+
+@pytest.mark.parametrize("text, limit, expected", [
+    (None, 8, ""),
+    ("  short\n error\t", 20, "short error"),
+    ("  short\n error\t", 11, "short error"),
+    ("  prefix\n middle\t reason  ", 10, "pre…reason"),
+])
+def test_error_clipping_keeps_both_ends(text: Any, limit: int, expected: str) -> None:
+    assert planner._clip_ends(text, limit) == expected
+
+
+def test_failed_review_summary_keeps_its_final_reason(tmp_path: Path) -> None:
+    agent = planner.PlannerAgent(task_id="t1", runtime_root=tmp_path)
+    step = planner.PlanStep(step_id="s1", index=0, instruction="Inspect", reviewer_id="r1")
+    summary = "Review failed: " + "diagnostic\n" * 150 + SIGN_IN_ERROR
+    report = agent._review_report(step, {"passed": False, "summary": summary})
+    assert report[-1].startswith("- summary: Review failed: ")
+    assert report[-1].endswith(SIGN_IN_ERROR)
+    assert len(report[-1]) == len("- summary: ") + 1000
+    outcome = planner.result_outcome({"verify_passed": False, "verify_summary": summary})
+    assert outcome.startswith("review failed: Review failed: ") and outcome.endswith(SIGN_IN_ERROR)
+    # Findings still take precedence and retain their existing head-only clipping.
+    finding = "finding " * 40
+    assert planner.result_outcome({"verify_passed": False, "verify_findings": [finding],
+                                   "verify_summary": summary}) == f"review failed: {finding.strip()[:199]}…"
 
 
 @pytest.fixture
@@ -65,6 +91,90 @@ def test_ttadk_step_without_result_records_sign_in_stderr(
     assert result["status"] == "failed"
     _assert_diagnostic(result["error"], agent_db)
     assert SECRET not in result["stderr"] and "synthetic-api-token" not in result["stderr"]
+    assert len(result["stderr"]) == 1000 and result["error"].endswith(result["stderr"])
+    assert any(call.kwargs.get("summary") == result["error"]
+               for call in agent_db.insert_activity.await_args_list)
+
+    agent = planner.PlannerAgent(task_id="t1", runtime_root=tmp_path / "runtime")
+    step = planner.PlanStep(step_id="s1", index=0, instruction="Inspect", worker_id="w1", reviewer_id="r1",
+                            status="completed" if verify else "dispatched")
+    agent._plan = planner.TaskPlan("p1", "g1", "Inspect", str(tmp_path), steps=[step], status="executing")
+    turn = AsyncMock(return_value='```json\n{"decision": "fail", "reason": "run failed"}\n```')
+    monkeypatch.setattr(agent, "_turn", turn)
+    monkeypatch.setattr(agent, "_apply_decision", AsyncMock())
+    envelope = MessageEnvelope.create(
+        source=worker_address("r1" if verify else "w1"), target=agent.agent_address,
+        message_type=MessageType.VERIFY_RESULT if verify else MessageType.WORK_RESULT,
+        payload={**result, "task_id": "s1"},
+    )
+    handler = agent._handle_verify_result if verify else agent._handle_work_result
+    asyncio.run(asyncio.wait_for(handler(envelope), 5))
+    report = agent._review_report(step, result) if verify else agent._work_report(step, result)
+    outcome = planner.result_outcome(step.result)
+    activity = agent_db.insert_activity.await_args.kwargs
+    for text in [report[-1], outcome, activity["summary"], turn.await_args.args[0]]:
+        assert SIGN_IN_ERROR in text
+        assert SECRET not in text and "synthetic-api-token" not in text
+    assert activity["kind"] == "error"
+    if verify:
+        assert step.result["verify_passed"] is False
+        assert step.result["verify_summary"] == result["error"]
+        assert report[-1].startswith("- review run failed: ")
+    else:
+        assert result["error"].split(":", 1)[0] in report[-1]
+        assert result["error"].split(":", 1)[0] in outcome
+
+
+@pytest.mark.parametrize("role", [False, True], ids=["builtin", "role"])
+def test_planner_keeps_reviewer_run_error_without_a_verdict(
+    role: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+) -> None:
+    agent = planner.PlannerAgent(task_id="t1", runtime_root=tmp_path)
+    step = planner.PlanStep(step_id="s1", index=0, instruction="Inspect", status="completed", reviewer_id="r1",
+                            result={"status": "completed"})
+    if role:
+        step.review_roles = [planner.StepReviewRole("security")]
+        step.review_stage, step.review_position = planner.ReviewStage.ROLE, 0
+    agent._plan = planner.TaskPlan("p1", "g1", "Inspect", str(tmp_path), steps=[step], status="executing")
+    decide = AsyncMock()
+    monkeypatch.setattr(agent, "_decide", decide)
+    error = "Reviewer timed out before producing a verdict"
+    envelope = MessageEnvelope.create(
+        source=worker_address("r1"), target=agent.agent_address, message_type=MessageType.VERIFY_RESULT,
+        payload={"task_id": "s1", "status": "failed", "error": error},
+    )
+    asyncio.run(asyncio.wait_for(agent._handle_verify_result(envelope), 5))
+    assert error in planner.result_outcome(step.result)
+    assert error in agent_db.insert_activity.await_args.kwargs["summary"]
+    assert error in "\n".join(decide.await_args.args[3])
+    assert decide.await_args.args[2].succeeded is False
+
+
+@pytest.mark.parametrize("verify", [False, True], ids=["work", "review"])
+def test_planner_success_reports_keep_the_existing_clipping(
+    verify: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+) -> None:
+    agent = planner.PlannerAgent(task_id="t1", runtime_root=tmp_path)
+    step = planner.PlanStep(step_id="s1", index=0, instruction="Inspect", worker_id="w1", reviewer_id="r1",
+                            status="completed" if verify else "dispatched")
+    agent._plan = planner.TaskPlan("p1", "g1", "Inspect", str(tmp_path), steps=[step], status="executing")
+    monkeypatch.setattr(agent, "_decide", AsyncMock())
+    summary = "All checks passed.\n" * 80
+    flat = " ".join(summary.split())
+    result = {"task_id": "s1", "summary": summary, **({"passed": True} if verify else {"status": "completed"})}
+    envelope = MessageEnvelope.create(
+        source=worker_address("r1" if verify else "w1"), target=agent.agent_address,
+        message_type=MessageType.VERIFY_RESULT if verify else MessageType.WORK_RESULT, payload=result,
+    )
+    handler = agent._handle_verify_result if verify else agent._handle_work_result
+    asyncio.run(asyncio.wait_for(handler(envelope), 5))
+    report = agent._review_report(step, result) if verify else agent._work_report(step, result)
+    assert report == (["Review of step s1 by r1:", "- passed: yes"] if verify else
+                      ["Result of step s1 from w1:", "- status: completed"]) + [f"- summary: {flat[:999]}…"]
+    assert agent_db.insert_activity.await_args.kwargs["summary"] == (
+        f"Verify passed: {summary[:150]}" if verify else summary[:200])
+    if not verify:
+        assert planner.result_outcome(step.result) == f"completed: {flat[:399]}…"
 
 
 @pytest.mark.parametrize("resuming", [False, True], ids=["new-session", "resume"])

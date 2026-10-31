@@ -633,6 +633,15 @@ def _clip(text: Any, limit: int) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
+def _clip_ends(text: Any, limit: int) -> str:
+    """Keep a failed run's prefix and its final diagnostic within ``limit`` characters."""
+    flat = " ".join(str(text or "").split())
+    if len(flat) <= limit:
+        return flat
+    head = limit // 3
+    return flat[:head] + "…" + flat[len(flat) - (limit - head - 1):]
+
+
 def _sentence(text: str) -> str:
     """``text`` with a period at its end, unless it already ends a sentence."""
     return text if text.endswith((".", "!", "?", "…")) else text + "."
@@ -738,7 +747,7 @@ def _thread_lines(messages: Sequence[Mapping[str, Any]], limit: int) -> list[str
 def _verdict_reason(verdict: Mapping[str, Any], findings: str, summary: str) -> str:
     """Why a review did not pass, in a line: its findings, else its summary."""
     found = "; ".join(_clip(f, 200) for f in verdict.get(findings) or [] if str(f).strip())
-    return found or _clip(verdict.get(summary), 300) or "no reason given"
+    return found or _clip_ends(verdict.get(summary), 300) or "no reason given"
 
 
 def _role_reviews(result: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -758,7 +767,8 @@ def result_outcome(result: Mapping[str, Any]) -> str:
         return f"review failed: {_verdict_reason(result, 'verify_findings', 'verify_summary')}"
     status = str(result.get("status") or "unknown")
     detail = result.get("summary") if status == "completed" else result.get("error") or result.get("summary")
-    return f"{status}: {_clip(detail, 400) or 'no reason given'}"
+    detail = _clip(detail, 400) if status == "completed" else _clip_ends(detail, 400)
+    return f"{status}: {detail or 'no reason given'}"
 
 
 # How a closing note names a step that is not done, by its status.
@@ -2134,9 +2144,10 @@ class PlannerAgent:
             step.missed_messages.extend(text for text in missed if isinstance(text, str))
         await self._capture_project_learnings(plan, step, result.get("learnings"), "Worker")
         succeeded = result.get("status") == "completed"
+        summary = str(result.get("summary") or result.get("error") or result.get("status") or "")
         await self._activity(
             "text" if succeeded else "error",
-            str(result.get("summary") or result.get("error") or result.get("status") or "")[:200],
+            summary[:200] if succeeded else _clip_ends(summary, 200),
             worker=step.worker_id,
         )
         context = DecisionContext(
@@ -2209,19 +2220,20 @@ class PlannerAgent:
             return
 
         passed = result.get("passed") is True
+        summary = str(result.get("summary") or result.get("error") or "")
         findings = result.get("findings") or []
         await self._capture_project_learnings(plan, step, result.get("learnings"), "Reviewer")
         if (item := self._reviewing_role(step)) is not None:
             await self._role_review_done(plan, step, item, {
-                "passed": passed, "findings": findings, "summary": result.get("summary", ""),
+                "passed": passed, "findings": findings, "summary": summary,
                 "learnings": journal.reported_learnings(result.get("learnings"))})
             return
         step.result = {**(step.result or {}), "verify_passed": passed, "verify_findings": findings,
-                       "verify_summary": result.get("summary", ""),
+                       "verify_summary": summary,
                        "verify_learnings": journal.reported_learnings(result.get("learnings"))}
         await self._activity(
             "text" if passed else "error",
-            f"Verify {'passed' if passed else 'failed'}: {str(result.get('summary') or '')[:150]}",
+            f"Verify {'passed' if passed else 'failed'}: {summary[:150] if passed else _clip_ends(summary, 150)}",
             worker=step.reviewer_id,
         )
         if passed and step.review_roles:
@@ -3918,7 +3930,7 @@ class PlannerAgent:
                          f"{reported_files.prompt_name(workspaces.short_branch(workspace.branch))} from "
                          f"{workspace.base_commit[:12]}")
         if result.get("error") and result.get("error") != result.get("summary"):
-            lines.append(f"- error: {_clip(result['error'], 500)}")
+            lines.append(f"- error: {_clip_ends(result['error'], 500)}")
         if result.get("final_message"):
             lines.append(f"- the Worker's final message: {_clip(result['final_message'], 300)}")
         return lines + _learning_lines(result.get("learnings"))
@@ -3947,7 +3959,10 @@ class PlannerAgent:
     def _verdict_lines(title: str, result: Mapping[str, Any]) -> list[str]:
         lines = [title, f"- passed: {'yes' if result.get('passed') is True else 'no'}"]
         if result.get("summary"):
-            lines.append(f"- summary: {_clip(result['summary'], 1000)}")
+            clip = _clip if result.get("passed") is True else _clip_ends
+            lines.append(f"- summary: {clip(result['summary'], 1000)}")
+        elif result.get("error"):
+            lines.append(f"- review run failed: {_clip_ends(result['error'], 1000)}")
         findings = result.get("findings")
         if isinstance(findings, list):
             lines.extend(f"- finding: {_clip(f, 300)}" for f in findings[:10])
