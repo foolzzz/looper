@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.37] - 2026-10-31
+
+### Changed
+
+- **Housekeeping keeps going after a failed step; the retention setting is in the dashboard and the Manager tool.** The hourly pass runs its five steps (runs and notifications, command logs, run directories, runner files, log rotation) independently: a failure is logged as a warning, recorded in the report's `failed_steps` and in the closing log line, and no longer skips log rotation. Settings → Scheduler gains "Run retention (days)" (1 to 3650), and the Manager settings tool's `scheduler` description and empty-argument message name `run_retention_days`. ([#983](https://github.com/foolzzz/looper/pull/983))
+
+Model-visible change: the Manager settings tool's `scheduler` description now mentions `run_retention_days`; no prompt or skill text changes.
+
 ## [2.14.36] - 2026-10-31
 
 ### Added
