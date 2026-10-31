@@ -237,19 +237,19 @@
 
 | 组件 | 路径 | 改了以后 |
 |---|---|---|
-| `web` | checkout 里是 `web/src/**` 和 `web/package*.json`（计划用）、`web/dist/**`（校验用）；wheel 里是 `looper/web/dashboard/**` | 不用重启：静态文件每次请求都从磁盘读（`looper/agents/http_server.py:55-66`、`1309-1360`） |
-| `control_plane` | `looper/**`，不含 `keeper` 组件、只供 CLI 用的文件和 `looper/__init__.py` | 重启控制面 |
+| `web` | 计划统一比较构建输入的源指纹：`web/src/**`、`web/index.html`、`web/public/**`、`web/package*.json`、Vite/TypeScript/Tailwind/PostCSS 配置；构建将它写入 `web/dist/.source-fingerprint`，wheel 同样带在 `looper/web/dashboard/.source-fingerprint`；构建产物哈希只供校验 | 不用重启：静态文件每次请求都从磁盘读（`looper/agents/http_server.py:55-66`、`1309-1360`） |
+| `control_plane` | `looper/**`（包含 `keeper` 的重叠文件），不含只供 CLI 用的文件和 `looper/__init__.py`；另含 `[project]` 的运行时依赖声明和分发的 `uv.lock`，忽略 `pyproject.toml` 的工具配置 | 重启控制面 |
 | `keeper` | `looper/agents/keeper/**`、`looper/agents/proc_tree.py`、`looper/child_env.py` | 不需要动作，新运行自然用上新代码（这几个文件同时也算在 `control_plane` 里） |
 | `runners` | `runners/**` | S3 之前算在 `control_plane` 里 |
 | 忽略 | `docs/**`、`tests/**`、`evals/**`、`*.md`、`looper/__init__.py`（只有版本号） | — |
 
 - **指纹** 是组件里每个文件的「路径 + 内容的 sha256」排序后再取一次 sha256。目标版本的指纹可以直接从 git 树（`git cat-file --batch`，不用检出）或者 wheel（zip）算出来，不需要先安装。
 - **接管契约指纹**（单独一组，任何一项变了都走 `FULL`）：`run_manifest_version`；Worker 和 Reviewer 报告契约原文的 sha256（`looper/agents/system_prompt.py` 的 `WORK_CONTRACT`、`REVIEW_CONTRACT`）；Worker/Reviewer 席位工具列表 JSON 的 sha256；看护进程支持的协议版本集合。
-- **运行中的指纹：** 控制面启动时，按自己加载的安装目录计算并固定 `loaded_components`（不含 `web`）和 `adoption`，与 `version`、`loaded_at` 一起保留到退出；磁盘文件被替换不改变这份加载快照。`web.fingerprint` 则在每次请求时从 HTTP 服务实际使用的静态资源目录读取文件计算，`web.checked_at` 记录本次读取时间。`POST /api/v1/system/components`（`system.components`，要操作者令牌）返回 HTTP 200，正文为 `{status: "ok", result: {version, loaded_at, loaded_components: {…}, adoption: {…}, web: {fingerprint, checked_at}}}`。`WEB_ONLY` 校验和后续升级计划都读取当前的 `web.fingerprint`。
+- **运行中的指纹：** 控制面启动时，按自己加载的安装目录计算并固定 `components` 中除 `web` 外的指纹和 `adoption`，与 `version`、`loaded_at` 一起保留到退出；磁盘文件被替换不改变这份加载快照。`POST /api/v1/system/components`（`system.components`，要操作者令牌）每次从 `server._static_dir` 读取记录的源指纹到 `components.web`，重新计算当前构建产物哈希到 `verification.web`。HTTP 200 正文为 `{status: "ok", result: {version, loaded_at, components: {web, control_plane, keeper, runners}, adoption: {…}, verification: {web}}}`。后续升级计划比较源指纹，`WEB_ONLY` 安装后用构建产物哈希确认实际提供的文件。旧构建没有源指纹记录时按未知来源处理，首次升级重建，不能误报 `NOOP`。
 
 ### 7.2 升级计划和部署脚本
 
-新加 `looper service upgrade [--to <git ref | wheel>] [--dry-run] [--drain-timeout 1200] [--turns-timeout 180]`；`looper service restart --drain` 是它在 `FULL` 计划下省去安装的那一段。需要重启时，顺序必须是 **先算计划 → 排空 → 停止旧控制面并完成脱离 → 确认旧进程退出 → 安装 → 启动**。排空超时也遵守这个顺序，旧进程仍在运行时不得就地安装，避免延迟导入混用新旧代码（第 4.5 节）：
+新加 `looper service upgrade [--to <git ref | wheel>] [--dry-run] [--drain-timeout 1200] [--no-force]`；`looper service restart --drain` 是它在 `FULL` 计划下省去安装的那一段。需要重启时，顺序必须是 **先算计划 → 排空 → 停止旧控制面并完成脱离 → 确认旧进程退出 → 安装 → 启动**。排空超时也遵守这个顺序，旧进程仍在运行时不得就地安装，避免延迟导入混用新旧代码（第 4.5 节）：
 
 ```text
 target   = manifest_of(source)              # git 树或 wheel，不安装
@@ -261,14 +261,14 @@ NOOP          → 安装（只是换文件），不重启
 WEB_ONLY      → 安装；checkout 先构建到临时目录再整体换名替换 web/dist；校验 index.html
 CONTROL_PLANE → 排空（scope=turns）→ service stop（托管运行完成脱离，确认旧进程退出）→ 安装 → service start → 等服务起来 → 校验
 FULL          → 排空（scope=runs）→ service stop（完成停机，确认旧进程退出）→ 安装 → service start → 等服务起来 → 校验
-校验：重新 POST /api/v1/system/components {}，web.fingerprint 等于 target.web；
-      其余组件的 loaded_components 和 adoption 等于 target 对应值；
+校验：重新 POST /api/v1/system/components {}，components.web 等于 target.components.web，
+      verification.web 等于安装后构建产物的哈希；其余 components 和 adoption 等于 target 对应值；
       CONTROL_PLANE 的接管数 = 重启前托管的运行数；打印部署报告（第 8.2 节）
 ```
 
 ```text
 decide(target, running, keepers, keeper_mode):
-  current = running.loaded_components + {web: running.web.fingerprint}
+  current = running.components        # web 是已提供构建的源指纹，非产物哈希
   changed = {c | target[c] != current[c]}
   if changed == ∅:                                         return NOOP
   if changed ⊆ {web}:                                      return WEB_ONLY
@@ -319,8 +319,8 @@ class DrainStatus: phase: DrainPhase; scope: DrainScope | None; since: datetime 
 
 ### 7.4 S0：重启空窗
 
-- **Telegram：** 计划内重启不再丢掉积压的更新（`drop_pending_updates=False`），按 `update_id` 去重；超过 N 分钟的积压消息（默认 10 分钟，作为渠道配置项）只记录、不交给 Manager。需要先验证 python-telegram-bot 在什么时候确认 offset，以及去重键落在哪里（总线日志的 `message_id`，或者 `chat_messages`）。
-- **Lark：** 先用替身平台确认长连接和 `lark-cli event consume` 断线期间的事件会不会补发；如果不会，v0 只在文档里写明。
+- **Telegram：** 计划内重启不再丢掉积压的更新（`drop_pending_updates=False`），按 `update_id` 去重；超过渠道配置 `backlog_max_age_seconds`（默认 600 秒）的积压消息只记录、不交给 Manager。PTB 在入队之后推进 offset、下次轮询确认；入队前先提交 runtime root 的 `.local/telegram/<channel_id>/<bot_id>.sqlite3`，`updates.update_id` 为持久化去重键，重启重放 pending 更新。验证细节见[渠道重启投递](../channel-restart-delivery.md)。
+- **Lark：** 长连接替身平台不保留离线事件，重连只收到新事件；`lark-cli` 替身可显式重放输入事件，但不能证明真实平台保证。真实平台是否补发仍未验证，v0 不改 transport，重启空窗消息按可能丢失处理，见[渠道重启投递](../channel-restart-delivery.md)。
 - **控制台：** 空窗期间请求会失败，靠显示出来的横幅和重试解决，不另外做排队。
 
 ### 7.5 S1：看护进程

@@ -134,9 +134,16 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
         command.add_argument("--timeout", type=float, default=120.0,
                              help="Seconds to wait for the service to answer (default 120).")
     upgrade = service_commands.add_parser(
-        "upgrade", allow_abbrev=False, help="Compute a component upgrade plan without installing or restarting.")
+        "upgrade", allow_abbrev=False, help="Plan, drain, install and restart the changed components.")
     upgrade.add_argument("--dry-run", action="store_true", help="Print the upgrade plan only.")
     upgrade.add_argument("--to", metavar="REF_OR_WHEEL", help="Target Git ref (default origin/main) or wheel path.")
+    upgrade.add_argument("--timeout", type=float, default=120.0,
+                         help="Seconds to wait for the restarted service to answer (default 120).")
+    restart.add_argument("--drain", action="store_true", help="Drain active runs before restarting.")
+    for command in (upgrade, restart):
+        command.add_argument("--drain-timeout", type=float, default=1200.0,
+                             help="Seconds to drain before stopping (default 1200).")
+        command.add_argument("--no-force", action="store_true", help="Cancel the drain at its deadline.")
     status = service_commands.add_parser(
         "status", allow_abbrev=False,
         help="Show whether the service is installed and running, its PID, last exit and log, and POST /api/v1/system/status.",
@@ -246,9 +253,11 @@ def _service(args: argparse.Namespace) -> int:
             print(service.install(host, ops, label=args.label, port=args.port, extra_env=args.env,
                                   timeout=args.timeout))
         elif args.service_command == "upgrade":
-            print(service.upgrade(host, label=args.label, to=args.to, dry_run=args.dry_run))
+            print(service.upgrade(host, label=args.label, to=args.to, dry_run=args.dry_run,
+                                  timeout=args.timeout, drain_timeout=args.drain_timeout, no_force=args.no_force))
         elif args.service_command == "restart":
-            print(service.restart(host, label=args.label, timeout=args.timeout))
+            print(service.restart(host, label=args.label, timeout=args.timeout, drain=args.drain,
+                                  drain_timeout=args.drain_timeout, no_force=args.no_force))
         elif args.service_command == "uninstall":
             print(service.uninstall(host, label=args.label))
         else:

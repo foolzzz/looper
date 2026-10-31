@@ -3,6 +3,8 @@
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..drain import DrainScope
 
+DRAIN_POLL_TIMEOUT_SECONDS = 30.0
+
 _RUN = _object({"worker_id": _STR, "task_id": _STR, "role": _STR, "since": _STR, "keepable": _BOOL}, closed=True)
 DRAIN = _object({"phase": {"type": "string", "enum": ["serving", "draining", "drained"]},
                  "scope": {"type": ["string", "null"], "enum": ["turns", "runs", None]},
@@ -13,13 +15,13 @@ DRAIN = _object({"phase": {"type": "string", "enum": ["serving", "draining", "dr
 RESULTS = {}
 OPERATIONS = (
     Operation("system.drain", "POST", "/api/v1/system/drain", "Drain before a planned restart.",
-              "Drain before a planned restart. Hold new turns and runs until restart or cancellation; deadlines do not abort work.",
+              "Drain before a planned restart. Hold new turns and runs while drain_status is polled at least every 30 seconds; deadlines do not abort work.",
               _object({"scope": {"type": "string", "enum": ["turns", "runs"]},
                        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0}},
                       ["scope"], closed=True), DRAIN, risk="write", operator_only=True,
               audit_operator=False),
     Operation("system.drain_status", "POST", "/api/v1/system/drain_status", "Read drain status and blockers.",
-              "Read drain status and blockers.", _object({}, closed=True), DRAIN, risk="read", operator_only=True),
+              "Read drain status and blockers. Renew the 30-second controller lease.", _object({}, closed=True), DRAIN, risk="read", operator_only=True),
     Operation("system.drain_cancel", "POST", "/api/v1/system/drain_cancel", "Cancel drain and resume admission.",
               "Cancel drain and resume admission. Resume held messages and runs.",
               _object({}, closed=True), DRAIN, risk="write",
@@ -29,7 +31,8 @@ OPERATIONS = (
 
 async def run(server, operation, arguments, principal, headers):
     if operation.operation_id == "system.drain":
-        return server._drain.begin(DrainScope(arguments["scope"]), arguments.get("timeout_seconds"))
+        return server._drain.begin(DrainScope(arguments["scope"]), arguments.get("timeout_seconds"),
+                                   poll_timeout_seconds=DRAIN_POLL_TIMEOUT_SECONDS)
     if operation.operation_id == "system.drain_cancel":
         return server._drain.cancel()
-    return server._drain.snapshot()
+    return server._drain.poll()

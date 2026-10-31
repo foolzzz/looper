@@ -168,14 +168,6 @@ def test_cli_upgrade_rejects_executable_wheel_declarations_without_side_effects(
     assert "cannot read target Worker/Reviewer seat tool contracts" in captured.err + captured.out
 
 
-def test_cli_upgrade_without_dry_run_refuses_before_touching_the_service(upgrade_host, monkeypatch, capsys):
-    monkeypatch.setattr(components, "manifest_from_git", lambda *args: pytest.fail("must refuse before reading target"))
-    assert cli.main(["service", "upgrade"]) == 1
-    captured = capsys.readouterr()
-    assert "the upgrade itself comes with the drain (next change)" in captured.err + captured.out
-    assert upgrade_host[1] == []
-
-
 @pytest.mark.parametrize("answer", [None, {"status": "unauthorized"}, {"unexpected": "response"}])
 def test_upgrade_fails_closed_when_the_running_manifest_is_unavailable(upgrade_host, monkeypatch, answer):
     host, _ = upgrade_host

@@ -15,6 +15,8 @@ from looper.components import (
     manifest_from_directory,
     manifest_from_git,
     manifest_from_wheel,
+    record_web_source,
+    runtime_fingerprint,
 )
 from looper.upgrade import Keeper, UpgradeKind, decide
 
@@ -71,6 +73,20 @@ def test_manifest_round_trip_preserves_all_fingerprints():
     assert Manifest.from_dict(manifest.to_dict()) == manifest
 
 
+@pytest.mark.parametrize("tracked", [False, True], ids=["generated-lock", "distributed-lock"])
+def test_runtime_fingerprint_with_an_isolated_path(component_tree, tmp_path, monkeypatch, tracked):
+    before = runtime_fingerprint(component_tree)
+    (component_tree / "uv.lock").write_text("version = 1\n")
+    if tracked:
+        _git(component_tree, "add", "uv.lock")
+    expected = runtime_fingerprint(component_tree)
+    assert (expected != before) is tracked
+    empty_bin = tmp_path / "bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    assert runtime_fingerprint(component_tree) == expected
+
+
 def _git(root: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "-C", str(root), *args], check=True, capture_output=True, text=True, timeout=10,
@@ -90,6 +106,7 @@ def component_tree(tmp_path: Path) -> Path:
     files = {
         "looper/__init__.py": '__version__ = "1.0.0"\n',
         "docs/guide.md": "Ignored documentation\n",
+        "pyproject.toml": '[project]\ndependencies = ["httpx>=0.27,<1"]\nrequires-python = ">=3.11"\n',
     }
     for relative, content in files.items():
         target = root / relative
@@ -99,7 +116,7 @@ def component_tree(tmp_path: Path) -> Path:
     _git(root, "config", "user.name", "Component test")
     _git(root, "config", "user.email", "component-test@example.invalid")
     _git(root, "config", "commit.gpgsign", "false")
-    _git(root, "add", "looper", "docs")
+    _git(root, "add", "looper", "docs", "pyproject.toml")
     _git(root, "commit", "-q", "-m", "component fixture")
     return root
 
@@ -111,6 +128,7 @@ def test_same_files_have_equal_git_wheel_and_directory_fingerprints(component_tr
             if path.is_file():
                 archive.write(path, path.relative_to(component_tree).as_posix())
         archive.writestr("looper-1.0.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: looper\nVersion: 1.0.0\n")
+        archive.writestr("looper/.runtime-fingerprint", runtime_fingerprint(component_tree))
 
     git = manifest_from_git(component_tree, "HEAD")
     installed = manifest_from_directory(component_tree)
@@ -148,6 +166,7 @@ def test_web_build_verification_is_separate_and_matches_wheel_assets(component_t
     built = component_tree / "web/dist/index.html"
     built.parent.mkdir(parents=True)
     built.write_text("<html>dashboard</html>\n")
+    record_web_source(component_tree, built.parent)
     _git(component_tree, "add", "web")
     _git(component_tree, "commit", "-q", "-m", "dashboard fixture")
     target = manifest_from_git(component_tree, "HEAD")
@@ -158,8 +177,12 @@ def test_web_build_verification_is_separate_and_matches_wheel_assets(component_t
             if path.is_file():
                 archive.write(path, path.relative_to(component_tree).as_posix())
         archive.write(built, "looper/web/dashboard/index.html")
+        archive.write(built.parent / ".source-fingerprint", "looper/web/dashboard/.source-fingerprint")
+        archive.writestr("looper/.runtime-fingerprint", runtime_fingerprint(component_tree))
     packaged = manifest_from_wheel(wheel)
-    assert target.verification["web"] == packaged.verification["web"] == packaged.components["web"]
+    assert target.verification["web"] == packaged.verification["web"]
+    assert target.components["web"] == packaged.components["web"]
+    assert decide(target, packaged, [], False).kind is UpgradeKind.NOOP
     assert target.components["web"] != target.verification["web"]
 
     # Rebuilding assets must not change the source-based upgrade plan.
@@ -206,13 +229,52 @@ def test_seat_tool_schema_changes_are_detected_from_target_sources(component_tre
 @pytest.mark.parametrize("relative, expected", [
     ("docs/guide.md", UpgradeKind.NOOP),
     ("web/src/App.tsx", UpgradeKind.WEB_ONLY),
+    ("web/index.html", UpgradeKind.WEB_ONLY),
+    ("web/public/icon.svg", UpgradeKind.WEB_ONLY),
+    ("web/package.json", UpgradeKind.WEB_ONLY),
+    ("web/vite.config.ts", UpgradeKind.WEB_ONLY),
+    ("web/tsconfig.app.json", UpgradeKind.WEB_ONLY),
+    ("web/tailwind.config.js", UpgradeKind.WEB_ONLY),
+    ("web/postcss.config.js", UpgradeKind.WEB_ONLY),
+    ("pyproject.toml:dependencies", UpgradeKind.FULL),
+    ("pyproject.toml:tools", UpgradeKind.NOOP),
+    ("uv.lock", UpgradeKind.FULL),
     ("looper/agents/tiers/planner.py", UpgradeKind.FULL),
+    ("same-version-wheel", UpgradeKind.NOOP),
 ])
 def test_upgrade_rfc_examples_from_git_trees(component_tree: Path, relative: str, expected: UpgradeKind):
     running = manifest_from_git(component_tree, "HEAD")
+    if relative == "same-version-wheel":
+        source = component_tree / "web/src/App.tsx"
+        source.parent.mkdir(parents=True)
+        source.write_text("export default 'same wheel and git source';\n")
+        dist = component_tree / "web/dist"
+        dist.mkdir()
+        (dist / "index.html").write_text("<html>same version</html>")
+        record_web_source(component_tree, dist)
+        _git(component_tree, "add", "web")
+        _git(component_tree, "commit", "-q", "-m", "built dashboard")
+        running = manifest_from_git(component_tree, "HEAD")
+        wheel = component_tree / "looper.whl"
+        with zipfile.ZipFile(wheel, "w") as archive:
+            for path in (component_tree / "looper").rglob("*"):
+                if path.is_file():
+                    archive.write(path, path.relative_to(component_tree).as_posix())
+            archive.writestr("looper/.runtime-fingerprint", runtime_fingerprint(component_tree))
+            for path in dist.iterdir():
+                archive.write(path, "looper/web/dashboard/" + path.name)
+        assert decide(manifest_from_wheel(wheel), running, [], False).kind is expected
+        return
+    change = relative.partition(":")[2]
+    relative = relative.partition(":")[0]
     target_file = component_tree / relative
     target_file.parent.mkdir(parents=True, exist_ok=True)
-    target_file.write_text(target_file.read_text() + "\n# change\n" if target_file.exists() else "// changed\n")
+    if change == "dependencies":
+        target_file.write_text(target_file.read_text().replace("httpx>=0.27,<1", "httpx>=0.28,<1"))
+    elif change == "tools":
+        target_file.write_text(target_file.read_text() + '\n[tool.example]\nlevel = "debug"\n')
+    else:
+        target_file.write_text(target_file.read_text() + "\n# change\n" if target_file.exists() else "// changed\n")
     _git(component_tree, "add", relative)
     _git(component_tree, "commit", "-q", "-m", "upgrade candidate")
     target = manifest_from_git(component_tree, "HEAD")
@@ -275,6 +337,7 @@ def test_packaged_runner_aliases_have_the_same_fingerprints(component_tree: Path
             archive.write(path, path.relative_to(component_tree).as_posix())
         archive.write(component_tree / "looper/components.toml", "looper/components.toml")
         archive.write(runner, "looper/agents/runtimes/runner/pi_runner/src/main.ts")
+        archive.writestr("looper/.runtime-fingerprint", runtime_fingerprint(component_tree))
     assert manifest_from_git(component_tree, "HEAD").components == manifest_from_wheel(wheel).components
 
 

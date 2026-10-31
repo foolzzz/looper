@@ -503,24 +503,19 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
         adapters: list[Any] = []
         registries: list[Any] = []
         servers: list[Any] = []
-        incoming: list[str] = []
+        incoming: list[str] = ["sent while offline"] if channel_type == "telegram" else []
         bot, transport = _Bot(), StubTransport()
-        pending = ["sent while offline"]
-
-        async def start_polling(*, drop_pending_updates: bool) -> None:
-            assert drop_pending_updates is True
-            pending.clear()
+        pending = incoming.copy()
 
         if channel_type == "telegram":
             from telegram.ext import ApplicationBuilder
 
-            # Exercise the real adapter startup, including the destructive polling bootstrap.
+            # Exercise the real adapter startup, including retained offline updates.
             app = MagicMock()
             app.bot = bot
             bot.set_my_commands = AsyncMock()
             for name in ("initialize", "start", "stop", "shutdown"):
                 setattr(app, name, AsyncMock())
-            app.updater.start_polling = start_polling
             app.updater.stop = AsyncMock()
             builder = MagicMock(spec=ApplicationBuilder)
             builder.token.return_value = builder
@@ -540,6 +535,13 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
             if first_fails and adapter.channel_id == f"channel-{channel_type}":
                 raise RuntimeError("synthetic startup failure")
             if channel_type == "telegram":
+                async def start_polling(*, drop_pending_updates: bool) -> None:
+                    assert drop_pending_updates is False
+                    for text in pending:
+                        await adapter._on_message(_tg_update(7, text), None)
+                    pending.clear()
+
+                app.updater.start_polling = start_polling
                 adapter._acknowledge = lambda update: None
                 await telegram_start(adapter, bus)
             else:
@@ -553,7 +555,7 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
             if adapters:
                 await receive(adapters[0])
             else:
-                # Telegram queues these until start_polling deletes the old updates.
+                # Telegram retains these until polling receives them.
                 text = f"backlog {len(incoming)}"
                 incoming.append(text)
                 pending.append(text)
@@ -625,7 +627,7 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
             assert adapters and incoming
             if first_fails:
                 assert all(registry.get(f"channel-{channel_type}") is None for registry in registries)
-            assert len(incoming) == 5
+            assert len(incoming) == (6 if channel_type == "telegram" else 5)
             if channel_type == "telegram":
                 assert pending == []
             queued = await adapters[0]._bus.drain_queue(manager_id)

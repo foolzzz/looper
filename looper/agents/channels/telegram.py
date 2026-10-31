@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 from ... import env
@@ -44,6 +45,7 @@ from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
 from .chat_history import record_reply
 from .chat_routing import ChatResolver, RouteAction, RouteDecision, observe_chat, log_route
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
+from .telegram_inbox import TelegramInbox
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         manager_running: Callable[[str], bool] | None = None,
         resolve_chat: ChatResolver | None = None,
         stop_chat: Callable[..., Awaitable[Any]] | None = None,
+        backlog_max_age_seconds: int = 600,
     ) -> None:
         if channel_id is not None:
             parsed = parse_channel_id(channel_id)
@@ -91,6 +94,10 @@ class TelegramChannelAdapter(ChannelAdapter):
         self._manager_running = manager_running
         self._resolve_chat = resolve_chat
         self._stop_chat = stop_chat
+        if type(backlog_max_age_seconds) is not int or backlog_max_age_seconds <= 0:
+            raise ValueError("backlog_max_age_seconds must be a positive integer")
+        self._backlog_max_age_seconds = backlog_max_age_seconds
+        self._inbox: TelegramInbox | None = None
         # Only the built-in row falls back to the environment; an added bot has its own token.
         self._bot_token = bot_token or (env.get("LOOPER_TELEGRAM_BOT_TOKEN", "") if channel_id is None else "")
         self._allowlist = allowlist  # Telegram user ids, as strings
@@ -135,8 +142,10 @@ class TelegramChannelAdapter(ChannelAdapter):
             Application,
             CommandHandler,
             MessageHandler,
+            TypeHandler,
             filters,
         )
+        from telegram import Update
         from telegram.request import HTTPXRequest
 
         self._bus = bus
@@ -146,29 +155,39 @@ class TelegramChannelAdapter(ChannelAdapter):
         # Own both transports: Application.shutdown is a no-op if initialize failed.
         # Match ApplicationBuilder's default pool sizes for polling and other calls.
         self._requests = (HTTPXRequest(connection_pool_size=1), HTTPXRequest(connection_pool_size=256))
-        builder = Application.builder().token(self._bot_token)
-        builder.get_updates_request(self._requests[0])
-        builder.request(self._requests[1])
-        self._app = builder.build()
-
-        self._app.add_handler(CommandHandler("start", self._cmd_start))
-        self._app.add_handler(CommandHandler("status", self._cmd_status))
-        self._app.add_handler(CommandHandler("help", self._cmd_help))
-        # Only /new itself (also /new@<this bot>): "/new foo" stays an unknown command, as before.
-        self._app.add_handler(CommandHandler("new", self._cmd_new, has_args=False))
-        self._app.add_handler(CommandHandler("stop", self._cmd_stop, has_args=False))
-        # The gate commands take arguments; the Manager parses and answers them in code, so the text goes as typed.
-        self._app.add_handler(CommandHandler("gates", self._cmd_gates))
-        self._app.add_handler(CommandHandler("gate", self._cmd_gate))
-        self._app.add_handler(CommandHandler("profile", self._cmd_profile))
-        self._app.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)
-        )
-
-        self._outbound_task = asyncio.create_task(self._outbound_loop())
-
         try:
+            builder = Application.builder().token(self._bot_token)
+            builder.get_updates_request(self._requests[0])
+            builder.request(self._requests[1])
+            # update_id is unique within a bot, not across bots assigned to the same
+            # channel row. Rotating one bot's token keeps its numeric identity.
+            identity = self._bot_token.partition(":")[0]
+            bot_id = identity if identity.isdecimal() else "invalid"
+            self._inbox = TelegramInbox(bus.runtime_root / ".local" / "telegram" / self.channel_id / f"{bot_id}.sqlite3")
+            builder.update_queue(self._inbox)
+            self._app = builder.build()
+
+            self._app.add_handler(CommandHandler("start", self._durable(self._cmd_start)))
+            self._app.add_handler(CommandHandler("status", self._durable(self._cmd_status)))
+            self._app.add_handler(CommandHandler("help", self._durable(self._cmd_help)))
+            # Only /new itself (also /new@<this bot>): "/new foo" stays an unknown command, as before.
+            self._app.add_handler(CommandHandler("new", self._durable(self._cmd_new), has_args=False))
+            self._app.add_handler(CommandHandler("stop", self._durable(self._cmd_stop), has_args=False))
+            # The gate commands take arguments; the Manager parses and answers them in code, so the text goes as typed.
+            self._app.add_handler(CommandHandler("gates", self._durable(self._cmd_gates)))
+            self._app.add_handler(CommandHandler("gate", self._durable(self._cmd_gate)))
+            self._app.add_handler(CommandHandler("profile", self._durable(self._cmd_profile)))
+            self._app.add_handler(
+                MessageHandler(filters.TEXT & ~filters.COMMAND, self._durable(self._on_message))
+            )
+            # The first matching handler wins in this group. Unhandled updates still
+            # need retiring from the durable inbox (photos, unknown commands, etc.).
+            self._app.add_handler(TypeHandler(Update, self._durable(self._ignore_update)))
+
+            self._outbound_task = asyncio.create_task(self._outbound_loop())
+
             await self._app.initialize()
+            await self._inbox.replay(self._app.bot)
             try:
                 from telegram import BotCommand
 
@@ -178,7 +197,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             except Exception:
                 logger.warning("telegram set_my_commands failed", exc_info=True)
             await self._app.start()
-            await self._app.updater.start_polling(drop_pending_updates=True)  # type: ignore[union-attr]
+            await self._app.updater.start_polling(drop_pending_updates=False)  # type: ignore[union-attr]
         except BaseException:
             await self.stop()
             raise
@@ -214,6 +233,9 @@ class TelegramChannelAdapter(ChannelAdapter):
         self._app = None
         self._requests = ()
         self._outbound_task = None
+        if self._inbox is not None:
+            self._inbox.close()
+            self._inbox = None
         self._bus = None
         logger.info("telegram channel adapter stopped")
 
@@ -404,6 +426,26 @@ class TelegramChannelAdapter(ChannelAdapter):
             self._reactions.add(str(chat.id), str(update.message.message_id))
 
     # --- Telegram handlers ---
+
+    async def _ignore_update(self, update: Any, context: Any) -> None:
+        pass
+
+    def _durable(self, callback: Callable[..., Awaitable[None]]) -> Callable[..., Awaitable[None]]:
+        async def handle(update: Any, context: Any) -> None:
+            assert self._inbox is not None
+            if self._inbox.processed(update.update_id):
+                logger.info("%s: duplicate Telegram update_id=%s ignored", self.channel_id, update.update_id)
+                return
+            message = update.effective_message
+            date = getattr(message, "date", None)
+            age = (datetime.now(timezone.utc) - date).total_seconds() if date is not None else 0
+            if age > self._backlog_max_age_seconds:
+                logger.warning("%s: stale Telegram update_id=%s age_seconds=%.0f backlog_max_age_seconds=%s ignored",
+                               self.channel_id, update.update_id, age, self._backlog_max_age_seconds)
+            else:
+                await callback(update, context)
+            self._inbox.finish(update.update_id)
+        return handle
 
     async def _admitted(self, update: Any, *, text_required: bool = False) -> RouteDecision | None:
         if not self._admits(update):

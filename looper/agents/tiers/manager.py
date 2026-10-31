@@ -652,6 +652,7 @@ class ManagerConfig:
     claude_bin: str = "claude"
     work_dir: Path = field(default_factory=lambda: Path.cwd())
     max_context_tokens: int = 100_000
+    http_ready: asyncio.Event | None = None
 
 
 @dataclass
@@ -1039,6 +1040,8 @@ class ManagerAgent:
         try:
             # Startup replays before the HTTP tools endpoint listens. Keep messages queued and unacknowledged
             # until a turn can probe its tools, instead of consuming it with a tools-unavailable reply.
+            if self._config.http_ready is not None:
+                await self._config.http_ready.wait()
             if self._tools_ready is not None:
                 await self._tools_ready.wait()
             async for envelope in self._bus.subscribe(self.agent_id):
