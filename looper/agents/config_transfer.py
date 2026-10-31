@@ -132,6 +132,10 @@ SECTIONS = ("runtimes", "providers", "models", "profiles", "settings.layers", "s
 _SCHEDULE_FIELDS = ("name", "cron", "timezone", "requirement", "overlap", "max_parallel_runs", "catch_up",
                     "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds", "daily_budget_usd",
                     "notify", "user_gates")
+_COMMAND_FIELDS = ("command", "env", "env_file")
+_ALERT_FIELDS = ("success_deadline", "alert_failures_after", "alert_stale_after_seconds", "alert_overlap_after")
+_AGENT_SCHEDULE_FIELDS = ("requirement", "gate_command", "gate_timeout_seconds", "run_budget_usd",
+                          "daily_budget_usd", "user_gates")
 
 
 @dataclass(frozen=True)
@@ -399,7 +403,8 @@ async def stored_scheduler_settings(conn: Any) -> dict[str, int]:
     from . import scheduler_settings
 
     keys = {"min_interval_seconds": scheduler_settings.MIN_INTERVAL_KEY,
-            "run_timeout_seconds": scheduler_settings.RUN_TIMEOUT_KEY}
+            "run_timeout_seconds": scheduler_settings.RUN_TIMEOUT_KEY,
+            "run_retention_days": scheduler_settings.RUN_RETENTION_KEY}
     if not await conn.fetchval("SELECT to_regclass('system_settings') IS NOT NULL"):
         return {}  # a database not set up yet: a preview before the first start
     stored = await db_settings.get_settings(list(keys.values()), pool=conn)
@@ -415,6 +420,12 @@ def schedule_entry(row: Mapping[str, Any], profile_names: Mapping[str, str]) -> 
                               if row["notify_channel"] else None)
     entry["profiles"] = {role: profile_names.get(pid, pid) for role, pid in sorted(row["profile_overrides"].items())}
     entry["task_limits"] = dict(sorted(row["task_limits"].items()))
+    if row.get("kind", "agent") == "command":
+        entry["kind"] = "command"
+        entry.update({name: row[name] for name in _COMMAND_FIELDS})
+        for name in (*_AGENT_SCHEDULE_FIELDS, "profiles", "task_limits"):
+            entry.pop(name)
+    entry.update({name: row[name] for name in _ALERT_FIELDS if row.get(name) is not None})
     if row.get("template_key"):
         entry["template_key"] = row["template_key"]
         entry["template_inputs"] = dict(row.get("template_inputs") or {})
@@ -2126,25 +2137,45 @@ class _Importer:
         from .projects import TASK_PROFILE_ROLES, RequestError, _concurrency_limits
 
         entry = _mapping(entry, "a schedule")
-        unknown = sorted(set(entry) - {*_SCHEDULE_FIELDS, "notify_target", "profiles", "task_limits", "repoint", "manager", "template_key", "template_inputs"})
+        unknown = sorted(set(entry) - {*_SCHEDULE_FIELDS, "kind", *_COMMAND_FIELDS, *_ALERT_FIELDS,
+                                      "notify_target", "profiles", "task_limits", "repoint", "manager",
+                                      "template_key", "template_inputs"})
         if unknown:
             raise _Skip(f"unknown field {unknown[0]!r}")
+        kind = entry.get("kind", "agent")
+        if kind not in ("agent", "command"):
+            raise _Skip("kind must be one of agent, command")
         owner = entry.get("manager", "manager")
         if not isinstance(owner, str) or owner not in managers:
             raise _Skip(f"Manager owner conflict: no nondeleted Manager {owner!r} here or in the file")
-        defaults = {"overlap": "skip", "max_parallel_runs": 3, "catch_up": "once", "notify": "failures",
-                    "user_gates": "off"}
-        values: dict[str, Any] = {"manager_id": owner}
+        defaults = {"overlap": "skip", "max_parallel_runs": 3, "catch_up": "once", "notify": "failures"}
+        if kind == "agent":
+            defaults["user_gates"] = "off"
+        values: dict[str, Any] = {"manager_id": owner, "kind": kind, "command": None, "env": {}, "env_file": None}
         try:
             from .schedule_templates import selection_patch
             values.update(selection_patch(entry))
             for name in _SCHEDULE_FIELDS:
+                if kind == "command" and name in _AGENT_SCHEDULE_FIELDS:
+                    if name == "requirement":
+                        values[name] = ""
+                        continue
+                    if name not in entry:
+                        continue
                 if name not in ("cron", "timezone", "run_timeout_seconds"):
                     values[name] = schedules._PARSERS[name](entry.get(name, defaults.get(name)))
-            values.update(schedules._timeout(entry.get("run_timeout_seconds", schedules.TIMEOUT_DEFAULT)))
+            for name in (*_COMMAND_FIELDS, *_ALERT_FIELDS):
+                if name in _COMMAND_FIELDS and kind == "agent" and name not in entry:
+                    continue
+                raw = entry.get(name)
+                values[name] = (schedules._env_file(raw, must_exist=False) if name == "env_file"
+                                else schedules._PARSERS[name](raw))
+            timeout_default = None if kind == "command" else schedules.TIMEOUT_DEFAULT
+            values.update(schedules._timeout(entry.get("run_timeout_seconds", timeout_default)))
             zone = entry.get("timezone") or cron.local_zone_name()
             rule, _ = schedules.checked_rule(entry.get("cron"), zone, now=datetime.now(UTC),
-                                             gated=bool(values["gate_command"]), base_interval=self.min_interval)
+                                             gated=kind == "command" or bool(values.get("gate_command")),
+                                             base_interval=self.min_interval)
             values.update(cron=rule.text, timezone=zone)
             limits = _concurrency_limits(entry.get("task_limits") or {}, field="task_limits")
         except ValueError as exc:
@@ -2174,6 +2205,13 @@ class _Importer:
             except RegistryError as exc:
                 raise _Skip(f"profiles.{role}: {exc}") from None
             profiles[role] = (name, profile_id)
+        try:
+            schedules._check_kind_fields(kind, {**values, "profile_overrides": profiles, "task_limits": limits})
+        except (ValueError, RequestError) as exc:
+            raise _Skip(str(exc)) from None
+        if values["env_file"] and not os.path.exists(os.path.expanduser(values["env_file"])):
+            self.plan.notes.append(f"schedule {label}{values['name']}: env_file {values['env_file']} does not exist "
+                                   "on this machine; create it before enabling")
         return values, profiles, {role: limit for role, limit in limits.items() if limit is not None}
 
     async def schedules(self, entries: Any, project_id: str, label: str, *,
@@ -2204,6 +2242,10 @@ class _Importer:
                 continue
             key = f"{label}{values['name']}"
             row = stored.get(values["name"].lower())
+            if row is not None and row["kind"] != values["kind"]:
+                self.record("project.schedules", key, Action.SKIPPED,
+                            reason="a schedule with this name has another kind; rename one of them")
+                continue
             if row is not None and row["manager_id"] != values["manager_id"]:
                 self.record("project.schedules", key, Action.SKIPPED,
                             reason="Manager owner conflict: an existing schedule's owner is immutable")
@@ -2236,7 +2278,8 @@ class _Importer:
             profile_ids = {role: profile_id for role, (_, profile_id) in profiles.items()}
             current = None
             if row is not None:
-                current = {name: row[name] for name in (*_SCHEDULE_FIELDS, "run_timeout_mode", "notify_channel",
+                current = {name: row[name] for name in (*_SCHEDULE_FIELDS, "kind", *_COMMAND_FIELDS, *_ALERT_FIELDS,
+                                                        "run_timeout_mode", "notify_channel",
                                                         "notify_chat", "manager_id", "template_key", "template_inputs")}
                 current["profiles"] = {role: names.get(pid, pid) for role, pid in row["profile_overrides"].items()}
                 current["task_limits"] = dict(row["task_limits"])
@@ -2258,7 +2301,7 @@ class _Importer:
                                                    manager_id=values["manager_id"],
                                                    profiles=profile_ids, task_limits=limits, created_via="import")
             else:
-                fields = {name: value for name, value in values.items() if name != "manager_id"}
+                fields = {name: value for name, value in values.items() if name not in ("manager_id", "kind")}
                 fields.update(enabled=False, next_fire_at=None)
                 if (values["cron"], values["timezone"]) != (row["cron"], row["timezone"]):
                     fields["rule_changed_at"] = datetime.now(UTC)

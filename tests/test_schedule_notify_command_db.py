@@ -62,9 +62,12 @@ async def ended_command(env: ScheduleEnv, sid: str, *, manual: bool = True) -> d
 def test_daily_command_deadline_alert_and_manual_recovery(monkeypatch, tmp_path):
     async def test(env: ScheduleEnv):
         sender = with_sender(env, dashboard_url="https://looper.example")
-        env.clock.now = local(15, 0)
+        # Notifications use the database's wall clock; keep them inside the retention window as time advances.
+        today = (await env.pool.fetchval("SELECT clock_timestamp()")).astimezone(LA).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        env.clock.now = today.astimezone(UTC)
         sid = await configured(env, success_deadline="08:00")
-        env.clock.now = local(15, 5, 30)
+        env.clock.now = today.replace(hour=5, minute=30).astimezone(UTC)
         await env.pool.execute("UPDATE schedules SET next_fire_at=$2 WHERE id=$1", sid, env.clock.now)
         run = await ended_command(env, sid, manual=False)
         assert (run["status"], run["exit_code"]) == ("failed", 1)
@@ -72,7 +75,7 @@ def test_daily_command_deadline_alert_and_manual_recovery(monkeypatch, tmp_path)
         assert notice["kind"] == "run"
         assert "退出码 1" in notice["text"] and "日志末尾：\n```\nfailure\n```" in notice["text"]
         assert notice["text"].endswith(f"/schedules/{sid}/runs/{run['id']}")
-        env.clock.now = local(15, 8) + timedelta(seconds=15)
+        env.clock.now = today.replace(hour=8, second=15).astimezone(UTC)
         for _ in range(3):
             await env.scheduler.tick()
         assert [n["kind"] for n in await notices(env, sid)] == ["run", "deadline_alert"]
@@ -157,7 +160,6 @@ def test_stale_window_exact_boundary(monkeypatch, tmp_path):
 def test_overlap_streak_alert_recovers_on_started_run(monkeypatch, tmp_path, kind, overlap, notify):
     async def test(env: ScheduleEnv):
         sender = with_sender(env)
-        env.clock.now = local(15, 0)
         if kind == "agent":
             # Agent tasks use their real task state to decide whether another run overlaps.
             sid = (await env.enabled())["schedule_id"]

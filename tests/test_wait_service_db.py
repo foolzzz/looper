@@ -715,6 +715,7 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
                 value.bus = bus  # the Manager fleet's bus
             if name == "ChannelRegistry":
                 value.register = AsyncMock()
+                value.prepare_stop_all = MagicMock(side_effect=lambda: events.append("registry.prepare_stop_all"))
             monkeypatch.setattr(serve, name, constructor)
 
         class WaitService:
@@ -790,6 +791,8 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
         assert events[events.index("gates.stop") + 1] == "waits.stop"
         assert events.count("waits.start") == events.count("waits.stop") == 1
         assert events.index("http.start") < events.index("waits.start")
+        assert events.count("registry.prepare_stop_all") == 1
+        assert events.index("registry.prepare_stop_all") < events.index("waits.stop")
         assert events.index("waits.stop") < events.index("supervisor.stop")
 
     run_db(test, monkeypatch)
