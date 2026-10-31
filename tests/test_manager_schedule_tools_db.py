@@ -30,19 +30,21 @@ TOOL = "looper_schedules"
 
 
 @pytest.mark.parametrize("action", ["enable", "run"])
+@pytest.mark.parametrize("env_file", [False, True])
 def test_command_schedule_creation_and_start_show_the_command_before_confirmation(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, action: str,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, action: str, env_file: bool,
 ) -> None:
     async def test(pool: Any) -> None:
         await _project(pool, work_dir=str(tmp_path))
         chat = _Chat(tmp_path)
         (tmp_path / "pull.env").write_text("TOKEN=synthetic-value\n")
-        command = "bash scripts/pull.sh" + (" # " + "long command " * 30 + "end" if action == "run" else "")
+        command = "bash scripts/pull.sh # `literal`\n# ````" + (" long command " * 30 + "end" if action == "run" else "")
+        fenced = f"\n`````\n{command}\n`````\n"
         created, refused = await chat.say("每分钟运行脚本", (TOOL, {
             "action": "create", "project": "calc", "fields": {
                 "name": "pull", "kind": "command", "command": command, "cron": "* * * * *",
                 "overlap": "skip", "run_timeout_seconds": 180, "env": {"MODE": "private-value"},
-                "env_file": str(tmp_path / "pull.env"), "success_deadline": "09:00"}}),
+                "env_file": str(tmp_path / "pull.env") if env_file else None, "success_deadline": "09:00"}}),
             (TOOL, {"action": action, "schedule": "pull"}))
         assert created["status"] == "ok", created
         assert created["result"]["schedule"]["kind"] == "command"
@@ -50,20 +52,27 @@ def test_command_schedule_creation_and_start_show_the_command_before_confirmatio
         assert await _starting_state(pool, sid) == (False, 0)
         assert _error(refused) == "conflict", refused
         (block,) = chat.turns[-1].blocks
-        for text in ("- 命令：`bash scripts/pull.sh", "不花模型额度", "- 环境变量：MODE", f"- 环境文件：{tmp_path / 'pull.env'}",
+        for text in ("不花模型额度", "- 环境变量：MODE",
                      "- 最晚成功时间：09:00", "- 告警阈值：连续失败 3 次、长时间没成功按默认、连续跳过 10 次（0 为不发）"):
             assert text in block
         for text in ("需求", "前置检查", "用户确认", "花费上限", "Profile", "任务并发", "private-value"):
             assert text not in block
-        assert f"- 命令：`{command}`" in block
+        assert f"- 命令：{fenced}" in block
 
         (asked,) = await chat.say("启用或立即运行", (TOOL, {"action": action, "schedule": "pull"}))
         assert asked["status"] == "needs_confirmation", asked
         assert await _starting_state(pool, sid) == (False, 0)
         (block,) = chat.turns[-1].blocks
-        assert f"- 命令：`{command}`" in block
+        assert f"- 命令：{fenced}" in block
         assert "不花模型额度" in block
         assert "- 目录：" in block
+        assert "- 运行超时：180 秒" in block
+        assert "- 环境变量：MODE" in block
+        assert (f"- 环境文件：{tmp_path / 'pull.env'}" in block) is env_file
+        assert ("- 环境文件：" in block) is env_file
+        assert all(text not in block for text in ("private-value", "synthetic-value", "需求", "建任务"))
+        assert ("- 最晚成功时间：09:00" in block) is (action == "enable")
+        assert ("- 告警阈值：连续失败 3 次" in block) is (action == "enable")
         assert ("- 接下来 3 次：" in block) is (action == "enable")
         if action == "enable":
             enabled = await _confirm(chat, asked)
@@ -78,11 +87,35 @@ def test_command_schedule_creation_and_start_show_the_command_before_confirmatio
         (got,) = await chat.say("查看 pull", (TOOL, {"action": "get", "schedule": "pull"}))
         assert got["result"]["schedule"]["kind"] == "command"
         assert got["result"]["latest_runs"][0]["exit_code"] == 3
+        assert got["result"]["latest_runs"][0]["kind"] == "command"
         (listed,) = await chat.say("列出定时任务", (TOOL, {"action": "list"}))
         schedule = listed["result"]["schedules"][0]
         assert (schedule["kind"], schedule["last_run"]["exit_code"]) == ("command", 3)
+        assert schedule["last_run"]["kind"] == "command"
 
     run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("kind", ["command", "agent"])
+def test_schedule_update_shows_verbatim_command_diff_and_model_spend_by_kind(monkeypatch, tmp_path, kind):
+    async def test(pool):
+        before, after = "printf '`before`'\n# ```", "printf '`after`'\n# ````"
+        sid = (await _schedule(await _project(pool, work_dir=str(tmp_path)), "pull", kind=kind,
+                               **({"command": before, "requirement": ""} if kind == "command" else {})))["schedule_id"]
+        chat = _Chat(tmp_path)
+        fields = {"command": after} if kind == "command" else {"requirement": "Read updated reports."}
+        (result,) = await chat.say("修改定时任务", (TOOL, {"action": "update", "schedule": sid, "fields": fields}))
+        assert result["status"] == "ok", result
+        (block,) = chat.turns[-1].blocks
+        assert block.count("不经过 agent，不花模型额度") == int(kind == "command")
+        if kind == "command":
+            assert f"\n````\n{before}\n````\n" in block
+            assert f"\n`````\n{after}\n`````\n" in block
+            assert "→" in block
+            (result,) = await chat.say("名称不变", (TOOL, {"action": "update", "schedule": sid, "fields": {"name": "pull"}}))
+            assert result["status"] == "ok", result
+            assert chat.turns[-1].blocks[0].count("不经过 agent，不花模型额度") == 1
+    run_db(test, monkeypatch, timeout=30)
 
 
 async def _confirm(chat: _Chat, asked: dict[str, Any]) -> dict[str, Any]:
@@ -112,7 +145,7 @@ def test_command_confirmation_is_bound_to_the_schedule_and_configuration(
         try:
             arguments = {"action": action, "schedule": "pull"}
             (asked,) = await chat.say("启用或立即运行", (TOOL, arguments))
-            assert "`exit 0`" in chat.turns[-1].blocks[0]
+            assert "\n```\nexit 0\n```\n" in chat.turns[-1].blocks[0]
             if when == "before-lock":
                 lock = db_schedules.lock_schedule
 
@@ -137,12 +170,13 @@ def test_command_confirmation_is_bound_to_the_schedule_and_configuration(
 
             # A fresh confirmation describes the new configuration and can execute it.
             (again,) = await chat.say("重新确认", (TOOL, arguments))
-            assert "`exit 7`" in chat.turns[-1].blocks[0]
+            assert "\n```\nexit 7\n```\n" in chat.turns[-1].blocks[0]
             done = await _confirm(chat, again)
             assert done["status"] == "ok", done
             if action == "enable":
                 assert done["result"]["schedule"]["enabled"] is True
             else:
+                assert done["result"]["run"]["kind"] == "command"
                 run = await db_schedules.get_run(done["result"]["run"]["run_id"])
                 process = scheduler._commands._owned[run["id"]]
                 await asyncio.to_thread(process.wait, timeout=10)
@@ -344,6 +378,10 @@ def test_starting_a_schedule_asks_first_and_runs_only_on_the_next_messages_confi
             (block,) = chat.turns[-1].blocks
             assert "定时任务「nightly」（项目 calc）" in block
             assert "回复「确认」就执行" in block
+            assert "- 需求：" in block and "- 花费上限：" in block
+            assert "不花模型额度" not in block and "- 环境变量：" not in block
+            assert ("它会立刻建出任务并开始执行，花费计入它的上限。" in block) is (action == "run")
+            assert ("启用后它按规则无人值守地建任务运行。" in block) is (action == "enable")
 
             done = await _confirm(chat, asked)
             assert done["status"] == "ok", done

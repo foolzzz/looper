@@ -23,7 +23,7 @@ _RUN_STATUS = _enum(*dict.fromkeys((*db_schedules.OPEN_STATUSES, *db_schedules.S
                                    *db_schedules.FAILURES, *db_schedules.SKIPPED, "stopped", "cancelled")))
 RUN = _object({
     **dict.fromkeys(("run_id", "schedule_id", "manager_id", "scheduled_for", "trigger", "status"), _STR),
-    "missed": _INT, "firings": _INT,
+    "missed": _INT, "firings": _INT, "kind": _enum("agent", "command"),
     **dict.fromkeys(("fired_at", "task_id", "task_status", "task_title", "summary", "error", "finished_at",
                      "gate_output", "carried_from", "started_at", "log_tail"), _NULL_STR),
     "cost_usd": _NULL_NUMBER, "exit_code": _NULL_INT, "exit_signal": _NULL_INT,
@@ -84,8 +84,8 @@ NOTIFICATION = _object({
 LISTED_RUN = _object({
     **dict.fromkeys(("run_id", "status", "trigger"), _STR),
     **dict.fromkeys(("at", "task_id", "summary"), _NULL_STR), "cost_usd": _NULL_NUMBER, "firings": _INT,
-    "exit_code": _NULL_INT},
-    ["run_id", "status", "trigger", "at", "task_id", "summary", "cost_usd", "exit_code"])
+    "exit_code": _NULL_INT, "kind": _enum("agent", "command")},
+    ["run_id", "status", "trigger", "at", "task_id", "summary", "cost_usd", "exit_code", "kind"])
 LISTED_SCHEDULE = _object({
     **dict.fromkeys(("schedule_id", "name", "project", "cron", "timezone", "description"), _STR),
     "user_gates": _enum("off", "on"), "kind": _enum("agent", "command"),

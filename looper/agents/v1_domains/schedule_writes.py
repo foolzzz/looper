@@ -88,6 +88,9 @@ async def impact(server, operation, arguments, principal, headers):
     if action == "delete":
         return f"Delete {subject}, its runs and notifications. Its created tasks stay."
     if action == "run":
+        if row["kind"] == "command":
+            return (f"Run {subject}'s shell command once now, without an agent or model spend: "
+                    f"{row['command']!r} in {row['work_dir'] or 'the project directory'}. Its next fire stays.")
         return f"Run {subject} once now through its overlap check, spending within its caps. Its next fire stays."
     if action == "reset_planner_session":
         return (f"Reset the stored Planner session of {subject}. The next run starts a new session; "
@@ -116,8 +119,10 @@ async def impact(server, operation, arguments, principal, headers):
     if (data.get("enabled") and not row["enabled"]) or raises:
         changes = ", ".join(f"{key}: {row[key]!r} → {data[key]!r}" for key in
                             ("enabled", "run_budget_usd", "daily_budget_usd") if key in data)
-        return (f"Update {subject}: {changes}. "
-                "Enabling starts unattended scheduled tasks; raised or removed caps allow more spending.")
+        effect = (f"Enabling runs its shell command {fields.get('command', row['command'])!r} unattended "
+                  "at each fire, without an agent or model spend." if command else
+                  "Enabling starts unattended scheduled tasks; raised or removed caps allow more spending.")
+        return f"Update {subject}: {changes}. {effect}"
     return None
 
 

@@ -173,6 +173,37 @@ def test_client_enable_and_cap_raise_wait_for_confirmation_and_disable_clears_fi
     run_db(run, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("kind,action,command_patch,work_dir", [
+    ("agent", "enable", None, ""), ("agent", "run", None, ""),
+    ("command", "enable", None, ""), ("command", "enable", "printf '`updated`'\nexit 0", ""),
+    ("command", "run", None, ""), ("command", "run", None, "/srv/reports"),
+])
+def test_client_start_impact_describes_schedule_kind(tmp_path, monkeypatch, action, kind, command_patch, work_dir):
+    async def run(pool):
+        _, sid = await _seed(pool, kind=kind, work_dir=work_dir,
+                             **({"command": "exit 0", "requirement": ""} if kind == "command" else {}))
+        subject = "schedule 'Hourly' in project 'Reports'"
+        async with _api(tmp_path, pool) as call:
+            fields = {"enabled": True, **({"command": command_patch} if command_patch else {})}
+            status, pending = await call("update" if action == "enable" else "run",
+                {"schedule_id": sid, **({"fields": fields} if action == "enable" else {})}, client=True)
+            assert status == 202, pending
+            if kind == "command":
+                expected = (f"Update {subject}: enabled: False → True. Enabling runs its shell command "
+                            f"{command_patch or 'exit 0'!r} unattended at each fire, without an agent or model spend."
+                            if action == "enable" else
+                            f"Run {subject}'s shell command once now, without an agent or model spend: "
+                            f"'exit 0' in {work_dir or 'the project directory'}. Its next fire stays.")
+            else:
+                expected = (f"Update {subject}: enabled: False → True. Enabling starts unattended scheduled tasks; "
+                            "raised or removed caps allow more spending." if action == "enable" else
+                            f"Run {subject} once now through its overlap check, spending within its caps. Its next fire stays.")
+            assert pending["impact"] == expected
+            assert not (await db_schedules.get_schedule(sid))["enabled"]
+            assert await pool.fetchval("SELECT count(*) FROM schedule_runs") == 0
+    run_db(run, monkeypatch, timeout=30)
+
+
 
 @pytest.mark.parametrize("schedule_cap,project_cap,after,high", [(None, 1, 2, True), (None, 2, 1, False),
     (1, 2, None, True), (2, 1, None, False)])
