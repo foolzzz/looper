@@ -9,6 +9,7 @@ import pytest
 from looper.db import projects, schedules as db_schedules
 from tests.db_support import DSN, run_db
 from tests.test_api_v1_schedule_reads_db import _api
+from tests.test_ops_tasks_db import _Chat
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -29,6 +30,28 @@ async def _run(pool, sid, *, status="succeeded", log_path=None, finished_at=None
         fired_at=begin - timedelta(seconds=100) if started else begin,
         started_at=begin if started else None, finished_at=None if status in db_schedules.OPEN_STATUSES else end,
         trigger="scheduled", status=status, log_path=log_path)
+
+
+def test_manager_can_rename_one_minute_command_schedule(tmp_path, monkeypatch):
+    async def run(pool):
+        project = await projects.create_project(name="Example", work_dir=str(tmp_path))
+        async with _api(tmp_path, pool) as call:
+            view = await _create(call, project["id"])
+            sid = view["schedule_id"]
+            assert view["cron"] == "* * * * *" and view["gate_command"] is None
+            chat = _Chat(tmp_path)
+            (answer,) = await chat.say("Rename the command schedule", ("looper_schedules", {
+                "action": "update", "schedule": sid, "fields": {"name": "Renamed"}}))
+            assert answer["status"] == "ok", answer
+            assert answer["result"]["changed"] == ["name"]
+            assert answer["result"]["schedule"]["name"] == "Renamed"
+            status, result = await call("get", {"schedule_id": sid})
+            assert status == 200, result
+            saved = result["schedule"]
+            assert saved["name"] == "Renamed"
+            assert (saved["kind"], saved["cron"], saved["command"], saved["gate_command"]) == (
+                "command", "* * * * *", "printf hello", None)
+    run_db(run, monkeypatch, timeout=30)
 
 
 def test_agent_profile_update_completes_with_one_database_connection(tmp_path, monkeypatch):
