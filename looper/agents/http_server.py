@@ -21,9 +21,8 @@ import uuid
 import urllib.parse
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .. import components
 from ..db import api_clients as db_api_clients
 from ..ops_config import OpsConfig
 from . import (
@@ -50,6 +49,9 @@ from .tiers.manager import ManagerAgent
 from .tiers.task import TaskRouter
 from .tiers.worker import recheck_limits
 from .tiers.worker import WorkerPool
+
+if TYPE_CHECKING:
+    from .. import components
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +213,8 @@ class AgentHTTPServer:
         self._components: components.Manifest | None = None
 
     async def start(self) -> None:
+        from .. import components
+
         # Snapshot the loaded installation once, before accepting requests.
         self._components = components.loaded_manifest()
         if self._config_imports:
