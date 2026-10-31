@@ -224,7 +224,8 @@ def _portable_source(source: str) -> str | None:
 
 def runtime_entry(row: Mapping[str, Any]) -> dict[str, Any]:
     return {"name": row["name"], "type": row["type"], "executable": _portable_source(row["executable"])
-            if row["executable"] else ""}
+            if row["executable"] else "",
+            **({"launcher": row["launcher"]} if row.get("launcher", "native") != "native" else {})}
 
 
 def provider_entry(row: Mapping[str, Any], include_secrets: bool) -> dict[str, Any]:
@@ -1048,7 +1049,7 @@ class _Importer:
         builtin = builtin_resolved_profile()
         self.runtimes = {name: (row["id"], runtime_spec(row)) for name, row in target.runtimes.items()}
         self.runtimes.setdefault(builtin.runtime.name, (builtin.runtime.id, builtin.runtime))
-        self.builtin_runtimes = {spec.type: (identity, spec) for name, (identity, spec) in self.runtimes.items()
+        self.builtin_runtimes = {(spec.type, spec.launcher): (identity, spec) for name, (identity, spec) in self.runtimes.items()
                                  if name not in target.runtimes or target.runtimes[name]["builtin"]}
         self.providers = {name: (row["id"], provider_spec(row)) for name, row in target.providers.items()}
         self.providers.setdefault(builtin.resolved_model.provider.name,
@@ -1127,18 +1128,24 @@ class _Importer:
     async def runtime(self, entry: Any) -> None:
         """Resolve a runtime by name or its built-in type, keeping the destination's executable."""
         from .profile_registry import RegistryError, _executable, entry_name
-        from .runtimes import RuntimeUnsupported, adapter
+        from .runtimes import Launcher, RuntimeUnsupported, adapter
 
         raw = entry if isinstance(entry, Mapping) else {}
         label = str(raw.get("name"))
         try:
             entry = _mapping(entry, "a runtime")
-            unknown = sorted(set(entry) - {"name", "type", "executable"})
+            unknown = sorted(set(entry) - {"name", "type", "executable", "launcher"})
             if unknown:
                 raise _Skip(f"unknown field {unknown[0]!r}")
             try:
                 name = label = entry_name(entry.get("name"), "runtime")
                 runtime = adapter(entry.get("type") if isinstance(entry.get("type"), str) else "")
+                try:
+                    launcher = Launcher(entry.get("launcher", "native"))
+                except (TypeError, ValueError):
+                    raise _Skip("launcher must be native or ttadk") from None
+                if launcher not in runtime.launchers:
+                    raise _Skip(f"{runtime.label} cannot be launched through {launcher.value}")
                 if entry.get("executable") is not None:
                     _executable(entry["executable"])
             except (RegistryError, RuntimeUnsupported) as exc:
@@ -1146,7 +1153,9 @@ class _Importer:
             row = self.target.runtimes.get(name)
             if row is not None and row["type"] != runtime.type:
                 raise _Skip(f"a {row['type']} runtime has this name here")
-            if row is None and runtime.type not in self.builtin_runtimes:
+            if row is not None and row.get("launcher", "native") != launcher.value:
+                raise _Skip(f"a {row.get('launcher', 'native')} runtime has this name here")
+            if row is None and (runtime.type, launcher) not in self.builtin_runtimes:
                 if runtime.in_process and (error := runtime.probe("").error):
                     raise _Skip(f"runtimes are built in, and {runtime.label} cannot run here: "
                                 f"{error}; then Re-detect it in Settings, Agent Runtimes")
@@ -1159,7 +1168,7 @@ class _Importer:
         if row is not None:
             self.record("runtimes", name, Action.UNCHANGED)
             return
-        self.runtimes[name] = self.builtin_runtimes[runtime.type]
+        self.runtimes[name] = self.builtin_runtimes[(runtime.type, launcher)]
         self.plan.notes.append(f"runtime {name}: runtimes are built in; its Agent Profiles run on the built-in "
                                f"{self.runtimes[name][1].name} runtime here")
 

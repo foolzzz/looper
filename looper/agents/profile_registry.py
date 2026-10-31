@@ -56,7 +56,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 from . import runtimes
 from .model_names import parse_model_name
-from .runtimes import ApiProtocol, AuthKind, Capability, RuntimeUnsupported, VendorType
+from .runtimes import ApiProtocol, AuthKind, Capability, Launcher, RuntimeUnsupported, VendorType
 
 NAME_MAX_CHARS = 240
 EXECUTABLE_MAX_CHARS = 1_000
@@ -95,6 +95,8 @@ class RuntimeSpec:
     type: str
     executable: str = ""  # '' = the type's default (for Claude Code, the server's configured claude)
     capabilities: frozenset[Capability] = frozenset()
+    launcher: Launcher = Launcher.NATIVE
+    version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -336,7 +338,9 @@ class ResolvedModel:
             raise RegistryError("runtime does not support the model's exact protocol")
         if self.provider.auth is AuthKind.OAUTH and self.provider.oauth_runtime_type != runtime.type:
             raise RegistryError("a login provider can only use its own runtime")
-        if self.provider.auth not in adapter.auth_kinds:
+        if self.provider.auth not in adapter.auth_kinds_for(runtime.launcher):
+            if runtime.launcher is Launcher.TTADK:
+                raise RegistryError(_ttadk_pairing_problem(runtime, self.provider.name, adapter))
             raise RegistryError("runtime does not support the provider's auth kind")
         try:
             adapter.check_pairing(self.binding_provider(), self.model.name, effort)
@@ -383,13 +387,15 @@ class AgentProfile:
         known = {c.value for c in Capability}
         runtime = RuntimeSpec(row["runtime_id"], row["runtime_name"], row["runtime_type"],
                               row.get("runtime_executable") or "",
-                              frozenset(Capability(c) for c in row.get("runtime_capabilities") or () if c in known))
+                              frozenset(Capability(c) for c in row.get("runtime_capabilities") or () if c in known),
+                              Launcher(row.get("runtime_launcher") or "native"), row.get("runtime_version"))
         return cls(row["id"], row["name"], runtime, row.get("model_id"), row.get("effort"),
                    row.get("agent_teams", False), row.get("custom_prompt", ""))
 
     def record(self) -> dict[str, Any]:
         return {"id": self.id, "name": self.name, "model_id": self.model_id, "custom_prompt": self.custom_prompt,
-                "runtime": {"id": self.runtime.id, "name": self.runtime.name, "type": self.runtime.type}}
+                "runtime": {"id": self.runtime.id, "name": self.runtime.name, "type": self.runtime.type,
+                            "launcher": self.runtime.launcher.value}}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -644,6 +650,12 @@ def _listed(values: Iterable[Any]) -> str:
     return ", ".join(sorted(getattr(v, "value", str(v)) for v in values))
 
 
+def _ttadk_pairing_problem(runtime: RuntimeSpec, provider_name: str, adapter: runtimes.RuntimeAdapter) -> str:
+    return (f"runtime {runtime.name} launches {adapter.label} through TTADK, which replaces the provider with "
+            f"TTADK's gateway: provider {provider_name}'s key would not be used. "
+            f"Use the {runtime.type}-login provider, or the {runtime.type} runtime")
+
+
 def check_pairing(runtime: RuntimeSpec, provider: LegacyProviderSpec, model: str, effort: str | None = None) -> None:
     """Refuse a profile of ``runtime``, ``provider`` and ``model`` that could not run (the module's rules)."""
     try:
@@ -659,10 +671,12 @@ def check_pairing(runtime: RuntimeSpec, provider: LegacyProviderSpec, model: str
         raise RegistryError(
             f"provider {provider.name!r} is the login of {provider.oauth_runtime_type} runtimes: it pairs only with "
             f"them, not with runtime {runtime.name!r} ({runtime.type})")
-    if provider.auth not in adapter.auth_kinds:
+    if provider.auth not in adapter.auth_kinds_for(runtime.launcher):
+        if runtime.launcher is Launcher.TTADK:
+            raise RegistryError(_ttadk_pairing_problem(runtime, provider.name, adapter))
         raise RegistryError(
             f"runtime {runtime.name!r} ({adapter.label}) cannot be started with an {provider.auth.value} provider yet; "
-            f"it takes {_listed(adapter.auth_kinds)} providers")
+            f"it takes {_listed(adapter.auth_kinds_for(runtime.launcher))} providers")
     if provider.models and model not in provider.models:
         raise RegistryError(f"provider {provider.name!r} lists the models {', '.join(provider.models)}; "
                             f"{model!r} is not one of them")
@@ -759,7 +773,8 @@ def runtime_spec(row: Mapping[str, Any]) -> RuntimeSpec:
     """A runtime row (``agent_runtimes``) as what a profile is checked with."""
     known = {c.value for c in Capability}
     return RuntimeSpec(row["id"], row["name"], row["type"], row["executable"],
-                       frozenset(Capability(c) for c in row["capabilities"] or () if c in known))
+                       frozenset(Capability(c) for c in row["capabilities"] or () if c in known),
+                       Launcher(row.get("launcher") or "native"), row.get("version"))
 
 
 def provider_spec(row: Mapping[str, Any]) -> ProviderSpec:
@@ -793,18 +808,19 @@ def type_view(adapter: runtimes.RuntimeAdapter) -> dict[str, Any]:
             "auth_kinds": sorted(a.value for a in adapter.auth_kinds)}
 
 
-def builtin_runtime_id(adapter: runtimes.RuntimeAdapter) -> str:
-    """The id of the built-in runtime of ``adapter``'s type: ``rt-<type>``."""
-    return f"rt-{adapter.type}"
+def builtin_runtime_id(adapter: runtimes.RuntimeAdapter, launcher: Launcher = Launcher.NATIVE) -> str:
+    """The id of a built-in runtime for this adapter and launcher."""
+    return f"rt-{'ttadk-' if launcher is Launcher.TTADK else ''}{adapter.type}"
 
 
-def runtime_path(runtime_type: str, executable: str, server_claude: str) -> str | None:
+def runtime_path(runtime_type: str, executable: str, server_claude: str,
+                 launcher: Launcher = Launcher.NATIVE) -> str | None:
     """Where the runtime's executable is on the server's PATH (or the absolute path it names); None when it is
     not found."""
     import shutil
 
     try:
-        command = _probe_executable(runtime_type, executable, server_claude)
+        command = _probe_executable(runtime_type, executable, server_claude, launcher)
     except RuntimeUnsupported:
         command = executable
     return shutil.which(command) if command else None
@@ -812,13 +828,15 @@ def runtime_path(runtime_type: str, executable: str, server_claude: str) -> str 
 
 def runtime_view(row: Mapping[str, Any], *, server_claude: str = "claude") -> dict[str, Any]:
     adapter = runtimes.ADAPTERS.get(row["type"])
+    launcher = Launcher(row.get("launcher") or "native")
     return {
-        "runtime_id": row["id"], "name": row["name"], "type": row["type"],
+        "runtime_id": row["id"], "name": row["name"], "type": row["type"], "launcher": launcher.value,
         "type_label": adapter.label if adapter else row["type"], "executable": row["executable"],
-        "default_executable": adapter.default_executable if adapter else None,
-        "path": None if adapter and adapter.in_process else runtime_path(row["type"], row["executable"], server_claude),
+        "default_executable": "ttadk" if launcher is Launcher.TTADK else adapter.default_executable if adapter else None,
+        "path": None if adapter and adapter.in_process else runtime_path(row["type"], row["executable"], server_claude, launcher),
         "in_process": adapter.in_process if adapter else False,
         "protocols": sorted(p.value for p in adapter.protocols) if adapter else [],
+        "auth_kinds": sorted(a.value for a in adapter.auth_kinds_for(launcher)) if adapter else [],
         "version": row["version"], "capabilities": list(row["capabilities"] or ()),
         "roles": servable_roles(row["capabilities"] or (), row["type"]), "probed_at": row["probed_at"],
         "probe_error": row["probe_error"], "builtin": row["builtin"], "profile_count": row.get("profile_count", 0),
@@ -1096,8 +1114,11 @@ async def registry_view(*, server_claude: str = "claude", manager_id: str | None
 # --- Runtimes ---
 
 
-def _probe_executable(runtime_type: str, executable: str, server_claude: str) -> str:
+def _probe_executable(runtime_type: str, executable: str, server_claude: str,
+                      launcher: Launcher = Launcher.NATIVE) -> str:
     """What a probe runs: the runtime's executable, else its type's default (the server's for Claude Code)."""
+    if launcher is Launcher.TTADK:
+        return executable or "ttadk"
     adapter = runtimes.ADAPTERS.get(runtime_type)
     if adapter is not None and adapter.in_process:
         return ""
@@ -1107,39 +1128,45 @@ def _probe_executable(runtime_type: str, executable: str, server_claude: str) ->
     return server_claude if adapter is runtimes.CLAUDE_CODE else adapter.default_executable
 
 
-async def _probe(runtime_type: str, executable: str, server_claude: str) -> dict[str, Any]:
+async def _probe(runtime_type: str, executable: str, server_claude: str,
+                 launcher: Launcher = Launcher.NATIVE) -> dict[str, Any]:
     adapter = runtimes.adapter(runtime_type)
-    probe = await asyncio.to_thread(adapter.probe, _probe_executable(runtime_type, executable, server_claude))
+    probe = await asyncio.to_thread(adapter.probe_for,
+                                   _probe_executable(runtime_type, executable, server_claude, launcher), launcher)
     return {"version": probe.version, "capabilities": sorted(c.value for c in probe.capabilities),
             "probe_error": probe.error}
 
 
-async def _detect(adapter: runtimes.RuntimeAdapter) -> bool:
-    """Register the built-in runtime of ``adapter``'s type (``rt-<type>``, named after its type), probed once,
-    when its executable is on PATH (or an in-process probe succeeds) and neither it nor a runtime of its name
-    exists; whether it did."""
+async def _detect(adapter: runtimes.RuntimeAdapter, launcher: Launcher = Launcher.NATIVE) -> bool:
+    """Register and probe this adapter/launcher pair when its executable is available and its built-in id
+    and name are free; return whether it was added."""
     import shutil
 
     from ..db import profile_registry as db
 
-    if not adapter.in_process and shutil.which(adapter.default_executable) is None:
+    executable = "ttadk" if launcher is Launcher.TTADK else adapter.default_executable
+    if not adapter.in_process and shutil.which(executable) is None:
         return False
-    if await db.get_runtime(builtin_runtime_id(adapter)) is not None:
+    if await db.get_runtime(builtin_runtime_id(adapter, launcher)) is not None:
         return False
-    probe = await _probe(adapter.type, "", adapter.default_executable)
+    probe = await _probe(adapter.type, "", adapter.default_executable, launcher)
     if adapter.in_process and probe["probe_error"]:
         logging.getLogger(__name__).info("%s not registered: %s", adapter.label, probe["probe_error"])
         return False
-    return await db.insert_builtin_runtime(builtin_runtime_id(adapter), {
-        "name": adapter.type, "type": adapter.type, "executable": "", **probe})
+    return await db.insert_builtin_runtime(builtin_runtime_id(adapter, launcher), {
+        "name": adapter.ttadk_runtime_name if launcher is Launcher.TTADK else adapter.type,
+        "type": adapter.type, "executable": "", "launcher": launcher.value, **probe})
 
 
 async def register_found_runtimes() -> list[str]:
     """Register a built-in runtime for each runtime type other than Claude Code whose default executable is on
     PATH (``_detect``); one that exists already, or whose name is taken, is left alone. Claude Code's built-in
     runtime comes with the schema. Returns the names registered."""
-    return [adapter.type for adapter in runtimes.ADAPTERS.values()
-            if adapter is not runtimes.CLAUDE_CODE and await _detect(adapter)]
+    return [adapter.ttadk_runtime_name if launcher is Launcher.TTADK else adapter.type
+            for adapter in runtimes.ADAPTERS.values()
+            for launcher in sorted(adapter.launchers, key=lambda item: item.value)
+            if not (adapter is runtimes.CLAUDE_CODE and launcher is Launcher.NATIVE)
+            and await _detect(adapter, launcher)]
 
 
 async def _existing_runtime(runtime_id: str) -> dict[str, Any]:
@@ -1168,23 +1195,27 @@ async def probe_runtime(runtime_id: str, *, server_claude: str = "claude") -> di
     of a type not found yet (``rt-<type>``) is registered when its executable is on PATH now (``_detect``)."""
     from ..db import profile_registry as db
 
-    adapter = next((a for a in runtimes.ADAPTERS.values() if builtin_runtime_id(a) == runtime_id), None)
-    if await db.get_runtime(runtime_id) is None and adapter is not None:
-        if not await _detect(adapter):
+    match = next(((a, launcher) for a in runtimes.ADAPTERS.values() for launcher in a.launchers
+                  if builtin_runtime_id(a, launcher) == runtime_id), None)
+    if await db.get_runtime(runtime_id) is None and match is not None:
+        adapter, launcher = match
+        name = adapter.ttadk_runtime_name if launcher is Launcher.TTADK else adapter.type
+        executable = _probe_executable(adapter.type, "", server_claude, launcher)
+        if not await _detect(adapter, launcher):
             import shutil
 
             if adapter.in_process:
                 probe = await _probe(adapter.type, "", server_claude)
                 if probe["probe_error"]:
                     raise RegistryNotFound(probe["probe_error"])
-            elif shutil.which(adapter.default_executable) is None:
-                raise RegistryNotFound(f"{adapter.label} ({adapter.default_executable}) is not on the server's PATH")
-            raise RegistryConflict(f"a runtime named {adapter.type!r} exists already, so the built-in "
+            elif shutil.which(executable) is None:
+                raise RegistryNotFound(f"{adapter.label} ({executable}) is not on the server's PATH")
+            raise RegistryConflict(f"a runtime named {name!r} exists already, so the built-in "
                                    f"{adapter.label} runtime cannot be added")
         return await _runtime_answer(runtime_id, server_claude)
     row = await _existing_runtime(runtime_id)
     try:
-        probe = await _probe(row["type"], row["executable"], server_claude)
+        probe = await _probe(row["type"], row["executable"], server_claude, Launcher(row.get("launcher") or "native"))
     except RuntimeUnsupported as exc:
         raise RegistryError(str(exc)) from None
     await db.update_runtime(runtime_id, probe)

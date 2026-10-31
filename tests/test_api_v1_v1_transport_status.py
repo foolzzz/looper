@@ -74,7 +74,7 @@ def test_status_preserves_the_complete_projection(tmp_path, status_data, identit
                 headers = {"Cookie": login["set-cookie"].split(";", 1)[0]}
             code, _, answer = await _send(server, f"POST {STATUS}", headers, "{}")
             assert code == 200
-            assert answer["result"] == {"status": "running", "agents": {"manager": AGENT},
+            assert answer["result"] == {"drain": server._drain.snapshot(), "status": "running", "agents": {"manager": AGENT},
                 "tasks": {"total": 10, "running": 5, "completed": 4},
                 "channels": {"web": {"channel": "web", "healthy": True, "active_sse_streams": 2}},
                 "checks": [WARNING], "can_sign_out": identity == "password",

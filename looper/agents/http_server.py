@@ -22,8 +22,9 @@ import urllib.parse
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from .drain import DrainState
 from ..db import api_clients as db_api_clients
 from ..ops_config import OpsConfig
 from . import (
@@ -50,6 +51,9 @@ from .tiers.manager import ManagerAgent
 from .tiers.task import TaskRouter
 from .tiers.worker import recheck_limits
 from .tiers.worker import WorkerPool
+
+if TYPE_CHECKING:
+    from .. import components
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +170,9 @@ class AgentHTTPServer:
         client_ops: ClientOps | None = None,
         ops_config: OpsConfig | None = None,
         channels: ChannelRegistry | None = None,
+        drain: DrainState | None = None,
     ) -> None:
+        self._drain = drain or DrainState()
         self._started_at = datetime.now(timezone.utc)
         self._host = host
         self._port = port
@@ -209,8 +215,13 @@ class AgentHTTPServer:
         # Configuration files uploaded for import, waiting to be applied (under the runtime root).
         self._config_imports = config_imports.ConfigImports(runtime_root) if runtime_root else None
         self._server: asyncio.Server | None = None
+        self._components: components.Manifest | None = None
 
     async def start(self) -> None:
+        from .. import components
+
+        # Snapshot the loaded installation once, before accepting requests.
+        self._components = components.loaded_manifest()
         if self._config_imports:
             self._config_imports.clear()  # what a previous server left pending
         self._server = await asyncio.start_server(
@@ -979,6 +990,7 @@ class AgentHTTPServer:
             counts = overview.group_counts([])
         status = {
             "status": "running",
+            "drain": self._drain.snapshot(),
             "agents": agents,
             # Every task counted; "running" is every task in progress (one waiting for the user too).
             "tasks": {

@@ -2459,8 +2459,8 @@ the design is the [task workspaces RFC](rfcs/task-workspaces-v0.zh-CN.md)):
 
 ### Schedules: tasks on a time rule
 
-A project's agent schedules fire a full task of the project on a time rule
-([scheduled-tasks RFC](rfcs/scheduled-tasks-v0.zh-CN.md); the
+A project's schedules fire a full task of the project on a time rule
+([scheduled-tasks RFC](rfcs/scheduled-tasks-v0.zh-CN.md), S1 and S2; the
 Manager lists, reads, creates, changes, enables, disables, runs and deletes
 them with `looper_schedules`, which also resets their stored Planner
 sessions; they move with their projects in the configuration file, [Moving the configuration](#moving-the-configuration-export-and-import)). A schedule has a `name` (unique in the project ignoring case),
@@ -2480,26 +2480,6 @@ run's task's Workers and Reviewers run at once, `schedule_task_limits`); and, fr
 `gate_command` with `gate_timeout_seconds` (1–600, default 60), an optional `daily_budget_usd`, `notify` (`failures`,
 `alerts`, `always`, `never`) and a `notify_target` (a channel and chat; none: the
 dashboard only). A new schedule is disabled.
-
-**Command schedules** (`kind=command`, [command schedules RFC](rfcs/command-schedules-v0.zh-CN.md))
-run `/bin/sh -c` directly in the schedule's effective work directory, without
-creating a task or spending model budget. Each run starts a standalone Python
-supervisor in its own session, from a copy named by its source hash under the
-runtime root. Neither scheduler shutdown nor the agent-process sweep ends it.
-The supervisor records its identity, command start, exit code or signal and
-bounded output; logs remain under `logs/schedules/<schedule id>/<run id>.log`.
-On each pass, including after restart, the scheduler reads exit records or
-checks process identity and rejects zombies. Exit code zero is `succeeded`;
-a missing supervisor without an exit record is `interrupted` and counts as a
-failure. A timeout backstop kills a stuck supervisor and its command group
-after checking their identities. Final results and failure counters are
-written once, even when two schedulers observe the same exit. Overlap and
-catch-up policies also apply to commands; every skipped firing has its own
-record. Commands and preflight gates receive `LOOPER_SCHEDULE_TRIGGER`,
-`LOOPER_SCHEDULE_MISSED` and `LOOPER_SCHEDULE_MISSED_SINCE` alongside the
-schedule id, run id, scheduled time and timeout. Configuration and log-view
-entry points are described in the RFC; this execution path shares the
-existing scheduler and notification channels.
 
 A schedule has an immutable `manager_id`, chosen when created and defaulting
 to `manager` when omitted. The dashboard/operator API can choose its owner;
@@ -4304,6 +4284,32 @@ SPA uses `#page/sub` format for deep linking that survives browser refresh:
 - `#runs/agent-id` → the role's runs (`#agents/...`, the page's name before, redirects here)
 - `#settings/page[/sub]` → one Settings page (`#settings` and `#settings/defaults` redirect to `#settings/roles`)
 - `#history/agent-id?task=task-id` → one agent's history
+
+## Component upgrade previews
+
+`looper service upgrade --dry-run [--to <git ref | wheel path>]` compares the
+running service's startup manifest with a Git tree (default `origin/main` of
+the current checkout) or a wheel, without installing files or restarting.
+It prints `NOOP`, `WEB_ONLY`, `CONTROL_PLANE` or `FULL`, the changed components
+and the reason. Keeper mode is off in S0, so every control-plane change plans
+`FULL`. Running without `--dry-run` refuses until drain and deployment are
+available.
+
+`looper/components.toml` declares component globs, runner packaging aliases
+and explicit ignores. A normal-suite test rejects unclassified tracked files.
+Git objects are read with `git cat-file --batch`; wheels are read as ZIP files.
+Each fingerprint hashes sorted `path sha256(content)\n` lines. Checkout web
+plans use `web/src` and package files; `verification.web` hashes built assets
+under canonical `web/dist` paths (also used for the packaged dashboard).
+The adoption fingerprint separately covers report contracts, both seat-tool
+listings (including optional vault tools), manifest version and keeper protocols.
+
+`POST /api/v1/system/components` requires operator authentication and returns the
+standard v1 result envelope containing `version`, `loaded_at`, `components`,
+`adoption` and `verification`. The snapshot is captured from the loaded package's
+directory once per process at HTTP-server startup and remains fixed if files later change.
+The operation is also available through generated `loopercli` commands. Dashboard,
+Telegram and Lark need no change for this read-only planning command.
 
 ## HTTP API
 

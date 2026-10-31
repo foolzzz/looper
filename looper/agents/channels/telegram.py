@@ -270,6 +270,16 @@ class TelegramChannelAdapter(ChannelAdapter):
             return await self._send_answer(chat, str(envelope.payload.get("text") or ""))
         corr_id = envelope.correlation_id
         chat_id = self._correlation_chat.get(corr_id)
+        if chat_id is None and envelope.target == self._address:
+            # Replayed turns and answers outlive the channel instance that received the question.
+            route = envelope.metadata.get("reply_route")
+            if isinstance(route, dict) and isinstance(route.get("chat_id"), str):
+                try:
+                    chat_id = int(route["chat_id"])
+                except ValueError:
+                    pass
+                else:
+                    self._remember(corr_id, chat_id)
         if chat_id is None:
             return DeliveryReceipt(
                 channel="telegram",

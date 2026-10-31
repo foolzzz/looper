@@ -42,7 +42,7 @@ async def read_layers(conn: asyncpg.Connection) -> list[dict[str, Any]]:
 
 
 async def read_runtimes(conn: asyncpg.Connection) -> list[dict[str, Any]]:
-    rows = await conn.fetch("SELECT id, name, type, executable, capabilities, builtin FROM agent_runtimes "
+    rows = await conn.fetch("SELECT id, name, type, launcher, executable, capabilities, builtin FROM agent_runtimes "
                             "ORDER BY name COLLATE \"C\"")
     return [dict(row) for row in rows]
 
