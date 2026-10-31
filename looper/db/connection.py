@@ -21,12 +21,19 @@ SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 SEEDS_PATH = Path(__file__).with_name("seeds.sql")
 
 
+async def _check_connection_fence(conn: asyncpg.Connection) -> None:
+    # asyncpg < 0.32 can finish connecting after Pool.terminate(). setup runs
+    # before every checkout; raising here also makes asyncpg close the connection.
+    if _fenced:
+        raise RuntimeError(_FENCED_MESSAGE)
+
+
 async def init_pool(dsn: str, *, min_size: int = 2, max_size: int = 10) -> asyncpg.Pool:
     """The pool for ``dsn``, the ops file's ``database.url`` (``looper.ops_config``)."""
     global _pool
     if _fenced:
         raise RuntimeError(_FENCED_MESSAGE)
-    pool = await asyncpg.create_pool(dsn, min_size=min_size, max_size=max_size)
+    pool = await asyncpg.create_pool(dsn, min_size=min_size, max_size=max_size, setup=_check_connection_fence)
     # Loss can happen while create_pool is connecting, before _pool exists.
     if _fenced:
         pool.terminate()

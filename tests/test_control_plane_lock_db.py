@@ -171,6 +171,72 @@ def test_keeper_off_takes_no_lock_and_writes_no_epoch(monkeypatch: pytest.Monkey
     asyncio.run(asyncio.wait_for(test(), 25))
 
 
+@pytest.mark.parametrize("write_path", ["execute", "acquire", "transaction"])
+def test_lock_loss_during_pool_growth_refuses_writes(monkeypatch: pytest.MonkeyPatch, write_path: str) -> None:
+    async def test() -> None:
+        async with fresh_schema() as driver:
+            await driver.execute("CREATE TABLE fence_writes (marker text)")
+            schema = await driver.fetchval("SELECT current_schema()")
+            monkeypatch.setattr(connection, "_fenced", False)
+            monkeypatch.setattr(connection, "_pool", None)
+            lease = await control_plane.ControlPlaneLease.acquire(DSN, on_lost=lambda _: connection.fence())
+            real_connect = asyncpg.connection.connect
+            connecting, resume = asyncio.Event(), asyncio.Event()
+            connections = []
+
+            async def connect(*args: Any, **kwargs: Any) -> asyncpg.Connection:
+                conn = await real_connect(*args, **kwargs)
+                connections.append(conn)
+                if len(connections) > 1:
+                    # The holder has not received this connection yet, so older
+                    # asyncpg versions cannot reach it from Pool.terminate().
+                    connecting.set()
+                    await resume.wait()
+                return conn
+
+            monkeypatch.setattr(asyncpg.connection, "connect", connect)
+            writer = None
+            pending = None
+            try:
+                writer = await connection.init_pool(_schema_dsn(schema), min_size=1, max_size=2)
+                await writer.execute("INSERT INTO fence_writes VALUES ('before')")
+                assert await driver.fetchval("SELECT count(*) FROM fence_writes") == 1
+
+                async def write() -> None:
+                    if write_path == "execute":
+                        await writer.execute("INSERT INTO fence_writes VALUES ('after')")
+                    elif write_path == "acquire":
+                        async with writer.acquire() as conn, conn.transaction():
+                            await conn.execute("INSERT INTO fence_writes VALUES ('after')")
+                    else:
+                        async with connection.transaction() as conn:
+                            await conn.execute("INSERT INTO fence_writes VALUES ('after')")
+
+                async with writer.acquire():
+                    pending = asyncio.create_task(write())
+                    await asyncio.wait_for(connecting.wait(), 5)
+                    assert await driver.fetchval("SELECT pg_terminate_backend($1)", lease._conn.get_server_pid())
+                    await until(lambda: connection._fenced, "the lost-lock fence", timeout=5)
+                    assert lease.state is control_plane.LeaseState.LOST
+                    resume.set()
+                    outcome, = await asyncio.gather(pending, return_exceptions=True)
+                    assert await driver.fetchval("SELECT count(*) FROM fence_writes WHERE marker='after'") == 0
+                    assert isinstance(outcome, (RuntimeError, asyncpg.InterfaceError)), repr(outcome)
+                    assert connections[-1].is_closed(), "a connection completed after fencing must be closed"
+            finally:
+                resume.set()
+                if pending is not None:
+                    pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
+                for conn in connections:
+                    conn.terminate()
+                if writer is not None:
+                    await writer.close()
+                await lease.release()
+
+    asyncio.run(asyncio.wait_for(test(), 20))
+
+
 async def _lose_running_system(pool: Any, monkeypatch: pytest.MonkeyPatch, root: Path, *, restart: bool) -> None:
     # Keep the fixture's schema owner alive: it is part of the test driver and drops the schema afterwards.
     driver_pids = {row["pid"] for row in await pool.fetch("""SELECT pid FROM pg_stat_activity
