@@ -166,6 +166,7 @@ def test_web_build_verification_is_separate_and_matches_wheel_assets(component_t
     built = component_tree / "web/dist/index.html"
     built.parent.mkdir(parents=True)
     built.write_text("<html>dashboard</html>\n")
+    _git(component_tree, "add", "web")
     record_web_source(component_tree, built.parent)
     _git(component_tree, "add", "web")
     _git(component_tree, "commit", "-q", "-m", "dashboard fixture")
@@ -191,6 +192,61 @@ def test_web_build_verification_is_separate_and_matches_wheel_assets(component_t
     assert target.components["web"] == rebuilt.components["web"]
     assert target.verification["web"] != rebuilt.verification["web"]
     assert target.components["control_plane"] == packaged.components["control_plane"]
+
+
+def test_checkout_fingerprints_ignore_files_outside_the_git_index(component_tree: Path):
+    source = component_tree / "web/src/App.tsx"
+    source.parent.mkdir(parents=True)
+    source.write_text("export default 'dashboard';\n")
+    dist = component_tree / "web/dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<html>dashboard</html>")
+    (component_tree / ".gitignore").write_text(".DS_Store\n*.pyc\n*.local\n*.log\nweb/dist/\n")
+    _git(component_tree, "add", "web/src", ".gitignore")
+    _git(component_tree, "commit", "-q", "-m", "tracked dashboard sources")
+    expected = manifest_from_git(component_tree, "HEAD")
+    before = record_web_source(component_tree, dist)
+    for relative in ("web/src/.DS_Store", "web/src/x.pyc", "web/public/dev.local",
+                     "web/public/dev.log", "web/src/untracked.ts", "looper/dev.local"):
+        path = component_tree / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("local artifact")
+
+    assert record_web_source(component_tree, dist) == before == expected.components["web"]
+    actual = manifest_from_directory(component_tree)
+    assert actual.components == expected.components
+    assert actual.verification["web"] != expected.verification["web"]
+    source.write_text("export default 'updated dashboard';\n")
+    assert record_web_source(component_tree, dist) != before
+
+
+@pytest.mark.parametrize("runtime_record", [True, False], ids=["runtime-record", "legacy-wheel"])
+def test_installed_fingerprints_use_the_wheels_file_list(component_tree: Path, tmp_path: Path, runtime_record):
+    installed = tmp_path / "site-packages"
+    shutil.copytree(component_tree / "looper", installed / "looper")
+    if runtime_record:
+        (installed / "looper/.runtime-fingerprint").write_text(runtime_fingerprint(component_tree))
+    files = [path.relative_to(installed).as_posix()
+             for path in (installed / "looper").rglob("*") if path.is_file()]
+    wheel = tmp_path / "looper.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name in files:
+            archive.write(installed / name, name)
+    metadata = installed / "looper-1.0.0.dist-info"
+    metadata.mkdir()
+    (metadata / "RECORD").write_text("".join(f"{name},,\n" for name in files))
+    expected = manifest_from_wheel(wheel)
+    if runtime_record:
+        assert expected.components == manifest_from_git(component_tree, "HEAD").components
+    assert manifest_from_directory(installed).components == expected.components
+    (installed / "pyproject.toml").write_text('[project]\ndependencies = ["unrelated-package"]\n')
+    (installed / "uv.lock").write_text("unrelated lock")
+    for relative in ("looper/.DS_Store", "looper/agents/x.pyc", "looper/dev.local", "looper/dev.log"):
+        (installed / relative).write_text("local artifact")
+    assert manifest_from_directory(installed).components == expected.components
+    tracked = installed / "looper/agents/tiers/planner.py"
+    tracked.write_text(tracked.read_text() + "\n# installed code changed\n")
+    assert manifest_from_directory(installed).components["control_plane"] != expected.components["control_plane"]
 
 
 @pytest.mark.parametrize("contract, heading", [
@@ -251,6 +307,7 @@ def test_upgrade_rfc_examples_from_git_trees(component_tree: Path, relative: str
         dist = component_tree / "web/dist"
         dist.mkdir()
         (dist / "index.html").write_text("<html>same version</html>")
+        _git(component_tree, "add", "web")
         record_web_source(component_tree, dist)
         _git(component_tree, "add", "web")
         _git(component_tree, "commit", "-q", "-m", "built dashboard")
@@ -293,6 +350,7 @@ def test_keeper_and_runner_files_also_invalidate_control_plane(component_tree: P
     target = component_tree / relative
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text((target.read_text() if target.exists() else "") + "\n# changed component\n")
+    _git(component_tree, "add", relative)
     after = manifest_from_directory(component_tree)
     changed = {name for name in before.components if before.components[name] != after.components[name]}
     assert changed == components
@@ -344,6 +402,7 @@ def test_packaged_runner_aliases_have_the_same_fingerprints(component_tree: Path
 def test_broken_runner_alias_is_not_silently_ignored(component_tree: Path):
     alias = component_tree / "looper/agents/runtimes/runner/pi_runner"
     alias.symlink_to("../../../../runners/wrong")
+    _git(component_tree, "add", "looper/agents/runtimes/runner/pi_runner")
     with pytest.raises(ValueError, match="invalid component alias target.*pi_runner"):
         manifest_from_directory(component_tree)
     _git(component_tree, "add", "looper/agents/runtimes/runner/pi_runner")
