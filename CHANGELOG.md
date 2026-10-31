@@ -18,6 +18,20 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.36] - 2026-10-31
+
+### Added
+
+- **`looper service upgrade` executes its plan; `looper service restart --drain`; Telegram updates survive a restart.** The upgrade installs for a NOOP plan, installs and atomically replaces the served dashboard for WEB_ONLY, and for FULL drains, stops, installs, restarts through the service manager and verifies `system.components`; a failed install restarts the old service and cancels the drain. `--timeout`, `--drain-timeout` and `--no-force` are new, a deploy report is printed and appended to the service log, and a drain started through the system API now needs `drain_status` polled at least every 30 seconds. The runtime fingerprint covers `pyproject.toml` dependencies and `uv.lock`, and a built dashboard records its source fingerprint. Telegram polling no longer drops pending updates: they are saved before acknowledgement, replayed after a restart and deduplicated by `update_id`; updates older than `backlog_max_age_seconds` (default 600) are ignored. ([#949](https://github.com/foolzzz/looper/pull/949))
+- **Command schedules in the schedule API, with `schedule_admin.run_log`.** Create takes `kind` (`agent` or `command`; it cannot change later) and validates each kind separately; create and update take `env`, `env_file`, `success_deadline` and the three alert thresholds; the schedule view returns them with the effective `alert_policy`. Runs carry the command columns (`started_at`, `exit_code`, `exit_signal`, `duration_seconds`, `log`, `log_tail`), the run list filters by `status` and returns 24-hour and 7-day statistics, and the new read-only `schedule_admin.run_log` reads a run's log in byte pages. ([#960](https://github.com/foolzzz/looper/pull/960))
+- **Command schedule fields in config export and import.** Schedule entries carry `kind`, `command`, `env`, `env_file`, `success_deadline` and the alert thresholds (written for an agent schedule only when not default, so its export is unchanged). Import validates by kind, still disables the schedules, skips a same-name schedule of the other kind, and imports a schedule whose `env_file` is missing on this machine with a note. ([#980](https://github.com/foolzzz/looper/pull/980))
+
+### Changed
+
+- **Run history and logs are bounded.** The scheduler runs a housekeeping pass at startup and then hourly. New setting `scheduler.run_retention_days` (default 30, 1 to 3650) deletes finished runs and notifications older than that, keeping each schedule's newest 100 runs and every open run; command logs go by age and a 2 GiB cap; `serve.log` and `probe.log` rotate at 20 MiB, keeping 5 copies. Agent schedules no longer keep their run history forever, and the first pass runs at the first start after the upgrade. The setting is not yet in the dashboard's Settings page or the Manager settings tool's description. ([#964](https://github.com/foolzzz/looper/pull/964))
+
+Model-visible change: no prompt or skill text changes. The Manager settings tool accepts and shows `run_retention_days` without a description update, and Telegram messages sent during a restart now reach the Manager instead of being dropped.
+
 ## [2.14.35] - 2026-10-31
 
 ### Added
